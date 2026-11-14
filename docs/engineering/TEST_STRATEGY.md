@@ -1,5 +1,44 @@
 # Stratégie de qualification
 
+## 14 novembre — A1 : sélection API/CLI du registre egress
+
+Le gel `db2678d42cff9c8d6d15bf31284a989732cc6f0d` possède une compilation
+réelle des libtests et du CLI normal, puis un check toutes cibles RC0. Son
+premier harnais échoue avant les listes ; la reprise tests-only importe les
+trois opaques byte-exacts, sans rebuild. Exiger les listes réelles des bons
+artefacts, les FQN exacts et leurs résultats :18 listes, huit groupes,
+74 parents uniques PASS (73 ordinaires, un default-ignored exécuté
+explicitement), aucun FAIL. Ne pas additionner les baselines ou le build
+aux PASS, ni déplacer cette preuve sur le gel suivant.
+
+Les deux libtests et le CLI normal sont résolus depuis les messages Cargo
+JSON. Les sélections couvrent contrats scope/CAS et reçus, vrai SDK/HTTP et
+Store15, refus avant corps, source/binding/génération, contention/timeout713,
+rollback SQLite-FULL logique, abandon du seul observateur, maintien des
+permits et drain, façade FS durable et parsing du CLI. Le parent vertical
+ignoré par défaut est exécuté une fois avec le vrai CLI normal et ses pipes :
+commit dont le reçu est perdu, mêmes UUID/octets à la reprise, reçu durable
+puis révocation demandée. Ce n'est pas un scénario runtime réseau.
+
+Conserver les ACK qui prouvent la réception du rendez-vous, les vraies
+observations plutôt qu'un délai attendu, les refus sans réparation des
+fichiers et les barrières file/dir/parent. Une faute injectée après un vrai
+sync n'est pas un errno fsync observé ; SQLite-FULL ne remplit pas le disque
+physique. Les fsync des preuves ne qualifient ni coupure électrique ni reprise
+de machine. Les FQN/argv exacts et huit groupes se trouvent dans
+[SELECTIONS.json](evidence/2026-11-14/owned-egress-policy-api-cli/SELECTIONS.json).
+
+Les commandes réellement utilisées en QA sont les builds offline/frozen
+lib+bin en no-run, le build du CLI normal et le check all-targets consignés
+dans les [preuves EN](evidence/2026-11-14/owned-egress-policy-api-cli/README.md) /
+[FR](evidence/2026-11-14/owned-egress-policy-api-cli/README.fr.md).
+La reprise n'en répète aucune. Aucun nouveau harnais n'est requis par cette
+documentation. Le parcours d'acquisition scope/CAS frais reste ouvert ;
+`inspect` et `prepare --inspection-dir` ne sont pas livrés, leurs cinq
+parents ultérieurs sur `05a4451` sont NOT_RUN. Runtime/réseau/worker,
+fournisseurs/SSO, cluster, charge100, suite complète, Clippy strict et tous
+les gates production restent hors qualification ; broker/relais restent fermés.
+
 ## 13 novembre — A0 : sélection ciblée exécutée sur `0114013`
 
 GREEN R3 compile et passe le check toutes cibles à 0 (157 warnings de compilation), vérifie 20 listes puis exécute les 37 FQN uniques en neuf groupes : 34 parents lib (SDK 14/15, refus, abandon/drain, DTO et canaris metadata) et trois `control_protocol_schema`, tous PASS, zéro FAIL/ignoré. Les noms et résultats réels par groupe figurent dans [SELECTIONS.json](evidence/2026-11-13/owned-control-diagnostic/SELECTIONS.json). Conserver séparément les deux vrais oracles avant correction sur a47 et son harnais 127, le build 0 suivi du harnais 88 de GREEN R1, puis les 14 PASS / 1 fixture FAIL / 22 NOT_RUN de GREEN R2 sur `452d` ; aucune addition de parents recouvrants.

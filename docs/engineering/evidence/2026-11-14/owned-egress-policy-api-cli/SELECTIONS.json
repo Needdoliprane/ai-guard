@@ -1,0 +1,580 @@
+{
+  "schema": 1,
+  "title": "Owned egress policy API/CLI A1 — actual source-specific software evidence",
+  "date": "2026-11-14",
+  "status": "SOURCE_SPECIFIC_74_TARGETED_PASS_SEPARATE_BUILD_AND_RESUME",
+  "source": {
+    "commit": "db2678d42cff9c8d6d15bf31284a989732cc6f0d",
+    "tree": "79a378461d75d46a8d102c9126d04251422b4dda",
+    "archive_sha256": "40719c46c00d1793cea3518a48950a71501f00982e56cc672480729060a2a88d"
+  },
+  "documentation_base": "0dab5f78464931301183824eb81724488981ce2e",
+  "evidence_receipts": {
+    "build_check_result_sha256": "c24896a4bc8fa649d23891e165dd00b13b5e65c27d4af9c00418f99124eb100a",
+    "build_check_host_flush_sha256": "aaba0fd7ef4d38af2559b5e6d1342659565ac3ea162c760c4e5311d284ad81a3",
+    "resume_result_sha256": "ae52ce89e84dc85102e9f3e555fd20fd5ff1275ede62c2a223ea50eda9d07a74",
+    "resume_host_flush_sha256": "c5c587f0f7ab1d1741c228651d73e88e7a46f4f1211fd4ddc51bd77d17ca8bff",
+    "resume_created_profile_receipt_sha256": "872cb09026c51c3e50c9daaabfb3b64e571c4dde4aeb6c89d0e7788807b9f1dc",
+    "baseline_result_sha256": "2336cf80ab8cec576b93c01e17b397defafdd9ffacc629aeed9fdf11a417f850",
+    "green_r1_compile_failure_result_sha256": "cfa618ee3795fef16aa91f5961b095e556e7215edee6f074b194cde6cdd5d4a9"
+  },
+  "campaigns": [
+    {
+      "id": "baseline",
+      "source": "ae8d5210272f2af903da53f999ab03d63d1fd086",
+      "classification": "EXPECTED_FUNCTIONAL_ABSENCE_NOT_PASS_NOT_VULNERABILITY",
+      "build_rc": 0,
+      "actual_lists": 6,
+      "parents": [
+        {
+          "fqn": "api::human_sources::owned_policy_tests::owned_policy_replace_reaches_real_e1_after_reserved_sdk_diagnostic",
+          "rc": 101,
+          "passed": 0,
+          "failed": 1,
+          "observed": "Actual reserved SDK diagnostic 200, then POST 404 instead of 200"
+        },
+        {
+          "fqn": "broker_cli::policy_baseline_tests::broker_policy_status_is_parsed_without_opening_an_operation",
+          "rc": 101,
+          "passed": 0,
+          "failed": 1,
+          "observed": "Existing control-info parsed; policy/status rejected as InvalidSubcommand"
+        }
+      ],
+      "collectors_rc": 0,
+      "closure_rc": 0
+    },
+    {
+      "id": "green-r1",
+      "source": "0abb6efe045701e0d3f76548a15392db8159c41d",
+      "build_tests_rc": 101,
+      "compiler_errors": [
+        {
+          "code": "E0433",
+          "file": "src/audit/egress/mutation.rs",
+          "line": 16
+        },
+        {
+          "code": "E0631",
+          "file": "src/api/auth/owned_control.rs",
+          "line": 67
+        },
+        {
+          "code": "E0631",
+          "file": "src/api/auth/owned_control.rs",
+          "line": 222
+        }
+      ],
+      "tests": "NOT_RUN",
+      "build_normal": "NOT_RUN",
+      "check_all_targets": "NOT_RUN",
+      "collectors_rc": 0,
+      "closure_rc": 0
+    },
+    {
+      "id": "green-r2-build-check",
+      "source": "db2678d42cff9c8d6d15bf31284a989732cc6f0d",
+      "build_tests_rc": 0,
+      "build_normal_rc": 0,
+      "check_all_targets_rc": 0,
+      "build_warning_messages": 156,
+      "terminal_rc": 1,
+      "fresh_lists": 0,
+      "tests": "NOT_RUN",
+      "failure": "Bash 3.2 local empty array with nounset before registration",
+      "build_commands": [
+        [
+          "/usr/local/cargo/bin/cargo",
+          "test",
+          "--frozen",
+          "--offline",
+          "--lib",
+          "--bin",
+          "agentsandbox",
+          "--no-run",
+          "--message-format=json"
+        ],
+        [
+          "/usr/local/cargo/bin/cargo",
+          "build",
+          "--frozen",
+          "--offline",
+          "--bin",
+          "agentsandbox",
+          "--message-format=json"
+        ],
+        [
+          "/usr/local/cargo/bin/cargo",
+          "check",
+          "--frozen",
+          "--offline",
+          "--all-targets"
+        ]
+      ],
+      "source_post": {
+        "files": 2813,
+        "private_0600": 18,
+        "nodes": 3215,
+        "contents_paths_modes_unchanged": true,
+        "archive_sha256": "37b08a37070a5082bb3a2e54518cf62079b8580b4f91d22ea87396149c4ea932",
+        "archive_bytes": 34938880
+      },
+      "memory": {
+        "peak_bytes": 8528764928,
+        "limit_bytes": 9663676416,
+        "swap_limit": 0,
+        "oom": 0,
+        "oom_kill": 0
+      },
+      "collectors": [
+        {
+          "name": "post-source-verify",
+          "rc": 0
+        },
+        {
+          "name": "export-postrun-ustar",
+          "rc": 0
+        },
+        {
+          "name": "fixture-regular-inventory",
+          "rc": 0
+        },
+        {
+          "name": "export-private-fixtures",
+          "rc": 0
+        },
+        {
+          "name": "final-kernel-tmp-metadata",
+          "rc": 0
+        },
+        {
+          "name": "final-cgroup-memory",
+          "rc": 0
+        },
+        {
+          "name": "target-regular-metadata",
+          "rc": 0
+        }
+      ],
+      "closure_rc": 0,
+      "exact_qa_container_removed": true
+    },
+    {
+      "id": "tests-only-resume",
+      "source": "db2678d42cff9c8d6d15bf31284a989732cc6f0d",
+      "terminal_rc": 0,
+      "rebuilt": false,
+      "check_rerun": false,
+      "inherited_original_three_artifacts_byte_exact": true,
+      "fresh_lists": 18,
+      "registration": {
+        "global_lists": 2,
+        "exact_group_lists": 8,
+        "ignored_exact_group_lists": 8
+      },
+      "selected_unique": 74,
+      "ordinary_pass": 73,
+      "explicit_default_ignored_pass": 1,
+      "failed": 0,
+      "selected_left_ignored": 0,
+      "groups": [
+        {
+          "id": "core",
+          "artifact": "lib",
+          "passed": 19,
+          "failed": 0,
+          "default_ignored": 0,
+          "explicit_ignored_executed": 0,
+          "actual_fqns": [
+            "api::auth::owned_control::test_hook::release_ack_requires_successful_waiter_receive",
+            "api::human_sources::owned_policy_tests::aborted_policy_observer_retains_committed_work_and_operation_until_drain",
+            "api::human_sources::owned_policy_tests::binding_revoked_after_real_policy_commit_cannot_publish_a_receipt",
+            "api::human_sources::owned_policy_tests::expected_scope_conflicts_before_fresh_and_replayed_policy_with_no_neighbor_sql",
+            "api::human_sources::owned_policy_tests::expected_scope_survives_real_gateway_namespace_replacement",
+            "api::human_sources::owned_policy_tests::owned_policy_replace_reaches_real_e1_after_reserved_sdk_diagnostic",
+            "api::human_sources::owned_policy_tests::policy_role_format_and_declared_size_refuse_before_body_polling",
+            "api::human_sources::owned_policy_tests::policy_scope_body_and_method_failures_keep_existing_boundaries",
+            "api::human_sources::owned_policy_tests::retained_read_gate_refuses_policy_write_until_the_same_guard_is_released",
+            "audit::egress::a1_tests::actual_checked_e1_nowait_mutex_and_sqlite_restore_713_before_real_recovery",
+            "audit::egress::a1_tests::actual_checked_e1_scope_precedes_fresh_and_retry_policy_lookup_without_neighbor_sql",
+            "audit::egress::a1_tests::actual_checked_e1_sqlite_full_rolls_back_policy_reserve_and_restores_713",
+            "audit::egress::a1_tests::actual_checked_e1_stale_discovery_refuses_before_a_policy_operation",
+            "control::egress_policy::tests::canonical_receipt_and_uuid_forms_remain_closed",
+            "control::egress_policy::tests::closed_bounds_precede_core_clone_and_empty_deny_all_is_preserved",
+            "control::egress_policy::tests::replace_digest_is_correlated_but_revoke_only_validates_its_shape",
+            "control::egress_policy::tests::scope_is_required_closed_and_never_a_tenant_selector",
+            "runner::egress_policy::tests::closed_error_codes_never_expose_remote_text_or_turn_refusal_into_success",
+            "runner::egress_policy::tests::real_reserved_sdk_preserves_e1_receipts_retries_and_revoke"
+          ],
+          "argv": [
+            "--exact",
+            "control::egress_policy::tests::scope_is_required_closed_and_never_a_tenant_selector",
+            "control::egress_policy::tests::closed_bounds_precede_core_clone_and_empty_deny_all_is_preserved",
+            "control::egress_policy::tests::replace_digest_is_correlated_but_revoke_only_validates_its_shape",
+            "control::egress_policy::tests::canonical_receipt_and_uuid_forms_remain_closed",
+            "runner::egress_policy::tests::closed_error_codes_never_expose_remote_text_or_turn_refusal_into_success",
+            "runner::egress_policy::tests::real_reserved_sdk_preserves_e1_receipts_retries_and_revoke",
+            "audit::egress::a1_tests::actual_checked_e1_scope_precedes_fresh_and_retry_policy_lookup_without_neighbor_sql",
+            "audit::egress::a1_tests::actual_checked_e1_nowait_mutex_and_sqlite_restore_713_before_real_recovery",
+            "audit::egress::a1_tests::actual_checked_e1_sqlite_full_rolls_back_policy_reserve_and_restores_713",
+            "audit::egress::a1_tests::actual_checked_e1_stale_discovery_refuses_before_a_policy_operation",
+            "api::human_sources::owned_policy_tests::owned_policy_replace_reaches_real_e1_after_reserved_sdk_diagnostic",
+            "api::human_sources::owned_policy_tests::expected_scope_conflicts_before_fresh_and_replayed_policy_with_no_neighbor_sql",
+            "api::human_sources::owned_policy_tests::expected_scope_survives_real_gateway_namespace_replacement",
+            "api::human_sources::owned_policy_tests::policy_scope_body_and_method_failures_keep_existing_boundaries",
+            "api::human_sources::owned_policy_tests::policy_role_format_and_declared_size_refuse_before_body_polling",
+            "api::human_sources::owned_policy_tests::retained_read_gate_refuses_policy_write_until_the_same_guard_is_released",
+            "api::human_sources::owned_policy_tests::binding_revoked_after_real_policy_commit_cannot_publish_a_receipt",
+            "api::human_sources::owned_policy_tests::aborted_policy_observer_retains_committed_work_and_operation_until_drain",
+            "api::auth::owned_control::test_hook::release_ack_requires_successful_waiter_receive",
+            "--test-threads=1",
+            "--nocapture"
+          ]
+        },
+        {
+          "id": "e1",
+          "artifact": "lib",
+          "passed": 19,
+          "failed": 0,
+          "default_ignored": 0,
+          "explicit_ignored_executed": 0,
+          "actual_fqns": [
+            "audit::egress::tests::capacity_and_sqlite_full_leave_policy_operation_and_reserve_unchanged",
+            "audit::egress::tests::durable_clock_regression_refuses_new_mutation_and_exact_replay",
+            "audit::egress::tests::exact_retry_is_byte_identical_and_foreign_source_is_refused_before_replay",
+            "audit::egress::tests::format15_genesis_predecessor_must_include_the_original_format14_anchor",
+            "audit::egress::tests::format15_replay_refuses_noncanonical_reserved_family_without_projection_mutation",
+            "audit::egress::tests::inherited_noncanonical_ordinary_history_stays_ordinary_in_format15",
+            "audit::egress::tests::invalid_limits_and_sqlite_integer_overflow_refuse_before_storage",
+            "audit::egress::tests::maintenance_active_owner_refusal_is_typed_at_acquisition_and_effect_free",
+            "audit::egress::tests::maintenance_migration_is_explicit_backed_up_and_format14_remains_closed",
+            "audit::egress::tests::ordinary_control_and_identity_writes_preserve_terminal_audit_reservation",
+            "audit::egress::tests::reopen_rejects_projection_and_limits_tampering_and_redaction_collision",
+            "audit::egress::tests::retained_entry_ceiling_holds_exact_terminal_slot_and_revoke_consumes_it",
+            "audit::egress::tests::revoke_is_requested_once_and_exact_retry_never_claims_runtime_application",
+            "audit::egress::tests::revoked_live_binding_cannot_replay_retained_machine_receipt",
+            "audit::egress::tests::saturation_helper_propagates_real_source_refusal_and_rejects_clock_error_classification",
+            "audit::egress::tests::session_requires_real_active_resource_and_historical_tenant_ceiling",
+            "audit::egress::tests::tenant_policy_survives_reopen_and_isolated_other_tenant_remains_empty",
+            "audit::egress::tests::terminal_transition_does_not_require_old_policy_interval_to_be_active",
+            "audit::egress::tests::untrusted_case_variants_are_reserved_even_before_egress_migration"
+          ],
+          "argv": [
+            "--exact",
+            "audit::egress::tests::tenant_policy_survives_reopen_and_isolated_other_tenant_remains_empty",
+            "audit::egress::tests::exact_retry_is_byte_identical_and_foreign_source_is_refused_before_replay",
+            "audit::egress::tests::revoke_is_requested_once_and_exact_retry_never_claims_runtime_application",
+            "audit::egress::tests::retained_entry_ceiling_holds_exact_terminal_slot_and_revoke_consumes_it",
+            "audit::egress::tests::ordinary_control_and_identity_writes_preserve_terminal_audit_reservation",
+            "audit::egress::tests::session_requires_real_active_resource_and_historical_tenant_ceiling",
+            "audit::egress::tests::capacity_and_sqlite_full_leave_policy_operation_and_reserve_unchanged",
+            "audit::egress::tests::reopen_rejects_projection_and_limits_tampering_and_redaction_collision",
+            "audit::egress::tests::maintenance_migration_is_explicit_backed_up_and_format14_remains_closed",
+            "audit::egress::tests::format15_replay_refuses_noncanonical_reserved_family_without_projection_mutation",
+            "audit::egress::tests::inherited_noncanonical_ordinary_history_stays_ordinary_in_format15",
+            "audit::egress::tests::saturation_helper_propagates_real_source_refusal_and_rejects_clock_error_classification",
+            "audit::egress::tests::maintenance_active_owner_refusal_is_typed_at_acquisition_and_effect_free",
+            "audit::egress::tests::format15_genesis_predecessor_must_include_the_original_format14_anchor",
+            "audit::egress::tests::untrusted_case_variants_are_reserved_even_before_egress_migration",
+            "audit::egress::tests::revoked_live_binding_cannot_replay_retained_machine_receipt",
+            "audit::egress::tests::durable_clock_regression_refuses_new_mutation_and_exact_replay",
+            "audit::egress::tests::terminal_transition_does_not_require_old_policy_interval_to_be_active",
+            "audit::egress::tests::invalid_limits_and_sqlite_integer_overflow_refuse_before_storage",
+            "--test-threads=1",
+            "--nocapture"
+          ]
+        },
+        {
+          "id": "a0-canaries",
+          "artifact": "lib",
+          "passed": 9,
+          "failed": 0,
+          "default_ignored": 0,
+          "explicit_ignored_executed": 0,
+          "actual_fqns": [
+            "api::human_sources::owned_control_tests::negative::owned_control_b_sdk_succeeds_while_a_mutex_and_sqlite_are_unavailable",
+            "api::human_sources::owned_control_tests::negative::owned_control_changed_retained_registry_refuses_before_sql",
+            "api::human_sources::owned_control_tests::negative::owned_control_historical_human_collision_refuses_before_either_store",
+            "api::human_sources::owned_control_tests::negative::owned_control_legacy_protocol_keeps_runner_viewer_and_head_behavior",
+            "api::human_sources::owned_control_tests::negative::owned_control_nonrunner_absent_and_duplicate_headers_refuse_before_store",
+            "api::human_sources::owned_control_tests::negative::owned_control_own_mutex_refuses_while_held_and_preserves_timeout713",
+            "api::human_sources::owned_control_tests::negative::owned_control_own_sqlite_busy_refuses_and_restores_timeout713",
+            "api::human_sources::owned_control_tests::negative::owned_control_public_head_mutations_and_unknown_routes_keep_their_boundaries",
+            "api::human_sources::owned_control_tests::negative::owned_control_revoked_review_binding_cannot_publish_a_protocol"
+          ],
+          "argv": [
+            "--exact",
+            "api::human_sources::owned_control_tests::negative::owned_control_nonrunner_absent_and_duplicate_headers_refuse_before_store",
+            "api::human_sources::owned_control_tests::negative::owned_control_historical_human_collision_refuses_before_either_store",
+            "api::human_sources::owned_control_tests::negative::owned_control_revoked_review_binding_cannot_publish_a_protocol",
+            "api::human_sources::owned_control_tests::negative::owned_control_changed_retained_registry_refuses_before_sql",
+            "api::human_sources::owned_control_tests::negative::owned_control_own_mutex_refuses_while_held_and_preserves_timeout713",
+            "api::human_sources::owned_control_tests::negative::owned_control_own_sqlite_busy_refuses_and_restores_timeout713",
+            "api::human_sources::owned_control_tests::negative::owned_control_b_sdk_succeeds_while_a_mutex_and_sqlite_are_unavailable",
+            "api::human_sources::owned_control_tests::negative::owned_control_public_head_mutations_and_unknown_routes_keep_their_boundaries",
+            "api::human_sources::owned_control_tests::negative::owned_control_legacy_protocol_keeps_runner_viewer_and_head_behavior",
+            "--test-threads=1",
+            "--nocapture"
+          ]
+        },
+        {
+          "id": "fs-facade",
+          "artifact": "lib",
+          "passed": 8,
+          "failed": 0,
+          "default_ignored": 0,
+          "explicit_ignored_executed": 0,
+          "actual_fqns": [
+            "control_fs::operation::tests::divergent_receipt_or_changed_ancestry_taints_without_overwrite_or_revalidation_repair",
+            "control_fs::operation::tests::exclusive_preparation_preserves_existing_paths_and_real_ambiguous_publication",
+            "control_fs::operation::tests::injected_wrapper_error_after_real_receipt_sync_taints_new_and_identical_branches",
+            "control_fs::operation::tests::injected_wrapper_error_after_real_reopen_parent_sync_refuses_without_claiming_fsync_errno",
+            "control_fs::operation::tests::new_and_identical_receipt_acknowledgements_both_sync_file_and_directory",
+            "control_fs::operation::tests::oversized_unknown_or_symlink_records_are_refused_without_repair",
+            "control_fs::operation::tests::pending_state_is_never_implicitly_published_and_only_explicit_recovery_moves_the_pointer",
+            "control_fs::operation::tests::reopen_syncs_required_optional_and_lock_fds_and_both_directories_under_real_flock"
+          ],
+          "argv": [
+            "--exact",
+            "control_fs::operation::tests::reopen_syncs_required_optional_and_lock_fds_and_both_directories_under_real_flock",
+            "control_fs::operation::tests::injected_wrapper_error_after_real_reopen_parent_sync_refuses_without_claiming_fsync_errno",
+            "control_fs::operation::tests::new_and_identical_receipt_acknowledgements_both_sync_file_and_directory",
+            "control_fs::operation::tests::injected_wrapper_error_after_real_receipt_sync_taints_new_and_identical_branches",
+            "control_fs::operation::tests::pending_state_is_never_implicitly_published_and_only_explicit_recovery_moves_the_pointer",
+            "control_fs::operation::tests::divergent_receipt_or_changed_ancestry_taints_without_overwrite_or_revalidation_repair",
+            "control_fs::operation::tests::exclusive_preparation_preserves_existing_paths_and_real_ambiguous_publication",
+            "control_fs::operation::tests::oversized_unknown_or_symlink_records_are_refused_without_repair",
+            "--test-threads=1",
+            "--nocapture"
+          ]
+        },
+        {
+          "id": "cli-main",
+          "artifact": "bin-test",
+          "passed": 10,
+          "failed": 0,
+          "default_ignored": 0,
+          "explicit_ignored_executed": 0,
+          "actual_fqns": [
+            "broker_cli::policy::tests::canonical_preparation_survives_reopen_with_same_scope_operation_and_zero_attempts",
+            "broker_cli::policy::tests::closed_input_and_scope_validation_refuse_before_publishing_a_directory",
+            "broker_cli::policy::tests::existing_destination_and_changed_preparation_refuse_without_repair_or_new_intent",
+            "broker_cli::policy::tests::input_bound_private_mode_and_invalid_receipt_refuse_without_destroying_evidence",
+            "broker_cli::policy::tests::origin_preparation_refuses_credentials_nonloopback_plaintext_and_hidden_query",
+            "broker_cli::policy::tests::output_failure_and_literal_token_overlap_preserve_the_real_preparation",
+            "broker_cli::policy::tests::pending_transition_requires_explicit_local_resume_and_malformed_pending_is_preserved",
+            "broker_cli::policy::tests::persisted_scope_operation_and_request_hash_must_correlate_on_every_reopen",
+            "broker_cli::policy::tests::policy_parser_accepts_four_exact_commands_and_refuses_apply_scope_overrides",
+            "broker_cli::policy::tests::scope_conflict_code_keeps_prior_unresolved_attempt_and_never_rewrites_preparation"
+          ],
+          "argv": [
+            "--exact",
+            "broker_cli::policy::tests::policy_parser_accepts_four_exact_commands_and_refuses_apply_scope_overrides",
+            "broker_cli::policy::tests::canonical_preparation_survives_reopen_with_same_scope_operation_and_zero_attempts",
+            "broker_cli::policy::tests::closed_input_and_scope_validation_refuse_before_publishing_a_directory",
+            "broker_cli::policy::tests::scope_conflict_code_keeps_prior_unresolved_attempt_and_never_rewrites_preparation",
+            "broker_cli::policy::tests::pending_transition_requires_explicit_local_resume_and_malformed_pending_is_preserved",
+            "broker_cli::policy::tests::existing_destination_and_changed_preparation_refuse_without_repair_or_new_intent",
+            "broker_cli::policy::tests::input_bound_private_mode_and_invalid_receipt_refuse_without_destroying_evidence",
+            "broker_cli::policy::tests::origin_preparation_refuses_credentials_nonloopback_plaintext_and_hidden_query",
+            "broker_cli::policy::tests::output_failure_and_literal_token_overlap_preserve_the_real_preparation",
+            "broker_cli::policy::tests::persisted_scope_operation_and_request_hash_must_correlate_on_every_reopen",
+            "--test-threads=1",
+            "--nocapture"
+          ]
+        },
+        {
+          "id": "cli-baseline",
+          "artifact": "bin-test",
+          "passed": 1,
+          "failed": 0,
+          "default_ignored": 0,
+          "explicit_ignored_executed": 0,
+          "actual_fqns": [
+            "broker_cli::policy_baseline_tests::broker_policy_status_is_parsed_without_opening_an_operation"
+          ],
+          "argv": [
+            "--exact",
+            "broker_cli::policy_baseline_tests::broker_policy_status_is_parsed_without_opening_an_operation",
+            "--test-threads=1",
+            "--nocapture"
+          ]
+        },
+        {
+          "id": "shared-reader",
+          "artifact": "lib",
+          "passed": 7,
+          "failed": 0,
+          "default_ignored": 0,
+          "explicit_ignored_executed": 0,
+          "actual_fqns": [
+            "audit::human_modern::journal_tests::metadata_events_own_busy_restores_timeout_and_preserves_health",
+            "audit::human_modern::journal_tests::metadata_events_sqlite_audit_full_preserves_head_quota_and_usage",
+            "audit::human_modern::recent::tests::modern_recent_own_mutex_refuses_without_waiting_or_changing_713",
+            "audit::human_modern::recent::tests::modern_recent_own_sqlite_busy_rolls_back_and_restores_713_then_recovers",
+            "audit::human_modern::recent::tests::modern_recent_real_audit_full_rolls_back_restores_713_and_latches_unavailable",
+            "audit::human_modern::tests::own_mutex_busy_refuses_without_waiting_or_changing_timeout",
+            "audit::human_modern::tests::own_sqlite_busy_refuses_without_latching_and_restores_timeout"
+          ],
+          "argv": [
+            "--exact",
+            "audit::human_modern::tests::own_sqlite_busy_refuses_without_latching_and_restores_timeout",
+            "audit::human_modern::tests::own_mutex_busy_refuses_without_waiting_or_changing_timeout",
+            "audit::human_modern::journal_tests::metadata_events_own_busy_restores_timeout_and_preserves_health",
+            "audit::human_modern::recent::tests::modern_recent_own_sqlite_busy_rolls_back_and_restores_713_then_recovers",
+            "audit::human_modern::recent::tests::modern_recent_own_mutex_refuses_without_waiting_or_changing_713",
+            "audit::human_modern::journal_tests::metadata_events_sqlite_audit_full_preserves_head_quota_and_usage",
+            "audit::human_modern::recent::tests::modern_recent_real_audit_full_rolls_back_restores_713_and_latches_unavailable",
+            "--test-threads=1",
+            "--nocapture"
+          ]
+        },
+        {
+          "id": "root-vertical",
+          "artifact": "lib",
+          "passed": 1,
+          "failed": 0,
+          "default_ignored": 1,
+          "explicit_ignored_executed": 1,
+          "actual_fqns": [
+            "api::human_sources::owned_policy_cli_tests::actual_cli_preserves_operation_after_lost_receipt_then_revokes_without_runtime_claim"
+          ],
+          "argv": [
+            "--ignored",
+            "--exact",
+            "api::human_sources::owned_policy_cli_tests::actual_cli_preserves_operation_after_lost_receipt_then_revokes_without_runtime_claim",
+            "--test-threads=1",
+            "--nocapture"
+          ]
+        }
+      ],
+      "source_post": {
+        "files": 2813,
+        "private_0600": 18,
+        "nodes": 3215,
+        "contents_paths_modes_unchanged": true,
+        "archive_sha256": "a999212811f630e824d1fef0b0acd2e0dcc4af7af11cb0254ca29757c2ce6925",
+        "archive_bytes": 34938880
+      },
+      "memory": {
+        "peak_bytes": 1252507648,
+        "limit_bytes": 4294967296,
+        "swap_limit": 0,
+        "oom": 0,
+        "oom_kill": 0
+      },
+      "collectors": [
+        {
+          "name": "post-source-verify",
+          "rc": 0
+        },
+        {
+          "name": "export-postrun-ustar",
+          "rc": 0
+        },
+        {
+          "name": "fixture-regular-inventory",
+          "rc": 0
+        },
+        {
+          "name": "export-private-fixtures",
+          "rc": 0
+        },
+        {
+          "name": "final-kernel-tmp-metadata",
+          "rc": 0
+        },
+        {
+          "name": "final-cgroup-memory",
+          "rc": 0
+        },
+        {
+          "name": "target-regular-metadata",
+          "rc": 0
+        }
+      ],
+      "closure_rc": 0,
+      "exact_qa_container_removed": true
+    }
+  ],
+  "artifacts": [
+    {
+      "id": "lib",
+      "sha256": "e6007acec0f26005e88f73849c736fdbf3de4bdacd399c2dcd133bcf1d4922e7",
+      "bytes": 301320496,
+      "cargo_artifact_json_sha256": "9577d929611c8053b734b47fe0e531a5304136ff0aed5f276fcb6d36cad0561d",
+      "profile_test": true,
+      "host_executed": false,
+      "reused_byte_exact_in_resume": true
+    },
+    {
+      "id": "bin-test",
+      "sha256": "c82ccd5e41e84b016415ea9f0fe880e0cebb080da85efa66fd076d5ac5784ca8",
+      "bytes": 55988832,
+      "cargo_artifact_json_sha256": "8af224473bee7da3c00b9746c5ba9e82241f9ec327db9ad0e87a689192018802",
+      "profile_test": true,
+      "host_executed": false,
+      "reused_byte_exact_in_resume": true
+    },
+    {
+      "id": "bin",
+      "sha256": "482eef65c2f6ed5b339356bb855103b8268014d1b601f05b088dce78a5df896d",
+      "bytes": 204114512,
+      "cargo_artifact_json_sha256": "155fedc73a3cf0390009e2c0d70d42aacee2499313d05af923e1319164de8129",
+      "profile_test": false,
+      "host_executed": false,
+      "reused_byte_exact_in_resume": true
+    }
+  ],
+  "resume_qa_profile": {
+    "image": "sha256:2115d4321fa70d045c7c73361444bdef10f69c9069e66a70ad27a73daa92a207",
+    "architecture": "linux/arm64",
+    "uid_gid": "1000:1000",
+    "network": "none",
+    "readonly_root": true,
+    "cap_drop": "ALL",
+    "no_new_privileges": true,
+    "seccomp": 2,
+    "cpu": 2,
+    "memory_bytes": 4294967296,
+    "swap_bytes": 0,
+    "pids": 128,
+    "scratch_bytes": 2147483648,
+    "scratch_inodes": 131072,
+    "tmp_bytes": 67108864,
+    "tmp_inodes": 4096,
+    "tmp_noexec": true,
+    "shm_readonly": true,
+    "mqueue_readonly": true,
+    "inputs_readonly": true,
+    "cargo_cache": false
+  },
+  "coverage": "Real SDK/Router/SQLite/control_fs and CLI parser; normal CLI HTTP with lost receipt and same-operation replay; policy_registry_only",
+  "operator_gap": {
+    "status": "OPEN",
+    "no_supported_fresh_scope_cas_acquisition": true,
+    "local_status_is_historical": true,
+    "expected_scope_is_comparison_not_tenant_selector": true,
+    "inspect_implemented": false,
+    "prepare_inspection_dir_implemented": false,
+    "later_five_inspection_tests": {
+      "source": "05a4451d08856ce5253bce0103acf8b3d873057b",
+      "status": "NOT_RUN"
+    }
+  },
+  "not_run": [
+    "Another HEAD/public composed source",
+    "Fresh scope/CAS acquisition journey",
+    "Real worker/runtime/egress network",
+    "Provider/SSO",
+    "Kubernetes/other real product cluster",
+    "100 workers",
+    "Full suite",
+    "Strict Clippy",
+    "Physical power-loss/restore"
+  ],
+  "production": false,
+  "production_gates_closed": 0,
+  "broker_lifecycle_opened": false,
+  "relay_opened": false
+}

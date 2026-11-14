@@ -43,7 +43,7 @@ Known unadopted human, control, workload, broker, relay and OIDC methods, includ
 
 A busy mutex or SQLite writer in sourceA does not trigger SQL queries in A while authenticating and reading sourceB. A busy own source returns503. Busy is not absence or a permanent mismatch. Actual compared filesystem/configuration/marker/incarnation mismatches retain global owner invalidation. Filesystem revalidation still covers the full union: blocked filesystem calls or a shared Write epoch carry the existing availability limits. The private candidate index is bounded at65536 entries/16MiB of representation before accumulation; overflow refuses complete publication. These bounds do not measure process RAM.
 
-For the adopted human reads, runtime compares the own source's real identity authorization revision and workload-binding-history high watermark before and after the adopted operation. These markers cover identity mutations and workload-binding issue/rotation/revocation; ordinary read audits do not move them. A compared mismatch requires discovery rebuilding with admission closed. This is not a universal writer generation: other HTTP writers remain closed, and a raw neighboring storage mutation cannot be detected instantly without observing that neighbor.
+For the adopted human reads, runtime compares the own source's real identity authorization revision and workload-binding-history high watermark before and after the adopted operation. These markers cover identity mutations and workload-binding issue/rotation/revocation; ordinary read audits do not move them. A compared mismatch requires discovery rebuilding with admission closed. This is not a universal writer generation: identity/workload HTTP writers remain closed, and a raw neighboring storage mutation cannot be detected instantly without observing that neighbor.
 
 ## Candidate A0: reserved technical control diagnostic
 
@@ -55,8 +55,103 @@ The checked `Business` transaction verifies the binding before facts and revalid
 
 The candidate Rust validator and JSON Schema agree on the existing `ControlProtocolV1` facts for formats 14/15; `active` remains the actual lease fact. A future 200 from `AuditClient::control_supervision_identity` would qualify neither broker lifecycle nor a connection permit. The broker 3–13 and relay 6–13 gates stay unchanged; 14/15 still encounter `IncompatibleControl` before broker effects. No worker, human launch or egress capability is opened.
 
-Coverage is the complete W0 startup index plus the selected source's own generation, not multiprocess coherence or a universal writer generation. Owned HTTP writers remain closed. Real internal source/`WriteEpoch` writers remain available, with no post-startup server caller connected in the inspected source. A future writer changing credentials, workloads or candidate coverage must close admission through `require_rebuild` **before the effect**, then reconstruct the complete union. A B read cannot infer a new A collision without a global invalidation producer; the real own binding is nevertheless checked on each diagnostic. See the [candidate API contract](../../api.md#owned-control-a0). These are limits to preserve before adopting any writer, not a new end-user procedure.
+Coverage is the complete W0 startup index plus the selected source's own generation, not multiprocess coherence or a universal writer generation. Within the inspected A0 source boundary, owned HTTP writers remain closed. Candidate A1 below connects only policy-registry replace/revoke; internal identity/workload source/`WriteEpoch` writers still have no post-startup server caller. A future writer changing credentials, workloads or candidate coverage must close admission through `require_rebuild` **before the effect**, then reconstruct the complete union. A B read cannot infer a new A collision without a global invalidation producer; the real own binding is nevertheless checked on each diagnostic. See the [candidate API contract](../../api.md#owned-control-a0). These are limits to preserve before adopting any writer, not a new end-user procedure.
 
 The server reserves a cleanup supervisor before fallible builders/binds. Shutdown and Drop close human/context admission, stop HTTP, observe real HTTP joins, and wait for accepted/queued blocking usages and epochs. A drain error reports failure, including any primary bind/serve error. An unestablished drain is never success; real remaining usage/epoch handles retain their owner and file descriptors. Runtime/process termination and host failure remain outside this in-process guarantee.
 
 Local browser `HumanApiClient.close()` clears the token, aborts requests and discards late responses. It does not revoke the durable credential. Modern credential mutation, fresh discovery of memberships from other sources and SSO sessions/revocation remain mandatory open work. The adoption workflow records its software results and [remaining qualification limits](../human-sources-maintenance/README.md#validation-scope). Stop consumers and retain configuration, databases, backups and evidence before operator reconciliation; never delete history to recover a green startup.
+
+<a id="owned-policy-a1-operator"></a>
+
+## A1: policy-registry operations
+
+**A1 policy-registry contract.** These four commands exist in the [source with dated targeted software evidence](../../engineering/evidence/2026-11-14/owned-egress-policy-api-cli/README.md), `db2678d42cff9c8d6d15bf31284a989732cc6f0d`. Those results do not transfer to another HEAD or qualify a complete operator journey. The scope/CAS acquisition gap below remains open; `inspect` and `prepare --inspection-dir` are not implemented. Scope is `policy_registry_only`: a durable policy or `revoke_requested` receipt establishes neither network enforcement, a connection permit, worker/broker start nor human approval.
+
+### Prerequisites that these commands do not create
+
+Use an already adopted owned installation with **actual Store15**, the retained complete source union and a technical `runner` credential already present in its private registry **and live binding to that exact source/tenant/control namespace**. A named human bearer, viewer, workload token or SSO role is not this credential. A1 creates no credential/binding and performs no migration. The adoption procedure above converts 13→14, not 15; the [E1 maintenance contract](../../engineering/EGRESS_POLICY_STORE.md#exact-format-15-and-maintenance) describes the separate existing trusted protocol. Do not fabricate envelopes, receipts, SQLite rows or use fixtures as installation instructions. Without those real prerequisites, stop here and retain the installation's files.
+
+> **Current operator-path limit.** The input requires tenant_id/control_namespace_uuid confirmed by a real authenticated reserved diagnostic and the exact policy-head/CAS facts. These four commands do not acquire those facts. Existing broker control-info uses the public diagnostic, closed in owned mode; status is local history, not a current server head. No supported acquisition command is supplied by A1. Without the actual retained control evidence, stop: do not infer values from filenames/errors, copy another tenant or build a user-side Rust/SQLite workaround. The missing operator connection remains a separate implementation/qualification requirement.
+
+The diagnostic's active value is a lease fact, not permission, and it does not contain a policy head. Session replacement also requires the actual tenant ceiling and active Session facts. Another operation may make a historical receipt/status stale. No current-policy read is provided here. `expected_scope` is a comparison assertion, never a source/Store/tenant selector or authority. Fill exact preconditions only from real controlled evidence; there is no default CAS or automatic repair. Choose the new operation UUID explicitly; every retry/resume retains its UUID and bytes.
+
+Keep input and runner-token files private (0600), a private (0700) destination parent already present, and the operation destination absent. Its final name is at most 128 ASCII alphanumeric/dot/dash/underscore characters, excluding `.` and `..`. Input is bounded to 66,560 bytes; canonical request to 65,536; local metadata/state and canonical receipt to 4,096 each. The input may contain sensitive destination metadata: keep it outside the user workspace, frontend and public artifacts. The credential is read privately from its file, never passed as a value or stored in the operation.
+
+### Fill the input before using it
+
+**The two JSON objects below are templates, not accepted requests or executable examples. Every null scope/UUID/CAS/time field must be replaced with the installation's actual typed value.** There is no bootstrap/default CAS example here. For replacement, choose an actual valid Unix-millisecond not-before/expiry window; expiry must follow not-before. The control's durable clock and policy rules remain authoritative. Empty destinations demonstrates a deny-all registry policy, not an external access grant. Revoke has no policy/window or expected digest. The selector shown is Tenant; a Session replacement additionally requires its canonical session UUID, active Session and exact tenant ceiling (revision/epoch/digest), as specified by the [API contract](../../api.md#owned-policy-a1).
+
+```json
+{
+  "version": 1,
+  "action": "replace",
+  "request": {
+    "version": 1,
+    "expected_scope": {
+      "tenant_id": null,
+      "control_namespace_uuid": null
+    },
+    "operation_id": null,
+    "selector": {
+      "kind": "tenant"
+    },
+    "expected_revision": null,
+    "expected_epoch": null,
+    "policy": {
+      "not_before_ms": null,
+      "expires_at_ms": null,
+      "destinations": [],
+      "max_destinations": 128,
+      "max_resolution_ips": 16
+    },
+    "tenant_ceiling": null
+  }
+}
+```
+
+```json
+{
+  "version": 1,
+  "action": "revoke",
+  "request": {
+    "version": 1,
+    "expected_scope": {
+      "tenant_id": null,
+      "control_namespace_uuid": null
+    },
+    "operation_id": null,
+    "selector": {
+      "kind": "tenant"
+    },
+    "expected_revision": null,
+    "expected_epoch": null
+  }
+}
+```
+
+### Prepare, submit, read local history and explicitly resume
+
+**Set these variables to actual nonsecret origins/private paths first; the block is not runnable as supplied.** GATEWAY_ORIGIN is the immutable origin used at preparation: HTTPS or HTTP loopback, without URL credentials/query/fragment or a non-root path. PRIVATE_RUNNER_TOKEN names the private file, not its contents. The four product commands are exactly:
+
+```sh
+agentsandbox broker policy prepare --gateway "$GATEWAY_ORIGIN" --input "$PRIVATE_INPUT_JSON" --output-dir "$NEW_OPERATION_DIR"
+agentsandbox broker policy apply --operation-dir "$NEW_OPERATION_DIR" --token-file "$PRIVATE_RUNNER_TOKEN"
+agentsandbox broker policy status --operation-dir "$NEW_OPERATION_DIR"
+agentsandbox broker policy resume --operation-dir "$NEW_OPERATION_DIR" --token-file "$PRIVATE_RUNNER_TOKEN"
+```
+
+prepare performs no network call. It validates the closed version1/action/request, canonicalizes it and durably retains origin/action/op/CAS/expected_scope/request bytes and hash in the new directory before any submission. Unknown fields, invalid UUIDs/limits or unsafe paths refuse without adopting/overwriting old data. No input/token or existing directory is repaired. Retain the complete operation directory, including partial records, after an error; do not edit its JSON to force a retry.
+
+apply requires the initial prepared state. It holds the real local lock, revalidates retained files/token, compares the actual reserved diagnostic to the prepared scope and durably records an intent, then calls the action-specific SDK at most once. A successful diagnostic does not bind the later POST: the server checks expected_scope again in its own transaction. There is no origin/scope/UUID/CAS override, automatic retry, redirect/proxy or public/legacy fallback. The SDK retains its 15 s request/3 s connect bounds. Format 14 needs explicit maintenance; a true busy/source/clock/audit refusal is not absence or permission to switch.
+
+status makes no network call and reports local history only. One JSON object and LF contains version, operation_id, action, phase, attempts, last_error, receipt_present, pending_state, a receipt summary, historical:true and coverage:policy_registry_only. Phases are prepared, remote_outcome_unresolved and receipt_recorded. attempts counts local submission intents, not remote effects. No credential, origin, actual scope, DNS, private path, arbitrary response/chain or runtime_applied field is printed. A failed command may emit safe unresolved state only if its persistence/output succeed; otherwise it returns a closed error. Busy can mean another command holds the local lock, not a missing operation. A partial/unsafe record remains an error, never empty history.
+
+resume is explicit and keeps the exact preparation. It may publish an already retained **validated local pending transition**; reopen/status never do so implicitly. If a canonical action-correlated receipt is already durable, resume revalidates/resynchronizes it and the supplied private token and returns historical evidence without another POST or fresh server-state claim. Otherwise it performs a new diagnostic and at most one same-operation POST. Accepted server work may finish after observer loss; lost ACK, Transport/InvalidResponse, changed token or local output/publication failure never proves rollback. Preserve all records. An output failure does not remove an already stored receipt. A later ScopeConflict does not erase an earlier unresolved attempt; do not change scope/CAS or generate another UUID to hide it.
+
+### Receipt, refusals and limits
+
+The SDK parses bounded canonical E1 bytes and validates the action. Replace correlates operation/selector/CAS, revision+1/epoch+1, Active and a recomputed digest. Revoke retains revision, requires epoch+1/RevokeRequested and checks policy_digest **shape only** (lowercase64hex), without a prior-receipt value expectation or extra remote policy read. revoke_requested is a registry revocation request, not evidence of runtime closure. The controller owns limits, reservations, clock and audit; a local file/DTO/status is not actor authority.
+
+Closed codes include `egress_policy_scope_conflict` and `egress_policy_conflict` (retain preparation; no CAS repair), `egress_policy_migration_required` (no automatic migration), `egress_policy_busy`, `egress_policy_clock_unavailable`, `egress_policy_unavailable` or `egress_policy_capacity_exhausted` (no fallback), and `egress_policy_transport_unresolved`/`egress_policy_invalid_response` (preserve ambiguity and explicitly resume). Local unsafe/incomplete or durability failures also refuse without cleanup. HTTP/pre-body error details are in the [A1 API contract](../../api.md#owned-policy-a1); no error scope echo is an authoritative discovery source.
+
+The in-process filesystem barrier uses real retained files/locks plus file, operation-directory and containing-parent synchronization. It establishes a new local barrier, not proof that a previous sync succeeded or physical power-loss recovery. Existing same-UID/root trust limits remain. No new human credential mutation, policy read API, runtime network mediation/revocation, provider/worker/cluster qualification or broker 3–13 / relay 6–13 opening follows. The dated evidence covers targeted software behavior on its exact source. Fresh scope/CAS acquisition, the later five inspection tests, real runtime/network and production qualification remain NOT_RUN; the incomplete operator path remains an open requirement.
