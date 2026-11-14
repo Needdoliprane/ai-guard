@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { HumanContractError, parseHumanBrokerPage } from "../src/human-model.ts";
-import { humanOwnedBrokersUrl, parseHumanOwnedBrokerPage, checkpointLabel, checkpointFacts } from "../src/human-owned-brokers.ts";
+import { humanOwnedBrokersUrl, parseHumanOwnedBrokerPage, checkpointLabel, checkpointFacts, formatBrokerDate } from "../src/human-owned-brokers.ts";
 import { ownedBroker, ownedBrokerPage, noCheckpoint } from "./owned-brokers-fixture.mjs";
 import { brokerAuthorityLabel } from "../src/supervision-model.ts";
 
@@ -72,4 +72,20 @@ test("owned: un identifiant d’autorité blanc valide garde sa valeur et son li
   const value = ownedBrokerPage(); value.items[0].grant.authorities[0].authority_id = "  ";
   const authority = parseHumanOwnedBrokerPage(value).items[0].authorities[0];
   assert.equal(authority.authority_id, "  "); assert.equal(brokerAuthorityLabel(authority), 'Identifiant blanc · "  "');
+});
+
+test("owned: une seconde intercalaire conserve sa chaîne et son ordre59/60/00 sans inventer un instant local", () => {
+  const value = ownedBrokerPage(); const item = value.items[0];
+  const leap = "2016-12-31T23:59:60.500Z";
+  value.evaluated_at = leap; value.read_receipt.received_at = leap;
+  item.grant.granted_at = "2016-12-31T23:59:59Z"; item.grant.not_after = "2017-01-01T00:00:00Z";
+  item.grant.revoked = true; item.grant.revoked_at = leap;
+  item.heartbeat.last.received_at = leap; item.heartbeat.last.lease_expires_at = "2017-01-01T00:00:00Z";
+  item.checkpoint.received_at = "2016-12-31T23:59:59.999999999Z"; item.checkpoint.lease_expires_at = leap;
+  const parsed = parseHumanOwnedBrokerPage(value);
+  assert.equal(parsed.evaluated_at, leap); assert.equal(parsed.items[0].last_heartbeat.received_at, leap);
+  assert.equal(parsed.items[0].owned.checkpoint.lease_expires_at, leap);
+  assert.equal(formatBrokerDate(leap), `${leap} · date serveur conservée, conversion locale inconnue`);
+  value.items[0].checkpoint.received_at = "2017-01-01T00:00:00Z";
+  assert.throws(() => parseHumanOwnedBrokerPage(value), HumanContractError, "La seconde suivante précède une expiration intercalaire : ordre invalide");
 });

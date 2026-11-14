@@ -6,7 +6,7 @@ import { button, el, icon } from "./dom.ts";
 import { announce, place, replaceIfChanged, setText, signatureOf, syncRows, syncSections } from "./dom-sync.ts";
 import { formatDate } from "./model.ts";
 import { CADENCES, SupervisionStore, sessionAnnouncement, summarize } from "./supervision-store.ts";
-import { checkpointFacts, checkpointLabel } from "./human-owned-brokers.ts";
+import { checkpointFacts, checkpointLabel, formatBrokerDate } from "./human-owned-brokers.ts";
 import { accessLines, activityLabel, associationLabel, brokerAuthorityLabel, brokerStateLabel, defaultFleetFilter, FILTER_ANNOUNCE_MS, filterBrokers, filterResources, filterWorkers, fleetCoverage, freshness,
   heartbeatOfPreviousIncarnation, isDefaultFleetFilter, joinFleet, resourceKindLabel, SEARCH_MAX_LENGTH, sessionResource, shownOfLoaded, sortWorkers, sourceAnnouncement, windowSummary,
   workerActivity, workerFlagLabel, workerFlags, workersOfSession, workerStateLabel } from "./supervision-model.ts";
@@ -424,7 +424,7 @@ export class SupervisionView {
         item.owned ? el("p", "muted", checkpointLabel(item)) : null,
         item.owned?.clock_uncertain && item.state !== "clock_uncertain" ? badge("Horloge incertaine du checkpoint", "amber") : null),
       cell("Autorités déclarées", el("ul", "sv-plain", ...item.authorities.map((authority) => el("li", "", el("span", "mono", brokerAuthorityLabel(authority)), ` · ${authority.runtime_kind}`)))),
-      cell("Dernière réception", heartbeat ? el("p", "", formatDate(heartbeat.received_at, true)) : el("p", "muted", "Aucun heartbeat reçu"),
+      cell("Dernière réception", heartbeat ? el("p", "", formatBrokerDate(heartbeat.received_at, true)) : el("p", "muted", "Aucun heartbeat reçu"),
         heartbeat ? el("p", "muted", "Heartbeat déclaré · réception observée") : null,
         // The registry keeps this fact across a new grant: it is not the last contact of the current incarnation.
         heartbeatOfPreviousIncarnation(item) ? badge("Heartbeat d’une ancienne incarnation", "amber") : null),
@@ -442,7 +442,7 @@ export class SupervisionView {
     const shown = listed.filter((group) => matching.has(group.key));
     syncRows(this.#brokerTable.body, shown.map((group) => ({ key: group.key, signature: `${signatureOf(group.broker!)}\n${group.workers.length}\n${windowNote}\n${more}`,
       build: () => this.#brokerRow(group, group.broker!, windowNote, more) })));
-    if (brokers.value) setText(this.#brokerTable.caption, `Brokers enregistrés · évaluation serveur du ${formatDate(brokers.value.evaluatedAt, true)}${
+    if (brokers.value) setText(this.#brokerTable.caption, `Brokers enregistrés · évaluation serveur du ${formatBrokerDate(brokers.value.evaluatedAt, true)}${
       brokers.value.profile ? ` · profil ${brokers.value.profile} · compte limité à la page · checkpoints déclarés partiels` : ""}${brokers.value.hasMore ? " · d’autres pages existent, voir le registre Brokers" : ""}`);
     this.#counts.brokers = brokers.value ? `${shownOfLoaded("brokers", shown.length, listed.length)}.` : "";
     setText(this.#brokerSummary, brokers.value ? `${windowSummary({ shown: shown.length, loaded: listed.length, hasMore: brokers.value.hasMore, noun: "brokers" })}${
@@ -650,20 +650,20 @@ export class SupervisionView {
     const window = this.#store.state.brokers.value; const heartbeat = item.last_heartbeat; const count = group?.workers.length ?? 0;
     return [
       definition([["État du bail", brokerStateLabel[item.state]], ["Incarnation courante", item.incarnation_id], ["Révision de l’autorisation", item.grant_revision],
-        ["Révision du heartbeat", item.heartbeat_revision], ["Autorisation accordée", formatDate(item.granted_at, true)], ["Expiration de l’autorisation", formatDate(item.not_after, true)],
-        ["Révocation", item.revoked_at ? formatDate(item.revoked_at, true) : "Aucune révocation enregistrée"],
+        ["Révision du heartbeat", item.heartbeat_revision], ["Autorisation accordée", formatBrokerDate(item.granted_at, true)], ["Expiration de l’autorisation", formatBrokerDate(item.not_after, true)],
+        ["Révocation", item.revoked_at ? formatBrokerDate(item.revoked_at, true) : "Aucune révocation enregistrée"],
         ["Autorités déclarées", item.authorities.map((authority) => `${brokerAuthorityLabel(authority)} · ${authority.runtime_kind}`).join(" ; ")],
         ["Heartbeat déclaré", heartbeat ? `Séquence ${heartbeat.sequence} · incarnation ${heartbeat.incarnation_id}${heartbeatOfPreviousIncarnation(item) ? " · ancienne incarnation" : ""}` : "Aucun heartbeat reçu"],
-        ["Réception observée", heartbeat ? formatDate(heartbeat.received_at, true) : "Inconnue"], ["Expiration du bail déclaré", heartbeat ? formatDate(heartbeat.lease_expires_at, true) : "Inconnue"]]),
+        ["Réception observée", heartbeat ? formatBrokerDate(heartbeat.received_at, true) : "Inconnue"], ["Expiration du bail déclaré", heartbeat ? formatBrokerDate(heartbeat.lease_expires_at, true) : "Inconnue"]]),
       ...(item.owned ? [definition([["Profil", "human_broker_registry_owned_v1"], ["Durée du bail autorisée", `${item.owned.lease_seconds} s`],
         ["Horloge", item.owned.clock_uncertain ? "Incertaine pour le heartbeat ou le checkpoint" : "Aucune incertitude signalée par le contrôle"],
-        ...checkpointFacts(item).map(([label, value]): [string, string] => [label, label === "Réception du checkpoint" || label === "Expiration du checkpoint" ? formatDate(value, true) : value])])] : []),
+        ...checkpointFacts(item).map(([label, value]): [string, string] => [label, label === "Réception du checkpoint" || label === "Expiration du checkpoint" ? formatBrokerDate(value, true) : value])])] : []),
       el("p", "muted", this.#store.state.workers.phase === "unavailable" ? "Profil workers indisponible : associations et activité inconnues. Les références du checkpoint ne sont pas un inventaire de workers." :
         this.#store.state.workers.phase === "not_granted" ? "Registre des workers non accordé : associations inconnues." :
         `${count} worker(s) de la fenêtre chargée portent une association d’autorité vers ce broker. Elle est historique et ne prouve pas l’exécution par ce broker ; l’inventaire runtime reste inconnu.`),
       count ? action("Voir ces workers", "sv-detail-broker-workers", () => this.#filterBroker(item.broker_id)) : null,
       // The receipt changes with every read: on its own line, it is the only part of this detail a refresh replaces.
-      window ? el("p", "muted", `Reçu durable de cette lecture : ${window.receipt.audit_event_id} · ${formatDate(window.receipt.received_at, true)}. Un reçu atteste l’enregistrement de la lecture, pas une exécution.`) : null,
+      window ? el("p", "muted", `Reçu durable de cette lecture : ${window.receipt.audit_event_id} · ${formatBrokerDate(window.receipt.received_at, true)}. Un reçu atteste l’enregistrement de la lecture, pas une exécution.`) : null,
     ];
   }
   #resourceDetail(item: HumanResource): (HTMLElement | null)[] {

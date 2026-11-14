@@ -2,6 +2,7 @@
 // sharing the existing broker presentation model; it never retries another route or infers runtime facts.
 import { HumanContractError, object, pageLimit, parseHumanBrokerPage } from "./human-model.ts";
 import type { HumanBroker, HumanBrokerPage, HumanOwnedBrokerCheckpoint } from "./human-model.ts";
+import { formatDate } from "./model.ts";
 
 export const OWNED_BROKER_PROFILE = "human_broker_registry_owned_v1" as const;
 export const OWNED_BROKER_PAGE_BYTES = 256 * 1024;
@@ -11,7 +12,7 @@ function closed(value: unknown, fields: readonly string[]): asserts value is Rec
   requireContract(object(value) && Object.keys(value).length === fields.length && fields.every((key) => Object.hasOwn(value, key)));
 }
 /** RFC3339 dates emitted by the registry are bounded and strictly after the Unix epoch. */
-function instant(value: unknown): bigint | null {
+function instant(value: unknown): { seconds: bigint; nanoseconds: bigint } | null {
   if (typeof value !== "string" || value.length > 64) return null;
   const parts = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(?:\.(\d+))?(Z|[+-]\d\d:\d\d)$/i.exec(value);
   if (!parts) return null;
@@ -19,15 +20,21 @@ function instant(value: unknown): bigint | null {
   if (!zone) return null;
   const y = Number(year); const m = Number(month); const d = Number(day);
   const days = [31, y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-  if (m < 1 || m > 12 || d < 1 || d > days[m - 1]! || Number(hour) > 23 || Number(minute) > 59 || Number(second) > 59 ||
+  if (m < 1 || m > 12 || d < 1 || d > days[m - 1]! || Number(hour) > 23 || Number(minute) > 59 || Number(second) > 60 ||
     zone !== "Z" && zone !== "z" && (Number(zone.slice(1, 3)) > 23 || Number(zone.slice(4, 6)) > 59)) return null;
-  const milliseconds = Date.parse(`${year}-${month}-${day}T${hour}:${minute}:${second}${zone.toUpperCase()}`);
+  const leap = second === "60";
+  const milliseconds = Date.parse(`${year}-${month}-${day}T${hour}:${minute}:${leap ? "59" : second}${zone.toUpperCase()}`);
   // Match the server's timestamp() > 0 rule (fractional positive values in the first second are rejected).
   if (!Number.isFinite(milliseconds) || milliseconds < 1000) return null;
-  return BigInt(milliseconds) * 1000000n + BigInt(fraction.slice(0, 9).padEnd(9, "0"));
+  // Chrono retains a leap second as second59 with nanoseconds >=1e9. Compare the pair lexicographically:
+  // adding one second to a scalar instant would collapse this distinct value into the following second.
+  return { seconds: BigInt(milliseconds) / 1000n, nanoseconds: BigInt(fraction.slice(0, 9).padEnd(9, "0")) + (leap ? 1000000000n : 0n) };
 }
 function time(value: unknown): value is string { return instant(value) !== null; }
-function ordered(start: string, end: string): boolean { return instant(end)! >= instant(start)!; }
+function ordered(start: string, end: string): boolean {
+  const a = instant(start)!; const b = instant(end)!;
+  return b.seconds > a.seconds || b.seconds === a.seconds && b.nanoseconds >= a.nanoseconds;
+}
 const checkpointFields = ["status", "received_at", "lease_expires_at", "freshness", "in_current_grant", "coverage", "reference_count", "has_more", "publication_provenance", "reception_provenance"] as const;
 function checkpoint(value: unknown): HumanOwnedBrokerCheckpoint {
   closed(value, checkpointFields);
@@ -80,7 +87,7 @@ export function parseHumanOwnedBrokerPage(value: unknown): HumanBrokerPage {
   // the legacy `opaque` helper has a different contract, so only this local validation frame uses null.
   const base = parseHumanBrokerPage({ version: value.version, context_id: value.context_id, authorization_version: value.authorization_version,
     source: value.source, consistency: value.consistency, evaluated_at: value.evaluated_at, runtime_inventory: value.runtime_inventory,
-    items, has_more: false, next_cursor: null, read_receipt: value.read_receipt });
+    items, has_more: false, next_cursor: null, read_receipt: value.read_receipt }, time);
   requireContract(typeof value.has_more === "boolean" && value.has_more === (value.next_cursor !== null));
   return { ...base, profile: OWNED_BROKER_PROFILE, count_scope: "page", has_more: value.has_more, next_cursor: value.next_cursor as string | null,
     items: base.items.map((item, index) => ({ ...item, owned: summaries[index]! })) };
@@ -89,6 +96,10 @@ export function humanOwnedBrokersUrl(cursor: string | null = null, limit?: numbe
   const query = new URLSearchParams({ limit: pageLimit(limit) });
   if (cursor !== null) { requireContract(cursorPattern.test(cursor)); query.set("cursor", cursor); }
   return `/api/v1/human/owned/brokers?${query}`;
+}
+/** A valid server RFC3339 leap second remains visible verbatim when the browser cannot format it. */
+export function formatBrokerDate(value: string, detailed = true): string {
+  return Number.isFinite(Date.parse(value)) ? formatDate(value, detailed) : `${value} · date serveur conservée, conversion locale inconnue`;
 }
 
 const freshnessLabel = { current: "Checkpoint courant", stale: "Checkpoint périmé", historical: "Checkpoint historique", clock_uncertain: "Horloge incertaine du checkpoint" } as const;

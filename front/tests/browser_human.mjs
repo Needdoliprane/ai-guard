@@ -108,8 +108,11 @@ const server = createServer(async (request, response) => {
       if (ownedHeaders403) return refuseHeadersOnly(response);
       if (brokerDenied || brokerCapRemoved) return error(response, 403, "permission_denied", "review_permissions");
       if (brokersDown) return error(response, 503, "audit_unavailable", "retry");
-      const items = brokerDisplay === "empty" ? [] : brokerDisplay === "dense" ? denseBrokerItems().map((item, index) => ownedBrokerFromLegacy(item,
-        index === 1 ? { checkpoint: noCheckpoint("absent") } : index === 2 ? { checkpoint: noCheckpoint() } : {})) : undefined;
+      const items = brokerDisplay === "empty" ? [] : brokerDisplay === "dense" ? denseBrokerItems().map((item, index) => {
+        const row = ownedBrokerFromLegacy(item, index === 1 ? { checkpoint: noCheckpoint("absent") } : index === 2 ? { checkpoint: noCheckpoint() } : {});
+        if (index === 0) row.checkpoint.received_at = "2016-12-31T23:59:60.500Z";
+        return row;
+      }) : undefined;
       return json(response, ownedBrokerPage(items, url.searchParams.has("cursor") || brokerDisplay !== "standard" ? {} : { has_more: true, next_cursor: "a".repeat(1082) }));
     }
     if (url.pathname === "/api/v1/human/brokers") {
@@ -316,6 +319,7 @@ const runRegression = async () => {
       assert.ok(await page.getByText(label, { exact: true }).count());
     const detail = page.locator('[data-focus-key="broker-detail-0"]'); await detail.click();
     await page.getByRole("dialog").getByText(/ce compte ne mesure pas l’activité/).waitFor();
+    await page.getByRole("dialog").getByText("2016-12-31T23:59:60.500Z · date serveur conservée, conversion locale inconnue", { exact: true }).waitFor();
     await page.getByRole("dialog").getByRole("button", { name: "Fermer les détails", exact: true }).focus();
     await page.getByRole("dialog").evaluate((node) => { node.dataset.retained = "yes"; });
     const refreshed = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/v1/human/owned/brokers");

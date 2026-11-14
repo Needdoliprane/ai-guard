@@ -11,7 +11,7 @@ import "./human.css";
 import type { SupervisionPreferences } from "./supervision-view.ts";
 import type { JournalPreferences } from "./journal-view.ts";
 import type { HumanBroker, HumanBrokerPage, HumanWorker, HumanWorkerPage, HumanWorkerAssociation, HumanWorkerTimeStatus, HumanFederationWorkerPage, HumanContext, HumanEvent, HumanEventPage, HumanIdentity, HumanPage, HumanResource, HumanView } from "./human-model.ts";
-import { checkpointFacts, checkpointLabel } from "./human-owned-brokers.ts";
+import { checkpointFacts, checkpointLabel, formatBrokerDate } from "./human-owned-brokers.ts";
 
 interface ReadState<T> {
   value: T | null; loading: boolean; error: string; loadedAt: string | null; stale: boolean;
@@ -681,11 +681,11 @@ export class HumanDashboard {
     const node = el("div", "control-error", icon("alert"), el("p", "", message), this.#api.readBudgetStopped ? null : action("Réessayer", "human-retry", retry));
     node.setAttribute("role", "alert"); return node;
   }
-  #status<T extends { read_receipt: { received_at: string } }>(state: ReadState<T>) {
+  #status<T extends { read_receipt: { received_at: string } }>(state: ReadState<T>, formatTime: (value: string, detailed: boolean) => string = formatDate) {
     const stale = state.stale || !!state.loadedAt && Date.now() - Date.parse(state.loadedAt) > 30000;
     const node = el("div", "control-status", badge(state.loading ? "Lecture en cours…" : state.error ? state.value ? "Données périmées · dernière lecture conservée" : "Données indisponibles" : stale ? "Données à actualiser" : state.value ? "Lecture réussie" : "Lecture requise", state.error || stale ? "amber" : "neutral"),
-      el("span", "muted", state.loadedAt ? `Lu le ${formatDate(state.loadedAt, true)}` : "Aucune lecture réussie"),
-      state.value ? el("span", "muted", `Reçu du contrôle : ${formatDate(state.value.read_receipt.received_at, true)}`) : null);
+      el("span", "muted", state.loadedAt ? `Lu le ${formatTime(state.loadedAt, true)}` : "Aucune lecture réussie"),
+      state.value ? el("span", "muted", `Reçu du contrôle : ${formatTime(state.value.read_receipt.received_at, true)}`) : null);
     node.setAttribute("role", "status"); return node;
   }
   #pagination<T extends { items: unknown[]; has_more: boolean; next_cursor: string | null }>(state: ReadState<T>, load: (cursor: string | null, history: (string | null)[]) => void, key = "human", label?: string) {
@@ -866,12 +866,12 @@ export class HumanDashboard {
           item.state === "stale" ? el("p", "muted", "Broker déconnecté possible · état runtime inconnu") : null,
           item.owned?.clock_uncertain && item.state !== "clock_uncertain" ? badge("Horloge du checkpoint incertaine", "amber") : null),
         el("td", "", this.#brokerAuthorities(item)),
-        el("td", "", heartbeat ? el("div", "", el("p", "", formatDate(heartbeat.received_at, true)), el("p", "muted", "Heartbeat déclaré · réception observée"),
+        el("td", "", heartbeat ? el("div", "", el("p", "", formatBrokerDate(heartbeat.received_at, true)), el("p", "muted", "Heartbeat déclaré · réception observée"),
           heartbeat.incarnation_id !== item.incarnation_id ? badge("Heartbeat d’une ancienne incarnation", "amber") : null) : el("p", "muted", "Aucun heartbeat reçu dans le registre")),
-        el("td", "", el("p", "muted", `Autorisation : ${formatDate(item.not_after, true)}`),
-          heartbeat ? el("p", "muted", `Bail déclaré : ${formatDate(heartbeat.lease_expires_at, true)}`) : null),
+        el("td", "", el("p", "muted", `Autorisation : ${formatBrokerDate(item.not_after, true)}`),
+          heartbeat ? el("p", "muted", `Bail déclaré : ${formatBrokerDate(heartbeat.lease_expires_at, true)}`) : null),
         owned ? el("td", "", el("p", "", checkpointLabel(item)), item.owned?.checkpoint.status === "received" ?
-          el("p", "muted", `Réception observée : ${formatDate(item.owned.checkpoint.received_at, true)} · couverture déclarée partielle`) :
+          el("p", "muted", `Réception observée : ${formatBrokerDate(item.owned.checkpoint.received_at, true)} · couverture déclarée partielle`) :
           el("p", "muted", "L’activité reste inconnue")) : null,
         federation ? el("td", "", associated.length ? el("div", "human-federation-links", el("p", "muted", "Références historiques, sans preuve d’exécution par ce broker"),
           ...associated.map((worker) => action(`Ouvrir le worker ${worker.worker_id}`, `federation-broker-${item.broker_id}-worker-${worker.worker_id}`, () => this.#showWorker(worker)))) :
@@ -884,7 +884,7 @@ export class HumanDashboard {
       el("p", "", "Lecture live paginée : les lignes peuvent changer entre deux pages. Le flux des ressources ne couvre pas ce registre."))),
       owned ? el("div", "info-strip", badge("Couverture partielle", "amber"), el("p", "", "Profil human_broker_registry_owned_v1 annoncé par le contrôle. Heartbeats et checkpoints ont des fraîcheurs indépendantes. Registres workers et composition de fédération indisponibles pour ce profil ; activité et inventaire runtime inconnus."),
         this.#brokerForbidden ? null : action("Relire mes accès", "human-owned-profile-access", () => this.#openView("contexts"))) : null,
-      this.#status(state), state.value ? el("p", "human-broker-evaluation muted", `Évaluation serveur : ${formatDate(state.value.evaluated_at, true)} · source tenant_broker_registry · cohérence live_keyset${owned ? " · count_scope page : aucun total du tenant" : ""}.`) : null,
+      this.#status(state, formatBrokerDate), state.value ? el("p", "human-broker-evaluation muted", `Évaluation serveur : ${formatBrokerDate(state.value.evaluated_at, true)} · source tenant_broker_registry · cohérence live_keyset${owned ? " · count_scope page : aucun total du tenant" : ""}.`) : null,
       federation ? null : this.#brokerForbidden ? el("div", "control-error", el("p", "", state.error), action("Relire mes accès", "human-broker-access", () => this.#openView("contexts"))) :
         state.error ? this.#error(state.error, () => { void this.#loadBrokers(); }) : null,
       !state.value ? empty(state.loading ? "Chargement du registre…" : "Registre indisponible", this.#brokerForbidden ? "L’accès a été refusé. Les données, détails et positions de lecture ont été retirés." :
@@ -908,18 +908,18 @@ export class HumanDashboard {
     const detail = (name: string, value: string | HTMLElement) => el("div", "", el("dt", "", name), el("dd", "", value));
     const h = item.last_heartbeat;
     dialog.append(el("div", "detail-header", heading, close), el("div", "detail-body",
-      el("p", "muted", `Métadonnées de la page évaluée le ${formatDate(page.evaluated_at, true)}. Inventaire runtime inconnu.`),
+      el("p", "muted", `Métadonnées de la page évaluée le ${formatBrokerDate(page.evaluated_at, true)}. Inventaire runtime inconnu.`),
       el("dl", "human-broker-details", detail("Broker", item.broker_id), detail("Incarnation courante", item.incarnation_id),
         detail("État du bail", brokerStateName[item.state]), detail("Révision de l’autorisation", item.grant_revision), detail("Révision du heartbeat", item.heartbeat_revision),
-        detail("Autorisation accordée", formatDate(item.granted_at, true)), detail("Expiration de l’autorisation", formatDate(item.not_after, true)),
-        detail("Révocation", item.revoked_at ? formatDate(item.revoked_at, true) : "Aucune révocation enregistrée"), detail("Autorités déclarées", this.#brokerAuthorities(item)),
+        detail("Autorisation accordée", formatBrokerDate(item.granted_at, true)), detail("Expiration de l’autorisation", formatBrokerDate(item.not_after, true)),
+        detail("Révocation", item.revoked_at ? formatBrokerDate(item.revoked_at, true) : "Aucune révocation enregistrée"), detail("Autorités déclarées", this.#brokerAuthorities(item)),
         detail("Heartbeat déclaré", h ? `Séquence ${h.sequence} · incarnation ${h.incarnation_id}${h.incarnation_id !== item.incarnation_id ? " · ancienne incarnation" : ""}` : "Aucun heartbeat reçu"),
-        detail("Réception observée", h ? formatDate(h.received_at, true) : "Inconnue"), detail("Expiration du bail déclaré", h ? formatDate(h.lease_expires_at, true) : "Inconnue"),
+        detail("Réception observée", h ? formatBrokerDate(h.received_at, true) : "Inconnue"), detail("Expiration du bail déclaré", h ? formatBrokerDate(h.lease_expires_at, true) : "Inconnue"),
         ...(item.owned ? [detail("Profil", "human_broker_registry_owned_v1"), detail("Durée du bail autorisée", `${item.owned.lease_seconds} s`),
           detail("Horloge", item.owned.clock_uncertain ? "Incertaine pour le heartbeat ou le checkpoint" : "Aucune incertitude signalée par le contrôle"),
-          ...checkpointFacts(item).map(([label, value]) => detail(label, label === "Réception du checkpoint" || label === "Expiration du checkpoint" ? formatDate(value, true) : value))] : []),
+          ...checkpointFacts(item).map(([label, value]) => detail(label, label === "Réception du checkpoint" || label === "Expiration du checkpoint" ? formatBrokerDate(value, true) : value))] : []),
         detail("Demande de lecture", page.read_receipt.request_id), detail("Événement du reçu", page.read_receipt.audit_event_id),
-        detail("Reçu durable du contrôle", formatDate(page.read_receipt.received_at, true))),
+        detail("Reçu durable du contrôle", formatBrokerDate(page.read_receipt.received_at, true))),
       el("p", "muted", "Le reçu atteste l’enregistrement de la lecture, sans prouver sa livraison ni une exécution runtime. Kubernetes reste une autorité déclarée.")));
     document.body.append(dialog); this.#dialog = dialog; dialog.showModal();
     dialog.addEventListener("close", () => {

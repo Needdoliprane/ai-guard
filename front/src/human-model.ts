@@ -256,19 +256,19 @@ function brokerAuthorityId(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && new TextEncoder().encode(value).length <= 256 && !/[\u0000-\u001f\u007f-\u009f]/.test(value);
 }
 /** Registry metadata has its own closed projection; resource ACL coverage does not apply. */
-export function parseHumanBrokerPage(value: unknown): HumanBrokerPage {
+export function parseHumanBrokerPage(value: unknown, validateRegistryTime: (value: unknown) => value is string = timestamp): HumanBrokerPage {
   closed(value, ["version", "context_id", "authorization_version", "source", "consistency", "evaluated_at", "runtime_inventory", "items", "has_more", "next_cursor", "read_receipt"]);
   requireContract(value.version === 1 && opaque(value.context_id) && authorizationVersion(value.authorization_version) &&
-    value.source === "tenant_broker_registry" && value.consistency === "live_keyset" && timestamp(value.evaluated_at) &&
+    value.source === "tenant_broker_registry" && value.consistency === "live_keyset" && validateRegistryTime(value.evaluated_at) &&
     value.runtime_inventory === "unknown" && Array.isArray(value.items) && value.items.length <= 100 &&
     typeof value.has_more === "boolean" && (value.next_cursor === null || opaque(value.next_cursor)) && value.has_more === (value.next_cursor !== null));
   closed(value.read_receipt, ["request_id", "audit_event_id", "received_at"]);
-  requireContract(brokerUuid(value.read_receipt.request_id) && brokerUuid(value.read_receipt.audit_event_id) && timestamp(value.read_receipt.received_at));
+  requireContract(brokerUuid(value.read_receipt.request_id) && brokerUuid(value.read_receipt.audit_event_id) && validateRegistryTime(value.read_receipt.received_at));
   const items = value.items.map((item): HumanBroker => {
     closed(item, ["broker_id", "incarnation_id", "grant_revision", "heartbeat_revision", "state", "authorities", "granted_at", "not_after", "revoked_at", "last_heartbeat"]);
     requireContract(brokerUuid(item.broker_id) && brokerUuid(item.incarnation_id) && brokerRevision(item.grant_revision, true) &&
       brokerRevision(item.heartbeat_revision) && ["unseen", "current", "stale", "expired", "revoked", "clock_uncertain"].includes(String(item.state)) &&
-      timestamp(item.granted_at) && timestamp(item.not_after) && (item.revoked_at === null || timestamp(item.revoked_at)) &&
+      validateRegistryTime(item.granted_at) && validateRegistryTime(item.not_after) && (item.revoked_at === null || validateRegistryTime(item.revoked_at)) &&
       Array.isArray(item.authorities) && item.authorities.length >= 1 && item.authorities.length <= 16);
     const authorities = item.authorities.map((authority): HumanBroker["authorities"][number] => {
       closed(authority, ["authority_id", "runtime_kind", "authority_id_redacted"]);
@@ -280,7 +280,7 @@ export function parseHumanBrokerPage(value: unknown): HumanBrokerPage {
     if (item.last_heartbeat !== null) {
       closed(item.last_heartbeat, ["incarnation_id", "sequence", "received_at", "lease_expires_at", "heartbeat_provenance", "reception_provenance"]);
       const h = item.last_heartbeat;
-      requireContract(brokerUuid(h.incarnation_id) && brokerRevision(h.sequence, true) && timestamp(h.received_at) && timestamp(h.lease_expires_at) &&
+      requireContract(brokerUuid(h.incarnation_id) && brokerRevision(h.sequence, true) && validateRegistryTime(h.received_at) && validateRegistryTime(h.lease_expires_at) &&
         h.heartbeat_provenance === "declared" && h.reception_provenance === "observed");
       heartbeat = { incarnation_id: h.incarnation_id, sequence: h.sequence, received_at: h.received_at, lease_expires_at: h.lease_expires_at,
         heartbeat_provenance: "declared", reception_provenance: "observed" };
