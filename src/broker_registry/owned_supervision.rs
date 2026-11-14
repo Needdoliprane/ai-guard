@@ -1,7 +1,7 @@
 //! Shared contract of the proposed owned broker-supervision profile.
 //!
 //! **Proposal submitted to Root, not an admitted interface.** The profile name
-//! [`OWNED_SUPERVISION_PROFILE_V1`], its closed operation set, routes, bounds,
+//! [`OWNED_SUPERVISION_PROFILE_V2`], its closed operation set, routes, bounds,
 //! commitments, Pending/ACK rules and every type below are frozen between the
 //! control plane (federation lot A) and the broker publisher (lot B) until Root
 //! admits or revises them. Nothing here authenticates, authorizes, opens a
@@ -17,10 +17,10 @@
 //! | profile | Store format | operations | access |
 //! |---|---|---|---|
 //! | legacy presence | 6–13 heartbeat, 12–13 checkpoint | legacy routes | unscoped legacy Store |
-//! | `broker_supervision_owned_v1` | exactly 14 or 15, equal to the retained source descriptor and its verified marker | the five [`OwnedBrokerOperationV1`] | scoped `HumanSourceAccess` only |
+//! | `broker_supervision_owned_v2` | exactly 14 or 15, equal to the retained source descriptor and its verified marker | the five [`OwnedBrokerOperationV2`] | scoped `HumanSourceAccess` only |
 //!
 //! No format is served by both profiles and no format grants a permission. A
-//! future format is refused by [`OwnedSourceFormatV1::from_verified`] until a
+//! future format is refused by [`OwnedSourceFormatV2::from_verified`] until a
 //! reviewed variant is added. A new field, operation or format requires a new
 //! profile version and a new enrollment handoff, never an implicit upgrade of
 //! a v1 journal, an adoption of a legacy journal or of a remote head.
@@ -33,12 +33,12 @@
 //! private hash for every owned operation and refuses any divergence.
 //!
 //! Journal pins and engaged identity:
-//! - Pinned for a journal's lifetime ([`OwnedSupervisionPinsV1`]): profile,
+//! - Pinned for a journal's lifetime ([`OwnedSupervisionPinsV2`]): profile,
 //!   gateway origin, installation, closure ID, source, Store format, tenant,
 //!   namespace, broker, incarnation, credential, grant revision and authority.
 //!   Any change requires a new enrollment handoff and a new private journal;
 //!   the old journal and its Pending bytes are kept untouched.
-//! - Engaged per operation ([`OwnedBrokerSubjectV1`]): the pins plus the
+//! - Engaged per operation ([`OwnedBrokerSubjectV2`]): the pins plus the
 //!   binding revision. A Pending is replayed only under an identical subject.
 //!   New operations accept a renewed (higher) binding revision.
 //! - Observed only: the closure revision. It may advance between operations
@@ -48,12 +48,15 @@ use super::*;
 use crate::control::content_hash;
 use serde_json::Value;
 
-pub const OWNED_SUPERVISION_PROFILE_V1: &str = "broker_supervision_owned_v1";
-pub const OWNED_SUPERVISION_VERSION_V1: u32 = 1;
+mod reconciliation;
+pub use reconciliation::*;
 
-const SUBJECT_DOMAIN: &str = "ai-guard:broker-supervision-owned:v1:subject";
-const OPERATION_DOMAIN: &str = "ai-guard:broker-supervision-owned:v1:operation";
-const ENROLLMENT_DOMAIN: &str = "ai-guard:broker-supervision-owned:v1:enrollment";
+pub const OWNED_SUPERVISION_PROFILE_V2: &str = "broker_supervision_owned_v2";
+pub const OWNED_SUPERVISION_VERSION_V2: u32 = 2;
+
+const SUBJECT_DOMAIN: &str = "ai-guard:broker-supervision-owned:v2:subject";
+const OPERATION_DOMAIN: &str = "ai-guard:broker-supervision-owned:v2:operation";
+const ENROLLMENT_DOMAIN: &str = "ai-guard:broker-supervision-owned:v2:enrollment";
 /// Equal to the private `Change::input_hash` domains of `audit::broker_registry`.
 const REGISTRY_INPUT_DOMAIN: &str = "ai-guard:broker-registry-input:v1";
 const REGISTRY_CHECKPOINT_DOMAIN: &str = "ai-guard:broker-checkpoint-input:v1";
@@ -71,13 +74,13 @@ pub const MAX_OWNED_ENROLLMENT_BYTES: usize = 8 * 1024;
 pub const MAX_OWNED_ERROR_BYTES: usize = 4 * 1024;
 
 /// Result of the pure owned-supervision validators; the error is a closed code.
-pub type OwnedChecked<T> = std::result::Result<T, OwnedSupervisionErrorCodeV1>;
+pub type OwnedChecked<T> = std::result::Result<T, OwnedSupervisionErrorCodeV2>;
 
 /// Closed stable error codes of the owned profile. The wire code, HTTP status
 /// and retry class are fixed together; a body naming a known code with
 /// another status is unrecognized, never reinterpreted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum OwnedSupervisionErrorCodeV1 {
+pub enum OwnedSupervisionErrorCodeV2 {
     AuthenticationRequired,
     Forbidden,
     InvalidRequest,
@@ -100,7 +103,7 @@ pub enum OwnedSupervisionErrorCodeV1 {
     CredentialAmbiguous,
 }
 
-impl OwnedSupervisionErrorCodeV1 {
+impl OwnedSupervisionErrorCodeV2 {
     pub const ALL: [Self; 15] = [
         Self::AuthenticationRequired,
         Self::Forbidden,
@@ -158,14 +161,14 @@ impl OwnedSupervisionErrorCodeV1 {
         }
     }
 
-    pub const fn retry(self) -> OwnedRetryClassV1 {
+    pub const fn retry(self) -> OwnedRetryClassV2 {
         match self {
-            Self::SupervisionUnavailable => OwnedRetryClassV1::RetrySameOperation,
-            Self::ResponseWithheld => OwnedRetryClassV1::ReconcileSameOperation,
+            Self::SupervisionUnavailable => OwnedRetryClassV2::RetrySameOperation,
+            Self::ResponseWithheld => OwnedRetryClassV2::ReconcileSameOperation,
             Self::SourceRebuildRequired
             | Self::AuditUnavailable
             | Self::ResponseUnpublishable
-            | Self::CredentialAmbiguous => OwnedRetryClassV1::WaitForOperator,
+            | Self::CredentialAmbiguous => OwnedRetryClassV2::WaitForOperator,
             Self::AuthenticationRequired
             | Self::Forbidden
             | Self::InvalidRequest
@@ -174,7 +177,7 @@ impl OwnedSupervisionErrorCodeV1 {
             | Self::OperationConflict
             | Self::SequenceConflict
             | Self::ClockUncertain
-            | Self::MigrationRequired => OwnedRetryClassV1::Stop,
+            | Self::MigrationRequired => OwnedRetryClassV2::Stop,
         }
     }
 
@@ -237,21 +240,21 @@ impl OwnedSupervisionErrorCodeV1 {
             "code": self.code(),
             "message": self.message(),
             "retry_action": self.retry().retry_action(),
-            "profile": OWNED_SUPERVISION_PROFILE_V1,
+            "profile": OWNED_SUPERVISION_PROFILE_V2,
         }})
     }
 }
 
-impl std::fmt::Display for OwnedSupervisionErrorCodeV1 {
+impl std::fmt::Display for OwnedSupervisionErrorCodeV2 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.code())
     }
 }
-impl std::error::Error for OwnedSupervisionErrorCodeV1 {}
+impl std::error::Error for OwnedSupervisionErrorCodeV2 {}
 
 /// What a publisher may do after a refusal; it never selects another profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OwnedRetryClassV1 {
+pub enum OwnedRetryClassV2 {
     /// Recognized temporary refusal without mutation: retry the same retained
     /// operation after bounded backoff.
     RetrySameOperation,
@@ -264,7 +267,7 @@ pub enum OwnedRetryClassV1 {
     /// Never retried automatically; stop with the Pending retained.
     Stop,
 }
-impl OwnedRetryClassV1 {
+impl OwnedRetryClassV2 {
     pub const fn retry_action(self) -> &'static str {
         match self {
             Self::RetrySameOperation => "retry_same_operation",
@@ -279,8 +282,8 @@ impl OwnedRetryClassV1 {
 /// with their exact status are recognized; any other named or unnamed body is
 /// `Unrecognized` and stops the publisher, including an unknown named 503.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OwnedRemoteFailureV1 {
-    Owned(OwnedSupervisionErrorCodeV1),
+pub enum OwnedRemoteFailureV2 {
+    Owned(OwnedSupervisionErrorCodeV2),
     /// Valid relay `control_transport_failure` envelope: outcome unknown.
     TransportOutcomeUnknown,
     /// The transport gate refused before dispatch for occupied capacity.
@@ -295,17 +298,17 @@ pub enum OwnedRemoteFailureV1 {
     AuditBudgetExhausted,
     Unrecognized,
 }
-impl OwnedRemoteFailureV1 {
-    pub const fn retry(self) -> OwnedRetryClassV1 {
+impl OwnedRemoteFailureV2 {
+    pub const fn retry(self) -> OwnedRetryClassV2 {
         match self {
             Self::Owned(code) => code.retry(),
-            Self::TransportOutcomeUnknown => OwnedRetryClassV1::ReconcileSameOperation,
+            Self::TransportOutcomeUnknown => OwnedRetryClassV2::ReconcileSameOperation,
             Self::GatewayCapacityBusy | Self::GatewayNotDispatched => {
-                OwnedRetryClassV1::RetrySameOperation
+                OwnedRetryClassV2::RetrySameOperation
             }
-            Self::CoverageUnavailable => OwnedRetryClassV1::WaitForOperator,
+            Self::CoverageUnavailable => OwnedRetryClassV2::WaitForOperator,
             Self::GatewayRefused | Self::AuditBudgetExhausted | Self::Unrecognized => {
-                OwnedRetryClassV1::Stop
+                OwnedRetryClassV2::Stop
             }
         }
     }
@@ -313,19 +316,19 @@ impl OwnedRemoteFailureV1 {
 
 /// Classify a bounded, already parsed error body. The caller must not persist,
 /// log or display the remote prose; only the returned closed value is kept.
-pub fn classify_remote_failure(status: u16, body: &Value) -> OwnedRemoteFailureV1 {
+pub fn classify_remote_failure(status: u16, body: &Value) -> OwnedRemoteFailureV2 {
     use crate::control_transport::{
         ControlTransportFailureReasonV1 as Reason, ControlTransportFailureV1,
     };
     let Some(error) = body.get("error") else {
-        return OwnedRemoteFailureV1::Unrecognized;
+        return OwnedRemoteFailureV2::Unrecognized;
     };
     let code = error.get("code").and_then(Value::as_str);
-    if let Some(owned) = code.and_then(OwnedSupervisionErrorCodeV1::from_code) {
+    if let Some(owned) = code.and_then(OwnedSupervisionErrorCodeV2::from_code) {
         return if owned.status() == status {
-            OwnedRemoteFailureV1::Owned(owned)
+            OwnedRemoteFailureV2::Owned(owned)
         } else {
-            OwnedRemoteFailureV1::Unrecognized
+            OwnedRemoteFailureV2::Unrecognized
         };
     }
     let not_dispatched = error.get("outcome").and_then(Value::as_str) == Some("not_dispatched");
@@ -343,18 +346,18 @@ pub fn classify_remote_failure(status: u16, body: &Value) -> OwnedRemoteFailureV
                             ) | (504, Reason::UpstreamTimeout)
                         ) =>
                 {
-                    OwnedRemoteFailureV1::TransportOutcomeUnknown
+                    OwnedRemoteFailureV2::TransportOutcomeUnknown
                 }
-                _ => OwnedRemoteFailureV1::Unrecognized,
+                _ => OwnedRemoteFailureV2::Unrecognized,
             }
         }
         (429, Some("control_operation_capacity_exhausted")) if not_dispatched => {
-            OwnedRemoteFailureV1::GatewayCapacityBusy
+            OwnedRemoteFailureV2::GatewayCapacityBusy
         }
         (408, Some("control_body_timeout")) | (400, Some("control_body_incomplete"))
             if not_dispatched =>
         {
-            OwnedRemoteFailureV1::GatewayNotDispatched
+            OwnedRemoteFailureV2::GatewayNotDispatched
         }
         (413, Some("control_body_too_large"))
         | (400, Some("invalid_control_target"))
@@ -362,9 +365,9 @@ pub fn classify_remote_failure(status: u16, body: &Value) -> OwnedRemoteFailureV
         | (405, Some("control_method_not_allowed"))
             if not_dispatched =>
         {
-            OwnedRemoteFailureV1::GatewayRefused
+            OwnedRemoteFailureV2::GatewayRefused
         }
-        (503, Some("identity_unavailable")) => OwnedRemoteFailureV1::CoverageUnavailable,
+        (503, Some("identity_unavailable")) => OwnedRemoteFailureV2::CoverageUnavailable,
         (
             429,
             Some(
@@ -372,8 +375,8 @@ pub fn classify_remote_failure(status: u16, body: &Value) -> OwnedRemoteFailureV
                 | "audit_write_budget_exhausted"
                 | "audit_workload_budget_exhausted",
             ),
-        ) => OwnedRemoteFailureV1::AuditBudgetExhausted,
-        _ => OwnedRemoteFailureV1::Unrecognized,
+        ) => OwnedRemoteFailureV2::AuditBudgetExhausted,
+        _ => OwnedRemoteFailureV2::Unrecognized,
     }
 }
 
@@ -381,25 +384,29 @@ pub fn classify_remote_failure(status: u16, body: &Value) -> OwnedRemoteFailureV
 /// server route dispatch, never by a request field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum OwnedBrokerOperationV1 {
+pub enum OwnedBrokerOperationV2 {
     Identity,
     SelfView,
     Heartbeat,
     Checkpoint,
     CheckpointSelf,
+    HeartbeatReconcile,
+    CheckpointReconcile,
 }
-impl OwnedBrokerOperationV1 {
-    pub const ALL: [Self; 5] = [
+impl OwnedBrokerOperationV2 {
+    pub const ALL: [Self; 7] = [
         Self::Identity,
         Self::SelfView,
         Self::Heartbeat,
         Self::Checkpoint,
         Self::CheckpointSelf,
+        Self::HeartbeatReconcile,
+        Self::CheckpointReconcile,
     ];
 
     pub const fn method(self) -> &'static str {
         match self {
-            Self::Heartbeat | Self::Checkpoint => "POST",
+            Self::Heartbeat | Self::Checkpoint | Self::HeartbeatReconcile | Self::CheckpointReconcile => "POST",
             Self::Identity | Self::SelfView | Self::CheckpointSelf => "GET",
         }
     }
@@ -412,6 +419,8 @@ impl OwnedBrokerOperationV1 {
             Self::Heartbeat => "/api/v1/owned/brokers/heartbeats",
             Self::Checkpoint => "/api/v1/owned/brokers/checkpoints",
             Self::CheckpointSelf => "/api/v1/owned/brokers/checkpoints/self",
+            Self::HeartbeatReconcile => "/api/v1/owned/brokers/heartbeats/reconcile",
+            Self::CheckpointReconcile => "/api/v1/owned/brokers/checkpoints/reconcile",
         }
     }
 
@@ -423,6 +432,8 @@ impl OwnedBrokerOperationV1 {
             Self::Heartbeat => "/owned/brokers/heartbeats",
             Self::Checkpoint => "/owned/brokers/checkpoints",
             Self::CheckpointSelf => "/owned/brokers/checkpoints/self",
+            Self::HeartbeatReconcile => "/owned/brokers/heartbeats/reconcile",
+            Self::CheckpointReconcile => "/owned/brokers/checkpoints/reconcile",
         }
     }
 
@@ -435,6 +446,7 @@ impl OwnedBrokerOperationV1 {
         match self {
             Self::Heartbeat => MAX_OWNED_HEARTBEAT_REQUEST_BYTES,
             Self::Checkpoint => MAX_OWNED_CHECKPOINT_REQUEST_BYTES,
+            Self::HeartbeatReconcile | Self::CheckpointReconcile => MAX_OWNED_RECONCILIATION_REQUEST_BYTES,
             Self::Identity | Self::SelfView | Self::CheckpointSelf => 0,
         }
     }
@@ -446,6 +458,7 @@ impl OwnedBrokerOperationV1 {
             Self::Heartbeat => MAX_OWNED_HEARTBEAT_RESULT_BYTES,
             Self::Checkpoint => MAX_OWNED_CHECKPOINT_RESULT_BYTES,
             Self::CheckpointSelf => MAX_OWNED_CHECKPOINT_SELF_VIEW_BYTES,
+            Self::HeartbeatReconcile | Self::CheckpointReconcile => MAX_OWNED_RECONCILIATION_RESULT_BYTES,
         }
     }
 
@@ -461,11 +474,11 @@ impl OwnedBrokerOperationV1 {
 /// real scoped transaction after source and marker revalidation, never from a
 /// client DTO.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OwnedSourceFormatV1 {
+pub enum OwnedSourceFormatV2 {
     Format14,
     Format15,
 }
-impl OwnedSourceFormatV1 {
+impl OwnedSourceFormatV2 {
     pub const fn from_verified(format: u32) -> Option<Self> {
         match format {
             14 => Some(Self::Format14),
@@ -481,7 +494,7 @@ impl OwnedSourceFormatV1 {
     }
 }
 
-fn check(ok: bool, code: OwnedSupervisionErrorCodeV1) -> OwnedChecked<()> {
+fn check(ok: bool, code: OwnedSupervisionErrorCodeV2) -> OwnedChecked<()> {
     if ok { Ok(()) } else { Err(code) }
 }
 fn is_hex64(value: &str) -> bool {
@@ -491,46 +504,46 @@ fn is_hex64(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 fn uuid_field(value: &str) -> OwnedChecked<()> {
-    registry_uuid(value).map_err(|_| OwnedSupervisionErrorCodeV1::InvalidRequest)
+    registry_uuid(value).map_err(|_| OwnedSupervisionErrorCodeV2::InvalidRequest)
 }
 fn revision_field(value: u64) -> OwnedChecked<()> {
-    revision(value).map_err(|_| OwnedSupervisionErrorCodeV1::InvalidRequest)
+    revision(value).map_err(|_| OwnedSupervisionErrorCodeV2::InvalidRequest)
 }
 /// Canonical control time: parses and formats back to the same bytes.
 fn canonical_time(value: &str) -> OwnedChecked<DateTime<Utc>> {
-    let time = parse_time(value).map_err(|_| OwnedSupervisionErrorCodeV1::InvalidRequest)?;
+    let time = parse_time(value).map_err(|_| OwnedSupervisionErrorCodeV2::InvalidRequest)?;
     check(
         format_time(time) == value,
-        OwnedSupervisionErrorCodeV1::InvalidRequest,
+        OwnedSupervisionErrorCodeV2::InvalidRequest,
     )?;
     Ok(time)
 }
 fn require_profile(profile: &str, version: u32) -> OwnedChecked<()> {
     check(
-        profile == OWNED_SUPERVISION_PROFILE_V1 && version == OWNED_SUPERVISION_VERSION_V1,
-        OwnedSupervisionErrorCodeV1::ProtocolMismatch,
+        profile == OWNED_SUPERVISION_PROFILE_V2 && version == OWNED_SUPERVISION_VERSION_V2,
+        OwnedSupervisionErrorCodeV2::ProtocolMismatch,
     )
 }
 fn bounded<T: Serialize>(
     value: &T,
     limit: usize,
-    code: OwnedSupervisionErrorCodeV1,
+    code: OwnedSupervisionErrorCodeV2,
 ) -> OwnedChecked<()> {
     let bytes = serde_json::to_vec(value).map_err(|_| code)?;
     check(bytes.len() <= limit, code)
 }
 fn hash<T: Serialize>(domain: &str, value: &T) -> OwnedChecked<String> {
-    content_hash(domain, value).map_err(|_| OwnedSupervisionErrorCodeV1::InvalidRequest)
+    content_hash(domain, value).map_err(|_| OwnedSupervisionErrorCodeV2::InvalidRequest)
 }
 fn as_protocol<T>(value: OwnedChecked<T>) -> OwnedChecked<T> {
-    value.map_err(|_| OwnedSupervisionErrorCodeV1::ProtocolMismatch)
+    value.map_err(|_| OwnedSupervisionErrorCodeV2::ProtocolMismatch)
 }
 
 /// Canonical gateway origin, with the presence publisher's transport rules:
 /// HTTPS, or HTTP only to a loopback IP literal; no user, path, query or
 /// fragment. Returns the origin without its trailing slash.
 pub fn canonical_gateway_origin(value: &str) -> OwnedChecked<String> {
-    let invalid = OwnedSupervisionErrorCodeV1::InvalidRequest;
+    let invalid = OwnedSupervisionErrorCodeV2::InvalidRequest;
     check(value.len() <= 2048, invalid)?;
     let url = reqwest::Url::parse(value).map_err(|_| invalid)?;
     let loopback = url.host_str().is_some_and(|host| {
@@ -557,7 +570,7 @@ pub fn canonical_gateway_origin(value: &str) -> OwnedChecked<String> {
 /// No pathname, bearer, digest or secret belongs here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OwnedBrokerSubjectV1 {
+pub struct OwnedBrokerSubjectV2 {
     pub installation_id: String,
     pub closure_id: String,
     pub source_id: String,
@@ -570,7 +583,7 @@ pub struct OwnedBrokerSubjectV1 {
     pub binding_revision: u64,
     pub grant_revision: u64,
 }
-impl OwnedBrokerSubjectV1 {
+impl OwnedBrokerSubjectV2 {
     pub fn validate(&self) -> OwnedChecked<()> {
         for id in [
             &self.installation_id,
@@ -584,22 +597,22 @@ impl OwnedBrokerSubjectV1 {
             uuid_field(id)?;
         }
         crate::tenancy::validate_tenant_id(&self.tenant_id)
-            .map_err(|_| OwnedSupervisionErrorCodeV1::InvalidRequest)?;
+            .map_err(|_| OwnedSupervisionErrorCodeV2::InvalidRequest)?;
         check(
-            OwnedSourceFormatV1::from_verified(self.source_format).is_some(),
-            OwnedSupervisionErrorCodeV1::MigrationRequired,
+            OwnedSourceFormatV2::from_verified(self.source_format).is_some(),
+            OwnedSupervisionErrorCodeV2::MigrationRequired,
         )?;
         check(
             self.binding_revision > 0 && self.grant_revision > 0,
-            OwnedSupervisionErrorCodeV1::InvalidRequest,
+            OwnedSupervisionErrorCodeV2::InvalidRequest,
         )?;
         revision_field(self.binding_revision)?;
         revision_field(self.grant_revision)
     }
 
-    pub fn format(&self) -> OwnedChecked<OwnedSourceFormatV1> {
-        OwnedSourceFormatV1::from_verified(self.source_format)
-            .ok_or(OwnedSupervisionErrorCodeV1::MigrationRequired)
+    pub fn format(&self) -> OwnedChecked<OwnedSourceFormatV2> {
+        OwnedSourceFormatV2::from_verified(self.source_format)
+            .ok_or(OwnedSupervisionErrorCodeV2::MigrationRequired)
     }
 
     pub fn commitment(&self) -> OwnedChecked<String> {
@@ -622,17 +635,17 @@ impl OwnedBrokerSubjectV1 {
 /// observation, not a proof transferable to another operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OwnedBrokerIdentityViewV1 {
+pub struct OwnedBrokerIdentityViewV2 {
     pub profile: String,
     pub version: u32,
     pub closure_revision: u64,
-    pub subject: OwnedBrokerSubjectV1,
+    pub subject: OwnedBrokerSubjectV2,
 }
-impl OwnedBrokerIdentityViewV1 {
-    pub fn new(closure_revision: u64, subject: OwnedBrokerSubjectV1) -> OwnedChecked<Self> {
+impl OwnedBrokerIdentityViewV2 {
+    pub fn new(closure_revision: u64, subject: OwnedBrokerSubjectV2) -> OwnedChecked<Self> {
         let view = Self {
-            profile: OWNED_SUPERVISION_PROFILE_V1.into(),
-            version: OWNED_SUPERVISION_VERSION_V1,
+            profile: OWNED_SUPERVISION_PROFILE_V2.into(),
+            version: OWNED_SUPERVISION_VERSION_V2,
             closure_revision,
             subject,
         };
@@ -643,14 +656,14 @@ impl OwnedBrokerIdentityViewV1 {
         require_profile(&self.profile, self.version)?;
         check(
             self.closure_revision > 0,
-            OwnedSupervisionErrorCodeV1::InvalidRequest,
+            OwnedSupervisionErrorCodeV2::InvalidRequest,
         )?;
         revision_field(self.closure_revision)?;
         self.subject.validate()?;
         bounded(
             self,
             MAX_OWNED_IDENTITY_BYTES,
-            OwnedSupervisionErrorCodeV1::InvalidRequest,
+            OwnedSupervisionErrorCodeV2::InvalidRequest,
         )
     }
 }
@@ -680,7 +693,7 @@ enum RegistryChange<'a> {
 struct OperationCommitment<'a> {
     profile: &'a str,
     version: u32,
-    operation: OwnedBrokerOperationV1,
+    operation: OwnedBrokerOperationV2,
     subject_commitment: &'a str,
     operation_id: &'a str,
     registry_input_hash: &'a str,
@@ -690,46 +703,46 @@ struct OperationCommitment<'a> {
 /// operation commitment binding it to the installation, closure, source and
 /// format. Both are deterministic; neither authorizes the operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OwnedOperationCommitmentsV1 {
+pub struct OwnedOperationCommitmentsV2 {
     pub registry_input_hash: String,
     pub operation_commitment: String,
 }
 
 fn operation_commitments(
-    operation: OwnedBrokerOperationV1,
-    subject: &OwnedBrokerSubjectV1,
+    operation: OwnedBrokerOperationV2,
+    subject: &OwnedBrokerSubjectV2,
     operation_id: &str,
     registry_input_hash: String,
-) -> OwnedChecked<OwnedOperationCommitmentsV1> {
+) -> OwnedChecked<OwnedOperationCommitmentsV2> {
     let subject_commitment = subject.commitment()?;
     let operation_commitment = hash(
         OPERATION_DOMAIN,
         &OperationCommitment {
-            profile: OWNED_SUPERVISION_PROFILE_V1,
-            version: OWNED_SUPERVISION_VERSION_V1,
+            profile: OWNED_SUPERVISION_PROFILE_V2,
+            version: OWNED_SUPERVISION_VERSION_V2,
             operation,
             subject_commitment: &subject_commitment,
             operation_id,
             registry_input_hash: &registry_input_hash,
         },
     )?;
-    Ok(OwnedOperationCommitmentsV1 {
+    Ok(OwnedOperationCommitmentsV2 {
         registry_input_hash,
         operation_commitment,
     })
 }
 
 pub fn heartbeat_commitments(
-    subject: &OwnedBrokerSubjectV1,
+    subject: &OwnedBrokerSubjectV2,
     heartbeat: &BrokerHeartbeatV1,
-) -> OwnedChecked<OwnedOperationCommitmentsV1> {
+) -> OwnedChecked<OwnedOperationCommitmentsV2> {
     subject.validate()?;
     heartbeat
         .validate()
-        .map_err(|_| OwnedSupervisionErrorCodeV1::InvalidRequest)?;
+        .map_err(|_| OwnedSupervisionErrorCodeV2::InvalidRequest)?;
     check(
         heartbeat.incarnation_id == subject.incarnation_id,
-        OwnedSupervisionErrorCodeV1::InvalidRequest,
+        OwnedSupervisionErrorCodeV2::InvalidRequest,
     )?;
     let registry = hash(
         REGISTRY_INPUT_DOMAIN,
@@ -739,7 +752,7 @@ pub fn heartbeat_commitments(
         },
     )?;
     operation_commitments(
-        OwnedBrokerOperationV1::Heartbeat,
+        OwnedBrokerOperationV2::Heartbeat,
         subject,
         &heartbeat.operation_id,
         registry,
@@ -747,16 +760,16 @@ pub fn heartbeat_commitments(
 }
 
 pub fn checkpoint_commitments(
-    subject: &OwnedBrokerSubjectV1,
+    subject: &OwnedBrokerSubjectV2,
     checkpoint: &BrokerCheckpointV1,
-) -> OwnedChecked<OwnedOperationCommitmentsV1> {
+) -> OwnedChecked<OwnedOperationCommitmentsV2> {
     subject.validate()?;
     checkpoint
         .validate()
-        .map_err(|_| OwnedSupervisionErrorCodeV1::InvalidRequest)?;
+        .map_err(|_| OwnedSupervisionErrorCodeV2::InvalidRequest)?;
     check(
         checkpoint.incarnation_id == subject.incarnation_id,
-        OwnedSupervisionErrorCodeV1::InvalidRequest,
+        OwnedSupervisionErrorCodeV2::InvalidRequest,
     )?;
     let registry = hash(
         REGISTRY_CHECKPOINT_DOMAIN,
@@ -766,7 +779,7 @@ pub fn checkpoint_commitments(
         },
     )?;
     operation_commitments(
-        OwnedBrokerOperationV1::Checkpoint,
+        OwnedBrokerOperationV2::Checkpoint,
         subject,
         &checkpoint.operation_id,
         registry,
@@ -776,7 +789,7 @@ pub fn checkpoint_commitments(
 /// Closed reason for which an engaged identity cannot be used. Each reason
 /// keeps the Pending bytes; none authorizes a rewrite of identity or hash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OwnedIncompatibilityV1 {
+pub enum OwnedIncompatibilityV2 {
     Profile,
     GatewayOrigin,
     Installation,
@@ -794,7 +807,7 @@ pub enum OwnedIncompatibilityV1 {
     GrantRevision,
     Authority,
 }
-impl OwnedIncompatibilityV1 {
+impl OwnedIncompatibilityV2 {
     pub const fn code(self) -> &'static str {
         match self {
             Self::Profile => "profile",
@@ -855,11 +868,11 @@ enum BindingRule {
 }
 
 fn compare_subject(
-    expected: &OwnedBrokerSubjectV1,
-    actual: &OwnedBrokerSubjectV1,
+    expected: &OwnedBrokerSubjectV2,
+    actual: &OwnedBrokerSubjectV2,
     binding: BindingRule,
-) -> Result<(), OwnedIncompatibilityV1> {
-    use OwnedIncompatibilityV1 as Reason;
+) -> Result<(), OwnedIncompatibilityV2> {
+    use OwnedIncompatibilityV2 as Reason;
     let checks = [
         (expected.installation_id == actual.installation_id, Reason::Installation),
         (expected.closure_id == actual.closure_id, Reason::Closure),
@@ -892,12 +905,12 @@ fn compare_subject(
 /// A retained Pending may be replayed only under an identical engaged subject.
 /// The closure revision may advance but never regress.
 pub fn check_replay_identity(
-    pending: &OwnedBrokerIdentityViewV1,
-    current: &OwnedBrokerIdentityViewV1,
-) -> Result<(), OwnedIncompatibilityV1> {
+    pending: &OwnedBrokerIdentityViewV2,
+    current: &OwnedBrokerIdentityViewV2,
+) -> Result<(), OwnedIncompatibilityV2> {
     compare_subject(&pending.subject, &current.subject, BindingRule::Exact)?;
     if current.closure_revision < pending.closure_revision {
-        return Err(OwnedIncompatibilityV1::ClosureRegression);
+        return Err(OwnedIncompatibilityV2::ClosureRegression);
     }
     Ok(())
 }
@@ -905,16 +918,16 @@ pub fn check_replay_identity(
 /// A new operation after an acknowledged one: same pins, binding revision and
 /// closure revision non-decreasing.
 pub fn check_progress_identity(
-    acknowledged: &OwnedBrokerIdentityViewV1,
-    current: &OwnedBrokerIdentityViewV1,
-) -> Result<(), OwnedIncompatibilityV1> {
+    acknowledged: &OwnedBrokerIdentityViewV2,
+    current: &OwnedBrokerIdentityViewV2,
+) -> Result<(), OwnedIncompatibilityV2> {
     compare_subject(
         &acknowledged.subject,
         &current.subject,
         BindingRule::AtLeast(acknowledged.subject.binding_revision),
     )?;
     if current.closure_revision < acknowledged.closure_revision {
-        return Err(OwnedIncompatibilityV1::ClosureRegression);
+        return Err(OwnedIncompatibilityV2::ClosureRegression);
     }
     Ok(())
 }
@@ -922,17 +935,17 @@ pub fn check_progress_identity(
 /// Committed receipt of one enrollment step, copied from the durable audit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OwnedEnrollmentReceiptV1 {
+pub struct OwnedEnrollmentReceiptV2 {
     pub operation_id: String,
     pub audit_seq: i64,
     pub audit_hash: String,
 }
-impl OwnedEnrollmentReceiptV1 {
+impl OwnedEnrollmentReceiptV2 {
     pub fn validate(&self) -> OwnedChecked<()> {
         uuid_field(&self.operation_id)?;
         check(
             self.audit_seq > 0 && is_hex64(&self.audit_hash),
-            OwnedSupervisionErrorCodeV1::InvalidRequest,
+            OwnedSupervisionErrorCodeV2::InvalidRequest,
         )
     }
 }
@@ -944,23 +957,23 @@ impl OwnedEnrollmentReceiptV1 {
 /// the retained source and compares the engaged subject on every operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OwnedBrokerEnrollmentV1 {
+pub struct OwnedBrokerEnrollmentV2 {
     pub profile: String,
     pub version: u32,
     pub gateway_origin: String,
     pub closure_revision: u64,
-    pub subject: OwnedBrokerSubjectV1,
+    pub subject: OwnedBrokerSubjectV2,
     pub authority: BrokerAuthorityV1,
     pub lease_seconds: u32,
     pub grant_not_after: String,
     pub credential_expires_at: String,
     pub issued_at: String,
-    pub grant_receipt: OwnedEnrollmentReceiptV1,
-    pub binding_receipt: OwnedEnrollmentReceiptV1,
+    pub grant_receipt: OwnedEnrollmentReceiptV2,
+    pub binding_receipt: OwnedEnrollmentReceiptV2,
 }
-impl OwnedBrokerEnrollmentV1 {
+impl OwnedBrokerEnrollmentV2 {
     pub fn validate(&self) -> OwnedChecked<()> {
-        let invalid = OwnedSupervisionErrorCodeV1::InvalidRequest;
+        let invalid = OwnedSupervisionErrorCodeV2::InvalidRequest;
         require_profile(&self.profile, self.version)?;
         check(
             canonical_gateway_origin(&self.gateway_origin)? == self.gateway_origin,
@@ -997,20 +1010,20 @@ impl OwnedBrokerEnrollmentV1 {
 /// publisher stores them in its owned anchor; they never leave the broker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OwnedSupervisionPinsV1 {
+pub struct OwnedSupervisionPinsV2 {
     pub profile: String,
     pub version: u32,
     pub gateway_origin: String,
     pub enrollment_commitment: String,
-    pub enrolled: OwnedBrokerSubjectV1,
+    pub enrolled: OwnedBrokerSubjectV2,
     pub minimum_closure_revision: u64,
     pub authority: BrokerAuthorityV1,
 }
-impl OwnedSupervisionPinsV1 {
-    pub fn from_enrollment(enrollment: &OwnedBrokerEnrollmentV1) -> OwnedChecked<Self> {
+impl OwnedSupervisionPinsV2 {
+    pub fn from_enrollment(enrollment: &OwnedBrokerEnrollmentV2) -> OwnedChecked<Self> {
         let pins = Self {
-            profile: OWNED_SUPERVISION_PROFILE_V1.into(),
-            version: OWNED_SUPERVISION_VERSION_V1,
+            profile: OWNED_SUPERVISION_PROFILE_V2.into(),
+            version: OWNED_SUPERVISION_VERSION_V2,
             gateway_origin: enrollment.gateway_origin.clone(),
             enrollment_commitment: enrollment.commitment()?,
             enrolled: enrollment.subject.clone(),
@@ -1022,7 +1035,7 @@ impl OwnedSupervisionPinsV1 {
     }
 
     pub fn validate(&self) -> OwnedChecked<()> {
-        let invalid = OwnedSupervisionErrorCodeV1::InvalidRequest;
+        let invalid = OwnedSupervisionErrorCodeV2::InvalidRequest;
         require_profile(&self.profile, self.version)?;
         check(
             canonical_gateway_origin(&self.gateway_origin)? == self.gateway_origin,
@@ -1038,15 +1051,15 @@ impl OwnedSupervisionPinsV1 {
 
     pub fn check_identity(
         &self,
-        identity: &OwnedBrokerIdentityViewV1,
-    ) -> Result<(), OwnedIncompatibilityV1> {
+        identity: &OwnedBrokerIdentityViewV2,
+    ) -> Result<(), OwnedIncompatibilityV2> {
         compare_subject(
             &self.enrolled,
             &identity.subject,
             BindingRule::AtLeast(self.enrolled.binding_revision),
         )?;
         if identity.closure_revision < self.minimum_closure_revision {
-            return Err(OwnedIncompatibilityV1::ClosureRegression);
+            return Err(OwnedIncompatibilityV2::ClosureRegression);
         }
         Ok(())
     }
@@ -1054,11 +1067,11 @@ impl OwnedSupervisionPinsV1 {
     pub fn check_snapshot_authority(
         &self,
         snapshot: &BrokerCheckpointSnapshotV1,
-    ) -> Result<(), OwnedIncompatibilityV1> {
+    ) -> Result<(), OwnedIncompatibilityV2> {
         if snapshot.authority == self.authority {
             Ok(())
         } else {
-            Err(OwnedIncompatibilityV1::Authority)
+            Err(OwnedIncompatibilityV2::Authority)
         }
     }
 }
@@ -1073,8 +1086,8 @@ fn previous_heartbeat_sequence(broker: &BrokerV1, incarnation_id: &str) -> u64 {
 
 /// Internal coherence of a broker view with the engaged subject; the same
 /// rules as the legacy handshake, without accepting another broker or grant.
-fn validate_broker_view(subject: &OwnedBrokerSubjectV1, view: &BrokerViewV1) -> OwnedChecked<()> {
-    let protocol = OwnedSupervisionErrorCodeV1::ProtocolMismatch;
+fn validate_broker_view(subject: &OwnedBrokerSubjectV2, view: &BrokerViewV1) -> OwnedChecked<()> {
+    let protocol = OwnedSupervisionErrorCodeV2::ProtocolMismatch;
     let broker = &view.broker;
     check(
         broker.version == 1
@@ -1109,9 +1122,9 @@ fn validate_broker_view(subject: &OwnedBrokerSubjectV1, view: &BrokerViewV1) -> 
 
 fn validate_receipt(
     receipt: &BrokerMutationReceiptV1,
-    subject: &OwnedBrokerSubjectV1,
+    subject: &OwnedBrokerSubjectV2,
 ) -> OwnedChecked<()> {
-    let protocol = OwnedSupervisionErrorCodeV1::ProtocolMismatch;
+    let protocol = OwnedSupervisionErrorCodeV2::ProtocolMismatch;
     registry_uuid(&receipt.operation_id).map_err(|_| protocol)?;
     revision(receipt.grant_revision).map_err(|_| protocol)?;
     revision(receipt.heartbeat_revision).map_err(|_| protocol)?;
@@ -1129,22 +1142,22 @@ fn validate_receipt(
 /// exact committed operation after a lost response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OwnedBrokerSelfViewV1 {
+pub struct OwnedBrokerSelfViewV2 {
     pub profile: String,
     pub version: u32,
-    pub identity: OwnedBrokerIdentityViewV1,
+    pub identity: OwnedBrokerIdentityViewV2,
     pub view: BrokerViewV1,
     pub last_heartbeat_receipt: Option<BrokerMutationReceiptV1>,
 }
-impl OwnedBrokerSelfViewV1 {
+impl OwnedBrokerSelfViewV2 {
     pub fn new(
-        identity: OwnedBrokerIdentityViewV1,
+        identity: OwnedBrokerIdentityViewV2,
         view: BrokerViewV1,
         last_heartbeat_receipt: Option<BrokerMutationReceiptV1>,
     ) -> OwnedChecked<Self> {
         let value = Self {
-            profile: OWNED_SUPERVISION_PROFILE_V1.into(),
-            version: OWNED_SUPERVISION_VERSION_V1,
+            profile: OWNED_SUPERVISION_PROFILE_V2.into(),
+            version: OWNED_SUPERVISION_VERSION_V2,
             identity,
             view,
             last_heartbeat_receipt,
@@ -1153,7 +1166,7 @@ impl OwnedBrokerSelfViewV1 {
         Ok(value)
     }
     pub fn validate(&self) -> OwnedChecked<()> {
-        let protocol = OwnedSupervisionErrorCodeV1::ProtocolMismatch;
+        let protocol = OwnedSupervisionErrorCodeV2::ProtocolMismatch;
         require_profile(&self.profile, self.version)?;
         as_protocol(self.identity.validate())?;
         validate_broker_view(&self.identity.subject, &self.view)?;
@@ -1179,20 +1192,20 @@ impl OwnedBrokerSelfViewV1 {
 /// Checkpoint self view, read with its identity in one checked transaction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OwnedBrokerCheckpointSelfViewV1 {
+pub struct OwnedBrokerCheckpointSelfViewV2 {
     pub profile: String,
     pub version: u32,
-    pub identity: OwnedBrokerIdentityViewV1,
+    pub identity: OwnedBrokerIdentityViewV2,
     pub view: BrokerCheckpointViewV1,
 }
-impl OwnedBrokerCheckpointSelfViewV1 {
+impl OwnedBrokerCheckpointSelfViewV2 {
     pub fn new(
-        identity: OwnedBrokerIdentityViewV1,
+        identity: OwnedBrokerIdentityViewV2,
         view: BrokerCheckpointViewV1,
     ) -> OwnedChecked<Self> {
         let value = Self {
-            profile: OWNED_SUPERVISION_PROFILE_V1.into(),
-            version: OWNED_SUPERVISION_VERSION_V1,
+            profile: OWNED_SUPERVISION_PROFILE_V2.into(),
+            version: OWNED_SUPERVISION_VERSION_V2,
             identity,
             view,
         };
@@ -1200,7 +1213,7 @@ impl OwnedBrokerCheckpointSelfViewV1 {
         Ok(value)
     }
     pub fn validate(&self) -> OwnedChecked<()> {
-        let protocol = OwnedSupervisionErrorCodeV1::ProtocolMismatch;
+        let protocol = OwnedSupervisionErrorCodeV2::ProtocolMismatch;
         require_profile(&self.profile, self.version)?;
         as_protocol(self.identity.validate())?;
         check(self.view.version == 1, protocol)?;
@@ -1225,27 +1238,27 @@ impl OwnedBrokerCheckpointSelfViewV1 {
 
 /// Closed handshake refusal. None of them updates an anchor or a Pending.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OwnedHandshakeRejectionV1 {
+pub enum OwnedHandshakeRejectionV2 {
     Protocol,
-    Incompatible(OwnedIncompatibilityV1),
+    Incompatible(OwnedIncompatibilityV2),
     Forbidden,
     Clock,
 }
 
 fn handshake_broker(
-    pins: &OwnedSupervisionPinsV1,
-    identity: &OwnedBrokerIdentityViewV1,
+    pins: &OwnedSupervisionPinsV2,
+    identity: &OwnedBrokerIdentityViewV2,
     view: &BrokerViewV1,
     min_lease_seconds: u32,
-) -> Result<(), OwnedHandshakeRejectionV1> {
+) -> Result<(), OwnedHandshakeRejectionV2> {
     pins.validate()
-        .map_err(|_| OwnedHandshakeRejectionV1::Protocol)?;
+        .map_err(|_| OwnedHandshakeRejectionV2::Protocol)?;
     pins.check_identity(identity)
-        .map_err(OwnedHandshakeRejectionV1::Incompatible)?;
+        .map_err(OwnedHandshakeRejectionV2::Incompatible)?;
     let broker = &view.broker;
     if !matches!(broker.authorities.as_slice(), [only] if *only == pins.authority) {
-        return Err(OwnedHandshakeRejectionV1::Incompatible(
-            OwnedIncompatibilityV1::Authority,
+        return Err(OwnedHandshakeRejectionV2::Incompatible(
+            OwnedIncompatibilityV2::Authority,
         ));
     }
     if broker.revoked
@@ -1253,36 +1266,36 @@ fn handshake_broker(
         || broker.lease_seconds < min_lease_seconds
         || broker.lease_seconds > 300
     {
-        return Err(OwnedHandshakeRejectionV1::Forbidden);
+        return Err(OwnedHandshakeRejectionV2::Forbidden);
     }
     match view.state {
         BrokerStateV1::Unseen | BrokerStateV1::Current | BrokerStateV1::Stale => Ok(()),
-        BrokerStateV1::ClockUncertain => Err(OwnedHandshakeRejectionV1::Clock),
+        BrokerStateV1::ClockUncertain => Err(OwnedHandshakeRejectionV2::Clock),
         BrokerStateV1::Expired | BrokerStateV1::Revoked => {
-            Err(OwnedHandshakeRejectionV1::Forbidden)
+            Err(OwnedHandshakeRejectionV2::Forbidden)
         }
     }
 }
 
 /// Publisher handshake for heartbeats, against its pinned enrollment.
 pub fn validate_heartbeat_handshake(
-    pins: &OwnedSupervisionPinsV1,
-    view: &OwnedBrokerSelfViewV1,
+    pins: &OwnedSupervisionPinsV2,
+    view: &OwnedBrokerSelfViewV2,
     min_lease_seconds: u32,
-) -> Result<(), OwnedHandshakeRejectionV1> {
+) -> Result<(), OwnedHandshakeRejectionV2> {
     view.validate()
-        .map_err(|_| OwnedHandshakeRejectionV1::Protocol)?;
+        .map_err(|_| OwnedHandshakeRejectionV2::Protocol)?;
     handshake_broker(pins, &view.identity, &view.view, min_lease_seconds)
 }
 
 /// Publisher handshake for checkpoints, against its pinned enrollment.
 pub fn validate_checkpoint_handshake(
-    pins: &OwnedSupervisionPinsV1,
-    view: &OwnedBrokerCheckpointSelfViewV1,
+    pins: &OwnedSupervisionPinsV2,
+    view: &OwnedBrokerCheckpointSelfViewV2,
     min_lease_seconds: u32,
-) -> Result<(), OwnedHandshakeRejectionV1> {
+) -> Result<(), OwnedHandshakeRejectionV2> {
     view.validate()
-        .map_err(|_| OwnedHandshakeRejectionV1::Protocol)?;
+        .map_err(|_| OwnedHandshakeRejectionV2::Protocol)?;
     handshake_broker(pins, &view.identity, &view.view.broker, min_lease_seconds)?;
     if view
         .view
@@ -1290,7 +1303,7 @@ pub fn validate_checkpoint_handshake(
         .as_ref()
         .is_some_and(|observed| observed.freshness == BrokerCheckpointFreshnessV1::ClockUncertain)
     {
-        return Err(OwnedHandshakeRejectionV1::Clock);
+        return Err(OwnedHandshakeRejectionV2::Clock);
     }
     Ok(())
 }
@@ -1299,40 +1312,40 @@ pub fn validate_checkpoint_handshake(
 /// with its own authenticated values before any replay or mutation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OwnedBrokerHeartbeatRequestV1 {
+pub struct OwnedBrokerHeartbeatRequestV2 {
     pub profile: String,
     pub version: u32,
-    pub subject: OwnedBrokerSubjectV1,
+    pub subject: OwnedBrokerSubjectV2,
     pub heartbeat: BrokerHeartbeatV1,
     pub registry_input_hash: String,
     pub operation_commitment: String,
 }
-impl OwnedBrokerHeartbeatRequestV1 {
-    pub fn validate(&self) -> OwnedChecked<OwnedOperationCommitmentsV1> {
+impl OwnedBrokerHeartbeatRequestV2 {
+    pub fn validate(&self) -> OwnedChecked<OwnedOperationCommitmentsV2> {
         require_profile(&self.profile, self.version)?;
         bounded(
             self,
             MAX_OWNED_HEARTBEAT_REQUEST_BYTES,
-            OwnedSupervisionErrorCodeV1::InvalidRequest,
+            OwnedSupervisionErrorCodeV2::InvalidRequest,
         )?;
         let commitments = heartbeat_commitments(&self.subject, &self.heartbeat)?;
         check(
             commitments.registry_input_hash == self.registry_input_hash
                 && commitments.operation_commitment == self.operation_commitment,
-            OwnedSupervisionErrorCodeV1::ProtocolMismatch,
+            OwnedSupervisionErrorCodeV2::ProtocolMismatch,
         )?;
         Ok(commitments)
     }
     /// Server comparison with the current authenticated identity.
     pub fn verify_for(
         &self,
-        current: &OwnedBrokerIdentityViewV1,
-    ) -> OwnedChecked<OwnedOperationCommitmentsV1> {
+        current: &OwnedBrokerIdentityViewV2,
+    ) -> OwnedChecked<OwnedOperationCommitmentsV2> {
         let commitments = self.validate()?;
         as_protocol(current.validate())?;
         check(
             self.subject == current.subject,
-            OwnedSupervisionErrorCodeV1::IdentityMismatch,
+            OwnedSupervisionErrorCodeV2::IdentityMismatch,
         )?;
         Ok(commitments)
     }
@@ -1341,39 +1354,39 @@ impl OwnedBrokerHeartbeatRequestV1 {
 /// Checkpoint request, compared like a heartbeat request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OwnedBrokerCheckpointRequestV1 {
+pub struct OwnedBrokerCheckpointRequestV2 {
     pub profile: String,
     pub version: u32,
-    pub subject: OwnedBrokerSubjectV1,
+    pub subject: OwnedBrokerSubjectV2,
     pub checkpoint: BrokerCheckpointV1,
     pub registry_input_hash: String,
     pub operation_commitment: String,
 }
-impl OwnedBrokerCheckpointRequestV1 {
-    pub fn validate(&self) -> OwnedChecked<OwnedOperationCommitmentsV1> {
+impl OwnedBrokerCheckpointRequestV2 {
+    pub fn validate(&self) -> OwnedChecked<OwnedOperationCommitmentsV2> {
         require_profile(&self.profile, self.version)?;
         bounded(
             self,
             MAX_OWNED_CHECKPOINT_REQUEST_BYTES,
-            OwnedSupervisionErrorCodeV1::InvalidRequest,
+            OwnedSupervisionErrorCodeV2::InvalidRequest,
         )?;
         let commitments = checkpoint_commitments(&self.subject, &self.checkpoint)?;
         check(
             commitments.registry_input_hash == self.registry_input_hash
                 && commitments.operation_commitment == self.operation_commitment,
-            OwnedSupervisionErrorCodeV1::ProtocolMismatch,
+            OwnedSupervisionErrorCodeV2::ProtocolMismatch,
         )?;
         Ok(commitments)
     }
     pub fn verify_for(
         &self,
-        current: &OwnedBrokerIdentityViewV1,
-    ) -> OwnedChecked<OwnedOperationCommitmentsV1> {
+        current: &OwnedBrokerIdentityViewV2,
+    ) -> OwnedChecked<OwnedOperationCommitmentsV2> {
         let commitments = self.validate()?;
         as_protocol(current.validate())?;
         check(
             self.subject == current.subject,
-            OwnedSupervisionErrorCodeV1::IdentityMismatch,
+            OwnedSupervisionErrorCodeV2::IdentityMismatch,
         )?;
         Ok(commitments)
     }
@@ -1384,22 +1397,22 @@ impl OwnedBrokerCheckpointRequestV1 {
 /// current authority). A replay returns the original receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OwnedBrokerHeartbeatResultV1 {
+pub struct OwnedBrokerHeartbeatResultV2 {
     pub profile: String,
     pub version: u32,
-    pub identity: OwnedBrokerIdentityViewV1,
+    pub identity: OwnedBrokerIdentityViewV2,
     pub operation_commitment: String,
     pub result: BrokerMutationResultV1,
 }
-impl OwnedBrokerHeartbeatResultV1 {
+impl OwnedBrokerHeartbeatResultV2 {
     pub fn new(
-        identity: OwnedBrokerIdentityViewV1,
+        identity: OwnedBrokerIdentityViewV2,
         operation_commitment: String,
         result: BrokerMutationResultV1,
     ) -> OwnedChecked<Self> {
         let value = Self {
-            profile: OWNED_SUPERVISION_PROFILE_V1.into(),
-            version: OWNED_SUPERVISION_VERSION_V1,
+            profile: OWNED_SUPERVISION_PROFILE_V2.into(),
+            version: OWNED_SUPERVISION_VERSION_V2,
             identity,
             operation_commitment,
             result,
@@ -1408,7 +1421,7 @@ impl OwnedBrokerHeartbeatResultV1 {
         Ok(value)
     }
     pub fn validate(&self) -> OwnedChecked<()> {
-        let protocol = OwnedSupervisionErrorCodeV1::ProtocolMismatch;
+        let protocol = OwnedSupervisionErrorCodeV2::ProtocolMismatch;
         require_profile(&self.profile, self.version)?;
         as_protocol(self.identity.validate())?;
         check(is_hex64(&self.operation_commitment), protocol)?;
@@ -1424,22 +1437,22 @@ impl OwnedBrokerHeartbeatResultV1 {
 /// Positive checkpoint outcome, with the same durability rule.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OwnedBrokerCheckpointResultV1 {
+pub struct OwnedBrokerCheckpointResultV2 {
     pub profile: String,
     pub version: u32,
-    pub identity: OwnedBrokerIdentityViewV1,
+    pub identity: OwnedBrokerIdentityViewV2,
     pub operation_commitment: String,
     pub result: BrokerCheckpointResultV1,
 }
-impl OwnedBrokerCheckpointResultV1 {
+impl OwnedBrokerCheckpointResultV2 {
     pub fn new(
-        identity: OwnedBrokerIdentityViewV1,
+        identity: OwnedBrokerIdentityViewV2,
         operation_commitment: String,
         result: BrokerCheckpointResultV1,
     ) -> OwnedChecked<Self> {
         let value = Self {
-            profile: OWNED_SUPERVISION_PROFILE_V1.into(),
-            version: OWNED_SUPERVISION_VERSION_V1,
+            profile: OWNED_SUPERVISION_PROFILE_V2.into(),
+            version: OWNED_SUPERVISION_VERSION_V2,
             identity,
             operation_commitment,
             result,
@@ -1448,7 +1461,7 @@ impl OwnedBrokerCheckpointResultV1 {
         Ok(value)
     }
     pub fn validate(&self) -> OwnedChecked<()> {
-        let protocol = OwnedSupervisionErrorCodeV1::ProtocolMismatch;
+        let protocol = OwnedSupervisionErrorCodeV2::ProtocolMismatch;
         require_profile(&self.profile, self.version)?;
         as_protocol(self.identity.validate())?;
         check(is_hex64(&self.operation_commitment), protocol)?;
@@ -1465,9 +1478,9 @@ impl OwnedBrokerCheckpointResultV1 {
 /// Closed reason for refusing a positive response or a self-read as the ACK
 /// of a retained Pending. The Pending is kept in every case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OwnedAckRejectionV1 {
+pub enum OwnedAckRejectionV2 {
     Protocol,
-    Incompatible(OwnedIncompatibilityV1),
+    Incompatible(OwnedIncompatibilityV2),
     Commitment,
     Receipt,
     Snapshot,
@@ -1478,28 +1491,29 @@ pub enum OwnedAckRejectionV1 {
 /// How a publisher established its acknowledgement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum OwnedAcknowledgementSourceV1 {
+pub enum OwnedAcknowledgementSourceV2 {
     Response,
     SelfRead,
+    AfterRotation,
 }
 
 /// Durable publisher Pending, written before any POST. Retries, timeouts,
 /// restarts and lost acknowledgements reuse its exact bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OwnedHeartbeatPendingV1 {
+pub struct OwnedHeartbeatPendingV2 {
     pub profile: String,
     pub version: u32,
-    pub identity: OwnedBrokerIdentityViewV1,
+    pub identity: OwnedBrokerIdentityViewV2,
     pub prior: BrokerViewV1,
     pub heartbeat: BrokerHeartbeatV1,
     pub registry_input_hash: String,
     pub operation_commitment: String,
 }
-impl OwnedHeartbeatPendingV1 {
+impl OwnedHeartbeatPendingV2 {
     /// Next operation from a validated handshake self view. The caller owns
     /// the fresh operation ID and must persist the Pending before any POST.
-    pub fn prepare(view: &OwnedBrokerSelfViewV1, operation_id: String) -> OwnedChecked<Self> {
+    pub fn prepare(view: &OwnedBrokerSelfViewV2, operation_id: String) -> OwnedChecked<Self> {
         view.validate()?;
         let subject = &view.identity.subject;
         let previous = previous_heartbeat_sequence(&view.view.broker, &subject.incarnation_id);
@@ -1510,12 +1524,12 @@ impl OwnedHeartbeatPendingV1 {
             incarnation_id: subject.incarnation_id.clone(),
             sequence: previous
                 .checked_add(1)
-                .ok_or(OwnedSupervisionErrorCodeV1::SequenceConflict)?,
+                .ok_or(OwnedSupervisionErrorCodeV2::SequenceConflict)?,
         };
         let commitments = heartbeat_commitments(subject, &heartbeat)?;
         let pending = Self {
-            profile: OWNED_SUPERVISION_PROFILE_V1.into(),
-            version: OWNED_SUPERVISION_VERSION_V1,
+            profile: OWNED_SUPERVISION_PROFILE_V2.into(),
+            version: OWNED_SUPERVISION_VERSION_V2,
             identity: view.identity.clone(),
             prior: view.view.clone(),
             heartbeat,
@@ -1527,7 +1541,7 @@ impl OwnedHeartbeatPendingV1 {
     }
 
     pub fn validate(&self) -> OwnedChecked<()> {
-        let invalid = OwnedSupervisionErrorCodeV1::InvalidRequest;
+        let invalid = OwnedSupervisionErrorCodeV2::InvalidRequest;
         require_profile(&self.profile, self.version)?;
         self.identity.validate()?;
         let subject = &self.identity.subject;
@@ -1545,13 +1559,13 @@ impl OwnedHeartbeatPendingV1 {
         check(
             commitments.registry_input_hash == self.registry_input_hash
                 && commitments.operation_commitment == self.operation_commitment,
-            OwnedSupervisionErrorCodeV1::ProtocolMismatch,
+            OwnedSupervisionErrorCodeV2::ProtocolMismatch,
         )?;
         bounded(self, MAX_OWNED_HEARTBEAT_PENDING_BYTES, invalid)
     }
 
-    pub fn request(&self) -> OwnedBrokerHeartbeatRequestV1 {
-        OwnedBrokerHeartbeatRequestV1 {
+    pub fn request(&self) -> OwnedBrokerHeartbeatRequestV2 {
+        OwnedBrokerHeartbeatRequestV2 {
             profile: self.profile.clone(),
             version: self.version,
             subject: self.identity.subject.clone(),
@@ -1565,9 +1579,9 @@ impl OwnedHeartbeatPendingV1 {
     /// the exact successor of the retained prior view under this operation.
     pub fn validate_result(
         &self,
-        result: &OwnedBrokerHeartbeatResultV1,
-    ) -> Result<(), OwnedAckRejectionV1> {
-        use OwnedAckRejectionV1 as Rejection;
+        result: &OwnedBrokerHeartbeatResultV2,
+    ) -> Result<(), OwnedAckRejectionV2> {
+        use OwnedAckRejectionV2 as Rejection;
         result.validate().map_err(|_| Rejection::Protocol)?;
         check_replay_identity(&self.identity, &result.identity)
             .map_err(Rejection::Incompatible)?;
@@ -1623,9 +1637,9 @@ impl OwnedHeartbeatPendingV1 {
     /// this operation is not committed yet and stays the next one to send.
     pub fn recognize(
         &self,
-        view: &OwnedBrokerSelfViewV1,
-    ) -> Result<Option<OwnedBrokerHeartbeatResultV1>, OwnedAckRejectionV1> {
-        use OwnedAckRejectionV1 as Rejection;
+        view: &OwnedBrokerSelfViewV2,
+    ) -> Result<Option<OwnedBrokerHeartbeatResultV2>, OwnedAckRejectionV2> {
+        use OwnedAckRejectionV2 as Rejection;
         view.validate().map_err(|_| Rejection::Protocol)?;
         check_replay_identity(&self.identity, &view.identity).map_err(Rejection::Incompatible)?;
         let current =
@@ -1647,9 +1661,9 @@ impl OwnedHeartbeatPendingV1 {
         {
             return Err(Rejection::Conflict);
         }
-        let result = OwnedBrokerHeartbeatResultV1 {
-            profile: OWNED_SUPERVISION_PROFILE_V1.into(),
-            version: OWNED_SUPERVISION_VERSION_V1,
+        let result = OwnedBrokerHeartbeatResultV2 {
+            profile: OWNED_SUPERVISION_PROFILE_V2.into(),
+            version: OWNED_SUPERVISION_VERSION_V2,
             identity: view.identity.clone(),
             operation_commitment: self.operation_commitment.clone(),
             result: BrokerMutationResultV1 {
@@ -1667,19 +1681,19 @@ impl OwnedHeartbeatPendingV1 {
 /// is coalesced only after this Pending's acknowledgement is durable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OwnedCheckpointPendingV1 {
+pub struct OwnedCheckpointPendingV2 {
     pub profile: String,
     pub version: u32,
-    pub identity: OwnedBrokerIdentityViewV1,
+    pub identity: OwnedBrokerIdentityViewV2,
     pub checkpoint: BrokerCheckpointV1,
     pub registry_input_hash: String,
     pub operation_commitment: String,
 }
-impl OwnedCheckpointPendingV1 {
+impl OwnedCheckpointPendingV2 {
     /// `previous_sequence` is the locally acknowledged head of this journal
     /// (zero for none); it is never taken from a remote view without history.
     pub fn prepare(
-        identity: &OwnedBrokerIdentityViewV1,
+        identity: &OwnedBrokerIdentityViewV2,
         previous_sequence: u64,
         snapshot: BrokerCheckpointSnapshotV1,
         operation_id: String,
@@ -1692,13 +1706,13 @@ impl OwnedCheckpointPendingV1 {
             previous_sequence,
             sequence: previous_sequence
                 .checked_add(1)
-                .ok_or(OwnedSupervisionErrorCodeV1::SequenceConflict)?,
+                .ok_or(OwnedSupervisionErrorCodeV2::SequenceConflict)?,
             snapshot,
         };
         let commitments = checkpoint_commitments(&identity.subject, &checkpoint)?;
         let pending = Self {
-            profile: OWNED_SUPERVISION_PROFILE_V1.into(),
-            version: OWNED_SUPERVISION_VERSION_V1,
+            profile: OWNED_SUPERVISION_PROFILE_V2.into(),
+            version: OWNED_SUPERVISION_VERSION_V2,
             identity: identity.clone(),
             checkpoint,
             registry_input_hash: commitments.registry_input_hash,
@@ -1709,20 +1723,20 @@ impl OwnedCheckpointPendingV1 {
     }
 
     pub fn validate(&self) -> OwnedChecked<()> {
-        let invalid = OwnedSupervisionErrorCodeV1::InvalidRequest;
+        let invalid = OwnedSupervisionErrorCodeV2::InvalidRequest;
         require_profile(&self.profile, self.version)?;
         self.identity.validate()?;
         let commitments = checkpoint_commitments(&self.identity.subject, &self.checkpoint)?;
         check(
             commitments.registry_input_hash == self.registry_input_hash
                 && commitments.operation_commitment == self.operation_commitment,
-            OwnedSupervisionErrorCodeV1::ProtocolMismatch,
+            OwnedSupervisionErrorCodeV2::ProtocolMismatch,
         )?;
         bounded(self, MAX_OWNED_CHECKPOINT_PENDING_BYTES, invalid)
     }
 
-    pub fn request(&self) -> OwnedBrokerCheckpointRequestV1 {
-        OwnedBrokerCheckpointRequestV1 {
+    pub fn request(&self) -> OwnedBrokerCheckpointRequestV2 {
+        OwnedBrokerCheckpointRequestV2 {
             profile: self.profile.clone(),
             version: self.version,
             subject: self.identity.subject.clone(),
@@ -1734,9 +1748,9 @@ impl OwnedCheckpointPendingV1 {
 
     pub fn validate_result(
         &self,
-        result: &OwnedBrokerCheckpointResultV1,
-    ) -> Result<(), OwnedAckRejectionV1> {
-        use OwnedAckRejectionV1 as Rejection;
+        result: &OwnedBrokerCheckpointResultV2,
+    ) -> Result<(), OwnedAckRejectionV2> {
+        use OwnedAckRejectionV2 as Rejection;
         result.validate().map_err(|_| Rejection::Protocol)?;
         check_replay_identity(&self.identity, &result.identity)
             .map_err(Rejection::Incompatible)?;
@@ -1764,9 +1778,9 @@ impl OwnedCheckpointPendingV1 {
     /// local acknowledged history that `previous_sequence` represents.
     pub fn recognize(
         &self,
-        view: &OwnedBrokerCheckpointSelfViewV1,
-    ) -> Result<Option<OwnedBrokerCheckpointResultV1>, OwnedAckRejectionV1> {
-        use OwnedAckRejectionV1 as Rejection;
+        view: &OwnedBrokerCheckpointSelfViewV2,
+    ) -> Result<Option<OwnedBrokerCheckpointResultV2>, OwnedAckRejectionV2> {
+        use OwnedAckRejectionV2 as Rejection;
         view.validate().map_err(|_| Rejection::Protocol)?;
         check_replay_identity(&self.identity, &view.identity).map_err(Rejection::Incompatible)?;
         let incarnation = &self.identity.subject.incarnation_id;
@@ -1793,9 +1807,9 @@ impl OwnedCheckpointPendingV1 {
         {
             return Err(Rejection::Conflict);
         }
-        let result = OwnedBrokerCheckpointResultV1 {
-            profile: OWNED_SUPERVISION_PROFILE_V1.into(),
-            version: OWNED_SUPERVISION_VERSION_V1,
+        let result = OwnedBrokerCheckpointResultV2 {
+            profile: OWNED_SUPERVISION_PROFILE_V2.into(),
+            version: OWNED_SUPERVISION_VERSION_V2,
             identity: view.identity.clone(),
             operation_commitment: self.operation_commitment.clone(),
             result: BrokerCheckpointResultV1 {
