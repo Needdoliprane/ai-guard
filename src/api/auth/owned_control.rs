@@ -63,8 +63,7 @@ pub(in crate::api) async fn authenticate_policy(
                 .owner
                 .try_read_epoch()
                 .map_err(policy_authority_failure)?;
-            let access =
-                HumanSourceAccess::read(&epoch, source).map_err(policy_store_failure)?;
+            let access = HumanSourceAccess::read(&epoch, source).map_err(policy_store_failure)?;
             // Only actual source/format admission precedes body polling. This
             // read epoch ends here; it never becomes the post-body WriteEpoch.
             identity
