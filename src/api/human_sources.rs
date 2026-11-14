@@ -457,11 +457,11 @@ mod journal_tests;
 #[cfg(all(test, unix))]
 mod owned_control_tests;
 #[cfg(all(test, unix))]
-mod owned_policy_tests;
+mod owned_policy_inspection_cli_tests;
 #[cfg(all(test, unix))]
 mod owned_policy_inspection_tests;
 #[cfg(all(test, unix))]
-mod owned_policy_inspection_cli_tests;
+mod owned_policy_tests;
 #[cfg(test)]
 pub(super) mod tests;
 

@@ -2,7 +2,9 @@
 //! Root supplies the exact same QA executable/digest variables as parent A1.
 use super::{
     owned_policy_cli_tests::{ActualCli, CliOutput, private_input, text},
-    owned_policy_inspection_tests::{Fixture, Server, RUNNER, INSPECT, PROTOCOL, policy, replacement, snapshot},
+    owned_policy_inspection_tests::{
+        Fixture, INSPECT, PROTOCOL, RUNNER, Server, policy, replacement, snapshot,
+    },
 };
 use crate::{
     control::egress_policy::{EgressPolicyReceiptV1, EgressReplacePolicyRequestV1},
@@ -11,92 +13,190 @@ use crate::{
 use anyhow::{Result, ensure};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{
-    collections::BTreeSet,
-    fs::Permissions,
-    os::unix::fs::PermissionsExt,
-    path::Path,
-};
+use std::{collections::BTreeSet, fs::Permissions, os::unix::fs::PermissionsExt, path::Path};
 
 const REPLACE: &str = "/control/api/v1/egress/policies/replace";
 
 fn stdout(output: &CliOutput) -> Result<Value> {
-    ensure!(output.stdout.ends_with(b"\n")
-        && output.stdout.iter().filter(|b| **b == b'\n').count() == 1
-        && !output.stdout.contains(&b'\r'), "CLI summary must be one complete line");
+    ensure!(
+        output.stdout.ends_with(b"\n")
+            && output.stdout.iter().filter(|b| **b == b'\n').count() == 1
+            && !output.stdout.contains(&b'\r'),
+        "CLI summary must be one complete line"
+    );
     let value: Value = serde_json::from_slice(&output.stdout)?;
-    ensure!(value["historical"] == true, "CLI summary lost historical coverage");
-    for forbidden in [RUNNER,"example.com","destinations","control_namespace_uuid","binding_id","runtime_applied"] {
-        ensure!(!String::from_utf8_lossy(&output.stdout).contains(forbidden)
-            && !String::from_utf8_lossy(&output.stderr).contains(forbidden), "CLI summary leaked data or claimed runtime coverage");
+    ensure!(
+        value["historical"] == true,
+        "CLI summary lost historical coverage"
+    );
+    for forbidden in [
+        RUNNER,
+        "example.com",
+        "destinations",
+        "control_namespace_uuid",
+        "binding_id",
+        "runtime_applied",
+    ] {
+        ensure!(
+            !String::from_utf8_lossy(&output.stdout).contains(forbidden)
+                && !String::from_utf8_lossy(&output.stderr).contains(forbidden),
+            "CLI summary leaked data or claimed runtime coverage"
+        );
     }
     Ok(value)
 }
 
 fn preparation(path: &Path) -> Result<(EgressReplacePolicyRequestV1, Vec<u8>, Vec<u8>)> {
-    let bytes=std::fs::read(path.join("request.json"))?;
-    let request=EgressReplacePolicyRequestV1::from_json(&bytes)?;
-    ensure!(request.canonical_bytes()? == bytes,"prepare did not persist canonical existing A1 DTO");
-    let metadata=std::fs::read(path.join("metadata.json"))?;
-    ensure!(std::fs::metadata(path)?.permissions().mode()&0o777==0o700,"operation directory permissions");
-    for name in ["request.json","metadata.json","current.json","owner.lock"] {
-        ensure!(std::fs::symlink_metadata(path.join(name))?.is_file()
-            && std::fs::metadata(path.join(name))?.permissions().mode()&0o777==0o600,"operation file permissions");
+    let bytes = std::fs::read(path.join("request.json"))?;
+    let request = EgressReplacePolicyRequestV1::from_json(&bytes)?;
+    ensure!(
+        request.canonical_bytes()? == bytes,
+        "prepare did not persist canonical existing A1 DTO"
+    );
+    let metadata = std::fs::read(path.join("metadata.json"))?;
+    ensure!(
+        std::fs::metadata(path)?.permissions().mode() & 0o777 == 0o700,
+        "operation directory permissions"
+    );
+    for name in [
+        "request.json",
+        "metadata.json",
+        "current.json",
+        "owner.lock",
+    ] {
+        ensure!(
+            std::fs::symlink_metadata(path.join(name))?.is_file()
+                && std::fs::metadata(path.join(name))?.permissions().mode() & 0o777 == 0o600,
+            "operation file permissions"
+        );
     }
-    Ok((request,bytes,metadata))
+    Ok((request, bytes, metadata))
 }
 
 fn report(path: &Path, origin: &str, fixture: &Fixture) -> Result<Value> {
-    ensure!(std::fs::metadata(path)?.permissions().mode()&0o777==0o700,"inspection directory is not private");
-    let names=std::fs::read_dir(path)?.map(|entry|entry.map(|e|e.file_name().to_string_lossy().into_owned()))
+    ensure!(
+        std::fs::metadata(path)?.permissions().mode() & 0o777 == 0o700,
+        "inspection directory is not private"
+    );
+    let names = std::fs::read_dir(path)?
+        .map(|entry| entry.map(|e| e.file_name().to_string_lossy().into_owned()))
         .collect::<std::io::Result<BTreeSet<_>>>()?;
-    let expected=["request.json","metadata.json","current.json","owner.lock"].into_iter().map(str::to_owned).collect();
-    ensure!(names==expected,"inspection report gained pending/receipt/unknown records");
+    let expected = [
+        "request.json",
+        "metadata.json",
+        "current.json",
+        "owner.lock",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    ensure!(
+        names == expected,
+        "inspection report gained pending/receipt/unknown records"
+    );
     for name in &names {
-        let meta=std::fs::symlink_metadata(path.join(name))?;
-        ensure!(meta.is_file()&&meta.permissions().mode()&0o777==0o600,"inspection record is not private regular file");
+        let meta = std::fs::symlink_metadata(path.join(name))?;
+        ensure!(
+            meta.is_file() && meta.permissions().mode() & 0o777 == 0o600,
+            "inspection record is not private regular file"
+        );
     }
-    let request=std::fs::read(path.join("request.json"))?;
-    let observation=std::fs::read(path.join("current.json"))?;
-    let metadata:Value=serde_json::from_slice(&std::fs::read(path.join("metadata.json"))?)?;
-    let value:Value=serde_json::from_slice(&observation)?;
-    ensure!(request==br#"{"version":1,"selector":{"kind":"tenant"}}"#
-        &&metadata["version"]==1&&metadata["kind"]=="policy_inspection"&&metadata["gateway"]==origin
-        &&metadata["request_sha256"]==hex::encode(Sha256::digest(&request))
-        &&metadata["observation_sha256"]==hex::encode(Sha256::digest(&observation)),"report binding/hash contract");
-    ensure!(value["scope"]==json!({"tenant_id":"A","control_namespace_uuid":fixture.namespace})
-        &&value["selector"]==json!({"kind":"tenant"})&&value["head"]==json!({"presence":"absent"})
-        &&value["historical"]==true&&value["coverage"]=="policy_registry_metadata","actual retained observation");
-    ensure!(!String::from_utf8_lossy(&observation).contains(RUNNER)
-        &&!String::from_utf8_lossy(&observation).contains("example.com"),"inspection report exposed secret/policy");
+    let request = std::fs::read(path.join("request.json"))?;
+    let observation = std::fs::read(path.join("current.json"))?;
+    let metadata: Value = serde_json::from_slice(&std::fs::read(path.join("metadata.json"))?)?;
+    let value: Value = serde_json::from_slice(&observation)?;
+    ensure!(
+        request == br#"{"version":1,"selector":{"kind":"tenant"}}"#
+            && metadata["version"] == 1
+            && metadata["kind"] == "policy_inspection"
+            && metadata["gateway"] == origin
+            && metadata["request_sha256"] == hex::encode(Sha256::digest(&request))
+            && metadata["observation_sha256"] == hex::encode(Sha256::digest(&observation)),
+        "report binding/hash contract"
+    );
+    ensure!(
+        value["scope"] == json!({"tenant_id":"A","control_namespace_uuid":fixture.namespace})
+            && value["selector"] == json!({"kind":"tenant"})
+            && value["head"] == json!({"presence":"absent"})
+            && value["historical"] == true
+            && value["coverage"] == "policy_registry_metadata",
+        "actual retained observation"
+    );
+    ensure!(
+        !String::from_utf8_lossy(&observation).contains(RUNNER)
+            && !String::from_utf8_lossy(&observation).contains("example.com"),
+        "inspection report exposed secret/policy"
+    );
     Ok(value)
 }
 
-async fn inspect_cli(cli:&ActualCli,server:&Server,token:&Path,destination:&Path)->Result<CliOutput> {
-    cli.run(&["broker","policy","inspect","--gateway",&server.origin,"--token-file",text(token)?,
-        "--tenant","--output-dir",text(destination)?]).await
+async fn inspect_cli(
+    cli: &ActualCli,
+    server: &Server,
+    token: &Path,
+    destination: &Path,
+) -> Result<CliOutput> {
+    cli.run(&[
+        "broker",
+        "policy",
+        "inspect",
+        "--gateway",
+        &server.origin,
+        "--token-file",
+        text(token)?,
+        "--tenant",
+        "--output-dir",
+        text(destination)?,
+    ])
+    .await
 }
 
-async fn prepare_cli(cli:&ActualCli,inspection:&Path,draft:&Path,destination:&Path)->Result<CliOutput> {
-    cli.run(&["broker","policy","prepare","--inspection-dir",text(inspection)?,"--input",text(draft)?,
-        "--output-dir",text(destination)?]).await
+async fn prepare_cli(
+    cli: &ActualCli,
+    inspection: &Path,
+    draft: &Path,
+    destination: &Path,
+) -> Result<CliOutput> {
+    cli.run(&[
+        "broker",
+        "policy",
+        "prepare",
+        "--inspection-dir",
+        text(inspection)?,
+        "--input",
+        text(draft)?,
+        "--output-dir",
+        text(destination)?,
+    ])
+    .await
 }
 
-fn unchanged(path:&Path,request:&[u8],metadata:&[u8])->Result<()> {
-    ensure!(std::fs::read(path.join("request.json"))?==request
-        &&std::fs::read(path.join("metadata.json"))?==metadata,"apply/resume repaired immutable operation/scope/CAS");
+fn unchanged(path: &Path, request: &[u8], metadata: &[u8]) -> Result<()> {
+    ensure!(
+        std::fs::read(path.join("request.json"))? == request
+            && std::fs::read(path.join("metadata.json"))? == metadata,
+        "apply/resume repaired immutable operation/scope/CAS"
+    );
     Ok(())
 }
 
-fn persisted_receipt(database:&Path,operation:uuid::Uuid,receipt:&[u8])->Result<()> {
-    let db=rusqlite::Connection::open_with_flags(database,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+fn persisted_receipt(database: &Path, operation: uuid::Uuid, receipt: &[u8]) -> Result<()> {
+    let db = rusqlite::Connection::open_with_flags(
+        database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
     let (canonical,seq,hash,kind):(String,i64,String,String)=db.query_row(
         "SELECT o.receipt_json,e.seq,e.hash,e.kind FROM egress_policy_operations o JOIN events e ON e.seq=o.event_seq WHERE o.operation_id=?1",
         [operation.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
-    let value:Value=serde_json::from_slice(receipt)?;
-    ensure!(canonical.as_bytes()==receipt&&value["operation_id"]==operation.to_string()
-        &&value["event_seq"]==seq&&value["event_hash"]==hash&&kind=="control.egress_policy.replaced",
-        "CLI receipt not correlated with independent actual SQLite event");
+    let value: Value = serde_json::from_slice(receipt)?;
+    ensure!(
+        canonical.as_bytes() == receipt
+            && value["operation_id"] == operation.to_string()
+            && value["event_seq"] == seq
+            && value["event_hash"] == hash
+            && kind == "control.egress_policy.replaced",
+        "CLI receipt not correlated with independent actual SQLite event"
+    );
     Ok(())
 }
 
@@ -104,15 +204,23 @@ fn persisted_receipt(database:&Path,operation:uuid::Uuid,receipt:&[u8])->Result<
 // changed UUID on recovery, or success without a durable canonical receipt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires an explicitly selected same-build Cargo-bound normal CLI in isolated QA"]
-async fn real_cli_inspect_prepare_apply_keeps_observed_scope_cas_and_operation()->Result<()> {
-    let files=tempfile::Builder::new().permissions(Permissions::from_mode(0o700))
+async fn real_cli_inspect_prepare_apply_keeps_observed_scope_cas_and_operation() -> Result<()> {
+    let files = tempfile::Builder::new()
+        .permissions(Permissions::from_mode(0o700))
         .tempdir_in(std::fs::canonicalize(std::env::temp_dir())?)?;
-    let cli=ActualCli::from_qa(files.path())?;
-    let fixture=Fixture::new(15);let mut server=Server::new(&fixture.state).await?;
-    let token=files.path().join("runner-token");private_input(&token,RUNNER.as_bytes())?;
-    let inspection=files.path().join("inspection");let draft=files.path().join("draft.json");
-    let operation=files.path().join("operation");
-    let desired=policy();private_input(&draft,&serde_json::to_vec(&json!({"version":1,"action":"replace","policy":desired}))?)?;
+    let cli = ActualCli::from_qa(files.path())?;
+    let fixture = Fixture::new(15);
+    let mut server = Server::new(&fixture.state).await?;
+    let token = files.path().join("runner-token");
+    private_input(&token, RUNNER.as_bytes())?;
+    let inspection = files.path().join("inspection");
+    let draft = files.path().join("draft.json");
+    let operation = files.path().join("operation");
+    let desired = policy();
+    private_input(
+        &draft,
+        &serde_json::to_vec(&json!({"version":1,"action":"replace","policy":desired}))?,
+    )?;
     let outcome:Result<(uuid::Uuid,Vec<u8>)>=async {
         server.sdk_witness(&fixture,RUNNER,"A",15).await?;
         let before=snapshot(&fixture)?;
@@ -171,26 +279,40 @@ async fn real_cli_inspect_prepare_apply_keeps_observed_scope_cas_and_operation()
             "receipt resume performed hidden inspection/preflight/effect");
         Ok((id,receipt))
     }.await;
-    let close=server.close().await;let drain=fixture.drain().await;
-    close?;drain?;let (id,receipt)=outcome?;
-    persisted_receipt(&fixture.database,id,&receipt)
+    let close = server.close().await;
+    let drain = fixture.drain().await;
+    close?;
+    drain?;
+    let (id, receipt) = outcome?;
+    persisted_receipt(&fixture.database, id, &receipt)
 }
 
 // Break caught: refreshing a retained head/CAS or accepting the same bearer at
 // the same origin after its actual namespace changed. Both Stores are real.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires an explicitly selected same-build Cargo-bound normal CLI in isolated QA"]
-async fn retained_inspection_never_repairs_changed_head_or_namespace()->Result<()> {
-    let files=tempfile::Builder::new().permissions(Permissions::from_mode(0o700))
+async fn retained_inspection_never_repairs_changed_head_or_namespace() -> Result<()> {
+    let files = tempfile::Builder::new()
+        .permissions(Permissions::from_mode(0o700))
         .tempdir_in(std::fs::canonicalize(std::env::temp_dir())?)?;
-    let cli=ActualCli::from_qa(files.path())?;
-    let fixture=Fixture::new(15);let next=Fixture::new(15);
-    ensure!(fixture.namespace!=next.namespace,"namespace replacement fixture not distinct");
-    let mut server=Server::new(&fixture.state).await?;
-    let token=files.path().join("runner-token");private_input(&token,RUNNER.as_bytes())?;
-    let inspection=files.path().join("inspection");let draft=files.path().join("draft.json");
-    let operation=files.path().join("stale-operation");let replaced=files.path().join("namespace-operation");
-    private_input(&draft,&serde_json::to_vec(&json!({"version":1,"action":"replace","policy":policy()}))?)?;
+    let cli = ActualCli::from_qa(files.path())?;
+    let fixture = Fixture::new(15);
+    let next = Fixture::new(15);
+    ensure!(
+        fixture.namespace != next.namespace,
+        "namespace replacement fixture not distinct"
+    );
+    let mut server = Server::new(&fixture.state).await?;
+    let token = files.path().join("runner-token");
+    private_input(&token, RUNNER.as_bytes())?;
+    let inspection = files.path().join("inspection");
+    let draft = files.path().join("draft.json");
+    let operation = files.path().join("stale-operation");
+    let replaced = files.path().join("namespace-operation");
+    private_input(
+        &draft,
+        &serde_json::to_vec(&json!({"version":1,"action":"replace","policy":policy()}))?,
+    )?;
     let outcome:Result<()>=async {
         server.sdk_witness(&fixture,RUNNER,"A",15).await?;
         println!("OPI_RETAINED_SETUP_REAL_OWNED15_REGISTRY_BINDING_SDK200");
@@ -242,6 +364,11 @@ async fn retained_inspection_never_repairs_changed_head_or_namespace()->Result<(
         ensure!(snapshot(&fixture)?==stable,"namespace test touched retired authority");
         Ok(())
     }.await;
-    let close=server.close().await;let old_drain=fixture.drain().await;let new_drain=next.drain().await;
-    close?;old_drain?;new_drain?;outcome
+    let close = server.close().await;
+    let old_drain = fixture.drain().await;
+    let new_drain = next.drain().await;
+    close?;
+    old_drain?;
+    new_drain?;
+    outcome
 }

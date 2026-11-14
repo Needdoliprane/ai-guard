@@ -44,7 +44,10 @@ fn tenant(state: &GatewayState, id: &str) -> usize {
         .unwrap()
 }
 
-pub(in crate::api::human_sources) fn command(bundle: &HumanOwnedStartupBundle, id: &str) -> ProvisionRunnerReviewBindingV1 {
+pub(in crate::api::human_sources) fn command(
+    bundle: &HumanOwnedStartupBundle,
+    id: &str,
+) -> ProvisionRunnerReviewBindingV1 {
     let descriptor = bundle
         .owner
         .closure()
@@ -165,7 +168,12 @@ pub(in crate::api::human_sources) fn provision_b(bundle: &HumanOwnedStartupBundl
     );
 }
 
-pub(in crate::api::human_sources) fn local_credential(bundle: &HumanOwnedStartupBundle, id: &str, token: &str, active: bool) {
+pub(in crate::api::human_sources) fn local_credential(
+    bundle: &HumanOwnedStartupBundle,
+    id: &str,
+    token: &str,
+    active: bool,
+) {
     let principal = command(bundle, id).policy.owner;
     identity_change(
         bundle,
