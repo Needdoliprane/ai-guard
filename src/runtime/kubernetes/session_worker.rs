@@ -28,8 +28,8 @@
 //!
 //! Every item here has a caller outside tests through `dispatch_waiting_mode`,
 //! which is public in the library, so the module carries no `dead_code`
-//! attribute. The call from `src/bin/ai-guard-provider.rs` is a separate wire
-//! patch that this lot does not apply.
+//! attribute. The existing `src/bin/ai-guard-provider.rs` calls this dispatch
+//! before decoding provider arguments; waiting mode never reaches that path.
 use super::{
     bootstrap::{
         BootstrapCapacity, BootstrapError, MAX_HANDSHAKE_TIME, RESERVED_BYTES, WaitingForAttachV2,
