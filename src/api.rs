@@ -1837,6 +1837,7 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
                 "/api/v1/human/resources",
                 "/api/v1/human/events",
                 "/api/v1/human/events/recent",
+                "/api/v1/human/owned/brokers",
             ]
             .contains(&request.uri().path()))
     {
@@ -1977,6 +1978,7 @@ fn human_dashboard_path(path: &str) -> bool {
     [
         "/api/human/identity",
         "/api/human/brokers",
+        "/api/human/owned/brokers",
         "/api/human/workers",
         "/api/human/federation/workers",
         "/api/human/resources",

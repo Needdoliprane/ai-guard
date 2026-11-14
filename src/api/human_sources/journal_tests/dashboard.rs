@@ -137,8 +137,8 @@ async fn owned_brokers_proxy() -> (
                     received.fetch_add(1, Ordering::SeqCst);
                     assert_eq!(request.method(), "GET");
                     assert_eq!(request.uri().query(), Some("limit=25"));
-                    assert_eq!(request.headers().get("authorization").unwrap(), &format!("Bearer {OWNED_PROXY_BEARER}"));
-                    assert_eq!(request.headers().get("x-aiguard-context").unwrap(), OWNED_PROXY_CONTEXT);
+                    assert_eq!(request.headers().get("authorization").unwrap().to_str().unwrap(), format!("Bearer {OWNED_PROXY_BEARER}"));
+                    assert_eq!(request.headers().get("x-aiguard-context").unwrap().to_str().unwrap(), OWNED_PROXY_CONTEXT);
                     (
                         StatusCode::FORBIDDEN,
                         axum::Json(json!({"error":{"code":"permission_denied","next":"select_context"}})),
