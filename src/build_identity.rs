@@ -197,7 +197,10 @@ impl BuildStatusV1 {
         // first, then decode the original bytes to retain duplicate-key checks.
         let shape: serde_json::Value =
             serde_json::from_slice(bytes).map_err(|_| BuildIdentityError::InvalidStatus)?;
-        if !shape.is_object() || !shape.get("build").is_some_and(serde_json::Value::is_object) {
+        if !shape.is_object()
+            || !shape.get("build").is_some_and(serde_json::Value::is_object)
+            || !shape.get("component").is_some_and(serde_json::Value::is_string)
+        {
             return Err(BuildIdentityError::InvalidStatus);
         }
         let raw: RawBuildStatus =

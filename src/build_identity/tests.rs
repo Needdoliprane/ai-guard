@@ -132,6 +132,7 @@ fn decoder_rejects_duplicates_wrong_identity_and_nonnullable_metadata_types() {
         ("schema_version", serde_json::json!(2)),
         ("product", serde_json::json!("agentsandbox")),
         ("component", serde_json::json!("unknown")),
+        ("component", serde_json::json!({"gateway":null})),
     ] {
         let mut value = base.clone();
         value[field] = invalid;
