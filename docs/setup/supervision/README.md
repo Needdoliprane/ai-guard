@@ -8,7 +8,7 @@ The view needs a named account: [local](../identity/README.md) or [SSO](../sso/R
 
 ## Who sees what
 
-Navigation, sections and actions follow the capabilities that the control returns for the selected context. The browser never derives a right from an account name; every read is authorized again by the gateway.
+Navigation, sections and actions follow both the capabilities that the control returns for the selected context and the read profiles it actually serves. A profile announces a wire contract; it grants no permission. The browser never derives a right from an account name; every read is authorized again by the gateway. The following table describes controls that omit `read_profiles` (the legacy registry contracts). The owned profile is described below.
 
 | Capability in the selected context | What Supervision shows | Read sent |
 |---|---|---|
@@ -20,6 +20,30 @@ Navigation, sections and actions follow the capabilities that the control return
 | None of the above | No Supervision entry for that context | none |
 
 A source that the context does not grant is never requested. The **Accès de ce contexte** panel (access of this context; closed by default, opened with its chevron) lists each capability, what it opens and what is missing. Two items are always listed as unavailable: the personal view of workers (no authenticated initiation chain links a worker to a person yet) and the agent / sub-agent hierarchy (the named contract does not return it, so it stays unknown and is never inferred from a name).
+
+## Owned broker supervision profile
+
+**Frontend candidate; execution and visual qualification must be recorded on the integrated source.** Update the Rust gateway and dashboard together. On an owned control, `GET /api/v1/human/identity` announces exactly:
+
+```json
+{"read_profiles":{"broker_registry":"human_broker_registry_owned_v1","worker_registry":"unavailable","federation_registry":"unavailable"}}
+```
+
+This announcement is independent of context permissions. An administration context still needs `read_broker_registry`. The dashboard chooses `GET /api/v1/human/owned/brokers` before requesting a page: 25 rows in **Brokers**, 100 in **Supervision**, at most 100 rows and 256 KiB per response. It validates the profile, version, closed fields, selected context, authorization version and receipt. The page is `live_keyset`, its runtime inventory is `unknown`, and `count_scope: page` means a page count, never a tenant total. Owned cursors belong only to that profile and page size. A 403, 404, 503 or incompatible body never triggers a legacy registry request.
+
+**Workers** and **Fédération** navigation are unavailable for this announced profile. Supervision continues to read the authorized owned brokers and resources independently. If `read_worker_registry` is present, **Workers · profil indisponible** explains that the route is unavailable; no worker read is sent and no zero activity is shown. **Relire mes accès** returns to the control's current offer. Ask the operator to check supported profiles; this action does not activate a missing capability. Full multi-host worker supervision remains an open requirement.
+
+The broker row and its detail distinguish heartbeat freshness from checkpoint freshness:
+
+| Checkpoint status | Displayed meaning |
+|---|---|
+| `received` | **Checkpoint courant**, **Checkpoint périmé**, **Checkpoint historique** or **Horloge incertaine du checkpoint**; publication declared, reception observed, coverage partial |
+| `absent` | **Aucune publication de checkpoint**: no publication in the broker's complete operation history; activity still unknown |
+| `unknown` | **Checkpoint inconnu**: the bounded search did not establish whether a publication exists; activity still unknown |
+
+A received checkpoint shows its own reception/expiry, current-grant relation, reference count and `has_more`. Even zero references do not measure activity or the tenant's workers. Job identifiers, hashes, operation identifiers, credentials, commands and paths are excluded. An authority identifier may be masked, or explicitly labelled **Identifiant blanc** when its valid value contains only whitespace. A stale heartbeat can indicate a disconnected broker; the interface does not infer a physical disconnection, stopped worker or released quota from it. The two clock/freshness states remain independent. A valid RFC3339 leap second that the browser cannot format stays visible as its original server string with **date serveur conservée, conversion locale inconnue**; it is never normalized into the following second. Server freshness remains the server's value, without a new local inference. Context authentication and expiry keep their separate validators.
+
+Loading, a successful empty page, a failed initial read and the dated last successful page after a failed refresh stay distinct. An open **Brokers** detail remains tied to its dated page through ordinary heartbeat refreshes; it closes when its broker leaves the page or its grant, incarnation or disclosed authorities change. A 403 removes rows, details and cursors as soon as headers arrive, without waiting for the response body. In Supervision it also fences concurrent reads before the control's access offer is checked again. A changed or removed `read_profiles` announcement removes the selected context and its data; no late response restores them. A 401 signs out. No broker SSE, runner credential or engine access is added.
 
 ## Open the view
 
