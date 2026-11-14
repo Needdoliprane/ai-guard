@@ -132,6 +132,7 @@ fn final_rows(store: &Store) -> Result<Vec<crate::model::StoredEvent>> {
 #[derive(Clone, Copy)]
 enum Scenario {
     Settle,
+    PendingBeforeFinal,
     ForeignCore,
     AbsentLocalSlot,
     RetainedVerified,
@@ -141,6 +142,11 @@ enum Scenario {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn same_original_submitted_final_settles_after_lost_q_without_new_final() {
     composed_settlement(Scenario::Settle).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn same_original_submitted_pending_recovers_q_then_final_without_new_retire() {
+    composed_settlement(Scenario::PendingBeforeFinal).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -340,6 +346,23 @@ async fn submitted_final_case(
         .await?;
     let q_digest = verified.receipt().digest()?;
     let q_head = canonical(verified.head())?;
+    if matches!(scenario, Scenario::PendingBeforeFinal) {
+        drop(producer);
+        return submitted_pending_case(
+            service,
+            profile,
+            jobs,
+            job,
+            writer,
+            full,
+            slot,
+            store,
+            owner,
+            verified,
+            final_event_id,
+        )
+        .await;
+    }
     let final_receipt = writer.stops().finalize_retirement(verified).await?;
     let before = writer
         .stops()
@@ -400,6 +423,9 @@ async fn submitted_final_case(
     };
     let should_settle = matches!(scenario, Scenario::Settle | Scenario::CancelledAfterFinal);
     match scenario {
+        Scenario::PendingBeforeFinal => {
+            return Err(anyhow!("Pending case reached the already-Final fixture"));
+        }
         Scenario::Settle | Scenario::CancelledAfterFinal => {
             // A failed current Q round keeps the actual holder; only the next
             // successful round may complete. This is a real verified reply loss.
@@ -598,6 +624,221 @@ async fn submitted_final_case(
     ensure!(
         jobs.has_retained_retirement() == !should_settle,
         "settlement reported the wrong remaining process ownership"
+    );
+    service.full_owners.drain().await?;
+    service.cold_owners.drain().await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn submitted_pending_case(
+    service: &Arc<Service>,
+    profile: &ControlProfileV1,
+    jobs: &Arc<ProfileJobs>,
+    job: &Arc<Job>,
+    writer: &WriterClient,
+    full: &EnforcerFullClientV3,
+    slot: &EnforcedSlot,
+    store: &Store,
+    owner: Arc<crate::broker::service::preclaim::RetirementSubmission>,
+    verified: crate::broker::enforcer::retirement::VerifiedRetirementReceipt,
+    final_event_id: Uuid,
+) -> Result<()> {
+    let identity = owner.identity().clone();
+    let operation = *identity.job_operation_id();
+    let arm = Uuid::parse_str(&identity.arm().operation_id)?;
+    let generation = *identity.generation();
+    let setup_guard = jobs
+        .try_retirement_query(operation)?
+        .ok_or_else(|| anyhow!("actual Pending setup guard unavailable"))?;
+    let before = writer
+        .stops()
+        .recovery_status(operation)
+        .await?
+        .ok_or_else(|| anyhow!("actual Pending snapshot missing"))?;
+    ensure!(
+        !before.incomplete()
+            && before.retirements().len() == 1
+            && owner.matches_recovery_origin(&before)
+            && owner.is_submitted()?,
+        "Pending fixture lacks the actual complete Submitted origin"
+    );
+    let pending = before.retirements()[0].request();
+    let pending_bytes = canonical(pending)?;
+    ensure!(
+        before.retirements()[0].finalized().is_none()
+            && pending.audit_ack().is_some()
+            && pending.identity().digest()? == identity.digest()?
+            && pending.evidence().digest()? == owner.evidence().digest()?
+            && canonical(&pending.audit_ack())? == canonical(&Some(owner.audit_ack()))?
+            && pending.final_event_id() == final_event_id
+            && full.has_local_slot(&identity.arm().operation_id)?
+            && final_rows(store)?.is_empty()
+            && matches!(
+                writer.stops().recover_final_retirement_state(
+                    operation,
+                    arm,
+                    *identity.retirement_id(),
+                ),
+                Ok(crate::broker::writer::FinalRetirementRecovery::Absent)
+            ),
+        "Pending fixture already has Final, lacks its intention ACK, or owns another Final input"
+    );
+    let initial = writer
+        .load(operation)
+        .await?
+        .ok_or_else(|| anyhow!("actual Pending job missing"))?;
+    let original_intent = initial.intent().canonical_bytes()?;
+    let operations = initial
+        .broker_checkpoint_v2()
+        .ok_or_else(|| anyhow!("actual Pending supervision missing"))?
+        .supervision()
+        .operations();
+    let original_operations = canonical(&operations)?;
+    ensure!(
+        !operations.iter().any(|entry| matches!(
+            entry,
+            crate::broker::checkpoint::SupervisionOperationV1::WorkerClaim { .. }
+                | crate::broker::checkpoint::SupervisionOperationV1::HelperClaim { .. }
+        )) && initial.outbox_receipt(final_event_id, None).is_none(),
+        "Pending fixture already consumed a claim or committed a Final event"
+    );
+    let q_digest = verified.receipt().digest()?;
+    let q_head = canonical(verified.head())?;
+    let q_accepted = canonical(verified.accepted())?;
+    let q_identity = canonical(verified.identity())?;
+    ensure!(
+        verified.identity().digest()? == identity.digest()?
+            && !verified.completes_retained_submission(&owner),
+        "actual RetireUnused reply lacks the original Q or already claims local removal"
+    );
+    let worker = canonical(
+        &store
+            .worker(&identity.arm().worker_id)?
+            .ok_or_else(|| anyhow!("actual Pending worker missing"))?,
+    )?;
+    let quota = canonical(&store.worker_quota(&QuotaPolicyV1::default())?)?;
+    let usage = canonical(&store.worker_usage()?)?;
+    // Lose a genuine authenticated result wrapper before Final admission. This
+    // is not a lost wire ACK, and no test-created receipt replaces the result.
+    drop(verified);
+    ensure!(
+        Arc::ptr_eq(
+            &job.preclaim
+                .retirement_submission_for_test(arm)
+                .ok_or_else(|| anyhow!("Pending setup lost its canonical owner"))?,
+            &owner
+        ) && owner.is_submitted()?
+            && owner.reserve_attempt() == Err(EnforcerError::Conflict)
+            && job
+                .preclaim
+                .submitted_retirement_for_settlement(&identity)?
+                .is_some_and(|continuation| Arc::ptr_eq(continuation.owner(), &owner))
+            && job.cancel.current() == generation,
+        "dropping Q changed the original Submitted owner or reopened submission"
+    );
+    // Only this marker establishes setup: P/intention ACK, native join/Q,
+    // canonical Submitted without F, and actual wrapper loss all precede it.
+    eprintln!("BROKER_SUBMITTED_PENDING_BASELINE_SETUP_CONFIRMED");
+    drop(setup_guard);
+    Arc::clone(service)
+        .reconcile_retirement_audit_profile(profile.clone())
+        .await?;
+    let settled = writer
+        .stops()
+        .recovery_status(operation)
+        .await?
+        .ok_or_else(|| anyhow!("Pending recovery snapshot missing after pump"))?;
+    ensure!(
+        settled.retirements().len() == 1
+            && settled.retirements()[0].finalized().is_some()
+            && !job.preclaim.has_retained_retirement()
+            && !jobs.has_retained_retirement()
+            && !full.has_local_slot(&identity.arm().operation_id)?,
+        "submitted Pending with genuine Q did not converge to its exact Final and local release"
+    );
+    ensure!(
+        owner.matches_recovery_origin(&settled)
+            && canonical(settled.retirements()[0].request())? == pending_bytes
+            && settled.retirements()[0]
+                .finalized()
+                .ok_or_else(|| anyhow!("settled Pending Final disappeared"))?
+                .receipt()
+                .digest()?
+                == q_digest,
+        "Pending reconciliation changed its original origin, request, ACK, deadline, or Q receipt"
+    );
+    let after = writer
+        .load(operation)
+        .await?
+        .ok_or_else(|| anyhow!("reconciled Pending job missing"))?;
+    let final_birth = after
+        .outbox_receipt(final_event_id, None)
+        .ok_or_else(|| anyhow!("reconciled Pending Final birth receipt missing"))?
+        .head()
+        .clone();
+    let final_events = final_rows(store)?;
+    ensure!(
+        final_events.len() == 1 && final_events[0].event.id == final_event_id.to_string(),
+        "Pending reconciliation did not deliver its single fixed Final event"
+    );
+    let replay = full
+        .query_retirement_retained(&owner)
+        .await?
+        .ok_or_else(|| anyhow!("actual Q missing after Pending reconciliation"))?;
+    ensure!(
+        replay.receipt().digest()? == q_digest
+            && canonical(replay.head())? == q_head
+            && canonical(replay.accepted())? == q_accepted
+            && canonical(replay.identity())? == q_identity,
+        "Pending reconciliation created another native retirement effect"
+    );
+    // Stable native Q proves no new durable retirement effect, not a count of
+    // idempotent RPCs. The unchanged consumed-attempt guard also stays closed.
+    ensure!(
+        owner.reserve_attempt() == Err(EnforcerError::Conflict)
+            && matches!(slot.reserve_claim(generation), Err(EnforcerError::NotReady))
+            && service.stopping.load(Ordering::Acquire)
+            && service.fenced.load(Ordering::Acquire)
+            && service.require_starts().await.is_err()
+            && job.cancel.current() == generation
+            && after.intent().canonical_bytes()? == original_intent
+            && canonical(
+                &after
+                    .broker_checkpoint_v2()
+                    .ok_or_else(|| anyhow!("reconciled Pending supervision missing"))?
+                    .supervision()
+                    .operations(),
+            )? == original_operations,
+        "Pending reconciliation reopened submission or changed an Arm, claim, intent, or generation"
+    );
+    ensure!(
+        worker
+            == canonical(
+                &store
+                    .worker(&identity.arm().worker_id)?
+                    .ok_or_else(|| anyhow!("Pending worker disappeared"))?
+            )?
+            && quota == canonical(&store.worker_quota(&QuotaPolicyV1::default())?)?
+            && usage == canonical(&store.worker_usage()?)?,
+        "Pending reconciliation fabricated a worker terminal, quota release, or usage"
+    );
+    Arc::clone(service)
+        .reconcile_retirement_audit_profile(profile.clone())
+        .await?;
+    let repeated = writer
+        .load(operation)
+        .await?
+        .ok_or_else(|| anyhow!("replayed Pending job missing"))?;
+    ensure!(
+        repeated.head() == after.head()
+            && repeated
+                .outbox_receipt(final_event_id, None)
+                .is_some_and(|birth| birth.head() == &final_birth)
+            && canonical(&final_rows(store)?)? == canonical(&final_events)?
+            && !job.preclaim.has_retained_retirement()
+            && !full.has_local_slot(&identity.arm().operation_id)?,
+        "Pending replay repeated Final or changed its completed local retirement"
     );
     service.full_owners.drain().await?;
     service.cold_owners.drain().await?;
