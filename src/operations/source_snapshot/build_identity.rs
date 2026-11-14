@@ -56,9 +56,7 @@ impl PreparedSource {
         stop_result?;
         match result {
             Ok(result) => result,
-            Err(_) => bail!(
-                "the build plan ended without a result; no engine command was started"
-            ),
+            Err(_) => bail!("the build plan ended without a result; no engine command was started"),
         }
     }
 

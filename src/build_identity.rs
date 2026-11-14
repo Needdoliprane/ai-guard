@@ -107,9 +107,9 @@ impl BuildMetadata {
 fn valid_build_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-')
-        })
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-'))
 }
 
 fn valid_revision(value: &str) -> bool {
@@ -199,7 +199,9 @@ impl BuildStatusV1 {
             serde_json::from_slice(bytes).map_err(|_| BuildIdentityError::InvalidStatus)?;
         if !shape.is_object()
             || !shape.get("build").is_some_and(serde_json::Value::is_object)
-            || !shape.get("component").is_some_and(serde_json::Value::is_string)
+            || !shape
+                .get("component")
+                .is_some_and(serde_json::Value::is_string)
         {
             return Err(BuildIdentityError::InvalidStatus);
         }
@@ -209,7 +211,12 @@ impl BuildStatusV1 {
             || raw.product != "ai-guard"
             || raw.component != expected
             || !valid_version(&raw.version)
-            || raw.build.id.0.as_deref().is_some_and(|value| !valid_build_id(value))
+            || raw
+                .build
+                .id
+                .0
+                .as_deref()
+                .is_some_and(|value| !valid_build_id(value))
             || raw
                 .build
                 .revision
@@ -290,11 +297,14 @@ pub fn early_output(
     args: &[OsString],
 ) -> Option<Result<String, BuildIdentityError>> {
     let exact_flag = |argument: &OsString| argument == "--version" || argument == "-V";
-    let has_flag = args.iter().take_while(|argument| *argument != "--").any(|argument| {
-        exact_flag(argument)
-            || argument.as_encoded_bytes().starts_with(b"--version")
-            || argument.as_encoded_bytes().starts_with(b"-V")
-    });
+    let has_flag = args
+        .iter()
+        .take_while(|argument| *argument != "--")
+        .any(|argument| {
+            exact_flag(argument)
+                || argument.as_encoded_bytes().starts_with(b"--version")
+                || argument.as_encoded_bytes().starts_with(b"-V")
+        });
     if has_flag {
         return Some(if args.len() == 1 && exact_flag(&args[0]) {
             Ok(text_identity(component))
@@ -307,12 +317,14 @@ pub fn early_output(
     }
     Some(match args {
         [_] => Ok(text_identity(component)),
-        [_, format] if format == "--json" => serde_json::to_string(&BuildStatusV1::current(component))
-            .map(|mut value| {
-                value.push('\n');
-                value
-            })
-            .map_err(|_| BuildIdentityError::Encoding),
+        [_, format] if format == "--json" => {
+            serde_json::to_string(&BuildStatusV1::current(component))
+                .map(|mut value| {
+                    value.push('\n');
+                    value
+                })
+                .map_err(|_| BuildIdentityError::Encoding)
+        }
         _ => Err(BuildIdentityError::InvalidArguments),
     })
 }
@@ -324,7 +336,11 @@ fn emit_early_result(
 ) -> i32 {
     match result {
         Ok(output) => {
-            if stdout.write_all(output.as_bytes()).and_then(|()| stdout.flush()).is_ok() {
+            if stdout
+                .write_all(output.as_bytes())
+                .and_then(|()| stdout.flush())
+                .is_ok()
+            {
                 0
             } else {
                 74
@@ -332,7 +348,11 @@ fn emit_early_result(
         }
         Err(error) => {
             let message = format!("{error}\n");
-            if stderr.write_all(message.as_bytes()).and_then(|()| stderr.flush()).is_ok() {
+            if stderr
+                .write_all(message.as_bytes())
+                .and_then(|()| stderr.flush())
+                .is_ok()
+            {
                 2
             } else {
                 74

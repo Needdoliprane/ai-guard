@@ -39,10 +39,10 @@ use std::{
 
 #[cfg(test)]
 mod audit_capacity_tests;
+mod auth;
 #[cfg(test)]
 #[path = "build_identity/http_tests.rs"]
 mod build_identity_http_tests;
-mod auth;
 pub use auth::{
     EnvelopeExpectationsV1, TechnicalCredentialIdentityV1, TechnicalCredentialInput,
     TechnicalCredentialRoleV1, prepare_envelope_configuration,
@@ -1632,7 +1632,10 @@ pub fn dashboard_router_with_human_mode(
             get(|| async { Json(json!({"status":"ok","service":"dashboard"})) }),
         )
         .route("/api/v1/status", get(dashboard_build_status))
-        .route("/api/v1/gateway/status", get(dashboard_gateway_build_status))
+        .route(
+            "/api/v1/gateway/status",
+            get(dashboard_gateway_build_status),
+        )
         .route("/api/{*path}", get(dashboard_proxy))
         .route("/auth/oidc/status", get(dashboard_oidc_proxy))
         .route("/auth/oidc/start", post(dashboard_oidc_proxy))
@@ -1668,14 +1671,23 @@ async fn dashboard_gateway_build_status(
     destination.set_query(None);
     destination.set_fragment(None);
     let fetched = tokio::time::timeout(Duration::from_secs(5), async {
-        let mut response = state.client.get(destination)
+        let mut response = state
+            .client
+            .get(destination)
             .header(header::ACCEPT, "application/json")
-            .send().await.map_err(|_| ())?;
+            .send()
+            .await
+            .map_err(|_| ())?;
         if response.status() != StatusCode::OK
-            || response.content_length().is_some_and(|length| length > MAX_STATUS_BYTES as u64)
-            || response.headers().get(header::CONTENT_TYPE)
+            || response
+                .content_length()
+                .is_some_and(|length| length > MAX_STATUS_BYTES as u64)
+            || response
+                .headers()
+                .get(header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.split(';').next()) != Some("application/json")
+                .and_then(|value| value.split(';').next())
+                != Some("application/json")
         {
             return Err(());
         }
@@ -1687,10 +1699,14 @@ async fn dashboard_gateway_build_status(
             bytes.extend_from_slice(&chunk);
         }
         BuildStatusV1::from_json(&bytes, Component::Gateway).map_err(|_| ())
-    }).await;
+    })
+    .await;
     match fetched {
         Ok(Ok(status)) => Ok(Json(status)),
-        _ => Err(error(StatusCode::BAD_GATEWAY, "Gateway build status is unavailable.")),
+        _ => Err(error(
+            StatusCode::BAD_GATEWAY,
+            "Gateway build status is unavailable.",
+        )),
     }
 }
 

@@ -484,15 +484,11 @@ pub fn write_synthetic_source(root: &Path) {
         } else if relative == COMPOSE_FILE {
             fs::write(&path, "services: {}\n").expect("SETUP: synthetic Compose file");
         } else if let Some(manifest) = match relative {
-            "Cargo.toml" => Some(
-                "[package]\nname = \"agentsandbox\"\nversion = \"0.0.1\"\n",
-            ),
-            "Cargo.lock" => Some(
-                "version = 4\n[[package]]\nname = \"agentsandbox\"\nversion = \"0.0.1\"\n",
-            ),
-            "front/package.json" => {
-                Some(r#"{"name":"ai-guard-front","version":"0.0.1"}"#)
+            "Cargo.toml" => Some("[package]\nname = \"agentsandbox\"\nversion = \"0.0.1\"\n"),
+            "Cargo.lock" => {
+                Some("version = 4\n[[package]]\nname = \"agentsandbox\"\nversion = \"0.0.1\"\n")
             }
+            "front/package.json" => Some(r#"{"name":"ai-guard-front","version":"0.0.1"}"#),
             "front/package-lock.json" => Some(
                 r#"{
                   "name":"ai-guard-front","version":"0.0.1","lockfileVersion":3,
