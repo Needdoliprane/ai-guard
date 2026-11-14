@@ -44,7 +44,7 @@ fn tenant(state: &GatewayState, id: &str) -> usize {
         .unwrap()
 }
 
-fn command(bundle: &HumanOwnedStartupBundle, id: &str) -> ProvisionRunnerReviewBindingV1 {
+pub(in crate::api::human_sources) fn command(bundle: &HumanOwnedStartupBundle, id: &str) -> ProvisionRunnerReviewBindingV1 {
     let descriptor = bundle
         .owner
         .closure()
@@ -109,7 +109,7 @@ fn identity_change(bundle: &HumanOwnedStartupBundle, id: &str, change: IdentityC
         .unwrap();
 }
 
-fn provision_b(bundle: &HumanOwnedStartupBundle) {
+pub(in crate::api::human_sources) fn provision_b(bundle: &HumanOwnedStartupBundle) {
     let command = command(bundle, "B");
     identity_change(
         bundle,
@@ -165,7 +165,7 @@ fn provision_b(bundle: &HumanOwnedStartupBundle) {
     );
 }
 
-fn local_credential(bundle: &HumanOwnedStartupBundle, id: &str, token: &str, active: bool) {
+pub(in crate::api::human_sources) fn local_credential(bundle: &HumanOwnedStartupBundle, id: &str, token: &str, active: bool) {
     let principal = command(bundle, id).policy.owner;
     identity_change(
         bundle,
@@ -297,7 +297,7 @@ async fn drain_invalid_owner(state: &GatewayState) {
 
 // Same real decision/admission sequence as tests/support/relay_admission_fixture.rs.
 // It reserves durable quota/IDs only; no runtime or Running relay is asserted.
-fn reserve_workload_fixture_worker(store: &Store) -> WorkerV1 {
+pub(in crate::api::human_sources) fn reserve_workload_fixture_worker(store: &Store) -> WorkerV1 {
     let session_id = uuid::Uuid::new_v4().to_string();
     let request = DecisionRequest {
         request_id: uuid::Uuid::new_v4().to_string(),
