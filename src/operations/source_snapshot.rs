@@ -16,6 +16,7 @@
 //! trust in the selected distribution, not an atomic snapshot of its tree and
 //! not a confinement of the engine CLI process. The control UID, root and the
 //! storage and engine administrators remain trusted.
+mod build_identity;
 mod capture;
 mod interrupt;
 mod release_metadata;

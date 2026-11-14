@@ -70,6 +70,39 @@ const LIMITS_LINE: &str = "limits     declared values are not authenticated; thi
 /// What may exist after a step that runs before any publication.
 const NOTHING_PUBLISHED: &str = "nothing was published and no staging directory was created";
 
+/// Canonical product version for an operator build, from retained declarations
+/// only. Reuses the format-1 readers without changing its documents, identities,
+/// producer comparison or historical verification semantics.
+pub(super) fn aligned_product_version(snapshot: &Snapshot) -> Result<String> {
+    let contents = snapshot.read_retained(
+        &[
+            declared::CARGO_TOML,
+            cargo_lock::CARGO_LOCK,
+            npm_lock::NPM_MANIFEST,
+            npm_lock::NPM_LOCK,
+        ],
+        MAX_DECLARATION_BYTES,
+    )?;
+    let facts = declared::read(&contents[0], &[], &[]);
+    let Some((name, version)) = facts.cargo_package.value() else {
+        bail!("Cargo.toml must declare a known literal [package] name and version before a build");
+    };
+    crate::operations::validate_provider_version(version)
+        .context("Cargo.toml must declare an exact product semantic version")?;
+    let cargo = cargo_lock::parse(&contents[1])?;
+    let root = &cargo.packages[cargo.root];
+    ensure!(
+        root.name == *name && root.version == *version,
+        "Cargo.toml and the root package of Cargo.lock disagree; no image build was started"
+    );
+    let npm = npm_lock::parse(&contents[3], &contents[2])?;
+    ensure!(
+        npm.root.version == *version,
+        "Cargo.toml and front/package.json/root package-lock.json versions disagree; no image build was started"
+    );
+    Ok(version.clone())
+}
+
 /// A lock that format 1 cannot read completely. Never downgraded to a
 /// warning or an unknown.
 #[derive(Clone, Debug, PartialEq, Eq)]

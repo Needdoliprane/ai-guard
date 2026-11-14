@@ -54,6 +54,9 @@ pub enum OperatorCommand {
         codex_version: Option<String>,
         #[arg(long)]
         claude_code_version: Option<String>,
+        /// Optional descriptive source revision; never resolved from ambient Git.
+        #[arg(long)]
+        build_revision: Option<String>,
     },
     /// Start the gateway and the separately containerized dashboard.
     Up {
@@ -429,6 +432,7 @@ pub async fn execute(command: OperatorCommand) -> Result<()> {
             allow_rootful_runtime,
             codex_version,
             claude_code_version,
+            build_revision,
         } => {
             if let Some(version) = &codex_version {
                 validate_provider_version(version)?;
@@ -439,6 +443,15 @@ pub async fn execute(command: OperatorCommand) -> Result<()> {
             let source = source.canonicalize()?;
             preflight_build_inputs(&source)?;
             let prepared = source_snapshot::prepare_build(&source).await?;
+            // Hold the common plan for the whole build. Read/hash off the
+            // signal task and resolve both commands before probing the engine.
+            let (_plan, commands) = prepared
+                .prepare_build_plan(
+                    build_revision.as_deref(),
+                    codex_version.as_deref(),
+                    claude_code_version.as_deref(),
+                )
+                .await?;
             let runtime = selected_runtime(
                 runtime,
                 runtime_program.as_deref(),
@@ -447,37 +460,11 @@ pub async fn execute(command: OperatorCommand) -> Result<()> {
             )
             .await?;
             runtime.doctor(allow_rootful_runtime).await?;
-            for (dockerfile, tag, worker) in [
-                (
-                    "images/control.Dockerfile",
-                    "agentsandbox-control:local",
-                    false,
-                ),
-                (
-                    "images/worker.Dockerfile",
-                    "agentsandbox-worker:local",
-                    true,
-                ),
-            ] {
-                let mut args = vec![
-                    "build".into(),
-                    // No path here: the prepared source adds `--file` and the context.
-                    "--tag".into(),
-                    tag.into(),
-                ];
-                if worker {
-                    if let Some(version) = &codex_version {
-                        args.extend(["--build-arg".into(), format!("CODEX_VERSION={version}")]);
-                    }
-                    if let Some(version) = &claude_code_version {
-                        args.extend([
-                            "--build-arg".into(),
-                            format!("CLAUDE_CODE_VERSION={version}"),
-                        ]);
-                    }
-                }
+            for (tag, command) in ["agentsandbox-control:local", "agentsandbox-worker:local"]
+                .into_iter()
+                .zip(commands)
+            {
                 eprintln!("Building {tag} with {}…", runtime.kind);
-                let command = prepared.build_command(dockerfile, &args)?;
                 let output = runtime
                     .consume_prepared(command, Duration::from_secs(30 * 60), &[], None)
                     .await?;
