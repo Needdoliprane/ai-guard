@@ -52,6 +52,10 @@ test("common delivery ID and revision detect partial updates without rewriting b
   assert.equal(identityRows(bundle, state)[2].build.id, "delivery-B");
   const unknown = frontendIdentity("0.0.1");
   assert.equal(identitySummary(unknown, state).mismatch, true, "two known services still disagree when the bundle build is unknown");
+  state.gateway = available("gateway", "0.0.1", { id: "delivery-A", revision: "b".repeat(40) });
+  assert.equal(identitySummary(bundle, state).mismatch, true, "a revision divergence alone must be visible");
+  state.gateway = available("gateway", "0.0.1", { id: "delivery-B", revision: "a".repeat(40) });
+  assert.equal(identitySummary(bundle, state).mismatch, true, "a build ID divergence alone must be visible");
   state.gateway = available("gateway");
   assert.equal(identitySummary(bundle, state).mismatch, false, "missing identity is unknown, not invented mismatch");
   assert.match(identityRows(bundle, state)[2].build.id ?? "inconnu", /inconnu/);
