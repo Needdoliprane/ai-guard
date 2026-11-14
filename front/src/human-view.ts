@@ -4,13 +4,14 @@ import { HumanApiClient, HumanApiError, HumanSuperseded } from "./human-api.ts";
 import { HumanContractError, canReadHumanFederation } from "./human-model.ts";
 import { RENDER_STEP, SupervisionView, defaultSupervisionPreferences } from "./supervision-view.ts";
 import { JournalView, defaultJournalPreferences } from "./journal-view.ts";
-import { defaultFleetFilter, supervisionAccess } from "./supervision-model.ts";
+import { brokerAuthorityLabel, defaultFleetFilter, supervisionAccess } from "./supervision-model.ts";
 import { captureIntent, deferredReadAllowed, resumeCandidate, resumeRetryDelay } from "./human-continuity.ts";
 import type { ResumeIntent } from "./human-continuity.ts";
 import "./human.css";
 import type { SupervisionPreferences } from "./supervision-view.ts";
 import type { JournalPreferences } from "./journal-view.ts";
 import type { HumanBroker, HumanBrokerPage, HumanWorker, HumanWorkerPage, HumanWorkerAssociation, HumanWorkerTimeStatus, HumanFederationWorkerPage, HumanContext, HumanEvent, HumanEventPage, HumanIdentity, HumanPage, HumanResource, HumanView } from "./human-model.ts";
+import { checkpointFacts, checkpointLabel, formatBrokerDate } from "./human-owned-brokers.ts";
 
 interface ReadState<T> {
   value: T | null; loading: boolean; error: string; loadedAt: string | null; stale: boolean;
@@ -333,13 +334,13 @@ export class HumanDashboard {
     this.#brokerGeneration++; this.#brokerAbort.abort(); this.#brokerAbort = new AbortController(); this.#brokers = readState();
     if (this.#mode === "brokers") { this.#dialog?.close(); this.#dialog?.remove(); this.#dialog = null; }
   }
-  #canWorkers() { return this.#context?.mode === "administration" && this.#context.capabilities.includes("read_worker_registry"); }
+  #canWorkers() { return this.#api.readProfiles?.worker_registry !== "unavailable" && this.#context?.mode === "administration" && this.#context.capabilities.includes("read_worker_registry"); }
   #purgeWorkers() {
     this.#workerGeneration++; this.#workerAbort.abort(); this.#workerAbort = new AbortController(); this.#workers = readState();
     if (this.#mode === "workers") { this.#dialog?.close(); this.#dialog?.remove(); this.#dialog = null; }
   }
-  #canFederation() { return canReadHumanFederation(this.#context); }
-  #canSupervise() { return supervisionAccess(this.#context).any; }
+  #canFederation() { return this.#api.readProfiles?.federation_registry !== "unavailable" && canReadHumanFederation(this.#context); }
+  #canSupervise() { return supervisionAccess(this.#context, this.#api.readProfiles).any; }
   #closeSupervision() { this.#supervision?.close(); this.#supervision = null; }
   #openSupervision() {
     const context = this.#context; if (!context) return;
@@ -363,7 +364,7 @@ export class HumanDashboard {
     const confirmed = await this.#loadIdentity();
     if (confirmed && !this.#closed && generation === this.#generation && this.#context && view && view === this.#supervision) void view.reread();
   }
-  #canJournal() { return supervisionAccess(this.#context).journal; }
+  #canJournal() { return supervisionAccess(this.#context, this.#api.readProfiles).journal; }
   #currentJournalProfile() {
     return this.#journalProfile?.contextId === this.#context?.id &&
       this.#journalProfile?.authorizationVersion === this.#context?.authorization_version ? this.#journalProfile : null;
@@ -664,10 +665,11 @@ export class HumanDashboard {
             else if (this.#canFederation()) this.#openView("federation");
             else if (this.#canWorkers()) this.#openView("workers");
             else if (this.#canBrokers()) this.#openView("brokers");
+            else if (this.#canSupervise()) this.#openView("supervision");
             else { this.#mode = "contexts"; this.#message = "Ce contexte n’offre aucune vue de consultation disponible avec ses capacités. Faites vérifier vos accès."; this.#render(); }
           } catch (error) { this.#identityError = failure(error); this.#render(); }
         }, this.#identityLoading || Date.parse(context.expires_at) <= Date.now()),
-        supervisionAccess(context).any ? action(`Superviser ${modeName(context).toLowerCase()} · ${context.tenant_id}`, `context-supervise-${index}`, () => {
+        supervisionAccess(context, this.#api.readProfiles).any ? action(`Superviser ${modeName(context).toLowerCase()} · ${context.tenant_id}`, `context-supervise-${index}`, () => {
           try {
             this.#purgeContext(); this.#context = this.#api.selectContext(context.id); this.#message = ""; this.#openView("supervision");
           } catch (error) { this.#identityError = failure(error); this.#render(); }
@@ -679,11 +681,11 @@ export class HumanDashboard {
     const node = el("div", "control-error", icon("alert"), el("p", "", message), this.#api.readBudgetStopped ? null : action("Réessayer", "human-retry", retry));
     node.setAttribute("role", "alert"); return node;
   }
-  #status<T extends { read_receipt: { received_at: string } }>(state: ReadState<T>) {
+  #status<T extends { read_receipt: { received_at: string } }>(state: ReadState<T>, formatTime: (value: string, detailed: boolean) => string = formatDate) {
     const stale = state.stale || !!state.loadedAt && Date.now() - Date.parse(state.loadedAt) > 30000;
     const node = el("div", "control-status", badge(state.loading ? "Lecture en cours…" : state.error ? state.value ? "Données périmées · dernière lecture conservée" : "Données indisponibles" : stale ? "Données à actualiser" : state.value ? "Lecture réussie" : "Lecture requise", state.error || stale ? "amber" : "neutral"),
-      el("span", "muted", state.loadedAt ? `Lu le ${formatDate(state.loadedAt, true)}` : "Aucune lecture réussie"),
-      state.value ? el("span", "muted", `Reçu du contrôle : ${formatDate(state.value.read_receipt.received_at, true)}`) : null);
+      el("span", "muted", state.loadedAt ? `Lu le ${formatTime(state.loadedAt, true)}` : "Aucune lecture réussie"),
+      state.value ? el("span", "muted", `Reçu du contrôle : ${formatTime(state.value.read_receipt.received_at, true)}`) : null);
     node.setAttribute("role", "status"); return node;
   }
   #pagination<T extends { items: unknown[]; has_more: boolean; next_cursor: string | null }>(state: ReadState<T>, load: (cursor: string | null, history: (string | null)[]) => void, key = "human", label?: string) {
@@ -745,6 +747,12 @@ export class HumanDashboard {
     try {
       const page = await this.#api.brokers(cursor, this.#brokerAbort.signal);
       if (this.#closed || generation !== this.#generation || request !== this.#brokerGeneration || this.#mode !== "brokers" || !this.#canBrokers()) return;
+      const open = this.#dialog; const row = page.items.find((item) => item.broker_id === open?.dataset.brokerId);
+      // A heartbeat refresh keeps the dated detail and its focus. Remove it when its broker leaves the page
+      // or its grant/incarnation/disclosed authority metadata changes; context withdrawal purges it earlier.
+      if (open?.dataset.brokerId && (!row || open.dataset.brokerDisclosure !== JSON.stringify([row.incarnation_id, row.grant_revision, row.authorities]))) {
+        open.close(); open.remove(); this.#dialog = null;
+      }
       state.value = page; state.cursor = cursor; state.history = [...history]; state.loadedAt = new Date().toISOString(); state.error = ""; state.stale = false;
     } catch (error) {
       if (this.#closed || generation !== this.#generation || request !== this.#brokerGeneration || error instanceof HumanSuperseded) return;
@@ -839,13 +847,14 @@ export class HumanDashboard {
   }
   #brokerAuthorities(item: HumanBroker) {
     return el("ul", "human-broker-authorities", ...item.authorities.map((authority) => el("li", "",
-      el("span", "mono", authority.authority_id_redacted ? "Identifiant masqué" : authority.authority_id),
+      el("span", "mono", brokerAuthorityLabel(authority)),
       el("span", "muted", ` · ${authority.runtime_kind}`))));
   }
   #renderBrokers(state = this.#brokers, federation = false) {
     const table = el("table", "human-broker-table");
     const caption = el("caption", "", "Registre central du tenant · métadonnées enregistrées");
-    const headers = ["Broker / incarnation", "État du bail", "Autorités déclarées", "Dernière réception observée", "Expiration", ...(federation ? ["Associations de la page workers"] : []), "Détails"].map((label) => {
+    const owned = state.value?.profile === "human_broker_registry_owned_v1" || !federation && this.#api.readProfiles?.broker_registry === "human_broker_registry_owned_v1";
+    const headers = ["Broker / incarnation", "État du bail", "Autorités déclarées", "Dernière réception observée", "Expiration", ...(owned ? ["Checkpoint déclaré"] : []), ...(federation ? ["Associations de la page workers"] : []), "Détails"].map((label) => {
       const cell = el("th", "", label); cell.scope = "col"; return cell;
     });
     table.append(caption, el("thead", "", el("tr", "", ...headers)), el("tbody", "", ...(state.value?.items ?? []).map((item, index) => {
@@ -853,12 +862,17 @@ export class HumanDashboard {
       const associated = federation ? this.#federation.value?.workers.items.filter((worker) =>
         worker.launch_broker.broker?.broker_id === item.broker_id || worker.observation_broker.broker?.broker_id === item.broker_id) ?? [] : [];
       return el("tr", "", el("td", "", el("p", "mono control-id", item.broker_id), el("p", "muted", "Incarnation courante"), el("p", "mono control-id", item.incarnation_id)),
-        el("td", "", badge(brokerStateName[item.state], item.state === "current" ? "neutral" : "amber")),
+        el("td", "", badge(brokerStateName[item.state], item.state === "current" ? "neutral" : "amber"),
+          item.state === "stale" ? el("p", "muted", "Broker déconnecté possible · état runtime inconnu") : null,
+          item.owned?.clock_uncertain && item.state !== "clock_uncertain" ? badge("Horloge du checkpoint incertaine", "amber") : null),
         el("td", "", this.#brokerAuthorities(item)),
-        el("td", "", heartbeat ? el("div", "", el("p", "", formatDate(heartbeat.received_at, true)), el("p", "muted", "Heartbeat déclaré · réception observée"),
+        el("td", "", heartbeat ? el("div", "", el("p", "", formatBrokerDate(heartbeat.received_at, true)), el("p", "muted", "Heartbeat déclaré · réception observée"),
           heartbeat.incarnation_id !== item.incarnation_id ? badge("Heartbeat d’une ancienne incarnation", "amber") : null) : el("p", "muted", "Aucun heartbeat reçu dans le registre")),
-        el("td", "", el("p", "muted", `Autorisation : ${formatDate(item.not_after, true)}`),
-          heartbeat ? el("p", "muted", `Bail déclaré : ${formatDate(heartbeat.lease_expires_at, true)}`) : null),
+        el("td", "", el("p", "muted", `Autorisation : ${formatBrokerDate(item.not_after, true)}`),
+          heartbeat ? el("p", "muted", `Bail déclaré : ${formatBrokerDate(heartbeat.lease_expires_at, true)}`) : null),
+        owned ? el("td", "", el("p", "", checkpointLabel(item)), item.owned?.checkpoint.status === "received" ?
+          el("p", "muted", `Réception observée : ${formatBrokerDate(item.owned.checkpoint.received_at, true)} · couverture déclarée partielle`) :
+          el("p", "muted", "L’activité reste inconnue")) : null,
         federation ? el("td", "", associated.length ? el("div", "human-federation-links", el("p", "muted", "Références historiques, sans preuve d’exécution par ce broker"),
           ...associated.map((worker) => action(`Ouvrir le worker ${worker.worker_id}`, `federation-broker-${item.broker_id}-worker-${worker.worker_id}`, () => this.#showWorker(worker)))) :
           el("p", "muted", "Aucune association dans la page workers · autres pages inconnues")) : null,
@@ -868,7 +882,9 @@ export class HumanDashboard {
     return el("section", "panel human-broker-panel", el("div", "panel-heading", el("div", "", el("h2", "", "Registre des brokers"),
       el("p", "", "Source : registre central du tenant. Inventaire runtime inconnu ; aucun worker ni état de fonctionnement n’est déduit du bail."),
       el("p", "", "Lecture live paginée : les lignes peuvent changer entre deux pages. Le flux des ressources ne couvre pas ce registre."))),
-      this.#status(state), state.value ? el("p", "human-broker-evaluation muted", `Évaluation serveur : ${formatDate(state.value.evaluated_at, true)} · source tenant_broker_registry · cohérence live_keyset.`) : null,
+      owned ? el("div", "info-strip", badge("Couverture partielle", "amber"), el("p", "", "Profil human_broker_registry_owned_v1 annoncé par le contrôle. Heartbeats et checkpoints ont des fraîcheurs indépendantes. Registres workers et composition de fédération indisponibles pour ce profil ; activité et inventaire runtime inconnus."),
+        this.#brokerForbidden ? null : action("Relire mes accès", "human-owned-profile-access", () => this.#openView("contexts"))) : null,
+      this.#status(state, formatBrokerDate), state.value ? el("p", "human-broker-evaluation muted", `Évaluation serveur : ${formatBrokerDate(state.value.evaluated_at, true)} · source tenant_broker_registry · cohérence live_keyset${owned ? " · count_scope page : aucun total du tenant" : ""}.`) : null,
       federation ? null : this.#brokerForbidden ? el("div", "control-error", el("p", "", state.error), action("Relire mes accès", "human-broker-access", () => this.#openView("contexts"))) :
         state.error ? this.#error(state.error, () => { void this.#loadBrokers(); }) : null,
       !state.value ? empty(state.loading ? "Chargement du registre…" : "Registre indisponible", this.#brokerForbidden ? "L’accès a été refusé. Les données, détails et positions de lecture ont été retirés." :
@@ -886,19 +902,24 @@ export class HumanDashboard {
     this.#dialog?.close(); this.#dialog?.remove();
     const heading = el("h2", "", "Détails du broker"); heading.id = "human-broker-detail-title";
     const dialog = el("dialog", "detail-dialog human-broker-dialog"); dialog.setAttribute("aria-labelledby", heading.id);
+    dialog.dataset.brokerId = item.broker_id;
+    dialog.dataset.brokerDisclosure = JSON.stringify([item.incarnation_id, item.grant_revision, item.authorities]);
     const close = button("", "icon-button", () => dialog.close(), "x"); close.setAttribute("aria-label", "Fermer les détails");
     const detail = (name: string, value: string | HTMLElement) => el("div", "", el("dt", "", name), el("dd", "", value));
     const h = item.last_heartbeat;
     dialog.append(el("div", "detail-header", heading, close), el("div", "detail-body",
-      el("p", "muted", `Métadonnées de la page évaluée le ${formatDate(page.evaluated_at, true)}. Inventaire runtime inconnu.`),
+      el("p", "muted", `Métadonnées de la page évaluée le ${formatBrokerDate(page.evaluated_at, true)}. Inventaire runtime inconnu.`),
       el("dl", "human-broker-details", detail("Broker", item.broker_id), detail("Incarnation courante", item.incarnation_id),
         detail("État du bail", brokerStateName[item.state]), detail("Révision de l’autorisation", item.grant_revision), detail("Révision du heartbeat", item.heartbeat_revision),
-        detail("Autorisation accordée", formatDate(item.granted_at, true)), detail("Expiration de l’autorisation", formatDate(item.not_after, true)),
-        detail("Révocation", item.revoked_at ? formatDate(item.revoked_at, true) : "Aucune révocation enregistrée"), detail("Autorités déclarées", this.#brokerAuthorities(item)),
+        detail("Autorisation accordée", formatBrokerDate(item.granted_at, true)), detail("Expiration de l’autorisation", formatBrokerDate(item.not_after, true)),
+        detail("Révocation", item.revoked_at ? formatBrokerDate(item.revoked_at, true) : "Aucune révocation enregistrée"), detail("Autorités déclarées", this.#brokerAuthorities(item)),
         detail("Heartbeat déclaré", h ? `Séquence ${h.sequence} · incarnation ${h.incarnation_id}${h.incarnation_id !== item.incarnation_id ? " · ancienne incarnation" : ""}` : "Aucun heartbeat reçu"),
-        detail("Réception observée", h ? formatDate(h.received_at, true) : "Inconnue"), detail("Expiration du bail déclaré", h ? formatDate(h.lease_expires_at, true) : "Inconnue"),
+        detail("Réception observée", h ? formatBrokerDate(h.received_at, true) : "Inconnue"), detail("Expiration du bail déclaré", h ? formatBrokerDate(h.lease_expires_at, true) : "Inconnue"),
+        ...(item.owned ? [detail("Profil", "human_broker_registry_owned_v1"), detail("Durée du bail autorisée", `${item.owned.lease_seconds} s`),
+          detail("Horloge", item.owned.clock_uncertain ? "Incertaine pour le heartbeat ou le checkpoint" : "Aucune incertitude signalée par le contrôle"),
+          ...checkpointFacts(item).map(([label, value]) => detail(label, label === "Réception du checkpoint" || label === "Expiration du checkpoint" ? formatBrokerDate(value, true) : value))] : []),
         detail("Demande de lecture", page.read_receipt.request_id), detail("Événement du reçu", page.read_receipt.audit_event_id),
-        detail("Reçu durable du contrôle", formatDate(page.read_receipt.received_at, true))),
+        detail("Reçu durable du contrôle", formatBrokerDate(page.read_receipt.received_at, true))),
       el("p", "muted", "Le reçu atteste l’enregistrement de la lecture, sans prouver sa livraison ni une exécution runtime. Kubernetes reste une autorité déclarée.")));
     document.body.append(dialog); this.#dialog = dialog; dialog.showModal();
     dialog.addEventListener("close", () => {

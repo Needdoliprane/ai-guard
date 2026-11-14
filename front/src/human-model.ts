@@ -11,6 +11,11 @@ export interface HumanIdentity {
   version: 1; principal: Principal; display_name: string;
   authentication: { method: "local_credential" | "oidc_access_token"; credential_id: string; expires_at: string | null };
   contexts: HumanContext[]; contexts_complete: boolean;
+  /** A server wire profile, independent of the permissions of each context. Omitted by legacy controls. */
+  read_profiles?: HumanReadProfiles;
+}
+export interface HumanReadProfiles {
+  broker_registry: "human_broker_registry_owned_v1"; worker_registry: "unavailable"; federation_registry: "unavailable";
 }
 export interface ResourceRef { kind: ResourceKind; resource_id: string }
 export interface HumanResource {
@@ -37,11 +42,21 @@ export interface HumanBroker {
   granted_at: string; not_after: string; revoked_at: string | null;
   last_heartbeat: { incarnation_id: string; sequence: string; received_at: string; lease_expires_at: string;
     heartbeat_provenance: "declared"; reception_provenance: "observed" } | null;
+  /** Present only after validating the distinct owned wire profile. Never inferred from legacy metadata. */
+  owned?: { clock_uncertain: boolean; lease_seconds: number; checkpoint: HumanOwnedBrokerCheckpoint };
 }
+export type HumanOwnedBrokerCheckpoint = {
+  status: "received"; received_at: string; lease_expires_at: string;
+  freshness: "current" | "stale" | "historical" | "clock_uncertain"; in_current_grant: boolean;
+  coverage: "declared_partial"; reference_count: number; has_more: boolean;
+  publication_provenance: "declared"; reception_provenance: "observed";
+} | { status: "absent" | "unknown"; received_at: null; lease_expires_at: null; freshness: null; in_current_grant: null;
+  coverage: null; reference_count: null; has_more: null; publication_provenance: null; reception_provenance: null };
 export interface HumanBrokerPage {
   version: 1; context_id: string; authorization_version: string; source: "tenant_broker_registry";
   consistency: "live_keyset"; evaluated_at: string; runtime_inventory: "unknown"; items: HumanBroker[];
   has_more: boolean; next_cursor: string | null; read_receipt: ReadReceipt;
+  profile?: "human_broker_registry_owned_v1"; count_scope?: "page";
 }
 
 export class HumanContractError extends Error {
@@ -92,6 +107,12 @@ export function parseHumanIdentity(value: unknown): HumanIdentity {
     ["local_credential", "oidc_access_token"].includes(String(value.authentication.method)) && uuid(value.authentication.credential_id) &&
     (value.authentication.expires_at === null || timestamp(value.authentication.expires_at)) && Array.isArray(value.contexts) && value.contexts.length <= 1000 &&
     typeof value.contexts_complete === "boolean");
+  const profiles = Object.hasOwn(value, "read_profiles");
+  if (profiles) {
+    closed(value.read_profiles, ["broker_registry", "worker_registry", "federation_registry"]);
+    requireContract(value.read_profiles.broker_registry === "human_broker_registry_owned_v1" &&
+      value.read_profiles.worker_registry === "unavailable" && value.read_profiles.federation_registry === "unavailable");
+  }
   const seen = new Set<string>();
   const contexts = value.contexts.map((item): HumanContext => {
     requireContract(object(item) && opaque(item.id) && !seen.has(item.id) && boundedText(item.tenant_id, 128) &&
@@ -109,7 +130,9 @@ export function parseHumanIdentity(value: unknown): HumanIdentity {
     (value.authentication.method === "oidc_access_token" && authenticatedPrincipal.kind === "human_oidc" && timestamp(value.authentication.expires_at)));
   return { version: 1, principal: authenticatedPrincipal, display_name: value.display_name,
     authentication: { method: value.authentication.method as HumanIdentity["authentication"]["method"], credential_id: value.authentication.credential_id, expires_at: value.authentication.expires_at as string | null },
-    contexts, contexts_complete: value.contexts_complete };
+    contexts, contexts_complete: value.contexts_complete,
+    ...(profiles ? { read_profiles: { broker_registry: "human_broker_registry_owned_v1" as const,
+      worker_registry: "unavailable" as const, federation_registry: "unavailable" as const } } : {}) };
 }
 function page<T>(value: unknown, parse: (item: unknown) => T, streaming = false): HumanPage<T> {
   requireContract(object(value) && value.version === 1 && opaque(value.context_id) && authorizationVersion(value.authorization_version) &&
@@ -228,32 +251,36 @@ function brokerUuid(value: unknown): value is string {
 function brokerRevision(value: unknown, positive = false): value is string {
   return typeof value === "string" && /^(0|[1-9][0-9]{0,18})$/.test(value) && BigInt(value) <= 9223372036854775807n && (!positive || value !== "0");
 }
+function brokerAuthorityId(value: unknown): value is string {
+  // BrokerAuthorityV1 allows non-empty whitespace IDs; do not apply profile/principal trimming rules here.
+  return typeof value === "string" && value.length > 0 && new TextEncoder().encode(value).length <= 256 && !/[\u0000-\u001f\u007f-\u009f]/.test(value);
+}
 /** Registry metadata has its own closed projection; resource ACL coverage does not apply. */
-export function parseHumanBrokerPage(value: unknown): HumanBrokerPage {
+export function parseHumanBrokerPage(value: unknown, validateRegistryTime: (value: unknown) => value is string = timestamp): HumanBrokerPage {
   closed(value, ["version", "context_id", "authorization_version", "source", "consistency", "evaluated_at", "runtime_inventory", "items", "has_more", "next_cursor", "read_receipt"]);
   requireContract(value.version === 1 && opaque(value.context_id) && authorizationVersion(value.authorization_version) &&
-    value.source === "tenant_broker_registry" && value.consistency === "live_keyset" && timestamp(value.evaluated_at) &&
+    value.source === "tenant_broker_registry" && value.consistency === "live_keyset" && validateRegistryTime(value.evaluated_at) &&
     value.runtime_inventory === "unknown" && Array.isArray(value.items) && value.items.length <= 100 &&
     typeof value.has_more === "boolean" && (value.next_cursor === null || opaque(value.next_cursor)) && value.has_more === (value.next_cursor !== null));
   closed(value.read_receipt, ["request_id", "audit_event_id", "received_at"]);
-  requireContract(brokerUuid(value.read_receipt.request_id) && brokerUuid(value.read_receipt.audit_event_id) && timestamp(value.read_receipt.received_at));
+  requireContract(brokerUuid(value.read_receipt.request_id) && brokerUuid(value.read_receipt.audit_event_id) && validateRegistryTime(value.read_receipt.received_at));
   const items = value.items.map((item): HumanBroker => {
     closed(item, ["broker_id", "incarnation_id", "grant_revision", "heartbeat_revision", "state", "authorities", "granted_at", "not_after", "revoked_at", "last_heartbeat"]);
     requireContract(brokerUuid(item.broker_id) && brokerUuid(item.incarnation_id) && brokerRevision(item.grant_revision, true) &&
       brokerRevision(item.heartbeat_revision) && ["unseen", "current", "stale", "expired", "revoked", "clock_uncertain"].includes(String(item.state)) &&
-      timestamp(item.granted_at) && timestamp(item.not_after) && (item.revoked_at === null || timestamp(item.revoked_at)) &&
+      validateRegistryTime(item.granted_at) && validateRegistryTime(item.not_after) && (item.revoked_at === null || validateRegistryTime(item.revoked_at)) &&
       Array.isArray(item.authorities) && item.authorities.length >= 1 && item.authorities.length <= 16);
     const authorities = item.authorities.map((authority): HumanBroker["authorities"][number] => {
       closed(authority, ["authority_id", "runtime_kind", "authority_id_redacted"]);
       requireContract(typeof authority.authority_id_redacted === "boolean" && ["docker", "podman", "kubernetes"].includes(String(authority.runtime_kind)) &&
-        (authority.authority_id_redacted === true ? authority.authority_id === null : authority.authority_id_redacted === false && utf8Text(authority.authority_id, 256)));
+        (authority.authority_id_redacted === true ? authority.authority_id === null : authority.authority_id_redacted === false && brokerAuthorityId(authority.authority_id)));
       return { authority_id: authority.authority_id as string | null, runtime_kind: authority.runtime_kind as HumanBroker["authorities"][number]["runtime_kind"], authority_id_redacted: authority.authority_id_redacted };
     });
     let heartbeat: HumanBroker["last_heartbeat"] = null;
     if (item.last_heartbeat !== null) {
       closed(item.last_heartbeat, ["incarnation_id", "sequence", "received_at", "lease_expires_at", "heartbeat_provenance", "reception_provenance"]);
       const h = item.last_heartbeat;
-      requireContract(brokerUuid(h.incarnation_id) && brokerRevision(h.sequence, true) && timestamp(h.received_at) && timestamp(h.lease_expires_at) &&
+      requireContract(brokerUuid(h.incarnation_id) && brokerRevision(h.sequence, true) && validateRegistryTime(h.received_at) && validateRegistryTime(h.lease_expires_at) &&
         h.heartbeat_provenance === "declared" && h.reception_provenance === "observed");
       heartbeat = { incarnation_id: h.incarnation_id, sequence: h.sequence, received_at: h.received_at, lease_expires_at: h.lease_expires_at,
         heartbeat_provenance: "declared", reception_provenance: "observed" };

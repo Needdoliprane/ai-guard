@@ -10,6 +10,7 @@ import { identity, page as envelope, resource, event, uuid } from "./human-fixtu
 import { brokerIdentity, brokerPage, denseBrokerItems } from "./human-fixtures.mjs";
 import { workerIdentity, workerPage, worker, workerObservation } from "./human-fixtures.mjs";
 import { federationIdentity, federationPage, broker } from "./human-fixtures.mjs";
+import { noCheckpoint, ownedBrokerFromLegacy, ownedBrokerPage, ownedReadProfiles } from "./owned-brokers-fixture.mjs";
 
 const require = createRequire(import.meta.url);
 let chromium;
@@ -25,9 +26,14 @@ let brokersDown = false; let brokerDenied = false; let budgetExhausted = false; 
 let brokerDisplay = "standard"; let credentialExpiresAt = null;
 let workerDenied = false; let identityDenied = false;
 let federationHeaders403 = false; let identityHeaders403 = false;
+let ownedProfile = true; let ownedHeaders403 = false;
 const unfinishedRefusals = [];
 const humanIdentity = () => {
   const value = scenario.startsWith("federation") ? federationIdentity() : scenario === "workers" ? workerIdentity() : scenario.startsWith("brokers") ? brokerIdentity(scenario === "brokers-mixed") : identity();
+  if (scenario === "brokers-owned") {
+    value.contexts[0].capabilities = ["read_broker_registry", "read_worker_registry"];
+    if (ownedProfile) value.read_profiles = ownedReadProfiles();
+  }
   if (brokerCapRemoved) value.contexts[0].capabilities = value.contexts[0].capabilities.filter((cap) => cap !== "read_broker_registry");
   if (scenario === "brokers-lifecycle") value.authentication.expires_at = credentialExpiresAt;
   return value;
@@ -98,6 +104,17 @@ const server = createServer(async (request, response) => {
         ...(index % 4 === 2 ? { last_observation: workerObservation({ started_at: null, started_at_status: "unknown", exit_code: "9007199254740993" }) } : {}) }))));
       return json(response, workerPage([worker()], url.searchParams.has("cursor") ? {} : { has_more: true, next_cursor: "worker-next-cursor" }));
     }
+    if (url.pathname === "/api/v1/human/owned/brokers") {
+      if (ownedHeaders403) return refuseHeadersOnly(response);
+      if (brokerDenied || brokerCapRemoved) return error(response, 403, "permission_denied", "review_permissions");
+      if (brokersDown) return error(response, 503, "audit_unavailable", "retry");
+      const items = brokerDisplay === "empty" ? [] : brokerDisplay === "dense" ? denseBrokerItems().map((item, index) => {
+        const row = ownedBrokerFromLegacy(item, index === 1 ? { checkpoint: noCheckpoint("absent") } : index === 2 ? { checkpoint: noCheckpoint() } : {});
+        if (index === 0) row.checkpoint.received_at = "2016-12-31T23:59:60.500Z";
+        return row;
+      }) : undefined;
+      return json(response, ownedBrokerPage(items, url.searchParams.has("cursor") || brokerDisplay !== "standard" ? {} : { has_more: true, next_cursor: "a".repeat(1082) }));
+    }
     if (url.pathname === "/api/v1/human/brokers") {
       if (budgetExhausted) return error(response, 429, "audit_read_budget_exhausted", "contact_operator");
       if (brokerDenied || brokerCapRemoved) return error(response, 403, "permission_denied", "review_permissions");
@@ -167,7 +184,7 @@ await page.addInitScript(() => {
   window.fetch = async (...args) => {
     window.__humanFetches.push(String(args[0]));
     const response = await nativeFetch(...args);
-    if (window.__humanHold && (String(args[0]).includes("/human/events/") || String(args[0]).includes("/human/brokers") || String(args[0]).includes("/human/workers") || String(args[0]).includes("/human/federation/workers"))) {
+    if (window.__humanHold && (String(args[0]).includes("/human/events/") || String(args[0]).includes("/human/brokers") || String(args[0]).includes("/human/owned/brokers") || String(args[0]).includes("/human/workers") || String(args[0]).includes("/human/federation/workers"))) {
       window.__humanHold = false; const body = await response.text();
       await new Promise((release) => window.__humanHeld.push(release));
       return new Response(body, { status: response.status, headers: response.headers });
@@ -284,7 +301,61 @@ const runBrokerLifecycle = async () => {
   assert.equal(downloadCount, 0);
 };
 const runRegression = async () => {
-  if (scenario.startsWith("federation-403-headers")) {
+  if (scenario === "brokers-owned") {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    brokerDisplay = "empty"; await loginHuman();
+    await page.evaluate(() => { window.__humanHold = true; }); await choose("administration");
+    await page.waitForFunction(() => window.__humanHeld.length > 0);
+    await page.getByRole("heading", { name: "Chargement du registre…", exact: true }).waitFor();
+    assert.equal(await page.getByRole("heading", { name: "Aucun broker enregistré à cette lecture", exact: true }).count(), 0);
+    await captureBrokerState("owned-loading", [390, 320]);
+    await page.evaluate(() => window.__humanRelease());
+    await page.getByRole("heading", { name: "Aucun broker enregistré à cette lecture", exact: true }).waitFor();
+    assert.equal(await page.getByRole("button", { name: "Workers", exact: true }).count(), 0);
+    assert.equal(await page.getByRole("button", { name: "Fédération", exact: true }).count(), 0);
+    await captureBrokerState("owned-empty", [390, 320]);
+    brokerDisplay = "dense"; await tab("Actualiser"); await page.locator(".human-broker-table tbody tr").nth(24).waitFor();
+    for (const label of ["Checkpoint courant", "Aucune publication de checkpoint", "Checkpoint inconnu"])
+      assert.ok(await page.getByText(label, { exact: true }).count());
+    const detail = page.locator('[data-focus-key="broker-detail-0"]'); await detail.click();
+    await page.getByRole("dialog").getByText(/ce compte ne mesure pas l’activité/).waitFor();
+    await page.getByRole("dialog").getByText("2016-12-31T23:59:60.500Z · date serveur conservée, conversion locale inconnue", { exact: true }).waitFor();
+    await page.getByRole("dialog").getByRole("button", { name: "Fermer les détails", exact: true }).focus();
+    await page.getByRole("dialog").evaluate((node) => { node.dataset.retained = "yes"; });
+    const refreshed = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/v1/human/owned/brokers");
+    await page.evaluate(() => { window.__humanAdvance(31000); window.__humanPoll.at(-1)(); }); await refreshed; await settle();
+    assert.equal(await page.getByRole("dialog").getAttribute("data-retained"), "yes", "Une lecture heartbeat conserve le dialogue daté");
+    assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("aria-label")), "Fermer les détails");
+    await page.keyboard.press("Escape"); assert.equal(await page.evaluate(() => document.activeElement?.dataset.focusKey), "broker-detail-0");
+    await captureBrokerState("owned-dense", [1440, 390, 320], () => page.locator(".human-broker-table tbody tr").first());
+    brokersDown = true; await tab("Actualiser"); await page.getByText("Données périmées · dernière lecture conservée", { exact: true }).waitFor();
+    assert.equal(await page.locator(".human-broker-table tbody tr").count(), 25);
+    await captureBrokerState("owned-unreachable", [390, 320]); brokersDown = false; await tab("Réessayer");
+    await page.getByText("Lecture réussie", { exact: true }).waitFor();
+    await tab("Supervision"); await page.getByRole("heading", { name: "Workers · profil indisponible", exact: true }).waitFor();
+    await page.locator(".sv-source", { hasText: "Brokers" }).getByText("Lecture réussie", { exact: true }).waitFor();
+    assert.equal(await page.locator(".sv-source", { hasText: "Workers" }).getByText("Profil indisponible", { exact: true }).count(), 1);
+    assert.ok(!(await page.locator(".sv").innerText()).includes("0 worker"));
+    await captureBrokerState("owned-supervision", [1440, 390, 320], () => page.locator(".sv"));
+    await page.locator('[data-focus-key^="sv-broker-"]').first().click(); await page.getByRole("dialog").getByText(/couverture partielle/).waitFor();
+    await page.keyboard.press("Escape");
+    await tab("Brokers"); await page.getByText("Lecture réussie", { exact: true }).waitFor();
+    await page.locator('[data-focus-key="broker-detail-0"]').click(); ownedHeaders403 = true;
+    const refused = page.waitForResponse((response) => response.status() === 403 && new URL(response.url()).pathname === "/api/v1/human/owned/brokers");
+    await page.evaluate(() => { window.__humanAdvance(31000); window.__humanPoll.at(-1)(); }); await refused;
+    await page.getByText("Les données, détails et positions de lecture ont été retirés.", { exact: false }).waitFor({ timeout: 1000 });
+    assert.equal(await page.locator("dialog, .human-broker-table").count(), 0);
+    for (const refusal of unfinishedRefusals) { refusal.released = true; if (!refusal.response.destroyed) refusal.response.end(); }
+    ownedHeaders403 = false; await tab("Relire mes accès"); await choose("administration"); await page.getByText("Lecture réussie", { exact: true }).waitFor();
+    await page.evaluate(() => { window.__humanHold = true; }); await tab("Actualiser"); await page.waitForFunction(() => window.__humanHeld.length > 0);
+    ownedProfile = false; const identityRead = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/v1/human/identity");
+    await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange"))); await identityRead;
+    await page.getByRole("heading", { name: "Choisir un contexte.", exact: true }).waitFor();
+    await page.evaluate(() => window.__humanRelease()); await settle(); assert.equal(await page.locator("dialog, .human-broker-table").count(), 0);
+    assert.ok(!requests.some(({ path }) => /^\/api\/v1\/human\/(brokers|workers|federation\/workers)(?:\?|$)/.test(path)), "Aucune route de registre legacy n’est appelée");
+    assert.equal(await page.evaluate(() => localStorage.length + sessionStorage.length), 0);
+    await tab("Se déconnecter"); assert.equal(await page.locator(".human-shell, dialog").count(), 0);
+  } else if (scenario.startsWith("federation-403-headers")) {
     const identityRefusal = scenario.endsWith("-identity");
     await loginHuman(); await choose("administration");
     const workerPanel = page.locator(".human-federation-registries > section").nth(0);

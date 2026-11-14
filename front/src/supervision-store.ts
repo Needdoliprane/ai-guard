@@ -3,12 +3,13 @@
 import { HumanApiError, HumanRecentUnavailable, HumanSuperseded } from "./human-api.ts";
 import { HumanContractError } from "./human-model.ts";
 import { supervisionAccess } from "./supervision-model.ts";
-import type { HumanBroker, HumanBrokerPage, HumanContext, HumanEvent, HumanEventPage, HumanRecentEventPage, HumanFederationSelection, HumanFederationWorkerPage, HumanPage, HumanResource, HumanSelection, HumanWorker, HumanWorkerPage, ReadReceipt } from "./human-model.ts";
+import type { HumanBroker, HumanBrokerPage, HumanContext, HumanEvent, HumanEventPage, HumanReadProfiles, HumanRecentEventPage, HumanFederationSelection, HumanFederationWorkerPage, HumanPage, HumanResource, HumanSelection, HumanWorker, HumanWorkerPage, ReadReceipt } from "./human-model.ts";
 import type { SourcePhase, SourceSummary, SupervisionAccess } from "./supervision-model.ts";
 
 /** The reads of HumanApiClient this view may use. Nothing else of the client is reachable from here. */
 export interface SupervisionReads {
   readonly readBudgetStopped: boolean;
+  readonly readProfiles?: HumanReadProfiles;
   federationWorkers(selection: HumanFederationSelection, signal?: AbortSignal): Promise<HumanFederationWorkerPage>;
   workers(cursor: string | null, signal?: AbortSignal, limit?: number): Promise<HumanWorkerPage>;
   brokers(cursor: string | null, signal?: AbortSignal, limit?: number): Promise<HumanBrokerPage>;
@@ -35,7 +36,7 @@ export interface Source<T> { phase: SourcePhase; value: T | null; loadedAt: numb
 /** `oldestReadAt`: read time of the oldest page still in the window. Its freshness is that of this page. */
 export interface WorkerWindow { items: HumanWorker[]; pages: number; hasMore: boolean; capped: boolean; evaluatedAt: string; receipts: ReadReceipt[]; oldestReadAt: number }
 /** With several worker pages, the broker snapshot of the last page read is the one kept. */
-export interface BrokerWindow { items: HumanBroker[]; hasMore: boolean; evaluatedAt: string; receipt: ReadReceipt }
+export interface BrokerWindow { items: HumanBroker[]; hasMore: boolean; evaluatedAt: string; receipt: ReadReceipt; profile?: HumanBrokerPage["profile"] }
 export interface ResourceWindow { items: HumanResource[]; pages: number; hasMore: boolean; capped: boolean; receipt: ReadReceipt; oldestReadAt: number }
 export interface SessionEvents { items: HumanEvent[]; has_more: boolean; read_receipt: ReadReceipt }
 /** `order` is "oldest_first" only when the control does not serve the newest-first read. */
@@ -62,6 +63,8 @@ export function sessionAnnouncement(read: SessionRead | null): string | null {
     read.page.has_more ? " ; d’autres existent" : ""}.`;
 }
 const source = <T>(granted: boolean): Source<T> => ({ phase: granted ? "idle" : "not_granted", value: null, loadedAt: null, stale: false, busy: false, error: null });
+const workerSource = (access: SupervisionAccess): Source<WorkerWindow> => ({ ...source<WorkerWindow>(access.workers),
+  ...(access.workersUnavailable ? { phase: "unavailable" as const } : {}) });
 const contextCodes = ["context_required", "context_invalid", "context_expired", "context_revoked"];
 
 export function sourceError(error: unknown): SourceError {
@@ -102,8 +105,8 @@ export class SupervisionStore {
    */
   constructor(reads: SupervisionReads, context: HumanContext, clock: SupervisionClock, onChange: () => void, onAccessDoubt: () => void = () => {}) {
     this.#reads = reads; this.#clock = clock; this.#onChange = onChange; this.#onAccessDoubt = onAccessDoubt;
-    const access = supervisionAccess(context);
-    this.#state = { access, workers: source(access.workers), brokers: source(access.brokers), resources: source(access.resources),
+    const access = supervisionAccess(context, reads.readProfiles);
+    this.#state = { access, workers: workerSource(access), brokers: source(access.brokers), resources: source(access.resources),
       session: null, cadence: CADENCES[0], autoPaused: access.workers || access.brokers ? "" : "not_granted", closed: false };
   }
   /** Live state. Callers read it and never mutate it. */
@@ -112,7 +115,7 @@ export class SupervisionStore {
 
   #publish() { if (!this.#state.closed) this.#onChange(); }
   #fleetGranted() { return this.#state.access.workers || this.#state.access.brokers; }
-  #fleetSources() { return [this.#state.workers, this.#state.brokers].filter((item) => item.phase !== "not_granted"); }
+  #fleetSources() { return [this.#state.workers, this.#state.brokers].filter((item) => !["not_granted", "unavailable"].includes(item.phase)); }
   #fleetReadable() { return this.#fleetGranted() && this.#fleetSources().every((item) => item.phase !== "forbidden"); }
   #begin(sources: Source<unknown>[]) {
     for (const item of sources) { item.busy = true; if (!item.value) item.phase = "loading"; }
@@ -131,17 +134,25 @@ export class SupervisionStore {
    */
   #refuseFleet(sources: Source<unknown>[]) {
     this.#forbid(sources); this.#workerCursor = null; this.clearSessionEvents(false);
-    if (!this.#state.access.composed) return;
+    if (!this.#state.access.composed && !this.#reads.readProfiles) return;
+    const owned = !!this.#reads.readProfiles;
+    if (owned) {
+      // The owned refusal is reported from headers alone. Fence every concurrent source until the host
+      // revalidates the context; a delayed resource answer must not restore data withdrawn meanwhile.
+      this.#generation++; this.#abort.abort(); this.#abort = new AbortController(); this.#cancelTimer();
+      for (const item of sources) item.busy = false;
+    }
     const resources = this.#state.resources;
     if (resources.phase !== "not_granted" && resources.phase !== "forbidden") {
       resources.value = null; resources.loadedAt = null; resources.stale = false; this.#resourceCursor = null;
       // A resource read still in flight keeps its own outcome: the control answers it for this same context.
-      if (resources.busy) resources.phase = "loading";
+      if (resources.busy && !owned) resources.phase = "loading";
       else {
-        resources.phase = "error";
+        resources.phase = "error"; resources.busy = false;
         resources.error = { kind: "withdrawn", message: "Ressources retirées : le contrôle a refusé la lecture des registres sans motif lisible. Vos accès sont relus ; réessayez si elles ne reviennent pas." };
       }
     }
+    if (owned) { this.#arm(); this.#publish(); }
     this.#onAccessDoubt();
   }
   /** Returns true when the failure belongs to a superseded read or closed the store. */
@@ -161,10 +172,11 @@ export class SupervisionStore {
       return { workers: page.workers, brokers: page.brokers };
     }
     if (access.workers) return { workers: await this.#reads.workers(cursor, signal, SUPERVISION_PAGE), brokers: null };
-    return { workers: null, brokers: await this.#reads.brokers(null, signal, SUPERVISION_PAGE) };
+    return { workers: null, brokers: access.brokers ? await this.#reads.brokers(null, signal, SUPERVISION_PAGE) : null };
   }
   #brokerWindow(page: HumanBrokerPage | null): BrokerWindow | null {
-    return page && { items: page.items, hasMore: page.has_more, evaluatedAt: page.evaluated_at, receipt: page.read_receipt };
+    return page && { items: page.items, hasMore: page.has_more, evaluatedAt: page.evaluated_at, receipt: page.read_receipt,
+      ...(page.profile ? { profile: page.profile } : {}) };
   }
   /** Reads `pages` worker pages from the start. The result is published only as a whole. */
   async #readFleet(pages: number, signal: AbortSignal): Promise<Fleet> {
@@ -405,7 +417,7 @@ export class SupervisionStore {
     this.#generation++; this.#abort.abort(); this.#detailAbort.abort(); this.#detailRequest++;
     this.#cancelTimer(); this.#workerCursor = null; this.#resourceCursor = null;
     const access = this.#state.access;
-    this.#state = { access, workers: source(access.workers), brokers: source(access.brokers), resources: source(access.resources),
+    this.#state = { access, workers: workerSource(access), brokers: source(access.brokers), resources: source(access.resources),
       session: null, cadence: this.#state.cadence, autoPaused: "", closed: true };
   }
 }

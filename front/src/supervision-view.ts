@@ -6,7 +6,8 @@ import { button, el, icon } from "./dom.ts";
 import { announce, place, replaceIfChanged, setText, signatureOf, syncRows, syncSections } from "./dom-sync.ts";
 import { formatDate } from "./model.ts";
 import { CADENCES, SupervisionStore, sessionAnnouncement, summarize } from "./supervision-store.ts";
-import { accessLines, activityLabel, associationLabel, brokerStateLabel, defaultFleetFilter, FILTER_ANNOUNCE_MS, filterBrokers, filterResources, filterWorkers, fleetCoverage, freshness,
+import { checkpointFacts, checkpointLabel, formatBrokerDate } from "./human-owned-brokers.ts";
+import { accessLines, activityLabel, associationLabel, brokerAuthorityLabel, brokerStateLabel, defaultFleetFilter, FILTER_ANNOUNCE_MS, filterBrokers, filterResources, filterWorkers, fleetCoverage, freshness,
   heartbeatOfPreviousIncarnation, isDefaultFleetFilter, joinFleet, resourceKindLabel, SEARCH_MAX_LENGTH, sessionResource, shownOfLoaded, sortWorkers, sourceAnnouncement, windowSummary,
   workerActivity, workerFlagLabel, workerFlags, workersOfSession, workerStateLabel } from "./supervision-model.ts";
 import "./supervision.css";
@@ -167,7 +168,7 @@ export class SupervisionView {
     this.#buildStatusControls(); this.#buildAccess(); this.#buildBrokerPanel(); this.#buildWorkerPanel(); this.#buildResourcePanel();
     this.element.append(this.#status, this.#access);
     if (access.brokers || access.workers) this.element.append(this.#brokers);
-    if (access.workers) this.element.append(this.#workers);
+    if (access.workers || access.workersUnavailable) this.element.append(this.#workers);
     this.element.append(this.#resources);
     this.#render();
   }
@@ -211,7 +212,7 @@ export class SupervisionView {
     const context = this.#host.context;
     this.#access.append(el("summary", "", icon("chevron"), el("span", "", "Accès de ce contexte")),
       el("p", "muted", `Capacités fournies par le contrôle : ${context.capabilities.join(", ") || "aucune"}. Le navigateur n’en déduit aucune autre ; chaque lecture est autorisée de nouveau par le serveur.`),
-      el("ul", "sv-access-list", ...accessLines(context).map((line) => el("li", "", badge(line.granted ? "Accordé" : "Non disponible", line.granted ? "teal" : "neutral"),
+      el("ul", "sv-access-list", ...accessLines(context, this.#host.reads.readProfiles).map((line) => el("li", "", badge(line.granted ? "Accordé" : "Non disponible", line.granted ? "teal" : "neutral"),
         el("div", "", el("strong", "", line.label), el("p", "muted", line.detail))))));
   }
   #buildBrokerPanel() {
@@ -225,6 +226,13 @@ export class SupervisionView {
     this.#brokerFooter.append(action("Ouvrir le registre exact des brokers", "sv-open-brokers", () => this.#host.openRegistry("brokers")));
   }
   #buildWorkerPanel() {
+    if (this.#store.state.access.workersUnavailable) {
+      this.#workers.append(el("div", "panel-heading", el("h2", "", "Workers · profil indisponible")),
+        emptyState("Registre des workers indisponible pour ce profil", "La permission read_worker_registry est présente, mais le contrôle annonce worker_registry unavailable et federation_registry unavailable. Aucune route historique n’est appelée. L’activité et les associations restent inconnues ; les checkpoints ne remplacent pas ce registre."),
+        el("p", "sv-note muted", "Faites vérifier par l’opérateur les profils de lecture pris en charge. Relire les accès vérifie une nouvelle annonce du contrôle ; cette action n’active aucune capacité."),
+        action("Relire mes accès", "sv-profile-access", () => this.#host.onReviewAccess()));
+      return;
+    }
     const filter = this.#preferences.fleet;
     const search = searchInput(filter.text, "Identifiant, session, état, broker", (value) => { filter.text = value; this.#filtersChanged(); });
     this.#brokerSelect = select<string>([["all", "Tous"]], "all", (value) => { filter.broker = value; this.#filtersChanged(); });
@@ -346,7 +354,7 @@ export class SupervisionView {
     // A window of several pages is as fresh as the oldest page it still holds.
     const since = state.loadedAt === null ? null : Math.min(state.loadedAt, state.value?.oldestReadAt ?? state.loadedAt);
     const tone = state.phase === "forbidden" ? "red" : state.error || state.stale ? "amber" : "neutral";
-    const text = state.phase === "not_granted" ? "Non accordé" : state.phase === "forbidden" ? "Lecture refusée" :
+    const text = state.phase === "unavailable" ? "Profil indisponible" : state.phase === "not_granted" ? "Non accordé" : state.phase === "forbidden" ? "Lecture refusée" :
       state.phase === "loading" ? "Lecture en cours…" : state.phase === "idle" ? "Lecture requise" :
       state.phase === "error" ? state.error?.kind === "unreachable" ? "Contrôle injoignable" : state.error?.kind === "withdrawn" ? "Données retirées · accès à relire" : "Données indisponibles" :
       state.stale ? state.error?.kind === "unreachable" ? "Contrôle injoignable · dernière lecture conservée" : "Données périmées · dernière lecture conservée" :
@@ -367,14 +375,16 @@ export class SupervisionView {
     const state = this.#store.state;
     const summaries = { workers: summarize(state.workers), brokers: summarize(state.brokers), resources: summarize(state.resources) };
     const coverage = fleetCoverage({ ...summaries, contextsComplete: this.#host.contextsComplete() });
-    const auto = state.autoPaused === "not_granted" ? "Aucun registre n’est accordé à ce contexte : rien n’est relu automatiquement. Les ressources sont relues par « Actualiser maintenant »." :
+    const auto = state.autoPaused === "not_granted" ? state.access.workersUnavailable ?
+      "Aucun registre disponible pour ce contexte : le profil workers est indisponible. Aucune lecture automatique ; l’activité reste inconnue." :
+      "Aucun registre n’est accordé à ce contexte : rien n’est relu automatiquement. Les ressources sont relues par « Actualiser maintenant »." :
       state.cadence === 0 ? "Actualisation manuelle : aucune lecture sans action de votre part." :
       state.autoPaused === "hidden" ? "Actualisation automatique suspendue : onglet masqué." :
       state.autoPaused === "window" ? "Actualisation automatique suspendue : la fenêtre dépasse deux pages. Utilisez Actualiser pour relire toute la fenêtre." :
       state.autoPaused === "budget" ? "Actualisation automatique arrêtée : budget durable de lecture atteint." :
       state.autoPaused === "forbidden" ? "Actualisation automatique arrêtée : lecture refusée par le contrôle." :
       `Actualisation automatique de la flotte toutes les ${cadenceLabel(state.cadence)} lorsque cet onglet est visible ; les ressources sont relues sur action explicite.`;
-    const fleet = [state.workers, state.brokers].filter((item) => item.phase !== "not_granted");
+    const fleet = [state.workers, state.brokers].filter((item) => !["not_granted", "unavailable"].includes(item.phase));
     const fleetError = fleet.find((item) => item.error)?.error ?? null;
     setText(this.#autoNote, auto);
     const reading = this.#reading();
@@ -409,9 +419,12 @@ export class SupervisionView {
         action("Voir ces workers", `sv-broker-workers-${group.key}`, () => this.#filterBroker(group.key))) :
       el("p", "muted", loaded ? `Aucune association ${windowNote}${more ? " · autres pages inconnues" : ""}` : windowNote);
     return tableRow(cell("Broker", el("p", "mono sv-id", item.broker_id), el("p", "muted", `Incarnation ${item.incarnation_id}`)),
-      cell("État du bail", badge(brokerStateLabel[item.state], item.state === "current" ? "neutral" : "amber")),
-      cell("Autorités déclarées", el("ul", "sv-plain", ...item.authorities.map((authority) => el("li", "", el("span", "mono", authority.authority_id_redacted ? "Identifiant masqué" : authority.authority_id), ` · ${authority.runtime_kind}`)))),
-      cell("Dernière réception", heartbeat ? el("p", "", formatDate(heartbeat.received_at, true)) : el("p", "muted", "Aucun heartbeat reçu"),
+      cell("État du bail", badge(brokerStateLabel[item.state], item.state === "current" ? "neutral" : "amber"),
+        item.state === "stale" ? el("p", "muted", "Broker déconnecté possible · dernier bail périmé, état runtime inconnu") : null,
+        item.owned ? el("p", "muted", checkpointLabel(item)) : null,
+        item.owned?.clock_uncertain && item.state !== "clock_uncertain" ? badge("Horloge incertaine du checkpoint", "amber") : null),
+      cell("Autorités déclarées", el("ul", "sv-plain", ...item.authorities.map((authority) => el("li", "", el("span", "mono", brokerAuthorityLabel(authority)), ` · ${authority.runtime_kind}`)))),
+      cell("Dernière réception", heartbeat ? el("p", "", formatBrokerDate(heartbeat.received_at, true)) : el("p", "muted", "Aucun heartbeat reçu"),
         heartbeat ? el("p", "muted", "Heartbeat déclaré · réception observée") : null,
         // The registry keeps this fact across a new grant: it is not the last contact of the current incarnation.
         heartbeatOfPreviousIncarnation(item) ? badge("Heartbeat d’une ancienne incarnation", "amber") : null),
@@ -420,7 +433,8 @@ export class SupervisionView {
   }
   #renderBrokers() {
     const state = this.#store.state; const brokers = state.brokers; const groups = this.#groups();
-    const windowNote = state.workers.phase === "not_granted" ? "Registre des workers non accordé : associations inconnues" :
+    const windowNote = state.workers.phase === "unavailable" ? "Profil workers indisponible : associations inconnues" :
+      state.workers.phase === "not_granted" ? "Registre des workers non accordé : associations inconnues" :
       state.workers.value ? "dans la fenêtre de workers chargée" : "fenêtre de workers non lue : associations inconnues";
     const more = !!state.workers.value?.hasMore;
     const listed = groups.filter((group) => group.broker);
@@ -428,7 +442,8 @@ export class SupervisionView {
     const shown = listed.filter((group) => matching.has(group.key));
     syncRows(this.#brokerTable.body, shown.map((group) => ({ key: group.key, signature: `${signatureOf(group.broker!)}\n${group.workers.length}\n${windowNote}\n${more}`,
       build: () => this.#brokerRow(group, group.broker!, windowNote, more) })));
-    if (brokers.value) setText(this.#brokerTable.caption, `Brokers enregistrés · évaluation serveur du ${formatDate(brokers.value.evaluatedAt, true)}${brokers.value.hasMore ? " · d’autres pages existent, voir le registre Brokers" : ""}`);
+    if (brokers.value) setText(this.#brokerTable.caption, `Brokers enregistrés · évaluation serveur du ${formatBrokerDate(brokers.value.evaluatedAt, true)}${
+      brokers.value.profile ? ` · profil ${brokers.value.profile} · compte limité à la page · checkpoints déclarés partiels` : ""}${brokers.value.hasMore ? " · d’autres pages existent, voir le registre Brokers" : ""}`);
     this.#counts.brokers = brokers.value ? `${shownOfLoaded("brokers", shown.length, listed.length)}.` : "";
     setText(this.#brokerSummary, brokers.value ? `${windowSummary({ shown: shown.length, loaded: listed.length, hasMore: brokers.value.hasMore, noun: "brokers" })}${
       this.#preferences.brokers.text.trim() ? " · recherche appliquée aux seuls brokers chargés" : ""}` : "Aucun broker chargé : contenu du registre inconnu.");
@@ -480,7 +495,7 @@ export class SupervisionView {
   }
   #renderWorkers() {
     const state = this.#store.state; const source = state.workers; const window = source.value;
-    if (source.phase === "not_granted") return;
+    if (source.phase === "not_granted" || source.phase === "unavailable") return;
     const resources = state.resources.value?.items ?? [];
     const filtered = window ? sortWorkers(filterWorkers(window.items, this.#preferences.fleet), this.#preferences.order) : [];
     const shown = filtered.slice(0, this.#preferences.rendered);
@@ -523,7 +538,7 @@ export class SupervisionView {
   #renderResources() {
     const state = this.#store.state; const source = state.resources; const window = source.value;
     if (source.phase === "not_granted") return;
-    const workers = state.workers.value?.items ?? []; const workersGranted = state.workers.phase !== "not_granted";
+    const workers = state.workers.value?.items ?? []; const workersGranted = !["not_granted", "unavailable"].includes(state.workers.phase);
     const filtered = window ? filterResources(window.items, this.#preferences.resources) : [];
     syncRows(this.#resourceTable.body, filtered.map((item) => {
       const related = item.resource.kind === "session" ? workersOfSession(workers, item.resource.resource_id).length : 0;
@@ -635,16 +650,20 @@ export class SupervisionView {
     const window = this.#store.state.brokers.value; const heartbeat = item.last_heartbeat; const count = group?.workers.length ?? 0;
     return [
       definition([["État du bail", brokerStateLabel[item.state]], ["Incarnation courante", item.incarnation_id], ["Révision de l’autorisation", item.grant_revision],
-        ["Révision du heartbeat", item.heartbeat_revision], ["Autorisation accordée", formatDate(item.granted_at, true)], ["Expiration de l’autorisation", formatDate(item.not_after, true)],
-        ["Révocation", item.revoked_at ? formatDate(item.revoked_at, true) : "Aucune révocation enregistrée"],
-        ["Autorités déclarées", item.authorities.map((authority) => `${authority.authority_id_redacted ? "Identifiant masqué" : authority.authority_id} · ${authority.runtime_kind}`).join(" ; ")],
+        ["Révision du heartbeat", item.heartbeat_revision], ["Autorisation accordée", formatBrokerDate(item.granted_at, true)], ["Expiration de l’autorisation", formatBrokerDate(item.not_after, true)],
+        ["Révocation", item.revoked_at ? formatBrokerDate(item.revoked_at, true) : "Aucune révocation enregistrée"],
+        ["Autorités déclarées", item.authorities.map((authority) => `${brokerAuthorityLabel(authority)} · ${authority.runtime_kind}`).join(" ; ")],
         ["Heartbeat déclaré", heartbeat ? `Séquence ${heartbeat.sequence} · incarnation ${heartbeat.incarnation_id}${heartbeatOfPreviousIncarnation(item) ? " · ancienne incarnation" : ""}` : "Aucun heartbeat reçu"],
-        ["Réception observée", heartbeat ? formatDate(heartbeat.received_at, true) : "Inconnue"], ["Expiration du bail déclaré", heartbeat ? formatDate(heartbeat.lease_expires_at, true) : "Inconnue"]]),
-      el("p", "muted", this.#store.state.workers.phase === "not_granted" ? "Registre des workers non accordé : associations inconnues." :
+        ["Réception observée", heartbeat ? formatBrokerDate(heartbeat.received_at, true) : "Inconnue"], ["Expiration du bail déclaré", heartbeat ? formatBrokerDate(heartbeat.lease_expires_at, true) : "Inconnue"]]),
+      ...(item.owned ? [definition([["Profil", "human_broker_registry_owned_v1"], ["Durée du bail autorisée", `${item.owned.lease_seconds} s`],
+        ["Horloge", item.owned.clock_uncertain ? "Incertaine pour le heartbeat ou le checkpoint" : "Aucune incertitude signalée par le contrôle"],
+        ...checkpointFacts(item).map(([label, value]): [string, string] => [label, label === "Réception du checkpoint" || label === "Expiration du checkpoint" ? formatBrokerDate(value, true) : value])])] : []),
+      el("p", "muted", this.#store.state.workers.phase === "unavailable" ? "Profil workers indisponible : associations et activité inconnues. Les références du checkpoint ne sont pas un inventaire de workers." :
+        this.#store.state.workers.phase === "not_granted" ? "Registre des workers non accordé : associations inconnues." :
         `${count} worker(s) de la fenêtre chargée portent une association d’autorité vers ce broker. Elle est historique et ne prouve pas l’exécution par ce broker ; l’inventaire runtime reste inconnu.`),
       count ? action("Voir ces workers", "sv-detail-broker-workers", () => this.#filterBroker(item.broker_id)) : null,
       // The receipt changes with every read: on its own line, it is the only part of this detail a refresh replaces.
-      window ? el("p", "muted", `Reçu durable de cette lecture : ${window.receipt.audit_event_id} · ${formatDate(window.receipt.received_at, true)}. Un reçu atteste l’enregistrement de la lecture, pas une exécution.`) : null,
+      window ? el("p", "muted", `Reçu durable de cette lecture : ${window.receipt.audit_event_id} · ${formatBrokerDate(window.receipt.received_at, true)}. Un reçu atteste l’enregistrement de la lecture, pas une exécution.`) : null,
     ];
   }
   #resourceDetail(item: HumanResource): (HTMLElement | null)[] {
@@ -657,6 +676,7 @@ export class SupervisionView {
       session ? el("h3", "", "Workers déclarant cette session") : null,
       !session ? el("p", "muted", item.resource.kind === "agent" ? "Relation agent ↔ session et agent ↔ sous-agent : non fournie par le contrat nominatif, donc inconnue. Elle n’est jamais déduite d’un nom ou d’un modèle." :
         "Aucune relation vers un worker ou une session n’est fournie par le contrat nominatif pour ce type de ressource.") :
+        state.workers.phase === "unavailable" ? el("p", "muted", "Profil workers indisponible : aucune association ne peut être recherchée.") :
         state.workers.phase === "not_granted" ? el("p", "muted", "Registre des workers non accordé à ce contexte.") :
         related.length ? el("ul", "sv-plain", ...related.map((worker) => el("li", "", action(`Ouvrir le worker ${worker.worker_id}`, `sv-detail-worker-${worker.worker_id}`, () => this.#open({ kind: "worker", id: worker.worker_id })),
           el("span", "muted", ` ${workerStateLabel[worker.state]} · référence de session déclarée`)))) :

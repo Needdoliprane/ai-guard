@@ -1,6 +1,7 @@
 import { createSseParser } from "./sse.ts";
 import { HUMAN_FEDERATION_PAGE_BYTES, HumanContractError, boundedText, humanBrokersUrl, humanWorkersUrl, humanFederationWorkersUrl, humanRecentEventsUrl, humanUrl, object, opaque, parseHumanBrokerPage, parseHumanWorkerPage, parseHumanFederationWorkerPage, parseHumanEventPage, parseHumanIdentity, parseHumanRecentEventPage, parseResourcePage, uuid } from "./human-model.ts";
 import type { HumanContext, HumanEventPage, HumanIdentity, HumanRecentEventPage, HumanSelection, HumanFederationSelection, ResourceRef } from "./human-model.ts";
+import { humanOwnedBrokersUrl, parseHumanOwnedBrokerPage } from "./human-owned-brokers.ts";
 
 export class HumanSuperseded extends Error { constructor() { super("Lecture abandonnée après changement de contexte."); } }
 export class HumanApiError extends Error {
@@ -52,6 +53,7 @@ export class HumanApiClient {
     this.#token = token; this.#handlers = handlers; this.#fetcher = fetcher;
   }
   get context() { return this.#context ? structuredClone(this.#context) : null; }
+  get readProfiles() { return this.#identity?.read_profiles ? structuredClone(this.#identity.read_profiles) : undefined; }
   get readBudgetStopped() { return this.#readBudgetStopped; }
   /** One attempt after the user confirms an operator intervention; no server budget is reset. */
   allowReadAfterOperatorAction() { if (this.#readBudgetStopped) this.#operatorReadAllowed = true; }
@@ -121,7 +123,8 @@ export class HumanApiClient {
   async #request(path: string, snapshot: Snapshot, signal?: AbortSignal, stream = false): Promise<Response> {
     this.#assert(snapshot);
     if (!/^\/api\/v1\/human\/(identity|resources|events|export|stream|brokers|workers)(?:\/[0-9a-f-]{36})?(?:\?[^#]*)?$/.test(path) &&
-      !/^\/api\/v1\/human\/federation\/workers(?:\?[^#]*)?$/.test(path) && !/^\/api\/v1\/human\/events\/recent(?:\?[^#]*)?$/.test(path)) throw new HumanContractError();
+      !/^\/api\/v1\/human\/federation\/workers(?:\?[^#]*)?$/.test(path) && !/^\/api\/v1\/human\/events\/recent(?:\?[^#]*)?$/.test(path) &&
+      !/^\/api\/v1\/human\/owned\/brokers(?:\?[^#]*)?$/.test(path)) throw new HumanContractError();
     if (this.#readBudgetStopped) {
       if (!this.#operatorReadAllowed || stream) throw new HumanApiError(429, "audit_read_budget_exhausted", "Lecture automatique suspendue : budget durable de lecture atteint. Contactez l’opérateur.", "contact_operator");
       this.#operatorReadAllowed = false; snapshot.operatorRetry = true;
@@ -144,7 +147,7 @@ export class HumanApiClient {
       void response.body?.cancel().catch(() => {}); throw error;
     }
     if (!this.#current(snapshot)) { void response.body?.cancel().catch(() => {}); throw new HumanSuperseded(); }
-    if (response.status === 403 && (path === "/api/v1/human/identity" || /^\/api\/v1\/human\/federation\/workers(?:\?|$)/.test(path))) {
+    if (response.status === 403 && (path === "/api/v1/human/identity" || /^\/api\/v1\/human\/(?:federation\/workers|owned\/brokers)(?:\?|$)/.test(path))) {
       // These reads must retire displayed data as soon as refusal headers arrive.
       // No error body or cancellation acknowledgement may delay that refusal.
       // Other routes keep their existing structured context and stream errors.
@@ -177,7 +180,9 @@ export class HumanApiClient {
     const snapshot = this.#snapshot(false); const request = ++this.#identityRequest;
     const body = await this.#json(await this.#request("/api/v1/human/identity", snapshot), snapshot);
     this.#assert(snapshot); if (request !== this.#identityRequest) throw new HumanSuperseded();
-    const identity = parseHumanIdentity(body.value); this.#identity = structuredClone(identity);
+    const identity = parseHumanIdentity(body.value);
+    const profilesChanged = this.#identity !== null && JSON.stringify(this.#identity.read_profiles) !== JSON.stringify(identity.read_profiles);
+    this.#identity = structuredClone(identity);
     clearTimeout(this.#credentialExpiry);
     const expires = identity.authentication.expires_at;
     if (expires && Date.parse(expires) <= Date.now())
@@ -194,7 +199,7 @@ export class HumanApiClient {
     if (!this.#token) throw new HumanSuperseded();
     const selected = this.#context;
     const current = selected && identity.contexts.find((context) => context.id === selected.id);
-    if (selected && (!current || current.authorization_version !== selected.authorization_version ||
+    if (selected && (profilesChanged || !current || current.authorization_version !== selected.authorization_version ||
       current.membership_revision !== selected.membership_revision || current.tenant_id !== selected.tenant_id ||
       current.organization_scope !== selected.organization_scope || current.mode !== selected.mode ||
       [...current.capabilities].sort().join(",") !== [...selected.capabilities].sort().join(",") || Date.parse(current.expires_at) <= Date.now())) {
@@ -229,16 +234,21 @@ export class HumanApiClient {
   }
   async brokers(cursor: string | null = null, signal?: AbortSignal, limit?: number) {
     const snapshot = this.#snapshot(true);
-    const body = await this.#json(await this.#request(humanBrokersUrl(cursor, limit), snapshot, signal), snapshot);
-    return this.#finishRead(this.#validatePage(parseHumanBrokerPage(body.value), snapshot), snapshot, signal);
+    const owned = this.#identity?.read_profiles?.broker_registry === "human_broker_registry_owned_v1";
+    const body = await this.#json(await this.#request(owned ? humanOwnedBrokersUrl(cursor, limit) : humanBrokersUrl(cursor, limit), snapshot, signal), snapshot);
+    return this.#finishRead(this.#validatePage(owned ? parseHumanOwnedBrokerPage(body.value) : parseHumanBrokerPage(body.value), snapshot), snapshot, signal);
   }
   async workers(cursor: string | null = null, signal?: AbortSignal, limit?: number) {
     const snapshot = this.#snapshot(true);
+    if (this.#identity?.read_profiles?.worker_registry === "unavailable")
+      throw new HumanApiError(503, "read_profile_unavailable", "Registre des workers indisponible pour le profil annoncé par le contrôle. La couverture reste partielle.", "contact_operator");
     const body = await this.#json(await this.#request(humanWorkersUrl(cursor, limit), snapshot, signal), snapshot);
     return this.#finishRead(this.#validatePage(parseHumanWorkerPage(body.value), snapshot), snapshot, signal);
   }
   async federationWorkers(selection: HumanFederationSelection = {}, signal?: AbortSignal) {
     const snapshot = this.#snapshot(true);
+    if (this.#identity?.read_profiles?.federation_registry === "unavailable")
+      throw new HumanApiError(503, "read_profile_unavailable", "Composition workers/brokers indisponible pour le profil annoncé par le contrôle. Ouvrez le registre Brokers autorisé.", "contact_operator");
     const body = await this.#json(await this.#request(humanFederationWorkersUrl(selection), snapshot, signal), snapshot, HUMAN_FEDERATION_PAGE_BYTES);
     const page = parseHumanFederationWorkerPage(body.value);
     this.#validatePage(page.workers, snapshot); this.#validatePage(page.brokers, snapshot);
