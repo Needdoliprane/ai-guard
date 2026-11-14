@@ -7,6 +7,9 @@ use uuid::Uuid;
 fn id(n: u128) -> String { Uuid::from_u128(n).to_string() }
 
 fn prepared(root: &Directory) -> PreparedOwnedPresence {
+    prepared_profile(root, false)
+}
+fn prepared_profile(root: &Directory, checkpoints: bool) -> PreparedOwnedPresence {
     let state = root.persistent_child("state", true).unwrap().unwrap();
     let authority = BrokerAuthorityV1 { authority_id: "filesystem-fixture".into(), runtime_kind: BrokerRuntimeKindV1::Docker };
     let subject = OwnedBrokerSubjectV2 {
@@ -25,9 +28,13 @@ fn prepared(root: &Directory) -> PreparedOwnedPresence {
     if root.private_entry(OsStr::new("enrollment.json")).unwrap().is_none() {
         save(root, "enrollment.json", &serde_json::to_vec(&enrollment).unwrap()).unwrap();
         save(root, "bearer", b"synthetic-filesystem-fixture-bearer-000000000000").unwrap();
-        let config = serde_json::json!({"profile":"broker_supervision_owned_v2","version":2,
+        let mut config = serde_json::json!({"profile":"broker_supervision_owned_v2","version":2,
             "enrollment_file": root.path().join("enrollment.json"), "bearer_file":root.path().join("bearer"),
             "interval_seconds":5,"heartbeat_journal":{"state_dir":state.path(),"max_operations":20,"max_state_bytes":2097152}});
+        if checkpoints {
+            let checkpoint = root.persistent_child("checkpoint-state", true).unwrap().unwrap();
+            config["checkpoint_journal"] = serde_json::json!({"state_dir":checkpoint.path(),"max_operations":20,"max_state_bytes":2097152});
+        }
         save(root, "presence.json", &serde_json::to_vec(&config).unwrap()).unwrap();
     }
     let scope = PresenceScope { installation_id: Uuid::from_u128(10), profile_id: "fixture".into(), gateway: enrollment.gateway_origin,
@@ -146,7 +153,7 @@ fn checkpoint_replacement_preserves_original_snapshot_and_sequence() {
 
 #[test]
 fn reconciled_ack_persists_old_actor_and_current_observation_as_distinct_facts() {
-    let (_tmp,root)=root(); let p=prepared(&root); let old=pending(&p);
+    let (_tmp,root)=root(); let p=prepared_profile(&root,true); let old=pending(&p);
     p.heartbeat_journal().unwrap().append(&p,old.clone()).unwrap();
     let mut broker=old.prior.broker.clone(); broker.heartbeat_revision=1;
     broker.last_heartbeat=Some(BrokerHeartbeatReceiptV1 { incarnation_id:id(6),sequence:1,
@@ -160,9 +167,84 @@ fn reconciled_ack_persists_old_actor_and_current_observation_as_distinct_facts()
     proof.head=OwnedReconciliationHeadV2::Heartbeat { view:broker.view_at("2026-11-14T10:00:03.000Z").unwrap(),receipt:Some(receipt) };
     proof.state=OwnedReconciliationStateV2::CommittedExact { historical:OwnedHistoricalResultV2::Heartbeat { result:Box::new(historical) } };
     p.heartbeat_journal().unwrap().acknowledge_reconciled(&p,proof).unwrap();
-    drop(p); let p=prepared(&root); let head=p.heartbeat_journal().unwrap().cached_head().unwrap();
+    // The current observation must gate the peer journal immediately, while
+    // the historical result actor stays immutable at binding1/closure7.
+    assert!(p.observe_closure(&old.identity).is_err());
+    let mut lower_closure=old.identity.clone();lower_closure.subject.binding_revision=2;
+    assert!(p.observe_closure(&lower_closure).is_err());
+    drop(p); let p=prepared_profile(&root,true); let head=p.heartbeat_journal().unwrap().cached_head().unwrap();
     let ack=head.last.unwrap();
     assert_eq!(ack.result.identity.subject.binding_revision,1);
     assert_eq!(ack.observation.subject.binding_revision,2);
     assert_eq!(head.binding_floor,2);assert_eq!(head.closure_floor,8);assert!(head.pending.is_none());
+}
+
+fn heartbeat_ack(old: &OwnedHeartbeatPendingV2, closure: u64) -> OwnedBrokerHeartbeatResultV2 {
+    let mut broker=old.prior.broker.clone();broker.heartbeat_revision=1;
+    broker.last_heartbeat=Some(BrokerHeartbeatReceiptV1 { incarnation_id:id(6),sequence:1,
+        received_at:"2026-11-14T10:00:02.000Z".into(),lease_expires_at:"2026-11-14T10:00:32.000Z".into(),
+        heartbeat_provenance:BrokerClaimProvenanceV1::Declared,reception_provenance:BrokerReceptionProvenanceV1::Observed });
+    let mut identity=old.identity.clone();identity.closure_revision=closure;
+    let result=OwnedBrokerHeartbeatResultV2::new(identity,old.operation_commitment.clone(),BrokerMutationResultV1 {
+        broker,receipt:BrokerMutationReceiptV1 { operation_id:old.heartbeat.operation_id.clone(),broker_id:id(5),
+            grant_revision:1,heartbeat_revision:1,input_hash:old.registry_input_hash.clone(),audit_seq:3,audit_hash:"e".repeat(64) },replayed:false }).unwrap();
+    old.validate_result(&result).unwrap();result
+}
+fn checkpoint_pending(p: &PreparedOwnedPresence) -> OwnedCheckpointPendingV2 {
+    OwnedCheckpointPendingV2::prepare(&pending(p).identity,0,BrokerCheckpointSnapshotV1 { version:1,
+        authority:p.pins.authority.clone(),jobs:vec![],has_more:false },id(31)).unwrap()
+}
+fn checkpoint_ack(old: &OwnedCheckpointPendingV2, closure: u64) -> OwnedBrokerCheckpointResultV2 {
+    let mut identity=old.identity.clone();identity.closure_revision=closure;
+    let result=OwnedBrokerCheckpointResultV2::new(identity,old.operation_commitment.clone(),BrokerCheckpointResultV1 {
+        checkpoint:old.checkpoint.clone(),receipt:BrokerMutationReceiptV1 { operation_id:old.checkpoint.operation_id.clone(),
+            broker_id:id(5),grant_revision:1,heartbeat_revision:1,input_hash:old.registry_input_hash.clone(),audit_seq:4,audit_hash:"d".repeat(64) },replayed:false }).unwrap();
+    old.validate_result(&result).unwrap();result
+}
+
+#[test]
+fn heartbeat_ack_syncs_a_higher_observation_and_blocks_the_checkpoint_view_without_reopen() {
+    let (_tmp,root)=root();let p=prepared_profile(&root,true);let old=pending(&p);
+    p.observe_closure(&old.identity).unwrap();
+    let journal=p.heartbeat_journal().unwrap();journal.append(&p,old.clone()).unwrap();
+    let result=heartbeat_ack(&old,8);
+    journal.acknowledge(&p,OwnedAcknowledgementSourceV2::Response,result.clone()).unwrap();
+    let directory=journal.root.persistent_child(&operation_name(1),false).unwrap().unwrap();
+    let (record,_):(AckRecordV2<OwnedBrokerHeartbeatResultV2>,_)=read(&p,&directory,ACK,heartbeat::HeartbeatJournal::RECORD_BYTES).unwrap();
+    assert_eq!(record.result,result);assert_eq!(record.observation.closure_revision,8);
+    let peer=OwnedBrokerCheckpointSelfViewV2::new(old.identity.clone(),BrokerCheckpointViewV1 {
+        version:1,broker:old.prior.clone(),checkpoint:None }).unwrap();
+    validate_checkpoint_handshake(&p.pins,&peer,p.min_lease()).unwrap();
+    assert!(p.observe_closure(&peer.identity).is_err(),"durable heartbeat ACK8 must gate checkpoint view7 in this process");
+    assert!(p.checkpoint_journal().unwrap().cached_head().unwrap().last.is_none());
+}
+
+#[test]
+fn checkpoint_ack_syncs_a_higher_observation_and_blocks_the_heartbeat_view_without_reopen() {
+    let (_tmp,root)=root();let p=prepared_profile(&root,true);let hb=pending(&p);let old=checkpoint_pending(&p);
+    p.observe_closure(&old.identity).unwrap();
+    let journal=p.checkpoint_journal().unwrap();journal.append(&p,old.clone()).unwrap();
+    let result=checkpoint_ack(&old,8);
+    journal.acknowledge(&p,OwnedAcknowledgementSourceV2::Response,result.clone()).unwrap();
+    let directory=journal.root.persistent_child(&operation_name(1),false).unwrap().unwrap();
+    let (record,_):(AckRecordV2<OwnedBrokerCheckpointResultV2>,_)=read(&p,&directory,ACK,checkpoint::CheckpointJournal::RECORD_BYTES).unwrap();
+    assert_eq!(record.result,result);assert_eq!(record.observation.closure_revision,8);
+    let peer=OwnedBrokerSelfViewV2::new(hb.identity.clone(),hb.prior.clone(),None).unwrap();
+    validate_heartbeat_handshake(&p.pins,&peer,p.min_lease()).unwrap();
+    assert!(p.observe_closure(&peer.identity).is_err(),"durable checkpoint ACK8 must gate heartbeat view7 in this process");
+}
+
+#[test]
+fn a_stale_ack_cannot_publish_below_the_shared_floor_or_clear_either_pending() {
+    let (_tmp,root)=root();let p=prepared_profile(&root,true);let hb=pending(&p);let cp=checkpoint_pending(&p);
+    let heartbeat=p.heartbeat_journal().unwrap();let checkpoint=p.checkpoint_journal().unwrap();
+    heartbeat.append(&p,hb.clone()).unwrap();checkpoint.append(&p,cp.clone()).unwrap();
+    let mut current=hb.identity.clone();current.closure_revision=8;p.observe_closure(&current).unwrap();
+    assert!(heartbeat.acknowledge(&p,OwnedAcknowledgementSourceV2::Response,heartbeat_ack(&hb,7)).is_err());
+    assert!(checkpoint.acknowledge(&p,OwnedAcknowledgementSourceV2::Response,checkpoint_ack(&cp,7)).is_err());
+    assert_eq!(heartbeat.durable_pending(&p).unwrap(),hb);assert_eq!(checkpoint.durable_pending(&p).unwrap(),cp);
+    for root in [&heartbeat.root,&checkpoint.root] {
+        let directory=root.persistent_child(&operation_name(1),false).unwrap().unwrap();
+        assert!(directory.private_entry(OsStr::new(ACK)).unwrap().is_none());
+    }
 }
