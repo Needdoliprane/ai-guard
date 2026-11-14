@@ -108,6 +108,7 @@ fn insufficient_recovery_budget_refuses_before_closure_and_torn_record_is_kept()
     let proof=proof(&old); let replacement=heartbeat::HeartbeatJournal::replacement(&old,&proof,id(13)).unwrap();
     let journal=p.heartbeat_journal().unwrap();
     assert!(matches!(journal.supersede(&p,&old,proof,replacement),Err(PresenceError::Capacity)));
+    assert!(p.observe_closure(&old.identity).is_err(),"a validated proof stays observed even when closure financing refuses");
     let directory=journal.root.persistent_child(&operation_name(1),false).unwrap().unwrap();
     assert!(directory.private_entry(OsStr::new(SUPERSEDED)).unwrap().is_none());
     save(&directory,SUPERSEDED,b"{").unwrap();
@@ -247,4 +248,60 @@ fn a_stale_ack_cannot_publish_below_the_shared_floor_or_clear_either_pending() {
         let directory=root.persistent_child(&operation_name(1),false).unwrap().unwrap();
         assert!(directory.private_entry(OsStr::new(ACK)).unwrap().is_none());
     }
+}
+
+#[test]
+fn rejected_observation_does_not_partially_raise_the_other_floor() {
+    let (_tmp,root)=root();let p=prepared_profile(&root,true);let old=pending(&p);
+    let mut accepted=old.identity.clone();accepted.closure_revision=8;p.observe_closure(&accepted).unwrap();
+    let mut rejected=old.identity.clone();rejected.subject.binding_revision=2;
+    assert!(p.observe_closure(&rejected).is_err());
+    accepted.closure_revision=9;
+    p.observe_closure(&accepted).unwrap();
+}
+
+#[test]
+fn late_supersession_cannot_publish_below_a_peer_observation() {
+    let (_tmp,root)=root();let p=prepared_profile(&root,true);let old=pending(&p);
+    let journal=p.heartbeat_journal().unwrap();journal.append(&p,old.clone()).unwrap();
+    let proof=proof(&old);let replacement=heartbeat::HeartbeatJournal::replacement(&old,&proof,id(13)).unwrap();
+    let mut current=proof.observation.clone();current.closure_revision=9;p.observe_closure(&current).unwrap();
+    assert!(journal.supersede(&p,&old,proof,replacement).is_err());
+    let directory=journal.root.persistent_child(&operation_name(1),false).unwrap().unwrap();
+    assert!(directory.private_entry(OsStr::new(SUPERSEDED)).unwrap().is_none());
+    assert_eq!(journal.durable_pending(&p).unwrap(),old);
+}
+
+// This test-only pause sits before the actual immutable ACK write. It grants
+// no permission, changes no record and cannot simulate a successful fsync.
+type AckBoundary=(std::sync::mpsc::Sender<()>,std::sync::mpsc::Receiver<()>);
+thread_local! { static ACK_BOUNDARY: std::cell::RefCell<Option<AckBoundary>> = const { std::cell::RefCell::new(None) }; }
+pub(super) fn before_ack_save(p: &PreparedOwnedPresence) {
+    if let Some((entered,release))=ACK_BOUNDARY.with(|slot|slot.borrow_mut().take()) {
+        assert!(matches!(p.observations.try_lock(),Err(std::sync::TryLockError::WouldBlock)),"actual ACK must retain the shared observation gate through its save");
+        entered.send(()).unwrap();release.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+    }
+}
+
+#[test]
+fn ack_publication_keeps_the_shared_gate_until_the_real_save_and_head_update() {
+    let (_tmp,root)=root();let p=prepared_profile(&root,true);let old=pending(&p);
+    let journal=p.heartbeat_journal().unwrap();journal.append(&p,old.clone()).unwrap();
+    let result=heartbeat_ack(&old,8);
+    let (entered,at_save)=std::sync::mpsc::channel();let (release,released)=std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let ack=scope.spawn(|| {
+            ACK_BOUNDARY.with(|slot|*slot.borrow_mut()=Some((entered,released)));
+            journal.acknowledge(&p,OwnedAcknowledgementSourceV2::Response,result)
+        });
+        at_save.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        assert!(journal.root.persistent_child(&operation_name(1),false).unwrap().unwrap().private_entry(OsStr::new(ACK)).unwrap().is_none());
+        let observer=scope.spawn(||p.observe_closure(&old.identity));
+        release.send(()).unwrap();ack.join().unwrap().unwrap();
+        assert!(observer.join().unwrap().is_err());
+    });
+    assert!(journal.cached_head().unwrap().pending.is_none());
+    let directory=journal.root.persistent_child(&operation_name(1),false).unwrap().unwrap();
+    let (record,_):(AckRecordV2<OwnedBrokerHeartbeatResultV2>,_)=read(&p,&directory,ACK,heartbeat::HeartbeatJournal::RECORD_BYTES).unwrap();
+    assert_eq!(record.observation.closure_revision,8);
 }
