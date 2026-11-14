@@ -1,5 +1,19 @@
 # Gates de qualification production
 
+Broker Submitted/Pending du 14 novembre : neuf parents logiciels uniques PASS
+sur `a4340c4f`, format courant des trois sources, compilation et check toutes
+cibles RC0, 169 avertissements hors des trois fichiers modifiés. Source après
+exécution, fixtures, fermeture exacte/OOM0 et flush Root vérifiés ;
+[preuve bornée](evidence/2026-11-14/broker-submitted-pending/README.md).
+L'original retenu converge de Pending+Q vers Final puis retrait local sans
+nouveau start/claim ni retransmission de RetireUnused. Le RED initial,
+l'abort134 de R1 et la sonde de pile restent
+leurs résultats datés ; la variation test-only qui rétablit le canari ne
+démontre pas une correction de pile du produit. Clippy strict, Unsubmitted
+audité, reprise froide complète, D5/fencing, familles namespace/restauration
+et NativeResume, moteurs et capacité100 restent ouverts. Aucun terminal
+worker ou quota libéré n'en découle ; G09 FAIL, 0/12 gates globaux clos.
+
 Diagnostic opérateur E du 12 novembre : neuf parités binaires et 85 cas CLI
 normaux PASS sur le gel composé `c2b907a8…`, check toutes cibles RC 0,
 export vivant exact et fermeture RC 0/OOM 0. L’exporteur manuel ignoré reste

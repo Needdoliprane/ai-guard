@@ -1,5 +1,37 @@
 # État constaté — suivi du développement
 
+## 14 novembre — broker : convergence chaude Submitted/Pending vérifiée
+
+Sur le gel `a4340c4f293eb459a168c98d33386b44d38ad1fa`, le keeper original
+Submitted peut reprendre un Pending audit-ACKé dont le vrai Q existe mais
+dont Final manque. Le même owner et l'entrée Final réellement retenue sont
+conservés à travers refus d'enqueue, travail en cours et perte de l'appelant.
+Le retrait du slot local puis le clear du keeper exigent toujours Final
+durable, Q authentifié et origine physique exacte ; aucune retransmission de
+RetireUnused, nouveau start, claim ou délai n'est autorisé par ce raccord.
+[Preuves, sources et limites](evidence/2026-11-14/broker-submitted-pending/README.md).
+
+La QA finale compte 20 listes réelles et neuf parents uniques PASS, zéro
+échec/ignoré sélectionné. Format courant des trois sources, compilation des
+tests et check toutes cibles RC0 ; 169 avertissements de compilation, aucun
+message visant ces trois fichiers, Clippy strict NOT_RUN. Les 2842 fichiers
+source sont exacts après exécution ; 96 fichiers et 60 répertoires de fixture
+(156 nœuds, zéro socket exclu), OOM0, fermeture et flush Root sont vérifiés.
+
+Le RED initial `0186` et les cinq PASS puis abort de pile de R1 `a48fc581`
+restent distincts. La variation test-only du snapshot étranger via le vrai
+Writer fait passer le canari avec ses assertions conservées ; elle n'identifie
+pas le frame fautif ni une correction de pile du produit. Les arbres RED et
+final diffèrent aussi par d'autres intégrations : même scénario/oracle,
+pas expérience globale à une seule variable.
+
+Cette preuve porte sur la continuation logicielle dans le même processus,
+avec observation runtime SyntheticReady. La reprise Unsubmitted avec permis
+explicitement audité, la reprise froide complète, D5/fencing, les familles
+namespace/restauration et NativeResume, les moteurs réels et la capacité100
+restent ouverts. Worker/quota/usage ne sont pas libérés par ce settlement.
+G09 reste FAIL et aucun gate ni fingerprint historique n'est clos.
+
 ## 14 novembre — inspection du registre et préparation CLI : composition vérifiée
 
 `broker policy inspect` conserve désormais les métadonnées authentifiées du

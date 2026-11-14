@@ -1,5 +1,26 @@
 # Suivi des audits indépendants
 
+## 14 novembre — continuation chaude Submitted/Pending : régression bornée vérifiée
+
+Le [lot logiciel broker](evidence/2026-11-14/broker-submitted-pending/README.md)
+conserve un RED de progression authentique sur `0186ccee`, puis neuf parents
+PASS sur `a4340c4f` et le check toutes cibles. Le helper du scénario Pending,
+l'original Submitted et son oracle restent comparables ; les arbres complets
+ont aussi d'autres changements, donc aucune isolation causale exhaustive
+n'est revendiquée. F, Q, identité d'origine et retrait réel du slot local sont
+revérifiés ; simple absence, snapshot public étranger et travail en cours
+ne libèrent ni keeper ni quota. Les cinq PASS puis abort134 de R1 et le
+diagnostic de pile restent séparés. La variation test-only du snapshot via
+le vrai Writer garde l'oracle ; le frame fautif reste inconnu.
+
+Ce résultat ne clôt aucun fingerprint des rapports run-1/run-2/couverture
+de risques, ni D5/fencing, la reprise froide, namespace/restauration ou
+NativeResume. Il ne prouve aucun terminal worker, effet moteur, confinement
+réseau réel ou capacité100. Les réservations/usage restent inchangés dans
+les scénarios ; G09 demeure FAIL et aucun gate global n'est fermé. Les pièces
+primaires, fixtures et diagnostics privés restent hors Git ; seuls leurs
+résultats bornés et empreintes expurgées sont publiés.
+
 ## 13 novembre — lectures possédées et préparation opérateur
 
 Une verticale nominative utilise de vrais Stores14/15 retenus et, si sélectionné, Auth5. Le bootstrap enveloppe le coordinateur13→14/4→5 ; un UUID ou fichier d’activation seul n’est pas une autorité. Deux GET adoptés authentifient et lisent la propre source sans SQL voisin. La même archive `7050d12b…9302` du Git `dbee1d5f…` passe 107 fonctions uniques en deux campagnes 34 + 73, avec sources exactes, collectes et fermetures vérifiées. [Preuves EN/FR](evidence/2026-11-13/human-sources-operator/README.fr.md).

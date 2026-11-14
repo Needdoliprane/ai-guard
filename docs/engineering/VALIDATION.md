@@ -1,5 +1,43 @@
 # Validation courante
 
+## 14 novembre — Submitted/Pending broker : neuf régressions logicielles vérifiées
+
+Source `a4340c4f293eb459a168c98d33386b44d38ad1fa`, exactement trois sources
+broker modifiées par rapport au public `c6ec590`. Les
+[preuves et neuf FQN](evidence/2026-11-14/broker-submitted-pending/README.md)
+conservent les reçus Root complets par empreinte, les sources et les limites.
+
+| Gel et étape | Résultat constaté |
+|---|---|
+| Baseline `0186ccee` | Compilation et format du fichier ciblé RC0 ; six listes, un seul parent exécuté. RED101 accepté par Root après le marker de setup : même original Submitted, Q authentique, F absent, puis échec de convergence attendu. Canaris/check toutes cibles non sélectionnés. |
+| R1 `a48fc581` | Compilation RC0, 20 listes/neuf parents actifs ; p01–p05 PASS, p06 abort134 avec stack overflow, p07–p09 et check toutes cibles NOT_RUN. Aucun GREEN global. |
+| Sonde `98b6bbfd` | Leaf de layout PASS et canari étranger abort134 explicite ; dernier marker `foreign.snapshot.enter`, sans localisation du frame fautif. Cause précise non confirmée. |
+| R2 `a4340c4f` | Format courant des trois sources et compilation des tests RC0, 20 listes/neuf FQN actifs, neuf PASS/zéro FAIL/zéro ignoré sélectionné ; check toutes cibles RC0, 169 avertissements, aucun dans les trois sources modifiées. |
+
+Le helper du scénario Pending et son oracle de progression sont conservés
+entre baseline et résultat final ; les arbres complets diffèrent sur 64 fichiers,
+dont d'autres intégrations et Cargo. Le RED/GREEN établit la régression du
+même scénario logiciel, sans isoler toutes les variables de compilation.
+Le seul delta R1→R2 est test-only : la lecture du vrai snapshot étranger passe
+par le Writer/sa queue existants au lieu de l'appel synchrone direct. L'origine
+étrangère et les assertions Q/keeper/Final/admission restent inchangées.
+
+Le reçu final Root SHA-256
+`bae9286e238acd66522c0b17854803d972ed8f1977140800853f4ac90b557577`
+vérifie 2842 postimages source et 96 fichiers/60 répertoires de fixture,
+156 nœuds/zéro socket exclu, pic mémoire 8251834368 octets, OOM/OOM-kill0,
+fermeture RC0 et CID exact absent. Le flush séparé a l'empreinte
+`90593c28e88e577debe872e74d557d735d04dd55403af44d9d11c6f3c433c600`.
+Les fixtures et sorties brutes restent privées, sans publication de contenu.
+
+Le `product_fix_demonstrated=false` du FINAL brut concerne la variation de
+contexte diagnostique et la cause de pile, pas l'annulation des neuf vrais
+résumés PASS. Il ne devient pas non plus une preuve de correction de pile.
+La preuve reste limitée au settlement chaud logiciel avec SyntheticReady :
+ni terminal worker, ni libération de quota, reprise froide, D5 global,
+namespace/restauration/NativeResume, moteurs, fournisseur, capacité100 ou
+Clippy strict qualifiés. Aucun gate ni fingerprint clos.
+
 ## 14 novembre — inspection composée R3 : 47 parents vérifiés sur `45179db`
 
 Source `45179db23205ff2a534bcadfafd694830f2a62ce`, arbre
