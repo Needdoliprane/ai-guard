@@ -1,14 +1,65 @@
 //! Owned publication from acknowledged diagnostic heads, never a runtime
 //! inventory or execution capability. The service retains this owner to join.
+//! The legacy and owned presence profiles share this owner, its sampler and
+//! its stop/join; the explicitly selected profile alone decides which runs.
 use super::*;
 use crate::{
-    broker::presence::PresenceRunOwner,
+    broker::presence::{PreparedPresence, PresenceRunOwner},
     broker_registry::{BrokerAuthorityV1, BrokerCheckpointSnapshotV1, BrokerJobCheckpointV1},
 };
 use std::sync::Weak;
 use tokio::{sync::Mutex, task::JoinHandle};
 
 type PublicationResult<T> = std::result::Result<T, PresenceError>;
+/// Sampled acknowledged heads. `None` declares nothing; it is never zero.
+pub(super) type Snapshots = watch::Receiver<Option<BrokerCheckpointSnapshotV1>>;
+
+/// Checkpoint source of a profile whose configuration explicitly enables
+/// checkpoints: the single authority its heads are declared for and the
+/// sampling cadence. No source exists, and nothing is sampled, otherwise.
+pub(super) struct CheckpointSource {
+    pub(super) authority: BrokerAuthorityV1,
+    pub(super) cadence: Duration,
+}
+
+/// A prepared presence profile the service can own. Implementations only
+/// report their explicit configuration and start their retained actors; the
+/// snapshots, when present, come exclusively from [`confirmed_snapshot`].
+pub(super) trait PresencePublisher {
+    /// `Some` exactly when the profile's configuration enables checkpoints.
+    fn checkpoint_source(&self) -> Option<CheckpointSource>;
+    /// Start the retained owner; `snapshots` is `Some` exactly when
+    /// [`checkpoint_source`](Self::checkpoint_source) returned `Some`.
+    fn start_owner(
+        self,
+        snapshots: Option<Snapshots>,
+        shutdown: watch::Receiver<bool>,
+        attempts: Arc<Semaphore>,
+        io: Arc<Semaphore>,
+    ) -> PublicationResult<PresenceRunOwner>;
+}
+
+impl PresencePublisher for PreparedPresence {
+    fn checkpoint_source(&self) -> Option<CheckpointSource> {
+        self.checkpoints_enabled().then(|| CheckpointSource {
+            authority: self.checkpoint_authority(),
+            cadence: self.publication_interval(),
+        })
+    }
+
+    fn start_owner(
+        self,
+        snapshots: Option<Snapshots>,
+        shutdown: watch::Receiver<bool>,
+        attempts: Arc<Semaphore>,
+        io: Arc<Semaphore>,
+    ) -> PublicationResult<PresenceRunOwner> {
+        match snapshots {
+            Some(snapshots) => self.start_with_checkpoints(snapshots, shutdown, attempts, io),
+            None => self.start(shutdown, attempts, io),
+        }
+    }
+}
 
 struct SourceState {
     task: Option<JoinHandle<()>>,
@@ -22,10 +73,13 @@ pub(super) struct Publication {
 }
 
 impl Publication {
-    pub(super) fn start(
+    /// One retained owner per prepared profile. With a checkpoint source, the
+    /// publisher starts before its sampler, which offers only acknowledged
+    /// heads of an already admitted Full writer; without one, no sampler runs.
+    pub(super) fn start<P: PresencePublisher>(
         service: &Arc<Service>,
         profile: String,
-        presence: PreparedPresence,
+        presence: P,
         shutdown: watch::Receiver<bool>,
         attempts: Arc<Semaphore>,
         io: Arc<Semaphore>,
@@ -33,19 +87,18 @@ impl Publication {
         let runtime =
             tokio::runtime::Handle::try_current().map_err(|_| PresenceError::Unavailable)?;
         let (stop, stopped) = watch::channel(false);
-        let (publisher, task) = if presence.checkpoints_enabled() {
-            let authority = presence.checkpoint_authority();
-            let cadence = presence.publication_interval();
-            let (snapshots, source) = watch::channel(None);
-            let publisher =
-                presence.start_with_checkpoints(source, shutdown.clone(), attempts, io)?;
-            let service = Arc::downgrade(service);
-            let task = runtime.spawn(sample(
-                service, profile, authority, cadence, snapshots, shutdown, stopped,
-            ));
-            (publisher, Some(task))
-        } else {
-            (presence.start(shutdown, attempts, io)?, None)
+        let (publisher, task) = match presence.checkpoint_source() {
+            Some(CheckpointSource { authority, cadence }) => {
+                let (snapshots, source) = watch::channel(None);
+                let publisher =
+                    presence.start_owner(Some(source), shutdown.clone(), attempts, io)?;
+                let service = Arc::downgrade(service);
+                let task = runtime.spawn(sample(
+                    service, profile, authority, cadence, snapshots, shutdown, stopped,
+                ));
+                (publisher, Some(task))
+            }
+            None => (presence.start_owner(None, shutdown, attempts, io)?, None),
         };
         Ok(Self {
             publisher,

@@ -2,6 +2,9 @@
 use super::*;
 use crate::{broker_registry::BrokerV1, identity::*};
 
+/// Proposed owned (formats 14/15) whitelisted human broker projection.
+pub(super) mod owned;
+
 pub(super) const GENESIS_KIND: &str = "control.identity.brokers_access.genesis";
 pub(super) const READ_KIND: &str = "control.identity.brokers.access";
 #[derive(Serialize, Deserialize)]

@@ -16,6 +16,10 @@
 mod manifest;
 pub use manifest::*;
 pub(crate) mod maintenance;
+/// Proposed offline owned broker identity maintenance, reachable by the
+/// binary's `human-sources broker-identity` command; the rest of the
+/// maintenance module stays crate-private.
+pub use maintenance::broker_identity;
 pub mod migration;
 pub mod startup;
 

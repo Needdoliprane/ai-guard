@@ -12,6 +12,9 @@ use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use serde::{Deserialize, Serialize};
 mod brokers;
+/// Proposed owned (formats 14/15) human broker registry projection, served on
+/// its own path because its page shape is not the legacy page's.
+mod brokers_owned;
 #[cfg(test)]
 pub(super) mod event_read_test_hook;
 mod recent;
@@ -808,6 +811,7 @@ pub(super) fn routes() -> Router<GatewayState> {
     Router::new()
         .route("/human/identity", get(identity))
         .route("/human/brokers", get(brokers::brokers))
+        .route("/human/owned/brokers", get(brokers_owned::brokers))
         .route("/human/workers", get(workers::workers))
         .route(
             "/human/federation/workers",
@@ -1028,6 +1032,11 @@ fn identity_sync(
         },
         contexts_complete,
         contexts,
+        read_profiles: state.owned_human.as_ref().map(|_| HumanReadProfilesV1 {
+            broker_registry: HumanBrokerRegistryReadProfileV1::OwnedV1,
+            worker_registry: HumanUnavailableReadProfileV1::Unavailable,
+            federation_registry: HumanUnavailableReadProfileV1::Unavailable,
+        }),
     };
     if capacity_exhausted && identity.contexts.is_empty() {
         return Err(state_failure(StateFailure::Capacity));

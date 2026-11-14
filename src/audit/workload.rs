@@ -7,6 +7,8 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 
+/// Proposed owned broker binding writers (IdentityAuthority) and status reads.
+pub(super) mod owned_broker_identity;
 #[cfg(test)]
 #[path = "workload_scoped_tests.rs"]
 mod scoped_tests;
@@ -717,20 +719,33 @@ impl Store {
         };
         require_checked_schema(&tx)?;
         let clock = capture_control_time(&tx)?;
-        if let Some(receipt) = replay(&tx, &change)? {
-            self.commit_authorized(tx, &clock)?;
+        let receipt = self.persist_workload_checked(&mut tx, &clock, change)?;
+        self.commit_authorized(tx, &clock)?;
+        Ok(receipt)
+    }
+    /// Shared binding mutation body over a checked transaction whose access
+    /// class, format guard and control clock the caller already established.
+    /// An exact replay returns the original receipt without a second write.
+    /// The caller alone commits; nothing is published before that commit.
+    fn persist_workload_checked(
+        &self,
+        tx: &mut CheckedTransaction<'_>,
+        clock: &AuthorizedControlTimeV1,
+        change: Change,
+    ) -> anyhow::Result<WorkloadBindingReceiptV1> {
+        if let Some(receipt) = replay(tx, &change)? {
             return Ok(receipt);
         }
-        validate_issue_worker(&tx, &change, None)?;
+        validate_issue_worker(tx, &change, None)?;
         let record = Record {
             version: 1,
             input_hash: change.input_hash()?,
             received_at: format_time(clock.at()),
             change,
         };
-        validate_control_time(&tx, &record.received_at, None)?;
-        let mut projection = preflight(&tx, &record.change)?;
-        let next_seq = audit_head(&tx)?
+        validate_control_time(tx, &record.received_at, None)?;
+        let mut projection = preflight(tx, &record.change)?;
+        let next_seq = audit_head(tx)?
             .0
             .checked_add(1)
             .context("audit sequence exhausted")?;
@@ -742,9 +757,9 @@ impl Store {
         let (event, payload) = self.prepare_event(event)?;
         workload_valid(serde_json::to_value(&event)? == original)?;
         let stored = if matches!(record.change, Change::Revoke { .. }) {
-            self.append_authorized_identity_in_transaction(&tx, event, payload, &clock)?
+            self.append_authorized_identity_in_transaction(tx, event, payload, clock)?
         } else {
-            self.append_authorized_in_transaction(&tx, event, payload, &clock)?
+            self.append_authorized_in_transaction(tx, event, payload, clock)?
         };
         workload_valid(
             stored.seq == next_seq
@@ -764,8 +779,7 @@ impl Store {
             }
         }
         tx.execute("INSERT INTO workload_operations(operation_id,input_hash,event_seq,credential_id,revision) VALUES(?1,?2,?3,?4,?5)",params![record.change.operation_id(),record.input_hash,stored.seq,binding.credential_id,i64::try_from(binding.revision)?])?;
-        tx.positive_bindings = Some(metadata::PositiveBindings::load(&tx)?);
-        self.commit_authorized(tx, &clock)?;
+        tx.positive_bindings = Some(metadata::PositiveBindings::load(tx)?);
         Ok(receipt(
             &stored,
             binding.credential_id,
@@ -807,7 +821,20 @@ impl Store {
         };
         require_checked_schema(&tx)?;
         let clock = capture_control_time(&tx)?;
-        let now = clock.at();
+        let identity = self.authenticate_workload_digest_checked(&tx, &digest, clock.at())?;
+        self.commit_authorized(tx, &clock)?;
+        Ok(identity)
+    }
+    /// Shared workload authentication body over a checked transaction whose
+    /// access class, format guard and control clock the caller established:
+    /// binding, expiry, grant, incarnation and time floor of the digest's
+    /// subject. `None` is an unbound digest. The caller alone commits.
+    fn authenticate_workload_digest_checked(
+        &self,
+        tx: &CheckedTransaction<'_>,
+        digest: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Option<AuthenticatedWorkload>> {
         let json = tx
             .query_row(
                 "SELECT payload_json FROM workload_bindings WHERE sha256_digest=?1",
@@ -816,7 +843,6 @@ impl Store {
             )
             .optional()?;
         let Some(json) = json else {
-            self.commit_authorized(tx, &clock)?;
             return Ok(None);
         };
         let binding: WorkloadBinding = serde_json::from_str(&json)?;
@@ -826,7 +852,7 @@ impl Store {
                 broker_id,
                 incarnation_id,
             } => {
-                let broker = load_broker(&tx, broker_id)?.ok_or(WorkloadFailureV1::Unauthorized)?;
+                let broker = load_broker(tx, broker_id)?.ok_or(WorkloadFailureV1::Unauthorized)?;
                 workload_authorized(broker.incarnation_id == *incarnation_id)?;
                 let identity = BrokerIdentityV1::authenticated(
                     self.tenant_id.clone(),
@@ -835,7 +861,7 @@ impl Store {
                     binding.revision,
                     broker.grant_revision,
                 )?;
-                revalidate_broker_identity_checked(&tx, &identity, now)?;
+                revalidate_broker_identity_checked(tx, &identity, now)?;
                 broker.require_current_grant(&identity, &format_time(now))?;
                 AuthenticatedWorkload::Broker(identity)
             }
@@ -852,11 +878,10 @@ impl Store {
                     generation: *generation,
                     binding_revision: binding.revision,
                 };
-                self.checked_worker_relay_identity(&tx, &identity, now)?;
+                self.checked_worker_relay_identity(tx, &identity, now)?;
                 AuthenticatedWorkload::Worker(identity)
             }
         };
-        self.commit_authorized(tx, &clock)?;
         Ok(Some(identity))
     }
     pub(super) fn checked_worker_relay_identity(

@@ -28,6 +28,9 @@ mod hash_tests;
 mod http;
 #[cfg(test)]
 mod http_tests;
+/// Proposed owned broker-supervision publisher, selected only by its explicit
+/// configuration profile. It never falls back to, adopts or migrates legacy.
+pub(crate) mod owned;
 #[cfg(test)]
 mod preparation_tests;
 mod storage;
@@ -49,6 +52,8 @@ pub(crate) enum PresenceError {
     Transport,
     Unavailable,
     Stopped,
+    /// Closed owned-profile state. It never carries remote prose or a secret.
+    Owned(owned::OwnedPresenceBlock),
 }
 impl PresenceError {
     pub(crate) fn fences_admission(self) -> bool {
@@ -72,6 +77,7 @@ impl fmt::Display for PresenceError {
             Self::Transport => "broker presence transport attempts were exhausted",
             Self::Unavailable => "broker presence is unavailable",
             Self::Stopped => "broker presence was stopped",
+            Self::Owned(block) => return fmt::Display::fmt(block, f),
         })
     }
 }
@@ -196,37 +202,12 @@ impl PreparedPresence {
         }
         .validate()
         .map_err(|_| PresenceError::InvalidConfig)?;
-        if scope.installation_id.is_nil()
-            || scope.control_namespace_uuid.is_nil()
-            || scope.profile_id.is_empty()
-            || scope.profile_id.len() > 80
-            || !scope
-                .profile_id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
-        {
-            return Err(PresenceError::InvalidConfig);
-        }
-        crate::tenancy::validate_tenant_id(&scope.expected_tenant_id)
-            .map_err(|_| PresenceError::InvalidConfig)?;
-        let origin = origin(&scope.gateway)?;
-        scope.gateway = origin.as_str().trim_end_matches('/').into();
+        let origin = admit_scope(&mut scope)?;
         normalized(&config.broker_token_file)?;
         normalized(&config.state_dir)?;
         let token_file = PrivateFile::open(&config.broker_token_file, 4097)
             .map_err(|_| PresenceError::InvalidConfig)?;
-        let token =
-            std::str::from_utf8(token_file.bytes()).map_err(|_| PresenceError::InvalidConfig)?;
-        let token = token.strip_suffix('\n').unwrap_or(token);
-        if !(32..=4096).contains(&token.len())
-            || !token.is_ascii()
-            || token
-                .bytes()
-                .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
-        {
-            return Err(PresenceError::InvalidConfig);
-        }
-        let token = token.to_owned();
+        let token = private_bearer(&token_file)?;
         let ca = config
             .ca_bundle_file
             .as_ref()
@@ -299,6 +280,13 @@ impl PreparedPresence {
     pub(crate) fn secret_literals(&self) -> Vec<String> {
         vec![self.token.clone()]
     }
+    /// The configured state directories, already opened read-only by `load`.
+    /// The service compares them with owned journals; nothing is created here.
+    pub(crate) fn journal_roots(&self) -> Vec<Directory> {
+        let mut roots = vec![self.state.clone()];
+        roots.extend(self.checkpoint_state.iter().cloned());
+        roots
+    }
     pub(crate) fn finalize(&mut self, values: &[String]) -> Result<()> {
         if self.stream.is_some() {
             return Err(PresenceError::UnsafeState);
@@ -344,26 +332,10 @@ impl PreparedPresence {
         Ok(())
     }
     fn screen_text(&self, text: &str) -> Result<()> {
-        if self
-            .secrets
-            .iter()
-            .any(|secret| !secret.is_empty() && text.contains(secret))
-            || Redactor::new(self.secrets.clone()).text(text) != text
-        {
-            return Err(PresenceError::Protocol);
-        }
-        Ok(())
+        screen_text_with(&self.secrets, text)
     }
     fn screen(&self, value: &Value) -> Result<()> {
-        match value {
-            Value::String(s) => self.screen_text(s),
-            Value::Array(values) => values.iter().try_for_each(|v| self.screen(v)),
-            Value::Object(values) => values.iter().try_for_each(|(key, v)| {
-                self.screen_text(key)?;
-                self.screen(v)
-            }),
-            _ => Ok(()),
-        }
+        screen_with(&self.secrets, value)
     }
     pub(crate) async fn run(
         self,
@@ -423,6 +395,64 @@ impl PreparedPresence {
 }
 fn uuid(value: &str) -> Result<()> {
     crate::broker_registry::registry_uuid(value).map_err(|_| PresenceError::InvalidConfig)
+}
+/// Broker-side scope admission shared by the legacy and owned profiles. It
+/// returns the exact origin and keeps its canonical spelling without slash.
+fn admit_scope(scope: &mut PresenceScope) -> Result<reqwest::Url> {
+    if scope.installation_id.is_nil()
+        || scope.control_namespace_uuid.is_nil()
+        || scope.profile_id.is_empty()
+        || scope.profile_id.len() > 80
+        || !scope
+            .profile_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+    {
+        return Err(PresenceError::InvalidConfig);
+    }
+    crate::tenancy::validate_tenant_id(&scope.expected_tenant_id)
+        .map_err(|_| PresenceError::InvalidConfig)?;
+    let origin = origin(&scope.gateway)?;
+    scope.gateway = origin.as_str().trim_end_matches('/').into();
+    Ok(origin)
+}
+/// Private bearer rules shared by both profiles: one ASCII line of 32 to 4096
+/// visible bytes, without whitespace or control characters.
+fn private_bearer(file: &PrivateFile) -> Result<String> {
+    let token = std::str::from_utf8(file.bytes()).map_err(|_| PresenceError::InvalidConfig)?;
+    let token = token.strip_suffix('\n').unwrap_or(token);
+    if !(32..=4096).contains(&token.len())
+        || !token.is_ascii()
+        || token
+            .bytes()
+            .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+    {
+        return Err(PresenceError::InvalidConfig);
+    }
+    Ok(token.to_owned())
+}
+/// Secret screen shared by both profiles: no known literal and no redactor
+/// pattern may occur in persisted, displayed or accepted material.
+fn screen_text_with(secrets: &[String], text: &str) -> Result<()> {
+    if secrets
+        .iter()
+        .any(|secret| !secret.is_empty() && text.contains(secret))
+        || Redactor::new(secrets.to_vec()).text(text) != text
+    {
+        return Err(PresenceError::Protocol);
+    }
+    Ok(())
+}
+fn screen_with(secrets: &[String], value: &Value) -> Result<()> {
+    match value {
+        Value::String(s) => screen_text_with(secrets, s),
+        Value::Array(values) => values.iter().try_for_each(|v| screen_with(secrets, v)),
+        Value::Object(values) => values.iter().try_for_each(|(key, v)| {
+            screen_text_with(secrets, key)?;
+            screen_with(secrets, v)
+        }),
+        _ => Ok(()),
+    }
 }
 fn normalized(path: &Path) -> Result<()> {
     if !path.is_absolute()

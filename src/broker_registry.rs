@@ -10,6 +10,8 @@ use std::collections::BTreeSet;
 
 mod checkpoint;
 mod federation;
+/// Proposed owned broker-supervision profile: pure shared contract only.
+pub mod owned_supervision;
 pub use checkpoint::{
     BrokerCheckpointCoverageV1, BrokerCheckpointFreshnessV1, BrokerCheckpointObservationV1,
     BrokerCheckpointResultV1, BrokerCheckpointSnapshotV1, BrokerCheckpointV1,

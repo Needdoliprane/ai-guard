@@ -222,6 +222,21 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
         {
             Some(BrokerPresence)
         }
+        // Proposed owned broker-supervision targets (`OwnedBrokerOperationV2`).
+        // Classified for relay forwarding and presence capacity only: the
+        // gateway gate authenticates the owned proof, and a legacy gateway
+        // refuses these targets before any extractor or body read.
+        (&Method::GET, ["owned", "brokers", "identity"])
+        | (&Method::GET, ["owned", "brokers", "self"])
+        | (&Method::POST, ["owned", "brokers", "heartbeats"])
+        | (&Method::POST, ["owned", "brokers", "heartbeats", "reconcile"])
+        | (&Method::POST, ["owned", "brokers", "checkpoints"])
+        | (&Method::POST, ["owned", "brokers", "checkpoints", "reconcile"])
+        | (&Method::GET, ["owned", "brokers", "checkpoints", "self"])
+            if v1 =>
+        {
+            Some(BrokerPresence)
+        }
         (&Method::POST | &Method::GET, ["relay", "messages"]) if v1 => Some(WorkerRelay),
         (&Method::POST, ["relay", "messages", id, "ack"]) if v1 && canonical_uuid(id) => {
             Some(WorkerRelay)

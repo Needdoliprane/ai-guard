@@ -11,32 +11,34 @@ pub(super) fn require_schema12(db: &Connection) -> anyhow::Result<()> {
     }
 }
 
-struct Retained {
+pub(super) struct Retained {
     stored: StoredEvent,
     record: Record,
     broker: BrokerV1,
 }
-fn latest(db: &Connection, broker: &str) -> anyhow::Result<Option<Retained>> {
+/// Decode one checkpoint operation row and recheck its record commitment.
+/// Shared by the legacy lookup and the owned bounded lookup; no format gate.
+pub(super) fn retained(stored: StoredEvent, broker: &str) -> anyhow::Result<Retained> {
+    let record: Record = serde_json::from_value(stored.event.data.clone())?;
+    require(
+        record.version == 2
+            && matches!(record.change, Change::Checkpoint { .. })
+            && record.input_hash == record.change.input_hash()?,
+    )?;
+    record.change.validate()?;
+    Ok(Retained {
+        stored,
+        record,
+        broker: serde_json::from_str(broker)?,
+    })
+}
+pub(super) fn latest(db: &Connection, broker: &str) -> anyhow::Result<Option<Retained>> {
     let row = db.query_row(
         "SELECT e.seq,e.received_at,e.prev_hash,e.hash,e.payload,o.result_json FROM broker_registry_operations o JOIN events e ON e.seq=o.event_seq WHERE o.broker_id=?1 AND e.kind='control.broker_registry.checkpoint' ORDER BY o.event_seq DESC LIMIT 1",
         [broker],
         |row| Ok((row_event(row)?, row.get::<_, String>(5)?)),
     ).optional()?;
-    row.map(|(stored, broker)| {
-        let record: Record = serde_json::from_value(stored.event.data.clone())?;
-        require(
-            record.version == 2
-                && matches!(record.change, Change::Checkpoint { .. })
-                && record.input_hash == record.change.input_hash()?,
-        )?;
-        record.change.validate()?;
-        Ok(Retained {
-            stored,
-            record,
-            broker: serde_json::from_str(&broker)?,
-        })
-    })
-    .transpose()
+    row.map(|(stored, broker)| retained(stored, &broker)).transpose()
 }
 pub(super) fn latest_publication(
     db: &Connection,
@@ -51,7 +53,7 @@ pub(super) fn latest_publication(
         })
         .transpose()
 }
-fn observation(
+pub(super) fn observation(
     retained: Retained,
     current: &BrokerV1,
     evaluated_at: &str,

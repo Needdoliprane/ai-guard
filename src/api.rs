@@ -62,6 +62,8 @@ mod kubernetes_sessions;
 #[cfg(test)]
 mod kubernetes_tests;
 mod oidc;
+/// Proposed owned broker-supervision routes (`broker_supervision_owned_v2`).
+mod owned_brokers;
 #[cfg(test)]
 mod read_execution_tests;
 mod relay;
@@ -917,6 +919,7 @@ fn gateway_base_router(state: GatewayState) -> Router {
                 .merge(relay::routes())
                 .merge(relay_admission::routes())
                 .merge(brokers::routes())
+                .merge(owned_brokers::routes())
                 .merge(kubernetes::routes())
                 .merge(kubernetes_sessions::routes())
                 .merge(human::routes()),

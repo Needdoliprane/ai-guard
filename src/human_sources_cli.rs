@@ -27,6 +27,7 @@ use std::{
 };
 use uuid::Uuid;
 mod activation;
+mod broker_identity;
 mod inputs;
 mod preparation;
 mod schema;
@@ -51,6 +52,8 @@ pub(crate) enum HumanSourcesCommand {
     Resume(StoppedPreparationArgs),
     /// Validate private metadata files only; no SQLite, owner or writes.
     Check(PreparationArgs),
+    /// Offline owned broker identity (proposal): enroll, rotate, revoke, resume, status.
+    BrokerIdentity(broker_identity::BrokerIdentityArgs),
 }
 #[derive(Args)]
 pub(crate) struct PrepareArgs {
@@ -118,6 +121,9 @@ pub(crate) async fn run(args: HumanSourcesArgs) -> Result<()> {
             "preserve_and_reconcile; resume_same_operation_only",
         ),
         HumanSourcesCommand::Check(_) => ("check", "inspect_files_only"),
+        HumanSourcesCommand::BrokerIdentity(_) => {
+            ("broker-identity", "preserve_the_plan_directory")
+        }
     };
     let result = match args.command {
         HumanSourcesCommand::Prepare(args) => {
@@ -152,6 +158,8 @@ pub(crate) async fn run(args: HumanSourcesArgs) -> Result<()> {
             );
             return Ok(());
         }
+        // Its own closed report and refusal vocabulary; no shared state here.
+        HumanSourcesCommand::BrokerIdentity(args) => return broker_identity::run(args),
     };
     match result {
         Ok((state, count)) => {

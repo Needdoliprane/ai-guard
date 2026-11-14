@@ -1,7 +1,10 @@
 //! Authentication precedes both reserved operation admission and body polling.
 //! Existing handlers authenticate/revalidate again at their normal boundaries.
 use super::*;
-use crate::control_transport::{ControlRouteIdentity, control_query, control_route};
+use crate::{
+    broker_registry::owned_supervision::OwnedBrokerOperationV2,
+    control_transport::{ControlRouteIdentity, control_query, control_route},
+};
 use axum::{body::HttpBody, extract::FromRequestParts};
 use tokio::sync::Semaphore;
 
@@ -58,6 +61,32 @@ pub(super) fn owned_protocol_request(request: &Request) -> bool {
             .extensions()
             .get::<Arc<auth::owned_control::OwnedProtocol>>()
             .is_some()
+}
+
+/// Produced only here after owned authentication and presence admission.
+#[derive(Clone, Copy)]
+pub(super) struct OwnedBrokerRoute(OwnedBrokerOperationV2);
+impl OwnedBrokerRoute {
+    pub(super) fn operation(self) -> OwnedBrokerOperationV2 {
+        self.0
+    }
+}
+
+pub(super) fn owned_broker_request(request: &Request) -> bool {
+    let Some(route) = request.extensions().get::<OwnedBrokerRoute>().copied() else {
+        return false;
+    };
+    let operation = route.operation();
+    request.method().as_str() == operation.method()
+        && request.uri().query().is_none()
+        && request
+            .extensions()
+            .get::<axum::extract::MatchedPath>()
+            .is_some_and(|path| path.as_str() == operation.path())
+        && request
+            .extensions()
+            .get::<Arc<auth::owned_broker_supervision::OwnedBrokerSupervisionWork>>()
+            .is_some_and(|work| work.operation() == operation)
 }
 
 pub(super) struct ControlCapacity {
@@ -141,6 +170,15 @@ async fn read_body(body: Body, max_body: usize) -> Result<Vec<u8>, Response> {
 }
 
 async fn gate(State(state): State<GatewayState>, request: Request, next: Next) -> Response {
+    let owned_broker =
+        OwnedBrokerOperationV2::classify(request.method().as_str(), request.uri().path());
+    if owned_broker.is_some() && state.owned_human.is_none() {
+        return refused(
+            StatusCode::NOT_FOUND,
+            "unknown_control_route",
+            "Unknown control transport route.",
+        );
+    }
     let inspection_route = crate::control_transport::owned_policy_inspection_route(
         request.method(),
         request.uri().path(),
@@ -155,12 +193,15 @@ async fn gate(State(state): State<GatewayState>, request: Request, next: Next) -
     }
     let max_body = if policy_route {
         crate::control::egress_policy::REQUEST_BYTES
+    } else if let Some(operation) = owned_broker {
+        operation.request_limit()
     } else {
         MAX_BODY
     };
     if state.owned_human.is_some()
         && !(crate::control_transport::owned_protocol_route(request.method(), request.uri().path())
-            || policy_route)
+            || policy_route
+            || owned_broker.is_some())
     {
         let method = if request.method() == "HEAD" {
             &axum::http::Method::GET
@@ -214,6 +255,7 @@ async fn gate(State(state): State<GatewayState>, request: Request, next: Next) -
     let (mut parts, body) = request.into_parts();
     let mut owned_identity = None;
     let mut owned_policy_identity = None;
+    let mut owned_broker_identity = None;
     let semaphore = match identity {
         ControlRouteIdentity::Runner => {
             if state.owned_human.is_some() && policy_route {
@@ -240,6 +282,16 @@ async fn gate(State(state): State<GatewayState>, request: Request, next: Next) -
                     Err(rejection) => return rejection.into_response(),
                 }
             }
+        }
+        ControlRouteIdentity::BrokerPresence if owned_broker.is_some() => {
+            let identity =
+                match auth::owned_broker_supervision::authenticate(&state, &parts.headers).await {
+                    Ok(identity) => identity,
+                    Err(rejection) => return rejection.into_response(),
+                };
+            let capacity = identity.tenant().control_capacity.presence.clone();
+            owned_broker_identity = Some(identity);
+            capacity
         }
         ControlRouteIdentity::BrokerPresence => {
             let broker =
@@ -299,6 +351,12 @@ async fn gate(State(state): State<GatewayState>, request: Request, next: Next) -
         parts
             .extensions
             .insert(Arc::new(identity.accept(operation)));
+        None
+    } else if let (Some(route), Some(identity)) = (owned_broker, owned_broker_identity) {
+        parts.extensions.insert(OwnedBrokerRoute(route));
+        parts
+            .extensions
+            .insert(Arc::new(identity.accept(route, operation)));
         None
     } else {
         Some(operation)
