@@ -21,8 +21,9 @@ covers:
   `resume`, `status` (subcommands of `agentsandbox human-sources broker-identity`);
 - the trust model of the enrollment handoff;
 - the seven closed owned supervision routes on the control transport;
-- the owned human broker page on `GET /api/v1/human/owned/brokers` (API
-  only: the dashboard does not display it yet);
+- the owned human broker page on `GET /api/v1/human/owned/brokers` and its
+  source-integrated dashboard candidate (HTTP and visual qualification remain
+  `NOT_RUN` on this composition);
 - diagnosis of the closed refusals, backup/restore and recovery.
 
 It does not cover the publisher, which has its own
@@ -365,10 +366,13 @@ default 25, and the sealed `cursor`) serves the owned page. Its shape is not
 the legacy registry page's, so it has its own path and names
 `profile:"human_broker_registry_owned_v1"`; the legacy
 `GET /api/v1/human/brokers` stays closed there (`503 identity_unavailable`),
-as before, and the existing dashboard never receives the owned shape. The
-dashboard does not display the owned page yet: its parser, its states and its
-proxy path are not implemented. A legacy gateway refuses the owned path
-before any authentication or Store work.
+as before. This composition includes the dashboard's owned parser and states
+and its exact GET proxy path. The dashboard selects this page from the
+gateway's explicit `read_profiles` announcement, independently of permission.
+Integrated HTTP and visual qualification remain `NOT_RUN` on this source;
+these changes do not activate the profile or provide owned worker/federation
+views. A legacy gateway refuses the owned path before any authentication or
+Store work.
 
 The page uses a local human proof in an Administration context with the
 `ReadBrokerRegistry` capability, revalidated in the read transaction of the

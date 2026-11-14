@@ -22,8 +22,9 @@ guide couvre :
   `agentsandbox human-sources broker-identity`) ;
 - le modèle de confiance de la remise d'enrôlement ;
 - les sept routes fermées de supervision owned sur le transport de contrôle ;
-- la page humaine des brokers owned sur `GET /api/v1/human/owned/brokers`
-  (API seulement : le dashboard ne l'affiche pas encore) ;
+- la page humaine des brokers owned sur `GET /api/v1/human/owned/brokers` et
+  son candidat dashboard intégré en source (qualification HTTP et visuelle
+  encore `NOT_RUN` sur cette composition) ;
 - le diagnostic des refus fermés, la sauvegarde/restauration et la reprise.
 
 Il ne couvre pas le publisher, qui a son propre
@@ -385,10 +386,13 @@ Sur un gateway owned, `GET /api/v1/human/owned/brokers` (query `limit` de 1
 pas celle de la page legacy du registre : elle a donc son propre chemin et
 porte `profile:"human_broker_registry_owned_v1"` ; le chemin legacy
 `GET /api/v1/human/brokers` y reste fermé (`503 identity_unavailable`), comme
-avant, et le dashboard existant ne reçoit jamais la forme owned. Le dashboard
-n'affiche pas encore la page owned : son parseur, ses états et son chemin de
-proxy ne sont pas implémentés. Un gateway legacy refuse le chemin owned avant
-toute authentification ou travail Store.
+avant. Cette composition intègre le parseur et les états owned du dashboard
+ainsi que son chemin proxy GET exact. Le dashboard choisit cette page depuis
+l'annonce explicite `read_profiles` du gateway, indépendamment des permissions.
+La qualification HTTP et visuelle intégrée reste `NOT_RUN` sur cette source ;
+ces changements n'activent pas le profil et n'apportent pas de vues owned
+workers/fédération. Un gateway legacy refuse le chemin owned avant toute
+authentification ou travail Store.
 
 La page utilise une preuve humaine locale dans un contexte Administration
 avec la capacité `ReadBrokerRegistry`, revalidé dans la transaction de
