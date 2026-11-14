@@ -1,5 +1,29 @@
 # Décisions d'industrialisation
 
+## 14 novembre — une version et un build communs, sans updater implicite
+
+Le mainteneur fixe la version produit de développement à 0.0.1 et demande un
+ensemble ai-guard aligné : Cargo est canonique, les racines package/lock frontend
+concordent, le même digest de source publique préparée devient Build ID commun.
+Un plan Rust le lit une fois puis passe version/ID/révision facultative aux
+trois stages frontend/Rust contrôle et Rust worker, sans modifier la copie
+scellée, Git vivant, horloge ou identifiant aléatoire. Révision 40/64 hex fournie
+explicitement ; ID/données inconnus restent inconnus. Les versions propres des
+clients IA, bases, protocoles et images de base restent indépendantes.
+
+Les [identités publiques](../api.md#build-status) décrivent le composant local
+ou le gateway fixe du dashboard ; elles ne donnent ni readiness ni accès tenant.
+L'interface conserve son identité compilée et rend les décalages visibles avant
+connexion. [Procédure EN](../setup/release/README.md#versions-and-updates) ·
+[FR](../setup/release/README.fr.md#versions-and-updates).
+Aucun daemon/updater, déploiement automatique ou remplacement de session n'est
+ajouté. Les sessions admises gardent leur image immuable ; maintenance,
+migrations et basculement restent des actions explicites distinctes.
+
+Contrat lu sur `e0372db`, sans compilation/tests/images/rollout dans ce lot
+documentaire. Les artefacts et preuves 0.1.0 historiques ne sont pas renommés ;
+aucun gate production clos par cette décision ou ces métadonnées.
+
 ## 13 novembre — note de réalisation : adoption explicite des sources humaines
 
 Dans les frontières Rust existantes, le gateway conserve legacy par défaut et propose un profil owned explicite. Les documents privés fermés lient identités, configuration et attentes physiques ; le coordinateur13→14/4→5 précède la publication. Chaque startup reprend les sources, planchers et CAS réels. L’enveloppe seule n’est pas une autorité. Prepare a des effets SQLite ; check reste une vérification de fichiers/métadonnées, sans admission Ready.

@@ -9,6 +9,7 @@ This manual describes the complete product contract. The implementation and qual
 | Guide | What it configures |
 |---|---|
 | [Local workstation](local/README.md) | Rust CLI, Docker/Podman, control services, first worker, permissions, workspace/export, data and recovery. |
+| [Versions, build identity and manual updates](release/README.md#versions-and-updates) | One product version/build, static CLI/public status, explicit rebuild and update boundaries; no automatic updater. |
 | [Trusted local broker](broker/README.md) | Private Registry2, Docker start profile, service/IPC, replay identities, approval, cancellation, recovery and export. |
 | [Owned remote broker publisher](federation-broker/README.md) | Proposed `broker_supervision_owned_v2` presence profile: explicit selection, enrollment handoff and pins, private journals, Pending/ACK recovery, retries, rotation, backup and refusal of remote adoption. Not admitted or qualified. |
 | [Workload identities and relay](workloads/README.md) | Explicit migrations5→6→7, scoped credentials, broker registry and its separately authorized human view, directed messages, audit budgets and maintenance. Runtime transport remains separate. |

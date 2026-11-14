@@ -1,12 +1,71 @@
-# Contrat API locale — v0.1.0
+# Contrat API locale — produit 0.0.1
 
 Les routes historiques du tableau ci-dessous sont également exposées sous le préfixe versionné `/api/v1` ; `/api` reste leur alias compatible. Les nouvelles [routes de supervision](#supervision-centrale--protocole-v1) et la [route des faits du contrôle](#ingestion-et-faits-du-contrôle--ingestion-and-control-facts) existent uniquement sous `/api/v1`. `GET /api/v1/identity` (ou `/api/identity`) renvoie `{tenant_id,role}` depuis le jeton authentifié. Le gateway peut charger plusieurs identités et bases avec `--tenants-file` ; le [contrat multi-client](engineering/CLOUD_TENANCY.md) documente la configuration, la liaison durable et les limites. Les identifiants envoyés dans les requêtes ne choisissent jamais le tenant.
 
 Gateway par défaut : `http://127.0.0.1:8787`. Le dashboard utilise les mêmes routes de lecture sous `http://127.0.0.1:4000`. La gateway et le dashboard ne fournissent aucune route d'exécution de commande HTTP : seul le CLI de confiance pilote Docker/Podman.
 
+<a id="build-status"></a>
+
+## Identité publique du build / Public build identity
+
+La version produit `0.0.1` est distincte des versions de protocole `/api/v1`,
+DTO, Store et journaux. Le contrat ci-dessous est documenté depuis la source
+`e0372db` du 14 novembre 2026 ; compilation, tests, images et déploiement de
+cette candidate restent **NOT_RUN dans ce lot documentaire**. Les anciennes
+preuves conservent leurs sources et leurs versions.
+
+| Serveur joint / Server reached | GET/HEAD exact | Composant décrit / Reported component |
+|---|---|---|
+| Gateway | `/api/v1/status` | `gateway`, identité locale compilée / local compiled identity |
+| Dashboard | `/api/v1/status` | `dashboard`, identité locale compilée / local compiled identity |
+| Dashboard | `/api/v1/gateway/status` | `gateway`, lu depuis son upstream configuré fixe / read from its fixed configured upstream |
+
+Ces GET/HEAD sont publics, sans Bearer, y compris dans le profil owned. Aucun alias
+`/api/status` ou `/api/gateway/status` n'est déclaré. Le handler local ne lit
+ni configuration, ni Store, ni audit ; il ne teste pas le gateway voisin.
+Les protections HTTP/Origin communes restent appliquées. Une réponse décrit
+le binaire qui répond, sans prouver santé, autorisation, compatibilité des
+données, audit disponible ou readiness. `/healthz` conserve son contrat actuel.
+
+These GET/HEAD requests disclose only static build metadata. Local dashboard status does
+not describe its gateway. The dashboard's gateway-status read uses its one
+configured upstream, fixes the path to `/api/v1/status`, drops query/fragment,
+and forwards no caller credential, cookie or header. A query cannot select
+another destination. Redirects and environment proxies are disabled. The whole
+send/read/decode is bounded to 5 seconds and 8192 bytes, requires HTTP 200,
+JSON and the exact gateway component; unavailable, old/incompatible or invalid
+upstream responses produce **502**, without a guessed identity or fallback.
+Responses use `Cache-Control: no-store` under the common HTTP protections.
+
+Le DTO fermé `BuildStatusV1` a exactement cette forme ; l'exemple représente
+un build sans annotation, pas une observation d'installation :
+
+```json
+{"schema_version":1,"product":"ai-guard","version":"0.0.1","component":"gateway","build":{"id":null,"revision":null}}
+```
+
+`schema_version=1`, `product=ai-guard`, `version` (SemVer ASCII borné à 64
+caractères) et `component` sont obligatoires. `build.id` et `build.revision`
+sont toujours présents, chaîne ou `null`. Un ID valide a 1–64 caractères
+ASCII `[A-Za-z0-9._+-]` ; une révision valide a exactement 40 ou 64 caractères
+hexadécimaux. Le lecteur refuse les champs inconnus, manquants, les formes
+non objet et une identité de composant inattendue ; une version différente
+mais valide reste sa vraie version. Les métadonnées de compilation absentes
+ou malformées sont publiées comme `null`, jamais reconstituées depuis Git,
+une horloge ou un serveur voisin.
+
+All fields are required, including explicit nullable build fields. Metadata
+is descriptive and public, not a signature, image digest, compatibility
+certificate, execution permission or update notification. The normal Rust
+build plan derives one common ID from its captured source for all components;
+manual unannotated builds can report unknown. Compare the frontend bundle,
+dashboard and gateway separately; never replace an older or missing identity
+with a newer component's value. See the [English version/update guide](setup/release/README.md#versions-and-updates)
+and [French guide](setup/release/README.fr.md#versions-and-updates).
+
 ## Identités
 
-Toutes les routes `/api/` exigent `Authorization: Bearer <secret>`. Sur les routes techniques, le secret viewer donne accès aux lectures et le secret runner aux écritures/lectures gateway. Le dashboard vérifie le rôle `viewer` avant chaque lecture technique relayée, même si son fichier de clé a été mal configuré. Par défaut, il accepte seulement le viewer configuré ; `dashboard --shared-tenants` accepte les viewers des tenants configurés par le gateway, chacun dans son périmètre. Cette option exclut `--viewer-token-file`. Les routes humaines `/api/v1/human/` ont leur authentification nominative séparée décrite ci-dessous, sans conversion en viewer. Aucun paramètre d'URL ne transporte un jeton.
+Les routes de données `/api/` exigent `Authorization: Bearer <secret>`. Les seules exceptions de build publiques sont les GET/HEAD exacts [décrits ci-dessous](#build-status) ; ils ne donnent aucun accès tenant. Sur les routes techniques, le secret viewer donne accès aux lectures et le secret runner aux écritures/lectures gateway. Le dashboard vérifie le rôle `viewer` avant chaque lecture technique relayée, même si son fichier de clé a été mal configuré. Par défaut, il accepte seulement le viewer configuré ; `dashboard --shared-tenants` accepte les viewers des tenants configurés par le gateway, chacun dans son périmètre. Cette option exclut `--viewer-token-file`. Les routes humaines `/api/v1/human/` ont leur authentification nominative séparée décrite ci-dessous, sans conversion en viewer. Aucun paramètre d'URL ne transporte un jeton.
 
 Sur une route technique protégée reconnue, l'identité est extraite avant `Path`, `Query` et `Json` : Bearer absent/invalide →401, viewer sur mutation →403, même si son corps ou ses paramètres sont malformés. Ces refus n'imposent pas de lecture/désérialisation applicative du corps. Les erreurs d'une entrée authentifiée invalide restent celles de son contrat. Routage, transport et protections Origin/URI restent en amont : cette règle ne prétend pas empêcher toute réception d'octets réseau. [Preuves](engineering/evidence/2026-10-30/api-auth/README.md) et [ordre des extracteurs Axum](https://docs.rs/axum/latest/axum/extract/index.html#the-order-of-extractors).
 

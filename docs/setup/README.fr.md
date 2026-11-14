@@ -9,6 +9,7 @@ Ce manuel décrit le contrat du produit complet. L'état d'implémentation et le
 | Guide | Éléments configurés |
 |---|---|
 | [Poste local](local/README.fr.md) | CLI Rust, Docker/Podman, services de contrôle, premier worker, permissions, copie/export, données et reprise. |
+| [Versions, identité de build et mises à jour manuelles](release/README.fr.md#versions-and-updates) | Version/build produit communs, CLI statique/status public, reconstruction explicite et limites de mise à jour ; aucun updater automatique. |
 | [Broker local de confiance](broker/README.fr.md) | Registre privé2, profil de lancement Docker, service/IPC, identités de replay, approbation, annulation, reprise et export. |
 | [Publisher de broker distant owned](federation-broker/README.fr.md) | Profil de présence proposé `broker_supervision_owned_v2` : sélection explicite, remise d'enrôlement et pins, journaux privés, reprise Pending/ACK, réessais, rotation, sauvegarde et refus d'adoption distante. Ni admis ni qualifié. |
 | [Identités workload et relais](workloads/README.fr.md) | Migrations5→6→7 explicites, credentials restreints, registre des brokers et sa vue humaine autorisée séparément, messages dirigés, budgets d'audit et maintenance. Transport runtime distinct. |

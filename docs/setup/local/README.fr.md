@@ -44,6 +44,32 @@ L'image worker par défaut permet les commandes ordinaires. Pour Codex ou Claude
 
 Ce contrôle est structurel. `build` copie ensuite ses entrées avant la première commande du moteur et désigne cette copie au CLI du moteur à la place du checkout, comme le décrit [sources préparées de build et Compose](#prepared-source) : une modification du checkout postérieure à la copie n'atteint pas les deux builds. Aucune de ces deux étapes ne valide tous les imports ni le contenu des locks ; `.dockerignore` est comparé octet par octet au fichier que ce CLI reflète et n'est pas interprété ; et les deux builds ne sont pas atomiques : la première image peut encore réussir avant un échec ultérieur. Conserver les résultats réels du moteur, dont le CLI [n'affiche qu'une partie](#engine-output) ; un contrôle réussi et une copie privée ne qualifient ni un build reproductible ni la production.
 
+<a id="build-version"></a>
+
+### Identifier version et build
+
+La version produit vient de `Cargo.toml`, actuellement 0.0.1. `--version` ou
+`version --json` du CLI principal est statique ; aucun runtime ou fournisseur
+n'est lancé. `build` vérifie les versions Cargo/package/lock frontend dans une
+seule source capturée, puis fournit son digest de source préparée comme Build ID
+commun aux stages frontend/Rust du contrôle et Rust du worker.
+`--build-revision` facultatif reçoit explicitement 40 ou 64 caractères hex, par
+exemple :
+
+```sh
+"$AIGUARD_BIN" build --runtime docker --source . --build-revision "$AIGUARD_BUILD_REVISION"
+```
+
+Donner à cette variable publique la révision relue, ou omettre l'option si elle
+est inconnue. Aucun commit n'est découvert depuis Git. Les builds manuels sans
+annotation gardent des IDs inconnus ; les différences ou anciennes identités
+du frontend et des serveurs restent visibles. Le [guide version et mise à jour
+manuelle](../release/README.fr.md#versions-and-updates) explique routes status,
+builds partiels, IDs d'images de session retenus, sauvegardes/migrations et
+basculement délibéré. Aucun updater automatique. Ce contrat candidat est lu
+sur `e0372db` ; compilation, tests, images et déploiement du nouvel alignement
+restent NOT_RUN dans ce lot documentaire.
+
 <a id="prepared-source"></a>
 
 ### Sources préparées de build et Compose
@@ -58,7 +84,7 @@ La liste des entrées de build est figée dans le binaire du CLI et reflète le 
 Le CLI du moteur ne reçoit ensuite en arguments que des chemins situés dans cette copie ; avec Docker, ils suivent `--host <endpoint>` :
 
 ```text
-build --file <copy>/context/images/<name>.Dockerfile --tag <tag> [--build-arg <NAME>=<version>]… <copy>/context
+build --file <copy>/context/images/<name>.Dockerfile --tag <tag> [--build-arg <NAME>=<public-value>]… <copy>/context
 compose --project-name agentsandbox --env-file <copy>/compose-empty.env --file <copy>/context/deploy/<engine>/compose.yaml up --detach --force-recreate
 compose --project-name agentsandbox --env-file <copy>/compose-empty.env --file <copy>/context/deploy/<engine>/compose.yaml down
 ```

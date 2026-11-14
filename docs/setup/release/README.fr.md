@@ -1,10 +1,150 @@
-# Métadonnées de livraison
+# Métadonnées de livraison, versions et mises à jour
 
 [English](README.md) · [Index d'installation](../README.fr.md) · [Poste de travail local](../local/README.fr.md) · [Fournisseurs IA](../providers/README.fr.md)
 
 Ce guide permet de décrire une source de build ai-guard dans un manifeste de livraison, un inventaire CycloneDX et un fichier `SHA256SUMS`, de lier à cette description les fichiers construits par nom, taille et SHA-256, puis de tout revérifier plus tard, hors ligne. Deux commandes opérateur du CLI Rust s'en chargent : `agentsandbox release manifest` et `agentsandbox release verify`. Elles ne lancent aucun moteur, n'ouvrent aucune connexion réseau, n'écrivent jamais dans la source et ne remplacent ni ne suppriment jamais un répertoire existant.
 
 **État (13 novembre 2026, composition validée).** Les commandes manifest/verify W1–W3 sont livrées et compilées : 123 parents release sélectionnés PASS, plus 144 Kubernetes et 5 broker dans la même campagne. Compilation et check toutes cibles PASS. Le harnais global sort RC99 : le sous-cas `it-manifest` parent0700 appartenant à un autre UID reste NOT_RUN faute de second compte ; les deux helpers ignorés restent NOT_RUN. Voir les [preuves courantes](../../engineering/evidence/2026-11-13/claude-composition/README.fr.md) ; le [dossier initial](../../engineering/evidence/2026-11-12/release-integrity/README.md) conserve son périmètre daté. Aucun build release ni image produit contrôle/worker construit ou inspecté. L’image outil QA seule a été inspectée. PW1/PW2/PW3/PW6/PW8 restent proposés et non appliqués. Aucune procédure de release qualifiée ni release produit publiée par cette campagne.
+
+<a id="versions-and-updates"></a>
+
+## Version produit, identité du build et mises à jour manuelles
+
+**Contrat candidat, 14 novembre 2026.** L'implémentation décrite ici a été lue
+sur la source `e0372db`. Compilation, tests ciblés, construction d'images,
+observations des composants, migration/restauration et déploiement de cette
+candidate sont **NOT_RUN dans ce lot documentaire**. Les résultats datés de
+manifest/verify ci-dessus gardent leur source ; ils ne qualifient pas cette
+nouvelle composition.
+
+### Lire l'identité distribuée
+
+`Cargo.toml [package].version` est la version produit ai-guard canonique,
+actuellement **0.0.1**. CLI/outils, broker, gateway, dashboard, frontend et
+binaires ai-guard du worker partagent cette version produit. Images de base,
+Rust/Node, Codex/Claude, modèles, protocoles et formats de bases gardent leurs
+propres versions. La version produit seule ne migre aucune donnée et ne
+prouve aucune compatibilité.
+
+Le CLI principal fournit ces commandes statiques sans ouvrir configuration ou
+données et sans lancer de fournisseur ni runtime :
+
+```sh
+"$AIGUARD_BIN" --version
+"$AIGUARD_BIN" version --json
+```
+
+`-V` et `version` sont les variantes texte. Le texte donne composant/version,
+puis build et révision (`unknown` si absents) ; le JSON suit le contrat fermé
+[BuildStatusV1](../../api.md#build-status). `ai-guard-diagnose`, `ai-guard-provider`, `ai-guard-demo-pki`, `ai-guard-relay`
+et `ai-guard-audit-checkpoint` fournissent les flags statiques `--version`/`-V` ;
+`version --json` appartient au CLI principal. Arguments de version
+supplémentaires/répétés : sortie 2 ; échec d’écriture/flush : sortie 74. Ne pas ajouter `--json` à `--version` ni combiner un flag de
+version et une action.
+
+Le dashboard affiche **l'identité propre du bundle frontend chargé avant la
+connexion**, puis des lectures dashboard et gateway distinctes. Son
+`/api/v1/status` local décrit le dashboard ; `/api/v1/gateway/status` lit son
+gateway configuré fixe. Le `/api/v1/status` direct du gateway décrit ce gateway.
+Ces lectures publiques ne transportent aucun credential utilisateur et ne
+donnent aucun accès aux données. Route absente d'un ancien serveur, réponse
+invalide, délai ou service hors ligne restent indisponibles/inconnus. Version
+ou build différents restent visibles ; un bundle en cache n'est jamais
+réétiqueté avec l'identité serveur. La concordance ne prouve ni santé,
+readiness, autorisation ou mise à jour sûre. Lecture initiale et actualisation
+explicite ne recherchent aucune nouvelle release.
+
+### Construire un ensemble aligné
+
+`build` capture une seule fois sa source publique bornée. Le plan Rust commun
+lit Cargo et les racines package/lock frontend dans cette copie scellée et
+refuse un décalage de version avant toute commande moteur. Il reprend sans
+transformation le `snapshot.digest()` existant comme Build ID commun : 64
+caractères hexadécimaux minuscules, ni digest d'image ni `build.inputs_identity`.
+Il fournit les mêmes `AI_GUARD_VERSION`, `AI_GUARD_BUILD_ID` et
+`AI_GUARD_BUILD_REVISION` facultatif aux deux builds d'image. Les trois
+consommateurs de compilation sont `front-build` et `rust-build` du contrôle,
+puis `provider-build` du worker. Rust/Vite refusent aussi une version non vide
+fournie qui ne correspond pas à leur propre package. Aucune métadonnée n'est
+écrite dans la copie scellée ; ni Git vivant, ni horloge ou valeur aléatoire
+ne fournit l'identité du build. Ces variables sont des entrées des stages de
+build, pas un nouvel environnement runtime final du worker ou handoff secret.
+
+Pour un build autorisé dans l'environnement choisi, `DISTRIBUTION` désigne la
+source relue et, si souhaité, `AIGUARD_BUILD_REVISION` sa révision 40 ou 64 hex
+explicitement relue. Omettre l'option si elle est inconnue :
+
+```sh
+"$AIGUARD_BIN" build --runtime docker --source "$DISTRIBUTION" --build-revision "$AIGUARD_BUILD_REVISION"
+```
+
+Podman exige sa propre qualification ; employer `--runtime podman`. Les options
+rootless et versions fournisseurs existantes restent applicables. Aucun flag
+`--build-id` n'est fourni. Un build manuel des Dockerfiles/du frontend sans
+ID/révision expose `null`/inconnu, sans alignement inventé. Un ID déclaré commun
+ne prouve pas que l'image vient de cette source : conserver et observer aussi
+chaque vrai ID/digest d'image. Les [règles de cycle de vie et d'interruption de
+source préparée](../local/README.fr.md#prepared-source) restent applicables.
+Ces commandes sont des instructions, pas des exécutions.
+
+### Conserver puis appliquer une mise à jour délibérée
+
+1. Relever source visée, lectures réelles des composants, vrais IDs/digests
+   d'image, configuration et formats de données. Conserver CLI, source,
+   manifeste release et vérificateur assortis. Les artefacts/preuves 0.1.0
+   existants gardent cette valeur : les contrôles version-producteur/allowlist
+   peuvent faire déclarer un ancien producteur `UNVERIFIED` par un vérificateur
+   0.0.1. Ne pas modifier l'ancien manifeste ni contourner ce refus ; employer
+   son vérificateur assorti conservé.
+2. Construire hors du magasin d'images d'une installation active tant que des
+   travaux en attente dépendent de ses tags `:local`. `build` retague
+   `agentsandbox-control:local` puis `agentsandbox-worker:local` ; ces builds
+   successifs ne sont pas atomiques et ne redémarrent aucun service. Un second
+   résultat échoué/inconnu reste un build partiel. Avant admission, l'attente
+   peut résoudre de nouveau son tag et refuser un checkpoint changé. Ne pas
+   retaguer pour forcer l'acceptation. Une session admise conserve son `image_id`
+   immuable ; une mise à jour ne le remplace pas.
+3. Fermer les nouvelles admissions avec les contrôles autorisés existants de
+   l'installation, puis réconcilier travail actif/ambigu avant maintenance.
+   Conserver exécutable exact, racines de contrôle, configuration, journaux et
+   échéances de chaque broker/enforcer armé. Arrêter le broker de premier plan
+   ne prouve pas que son enforcer distinct est désarmé. Modifier un registre
+   vivant n'est pas un rechargement à chaud ; sélectionner un nouveau profil
+   ne réécrit pas un binding Accepted/Review/rejoué et ne redonne pas l'usage
+   d'un démarrage consommé.
+4. Arrêter consommateurs de données et redémarrages automatiques avant les
+   sauvegardes privées cohérentes. Conserver l'ensemble SQLite/WAL de chaque
+   tenant avec journal Auth distinct, identités, configuration/credentials,
+   ancres d'audit, journaux broker, plans/bindings, claims et volumes retenus.
+   Suivre la [reprise entreprise existante](../enterprise/README.fr.md#exploiter-et-reprendre).
+   Vérifier chaque prochaine migration exacte et sauvegarde neuve :
+   `migrate-control` historique accepte les cibles 2–13 et
+   `migrate-authentication` 2–4, une étape seulement.
+   L'[adoption Store13→14/Auth4→5 sélectionné](../human-sources-maintenance/README.fr.md)
+   suit son workflow distinct prepare/check/apply/resume. La version 0.0.1 ne
+   sélectionne aucun format automatiquement ; `--confirm-control-stopped`
+   reste une attestation, pas du fencing.
+5. Appliquer explicitement le changement relu de service/image selon la
+   procédure existante de l'installation. [Compose direct et `up` du CLI sont
+   distincts](../local/README.fr.md#suivre-une-pile-démarrée-par-up-du-cli) :
+   Compose consomme ses env/projet sélectionnés, tandis que Rust `up` utilise
+   un fichier de base capturé, le projet fixe `agentsandbox`, un env vide et
+   `--force-recreate`. Ce n'est pas une inspection/planification. Changer un
+   tag/fichier env n'applique rien automatiquement. Relever de nouveau les
+   identités réelles composants/images, santé, autorisations/refus, continuité
+   d'audit et sessions réconciliées avant de rouvrir les admissions.
+6. Conserver les résultats partiels/inconnus. Restaurer un ensemble cohérent
+   compatible dans une destination contrôlée neuve avec son autorité et ses
+   échéances retenues ; ne jamais rétrograder une base migrée, éditer
+   `user_version`, rétablir un claim comme neuf ou déduire un rollback
+   automatique sûr d'une migration échouée.
+
+Cette fonction n'ajoute ni recherche de nouveautés, commande inspect/plan,
+updater/contrôleur, daemon, pull automatique, rollout, remplacement vivant de
+worker ou déploiement Kubernetes. Les [prérequis Kubernetes](../kubernetes/README.fr.md)
+ne fournissent aucun tel contrôleur. Qualifications des plateformes, vraies
+images alignées, pannes/reprise, migration/restauration et acceptation release
+restent des gates ouverts ; ces métadonnées et instructions n'en ferment aucun.
 
 <a id="scope"></a>
 
@@ -25,7 +165,7 @@ Il n'établit **pas** :
 - qu'un artefact ou une image a été construit depuis cette source, ni la plateforme cible ou le profil de build de l'un ou de l'autre ;
 - un identifiant d'image, une empreinte d'image ou le contenu installé dans une image ;
 - un commit approuvé, ni la confiance dans la distribution sélectionnée : une copie ne rend pas fiable une source qui ne l'est pas ;
-- une identité de build. Le manifeste porte une [identité des entrées de build](#build-input-identity), qui identifie les entrées d'un build, non un build.
+- une identité compilée de build authentifiée. Le manifeste porte une [identité des entrées de build](#build-input-identity), distincte du [Build ID compilé](#versions-and-updates) commun descriptif. Aucune des deux n'atteste une image.
 
 Toute valeur que les documents disent *déclarée* est ce qu'affirme un fichier ou l'opérateur ; rien ne l'authentifie.
 
@@ -280,7 +420,7 @@ Elle peut alors être comparée au `sha256=` d'une ligne de provenance de `build
 
 ## Relation avec `agentsandbox build` et avec les images
 
-`release manifest` fait sa propre capture de la source. Elle ne réutilise pas la copie que `build` a remise au moteur, et rien ne consigne la copie à partir de laquelle une image a été construite ; deux captures d'une source inchangée ont la même empreinte. Pour rattacher un manifeste à la source rapportée par un `build`, copiez la valeur `sha256=` de la ligne `Prepared public distribution (build): sha256=<hex> …` affichée par `build`, et donnez-la au manifeste :
+`release manifest` fait sa propre capture de la source. Elle ne réutilise ni n'atteste la copie que `build` a remise au moteur ; deux captures d'une source inchangée ont la même empreinte. Le plan de build aligné compile ce digest de source préparée comme Build ID commun descriptif, distinct de `build.inputs_identity` du manifeste. Lire cet ID n'authentifie pas le lien image-source. Pour rattacher un manifeste à la source rapportée par un `build`, copiez la valeur `sha256=` de la ligne `Prepared public distribution (build): sha256=<hex> …` affichée par `build`, et donnez-la au manifeste :
 
 ```sh
 "$AIGUARD_BIN" build --runtime docker --source . --codex-version <X.Y.Z> --claude-code-version <X.Y.Z>

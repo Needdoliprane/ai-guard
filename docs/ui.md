@@ -2,6 +2,48 @@
 
 Ce document est la référence pour l'identité visuelle et les vues du dashboard. Le [périmètre livré](#périmètre-livré) comprend la consultation technique `viewer` et les lectures nominatives locales/OIDC décrites ci-dessous, dont le registre brokers sur permission explicite. La [supervision unifiée nominative](#supervision-unifiée-nominative--candidat-du-10-novembre-2026) est un composant candidat ajouté le 10 novembre 2026. Les [vues utilisateur et administration unifiée à 360°](#vues-utilisateur-et-administration-unifiée--cible-à-livrer) restent une cible obligatoire à compléter et qualifier. Le [contrat d'identité et de configuration](sso.md) fixe les permissions et profils attendus. Les preuves visuelles datées ne qualifient pas les fonctions futures.
 
+## Identité de version et build — candidat du 14 novembre 2026
+
+La zone permanente de diagnostic version/build présente l'identité propre du bundle
+chargé, même avant connexion ou sans données métier. Version produit 0.0.1 et
+Build ID commun décrivent l'ensemble distribué ; Interface, Dashboard et
+Gateway restent trois provenances distinctes. L'identité frontend est compilée
+depuis son package, jamais remplacée par une valeur du serveur. La politique
+canonique Cargo et le build source capturé sont décrits dans le [guide FR](setup/release/README.fr.md#versions-and-updates)
+et le [guide EN](setup/release/README.md#versions-and-updates).
+
+Les deux lectures publiques ont lieu initialement puis sur actualisation
+explicite, sans polling ni recherche de nouvelle release : status dashboard
+local et status de son gateway configuré, [contrat HTTP](api.md#build-status).
+Elles omettent credentials/cookies, cache et referrer, refusent redirections
+et réponse incompatible ; le lecteur frontend borne chaque lecture à 4 s,
+4096 octets et 128 chunks. Une requête déjà en cours est partagée ; la fermeture
+annule l'observation. Ces bornes frontend restent distinctes du proxy Rust 5 s/
+8192 octets. Aucun échec ne déclenche une boucle de relance.
+
+Chargement, route absente d'un ancien serveur, réponse invalide, délai, service
+en erreur et connexion impossible ont des libellés distincts. Un ID/révision
+absent reste inconnu ; une identité indisponible ne reprend pas l'ancienne
+valeur comme courante. Les différences version/build sont visibles, y compris
+un bundle ancien en cache ; révision hex normalisée pour la comparaison,
+valeur reçue conservée. « Version concordante · build inconnu » et identité
+incomplète restent distincts de « Identités concordantes ». Aucun de ces
+libellés ne prouve santé, autorisation, readiness, compatibilité des bases ou
+mise à jour appliquée. Il n'y a pas de bouton installer/appliquer une mise à
+jour ni de contrôleur livré par cette fonction.
+
+Conserver identité OVPT, thèmes, mobile, clavier/focus et annonce accessible
+après les lectures terminées, sans répétition des états identiques. Cette
+surface est documentée depuis `e0372db` ; tests Node/Rust, build, navigateur,
+captures et observations réelles de cette candidate restent NOT_RUN dans ce
+lot. Les preuves visuelles et résultats historiques gardent leur source.
+
+The loaded frontend keeps its own compiled version/build before sign-in.
+Dashboard and gateway are separate bounded public observations; loading,
+unknown/unavailable and mismatches stay explicit. Initial/manual refresh adds
+no release discovery, readiness claim, updater or replacement of active
+sessions. Candidate validation and visual evidence remain NOT_RUN here.
+
 ## Direction de conception
 
 Le guide détaillé du mainteneur reçu le 30 octobre 2026 a guidé la refonte livrée en QA. Le front antérieur, avec barre latérale claire et accents turquoise, a été remplacé par le header clair et la navigation sombre fixes. La référence est transposée à **ai-guard**, à ses neuf vues et à ses données de supervision ; elle ne transforme pas le dashboard en page de vente ou en parcours fictif de dix chapitres. Les [preuves et captures réelles](engineering/evidence/2026-10-30/editorial-ui/README.md) identifient le rendu déployé.

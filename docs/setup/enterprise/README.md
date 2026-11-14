@@ -51,6 +51,8 @@ docker compose --env-file "$AIGUARD_CONFIG/enterprise.env" -f deploy/docker/comp
 
 For Podman, use `podman compose` and `deploy/podman/compose.yaml`. Adjust health URLs if you changed published host ports. The base publishes only loopback HTTP; do not expose it directly by changing the bind address. Put the organization-facing HTTPS entry point in your explicitly configured transport architecture. Retain the same env file, project name, engine endpoint and overrides for every lifecycle command.
 
+Read [versions, build identity and manual updates](../release/README.md#versions-and-updates) before replacing an installation. The common 0.0.1 product version and captured-source Build ID are descriptive; record actual image identities, preserve active session bindings and armed enforcement, and apply a reviewed change explicitly. No update controller or automatic rollout is provided.
+
 ## Configure tenants and permissions
 
 Create distinct tenant identities and distinct runner/viewer credentials; keep a separate SQLite database for each tenant. The [public registry example](../../../config/tenants.example.json) contains tenants A/B, container paths and exact quotas. Generate their four distinct credentials and create a new private registry copy:

@@ -44,6 +44,30 @@ The default worker image supports ordinary commands. For Codex or Claude Code, b
 
 That check is structural. `build` then copies its inputs before the first engine command and points the engine CLI at that copy instead of the checkout, as described in [prepared build and Compose sources](#prepared-source): a change made to the checkout after the copy does not reach the two builds. Neither step validates every import or lockfile content; `.dockerignore` is compared byte for byte with the file this CLI mirrors and is not interpreted; and the two image builds are not atomic: the first image can still build successfully before a later build failure. Retain the actual engine results, of which the CLI [prints only a part](#engine-output); a completed check and a private copy are not a reproducible-build or production qualification.
 
+<a id="build-version"></a>
+
+### Identify the version and build
+
+The product version comes from `Cargo.toml`, currently 0.0.1. The main CLI's
+`--version` or `version --json` is static; it starts no runtime or provider.
+`build` checks Cargo/frontend package and lock versions in one captured source,
+then supplies one prepared-source digest as the common Build ID to the control
+frontend/Rust and worker Rust stages. Optional `--build-revision` accepts an
+explicit 40- or 64-hex value, for example:
+
+```sh
+"$AIGUARD_BIN" build --runtime docker --source . --build-revision "$AIGUARD_BUILD_REVISION"
+```
+
+Set that public variable to the reviewed revision, or omit the option when
+unknown. It does not discover a commit from Git. Manual unannotated builds
+keep unknown IDs; different/old frontend and server identities stay visible.
+The [version and manual-update guide](../release/README.md#versions-and-updates)
+explains public status routes, partial builds, retained session image IDs,
+backups/migrations and deliberate cutover. There is no automatic updater.
+This candidate contract is read from `e0372db`; compilation, tests, images and
+rollout for the new alignment are NOT_RUN in this documentation lot.
+
 <a id="prepared-source"></a>
 
 ### Prepared build and Compose sources
@@ -58,7 +82,7 @@ The list of build inputs is fixed in the CLI binary and mirrors the `.dockerigno
 The engine CLI then receives only paths inside that copy as arguments; with Docker they follow `--host <endpoint>`:
 
 ```text
-build --file <copy>/context/images/<name>.Dockerfile --tag <tag> [--build-arg <NAME>=<version>]… <copy>/context
+build --file <copy>/context/images/<name>.Dockerfile --tag <tag> [--build-arg <NAME>=<public-value>]… <copy>/context
 compose --project-name agentsandbox --env-file <copy>/compose-empty.env --file <copy>/context/deploy/<engine>/compose.yaml up --detach --force-recreate
 compose --project-name agentsandbox --env-file <copy>/compose-empty.env --file <copy>/context/deploy/<engine>/compose.yaml down
 ```

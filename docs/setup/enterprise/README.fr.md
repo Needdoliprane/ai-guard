@@ -51,6 +51,8 @@ docker compose --env-file "$AIGUARD_CONFIG/enterprise.env" -f deploy/docker/comp
 
 Avec Podman, utiliser `podman compose` et `deploy/podman/compose.yaml`. Adapter les URL de contrôle si les ports hôte ont changé. Le socle ne publie que du HTTP loopback ; ne pas l'exposer directement en modifiant l'adresse d'écoute. Placer l'entrée HTTPS de l'organisation dans une architecture de transport explicitement configurée. Garder mêmes fichier env, nom de projet, endpoint moteur et surcharges pour chaque commande de cycle de vie.
 
+Lire [versions, identité de build et mises à jour manuelles](../release/README.fr.md#versions-and-updates) avant de remplacer une installation. La version produit 0.0.1 commune et le Build ID de source capturée sont descriptifs ; relever les vraies identités d’image, conserver les bindings des sessions actives et l’enforcement armé, puis appliquer explicitement un changement relu. Aucun contrôleur de mise à jour ou rollout automatique.
+
 ## Configurer les tenants et les permissions
 
 Créer des identités tenant et des credentials runner/viewer distincts ; conserver une base SQLite distincte par tenant. L'[exemple public de registre](../../../config/tenants.example.json) contient les tenants A/B, les chemins internes et les quotas exacts. Générer leurs quatre credentials distincts et créer une nouvelle copie privée du registre :
