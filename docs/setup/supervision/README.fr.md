@@ -29,7 +29,7 @@ Une source que le contexte n'accorde pas n'est jamais demandée. Le panneau **Ac
 {"read_profiles":{"broker_registry":"human_broker_registry_owned_v1","worker_registry":"unavailable","federation_registry":"unavailable"}}
 ```
 
-Cette annonce reste indépendante des permissions du contexte. Un contexte d'administration exige toujours `read_broker_registry`. Le dashboard choisit `GET /api/v1/human/owned/brokers` avant de demander une page : 25 lignes dans **Brokers**, 100 dans **Supervision**, au plus 100 lignes et 256 Kio par réponse. Il valide profil, version, champs fermés, contexte sélectionné, version des autorisations et reçu. La page est `live_keyset`, l'inventaire runtime est `unknown`, et `count_scope: page` désigne le compte de la page, jamais un total du tenant. Les curseurs owned appartiennent uniquement à ce profil et à la taille de page. Un 403, 404, 503 ou corps incompatible ne déclenche jamais de lecture du registre historique.
+Cette annonce reste indépendante des permissions du contexte. La lecture exige un contexte d'administration actuellement proposé par le contrôle portant `read_broker_registry`. Le dashboard choisit `GET /api/v1/human/owned/brokers` avant de demander une page : 25 lignes dans **Brokers**, 100 dans **Supervision**, au plus 100 lignes et 256 Kio par réponse. Il valide profil, version, champs fermés, contexte sélectionné, version des autorisations et reçu. La page est `live_keyset`, l'inventaire runtime est `unknown`, et `count_scope: page` désigne le compte de la page, jamais un total du tenant. Les curseurs owned appartiennent uniquement à ce profil et à la taille de page. Un 403, 404, 503 ou corps incompatible ne déclenche jamais de lecture du registre historique.
 
 Les destinations **Workers** et **Fédération** sont indisponibles pour ce profil annoncé. Supervision continue de lire indépendamment les brokers owned et les ressources autorisés. Si `read_worker_registry` est présent, **Workers · profil indisponible** explique que la route est indisponible ; aucune lecture worker n'est émise et aucune activité nulle n'est affichée. **Relire mes accès** revient à l'offre courante du contrôle. Faire vérifier les profils pris en charge par l'opérateur ; cette action n'active aucune capacité manquante. La supervision multi-hôtes complète des workers reste une exigence ouverte.
 
@@ -44,6 +44,8 @@ La ligne du broker et son détail distinguent fraîcheur du heartbeat et fraîch
 Un checkpoint reçu affiche ses propres réception/expiration, relation à l'autorisation courante, compte de références et `has_more`. Même zéro référence ne mesure ni l'activité ni les workers du tenant. Identifiants de jobs, hashes, identifiants d'opération, credentials, commandes et chemins sont exclus. Un identifiant d'autorité peut être masqué ou explicitement libellé **Identifiant blanc** lorsque sa valeur valide ne comporte que des espaces. Un heartbeat périmé peut signaler un broker déconnecté ; l'interface n'en déduit ni déconnexion physique, ni arrêt de worker, ni libération de quota. Les deux états d'horloge/fraîcheur restent indépendants. Une seconde intercalaire RFC3339 valide que le navigateur ne sait pas formater reste visible sous sa chaîne serveur originale avec **date serveur conservée, conversion locale inconnue** ; elle n'est jamais normalisée vers la seconde suivante. La fraîcheur serveur reste celle du serveur, sans nouvelle inférence locale. L'authentification et l'expiration des contextes gardent leurs validateurs séparés.
 
 Chargement, page vide réussie, premier échec de lecture et dernière page réussie datée après un échec d'actualisation restent distincts. Un détail **Brokers** ouvert reste lié à sa page datée pendant les actualisations ordinaires du heartbeat ; il se ferme lorsque son broker quitte la page ou que son autorisation, son incarnation ou ses autorités divulguées changent. Un 403 retire lignes, détails et curseurs dès les en-têtes, sans attendre le corps. Dans Supervision, il invalide aussi les lectures concurrentes avant relecture de l'offre d'accès du contrôle. Une annonce `read_profiles` modifiée ou retirée supprime le contexte sélectionné et ses données ; aucune réponse tardive ne les rétablit. Un 401 déconnecte. Aucun SSE broker, credential runner ou accès moteur n'est ajouté.
+
+Les procédures ci-dessous d'association et de pagination des workers et de fédération concernent les profils historiques ci-dessus. Ces sources restent indisponibles dans le profil owned.
 
 ## Ouvrir la vue
 
@@ -214,11 +216,13 @@ La route est documentée dans [docs/api.md](../../api.md). Son intégration sur 
 
 ## Compatibilité de versions
 
+Les indications et le tableau de cette section concernent la route `events/recent`. Le profil brokers owned exige en plus son annonce explicite par le gateway et un dashboard correspondant, sans repli historique.
+
 Aucune migration de schéma, aucun nouveau type d'audit, aucun changement de configuration et aucune nouvelle dépendance. Mettre à jour le gateway et le dashboard ensemble.
 
 | Gateway | Binaire dashboard avec son `front/dist` | Résultat |
 |---|---|---|
-| Avec la route | Avec la route | Tout ce guide |
+| Avec la route | Avec la route | Les fonctions events/recent décrites ci-dessus |
 | Sans la route | Avec la route | Le Journal affiche **Lecture récente indisponible sur ce contrôle** et n'ouvre aucun flux ; les événements de session dans Supervision se replient sur la lecture avant, du plus ancien au plus récent, et le disent ; toutes les autres vues fonctionnent |
 | Avec la route | Plus ancien | La route est simplement inutilisée |
 

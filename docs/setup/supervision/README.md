@@ -29,7 +29,7 @@ A source that the context does not grant is never requested. The **Accès de ce 
 {"read_profiles":{"broker_registry":"human_broker_registry_owned_v1","worker_registry":"unavailable","federation_registry":"unavailable"}}
 ```
 
-This announcement is independent of context permissions. An administration context still needs `read_broker_registry`. The dashboard chooses `GET /api/v1/human/owned/brokers` before requesting a page: 25 rows in **Brokers**, 100 in **Supervision**, at most 100 rows and 256 KiB per response. It validates the profile, version, closed fields, selected context, authorization version and receipt. The page is `live_keyset`, its runtime inventory is `unknown`, and `count_scope: page` means a page count, never a tenant total. Owned cursors belong only to that profile and page size. A 403, 404, 503 or incompatible body never triggers a legacy registry request.
+This announcement is independent of context permissions. The control must currently offer an administration context carrying `read_broker_registry`. The dashboard chooses `GET /api/v1/human/owned/brokers` before requesting a page: 25 rows in **Brokers**, 100 in **Supervision**, at most 100 rows and 256 KiB per response. It validates the profile, version, closed fields, selected context, authorization version and receipt. The page is `live_keyset`, its runtime inventory is `unknown`, and `count_scope: page` means a page count, never a tenant total. Owned cursors belong only to that profile and page size. A 403, 404, 503 or incompatible body never triggers a legacy registry request.
 
 **Workers** and **Fédération** navigation are unavailable for this announced profile. Supervision continues to read the authorized owned brokers and resources independently. If `read_worker_registry` is present, **Workers · profil indisponible** explains that the route is unavailable; no worker read is sent and no zero activity is shown. **Relire mes accès** returns to the control's current offer. Ask the operator to check supported profiles; this action does not activate a missing capability. Full multi-host worker supervision remains an open requirement.
 
@@ -44,6 +44,8 @@ The broker row and its detail distinguish heartbeat freshness from checkpoint fr
 A received checkpoint shows its own reception/expiry, current-grant relation, reference count and `has_more`. Even zero references do not measure activity or the tenant's workers. Job identifiers, hashes, operation identifiers, credentials, commands and paths are excluded. An authority identifier may be masked, or explicitly labelled **Identifiant blanc** when its valid value contains only whitespace. A stale heartbeat can indicate a disconnected broker; the interface does not infer a physical disconnection, stopped worker or released quota from it. The two clock/freshness states remain independent. A valid RFC3339 leap second that the browser cannot format stays visible as its original server string with **date serveur conservée, conversion locale inconnue**; it is never normalized into the following second. Server freshness remains the server's value, without a new local inference. Context authentication and expiry keep their separate validators.
 
 Loading, a successful empty page, a failed initial read and the dated last successful page after a failed refresh stay distinct. An open **Brokers** detail remains tied to its dated page through ordinary heartbeat refreshes; it closes when its broker leaves the page or its grant, incarnation or disclosed authorities change. A 403 removes rows, details and cursors as soon as headers arrive, without waiting for the response body. In Supervision it also fences concurrent reads before the control's access offer is checked again. A changed or removed `read_profiles` announcement removes the selected context and its data; no late response restores them. A 401 signs out. No broker SSE, runner credential or engine access is added.
+
+The worker-association, worker-pagination and federation procedures below apply to the legacy profiles above. Under the owned profile, these sources remain unavailable.
 
 ## Open the view
 
@@ -214,11 +216,13 @@ The route is documented in [docs/api.md](../../api.md). Its integration on `2cc2
 
 ## Version compatibility
 
+The statements and table in this section concern the `events/recent` route. The owned broker profile additionally requires its explicit gateway announcement and a matching dashboard, without legacy fallback.
+
 No schema migration, no new audit kind, no configuration change and no new dependency. Update the gateway and the dashboard together.
 
 | Gateway | Dashboard binary with its `front/dist` | Result |
 |---|---|---|
-| With the route | With the route | Everything in this guide |
+| With the route | With the route | The events/recent functions described above |
 | Without the route | With the route | The Journal shows **Lecture récente indisponible sur ce contrôle** and opens no stream; session events in Supervision fall back to the forward read, oldest first, and say so; every other view works |
 | With the route | Older | The route is simply unused |
 
