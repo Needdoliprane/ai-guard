@@ -127,7 +127,10 @@ export function identitySummary(frontend: FrontendIdentity, state: ServiceIdenti
   const identities = [frontend, ...readings.flatMap((reading) => reading.kind === "available" ? [reading.identity] : [])];
   const versionMismatch = identities.some((identity) => identity.version !== frontend.version);
   const buildMismatch = (["id", "revision"] as const).some((field) =>
-    new Set(identities.flatMap((identity) => identity.build[field] === null ? [] : [identity.build[field]])).size > 1);
+    new Set(identities.flatMap((identity) => {
+      const value = identity.build[field];
+      return value === null ? [] : [field === "revision" ? value.toLowerCase() : value];
+    })).size > 1);
   const mismatch = versionMismatch || buildMismatch;
   const complete = readings.every((reading) => reading.kind === "available");
   const missingBuild = identities.some((identity) => identity.build.id === null);
