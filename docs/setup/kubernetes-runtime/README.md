@@ -7,25 +7,35 @@
 activation. This guide describes the V2 session runtime code that exists in
 the Rust sources, what an operator can do today, and the plan to qualify it
 later on the single-node Kubernetes cluster of Docker Desktop. That plan has
-**not been executed against a real cluster**. Status on 13 November: the 144 selected Kubernetes software parents pass in the Linux ARM64 QA composition; see [current evidence](../../engineering/evidence/2026-11-13/claude-composition/README.md) for results and limits. The [original record](../../engineering/evidence/2026-11-12/kubernetes-v2-runtime/README.md) retains its dated delivery status.
+**not been executed against a real cluster**. The [13 November evidence](../../engineering/evidence/2026-11-13/claude-composition/README.md) records 144 selected Kubernetes software parents passing on its exact source, with global RC99 and an explicit subcase gap. The [original record](../../engineering/evidence/2026-11-12/kubernetes-v2-runtime/README.md) retains its dated delivery status.
 The binding contract is the [Kubernetes admission contract](../../engineering/KUBERNETES_ADMISSION.md).
+
+The current source composes stage S2b: a preamble-only attach, its hardening,
+and the worker waiting-mode dispatch ([section 11](#11-preamble-only-attach-and-worker-waiting-mode-stage-s2b)).
+A separate 14 November software run passed 121 selected parents on
+`be6b12dce7f74e2062f7ad5524e12818bf7313b5`, including build and all-targets
+check. Those results do not qualify the composition based on
+`6fb1e93a0fe4bbcf10aa1fbecd08cb88d481dbf7`, its seven new real-stdio tests,
+or a cluster: the composed software checks are **NOT_RUN**. No product session
+path reaches the attach.
 
 ## 1. Status by layer
 
 | Layer | What exists | Who can call it today | Verified |
 |---|---|---|---|
-| A. Library entry with real inputs | `KubernetesRuntime::inspect_session_workspace_claim(name)`: DNS-label name checked before any request, then GET of the two namespace anchors, the PVC and the anchors again. An invalid name is reported as `InvalidAuthority` before any request, a claim that does not meet the requirements of section 3 as `InvalidResponse`, and an absent PVC as `ApiRejected(404)`. | Rust code holding a `KubernetesRuntime`. **No product binary calls it**; a read-only CLI entry, which would map the first two errors to dedicated messages, is only a proposed patch. | Selected software PASS; cluster NOT_RUN |
-| B. Pure mechanics (crate-internal) | Exact V2 Pod request renderer, admitted-response projection, exact observation parser, journal records. | Crate code only. | Selected software PASS; cluster NOT_RUN |
-| C. Before-effect lifecycle (crate-internal) | Journal retention chain, observe-only reopen, abandonment before any effect, successor recovery, receipt replay, observe-only reconcile report. | **Nobody in production.** The gateway Store issues the confirmations while the broker keeps the journal; the broker routes that would connect them do not exist yet (Root request R2). | Selected software PASS; cluster NOT_RUN |
-| D. Effect mechanics (closed) | Held CREATE of the exact bytes, gate-release PATCH with JSON-Patch `test` operations, DELETE with a UID precondition. | A sealed guard whose only implementation exists in tests and is bound to an owned loopback listener. No product path reaches an effect. | Selected software PASS; cluster NOT_RUN |
+| A. Library entry with real inputs | `KubernetesRuntime::inspect_session_workspace_claim(name)`: DNS-label name checked before any request, then GET of the two namespace anchors, the PVC and the anchors again. An invalid name is reported as `InvalidAuthority` before any request, a claim that does not meet the requirements of section 3 as `InvalidResponse`, and an absent PVC as `ApiRejected(404)`. | Rust code holding a `KubernetesRuntime`. **No product binary calls it**; a read-only CLI entry, which would map the first two errors to dedicated messages, is only a proposed patch. | Historical selection PASS; composition and cluster NOT_RUN |
+| B. Pure mechanics (crate-internal) | Exact V2 Pod request renderer, admitted-response projection, exact observation parser, journal records. | Crate code only. | Historical selection PASS; composition and cluster NOT_RUN |
+| C. Before-effect lifecycle (crate-internal) | Journal retention chain, observe-only reopen, abandonment before any effect, successor recovery, receipt replay, observe-only reconcile report. | **Nobody in production.** The gateway Store issues the confirmations while the broker keeps the journal; the broker routes that would connect them do not exist yet (Root request R2). | Historical selection PASS; composition and cluster NOT_RUN |
+| D. Effect mechanics (closed) | Held CREATE of the exact bytes, gate-release PATCH with JSON-Patch `test` operations, DELETE with a UID precondition; S2b preamble-only attach. | A sealed guard whose only implementation exists in tests and is bound to an owned loopback listener. No product path reaches an effect. | Historical selections PASS on their own sources; composition and cluster NOT_RUN |
+| S2b worker waiting mode | `ai-guard-provider` dispatches the fixed mode before the provider path. It exchanges Hello/Ready, then refuses any further byte. | The existing binary's waiting-mode entry only; no session launcher. | Historical library selection PASS; seven new real-stdio tests and image NOT_RUN |
 | E. Missing seams and qualification | Typed requests R1–R11 to the control owner; this Docker Desktop plan. | — | not started |
 
-Attach to a Pod, the worker waiting mode, effect permits, handoff, start,
-terminal observation and quota settlement after an effect are **not
-implemented**. Nothing in this guide is qualified, and no production gate is
-closed by it.
+Effect permits, handoff, start, terminal observation and quota settlement
+after an effect are **not implemented**. S2b implements only the preamble and
+waiting mode in source. No Kubernetes runtime qualification or production
+gate is closed by it.
 
-Software results cover only the selections in the [typed record](../../engineering/evidence/2026-11-13/claude-composition/TESTS.json), not every combination within each layer. Global RC99: one release other-UID subcase remains NOT_RUN. S5 product effects remain closed. S2b attach remains active with Claude and is not integrated; inherited Q1/Q6 questions below are historical, separate from the newer dispatch.
+The 13 November results cover only the selections in the [typed record](../../engineering/evidence/2026-11-13/claude-composition/TESTS.json), not every combination within each layer. Global RC99: one release other-UID subcase remains NOT_RUN. S5 product effects remain closed. Q1/Q6 were decided for the S2b preamble code only; they do not authorize activation.
 
 ## 2. What an operator can do today
 
@@ -64,7 +74,7 @@ session. The journal is evidence; a refusal means reconciliation is needed.
 - **Exact request.** The Pod request is rendered deterministically from the
   confirmed intent, the preparation digest and the retained claim. Its command
   is the waiting mode of the existing `ai-guard-provider` binary
-  (`kubernetes-session-wait-v2`, spelling pending Root decision Q6), never a
+  (`kubernetes-session-wait-v2`, fixed by Root decision Q6), never a
   business invocation. It has no environment, Secret, token, host path or
   service-account token, and a scheduling gate.
 - **Effect chain.** CREATE (held behind the gate), release, attach, start and
@@ -158,11 +168,12 @@ inspected; otherwise it is absent from the serialized report (not `null`).
   record, a boolean or a declared UID. A Pod observation binds the exact UID,
   spec digest and container identity; another UID at the same name is another
   instance.
-- **Attach (proposal only, not implemented):** a preamble-only attach bracketed
-  by two exact observations, sending only the non-secret Hello before the second
-  check. It is not an atomic precondition and rests on stated assumptions (UID
-  never reused, name uniqueness, honest API server and kubelet, most-recent GET).
-  Every attach would end the worker. It waits for Root decision Q1.
+- **Attach (preamble only, in source, closed):** Q1 accepts the bracketed
+  argument for the preamble code only. Only the non-secret Hello travels
+  before the second observation. This is neither an atomic precondition nor
+  an identity proof; section 11 states its assumptions and limits. Every
+  initiated attempt must be treated as final for the Pod. No product path
+  reaches it.
 - **Node logs persist worker output**, including preamble metadata. No secret
   may travel from the worker to the broker.
 - **Storage:** one `ReadWriteOncePod` claim per attempt; no host path in the Pod
@@ -210,9 +221,11 @@ refusal or ceiling.
   facts to verify against official sources, never assumed. A documented
   enforcement is not an observation; plan step 4a observes it. Without
   enforcement, steps 5–12 stay `BLOCKED`.
-- A worker image built locally with the proposed patches 0001 (waiting mode) and
-  0002 (provider ownership) applied, referenced by digest and present in the
-  node image store (`imagePullPolicy: Never`).
+- A worker image built locally from the composed waiting-mode source, with
+  the bootstrap's ownership and executable mode inspected, referenced by
+  digest and present in the node image store (`imagePullPolicy: Never`). The
+  dispatch is now wired in source; an image build and its execution remain
+  NOT_RUN. The earlier proposed image-ownership patch is not applied here.
 - `agentsandbox` built only in the admitted isolated QA environment.
 
 ### 8.2 Storage prerequisites
@@ -244,8 +257,9 @@ authorization.
 
 ### 8.4 Effect suite (all BLOCKED)
 
-Steps 4–12 stay `BLOCKED` until the Root requests R1–R7, the decisions Q1 and
-Q6 and an explicit authorization exist: step 4 held CREATE, including the
+Steps 4–12 stay `BLOCKED` until the missing Root requests R1–R7, S5 effect
+permits and an explicit authorization exist. Q1 and Q6 are decided for the
+S2b preamble code only. The future suite is: step 4 held CREATE, including the
 check that the admitted 201 passes the closed admitted-response projection
 (omitted false booleans and quantity forms, EXT-14); step 5 release with
 preconditions and a stale-`resourceVersion` refusal, which also needs step 4a;
@@ -326,6 +340,9 @@ not discriminated.
   100 workers.
 - Loopback test peers answer with declared fixtures; they never qualify a
   Kubernetes API server, a provisioner or `ReadWriteOncePod`.
+- S2b's software ceilings, WebSocket interoperability, `stdinOnce`, worker
+  signal handling and node-log retention remain unmeasured on a cluster.
+  The seven new process-stdio tests and the current composition remain NOT_RUN.
 - Gates G05, G07 and G11 stay open, G11 `BLOCKED`. The product is not
   production-ready, and the absence of an effect path is the barrier that keeps
   Kubernetes launch closed.
@@ -333,8 +350,8 @@ not discriminated.
 ## 10. Open items cited in this guide
 
 These identifiers come from the lot design and contract, which are kept
-outside this repository. Every item is open: this work decides or delivers
-none of them.
+outside this repository. Q1 and Q6 are decided for stage S2b only; the other
+items below remain open. This guide makes no new control decision.
 
 - **Root**: the owner of the central control contracts and of the files
   shared between work lots. It decides the requests R1–R11 and the questions
@@ -349,8 +366,9 @@ none of them.
 - **R4**: the frames after the waiting-mode `Ready` (handoff, start, declared
   result).
 - **R5**: the session storage policy for workspace claims.
-- **R6**: changes to files outside this lot, delivered as proposed patches
-  only.
+- **R6**: changes outside the original lot, delivered as proposed patches.
+  The waiting-mode binary dispatch is now composed; the proposed image
+  ownership and read-only claim CLI changes are not applied here.
 - **R7**: the production activation capability, which stays closed.
 - **R8**: coordination with the next central schema version (information
   request).
@@ -359,10 +377,14 @@ none of them.
   Kubernetes authority or namespace.
 - **R11**: a successor confirmation to reopen a journal of another
   incarnation.
-- **Q1**: whether a preamble-only attach bracketed by two exact observations
-  is an acceptable attach identity argument.
-- **Q6**: the spelling and entry point of the worker waiting mode
-  (`kubernetes-session-wait-v2`).
+- **Q1** (decided for S2b): the bracketed argument is accepted for the
+  preamble code only, under the assumptions of section 11. It proves no
+  identity and grants no effect permission; the guard stays sealed.
+- **Q6** (decided for S2b): the waiting mode is in `ai-guard-provider`, selected
+  by the sole argument `kubernetes-session-wait-v2` before reading the provider
+  environment. Any extra argument is refused with exit 64 without fallback.
+- **S5**: effect permits and a production implementation of the sealed guard,
+  with a durable checkpoint before each effect; blocked on R1–R3 and R7.
 - **Q7**: the per-attempt claim name rule and the never-reuse rule for claim
   UIDs.
 - **Q9**: what to do when the only StorageClass uses `WaitForFirstConsumer`.
@@ -373,3 +395,209 @@ none of them.
 - **EXT-13**: the kubectl version skew policy.
 - **EXT-14**: how Kubernetes v1.36 encodes omitted false booleans and
   canonical quantities in an admitted Pod.
+
+## 11. Preamble-only attach and worker waiting mode (stage S2b)
+
+The [attach owner](../../../src/runtime/kubernetes/session_attach.rs),
+[WebSocket adapter](../../../src/runtime/kubernetes/session_attach_codec.rs)
+and [worker waiting mode](../../../src/runtime/kubernetes/session_worker.rs)
+exist in source. The dispatch is wired into the existing
+[`ai-guard-provider` binary](../../../src/bin/ai-guard-provider.rs).
+The composition and its seven new process-stdio tests are NOT_RUN; the
+121 passing parents on the separate `be6b12d` source do not transfer here.
+No cluster was exercised. The effect guard has no production implementation;
+there is no session attach command, activation option or operator procedure.
+
+### 11.1 One attempt: Hello, Ready, observations, close
+
+The attach carries only a bootstrap preamble, with no business data.
+
+1. Verify the `kube-system` and tenant Namespace UIDs, active and not deleting.
+2. Observe the retained exact Pod UID and spec digest, node, running worker
+   container ID, start time and image ID, restart count zero and no deletion
+   timestamp. The Pod phase alone is not used as proof.
+3. Check the sealed guard and cancellation flag before initiating a request.
+4. Initiate one WebSocket upgrade to the Pod's attach subresource by name,
+   using the same HTTPS endpoint, CA and credential as the observations.
+   Redirects are refused. Validate the 101 response and the sole subprotocol
+   `v5.channel.k8s.io`; extensions and fallback protocols are refused.
+5. Send only Hello to stdin; accept one matching Ready on stdout. Both carry
+   non-secret identifiers and digests. Any extra bootstrap byte on stdout is
+   refused; the worker refuses any further stdin byte.
+6. Observe the Pod again and compare every field of step 2; verify the
+   Namespace anchors again. Local request-slot contention retries these
+   reads within the same deadline, without sending a refused request.
+7. End the stream and retain the local result, regardless of the verdict.
+
+The normal request order is anchors, Pod, attach, Pod, anchors. Matching
+observations allow the preamble to be reported as **declared metadata**.
+Ready is an echo: it proves neither process identity nor execution. The local
+attempt report is not the missing independent durable audit of product effects.
+
+Q1 accepts this argument only for the preamble code. It assumes UIDs are
+never reused, names are unique, the API server and kubelet are honest, an
+attach stays bound to its container, and the second observation is a
+most-recent read. None of those assumptions is verified here. Attach has no
+atomic Pod-UID precondition: it addresses a name between two separate reads.
+If an assumption fails, Hello can reach another process. No secret,
+credential, business argv or workspace content travels before or after it.
+
+### 11.2 Ownership, cancellation and endings
+
+`stdinOnce: true` makes every **initiated** attempt final for the Pod, even
+if no successful upgrade answer returns. There is no reconnect or second
+attach. Recovery requires a new reservation, Pod and per-attempt workspace
+claim. An attempt refused before initiation has not touched the Pod.
+
+From HTTP initiation, one task owns the pending upgrade, then the stream and
+its capacity slot. Losing the caller does not cancel the request or return
+the slot: the owner waits for the answer or handshake deadline, then for the
+stream's effective end. Without the caller's second observation the ending
+has no identity. Runtime shutdown drops what the owner holds and records a
+stopped-owner cause; dropping an owner is never success.
+
+Cancellation is checked before initiation and polled about every 50 ms while
+waiting for Ready or the second observation. This is a source constant,
+not a measured latency. It does not interrupt a pending upgrade or a write
+that the peer is not absorbing. Such a write waits until the deadline and
+ends as `AttachDeadline`, before or after Ready; a cancellation requested
+during it is kept separately as the cause. A possibly cut frame makes the
+stream unusable: no further frame is sent.
+
+On a usable stream the owner closes stdin with the v5 message `[255, 0]`,
+then sends a WebSocket close and shuts down the transport. Each step has its
+own one-second limit and may run after the bracket deadline. After a
+well-formed peer close, only the library's close reply is written; after a
+transport failure or cut frame, only bounded shutdown remains. A malformed
+close rejected by the library leaves the write side usable, so stdin close
+and close code 1002 are still attempted. The slot returns once the owner has
+ended. None of these endings is an observed terminal proof for the Pod.
+
+| Result | Meaning |
+|---|---|
+| `AttachHandshakeRefused` | The initiated upgrade returned an unexpected status, headers, subprotocol or extension. No stream or frame. |
+| `AttachProtocol` | A refused frame, channel, status shape or exceeded content bound; any extra bootstrap byte after Ready. |
+| `AttachIdentityUnproven` | No two equal observations around an accepted Ready: mismatch, observation failure, caller loss, cancellation, peer end, status arrival or other bootstrap failure. A deadline after Ready with no write pending also has this result. |
+| `AttachCapacity` | Both per-runtime attach slots are occupied. This does not cover an allocator abort inside the codec. |
+| `AttachDeadline` | Invalid or elapsed deadline, upgrade or pre-Ready handshake timeout, or a stream write still pending at its deadline. |
+| Existing pre-request/transport errors | A local precondition, guard or early cancellation can return `EffectRefusedBeforeSend`; observations can return `InstanceReplaced`, `ApiRejected` or `AuthorityChanged`. A lost upgrade answer can return `TransportUnavailable` or `Timeout`; the initiation mark still makes that attempt final. |
+
+A peer close counts as a peer end only with an empty body or code 1000 or
+1001. Any other code, malformed body or invalid UTF-8 reason is refused.
+Transport EOF or failure is also a peer end. None proves identity or success.
+
+### 11.3 Configured software bounds, not measured capacity
+
+| Bound | Value |
+|---|---|
+| WebSocket frame and reassembled message | 64 KiB each, including the channel byte |
+| One read / initial read buffer | 4 KiB; the frame buffer can grow |
+| Write queue | One client frame, 4,111 bytes; no write batching |
+| Worker stderr | 16 KiB counted then discarded by ai-guard |
+| Status document | 4 KiB, projected to a closed status and reason; no peer text retained |
+| Bootstrap envelope body | 16 KiB, length checked before allocation |
+| Upgrade and preamble exchange | 5 s each, within the whole bracket |
+| Whole bracket | At most 15 s, including the observations |
+| Closing after the end | At most three steps of 1 s each |
+| Concurrent preamble attempts | Two per runtime; not a capacity for 100 sessions |
+
+Only binary messages on stdout, stderr and status are admitted. An empty
+stdout payload is allowed; a message without a channel byte or on stdin,
+resize, close or an unknown channel is refused. Status is reduced to
+`Success`/`Failure` and a closed reason (`NonZeroExitCode`, `InternalError`,
+other or none). A status arriving before the observation bracket completes
+does not prove a completed preamble. Real API-server/kubelet interoperability,
+deadlines, memory and throughput remain unmeasured.
+
+### 11.4 Maintained WebSocket library and H21 compatibility
+
+`tokio-tungstenite` **0.30.0** is pinned exactly, with default features
+disabled, and uses `tungstenite` 0.30.0 (MIT / MIT-or-Apache-2.0 respectively).
+It wraps an already upgraded stream in the client role. It performs no
+handshake, connection, TLS or redirect here. ai-guard retains upgrade
+validation, channel policy and authorization. Library errors become closed
+values; their text is not formatted or retained.
+
+H21 explicitly retains two compatibility cases: a four-byte payload announced
+in the 16-bit length form, and a short Ready message announced in the 64-bit
+form, are accepted as the same payload. **Non-minimal lengths are accepted**;
+this is not strict minimal-length enforcement of RFC 6455. The 64 KiB
+declared-frame and aggregate-message bounds still apply. A 64-bit length
+with its top bit set, or a declared frame above the bound, is refused from
+the header as too big.
+
+Reserved opcodes and oversized declared frames are refused from the header.
+Other library refusals (reserved bits, masked server frames, invalid
+fragmentation or control frames) occur after the bounded frame payload is
+read. Text is read before ai-guard refuses it. A peer that withholds such a
+payload can consume the deadline. The fragment that crosses the aggregate
+bound can coexist in memory with the message being assembled.
+
+These are content bounds, **not an exact heap bound**. Library buffers grow,
+and its infallible allocations can abort the process on exhaustion; there is
+no typed recovery guarantee. A library panic stops the owner and returns its
+slot with the stopped-owner cause. The library emits debug/trace `log`
+records that can include frames and payloads. No logger is installed by this
+crate today; a future global logger at those levels could receive Hello,
+Ready and peer-controlled bytes. A build-time logging cap is not implemented.
+
+### 11.5 Worker waiting mode and real standard streams
+
+The rendered Pod command is the existing binary with one fixed argument:
+
+```text
+/usr/local/bin/ai-guard-provider kubernetes-session-wait-v2
+```
+
+This is the Pod's bootstrap command, not a session-launch procedure. Raw
+arguments select it before text decoding and before reading the provider
+handoff environment. Any additional argument, including invalid UTF-8, exits
+64 without building a runtime, reading stdin or falling back. Other first
+arguments retain the provider path; invalid UTF-8 there remains exit 126.
+
+The worker waits without a local timeout before the first byte and after
+Ready; the Pod's `activeDeadlineSeconds` is the runtime bound, not a durable
+broker deadline. The first byte arms five seconds to complete Hello and
+flush Ready. No program is executed and no subsequent frame is accepted.
+Only Ready goes to stdout; a fixed diagnostic without identifiers or frame
+contents goes to stderr.
+
+| Exit | Waiting-mode end |
+|---|---|
+| 64 | Protocol refusal: invalid, oversized, truncated or unexpected frame; any byte after Ready; any argument after the mode. |
+| 65 | Hello or flushed Ready did not complete within five seconds of the first byte. |
+| 66 | EOF before Hello or after Ready, without handoff. Expected for a preamble-only exchange, never session success. |
+| 70 | Local read/write, capacity or runtime failure. |
+| 0 | Never returned. |
+
+The source calls `shutdown_background` after the exchange: Tokio's blocking
+stdin reader can still be parked when a handshake deadline expires; waiting
+for runtime destruction would otherwise prevent the exit from arriving.
+Seven new tests target the real binary and pipes, including a partial Hello
+with stdin kept open. They remain NOT_RUN on this composition. They do not
+exercise a worker image, attach transport or cluster.
+
+The mode reads no credential or environment itself. Constructing its Tokio
+runtime can read Tokio's `TOKIO_UNSTABLE_SHARDED_BLOCKING_QUEUE` setting;
+extra-argument refusal constructs none. The Pod request has no environment.
+The mode installs no signal handler: PID-1 SIGTERM behaviour, the active
+deadline and the rendered 30-second termination grace remain to be observed.
+
+Ready repeats the Hello's identifiers and four digests on stdout. Node
+runtime logs can retain this session metadata and stderr outside ai-guard;
+this has not been observed on a cluster here. ai-guard does not mask, bound
+or delete those node logs. No secret may travel on this channel, and output
+protection before runtime persistence remains open.
+
+### 11.6 Closed prerequisites
+
+- **R4:** no handoff, Start or declared-result frames after Ready.
+- **R7:** no production activation or proven exclusivity of attach/exec
+  permissions in the tenant Namespace.
+- **R10:** rejecting shared Kubernetes authority/Namespace between tenants at
+  configuration load remains a prerequisite, not a delivered check.
+- **S5 / sealed guard:** no production effect permit or product attach path.
+- **Cluster qualification:** upgrade/channel interoperability, effective RBAC
+  verbs (EXT-8), feature gates, `stdinOnce`, node logs, signal handling, CNI,
+  storage, deadlines and 100-worker capacity remain BLOCKED. Plan step 6 stays
+  BLOCKED; source and loopback results do not qualify a cluster.

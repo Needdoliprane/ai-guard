@@ -39,6 +39,21 @@ pub(crate) enum KubernetesSessionRuntimeError {
     EffectRefusedBeforeSend,
     /// The exact instance is being deleted; its gate is never released.
     InstanceDeleting,
+    /// The attach upgrade was initiated and its answer was not the exact
+    /// accepted `101`: no stream is held.
+    AttachHandshakeRefused,
+    /// The attach stream broke the bounded v5 channel framing or its bounds,
+    /// or the peer closed it with a code that this client refuses.
+    AttachProtocol,
+    /// The attach ended without two equal observations of the exact
+    /// instance around the preamble.
+    AttachIdentityUnproven,
+    /// No attach slot was available.
+    AttachCapacity,
+    /// The attach deadline is elapsed, beyond its bound, or was reached
+    /// before the preamble completed or while a write to the stream was
+    /// still pending.
+    AttachDeadline,
 }
 impl fmt::Display for KubernetesSessionRuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -61,6 +76,21 @@ impl fmt::Display for KubernetesSessionRuntimeError {
             ),
             Self::InstanceDeleting => f.write_str(
                 "Kubernetes session Pod deletion is requested; its gate is not released",
+            ),
+            Self::AttachHandshakeRefused => f.write_str(
+                "Kubernetes session attach upgrade was refused or was not the exact v5 channel handshake",
+            ),
+            Self::AttachProtocol => f.write_str(
+                "Kubernetes session attach stream violated the bounded v5 channel protocol",
+            ),
+            Self::AttachIdentityUnproven => f.write_str(
+                "Kubernetes session attach ended without a proven exact instance; no identity is established",
+            ),
+            Self::AttachCapacity => {
+                f.write_str("Kubernetes session attach capacity is unavailable")
+            }
+            Self::AttachDeadline => f.write_str(
+                "Kubernetes session attach deadline elapsed or exceeds its bound",
             ),
         }
     }

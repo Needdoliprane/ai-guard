@@ -3,12 +3,18 @@
 //! One owned listener per runtime, one request per connection (the client
 //! keeps no idle connection), bounded request parsing and no new dependency.
 //! It can drop a connection after the full request without any response
-//! byte. Its answers are declared fixture facts: they never qualify a
-//! Kubernetes API server, admission, scheduling or deletion.
+//! byte. For the attach tests it can also answer a head with chosen headers
+//! and hand the raw TLS stream to a test script, served by its own task so
+//! that the listener keeps answering while that stream is open. Its answers
+//! are declared fixture facts: they never qualify a Kubernetes API server,
+//! admission, scheduling, deletion, an attach endpoint or a kubelet stream.
 use super::admission::transport_tests::TlsMaterial;
+use base64::{Engine, engine::general_purpose::STANDARD};
 use std::{
+    future::Future,
     io,
     path::Path,
+    pin::Pin,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -60,6 +66,11 @@ impl PeerRequest {
     }
 }
 
+/// The server side of one accepted connection after its request was read.
+pub(crate) type PeerStream = tokio_rustls::server::TlsStream<TcpStream>;
+pub(crate) type PeerScriptFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+pub(crate) type PeerScript = Box<dyn FnOnce(PeerStream) -> PeerScriptFuture + Send>;
+
 pub(crate) enum PeerReply {
     Json {
         status: u16,
@@ -68,6 +79,18 @@ pub(crate) enum PeerReply {
     /// The whole request was read; the connection is dropped without any
     /// response byte, as after a lost answer.
     CloseWithoutResponse,
+    /// A head with exactly these headers and no body, then the connection is
+    /// closed.
+    Head {
+        status: u16,
+        headers: Vec<(String, String)>,
+    },
+    /// These head bytes (possibly none), then the raw TLS stream goes to
+    /// `script`, served by its own task.
+    Handoff {
+        head: Vec<u8>,
+        script: PeerScript,
+    },
 }
 impl PeerReply {
     pub(crate) fn json(status: u16, value: &serde_json::Value) -> Self {
@@ -76,6 +99,64 @@ impl PeerReply {
             body: serde_json::to_vec(value).expect("serialize a fixture reply"),
         }
     }
+    pub(crate) fn head(status: u16, headers: &[(&str, &str)]) -> Self {
+        Self::Head {
+            status,
+            headers: headers
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect(),
+        }
+    }
+    /// `101 Switching Protocols` with exactly these headers, then `script`
+    /// owns the stream.
+    pub(crate) fn switching<F, Fut>(headers: &[(&str, &str)], script: F) -> Self
+    where
+        F: FnOnce(PeerStream) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let headers: Vec<(String, String)> = headers
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect();
+        Self::Handoff {
+            head: response_head(101, "Switching Protocols", &headers, ""),
+            script: Box::new(move |stream: PeerStream| -> PeerScriptFuture {
+                Box::pin(script(stream))
+            }),
+        }
+    }
+    /// The request is read and never answered: the connection stays open
+    /// until the client closes it or the peer is dropped.
+    pub(crate) fn never_answer() -> Self {
+        Self::Handoff {
+            head: Vec::new(),
+            script: Box::new(|mut stream: PeerStream| -> PeerScriptFuture {
+                Box::pin(async move {
+                    let mut sink = [0_u8; 64];
+                    while matches!(stream.read(&mut sink).await, Ok(count) if count > 0) {}
+                })
+            }),
+        }
+    }
+}
+
+fn response_head(
+    status: u16,
+    reason: &str,
+    headers: &[(String, String)],
+    framing: &str,
+) -> Vec<u8> {
+    let mut head = format!("HTTP/1.1 {status} {reason}\r\n");
+    for (name, value) in headers {
+        head.push_str(name);
+        head.push_str(": ");
+        head.push_str(value);
+        head.push_str("\r\n");
+    }
+    head.push_str(framing);
+    head.push_str("\r\n");
+    head.into_bytes()
 }
 
 type Responder = Box<dyn FnMut(&PeerRequest) -> PeerReply + Send>;
@@ -85,6 +166,8 @@ struct PeerState {
     /// TCP connections accepted, counted before the TLS handshake and the
     /// request parsing.
     accepted: usize,
+    /// Tasks of the handed-off streams, kept so that none runs unobserved.
+    scripts: Vec<JoinHandle<()>>,
 }
 
 pub(crate) struct SessionTestPeer {
@@ -97,6 +180,11 @@ pub(crate) struct SessionTestPeer {
 impl Drop for SessionTestPeer {
     fn drop(&mut self) {
         self.task.abort();
+        if let Ok(mut state) = self.state.lock() {
+            for script in state.scripts.drain(..) {
+                script.abort();
+            }
+        }
     }
 }
 impl SessionTestPeer {
@@ -140,6 +228,7 @@ impl SessionTestPeer {
             }),
             seen: Vec::new(),
             accepted: 0,
+            scripts: Vec::new(),
         }));
         let task = tokio::spawn(serve(accepting, acceptor, state.clone()));
         Self {
@@ -175,6 +264,18 @@ impl SessionTestPeer {
     /// missing from `requests`.
     pub(crate) fn accepted(&self) -> usize {
         self.state.lock().expect("peer state").accepted
+    }
+    /// Waits for every handed-off script started so far and re-raises a
+    /// script panic in the test. A script that is still running after the
+    /// exchange limit fails the test instead of being left unobserved.
+    pub(crate) async fn finish_scripts(&self) {
+        let scripts = std::mem::take(&mut self.state.lock().expect("peer state").scripts);
+        for script in scripts {
+            tokio::time::timeout(EXCHANGE_LIMIT, script)
+                .await
+                .expect("a peer script is still running")
+                .expect("a peer script panicked or was cancelled");
+        }
     }
 }
 
@@ -225,7 +326,127 @@ async fn exchange(
             stream.shutdown().await
         }
         PeerReply::CloseWithoutResponse => Ok(()),
+        PeerReply::Head { status, headers } => {
+            let head = response_head(
+                status,
+                "Fixture",
+                &headers,
+                "content-length: 0\r\nconnection: close\r\n",
+            );
+            stream.write_all(&head).await?;
+            stream.shutdown().await
+        }
+        PeerReply::Handoff { head, script } => {
+            if !head.is_empty() {
+                stream.write_all(&head).await?;
+                stream.flush().await?;
+            }
+            // Its own task: this exchange ends here and the listener keeps
+            // answering while the script holds the stream.
+            let task = tokio::spawn(script(stream));
+            state
+                .lock()
+                .map_err(|_| io::Error::other("peer state is poisoned"))?
+                .scripts
+                .push(task);
+            Ok(())
+        }
     }
+}
+
+/// `Sec-WebSocket-Accept` of RFC 6455 section 4.2.2, written for the fixture
+/// independently of the client code under test.
+pub(crate) fn websocket_accept_value(key: &str) -> String {
+    let joined = format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    STANDARD.encode(ring::digest::digest(
+        &ring::digest::SHA1_FOR_LEGACY_USE_ONLY,
+        joined.as_bytes(),
+    ))
+}
+
+/// One unmasked server frame in the minimal length form. `first` is the raw
+/// first byte (FIN, reserved bits and opcode), so a test can also build a
+/// frame that the client must refuse.
+pub(crate) fn server_frame(first: u8, payload: &[u8]) -> Vec<u8> {
+    let mut frame = vec![first];
+    if let Ok(length) = u8::try_from(payload.len())
+        && length <= 125
+    {
+        frame.push(length);
+    } else if let Ok(length) = u16::try_from(payload.len()) {
+        frame.push(126);
+        frame.extend_from_slice(&length.to_be_bytes());
+    } else {
+        frame.push(127);
+        frame.extend_from_slice(
+            &u64::try_from(payload.len())
+                .expect("a fixture payload length fits 64 bits")
+                .to_be_bytes(),
+        );
+    }
+    frame.extend_from_slice(payload);
+    frame
+}
+
+/// One complete binary server message on `channel`.
+pub(crate) fn server_message(channel: u8, payload: &[u8]) -> Vec<u8> {
+    let mut message = vec![channel];
+    message.extend_from_slice(payload);
+    server_frame(0x82, &message)
+}
+
+/// One frame read from the client, unmasked.
+pub(crate) struct ClientFrame {
+    /// Raw first byte: FIN, reserved bits and opcode.
+    pub(crate) first: u8,
+    pub(crate) payload: Vec<u8>,
+}
+impl ClientFrame {
+    pub(crate) fn opcode(&self) -> u8 {
+        self.first & 0x0F
+    }
+    pub(crate) fn is_final(&self) -> bool {
+        self.first & 0x80 != 0
+    }
+}
+
+/// Reads one client frame. `Ok(None)` is the end of the stream before any
+/// byte of a frame. A frame without the mask bit, with a reserved bit or in
+/// the 64-bit length form is an error: the fixture accepts no unmasked client
+/// frame, so every frame it returns proves that the client masked it.
+pub(crate) async fn read_client_frame<S: AsyncRead + Unpin>(
+    stream: &mut S,
+) -> io::Result<Option<ClientFrame>> {
+    let mut head = [0_u8; 2];
+    if stream.read(&mut head[..1]).await? == 0 {
+        return Ok(None);
+    }
+    stream.read_exact(&mut head[1..]).await?;
+    if head[0] & 0x70 != 0 || head[1] & 0x80 == 0 {
+        return Err(io::Error::other(
+            "client frame without a mask or with a reserved bit",
+        ));
+    }
+    let length = match head[1] & 0x7F {
+        126 => {
+            let mut extended = [0_u8; 2];
+            stream.read_exact(&mut extended).await?;
+            usize::from(u16::from_be_bytes(extended))
+        }
+        127 => return Err(io::Error::other("oversized client frame")),
+        short => usize::from(short),
+    };
+    let mut key = [0_u8; 4];
+    stream.read_exact(&mut key).await?;
+    let mut payload = vec![0_u8; length];
+    stream.read_exact(&mut payload).await?;
+    for (byte, mask) in payload.iter_mut().zip(key.iter().cycle()) {
+        *byte ^= mask;
+    }
+    Ok(Some(ClientFrame {
+        first: head[0],
+        payload,
+    }))
 }
 
 /// Bounded HTTP/1.1 request: origin-form target, `Content-Length` body only.
