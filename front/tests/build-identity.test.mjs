@@ -106,14 +106,21 @@ test("public reads use fixed routes, no session credential, no redirect/cache, a
 });
 
 test("old servers, HTTP errors, non-JSON, malformed or oversized bodies remain unavailable", async () => {
+  const dto = status();
+  const validJson = JSON.stringify(dto);
+  const oversizedJson = validJson + " ".repeat(4097 - new TextEncoder().encode(validJson).byteLength);
+  assert.deepEqual(JSON.parse(oversizedJson), dto, "byte-limit fixture remains valid JSON and DTO");
+  assert.equal(new TextEncoder().encode(oversizedJson).byteLength, 4097);
+  assert.deepEqual(await readBuildStatus("dashboard", async () => new Response(validJson, { headers: { "content-type": "application/json" } })),
+    { kind: "available", identity: dto }, "otherwise identical public DTO is accepted");
   for (const [response, reason] of [
     [new Response(null, { status: 404 }), "unsupported"], [new Response(null, { status: 503 }), "http"],
-    [new Response("<html>old server</html>"), "invalid"],
+    [new Response(validJson, { headers: { "content-type": "text/html" } }), "invalid"],
     [new Response("{", { headers: { "content-type": "application/json" } }), "invalid"],
     [Response.json(status("gateway")), "invalid"],
     [Response.json({ ...status(), private: "never displayed" }), "invalid"],
-    [new Response(" ".repeat(4097), { headers: { "content-type": "application/json" } }), "invalid"],
-    [new Response("{}", { headers: { "content-type": "application/json", "content-length": "4097" } }), "invalid"],
+    [new Response(oversizedJson, { headers: { "content-type": "application/json" } }), "invalid"],
+    [new Response(validJson, { headers: { "content-type": "application/json", "content-length": "4097" } }), "invalid"],
   ]) assert.deepEqual(await readBuildStatus("dashboard", async () => response), { kind: "unavailable", reason });
   assert.deepEqual(await readBuildStatus("gateway", async () => { throw new Error("private detail"); }),
     { kind: "unavailable", reason: "network" });
@@ -128,18 +135,28 @@ test("deadline includes a blocked response body and cancellation does not wait f
 });
 
 test("byte bound applies across chunks and malformed UTF-8 is refused", async () => {
+  const dto = status();
+  const validJson = JSON.stringify(dto);
+  const encoder = new TextEncoder();
+  const padded = validJson + " ".repeat(4097 - encoder.encode(validJson).byteLength);
+  const bytes = encoder.encode(padded);
+  assert.deepEqual(JSON.parse(padded), dto);
+  assert.equal(bytes.byteLength, 4097);
   const chunks = new ReadableStream({ start(controller) {
-    controller.enqueue(new Uint8Array(2048)); controller.enqueue(new Uint8Array(2049)); controller.close();
+    controller.enqueue(bytes.slice(0, 2048)); controller.enqueue(bytes.slice(2048)); controller.close();
   } });
   assert.deepEqual(await readBuildStatus("dashboard", async () => new Response(chunks, { headers: { "content-type": "application/json" } })),
     { kind: "unavailable", reason: "invalid" });
   assert.deepEqual(await readBuildStatus("dashboard", async () => new Response(new Uint8Array([0xff]), { headers: { "content-type": "application/json" } })),
     { kind: "unavailable", reason: "invalid" });
-  const fragmented = new ReadableStream({ start(controller) {
-    for (let index = 0; index < 129; index++) controller.enqueue(new Uint8Array(0));
+  const fragmented = (emptyChunks) => new ReadableStream({ start(controller) {
+    for (let index = 0; index < emptyChunks; index++) controller.enqueue(new Uint8Array(0));
+    controller.enqueue(encoder.encode(validJson));
     controller.close();
   } });
-  assert.deepEqual(await readBuildStatus("dashboard", async () => new Response(fragmented, { headers: { "content-type": "application/json" } })),
+  assert.deepEqual(await readBuildStatus("dashboard", async () => new Response(fragmented(127), { headers: { "content-type": "application/json" } })),
+    { kind: "available", identity: dto }, "128 chunks are accepted, including a valid final DTO");
+  assert.deepEqual(await readBuildStatus("dashboard", async () => new Response(fragmented(128), { headers: { "content-type": "application/json" } })),
     { kind: "unavailable", reason: "invalid" });
 });
 
