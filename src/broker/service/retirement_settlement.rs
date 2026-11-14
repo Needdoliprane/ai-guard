@@ -124,7 +124,8 @@ async fn reload_pending(
         .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
     let after = confirmed_pending(continuation, &current)?;
     if current.head().revision() < before.head().revision()
-        || (current.head().revision() == before.head().revision() && current.head() != before.head())
+        || (current.head().revision() == before.head().revision()
+            && current.head() != before.head())
         || proof.request != after.request
         || (proof.receipt.is_some() && proof.receipt != after.receipt)
     {
@@ -165,7 +166,10 @@ async fn recover_final(
         Ok(FinalRetirementRecovery::Absent) => Ok(None),
         Ok(FinalRetirementRecovery::Completed(receipt)) => Ok(Some(receipt)),
         Ok(FinalRetirementRecovery::InFlight) => Err(BrokerErrorCodeV1::NeedsReconciliation),
-        Err(RetirementFailure::Refused { continuation: retained, .. }) => {
+        Err(RetirementFailure::Refused {
+            continuation: retained,
+            ..
+        }) => {
             // This ticket retains the same writer input; no Q is queried to
             // replace it, and dropping the waiter cannot cancel that input.
             match writer.retry_final_retirement(retained).await {
@@ -173,10 +177,11 @@ async fn recover_final(
                 Err(RetirementFailure::NotQueued { input, error }) => {
                     // Keep even an unexpected future NotQueued return. Current
                     // retry ports retain that input inside the same registry.
-                    let token = guard
-                        .job()
-                        .preclaim
-                        .reserve_final_input(guard, continuation, input)?;
+                    let token =
+                        guard
+                            .job()
+                            .preclaim
+                            .reserve_final_input(guard, continuation, input)?;
                     drop(token);
                     Err(jobs::journal_error(error))
                 }
@@ -240,13 +245,15 @@ pub(super) async fn settle_confirmed_final(
     let recovered = recover_final(guard, writer, &continuation).await?;
     // Completed recovery consumes its registry entry. Absent therefore never
     // proves that no F exists: always reload the original physical Journal.
-    let (mut current, mut proof) =
-        reload_pending(writer, &continuation, initial, &before).await?;
+    let (mut current, mut proof) = reload_pending(writer, &continuation, initial, &before).await?;
     same_canonical_owner(guard, &continuation)?;
     if let Some(receipt) = recovered.as_ref() {
         confirms_writer_receipt(&current, &proof, receipt)?;
     }
-    let mut input = match local.preclaim.take_retained_final_input(guard, &continuation)? {
+    let mut input = match local
+        .preclaim
+        .take_retained_final_input(guard, &continuation)?
+    {
         Some(input) => input,
         None if proof.receipt.is_some() => {
             return cleanup_confirmed_final(guard, writer, full, &current, &continuation).await;
@@ -267,7 +274,9 @@ pub(super) async fn settle_confirmed_final(
                 drop(verified);
                 return cleanup_confirmed_final(guard, writer, full, &current, &continuation).await;
             }
-            local.preclaim.reserve_final_input(guard, &continuation, verified)?
+            local
+                .preclaim
+                .reserve_final_input(guard, &continuation, verified)?
         }
     };
     let expected = input
@@ -275,14 +284,21 @@ pub(super) async fn settle_confirmed_final(
         .receipt()
         .digest()
         .map_err(jobs::journal_error)?;
-    if proof.receipt.as_ref().is_some_and(|receipt| receipt != &expected) {
+    if proof
+        .receipt
+        .as_ref()
+        .is_some_and(|receipt| receipt != &expected)
+    {
         return Err(BrokerErrorCodeV1::NeedsReconciliation);
     }
     // No await separates taking the actual input from the writer's existing
     // synchronous enqueue-before-await. On cancellation its registry owns it.
     let receipt = match writer.finalize_retirement(input.take_input()?).await {
         Ok(receipt) => receipt,
-        Err(RetirementFailure::NotQueued { input: returned, error }) => {
+        Err(RetirementFailure::NotQueued {
+            input: returned,
+            error,
+        }) => {
             input.retain_returned(returned)?;
             return Err(jobs::journal_error(error));
         }
@@ -335,9 +351,9 @@ async fn cleanup_confirmed_final(
     observe_final_registry(writer, continuation, &current)?;
     // No await follows the canonical-holder recheck. Only the existing client
     // can seal actual present-slot removal; no sealed Q is stored in its owner.
-    guard.job()
-        .preclaim
-        .finish_retirement_settlement(continuation, &mut verified, |owner, receipt| {
-            full.retire_retained_local_after_final(owner, receipt, &current)
-        })
+    guard.job().preclaim.finish_retirement_settlement(
+        continuation,
+        &mut verified,
+        |owner, receipt| full.retire_retained_local_after_final(owner, receipt, &current),
+    )
 }

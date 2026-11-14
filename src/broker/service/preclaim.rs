@@ -6,8 +6,7 @@ use crate::broker::writer::{AuthorizedRetirement, BeginUnusedRetirement, Pending
 use crate::{
     broker::{
         enforcer::{
-            CancelGeneration, EnforcerError, EnforcerResult,
-            retirement::VerifiedRetirementReceipt,
+            CancelGeneration, EnforcerError, EnforcerResult, retirement::VerifiedRetirementReceipt,
         },
         retirement::{RetirementAuditAckV1, RetirementEvidenceV1, RetirementIdentityV1},
     },
@@ -258,9 +257,7 @@ impl PendingFinalInput<'_> {
         &mut self,
         input: VerifiedRetirementReceipt,
     ) -> Result<(), BrokerErrorCodeV1> {
-        if self.input.is_none()
-            && valid_final_input(self.continuation.owner(), &input).is_ok()
-        {
+        if self.input.is_none() && valid_final_input(self.continuation.owner(), &input).is_ok() {
             self.input = Some(input);
             return Ok(());
         }
@@ -987,7 +984,11 @@ impl PreclaimControlV1 {
         identity: &RetirementIdentityV1,
         retained_only: bool,
     ) -> Result<Option<SubmittedRetirementSettlement>, BrokerErrorCodeV1> {
-        if self.inner.unmatched_retirement.load(std::sync::atomic::Ordering::Acquire) {
+        if self
+            .inner
+            .unmatched_retirement
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
             return Err(BrokerErrorCodeV1::NeedsReconciliation);
         }
         let mut state = self
@@ -1058,7 +1059,10 @@ impl PreclaimControlV1 {
         let accepted = (|| {
             if guard.operation_id() != continuation.request.operation_id
                 || !Arc::ptr_eq(&self.inner, &guard.job().preclaim.inner)
-                || self.inner.unmatched_retirement.load(std::sync::atomic::Ordering::Acquire)
+                || self
+                    .inner
+                    .unmatched_retirement
+                    .load(std::sync::atomic::Ordering::Acquire)
             {
                 return Err(BrokerErrorCodeV1::Conflict);
             }
@@ -1107,7 +1111,10 @@ impl PreclaimControlV1 {
     ) -> Result<Option<PendingFinalInput<'guard>>, BrokerErrorCodeV1> {
         if guard.operation_id() != continuation.request.operation_id
             || !Arc::ptr_eq(&self.inner, &guard.job().preclaim.inner)
-            || self.inner.unmatched_retirement.load(std::sync::atomic::Ordering::Acquire)
+            || self
+                .inner
+                .unmatched_retirement
+                .load(std::sync::atomic::Ordering::Acquire)
         {
             return Err(BrokerErrorCodeV1::Conflict);
         }
@@ -1217,7 +1224,11 @@ impl PreclaimControlV1 {
             &mut crate::broker::enforcer::retirement::VerifiedRetirementReceipt,
         ) -> EnforcerResult<()>,
     {
-        if self.inner.unmatched_retirement.load(std::sync::atomic::Ordering::Acquire) {
+        if self
+            .inner
+            .unmatched_retirement
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
             return Err(BrokerErrorCodeV1::NeedsReconciliation);
         }
         let mut state = self

@@ -158,12 +158,14 @@ async fn same_original_not_queued_final_retries_its_retained_input_before_anothe
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn same_original_inflight_final_keeps_its_owner_then_consumes_completed_without_readmission() {
+async fn same_original_inflight_final_keeps_its_owner_then_consumes_completed_without_readmission()
+{
     composed_settlement(Scenario::FinalQueued).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn same_original_stale_pending_reads_consumed_final_with_closed_registry_without_readmission() {
+async fn same_original_stale_pending_reads_consumed_final_with_closed_registry_without_readmission()
+{
     composed_settlement(Scenario::FinalCompletedConsumed).await;
 }
 
@@ -463,7 +465,9 @@ async fn submitted_final_case(
     let should_settle = matches!(scenario, Scenario::Settle | Scenario::CancelledAfterFinal);
     match scenario {
         Scenario::FinalNotQueued | Scenario::FinalQueued | Scenario::FinalCompletedConsumed => {
-            return Err(anyhow!("Final input case reached the already-Final fixture"));
+            return Err(anyhow!(
+                "Final input case reached the already-Final fixture"
+            ));
         }
         Scenario::PendingBeforeFinal => {
             return Err(anyhow!("Pending case reached the already-Final fixture"));
@@ -964,13 +968,18 @@ async fn submitted_final_input_case(
         Arc::ptr_eq(continuation.owner(), &owner),
         "Final input setup selected another keeper"
     );
-    let mut handoff = job.preclaim.reserve_final_input(&guard, &continuation, verified)?;
+    let mut handoff = job
+        .preclaim
+        .reserve_final_input(&guard, &continuation, verified)?;
     let input = handoff.take_input()?;
 
     match scenario {
         Scenario::FinalNotQueued => {
             let pause = writer.pause_for_test().await?;
-            ensure!(pause.is_paused(), "actual Final pressure writer did not pause");
+            ensure!(
+                pause.is_paused(),
+                "actual Final pressure writer did not pause"
+            );
             // The fixture's real writer queue has capacity 16. Poll ordinary
             // read commands into it while its existing actor pause is held;
             // the seventeenth refusal proves pressure without private sender access.
@@ -1033,7 +1042,9 @@ async fn submitted_final_input_case(
                 .take_retained_final_input(&guard, &retryable)?
                 .ok_or_else(|| anyhow!("NotQueued Final has no actual retained input"))?;
             ensure!(
-                job.preclaim.retained_final_for_settlement(&identity)?.is_none(),
+                job.preclaim
+                    .retained_final_for_settlement(&identity)?
+                    .is_none(),
                 "a borrowed Final input remained selectable by a second handoff"
             );
             drop(borrowed);
@@ -1045,7 +1056,10 @@ async fn submitted_final_input_case(
             );
             drop(pause);
             for waiter in queued {
-                ensure!(waiter.await?.is_some(), "ordinary pressure read did not drain");
+                ensure!(
+                    waiter.await?.is_some(),
+                    "ordinary pressure read did not drain"
+                );
             }
             eprintln!("BROKER_SUBMITTED_NOT_QUEUED_INPUT_SETUP_CONFIRMED");
         }
@@ -1056,10 +1070,15 @@ async fn submitted_final_input_case(
                 Ok(receive) => receive,
                 Err(crate::broker::writer::RetirementFailure::NotQueued { input, .. }) => {
                     handoff.retain_returned(input)?;
-                    return Err(anyhow!("Final owner fixture did not enqueue its actual input"));
+                    return Err(anyhow!(
+                        "Final owner fixture did not enqueue its actual input"
+                    ));
                 }
                 Err(failure) => {
-                    return Err(anyhow!("Final owner enqueue became unknown: {:?}", failure.error()));
+                    return Err(anyhow!(
+                        "Final owner enqueue became unknown: {:?}",
+                        failure.error()
+                    ));
                 }
             };
             // The real writer now owns the only input; losing its reply and
@@ -1070,8 +1089,12 @@ async fn submitted_final_input_case(
                 matches!(
                     stops.recover_final_retirement_state(operation, arm, *identity.retirement_id()),
                     Ok(crate::broker::writer::FinalRetirementRecovery::InFlight)
-                ) && job.preclaim.retained_final_for_settlement(&identity)?.is_none()
-                    && job.preclaim
+                ) && job
+                    .preclaim
+                    .retained_final_for_settlement(&identity)?
+                    .is_none()
+                    && job
+                        .preclaim
                         .submitted_retirement_for_settlement(&identity)?
                         .is_some_and(|retained| Arc::ptr_eq(retained.owner(), &owner)),
                 "queued Final did not retain the real writer input independently of its waiter"
@@ -1095,11 +1118,17 @@ async fn submitted_final_input_case(
                 pause.is_paused()
                     && matches!(inflight, Err(BrokerErrorCodeV1::NeedsReconciliation))
                     && matches!(
-                        stops.recover_final_retirement_state(operation, arm, *identity.retirement_id()),
+                        stops.recover_final_retirement_state(
+                            operation,
+                            arm,
+                            *identity.retirement_id()
+                        ),
                         Ok(crate::broker::writer::FinalRetirementRecovery::InFlight)
                     )
                     && full.has_local_slot(&identity.arm().operation_id)?
-                    && job.preclaim.retirement_submission_for_test(arm)
+                    && job
+                        .preclaim
+                        .retirement_submission_for_test(arm)
                         .is_some_and(|retained| Arc::ptr_eq(&retained, &owner)),
                 "InFlight Final was queried, released, replaced, or allowed its pause to expire"
             );
@@ -1126,7 +1155,11 @@ async fn submitted_final_input_case(
                     && owner.matches_recovery_origin(&durable)
                     && durable.head() == receipt.head()
                     && matches!(
-                        stops.recover_final_retirement_state(operation, arm, *identity.retirement_id()),
+                        stops.recover_final_retirement_state(
+                            operation,
+                            arm,
+                            *identity.retirement_id()
+                        ),
                         Ok(crate::broker::writer::FinalRetirementRecovery::Absent)
                     )
                     && !stops.has_retained_retirement()
@@ -1184,8 +1217,12 @@ async fn submitted_final_input_case(
                 && !stops.has_retained_retirement()
                 && job.preclaim.has_retained_retirement()
                 && full.has_local_slot(&identity.arm().operation_id)?
-                && job.preclaim.retained_final_for_settlement(&identity)?.is_none()
-                && job.preclaim
+                && job
+                    .preclaim
+                    .retained_final_for_settlement(&identity)?
+                    .is_none()
+                && job
+                    .preclaim
                     .submitted_retirement_for_settlement(&identity)?
                     .is_some_and(|retained| Arc::ptr_eq(retained.owner(), &owner)),
             "retained Final input was bypassed, not consumed, or released before post-F Q"
@@ -1202,13 +1239,20 @@ async fn submitted_final_input_case(
         .recovery_status(operation)
         .await?
         .ok_or_else(|| anyhow!("actual Final input completion snapshot missing"))?;
-    let finalized = snapshot.retirements().first().and_then(|entry| entry.finalized())
+    let finalized = snapshot
+        .retirements()
+        .first()
+        .and_then(|entry| entry.finalized())
         .ok_or_else(|| anyhow!("retained Final input did not produce Final"))?;
-    let birth = after.outbox_receipt(final_event_id, None)
+    let birth = after
+        .outbox_receipt(final_event_id, None)
         .ok_or_else(|| anyhow!("retained Final input lost its fixed Final event birth"))?
-        .head().clone();
+        .head()
+        .clone();
     let events = final_rows(store)?;
-    let replay = full.query_retirement_retained(&owner).await?
+    let replay = full
+        .query_retirement_retained(&owner)
+        .await?
         .ok_or_else(|| anyhow!("actual Q missing after Final input cleanup"))?;
     ensure!(
         snapshot.retirements().len() == 1
@@ -1234,21 +1278,34 @@ async fn submitted_final_input_case(
             && service.fenced.load(Ordering::Acquire)
             && service.require_starts().await.is_err()
             && after.intent().canonical_bytes()? == intent_bytes
-            && canonical(&after.broker_checkpoint_v2()
-                .ok_or_else(|| anyhow!("Final input completion supervision missing"))?
-                .supervision().operations())? == original_operations
-            && worker == canonical(&store.worker(&identity.arm().worker_id)?
-                .ok_or_else(|| anyhow!("Final input worker disappeared"))?)?
+            && canonical(
+                &after
+                    .broker_checkpoint_v2()
+                    .ok_or_else(|| anyhow!("Final input completion supervision missing"))?
+                    .supervision()
+                    .operations()
+            )? == original_operations
+            && worker
+                == canonical(
+                    &store
+                        .worker(&identity.arm().worker_id)?
+                        .ok_or_else(|| anyhow!("Final input worker disappeared"))?
+                )?
             && quota == canonical(&store.worker_quota(&QuotaPolicyV1::default())?)?
             && usage == canonical(&store.worker_usage()?)?,
         "Final input recovery changed admission, original deadline, claims, worker, quota, or usage"
     );
-    Arc::clone(service).reconcile_retirement_audit_profile(profile.clone()).await?;
-    let repeated = writer.load(operation).await?
+    Arc::clone(service)
+        .reconcile_retirement_audit_profile(profile.clone())
+        .await?;
+    let repeated = writer
+        .load(operation)
+        .await?
         .ok_or_else(|| anyhow!("Final input replay job missing"))?;
     ensure!(
         repeated.head() == after.head()
-            && repeated.outbox_receipt(final_event_id, None)
+            && repeated
+                .outbox_receipt(final_event_id, None)
                 .is_some_and(|receipt| receipt.head() == &birth)
             && canonical(&final_rows(store)?)? == canonical(&events)?
             && !jobs.has_retained_retirement()
