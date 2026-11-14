@@ -19,6 +19,9 @@ fn identity(binding: u64) -> OwnedBrokerIdentityViewV2 {
 fn fence() -> OwnedBindingRotationFenceV2 {
     OwnedBindingRotationFenceV2 {
         previous_revision: 1,
+        owner_incarnation: "00000000-0000-4000-8000-000000000010".into(),
+        incarnation_seq: 9,
+        incarnation_hash: "d".repeat(64),
         receipt: crate::workload::WorkloadBindingReceiptV1 {
             version: 1,
             credential_id: identity(2).subject.credential_id,
@@ -119,6 +122,9 @@ fn rotation_reconciliation_never_weakens_exact_replay_or_accepts_pin_changes() {
     other = current.clone();
     other.closure_revision = 6;
     assert!(fence().validate_for(&old, &other).is_err());
+    let mut same_owner = fence();
+    same_owner.incarnation_seq = same_owner.receipt.audit_seq;
+    assert!(same_owner.validate_for(&old, &current).is_err());
 }
 
 #[test]

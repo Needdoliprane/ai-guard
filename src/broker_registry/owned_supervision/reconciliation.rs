@@ -16,6 +16,11 @@ const REQUEST_DOMAIN: &str = "ai-guard:broker-supervision-owned:v2:reconciliatio
 pub struct OwnedBindingRotationFenceV2 {
     pub previous_revision: u64,
     pub receipt: WorkloadBindingReceiptV1,
+    /// Actual current source-owner incarnation, committed after rotation.
+    /// Its receipt links recovery to a real exclusive reopen, not r+1 alone.
+    pub owner_incarnation: String,
+    pub incarnation_seq: i64,
+    pub incarnation_hash: String,
 }
 impl OwnedBindingRotationFenceV2 {
     pub fn validate_for(
@@ -36,7 +41,10 @@ impl OwnedBindingRotationFenceV2 {
                 && receipt.revision == observation.subject.binding_revision
                 && receipt.audit_seq > 0
                 && registry_uuid(&receipt.audit_event_id).is_ok()
-                && is_hex64(&receipt.audit_hash),
+                && is_hex64(&receipt.audit_hash)
+                && registry_uuid(&self.owner_incarnation).is_ok()
+                && self.incarnation_seq > receipt.audit_seq
+                && is_hex64(&self.incarnation_hash),
             OwnedSupervisionErrorCodeV2::IdentityMismatch,
         )
     }
