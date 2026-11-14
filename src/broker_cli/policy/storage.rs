@@ -249,8 +249,8 @@ pub(super) fn prepare(gateway: &str, input: &Path, output: &Path) -> Result<Load
         envelope.action,
         request,
         output,
-        || file.revalidate().map_err(|_| anyhow!("egress_policy_input_changed")),
-        || file.revalidate().map_err(|_| anyhow!("egress_policy_input_changed_after_preparation")),
+        |_| file.revalidate().map_err(|_| anyhow!("egress_policy_input_changed")),
+        |_| file.revalidate().map_err(|_| anyhow!("egress_policy_input_changed_after_preparation")),
     )
 }
 
@@ -352,12 +352,14 @@ pub(super) fn prepare_from_inspection(
         action,
         request,
         &output,
-        || {
+        |parent| {
             report.revalidate()?;
+            report.require_output_parent_outside(parent)?;
             file.revalidate().map_err(|_| anyhow!("egress_policy_input_changed"))
         },
-        || {
+        |parent| {
             report.revalidate()?;
+            report.require_output_parent_outside(parent)?;
             file.revalidate().map_err(|_| anyhow!("egress_policy_input_changed_after_preparation"))
         },
     )
@@ -368,8 +370,8 @@ fn prepare_request(
     action: Action,
     request: Request,
     output: &Path,
-    revalidate_before: impl Fn() -> Result<()>,
-    revalidate_after: impl Fn() -> Result<()>,
+    revalidate_before: impl Fn(&Directory) -> Result<()>,
+    revalidate_after: impl Fn(&Directory) -> Result<()>,
 ) -> Result<Loaded> {
     let canonical = request.canonical()?;
     ensure!(canonical.len() <= 65_536, "egress_policy_invalid_input");
@@ -403,7 +405,7 @@ fn prepare_request(
         .ok_or_else(|| anyhow!("egress_policy_unsafe_output"))?;
     let parent = Directory::open_existing(containing)
         .map_err(|_| anyhow!("egress_policy_unsafe_output_parent"))?;
-    revalidate_before()?;
+    revalidate_before(&parent)?;
     fs_error(DurableOperationDirectory::prepare_new(
         &parent,
         name,
@@ -411,9 +413,9 @@ fn prepare_request(
         &encode(&metadata)?,
         &encode(&state)?,
     ))?;
-    revalidate_after()?;
+    revalidate_after(&parent)?;
     let loaded = Loaded::open(&output)?;
-    revalidate_after()?;
+    revalidate_after(&parent)?;
     loaded.revalidate()?;
     Ok(loaded)
 }

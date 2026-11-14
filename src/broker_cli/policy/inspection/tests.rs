@@ -5,7 +5,7 @@ use clap::Parser;
 use std::{
     fs,
     io::Write,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::Path,
 };
 
@@ -252,16 +252,55 @@ fn publication_revalidates_private_source_and_retains_late_failure_evidence() {
 
 #[test]
 fn derived_destination_cannot_add_records_inside_the_report() {
-    let temp = fixture();
-    drop(tenant_report(&temp));
-    write(&temp.path().join("draft.json"), replace_draft());
-    assert!(mutation::prepare_from_inspection(
-        &temp.path().join("report"),
-        &temp.path().join("draft.json"),
-        &temp.path().join("report/operation"),
-    ).is_err());
-    assert!(!temp.path().join("report/operation").exists());
-    assert!(storage::Report::open(&temp.path().join("report")).is_ok());
+    fn snapshot(path: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut names: Vec<_> = fs::read_dir(path).unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap()).collect();
+        names.sort();
+        assert_eq!(names, ["current.json", "metadata.json", "owner.lock", "request.json"]);
+        names.into_iter().map(|name| {
+            let bytes = fs::read(path.join(&name)).unwrap();
+            (name, bytes)
+        }).collect()
+    }
+    for (parent, physical_alias) in [("report", false), ("REPORT", true)] {
+        let temp = fixture();
+        drop(tenant_report(&temp));
+        let report_path = temp.path().join("report");
+        if physical_alias {
+            let original = fs::metadata(&report_path).unwrap();
+            match fs::metadata(temp.path().join(parent)) {
+                Ok(alias) => {
+                    assert_eq!((alias.dev(), alias.ino()), (original.dev(), original.ino()),
+                        "case alias must refer to the actual retained report");
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    eprintln!("NOT_APPLICABLE_CASE_ALIAS: filesystem resolves report/REPORT separately; physical alias branch was not exercised (including case-sensitive Linux QA)");
+                    continue;
+                }
+                Err(error) => panic!("case alias inspection failed: {error}"),
+            }
+        }
+        let before = snapshot(&report_path);
+        write(&temp.path().join("draft.json"), replace_draft());
+        let output = temp.path().join(parent).join("operation");
+        if physical_alias {
+            assert!(!output.starts_with(&report_path),
+                "physical alias branch must not rely on lexical containment");
+        }
+        let error = mutation::prepare_from_inspection(
+            &report_path,
+            &temp.path().join("draft.json"),
+            &output,
+        ).err().unwrap();
+        assert_eq!(error.to_string(), "egress_policy_output_overlaps_inspection");
+        assert!(!output.exists());
+        assert_eq!(snapshot(&report_path), before,
+            "refusal must precede every stage/child or record mutation");
+        assert!(storage::Report::open(&report_path).is_ok());
+        if physical_alias {
+            eprintln!("CASE_ALIAS_EXERCISED: actual same-device/inode alias refused before any stage or child; report bytes and inventory preserved");
+        }
+    }
 }
 
 #[test]

@@ -158,6 +158,19 @@ impl Report {
         &self.metadata.gateway
     }
 
+    pub(in crate::broker_cli::policy) fn require_output_parent_outside(
+        &self,
+        parent: &Directory,
+    ) -> Result<()> {
+        // The facade compares physical identities from both retained nofollow
+        // ancestry chains, including case/Unicode aliases on the filesystem.
+        ensure!(
+            !fs_error(self.directory.contains_directory(parent))?,
+            "egress_policy_output_overlaps_inspection"
+        );
+        Ok(())
+    }
+
     pub(in crate::broker_cli::policy) fn revalidate(&self) -> Result<()> {
         fs_error(self.directory.revalidate())?;
         ensure!(
