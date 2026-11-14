@@ -19,6 +19,9 @@ pub struct OwnedBindingRotationFenceV2 {
     /// Actual current source-owner incarnation, committed after rotation.
     /// Its receipt links recovery to a real exclusive reopen, not r+1 alone.
     pub owner_incarnation: String,
+    pub previous_owner_incarnation: String,
+    pub previous_incarnation_seq: i64,
+    pub previous_incarnation_hash: String,
     pub incarnation_seq: i64,
     pub incarnation_hash: String,
 }
@@ -30,7 +33,8 @@ impl OwnedBindingRotationFenceV2 {
     ) -> OwnedChecked<()> {
         original.validate()?;
         observation.validate()?;
-        as_protocol(check_progress_identity(original, observation))?;
+        check_progress_identity(original, observation)
+            .map_err(|_| OwnedSupervisionErrorCodeV2::IdentityMismatch)?;
         let old = original.subject.binding_revision;
         let receipt = &self.receipt;
         check(
@@ -43,6 +47,11 @@ impl OwnedBindingRotationFenceV2 {
                 && registry_uuid(&receipt.audit_event_id).is_ok()
                 && is_hex64(&receipt.audit_hash)
                 && registry_uuid(&self.owner_incarnation).is_ok()
+                && registry_uuid(&self.previous_owner_incarnation).is_ok()
+                && self.owner_incarnation != self.previous_owner_incarnation
+                && self.previous_incarnation_seq > 0
+                && self.previous_incarnation_seq < receipt.audit_seq
+                && is_hex64(&self.previous_incarnation_hash)
                 && self.incarnation_seq > receipt.audit_seq
                 && is_hex64(&self.incarnation_hash),
             OwnedSupervisionErrorCodeV2::IdentityMismatch,
@@ -97,7 +106,7 @@ impl OwnedReconciliationRequestV2 {
                 match previous {
                     Some(last) => {
                         last.validate()?;
-                        as_protocol(check_progress_identity(&last.identity, &pending.identity))?;
+                        check_progress_identity(&last.identity, &pending.identity).map_err(|_| conflict)?;
                         check(last.result.broker == pending.prior.broker, conflict)?;
                     }
                     None => check(previous_heartbeat_sequence(&pending.prior.broker,
@@ -109,7 +118,7 @@ impl OwnedReconciliationRequestV2 {
                 match previous {
                     Some(last) => {
                         last.validate()?;
-                        as_protocol(check_progress_identity(&last.identity, &pending.identity))?;
+                        check_progress_identity(&last.identity, &pending.identity).map_err(|_| conflict)?;
                         check(last.result.checkpoint.incarnation_id == pending.checkpoint.incarnation_id
                             && last.result.checkpoint.sequence == pending.checkpoint.previous_sequence,
                             conflict)?;
@@ -181,6 +190,7 @@ impl OwnedReconciliationResultV2 {
                     } => {
                         pending.validate_result(result).map_err(|_| conflict)?;
                         check(result.result.replayed
+                            && result.result.receipt.audit_seq < self.fence.receipt.audit_seq
                             && view.broker == result.result.broker
                             && receipt.as_ref() == Some(&result.result.receipt), conflict)?;
                     }
@@ -211,7 +221,8 @@ impl OwnedReconciliationResultV2 {
                         historical: OwnedHistoricalResultV2::Checkpoint { result }
                     } => {
                         pending.validate_result(result).map_err(|_| conflict)?;
-                        check(result.result.replayed && current.as_ref().is_some_and(|head|
+                        check(result.result.replayed && result.result.receipt.audit_seq < self.fence.receipt.audit_seq
+                            && current.as_ref().is_some_and(|head|
                             head.checkpoint == result.result.checkpoint
                                 && head.receipt == result.result.receipt), conflict)?;
                     }

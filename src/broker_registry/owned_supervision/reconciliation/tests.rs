@@ -20,6 +20,9 @@ fn fence() -> OwnedBindingRotationFenceV2 {
     OwnedBindingRotationFenceV2 {
         previous_revision: 1,
         owner_incarnation: "00000000-0000-4000-8000-000000000010".into(),
+        previous_owner_incarnation: "00000000-0000-4000-8000-000000000011".into(),
+        previous_incarnation_seq: 2,
+        previous_incarnation_hash: "e".repeat(64),
         incarnation_seq: 9,
         incarnation_hash: "d".repeat(64),
         receipt: crate::workload::WorkloadBindingReceiptV1 {
@@ -125,6 +128,9 @@ fn rotation_reconciliation_never_weakens_exact_replay_or_accepts_pin_changes() {
     let mut same_owner = fence();
     same_owner.incarnation_seq = same_owner.receipt.audit_seq;
     assert!(same_owner.validate_for(&old, &current).is_err());
+    let mut repeated_append = fence();
+    repeated_append.previous_owner_incarnation = repeated_append.owner_incarnation.clone();
+    assert!(repeated_append.validate_for(&old, &current).is_err());
 }
 
 #[test]
@@ -138,4 +144,8 @@ fn final_profile_refuses_old_profile_and_unadmitted_source_format() {
     assert_eq!(OwnedBrokerOperationV2::classify("GET", "/api/v1/owned/brokers/heartbeats/reconcile"), None);
     assert_eq!(OwnedBrokerOperationV2::classify("POST", "/api/v1/owned/brokers/heartbeats/reconcile"), Some(OwnedBrokerOperationV2::HeartbeatReconcile));
     assert!(!OwnedBrokerOperationV2::HeartbeatReconcile.mutating());
+    let mut error=OwnedSupervisionErrorCodeV2::SupervisionUnavailable.body();
+    assert_eq!(classify_remote_failure(503,&error),OwnedRemoteFailureV2::Owned(OwnedSupervisionErrorCodeV2::SupervisionUnavailable));
+    error["error"]["profile"]=Value::String("broker_supervision_owned_v1".into());
+    assert_eq!(classify_remote_failure(503,&error),OwnedRemoteFailureV2::Unrecognized);
 }

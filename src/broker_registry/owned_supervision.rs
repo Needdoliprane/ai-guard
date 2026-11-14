@@ -17,7 +17,7 @@
 //! | profile | Store format | operations | access |
 //! |---|---|---|---|
 //! | legacy presence | 6–13 heartbeat, 12–13 checkpoint | legacy routes | unscoped legacy Store |
-//! | `broker_supervision_owned_v2` | exactly 14 or 15, equal to the retained source descriptor and its verified marker | the five [`OwnedBrokerOperationV2`] | scoped `HumanSourceAccess` only |
+//! | `broker_supervision_owned_v2` | exactly 14 or 15, equal to the retained source descriptor and its verified marker | the seven [`OwnedBrokerOperationV2`] | scoped `HumanSourceAccess` only |
 //!
 //! No format is served by both profiles and no format grants a permission. A
 //! future format is refused by [`OwnedSourceFormatV2::from_verified`] until a
@@ -44,6 +44,10 @@
 //! - Observed only: the closure revision. It may advance between operations
 //!   and during a Pending; a lower value than already seen is a regression
 //!   (for example an older control backup) and blocks explicitly.
+//! - Rotation recovery is a separate read. Exact global lookup and a current
+//!   source-owner incarnation after rotation establish its fence. Historical
+//!   operation identity stays unchanged; Superseded funds and fixes one new
+//!   operation before any replacement POST. Ordinary replay remains exact.
 use super::*;
 use crate::control::content_hash;
 use serde_json::Value;
@@ -325,7 +329,9 @@ pub fn classify_remote_failure(status: u16, body: &Value) -> OwnedRemoteFailureV
     };
     let code = error.get("code").and_then(Value::as_str);
     if let Some(owned) = code.and_then(OwnedSupervisionErrorCodeV2::from_code) {
-        return if owned.status() == status {
+        return if owned.status() == status
+            && error.get("profile").and_then(Value::as_str) == Some(OWNED_SUPERVISION_PROFILE_V2)
+        {
             OwnedRemoteFailureV2::Owned(owned)
         } else {
             OwnedRemoteFailureV2::Unrecognized
