@@ -5,7 +5,10 @@ use super::protocol::BrokerErrorCodeV1;
 use crate::broker::writer::{AuthorizedRetirement, BeginUnusedRetirement, PendingUnusedRetirement};
 use crate::{
     broker::{
-        enforcer::{CancelGeneration, EnforcerError, EnforcerResult},
+        enforcer::{
+            CancelGeneration, EnforcerError, EnforcerResult,
+            retirement::VerifiedRetirementReceipt,
+        },
         retirement::{RetirementAuditAckV1, RetirementEvidenceV1, RetirementIdentityV1},
     },
     model::Event,
@@ -219,6 +222,93 @@ impl fmt::Debug for SubmittedRetirementSettlement {
     }
 }
 
+enum RetainedFinalInput {
+    // Existing observations are not a productive retry permission.
+    Blocked {
+        _input: Box<VerifiedRetirementReceipt>,
+    },
+    Retryable(Box<VerifiedRetirementReceipt>),
+    Borrowed,
+}
+
+/// Owns the actual Q input across a local handoff, never a copy of authority.
+/// Drop before enqueue restores that same input; after enqueue the writer's
+/// registry owns it independently of this token and of its caller future.
+pub(super) struct PendingFinalInput<'guard> {
+    _guard: &'guard super::jobs::RetirementQueryGuard,
+    control: PreclaimControlV1,
+    continuation: SubmittedRetirementSettlement,
+    input: Option<VerifiedRetirementReceipt>,
+}
+
+impl PendingFinalInput<'_> {
+    pub(super) fn input(&self) -> Result<&VerifiedRetirementReceipt, BrokerErrorCodeV1> {
+        self.input
+            .as_ref()
+            .ok_or(BrokerErrorCodeV1::NeedsReconciliation)
+    }
+
+    pub(super) fn take_input(&mut self) -> Result<VerifiedRetirementReceipt, BrokerErrorCodeV1> {
+        self.input
+            .take()
+            .ok_or(BrokerErrorCodeV1::NeedsReconciliation)
+    }
+
+    pub(super) fn retain_returned(
+        &mut self,
+        input: VerifiedRetirementReceipt,
+    ) -> Result<(), BrokerErrorCodeV1> {
+        if self.input.is_none()
+            && valid_final_input(self.continuation.owner(), &input).is_ok()
+        {
+            self.input = Some(input);
+            return Ok(());
+        }
+        self.control.retain_retirement(
+            self.continuation.request.arm_id,
+            self.continuation.request.expected_epoch,
+            self.continuation.request.generation,
+            RetainedRetirementV1::Verified {
+                _owner: Box::new(input),
+            },
+        );
+        Err(BrokerErrorCodeV1::NeedsReconciliation)
+    }
+}
+
+impl fmt::Debug for PendingFinalInput<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PendingFinalInput(<retained actual Q>)")
+    }
+}
+
+impl Drop for PendingFinalInput<'_> {
+    fn drop(&mut self) {
+        self.control
+            .restore_final_input(&self.continuation, self.input.take());
+    }
+}
+
+fn valid_final_input(
+    owner: &Arc<RetirementSubmission>,
+    input: &VerifiedRetirementReceipt,
+) -> Result<(), BrokerErrorCodeV1> {
+    let digest = |result: crate::broker::journal::JournalResult<_>| {
+        result.map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)
+    };
+    if input.completes_retained_submission(owner)
+        || digest(input.identity().digest())? != digest(owner.identity().digest())?
+        || digest(input.accepted().evidence().digest())? != digest(owner.evidence().digest())?
+        || serde_json::to_vec(input.accepted().audit_ack())
+            .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?
+            != serde_json::to_vec(owner.audit_ack())
+                .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?
+    {
+        return Err(BrokerErrorCodeV1::NeedsReconciliation);
+    }
+    Ok(())
+}
+
 enum RetirementSubmissionState {
     Unsubmitted {
         attempted: bool,
@@ -226,8 +316,7 @@ enum RetirementSubmissionState {
     Submitted {
         // A certainly unqueued Final still owns its actual verified input.
         // One fixed slot, not another list of continuation attempts.
-        retained_verified:
-            Option<Box<crate::broker::enforcer::retirement::VerifiedRetirementReceipt>>,
+        retained_verified: Option<RetainedFinalInput>,
     },
 }
 
@@ -318,6 +407,20 @@ impl RetirementSubmission {
             .map_err(|_| EnforcerError::Unhealthy)
     }
 
+    fn has_retryable_final(&self) -> EnforcerResult<bool> {
+        self.state
+            .lock()
+            .map(|state| {
+                matches!(
+                    &*state,
+                    RetirementSubmissionState::Submitted {
+                        retained_verified: Some(RetainedFinalInput::Retryable(_))
+                    }
+                )
+            })
+            .map_err(|_| EnforcerError::Unhealthy)
+    }
+
     pub(crate) fn retain_verified(
         &self,
         verified: crate::broker::enforcer::retirement::VerifiedRetirementReceipt,
@@ -331,7 +434,9 @@ impl RetirementSubmission {
         if let RetirementSubmissionState::Submitted { retained_verified } = &mut *state
             && retained_verified.is_none()
         {
-            *retained_verified = Some(Box::new(verified));
+            *retained_verified = Some(RetainedFinalInput::Blocked {
+                _input: Box::new(verified),
+            });
             return Ok(());
         }
         Err(verified)
@@ -390,6 +495,35 @@ fn matching_arm(
         .get_mut(&arm)
         .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
     if entry.epoch != epoch || entry.generation != generation {
+        return Err(BrokerErrorCodeV1::Conflict);
+    }
+    Ok(entry)
+}
+
+fn matching_settlement_arm<'a>(
+    state: &'a mut State,
+    continuation: &SubmittedRetirementSettlement,
+) -> Result<&'a mut Arm, BrokerErrorCodeV1> {
+    let request = &continuation.request;
+    if state.operation != Some(request.operation_id) {
+        return Err(BrokerErrorCodeV1::Conflict);
+    }
+    let entry = matching_arm(
+        state,
+        request.arm_id,
+        request.expected_epoch,
+        request.generation,
+    )?;
+    if !entry
+        .signal
+        .as_ref()
+        .is_some_and(|signal| signal.audit_confirmed && signal.request == *request)
+        || !matches!(
+            &entry.retained_retirement,
+            Some(RetainedRetirementV1::Submission { owner })
+                if Arc::ptr_eq(owner, continuation.owner())
+        )
+    {
         return Err(BrokerErrorCodeV1::Conflict);
     }
     Ok(entry)
@@ -836,6 +970,26 @@ impl PreclaimControlV1 {
         &self,
         identity: &RetirementIdentityV1,
     ) -> Result<Option<SubmittedRetirementSettlement>, BrokerErrorCodeV1> {
+        self.select_retirement_for_settlement(identity, false)
+    }
+
+    /// Only an input retained by the private Final handoff may enter this lane.
+    /// It does not make the ordinary query selector available or authorize Q.
+    pub(crate) fn retained_final_for_settlement(
+        &self,
+        identity: &RetirementIdentityV1,
+    ) -> Result<Option<SubmittedRetirementSettlement>, BrokerErrorCodeV1> {
+        self.select_retirement_for_settlement(identity, true)
+    }
+
+    fn select_retirement_for_settlement(
+        &self,
+        identity: &RetirementIdentityV1,
+        retained_only: bool,
+    ) -> Result<Option<SubmittedRetirementSettlement>, BrokerErrorCodeV1> {
+        if self.inner.unmatched_retirement.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(BrokerErrorCodeV1::NeedsReconciliation);
+        }
         let mut state = self
             .inner
             .state
@@ -857,10 +1011,13 @@ impl PreclaimControlV1 {
         let Some(RetainedRetirementV1::Submission { owner }) = &entry.retained_retirement else {
             return Ok(None);
         };
-        if !owner
-            .ready_for_settlement()
-            .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?
-        {
+        let eligible = if retained_only {
+            owner.has_retryable_final()
+        } else {
+            owner.ready_for_settlement()
+        }
+        .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+        if !eligible {
             return Ok(None);
         }
         if owner
@@ -890,6 +1047,161 @@ impl PreclaimControlV1 {
         }))
     }
 
+    /// The caller retains the actual Job guard. Validation and reservation are
+    /// synchronous; no IO or await occurs while either memory lock is held.
+    pub(super) fn reserve_final_input<'guard>(
+        &self,
+        guard: &'guard super::jobs::RetirementQueryGuard,
+        continuation: &SubmittedRetirementSettlement,
+        input: VerifiedRetirementReceipt,
+    ) -> Result<PendingFinalInput<'guard>, BrokerErrorCodeV1> {
+        let accepted = (|| {
+            if guard.operation_id() != continuation.request.operation_id
+                || !Arc::ptr_eq(&self.inner, &guard.job().preclaim.inner)
+                || self.inner.unmatched_retirement.load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Err(BrokerErrorCodeV1::Conflict);
+            }
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
+            matching_settlement_arm(&mut state, continuation)?;
+            valid_final_input(continuation.owner(), &input)?;
+            let mut submission = continuation
+                .owner
+                .state
+                .lock()
+                .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+            match &mut *submission {
+                RetirementSubmissionState::Submitted { retained_verified }
+                    if retained_verified.is_none() =>
+                {
+                    *retained_verified = Some(RetainedFinalInput::Borrowed);
+                    Ok(())
+                }
+                _ => Err(BrokerErrorCodeV1::NeedsReconciliation),
+            }
+        })();
+        if let Err(error) = accepted {
+            self.retain_retirement(
+                continuation.request.arm_id,
+                continuation.request.expected_epoch,
+                continuation.request.generation,
+                RetainedRetirementV1::Verified {
+                    _owner: Box::new(input),
+                },
+            );
+            return Err(error);
+        }
+        Ok(self.final_input_token(guard, continuation, input))
+    }
+
+    /// Retrieve the very same retained input. A blocked legacy observation or
+    /// another in-flight borrower never becomes a replacement query permit.
+    pub(super) fn take_retained_final_input<'guard>(
+        &self,
+        guard: &'guard super::jobs::RetirementQueryGuard,
+        continuation: &SubmittedRetirementSettlement,
+    ) -> Result<Option<PendingFinalInput<'guard>>, BrokerErrorCodeV1> {
+        if guard.operation_id() != continuation.request.operation_id
+            || !Arc::ptr_eq(&self.inner, &guard.job().preclaim.inner)
+            || self.inner.unmatched_retirement.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(BrokerErrorCodeV1::Conflict);
+        }
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
+        matching_settlement_arm(&mut state, continuation)?;
+        let mut submission = continuation
+            .owner
+            .state
+            .lock()
+            .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+        let RetirementSubmissionState::Submitted { retained_verified } = &mut *submission else {
+            return Err(BrokerErrorCodeV1::NeedsReconciliation);
+        };
+        if retained_verified.is_none() {
+            return Ok(None);
+        }
+        if !matches!(retained_verified, Some(RetainedFinalInput::Retryable(_))) {
+            return Err(BrokerErrorCodeV1::NeedsReconciliation);
+        }
+        let input = match retained_verified.replace(RetainedFinalInput::Borrowed) {
+            Some(RetainedFinalInput::Retryable(input)) => input,
+            original => {
+                *retained_verified = original;
+                return Err(BrokerErrorCodeV1::NeedsReconciliation);
+            }
+        };
+        // Release both locks before constructing or returning the local owner.
+        drop(submission);
+        drop(state);
+        Ok(Some(self.final_input_token(guard, continuation, *input)))
+    }
+
+    fn final_input_token<'guard>(
+        &self,
+        guard: &'guard super::jobs::RetirementQueryGuard,
+        continuation: &SubmittedRetirementSettlement,
+        input: VerifiedRetirementReceipt,
+    ) -> PendingFinalInput<'guard> {
+        PendingFinalInput {
+            _guard: guard,
+            control: self.clone(),
+            continuation: SubmittedRetirementSettlement {
+                request: continuation.request.clone(),
+                owner: Arc::clone(continuation.owner()),
+            },
+            input: Some(input),
+        }
+    }
+
+    fn restore_final_input(
+        &self,
+        continuation: &SubmittedRetirementSettlement,
+        mut input: Option<VerifiedRetirementReceipt>,
+    ) {
+        {
+            // Poison recovery only keeps an already owned input. Normal
+            // selectors and permission methods still fail closed on poison.
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if matching_settlement_arm(&mut state, continuation).is_ok() {
+                let mut submission = continuation
+                    .owner
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let RetirementSubmissionState::Submitted { retained_verified } = &mut *submission
+                    && matches!(retained_verified, Some(RetainedFinalInput::Borrowed))
+                {
+                    *retained_verified = input
+                        .take()
+                        .map(|input| RetainedFinalInput::Retryable(Box::new(input)));
+                    return;
+                }
+            }
+        }
+        if let Some(input) = input {
+            self.retain_retirement(
+                continuation.request.arm_id,
+                continuation.request.expected_epoch,
+                continuation.request.generation,
+                RetainedRetirementV1::Verified {
+                    _owner: Box::new(input),
+                },
+            );
+        }
+    }
+
     /// Recheck the canonical holder after the last await, then perform only the
     /// synchronous local removal/clear. No IO or future is run under this lock.
     /// Lock order remains preclaim -> submission -> recovery gate -> slots.
@@ -905,6 +1217,9 @@ impl PreclaimControlV1 {
             &mut crate::broker::enforcer::retirement::VerifiedRetirementReceipt,
         ) -> EnforcerResult<()>,
     {
+        if self.inner.unmatched_retirement.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(BrokerErrorCodeV1::NeedsReconciliation);
+        }
         let mut state = self
             .inner
             .state
