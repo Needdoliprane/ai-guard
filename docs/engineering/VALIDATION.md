@@ -1,5 +1,45 @@
 # Validation courante
 
+## 14 novembre — A1 : builds et reprise des 74 parents ciblés
+
+Source commune des deux QA finales :
+`db2678d42cff9c8d6d15bf31284a989732cc6f0d`, arbre
+`79a378461d75d46a8d102c9126d04251422b4dda`, archive
+`40719c46c00d1793cea3518a48950a71501f00982e56cc672480729060a2a88d`.
+
+| Étape | Résultat effectivement observé |
+|---|---|
+| Baseline test-only `ae8d521` | Deux vrais oracles d'absence attendue après setup : POST404 au lieu de200 et sous-commande policy non enregistrée. Deux parents RC101, zéro PASS ; ce ne sont ni des PASS ni des vulnérabilités démontrées. |
+| GREEN R1 `0abb6ef` | Compilation101 avec trois erreurs Rust ; aucun test, CLI normal ou check toutes cibles exécuté. |
+| GREEN R2 `db2678d` | Build des libtests et du CLI normal RC0, check toutes cibles RC0, 156 warnings de compilation. Le harnais Bash3.2 échoue ensuite avec1 sur un tableau local vide sous nounset avant tout enregistrement : zéro liste et les74 tests NOT_RUN dans cette QA. |
+| Reprise tests-only, même `db2678d` | Trois artefacts Cargo-bound importés byte-exacts aux chemins d'origine, sans rebuild ni nouveau check. Dix-huit listes réelles puis huit groupes, 74 FQN uniques PASS : 73 ordinaires et un default-ignored explicitement exécuté ; zéro FAIL et aucun sélectionné laissé ignoré. |
+
+Les groupes sont core19, E1 19, A0-canaries9, façade FS8, CLI-main10,
+CLI-baseline1, shared-reader7 et root-vertical1. Ce dernier lance le vrai CLI
+normal contre le vrai gateway/SDK/SQLite de fixture : perte du reçu après
+commit, conservation de la même préparation/opération, reprise idempotente
+et demande de révocation, sans effet réseau runtime déduit.
+Les FQN, commandes, sources, SHA des opaques et limites sont dans
+[SELECTIONS.json](evidence/2026-11-14/owned-egress-policy-api-cli/SELECTIONS.json).
+
+Chaque QA finale vérifie 2813 fichiers source, dont18 privés0600, contenus et
+modes inchangés, sept collectes et fermeture RC0, conteneur exact retiré,
+OOM/OOM-kill0. La reprise mesure un pic de1252507648 octets sous4GiB ;
+ce n'est pas une mémoire de worker ni un benchmark de capacité. Résultats et
+flushs primaires finaux : `c24896a4…` / `aaba0fd7…` pour build/check,
+`ae52ce89…` / `c5c587f0…` pour la reprise. Les anciens échecs ne sont pas
+requalifiés par ces sorties0.
+
+Le scope/CAS frais n'a toujours pas de commande d'acquisition supportée.
+`inspect`, `prepare --inspection-dir` et leurs cinq tests sur le gel
+ultérieur `05a4451` restent non implémentés/NOT_RUN. Statut local historique,
+reçu durable et `revoke_requested` ne prouvent ni état serveur frais,
+filtrage appliqué, exécution ou approbation humaine. Aucun autre HEAD/public
+composé, runtime/worker/réseau, fournisseur/SSO, cluster, charge100, suite
+complète, Clippy strict ou gate production n'est qualifié. Broker et relais
+restent fermés. [EN](evidence/2026-11-14/owned-egress-policy-api-cli/README.md) ·
+[FR](evidence/2026-11-14/owned-egress-policy-api-cli/README.fr.md).
+
 ## 13 novembre — A0 : 37 PASS ciblés, sources et historiques distincts
 
 | Source/étape | Résultat constaté |

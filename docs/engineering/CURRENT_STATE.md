@@ -1,5 +1,41 @@
 # État constaté — suivi du développement
 
+## 14 novembre — A1 : API/CLI du registre egress, 74 PASS sur une source exacte
+
+La source `db2678d42cff9c8d6d15bf31284a989732cc6f0d` raccorde les deux POST
+réservés replace/revoke et les quatre commandes `broker policy`
+prepare/apply/resume/status au vrai registre technique, à sa source owned,
+au Store15 et à la préparation privée durable. `expected_scope` reste une
+assertion comparée, jamais un sélecteur de tenant ni une autorité.
+[Preuves EN](evidence/2026-11-14/owned-egress-policy-api-cli/README.md) ·
+[FR](evidence/2026-11-14/owned-egress-policy-api-cli/README.fr.md) ·
+[sélections exactes](evidence/2026-11-14/owned-egress-policy-api-cli/SELECTIONS.json).
+
+Deux QA distinctes partagent cette même source : build libtests/CLI normal et
+check toutes cibles RC0, 156 avertissements de compilation, puis reprise sans
+rebuild des trois opaques exacts. La reprise vérifie 18 listes et exécute huit
+groupes : 74 parents uniques PASS, dont 73 ordinaires et un ignoré par défaut
+explicitement exécuté. Aucun échec de test dans cette reprise. Les échecs
+antérieurs — baseline fonctionnelle, compilation101 et harnais1 avant tests —
+restent consignés séparément. Les sources/modes sont préservés et chaque QA
+termine ses sept collectes et sa fermeture à0, OOM0.
+
+**Parcours opérateur encore incomplet :** aucune commande supportée ne fournit
+le scope réservé et le head/CAS frais requis. `status` reste historique local ;
+`control-info` utilise le diagnostic public fermé en owned. `inspect` et
+`prepare --inspection-dir` ne sont pas implémentés ; les cinq nouveaux tests
+du gel ultérieur `05a4451` restent NOT_RUN. Le
+[guide EN](../setup/identity/OWNED_SOURCES.md#owned-policy-a1-operator) /
+[FR](../setup/identity/OWNED_SOURCES.fr.md#owned-policy-a1-operator) conserve
+cet arrêt explicite, sans CAS inventé ni accès SQL opérateur.
+
+Un reçu de politique durable ou `revoke_requested` n'est ni contrôle réseau
+appliqué, permis de connexion, exécution observée ni approbation humaine.
+Broker3–13 et relais6–13 restent fermés. La preuve ne se transfère à aucun
+autre HEAD/public composé. Runtime/worker/réseau réels, fournisseur, SSO,
+cluster, charge100, suite complète et Clippy strict restent NOT_RUN ; aucun
+gate ou fingerprint historique n'est clos.
+
 ## 13 novembre — A0 : diagnostic réservé, 37 PASS ciblés sur `0114013`
 
 A0 raccorde uniquement le GET existant réservé `/control/api/v1/control/protocol` au vrai registre runner retenu, à sa source et au binding relu dans la même transaction `Business`. Les formats 14/15 sont descriptifs ; le diagnostic SDK n’ouvre ni lifecycle broker 3–13 ni relais 6–13 et ne donne aucun permis egress. GET public, HEAD du diagnostic et writers HTTP owned restent fermés ; la santé GET/HEAD est distincte. W0 garde l’index complet au démarrage et la génération propre, sans cohérence multiprocessus garantie.
