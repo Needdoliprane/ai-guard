@@ -1,5 +1,29 @@
 # Plan d'industrialisation
 
+## 14 novembre — broker : Pending chaud vérifié, reprise explicite encore ouverte
+
+La tranche logicielle du même keeper Submitted avec Pending audit-ACKé et Q
+réel converge désormais vers Final et le retrait local exact. Neuf parents
+ciblés passent sur `a4340c4f`, avec format des trois sources et check toutes
+cibles RC0 ; [preuves et limites](evidence/2026-11-14/broker-submitted-pending/README.md).
+Cette preuve met à jour la priorité Submitted du 10 novembre ci-dessous ; elle
+ne clôt ni le chantier D5 ni la reprise après perte du processus propriétaire.
+
+La prochaine tranche broker reste un permis de reprise **Unsubmitted**
+explicitement audité, lié à l'original réellement retenu. Une demande centrale
+ou un Resume ordinaire ne remint pas cette autorité et ne réarme aucun
+attempt/start/claim/délai consommé. Geler le scénario discriminant, les ports
+et la revue avant une nouvelle admission QA ; les reprises froides, inconnues
+ou sans propriétaire d'origine ne deviennent pas des succès par absence.
+
+Conserver en parallèle les raccords existants et leurs propriétaires :
+namespace/restauration et NativeResume restent hors des familles autorisées
+par ce lot ; moteurs Docker/Podman/Kubernetes réels, fencing, pannes physiques,
+charge100 et Clippy strict demandent leurs preuves distinctes. Le harnais
+étranger corrigé ne constitue pas une correction de pile produit : cause
+précise encore inconnue. Root garde composition, revue finale et publication.
+Aucun nouveau service, contrat opérateur ou droit d'exécution n'est ajouté.
+
 ## 12 novembre — intégrer la couverture de risques aux prochains lots
 
 Lire le [rapport reçu et son suivi](RISK_COVERAGE_20261112.md) avant de choisir un correctif :80 risques retenus,95 enregistrements avec rejets/fusions/réouverture, tous tests NOT_RUN. La comparaison initiale de fichiers sur6699a13 ne clôt aucun risque. Les onze entrées de vague0 doivent être rapprochées des chantiers et des preuves actuels, puis réparties par propriétaires et fichiers disjoints ; conserver une source figée et une revue indépendante.
