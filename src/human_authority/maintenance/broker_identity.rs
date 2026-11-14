@@ -151,9 +151,7 @@ impl BrokerIdentityFailureV1 {
                 "inspect_status; resume_only_the_same_plan_or_revoke_then_plan_again"
             }
             Self::ClockUncertain => "reconcile_the_control_clock_with_the_durable_floor; resume",
-            Self::AuditUnavailable => {
-                "restore_audit_capacity_or_integrity; resume_the_same_plan"
-            }
+            Self::AuditUnavailable => "restore_audit_capacity_or_integrity; resume_the_same_plan",
             Self::Unavailable => "retry_resume_with_the_same_plan",
             Self::HandoffRefused => {
                 "do_not_install_any_handoff; preserve_the_plan; inspect_status; resume"
@@ -647,7 +645,11 @@ impl BrokerIdentityPlanV1 {
         let origin_valid = |origin: &str| {
             canonical_gateway_origin(origin).is_ok_and(|canonical| canonical == origin)
         };
-        match (self.command, self.steps.as_slice(), self.gateway_origin.as_deref()) {
+        match (
+            self.command,
+            self.steps.as_slice(),
+            self.gateway_origin.as_deref(),
+        ) {
             (
                 PlanCommandV1::Enroll,
                 [
@@ -680,7 +682,10 @@ impl BrokerIdentityPlanV1 {
                     },
                 ],
                 Some(origin),
-            ) => check(origin_valid(origin) && input.expected_revision > 0, conflict),
+            ) => check(
+                origin_valid(origin) && input.expected_revision > 0,
+                conflict,
+            ),
             (PlanCommandV1::Revoke, steps, None) => {
                 let bindings = match steps {
                     [PlanStepV1::RevokeGrant { .. }, rest @ ..] => rest,
@@ -723,8 +728,12 @@ impl BrokerIdentityPlanV1 {
 enum StepReceiptV1 {
     /// Boxed: a registry result (broker snapshot and receipt) is much larger
     /// than a binding receipt.
-    Registry { result: Box<BrokerMutationResultV1> },
-    Binding { receipt: WorkloadBindingReceiptV1 },
+    Registry {
+        result: Box<BrokerMutationResultV1>,
+    },
+    Binding {
+        receipt: WorkloadBindingReceiptV1,
+    },
 }
 
 impl StepReceiptV1 {
@@ -744,10 +753,9 @@ impl StepReceiptV1 {
 
     fn audit_position(&self) -> (i64, &str) {
         match self {
-            Self::Registry { result } => (
-                result.receipt.audit_seq,
-                result.receipt.audit_hash.as_str(),
-            ),
+            Self::Registry { result } => {
+                (result.receipt.audit_seq, result.receipt.audit_hash.as_str())
+            }
             Self::Binding { receipt } => (receipt.audit_seq, receipt.audit_hash.as_str()),
         }
     }
@@ -888,7 +896,9 @@ impl PlanDirectory {
         check(
             bearer.is_some() == plan.command.issues_bearer()
                 && bearer.as_ref().map(|bearer| bearer.digest.as_str())
-                    == plan.binding().map(|(_, input)| input.sha256_digest.as_str()),
+                    == plan
+                        .binding()
+                        .map(|(_, input)| input.sha256_digest.as_str()),
             invalid,
         )?;
         let path = absolute_path(path).map_err(|_| invalid)?;
@@ -995,7 +1005,10 @@ impl PlanDirectory {
                 && record.plan_id == self.plan.plan_id
                 && usize::try_from(record.index).is_ok_and(|recorded| recorded == index)
                 && record.step_commitment == step.commitment()?
-                && record.receipt.validate_for(step, &self.plan.broker_id).is_ok(),
+                && record
+                    .receipt
+                    .validate_for(step, &self.plan.broker_id)
+                    .is_ok(),
             conflict,
         )?;
         Ok(Some(record))
@@ -1574,7 +1587,11 @@ impl BrokerIdentityMaintenance {
             .owner
             .source_token(descriptor.source_id)
             .map_err(authority)?;
-        let store = self.bundle.stores.get(&descriptor.source_id).ok_or(mismatch)?;
+        let store = self
+            .bundle
+            .stores
+            .get(&descriptor.source_id)
+            .ok_or(mismatch)?;
         let facts = OwnedRetainedSourceFacts::from_token(&source).map_err(owned)?;
         check(
             facts.tenant_id() == tenant_id && store.tenant_id() == tenant_id,
@@ -1620,7 +1637,8 @@ impl BrokerIdentityMaintenance {
     fn backup_outside_union(&self, path: &Path) -> Checked<()> {
         let refused = BrokerIdentityFailureV1::BackupRefused;
         let name = path.file_name().ok_or(refused)?;
-        let parent = Directory::open_existing(path.parent().ok_or(refused)?).map_err(|_| refused)?;
+        let parent =
+            Directory::open_existing(path.parent().ok_or(refused)?).map_err(|_| refused)?;
         let entry = parent
             .private_entry(name)
             .map_err(|_| refused)?

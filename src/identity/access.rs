@@ -72,10 +72,12 @@ mod read_profile_tests {
         let profiles: HumanReadProfilesV1 = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(serde_json::to_value(profiles).unwrap(), value);
         for field in ["broker_registry", "worker_registry", "federation_registry"] {
-            let mut unknown = value.clone(); unknown[field] = serde_json::json!("legacy");
+            let mut unknown = value.clone();
+            unknown[field] = serde_json::json!("legacy");
             assert!(serde_json::from_value::<HumanReadProfilesV1>(unknown).is_err());
         }
-        let mut unknown = value; unknown["future"] = serde_json::json!(true);
+        let mut unknown = value;
+        unknown["future"] = serde_json::json!(true);
         assert!(serde_json::from_value::<HumanReadProfilesV1>(unknown).is_err());
     }
 }

@@ -235,7 +235,9 @@ impl OwnedSupervisionErrorCodeV2 {
     }
 
     pub fn from_code(code: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|candidate| candidate.code() == code)
+        Self::ALL
+            .into_iter()
+            .find(|candidate| candidate.code() == code)
     }
 
     /// Closed error envelope emitted by the control plane.
@@ -412,7 +414,10 @@ impl OwnedBrokerOperationV2 {
 
     pub const fn method(self) -> &'static str {
         match self {
-            Self::Heartbeat | Self::Checkpoint | Self::HeartbeatReconcile | Self::CheckpointReconcile => "POST",
+            Self::Heartbeat
+            | Self::Checkpoint
+            | Self::HeartbeatReconcile
+            | Self::CheckpointReconcile => "POST",
             Self::Identity | Self::SelfView | Self::CheckpointSelf => "GET",
         }
     }
@@ -452,7 +457,9 @@ impl OwnedBrokerOperationV2 {
         match self {
             Self::Heartbeat => MAX_OWNED_HEARTBEAT_REQUEST_BYTES,
             Self::Checkpoint => MAX_OWNED_CHECKPOINT_REQUEST_BYTES,
-            Self::HeartbeatReconcile | Self::CheckpointReconcile => MAX_OWNED_RECONCILIATION_REQUEST_BYTES,
+            Self::HeartbeatReconcile | Self::CheckpointReconcile => {
+                MAX_OWNED_RECONCILIATION_REQUEST_BYTES
+            }
             Self::Identity | Self::SelfView | Self::CheckpointSelf => 0,
         }
     }
@@ -464,7 +471,9 @@ impl OwnedBrokerOperationV2 {
             Self::Heartbeat => MAX_OWNED_HEARTBEAT_RESULT_BYTES,
             Self::Checkpoint => MAX_OWNED_CHECKPOINT_RESULT_BYTES,
             Self::CheckpointSelf => MAX_OWNED_CHECKPOINT_SELF_VIEW_BYTES,
-            Self::HeartbeatReconcile | Self::CheckpointReconcile => MAX_OWNED_RECONCILIATION_RESULT_BYTES,
+            Self::HeartbeatReconcile | Self::CheckpointReconcile => {
+                MAX_OWNED_RECONCILIATION_RESULT_BYTES
+            }
         }
     }
 
@@ -880,19 +889,34 @@ fn compare_subject(
 ) -> Result<(), OwnedIncompatibilityV2> {
     use OwnedIncompatibilityV2 as Reason;
     let checks = [
-        (expected.installation_id == actual.installation_id, Reason::Installation),
+        (
+            expected.installation_id == actual.installation_id,
+            Reason::Installation,
+        ),
         (expected.closure_id == actual.closure_id, Reason::Closure),
         (expected.source_id == actual.source_id, Reason::Source),
-        (expected.source_format == actual.source_format, Reason::Format),
+        (
+            expected.source_format == actual.source_format,
+            Reason::Format,
+        ),
         (expected.tenant_id == actual.tenant_id, Reason::Tenant),
         (
             expected.control_namespace_uuid == actual.control_namespace_uuid,
             Reason::Namespace,
         ),
         (expected.broker_id == actual.broker_id, Reason::Broker),
-        (expected.incarnation_id == actual.incarnation_id, Reason::Incarnation),
-        (expected.credential_id == actual.credential_id, Reason::Credential),
-        (expected.grant_revision == actual.grant_revision, Reason::GrantRevision),
+        (
+            expected.incarnation_id == actual.incarnation_id,
+            Reason::Incarnation,
+        ),
+        (
+            expected.credential_id == actual.credential_id,
+            Reason::Credential,
+        ),
+        (
+            expected.grant_revision == actual.grant_revision,
+            Reason::GrantRevision,
+        ),
     ];
     if let Some((_, reason)) = checks.into_iter().find(|(same, _)| !same) {
         return Err(reason);
@@ -1589,8 +1613,7 @@ impl OwnedHeartbeatPendingV2 {
     ) -> Result<(), OwnedAckRejectionV2> {
         use OwnedAckRejectionV2 as Rejection;
         result.validate().map_err(|_| Rejection::Protocol)?;
-        check_replay_identity(&self.identity, &result.identity)
-            .map_err(Rejection::Incompatible)?;
+        check_replay_identity(&self.identity, &result.identity).map_err(Rejection::Incompatible)?;
         if result.operation_commitment != self.operation_commitment {
             return Err(Rejection::Commitment);
         }
@@ -1758,8 +1781,7 @@ impl OwnedCheckpointPendingV2 {
     ) -> Result<(), OwnedAckRejectionV2> {
         use OwnedAckRejectionV2 as Rejection;
         result.validate().map_err(|_| Rejection::Protocol)?;
-        check_replay_identity(&self.identity, &result.identity)
-            .map_err(Rejection::Incompatible)?;
+        check_replay_identity(&self.identity, &result.identity).map_err(Rejection::Incompatible)?;
         if result.operation_commitment != self.operation_commitment {
             return Err(Rejection::Commitment);
         }

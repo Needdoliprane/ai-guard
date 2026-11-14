@@ -137,11 +137,29 @@ async fn owned_brokers_proxy() -> (
                     received.fetch_add(1, Ordering::SeqCst);
                     assert_eq!(request.method(), "GET");
                     assert_eq!(request.uri().query(), Some("limit=25"));
-                    assert_eq!(request.headers().get("authorization").unwrap().to_str().unwrap(), format!("Bearer {OWNED_PROXY_BEARER}"));
-                    assert_eq!(request.headers().get("x-aiguard-context").unwrap().to_str().unwrap(), OWNED_PROXY_CONTEXT);
+                    assert_eq!(
+                        request
+                            .headers()
+                            .get("authorization")
+                            .unwrap()
+                            .to_str()
+                            .unwrap(),
+                        format!("Bearer {OWNED_PROXY_BEARER}")
+                    );
+                    assert_eq!(
+                        request
+                            .headers()
+                            .get("x-aiguard-context")
+                            .unwrap()
+                            .to_str()
+                            .unwrap(),
+                        OWNED_PROXY_CONTEXT
+                    );
                     (
                         StatusCode::FORBIDDEN,
-                        axum::Json(json!({"error":{"code":"permission_denied","next":"select_context"}})),
+                        axum::Json(
+                            json!({"error":{"code":"permission_denied","next":"select_context"}}),
+                        ),
                     )
                 }
             }),
@@ -157,68 +175,148 @@ async fn owned_brokers_proxy() -> (
     let address = listener.local_addr().unwrap();
     let (stop, stopped) = tokio::sync::oneshot::channel();
     let task = tokio::spawn(async move {
-        axum::serve(listener, router).with_graceful_shutdown(async {
-            let _ = stopped.await;
-        }).await
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await
     });
-    let server = LoopbackGateway { stop: Some(stop), task: Some(task) };
+    let server = LoopbackGateway {
+        stop: Some(stop),
+        task: Some(task),
+    };
     let front = tempfile::Builder::new()
         .permissions(std::fs::Permissions::from_mode(0o700))
-        .tempdir().unwrap();
-    std::fs::write(front.path().join("index.html"), "synthetic owned proxy canary").unwrap();
+        .tempdir()
+        .unwrap();
+    std::fs::write(
+        front.path().join("index.html"),
+        "synthetic owned proxy canary",
+    )
+    .unwrap();
     let dashboard = dashboard_router_with_human_mode(
-        &format!("http://{address}"), None, front.path().to_owned(), None, true,
-    ).unwrap();
+        &format!("http://{address}"),
+        None,
+        front.path().to_owned(),
+        None,
+        true,
+    )
+    .unwrap();
     (server, dashboard, calls, unexpected, front)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn owned_dashboard_brokers_forwards_exact_get_context_and_gateway_refusal_without_identity_probe() {
+async fn owned_dashboard_brokers_forwards_exact_get_context_and_gateway_refusal_without_identity_probe()
+ {
     let (server, dashboard, calls, unexpected, _front) = owned_brokers_proxy().await;
-    let response = dashboard.oneshot(
-        axum::http::Request::get("/api/v1/human/owned/brokers?limit=25")
-            .header("authorization", format!("Bearer {OWNED_PROXY_BEARER}"))
-            .header("x-aiguard-context", OWNED_PROXY_CONTEXT)
-            .body(Body::empty()).unwrap(),
-    ).await.unwrap();
+    let response = dashboard
+        .oneshot(
+            axum::http::Request::get("/api/v1/human/owned/brokers?limit=25")
+                .header("authorization", format!("Bearer {OWNED_PROXY_BEARER}"))
+                .header("x-aiguard-context", OWNED_PROXY_CONTEXT)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    let bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
     let value: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(value["error"]["code"], "permission_denied");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(unexpected.load(Ordering::SeqCst), 0, "no viewer/identity preflight or legacy fallback");
+    assert_eq!(
+        unexpected.load(Ordering::SeqCst),
+        0,
+        "no viewer/identity preflight or legacy fallback"
+    );
     server.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn owned_dashboard_brokers_keeps_head_mutations_legacy_and_neighbor_routes_closed() {
     let (server, dashboard, calls, unexpected, _front) = owned_brokers_proxy().await;
-    let unauthenticated = dashboard.clone().oneshot(
-        axum::http::Request::get("/api/v1/human/owned/brokers")
-            .body(Body::empty()).unwrap(),
-    ).await.unwrap();
+    let unauthenticated = dashboard
+        .clone()
+        .oneshot(
+            axum::http::Request::get("/api/v1/human/owned/brokers")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
-    let bytes = axum::body::to_bytes(unauthenticated.into_body(), 4096).await.unwrap();
+    let bytes = axum::body::to_bytes(unauthenticated.into_body(), 4096)
+        .await
+        .unwrap();
     let value: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(value["error"]["code"], "authentication_required");
     for (method, path, status) in [
-        ("HEAD", "/api/v1/human/owned/brokers", StatusCode::SERVICE_UNAVAILABLE),
-        ("POST", "/api/v1/human/owned/brokers", StatusCode::METHOD_NOT_ALLOWED),
-        ("DELETE", "/api/v1/human/owned/brokers", StatusCode::METHOD_NOT_ALLOWED),
-        ("GET", "/api/v1/human/brokers", StatusCode::SERVICE_UNAVAILABLE),
-        ("GET", "/api/v1/human/workers", StatusCode::SERVICE_UNAVAILABLE),
-        ("GET", "/api/v1/human/owned/workers", StatusCode::SERVICE_UNAVAILABLE),
-        ("GET", "/api/v1/human/federation/workers", StatusCode::SERVICE_UNAVAILABLE),
-        ("GET", "/api/v1/federation/workers", StatusCode::SERVICE_UNAVAILABLE),
-        ("GET", "/api/v1/human/owned/brokers/foreign", StatusCode::SERVICE_UNAVAILABLE),
-        ("GET", "/api/human/owned/brokers", StatusCode::SERVICE_UNAVAILABLE),
+        (
+            "HEAD",
+            "/api/v1/human/owned/brokers",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            "POST",
+            "/api/v1/human/owned/brokers",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            "DELETE",
+            "/api/v1/human/owned/brokers",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            "GET",
+            "/api/v1/human/brokers",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            "GET",
+            "/api/v1/human/workers",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            "GET",
+            "/api/v1/human/owned/workers",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            "GET",
+            "/api/v1/human/federation/workers",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            "GET",
+            "/api/v1/federation/workers",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            "GET",
+            "/api/v1/human/owned/brokers/foreign",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            "GET",
+            "/api/human/owned/brokers",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
     ] {
-        let response = dashboard.clone().oneshot(
-            axum::http::Request::builder().method(method).uri(path)
-                .header("authorization", format!("Bearer {OWNED_PROXY_BEARER}"))
-                .header("x-aiguard-context", OWNED_PROXY_CONTEXT)
-                .body(Body::empty()).unwrap(),
-        ).await.unwrap();
+        let response = dashboard
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("authorization", format!("Bearer {OWNED_PROXY_BEARER}"))
+                    .header("x-aiguard-context", OWNED_PROXY_CONTEXT)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(response.status(), status, "{method} {path}");
     }
     assert_eq!(calls.load(Ordering::SeqCst), 0);

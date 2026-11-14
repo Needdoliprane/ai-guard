@@ -158,8 +158,7 @@ impl OwnedHumanBrokerCheckpointV1 {
             fields.iter().all(|present| *present == received),
             "inconsistent owned checkpoint summary"
         );
-        if let (Some(received_at), Some(expires_at)) = (&self.received_at, &self.lease_expires_at)
-        {
+        if let (Some(received_at), Some(expires_at)) = (&self.received_at, &self.lease_expires_at) {
             anyhow::ensure!(
                 parse_time(expires_at)? >= parse_time(received_at)?,
                 "invalid owned checkpoint lease"

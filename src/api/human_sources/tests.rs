@@ -13,16 +13,27 @@ async fn identity_announces_actual_owned_read_profiles_and_omits_them_on_legacy(
     let (_owned_files, owned) = fixture();
     let (status, body) = get(&gateway_router(owned), "/api/v1/human/identity", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["read_profiles"], json!({
-        "broker_registry":"human_broker_registry_owned_v1",
-        "worker_registry":"unavailable", "federation_registry":"unavailable"
-    }));
+    assert_eq!(
+        body["read_profiles"],
+        json!({
+            "broker_registry":"human_broker_registry_owned_v1",
+            "worker_registry":"unavailable", "federation_registry":"unavailable"
+        })
+    );
     let (_legacy_files, legacy, token) = crate::api::read_execution_tests::local_identity_state();
-    let response = gateway_router(legacy).oneshot(axum::http::Request::get("/api/v1/human/identity")
-        .header("authorization", format!("Bearer {token}"))
-        .body(Body::empty()).unwrap()).await.unwrap();
+    let response = gateway_router(legacy)
+        .oneshot(
+            axum::http::Request::get("/api/v1/human/identity")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(response.into_body(), 262_144).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), 262_144)
+        .await
+        .unwrap();
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(body.get("read_profiles").is_none());
 }
@@ -935,7 +946,6 @@ async fn every_existing_control_alias_and_head_closes_before_body_and_store() {
     assert!(observed_b.try_recv().is_err());
 }
 
-
 #[test]
 fn workload_discovery_retains_its_nonzero_source_index_without_neighbor_sql() {
     let fixture = Fixture::new_owned();
@@ -969,8 +979,7 @@ fn workload_discovery_retains_its_nonzero_source_index_without_neighbor_sql() {
                         incarnation_id: uuid::Uuid::new_v4().to_string(),
                     },
                     sha256_digest: hex::encode(digest),
-                    expires_at: (chrono::Utc::now() + chrono::Duration::minutes(5))
-                        .to_rfc3339(),
+                    expires_at: (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
                 },
             )
             .unwrap();
@@ -1006,7 +1015,11 @@ fn workload_discovery_retains_its_nonzero_source_index_without_neighbor_sql() {
     assert_eq!(owned.broker_source(&digest).unwrap(), expected);
     assert_eq!(owned.source(&digest).unwrap(), None);
     assert!(!owned.technical_candidate(&digest).unwrap());
-    assert!(observers.iter().all(|observer| observer.try_recv().is_err()));
+    assert!(
+        observers
+            .iter()
+            .all(|observer| observer.try_recv().is_err())
+    );
 }
 
 #[tokio::test]
@@ -1067,13 +1080,11 @@ async fn owned_broker_page_requires_human_auth_while_legacy_and_head_stay_closed
             .uri(path)
             .body(Body::from_stream(stream))
             .unwrap();
-        let response = tokio::time::timeout(
-            Duration::from_secs(5),
-            router.clone().oneshot(request),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let response =
+            tokio::time::timeout(Duration::from_secs(5), router.clone().oneshot(request))
+                .await
+                .unwrap()
+                .unwrap();
         assert_eq!(response.status(), status, "{method} {path}");
         assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
         assert_eq!(polls.load(Ordering::Acquire), 0, "{method} {path}");
@@ -1086,7 +1097,11 @@ async fn owned_broker_page_requires_human_auth_while_legacy_and_head_stay_closed
             assert!(body.get("items").is_none() && body.get("read_receipt").is_none());
         }
     }
-    assert!(observers.iter().all(|observer| observer.try_recv().is_err()));
+    assert!(
+        observers
+            .iter()
+            .all(|observer| observer.try_recv().is_err())
+    );
 }
 
 #[path = "recent_tests.rs"]

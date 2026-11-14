@@ -36,8 +36,8 @@ use crate::{
             OwnedBrokerCheckpointRequestV2, OwnedBrokerCheckpointResultV2,
             OwnedBrokerCheckpointSelfViewV2, OwnedBrokerHeartbeatRequestV2,
             OwnedBrokerHeartbeatResultV2, OwnedBrokerIdentityViewV2, OwnedBrokerOperationV2,
-            OwnedBrokerSelfViewV2, OwnedChecked, OwnedSupervisionErrorCodeV2 as Code,
-            OwnedReconciliationRequestV2, OwnedReconciliationResultV2,
+            OwnedBrokerSelfViewV2, OwnedChecked, OwnedReconciliationRequestV2,
+            OwnedReconciliationResultV2, OwnedSupervisionErrorCodeV2 as Code,
         },
     },
     redaction::Redactor,
@@ -104,9 +104,13 @@ pub(in crate::api) async fn authenticate(
     let presented = present(state, headers).map_err(refusal)?;
     let shared = Arc::clone(&presented.state.io);
     let tenant = Arc::clone(&presented.tenant.io);
-    let outcome = store_io::run(shared, Some(tenant), store_io::Lane::Read, true, move || {
-        Ok(presented.verify())
-    })
+    let outcome = store_io::run(
+        shared,
+        Some(tenant),
+        store_io::Lane::Read,
+        true,
+        move || Ok(presented.verify()),
+    )
     .await;
     match outcome {
         Ok(verified) => verified.map_err(refusal),
@@ -133,7 +137,10 @@ fn present(state: &GatewayState, headers: &HeaderMap) -> OwnedChecked<Presented>
         .get(index)
         .ok_or(Code::SourceRebuildRequired)?
         .clone();
-    let source = owned.sources.get(index).ok_or(Code::SourceRebuildRequired)?;
+    let source = owned
+        .sources
+        .get(index)
+        .ok_or(Code::SourceRebuildRequired)?;
     let facts = OwnedRetainedSourceFacts::from_token(source)?;
     require(
         facts.tenant_id() == tenant.tenant_id,
@@ -162,11 +169,13 @@ impl Presented {
             self.owned.broker_source(&self.digest)? == self.index,
             Code::SourceRebuildRequired,
         )?;
-        let broker = self
-            .owned
-            .owned_broker_job(self.index, store, &self.token, false, |access, window| {
-                store.owned_window_authenticate(access, window, &self.facts)
-            })?;
+        let broker = self.owned.owned_broker_job(
+            self.index,
+            store,
+            &self.token,
+            false,
+            |access, window| store.owned_window_authenticate(access, window, &self.facts),
+        )?;
         require(
             self.owned.broker_source(&self.digest)? == self.index,
             Code::SourceRebuildRequired,
@@ -229,11 +238,13 @@ impl OwnedBrokerSupervisionIdentity {
             self.owned.broker_source(&self.digest)? == self.index,
             Code::SourceRebuildRequired,
         )?;
-        let value = self
-            .owned
-            .owned_broker_job(self.index, store, &self.token, mutating, |access, window| {
-                target(store, access, window, &self.facts, &self.broker)
-            })?;
+        let value = self.owned.owned_broker_job(
+            self.index,
+            store,
+            &self.token,
+            mutating,
+            |access, window| target(store, access, window, &self.facts, &self.broker),
+        )?;
         self.publishable(&value)
             .map_err(|code| withheld(mutating, code))?;
         Ok(value)
@@ -256,11 +267,16 @@ impl OwnedBrokerSupervisionIdentity {
 
 impl OwnedBrokerSupervisionWork {
     pub(in crate::api) async fn reconcile(
-        self: Arc<Self>, request: OwnedReconciliationRequestV2,
+        self: Arc<Self>,
+        request: OwnedReconciliationRequestV2,
     ) -> OwnedChecked<OwnedReconciliationResultV2> {
-        self.run(request.operation(), move |store, access, window, facts, broker| {
-            store.owned_broker_reconcile(access, window, facts, broker, &request)
-        }).await
+        self.run(
+            request.operation(),
+            move |store, access, window, facts, broker| {
+                store.owned_broker_reconcile(access, window, facts, broker, &request)
+            },
+        )
+        .await
     }
 
     /// Operation chosen by the transport gate's exact route classification.
@@ -292,11 +308,17 @@ impl OwnedBrokerSupervisionWork {
         let owned = Arc::clone(&self.identity.owned);
         let shared = Arc::clone(&self.identity.state.io);
         let tenant = Arc::clone(&self.identity.tenant.io);
-        let outcome = store_io::run(shared, Some(tenant), store_io::Lane::Read, true, move || {
-            // The Arc retains the presence permit and the accepted usage in
-            // this actual job even if the response future is abandoned.
-            Ok(self.identity.revalidated(mutating, target))
-        })
+        let outcome = store_io::run(
+            shared,
+            Some(tenant),
+            store_io::Lane::Read,
+            true,
+            move || {
+                // The Arc retains the presence permit and the accepted usage in
+                // this actual job even if the response future is abandoned.
+                Ok(self.identity.revalidated(mutating, target))
+            },
+        )
         .await;
         let value = match outcome {
             Ok(value) => value?,
@@ -317,16 +339,22 @@ impl OwnedBrokerSupervisionWork {
     pub(in crate::api) async fn identity(
         self: Arc<Self>,
     ) -> OwnedChecked<OwnedBrokerIdentityViewV2> {
-        self.run(OwnedBrokerOperationV2::Identity, |store, access, window, facts, broker| {
-            store.owned_window_identity(access, window, facts, broker)
-        })
+        self.run(
+            OwnedBrokerOperationV2::Identity,
+            |store, access, window, facts, broker| {
+                store.owned_window_identity(access, window, facts, broker)
+            },
+        )
         .await
     }
 
     pub(in crate::api) async fn self_view(self: Arc<Self>) -> OwnedChecked<OwnedBrokerSelfViewV2> {
-        self.run(OwnedBrokerOperationV2::SelfView, |store, access, window, facts, broker| {
-            store.owned_broker_self_view(access, window, facts, broker)
-        })
+        self.run(
+            OwnedBrokerOperationV2::SelfView,
+            |store, access, window, facts, broker| {
+                store.owned_broker_self_view(access, window, facts, broker)
+            },
+        )
         .await
     }
 
@@ -334,9 +362,12 @@ impl OwnedBrokerSupervisionWork {
         self: Arc<Self>,
         request: OwnedBrokerHeartbeatRequestV2,
     ) -> OwnedChecked<OwnedBrokerHeartbeatResultV2> {
-        self.run(OwnedBrokerOperationV2::Heartbeat, move |store, access, window, facts, broker| {
-            store.owned_broker_heartbeat(access, window, facts, broker, &request)
-        })
+        self.run(
+            OwnedBrokerOperationV2::Heartbeat,
+            move |store, access, window, facts, broker| {
+                store.owned_broker_heartbeat(access, window, facts, broker, &request)
+            },
+        )
         .await
     }
 
@@ -344,18 +375,24 @@ impl OwnedBrokerSupervisionWork {
         self: Arc<Self>,
         request: OwnedBrokerCheckpointRequestV2,
     ) -> OwnedChecked<OwnedBrokerCheckpointResultV2> {
-        self.run(OwnedBrokerOperationV2::Checkpoint, move |store, access, window, facts, broker| {
-            store.owned_broker_checkpoint(access, window, facts, broker, &request)
-        })
+        self.run(
+            OwnedBrokerOperationV2::Checkpoint,
+            move |store, access, window, facts, broker| {
+                store.owned_broker_checkpoint(access, window, facts, broker, &request)
+            },
+        )
         .await
     }
 
     pub(in crate::api) async fn checkpoint_self(
         self: Arc<Self>,
     ) -> OwnedChecked<OwnedBrokerCheckpointSelfViewV2> {
-        self.run(OwnedBrokerOperationV2::CheckpointSelf, |store, access, window, facts, broker| {
-            store.owned_broker_checkpoint_self(access, window, facts, broker)
-        })
+        self.run(
+            OwnedBrokerOperationV2::CheckpointSelf,
+            |store, access, window, facts, broker| {
+                store.owned_broker_checkpoint_self(access, window, facts, broker)
+            },
+        )
         .await
     }
 }

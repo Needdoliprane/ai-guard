@@ -141,7 +141,11 @@ struct EnrollArgs {
     #[arg(long)]
     tenant_id: String,
     /// Existing broker UUID, or an operator-chosen one for a first registration.
-    #[arg(long, conflicts_with = "new_broker", required_unless_present = "new_broker")]
+    #[arg(
+        long,
+        conflicts_with = "new_broker",
+        required_unless_present = "new_broker"
+    )]
     broker_id: Option<Uuid>,
     /// Register a new random broker UUID.
     #[arg(long)]

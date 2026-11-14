@@ -20,8 +20,8 @@ use super::{
 };
 use crate::broker_registry::owned_supervision::{
     OwnedBrokerCheckpointRequestV2, OwnedBrokerHeartbeatRequestV2,
-    OwnedReconciliationRequestV2,
-    OwnedBrokerOperationV2 as Operation, OwnedChecked, OwnedSupervisionErrorCodeV2 as Code,
+    OwnedBrokerOperationV2 as Operation, OwnedChecked, OwnedReconciliationRequestV2,
+    OwnedSupervisionErrorCodeV2 as Code,
 };
 
 pub(super) fn routes() -> Router<GatewayState> {
@@ -30,9 +30,18 @@ pub(super) fn routes() -> Router<GatewayState> {
         .route(Operation::SelfView.router_path(), get(self_view))
         .route(Operation::Heartbeat.router_path(), post(heartbeat))
         .route(Operation::Checkpoint.router_path(), post(checkpoint))
-        .route(Operation::CheckpointSelf.router_path(), get(checkpoint_self))
-        .route(Operation::HeartbeatReconcile.router_path(), post(heartbeat_reconcile))
-        .route(Operation::CheckpointReconcile.router_path(), post(checkpoint_reconcile))
+        .route(
+            Operation::CheckpointSelf.router_path(),
+            get(checkpoint_self),
+        )
+        .route(
+            Operation::HeartbeatReconcile.router_path(),
+            post(heartbeat_reconcile),
+        )
+        .route(
+            Operation::CheckpointReconcile.router_path(),
+            post(checkpoint_reconcile),
+        )
 }
 
 /// Closed owned refusal: the code fixes its HTTP status, stable wire code,

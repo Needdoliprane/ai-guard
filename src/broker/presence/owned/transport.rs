@@ -15,7 +15,8 @@ pub(super) struct OwnedClient {
 }
 impl OwnedClient {
     pub(super) async fn reconcile(
-        &self, p: &PreparedOwnedPresence,
+        &self,
+        p: &PreparedOwnedPresence,
         request: &crate::broker_registry::owned_supervision::OwnedReconciliationRequestV2,
     ) -> Result<crate::broker_registry::owned_supervision::OwnedReconciliationResultV2> {
         let bytes = serde_json::to_vec(request).map_err(|_| PresenceError::UnsafeState)?;
@@ -41,8 +42,7 @@ impl OwnedClient {
         };
         // Exact closed classification of the owned contract; a bodyless GET
         // never carries a body and a mutation always carries its request.
-        if OwnedBrokerOperationV2::classify(operation.method(), operation.path())
-            != Some(operation)
+        if OwnedBrokerOperationV2::classify(operation.method(), operation.path()) != Some(operation)
             || (operation.method() == "POST") != request.is_some()
         {
             return Err(PresenceError::Protocol);

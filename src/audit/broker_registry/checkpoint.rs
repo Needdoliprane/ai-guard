@@ -38,7 +38,8 @@ pub(super) fn latest(db: &Connection, broker: &str) -> anyhow::Result<Option<Ret
         [broker],
         |row| Ok((row_event(row)?, row.get::<_, String>(5)?)),
     ).optional()?;
-    row.map(|(stored, broker)| retained(stored, &broker)).transpose()
+    row.map(|(stored, broker)| retained(stored, &broker))
+        .transpose()
 }
 pub(super) fn latest_publication(
     db: &Connection,

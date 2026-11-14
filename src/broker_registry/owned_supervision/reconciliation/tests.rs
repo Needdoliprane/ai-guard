@@ -1,19 +1,23 @@
 use super::*;
 
 fn identity(binding: u64) -> OwnedBrokerIdentityViewV2 {
-    OwnedBrokerIdentityViewV2::new(7, OwnedBrokerSubjectV2 {
-        installation_id: "00000000-0000-4000-8000-000000000001".into(),
-        closure_id: "00000000-0000-4000-8000-000000000002".into(),
-        source_id: "00000000-0000-4000-8000-000000000003".into(),
-        source_format: 15,
-        tenant_id: "tenant-a".into(),
-        control_namespace_uuid: "00000000-0000-4000-8000-000000000004".into(),
-        broker_id: "00000000-0000-4000-8000-000000000005".into(),
-        incarnation_id: "00000000-0000-4000-8000-000000000006".into(),
-        credential_id: "00000000-0000-4000-8000-000000000007".into(),
-        binding_revision: binding,
-        grant_revision: 1,
-    }).unwrap()
+    OwnedBrokerIdentityViewV2::new(
+        7,
+        OwnedBrokerSubjectV2 {
+            installation_id: "00000000-0000-4000-8000-000000000001".into(),
+            closure_id: "00000000-0000-4000-8000-000000000002".into(),
+            source_id: "00000000-0000-4000-8000-000000000003".into(),
+            source_format: 15,
+            tenant_id: "tenant-a".into(),
+            control_namespace_uuid: "00000000-0000-4000-8000-000000000004".into(),
+            broker_id: "00000000-0000-4000-8000-000000000005".into(),
+            incarnation_id: "00000000-0000-4000-8000-000000000006".into(),
+            credential_id: "00000000-0000-4000-8000-000000000007".into(),
+            binding_revision: binding,
+            grant_revision: 1,
+        },
+    )
+    .unwrap()
 }
 
 fn fence() -> OwnedBindingRotationFenceV2 {
@@ -46,7 +50,10 @@ fn pending() -> OwnedHeartbeatPendingV2 {
         heartbeat_revision: 0,
         credential_id: old.subject.credential_id.clone(),
         incarnation_id: old.subject.incarnation_id.clone(),
-        authorities: vec![BrokerAuthorityV1 { authority_id: "local-docker".into(), runtime_kind: BrokerRuntimeKindV1::Docker }],
+        authorities: vec![BrokerAuthorityV1 {
+            authority_id: "local-docker".into(),
+            runtime_kind: BrokerRuntimeKindV1::Docker,
+        }],
         lease_seconds: 30,
         not_after: "2026-11-14T12:00:00.000Z".into(),
         revoked: false,
@@ -54,18 +61,32 @@ fn pending() -> OwnedHeartbeatPendingV2 {
         revoked_at: None,
         last_heartbeat: None,
     };
-    let view = OwnedBrokerSelfViewV2::new(old, broker.view_at("2026-11-14T10:00:00.000Z").unwrap(), None).unwrap();
+    let view = OwnedBrokerSelfViewV2::new(
+        old,
+        broker.view_at("2026-11-14T10:00:00.000Z").unwrap(),
+        None,
+    )
+    .unwrap();
     OwnedHeartbeatPendingV2::prepare(&view, "00000000-0000-4000-8000-000000000009".into()).unwrap()
 }
 
 #[test]
 fn noncommitted_proof_requires_exact_predecessor_and_original_request_commitment() {
     let pending = pending();
-    let request = OwnedReconciliationRequestV2::Heartbeat { pending: Box::new(pending.clone()), previous: None };
+    let request = OwnedReconciliationRequestV2::Heartbeat {
+        pending: Box::new(pending.clone()),
+        previous: None,
+    };
     let mut proof = OwnedReconciliationResultV2 {
-        profile: "broker_supervision_owned_v2".into(), version: 2,
-        request_commitment: request.commitment().unwrap(), observation: identity(2), fence: fence(),
-        head: OwnedReconciliationHeadV2::Heartbeat { view: pending.prior.clone(), receipt: None },
+        profile: "broker_supervision_owned_v2".into(),
+        version: 2,
+        request_commitment: request.commitment().unwrap(),
+        observation: identity(2),
+        fence: fence(),
+        head: OwnedReconciliationHeadV2::Heartbeat {
+            view: pending.prior.clone(),
+            receipt: None,
+        },
         state: OwnedReconciliationStateV2::NonCommitted,
     };
     proof.non_committed_for(&request).unwrap();
@@ -73,7 +94,10 @@ fn noncommitted_proof_requires_exact_predecessor_and_original_request_commitment
         view.broker.heartbeat_revision = 4;
     }
     assert!(proof.non_committed_for(&request).is_err());
-    proof.head = OwnedReconciliationHeadV2::Heartbeat { view: pending.prior.clone(), receipt: None };
+    proof.head = OwnedReconciliationHeadV2::Heartbeat {
+        view: pending.prior.clone(),
+        receipt: None,
+    };
     proof.request_commitment = "b".repeat(64);
     assert!(proof.non_committed_for(&request).is_err());
 }
@@ -81,26 +105,54 @@ fn noncommitted_proof_requires_exact_predecessor_and_original_request_commitment
 #[test]
 fn committed_rotation_ack_keeps_historical_actor_and_never_becomes_noncommitted() {
     let pending = pending();
-    let request = OwnedReconciliationRequestV2::Heartbeat { pending: Box::new(pending.clone()), previous: None };
+    let request = OwnedReconciliationRequestV2::Heartbeat {
+        pending: Box::new(pending.clone()),
+        previous: None,
+    };
     let mut broker = pending.prior.broker.clone();
     broker.heartbeat_revision = 1;
     broker.last_heartbeat = Some(BrokerHeartbeatReceiptV1 {
-        incarnation_id: pending.heartbeat.incarnation_id.clone(), sequence: 1,
-        received_at: "2026-11-14T10:00:01.000Z".into(), lease_expires_at: "2026-11-14T10:00:31.000Z".into(),
-        heartbeat_provenance: BrokerClaimProvenanceV1::Declared, reception_provenance: BrokerReceptionProvenanceV1::Observed,
+        incarnation_id: pending.heartbeat.incarnation_id.clone(),
+        sequence: 1,
+        received_at: "2026-11-14T10:00:01.000Z".into(),
+        lease_expires_at: "2026-11-14T10:00:31.000Z".into(),
+        heartbeat_provenance: BrokerClaimProvenanceV1::Declared,
+        reception_provenance: BrokerReceptionProvenanceV1::Observed,
     });
     let receipt = BrokerMutationReceiptV1 {
-        operation_id: pending.heartbeat.operation_id.clone(), broker_id: broker.broker_id.clone(),
-        grant_revision: 1, heartbeat_revision: 1, input_hash: pending.registry_input_hash.clone(),
-        audit_seq: 7, audit_hash: "c".repeat(64),
+        operation_id: pending.heartbeat.operation_id.clone(),
+        broker_id: broker.broker_id.clone(),
+        grant_revision: 1,
+        heartbeat_revision: 1,
+        input_hash: pending.registry_input_hash.clone(),
+        audit_seq: 7,
+        audit_hash: "c".repeat(64),
     };
-    let historical = OwnedBrokerHeartbeatResultV2::new(identity(1), pending.operation_commitment.clone(),
-        BrokerMutationResultV1 { broker: broker.clone(), receipt: receipt.clone(), replayed: true }).unwrap();
+    let historical = OwnedBrokerHeartbeatResultV2::new(
+        identity(1),
+        pending.operation_commitment.clone(),
+        BrokerMutationResultV1 {
+            broker: broker.clone(),
+            receipt: receipt.clone(),
+            replayed: true,
+        },
+    )
+    .unwrap();
     let proof = OwnedReconciliationResultV2 {
-        profile: "broker_supervision_owned_v2".into(), version: 2,
-        request_commitment: request.commitment().unwrap(), observation: identity(2), fence: fence(),
-        head: OwnedReconciliationHeadV2::Heartbeat { view: broker.view_at("2026-11-14T10:00:02.000Z").unwrap(), receipt: Some(receipt) },
-        state: OwnedReconciliationStateV2::CommittedExact { historical: OwnedHistoricalResultV2::Heartbeat { result: Box::new(historical.clone()) } },
+        profile: "broker_supervision_owned_v2".into(),
+        version: 2,
+        request_commitment: request.commitment().unwrap(),
+        observation: identity(2),
+        fence: fence(),
+        head: OwnedReconciliationHeadV2::Heartbeat {
+            view: broker.view_at("2026-11-14T10:00:02.000Z").unwrap(),
+            receipt: Some(receipt),
+        },
+        state: OwnedReconciliationStateV2::CommittedExact {
+            historical: OwnedHistoricalResultV2::Heartbeat {
+                result: Box::new(historical.clone()),
+            },
+        },
     };
     proof.validate_for(&request).unwrap();
     assert_eq!(historical.identity.subject.binding_revision, 1);
@@ -115,7 +167,10 @@ fn committed_rotation_ack_keeps_historical_actor_and_never_becomes_noncommitted(
 fn rotation_reconciliation_never_weakens_exact_replay_or_accepts_pin_changes() {
     let old = identity(1);
     let current = identity(2);
-    assert_eq!(check_replay_identity(&old, &current), Err(OwnedIncompatibilityV2::BindingRevision));
+    assert_eq!(
+        check_replay_identity(&old, &current),
+        Err(OwnedIncompatibilityV2::BindingRevision)
+    );
     fence().validate_for(&old, &current).unwrap();
     let mut other = current.clone();
     other.subject.tenant_id = "tenant-b".into();
@@ -141,11 +196,23 @@ fn final_profile_refuses_old_profile_and_unadmitted_source_format() {
     let old: OwnedBrokerIdentityViewV2 = serde_json::from_value(value).unwrap();
     assert!(old.validate().is_err());
     assert_eq!(OwnedSourceFormatV2::from_verified(16), None);
-    assert_eq!(OwnedBrokerOperationV2::classify("GET", "/api/v1/owned/brokers/heartbeats/reconcile"), None);
-    assert_eq!(OwnedBrokerOperationV2::classify("POST", "/api/v1/owned/brokers/heartbeats/reconcile"), Some(OwnedBrokerOperationV2::HeartbeatReconcile));
+    assert_eq!(
+        OwnedBrokerOperationV2::classify("GET", "/api/v1/owned/brokers/heartbeats/reconcile"),
+        None
+    );
+    assert_eq!(
+        OwnedBrokerOperationV2::classify("POST", "/api/v1/owned/brokers/heartbeats/reconcile"),
+        Some(OwnedBrokerOperationV2::HeartbeatReconcile)
+    );
     assert!(!OwnedBrokerOperationV2::HeartbeatReconcile.mutating());
-    let mut error=OwnedSupervisionErrorCodeV2::SupervisionUnavailable.body();
-    assert_eq!(classify_remote_failure(503,&error),OwnedRemoteFailureV2::Owned(OwnedSupervisionErrorCodeV2::SupervisionUnavailable));
-    error["error"]["profile"]=Value::String("broker_supervision_owned_v1".into());
-    assert_eq!(classify_remote_failure(503,&error),OwnedRemoteFailureV2::Unrecognized);
+    let mut error = OwnedSupervisionErrorCodeV2::SupervisionUnavailable.body();
+    assert_eq!(
+        classify_remote_failure(503, &error),
+        OwnedRemoteFailureV2::Owned(OwnedSupervisionErrorCodeV2::SupervisionUnavailable)
+    );
+    error["error"]["profile"] = Value::String("broker_supervision_owned_v1".into());
+    assert_eq!(
+        classify_remote_failure(503, &error),
+        OwnedRemoteFailureV2::Unrecognized
+    );
 }

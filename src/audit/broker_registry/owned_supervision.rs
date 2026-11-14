@@ -326,7 +326,9 @@ pub(super) fn latest_receipt(
     record.change.validate()?;
     let broker: BrokerV1 = serde_json::from_str(&json)?;
     require(broker.broker_id == broker_id)?;
-    Ok(Some(result(&stored, broker, input_hash, operation_id, false).receipt))
+    Ok(Some(
+        result(&stored, broker, input_hash, operation_id, false).receipt,
+    ))
 }
 
 impl Store {
@@ -399,10 +401,7 @@ impl Store {
         mutating: bool,
         work: impl FnOnce(&CheckedTransaction<'_>, &AuthorizedControlTimeV1) -> OwnedChecked<T>,
     ) -> OwnedChecked<T> {
-        let mut db = self
-            .db
-            .lock()
-            .map_err(|_| Code::SupervisionUnavailable)?;
+        let mut db = self.db.lock().map_err(|_| Code::SupervisionUnavailable)?;
         let tx = self
             .begin_checked_scoped(&mut db, access, StoreOperationClass::Business)
             .map_err(|error| classify(self, &error))?;

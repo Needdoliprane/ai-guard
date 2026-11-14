@@ -164,11 +164,7 @@ pub(super) fn check_owned_profiles(
                 return Err(PresenceError::InvalidConfig);
             }
         }
-        if journal.owned
-            && fixed
-                .iter()
-                .any(|root| overlaps(journal.root.path(), root))
-        {
+        if journal.owned && fixed.iter().any(|root| overlaps(journal.root.path(), root)) {
             return Err(PresenceError::InvalidConfig);
         }
     }

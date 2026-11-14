@@ -27,10 +27,9 @@
 use super::*;
 use crate::{
     broker_registry::owned_supervision::{
-        OwnedAcknowledgementSourceV2, OwnedBrokerIdentityViewV2,
-        OwnedReconciliationRequestV2, OwnedReconciliationResultV2,
         MAX_OWNED_IDENTITY_BYTES, MAX_OWNED_RECONCILIATION_RESULT_BYTES,
-        MAX_OWNED_SUPERSESSION_BYTES,
+        MAX_OWNED_SUPERSESSION_BYTES, OwnedAcknowledgementSourceV2, OwnedBrokerIdentityViewV2,
+        OwnedReconciliationRequestV2, OwnedReconciliationResultV2,
     },
     control_fs::{PrivateEntryIdentity, persistent::Entry},
 };
@@ -55,8 +54,10 @@ const HISTORY_DOMAIN: &[u8] = b"ai-guard:presence-owned-history:v2\0";
 /// Upper bound of one record: the larger shared-contract bound plus envelope.
 pub(super) const fn record_bytes(pending: usize, outcome: usize) -> u64 {
     let larger = if pending > outcome { pending } else { outcome };
-    larger as u64 + MAX_OWNED_RECONCILIATION_RESULT_BYTES as u64
-        + MAX_OWNED_IDENTITY_BYTES as u64 + ENVELOPE_BYTES
+    larger as u64
+        + MAX_OWNED_RECONCILIATION_RESULT_BYTES as u64
+        + MAX_OWNED_IDENTITY_BYTES as u64
+        + ENVELOPE_BYTES
 }
 /// Smallest admitted journal: its anchor, one Pending and its acknowledgement.
 pub(super) fn minimum_bytes<K: Kind>() -> u64 {
@@ -87,9 +88,16 @@ pub(super) trait Kind: Clone + PartialEq + Send + Sync + 'static {
     fn pending_identity(pending: &Self::Pending) -> &OwnedBrokerIdentityViewV2;
     fn outcome_identity(outcome: &Self::Outcome) -> &OwnedBrokerIdentityViewV2;
     fn operation_id(pending: &Self::Pending) -> &str;
-    fn recovery_request(pending: &Self::Pending, previous: Option<&AckRecordV2<Self::Outcome>>) -> OwnedReconciliationRequestV2;
+    fn recovery_request(
+        pending: &Self::Pending,
+        previous: Option<&AckRecordV2<Self::Outcome>>,
+    ) -> OwnedReconciliationRequestV2;
     fn recovered(proof: &OwnedReconciliationResultV2) -> Result<Option<Self::Outcome>>;
-    fn replacement(pending: &Self::Pending, proof: &OwnedReconciliationResultV2, operation_id: String) -> Result<Self::Pending>;
+    fn replacement(
+        pending: &Self::Pending,
+        proof: &OwnedReconciliationResultV2,
+        operation_id: String,
+    ) -> Result<Self::Pending>;
 }
 
 /// Durable acknowledgement as received or self-read, never rewritten.
@@ -113,22 +121,34 @@ struct SupersededRecordV2<P> {
 }
 
 fn pending_commitment<K: Kind>(pending: &K::Pending) -> Result<String> {
-    crate::control::content_hash("ai-guard:presence-owned:v2:superseded-pending", &(K::NAME, pending))
-        .map_err(|_| PresenceError::UnsafeState)
+    crate::control::content_hash(
+        "ai-guard:presence-owned:v2:superseded-pending",
+        &(K::NAME, pending),
+    )
+    .map_err(|_| PresenceError::UnsafeState)
 }
 
 fn check_superseded<K: Kind>(
-    pins: &OwnedSupervisionPinsV2, previous: Option<&AckRecordV2<K::Outcome>>,
-    pending: &K::Pending, record: &SupersededRecordV2<K::Pending>,
+    pins: &OwnedSupervisionPinsV2,
+    previous: Option<&AckRecordV2<K::Outcome>>,
+    pending: &K::Pending,
+    record: &SupersededRecordV2<K::Pending>,
 ) -> Result<()> {
     if record.version != 2 || record.pending_commitment != pending_commitment::<K>(pending)? {
         return Err(PresenceError::UnsafeState);
     }
     let request = K::recovery_request(pending, previous);
     record.proof.non_committed_for(&request).map_err(contract)?;
-    pins.check_identity(&record.proof.observation).map_err(identity)?;
-    let expected = K::replacement(pending, &record.proof, K::operation_id(&record.replacement).to_owned())?;
-    if expected != record.replacement || K::operation_id(pending) == K::operation_id(&record.replacement) {
+    pins.check_identity(&record.proof.observation)
+        .map_err(identity)?;
+    let expected = K::replacement(
+        pending,
+        &record.proof,
+        K::operation_id(&record.replacement).to_owned(),
+    )?;
+    if expected != record.replacement
+        || K::operation_id(pending) == K::operation_id(&record.replacement)
+    {
         return Err(PresenceError::UnsafeState);
     }
     K::check_pending(pins, previous, &record.replacement)
@@ -187,7 +207,9 @@ impl<K: Kind> Head<K> {
         }
     }
     fn observe(&mut self, view: &OwnedBrokerIdentityViewV2) -> Result<()> {
-        if view.subject.binding_revision < self.binding_floor || view.closure_revision < self.closure_floor {
+        if view.subject.binding_revision < self.binding_floor
+            || view.closure_revision < self.closure_floor
+        {
             return Err(PresenceError::UnsafeState);
         }
         self.binding_floor = view.subject.binding_revision;
@@ -242,8 +264,7 @@ fn read<T: DeserializeOwned>(
     let file = fs(root.persistent_read(name, limit, &[]))?.ok_or(PresenceError::UnsafeState)?;
     let value: Value =
         serde_json::from_slice(file.bytes()).map_err(|_| PresenceError::UnsafeState)?;
-    p.screen(&value)
-        .map_err(|_| PresenceError::UnsafeState)?;
+    p.screen(&value).map_err(|_| PresenceError::UnsafeState)?;
     // Typed decoding from the original bytes also refuses duplicate fields.
     let value = serde_json::from_slice(file.bytes()).map_err(|_| PresenceError::UnsafeState)?;
     Ok((value, file))
@@ -323,13 +344,19 @@ fn check_record<K: Kind>(
         Some(proof) => {
             if record.source != OwnedAcknowledgementSourceV2::AfterRotation
                 || record.observation != proof.observation
-                || K::recovered(proof)? != Some(record.result.clone()) {
+                || K::recovered(proof)? != Some(record.result.clone())
+            {
                 return Err(PresenceError::UnsafeState);
             }
-            proof.validate_for(&K::recovery_request(pending, previous)).map_err(contract)?;
+            proof
+                .validate_for(&K::recovery_request(pending, previous))
+                .map_err(contract)?;
         }
         None if record.source == OwnedAcknowledgementSourceV2::AfterRotation
-            || &record.observation != K::outcome_identity(&record.result) => return Err(PresenceError::UnsafeState),
+            || &record.observation != K::outcome_identity(&record.result) =>
+        {
+            return Err(PresenceError::UnsafeState);
+        }
         None => {}
     }
     pins.check_identity(&record.observation).map_err(identity)?;
@@ -457,14 +484,18 @@ impl<K: Kind> Journal<K> {
                 head.vacant = Some(directory_identity(&directory)?);
                 break;
             }
-            let (pending, file): (K::Pending, _) =
-                read(p, &directory, PENDING, K::RECORD_BYTES)?;
+            let (pending, file): (K::Pending, _) = read(p, &directory, PENDING, K::RECORD_BYTES)?;
             if let Some(expected) = head.replacement.take() {
-                if pending != expected { return Err(PresenceError::UnsafeState); }
+                if pending != expected {
+                    return Err(PresenceError::UnsafeState);
+                }
             }
             K::check_pending(&p.pins, head.last.as_ref(), &pending)
                 .map_err(|_| PresenceError::UnsafeState)?;
-            if !head.operation_ids.insert(K::operation_id(&pending).to_owned()) {
+            if !head
+                .operation_ids
+                .insert(K::operation_id(&pending).to_owned())
+            {
                 return Err(PresenceError::UnsafeState);
             }
             head.observe(K::pending_identity(&pending))?;
@@ -473,7 +504,9 @@ impl<K: Kind> Journal<K> {
             }
             fold(&mut head, &directory, PENDING, file.bytes())?;
             if children.iter().any(|e| e.name == ACK) {
-                if children.iter().any(|e| e.name == SUPERSEDED) { return Err(PresenceError::UnsafeState); }
+                if children.iter().any(|e| e.name == SUPERSEDED) {
+                    return Err(PresenceError::UnsafeState);
+                }
                 let (record, file): (AckRecordV2<K::Outcome>, _) =
                     read(p, &directory, ACK, K::RECORD_BYTES)?;
                 check_record::<K>(&p.pins, &pending, &record, head.last.as_ref())
@@ -485,13 +518,22 @@ impl<K: Kind> Journal<K> {
                 head.observe(&record.observation)?;
                 head.last = Some(record);
             } else if children.iter().any(|e| e.name == SUPERSEDED) {
-                let (record, file): (SupersededRecordV2<K::Pending>, _) =
-                    read(p, &directory, SUPERSEDED, MAX_OWNED_SUPERSESSION_BYTES as u64)?;
+                let (record, file): (SupersededRecordV2<K::Pending>, _) = read(
+                    p,
+                    &directory,
+                    SUPERSEDED,
+                    MAX_OWNED_SUPERSESSION_BYTES as u64,
+                )?;
                 check_superseded::<K>(&p.pins, head.last.as_ref(), &pending, &record)?;
-                if head.operation_ids.contains(K::operation_id(&record.replacement)) {
+                if head
+                    .operation_ids
+                    .contains(K::operation_id(&record.replacement))
+                {
                     return Err(PresenceError::UnsafeState);
                 }
-                if synchronize { fs(file.persistent_sync())?; }
+                if synchronize {
+                    fs(file.persistent_sync())?;
+                }
                 fold(&mut head, &directory, SUPERSEDED, file.bytes())?;
                 head.observe(&record.proof.observation)?;
                 head.replacement = Some(record.replacement);
@@ -521,8 +563,13 @@ impl<K: Kind> Journal<K> {
         }
         if let Some(replacement) = &head.replacement {
             let bytes = encode(p, replacement, K::RECORD_BYTES)?.len() as u64;
-            if head.count >= limits.operations || head.bytes.checked_add(bytes)
-                .and_then(|n| n.checked_add(K::RECORD_BYTES)).is_none_or(|n| n > limits.bytes) {
+            if head.count >= limits.operations
+                || head
+                    .bytes
+                    .checked_add(bytes)
+                    .and_then(|n| n.checked_add(K::RECORD_BYTES))
+                    .is_none_or(|n| n > limits.bytes)
+            {
                 return Err(PresenceError::Capacity);
             }
         }
@@ -570,7 +617,10 @@ impl<K: Kind> Journal<K> {
         p: &PreparedOwnedPresence,
         pending: K::Pending,
     ) -> Result<K::Pending> {
-        let _mutation = self.mutation.lock().map_err(|_| PresenceError::UnsafeState)?;
+        let _mutation = self
+            .mutation
+            .lock()
+            .map_err(|_| PresenceError::UnsafeState)?;
         let mut head = self.checked_head(p)?;
         if head.pending.is_some() {
             return Err(PresenceError::UnsafeState);
@@ -578,7 +628,11 @@ impl<K: Kind> Journal<K> {
         if head.count >= self.limits.operations {
             return Err(PresenceError::Capacity);
         }
-        if head.replacement.as_ref().is_some_and(|expected| *expected != pending) {
+        if head
+            .replacement
+            .as_ref()
+            .is_some_and(|expected| *expected != pending)
+        {
             return Err(PresenceError::UnsafeState);
         }
         if head.operation_ids.contains(K::operation_id(&pending)) {
@@ -608,7 +662,9 @@ impl<K: Kind> Journal<K> {
         // still reconcile it before POST if a later rotation was observed.
         let _observation = if head.replacement.is_none() {
             Some(p.lock_observation(K::pending_identity(&pending))?)
-        } else { None };
+        } else {
+            None
+        };
         let index = head.count.checked_add(1).ok_or(PresenceError::Capacity)?;
         let directory = fs(self.root.persistent_child(&operation_name(index), true))?
             .ok_or(PresenceError::UnsafeState)?;
@@ -625,7 +681,8 @@ impl<K: Kind> Journal<K> {
         save(&directory, PENDING, &bytes)?;
         fold(&mut head, &directory, PENDING, &bytes)?;
         head.count = index;
-        head.operation_ids.insert(K::operation_id(&pending).to_owned());
+        head.operation_ids
+            .insert(K::operation_id(&pending).to_owned());
         head.pending = Some(pending);
         head.replacement = None;
         head.vacant = None;
@@ -651,17 +708,37 @@ impl<K: Kind> Journal<K> {
         self.acknowledge_with(p, source, result, None)
     }
 
-    pub(super) fn acknowledge_reconciled(&self, p: &PreparedOwnedPresence, proof: OwnedReconciliationResultV2) -> Result<()> {
+    pub(super) fn acknowledge_reconciled(
+        &self,
+        p: &PreparedOwnedPresence,
+        proof: OwnedReconciliationResultV2,
+    ) -> Result<()> {
         let result = K::recovered(&proof)?.ok_or(PresenceError::UnsafeState)?;
-        self.acknowledge_with(p, OwnedAcknowledgementSourceV2::AfterRotation, result, Some(proof))
+        self.acknowledge_with(
+            p,
+            OwnedAcknowledgementSourceV2::AfterRotation,
+            result,
+            Some(proof),
+        )
     }
 
-    fn acknowledge_with(&self, p: &PreparedOwnedPresence, source: OwnedAcknowledgementSourceV2,
-        result: K::Outcome, reconciliation: Option<OwnedReconciliationResultV2>) -> Result<()> {
-        let _mutation = self.mutation.lock().map_err(|_| PresenceError::UnsafeState)?;
+    fn acknowledge_with(
+        &self,
+        p: &PreparedOwnedPresence,
+        source: OwnedAcknowledgementSourceV2,
+        result: K::Outcome,
+        reconciliation: Option<OwnedReconciliationResultV2>,
+    ) -> Result<()> {
+        let _mutation = self
+            .mutation
+            .lock()
+            .map_err(|_| PresenceError::UnsafeState)?;
         let mut head = self.checked_head(p)?;
         let pending = head.pending.clone().ok_or(PresenceError::UnsafeState)?;
-        let observation = reconciliation.as_ref().map_or_else(|| K::outcome_identity(&result).clone(), |proof| proof.observation.clone());
+        let observation = reconciliation.as_ref().map_or_else(
+            || K::outcome_identity(&result).clone(),
+            |proof| proof.observation.clone(),
+        );
         let record = AckRecordV2 {
             version: ACK_RECORD_VERSION,
             source,
@@ -700,14 +777,32 @@ impl<K: Kind> Journal<K> {
 
     /// Funds closure, replacement and its ACK before writing the closure.
     /// The closure embeds the exact prepared replacement, including its UUID.
-    pub(super) fn supersede(&self, p: &PreparedOwnedPresence, expected: &K::Pending,
-        proof: OwnedReconciliationResultV2, replacement: K::Pending) -> Result<()> {
-        let _mutation = self.mutation.lock().map_err(|_| PresenceError::UnsafeState)?;
+    pub(super) fn supersede(
+        &self,
+        p: &PreparedOwnedPresence,
+        expected: &K::Pending,
+        proof: OwnedReconciliationResultV2,
+        replacement: K::Pending,
+    ) -> Result<()> {
+        let _mutation = self
+            .mutation
+            .lock()
+            .map_err(|_| PresenceError::UnsafeState)?;
         let mut head = self.checked_head(p)?;
         let pending = head.pending.as_ref().ok_or(PresenceError::UnsafeState)?;
-        if pending != expected || head.replacement.is_some() { return Err(PresenceError::UnsafeState); }
-        let record = SupersededRecordV2 { version: 2, pending_commitment: pending_commitment::<K>(pending)?, proof, replacement };
-        if head.operation_ids.contains(K::operation_id(&record.replacement)) {
+        if pending != expected || head.replacement.is_some() {
+            return Err(PresenceError::UnsafeState);
+        }
+        let record = SupersededRecordV2 {
+            version: 2,
+            pending_commitment: pending_commitment::<K>(pending)?,
+            proof,
+            replacement,
+        };
+        if head
+            .operation_ids
+            .contains(K::operation_id(&record.replacement))
+        {
             return Err(PresenceError::UnsafeState);
         }
         check_superseded::<K>(&p.pins, head.last.as_ref(), pending, &record)?;
@@ -717,13 +812,21 @@ impl<K: Kind> Journal<K> {
         let _observation = p.lock_observation(&record.proof.observation)?;
         let bytes = encode(p, &record, MAX_OWNED_SUPERSESSION_BYTES as u64)?;
         let replacement_bytes = encode(p, &record.replacement, K::RECORD_BYTES)?;
-        if head.count >= self.limits.operations || head.bytes.checked_add(bytes.len() as u64)
-            .and_then(|n| n.checked_add(replacement_bytes.len() as u64))
-            .and_then(|n| n.checked_add(K::RECORD_BYTES)).is_none_or(|n| n > self.limits.bytes) {
+        if head.count >= self.limits.operations
+            || head
+                .bytes
+                .checked_add(bytes.len() as u64)
+                .and_then(|n| n.checked_add(replacement_bytes.len() as u64))
+                .and_then(|n| n.checked_add(K::RECORD_BYTES))
+                .is_none_or(|n| n > self.limits.bytes)
+        {
             return Err(PresenceError::Capacity);
         }
         head.observe(&record.proof.observation)?;
-        let directory = fs(self.root.persistent_child(&operation_name(head.count), false))?.ok_or(PresenceError::UnsafeState)?;
+        let directory = fs(self
+            .root
+            .persistent_child(&operation_name(head.count), false))?
+        .ok_or(PresenceError::UnsafeState)?;
         save(&directory, SUPERSEDED, &bytes)?;
         fold(&mut head, &directory, SUPERSEDED, &bytes)?;
         head.pending = None;

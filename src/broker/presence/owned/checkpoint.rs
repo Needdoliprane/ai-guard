@@ -8,6 +8,7 @@ use super::journal::{self, AckRecordV2, Head, Kind};
 use super::*;
 use super::{schedule, transport};
 use crate::broker::presence::actor;
+use crate::broker_registry::owned_supervision::*;
 use crate::broker_registry::owned_supervision::{
     MAX_OWNED_CHECKPOINT_PENDING_BYTES, MAX_OWNED_CHECKPOINT_RESULT_BYTES,
     OwnedAcknowledgementSourceV2, OwnedBrokerCheckpointResultV2, OwnedBrokerCheckpointSelfViewV2,
@@ -15,31 +16,55 @@ use crate::broker_registry::owned_supervision::{
     validate_checkpoint_handshake,
 };
 use uuid::Uuid;
-use crate::broker_registry::owned_supervision::*;
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct CheckpointJournal;
 
 impl Kind for CheckpointJournal {
-    fn pending_identity(pending: &Self::Pending) -> &OwnedBrokerIdentityViewV2 { &pending.identity }
-    fn outcome_identity(outcome: &Self::Outcome) -> &OwnedBrokerIdentityViewV2 { &outcome.identity }
-    fn operation_id(pending: &Self::Pending) -> &str { &pending.checkpoint.operation_id }
-    fn recovery_request(pending: &Self::Pending, previous: Option<&AckRecordV2<Self::Outcome>>) -> OwnedReconciliationRequestV2 {
-        OwnedReconciliationRequestV2::Checkpoint { pending: Box::new(pending.clone()), previous: previous.map(|last| Box::new(last.result.clone())) }
+    fn pending_identity(pending: &Self::Pending) -> &OwnedBrokerIdentityViewV2 {
+        &pending.identity
+    }
+    fn outcome_identity(outcome: &Self::Outcome) -> &OwnedBrokerIdentityViewV2 {
+        &outcome.identity
+    }
+    fn operation_id(pending: &Self::Pending) -> &str {
+        &pending.checkpoint.operation_id
+    }
+    fn recovery_request(
+        pending: &Self::Pending,
+        previous: Option<&AckRecordV2<Self::Outcome>>,
+    ) -> OwnedReconciliationRequestV2 {
+        OwnedReconciliationRequestV2::Checkpoint {
+            pending: Box::new(pending.clone()),
+            previous: previous.map(|last| Box::new(last.result.clone())),
+        }
     }
     fn recovered(proof: &OwnedReconciliationResultV2) -> Result<Option<Self::Outcome>> {
         match &proof.state {
-            OwnedReconciliationStateV2::CommittedExact { historical: OwnedHistoricalResultV2::Checkpoint { result } } => Ok(Some((**result).clone())),
+            OwnedReconciliationStateV2::CommittedExact {
+                historical: OwnedHistoricalResultV2::Checkpoint { result },
+            } => Ok(Some((**result).clone())),
             OwnedReconciliationStateV2::NonCommitted => Ok(None),
             _ => Err(PresenceError::Protocol),
         }
     }
-    fn replacement(pending: &Self::Pending, proof: &OwnedReconciliationResultV2, operation_id: String) -> Result<Self::Pending> {
-        if !matches!(proof.head, OwnedReconciliationHeadV2::Checkpoint { .. }) || operation_id == pending.checkpoint.operation_id {
+    fn replacement(
+        pending: &Self::Pending,
+        proof: &OwnedReconciliationResultV2,
+        operation_id: String,
+    ) -> Result<Self::Pending> {
+        if !matches!(proof.head, OwnedReconciliationHeadV2::Checkpoint { .. })
+            || operation_id == pending.checkpoint.operation_id
+        {
             return Err(PresenceError::Protocol);
         }
-        OwnedCheckpointPendingV2::prepare(&proof.observation, pending.checkpoint.previous_sequence,
-            pending.checkpoint.snapshot.clone(), operation_id).map_err(contract)
+        OwnedCheckpointPendingV2::prepare(
+            &proof.observation,
+            pending.checkpoint.previous_sequence,
+            pending.checkpoint.snapshot.clone(),
+            operation_id,
+        )
+        .map_err(contract)
     }
     const NAME: &'static str = "checkpoint";
     const RECORD_BYTES: u64 = journal::record_bytes(
@@ -58,14 +83,12 @@ impl Kind for CheckpointJournal {
         pins.check_identity(&pending.identity).map_err(identity)?;
         pins.check_snapshot_authority(&pending.checkpoint.snapshot)
             .map_err(identity)?;
-        let previous_sequence =
-            previous.map_or(0, |last| last.result.result.checkpoint.sequence);
+        let previous_sequence = previous.map_or(0, |last| last.result.result.checkpoint.sequence);
         if pending.checkpoint.previous_sequence != previous_sequence {
             return Err(contract(OwnedSupervisionErrorCodeV2::SequenceConflict));
         }
         if let Some(last) = previous {
-            check_progress_identity(&last.observation, &pending.identity)
-                .map_err(identity)?;
+            check_progress_identity(&last.observation, &pending.identity).map_err(identity)?;
         }
         Ok(())
     }
@@ -199,7 +222,8 @@ pub(super) async fn run(
         // Supersession closed the old request without acknowledging a server
         // checkpoint. Finish its fixed replacement even if the source became
         // absent; do not wait for or coalesce a newer snapshot yet.
-        let head = schedule::disk(&p, &io, shutdown, |p| p.checkpoint_journal()?.cached_head()).await?;
+        let head =
+            schedule::disk(&p, &io, shutdown, |p| p.checkpoint_journal()?.cached_head()).await?;
         if head.pending.is_some() || head.replacement.is_some() {
             continue;
         }
@@ -222,9 +246,13 @@ async fn attempt(
     shutdown: &mut watch::Receiver<bool>,
     next: Option<&BrokerCheckpointSnapshotV1>,
 ) -> Result<()> {
-    let mut head = schedule::disk(p, io, shutdown, |p| p.checkpoint_journal()?.cached_head()).await?;
+    let mut head =
+        schedule::disk(p, io, shutdown, |p| p.checkpoint_journal()?.cached_head()).await?;
     if let Some(replacement) = head.replacement.clone() {
-        schedule::disk(p, io, shutdown, move |p| p.checkpoint_journal()?.append(p, replacement)).await?;
+        schedule::disk(p, io, shutdown, move |p| {
+            p.checkpoint_journal()?.append(p, replacement)
+        })
+        .await?;
         head = schedule::disk(p, io, shutdown, |p| p.checkpoint_journal()?.cached_head()).await?;
     }
     let view = actor::interrupt(shutdown, client.checkpoint_self(p)).await?;
@@ -241,17 +269,31 @@ async fn attempt(
             proof.validate_for(&request).map_err(contract)?;
             schedule::observe(p, io, shutdown, &proof.observation).await?;
             if CheckpointJournal::recovered(&proof)?.is_some() {
-                return schedule::disk(p, io, shutdown, move |p| p.checkpoint_journal()?.acknowledge_reconciled(p, proof)).await;
+                return schedule::disk(p, io, shutdown, move |p| {
+                    p.checkpoint_journal()?.acknowledge_reconciled(p, proof)
+                })
+                .await;
             }
             let expected = pending.clone();
-            let replacement = CheckpointJournal::replacement(pending, &proof, Uuid::new_v4().to_string())?;
-            return schedule::disk(p, io, shutdown, move |p| p.checkpoint_journal()?.supersede(p, &expected, proof, replacement)).await;
+            let replacement =
+                CheckpointJournal::replacement(pending, &proof, Uuid::new_v4().to_string())?;
+            return schedule::disk(p, io, shutdown, move |p| {
+                p.checkpoint_journal()?
+                    .supersede(p, &expected, proof, replacement)
+            })
+            .await;
         }
         // Restart, timeout or lost ACK: replay only under the same subject.
         check_replay_identity(&pending.identity, &view.identity).map_err(identity)?;
         if let Some(result) = pending.recognize(&view).map_err(acknowledgement)? {
-            return acknowledge(p, io, shutdown, OwnedAcknowledgementSourceV2::SelfRead, result)
-                .await;
+            return acknowledge(
+                p,
+                io,
+                shutdown,
+                OwnedAcknowledgementSourceV2::SelfRead,
+                result,
+            )
+            .await;
         }
         check_continuity(&head, &view)?;
         schedule::disk(p, io, shutdown, |p| {
@@ -281,7 +323,14 @@ async fn attempt(
     let result = actor::interrupt(shutdown, client.checkpoint(p, &pending)).await?;
     // A 200 is not enough: the result must carry exactly this checkpoint.
     pending.validate_result(&result).map_err(acknowledgement)?;
-    acknowledge(p, io, shutdown, OwnedAcknowledgementSourceV2::Response, result).await
+    acknowledge(
+        p,
+        io,
+        shutdown,
+        OwnedAcknowledgementSourceV2::Response,
+        result,
+    )
+    .await
 }
 
 async fn acknowledge(

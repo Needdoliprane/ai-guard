@@ -10,8 +10,8 @@ pub(super) mod federation;
 /// Proposed owned broker-supervision Store entries: scoped formats 14/15 only.
 /// These local declarations shadow the glob-imported shared contract module.
 pub(super) mod owned_checkpoint;
-pub(super) mod owned_supervision;
 mod owned_reconciliation;
+pub(super) mod owned_supervision;
 
 pub(super) const SCHEMA: [(&str, &str, &str); 6] = [
     (

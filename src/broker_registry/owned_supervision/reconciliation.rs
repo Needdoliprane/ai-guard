@@ -106,11 +106,17 @@ impl OwnedReconciliationRequestV2 {
                 match previous {
                     Some(last) => {
                         last.validate()?;
-                        check_progress_identity(&last.identity, &pending.identity).map_err(|_| conflict)?;
+                        check_progress_identity(&last.identity, &pending.identity)
+                            .map_err(|_| conflict)?;
                         check(last.result.broker == pending.prior.broker, conflict)?;
                     }
-                    None => check(previous_heartbeat_sequence(&pending.prior.broker,
-                        &pending.identity.subject.incarnation_id) == 0, conflict)?,
+                    None => check(
+                        previous_heartbeat_sequence(
+                            &pending.prior.broker,
+                            &pending.identity.subject.incarnation_id,
+                        ) == 0,
+                        conflict,
+                    )?,
                 }
             }
             Self::Checkpoint { pending, previous } => {
@@ -118,10 +124,15 @@ impl OwnedReconciliationRequestV2 {
                 match previous {
                     Some(last) => {
                         last.validate()?;
-                        check_progress_identity(&last.identity, &pending.identity).map_err(|_| conflict)?;
-                        check(last.result.checkpoint.incarnation_id == pending.checkpoint.incarnation_id
-                            && last.result.checkpoint.sequence == pending.checkpoint.previous_sequence,
-                            conflict)?;
+                        check_progress_identity(&last.identity, &pending.identity)
+                            .map_err(|_| conflict)?;
+                        check(
+                            last.result.checkpoint.incarnation_id
+                                == pending.checkpoint.incarnation_id
+                                && last.result.checkpoint.sequence
+                                    == pending.checkpoint.previous_sequence,
+                            conflict,
+                        )?;
                     }
                     None => check(pending.checkpoint.previous_sequence == 0, conflict)?,
                 }
@@ -140,8 +151,14 @@ impl OwnedReconciliationRequestV2 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OwnedReconciliationHeadV2 {
-    Heartbeat { view: BrokerViewV1, receipt: Option<BrokerMutationReceiptV1> },
-    Checkpoint { view: BrokerViewV1, current: Option<Box<BrokerCheckpointResultV1>> },
+    Heartbeat {
+        view: BrokerViewV1,
+        receipt: Option<BrokerMutationReceiptV1>,
+    },
+    Checkpoint {
+        view: BrokerViewV1,
+        current: Option<Box<BrokerCheckpointResultV1>>,
+    },
 }
 
 /// Historical operation identity is deliberately separate from the current
@@ -149,14 +166,20 @@ pub enum OwnedReconciliationHeadV2 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OwnedHistoricalResultV2 {
-    Heartbeat { result: Box<OwnedBrokerHeartbeatResultV2> },
-    Checkpoint { result: Box<OwnedBrokerCheckpointResultV2> },
+    Heartbeat {
+        result: Box<OwnedBrokerHeartbeatResultV2>,
+    },
+    Checkpoint {
+        result: Box<OwnedBrokerCheckpointResultV2>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OwnedReconciliationStateV2 {
-    CommittedExact { historical: OwnedHistoricalResultV2 },
+    CommittedExact {
+        historical: OwnedHistoricalResultV2,
+    },
     /// Produced only after an exact global operation-ID lookup returned no
     /// row in the current healthy transaction, never from n-1 alone.
     NonCommitted,
@@ -179,58 +202,89 @@ impl OwnedReconciliationResultV2 {
         require_profile(&self.profile, self.version)?;
         request.validate()?;
         check(self.request_commitment == request.commitment()?, conflict)?;
-        self.fence.validate_for(request.identity(), &self.observation)?;
+        self.fence
+            .validate_for(request.identity(), &self.observation)?;
         match (request, &self.head, &self.state) {
-            (OwnedReconciliationRequestV2::Heartbeat { pending, previous },
-             OwnedReconciliationHeadV2::Heartbeat { view, receipt }, state) => {
-                OwnedBrokerSelfViewV2::new(self.observation.clone(), view.clone(), receipt.clone())?;
+            (
+                OwnedReconciliationRequestV2::Heartbeat { pending, previous },
+                OwnedReconciliationHeadV2::Heartbeat { view, receipt },
+                state,
+            ) => {
+                OwnedBrokerSelfViewV2::new(
+                    self.observation.clone(),
+                    view.clone(),
+                    receipt.clone(),
+                )?;
                 match state {
                     OwnedReconciliationStateV2::CommittedExact {
-                        historical: OwnedHistoricalResultV2::Heartbeat { result }
+                        historical: OwnedHistoricalResultV2::Heartbeat { result },
                     } => {
                         pending.validate_result(result).map_err(|_| conflict)?;
-                        check(result.result.replayed
-                            && result.result.receipt.audit_seq < self.fence.receipt.audit_seq
-                            && view.broker == result.result.broker
-                            && receipt.as_ref() == Some(&result.result.receipt), conflict)?;
+                        check(
+                            result.result.replayed
+                                && result.result.receipt.audit_seq < self.fence.receipt.audit_seq
+                                && view.broker == result.result.broker
+                                && receipt.as_ref() == Some(&result.result.receipt),
+                            conflict,
+                        )?;
                     }
                     OwnedReconciliationStateV2::NonCommitted => {
                         check(view.broker == pending.prior.broker, conflict)?;
                         if let Some(last) = previous {
                             check(receipt.as_ref() == Some(&last.result.receipt), conflict)?;
                         } else {
-                            check(previous_heartbeat_sequence(&view.broker,
-                                &self.observation.subject.incarnation_id) == 0, conflict)?;
+                            check(
+                                previous_heartbeat_sequence(
+                                    &view.broker,
+                                    &self.observation.subject.incarnation_id,
+                                ) == 0,
+                                conflict,
+                            )?;
                         }
                     }
                     _ => return Err(conflict),
                 }
             }
-            (OwnedReconciliationRequestV2::Checkpoint { pending, previous },
-             OwnedReconciliationHeadV2::Checkpoint { view, current }, state) => {
+            (
+                OwnedReconciliationRequestV2::Checkpoint { pending, previous },
+                OwnedReconciliationHeadV2::Checkpoint { view, current },
+                state,
+            ) => {
                 validate_broker_view(&self.observation.subject, view)?;
                 if let Some(current) = current {
                     current.checkpoint.validate().map_err(|_| conflict)?;
                     validate_receipt(&current.receipt, &self.observation.subject)?;
-                    check(current.checkpoint.incarnation_id == self.observation.subject.incarnation_id
-                        && current.receipt.grant_revision == self.observation.subject.grant_revision
-                        && current.receipt.operation_id == current.checkpoint.operation_id, conflict)?;
+                    check(
+                        current.checkpoint.incarnation_id
+                            == self.observation.subject.incarnation_id
+                            && current.receipt.grant_revision
+                                == self.observation.subject.grant_revision
+                            && current.receipt.operation_id == current.checkpoint.operation_id,
+                        conflict,
+                    )?;
                 }
                 match state {
                     OwnedReconciliationStateV2::CommittedExact {
-                        historical: OwnedHistoricalResultV2::Checkpoint { result }
+                        historical: OwnedHistoricalResultV2::Checkpoint { result },
                     } => {
                         pending.validate_result(result).map_err(|_| conflict)?;
-                        check(result.result.replayed && result.result.receipt.audit_seq < self.fence.receipt.audit_seq
-                            && current.as_ref().is_some_and(|head|
-                            head.checkpoint == result.result.checkpoint
-                                && head.receipt == result.result.receipt), conflict)?;
+                        check(
+                            result.result.replayed
+                                && result.result.receipt.audit_seq < self.fence.receipt.audit_seq
+                                && current.as_ref().is_some_and(|head| {
+                                    head.checkpoint == result.result.checkpoint
+                                        && head.receipt == result.result.receipt
+                                }),
+                            conflict,
+                        )?;
                     }
                     OwnedReconciliationStateV2::NonCommitted => match (previous, current) {
                         (None, None) => {}
                         (Some(last), Some(head)) => check(
-                            last.result.checkpoint == head.checkpoint && last.result.receipt == head.receipt,
-                            conflict)?,
+                            last.result.checkpoint == head.checkpoint
+                                && last.result.receipt == head.receipt,
+                            conflict,
+                        )?,
                         _ => return Err(conflict),
                     },
                     _ => return Err(conflict),
@@ -242,8 +296,10 @@ impl OwnedReconciliationResultV2 {
     }
     pub fn non_committed_for(&self, request: &OwnedReconciliationRequestV2) -> OwnedChecked<()> {
         self.validate_for(request)?;
-        check(matches!(self.state, OwnedReconciliationStateV2::NonCommitted),
-            OwnedSupervisionErrorCodeV2::OperationConflict)
+        check(
+            matches!(self.state, OwnedReconciliationStateV2::NonCommitted),
+            OwnedSupervisionErrorCodeV2::OperationConflict,
+        )
     }
 }
 

@@ -6,6 +6,7 @@ use super::journal::{self, AckRecordV2, Head, Kind};
 use super::*;
 use super::{schedule, transport};
 use crate::broker::presence::actor;
+use crate::broker_registry::owned_supervision::*;
 use crate::broker_registry::{
     BrokerV1,
     owned_supervision::{
@@ -16,33 +17,57 @@ use crate::broker_registry::{
     },
 };
 use uuid::Uuid;
-use crate::broker_registry::owned_supervision::*;
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct HeartbeatJournal;
 
 impl Kind for HeartbeatJournal {
-    fn pending_identity(pending: &Self::Pending) -> &OwnedBrokerIdentityViewV2 { &pending.identity }
-    fn outcome_identity(outcome: &Self::Outcome) -> &OwnedBrokerIdentityViewV2 { &outcome.identity }
-    fn operation_id(pending: &Self::Pending) -> &str { &pending.heartbeat.operation_id }
-    fn recovery_request(pending: &Self::Pending, previous: Option<&AckRecordV2<Self::Outcome>>) -> OwnedReconciliationRequestV2 {
-        OwnedReconciliationRequestV2::Heartbeat { pending: Box::new(pending.clone()), previous: previous.map(|last| Box::new(last.result.clone())) }
+    fn pending_identity(pending: &Self::Pending) -> &OwnedBrokerIdentityViewV2 {
+        &pending.identity
+    }
+    fn outcome_identity(outcome: &Self::Outcome) -> &OwnedBrokerIdentityViewV2 {
+        &outcome.identity
+    }
+    fn operation_id(pending: &Self::Pending) -> &str {
+        &pending.heartbeat.operation_id
+    }
+    fn recovery_request(
+        pending: &Self::Pending,
+        previous: Option<&AckRecordV2<Self::Outcome>>,
+    ) -> OwnedReconciliationRequestV2 {
+        OwnedReconciliationRequestV2::Heartbeat {
+            pending: Box::new(pending.clone()),
+            previous: previous.map(|last| Box::new(last.result.clone())),
+        }
     }
     fn recovered(proof: &OwnedReconciliationResultV2) -> Result<Option<Self::Outcome>> {
         match &proof.state {
-            OwnedReconciliationStateV2::CommittedExact { historical: OwnedHistoricalResultV2::Heartbeat { result } } => Ok(Some((**result).clone())),
+            OwnedReconciliationStateV2::CommittedExact {
+                historical: OwnedHistoricalResultV2::Heartbeat { result },
+            } => Ok(Some((**result).clone())),
             OwnedReconciliationStateV2::NonCommitted => Ok(None),
             _ => Err(PresenceError::Protocol),
         }
     }
-    fn replacement(pending: &Self::Pending, proof: &OwnedReconciliationResultV2, operation_id: String) -> Result<Self::Pending> {
-        let OwnedReconciliationHeadV2::Heartbeat { view, receipt } = &proof.head else { return Err(PresenceError::Protocol); };
-        let view = OwnedBrokerSelfViewV2::new(proof.observation.clone(), view.clone(), receipt.clone()).map_err(contract)?;
-        let replacement = OwnedHeartbeatPendingV2::prepare(&view, operation_id).map_err(contract)?;
+    fn replacement(
+        pending: &Self::Pending,
+        proof: &OwnedReconciliationResultV2,
+        operation_id: String,
+    ) -> Result<Self::Pending> {
+        let OwnedReconciliationHeadV2::Heartbeat { view, receipt } = &proof.head else {
+            return Err(PresenceError::Protocol);
+        };
+        let view =
+            OwnedBrokerSelfViewV2::new(proof.observation.clone(), view.clone(), receipt.clone())
+                .map_err(contract)?;
+        let replacement =
+            OwnedHeartbeatPendingV2::prepare(&view, operation_id).map_err(contract)?;
         if replacement.heartbeat.operation_id == pending.heartbeat.operation_id
             || replacement.heartbeat.sequence != pending.heartbeat.sequence
-            || replacement.heartbeat.expected_heartbeat_revision != pending.heartbeat.expected_heartbeat_revision
-            || replacement.prior.broker != pending.prior.broker {
+            || replacement.heartbeat.expected_heartbeat_revision
+                != pending.heartbeat.expected_heartbeat_revision
+            || replacement.prior.broker != pending.prior.broker
+        {
             return Err(PresenceError::UnsafeState);
         }
         Ok(replacement)
@@ -64,8 +89,7 @@ impl Kind for HeartbeatJournal {
         pins.check_identity(&pending.identity).map_err(identity)?;
         match previous {
             Some(last) => {
-                check_progress_identity(&last.observation, &pending.identity)
-                    .map_err(identity)?;
+                check_progress_identity(&last.observation, &pending.identity).map_err(identity)?;
                 if pending.prior.broker != last.result.result.broker {
                     return Err(block(OwnedPresenceBlock::RemoteHeadDiverged));
                 }
@@ -155,10 +179,14 @@ async fn attempt(
     io: &Arc<Semaphore>,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<()> {
-    let mut head = schedule::disk(p, io, shutdown, |p| p.heartbeat_journal()?.cached_head()).await?;
+    let mut head =
+        schedule::disk(p, io, shutdown, |p| p.heartbeat_journal()?.cached_head()).await?;
     if let Some(replacement) = head.replacement.clone() {
         // A durable closure already fixed these exact bytes and UUID.
-        schedule::disk(p, io, shutdown, move |p| p.heartbeat_journal()?.append(p, replacement)).await?;
+        schedule::disk(p, io, shutdown, move |p| {
+            p.heartbeat_journal()?.append(p, replacement)
+        })
+        .await?;
         head = schedule::disk(p, io, shutdown, |p| p.heartbeat_journal()?.cached_head()).await?;
     }
     let view = actor::interrupt(shutdown, client.self_view(p)).await?;
@@ -175,17 +203,31 @@ async fn attempt(
             proof.validate_for(&request).map_err(contract)?;
             schedule::observe(p, io, shutdown, &proof.observation).await?;
             if HeartbeatJournal::recovered(&proof)?.is_some() {
-                return schedule::disk(p, io, shutdown, move |p| p.heartbeat_journal()?.acknowledge_reconciled(p, proof)).await;
+                return schedule::disk(p, io, shutdown, move |p| {
+                    p.heartbeat_journal()?.acknowledge_reconciled(p, proof)
+                })
+                .await;
             }
             let expected = pending.clone();
-            let replacement = HeartbeatJournal::replacement(pending, &proof, Uuid::new_v4().to_string())?;
-            return schedule::disk(p, io, shutdown, move |p| p.heartbeat_journal()?.supersede(p, &expected, proof, replacement)).await;
+            let replacement =
+                HeartbeatJournal::replacement(pending, &proof, Uuid::new_v4().to_string())?;
+            return schedule::disk(p, io, shutdown, move |p| {
+                p.heartbeat_journal()?
+                    .supersede(p, &expected, proof, replacement)
+            })
+            .await;
         }
         // Restart, timeout or lost ACK: replay only under the same subject.
         check_replay_identity(&pending.identity, &view.identity).map_err(identity)?;
         if let Some(result) = pending.recognize(&view).map_err(acknowledgement)? {
-            return acknowledge(p, io, shutdown, OwnedAcknowledgementSourceV2::SelfRead, result)
-                .await;
+            return acknowledge(
+                p,
+                io,
+                shutdown,
+                OwnedAcknowledgementSourceV2::SelfRead,
+                result,
+            )
+            .await;
         }
         check_continuity(&head, &view)?;
         schedule::disk(p, io, shutdown, |p| {
@@ -207,7 +249,14 @@ async fn attempt(
     let result = actor::interrupt(shutdown, client.heartbeat(p, &pending)).await?;
     // A 200 is not enough: the result must be the exact expected successor.
     pending.validate_result(&result).map_err(acknowledgement)?;
-    acknowledge(p, io, shutdown, OwnedAcknowledgementSourceV2::Response, result).await
+    acknowledge(
+        p,
+        io,
+        shutdown,
+        OwnedAcknowledgementSourceV2::Response,
+        result,
+    )
+    .await
 }
 
 async fn acknowledge(

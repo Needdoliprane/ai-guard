@@ -266,7 +266,10 @@ impl OwnedPresenceConfigV2 {
 
 /// The same gate orders current observations from both publishers and keeps
 /// their binding/closure maxima together. It grants no external IO authority.
-struct ObservationFloors { binding: u64, closure: u64 }
+struct ObservationFloors {
+    binding: u64,
+    closure: u64,
+}
 impl ObservationFloors {
     fn observe(&mut self, view: &OwnedBrokerIdentityViewV2) -> Result<()> {
         if view.subject.binding_revision < self.binding {
@@ -364,8 +367,8 @@ impl PreparedOwnedPresence {
                 if origin.scheme() != "https" {
                     return Err(PresenceError::InvalidConfig);
                 }
-                let file = PrivateFile::open(ca_path, 65_536)
-                    .map_err(|_| PresenceError::InvalidConfig)?;
+                let file =
+                    PrivateFile::open(ca_path, 65_536).map_err(|_| PresenceError::InvalidConfig)?;
                 http::certificates(&file)?;
                 Ok(file)
             })
@@ -394,7 +397,8 @@ impl PreparedOwnedPresence {
             }
         }
         let observations = Mutex::new(ObservationFloors {
-            binding: pins.enrolled.binding_revision, closure: pins.minimum_closure_revision,
+            binding: pins.enrolled.binding_revision,
+            closure: pins.minimum_closure_revision,
         });
         let mut prepared = Self {
             scope,
@@ -483,7 +487,10 @@ impl PreparedOwnedPresence {
         }
         // Preparation precedes every actor. Merge both durable histories,
         // without holding the shared gate while taking a journal head lock.
-        let mut floors = self.observations.lock().map_err(|_| PresenceError::UnsafeState)?;
+        let mut floors = self
+            .observations
+            .lock()
+            .map_err(|_| PresenceError::UnsafeState)?;
         floors.binding = floors.binding.max(binding);
         floors.closure = floors.closure.max(closure);
         Ok(())
@@ -638,10 +645,16 @@ impl PreparedOwnedPresence {
     /// a higher peer observation cannot interleave before that publication.
     /// Production callers run this potentially waiting lock on the joined
     /// blocking IO lane, never across an async await or network exchange.
-    fn lock_observation(&self, view: &OwnedBrokerIdentityViewV2) -> Result<MutexGuard<'_, ObservationFloors>> {
+    fn lock_observation(
+        &self,
+        view: &OwnedBrokerIdentityViewV2,
+    ) -> Result<MutexGuard<'_, ObservationFloors>> {
         view.validate().map_err(contract)?;
         self.pins.check_identity(view).map_err(identity)?;
-        let mut floors = self.observations.lock().map_err(|_| PresenceError::UnsafeState)?;
+        let mut floors = self
+            .observations
+            .lock()
+            .map_err(|_| PresenceError::UnsafeState)?;
         floors.observe(view)?;
         Ok(floors)
     }
