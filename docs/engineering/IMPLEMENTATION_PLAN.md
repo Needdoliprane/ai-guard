@@ -1,5 +1,28 @@
 # Plan d'industrialisation
 
+## 14 novembre — fédération C3 : composition logicielle vérifiée, qualifications ouvertes
+
+La composition `f117ceae016049b7274708197c3702218148e56b` passe 44 parents
+logiciels uniques en six groupes et le check toutes cibles, après compilation
+fraîche et 14 listes réelles. Rotation/réconciliation, floors/journal partagés,
+frontières de profils et proxy, vraie page humaine Store14 avec audit/refus,
+canaris legacy et neuf scénarios chauds broker sont vérifiés ensemble.
+[Preuves et échecs préparatoires conservés](evidence/2026-11-14/federation-composition/README.md).
+La fusion doc-only `b889144` retient ce code et les six documents de preuve B9 déjà publiés.
+
+Cette étape ne clôt pas les positifs humains Source15/16, Source16/E2 distinct,
+D5/fencing global, reprise froide, fédération multi-hôtes, transports et
+workers réels, moteurs Docker/Podman/Kubernetes, fournisseurs, navigateur ou
+capacité 100. Ces parcours et leurs prérequis gardent leurs validations propres.
+Clippy strict et suite complète restent NOT_RUN ; les warnings sont conservés.
+
+L'alignement de version 0.0.1 et les travaux statut/environnement des agents
+restent des chantiers distincts non livrés par ce run ; ne pas renommer le
+0.1.0 de `f117` ni lui attribuer leur validation. Les 90 PASS/build 0 du frontend
+`f33bb623` et les campagnes B9 antérieures restent historiques. R1 compile 101
+et R2 9 PASS/2 FAIL/33 NOT_RUN restent datés ; aucun oracle produit n'a été
+assoupli pour obtenir R3. Tous les gates production restent ouverts.
+
 ## 14 novembre — broker : Pending chaud vérifié, reprise explicite encore ouverte
 
 La tranche logicielle du même keeper Submitted avec Pending audit-ACKé et Q
