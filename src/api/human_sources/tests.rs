@@ -7,6 +7,25 @@ pub(crate) fn fixture() -> (Fixture, GatewayState) {
     let state = state_from_fixture(&fixture);
     (fixture, state)
 }
+
+#[tokio::test]
+async fn identity_announces_actual_owned_read_profiles_and_omits_them_on_legacy() {
+    let (_owned_files, owned) = fixture();
+    let (status, body) = get(&gateway_router(owned), "/api/v1/human/identity", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["read_profiles"], json!({
+        "broker_registry":"human_broker_registry_owned_v1",
+        "worker_registry":"unavailable", "federation_registry":"unavailable"
+    }));
+    let (_legacy_files, legacy, token) = crate::api::read_execution_tests::local_identity_state();
+    let response = gateway_router(legacy).oneshot(axum::http::Request::get("/api/v1/human/identity")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 262_144).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(body.get("read_profiles").is_none());
+}
 fn state_from_fixture(fixture: &Fixture) -> GatewayState {
     let (bundle, credentials, tokens) = fixture.owned_startup();
     let state = GatewayState::for_owned_human_sources(
@@ -914,6 +933,160 @@ async fn every_existing_control_alias_and_head_closes_before_body_and_store() {
     }
     assert!(observed_a.try_recv().is_err());
     assert!(observed_b.try_recv().is_err());
+}
+
+
+#[test]
+fn workload_discovery_retains_its_nonzero_source_index_without_neighbor_sql() {
+    let fixture = Fixture::new_owned();
+    let (bundle, credentials, tokens) = fixture.owned_startup();
+    let source_id = bundle
+        .owner
+        .closure()
+        .sources
+        .iter()
+        .find(|source| source.tenant_id.as_deref() == Some("B"))
+        .unwrap()
+        .source_id;
+    let digest = [0x73; 32];
+    {
+        let source = bundle.owner.source_token(source_id).unwrap();
+        let epoch = bundle.owner.try_write_epoch().unwrap();
+        let access = HumanSourceAccess::write(&epoch, &source).unwrap();
+        bundle
+            .stores
+            .get(&source_id)
+            .unwrap()
+            .issue_workload_binding_scoped(
+                &access,
+                &crate::workload::WorkloadBindingIssueV1 {
+                    version: 1,
+                    operation_id: uuid::Uuid::new_v4().to_string(),
+                    credential_id: uuid::Uuid::new_v4().to_string(),
+                    expected_revision: 0,
+                    subject: crate::workload::WorkloadSubjectV1::Broker {
+                        broker_id: uuid::Uuid::new_v4().to_string(),
+                        incarnation_id: uuid::Uuid::new_v4().to_string(),
+                    },
+                    sha256_digest: hex::encode(digest),
+                    expires_at: (chrono::Utc::now() + chrono::Duration::minutes(5))
+                        .to_rfc3339(),
+                },
+            )
+            .unwrap();
+        epoch.check().unwrap();
+    }
+    // Discovery is built after the genuine workload mutation; it is not a
+    // stale-generation fixture or a hand-filled candidate index.
+    let state = GatewayState::for_owned_human_sources(
+        bundle,
+        credentials,
+        tokens,
+        Policy::default(),
+        None,
+        Redactor::new(vec![]),
+    )
+    .unwrap();
+    let expected = state
+        .tenants
+        .iter()
+        .position(|tenant| tenant.tenant_id == "B")
+        .unwrap();
+    assert!(expected > 0, "fixture must exercise a nonzero source index");
+    let observers = state
+        .tenants
+        .iter()
+        .map(|tenant| crate::audit::read_test_observer::observe(&tenant.store))
+        .collect::<Vec<_>>();
+    let owned = state.owned_human.as_ref().unwrap();
+    assert!(matches!(
+        owned.candidates.entries.get(&digest).map(Vec::as_slice),
+        Some([Candidate::Workload(index)]) if *index == expected
+    ));
+    assert_eq!(owned.broker_source(&digest).unwrap(), expected);
+    assert_eq!(owned.source(&digest).unwrap(), None);
+    assert!(!owned.technical_candidate(&digest).unwrap());
+    assert!(observers.iter().all(|observer| observer.try_recv().is_err()));
+}
+
+#[tokio::test]
+async fn owned_broker_page_requires_human_auth_while_legacy_and_head_stay_closed() {
+    let (_fixture, owned) = fixture();
+    let (_legacy_files, legacy, _legacy_token) =
+        crate::api::read_execution_tests::local_identity_state();
+    assert!(owned.owned_human.is_some());
+    assert!(legacy.owned_human.is_none());
+    let observers = owned
+        .tenants
+        .iter()
+        .chain(legacy.tenants.iter())
+        .map(|tenant| crate::audit::read_test_observer::observe(&tenant.store))
+        .collect::<Vec<_>>();
+    let owned_router = gateway_router(owned);
+    let legacy_router = gateway_router(legacy);
+    for (router, method, path, status, code) in [
+        (
+            &owned_router,
+            "GET",
+            "/api/v1/human/owned/brokers",
+            StatusCode::UNAUTHORIZED,
+            Some("authentication_required"),
+        ),
+        (
+            &owned_router,
+            "HEAD",
+            "/api/v1/human/owned/brokers",
+            StatusCode::SERVICE_UNAVAILABLE,
+            None,
+        ),
+        (
+            &owned_router,
+            "GET",
+            "/api/v1/human/brokers",
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some("identity_unavailable"),
+        ),
+        (
+            &legacy_router,
+            "GET",
+            "/api/v1/human/owned/brokers",
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some("identity_unavailable"),
+        ),
+    ] {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&polls);
+        let stream = futures_util::stream::poll_fn(move |_| {
+            observed.fetch_add(1, Ordering::AcqRel);
+            std::task::Poll::Pending::<Option<Result<axum::body::Bytes, std::io::Error>>>
+        });
+        // No bearer: the owned GET must reach the existing human extractor,
+        // while the legacy path/profile and HEAD refuse before that extractor.
+        let request = axum::http::Request::builder()
+            .method(method)
+            .uri(path)
+            .body(Body::from_stream(stream))
+            .unwrap();
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            router.clone().oneshot(request),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(response.status(), status, "{method} {path}");
+        assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
+        assert_eq!(polls.load(Ordering::Acquire), 0, "{method} {path}");
+        if let Some(code) = code {
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["error"]["code"], code, "{method} {path}");
+            assert!(body.get("items").is_none() && body.get("read_receipt").is_none());
+        }
+    }
+    assert!(observers.iter().all(|observer| observer.try_recv().is_err()));
 }
 
 #[path = "recent_tests.rs"]
