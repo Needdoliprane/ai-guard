@@ -1,6 +1,18 @@
 use super::*;
 use serde_json::json;
 
+fn contains_json_key(value: &serde_json::Value, key: &str) -> bool {
+    match value {
+        serde_json::Value::Object(fields) => {
+            fields.contains_key(key) || fields.values().any(|value| contains_json_key(value, key))
+        }
+        serde_json::Value::Array(values) => {
+            values.iter().any(|value| contains_json_key(value, key))
+        }
+        _ => false,
+    }
+}
+
 fn request(selector: EgressPolicySelectorV1) -> EgressPolicyInspectionRequestV1 {
     EgressPolicyInspectionRequestV1::new(selector).unwrap()
 }
@@ -180,6 +192,8 @@ fn canonical_inspection_is_bounded_historical_metadata_with_exact_resource_wire(
     );
     assert!(session.historical());
     assert_eq!(session.coverage(), "policy_registry_metadata");
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&session.canonical_bytes().unwrap()).unwrap();
     for forbidden in [
         "destinations",
         "name",
@@ -190,10 +204,15 @@ fn canonical_inspection_is_bounded_historical_metadata_with_exact_resource_wire(
         "actor",
         "policy_digest",
     ] {
-        assert!(
-            !String::from_utf8(session.canonical_bytes().unwrap())
-                .unwrap()
-                .contains(forbidden)
-        );
+        assert!(!contains_json_key(&metadata, forbidden), "{forbidden}");
+        // Namespace keys and matching scalar values are allowed; only an
+        // exact forbidden key, including inside objects/arrays, is excluded.
+        let mut nested = json!({
+            "scope": {"control_namespace_uuid": session.scope().control_namespace_uuid()},
+            "entries": [{"nested": {}, "value": forbidden}],
+        });
+        assert!(!contains_json_key(&nested, forbidden), "{forbidden}");
+        nested["entries"][0]["nested"][forbidden] = serde_json::Value::Null;
+        assert!(contains_json_key(&nested, forbidden), "{forbidden}");
     }
 }
