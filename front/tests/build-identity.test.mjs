@@ -38,7 +38,9 @@ test("build metadata is bounded and explicit; invalid optional compile metadata 
 
 test("canonical build version is an assertion, never an override or independently generated identity", () => {
   assert.equal(frontendIdentity("0.0.1", undefined, undefined, "0.0.1").version, "0.0.1");
-  for (const expected of ["0.0.2", "", " 0.0.1", "0.0.1\n"])
+  assert.equal(frontendIdentity("0.0.1", "", "", "").version, "0.0.1", "empty Docker ARG means an absent assertion");
+  assert.deepEqual(frontendIdentity("0.0.1", "", "", "").build, { id: null, revision: null });
+  for (const expected of ["0.0.2", " 0.0.1", "0.0.1\n"])
     assert.throws(() => frontendIdentity("0.0.1", undefined, undefined, expected), /AI_GUARD_VERSION/);
   assert.deepEqual(frontendIdentity("0.0.1").build, { id: null, revision: null });
 });
@@ -71,7 +73,7 @@ test("revision comparison uses hexadecimal identity while preserving the receive
   assert.equal(identitySummary(bundle, state).mismatch, true, "build IDs retain their case-sensitive identity");
 });
 
-test("UI identity stays visible before login/offline; unknown services are never assigned the bundle version", () => {
+test("presentation preserves the bundle identity and never assigns its version to unknown services", () => {
   const unknown = { dashboard: { kind: "loading" }, gateway: { kind: "unavailable", reason: "unsupported" } };
   const rows = identityRows(frontend, unknown);
   assert.equal(rows[0].version, "0.0.1"); assert.equal(rows[0].label, "Interface");
