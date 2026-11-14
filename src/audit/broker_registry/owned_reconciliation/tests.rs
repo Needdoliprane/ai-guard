@@ -462,7 +462,8 @@ fn global_operation_collision_with_another_broker_is_not_noncommitted() {
     let original = grant();
     enroll(&bundle, &original, OLD);
     let mut pending = pending(&bundle);
-    let other = grant();
+    let mut other = grant();
+    other.authorities[0].authority_id = "owned-reconciliation-other-fixture".into();
     let token = "synthetic-owned-other-broker-bearer-000000000000";
     enroll(&bundle, &other, token);
     let committed_id = online(&bundle, token, |store, access, window, facts, broker| {
@@ -588,7 +589,28 @@ async fn reserved_reconciliation_authenticates_before_body_and_publishes_real_sc
         previous: None,
     };
     rotate(&bundle, &grant);
-    let bundle = restart(bundle);
+    let tokens = ["A", "B"]
+        .into_iter()
+        .map(|tenant| {
+            (
+                tenant.to_owned(),
+                format!("synthetic-{tenant}-runner-credential-long-enough"),
+                format!("synthetic-{tenant}-viewer-credential-long-enough"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let redactor = tokens.iter().fold(Redactor::new(vec![]), |redactor, (_, runner, viewer)| {
+        redactor.union(&Redactor::new(vec![runner.clone(), viewer.clone()]))
+    });
+    let mut reopening = request_for_reopen(bundle.owner().closure(), bundle.manifest().clone());
+    // Configure the exact gateway credentials before retaining the reopened Stores.
+    for options in reopening.sources.values_mut() {
+        if let HumanOwnedSourceOptions::TenantStore { redactor: value, .. } = options {
+            *value = redactor.clone();
+        }
+    }
+    drop(bundle);
+    let bundle = HumanOwnedStartupBundle::open(reopening).unwrap();
     let closure = bundle.owner.closure();
     let credentials = closure
         .configuration
@@ -608,16 +630,6 @@ async fn reserved_reconciliation_authenticates_before_body_and_publishes_real_sc
             })
             .unwrap()
     };
-    let tokens = ["A", "B"]
-        .into_iter()
-        .map(|tenant| {
-            (
-                tenant.to_owned(),
-                format!("synthetic-{tenant}-runner-credential-long-enough"),
-                format!("synthetic-{tenant}-viewer-credential-long-enough"),
-            )
-        })
-        .collect();
     let state = crate::api::GatewayState::for_owned_human_sources(
         bundle,
         credentials,
