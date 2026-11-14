@@ -4,6 +4,8 @@
 //!
 //! The lifecycle of a prepared source across real engine CLI processes is
 //! covered end to end by `tests/source_lifecycle.rs`.
+mod build_identity;
+
 use super::{
     PreparedSource,
     capture::{

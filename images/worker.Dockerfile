@@ -4,6 +4,12 @@ FROM rust-toolchain AS provider-build
 WORKDIR /build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src/ ./src/
+ARG AI_GUARD_VERSION=""
+ARG AI_GUARD_BUILD_ID=""
+ARG AI_GUARD_BUILD_REVISION=""
+ENV AI_GUARD_VERSION=${AI_GUARD_VERSION} \
+    AI_GUARD_BUILD_ID=${AI_GUARD_BUILD_ID} \
+    AI_GUARD_BUILD_REVISION=${AI_GUARD_BUILD_REVISION}
 RUN cargo build --release --locked --bin ai-guard-provider --bin ai-guard-relay
 
 FROM node:24-bookworm-slim

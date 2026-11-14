@@ -3,12 +3,24 @@ WORKDIR /build/front
 COPY front/package.json front/package-lock.json ./
 RUN npm ci
 COPY front/ ./
+ARG AI_GUARD_VERSION=""
+ARG AI_GUARD_BUILD_ID=""
+ARG AI_GUARD_BUILD_REVISION=""
+ENV AI_GUARD_VERSION=${AI_GUARD_VERSION} \
+    AI_GUARD_BUILD_ID=${AI_GUARD_BUILD_ID} \
+    AI_GUARD_BUILD_REVISION=${AI_GUARD_BUILD_REVISION}
 RUN npm run build
 
 FROM rust:1.99.1-bookworm AS rust-build
 WORKDIR /build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src/ ./src/
+ARG AI_GUARD_VERSION=""
+ARG AI_GUARD_BUILD_ID=""
+ARG AI_GUARD_BUILD_REVISION=""
+ENV AI_GUARD_VERSION=${AI_GUARD_VERSION} \
+    AI_GUARD_BUILD_ID=${AI_GUARD_BUILD_ID} \
+    AI_GUARD_BUILD_REVISION=${AI_GUARD_BUILD_REVISION}
 RUN cargo build --release --locked --bin agentsandbox --bin ai-guard-audit-checkpoint --bin ai-guard-diagnose
 
 FROM debian:bookworm-slim
