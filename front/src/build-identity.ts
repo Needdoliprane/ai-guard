@@ -45,6 +45,32 @@ export function parseBuildStatus(value: unknown, component: ServiceComponent): B
     build: { id: build.id, revision: build.revision } };
 }
 
+/** Called after the transport bounds. Validate grammar, then inspect original keys before trusting the result. */
+export function parseBuildJson(text: string): unknown {
+  const value: unknown = JSON.parse(text);
+  const objects: Set<string>[] = [];
+  for (let offset = 0; offset < text.length; offset++) {
+    const character = text[offset];
+    if (character === "{") { objects.push(new Set()); continue; }
+    if (character === "}") { objects.pop(); continue; }
+    if (character !== '"') continue;
+    const start = offset;
+    // Grammar is already validated. Skip escaped code units and the whole string token.
+    for (offset++; offset < text.length; offset++) {
+      if (text[offset] === "\\") { offset++; continue; }
+      if (text[offset] === '"') break;
+    }
+    let next = offset + 1;
+    while (next < text.length && /[ \t\r\n]/.test(text[next]!)) next++;
+    if (text[next] !== ":") continue;
+    const object = objects[objects.length - 1];
+    const key: unknown = JSON.parse(text.slice(start, offset + 1));
+    if (!object || typeof key !== "string" || object.has(key)) throw new Error("Duplicate build JSON key");
+    object.add(key);
+  }
+  return value;
+}
+
 function cancel(body: ReadableStream<Uint8Array> | null) {
   if (body) void body.cancel().catch(() => {});
 }
@@ -73,7 +99,7 @@ async function readBody(response: Response, signal: AbortSignal): Promise<unknow
     const bytes = new Uint8Array(size);
     let offset = 0;
     for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    return parseBuildJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
   } finally { signal.removeEventListener("abort", abort); reader.releaseLock(); }
 }
 export async function readBuildStatus(component: ServiceComponent, request: typeof fetch = fetch, timeoutMs = TIMEOUT_MS,

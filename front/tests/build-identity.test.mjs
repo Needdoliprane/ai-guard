@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  parseBuildStatus, frontendIdentity, identitySummary, identityRows,
+  parseBuildStatus, parseBuildJson, frontendIdentity, identitySummary, identityRows,
   readBuildStatus, BuildIdentityStore, BuildIdentityAnnouncements,
 } from "../src/build-identity.ts";
 
@@ -20,6 +20,38 @@ test("strict service decoder preserves different valid versions and rejects fiel
     { ...status(), build: {} }, { ...status(), build: { id: null, revision: null, path: "private" } },
     { ...status(), version: 1 }, { ...status(), build: null }])
     assert.throws(() => parseBuildStatus(bad, "dashboard"));
+});
+
+test("raw status JSON refuses duplicate root and build keys, including escaped equivalents", async () => {
+  const fields = '"schema_version":1,"product":"ai-guard","version":"0.0.1","component":"dashboard"';
+  const build = '{"id":"delivery-A","revision":null}';
+  const dto = status("dashboard", "0.0.1", { id: "delivery-A", revision: null });
+  const wires = [
+    `{"schema_version":1,${fields},"build":${build}}`,
+    `{"product":"ai-guard",${fields},"build":${build}}`,
+    `{"version":"0.0.0",${fields},"build":${build}}`,
+    `{"component":"gateway",${fields},"build":${build}}`,
+    `{"build":{"id":"old","revision":null},${fields},"build":${build}}`,
+    `{${fields},"build":{"id":"old","id":"delivery-A","revision":null}}`,
+    `{${fields},"build":{"id":"delivery-A","revision":"${"a".repeat(40)}","revision":null}}`,
+    String.raw`{"vers\u0069on":"0.0.0",${fields},"build":${build}}`,
+    String.raw`{"\u0062uild":{"id":"old","revision":null},${fields},"build":${build}}`,
+    String.raw`{${fields},"build":{"id":"old","\u0069d":"delivery-A","revision":null}}`,
+    String.raw`{${fields},"build":{"id":"delivery-A","revision":"${"a".repeat(40)}","revis\u0069on":null}}`,
+  ];
+  const read = (wire) => readBuildStatus("dashboard", async () => new Response(wire, { headers: { "content-type": "application/json" } }));
+  assert.deepEqual(await read(`{${fields},"build":${build}}`), { kind: "available", identity: dto });
+  for (const wire of wires) {
+    assert.deepEqual(JSON.parse(wire), dto, "ordinary JSON parsing would hide the duplicate in an otherwise valid DTO");
+    assert.deepEqual(await read(wire), { kind: "unavailable", reason: "invalid" });
+  }
+});
+
+test("raw JSON key guard ignores punctuation inside strings and keys in distinct objects", () => {
+  const wire = String.raw`{"message":"punctuation: { } [ ] , \"id\": \"old\", \"id\": \"new\"","slash":"\\","items":[{"id":"A"},{"id":"B"}]}`;
+  assert.deepEqual(parseBuildJson(wire), {
+    message: 'punctuation: { } [ ] , "id": "old", "id": "new"', slash: "\\", items: [{ id: "A" }, { id: "B" }],
+  });
 });
 
 test("build metadata is bounded and explicit; invalid optional compile metadata remains unknown", () => {
