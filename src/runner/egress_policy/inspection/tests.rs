@@ -1,17 +1,19 @@
 use super::*;
+use crate::control::egress_policy::{
+    EgressPolicyExpectedScopeV1, EgressPolicyObservedCeilingV1, EgressPolicyObservedHeadV1,
+    EgressPolicyObservedSessionResourceV1, EgressPolicySelectorV1, REQUEST_BYTES,
+};
+#[cfg(unix)]
 use crate::{
     api::{GatewayState, gateway_router},
     audit::Store,
-    control::egress_policy::{
-        EgressPolicyExpectedScopeV1, EgressPolicyObservedCeilingV1, EgressPolicyObservedHeadV1,
-        EgressPolicyObservedSessionResourceV1, EgressPolicySelectorV1, REQUEST_BYTES,
-    },
     policy::Policy,
     redaction::Redactor,
 };
 use futures_util::FutureExt;
 use std::time::Duration;
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn inspection_sdk_uses_actual_reserved_owned15_metadata_and_closed_role_errors() {
     let mut fixture = Store::owned_control_fixture_for_test(15);
