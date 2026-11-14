@@ -13,7 +13,7 @@ fn check_policy_context(
         return Err(EgressStoreFailure::DiscoveryStale.into());
     }
     if store.tenant_id() != expected.tenant_id()
-        || crate::audit::supervision::namespace(tx)? != expected.control_namespace_uuid()
+        || crate::audit::control::supervision::namespace(tx)? != expected.control_namespace_uuid()
     {
         return Err(EgressStoreFailure::ScopeConflict.into());
     }

@@ -236,7 +236,7 @@ fn require_v3(
         Err(ControlFailure::MigrationRequired.into())
     }
 }
-pub(super) fn namespace(db: &Connection) -> anyhow::Result<String> {
+pub(in crate::audit) fn namespace(db: &Connection) -> anyhow::Result<String> {
     Ok(db.query_row(
         "SELECT namespace_uuid FROM control_meta WHERE singleton=1",
         [],
