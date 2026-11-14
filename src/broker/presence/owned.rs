@@ -36,10 +36,7 @@ use std::{
     fmt,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, Mutex, MutexGuard},
     time::Duration,
 };
 use tokio::sync::{Semaphore, watch};
@@ -267,6 +264,24 @@ impl OwnedPresenceConfigV2 {
     }
 }
 
+/// The same gate orders current observations from both publishers and keeps
+/// their binding/closure maxima together. It grants no external IO authority.
+struct ObservationFloors { binding: u64, closure: u64 }
+impl ObservationFloors {
+    fn observe(&mut self, view: &OwnedBrokerIdentityViewV2) -> Result<()> {
+        if view.subject.binding_revision < self.binding {
+            return Err(identity(OwnedIncompatibilityV2::BindingRegression));
+        }
+        if view.closure_revision < self.closure {
+            return Err(identity(OwnedIncompatibilityV2::ClosureRegression));
+        }
+        // Reject the complete pair before changing either maximum.
+        self.binding = view.subject.binding_revision;
+        self.closure = view.closure_revision;
+        Ok(())
+    }
+}
+
 pub(crate) struct PreparedOwnedPresence {
     scope: PresenceScope,
     config: OwnedPresenceConfigV2,
@@ -280,9 +295,9 @@ pub(crate) struct PreparedOwnedPresence {
     bearer: String,
     secrets: Vec<String>,
     ca: Option<PrivateFile>,
-    /// Process-wide maxima, initialized from the durable journal observations.
-    closure_floor: AtomicU64,
-    binding_floor: AtomicU64,
+    /// Process-wide maxima, initialized from durable observations. ACK and
+    /// supersession hold this gate through record sync and local publication.
+    observations: Mutex<ObservationFloors>,
     heartbeat: Option<journal::Journal<heartbeat::HeartbeatJournal>>,
     checkpoint: Option<journal::Journal<checkpoint::CheckpointJournal>>,
 }
@@ -378,8 +393,9 @@ impl PreparedOwnedPresence {
                 );
             }
         }
-        let closure_floor = AtomicU64::new(pins.minimum_closure_revision);
-        let binding_floor = AtomicU64::new(pins.enrolled.binding_revision);
+        let observations = Mutex::new(ObservationFloors {
+            binding: pins.enrolled.binding_revision, closure: pins.minimum_closure_revision,
+        });
         let mut prepared = Self {
             scope,
             config,
@@ -393,8 +409,7 @@ impl PreparedOwnedPresence {
             bearer,
             secrets: known_secrets,
             ca,
-            closure_floor,
-            binding_floor,
+            observations,
             heartbeat: None,
             checkpoint: None,
         };
@@ -459,13 +474,18 @@ impl PreparedOwnedPresence {
         self.heartbeat = Some(heartbeat);
         self.checkpoint = checkpoint;
         let head = self.heartbeat_journal()?.cached_head()?;
-        self.binding_floor.fetch_max(head.binding_floor, Ordering::SeqCst);
-        self.closure_floor.fetch_max(head.closure_floor, Ordering::SeqCst);
+        let mut binding = head.binding_floor;
+        let mut closure = head.closure_floor;
         if let Some(journal) = &self.checkpoint {
             let head = journal.cached_head()?;
-            self.binding_floor.fetch_max(head.binding_floor, Ordering::SeqCst);
-            self.closure_floor.fetch_max(head.closure_floor, Ordering::SeqCst);
+            binding = binding.max(head.binding_floor);
+            closure = closure.max(head.closure_floor);
         }
+        // Preparation precedes every actor. Merge both durable histories,
+        // without holding the shared gate while taking a journal head lock.
+        let mut floors = self.observations.lock().map_err(|_| PresenceError::UnsafeState)?;
+        floors.binding = floors.binding.max(binding);
+        floors.closure = floors.closure.max(closure);
         Ok(())
     }
 
@@ -613,19 +633,23 @@ impl PreparedOwnedPresence {
         self.config.interval_seconds * 2
     }
 
-    /// Closure revisions are observed: they may advance, never regress, during
-    /// this run. Journal records enforce the same rule across restarts.
+    /// Admit a validated current observation under the SAME shared gate used
+    /// by journal publication. The guard is retained through ACK/closure sync;
+    /// a higher peer observation cannot interleave before that publication.
+    /// Production callers run this potentially waiting lock on the joined
+    /// blocking IO lane, never across an async await or network exchange.
+    fn lock_observation(&self, view: &OwnedBrokerIdentityViewV2) -> Result<MutexGuard<'_, ObservationFloors>> {
+        view.validate().map_err(contract)?;
+        self.pins.check_identity(view).map_err(identity)?;
+        let mut floors = self.observations.lock().map_err(|_| PresenceError::UnsafeState)?;
+        floors.observe(view)?;
+        Ok(floors)
+    }
+
+    /// GET observations are process-local until an operation record persists
+    /// them. Reopen restores the maxima represented by durable journal records.
     fn observe_closure(&self, view: &OwnedBrokerIdentityViewV2) -> Result<()> {
-        let binding = self.binding_floor.fetch_max(view.subject.binding_revision, Ordering::SeqCst);
-        if view.subject.binding_revision < binding {
-            return Err(identity(OwnedIncompatibilityV2::BindingRegression));
-        }
-        let floor = self
-            .closure_floor
-            .fetch_max(view.closure_revision, Ordering::SeqCst);
-        if view.closure_revision < floor {
-            return Err(identity(OwnedIncompatibilityV2::ClosureRegression));
-        }
+        drop(self.lock_observation(view)?);
         Ok(())
     }
 

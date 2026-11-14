@@ -164,7 +164,7 @@ async fn attempt(
     let view = actor::interrupt(shutdown, client.self_view(p)).await?;
     // Any refusal below leaves the anchor and the Pending untouched.
     validate_heartbeat_handshake(&p.pins, &view, p.min_lease()).map_err(handshake)?;
-    p.observe_closure(&view.identity)?;
+    schedule::observe(p, io, shutdown, &view.identity).await?;
     // Either way, the POST below sends the durable bytes of the retained
     // Pending, decoded right after a complete verification of the journal.
     let pending = if let Some(pending) = &head.pending {
@@ -173,7 +173,7 @@ async fn attempt(
             let request = HeartbeatJournal::recovery_request(pending, head.last.as_ref());
             let proof = actor::interrupt(shutdown, client.reconcile(p, &request)).await?;
             proof.validate_for(&request).map_err(contract)?;
-            p.observe_closure(&proof.observation)?;
+            schedule::observe(p, io, shutdown, &proof.observation).await?;
             if HeartbeatJournal::recovered(&proof)?.is_some() {
                 return schedule::disk(p, io, shutdown, move |p| p.heartbeat_journal()?.acknowledge_reconciled(p, proof)).await;
             }

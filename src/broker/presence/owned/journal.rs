@@ -602,6 +602,13 @@ impl<K: Kind> Journal<K> {
         {
             return Err(PresenceError::Capacity);
         }
+        // A new operation publishes its current sampled identity under the
+        // shared floor gate. A fixed replacement retains its old engaged
+        // identity: it is not a new current observation and the actor must
+        // still reconcile it before POST if a later rotation was observed.
+        let _observation = if head.replacement.is_none() {
+            Some(p.lock_observation(K::pending_identity(&pending))?)
+        } else { None };
         let index = head.count.checked_add(1).ok_or(PresenceError::Capacity)?;
         let directory = fs(self.root.persistent_child(&operation_name(index), true))?
             .ok_or(PresenceError::UnsafeState)?;
@@ -663,6 +670,11 @@ impl<K: Kind> Journal<K> {
             reconciliation,
         };
         check_record::<K>(&p.pins, &pending, &record, head.last.as_ref())?;
+        // Fully correlated observation, never historical.result.identity.
+        // Retain the SAME gate through encoding, ACK sync and head publication:
+        // even a refused/failed write cannot erase an authenticated maximum
+        // from this process or let a lower peer observation pass meanwhile.
+        let _observation = p.lock_observation(&record.observation)?;
         let bytes = encode(p, &record, K::RECORD_BYTES)?;
         if head
             .bytes
@@ -675,6 +687,8 @@ impl<K: Kind> Journal<K> {
             .root
             .persistent_child(&operation_name(head.count), false))?
         .ok_or(PresenceError::UnsafeState)?;
+        #[cfg(test)]
+        tests::before_ack_save(p);
         save(&directory, ACK, &bytes)?;
         fold(&mut head, &directory, ACK, &bytes)?;
         head.observe(&record.observation)?;
@@ -697,6 +711,10 @@ impl<K: Kind> Journal<K> {
             return Err(PresenceError::UnsafeState);
         }
         check_superseded::<K>(&p.pins, head.last.as_ref(), pending, &record)?;
+        // A late proof cannot close a Pending below a higher current view
+        // admitted by the peer while this disk action was queued. Financing
+        // still precedes the closure; a refusal retains this maximum in memory.
+        let _observation = p.lock_observation(&record.proof.observation)?;
         let bytes = encode(p, &record, MAX_OWNED_SUPERSESSION_BYTES as u64)?;
         let replacement_bytes = encode(p, &record.replacement, K::RECORD_BYTES)?;
         if head.count >= self.limits.operations || head.bytes.checked_add(bytes.len() as u64)

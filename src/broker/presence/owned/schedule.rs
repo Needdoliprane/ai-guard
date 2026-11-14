@@ -54,6 +54,16 @@ pub(super) async fn disk<T: Send + 'static>(
     }
 }
 
+/// A journal sync can hold the common observation gate. Waiting for it uses
+/// the real bounded/joined disk lane, rather than blocking an async executor.
+pub(super) async fn observe(
+    p: &Arc<PreparedOwnedPresence>, io: &Arc<Semaphore>,
+    shutdown: &mut watch::Receiver<bool>, view: &OwnedBrokerIdentityViewV2,
+) -> Result<()> {
+    let view = view.clone();
+    disk(p, io, shutdown, move |p| p.observe_closure(&view)).await
+}
+
 /// One bounded in-flight attempt; the permit is shared with every profile.
 pub(super) async fn permit(
     shutdown: &mut watch::Receiver<bool>,

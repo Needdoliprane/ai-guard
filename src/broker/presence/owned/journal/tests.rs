@@ -272,6 +272,22 @@ fn late_supersession_cannot_publish_below_a_peer_observation() {
     assert_eq!(journal.durable_pending(&p).unwrap(),old);
 }
 
+#[test]
+fn a_fixed_replacement_keeps_its_engaged_identity_without_lowering_the_current_floor() {
+    let (_tmp,root)=root();let p=prepared_profile(&root,true);let old=pending(&p);
+    let journal=p.heartbeat_journal().unwrap();journal.append(&p,old.clone()).unwrap();
+    let proof=proof(&old);let replacement=heartbeat::HeartbeatJournal::replacement(&old,&proof,id(13)).unwrap();
+    journal.supersede(&p,&old,proof,replacement.clone()).unwrap();
+    let mut later=replacement.identity.clone();later.subject.binding_revision=3;later.closure_revision=9;
+    p.observe_closure(&later).unwrap();
+    // This only persists the already fixed Pending, never an ACK or a POST.
+    // The actor still needs a current self-view and rotation reconciliation.
+    journal.append(&p,replacement.clone()).unwrap();
+    assert_eq!(journal.durable_pending(&p).unwrap(),replacement);
+    assert!(journal.cached_head().unwrap().last.is_none());
+    assert!(p.observe_closure(&replacement.identity).is_err());
+}
+
 // This test-only pause sits before the actual immutable ACK write. It grants
 // no permission, changes no record and cannot simulate a successful fsync.
 type AckBoundary=(std::sync::mpsc::Sender<()>,std::sync::mpsc::Receiver<()>);
@@ -296,9 +312,17 @@ fn ack_publication_keeps_the_shared_gate_until_the_real_save_and_head_update() {
         });
         at_save.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
         assert!(journal.root.persistent_child(&operation_name(1),false).unwrap().unwrap().private_entry(OsStr::new(ACK)).unwrap().is_none());
-        let observer=scope.spawn(||p.observe_closure(&old.identity));
+        let mut higher=old.identity.clone();higher.closure_revision=9;
+        let profile=&p;
+        let observer=scope.spawn(move || {
+            profile.observe_closure(&higher).unwrap();
+            // A later observation cannot complete while an older accepted
+            // ACK is still waiting to sync/publish its local head.
+            let head=journal.cached_head().unwrap();
+            assert!(head.pending.is_none());assert_eq!(head.last.unwrap().observation.closure_revision,8);
+        });
         release.send(()).unwrap();ack.join().unwrap().unwrap();
-        assert!(observer.join().unwrap().is_err());
+        observer.join().unwrap();
     });
     assert!(journal.cached_head().unwrap().pending.is_none());
     let directory=journal.root.persistent_child(&operation_name(1),false).unwrap().unwrap();
