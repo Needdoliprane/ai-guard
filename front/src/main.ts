@@ -7,6 +7,8 @@ import { HumanDashboard } from "./human-view.ts";
 import { HumanApiError } from "./human-api.ts";
 import { HumanContractError } from "./human-model.ts";
 import { OidcSession, OidcSessionError } from "./oidc-session.ts";
+import { FRONTEND_IDENTITY } from "./frontend-version.ts";
+import { buildIdentityFooter } from "./build-identity-view.ts";
 import { relatedAgents, relatedSandboxes, workerRelation } from "./control.ts";
 import type { WorkerRecord } from "./control.ts";
 import {
@@ -229,7 +231,7 @@ function brand(): HTMLElement {
       el("span", "brand-caption", "LECTURE SEULE")));
   mark.setAttribute("role", "img");
   mark.setAttribute("aria-label", "OVPT · ai-guard · Lecture seule");
-  return mark;
+  return el("div", "brand-identity", mark, el("span", "brand-version", `Version ${FRONTEND_IDENTITY.version}`));
 }
 function footerBrand(): HTMLElement {
   const mark = el("span", "footer-brand", el("strong", "footer-signature", "OVPT"),
@@ -2224,7 +2226,9 @@ async function mountOidc(session: OidcSession): Promise<void> {
     candidate.close(); humanSession = null; session.close(errorMessage(cause));
   }
 }
-window.addEventListener("beforeunload", () => { client?.close(); humanSession?.close(); oidcSession?.close(); });
+const buildFooter = buildIdentityFooter(FRONTEND_IDENTITY);
+root.after(buildFooter.node);
+window.addEventListener("beforeunload", () => { buildFooter.close(); client?.close(); humanSession?.close(); oidcSession?.close(); });
 if (window.location.pathname === "/auth/oidc/complete") {
   window.history.replaceState(null, "", "/auth/oidc/complete");
   login("Vérification de la connexion SSO…", "human");

@@ -119,6 +119,12 @@ test("byte bound applies across chunks and malformed UTF-8 is refused", async ()
     { kind: "unavailable", reason: "invalid" });
   assert.deepEqual(await readBuildStatus("dashboard", async () => new Response(new Uint8Array([0xff]), { headers: { "content-type": "application/json" } })),
     { kind: "unavailable", reason: "invalid" });
+  const fragmented = new ReadableStream({ start(controller) {
+    for (let index = 0; index < 129; index++) controller.enqueue(new Uint8Array(0));
+    controller.close();
+  } });
+  assert.deepEqual(await readBuildStatus("dashboard", async () => new Response(fragmented, { headers: { "content-type": "application/json" } })),
+    { kind: "unavailable", reason: "invalid" });
 });
 
 test("refresh is explicit and serialized; delayed identity reads never publish after close", async () => {
