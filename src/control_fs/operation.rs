@@ -173,6 +173,29 @@ impl DurableOperationDirectory {
         Ok(operation)
     }
 
+    /// Compare physical ancestry only; this grants no filesystem authority.
+    /// `self` is the retained report and `candidate` is the exact held output
+    /// parent that the caller will pass to `prepare_new`. The same directory
+    /// counts as contained. Case/Unicode aliases compare by device/inode,
+    /// without exposing either identity or following pathname symlinks.
+    pub fn contains_directory(&self, candidate: &Directory) -> Result<bool> {
+        let result = (|| {
+            self.validate_inner()?;
+            safe(candidate.revalidate())?;
+            let report_identity = self
+                .directory
+                .0
+                .chain
+                .last()
+                .ok_or(OperationFsError::UnsafeOrIncomplete)?;
+            let contained = candidate.0.chain.contains(report_identity);
+            safe(candidate.revalidate())?;
+            self.validate_inner()?;
+            Ok(contained)
+        })();
+        self.finish(result)
+    }
+
     pub fn record(&self, which: OperationRecord) -> Option<&PrivateFile> {
         match which {
             OperationRecord::Request => Some(&self.request),

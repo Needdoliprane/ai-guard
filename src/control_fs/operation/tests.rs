@@ -262,3 +262,37 @@ fn oversized_unknown_or_symlink_records_are_refused_without_repair() {
     assert!(path.join("receipt.json").is_symlink());
     assert_eq!(fs::read(path.join("request.json")).unwrap(), b"request");
 }
+
+#[test]
+fn containment_checks_retained_physical_ancestry_without_mutating_records() {
+    let _gate = cost_probe::EXCLUSIVE.blocking_lock();
+    let (temp, parent) = fixture();
+    prepare(&parent);
+    let path = temp.path().join("operation");
+    let operation = DurableOperationDirectory::open_existing(&path).unwrap();
+    let same = Directory::open_existing(&path).unwrap();
+    let outside = parent.child("outside").unwrap();
+    assert!(operation.contains_directory(&same).unwrap());
+    assert!(!operation.contains_directory(&parent).unwrap());
+    assert!(!operation.contains_directory(&outside).unwrap());
+    operation.revalidate().unwrap();
+    assert_eq!(fs::read(path.join("request.json")).unwrap(), b"request");
+    assert_eq!(fs::read_dir(&path).unwrap().count(), 4);
+}
+
+#[test]
+fn changed_candidate_ancestry_refuses_and_taints_the_retained_instance() {
+    let _gate = cost_probe::EXCLUSIVE.blocking_lock();
+    let (temp, parent) = fixture();
+    prepare(&parent);
+    let path = temp.path().join("operation");
+    let operation = DurableOperationDirectory::open_existing(&path).unwrap();
+    let outside = parent.child("outside").unwrap();
+    fs::rename(temp.path().join("outside"), temp.path().join("moved-outside")).unwrap();
+    assert_eq!(operation.contains_directory(&outside), Err(OperationFsError::UnsafeOrIncomplete));
+    fs::rename(temp.path().join("moved-outside"), temp.path().join("outside")).unwrap();
+    assert_eq!(operation.revalidate(), Err(OperationFsError::UnsafeOrIncomplete));
+    assert_eq!(fs::read(path.join("request.json")).unwrap(), b"request");
+    drop(operation);
+    assert!(DurableOperationDirectory::open_existing(&path).is_ok());
+}
