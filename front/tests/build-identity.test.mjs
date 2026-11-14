@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   parseBuildStatus, frontendIdentity, identitySummary, identityRows,
-  readBuildStatus, BuildIdentityStore,
+  readBuildStatus, BuildIdentityStore, BuildIdentityAnnouncements,
 } from "../src/build-identity.ts";
 
 const status = (component = "dashboard", version = "0.0.1", build = { id: null, revision: null }) =>
@@ -86,6 +86,22 @@ test("presentation preserves the bundle identity and never assigns its version t
   assert.equal(identityRows(frontend, mixed)[1].version, "0.0.2");
   assert.equal(identitySummary(frontend, { dashboard: available("dashboard"), gateway: { kind: "unavailable", reason: "network" } }).complete, false);
   assert.equal(identitySummary(frontend, { dashboard: available("dashboard"), gateway: available("gateway") }).complete, true);
+});
+
+test("a mismatch arriving before its peer is announced when both readings settle", () => {
+  const messages = [];
+  const announcements = new BuildIdentityAnnouncements(frontend, (message) => messages.push(message));
+  announcements.update({ dashboard: { kind: "loading" }, gateway: { kind: "loading" } });
+  announcements.update({ dashboard: available("dashboard", "0.0.2"), gateway: { kind: "loading" } });
+  assert.deepEqual(messages, [], "an intermediate reading is not a completed announcement");
+  const settled = { dashboard: available("dashboard", "0.0.2"), gateway: available("gateway") };
+  announcements.update(settled);
+  assert.deepEqual(messages, ["Versions différentes"], "unchanged computed mismatch must be announced at completion");
+  announcements.update(settled);
+  assert.deepEqual(messages, ["Versions différentes"], "the same settled message is not repeatedly announced");
+  announcements.update({ dashboard: { kind: "loading" }, gateway: { kind: "loading" } });
+  announcements.update({ dashboard: available("dashboard"), gateway: available("gateway") });
+  assert.deepEqual(messages, ["Versions différentes", "Version concordante · build inconnu"], "a changed settled result remains observable");
 });
 
 test("public reads use fixed routes, no session credential, no redirect/cache, and preserve the actual component", async () => {
