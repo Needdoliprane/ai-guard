@@ -33,7 +33,7 @@ function record(value: unknown, keys: string[]): Record<string, unknown> {
 }
 export function frontendIdentity(value: string, id?: unknown, rev?: unknown, expectedVersion?: string): FrontendIdentity {
   if (!version(value)) throw new Error("Invalid frontend package version");
-  if (expectedVersion !== undefined && expectedVersion !== value) throw new Error("AI_GUARD_VERSION must match the frontend package version");
+  if (expectedVersion !== undefined && expectedVersion !== "" && expectedVersion !== value) throw new Error("AI_GUARD_VERSION must match the frontend package version");
   return { version: value, build: { id: buildId(id) ? id : null, revision: revision(rev) ? rev : null } };
 }
 export function parseBuildStatus(value: unknown, component: ServiceComponent): BuildStatus {
