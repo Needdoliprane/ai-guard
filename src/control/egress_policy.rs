@@ -643,5 +643,12 @@ impl EgressPolicyReceiptV1 {
     }
 }
 
+mod inspection;
+pub use inspection::{
+    EgressPolicyInspectionRequestV1, EgressPolicyInspectionV1,
+    EgressPolicyObservedCeilingV1, EgressPolicyObservedHeadV1,
+    EgressPolicyObservedSessionResourceV1,
+};
+
 #[cfg(test)]
 mod tests;

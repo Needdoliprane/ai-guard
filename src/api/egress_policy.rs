@@ -11,10 +11,13 @@ use axum::{
     http::request::Parts,
 };
 
+mod inspection;
+
 pub(super) fn router() -> Router<GatewayState> {
     Router::new()
         .route("/egress/policies/replace", post(replace))
         .route("/egress/policies/revoke", post(revoke))
+        .merge(inspection::router())
 }
 
 pub(in crate::api) fn failure(error: E) -> (StatusCode, Json<Value>) {

@@ -9,6 +9,9 @@ use crate::{audit::HumanSourceAccess, control::ControlProtocolV1};
 use std::sync::Arc;
 use tokio::sync::OwnedSemaphorePermit;
 
+mod inspection;
+pub(in crate::api) use inspection::OwnedPolicyInspection;
+
 /// Private operation classifier, produced by the reserved Rust transport only.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::api) enum PolicyWriteAction {

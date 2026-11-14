@@ -461,6 +461,8 @@ mod owned_policy_inspection_cli_tests;
 #[cfg(all(test, unix))]
 mod owned_policy_inspection_tests;
 #[cfg(all(test, unix))]
+mod owned_policy_inspection_regression_tests;
+#[cfg(all(test, unix))]
 mod owned_policy_tests;
 #[cfg(test)]
 pub(super) mod tests;
@@ -469,6 +471,7 @@ pub(super) mod tests;
 const REGISTERED_ROUTES: &[(&str, &[&str])] = &[
     ("/api/v1/egress/policies/replace", &["POST"]),
     ("/api/v1/egress/policies/revoke", &["POST"]),
+    ("/api/v1/egress/policies/inspect", &["POST"]),
     ("/api/agents", &["GET", "HEAD"]),
     ("/api/decide", &["POST"]),
     ("/api/events", &["GET", "POST", "HEAD"]),
@@ -610,6 +613,7 @@ pub(super) async fn route_gate(
     let allowed = (path == "/healthz" && (request.method() == "GET" || request.method() == "HEAD"))
         || super::control_transport::owned_protocol_request(&request)
         || super::control_transport::owned_policy_request(&request)
+        || super::control_transport::owned_policy_inspection_request(&request)
         || request.method() == "GET"
             && [
                 "/api/v1/human/identity",

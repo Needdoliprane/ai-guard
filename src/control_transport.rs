@@ -59,6 +59,11 @@ pub(crate) fn owned_policy_route(method: &Method, path: &str) -> bool {
         )
 }
 
+/// Exact technical read; it is never a policy writer classifier.
+pub(crate) fn owned_policy_inspection_route(method: &Method, path: &str) -> bool {
+    *method == Method::POST && path == "/api/v1/egress/policies/inspect"
+}
+
 pub(crate) fn owned_protocol_route(method: &Method, path: &str) -> bool {
     *method == Method::GET && path == "/api/v1/control/protocol"
 }
@@ -174,6 +179,7 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
         | (&Method::POST, ["control", "events"])
         | (&Method::POST, ["egress", "policies", "replace"])
         | (&Method::POST, ["egress", "policies", "revoke"])
+        | (&Method::POST, ["egress", "policies", "inspect"])
         | (&Method::POST, ["workers", "supervised-reservations"])
         | (&Method::POST, ["workers", _, "arms"])
         | (&Method::POST, ["workers", _, "armed-start-claims"])

@@ -18,6 +18,8 @@ pub(crate) use types::{
 mod schema;
 pub(super) use schema::{AUTO_INDEX_COUNTS, SCHEMA};
 mod replay;
+mod inspection;
+pub(super) use inspection::require_inspection_format;
 use replay::*;
 pub(super) use replay::{marker, validate};
 mod mutation;
