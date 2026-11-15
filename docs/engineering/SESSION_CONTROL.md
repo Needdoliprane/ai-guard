@@ -14,7 +14,7 @@ Preparation is held: it does not start an agent or consume a start claim. Launch
 
 The authenticated identity determines the tenant. Require explicit, distinct LaunchSession and SendSessionMessage permissions and resource ACLs. Content/read/admin visibility, tenant membership and ApproveLaunch do not imply either mutation. Revalidate membership, OIDC ceilings, revocation and resource scope immediately before the effect. The server creates the real named session grant through the verified existing grant producer; owner/principal fields from browser JSON are never identity proofs.
 
-Keep initiator, effective broker actor and causality distinct. A normal instruction does not approve an action, extend a lease, change a policy, lift a denial or bypass required review. No human SSO token or runner secret enters the worker or frontend. Existing owned read profiles and closed route/format contracts stay closed; new mutation profiles, provisioning and migrations must be explicit, backed up and coordinated with the integrator.
+Keep initiator, effective broker actor and causality distinct. A normal instruction does not approve an action, extend a lease, change a policy, lift a denial or bypass required review. No runner credential enters the worker or frontend, and no human SSO token enters the worker. The browser keeps only its human bearer in memory according to the SSO contract. Existing owned read profiles and closed route/format contracts stay closed; new mutation profiles, provisioning and migrations must be explicit, backed up and coordinated with the integrator.
 
 ## A real conversation channel
 

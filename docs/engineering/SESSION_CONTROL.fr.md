@@ -14,7 +14,7 @@ La préparation reste retenue : elle ne démarre pas l'agent et ne consomme pas 
 
 L'identité authentifiée détermine le tenant. Exiger LaunchSession et SendSessionMessage explicites et distincts, ainsi que les ACL de ressource. Lecture/contenu/visibilité administrative, appartenance au tenant et ApproveLaunch ne donnent implicitement aucun de ces droits. Révalider membership, plafond OIDC, révocation et périmètre juste avant l'effet. Le serveur crée réellement le grant nominatif de session via le producteur vérifié existant ; owner/principal dans le JSON du navigateur ne prouvent jamais une identité.
 
-Distinguer initiateur, acteur broker effectif et causalité. Une consigne normale n'approuve aucune action, ne prolonge pas de lease, ne change pas de politique, ne lève pas un refus et ne contourne pas une review obligatoire. Aucun jeton SSO humain ni secret runner dans le worker ou le frontend. Les profils de lecture possédés et leurs contrats fermés de routes/formats restent fermés ; profils de mutation, provisionnement et migrations doivent être explicites, sauvegardés et coordonnés avec l'intégrateur.
+Distinguer initiateur, acteur broker effectif et causalité. Une consigne normale n'approuve aucune action, ne prolonge pas de lease, ne change pas de politique, ne lève pas un refus et ne contourne pas une review obligatoire. Aucun credential runner dans le worker ou le frontend, et aucun jeton SSO humain dans le worker. Le navigateur conserve seulement son bearer humain en mémoire selon le contrat SSO. Les profils de lecture possédés et leurs contrats fermés de routes/formats restent fermés ; profils de mutation, provisionnement et migrations doivent être explicites, sauvegardés et coordonnés avec l'intégrateur.
 
 ## Un vrai canal de conversation
 
