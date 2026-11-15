@@ -1,5 +1,13 @@
 # Validation courante
 
+## 15 novembre — preuves ciblées et intégration native en cours
+
+Le [frontend natif de nouvelle autorisation](evidence/2026-11-15/session-control/FRONTEND_NATIVE17_QA_R1.md) a réellement passé 7 nouvelles régressions et 46 canaris : **53 PASS, 0 FAIL**, build TypeScript/Vite PASS. Navigateur et parcours gateway/broker/fournisseur restent NOT_RUN pour ce delta.
+
+Deux contrôles Rust distincts restent **FAIL** : le [baseline réparé R2](evidence/2026-11-15/session-control/COMPOSED_BASELINE_CHECK_R2.md), avec 4 erreurs codées, et le [candidat courant R3](evidence/2026-11-15/session-control/COMPOSED_LIVE_CHECK_R3.md), avec 11 erreurs de raccordement sur un périmètre plus large. Les correctifs de tailles/financement et d’API sont relus et appliqués après ce dernier gel, sans crédit de recompilation. Collecte, source/cache et fermeture des QA sont vérifiées ; aucune OOM observée lors de ces deux checks.
+
+Le [lot Kubernetes lifecycle/attach](evidence/2026-11-15/session-control/KUBERNETES_LIFECYCLE_QA_R4_R5.md) a réellement passé son check toutes cibles et 16 de ses 17 cas logiciels sur le premier gel ; le cas restant échouait dans sa fixture. Après correction de cette seule fixture, le retest ciblé du successeur passe **2/2**, dont un canari inter-tenant. Les 16 PASS historiques ne sont pas transférés comme une suite réexécutée. Formatage et Clippy restent NOT_RUN, ainsi que tout essai cluster. Le noyau natif, le contrôle réseau et les parcours de session restent à composer puis vérifier. La révocation du sender après autorisation avant émission reste un écart explicite du contrat. **0/12 gates production clos** ; aucun pourcentage fonctionnel fiable n’est établi. Ce commit documentaire ne qualifie ni les candidats privés ni la branche publiée.
+
 ## 15 novembre — composition Claude : 19 parents logiciels PASS
 
 Source `24be056e6c9a3bd4242f0bac872150062863c49f`, code src/tests/Cargo/toolchain identique au public `161e8ce`. Une compilation offline fraîche produit 9 artefacts ; 14 listes enregistrent 19 noms actifs uniques, zéro ignoré sélectionné. Quatre invocations libtest vérifient 5 fédération + 1 outbox + 6 attach + 7 waiting stdio : 19 PASS, 0 FAIL/NOT_RUN/inconnu sélectionné. Les sondes privées de protocole ne reçoivent aucun crédit produit.
