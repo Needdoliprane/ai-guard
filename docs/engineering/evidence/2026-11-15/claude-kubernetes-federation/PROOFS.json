@@ -1,0 +1,93 @@
+{
+  "schema": 1,
+  "status": "PASS_TARGETED_SOFTWARE_ONLY",
+  "source_commit": "24be056e6c9a3bd4242f0bac872150062863c49f",
+  "source_tree": "d745eff3928bb5b3b23ad7b56f484df015e99a33",
+  "published_code_equivalent": "161e8ce00b916bf33b2526130f10183d7bf51642",
+  "source_archive_sha256": "3a038cbf56079b54dc285529cc6bc294438e94db5bd59c75f2d6757381b270f4",
+  "root_verified_result_sha256": "70b7a2f604e6fac95713a8ebf7852038e2fdeb071c8d01403fe419c086cdc6dd",
+  "root_host_flush_sha256": "ee6e3da506945580a802bcfadafe91cb22fa105093a318c00646a36005fc994c",
+  "admission_sha256": "0cc8a8ad5633f6df5e09e2051ef2e46237a8146e1119c8e1bfc359b8093dd0dc",
+  "created_proof_sha256": "ef1238b5ce5d4f3da88008ced72e780fc838302e9fc74e52d9fcbf06a388cf71",
+  "executor_result_sha256": "f5fed3229d082de05c6570e2a4a2a95cd90fe0c0451d933fb7c2e28a2037a320",
+  "final_sha256": "d40e343f53ce6638da1c54e226750f580a5745a337a05160726dfe9c20202e28",
+  "individual_test_table_sha256": "08c942fd8cbf9ecac61514c2548b61d70fd5c5093b7d37c424445ff75861f6f6",
+  "group_table_sha256": "0b06daec5c54420a83ff12a5bc2fed4e6b6eb046f58ee9ab6c73ae547e47e4e5",
+  "fresh_artifacts": 9,
+  "actual_registration_lists": 14,
+  "individual_tests_pass": 19,
+  "individual_tests_fail": 0,
+  "selected_ignored": 0,
+  "groups": [
+    {
+      "id": "federation",
+      "passed": 5,
+      "raw_sha256": "662fafb2456a341b1b5f5eabeed736b442701c7fff2e3f9a5a619d85f71c0a34"
+    },
+    {
+      "id": "outbox",
+      "passed": 1,
+      "raw_sha256": "897a755d641b97550b31afb7734d83e456fbbf9bffd68215e0aea00a5e449bf3"
+    },
+    {
+      "id": "kube",
+      "passed": 6,
+      "raw_sha256": "ba307469807024499ccc0029d23b4c9387d46118401601aecae2a91bb2268ef2"
+    },
+    {
+      "id": "stdio",
+      "passed": 7,
+      "raw_sha256": "a8acd970680fe9b56b8dfa78e042d48443724a1fabac3ddcea7b4dd8e40eb10d"
+    }
+  ],
+  "selected_test_names": [
+    "broker_registry::owned_supervision::reconciliation::tests::final_profile_refuses_old_profile_and_unadmitted_source_format",
+    "audit::broker_registry::owned_reconciliation::tests::committed_lost_response_is_acknowledged_under_original_actor_after_real_rotation_without_write",
+    "audit::broker_registry::owned_reconciliation::tests::noncommitted_requires_rotation_and_owner_barrier_and_never_uses_sequence_alone",
+    "broker::presence::owned::journal::tests::synced_supersession_survives_reopen_without_new_uuid_or_rewritten_old_pending",
+    "broker::presence::owned::journal::tests::ack_publication_keeps_the_shared_gate_until_the_real_save_and_head_update",
+    "v4_survives_command_and_lifecycle_updates_and_direct_v3_downgrade_is_refused",
+    "runtime::kubernetes::session_attach::tests::initiated_upgrade_keeps_capacity_after_caller_loss_until_http_work_ends",
+    "runtime::kubernetes::session_attach::tests::post_ready_blocked_pong_write_records_a_typed_io_deadline",
+    "runtime::kubernetes::session_attach::tests::cancelled_post_ready_blocked_write_keeps_cancellation_with_its_io_deadline",
+    "runtime::kubernetes::session_attach::tests::invalid_close_payloads_are_refused_by_the_real_stream_reader",
+    "runtime::kubernetes::session_attach::tests::text_oversized_or_masked_server_frames_close_without_partial_delivery",
+    "runtime::kubernetes::session_attach::tests::frame_offences_announced_without_their_payload_end_at_the_deadline",
+    "mode_eof_before_hello_exits_66_without_stdout",
+    "hello_then_eof_emits_one_correlated_declared_ready_and_exits_66",
+    "mode_with_extra_argument_exits_64_without_stdout",
+    "mode_with_non_utf8_extra_argument_exits_64_without_stdout",
+    "truncated_prefix_then_eof_exits_64_without_stdout",
+    "held_prefix_exits_65_while_stdin_remains_open",
+    "non_utf8_first_argument_exits_126_without_stdout"
+  ],
+  "command": "cargo test --frozen --offline --lib --test broker_outbox --test kubernetes_waiting_cli --no-run --message-format=json -j1",
+  "execution": "Four direct libtest invocations with the registered exact selected names, one test thread per group.",
+  "source_post_files": 2888,
+  "source_post_archive_sha256": "6c832e199dd091030262aa48e42589d9ce27e373085595de26a62019b16e3151",
+  "fixtures": {
+    "regular_files": 0,
+    "directory_count": 8
+  },
+  "process_scan": {
+    "enumerated": 5,
+    "target_observed": 0,
+    "complete": true,
+    "atomic": false
+  },
+  "memory": {
+    "limit_bytes": 9663676416,
+    "peak_bytes": 9542557696,
+    "oom_events": 0
+  },
+  "prior_attempt": "R1 preparation failure before Cargo and all19 test invocations; retained without pass credit.",
+  "limits": [
+    "Software tests only, including synthetic loopback/TLS and real Rust waiting stdio.",
+    "Real worker runtimes, cluster, provider/model, OIDC provider, browser, capacity100, release and deployment NOT_RUN.",
+    "Root dirty Source17 is not tested.",
+    "Inherited all-targets/format evidence gets no new pass."
+  ],
+  "production_gates_closed": 0,
+  "root_verification_clarification_sha256": "4653e74decf0d667a352f90726ef9eb022e41ebdbd80225b8c7908bc028e010f",
+  "root_host_flush_after_clarification_sha256": "540f27fb40cc8053692fa41070d1d1ada8be273b0357895bd2da927673eadefb"
+}

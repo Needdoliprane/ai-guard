@@ -1,5 +1,11 @@
 # État constaté — suivi du développement
 
+## 15 novembre — Kubernetes/fédération Claude : 19 tests logiciels vérifiés
+
+Le code déjà composé dans la branche publique passe une compilation Rust fraîche et **19 tests ciblés** : 5 fédération, 1 outbox, 6 attach et 7 stdio réel du mode d’attente. Le gel `24be056` est identique à `161e8ce` pour src/tests/Cargo/toolchain ; Source17 en cours reste distinct et non testé. Quatorze listes réelles, zéro ignoré sélectionné et 19 résultats individuels sont vérifiés. Les sources, collectes, OOM0, fermeture exacte et flush Root sont conservés.
+
+[Commandes, empreintes et limites](evidence/2026-11-15/claude-kubernetes-federation/README.md). R1 reste un échec de préparation avant compilation/tests. Aucun cluster, worker Docker/Podman, fournisseur, OIDC réel, navigateur ou capacité100 n’est qualifié ; aucun nouveau PASS toutes cibles/format. **0/12 gates clos**, pas de pourcentage fonctionnel global mesuré.
+
 ## 14 novembre — version 0.0.1 et identité commune des builds validées
 
 Le gel `24be056` aligne Cargo, frontend et locks sur **0.0.1**. Le constructeur refuse les versions divergentes avant le moteur et réutilise une même source préparée pour les deux images. Le front montre sa version compilée et distingue les observations dashboard/gateway. GET/HEAD `/api/v1/status` et le relais fixe du dashboard rendent les métadonnées publiques sans données tenant. Les six outils Rust disposent de `--version`/`-V` ; `agentsandbox version --json` fournit le contrat fermé.

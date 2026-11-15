@@ -1,5 +1,13 @@
 # Validation courante
 
+## 15 novembre — composition Claude : 19 parents logiciels PASS
+
+Source `24be056e6c9a3bd4242f0bac872150062863c49f`, code src/tests/Cargo/toolchain identique au public `161e8ce`. Une compilation offline fraîche produit 9 artefacts ; 14 listes enregistrent 19 noms actifs uniques, zéro ignoré sélectionné. Quatre invocations libtest vérifient 5 fédération + 1 outbox + 6 attach + 7 waiting stdio : 19 PASS, 0 FAIL/NOT_RUN/inconnu sélectionné. Les sondes privées de protocole ne reçoivent aucun crédit produit.
+
+Root recontrôle 105 RC0, 2 888 hashes/tailles/modes source, archive exportée, zéro fichier régulier de fixture et huit répertoires observés. Scan complet non atomique 5/5, zéro cible, pic QA 9 542 557 696 octets/limite 9 663 676 416, OOM0 ; conteneur exact retiré et flush séparé. Reçu Root `70b7a2f604e6fac95713a8ebf7852038e2fdeb071c8d01403fe419c086cdc6dd`, flush `ee6e3da506945580a802bcfadafe91cb22fa105093a318c00646a36005fc994c`.
+
+[Preuves et commandes](evidence/2026-11-15/claude-kubernetes-federation/README.md). R1 : FAIL préparation avant Cargo et 19 NOT_RUN, conservé. R2 : sélection ci-dessus PASS, sans nouveau check toutes cibles/format. Source17, moteurs/workers/cluster/fournisseurs/OIDC réels, navigateur, images, charge100 et suite complète restent NOT_RUN ; aucun gate/fingerprint fermé.
+
 ## 14 novembre — alignement 0.0.1 : builds Rust et front vérifiés
 
 Source `24be056e6c9a3bd4242f0bac872150062863c49f`, tree `d745eff3928bb5b3b23ad7b56f484df015e99a33`, 2 888 fichiers. Les compilations Rust/front utilisent les mêmes version 0.0.1, ID de QA `3a038cbf56079b54dc285529cc6bc294438e94db5bd59c75f2d6757381b270f4` et révision du gel. Cet ID est une annotation de source QA, pas un digest d’image ni une attestation PreparedSnapshot.
