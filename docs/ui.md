@@ -44,6 +44,16 @@ unknown/unavailable and mismatches stay explicit. Initial/manual refresh adds
 no release discovery, readiness claim, updater or replacement of active
 sessions. Candidate validation and visual evidence remain NOT_RUN here.
 
+## Créer et intervenir sur une session — cible autorisée le 15 novembre 2026
+
+Le [contrat FR](engineering/SESSION_CONTROL.fr.md) et le [contrat EN](engineering/SESSION_CONTROL.md) rendent obligatoires deux actions nominatives : Nouvelle session et Envoyer une consigne. Elles restent à implémenter et qualifier ; cette section n’étend pas rétroactivement le périmètre livré.
+
+Nouvelle session choisit une cible projet/source opaque autorisée, tâche initiale et client/mode permis ; résolution effective et prérequis viennent de Rust. Préparer ne lance rien ; Lancer confirme l’intention exacte. Un timeout propose la relecture de la même opération, sans second Submit. Aucun chemin, argv, moteur, credential ou réseau libre dans le formulaire.
+
+Le détail d’une session propose une courte consigne seulement selon droits et canal effectifs. Afficher destination session/worker/tentative, limite et état réel : enregistré, transmis, acquitté au protocole ou livraison inconnue ; jamais « exécuté » sur simple écriture. Les anciens batch/TTY incompatibles sont nommés. Préserver le brouillon tant que l’admission durable reste inconnue, empêcher les doubles envois et ne pas relancer après une émission incertaine.
+
+LaunchSession, SendSessionMessage, lecture/contenu et ApproveLaunch sont distincts côté serveur. Changement d’identité/périmètre ou révocation purge brouillons, corps, reçus et callbacks périmés. Les contrôles restent accessibles au clavier et dans les thèmes clair/sombre et petits écrans ; conserver OVPT et la retenue visuelle de la supervision.
+
 ## Direction de conception
 
 Le guide détaillé du mainteneur reçu le 30 octobre 2026 a guidé la refonte livrée en QA. Le front antérieur, avec barre latérale claire et accents turquoise, a été remplacé par le header clair et la navigation sombre fixes. La référence est transposée à **ai-guard**, à ses neuf vues et à ses données de supervision ; elle ne transforme pas le dashboard en page de vente ou en parcours fictif de dix chapitres. Les [preuves et captures réelles](engineering/evidence/2026-10-30/editorial-ui/README.md) identifient le rendu déployé.

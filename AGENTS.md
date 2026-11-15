@@ -151,6 +151,14 @@ Le [contrat des vues par permissions](docs/ui.md#vues-utilisateur-et-administrat
 
 Conserver le cœur commun local/cloud et les frontières existantes. L'agrégation n'autorise ni fusion des bases clients, ni credentials globaux chez les workers, ni nouveaux microservices sans nécessité. Workload identity, transports, connexion des brokers distants et reprise restent à implémenter et qualifier ; cette consigne ne les déclare pas livrés.
 
+## Créer et piloter une session depuis le dashboard
+
+Le mainteneur a autorisé le 15 novembre 2026 deux parcours obligatoires : **créer une session IA** depuis le dashboard et **envoyer une courte consigne à une session existante**. Le [contrat de contrôle de session](docs/engineering/SESSION_CONTROL.fr.md) et sa [version anglaise](docs/engineering/SESSION_CONTROL.md) fixent cette cible à implémenter et qualifier, sans annoncer de disponibilité.
+
+Le contrôle authentifié établit tenant, identité, droits LaunchSession/SendSessionMessage distincts et ACL ; aucune élévation depuis lecture, administration ou ApproveLaunch. Préparation retenue puis lancement de l’intention exacte, audit durable avant effet, binding au vrai worker/tentative/canal, idempotence et incertitude de livraison restent obligatoires. Utiliser les protocoles conversation officiels, sans injection TTY ni repli réseau/legacy ; préserver le réseau None et l’egress Rust approuvé. Aucun secret runner/SSO dans le front ou le worker.
+
+Ce lot cohérent est délégué sur **une branche et un worktree**, avec code et guides EN/FR ; l’orchestrateur Codex garde tests avec Luna, revue de composition, intégration, push et fermeture. Une interface désactivée ou un mock permanent ne constitue pas la livraison des deux parcours.
+
 ## Trois approches Jev et décision locale
 
 Le produit doit distinguer explicitement trois moteurs sélectionnables : **Jev réel** via son contrat authentifié, **moteur Rust déterministe sans modèle**, et **petit modèle local Jev-like** conteneurisé dans Docker/Podman. Ne pas appeler les deux derniers « Jev réel » ni leur attribuer sa couverture sans preuve. Le choix est visible, audité et configurable ; une panne ne permet pas de changer silencieusement de moteur ou de niveau de contrôle.
