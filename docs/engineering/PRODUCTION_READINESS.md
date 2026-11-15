@@ -1,5 +1,17 @@
 # Gates de qualification production
 
+## 15 novembre — compilation du successeur natif R10
+
+Le [successeur corrigé R10](evidence/2026-11-15/session-control/COMPOSED_FULL_NATIVE_CHECK_R9.md#r10-successor-check-2026-11-15), 3 307 fichiers, a subi un nouveau check toutes cibles : **FAIL, RC 101, 7 erreurs codées**, 2 notes de résumé sans code et 60 avertissements. Une seule invocation Cargo a été exécutée ; aucun test. Collecte, gardes, source/cache et fermeture du CID exact sont vérifiées, sans hausse des compteurs OOM.
+
+La compilation reste **FAIL** sur le seul gel `1c75fb67…`. Les postchecks et la fermeture réussis qualifient la collecte de cette campagne, sans clôturer une exigence produit. Les tests, le formatage, Clippy, les parcours natifs, la reprise et les moteurs/fournisseurs réels restent non qualifiés par R10. **0/12 gates G01–G12 clos** ; aucun pourcentage global et aucune qualification production n’en découlent.
+
+## 15 novembre — compilation du noyau natif complet R9
+
+Le [gel complet réellement appliqué R9](evidence/2026-11-15/session-control/COMPOSED_FULL_NATIVE_CHECK_R9.md), 3 291 fichiers, a été compilé une fois : **FAIL, RC 101, 64 erreurs codées**, 2 résumés distincts et 62 avertissements. Il expose des dépendances et raccords encore incomplets, sur un périmètre plus large que R3. Collecte, source/cache et fermeture sont vérifiées, sans OOM observée. Aucun test exécuté par cette campagne.
+
+Trois lots corrigent séparément configuration, runtime/conversation et audit. Le correctif relu des trois agrégations d’authentification est appliqué après le gel R9, avec échéance inchangée et propriétaires retenus ; sa compilation et ses quatre régressions restent NOT_RUN. Les parcours natifs, OIDC, reprise réseau et configuration restent à terminer et qualifier. **0/12 gates production clos** ; pas de pourcentage fonctionnel fiable.
+
 ## 15 novembre — preuves ciblées et intégration native en cours
 
 Le [frontend natif de nouvelle autorisation](evidence/2026-11-15/session-control/FRONTEND_NATIVE17_QA_R1.md) a réellement passé 7 nouvelles régressions et 46 canaris : **53 PASS, 0 FAIL**, build TypeScript/Vite PASS. Navigateur et parcours gateway/broker/fournisseur restent NOT_RUN pour ce delta.
