@@ -1,5 +1,9 @@
 # Validation courante
 
+## 16 novembre — canari D1 PASS puis reproduction préstart RED
+
+Sur la source dédiée `c60b0cb0…` (même code produit que `a398131`), compilation CLI/intégration et découverte passent. Une invocation sans faute donne PASS RC0 ; une invocation avec GET429 préstart donne RC101 sur le premier start interdit, après les assertions communes du harnais. Les [reçus et limites](evidence/2026-11-16/control-monitor-prestart/README.md) distinguent l'oracle atteint des assertions suivantes non exécutées. Ce sont des essais logiciels locaux ; aucun moteur réel ni nouvelle correction qualifiée.
+
 ## 16 novembre — R2 : composition runtime/Kubernetes vérifiée sur sa source propre
 
 Le [relevé de composition](evidence/2026-11-16/runtime-kubernetes-batch-composition/README.md) place le candidat R2 actuel avant les preuves historiques, avec sources, deux binaires et reçus Root distincts.

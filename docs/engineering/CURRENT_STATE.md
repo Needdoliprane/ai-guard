@@ -1,5 +1,9 @@
 # État constaté — suivi du développement
 
+## 16 novembre — audit D1 : déclencheur pré-démarrage reproduit
+
+Le [canari CLI réel passe, puis la faute locale reproduit D1](evidence/2026-11-16/control-monitor-prestart/README.md) : un start est émis après l'échec de contrôle préstart. Le moteur est une fixture Rust, les assertions ultérieures de rétention ne sont pas atteintes et le correctif reste en cours. Aucun gate clos.
+
 ## 16 novembre — R2 runtime/Kubernetes : 26 cas de composition vérifiés
 
 Le candidat public R2 réunit **18 chemins Rust et 4 guides EN/FR**. Format et Clippy toutes cibles passent ; Clippy conserve **505 diagnostics d'avertissement**, sans gate strict. Les deux cibles de test et leurs listes sont vérifiées, puis **26 cas exacts passent une fois chacun**, avec sources et exécutables inchangés au recontrôle Root. [Sources R2, reprise du build, résultats et historique R1](evidence/2026-11-16/runtime-kubernetes-batch-composition/README.md).
