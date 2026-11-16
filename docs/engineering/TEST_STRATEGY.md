@@ -1,5 +1,9 @@
 # Stratégie de qualification
 
+## 16 novembre — corrélation du callback CLI
+
+La [sélection NV-09](evidence/2026-11-16/oidc-callback-correlation/README.md) exécute dix unités du vrai listener et quatre intégrations Rust/CLI loopback, sans IdP externe. Les quatre cas sélectionnés ne constituent pas une réussite des 25 tests enregistrés de `sso_cli`, ni du SSO complet.
+
 ## 16 novembre — régression de la préparation des images
 
 La cible `runtime_security` couvre la politique `--pull=never` et la séparation des arguments pour Docker/Podman, via les builders réels. [Preuve et limites](evidence/2026-11-16/runtime-local-image-policy/README.md). La qualification d’une image absente et le confinement demandent toujours les essais moteurs distincts.

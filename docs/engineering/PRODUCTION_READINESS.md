@@ -1,5 +1,9 @@
 # Gates de qualification production
 
+## 16 novembre — résilience locale du callback OIDC
+
+Le [lot NV-09](evidence/2026-11-16/oidc-callback-correlation/README.md) vérifie corrélation, bornes et continuité d’une tentative CLI sur macOS. G04 et les autres gates restent ouverts : le SSO réel, Native17, les autres principals et plateformes ne sont pas qualifiés par ces 14 cas.
+
 ## 16 novembre — contribution logicielle aux contrôles runtime
 
 Le [lot image locale](evidence/2026-11-16/runtime-local-image-policy/README.md) apporte des régressions du builder. Il ne qualifie pas le moteur, les sorties réseau ou la chaîne de livraison et ne clôture aucun gate G01–G12.

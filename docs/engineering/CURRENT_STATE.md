@@ -1,5 +1,9 @@
 # État constaté — suivi du développement
 
+## 16 novembre — callback SSO CLI borné
+
+Le [correctif de résilience du callback natif](evidence/2026-11-16/oidc-callback-correlation/README.md) est intégré : un pair invalide ne termine plus immédiatement la tentative. Dix tests unitaires et quatre intégrations ciblées passent. La frontière entre principals OS, le SSO réel et Native17 restent non qualifiés dans ce lot.
+
 ## 16 novembre — création avec image locale préparée
 
 Le [correctif Docker/Podman](evidence/2026-11-16/runtime-local-image-policy/README.md) impose `--pull=never` dans le builder partagé. Check toutes cibles, formatage, Clippy ciblé et deux régressions exactes passent ; les essais moteur restent `NOT_RUN`. Prochaine étape : le cas local borné sur un worker et une image déjà présente.

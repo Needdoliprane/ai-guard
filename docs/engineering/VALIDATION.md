@@ -1,5 +1,9 @@
 # Validation courante
 
+## 16 novembre — NV-09, observation puis régressions CLI
+
+[Sources, commandes et limites](evidence/2026-11-16/oidc-callback-correlation/README.md) : ancien comportement reproduit localement, puis 14 cas exacts réussis sur le candidat composé ; check/fmt/Clippy ciblé RC0. Le verdict primaire `needs_validation` reste inchangé pour la frontière OS non vérifiée.
+
 ## 16 novembre — politique d’image locale, preuve logicielle
 
 [Reçu et commandes](evidence/2026-11-16/runtime-local-image-policy/README.md) : candidat `d2745f79`, deux tests exacts réussis sur le nouvel exécutable, source relue après exécution. Clippy RC 0 avec 248 avertissements hors des trois fichiers Rust modifiés ; aucun gate de production fermé.

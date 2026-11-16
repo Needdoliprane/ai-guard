@@ -231,6 +231,8 @@ plausible ; aucune sévérité ou conclusion production n'est ajoutée.
 
 ### Lots de suivi sans collision avec les développements actifs
 
+**NV-09, suivi du 16 novembre : résilience du callback vérifiée dans une fixture locale.** Le premier pair invalide termine le listener original dans l’oracle exécuté ; le candidat borné à huit pairs conserve ensuite la même tentative jusqu’à un callback corrélé ou son échéance initiale. Dix unités et quatre intégrations CLI ciblées passent, après revue indépendante et compilation fraîche. La capacité d’un autre principal OS ou d’un worker à joindre ce port n’a pas été établie ; `needs_validation` et la portée primaire sont conservés, sans sévérité ajoutée ni garantie anti-saturation. [Reproduction, régressions, sources et limites](evidence/2026-11-16/oidc-callback-correlation/README.md).
+
 **NV-03, suivi du 10 novembre : correction logicielle vérifiée, qualification
 résiduelle ouverte.** Trois oracles stockage puis un oracle router/issuer et
 deux multi-handles reproduisent l'absence de réserve sur le code d'origine.
