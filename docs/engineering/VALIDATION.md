@@ -1,5 +1,9 @@
 # Validation courante
 
+## 16 novembre — politique d’image locale, preuve logicielle
+
+[Reçu et commandes](evidence/2026-11-16/runtime-local-image-policy/README.md) : candidat `d2745f79`, deux tests exacts réussis sur le nouvel exécutable, source relue après exécution. Clippy RC 0 avec 248 avertissements hors des trois fichiers Rust modifiés ; aucun gate de production fermé.
+
 ## 16 novembre — lot logiciel Kubernetes dédié intégré
 
 Le [lot lifecycle/attach isolé](evidence/2026-11-16/kubernetes-dedicated-integration/README.md) passe son check toutes cibles et son build libtest, puis **17/17 tests logiciels exacts** sur `1d274954`. Après correction du formatage seul (`cb1ca7f`), le contrôle de format des 18 fichiers Rust et un nouveau check toutes cibles passent ; les 17 tests ne sont pas réexécutés. La revue indépendante ne signale aucun blocage confirmé dans ce périmètre pré-effet. Seuls les 21 chemins dédiés sont repris, avec la garde canonique de replay conservée. Native17/S5, le vrai cluster et la qualification complète restent ouverts : **0/12 gates clos**.

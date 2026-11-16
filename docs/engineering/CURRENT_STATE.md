@@ -1,5 +1,9 @@
 # État constaté — suivi du développement
 
+## 16 novembre — création avec image locale préparée
+
+Le [correctif Docker/Podman](evidence/2026-11-16/runtime-local-image-policy/README.md) impose `--pull=never` dans le builder partagé. Check toutes cibles, formatage, Clippy ciblé et deux régressions exactes passent ; les essais moteur restent `NOT_RUN`. Prochaine étape : le cas local borné sur un worker et une image déjà présente.
+
 ## 16 novembre — lot logiciel Kubernetes dédié intégré
 
 Le [lot lifecycle/attach isolé](evidence/2026-11-16/kubernetes-dedicated-integration/README.md) passe son check toutes cibles et son build libtest, puis **17/17 tests logiciels exacts** sur `1d274954`. Après correction du formatage seul (`cb1ca7f`), le contrôle de format des 18 fichiers Rust et un nouveau check toutes cibles passent ; les 17 tests ne sont pas réexécutés. La revue indépendante ne signale aucun blocage confirmé dans ce périmètre pré-effet. Seuls les 21 chemins dédiés sont repris, avec la garde canonique de replay conservée. Native17/S5, le vrai cluster et la qualification complète restent ouverts : **0/12 gates clos**.

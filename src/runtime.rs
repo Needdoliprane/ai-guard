@@ -319,6 +319,7 @@ impl ContainerSpec {
         );
         let mut args = vec![
             "create".into(),
+            "--pull=never".into(),
             "--name".into(),
             self.name(),
             "--label".into(),
@@ -988,6 +989,7 @@ impl Runtime {
                 Duration::from_secs(30),
             )
             .await
+            .context("container creation failed with automatic image pulls disabled (--pull=never); prepare the selected image explicitly if it is absent locally")
             .map_err(AttemptFailure::unowned)?;
         // A successful CLI status without a usable returned reference still
         // does not prove ownership of whatever currently has the requested

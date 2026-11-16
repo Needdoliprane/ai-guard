@@ -875,7 +875,8 @@ impl ManagedRuntime {
                 ],
                 Duration::from_secs(15),
             )
-            .await?;
+            .await
+            .context("could not verify the selected image in the local runtime cache; prepare it explicitly if absent, automatic image pulls are disabled")?;
         let id = std::str::from_utf8(&output.bytes)
             .ok()
             .map(str::trim)
@@ -1388,7 +1389,8 @@ impl ManagedRuntime {
                 &spec.create_args(self.binding.kind)?,
                 Duration::from_secs(30),
             )
-            .await?;
+            .await
+            .context("container creation failed with automatic image pulls disabled (--pull=never); prepare the selected image explicitly if it is absent locally")?;
         let id = std::str::from_utf8(&output.bytes)
             .ok()
             .map(str::trim)

@@ -8,6 +8,44 @@ use std::{fs, io::Cursor, path::Path};
 use uuid::Uuid;
 
 #[test]
+fn every_worker_creation_requires_an_existing_local_image() {
+    let image = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    for kind in [RuntimeKind::Docker, RuntimeKind::Podman] {
+        for purpose in [
+            ContainerPurpose::Import,
+            ContainerPurpose::Run,
+            ContainerPurpose::Export,
+        ] {
+            let spec = ContainerSpec::new(
+                Uuid::new_v4(),
+                purpose,
+                image,
+                vec!["/bin/echo".into(), "--pull=always".into()],
+                NetworkMode::None,
+            )
+            .unwrap();
+            let args = spec.create_args(kind).unwrap();
+            let end = args.iter().position(|arg| arg == "--").unwrap();
+            assert_eq!(&args[..2], ["create", "--pull=never"]);
+            assert_eq!(
+                args[..end]
+                    .iter()
+                    .filter(|arg| arg.starts_with("--pull"))
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                ["--pull=never"],
+                "no later creation option may override local-image-only policy"
+            );
+            // The entrypoint is a creation option; the command's pull-looking
+            // argument follows IMAGE and remains data.
+            assert_eq!(args.len(), end + 3);
+            assert_eq!(args[end + 1], image);
+            assert_eq!(args[end + 2], "--pull=always");
+        }
+    }
+}
+
+#[test]
 fn worker_arguments_confine_a_named_volume_and_preserve_literal_arguments() {
     let session = Uuid::parse_str("bd249f63-d29e-4c62-a7ef-eb23511ca8de").unwrap();
     let spec = ContainerSpec::new(
