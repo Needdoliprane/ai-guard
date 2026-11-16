@@ -424,13 +424,12 @@ async fn serve_http(
     listener: tokio::net::TcpListener,
     router: axum::Router,
     shutdown: impl Future<Output = ()> + Send + 'static,
+    bounds: agentsandbox::http_listener_bounds::ListenerBounds,
 ) -> Result<()> {
     let shutdown = shutdown.shared();
     let server_shutdown = shutdown.clone();
     let serving = async move {
-        axum::serve(listener, router)
-            .with_graceful_shutdown(server_shutdown)
-            .await
+        agentsandbox::http_listener_bounds::serve(listener, router, server_shutdown, bounds).await
     };
     tokio::pin!(serving);
     tokio::select! {
@@ -1156,7 +1155,16 @@ async fn run() -> Result<()> {
             let shutdown = shutdown_signal()?;
             let listener = tokio::net::TcpListener::bind(args.listen).await?;
             eprintln!("Dashboard {} — lecture seule", listener.local_addr()?);
-            serve_http(listener, router, shutdown).await?;
+            serve_http(
+                listener,
+                router,
+                shutdown,
+                agentsandbox::http_listener_bounds::ListenerBounds::new(
+                    128,
+                    std::time::Duration::from_secs(15),
+                )?,
+            )
+            .await?;
         }
         Command::Ingress(args) => {
             validate_bind(args.gateway_listen, args.container_listen)?;
@@ -1179,14 +1187,28 @@ async fn run() -> Result<()> {
             let serving = async {
                 tokio::try_join!(
                     async {
-                        axum::serve(gateway_listener, gateway)
-                            .with_graceful_shutdown(gateway_shutdown)
-                            .await
+                        agentsandbox::http_listener_bounds::serve(
+                            gateway_listener,
+                            gateway,
+                            gateway_shutdown,
+                            agentsandbox::http_listener_bounds::ListenerBounds::new(
+                                128,
+                                std::time::Duration::from_secs(15),
+                            )?,
+                        )
+                        .await
                     },
                     async {
-                        axum::serve(dashboard_listener, dashboard)
-                            .with_graceful_shutdown(dashboard_shutdown)
-                            .await
+                        agentsandbox::http_listener_bounds::serve(
+                            dashboard_listener,
+                            dashboard,
+                            dashboard_shutdown,
+                            agentsandbox::http_listener_bounds::ListenerBounds::new(
+                                128,
+                                std::time::Duration::from_secs(15),
+                            )?,
+                        )
+                        .await
                     }
                 )
                 .map(|_| ())

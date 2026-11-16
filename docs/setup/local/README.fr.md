@@ -254,6 +254,18 @@ AGENTSANDBOX_CONFIG_DIR="$AIGUARD_CONFIG" podman compose --project-name agentsan
 
 Pour arrêter ou recréer cette pile, utiliser les commandes CLI `down` et `up` avec les mêmes `--runtime`, `--runtime-program`, `--runtime-endpoint` et `--config-dir` : chacune prépare une nouvelle copie et s'adresse au projet par son nom. Examiner les logs avant tout partage pour en exclure les secrets.
 
+<a id="http-listener-limits"></a>
+
+### Bornes des connexions et en-têtes HTTP
+
+Le dashboard, l'ingress et le gateway limitent chacun les connexions TCP acceptées à **128 par listener**, avec **15 secondes** pour recevoir les premiers en-têtes complets d'une requête. Au gateway, les listeners public et de contrôle ont des pools de connexions séparés. Les connexions keepalive inactives, SSE et mises à niveau occupent une place jusqu'à la fermeture de leur connexion réelle ; il ne s'agit pas d'une limite de requêtes ou de streams HTTP/2. Lorsqu'un pool est plein, une nouvelle connexion peut attendre avant son acceptation.
+
+La première échéance part de l'acceptation, inclut la détection du protocole et ne redémarre pas à l'arrivée d'octets. Si les premiers en-têtes restent incomplets, la connexion est fermée à cette échéance. Hyper gère les lectures d'en-têtes HTTP/1 suivantes avec le même délai de 15 secondes. Ce contrôle ne couvre pas les nouveaux streams HTTP/2 après la première requête. Une fois les premiers en-têtes acceptés, l'échéance initiale n'expire ni réponse active, ni corps, ni flux SSE ; leurs politiques existantes restent appliquées, dont les bornes de corps et d'échanges de l'ingress ci-dessous.
+
+Ces valeurs de compatibilité sont fixes dans les points d'entrée CLI. Aucune option CLI, variable d'environnement ou valeur dotenv ne permet de les régler. Les appelants Rust peuvent fournir des bornes validées par `ListenerBounds` et `serve_with_listener_bounds` du gateway ; ce sont des interfaces de code, pas des réglages opérateur. Ces valeurs n'ont pas été dimensionnées pour 100 workers ni pour le budget de descripteurs et de mémoire d'un processus. Une borne de sockets n'apporte ni authentification, ni quota tenant, ni garantie anti-DoS.
+
+Si une connexion est fermée, laisser le client en ouvrir une nouvelle et reprendre une lecture autorisée lorsque la capacité est disponible. Avant de répéter un lancement ou une autre mutation dont le résultat est inconnu, réconcilier l'opération initiale. Identifier si le chemin concerné atteint le dashboard, l'ingress ou le listener public/de contrôle du gateway ; utiliser l'état Compose et les logs bornés déjà décrits plus haut, sans déduire d'une fermeture quelle borne a été atteinte. Une fermeture de connexion se distingue des refus HTTP 429 liés aux corps et échanges de l'ingress ci-dessous.
+
 ### Bornes du relais HTTP
 
 L'ingress Rust public dispose de budgets indépendants pour **16 corps de requête en cours de lecture** et **64 échanges avec le service amont**. Chaque corps est limité à **256 Kio**, **5 secondes au total** et **2 secondes sans nouveau fragment**, à partir de sa lecture. Le corps complet est lu et son permis de lecture libéré avant de réserver un échange. Un corps connu vide par son état de flux passe sans permis de lecture ; la méthode HTTP ou le `Content-Length` déclaré ne décide pas de ce passage. Les routes publiques conservent leurs destinations fixes et contrôles d'authentification/autorisation amont. Ces bornes sont fixées dans le binaire ; le fichier dotenv et le CLI ne proposent aucun réglage pour les modifier.

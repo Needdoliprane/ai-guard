@@ -1,5 +1,9 @@
 # Gates de qualification production
 
+## 16 novembre — contribution logicielle aux bornes HTTP
+
+Le [lot des listeners](evidence/2026-11-16/http-listener-bounds/README.md) apporte 11 régressions réussies et ses guides EN/FR. G08 reste ouvert : seuils 128/15s non dimensionnés, streams HTTP/2 suivants et disponibilité déployée non qualifiés ; aucune clôture automatique des constats NV-07/V4. **0/12 gates clos.**
+
 ## 16 novembre — qualifications startup/runtime encore en échec
 
 Le [lot de mesures](evidence/2026-11-16/startup-runtime-failures/README.md) laisse le démarrage Native17 et le cas Docker générique en échec. Le refus post-COMMIT et le délai d’arrêt exigent leurs corrections et régressions. Les observations positives de profil/nettoyage ne qualifient pas le cas complet ; export, recette A1/A2/B1 et autres moteurs restent ouverts. **0/12 gates clos.**

@@ -5,14 +5,10 @@
 //! acceptors. The supervisor retains the serving futures and blocking-usage
 //! drain until they finish; dropping a caller never aborts a serving sibling.
 use crate::api::{GatewayControlRecoveryRetirementV2, GatewayHumanRetirement};
+use crate::http_listener_bounds::{ConnectionAdmission, ListenerBounds, serve_connection};
 use anyhow::{Context, Result};
 use axum::Router;
 use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
-use hyper_util::{
-    rt::{TokioExecutor, TokioIo},
-    server::conn::auto::Builder,
-    service::TowerToHyperService,
-};
 use std::{future::Future, net::SocketAddr, pin::Pin, sync::Arc, time::Duration};
 use tokio::{
     net::TcpListener,
@@ -91,9 +87,30 @@ impl GatewayServer {
     /// return means both serving futures AND genuine recovery usages drained.
     /// There is no HTTP timeout standing in for the latter condition.
     pub async fn serve(
-        mut self,
+        self,
         public: (SocketAddr, Router),
         control: Option<(SocketAddr, Router)>,
+        shutdown: impl Future<Output = ()> + Send + 'static,
+        on_bound: impl FnOnce(SocketAddr, Option<SocketAddr>) -> Result<()> + Send + 'static,
+    ) -> Result<()> {
+        // Proposed compatibility values, not a measured resource guarantee.
+        // Maintainers can select public/control policies independently through
+        // serve_with_listener_bounds without changing any authentication owner.
+        let public_bounds = ListenerBounds::new(128, Duration::from_secs(15))?;
+        let control_bounds = ListenerBounds::new(128, Duration::from_secs(15))?;
+        self.serve_with_listener_bounds(
+            (public.0, public.1, public_bounds),
+            control.map(|(address, router)| (address, router, control_bounds)),
+            shutdown,
+            on_bound,
+        )
+        .await
+    }
+
+    pub async fn serve_with_listener_bounds(
+        mut self,
+        public: (SocketAddr, Router, ListenerBounds),
+        control: Option<(SocketAddr, Router, ListenerBounds)>,
         shutdown: impl Future<Output = ()> + Send + 'static,
         on_bound: impl FnOnce(SocketAddr, Option<SocketAddr>) -> Result<()> + Send + 'static,
     ) -> Result<()> {
@@ -176,7 +193,10 @@ impl BoundOwners {
         self.stop.send_replace(true);
     }
 
-    async fn bind(&mut self, (address, router): (SocketAddr, Router)) -> Result<SocketAddr> {
+    async fn bind(
+        &mut self,
+        (address, router, bounds): (SocketAddr, Router, ListenerBounds),
+    ) -> Result<SocketAddr> {
         let stopped = wait_for_stop(self.stop.subscribe());
         tokio::pin!(stopped);
         let listener = tokio::select! {
@@ -191,6 +211,7 @@ impl BoundOwners {
             self.stop.clone(),
             Arc::clone(&self.retirement),
             self.human.clone(),
+            bounds,
         ));
         Ok(address)
     }
@@ -213,28 +234,53 @@ fn http_owner(
     stop: watch::Sender<bool>,
     retirement: Arc<GatewayControlRecoveryRetirementV2>,
     human: Option<Arc<GatewayHumanRetirement>>,
+    bounds: ListenerBounds,
 ) -> ServingOwner {
-    http_owner_inner(
+    http_owner_bounded_inner(
         listener,
         router,
         stop,
         retirement,
         human,
+        bounds,
         #[cfg(test)]
         None,
     )
 }
 
+// Keep the existing ownership-order test seam and its callback unchanged.
+#[cfg(test)]
 fn http_owner_inner(
+    listener: TcpListener,
+    router: Router,
+    stop: watch::Sender<bool>,
+    retirement: Arc<GatewayControlRecoveryRetirementV2>,
+    human: Option<Arc<GatewayHumanRetirement>>,
+    before_error_stop: Option<Box<dyn FnOnce() + Send>>,
+) -> ServingOwner {
+    http_owner_bounded_inner(
+        listener,
+        router,
+        stop,
+        retirement,
+        human,
+        ListenerBounds::new(128, Duration::from_secs(15)).unwrap(),
+        before_error_stop,
+    )
+}
+
+fn http_owner_bounded_inner(
     mut listener: TcpListener,
     router: Router,
     stop: watch::Sender<bool>,
     retirement: Arc<GatewayControlRecoveryRetirementV2>,
     human: Option<Arc<GatewayHumanRetirement>>,
+    bounds: ListenerBounds,
     #[cfg(test)] mut before_error_stop: Option<Box<dyn FnOnce() + Send>>,
 ) -> ServingOwner {
     async move {
         let mut connections = JoinSet::new();
+        let admission = ConnectionAdmission::new(bounds);
         let stopped = wait_for_stop(stop.subscribe());
         tokio::pin!(stopped);
         let mut failure = loop {
@@ -256,26 +302,19 @@ fn http_owner_inner(
                 }
                 // Reuse Axum's accept retry policy, including its existing
                 // one-second retry for resource errors; no new retry deadline.
-                accepted = axum::serve::Listener::accept(&mut listener) => accepted,
-            };
-            let (stream, _remote_address) = accepted;
-            let service = TowerToHyperService::new(router.clone());
-            let connection_stop = stop.subscribe();
-            connections.spawn(async move {
-                // Match the current axum::serve builder/defaults and body
-                // mapping through Router's Service implementation. Gateway
-                // routers have no ConnectInfo make-service or upgrade handler.
-                let builder = Builder::new(TokioExecutor::new());
-                let connection = builder.serve_connection_with_upgrades(TokioIo::new(stream), service);
-                tokio::pin!(connection);
-                tokio::select! {
-                    _ = &mut connection => {}, // Axum also treats connection errors locally.
-                    _ = wait_for_stop(connection_stop) => {
-                        connection.as_mut().graceful_shutdown();
-                        let _ = connection.await;
+                accepted = admission.accept(&mut listener) => match accepted {
+                    Ok(accepted) => accepted,
+                    Err(error) => {
+                        if let Some(human)=&human {human.retire();}
+                        retirement.retire();
+                        #[cfg(test)]
+                        if let Some(observe)=before_error_stop.take() {observe();}
+                        stop.send_replace(true);
+                        break Some(anyhow::Error::new(error).context("gateway listener admission failed"));
                     }
-                }
-            });
+                },
+            };
+            connections.spawn(serve_connection(accepted, router.clone(), stop.subscribe()));
         };
         // Stop accepting before graceful drain; both sibling owners receive
         // the same stop only after the shared epoch has been retired.

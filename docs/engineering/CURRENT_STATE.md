@@ -1,5 +1,9 @@
 # État constaté — suivi du développement
 
+## 16 novembre — bornes HTTP vérifiées logiciellement
+
+Le [lot des listeners HTTP](evidence/2026-11-16/http-listener-bounds/README.md) passe le check toutes cibles, les deux builds ciblés et **11 tests exacts**. Connexions et premiers en-têtes sont bornés avant routage ; les pools public/contrôle du gateway restent distincts. Guides locaux EN/FR synchronisés. Native17, HTTP/2 après le premier stream, disponibilité sous charge et déploiements réels restent ouverts.
+
 ## 16 novembre — défauts mesurés au démarrage et sur Docker
 
 La [validation ciblée](evidence/2026-11-16/startup-runtime-failures/README.md) donne R9 : **1 PASS / 3 FAIL** sur la source diagnostique privée, avec un refus après COMMIT réellement marqué. Un essai Docker générique réel échoue sur le contrôle de durée avant export ; dix opérations sont tracées et nettoyées. Les corrections startup, publication DATA et supervision du délai avancent séparément. Aucun parcours complet ni gate n’est déclaré qualifié.

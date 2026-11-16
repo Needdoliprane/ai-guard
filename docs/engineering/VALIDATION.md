@@ -1,5 +1,9 @@
 # Validation courante
 
+## 16 novembre — onze régressions HTTP ciblées
+
+[Source, commandes et reçus](evidence/2026-11-16/http-listener-bounds/README.md) : archive c0ec1d20, 2913 fichiers ; check toutes cibles et deux builds RC0 avec artefacts neufs, puis 11/11 cas actifs exacts PASS, sans relance. Clippy ciblé RC0 avec 248 avertissements hors des cinq fichiers modifiés, pas un gate strict. Source et exécutables relus après exécution.
+
 ## 16 novembre — R9 et un essai Docker en échec
 
 [Sources, commandes et reçus](evidence/2026-11-16/startup-runtime-failures/README.md) : build libtest R9 RC0, quatre cas exacts exécutés une fois (1 PASS / 3 FAIL), sans timeout. Le cas moteur Docker unique termine RC101 après 523,12 s, avant export. Root vérifie les sources/empreintes et les dix nettoyages ; données et volumes conservés. Les observations ne ferment aucun constat d’audit.

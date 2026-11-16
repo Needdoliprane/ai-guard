@@ -1,5 +1,9 @@
 # Suivi des audits indépendants
 
+## 16 novembre — NV-07, durcissement borné des listeners
+
+Fingerprint `http:pre-request-admission:unbounded-raw-connections` : fiche primaire privée relue, verdict `needs_validation` préservé. Le [candidat courant](evidence/2026-11-16/http-listener-bounds/README.md) introduit capacité détenue avec le vrai IO et première échéance absolue, puis 11 cas logiciels ciblés passent. Les conditions de déploiement, autres principals, limites process/charge et streams HTTP/2 suivants ne sont pas qualifiés. Aucun flood ni baseline adverse exécuté ; aucune vulnérabilité formelle ni fermeture globale inventée.
+
 ## 14 novembre — fédération C3 : preuve composée bornée, aucun fingerprint clos
 
 Le [run logiciel C3 R3](evidence/2026-11-14/federation-composition/README.md)

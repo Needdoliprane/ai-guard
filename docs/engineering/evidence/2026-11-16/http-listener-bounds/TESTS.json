@@ -1,0 +1,101 @@
+{
+  "schema": 1,
+  "sourceSha256": "c0ec1d20f46eb8f9511fbcb34b74452b4d16a92a702b04a75719b4cddab83f5b",
+  "sourceFiles": 2913,
+  "platform": "macOS ARM64",
+  "toolchain": "Rust1.99.1",
+  "scope": "Targeted shared listener and gateway ownership software tests only",
+  "binaries": [
+    {
+      "target": "lib_test",
+      "sha256": "6087c5d3bfdaa7c25f75860e40b121d0740b56b55b4d84b94240059cd4eeb8a4",
+      "bytes": 305616784
+    },
+    {
+      "target": "integration_test",
+      "sha256": "b967dbe6757e38dbac6826872ba007cdec45e022c71ae9fed9cf3945fa2e136e",
+      "bytes": 6610264
+    }
+  ],
+  "tests": [
+    {
+      "fqn": "bounds_reject_disabled_or_unrepresentable_limits",
+      "status": "PASS",
+      "rc": 0,
+      "invocations": 1
+    },
+    {
+      "fqn": "completed_response_keeps_capacity_until_the_keepalive_io_closes",
+      "status": "PASS",
+      "rc": 0,
+      "invocations": 1
+    },
+    {
+      "fqn": "incomplete_first_headers_expire_without_running_a_handler_then_admit_a_real_get",
+      "status": "PASS",
+      "rc": 0,
+      "invocations": 1
+    },
+    {
+      "fqn": "legitimate_keepalive_serves_two_requests_on_the_same_socket",
+      "status": "PASS",
+      "rc": 0,
+      "invocations": 1
+    },
+    {
+      "fqn": "shutdown_waits_for_the_in_flight_response_and_its_connection_join",
+      "status": "PASS",
+      "rc": 0,
+      "invocations": 1
+    },
+    {
+      "fqn": "a_live_streaming_body_survives_the_initial_header_deadline",
+      "status": "PASS",
+      "rc": 0,
+      "invocations": 1
+    },
+    {
+      "fqn": "http_listener_bounds::lease_tests::cancelled_join_waiter_keeps_capacity_until_real_io_drop_and_task_join",
+      "status": "PASS",
+      "rc": 0,
+      "invocations": 1
+    },
+    {
+      "fqn": "gateway_server::owned_tests::connection_join_error_retires_humans_before_signalling_acceptors",
+      "status": "PASS",
+      "rc": 0,
+      "invocations": 1
+    },
+    {
+      "fqn": "gateway_server::tests::signal_stops_both_acceptors_and_waits_for_real_usage_and_sqlite_commit",
+      "status": "PASS",
+      "rc": 0,
+      "invocations": 1
+    },
+    {
+      "fqn": "gateway_server::tests::caller_cancellation_retires_then_owns_cleanup_until_the_blocking_commit_drains",
+      "status": "PASS",
+      "rc": 0,
+      "invocations": 1
+    },
+    {
+      "fqn": "gateway_server::tests::panic_during_grace_returns_error_only_after_connections_and_real_usage_drain",
+      "status": "PASS",
+      "rc": 0,
+      "invocations": 1
+    }
+  ],
+  "total": 11,
+  "fail": 0,
+  "ignored": 0,
+  "Native17": "NOT_RUN",
+  "capacity100": "NOT_RUN",
+  "productionQualification": false,
+  "qualifications": {
+    "Native17": "NOT_RUN",
+    "deployedServices": "NOT_RUN",
+    "providers": "NOT_RUN",
+    "capacity100": "NOT_RUN",
+    "production": false
+  }
+}

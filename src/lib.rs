@@ -11,6 +11,7 @@ pub mod declared_agents;
 pub mod diagnostics;
 pub mod egress;
 pub mod gateway_server;
+pub mod http_listener_bounds;
 pub mod human_authority;
 pub mod identity;
 pub mod identity_cli;

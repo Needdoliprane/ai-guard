@@ -252,6 +252,18 @@ AGENTSANDBOX_CONFIG_DIR="$AIGUARD_CONFIG" podman compose --project-name agentsan
 
 To stop or recreate that stack, use the CLI `down` and `up` with the same `--runtime`, `--runtime-program`, `--runtime-endpoint` and `--config-dir`: each prepares a new copy and addresses the project by name. Review logs for secrets before sharing them.
 
+<a id="http-listener-limits"></a>
+
+### HTTP connection and header limits
+
+The dashboard, ingress and gateway each limit accepted TCP connections to **128 per listener**, with **15 seconds** to receive the first complete request headers. At the gateway, public and control listeners have separate connection pools. Idle keepalive connections, SSE and upgraded connections occupy a place until their actual connection closes; this is not a limit on requests or HTTP/2 streams. When a pool is full, a new connection can wait before acceptance.
+
+The first deadline starts at acceptance, includes protocol detection and does not restart as bytes arrive. If the first request headers remain incomplete, the connection closes at that deadline. Hyper manages later HTTP/1 header reads with the same 15-second timeout. This does not cover new HTTP/2 streams after the first request. Once the first headers are accepted, the initial deadline does not expire an active response, body or SSE stream; their existing policies, including the ingress body/exchange bounds below, still apply.
+
+These compatibility defaults are fixed in the CLI entry points. There is no CLI option, environment variable or dotenv setting for them. Rust callers can supply validated bounds through `ListenerBounds` and the gateway's `serve_with_listener_bounds`; those are code interfaces, not operator settings. The defaults have not been sized for 100 workers or a process's file-descriptor and memory budget. A socket limit provides neither authentication, tenant quotas nor an anti-DoS guarantee.
+
+If a connection closes, let the client open a new one and retry an authorized read once capacity is available. Before repeating a launch or another mutation whose result is unknown, reconcile the original operation. Identify whether the affected path reaches the dashboard, ingress or gateway public/control listener; use the existing Compose status and bounded logs described above, without assuming that a close proves which limit was reached. A connection close is distinct from the ingress's HTTP 429 body/exchange refusals below.
+
 ### HTTP ingress limits
 
 The public Rust ingress has independent budgets for **16 request bodies being read** and **64 upstream exchanges**. Each body is limited to **256 KiB**, **5 seconds in total** and **2 seconds without a new chunk**, starting when body reading begins. The complete body is read and its upload permit released before an exchange is acquired. A body known to be empty from its stream state bypasses the upload budget; the HTTP method or declared `Content-Length` does not decide this. Public routes retain their fixed destinations and upstream authentication/authorization. These bounds are fixed in the binary; the dotenv file and CLI expose no setting for them.

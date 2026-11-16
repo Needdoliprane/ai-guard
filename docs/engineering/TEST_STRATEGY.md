@@ -1,5 +1,9 @@
 # Stratégie de qualification
 
+## 16 novembre — admission TCP et lecture des en-têtes
+
+La [sélection HTTP](evidence/2026-11-16/http-listener-bounds/TESTS.json) réunit six tests d’intégration, dont cinq cas TCP loopback, une unité de détention du permis et quatre canaris gateway de retrait/drainage réels. Onze fonctions passent une fois chacune ; aucun flood, épuisement de descripteurs, campagne moteur ou suite frontend inutile. Autres plateformes, streams HTTP/2 suivants, budgets globaux et Native17 demandent leurs preuves distinctes.
+
 ## 16 novembre — conserver les oracles en échec
 
 Les [preuves R9/Docker](evidence/2026-11-16/startup-runtime-failures/README.md) restent attachées à leurs deux sources distinctes. Le contrôle startup garde son époque de deux secondes ; le test moteur conserve timeout1s/sleep60s et son garde global30s. Avant nouvel essai moteur, corriger et vérifier hors ligne la supervision des observations/callbacks, puis distinguer armement, envoi d’arrêt et terminal observé. Aucun agrégat avec les doublons R8 ni relance systématique.
