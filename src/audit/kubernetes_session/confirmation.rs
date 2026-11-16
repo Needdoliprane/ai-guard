@@ -1,4 +1,5 @@
-//! In-process evidence of a real, committed before-effect observation.
+//! Local evidence of a checked before-effect observation, either an actual
+//! Store transaction or a nonce-matched live HTTP ACK from the broker client.
 //! This is neither serializable authority nor a CREATE/release/start permit.
 use super::*;
 use crate::api::AuthenticatedControlRecoveryV2;
@@ -8,8 +9,23 @@ pub(crate) struct ConfirmedSessionReservationV2 {
     snapshot: KubernetesSessionReservationSnapshotV2,
     audit_seq: i64,
     audit_hash: String,
+    protected_files: Vec<crate::control_fs::PrivateFile>,
 }
 impl ConfirmedSessionReservationV2 {
+    pub(crate) fn from_live_http_ack(
+        ack: crate::broker::held_create_client::sessions::LiveSessionConfirmationAckV2,
+    ) -> anyhow::Result<Self> {
+        let (tenant, current, files) = ack.into_parts();
+        let mut confirmed = confirmed(&tenant, current)?;
+        confirmed.protected_files = files;
+        Ok(confirmed)
+    }
+    pub(crate) fn revalidate_material(&self) -> anyhow::Result<()> {
+        for file in &self.protected_files {
+            file.revalidate()?;
+        }
+        Ok(())
+    }
     pub(crate) fn tenant_id(&self) -> &str {
         &self.tenant_id
     }
@@ -48,6 +64,7 @@ fn confirmed(
         snapshot: current.snapshot,
         audit_seq: current.last_event_seq,
         audit_hash: current.last_event_hash,
+        protected_files: Vec::new(),
     })
 }
 

@@ -15,7 +15,7 @@ mod model;
 mod mutations;
 mod replay;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use KubernetesSessionReservationFailureV2 as Failure;
 pub(super) const GENESIS_KIND: &str = "control.kubernetes.session.reservation.genesis";

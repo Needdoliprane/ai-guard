@@ -3,8 +3,10 @@
 [English](README.md) · [Français](README.fr.md) · [Kubernetes guide](../kubernetes/README.md)
 
 **No Kubernetes session can be launched with this product.** There is no
-`--runtime kubernetes` option, no session CLI command and no production
-activation. This guide describes the V2 session runtime code that exists in
+`--runtime kubernetes` option or production activation. The R2 session CLI
+prepares, inspects and abandons reservations before any runtime effect
+([section 12](#12-r2-broker-http-and-pre-effect-cli)); its new tests remain `NOT_RUN`.
+This guide describes the V2 session runtime code that exists in
 the Rust sources, what an operator can do today, and the plan to qualify it
 later on the single-node Kubernetes cluster of Docker Desktop. That plan has
 **not been executed against a real cluster**. The [13 November evidence](../../engineering/evidence/2026-11-13/claude-composition/README.md) records 144 selected Kubernetes software parents passing on its exact source, with global RC99 and an explicit subcase gap. The [original record](../../engineering/evidence/2026-11-12/kubernetes-v2-runtime/README.md) retains its dated delivery status.
@@ -32,7 +34,7 @@ no TCP/TLS proof. No product session path reaches the attach.
 |---|---|---|---|
 | A. Library entry with real inputs | `KubernetesRuntime::inspect_session_workspace_claim(name)`: DNS-label name checked before any request, then GET of the two namespace anchors, the PVC and the anchors again. An invalid name is reported as `InvalidAuthority` before any request, a claim that does not meet the requirements of section 3 as `InvalidResponse`, and an absent PVC as `ApiRejected(404)`. | Rust code holding a `KubernetesRuntime`. **No product binary calls it**; a read-only CLI entry, which would map the first two errors to dedicated messages, is only a proposed patch. | Historical selection PASS on its own source; wider mechanics and cluster not qualified by the 45179db targeted run |
 | B. Pure mechanics (crate-internal) | Exact V2 Pod request renderer, admitted-response projection, exact observation parser, journal records. | Crate code only. | Historical selection PASS on its own source; wider mechanics and cluster not qualified by the 45179db targeted run |
-| C. Before-effect lifecycle (crate-internal) | Journal retention chain, observe-only reopen, abandonment before any effect, successor recovery, receipt replay, observe-only reconcile report. | **Nobody in production.** The gateway Store issues the confirmations while the broker keeps the journal; the broker routes that would connect them do not exist yet (Root request R2). | Historical selection PASS on its own source; wider mechanics and cluster not qualified by the 45179db targeted run |
+| C. Before-effect lifecycle | Journal retention chain, live HTTP confirmation and reopen, abandonment before any effect, successor recovery and receipt replay. | R2 broker HTTP and `kubernetes session prepare`, `status`, `abandon` for schema11–13. Native Source17 broker port remains unavailable. The separate runtime reconciliation helper remains internal. | R2 bindings and CLI: NOT_RUN; historical mechanics selections remain attached to their own source |
 | D. Effect mechanics (closed) | Held CREATE of the exact bytes, gate-release PATCH with JSON-Patch `test` operations, DELETE with a UID precondition; S2b preamble-only attach. | A sealed guard whose only implementation exists in tests and is bound to an owned loopback listener. No product path reaches an effect. | Four attach contracts PASS on 1e30e5e and again on 45179db; other selections remain source-specific; real effects and cluster NOT_RUN |
 | S2b worker waiting mode | `ai-guard-provider` dispatches the fixed mode before the provider path. It exchanges Hello/Ready, then refuses any further byte. | The existing binary's waiting-mode entry only; no session launcher. | Seven normal-binary stdio cases PASS on 1e30e5e and again on 45179db; worker image and cluster NOT_RUN |
 | E. Missing seams and qualification | Typed requests R1–R11 to the control owner; this Docker Desktop plan. | — | not started |
@@ -53,9 +55,10 @@ The 13 November results cover only the selections in the [typed record](../../en
   This work does not change that route.
 - **Inspect the Kubernetes authority** with the existing read-only
   `agentsandbox kubernetes doctor` (see the [Kubernetes guide](../kubernetes/README.md#run-the-read-only-cli-diagnostic)).
-- Abandonment, successor recovery, workspace-claim inspection and the
-  reconcile report are **library mechanics awaiting R2**. They are not
-  operator procedures, and no command is documented for them.
+- Prepare/reopen, inspect central state and abandon a before-effect session
+  reservation through the [R2 CLI](#12-r2-broker-http-and-pre-effect-cli).
+  Workspace-claim inspection and the runtime reconcile report remain library
+  mechanics; these commands perform no Kubernetes API request.
 
 Do not edit, rename or delete files in a V2 journal directory to "unblock" a
 session. The journal is evidence; a refusal means reconciliation is needed.
@@ -369,8 +372,9 @@ items below remain open. This guide makes no new control decision.
 - **R1**: central V2 effect states and their migration, including the rule
   that a claim UID is never reused and the central binding of the request
   digest and of the claim UID.
-- **R2**: broker HTTP routes and a live confirmation received over HTTP; they
-  would give the lifecycle mechanics a production caller.
+- **R2**: broker HTTP routes and live confirmation now have a pre-effect
+  caller for schema11–13 in source (section 12, tests NOT_RUN). The native
+  Source17 authenticated broker/transaction port remains to implement.
 - **R3**: a durable deadline armed before a gate release, independent of the
   CLI.
 - **R4**: the frames after the waiting-mode `Ready` (handoff, start, declared
@@ -429,7 +433,8 @@ The attach carries only a bootstrap preamble, with no business data.
 2. Observe the retained exact Pod UID and spec digest, node, running worker
    container ID, start time and image ID, restart count zero and no deletion
    timestamp. The Pod phase alone is not used as proof.
-3. Check the sealed guard and cancellation flag before initiating a request.
+3. Check the sealed guard, cancellation flag and absolute deadline before
+   initiating a request.
 4. Initiate one WebSocket upgrade to the Pod's attach subresource by name,
    using the same HTTPS endpoint, CA and credential as the observations.
    Redirects are refused. Validate the 101 response and the sole subprotocol
@@ -476,6 +481,13 @@ that the peer is not absorbing. Such a write waits until the deadline and
 ends as `AttachDeadline`, before or after Ready; a cancellation requested
 during it is kept separately as the cause. A possibly cut frame makes the
 stream unusable: no further frame is sent.
+
+The transport checks the absolute deadline synchronously after request
+construction and guard validation, immediately before the initiation mark
+and first HTTP poll. An expired request returns `AttachDeadline` with
+`request_initiated=false`, without spending the Pod's single attach. The
+new transport regression for this boundary is `NOT_RUN` on the current
+source; the historical results above do not cover this change.
 
 On a usable stream the owner closes stdin with the v5 message `[255, 0]`,
 then sends a WebSocket close and shuts down the transport. Each step has its
@@ -619,3 +631,82 @@ protection before runtime persistence remains open.
   verbs (EXT-8), feature gates, `stdinOnce`, node logs, signal handling, CNI,
   storage, deadlines and 100-worker capacity remain BLOCKED. Plan step 6 stays
   BLOCKED; source and loopback results do not qualify a cluster.
+
+## 12. R2 broker HTTP and pre-effect CLI
+
+This binding exists in source; compilation, tests and qualification of this
+new lot are `NOT_RUN`. It uses the existing schema11–13 ledger, with no
+migration or added table. The native Source17 port still requires
+`AuthenticatedExecutionBroker`, current grants/source/policy and their
+same-transaction revalidation; it is explicitly refused before reading the
+HTTP body. A shared `runner` is not a substitute broker or cloud identity.
+None of the commands below creates a Pod, releases a gate, attaches a stream
+or executes an AI client.
+
+The gateway must already have the current broker workload identity, its
+Kubernetes grant, tenant `session_reservation_policy` and quota configured
+([existing policies](../kubernetes/README.md#configure-session-reservation-v2-policies)).
+`session_recovery_policy` is a separate installation opt-in for resuming a
+retained abandonment with a successor incarnation. It comes from the tenant
+gateway configuration; the client sends no policy. Without it recovery is
+refused.
+
+The [JSON profile consumed by the CLI](examples/session-control-v2.json)
+contains public example values only. Replace endpoint, tenant, control
+namespace, broker, incarnation and credential with the installation values.
+The token stays in its designated private file; no secret goes in arguments.
+Profile, intent and credentials must be unchanged private regular files
+without links; paths are absolute. Verified HTTPS is required outside an IP
+loopback endpoint. Omit `gateway_ca_file` for public roots; a private CA
+supplies its public chain only. R2 needs no Kubernetes access or credential.
+
+A closed V2 intent is supplied by the existing Rust
+`KubernetesSessionProfileV2::build` and
+`KubernetesSessionReservationIntentV2::new` constructors. The file preserves
+the same IDs/hashes on every retry; this lot adds no interactive profile or
+authorization generator. Do not put a prompt, credential or business argv
+in it: it carries only their commitments defined by the contract.
+
+```console
+agentsandbox kubernetes session prepare --control-file /private/path/control-v2.json --intent-file /private/path/intent-v2.json --journal-dir /private/path/session-journal
+agentsandbox kubernetes session status --control-file /private/path/control-v2.json --journal-dir /private/path/session-journal
+agentsandbox kubernetes session abandon --control-file /private/path/control-v2.json --journal-dir /private/path/session-journal
+```
+
+`prepare` reserves the exact intent, requires a live HTTP ACK of `Reserved`
+with an exact nonce and broker scope, then prepares or reopens the private
+journal. It may create the requested journal directory; `status` and
+`abandon` require an existing directory. A lost response leaves reception
+unknown: repeat `prepare` with the same intent file. The Store replays the
+durable operation without another reservation or quota allocation.
+
+`abandon` retains a stable operation UUID in `abandoned-v2.json` before any
+close POST. A cut ACK after commit is resumed with the same command and
+journal; no replacement UUID is generated. A successor incarnation may
+submit only an already retained abandonment authorized by central policy.
+Without a retained abandonment, use authorized control recovery. Saturated
+audit capacity refuses the mutation and keeps quota; a failure or timeout
+releases nothing.
+
+`status` separates local phase from central state. Every report carries
+`execution_available=false` and `runtime_state="not_observed"`. Errors remain
+errors, without invented empty state or zero. The ACK is verified HTTP
+provenance to the control, not independent proof of its storage, NamespaceUID,
+PVC, confinement or Kubernetes process identity. S5, R1/R3/R4/R5/R7/R10 and
+cloud qualification remain open.
+
+The R2 HTTP contract exposes these routes under `/api/v1/brokers/kubernetes/`:
+
+| Method and suffix | Contract |
+|---|---|
+| GET `session-reservation-protocol` | Authenticated broker identity, schema, policy presence, effects unavailable |
+| POST `session-reservations` | Exact V2 intent; 201 fresh, 200 exact replay |
+| GET `session-reservations/{id}` | Descriptive reservation state for the authenticated broker |
+| POST `session-reservations/{id}/confirmations` | Version2, `request_id` nonce, `reservation_input_hash`; ACK bound to the same reserved state and broker |
+| POST `session-reservations/{id}/abandonments` | V2 `preparation_abandoned` close, expected revision1 and retained UUID; central CAS/audit/replay |
+
+The tenant comes from authenticated identity before body and path. Bodies
+and ACKs are limited to64/128KiB, closed JSON without duplicate members. Each
+control request has a12s timeout, without redirects, ambient proxies or
+automatic retries; incoming body reading is limited to5s. Secrets are refused
+before persistence/distribution and transport errors stay opaque.

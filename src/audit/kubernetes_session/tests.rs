@@ -16,7 +16,7 @@ use uuid::Uuid;
 #[path = "confirmation_tests.rs"]
 mod s2_confirmation_tests;
 
-fn prepare(f: &Fixture) {
+pub(crate) fn prepare(f: &Fixture) {
     let path = f._directory.path().join("tenant.sqlite");
     f.store
         .migrate_kubernetes_policy_v9(&path.with_extension("before9"))
@@ -28,7 +28,7 @@ fn prepare(f: &Fixture) {
         .migrate_kubernetes_session_reservations_v11(&path.with_extension("before11"))
         .unwrap();
 }
-fn intent(f: &Fixture, session_id: Uuid) -> KubernetesSessionReservationIntentV2 {
+pub(crate) fn intent(f: &Fixture, session_id: Uuid) -> KubernetesSessionReservationIntentV2 {
     let binding = KubernetesSessionBindingV2::new(
         &f.intent.authority,
         KubernetesSessionIdsV2 {
@@ -97,7 +97,9 @@ fn intent(f: &Fixture, session_id: Uuid) -> KubernetesSessionReservationIntentV2
     )
     .unwrap()
 }
-fn policy(intent: &KubernetesSessionReservationIntentV2) -> KubernetesSessionReservationPolicyV2 {
+pub(crate) fn policy(
+    intent: &KubernetesSessionReservationIntentV2,
+) -> KubernetesSessionReservationPolicyV2 {
     KubernetesSessionReservationPolicyV2 {
         version: 2,
         decision_ttl_seconds: 60,

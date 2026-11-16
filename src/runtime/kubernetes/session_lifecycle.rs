@@ -2,11 +2,11 @@
 //!
 //! Retains the exact request of one attempt, abandons a reservation that
 //! never issued an effect, recovers it through the existing successor API and
-//! reports an observe-only reconciliation. No production caller exists yet:
-//! the gateway Store mints confirmations while the broker keeps the journal
-//! and the Kubernetes credentials, and the broker routes that would join them
-//! are the Root request R2. Operators use the existing Runner
-//! `control-recovery` route meanwhile.
+//! reports an observe-only reconciliation. The local Store-bound functions
+//! below remain internal mechanics. The `remote` module supplies the R2
+//! production caller through authenticated broker HTTP and private journals;
+//! the separate Runner `control-recovery` route remains available. Neither
+//! path creates, releases, attaches or deletes a Pod.
 //!
 //! Nothing here creates, releases, attaches or deletes a Pod. The only
 //! central mutation is the existing before-effect close, with a stable
@@ -54,6 +54,9 @@ use crate::{
 use serde::Serialize;
 use std::fmt;
 use uuid::Uuid;
+
+#[path = "session_remote.rs"]
+pub(crate) mod remote;
 
 /// Closed lifecycle failures. They carry no server body, path or credential.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

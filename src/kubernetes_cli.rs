@@ -45,6 +45,8 @@ const MAX_TOKEN_BYTES: u64 = 8192;
 const MAX_CONTROL_BYTES: u64 = 16 * 1024;
 const MAX_PLAN_BYTES: u64 = 16 * 1024;
 const PREFLIGHT_GUARD_LIFETIME: Duration = Duration::from_secs(60);
+mod sessions;
+pub use sessions::SessionCliErrorV2;
 
 #[derive(Args)]
 pub struct KubernetesArgs {
@@ -54,6 +56,8 @@ pub struct KubernetesArgs {
 
 #[derive(Subcommand)]
 enum KubernetesCommand {
+    /// Prepare, inspect or abandon a durable session reservation before any runtime effect.
+    Session(sessions::SessionArgs),
     /// Inspect an explicit Kubernetes authority over HTTPS; never admit work.
     Doctor(DoctorCommandArgs),
     /// Audit and inspect a closed Pod profile using server-side dry-run; never start work.
@@ -149,6 +153,7 @@ struct DoctorArgs {
 /// Closed categories never retain parser, filesystem, credential or HTTP data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KubernetesCliError {
+    Session(SessionCliErrorV2),
     InvalidAuthority,
     InvalidCredentials,
     Inspection(KubernetesError),
@@ -172,6 +177,7 @@ pub enum KubernetesCliError {
 impl std::fmt::Display for KubernetesCliError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Session(error) => std::fmt::Display::fmt(error, f),
             Self::InvalidAuthority => f.write_str("Kubernetes authority configuration is invalid or unavailable; use an unchanged private authority file"),
             Self::InvalidCredentials => f.write_str("Kubernetes private credentials or trust are invalid or unavailable; verify the explicit private files"),
             Self::Inspection(error) => std::fmt::Display::fmt(error, f),
@@ -240,6 +246,9 @@ fn control_identity_matches_preflight_scope(
 
 pub async fn execute(args: KubernetesArgs) -> Result<(), KubernetesCliError> {
     match args.command {
+        KubernetesCommand::Session(args) => sessions::execute(args)
+            .await
+            .map_err(KubernetesCliError::Session),
         KubernetesCommand::Doctor(args) => doctor(args).await,
         KubernetesCommand::Preflight(args) => preflight(args).await,
         KubernetesCommand::ReconcileHeldCreate(args) => reconcile_held_create(args).await,

@@ -2597,6 +2597,50 @@ async fn bytes_after_ready_are_refused_even_when_the_bracket_matches() {
 }
 
 #[tokio::test]
+async fn expired_deadline_refuses_attach_before_http_initiation() {
+    let case = Case::new().await;
+    let attempt = case.new_attempt();
+    let claim = attempt.claim().unwrap();
+    let identity_one = fixture_identity().canonical_bytes().unwrap();
+    let start = case.peer.requests().len();
+    // Exercise the actual transport boundary after the caller's observation
+    // would have completed. No scheduler race or elapsed-time guess is needed:
+    // the absolute deadline is already reached when the transport is entered.
+    let request = SessionAttachRequestV2 {
+        pod_name: case.pod_name(),
+        identity_one: &identity_one,
+        attempt: &attempt,
+        until: Instant::now(),
+    };
+    let opening = case.runtime.transport.send_session_attach(
+        case.rendered.intent.authority(),
+        request,
+        case.attach_guard(),
+        &AtomicBool::new(false),
+    );
+    let error = match opening {
+        Err(error) => error,
+        Ok(opening) => {
+            drop(opening);
+            panic!("an expired attach must be refused before initiation");
+        }
+    };
+    assert_eq!(error, DEADLINE);
+    assert!(!attempt.0.initiated.load(Ordering::Acquire));
+    assert!(attempt.report().is_none());
+    assert_eq!(claim.refuse(error, None), DEADLINE);
+    assert_eq!(watched(attempt.join()).await.err(), Some(DEADLINE));
+    let report = attempt.report().unwrap();
+    assert!(!report.request_initiated());
+    assert_eq!(report.end(), None);
+    assert_eq!(report.cause(), None);
+    assert_eq!(case.runtime.attach_slots_available(), MAX_CONCURRENT_ATTACH);
+    tokio::task::yield_now().await;
+    assert!(case.lines_since(start).is_empty());
+    assert_eq!(case.attach_count(), 0);
+}
+
+#[tokio::test]
 async fn silence_is_bounded_before_and_after_ready() {
     let case = Case::new().await;
     // Ready, then silence: the bracket completes and closes by itself,
