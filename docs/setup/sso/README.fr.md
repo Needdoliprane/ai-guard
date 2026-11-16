@@ -657,6 +657,8 @@ AIGUARD_BIN="$(pwd)/target/debug/agentsandbox"
 
 Utilisez l’adresse réelle du gateway. Un gateway local isolé peut employer `http://127.0.0.1:8787`. Le CLI vérifie HTTPS, désactive proxies ambiants, redirects et retries automatiques ; HTTP est limité à une IP loopback littérale. Si le lanceur navigateur système pris en charge est indisponible, recommencez explicitement avec `--browser manual`. Cette option affiche une URL d’autorisation transitoire à ouvrir dans un navigateur externe ; ce n’est pas un flux headless/device/mot de passe. Gardez cette URL privée et hors des logs. Le navigateur doit revenir au listener éphémère de ce même poste.
 
+Le CLI accepte au plus huit connexions callback successives. Une requête malformée ou non corrélée reçoit une réponse fixe 400 sans consommer le login en attente ; seul un code ou refus valide avec le state attendu termine cette réception. Chaque pair dispose de deux secondes au plus pour le parsing et d’une seconde pour la réponse et sa fermeture, tronquées par l’échéance monotone initiale du login et de l’intention native. Aucun pair ne prolonge cette échéance. Annulation, expiration ou huit pairs invalides ferment le listener et imposent un nouveau login explicite. Cette résilience bornée ne protège pas complètement contre la saturation locale ; PKCE, issuer, state et validation des jetons restent obligatoires.
+
 Gardez le processus et son entrée standard ouverts. Après `session_ready`, saisissez `help` ou ces commandes ; remplacez les IDs en majuscules par les valeurs exactes des lectures précédentes :
 
 ```text

@@ -623,7 +623,10 @@ async fn send(child: &mut Child, command: &str) {
 }
 async fn code_callback(fixture: &Fixture, child: &mut Child) {
     let url = authorization(child).await;
-    let mut redirect = callback(&url);
+    code_callback_url(fixture, &url).await;
+}
+async fn code_callback_url(fixture: &Fixture, url: &reqwest::Url) {
+    let mut redirect = callback(url);
     let parameters: std::collections::BTreeMap<_, _> = url
         .query_pairs()
         .map(|(k, v)| (k.into_owned(), v.into_owned()))
@@ -794,11 +797,66 @@ async fn duplicate_callback_parameter_is_refused_before_exchange() {
         .await
         .unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert_eq!(fixture.hits("/realm/token"), 0);
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "an invalid peer must leave the original login pending"
+    );
+    send(&mut child, "logout\n").await;
     let (status, out, err) = finish(child).await;
-    assert!(!status.success());
-    assert!(err.contains("OIDC callback is invalid"));
+    assert!(status.success());
+    assert!(out.contains("session_closed"));
     assert_eq!(fixture.hits("/realm/token"), 0);
     no_secrets(&out, &err);
+}
+
+#[tokio::test]
+async fn unrelated_callbacks_preserve_one_pending_login_until_exact_completion() {
+    let fixture = Fixture::new(true).await;
+    let mut child = fixture.spawn();
+    let url = authorization(&mut child).await;
+    let redirect = callback(&url);
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let mut unrelated = redirect.clone();
+    unrelated.set_path("/unrelated");
+    let mut wrong_code = redirect.clone();
+    wrong_code
+        .query_pairs_mut()
+        .append_pair("state", "wrong-state-callback-canary")
+        .append_pair("code", "private-code-canary");
+    let mut wrong_refusal = redirect;
+    wrong_refusal
+        .query_pairs_mut()
+        .append_pair("state", "wrong-state-callback-canary")
+        .append_pair("error", "access_denied")
+        .append_pair("error_description", "private-error-description");
+    for target in [unrelated, wrong_code, wrong_refusal] {
+        let response = client.get(target).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        let body = response.text().await.unwrap();
+        for secret in [
+            "wrong-state-callback-canary",
+            "private-code-canary",
+            "private-error-description",
+        ] {
+            assert!(!body.contains(secret));
+        }
+        assert_eq!(fixture.hits("/realm/token"), 0);
+        assert!(child.try_wait().unwrap().is_none());
+    }
+    // The original authorization URL supplies the SAME state/nonce/PKCE
+    // transaction; no second begin_login or native intent is requested.
+    code_callback_url(&fixture, &url).await;
+    let ready = next_json(&mut child).await;
+    assert_eq!(ready["status"], "session_ready");
+    assert_eq!(fixture.hits("/realm/token"), 1);
+    no_tokens(&fixture, &ready.to_string());
+    send(&mut child, "logout\n").await;
+    let (status, out, err) = finish(child).await;
+    assert!(status.success());
+    no_secrets(&out, &err);
+    no_tokens(&fixture, &out);
+    no_tokens(&fixture, &err);
 }
 #[tokio::test]
 async fn eof_cancels_pending_native_login_and_closes_its_listener() {
