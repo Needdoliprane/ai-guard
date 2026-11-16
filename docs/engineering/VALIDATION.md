@@ -1,5 +1,9 @@
 # Validation courante
 
+## 16 novembre — résultats R10/R11 et baseline runtime conservés
+
+[Pièces et périmètres](evidence/2026-11-16/startup-runtime-failures/README.md#successors-r10-and-r11-software-results-remain-separate) : R10 échoue sur 6 erreurs de compilation, 21 tests NOT_RUN ; R11 corrige les types/appels, puis 18 PASS / 1 FAIL / 6 NOT_RUN sur 25 sélections. La baseline runtime compile et ses deux oracles finaux reproduisent le défaut après drainage réel. Kubernetes Desktop répond Ready en lecture seule ; aucun test worker/cluster effectué.
+
 ## 16 novembre — onze régressions HTTP ciblées
 
 [Source, commandes et reçus](evidence/2026-11-16/http-listener-bounds/README.md) : archive c0ec1d20, 2913 fichiers ; check toutes cibles et deux builds RC0 avec artefacts neufs, puis 11/11 cas actifs exacts PASS, sans relance. Clippy ciblé RC0 avec 248 avertissements hors des cinq fichiers modifiés, pas un gate strict. Source et exécutables relus après exécution.

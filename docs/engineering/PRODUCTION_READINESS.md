@@ -1,5 +1,9 @@
 # Gates de qualification production
 
+## 16 novembre — startup Native17 toujours non qualifié
+
+La [preuve R11](evidence/2026-11-16/startup-runtime-failures/README.md#successors-r10-and-r11-software-results-remain-separate) ajoute 18 régressions réussies mais conserve un refus du démarrage configuré et six cas non exécutés. Les 13 cas DATA/FS ne qualifient pas la construction complète. Un nœud Kubernetes Ready ne qualifie pas les workers ni leurs frontières. **0/12 gates clos.**
+
 ## 16 novembre — contribution logicielle aux bornes HTTP
 
 Le [lot des listeners](evidence/2026-11-16/http-listener-bounds/README.md) apporte 11 régressions réussies et ses guides EN/FR. G08 reste ouvert : seuils 128/15s non dimensionnés, streams HTTP/2 suivants et disponibilité déployée non qualifiés ; aucune clôture automatique des constats NV-07/V4. **0/12 gates clos.**

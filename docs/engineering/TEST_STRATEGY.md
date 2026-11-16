@@ -1,5 +1,9 @@
 # Stratégie de qualification
 
+## 16 novembre — prérequis observés et profils distincts
+
+Le [plan R11](evidence/2026-11-16/startup-runtime-failures/README.md#successors-r10-and-r11-software-results-remain-separate) exécute les cas DATA/FS, writer et Owner indépendants, puis conserve six dépendants NOT_RUN après le refus du positif configuré. Le timer inclut un oracle cfg(test) ; une mesure séparée doit distinguer corps et observation. Le nouveau test foreign-writer n’est pas exécuté sans ce prérequis. Aucun changement de 2 s/profil ne transforme le FAIL historique en succès.
+
 ## 16 novembre — admission TCP et lecture des en-têtes
 
 La [sélection HTTP](evidence/2026-11-16/http-listener-bounds/TESTS.json) réunit six tests d’intégration, dont cinq cas TCP loopback, une unité de détention du permis et quatre canaris gateway de retrait/drainage réels. Onze fonctions passent une fois chacune ; aucun flood, épuisement de descripteurs, campagne moteur ou suite frontend inutile. Autres plateformes, streams HTTP/2 suivants, budgets globaux et Native17 demandent leurs preuves distinctes.

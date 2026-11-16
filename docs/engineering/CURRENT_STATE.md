@@ -1,5 +1,9 @@
 # État constaté — suivi du développement
 
+## 16 novembre — Native17 compilable, prérequis configuré encore en échec
+
+Le [successeur R11](evidence/2026-11-16/startup-runtime-failures/README.md#successors-r10-and-r11-software-results-remain-separate) compile toutes cibles et passe 18 cas ciblés, dont 13 DATA/FS ; un positif BrokerRoot échoue et six dépendants restent NOT_RUN. Ces modifications privées ne sont pas intégrées au live R8. Les deux reproductions runtime et le snapshot Kubernetes Desktop en lecture seule restent distincts ; aucun gate clos.
+
 ## 16 novembre — bornes HTTP vérifiées logiciellement
 
 Le [lot des listeners HTTP](evidence/2026-11-16/http-listener-bounds/README.md) passe le check toutes cibles, les deux builds ciblés et **11 tests exacts**. Connexions et premiers en-têtes sont bornés avant routage ; les pools public/contrôle du gateway restent distincts. Guides locaux EN/FR synchronisés. Native17, HTTP/2 après le premier stream, disponibilité sous charge et déploiements réels restent ouverts.
