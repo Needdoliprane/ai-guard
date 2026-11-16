@@ -1,5 +1,9 @@
 # Stratégie de qualification
 
+## 16 novembre — passer de la compilation aux comportements natifs
+
+Après la [compilation R13](evidence/2026-11-15/session-control/COMPOSED_FULL_NATIVE_CHECK_R9.md#r11r13-successor-checks-2026-11-1516) toutes cibles réussie, la validation suivante cible 3 vrais tests de sauvegarde/reprise et 9 de fermeture/dette des diagnostics, avec construction libtest, liste et noms exacts contrôlés avant exécution. Ils restent **NOT_RUN** ; ni compilation, ni liste, ni oracle paramétré non appelé ne vaut PASS. Aucun appel modèle ni essai moteur/cluster n’est inclus.
+
 ## 15 novembre — compilation du successeur natif R10
 
 Le [successeur corrigé R10](evidence/2026-11-15/session-control/COMPOSED_FULL_NATIVE_CHECK_R9.md#r10-successor-check-2026-11-15), 3 307 fichiers, a subi un nouveau check toutes cibles : **FAIL, RC 101, 7 erreurs codées**, 2 notes de résumé sans code et 60 avertissements. Une seule invocation Cargo a été exécutée ; aucun test. Collecte, gardes, source/cache et fermeture du CID exact sont vérifiées, sans hausse des compteurs OOM.

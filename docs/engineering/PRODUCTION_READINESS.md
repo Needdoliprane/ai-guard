@@ -1,5 +1,9 @@
 # Gates de qualification production
 
+## 16 novembre — compilation native R13
+
+La [compilation R13](evidence/2026-11-15/session-control/COMPOSED_FULL_NATIVE_CHECK_R9.md#r11r13-successor-checks-2026-11-1516) est **PASS** sur son gel exact, avec 2 065 avertissements. Les tests de comportement, parcours sessions, OIDC/configuration/reprise, runtime et fournisseurs restent à prouver. Cette étape ne ferme aucun gate : **0/12 G01–G12 clos**.
+
 ## 15 novembre — compilation du successeur natif R10
 
 Le [successeur corrigé R10](evidence/2026-11-15/session-control/COMPOSED_FULL_NATIVE_CHECK_R9.md#r10-successor-check-2026-11-15), 3 307 fichiers, a subi un nouveau check toutes cibles : **FAIL, RC 101, 7 erreurs codées**, 2 notes de résumé sans code et 60 avertissements. Une seule invocation Cargo a été exécutée ; aucun test. Collecte, gardes, source/cache et fermeture du CID exact sont vérifiées, sans hausse des compteurs OOM.

@@ -1,5 +1,11 @@
 # État constaté — suivi du développement
 
+## 16 novembre — composition native : compilation réussie, comportements à vérifier
+
+La [compilation R13](evidence/2026-11-15/session-control/COMPOSED_FULL_NATIVE_CHECK_R9.md#r11r13-successor-checks-2026-11-1516) passe toutes les cibles sur le gel de 3 321 fichiers : **RC0, zéro erreur, 2 065 avertissements**. Les contrôles de collecte/source/cache et la fermeture du conteneur sont vérifiés. Les échecs R11/R12 restent documentés sur leurs propres sources.
+
+Aucun test de comportement n’a été exécuté par ce check. Luna prépare une sélection distincte de 3 tests de sauvegarde/reprise et 9 de fermeture/dette des diagnostics. Les raccords OIDC, configuration et réseau suivants restent en cours ; le diagnostic opérateur demeure fermé. Les lots Claude sont en composition, sans qualification de bout en bout. **0/12 gates production clos ; aucun pourcentage fonctionnel global fiable.**
+
 ## 15 novembre — compilation du successeur natif R10
 
 Le [successeur corrigé R10](evidence/2026-11-15/session-control/COMPOSED_FULL_NATIVE_CHECK_R9.md#r10-successor-check-2026-11-15), 3 307 fichiers, a subi un nouveau check toutes cibles : **FAIL, RC 101, 7 erreurs codées**, 2 notes de résumé sans code et 60 avertissements. Une seule invocation Cargo a été exécutée ; aucun test. Collecte, gardes, source/cache et fermeture du CID exact sont vérifiées, sans hausse des compteurs OOM.

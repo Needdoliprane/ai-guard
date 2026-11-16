@@ -58,3 +58,21 @@ Preparation, collection, terminal execution-slot checks and source/cache postche
 - Root verification receipt SHA-256: `0964c6f0bb0922b7f539c15365121584a0efb4caa16d3f10d62689395b222fdd`, recorded at `2026-11-15T21:59:51.865Z`. Root reparsed the strict archive, matched raw JSON and classified coded errors separately from failure-note summaries. Private raw evidence remains retained under the R10 QA record.
 
 Compilation still fails. Tests, formatting and Clippy analysis are **NOT_RUN** in this campaign; no Store, native runtime, provider, worker or cluster behavior is qualified. Any correction after this freeze requires its own source identity and verification. Neither this R10 result nor earlier PASS results apply automatically to the current integration worktree or published branch. **0/12 global production gates closed.**
+
+## R11–R13 successor checks (2026-11-15/16)
+
+These separately frozen filesystem compositions use the same offline/frozen all-targets check command above. They are not Git commits; no test was executed by these checks. Earlier results retain their original scope.
+
+| Freeze | Regular files | Source archive SHA-256 | Actual compiler result | Root verification receipt SHA-256 |
+|---|---:|---|---|---|
+| R11 | 3,307 | `1b6986a38486756b9fd10142a0218bfd63dbbf4c39664c0e8b0133524c0caa9b` | FAIL, RC101; 1 coded error, 1 failure note, 60 warnings | `f89e3a25aebd808de07992e7b8060621f321b06495cf9d161b2ab8387e53581b` |
+| R12 | 3,319 | `a21de5ec1b7330cf297186667227b6e8c7a8c4b9e2fee92c9ed0f2918f91fcab` | FAIL, RC101; 26 coded errors, 2 failure notes, 1,482 warnings | `df5e52ab491f4f0f54cc9e1a8df33076c1620a916e9baf6a6c0a27e80307bb14` |
+| R13 | 3,321 | `be3c991b9642deba07779f014701e151f2b114934e1625a9ebf0e2a60e0ea5f8` | PASS, RC0; 0 errors, 2,065 warnings | `e651efce8c1ac509eac035a7ed56f347ad1652666b8a79822b4d298e1fabf1a0` |
+
+R11 exposes a missing `anyhow::Context` import. R12 includes its reviewed correction and the provider diagnostic leaves with W01/W02/W06 seams; its normal library metadata artifact is reported, but all-targets compilation fails on test compatibility and a missing genuine backup fixture. R13 adds only the reviewed test compatibility corrections and the real migration/Complete/C3/Gateway backup fixture, preserving business guards.
+
+The R12 COMMAND metadata retained stale paths/modes digests from R11. Its actual SOURCE_READY, input/extraction/postcheck hashes identify R12 and were verified; immutable erratum `798da35e47e3f81ee7b3250d572ba98fcc7e8ff86e355b0a9926343253b5d036` records the discrepancy. R13 checks all source identity fields explicitly.
+
+Root independently reparsed each collection, verified source/cache/lock and terminal-slot results, and confirmed removal of each exact QA container. OOM counters did not increase. R13 has one successful build-finished message and zero invalid JSON rows. Its raw Cargo JSON SHA-256 is `84c9ef0015e4bbfe272bef79bdc5f95897401ee632f059ab0e6e0c350f594b4e`; evidence archive SHA-256 is `bd14f0b51fe840da718f44112bd20e6dd91e0173ff20588016669681db72f269` (6,961,152 bytes, 63 regular files). Private raw records remain under the corresponding `native-full-core-check-qa-r11/`, `r12/` and `r13/` folders.
+
+**R13 is a compilation PASS, not a behavior PASS.** Formatting, Clippy and all behavior tests are NOT_RUN in this campaign. A separate programme selects three real backup regressions and nine diagnostic custody/receipt regressions; they remain NOT_RUN until executed and verified. The diagnostic operator gate W04 remains closed; W03/W05 and further OIDC/configuration/cold/E2/enriched successors are outside this freeze. Native sessions, real engines/providers/clusters, restoration and capacity remain unqualified. **0/12 production gates closed; no reliable aggregate functional percentage.**

@@ -1,5 +1,9 @@
 # Validation courante
 
+## 16 novembre — résultat Rust toutes cibles R13
+
+[compilation R13](evidence/2026-11-15/session-control/COMPOSED_FULL_NATIVE_CHECK_R9.md#r11r13-successor-checks-2026-11-1516) : **PASS RC0, 0 erreur, 2 065 avertissements**, une seule invocation offline/frozen, aucune ligne JSON invalide, source/cache/collecte et fermeture vérifiées. R11/R12 conservent leurs FAIL et leurs empreintes distinctes. **Aucun test exécuté** par cette campagne ; la sélection suivante de 12 régressions reste NOT_RUN. Les preuves détaillées et l’erratum de métadonnées R12 sont liés ci-dessus.
+
 ## 15 novembre — compilation du successeur natif R10
 
 Le [successeur corrigé R10](evidence/2026-11-15/session-control/COMPOSED_FULL_NATIVE_CHECK_R9.md#r10-successor-check-2026-11-15), 3 307 fichiers, a subi un nouveau check toutes cibles : **FAIL, RC 101, 7 erreurs codées**, 2 notes de résumé sans code et 60 avertissements. Une seule invocation Cargo a été exécutée ; aucun test. Collecte, gardes, source/cache et fermeture du CID exact sont vérifiées, sans hausse des compteurs OOM.
