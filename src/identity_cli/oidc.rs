@@ -421,8 +421,9 @@ pub async fn execute(args: SsoArgs) -> Result<()> {
         )
         .await?;
     let mut input = input();
-    let result = if let Ok(remaining) = intent.remaining() {
-        let attempt = native_login(&provider, &issuer, args.browser);
+    let result = if intent.remaining().is_ok() {
+        let deadline = intent.deadline.min(tokio::time::Instant::now() + timeout);
+        let attempt = native_login(&provider, &issuer, args.browser, deadline);
         tokio::pin!(attempt);
         tokio::select! {
             biased;
@@ -433,7 +434,7 @@ pub async fn execute(args: SsoArgs) -> Result<()> {
                     Err(anyhow::anyhow!("OIDC login is pending; finish in the browser or cancel with logout or EOF")),
                 _ => Ok(Attempt::Cancelled),
             },
-            result = tokio::time::timeout(remaining.min(timeout), &mut attempt) => result
+            result = tokio::time::timeout_at(deadline, &mut attempt) => result
                 .map_err(|_|anyhow::anyhow!("OIDC login expired; start a new explicit login")).and_then(|r|r),
         }
     } else {
@@ -494,7 +495,16 @@ enum Attempt {
     Cancelled,
     Refused,
 }
-async fn native_login(provider: &OidcProvider, issuer: &str, browser: Browser) -> Result<Attempt> {
+async fn native_login(
+    provider: &OidcProvider,
+    issuer: &str,
+    browser: Browser,
+    deadline: tokio::time::Instant,
+) -> Result<Attempt> {
+    ensure!(
+        tokio::time::Instant::now() < deadline,
+        "OIDC login expired; start a new explicit login"
+    );
     provider.discover().await?;
     let listener = CallbackListener::bind().await?;
     let pending = provider
@@ -508,6 +518,10 @@ async fn native_login(provider: &OidcProvider, issuer: &str, browser: Browser) -
         .find(|(k, _)| k == "state")
         .map(|(_, v)| v.into_owned())
         .ok_or_else(|| anyhow::anyhow!("OIDC authorization request is invalid"))?;
+    ensure!(
+        tokio::time::Instant::now() < deadline,
+        "OIDC login expired; start a new explicit login"
+    );
     match browser {
         Browser::Manual => print_json(
             &serde_json::json!({"version":1,"status":"browser_authorization_required",
@@ -519,7 +533,7 @@ async fn native_login(provider: &OidcProvider, issuer: &str, browser: Browser) -
                 "next_action":"Complete ai-guard sign in in the external browser. EOF or logout cancels."}))?;
         }
     }
-    let callback = listener.receive(issuer).await?;
+    let callback = listener.receive(issuer, &expected_state, deadline).await?;
     let (code, state) = match callback {
         Callback::Code { code, state } => (code, state),
         Callback::Refused { state } => {
@@ -530,6 +544,10 @@ async fn native_login(provider: &OidcProvider, issuer: &str, browser: Browser) -
             return Ok(Attempt::Refused);
         }
     };
+    ensure!(
+        tokio::time::Instant::now() < deadline,
+        "OIDC login expired; start a new explicit login"
+    );
     Ok(Attempt::LoggedIn(Box::new(
         provider.complete_login(pending, &code, &state).await?,
     )))

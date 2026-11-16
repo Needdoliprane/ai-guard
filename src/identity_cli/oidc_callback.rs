@@ -1,19 +1,28 @@
-//! Single-use native callback listener. It never logs or returns callback parameters.
+//! One native login attempt, with bounded sequential peers and no parameter reflection.
 use anyhow::{Result, ensure};
+use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    time::{Instant, timeout_at},
 };
 
 const PATH: &str = "/oidc/callback";
 const MAX_HEADERS: usize = 8192;
 const MAX_QUERY: usize = 4096;
+const MAX_CONNECTIONS: usize = 8;
+const PARSE_TIMEOUT: Duration = Duration::from_secs(2);
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub(super) struct CallbackListener {
     listener: TcpListener,
     authority: String,
 }
+
+#[cfg(test)]
+#[path = "oidc_callback_tests.rs"]
+mod tests;
 pub(super) enum Callback {
     Code { code: String, state: String },
     Refused { state: String },
@@ -36,19 +45,72 @@ impl CallbackListener {
         format!("http://{}{PATH}", self.authority)
     }
 
-    /// This consumes and closes the listener even when parsing or writing fails.
-    pub(super) async fn receive(self, issuer: &str) -> Result<Callback> {
-        let (mut stream, peer) = self
-            .listener
-            .accept()
-            .await
-            .map_err(|_| anyhow::anyhow!("OIDC callback connection is unavailable"))?;
-        ensure!(peer.ip().is_loopback(), "OIDC callback is invalid");
-        let result = tokio::time::timeout(Duration::from_secs(2), self.parse(&mut stream, issuer))
-            .await
-            .map_err(|_| anyhow::anyhow!("OIDC callback exceeded its deadline"))
-            .and_then(|r| r);
-        let success = matches!(&result, Ok(Callback::Code { .. }));
+    /// Only a correlated outcome, the fixed peer cap or the original deadline
+    /// ends the attempt. Dropping this future closes its listener and peer.
+    pub(super) async fn receive(
+        self,
+        issuer: &str,
+        expected_state: &str,
+        deadline: Instant,
+    ) -> Result<Callback> {
+        let state_digest = Sha256::digest(expected_state.as_bytes());
+        for _ in 0..MAX_CONNECTIONS {
+            // Timeout polls its inner future first: do not admit an already
+            // queued connection or outcome after the original deadline.
+            ensure!(
+                Instant::now() < deadline,
+                "OIDC callback exceeded its deadline"
+            );
+            let (mut stream, peer) = timeout_at(deadline, self.listener.accept())
+                .await
+                .map_err(|_| anyhow::anyhow!("OIDC callback exceeded its deadline"))?
+                .map_err(|_| anyhow::anyhow!("OIDC callback connection is unavailable"))?;
+            ensure!(
+                Instant::now() < deadline,
+                "OIDC callback exceeded its deadline"
+            );
+            let parse_deadline = deadline.min(Instant::now() + PARSE_TIMEOUT);
+            let parsed = if peer.ip().is_loopback() {
+                match timeout_at(parse_deadline, self.parse(&mut stream, issuer)).await {
+                    Ok(result) if Instant::now() < parse_deadline => result,
+                    _ => Err(anyhow::anyhow!("OIDC callback exceeded its deadline")),
+                }
+            } else {
+                Err(anyhow::anyhow!("OIDC callback is invalid"))
+            };
+            let correlated = parsed.and_then(|callback| {
+                let state = match &callback {
+                    Callback::Code { state, .. } | Callback::Refused { state } => state,
+                };
+                ensure!(
+                    Sha256::digest(state.as_bytes()) == state_digest,
+                    "OIDC callback is invalid"
+                );
+                Ok(callback)
+            });
+            ensure!(
+                Instant::now() < deadline,
+                "OIDC callback exceeded its deadline"
+            );
+            Self::respond(
+                &mut stream,
+                matches!(&correlated, Ok(Callback::Code { .. })),
+                deadline,
+            )
+            .await;
+            ensure!(
+                Instant::now() < deadline,
+                "OIDC callback exceeded its deadline"
+            );
+            if let Ok(callback) = correlated {
+                return Ok(callback);
+            }
+        }
+        anyhow::bail!("OIDC callback connection limit reached; start a new explicit login")
+    }
+
+    async fn respond(stream: &mut TcpStream, success: bool, deadline: Instant) {
+        let response_deadline = deadline.min(Instant::now() + RESPONSE_TIMEOUT);
         // Fixed local text: no URI, code, state or IdP error reflection.
         let (status, body) = if success {
             (
@@ -65,13 +127,13 @@ impl CallbackListener {
             "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; frame-ancestors 'none'\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
-        let _ = tokio::time::timeout(
-            Duration::from_secs(1),
-            stream.write_all(response.as_bytes()),
-        )
-        .await;
-        let _ = stream.shutdown().await;
-        result
+        if Instant::now() < response_deadline {
+            let _ = timeout_at(response_deadline, async {
+                stream.write_all(response.as_bytes()).await?;
+                stream.shutdown().await
+            })
+            .await;
+        }
     }
     async fn parse(&self, stream: &mut TcpStream, issuer: &str) -> Result<Callback> {
         let invalid = || anyhow::anyhow!("OIDC callback is invalid");
