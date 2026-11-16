@@ -1060,3 +1060,105 @@ fn effect_request_digest_binds_method_path_and_body() {
     let distinct: BTreeSet<&String> = variants.iter().collect();
     assert_eq!(distinct.len(), variants.len());
 }
+
+// Pre-S5 source regressions: real retained HTTPS transport, declared loopback
+// server replies, no production effect guard or cluster qualification.
+#[tokio::test]
+async fn create_201_response_witness_is_affine_and_bound_to_the_original_target() {
+    for original_target in [true, false] {
+        let case = Case::new().await;
+        case.respond(None, created_201);
+        let reply = case
+            .runtime
+            .transport
+            .send_session_effect(
+                &case.runtime.binding,
+                SessionHttpEffectV2::CreateHeld {
+                    request: &case.rendered.request,
+                },
+                case.create_guard(),
+                &AtomicBool::new(false),
+            )
+            .await
+            .unwrap();
+        let response = match reply {
+            SessionHttpResponseV2::CreatedResponse(response) => response,
+            other => panic!("actual bounded POST201 response missing: {other:?}"),
+        };
+        if original_target {
+            let instance =
+                validate_admitted_session_pod(&case.rendered.request, *response).unwrap();
+            assert_eq!(instance.target(), case.rendered.request.target());
+            assert_eq!(instance.pod_uid(), POD_UID);
+        } else {
+            let other = rendered_case();
+            assert_ne!(other.request.target(), case.rendered.request.target());
+            assert_eq!(
+                validate_admitted_session_pod(&other.request, *response).err(),
+                Some(KubernetesSessionRuntimeError::Kubernetes(
+                    KubernetesError::InvalidResponse
+                )),
+            );
+        }
+        assert_eq!(case.effect_count(), 1);
+        assert_eq!(case.peer.requests()[0].line(), format!("POST {CREATE}"));
+        assert_eq!(
+            case.peer.requests()[0].body(),
+            case.rendered.request.bytes()
+        );
+    }
+}
+
+#[tokio::test]
+async fn non_201_or_non_create_http_reply_never_produces_a_create_response_witness() {
+    let case = Case::new().await;
+    let body = admitted(&case.rendered.request);
+    case.respond(None, move |_: &PeerRequest| PeerReply::json(200, &body));
+    let reply = case
+        .runtime
+        .transport
+        .send_session_effect(
+            &case.runtime.binding,
+            SessionHttpEffectV2::CreateHeld {
+                request: &case.rendered.request,
+            },
+            case.create_guard(),
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        reply,
+        SessionHttpResponseV2::Complete { status: 200, .. }
+    ));
+
+    let body = admitted(&case.rendered.request);
+    case.respond(None, move |_: &PeerRequest| PeerReply::json(201, &body));
+    let deletion = delete_body(Some("42"));
+    let digest = effect_request_sha256(
+        SessionEffectKindV2::DeleteExact,
+        &case.fingerprint(),
+        "DELETE",
+        &case.pod_path(),
+        deletion.as_bytes(),
+    );
+    let reply = case
+        .runtime
+        .transport
+        .send_session_effect(
+            &case.runtime.binding,
+            SessionHttpEffectV2::DeleteExact {
+                name: case.rendered.request.target().pod_name(),
+                body: deletion.into_bytes(),
+            },
+            case.guard(SessionEffectKindV2::DeleteExact, &digest),
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        reply,
+        SessionHttpResponseV2::Complete { status: 201, .. }
+    ));
+    assert_eq!(case.effect_count(), 2);
+}

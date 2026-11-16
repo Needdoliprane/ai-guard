@@ -7,6 +7,14 @@ use tokio::{
     time::{Instant, timeout},
 };
 use uuid::Uuid;
+mod batch_io;
+#[cfg(test)]
+mod deadline_driver_tests;
+#[cfg(test)]
+mod deadline_notification_tests;
+mod deadline_supervision;
+#[cfg(test)]
+mod deadline_supervision_tests;
 mod invocation;
 pub mod kubernetes;
 pub(crate) mod launch_profile;
@@ -483,6 +491,22 @@ pub struct RuntimeCommandFailure {
     stderr: Capture,
     private_redactions: Vec<String>,
 }
+/// Private context, never formats stdout or captured bytes. Stderr for a
+/// nonzero exit remains in its original RuntimeCommandFailure source.
+struct CliEvidence(batch_io::BatchIoCollected);
+impl std::fmt::Display for CliEvidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("control invocation collected; bounded diagnostics retained")
+    }
+}
+impl std::fmt::Debug for CliEvidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CliEvidence")
+            .field("stdout_bytes", &self.0.stdout.total_bytes)
+            .field("stderr_moved_to_source", &true)
+            .finish()
+    }
+}
 impl RuntimeCommandFailure {
     /// Raw control evidence, including its truncation boundary. Never log this
     /// capture directly; redact it before decoding and formatting diagnostics.
@@ -754,6 +778,33 @@ impl Runtime {
             .kill_on_drop(true);
         Ok(command)
     }
+    async fn command_async(&self) -> Result<Command> {
+        let runtime = self.clone();
+        deadline_supervision::checked_blocking(move || runtime.command()).await
+    }
+    async fn spawn_capture_command(
+        &self,
+        mut command: Command,
+        args: &[String],
+        environment: &[(&str, &str)],
+    ) -> Result<(batch_io::OwnedBatchIo, Instant)> {
+        let runtime = self.clone();
+        let args = args.to_vec();
+        let environment: Vec<(String, String)> = environment
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect();
+        deadline_supervision::checked_blocking(move || {
+            // Full second check and spawn stay in one non-awaiting unit. No
+            // scheduler-resumption gap is inserted after the final check.
+            runtime.anchor.verify(&runtime.invocation, runtime.kind)?;
+            let child = command.args(args).envs(environment)
+                .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
+                .with_context(|| format!("{} is unavailable; install and start a container runtime. No local fallback exists", runtime.kind))?;
+            let armed = Instant::now();
+            Ok((batch_io::OwnedBatchIo::own_cli(child, 256 * 1024, 64 * 1024), armed))
+        }).await
+    }
     pub async fn cli(&self, args: &[String], duration: Duration) -> Result<Capture> {
         self.cli_env(args, duration, &[]).await
     }
@@ -763,12 +814,12 @@ impl Runtime {
         duration: Duration,
         environment: &[(&str, &str)],
     ) -> Result<Capture> {
-        self.capture_cli(self.command()?, args, duration, environment)
+        self.capture_cli(self.command_async().await?, args, duration, environment)
             .await
     }
     async fn capture_cli(
         &self,
-        mut command: Command,
+        command: Command,
         args: &[String],
         duration: Duration,
         environment: &[(&str, &str)],
@@ -781,35 +832,103 @@ impl Runtime {
                     && !value.chars().any(char::is_control)),
             "runtime environment override is not an approved absolute control configuration directory"
         );
-        self.anchor.verify(&self.invocation, self.kind)?;
-        let mut child=command.args(args).envs(environment.iter().copied()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().with_context(||format!("{} is unavailable; install and start a container runtime. No local fallback exists",self.kind))?;
-        let out = tokio::spawn(capture_stream(
-            child.stdout.take().context("runtime stdout missing")?,
-            256 * 1024,
-        ));
-        let err = tokio::spawn(capture_stream(
-            child.stderr.take().context("runtime stderr missing")?,
-            64 * 1024,
-        ));
-        let status = match timeout(duration, child.wait()).await {
-            Ok(status) => status?,
-            Err(_) => {
-                let _ = child.kill().await;
-                bail!("{} control command timed out", self.kind);
+        let (mut owned, armed) = self
+            .spawn_capture_command(command, args, environment)
+            .await?;
+        let mut causes = Vec::new();
+        let observed = tokio::time::timeout_at(armed + duration, async {
+            match owned.wait_event().await {
+                batch_io::BatchIoEvent::Exited(Ok(_)) | batch_io::BatchIoEvent::OwnerFinished => {}
+                batch_io::BatchIoEvent::Exited(Err(_)) | batch_io::BatchIoEvent::Fault => {
+                    causes.push(anyhow::anyhow!(
+                        "runtime control IO unavailable; original causes retained"
+                    ));
+                    owned.request_transport_kill();
+                }
+            }
+        })
+        .await;
+        if observed.is_err() {
+            causes.push(anyhow::anyhow!("{} control command timed out", self.kind));
+            owned.request_transport_kill();
+        }
+        owned.begin_drain();
+        let mut io = match owned.collect().await {
+            Ok(io) => io,
+            Err(error) => {
+                causes.push(anyhow::Error::new(error));
+                return Err(anyhow::Error::new(deadline_supervision::Failure {
+                    first_cause: None,
+                    moved_fallback: None,
+                    causes,
+                    io: None,
+                    native_state: None,
+                    native_stop: None,
+                    runtime: Some(self.clone()),
+                    managed: None,
+                    notification: None,
+                    work: None,
+                }));
             }
         };
-        let out = out.await??;
-        let err = err.await??;
+        causes.append(&mut io.errors);
+        if !io.stdout_eof || !io.stderr_eof {
+            causes.push(anyhow::anyhow!(
+                "control capture ended without EOF; partial evidence retained"
+            ));
+        }
+        let Some(status) = io.status else {
+            causes.push(anyhow::anyhow!("runtime control wait status is unknown"));
+            return Err(anyhow::Error::new(deadline_supervision::Failure {
+                first_cause: None,
+                moved_fallback: None,
+                causes,
+                io: Some(io),
+                native_state: None,
+                native_stop: None,
+                runtime: Some(self.clone()),
+                managed: None,
+                notification: None,
+                work: None,
+            }));
+        };
         if !status.success() {
-            return Err(RuntimeCommandFailure {
+            let stderr = std::mem::replace(
+                &mut io.stderr,
+                Capture {
+                    bytes: Vec::new(),
+                    total_bytes: 0,
+                    truncated: false,
+                },
+            );
+            let failure = RuntimeCommandFailure {
                 runtime: self.kind,
                 status,
-                stderr: err,
+                stderr,
                 private_redactions: Vec::new(),
+            };
+            if causes.is_empty() {
+                // Preserve the established downcast/redaction interface while
+                // retaining the other bounded bytes behind a private context.
+                return Err(anyhow::Error::new(failure).context(CliEvidence(io)));
             }
-            .into());
+            causes.push(anyhow::Error::new(failure));
         }
-        Ok(out)
+        if !causes.is_empty() {
+            return Err(anyhow::Error::new(deadline_supervision::Failure {
+                first_cause: None,
+                moved_fallback: None,
+                causes,
+                io: Some(io),
+                native_state: None,
+                native_stop: None,
+                runtime: Some(self.clone()),
+                managed: None,
+                notification: None,
+                work: None,
+            }));
+        }
+        Ok(io.stdout)
     }
     pub async fn doctor(&self, allow_rootful: bool) -> Result<RuntimeInfo> {
         let args = match self.kind {
@@ -1022,6 +1141,7 @@ impl Runtime {
             name: spec.name(),
             target,
         };
+        let mut moved_batch_fallback = None;
         let execution = async {
             // The compatibility path also checks the selected logging and
             // stream profile before the first attach/start. Never persist raw
@@ -1039,6 +1159,7 @@ impl Runtime {
                 .await?;
             ensure!(!facts.truncated, "runtime inspection exceeds its bound");
             managed::validate_stream_configuration(spec, &facts.bytes, self.kind)?;
+            let work = deadline_supervision::WorkObservation::for_direct(self, &instance)?;
             self.execute_created(
                 &instance,
                 input,
@@ -1046,15 +1167,24 @@ impl Runtime {
                 stdout_limit,
                 None,
                 None,
+                Some(work),
                 on_started,
             )
             .await
+            .map_err(|failure| {
+                moved_batch_fallback = failure.moved_fallback;
+                anyhow::Error::new(*failure)
+            })
         }
         .await;
         match execution {
             Ok(result) => Ok(RetainedExecution { result, instance }),
             Err(error) => {
-                let stop_observed = self.stop_retained_instance(&instance).await;
+                let stop_observed =
+                    deadline_supervision::resolve_outer_fallback(moved_batch_fallback, || {
+                        self.stop_retained_instance(&instance)
+                    })
+                    .await;
                 Err(AttemptFailure {
                     error,
                     instance: Some(instance),
@@ -1072,105 +1202,386 @@ impl Runtime {
         stdout_limit: usize,
         managed: Option<(&ManagedRuntime, &ContainerObservation)>,
         interactive_secrets: Option<&[String]>,
+        work: Option<std::sync::Arc<deadline_supervision::WorkObservation>>,
         mut on_started: F,
-    ) -> Result<ExecutionResult>
+    ) -> Result<ExecutionResult, Box<deadline_supervision::Failure>>
     where
         F: FnMut(RuntimeState) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
+        use deadline_supervision::{
+            Cause, CauseLatch, Failure, Notification, NotificationState, Supervisor,
+        };
         if let Some(secrets) = interactive_secrets {
-            ensure!(
-                input.is_none(),
-                "interactive transport cannot consume an archive input"
-            );
+            if input.is_some() {
+                return Err(Failure::unmoved(anyhow::anyhow!(
+                    "interactive transport cannot consume an archive input"
+                )));
+            }
+            // The interactive monitor remains a distinct, uncorrected path.
             return self
                 .execute_interactive(instance, duration, managed, secrets, on_started)
-                .await;
+                .await
+                .map_err(Failure::unmoved);
         }
-        let mut command = match managed {
-            Some((managed, _)) => {
-                managed.verify_authority().await?;
-                managed.command()?
+        let work = match (managed, work) {
+            (Some((authority, baseline)), Some(work)) => {
+                work.require_binding(authority, &instance.target, baseline)
+                    .map_err(Failure::unmoved)?;
+                work
             }
-            None => self.command()?,
+            (None, Some(work)) => {
+                work.require_direct_binding(self, instance)
+                    .map_err(Failure::unmoved)?;
+                work
+            }
+            _ => {
+                return Err(Failure::unmoved(anyhow::anyhow!(
+                    "batch observation owner/scope missing or mismatched"
+                )));
+            }
         };
-        command.arg("start").arg("--attach");
-        if input.is_some() {
-            command.arg("--interactive").stdin(Stdio::piped());
+        if let Some((authority, _)) = managed {
+            authority
+                .verify_authority()
+                .await
+                .map_err(Failure::unmoved)?;
         }
-        let mut child = command
-            .arg(&instance.target)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("cannot attach to the session container")?;
-        let stdout = tokio::spawn(capture_stream(
-            child.stdout.take().context("missing stdout")?,
-            stdout_limit,
-        ));
-        let stderr = tokio::spawn(capture_stream(
-            child.stderr.take().context("missing stderr")?,
-            256 * 1024,
-        ));
-        let writer = if let Some(file) = input {
-            let mut sink = child.stdin.take().context("missing archive stdin")?;
-            Some(tokio::spawn(async move {
-                let mut source = tokio::fs::File::from_std(file);
-                tokio::io::copy(&mut source, &mut sink).await
-            }))
-        } else {
-            None
-        };
-        let start = Instant::now();
+        let runtime = self.clone();
+        let authority = managed.map(|(authority, _)| authority.clone());
+        let target = instance.target.clone();
+        let (io, start) = deadline_supervision::checked_blocking(move || {
+            // The original complete final command check stays adjacent to the
+            // effect. The join owns the spawned result, never an untracked PID.
+            let mut command = match authority {
+                Some(authority) => authority.command()?,
+                None => runtime.command()?,
+            };
+            command.arg("start").arg("--attach");
+            if input.is_some() {
+                command.arg("--interactive").stdin(Stdio::piped());
+            }
+            let child = command
+                .arg(target)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .context("cannot attach to the session container")?;
+            let armed = Instant::now();
+            // Own Child and all stdio before the blocking result can be yielded.
+            Ok((
+                batch_io::OwnedBatchIo::own(child, input, stdout_limit),
+                armed,
+            ))
+        })
+        .await
+        .map_err(Failure::unmoved)?;
         let deadline = start + duration;
+        let cause = CauseLatch::default();
+        let stop_cause = cause.clone();
+        let stop_work = work.clone();
+        let stop = self.stop_batch_native(instance, managed, &stop_work, &stop_cause);
+        let mut supervisor = Supervisor::new(io, deadline, cause, stop).with_work(work.clone());
         let mut interval = tokio::time::interval(Duration::from_millis(200));
         let mut observed_start = false;
-        let mut timed_out = false;
-        let status = loop {
-            tokio::select! {
-                status=child.wait()=>break status?,
-                _=tokio::time::sleep_until(deadline)=>{
-                    timed_out=true;let killed=self.execution_kill(&instance.target, managed).await;
-                    if killed.is_err(){ let _=child.kill().await; }
-                    break timeout(Duration::from_secs(10),child.wait()).await.context("runtime attach did not exit after timeout")??;
-                },
-                _=tokio::signal::ctrl_c()=>{let _=self.execution_kill(&instance.target, managed).await;let _=child.kill().await;bail!("session interrupted; stop requested for only its container");},
-                _=interval.tick(),if !observed_start=>{
-                    let state=self.execution_inspect(&instance.target, managed).await?;
-                    if state.has_started(){on_started(state).await?;observed_start=true;}
+        let notification = Notification::new();
+        while !observed_start && !supervisor.attached_exit() && !supervisor.closing() {
+            // Waiting for the next tick is itself supervised. A STOP here must
+            // not start another native observation or callback afterward.
+            let tick = interval.tick();
+            tokio::pin!(tick);
+            supervisor.drive(tick.as_mut()).await;
+            if supervisor.closing() || supervisor.attached_exit() {
+                break;
+            }
+            let result = {
+                let observation = async {
+                    let state = self
+                        .inspect_batch_state(&instance.target, managed, &work)
+                        .await?;
+                    if state.has_started() {
+                        notification.notify(state, &mut on_started).await?;
+                        Ok::<bool, anyhow::Error>(true)
+                    } else {
+                        Ok(false)
+                    }
+                };
+                tokio::pin!(observation);
+                supervisor.drive(observation.as_mut()).await
+            };
+            match result {
+                Ok(started) => observed_start = started,
+                Err(error) => {
+                    supervisor.operation_failed(error);
                 }
             }
+        }
+        supervisor.finish_stop().await;
+        supervisor.wait_attach().await;
+        supervisor.finish_stop().await;
+        let already_closing = supervisor.closing();
+        let mut state = None;
+        let final_result = {
+            let final_observation = async {
+                let observed = self
+                    .inspect_batch_state(&instance.target, managed, &work)
+                    .await?;
+                state = Some(observed.clone());
+                // Preserve the existing owed final notification, including
+                // Started observed only after STOP. Engaged/failed is NOT retry.
+                if notification.get() == NotificationState::NotEngaged && observed.has_started() {
+                    notification.notify(observed, &mut on_started).await?;
+                }
+                Ok::<(), anyhow::Error>(())
+            };
+            tokio::pin!(final_observation);
+            supervisor.drive(final_observation.as_mut()).await
         };
-        let state = self.execution_inspect(&instance.target, managed).await?;
-        if !observed_start && state.has_started() {
-            on_started(state.clone()).await?;
+        if let Err(error) = final_result {
+            supervisor.operation_failed(error);
         }
-        if !state.has_started() {
-            bail!("runtime never reported a StartedAt value; command start cannot be confirmed");
-        }
-        state.validate_terminal(self.kind)?;
-        if let Some(writer) = writer {
-            match timeout(Duration::from_secs(5), writer).await {
-                Ok(Ok(Ok(_))) => {}
-                other if status.success() => bail!("workspace archive transfer failed: {other:?}"),
-                _ => {}
+        supervisor.finish_stop().await;
+        if !already_closing && supervisor.closing() {
+            // The final inspection raced the first STOP. Reconcile only the
+            // terminal facts after that stop; never re-enter on_started.
+            match self
+                .inspect_batch_state(&instance.target, managed, &work)
+                .await
+            {
+                Ok(observed) => state = Some(observed),
+                Err(error) => supervisor.operation_failed(error),
             }
         }
-        let stdout = timeout(Duration::from_secs(10), stdout)
-            .await
-            .context("stdout pipe did not close")???;
-        let stderr = timeout(Duration::from_secs(10), stderr)
-            .await
-            .context("stderr pipe did not close")???;
-        Ok(ExecutionResult {
-            stdout,
-            stderr,
-            state,
-            exit_code: status.code(),
-            timed_out,
-            duration_ms: start.elapsed().as_millis(),
-            transport_stop_reason: None,
-        })
+        let validity = match state.as_ref() {
+            Some(state) if state.has_started() => state.validate_terminal(self.kind),
+            _ => Err(anyhow::anyhow!(
+                "runtime never reported a StartedAt value; command start cannot be confirmed"
+            )),
+        };
+        if let Err(error) = validity {
+            let was_closing = supervisor.closing();
+            supervisor.operation_failed(error);
+            supervisor.finish_stop().await;
+            if !was_closing {
+                // The original outer failure fallback is now completed here.
+                // This read is diagnostic reconciliation, not a start retry.
+                match self
+                    .inspect_batch_state(&instance.target, managed, &work)
+                    .await
+                {
+                    Ok(observed) => state = Some(observed),
+                    Err(error) => supervisor.operation_failed(error),
+                }
+            }
+        }
+        // No consuming timeout: the same IO owner's handle is awaited to actual
+        // completion. Its own unchanged budgets retain late outcomes/causes.
+        let mut collected = match supervisor.io.collect().await {
+            Ok(io) => Some(io),
+            Err(error) => {
+                supervisor.errors.push(anyhow::Error::new(error));
+                None
+            }
+        };
+        if let Some(io) = collected.as_mut() {
+            supervisor.errors.append(&mut io.errors);
+            if !io.stdout_eof || !io.stderr_eof {
+                supervisor.errors.push(anyhow::anyhow!(
+                    "batch capture ended without EOF; partial evidence retained"
+                ));
+            }
+            if io.status.is_none() {
+                supervisor
+                    .errors
+                    .push(anyhow::anyhow!("batch attach has no observed wait status"));
+            }
+        }
+        let moved_fallback =
+            deadline_supervision::outer_fallback_decision(&work, supervisor.stop_result.as_ref());
+        let mut native_stop = None;
+        if let Some(stop) = supervisor.stop_result.as_mut() {
+            supervisor.errors.append(&mut stop.errors);
+            native_stop = stop.evidence.take();
+        }
+        let timed_out = supervisor.cause.get() == Some(Cause::Deadline);
+        match (collected, state) {
+            (Some(io), Some(state)) if supervisor.errors.is_empty() => match io.status {
+                Some(status) => Ok(ExecutionResult {
+                    stdout: io.stdout,
+                    stderr: io.stderr,
+                    state,
+                    exit_code: status.code(),
+                    timed_out,
+                    duration_ms: start.elapsed().as_millis(),
+                    transport_stop_reason: None,
+                }),
+                None => Err(Box::new(Failure {
+                    first_cause: supervisor.cause.get(),
+                    moved_fallback,
+                    causes: vec![anyhow::anyhow!("batch attach wait not collected")],
+                    io: Some(io),
+                    native_state: Some(state),
+                    native_stop,
+                    runtime: Some(self.clone()),
+                    managed: managed.map(|(authority, _)| authority.clone()),
+                    notification: Some(notification.get()),
+                    work: Some(work),
+                })),
+            },
+            (io, state) => Err(Box::new(Failure {
+                first_cause: supervisor.cause.get(),
+                moved_fallback,
+                causes: supervisor.errors,
+                io,
+                native_state: state,
+                native_stop,
+                runtime: Some(self.clone()),
+                managed: managed.map(|(authority, _)| authority.clone()),
+                notification: Some(notification.get()),
+                work: Some(work),
+            })),
+        }
+    }
+
+    /// The same owned stop future used by the real batch supervisor. A cached
+    /// terminal shortcut has performed no native fallback: contradiction must
+    /// not preserve that exemption through moved_outer_fallback (R2-F01).
+    async fn stop_batch_native(
+        &self,
+        instance: &CreatedInstance,
+        managed: Option<(&ManagedRuntime, &ContainerObservation)>,
+        work: &deadline_supervision::WorkObservation,
+        cause: &deadline_supervision::CauseLatch,
+    ) -> deadline_supervision::NativeStop {
+        use deadline_supervision::{Cause, NativeStop, StopEvidence};
+        let binding = match managed {
+            Some((authority, baseline)) => {
+                work.require_binding(authority, &instance.target, baseline)
+            }
+            None => work.require_direct_binding(self, instance),
+        };
+        if let Err(error) = binding {
+            return NativeStop {
+                observed_stopped: false,
+                evidence: None,
+                errors: vec![error],
+                moved_outer_fallback: false,
+            };
+        }
+        let moved_outer_fallback = matches!(
+            cause.get(),
+            Some(Cause::OperationFailure | Cause::IoFailure)
+        );
+        if let Some(evidence) = work.terminal_evidence() {
+            return NativeStop {
+                observed_stopped: true,
+                evidence: Some(evidence),
+                errors: Vec::new(),
+                moved_outer_fallback: false,
+            };
+        }
+        match managed {
+            Some((authority, baseline)) => {
+                match authority
+                    .stop_snapshot_target(&instance.target, baseline)
+                    .await
+                {
+                    Ok(observed) => NativeStop {
+                        observed_stopped: true,
+                        evidence: Some(StopEvidence::Managed(Box::new(observed))),
+                        errors: Vec::new(),
+                        moved_outer_fallback,
+                    },
+                    Err(error) => NativeStop {
+                        observed_stopped: false,
+                        evidence: None,
+                        errors: vec![error],
+                        moved_outer_fallback,
+                    },
+                }
+            }
+            None if moved_outer_fallback => self.collect_batch_fallback(instance).await,
+            None => match self.kill_container(&instance.target).await {
+                Ok(()) => NativeStop {
+                    observed_stopped: false,
+                    evidence: None,
+                    errors: Vec::new(),
+                    moved_outer_fallback,
+                },
+                Err(error) => NativeStop {
+                    observed_stopped: false,
+                    evidence: None,
+                    errors: vec![error],
+                    moved_outer_fallback,
+                },
+            },
+        }
+    }
+
+    async fn inspect_batch_state(
+        &self,
+        target: &str,
+        managed: Option<(&ManagedRuntime, &ContainerObservation)>,
+        work: &deadline_supervision::WorkObservation,
+    ) -> Result<RuntimeState> {
+        // Binding was checked against this exact Runtime/CreatedInstance before
+        // spawn. The private scope performs the same actual native inspection,
+        // closes WORK on a validated terminal, then returns descriptive state.
+        if let Some((authority, created)) = managed {
+            work.require_binding(authority, target, created)?;
+        } else {
+            work.require_direct_target(self, target)?;
+        }
+        work.inspect().await
+    }
+
+    /// Same operation ordering as the bare Runtime's original error fallback.
+    /// Preserve its causes instead of reducing the actual stop to a caller bool.
+    async fn collect_batch_fallback(
+        &self,
+        instance: &CreatedInstance,
+    ) -> deadline_supervision::NativeStop {
+        use deadline_supervision::{NativeStop, StopEvidence};
+        let not_running = |state: &RuntimeState| {
+            !state.running
+                && matches!(
+                    state.status.as_str(),
+                    "created" | "initialized" | "configured" | "exited" | "stopped" | "dead"
+                )
+        };
+        let mut errors = Vec::new();
+        match self.inspect_target(&instance.target).await {
+            Ok(state) if not_running(&state) => {
+                return NativeStop {
+                    observed_stopped: true,
+                    evidence: Some(StopEvidence::Bare(state)),
+                    errors,
+                    moved_outer_fallback: true,
+                };
+            }
+            Ok(_) => {}
+            Err(error) => errors.push(error),
+        }
+        if let Err(error) = self.kill_container(&instance.target).await {
+            errors.push(error);
+        }
+        let state = match self.inspect_target(&instance.target).await {
+            Ok(state) => Some(state),
+            Err(error) => {
+                errors.push(error);
+                None
+            }
+        };
+        let observed_stopped = state.as_ref().is_some_and(not_running);
+        if !observed_stopped {
+            errors.push(anyhow::anyhow!("bare Runtime stop remains unknown"));
+        }
+        NativeStop {
+            observed_stopped,
+            evidence: state.map(StopEvidence::Bare),
+            errors,
+            moved_outer_fallback: true,
+        }
     }
     /// Batch transport for a service whose enforcer was armed before the claim.
     /// There is deliberately no Ctrl-C subscription or business duration here.

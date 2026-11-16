@@ -326,6 +326,14 @@ Pour produire un changement volontaire uniquement dans la copie de travail :
 
 Cette autre session reçoit une nouvelle copie du projet. `observe` ne signifie pas que tous les effets transitifs sont médiés ou compris. Choisir `review` lorsqu'une demande exige une approbation humaine : examiner la demande exacte puis reprendre son hash complet avec `--approve-hash` en la soumettant à nouveau. Des entrées modifiées nécessitent une nouvelle décision ; ne jamais approuver un hash sans rapport pour contourner un refus.
 
+### Arrêt et fin d'un batch
+
+Pour un batch non interactif, les demandes d'arrêt et l'échéance de travail restent prises en compte pendant une inspection du moteur ou l'attente de l'acquittement de démarrage. La fin exige des faits terminaux natifs pour l'instance créée. Le chemin runtime direct valide l'état de cette instance ; l'exécution gérée vérifie aussi l'autorité runtime retenue, la configuration de la sandbox et l'allocation. La sortie du CLI du moteur ou la fermeture d'un tube de sortie ne prouvent pas, seules, la fin du worker.
+
+Dès que ces faits terminaux sont validés, l'échéance de travail est fermée avant d'attendre un éventuel acquittement de démarrage encore en cours. Un timeout ou un arrêt déjà sélectionné garde son motif initial. L'audit obligatoire, le même acquittement en cours et la collecte des entrées/sorties doivent encore se terminer ; cette exécution ne recommence pas un acquittement déjà tenté, même s'il a échoué. Un acquittement lent après une fin prouvée ne crée pas un nouveau timeout de travail. Les faits terminaux manquants, une collecte incomplète et les erreurs restent explicites, avec les données de session et les sorties partielles conservées pour réconciliation. Préserver session, configuration et volume worker ; utiliser le statut et la reprise du worker enregistré avant de tenter un autre démarrage.
+
+Le timeout configuré n'est ni un budget global de temps écoulé ni une garantie d'arrêt temps réel, même réglé à une seconde. Inspection, contrôles d'autorité, audit et drainage peuvent prendre plus longtemps, notamment si le poste ou le moteur est bloqué. Ce comportement batch ne couvre ni les sessions terminal interactives ni le transport du broker armé par un gardien indépendant, et ne rend pas sûre l'annulation externe d'une tâche ou la terminaison brutale du CLI.
+
 ## Vérifier l'audit d'un tenant SetupV2
 
 Dans le `tenants.json` de l'installation préparée, repérer le champ `viewer_token_file` du tenant autorisé. Utiliser le fichier privé correspondant tel qu'il est accessible depuis la machine qui exécute le CLI. Le gateway détermine le tenant à partir de ce credential.

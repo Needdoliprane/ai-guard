@@ -5,7 +5,7 @@
 **Aucune session Kubernetes ne peut être lancée avec ce produit.** Il n'existe
 ni option `--runtime kubernetes`, ni activation de production. La CLI R2
 prépare, inspecte et abandonne des réservations avant tout effet runtime
-([section 12](#12-http-broker-r2-et-cli-avant-effet)) ; ses nouveaux tests restent `NOT_RUN`.
+([section 12](#12-http-broker-r2-et-cli-avant-effet)).
 Ce guide décrit le code du runtime de session V2 présent dans les
 sources Rust, ce qu'un opérateur peut faire aujourd'hui, et le plan qui le
 qualifiera plus tard sur le cluster Kubernetes à un nœud de Docker Desktop. Ce
@@ -95,6 +95,12 @@ qu'une réconciliation est nécessaire.
   Root Q6), jamais une invocation métier. Elle n'a ni
   environnement, ni Secret, ni jeton, ni chemin hôte, ni jeton de
   service-account, et porte un scheduling gate.
+- **Réponse au CREATE.** Un HTTP `201` de Kubernetes doit satisfaire les
+  vérifications de correspondance exacte avec la requête de Pod retenue avant
+  de produire une cible typée, non duplicable. L'acceptation HTTP n'est ni un
+  état `Running` observé, ni une preuve indépendante de l'identité du Namespace,
+  du cluster ou des droits RBAC. L'exécution en production et le chemin broker
+  natif Source17 restent indisponibles.
 - **Chaîne d'effets.** CREATE (retenu derrière le gate), levée du gate,
   attachement, démarrage et arrêt exigent chacun une preuve centrale distincte
   qui n'existe pas encore. « Autorisé à créer un Pod » ne signifie jamais
@@ -691,14 +697,14 @@ par le runtime reste ouverte.
 
 ## 12. HTTP broker R2 et CLI avant effet
 
-Ce raccord est implémenté en source ; compilation, tests et qualification de
-ce nouveau lot sont `NOT_RUN`. Il utilise le ledger existant des schémas11–13,
-sans migration ni table ajoutée. Le port natif Source17 exige encore
-`AuthenticatedExecutionBroker`, les grants/source/policy courants et leur
-revalidation dans la même transaction ; il est refusé explicitement avant
-lecture du corps HTTP. Un `runner` partagé n'est pas une identité broker ou
-cloud de remplacement. Aucune commande ci-dessous ne crée de Pod, ne lève de
-gate, n'attache de flux ou n'exécute de client IA.
+Ces commandes préparent, inspectent et abandonnent des réservations avant tout
+effet runtime, avec le ledger existant des schémas11–13. Le chemin broker natif
+Source17 reste indisponible : il exige `AuthenticatedExecutionBroker`,
+les grants/source/policy courants et leur revalidation dans la même
+transaction, et il est refusé avant lecture du corps HTTP. Un `runner` partagé
+n'est pas une identité broker ou cloud de remplacement. L'exécution en
+production reste indisponible. Aucune commande ci-dessous ne crée de Pod, ne
+lève de gate, n'attache de flux ou n'exécute de client IA.
 
 Le gateway doit déjà avoir son identité workload broker courante, son grant
 Kubernetes, `session_reservation_policy` et le quota du tenant configurés

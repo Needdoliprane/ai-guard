@@ -3,6 +3,14 @@ use super::*;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
+mod batch_observation;
+pub(super) use batch_observation::{
+    BatchObservationScope, NativeBatchTerminal, runtime_state as batch_runtime_state,
+};
+
+#[cfg(all(test, unix))]
+mod deadline_semantic_tests;
+
 pub(crate) mod relay;
 
 #[cfg(all(test, unix))]
@@ -976,6 +984,10 @@ impl ManagedRuntime {
         }
         Ok(command)
     }
+    pub(super) async fn command_async(&self) -> Result<Command> {
+        let runtime = self.clone();
+        super::deadline_supervision::checked_blocking(move || runtime.command()).await
+    }
     async fn cli(&self, args: &[String], duration: Duration) -> Result<Capture> {
         self.cli_sensitive(args, duration, &[]).await
     }
@@ -990,7 +1002,7 @@ impl ManagedRuntime {
             private_redactions.extend([binding.marker_volume.clone(), binding.nonce.to_string()]);
         }
         self.runtime
-            .capture_cli(self.command()?, args, duration, &[])
+            .capture_cli(self.command_async().await?, args, duration, &[])
             .await
             .map_err(|mut error| {
                 // Keep original bytes and capture metadata until the caller can
@@ -1545,6 +1557,7 @@ impl ManagedRuntime {
             );
         }
         let id = handle.id.clone();
+        let mut moved_batch_fallback = None;
         let mut stop_snapshot = baseline.map(|observation| OwnedContainerSnapshot {
             handle: handle.clone(),
             observation: observation.clone(),
@@ -1594,11 +1607,27 @@ impl ManagedRuntime {
                 name: handle.name.clone(),
                 target: id.clone(),
             };
+            let batch_work = if duration.is_some() && !spec.security_preset.is_interactive() {
+                Some(super::deadline_supervision::WorkObservation::new(Some(
+                    self.batch_observation_scope(&id, &created.observation)?,
+                )))
+            } else { None };
             let on_started = tokio::sync::Mutex::new(on_started);
             let callback = |_| async {
                     // RuntimeState cannot represent every unknown fact. Inspect
                     // again instead of promoting its compatibility bool defaults.
-                    let observation = self.observe(&handle).await?;
+                    let observation = match batch_work.as_ref() {
+                        Some(work) => {
+                            // Preserve observe(handle)'s original pure checks as
+                            // well as the actual observation/created validation.
+                            self.validate_handle(&handle)?;
+                            work.require_binding(self, &handle.id, &created.observation)?;
+                            let observed = work.observe().await?;
+                            ensure!(observed.name == handle.name, "runtime owned instance name changed");
+                            observed
+                        }
+                        None => self.observe(&handle).await?,
+                    };
                     observation.validate_identity_allocation(&created.observation)?;
                     let mut callback = on_started.lock().await;
                     callback(observation).await
@@ -1612,8 +1641,12 @@ impl ManagedRuntime {
                     &instance, input, duration.context("missing legacy runtime duration")?, stdout_limit,
                     Some((self, &created.observation)),
                     spec.security_preset.is_interactive().then_some(spec.terminal_secrets.0.as_slice()),
+                    batch_work.clone(),
                     callback,
-                ).await?
+                ).await.map_err(|failure| {
+                    moved_batch_fallback = failure.moved_fallback;
+                    anyhow::Error::new(*failure)
+                })?
             };
             let terminal = self.observe(&handle).await?;
             terminal.validate_terminal(self.binding.kind, &created.observation)?;
@@ -1633,10 +1666,16 @@ impl ManagedRuntime {
                         "owned instance {} retained; independent enforcement and terminal reconciliation remain required", handle.id
                     )));
                 }
-                let stopped = match stop_snapshot.as_ref() {
-                    Some(snapshot) => self.stop_snapshot_owned(snapshot).await.is_ok(),
-                    None => false,
-                };
+                let stopped = super::deadline_supervision::resolve_outer_fallback(
+                    moved_batch_fallback,
+                    || async {
+                        match stop_snapshot.as_ref() {
+                            Some(snapshot) => self.stop_snapshot_owned(snapshot).await.is_ok(),
+                            None => false,
+                        }
+                    },
+                )
+                .await;
                 let diagnosis = if stopped {
                     "runtime observed it not running"
                 } else {

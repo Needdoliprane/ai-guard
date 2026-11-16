@@ -5,7 +5,7 @@
 **No Kubernetes session can be launched with this product.** There is no
 `--runtime kubernetes` option or production activation. The R2 session CLI
 prepares, inspects and abandons reservations before any runtime effect
-([section 12](#12-r2-broker-http-and-pre-effect-cli)); its new tests remain `NOT_RUN`.
+([section 12](#12-r2-broker-http-and-pre-effect-cli)).
 This guide describes the V2 session runtime code that exists in
 the Rust sources, what an operator can do today, and the plan to qualify it
 later on the single-node Kubernetes cluster of Docker Desktop. That plan has
@@ -87,6 +87,12 @@ session. The journal is evidence; a refusal means reconciliation is needed.
   (`kubernetes-session-wait-v2`, fixed by Root decision Q6), never a
   business invocation. It has no environment, Secret, token, host path or
   service-account token, and a scheduling gate.
+- **CREATE response.** A Kubernetes HTTP `201` must satisfy the exact
+  correspondence checks against the retained Pod request before a typed,
+  non-duplicable target can be produced. HTTP acceptance is not an observed
+  `Running` state or independent proof of Namespace identity, cluster identity
+  or RBAC. Production execution and the native Source17 broker path remain
+  unavailable.
 - **Effect chain.** CREATE (held behind the gate), release, attach, start and
   stop each need a separate central proof that does not exist yet. "Allowed to
   create a Pod" never means "allowed to start it".
@@ -634,14 +640,14 @@ protection before runtime persistence remains open.
 
 ## 12. R2 broker HTTP and pre-effect CLI
 
-This binding exists in source; compilation, tests and qualification of this
-new lot are `NOT_RUN`. It uses the existing schema11–13 ledger, with no
-migration or added table. The native Source17 port still requires
-`AuthenticatedExecutionBroker`, current grants/source/policy and their
-same-transaction revalidation; it is explicitly refused before reading the
-HTTP body. A shared `runner` is not a substitute broker or cloud identity.
-None of the commands below creates a Pod, releases a gate, attaches a stream
-or executes an AI client.
+These commands prepare, inspect and abandon reservations before any runtime
+effect, using the existing schema11–13 ledger. The native Source17 broker
+path remains unavailable: it requires `AuthenticatedExecutionBroker`,
+current grants/source/policy and their same-transaction revalidation, and is
+refused before reading the HTTP body. A shared `runner` is not a substitute
+broker or cloud identity. Production execution remains unavailable. None of the
+commands below creates a Pod, releases a gate, attaches a stream or executes
+an AI client.
 
 The gateway must already have the current broker workload identity, its
 Kubernetes grant, tenant `session_reservation_policy` and quota configured

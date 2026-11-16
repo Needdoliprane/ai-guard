@@ -19,6 +19,7 @@ use super::{
         SessionObservedV2, parse_session_observation, validate_admitted_session_pod,
     },
     session_pod::{KubernetesSessionPodRequestV2, SESSION_SCHEDULING_GATE},
+    transport::CreatedSessionResponseV2,
     valid_dns_label,
 };
 use serde_json::{Map, Value, json};
@@ -130,6 +131,8 @@ impl SessionHttpEffectV2<'_> {
 /// Answer of an initiated effect request: the effect may have happened.
 #[derive(Debug)]
 pub(in crate::runtime::kubernetes) enum SessionHttpResponseV2 {
+    /// Real bounded 201 of this exact CREATE POST; still needs admission checks.
+    CreatedResponse(Box<CreatedSessionResponseV2>),
     /// Status and body read within the response bound.
     Complete { status: u16, bytes: Vec<u8> },
     /// Transport error, timeout, unreadable or oversized body.
@@ -282,12 +285,15 @@ impl KubernetesRuntime {
             .await
             .map_err(KubernetesSessionRuntimeError::Kubernetes)?;
         let effect = SessionHttpEffectV2::CreateHeld { request };
-        let (status, bytes) = match self
+        let response = match self
             .transport
             .send_session_effect(&self.binding, effect, guard, cancelled)
             .await?
         {
-            SessionHttpResponseV2::Complete { status, bytes } => (status, bytes),
+            SessionHttpResponseV2::CreatedResponse(response) => response,
+            SessionHttpResponseV2::Complete { status, .. } => {
+                return Ok(ownership_unknown(Some(status), rejected(status)));
+            }
             SessionHttpResponseV2::Uncertain { status, error } => {
                 return Ok(ownership_unknown(
                     status,
@@ -295,17 +301,16 @@ impl KubernetesRuntime {
                 ));
             }
         };
-        if status != 201 {
-            return Ok(ownership_unknown(Some(status), rejected(status)));
-        }
-        let instance = match validate_admitted_session_pod(request, &bytes) {
+        // Only the exact transport CREATE201 can produce CreatedResponse.
+        // Keep that observed status on either later ambiguous outcome.
+        let instance = match validate_admitted_session_pod(request, *response) {
             Ok(instance) => instance,
-            Err(cause) => return Ok(ownership_unknown(Some(status), cause)),
+            Err(cause) => return Ok(ownership_unknown(Some(201), cause)),
         };
         // Detection after the possible effect, not prevention.
         if let Err(error) = self.verify_active_authority().await {
             return Ok(ownership_unknown(
-                Some(status),
+                Some(201),
                 KubernetesSessionRuntimeError::Kubernetes(error),
             ));
         }
@@ -359,6 +364,12 @@ impl KubernetesRuntime {
             .await?
         {
             SessionHttpResponseV2::Complete { status, bytes } => (status, bytes),
+            SessionHttpResponseV2::CreatedResponse(_) => {
+                return Ok(SessionReleaseOutcomeV2::Uncertain {
+                    http_status: Some(201),
+                    cause: INVALID,
+                });
+            }
             SessionHttpResponseV2::Uncertain { status, error } => {
                 return Ok(SessionReleaseOutcomeV2::Uncertain {
                     http_status: status,
@@ -437,6 +448,12 @@ impl KubernetesRuntime {
             .await?
         {
             SessionHttpResponseV2::Complete { status, .. } => status,
+            SessionHttpResponseV2::CreatedResponse(_) => {
+                return Ok(SessionDeleteOutcomeV2::Uncertain {
+                    http_status: Some(201),
+                    cause: INVALID,
+                });
+            }
             SessionHttpResponseV2::Uncertain { status, error } => {
                 return Ok(SessionDeleteOutcomeV2::Uncertain {
                     http_status: status,

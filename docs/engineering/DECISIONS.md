@@ -1,5 +1,13 @@
 # Décisions d'industrialisation
 
+## 16 novembre — sous-profil Source17 de fédération : code et tests locaux autorisés
+
+Le mainteneur autorise le code Rust et les tests logiciels locaux du sous-profil fermé `broker_federation_native17_v1`, dans les processus Rust et la base SQLite par tenant existants. Le périmètre couvre de vrais producteurs pour une installation neuve et une installation Source17 déjà servie, avec sauvegarde, contrôle arrêté et audit ; Store, FD, approbations et gardes restent retenus jusqu'à publication sûre. Le format17 est conservé, sans format18 ni DDL au démarrage ; le refus des anciens lecteurs doit être démontré avant application.
+
+La lecture de reprise D3 est limitée à `CommittedExact` ou `Unknown` : une absence dans un préfixe ne clôt pas un Pending encore commitable. La clôture négative administrative D3-A exige un droit dédié explicite et la preuve native du drain et du fencing exhaustifs de tous les writers concernés, puis la revalidation transactionnelle de la source, de la chaîne, de l'absence et du CAS. Elle porte son propre UUID, acteur et reçu ; elle ne prouve ni l'arrêt d'un worker ni un effet moteur.
+
+Le checkpoint Full reste obligatoire ; une heartbeat seule ne termine pas le lot. Les preuves physiques locales ne deviennent jamais une autorité par JSON ou reçu distant. Cet accord ne permet aucune installation ou migration réelle, action cloud ou cluster, suppression de données, credentials ou volumes, ni lancement implicite de worker ou commande distante ; les epochs existantes restent inchangées. Il autorise le développement, sans constater une livraison ni une qualification production.
+
 ## 14 novembre — une version et un build communs, sans updater implicite
 
 Le mainteneur fixe la version produit de développement à 0.0.1 et demande un

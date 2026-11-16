@@ -18,6 +18,7 @@ use tokio::sync::Semaphore;
 mod prerequisites;
 #[path = "session_transport.rs"]
 mod session;
+pub(super) use session::CreatedSessionResponseV2;
 
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_PREFLIGHT_REQUEST_BYTES: usize = 64 * 1024;

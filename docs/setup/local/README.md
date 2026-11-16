@@ -324,6 +324,14 @@ To make a deliberate change only in the copied workspace:
 
 This is a separate session with a fresh project copy. `observe` does not mean that every transitive effect is mediated or understood. Select `review` when a request requires human approval: inspect the exact request and use its full approval hash with `--approve-hash` when resubmitting that request. Changed inputs need a new decision; never approve an unrelated hash to get past a refusal.
 
+### Batch stop and completion
+
+For a non-interactive batch, stop requests and the work deadline continue to be handled while an engine inspection or the start acknowledgement is pending. Completion requires native terminal facts for the created instance. The direct runtime path validates that instance's runtime state; managed execution also checks the retained runtime authority, sandbox configuration and allocation. An engine CLI exit or a closed output pipe alone does not establish worker completion.
+
+Once those terminal facts are validated, the work deadline closes before waiting for any outstanding start acknowledgement. A previously selected timeout or stop keeps its original cause. Mandatory audit, the same in-flight acknowledgement and input/output collection still have to finish; this execution does not retry an acknowledgement already attempted, including one that failed. A slow acknowledgement after proven completion does not create a new work timeout. Missing terminal facts, incomplete collection and failures remain explicit, with retained session data and partial output for reconciliation. Preserve the session, configuration and worker volume; use the recorded worker's status and recovery path before attempting another start.
+
+The configured timeout is not a total wall-clock budget or a real-time stop guarantee, even when set to one second. Inspection, authority checks, audit and drainage can take longer, particularly when the host or engine is blocked. This batch behavior does not cover interactive terminal sessions or the broker transport armed by an independent enforcer, and does not make external task cancellation or abrupt CLI termination safe.
+
 ## Verify the audit for a SetupV2 tenant
 
 In the prepared installation's `tenants.json`, find `viewer_token_file` for the authorized tenant. Use the corresponding private file as seen from the machine running the CLI. The gateway selects the tenant from that credential.

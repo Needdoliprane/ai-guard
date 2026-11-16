@@ -14,6 +14,7 @@ use super::{
     KubernetesAuthorityV1, KubernetesError, KubernetesPodHandle, KubernetesResult,
     KubernetesRuntime, observation, preflight,
     session_pod::{KubernetesSessionPodRequestV2, KubernetesSessionPodTargetV2},
+    transport::CreatedSessionResponseV2,
     valid_digest, valid_dns_label, valid_uid,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -296,13 +297,27 @@ impl SessionInstanceV2 {
 /// restores only the five omitted non-pointer bools. Any refusal must be kept
 /// as unknown ownership by an effect caller, never read as absence.
 ///
-/// It is the only constructor of `SessionInstanceV2` and takes raw bytes, so
-/// the type system does not prove where they came from: a held Pod read by
-/// GET at the session name would pass the same projection. It stays
-/// restricted to `runtime::kubernetes`, and its only non-test caller is the
-/// held CREATE on its own validated 201. It must never be called on a GET, a
-/// name or a journal record to re-adopt an instance (CONTRACT S5 obligation).
+/// The native constructor consumes the affine response from the exact
+/// transport CREATE201. A GET, name, raw body or journal record cannot satisfy
+/// this input. The response still passes the complete admission projection.
 pub(super) fn validate_admitted_session_pod(
+    request: &KubernetesSessionPodRequestV2,
+    response: CreatedSessionResponseV2,
+) -> Outcome<SessionInstanceV2> {
+    let bytes = response.into_bytes_for(request)?;
+    project_admitted_session_pod(request, &bytes)
+}
+
+/// Declared-fixture projection only, unavailable to a production caller.
+#[cfg(test)]
+pub(super) fn validate_declared_admitted_session_pod(
+    request: &KubernetesSessionPodRequestV2,
+    response: &[u8],
+) -> Outcome<SessionInstanceV2> {
+    project_admitted_session_pod(request, response)
+}
+
+fn project_admitted_session_pod(
     request: &KubernetesSessionPodRequestV2,
     response: &[u8],
 ) -> Outcome<SessionInstanceV2> {

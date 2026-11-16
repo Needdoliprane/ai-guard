@@ -52,11 +52,14 @@ use reqwest::{
     },
 };
 use std::{
-    future::Future,
     sync::atomic::{AtomicBool, Ordering},
     task::{Context, Poll, Waker},
 };
 use tokio::time::{Instant, timeout_at};
+
+#[path = "session_create_response.rs"]
+mod create_response;
+pub(in crate::runtime::kubernetes) use create_response::CreatedSessionResponseV2;
 
 /// Release and delete bodies are a few hundred bytes.
 const MAX_SMALL_EFFECT_BYTES: usize = 4096;
@@ -82,6 +85,11 @@ impl Transport {
         }
         let fingerprint = binding.fingerprint();
         let kind = effect.kind();
+        // Captured from the actual fixed route, never supplied as response data.
+        let create_target = match &effect {
+            SessionHttpEffectV2::CreateHeld { request } => Some(request.target().clone()),
+            _ => None,
+        };
         let (method, path, content_type, body, digest) = match effect {
             SessionHttpEffectV2::CreateHeld { request } => {
                 let target = request.target();
@@ -158,7 +166,12 @@ impl Transport {
         let status = response.status().as_u16();
         Ok(
             match read_response_bytes_limited(response, MAX_RESPONSE_BYTES).await {
-                Ok(bytes) => SessionHttpResponseV2::Complete { status, bytes },
+                Ok(bytes) => match (status, create_target) {
+                    (201, Some(target)) => SessionHttpResponseV2::CreatedResponse(Box::new(
+                        CreatedSessionResponseV2::from_created_post(target, bytes),
+                    )),
+                    _ => SessionHttpResponseV2::Complete { status, bytes },
+                },
                 Err(error) => SessionHttpResponseV2::Uncertain {
                     status: Some(status),
                     error,

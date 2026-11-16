@@ -14,7 +14,7 @@ use crate::{
         session_instance::{
             KubernetesSessionRuntimeError, parse_workspace_claim,
             tests::{CLAIM_UID, OBSERVED_AT, bound_claim, bound_pvc},
-            validate_admitted_session_pod,
+            validate_declared_admitted_session_pod,
         },
         session_profile::KubernetesSessionInvocationV2,
     },
@@ -439,8 +439,9 @@ fn admitted_response_accepts_documented_defaults_and_omitempty_encoding_and_refu
  {
     let rendered = rendered_case();
     let request = &rendered.request;
-    let validate =
-        |pod: &Value| validate_admitted_session_pod(request, &serde_json::to_vec(pod).unwrap());
+    let validate = |pod: &Value| {
+        validate_declared_admitted_session_pod(request, &serde_json::to_vec(pod).unwrap())
+    };
     let bare = validate(&admitted(request)).unwrap();
     assert_eq!(bare.pod_uid(), POD_UID);
     let echo = with_server_defaults(admitted(request));
@@ -513,11 +514,11 @@ fn admitted_response_accepts_documented_defaults_and_omitempty_encoding_and_refu
     let bytes = serde_json::to_string(&echo).unwrap();
     let duplicate = bytes.replacen("\"kind\":\"Pod\"", "\"kind\":\"Pod\",\"kind\":\"Pod\"", 1);
     assert_ne!(duplicate, bytes);
-    assert!(validate_admitted_session_pod(request, duplicate.as_bytes()).is_err());
+    assert!(validate_declared_admitted_session_pod(request, duplicate.as_bytes()).is_err());
     let mut large = bytes.into_bytes();
     large.resize(1024 * 1024 + 1, b' ');
     assert_eq!(
-        validate_admitted_session_pod(request, &large).err(),
+        validate_declared_admitted_session_pod(request, &large).err(),
         Some(KubernetesSessionRuntimeError::Kubernetes(
             KubernetesError::ResponseTooLarge
         ))

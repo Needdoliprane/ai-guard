@@ -1,5 +1,13 @@
 # Stratégie de qualification
 
+## 16 novembre — R2 : sélection logicielle de composition et reprise tracée
+
+Les **26 sélections R2** sont exécutées en série, une fois chacune : 18 runtime, quatre Kubernetes et quatre intégrations `runtime_managed`. Elles passent sur les deux nouveaux artefacts produits depuis la même source R2 ; listes actives/ignorées, sorties/RC et sources/binaires sont vérifiés par Root. Les helpers ignorés ne sont pas comptés. [FQN, commandes réelles, profils, empreintes et limites](evidence/2026-11-16/runtime-kubernetes-batch-composition/README.md).
+
+Conserver la première tentative de build R2 **RC130 pour ressources**, puis sa reprise explicitement admise avec le seul changement d'orchestration `-j2` vers `-j1` ; code, profil, assertions, deadlines et epochs restent identiques. Aucun cas n'est relancé automatiquement. Clippy toutes cibles RC0 avec **505 diagnostics d'avertissement** n'est pas un gate strict. R1 garde ses 26 PASS puis son Clippy FAIL ; les 18+4 standalone restent deux autres preuves.
+
+La sélection ne qualifie ni un moteur réel ni la durée physique d'arrêt. MetadataFD demeure un essai distinct en échec (phase append de 2 331 ms, COMMIT marqué, `full_post` incomplet, quatre dépendants NOT_RUN) ; aucun gain n'en découle. Native17, les variantes interactive/préarmée, l'annulation externe, le vrai caller A06 et la faute OS tardive complète demandent leurs preuves propres.
+
 ## 16 novembre — R6 : conserver le résultat du positif configuré
 
 Le test exact R6 est unique et actif dans la liste réelle ; exécuté une fois, il échoue au démarrage. Les autres cas ne sont pas crédités, et les résultats R11 restent séparés. Ne pas déduire la rétention durable du marqueur COMMIT. [Sélection, profil et limites](evidence/2026-11-16/startup-runtime-failures/README.md#native17-r6-one-configured-startup-oracle-remains-failing).

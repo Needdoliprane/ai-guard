@@ -66,9 +66,11 @@ fn observation_binds_exact_uid_spec_and_container_identity() {
     let rendered = rendered_case();
     let authority = rendered.intent.authority();
     let created = admitted(&rendered.request);
-    let instance =
-        validate_admitted_session_pod(&rendered.request, &serde_json::to_vec(&created).unwrap())
-            .unwrap();
+    let instance = validate_declared_admitted_session_pod(
+        &rendered.request,
+        &serde_json::to_vec(&created).unwrap(),
+    )
+    .unwrap();
     assert_eq!(instance.pod_uid(), POD_UID);
     assert_eq!(instance.created_resource_version(), "42");
     assert_eq!(instance.target(), rendered.request.target());

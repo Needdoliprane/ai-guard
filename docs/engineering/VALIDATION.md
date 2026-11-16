@@ -1,5 +1,19 @@
 # Validation courante
 
+## 16 novembre — R2 : composition runtime/Kubernetes vérifiée sur sa source propre
+
+Le [relevé de composition](evidence/2026-11-16/runtime-kubernetes-batch-composition/README.md) place le candidat R2 actuel avant les preuves historiques, avec sources, deux binaires et reçus Root distincts.
+
+| Périmètre | Résultat admis |
+|---|---|
+| **Composition publique R2**, 2 925 fichiers | Format RC0 ; Clippy toutes cibles RC0, **505 diagnostics d'avertissement, 0 erreur**, non strict ; build libtest + `runtime_managed` RC0 après reprise ciblée, 26 sélections actives uniques ; **26 PASS / 0 FAIL / 0 BLOCKED / 0 NOT_RUN**, une invocation par cas. |
+| Composition publique R1, source précédente | **26 PASS**, puis **Clippy FAIL RC101** sur `never_loop`, 475 diagnostics d'avertissement. Ces résultats restent historiques, pas le bilan final de R2. |
+| Deux gels standalone antérieurs | **18 PASS runtime + 4 PASS Kubernetes**, sur deux autres sources ; aucun transfert à R1 ou R2. |
+
+Le premier build sans exécution R2, interrompu RC130 pour ressources, reste conservé. La reprise admise en `-j1` utilise le même code et profil, après récupération ciblée de caches de QA. Root revérifie les 26 sorties/RC, les 2 925 sources et les deux exécutables après les nouvelles invocations R2. Les 475/505 avertissements ne sont pas une comparaison d'amélioration : le Clippy R1 s'était arrêté avant toutes les unités.
+
+L'essai Native17 MetadataFD distinct demeure **FAIL** : build RC0, format RC1, positif RC101 sur `human_authority_epoch_expired`, quatre dépendants **NOT_RUN**. Les **2 331 ms** concernent `incarnation_append17`, pas le cas complet (processus 28,196 s ; libtest 26,34 s). COMMIT est marqué mais `full_post` incomplet ; ni rétention complète, ni gain, ni correction clôturée ne sont établis. Les [reçus de cet échec](evidence/2026-11-16/runtime-kubernetes-batch-composition/README.md#native17-metadatafd-failure) et les résultats historiques ci-dessous restent séparés. Aucun nouveau moteur/cluster, Native17/S5 ou capacité100 qualifié ; **0/12 gates clos**.
+
 ## 16 novembre — R6 : un oracle de démarrage en échec
 
 Sur la source R6 épinglée, formatage, build libtest et sélection exacte sont vérifiés ; le seul cas invoqué échoue RC101 après 26,06 s (`human_authority_epoch_expired`). Le marqueur COMMIT ne prouve pas la réussite du post-contrôle ni la rétention durable. [Détails et empreintes](evidence/2026-11-16/startup-runtime-failures/README.md#native17-r6-one-configured-startup-oracle-remains-failing).

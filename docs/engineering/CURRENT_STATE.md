@@ -1,5 +1,11 @@
 # État constaté — suivi du développement
 
+## 16 novembre — R2 runtime/Kubernetes : 26 cas de composition vérifiés
+
+Le candidat public R2 réunit **18 chemins Rust et 4 guides EN/FR**. Format et Clippy toutes cibles passent ; Clippy conserve **505 diagnostics d'avertissement**, sans gate strict. Les deux cibles de test et leurs listes sont vérifiées, puis **26 cas exacts passent une fois chacun**, avec sources et exécutables inchangés au recontrôle Root. [Sources R2, reprise du build, résultats et historique R1](evidence/2026-11-16/runtime-kubernetes-batch-composition/README.md).
+
+La preuve reste logicielle : aucun nouveau moteur, délai réel d'arrêt, cluster, Native17/S5 ou parcours interactif/préarmé n'est qualifié. MetadataFD conserve son **FAIL**, sa phase de 2 331 ms et quatre dépendants **NOT_RUN** ; l'audit D1 reste ouvert. **0/12 gates clos**, aucune activation de production.
+
 ## 16 novembre — Native17 R6 : prérequis configuré toujours en échec
 
 R6 réussit le formatage ciblé, le build libtest et la vérification de liste ; son unique oracle de démarrage échoue sur `human_authority_epoch_expired`. Le refus n’établit pas une rétention durable. Résultat R6 distinct des 18/1/6 de R11 ; **0/12 gates clos**. [Source, preuve et limites](evidence/2026-11-16/startup-runtime-failures/README.md#native17-r6-one-configured-startup-oracle-remains-failing).

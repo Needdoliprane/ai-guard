@@ -1,5 +1,11 @@
 # Gates de qualification production
 
+## 16 novembre — R2 runtime/Kubernetes : preuve logicielle ciblée, gates ouverts
+
+La [composition publique R2](evidence/2026-11-16/runtime-kubernetes-batch-composition/README.md) passe format, Clippy toutes cibles **non strict (505 diagnostics d'avertissement)**, build et **26 cas exacts**, vérifiés sur ses sources et binaires propres. R1 et son Clippy FAIL restent historiques ; les PASS standalone ne sont pas transférés.
+
+**0/12 gates G01–G12 clos ; aucune activation de production.** Aucun nouveau moteur, délai physique, Native17/S5, cluster ou capacité100 qualifié. MetadataFD reste FAIL avec quatre dépendants NOT_RUN ; l'audit D1 reste ouvert.
+
 ## 16 novembre — Native17 R6 reste non qualifié
 
 Le contrôle R6 du démarrage configuré échoue ; la réussite du build ne qualifie pas le comportement et la rétention durable n’est pas établie. Aucun gate G01–G12 n’est clos (**0/12**). [Preuve R6 et périmètre](evidence/2026-11-16/startup-runtime-failures/README.md#native17-r6-one-configured-startup-oracle-remains-failing).
