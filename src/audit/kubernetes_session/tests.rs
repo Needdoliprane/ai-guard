@@ -97,7 +97,9 @@ pub(crate) fn intent(f: &Fixture, session_id: Uuid) -> KubernetesSessionReservat
     )
     .unwrap()
 }
-pub(crate) fn policy(intent: &KubernetesSessionReservationIntentV2) -> KubernetesSessionReservationPolicyV2 {
+pub(crate) fn policy(
+    intent: &KubernetesSessionReservationIntentV2,
+) -> KubernetesSessionReservationPolicyV2 {
     KubernetesSessionReservationPolicyV2 {
         version: 2,
         decision_ttl_seconds: 60,

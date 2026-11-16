@@ -99,7 +99,9 @@ impl Preparation {
         expected: &KubernetesSessionReservationIntentV2,
         confirmed: &ConfirmedSessionReservationV2,
     ) -> SessionResult<Self> {
-        confirmed.revalidate_material().map_err(|_| SessionError::UnsafeMaterial)?;
+        confirmed
+            .revalidate_material()
+            .map_err(|_| SessionError::UnsafeMaterial)?;
         let snapshot = confirmed.snapshot();
         snapshot
             .validate(confirmed.tenant_id())

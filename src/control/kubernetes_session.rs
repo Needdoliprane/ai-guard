@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
 
-mod policy;
 pub(crate) mod lifecycle;
+mod policy;
 pub(crate) mod validation;
 pub use policy::{
     KubernetesSessionControlRecoveryPolicyV2, KubernetesSessionRecoveryPolicyV2,

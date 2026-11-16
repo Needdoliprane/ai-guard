@@ -246,7 +246,9 @@ fn control_identity_matches_preflight_scope(
 
 pub async fn execute(args: KubernetesArgs) -> Result<(), KubernetesCliError> {
     match args.command {
-        KubernetesCommand::Session(args) => sessions::execute(args).await.map_err(KubernetesCliError::Session),
+        KubernetesCommand::Session(args) => sessions::execute(args)
+            .await
+            .map_err(KubernetesCliError::Session),
         KubernetesCommand::Doctor(args) => doctor(args).await,
         KubernetesCommand::Preflight(args) => preflight(args).await,
         KubernetesCommand::ReconcileHeldCreate(args) => reconcile_held_create(args).await,

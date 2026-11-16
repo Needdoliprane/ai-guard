@@ -12,14 +12,18 @@ pub(crate) struct ConfirmedSessionReservationV2 {
     protected_files: Vec<crate::control_fs::PrivateFile>,
 }
 impl ConfirmedSessionReservationV2 {
-    pub(crate) fn from_live_http_ack(ack: crate::broker::held_create_client::sessions::LiveSessionConfirmationAckV2) -> anyhow::Result<Self> {
+    pub(crate) fn from_live_http_ack(
+        ack: crate::broker::held_create_client::sessions::LiveSessionConfirmationAckV2,
+    ) -> anyhow::Result<Self> {
         let (tenant, current, files) = ack.into_parts();
         let mut confirmed = confirmed(&tenant, current)?;
         confirmed.protected_files = files;
         Ok(confirmed)
     }
     pub(crate) fn revalidate_material(&self) -> anyhow::Result<()> {
-        for file in &self.protected_files { file.revalidate()?; }
+        for file in &self.protected_files {
+            file.revalidate()?;
+        }
         Ok(())
     }
     pub(crate) fn tenant_id(&self) -> &str {
