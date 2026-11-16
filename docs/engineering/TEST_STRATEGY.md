@@ -1,5 +1,9 @@
 # Stratégie de qualification
 
+## 16 novembre — conserver les oracles en échec
+
+Les [preuves R9/Docker](evidence/2026-11-16/startup-runtime-failures/README.md) restent attachées à leurs deux sources distinctes. Le contrôle startup garde son époque de deux secondes ; le test moteur conserve timeout1s/sleep60s et son garde global30s. Avant nouvel essai moteur, corriger et vérifier hors ligne la supervision des observations/callbacks, puis distinguer armement, envoi d’arrêt et terminal observé. Aucun agrégat avec les doublons R8 ni relance systématique.
+
 ## 16 novembre — corrélation du callback CLI
 
 La [sélection NV-09](evidence/2026-11-16/oidc-callback-correlation/README.md) exécute dix unités du vrai listener et quatre intégrations Rust/CLI loopback, sans IdP externe. Les quatre cas sélectionnés ne constituent pas une réussite des 25 tests enregistrés de `sso_cli`, ni du SSO complet.

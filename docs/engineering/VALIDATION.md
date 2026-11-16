@@ -1,5 +1,9 @@
 # Validation courante
 
+## 16 novembre — R9 et un essai Docker en échec
+
+[Sources, commandes et reçus](evidence/2026-11-16/startup-runtime-failures/README.md) : build libtest R9 RC0, quatre cas exacts exécutés une fois (1 PASS / 3 FAIL), sans timeout. Le cas moteur Docker unique termine RC101 après 523,12 s, avant export. Root vérifie les sources/empreintes et les dix nettoyages ; données et volumes conservés. Les observations ne ferment aucun constat d’audit.
+
 ## 16 novembre — NV-09, observation puis régressions CLI
 
 [Sources, commandes et limites](evidence/2026-11-16/oidc-callback-correlation/README.md) : ancien comportement reproduit localement, puis 14 cas exacts réussis sur le candidat composé ; check/fmt/Clippy ciblé RC0. Le verdict primaire `needs_validation` reste inchangé pour la frontière OS non vérifiée.

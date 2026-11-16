@@ -1,5 +1,9 @@
 # Gates de qualification production
 
+## 16 novembre — qualifications startup/runtime encore en échec
+
+Le [lot de mesures](evidence/2026-11-16/startup-runtime-failures/README.md) laisse le démarrage Native17 et le cas Docker générique en échec. Le refus post-COMMIT et le délai d’arrêt exigent leurs corrections et régressions. Les observations positives de profil/nettoyage ne qualifient pas le cas complet ; export, recette A1/A2/B1 et autres moteurs restent ouverts. **0/12 gates clos.**
+
 ## 16 novembre — résilience locale du callback OIDC
 
 Le [lot NV-09](evidence/2026-11-16/oidc-callback-correlation/README.md) vérifie corrélation, bornes et continuité d’une tentative CLI sur macOS. G04 et les autres gates restent ouverts : le SSO réel, Native17, les autres principals et plateformes ne sont pas qualifiés par ces 14 cas.

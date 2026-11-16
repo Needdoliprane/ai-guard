@@ -1,5 +1,9 @@
 # État constaté — suivi du développement
 
+## 16 novembre — défauts mesurés au démarrage et sur Docker
+
+La [validation ciblée](evidence/2026-11-16/startup-runtime-failures/README.md) donne R9 : **1 PASS / 3 FAIL** sur la source diagnostique privée, avec un refus après COMMIT réellement marqué. Un essai Docker générique réel échoue sur le contrôle de durée avant export ; dix opérations sont tracées et nettoyées. Les corrections startup, publication DATA et supervision du délai avancent séparément. Aucun parcours complet ni gate n’est déclaré qualifié.
+
 ## 16 novembre — callback SSO CLI borné
 
 Le [correctif de résilience du callback natif](evidence/2026-11-16/oidc-callback-correlation/README.md) est intégré : un pair invalide ne termine plus immédiatement la tentative. Dix tests unitaires et quatre intégrations ciblées passent. La frontière entre principals OS, le SSO réel et Native17 restent non qualifiés dans ce lot.
