@@ -81,3 +81,18 @@ Actual binary SHA-256 is 1c52cd33fe5318f87d2a73429e9becb1586094ec1fd259f84a34b7b
 A separately recorded observation selects the real docker-desktop kubeconfig context and verifies its loopback server https://127.0.0.1:53145 without exposing credentials. kubectl client and kubelet are v1.36.1; /readyz returns ok. One node, desktop-control-plane, is Ready with 8 CPU and 12188076 Ki memory allocatable. StorageClasses hostpath and standard both report rancher.io/local-path and WaitForFirstConsumer. No workload or configuration is created or changed. Private receipt kubernetes-desktop-readiness-20261116-r2/RESULT.json SHA-256 94cbabd592bf1ac30a4a3619ebc4cc7d39a21980b961882e195cc8de56955e1f. This snapshot does not prove worker operation, RBAC, network policy, storage provisioning, isolation or capacity.
 
 All previous observations remain attached to their own sources and profiles. Native17 startup, session creation/instructions, real runtime matrices and production gates remain open.
+
+
+## Native17 R6: one configured-startup oracle remains failing
+
+This is a separate successor observation on the private R6 source, not an aggregate with R11. The pinned source archive SHA-256 is `e7c386e0ce12fcb6823d373f7cd617b18f78a0aad5ce25e8c2f23ff69e62552c` (3,407 files). Root verified all source paths, bytes and modes after the run; the live R8 tree remained unchanged.
+
+Targeted rustfmt on six paths returns RC 0. The native macOS ARM64 libtest build returns RC 0 and emits a new project artifact (`fresh:false`), SHA-256 `92d92b47f1d2172e41f344e6974151477eda4809e716a5e42de19f2c66634f3e`. The artifact reports `opt-level=0`, `debug=0`, debug assertions and overflow checks enabled; the admitted command requests codegen-units 256 and incremental disabled. The actual binary lists 2,369 tests including 19 ignored; the selected exact FQN is uniquely active. This is one selected case, not a suite result.
+
+`audit::review_startup::execution17_startup::broker_root_tests17::configured_broker_root_startup_reaches_genuine_retention17` was invoked once and returns **FAIL / RC 101** after 26.06 seconds with `human_authority_epoch_expired` in `incarnation_append17`. The measured append phase is 2,305 ms; the existing two-second epoch was unchanged. The probe recorded one append call with one completed COMMIT mark, then one full-post call with no completed mark and an unmarked exit. Therefore COMMIT marking did not establish successful full post-validation or durable retention.
+
+The probe observed 49 active owner-cache hits, zero active weak misses and three deep active boundaries. Its publication pre/post timings are nested and overlap; they are not additive CPU, cryptographic, hardware, SLO or speedup measurements. The disk guard crossed its threshold during compilation, but Cargo completed naturally with RC 0; the later SIGINT found no process. Cargo succeeded; the resource-guard incident does not establish a cause for the selected test failure.
+
+Private evidence is retained separately: source archive SHA above; Root receipt `ROOT_VERIFIED_R1.json` SHA-256 `60f1104e53c46f9c6bc518941c1db751bcf2f70ca22325557f1951a8cfe1a16a`; executor receipt `RESULT.json` SHA-256 `69a30baf5b005c24973516b95bd38bcabef9de010e619b0539157e55cb1b4942`. Raw stdout/stderr/RC are retained privately and referenced by digest in those receipts. No absolute private paths or log contents are reproduced here.
+
+R6 leaves Native17 startup **NOT_QUALIFIED** and durable retention **NOT_ESTABLISHED**. R11's separate 18 PASS / 1 FAIL / 6 NOT_RUN result is not combined with this single R6 case. No production gate is closed (**0/12**); no provider, engine, model or network qualification was run.

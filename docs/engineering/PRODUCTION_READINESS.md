@@ -1,5 +1,10 @@
 # Gates de qualification production
 
+## 16 novembre — Native17 R6 reste non qualifié
+
+Le contrôle R6 du démarrage configuré échoue ; la réussite du build ne qualifie pas le comportement et la rétention durable n’est pas établie. Aucun gate G01–G12 n’est clos (**0/12**). [Preuve R6 et périmètre](evidence/2026-11-16/startup-runtime-failures/README.md#native17-r6-one-configured-startup-oracle-remains-failing).
+
+
 ## 16 novembre — startup Native17 toujours non qualifié
 
 La [preuve R11](evidence/2026-11-16/startup-runtime-failures/README.md#successors-r10-and-r11-software-results-remain-separate) ajoute 18 régressions réussies mais conserve un refus du démarrage configuré et six cas non exécutés. Les 13 cas DATA/FS ne qualifient pas la construction complète. Un nœud Kubernetes Ready ne qualifie pas les workers ni leurs frontières. **0/12 gates clos.**

@@ -1,5 +1,10 @@
 # État constaté — suivi du développement
 
+## 16 novembre — Native17 R6 : prérequis configuré toujours en échec
+
+R6 réussit le formatage ciblé, le build libtest et la vérification de liste ; son unique oracle de démarrage échoue sur `human_authority_epoch_expired`. Le refus n’établit pas une rétention durable. Résultat R6 distinct des 18/1/6 de R11 ; **0/12 gates clos**. [Source, preuve et limites](evidence/2026-11-16/startup-runtime-failures/README.md#native17-r6-one-configured-startup-oracle-remains-failing).
+
+
 ## 16 novembre — Native17 compilable, prérequis configuré encore en échec
 
 Le [successeur R11](evidence/2026-11-16/startup-runtime-failures/README.md#successors-r10-and-r11-software-results-remain-separate) compile toutes cibles et passe 18 cas ciblés, dont 13 DATA/FS ; un positif BrokerRoot échoue et six dépendants restent NOT_RUN. Ces modifications privées ne sont pas intégrées au live R8. Les deux reproductions runtime et le snapshot Kubernetes Desktop en lecture seule restent distincts ; aucun gate clos.

@@ -1,5 +1,10 @@
 # Stratégie de qualification
 
+## 16 novembre — R6 : conserver le résultat du positif configuré
+
+Le test exact R6 est unique et actif dans la liste réelle ; exécuté une fois, il échoue au démarrage. Les autres cas ne sont pas crédités, et les résultats R11 restent séparés. Ne pas déduire la rétention durable du marqueur COMMIT. [Sélection, profil et limites](evidence/2026-11-16/startup-runtime-failures/README.md#native17-r6-one-configured-startup-oracle-remains-failing).
+
+
 ## 16 novembre — prérequis observés et profils distincts
 
 Le [plan R11](evidence/2026-11-16/startup-runtime-failures/README.md#successors-r10-and-r11-software-results-remain-separate) exécute les cas DATA/FS, writer et Owner indépendants, puis conserve six dépendants NOT_RUN après le refus du positif configuré. Le timer inclut un oracle cfg(test) ; une mesure séparée doit distinguer corps et observation. Le nouveau test foreign-writer n’est pas exécuté sans ce prérequis. Aucun changement de 2 s/profil ne transforme le FAIL historique en succès.

@@ -1,5 +1,10 @@
 # Validation courante
 
+## 16 novembre — R6 : un oracle de démarrage en échec
+
+Sur la source R6 épinglée, formatage, build libtest et sélection exacte sont vérifiés ; le seul cas invoqué échoue RC101 après 26,06 s (`human_authority_epoch_expired`). Le marqueur COMMIT ne prouve pas la réussite du post-contrôle ni la rétention durable. [Détails et empreintes](evidence/2026-11-16/startup-runtime-failures/README.md#native17-r6-one-configured-startup-oracle-remains-failing).
+
+
 ## 16 novembre — résultats R10/R11 et baseline runtime conservés
 
 [Pièces et périmètres](evidence/2026-11-16/startup-runtime-failures/README.md#successors-r10-and-r11-software-results-remain-separate) : R10 échoue sur 6 erreurs de compilation, 21 tests NOT_RUN ; R11 corrige les types/appels, puis 18 PASS / 1 FAIL / 6 NOT_RUN sur 25 sélections. La baseline runtime compile et ses deux oracles finaux reproduisent le défaut après drainage réel. Kubernetes Desktop répond Ready en lecture seule ; aucun test worker/cluster effectué.
