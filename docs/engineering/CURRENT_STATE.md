@@ -1,28 +1,29 @@
-# Synthèse courante — gel bf31a743 du 16 novembre 2026
+# Synthèse courante — 16 novembre 2026
 
 **Aucun des 12 gates de production n’est clos.** G09 conserve son FAIL ; aucune release, capacité de 100 workers ou qualification globale n’est établie. Les résultats restent attachés à leur source et à leur périmètre, sans pourcentage fonctionnel inventé. [Gates et écarts](PRODUCTION_READINESS.md).
 
-Référence publique : `bf31a743e67d24d9faebacc57534a3490de93892`, dont le code produit est celui de `a3981316d5a0ff1678dee7d943971fa845991e84`. Les 324 395 octets de l’ancien suivi sont conservés sans modification dans l’[archive adjacente du 16 novembre](CURRENT_STATE_HISTORY_20261116.md). Les preuves détaillées restent dans [VALIDATION.md](VALIDATION.md) et leurs dossiers datés.
+Base de l’intégration D1 : `961045788784b277a7a9eaa5e8f411275d7147e0`, dont le code produit avant D1 est celui de `a3981316d5a0ff1678dee7d943971fa845991e84`. Ce changement intègre les huit fichiers Rust D1. Clippy D1 toutes cibles sur la source composée `74d60de1…b7b` : **RC0 non strict, 507 émissions d’avertissement et 0 erreur**. Reçu `dc43ad33…0e0a2` ; gate strict ouvert. Les 324 395 octets de l’ancien suivi restent intacts dans l’[archive adjacente](CURRENT_STATE_HISTORY_20261116.md), SHA-256 `3dfd04cc353bb1f3455ad4eb066778abe0c79862cd197927abdb1077f8eda254`. Les preuves détaillées restent dans [VALIDATION.md](VALIDATION.md).
 
-## Faits vérifiés et portée — gel bf31a743
+## Faits vérifiés et portée — 16 novembre 2026
 
 | Périmètre | État constaté et source |
 |---|---|
 | Composition publique R2 runtime/Kubernetes | **26 PASS**, une invocation par cas sur son gel propre ; format et Clippy toutes cibles RC0, **505 avertissements, non strict**. Deux binaires et sources revérifiés. Preuve logicielle : ni nouvel essai moteur, ni délai physique d’arrêt, ni cluster. [Relevé R2 et historiques séparés](evidence/2026-11-16/runtime-kubernetes-batch-composition/README.md). |
-| Audit D1 pré-démarrage | Canari CLI/Gateway/SQLite **PASS**, puis faute GET 429 **FAIL RC101** : un start de la fixture Rust est observé après l’échec du contrôle. Les assertions ultérieures de rétention/quota n’ont pas été atteintes. Le correctif est en cours ; aucune nouvelle sévérité ni clôture du fingerprint. [Reproduction et limites](evidence/2026-11-16/control-monitor-prestart/README.md). |
-| Native17 configuré | **FAIL historique conservé** : BrokerRoot R11, R6 et MetadataFD échouent sur leur propre source/prérequis. R11 garde **18 PASS / 1 FAIL / 6 NOT_RUN** ; MetadataFD garde sa phase de 2 331 ms et quatre dépendants **NOT_RUN**, sans preuve de rétention complète ni gain. Ces résultats ne s’additionnent pas. [Startup et R11/R6](evidence/2026-11-16/startup-runtime-failures/README.md), [MetadataFD](evidence/2026-11-16/runtime-kubernetes-batch-composition/README.md). |
+| Audit D1 pré-démarrage | Correctif logiciel : **14 PASS** sur la source `74d60de1…b7b` (2 932 fichiers), dont quatre vrais CLI ai-guard/Gateway/SQLite avec moteur Rust de fixture. La faute GET 429 passe de `starts=1` dans la baseline RED à `starts=0` dans le correctif, audits valides. Les huit Rust D1 sont exacts à cette source ; les deux fichiers D7 cfg(test) ne sont pas destinés au commit D1. Clippy toutes cibles **RC0 non strict, 507 émissions d’avertissement, 0 erreur** ; gate strict ouvert. Verdict primaire historique inchangé ; qualification globale ouverte. [Preuve, causes et limites](evidence/2026-11-16/control-monitor-prestart-fix/README.md). |
+| Native17 configuré — privé | Source privée R2 `b13d6bdd…c0d2` : **11 PASS / 1 FAIL** sur 12 cas distincts ; le heartbeat du Broker enrôlé refuse avec une cause opaque. Reçu privé `84bc809ad25fd54308fd0bc61c171e4a0cb48165584bc02ec9430068c1a511f2`. Ni intégré ni qualifié ; aucun transfert au public, à Full ou au runtime réel. |
+| D7 capacité de reprise | Ouvert. Phase R1 : setup TMPDIR/UDS en échec avant oracle, conservé. Après correction de cette seule configuration de harnais, R2 : canari cap2 **PASS RC0**, Restore cap1 **RED RC101 au vrai oracle ACK sans STOP/Cancel** ; troisième cas NOT_RUN. Reçu Root `5634d050…c487`. Aucun correctif produit D7 inclus dans D1. |
 
-## Écarts ouverts et travaux privés — gel bf31a743
+## Écarts ouverts et travaux privés
 
-Les successeurs de composition Native17 et le raccord heartbeat/self sont des candidats source distincts : leurs nouveaux tests restent **NOT_RUN**. Une revue de source ne prouve ni compilation, ni bon fonctionnement du vrai démarrage. Les résultats historiques ci-dessus ne leur sont pas transférés. Le checkpoint **Full**, son installation/profil, la reprise et la supersession restent en cours ; heartbeat/self ne remplace pas ces exigences.
+D1 exige encore l’injection exacte de la faute tardive Managed à travers le finalizer Store/quota, le vrai TTY interactif et les garanties d’abandon/reprise froide. L’unité Managed et les tests PTY ne ferment pas ces parcours. Le résultat Native17 privé reste séparé ; heartbeat/self ne remplace pas le checkpoint **Full**, son installation/profil, la reprise ou la supersession.
 
 La cible conserve les parcours complets, le contrôle réseau Rust, l’audit, l’arrêt/reprise, la restauration et les qualifications réelles : A1/A2/B1, Codex CLI et Claude Code chacun par API et abonnement, Docker/Podman/Kubernetes, TLS et 100 workers. Les preuves partielles ne les qualifient pas. [Mandat](../../AGENTS.md), [contrat d’architecture](ARCHITECTURE_CONTRACT.md), [identité et configuration](../sso.md), [gates](PRODUCTION_READINESS.md).
 
-## Priorités de qualification — gel bf31a743
+## Priorités de qualification
 
-1. Corriger D1 au premier effet, puis vérifier canari et régression sur la source composée ; conserver causes, possession, révocation et drainage sans réduire les oracles.
-2. Résoudre le prérequis Native17 configuré sous ses échéances inchangées ; composer et vérifier séparément les nouveaux lots, le raccord heartbeat/self et Full. Tout cas dépendant reste NOT_RUN tant que son prérequis manque.
-3. Relier chaque lot relu à ses preuves réelles, actualiser les écarts puis qualifier les parcours et plateformes requis. Les [audits run-2](AUDIT_RUN_2_20261110.md), le [plan](IMPLEMENTATION_PLAN.md) et la [stratégie de tests](TEST_STRATEGY.md) gardent leurs fonctions distinctes.
+1. Compléter les parcours D1 encore ouverts : faute tardive jusqu’au Store/quota, vrai TTY, abandon et reprise. Conserver causes, possession, révocation et drainage.
+2. Expliquer le refus du heartbeat enrôlé Native17 sur sa source privée, puis qualifier séparément les parcours restants et Full ; aucun ancien PASS n’est transféré.
+3. Relier chaque lot relu à ses preuves réelles et qualifier les plateformes requises. Les [audits run-2](AUDIT_RUN_2_20261110.md), le [plan](IMPLEMENTATION_PLAN.md) et la [stratégie de tests](TEST_STRATEGY.md) gardent leurs fonctions distinctes.
 
 ## Index de compatibilité historique — gel bf31a743
 

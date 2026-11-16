@@ -777,7 +777,11 @@ mod private_state {
         );
         Ok(())
     }
+    #[derive(Clone)]
     pub(super) struct AttemptGuard {
+        inner: Arc<AttemptLock>,
+    }
+    struct AttemptLock {
         file: fs::File,
         directory: Directory,
         name: String,
@@ -821,24 +825,29 @@ mod private_state {
                 "attempt lock inode changed; reconciliation requires diagnosis"
             );
             let guard = Self {
-                file,
-                directory,
-                name,
-                identity,
+                inner: Arc::new(AttemptLock {
+                    file,
+                    directory,
+                    name,
+                    identity,
+                }),
             };
             guard.ensure_current()?;
             Ok(guard)
         }
         pub(super) fn identity(&self) -> LockIdentity {
-            self.identity
+            self.inner.identity
+        }
+        pub(super) fn same_owner(&self, other: &Self) -> bool {
+            Arc::ptr_eq(&self.inner, &other.inner)
         }
         pub(super) fn ensure_current(&self) -> Result<()> {
-            self.directory.trusted.revalidate()?;
-            check_private_file(&self.file)?;
-            let raw = checked_name(&self.name)?;
+            self.inner.directory.trusted.revalidate()?;
+            check_private_file(&self.inner.file)?;
+            let raw = checked_name(&self.inner.name)?;
             let fd = unsafe {
                 libc::openat(
-                    self.directory.file.as_raw_fd(),
+                    self.inner.directory.file.as_raw_fd(),
                     raw.as_ptr(),
                     libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
                 )
@@ -848,7 +857,7 @@ mod private_state {
             check_private_file(&current)?;
             let m = current.metadata()?;
             anyhow::ensure!(
-                self.identity
+                self.inner.identity
                     == LockIdentity {
                         dev: m.dev(),
                         ino: m.ino()
@@ -2015,44 +2024,36 @@ async fn record_observation(
     Ok(())
 }
 async fn mark_unknown(client: &AuditClient, state: &PlanState, reason: &str) {
-    // A Created acknowledgement can be retried with its original identity.
-    // Do not advance the registry revision with Unknown first: doing so would
-    // invalidate a still-uncommitted Created or hide a committed Created with
-    // no start claim. The private checkpoint keeps the owned immutable ID and
-    // exact pending request; recovery reconciles it before any first start.
-    if state.checkpoint().is_ok_and(|checkpoint| {
-        checkpoint.owned.is_some()
-            && checkpoint.pending.as_ref().is_some_and(|pending| {
-                matches!(pending.transition, WorkerTransitionV1::Created { .. })
-            })
-    }) {
-        return;
-    }
-    if refresh(client, state)
-        .await
-        .is_ok_and(|worker| worker.quota_held)
+    let _ = try_mark_unknown(client, state, reason).await;
+}
+async fn try_mark_unknown(client: &AuditClient, state: &PlanState, reason: &str) -> Result<()> {
+    // Never overwrite an unresolved Created operation. Its original bytes and
+    // owned snapshot remain in the private checkpoint for exact reconciliation.
+    let checkpoint = state.checkpoint()?;
+    if checkpoint.owned.is_some()
+        && checkpoint
+            .pending
+            .as_ref()
+            .is_some_and(|pending| matches!(pending.transition, WorkerTransitionV1::Created { .. }))
     {
-        // Preserve the original operation identity; an acknowledgement failure
-        // must not be silently retried as a new terminal or fresh start permit.
-        if state
-            .update(|plan| {
-                let checkpoint = plan.managed.as_mut().context("missing checkpoint")?;
-                if let Some(pending) = checkpoint.pending.take() {
-                    anyhow::ensure!(
-                        checkpoint.uncertain.len() < 64,
-                        "too many unresolved control operations"
-                    );
-                    checkpoint.uncertain.push(pending);
-                }
-                Ok(())
-            })
-            .is_err()
-        {
-            return;
-        }
-        let reason = crate::redaction::clip(&client.redactor.text(reason), 1000);
-        let _ = mutate(client, state, WorkerTransitionV1::Unknown { reason }).await;
+        bail!("Created acknowledgement is unresolved; control failure and owned instance retained");
     }
+    if refresh(client, state).await?.quota_held {
+        state.update(|plan| {
+            let checkpoint = plan.managed.as_mut().context("missing checkpoint")?;
+            if let Some(pending) = checkpoint.pending.take() {
+                anyhow::ensure!(
+                    checkpoint.uncertain.len() < 64,
+                    "too many unresolved control operations"
+                );
+                checkpoint.uncertain.push(pending);
+            }
+            Ok(())
+        })?;
+        let reason = crate::redaction::clip(&client.redactor.text(reason), 1000);
+        mutate(client, state, WorkerTransitionV1::Unknown { reason }).await?;
+    }
+    Ok(())
 }
 async fn post_saved_terminal(client: &AuditClient, state: &PlanState) -> Result<()> {
     let checkpoint = state.checkpoint()?;
@@ -2347,16 +2348,22 @@ async fn launch_worker(
         // Acknowledged before the durable start claim, no keypresses or screen contents.
         emit(client, &plan, "runtime.terminal.attach.authorized", json!({"execution_mode":plan.request.execution_mode,"security_preset":worker.launch.security_preset,"worker_id":worker.worker_id,"attempt_id":worker.attempt.attempt_id,"reattach":false})).await?;
     }
+    let execution_deadline =
+        tokio::time::Instant::now() + Duration::from_secs(plan.options.timeout);
+    let supervision =
+        control_monitor::PrestartOwner::new(runtime, client, state, guard, execution_deadline)?;
     let on_created = |created: OwnedContainerSnapshot| {
         let state = state.clone();
         let client = client.clone();
         let guard = &guard;
+        let supervision = supervision.clone();
         async move {
             guard.ensure_current()?;
             state.update(|plan| {
                 plan.managed.as_mut().context("missing checkpoint")?.owned = Some(created.clone());
                 Ok(())
             })?;
+            supervision.ensure_live()?;
             let worker = state.worker()?;
             if matches!(
                 worker.state,
@@ -2381,6 +2388,7 @@ async fn launch_worker(
                     "recovered Created instance conflicts with durable control"
                 );
             }
+            supervision.ensure_live()?;
             if state.worker()?.attempt.start_operation_id.is_some() {
                 return Ok(StartDirective::ObserveOnly);
             }
@@ -2394,9 +2402,10 @@ async fn launch_worker(
             )
             .await?;
             guard.ensure_current()?;
+            supervision.ensure_live()?;
             Ok(
                 if claimed.disposition == Some(ClaimDispositionV1::EmitOnce) {
-                    StartDirective::EmitOnce
+                    StartDirective::EmitOnceWithVeto(supervision.veto(created)?)
                 } else {
                     StartDirective::ObserveOnly
                 },
@@ -2427,35 +2436,38 @@ async fn launch_worker(
         }
     };
     let (done, completed) = tokio::sync::watch::channel(false);
-    // This earlier bound is deliberately conservative: it cannot extend the
-    // runtime's own lifetime while preparation/start observation is pending.
-    let execution_deadline =
-        tokio::time::Instant::now() + Duration::from_secs(plan.options.timeout);
+    // The original earlier deadline also bounds the first successful control
+    // read. It is never rebased after readiness, claim or final admission.
     let execute = async {
-        let result = if let Some(recovered) = &recovered {
-            runtime
-                .start_owned_retained(
-                    &spec,
-                    recovered,
-                    None,
-                    Duration::from_secs(plan.options.timeout),
-                    256 * 1024,
-                    on_created,
-                    on_started,
-                )
-                .await
-        } else {
-            runtime
-                .execute_retained(
-                    &spec,
-                    None,
-                    Duration::from_secs(plan.options.timeout),
-                    256 * 1024,
-                    on_created,
-                    on_started,
-                )
-                .await
-        };
+        let result = async {
+            supervision.wait_ready().await?;
+            if let Some(recovered) = &recovered {
+                runtime
+                    .start_owned_retained(
+                        &spec,
+                        recovered,
+                        None,
+                        Duration::from_secs(plan.options.timeout),
+                        256 * 1024,
+                        on_created,
+                        on_started,
+                    )
+                    .await
+            } else {
+                runtime
+                    .execute_retained(
+                        &spec,
+                        None,
+                        Duration::from_secs(plan.options.timeout),
+                        256 * 1024,
+                        on_created,
+                        on_started,
+                    )
+                    .await
+            }
+        }
+        .await;
+        supervision.execution_finished();
         let _ = done.send(true);
         result
     };
@@ -2467,8 +2479,50 @@ async fn launch_worker(
         completed,
         started,
         execution_deadline,
+        supervision.clone(),
     );
     let (execution, monitor) = tokio::join!(execute, monitor);
+    // Recover only a native completion qualified by this same runtime. The
+    // carrier's original cause/contexts remain owned beside that completion.
+    let (execution, execution_error) = match execution {
+        Ok(retained) => (Ok(retained), None),
+        Err(error) => match runtime.take_completed_legacy_failure(&spec, error) {
+            Ok((retained, error)) => (Ok(retained), Some(error)),
+            Err(error) => (Err(error), None),
+        },
+    };
+    if let Err(control) = monitor {
+        let reason = client.redactor.text(&control.to_string());
+        return match execution {
+            Err(error) => {
+                // Before start or unresolved effect: retain the actual error,
+                // owned snapshot/IO, original control cause and audit refusal.
+                let audit_error = try_mark_unknown(client, state, &reason).await.err();
+                Err(control_monitor::RejectedLaunch {
+                    cause: control.into(),
+                    diagnostic: reason,
+                    execution: None,
+                    execution_error: Some(error),
+                    summary: None,
+                    finalization_error: None,
+                    audit_error,
+                }
+                .into())
+            }
+            Ok(retained) => {
+                reject_completed_execution(
+                    runtime,
+                    client,
+                    state,
+                    retained,
+                    control.into(),
+                    execution_error,
+                    reason,
+                )
+                .await
+            }
+        };
+    }
     let retained = match execution {
         Ok(retained) => retained,
         Err(error) => {
@@ -2476,7 +2530,12 @@ async fn launch_worker(
             return Err(error);
         }
     };
-    let mut summary = match finish_execution(runtime, client, state, &retained).await {
+    if let Some(error) = execution_error {
+        let reason = redacted_error(&client.redactor, &error);
+        return reject_completed_execution(runtime, client, state, retained, error, None, reason)
+            .await;
+    }
+    let summary = match finish_execution(runtime, client, state, &retained).await {
         Ok(summary) => summary,
         Err(error) => {
             mark_unknown(
@@ -2491,20 +2550,58 @@ async fn launch_worker(
             return Err(error);
         }
     };
-    if let Err(error) = monitor {
-        summary.postprocessing_error = Some(crate::redaction::clip(
-            &format!(
-                "control observation failed during execution: {}",
-                redacted_error(&client.redactor, &error)
-            ),
-            8192,
-        ));
-        state.update(|plan| {
-            plan.managed.as_mut().context("missing checkpoint")?.result = Some(summary.clone());
-            Ok(())
-        })?;
-    }
     Ok(summary)
+}
+
+// A later observer failure does not erase a fully qualified native terminal.
+// Finalization uses the existing durable ACK/usage/cleanup protocol exactly
+// once; the result, primary cause and any subsequent refusal remain returned.
+async fn reject_completed_execution(
+    runtime: &ManagedRuntime,
+    client: &AuditClient,
+    state: &PlanState,
+    retained: crate::runtime::ManagedRetainedExecution,
+    cause: anyhow::Error,
+    execution_error: Option<anyhow::Error>,
+    reason: String,
+) -> Result<RunSummary> {
+    let (summary, finalization_error, audit_error) =
+        match finish_execution(runtime, client, state, &retained).await {
+            Ok(mut summary) => {
+                let prior = summary.postprocessing_error.take();
+                summary.postprocessing_error = Some(crate::redaction::clip(
+                    &match prior {
+                        Some(prior) => format!("{prior}; execution observation failed: {reason}"),
+                        None => format!("execution observation failed: {reason}"),
+                    },
+                    8192,
+                ));
+                let audit_error = state
+                    .update(|plan| {
+                        plan.managed.as_mut().context("missing checkpoint")?.result =
+                            Some(summary.clone());
+                        Ok(())
+                    })
+                    .err();
+                (Some(summary), None, audit_error)
+            }
+            Err(error) => {
+                // Only a still-held allocation may become InDoubt. A terminal
+                // already durably acknowledged is never rewritten as unknown.
+                let audit_error = try_mark_unknown(client, state, &reason).await.err();
+                (None, Some(error), audit_error)
+            }
+        };
+    Err(control_monitor::RejectedLaunch {
+        cause,
+        diagnostic: reason,
+        execution: Some(retained),
+        execution_error,
+        summary,
+        finalization_error,
+        audit_error,
+    }
+    .into())
 }
 
 fn helper_spec(

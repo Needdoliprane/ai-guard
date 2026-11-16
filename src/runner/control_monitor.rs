@@ -4,6 +4,10 @@ use super::*;
 use std::future::Future;
 use tokio::{sync::watch, time::Instant};
 
+#[path = "control_monitor/prestart.rs"]
+mod prestart;
+pub(super) use prestart::{PrestartOwner, RejectedLaunch};
+
 const WINDOW: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const ARMING_TIMEOUT: Duration = Duration::from_secs(15);
@@ -949,23 +953,64 @@ pub(super) async fn run(
     client: &AuditClient,
     state: &PlanState,
     guard: &AttemptGuard,
+    completed: watch::Receiver<bool>,
+    started: watch::Receiver<bool>,
+    original_deadline: Instant,
+    owner: Arc<PrestartOwner>,
+) -> std::result::Result<(), prestart::ControlFailure> {
+    if let Err(error) = owner.require_context(runtime, state, guard) {
+        let failure = owner.revoke(error);
+        owner.retain_stop_until_completed(completed).await;
+        return Err(failure);
+    }
+    let _lease = match owner.own_monitor() {
+        Ok(lease) => lease,
+        Err(error) => {
+            let failure = owner.revoke(error);
+            owner.retain_stop_until_completed(completed).await;
+            return Err(failure);
+        }
+    };
+    let result = run_observation(
+        client,
+        state,
+        guard,
+        completed.clone(),
+        started,
+        original_deadline,
+        &owner,
+    )
+    .await;
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            // Revoke synchronously BEFORE any stop await. The same observer
+            // remains the stop owner even if a start was already admitted.
+            let failure = owner.revoke(error);
+            owner.retain_stop_until_completed(completed).await;
+            Err(failure)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_observation(
+    client: &AuditClient,
+    state: &PlanState,
+    guard: &AttemptGuard,
     mut completed: watch::Receiver<bool>,
     mut started: watch::Receiver<bool>,
     original_deadline: Instant,
+    owner: &Arc<PrestartOwner>,
 ) -> Result<()> {
-    let stop_owned = || async {
-        if let Some(owned) = state.checkpoint()?.owned {
-            runtime.stop_snapshot_owned(&owned).await?;
-        }
-        Ok(())
-    };
-    let known_stop = || Ok(state.worker()?.state == WorkerStateV1::Stopping);
+    let stop_owned = || owner.stop_owned();
+    let known_stop = || Ok(owner.revoked() || state.worker()?.state == WorkerStateV1::Stopping);
     let prepare = async {
         // A read begun before both acknowledgements never gains tolerance.
         while !*started.borrow() {
             let read = async { refresh_readonly(client, state).await };
             match interruptible(read, &mut completed, original_deadline.min(Instant::now() + REQUEST_TIMEOUT), &known_stop).await? {
-                Wake::Value(result) => { result?; }, Wake::Completed => return Ok(None),
+                Wake::Value(result) => { result?; owner.confirm_read()?; }, Wake::Completed => return Ok(None),
                 _ => bail!("control observation before start acknowledgement failed or was interrupted"),
             }
             tokio::select! {
@@ -986,10 +1031,7 @@ pub(super) async fn run(
     let (plan, context) = match prepare {
         Ok(Some(prepared)) => prepared,
         Ok(None) => return Ok(()),
-        Err(error) => {
-            let _ = stop_owned().await;
-            return Err(error);
-        }
+        Err(error) => return Err(error),
     };
     let arming_started = Instant::now();
     let create = tokio::task::spawn_blocking(move || {

@@ -1,5 +1,13 @@
 # Validation courante
 
+## 16 novembre — D1 : quatorze cas logiciels du correctif vérifiés
+
+Sur la source `74d60de1c9348615b7c1a34bf8df55fa91bf5448b6c0b1d2197ef3aef0b02b7b` (2 932 fichiers), **14 cas exacts PASS**, une invocation chacun : quatre vrais CLI ai-guard (`agentsandbox`)/Gateway/SQLite, deux unités Managed/PTY, trois voisins PTY et cinq deadline. Le moteur est une fixture Rust ; aucun Codex CLI, Claude Code, fournisseur ou daemon Docker/Podman n’est testé. Les huit fichiers Rust D1 à intégrer sont exacts ; les deux fichiers D7 supplémentaires sont cfg(test) et exclus du commit D1.
+
+La baseline c60 conserve son canari PASS puis le RED préstart `starts=1` après GET 429 ; le même oracle corrigé observe `starts=0`, avec audit valide dans les deux observations. Les assertions baseline arrêtées au premier défaut ne sont pas rétrospectivement créditées. Le nouveau cas après start conserve STOP natif, callback committé et audit valide. [Reçus, FQN, EN/FR et limites](evidence/2026-11-16/control-monitor-prestart-fix/README.md). Clippy D1 toutes cibles sur la source composée `74d60de1…b7b` : **RC0 non strict, 507 émissions d’avertissement et 0 erreur**. Reçu `dc43ad33…0e0a2` ; gate strict ouvert.
+
+Le producteur fallback Managed n’est pas l’injection exacte de cette faute jusqu’au finalizer Store/quota. Vrai TTY interactif, abandon/reprise froide, moteurs, fournisseur et cluster restent non qualifiés. D7 reste ouvert : premier setup TMPDIR/UDS non concluant conservé ; phase R2 après seule correction de configuration du harnais, cap2 PASS RC0 puis Restore cap1 RED RC101 au vrai oracle ACK sans STOP/Cancel. Troisième cas NOT_RUN ; aucun correctif produit D7 inclus. Verdict primaire run-2 inchangé ; **0/12 gates clos**.
+
 ## 16 novembre — canari D1 PASS puis reproduction préstart RED
 
 Sur la source dédiée `c60b0cb0…` (même code produit que `a398131`), compilation CLI/intégration et découverte passent. Une invocation sans faute donne PASS RC0 ; une invocation avec GET429 préstart donne RC101 sur le premier start interdit, après les assertions communes du harnais. Les [reçus et limites](evidence/2026-11-16/control-monitor-prestart/README.md) distinguent l'oracle atteint des assertions suivantes non exécutées. Ce sont des essais logiciels locaux ; aucun moteur réel ni nouvelle correction qualifiée.

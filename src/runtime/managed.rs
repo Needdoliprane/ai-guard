@@ -10,6 +10,8 @@ pub(super) use batch_observation::{
 
 #[cfg(all(test, unix))]
 mod deadline_semantic_tests;
+#[cfg(all(test, unix))]
+mod legacy_completion_tests;
 
 pub(crate) mod relay;
 
@@ -439,6 +441,8 @@ pub struct OwnedContainerSnapshot {
 #[derive(Debug)]
 pub enum StartDirective {
     EmitOnce,
+    /// The existing first-start grant plus a consumed control-owner veto.
+    EmitOnceWithVeto(LegacyStartVeto),
     ObserveOnly,
 }
 #[derive(Debug)]
@@ -563,9 +567,47 @@ impl OwnedExecutionOutcome {
     }
 }
 
+/// Retains an actual legacy transport result across a later native check or
+/// fallback failure. These fields grant no terminal/accounting authority.
+struct RetainedLegacyExecutionFailure {
+    cause: anyhow::Error,
+    _runtime: ManagedRuntime,
+    owned: Option<OwnedContainerSnapshot>,
+    transport: Option<ExecutionResult>,
+    fallback_stop: Option<ContainerObservation>,
+    fallback_error: Option<anyhow::Error>,
+    terminal_validation_error: Option<anyhow::Error>,
+    completed: Option<ManagedRetainedExecution>,
+}
+impl std::fmt::Debug for RetainedLegacyExecutionFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RetainedLegacyExecutionFailure")
+            .field("owned", &self.owned.is_some())
+            .field("transport", &self.transport.is_some())
+            .field("fallback_stop", &self.fallback_stop.is_some())
+            .field("fallback_error", &self.fallback_error.is_some())
+            .field(
+                "terminal_validation_error",
+                &self.terminal_validation_error.is_some(),
+            )
+            .field("completed", &self.completed.is_some())
+            .finish_non_exhaustive()
+    }
+}
+impl std::fmt::Display for RetainedLegacyExecutionFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "legacy owned execution retained: {}", self.cause)
+    }
+}
+impl std::error::Error for RetainedLegacyExecutionFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.cause.as_ref())
+    }
+}
+
 enum OwnedStartDirective {
     ObserveOnly,
-    Legacy,
+    Legacy(Option<LegacyStartVeto>),
     Prearmed(PrearmedStartControl),
     AbandonedBeforeClaim(AbandonedBeforeClaim),
 }
@@ -573,7 +615,8 @@ impl From<StartDirective> for OwnedStartDirective {
     fn from(value: StartDirective) -> Self {
         match value {
             StartDirective::ObserveOnly => Self::ObserveOnly,
-            StartDirective::EmitOnce => Self::Legacy,
+            StartDirective::EmitOnce => Self::Legacy(None),
+            StartDirective::EmitOnceWithVeto(veto) => Self::Legacy(Some(veto)),
         }
     }
 }
@@ -1558,6 +1601,7 @@ impl ManagedRuntime {
         }
         let id = handle.id.clone();
         let mut moved_batch_fallback = None;
+        let mut completed_transport: Option<ExecutionResult> = None;
         let mut stop_snapshot = baseline.map(|observation| OwnedContainerSnapshot {
             handle: handle.clone(),
             observation: observation.clone(),
@@ -1585,17 +1629,17 @@ impl ManagedRuntime {
                 observation,
             };
             stop_snapshot = Some(created.clone());
-            let control = match on_created(created.clone()).await? {
+            let (control, legacy_veto) = match on_created(created.clone()).await? {
                 OwnedStartDirective::ObserveOnly => {
                     bail!("start claim already consumed; owned instance retained without emitting start; reconciliation required");
                 }
-                OwnedStartDirective::Legacy => {
+                OwnedStartDirective::Legacy(veto) => {
                     ensure!(duration.is_some(), "legacy start cannot authorize prearmed transport");
-                    None
+                    (None, veto)
                 }
                 OwnedStartDirective::Prearmed(control) => {
                     ensure!(duration.is_none(), "prearmed start cannot authorize legacy transport");
-                    Some(control)
+                    (Some(control), None)
                 }
                 OwnedStartDirective::AbandonedBeforeClaim(retirement) => {
                     ensure!(duration.is_none(), "unused-slot retirement requires the prearmed transport");
@@ -1642,14 +1686,19 @@ impl ManagedRuntime {
                     Some((self, &created.observation)),
                     spec.security_preset.is_interactive().then_some(spec.terminal_secrets.0.as_slice()),
                     batch_work.clone(),
+                    legacy_veto,
                     callback,
                 ).await.map_err(|failure| {
                     moved_batch_fallback = failure.moved_fallback;
                     anyhow::Error::new(*failure)
                 })?
             };
+            completed_transport = Some(result);
+            #[cfg(all(test, unix))]
+            legacy_completion_tests::after_transport(&handle.id);
             let terminal = self.observe(&handle).await?;
             terminal.validate_terminal(self.binding.kind, &created.observation)?;
+            let result = completed_transport.take().context("completed transport result is absent")?;
             Ok(OwnedExecutionOutcome::Executed(ManagedRetainedExecution {
                 execution: RetainedExecution { result, instance },
                 created,
@@ -1666,11 +1715,22 @@ impl ManagedRuntime {
                         "owned instance {} retained; independent enforcement and terminal reconciliation remain required", handle.id
                     )));
                 }
+                let mut fallback_stop = None;
+                let mut fallback_error = None;
                 let stopped = super::deadline_supervision::resolve_outer_fallback(
                     moved_batch_fallback,
                     || async {
                         match stop_snapshot.as_ref() {
-                            Some(snapshot) => self.stop_snapshot_owned(snapshot).await.is_ok(),
+                            Some(snapshot) => match self.stop_snapshot_owned(snapshot).await {
+                                Ok(observed) => {
+                                    fallback_stop = Some(observed);
+                                    true
+                                }
+                                Err(cause) => {
+                                    fallback_error = Some(cause);
+                                    false
+                                }
+                            },
                             None => false,
                         }
                     },
@@ -1681,11 +1741,96 @@ impl ManagedRuntime {
                 } else {
                     "stop unknown: authority unavailable or changed; instance may still be running"
                 };
-                Err(error.context(format!(
+                let cause = error.context(format!(
                     "owned instance {} retained for diagnosis; {diagnosis}",
                     handle.id
-                )))
+                ));
+                // A successful stop observation can still be only Created.
+                // Qualify the actual fallback against the original native
+                // baseline, and only after a complete transport/IO result.
+                let mut completed = None;
+                let mut terminal_validation_error = None;
+                if completed_transport.is_some() {
+                    if let (Some(created), Some(terminal)) =
+                        (stop_snapshot.as_ref(), fallback_stop.as_ref())
+                    {
+                        match self.validate_handle(&created.handle).and_then(|()| {
+                            terminal.validate_terminal(self.binding.kind, &created.observation)?;
+                            if let Some(result) = completed_transport.as_ref() {
+                                result.state.validate_terminal(self.binding.kind)?;
+                                let started = chrono::DateTime::parse_from_rfc3339(&result.state.started_at)?;
+                                let finished = chrono::DateTime::parse_from_rfc3339(&result.state.finished_at)?;
+                                ensure!(terminal.process.started_at == Some(started)
+                                    && terminal.process.finished_at == Some(finished)
+                                    && terminal.process.exit_code == u32::try_from(result.state.exit_code).ok(),
+                                    "fallback terminal contradicts the completed transport observation");
+                            }
+                            Ok(())
+                        }) {
+                            Ok(()) => {
+                                if let Some(result) = completed_transport.take() {
+                                    completed = Some(ManagedRetainedExecution {
+                                        execution: RetainedExecution {
+                                            result,
+                                            instance: CreatedInstance {
+                                                kind: self.binding.kind,
+                                                name: created.handle.name.clone(),
+                                                target: created.handle.id.clone(),
+                                            },
+                                        },
+                                        created: created.clone(),
+                                        terminal: terminal.clone(),
+                                    });
+                                }
+                            }
+                            Err(error) => terminal_validation_error = Some(error),
+                        }
+                    }
+                }
+                Err(RetainedLegacyExecutionFailure {
+                    cause,
+                    _runtime: self.clone(),
+                    owned: stop_snapshot,
+                    transport: completed_transport,
+                    fallback_stop,
+                    fallback_error,
+                    terminal_validation_error,
+                    completed,
+                }
+                .into())
             }
+        }
+    }
+    /// Consume once only the completion produced by this exact retained
+    /// runtime after its real fallback passed full terminal validation. The
+    /// original error (including contexts and ancillary causes) stays owned.
+    /// This port performs no runtime operation or additional stop.
+    pub(crate) fn take_completed_legacy_failure(
+        &self,
+        spec: &ContainerSpec,
+        mut error: anyhow::Error,
+    ) -> std::result::Result<(ManagedRetainedExecution, anyhow::Error), anyhow::Error> {
+        let completed = error
+            .downcast_mut::<RetainedLegacyExecutionFailure>()
+            .and_then(|failure| {
+                if std::sync::Arc::ptr_eq(&self.runtime.anchor, &failure._runtime.runtime.anchor)
+                    && self.binding.fingerprint() == failure._runtime.binding.fingerprint()
+                    && failure.completed.as_ref().is_some_and(|completed| {
+                        let handle = completed.handle();
+                        handle.session == spec.session
+                            && handle.operation == spec.operation_id()
+                            && handle.name == spec.name()
+                            && handle.fingerprint_version() == spec.fingerprint_version()
+                    })
+                {
+                    failure.completed.take()
+                } else {
+                    None
+                }
+            });
+        match completed {
+            Some(completed) => Ok((completed, error)),
+            None => Err(error),
         }
     }
     /// Reconciliation observes only; it can never emit start or infer disappearance.

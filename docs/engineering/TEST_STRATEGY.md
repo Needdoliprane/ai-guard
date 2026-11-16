@@ -1,5 +1,13 @@
 # Stratégie de qualification
 
+## 16 novembre — D1 : séparer preuve CLI, récupération Managed et TTY
+
+La [sélection D1](evidence/2026-11-16/control-monitor-prestart-fix/README.md) compte **14 PASS réels** : quatre invocations du binaire ai-guard `agentsandbox` avec Gateway/SQLite et moteur Rust de fixture, deux unités Managed/PTY, trois PTY et cinq deadline. Chaque FQN est invoqué une fois ; sources et trois exécutables sont revérifiés. Ni Codex CLI ni Claude Code fournisseur ne sont impliqués. Les deux fichiers D7 cfg(test) de la source commune sont hors commit D1 et leurs cas ne contribuent pas aux quatorze PASS.
+
+Conserver canari puis RED baseline, le refus préstart corrigé avant tout start, la faute au dernier contrôle d’autorité et le contraste après effet avec terminal réellement connu. L’unité de fallback vérifie le vrai producteur Managed et sa cause ; elle ne remplace pas la faute exacte à travers runner/Store/quota. Les voisins PTY/deadline ne qualifient pas une session TTY physique ni le délai d’arrêt d’un moteur réel. Abandon, reprise froide et autres plateformes restent ouverts. Clippy D1 toutes cibles sur la source composée `74d60de1…b7b` : **RC0 non strict, 507 émissions d’avertissement et 0 erreur**. Reçu `dc43ad33…0e0a2` ; gate strict ouvert.
+
+Une source commune D1/D7 économise un build ; elle ne fusionne ni qualification ni ordre des résultats. Le premier canari D7 échoue au setup TMPDIR/UDS avant l’oracle : ce résultat non concluant reste conservé. La phase R2 corrige seulement cette configuration de harnais, vérifie cap2 PASS RC0 puis atteint le vrai oracle cap1 ACK sans STOP/Cancel, RED RC101. Le troisième parent reste NOT_RUN et aucun correctif produit D7 n’est intégré. Aucun ancien PASS, helper ignoré ou résultat Native17 privé n’est transféré à ce lot.
+
 ## 16 novembre — R2 : sélection logicielle de composition et reprise tracée
 
 Les **26 sélections R2** sont exécutées en série, une fois chacune : 18 runtime, quatre Kubernetes et quatre intégrations `runtime_managed`. Elles passent sur les deux nouveaux artefacts produits depuis la même source R2 ; listes actives/ignorées, sorties/RC et sources/binaires sont vérifiés par Root. Les helpers ignorés ne sont pas comptés. [FQN, commandes réelles, profils, empreintes et limites](evidence/2026-11-16/runtime-kubernetes-batch-composition/README.md).

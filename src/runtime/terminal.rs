@@ -751,8 +751,15 @@ impl TransportIssue {
 /// Consuming the builder is significant: Command retains its Stdio values for reuse.
 /// No parent copy of the slave may keep the master artificially alive after child exit.
 fn spawn_transport(
+    command: Command,
+    dimensions: &libc::winsize,
+) -> Result<(AsyncFd<OwnedFd>, File, Child)> {
+    spawn_transport_with_veto(command, dimensions, None)
+}
+fn spawn_transport_with_veto(
     mut command: Command,
     dimensions: &libc::winsize,
+    veto: Option<(super::LegacyStartVeto, String)>,
 ) -> Result<(AsyncFd<OwnedFd>, File, Child)> {
     let (master, slave) = pty(dimensions)?;
     let slave_keeper = slave.try_clone()?;
@@ -778,6 +785,11 @@ fn spawn_transport(
             Ok(())
         });
     }
+    // All PTY, stdio and pre_exec preparation is complete. Consume the same
+    // retained control-owner veto at the actual final process boundary.
+    if let Some((veto, target)) = veto {
+        veto.check(&target)?;
+    }
     let child = command
         .spawn()
         .context("cannot start filtered terminal transport")?;
@@ -786,6 +798,19 @@ fn spawn_transport(
 }
 impl TerminalSession {
     pub(super) fn spawn(command: Command) -> Result<(Self, Child)> {
+        Self::spawn_checked(command, None)
+    }
+    pub(super) fn spawn_with_veto(
+        command: Command,
+        veto: super::LegacyStartVeto,
+        target: String,
+    ) -> Result<(Self, Child)> {
+        Self::spawn_checked(command, Some((veto, target)))
+    }
+    fn spawn_checked(
+        command: Command,
+        veto: Option<(super::LegacyStartVeto, String)>,
+    ) -> Result<(Self, Child)> {
         let mut terminal = TerminalGuard::open()?;
         let dimensions = size(terminal.file.as_raw_fd())?;
         // SAFETY: File/OwnedFd retain these exact open descriptors until AsyncFd is dropped.
@@ -797,7 +822,10 @@ impl TerminalSession {
         use std::io::Write;
         std::io::stderr().write_all(b"Interactive worker: Ctrl-X Ctrl-X requests stop. Typed Ctrl-C is sent to the worker.\n")?;
         terminal.enter_raw()?;
-        let (master, slave_keeper, child) = spawn_transport(command, &dimensions)?;
+        let (master, slave_keeper, child) = match veto {
+            Some(veto) => spawn_transport_with_veto(command, &dimensions, Some(veto)),
+            None => spawn_transport(command, &dimensions),
+        }?;
         let transport_pid = libc::pid_t::try_from(
             child
                 .id()
@@ -1288,6 +1316,55 @@ mod tests {
                 .any(|bytes| bytes == b"\x1b[r"),
             "authorized scrolling margins must be reset by the trusted presentation cleanup"
         );
+    }
+
+    #[tokio::test]
+    async fn final_veto_refuses_after_pty_preparation_before_transport_spawn() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        #[derive(Debug)]
+        struct FinalVetoRefusal;
+        impl std::fmt::Display for FinalVetoRefusal {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("synthetic final veto refusal")
+            }
+        }
+        impl std::error::Error for FinalVetoRefusal {}
+        struct Refuse {
+            checked: Arc<AtomicBool>,
+        }
+        impl super::super::BeforeSpawnGuard for Refuse {
+            fn check_before_spawn(self: Box<Self>, target: &str) -> Result<()> {
+                assert_eq!(target, "exact-owned-target");
+                self.checked.store(true, Ordering::SeqCst);
+                Err(FinalVetoRefusal.into())
+            }
+        }
+        let checked = Arc::new(AtomicBool::new(false));
+        let veto = super::super::LegacyStartVeto::new(Box::new(Refuse {
+            checked: Arc::clone(&checked),
+        }));
+        let dimensions = libc::winsize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        // Even a nonexistent executable must never reach Command::spawn when
+        // this final restriction refuses. The exact original cause is returned.
+        let command = Command::new("/nonexistent/d1-final-veto-must-not-spawn");
+        let error = match spawn_transport_with_veto(
+            command,
+            &dimensions,
+            Some((veto, "exact-owned-target".into())),
+        ) {
+            Ok(_) => panic!("refused transport must not be spawned"),
+            Err(error) => error,
+        };
+        assert!(checked.load(Ordering::SeqCst));
+        assert!(error.is::<FinalVetoRefusal>());
     }
 
     async fn queued_tail(payload: &str, secrets: Vec<String>) -> (Result<TerminalEnd>, Vec<u8>) {

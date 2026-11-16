@@ -1,5 +1,11 @@
 # Gates de qualification production
 
+## 16 novembre — D1 : quatorze PASS logiciels, aucune qualification globale
+
+Le [lot D1](evidence/2026-11-16/control-monitor-prestart-fix/README.md) corrige l’admission préstart au premier effet et conserve le propriétaire, les causes/captures et le terminal natif connu. **14 PASS** vérifient quatre vrais CLI ai-guard/Gateway/SQLite avec moteur Rust de fixture et dix unités/voisins Managed, PTY et deadline sur leur source exacte. La fenêtre post-ACK reste 60 s ; aucun réglage de sûreté n’a été réduit. Les deux fichiers D7 cfg(test) de la composition sont exclus du commit D1.
+
+Clippy D1 toutes cibles sur la source composée `74d60de1…b7b` : **RC0 non strict, 507 émissions d’avertissement et 0 erreur**. Reçu `dc43ad33…0e0a2` ; gate strict ouvert. Faute tardive exacte jusqu’au Store/quota, vrai TTY interactif, abandon/reprise froide, Docker/Podman, fournisseurs et cluster restent non qualifiés. Le verdict primaire D1 n’est pas réécrit ; D7 reste ouvert : le premier setup avant oracle est préservé ; après correction de la seule configuration TMPDIR, cap2 PASS et cap1 RED au vrai oracle de couverture sont vérifiés, sans correctif produit D7 ni qualification runtime. **0/12 gates G01–G12 clos**, G09 conserve son FAIL ; aucune release ni qualification production n’est déduite de ces tests.
+
 ## 16 novembre — R2 runtime/Kubernetes : preuve logicielle ciblée, gates ouverts
 
 La [composition publique R2](evidence/2026-11-16/runtime-kubernetes-batch-composition/README.md) passe format, Clippy toutes cibles **non strict (505 diagnostics d'avertissement)**, build et **26 cas exacts**, vérifiés sur ses sources et binaires propres. R1 et son Clippy FAIL restent historiques ; les PASS standalone ne sont pas transférés.

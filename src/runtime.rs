@@ -37,6 +37,25 @@ pub trait BeforeSpawnGuard: Send {
     fn check_before_spawn(self: Box<Self>, target: &str) -> Result<()>;
 }
 
+/// Additional legacy control-owner veto; this grants no start or enforcer right.
+/// Only the trusted runner can construct it from its real observer/claim owner.
+pub struct LegacyStartVeto {
+    guard: Box<dyn BeforeSpawnGuard>,
+}
+impl LegacyStartVeto {
+    pub(crate) fn new(guard: Box<dyn BeforeSpawnGuard>) -> Self {
+        Self { guard }
+    }
+    fn check(self, target: &str) -> Result<()> {
+        self.guard.check_before_spawn(target)
+    }
+}
+impl std::fmt::Debug for LegacyStartVeto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LegacyStartVeto([private consumed restriction])")
+    }
+}
+
 /// A fresh start claim and the stop notification of an independently armed enforcer.
 /// Neither this notification nor the transport establishes a worker's terminal state.
 pub struct PrearmedStartControl {
@@ -1168,6 +1187,7 @@ impl Runtime {
                 None,
                 None,
                 Some(work),
+                None,
                 on_started,
             )
             .await
@@ -1203,6 +1223,7 @@ impl Runtime {
         managed: Option<(&ManagedRuntime, &ContainerObservation)>,
         interactive_secrets: Option<&[String]>,
         work: Option<std::sync::Arc<deadline_supervision::WorkObservation>>,
+        legacy_veto: Option<LegacyStartVeto>,
         mut on_started: F,
     ) -> Result<ExecutionResult, Box<deadline_supervision::Failure>>
     where
@@ -1220,7 +1241,14 @@ impl Runtime {
             }
             // The interactive monitor remains a distinct, uncorrected path.
             return self
-                .execute_interactive(instance, duration, managed, secrets, on_started)
+                .execute_interactive(
+                    instance,
+                    duration,
+                    managed,
+                    secrets,
+                    legacy_veto,
+                    on_started,
+                )
                 .await
                 .map_err(Failure::unmoved);
         }
@@ -1261,8 +1289,11 @@ impl Runtime {
             if input.is_some() {
                 command.arg("--interactive").stdin(Stdio::piped());
             }
+            command.arg(&target);
+            if let Some(veto) = legacy_veto {
+                veto.check(&target)?;
+            }
             let child = command
-                .arg(target)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
@@ -1805,6 +1836,7 @@ impl Runtime {
         duration: Duration,
         managed: Option<(&ManagedRuntime, &ContainerObservation)>,
         secrets: &[String],
+        legacy_veto: Option<LegacyStartVeto>,
         mut on_started: F,
     ) -> Result<ExecutionResult>
     where
@@ -1825,7 +1857,16 @@ impl Runtime {
             .arg(&instance.target);
         // Register external signals before raw mode. A typed Ctrl-C is an input byte, not SIGINT.
         let mut signals = terminal::ExternalSignals::new()?;
-        let (mut session, mut child) = terminal::TerminalSession::spawn(command)?;
+        let target = instance.target.clone();
+        // Own and join setup/spawn off the polling thread. A slow foreground
+        // banner/PTY/FD operation must not prevent the control owner revoking
+        // admission; the same veto is consumed only at the real spawn boundary.
+        let (mut session, mut child) =
+            deadline_supervision::checked_blocking(move || match legacy_veto {
+                Some(veto) => terminal::TerminalSession::spawn_with_veto(command, veto, target),
+                None => terminal::TerminalSession::spawn(command),
+            })
+            .await?;
         let mut cancellation = InteractiveCancellation {
             runtime: managed_runtime.clone(),
             target: instance.target.clone(),
