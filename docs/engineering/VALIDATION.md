@@ -1,5 +1,9 @@
 # Validation courante
 
+## 16 novembre — tests natifs exécutés et raccords en correction
+
+Le [build natif macOS R16](evidence/2026-11-16/session-control/TARGETED_NATIVE_BUILD_R14_R16.md#native-macos-r16-successor--actually-executed) réussit, puis les 12 tests ciblés donnent **9 diagnostics PASS et 3 sauvegardes FAIL**, sans timeout ni relance. Les trois refus surviennent avant l’oracle de sauvegarde : `human_authority_epoch_expired` au démarrage ; leur cause reste à corriger ou expliquer. La composition suivante Config/E2, revue puis appliquée localement, échoue à son check toutes cibles avec **40 erreurs de compilation** ; ses 55 nouveaux tests sont NOT_RUN. Les preuves restent liées à chaque source. **0/12 gates clos ; aucun pourcentage fonctionnel fiable.**
+
 ## 16 novembre — résultat Rust toutes cibles R13
 
 [compilation R13](evidence/2026-11-15/session-control/COMPOSED_FULL_NATIVE_CHECK_R9.md#r11r13-successor-checks-2026-11-1516) : **PASS RC0, 0 erreur, 2 065 avertissements**, une seule invocation offline/frozen, aucune ligne JSON invalide, source/cache/collecte et fermeture vérifiées. R11/R12 conservent leurs FAIL et leurs empreintes distinctes. **Aucun test exécuté** par cette campagne ; la sélection suivante de 12 régressions reste NOT_RUN. Les preuves détaillées et l’erratum de métadonnées R12 sont liés ci-dessus.

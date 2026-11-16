@@ -1,5 +1,9 @@
 # Stratégie de qualification
 
+## 16 novembre — tests natifs exécutés et raccords en correction
+
+Le [build natif macOS R16](evidence/2026-11-16/session-control/TARGETED_NATIVE_BUILD_R14_R16.md#native-macos-r16-successor--actually-executed) réussit, puis les 12 tests ciblés donnent **9 diagnostics PASS et 3 sauvegardes FAIL**, sans timeout ni relance. Les trois refus surviennent avant l’oracle de sauvegarde : `human_authority_epoch_expired` au démarrage ; leur cause reste à corriger ou expliquer. La composition suivante Config/E2, revue puis appliquée localement, échoue à son check toutes cibles avec **40 erreurs de compilation** ; ses 55 nouveaux tests sont NOT_RUN. Les preuves restent liées à chaque source. **0/12 gates clos ; aucun pourcentage fonctionnel fiable.**
+
 ## 16 novembre — passer de la compilation aux comportements natifs
 
 Après la [compilation R13](evidence/2026-11-15/session-control/COMPOSED_FULL_NATIVE_CHECK_R9.md#r11r13-successor-checks-2026-11-1516) toutes cibles réussie, la validation suivante cible 3 vrais tests de sauvegarde/reprise et 9 de fermeture/dette des diagnostics, avec construction libtest, liste et noms exacts contrôlés avant exécution. Ils restent **NOT_RUN** ; ni compilation, ni liste, ni oracle paramétré non appelé ne vaut PASS. Aucun appel modèle ni essai moteur/cluster n’est inclus.
