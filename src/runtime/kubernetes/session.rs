@@ -6,9 +6,9 @@
 //! retained abandonment is not a central close and releases no quota.
 #![cfg_attr(
     not(test),
-    expect(
+    allow(
         dead_code,
-        reason = "V2 journal mechanics without a production caller until broker routes exist (DESIGN section 0, layer C)"
+        reason = "closed effect-stage journal helpers coexist with R2 production pre-effect callers"
     )
 )]
 use super::{
@@ -99,6 +99,7 @@ impl Preparation {
         expected: &KubernetesSessionReservationIntentV2,
         confirmed: &ConfirmedSessionReservationV2,
     ) -> SessionResult<Self> {
+        confirmed.revalidate_material().map_err(|_| SessionError::UnsafeMaterial)?;
         let snapshot = confirmed.snapshot();
         snapshot
             .validate(confirmed.tenant_id())

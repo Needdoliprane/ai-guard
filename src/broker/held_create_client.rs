@@ -17,6 +17,8 @@ use tokio::sync::Semaphore;
 mod http;
 #[path = "held_create_client_validation.rs"]
 mod validation;
+#[path = "kubernetes_session_client.rs"]
+pub(crate) mod sessions;
 #[cfg(test)]
 use http::MaterialTestGate;
 

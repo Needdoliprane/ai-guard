@@ -11,6 +11,7 @@ use serde_json::Value;
 use std::fmt;
 
 mod policy;
+pub(crate) mod lifecycle;
 pub(crate) mod validation;
 pub use policy::{
     KubernetesSessionControlRecoveryPolicyV2, KubernetesSessionRecoveryPolicyV2,
@@ -237,6 +238,12 @@ impl fmt::Debug for KubernetesSessionReservationIntentV2 {
         f.write_str("KubernetesSessionReservationIntentV2(<private metadata>)")
     }
 }
+impl<'de> Deserialize<'de> for KubernetesSessionReservationIntentV2 {
+    fn deserialize<D: serde::Deserializer<'de>>(decoder: D) -> Result<Self, D::Error> {
+        Self::parse_wire(IntentWire::deserialize(decoder)?)
+            .map_err(|_| serde::de::Error::custom("invalid Kubernetes session reservation intent"))
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -320,7 +327,8 @@ impl KubernetesSessionReservationStateDataV2 {
         }
     }
 }
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct KubernetesSessionReservationSnapshotV2 {
     pub version: u32,
     pub intent: KubernetesSessionReservationIntentV2,
@@ -390,14 +398,16 @@ pub struct KubernetesSessionReservationReceiptV2 {
     pub audit_seq: i64,
     pub audit_hash: String,
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct KubernetesSessionReservationMutationResponseV2 {
     pub version: u32,
     pub receipt: KubernetesSessionReservationReceiptV2,
     pub snapshot: KubernetesSessionReservationSnapshotV2,
     pub replayed: bool,
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct KubernetesSessionReservationCurrentV2 {
     pub version: u32,
     pub snapshot: KubernetesSessionReservationSnapshotV2,

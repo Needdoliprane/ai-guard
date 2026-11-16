@@ -3,8 +3,10 @@
 [English](README.md) · [Français](README.fr.md) · [Guide Kubernetes](../kubernetes/README.fr.md)
 
 **Aucune session Kubernetes ne peut être lancée avec ce produit.** Il n'existe
-ni option `--runtime kubernetes`, ni commande CLI de session, ni activation de
-production. Ce guide décrit le code du runtime de session V2 présent dans les
+ni option `--runtime kubernetes`, ni activation de production. La CLI R2
+prépare, inspecte et abandonne des réservations avant tout effet runtime
+([section 12](#12-http-broker-r2-et-cli-avant-effet)) ; ses nouveaux tests restent `NOT_RUN`.
+Ce guide décrit le code du runtime de session V2 présent dans les
 sources Rust, ce qu'un opérateur peut faire aujourd'hui, et le plan qui le
 qualifiera plus tard sur le cluster Kubernetes à un nœud de Docker Desktop. Ce
 plan **n’a pas été exécuté sur un cluster réel**. Les [preuves du 13 novembre](../../engineering/evidence/2026-11-13/claude-composition/README.fr.md) consignent 144 parents logiciels Kubernetes sélectionnés PASS sur leur source exacte, avec un RC99 global et un écart de sous-cas explicite. Le [registre initial](../../engineering/evidence/2026-11-12/kubernetes-v2-runtime/README.md) conserve son état de livraison daté.
@@ -34,7 +36,7 @@ n'atteint l'attachement.
 |---|---|---|---|
 | A. Entrée de bibliothèque avec données réelles | `KubernetesRuntime::inspect_session_workspace_claim(name)` : nom vérifié comme label DNS avant toute requête, puis GET des deux ancres de namespace, du PVC et à nouveau des ancres. Un nom invalide est signalé comme `InvalidAuthority` avant toute requête, un claim qui ne remplit pas les exigences de la section 3 comme `InvalidResponse`, et un PVC absent comme `ApiRejected(404)`. | Du code Rust qui détient un `KubernetesRuntime`. **Aucun binaire du produit ne l'appelle** ; une entrée CLI en lecture seule, qui associerait les deux premières erreurs à des messages dédiés, n'est qu'un patch proposé. | Sélection historique PASS sur sa source ; mécanismes plus larges et cluster non qualifiés par la sélection 45179db |
 | B. Mécanismes purs (internes à la crate) | Rendu exact de la requête de Pod V2, projection de la réponse admise, parseur exact d'observation, enregistrements du journal. | Code de la crate seulement. | Sélection historique PASS sur sa source ; mécanismes plus larges et cluster non qualifiés par la sélection 45179db |
-| C. Cycle de vie avant effet (interne à la crate) | Chaîne de rétention du journal, réouverture en observation seule, abandon avant tout effet, reprise par un successeur, rejeu du reçu, rapport de réconciliation en observation seule. | **Personne en production.** Le Store du gateway émet les confirmations alors que le broker garde le journal ; les routes broker qui les relieraient n'existent pas encore (demande Root R2). | Sélection historique PASS sur sa source ; mécanismes plus larges et cluster non qualifiés par la sélection 45179db |
+| C. Cycle de vie avant effet | Chaîne de rétention du journal, confirmation HTTP vivante et réouverture, abandon avant tout effet, reprise par un successeur et rejeu du reçu. | HTTP broker R2 et commandes `kubernetes session prepare`, `status`, `abandon` pour schémas11–13. Le port broker natif Source17 reste indisponible. Le rapport de réconciliation runtime reste interne. | Raccords R2 et CLI : NOT_RUN ; les sélections historiques restent liées à leur source |
 | D. Mécanismes d'effet (fermés) | CREATE retenu des octets exacts, PATCH de levée du gate avec opérations JSON-Patch `test`, DELETE avec précondition d'UID ; attachement S2b limité au préambule. | Une garde scellée dont la seule implémentation existe dans les tests, liée à un listener loopback possédé. Aucun chemin du produit n'atteint un effet. | Quatre contrats attach PASS sur 1e30e5e puis sur 45179db ; autres sélections liées à leur source ; effets réels et cluster NOT_RUN |
 | Mode d'attente worker S2b | `ai-guard-provider` sélectionne le mode fixe avant le parcours fournisseur. Il échange Hello/Ready, puis refuse tout octet supplémentaire. | Uniquement l'entrée du mode d'attente du binaire existant ; aucun lanceur de session. | Sept cas stdio du binaire normal PASS sur 1e30e5e puis sur 45179db ; image worker et cluster NOT_RUN |
 | E. Raccords et qualification manquants | Demandes typées R1–R11 au propriétaire du contrôle ; ce plan Docker Desktop. | — | non commencé |
@@ -55,10 +57,11 @@ Les résultats du 13 novembre concernent uniquement les sélections du [relevé 
   Ce travail ne modifie pas cette route.
 - **Inspecter l'autorité Kubernetes** avec la commande existante en lecture
   seule `agentsandbox kubernetes doctor` (voir le [guide Kubernetes](../kubernetes/README.fr.md#lancer-le-diagnostic-cli-en-lecture-seule)).
-- L'abandon, la reprise par un successeur, l'inspection du claim de workspace
-  et le rapport de réconciliation sont des **mécanismes de bibliothèque en
-  attente de R2**. Ce ne sont pas des procédures opérateur, et aucune commande
-  n'est documentée pour eux.
+- Préparer/réouvrir, lire l'état central et abandonner une réservation de
+  session avant effet avec la [CLI R2](#12-http-broker-r2-et-cli-avant-effet).
+  L'inspection du claim de workspace et le rapport de réconciliation runtime
+  restent des mécanismes de bibliothèque ; ces commandes n'appellent pas
+  l'API Kubernetes.
 
 Ne pas modifier, renommer ou supprimer les fichiers d'un répertoire de journal
 V2 pour « débloquer » une session. Le journal est une preuve ; un refus signale
@@ -402,8 +405,9 @@ du contrôle.
 - **R1** : états centraux d'effet V2 et leur migration, y compris la règle
   selon laquelle un UID de claim n'est jamais réutilisé et la liaison centrale
   de l'empreinte de la requête et de l'UID du claim.
-- **R2** : routes HTTP du broker et confirmation vivante reçue par HTTP ;
-  elles donneraient un appelant de production aux mécanismes du cycle de vie.
+- **R2** : les routes broker et la confirmation vivante ont désormais un
+  appelant avant effet pour schémas11–13 en source (section 12, tests NOT_RUN).
+  Le port broker authentifié/transaction natif Source17 reste à implémenter.
 - **R3** : une échéance durable armée avant la levée d'un gate, indépendante
   de la CLI.
 - **R4** : les trames après le `Ready` du mode d'attente (handoff, démarrage,
@@ -468,7 +472,8 @@ L'attachement ne transporte que le préambule du bootstrap, sans donnée métier
    conteneur worker en cours d'exécution, son heure de démarrage et son ID
    d'image, zéro redémarrage et aucune date de suppression. La phase du Pod
    seule ne fait pas preuve.
-3. Vérifier la garde scellée et le drapeau d'annulation avant toute requête.
+3. Vérifier la garde scellée, le drapeau d'annulation et l'échéance absolue
+   avant d'initier une requête.
 4. Initier un unique upgrade WebSocket vers le sous-resource attach du Pod
    nommé, avec les mêmes endpoint HTTPS, AC et credential que les observations.
    Les redirections sont refusées. Valider la réponse 101 et le seul
@@ -522,6 +527,13 @@ l'échéance et finit en `AttachDeadline`, avant ou après Ready ; une demande
 d'annulation pendant l'écriture est conservée séparément comme cause. Une
 trame potentiellement coupée rend le flux inutilisable : aucune autre trame
 n'est envoyée.
+
+Le transport vérifie l'échéance absolue de façon synchrone après construction
+de la requête et validation de la garde, juste avant la marque d'initiation
+et le premier poll HTTP. Une requête périmée retourne `AttachDeadline` avec
+`request_initiated=false`, sans consommer l'unique attachement du Pod. La
+nouvelle régression transport de cette frontière est `NOT_RUN` sur la source
+courante ; les résultats historiques ci-dessus ne couvrent pas ce changement.
 
 Sur un flux utilisable, le propriétaire ferme stdin avec le message v5
 `[255, 0]`, puis envoie une fermeture WebSocket et arrête le transport.
@@ -676,3 +688,84 @@ par le runtime reste ouverte.
   effectifs (EXT-8), feature gates, `stdinOnce`, logs du nœud, signaux, CNI,
   stockage, échéances et capacité de 100 workers restent BLOCKED. L'étape 6
   reste BLOCKED ; sources et résultats loopback ne qualifient pas un cluster.
+
+## 12. HTTP broker R2 et CLI avant effet
+
+Ce raccord est implémenté en source ; compilation, tests et qualification de
+ce nouveau lot sont `NOT_RUN`. Il utilise le ledger existant des schémas11–13,
+sans migration ni table ajoutée. Le port natif Source17 exige encore
+`AuthenticatedExecutionBroker`, les grants/source/policy courants et leur
+revalidation dans la même transaction ; il est refusé explicitement avant
+lecture du corps HTTP. Un `runner` partagé n'est pas une identité broker ou
+cloud de remplacement. Aucune commande ci-dessous ne crée de Pod, ne lève de
+gate, n'attache de flux ou n'exécute de client IA.
+
+Le gateway doit déjà avoir son identité workload broker courante, son grant
+Kubernetes, `session_reservation_policy` et le quota du tenant configurés
+([politiques existantes](../kubernetes/README.fr.md#configurer-les-politiques-de-réservation-de-session-v2)).
+`session_recovery_policy` est une autorisation distincte, facultative à
+l'installation, pour reprendre un abandon retenu avec une incarnation
+successeur. Elle vient de la configuration du tenant au gateway ; le client
+ne transmet aucune politique. Le mode sans politique refuse cette reprise.
+
+Le [profil JSON consommé par la CLI](examples/session-control-v2.json)
+contient uniquement des valeurs publiques d'exemple. Remplacer endpoint,
+tenant, namespace de contrôle, broker, incarnation et credential par les
+valeurs de l'installation. Le token reste dans son fichier privé désigné ;
+aucun secret dans les arguments. Le profil, l'intention et les credentials
+doivent être des fichiers privés réguliers, inchangés, sans lien ; les chemins
+sont absolus. HTTPS vérifié est exigé hors loopback IP. Omettre
+`gateway_ca_file` pour les racines publiques ; une AC privée fournit uniquement
+sa chaîne publique. Aucun accès Kubernetes ni credential Kubernetes n'est
+nécessaire pour R2.
+
+Une intention V2 fermée est fournie par le constructeur Rust existant
+`KubernetesSessionProfileV2::build` puis
+`KubernetesSessionReservationIntentV2::new`. Le fichier conserve les mêmes
+IDs/empreintes à chaque reprise ; ce lot n'ajoute pas de générateur interactif
+de profil ou d'autorisation. Ne pas y insérer de prompt, de credential ou
+d'argv métier : seules leurs empreintes prévues par le contrat y figurent.
+
+```console
+agentsandbox kubernetes session prepare --control-file /chemin/prive/control-v2.json --intent-file /chemin/prive/intent-v2.json --journal-dir /chemin/prive/session-journal
+agentsandbox kubernetes session status --control-file /chemin/prive/control-v2.json --journal-dir /chemin/prive/session-journal
+agentsandbox kubernetes session abandon --control-file /chemin/prive/control-v2.json --journal-dir /chemin/prive/session-journal
+```
+
+`prepare` réserve l'intention exacte, exige un ACK HTTP vivant de l'état
+`Reserved` avec nonce et périmètre broker exacts, puis prépare ou réouvre le
+journal privé. Il peut créer le répertoire de journal demandé ; `status` et
+`abandon` exigent un répertoire existant. Une réponse perdue conserve une
+réception inconnue : rejouer `prepare` avec le même fichier d'intention.
+Le Store rejoue l'opération durable sans nouvelle réservation ou quota.
+
+`abandon` retient un UUID d'opération stable dans `abandoned-v2.json` avant
+tout POST de clôture. Une coupure après commit se reprend avec la même
+commande et le même journal ; aucun UUID de remplacement n'est généré. Une
+incarnation successeur peut soumettre uniquement l'abandon déjà retenu et
+autorisé par la politique centrale. Sans abandon retenu, utiliser la
+procédure de récupération contrôle autorisée. Un audit saturé refuse la
+mutation et conserve le quota ; une panne ou un timeout ne libère rien.
+
+`status` distingue phase locale et état central. Tous les rapports portent
+`execution_available=false` et `runtime_state="not_observed"`. Une erreur
+reste une erreur, sans état vide ou zéro inventé. L'ACK est une provenance
+HTTP vérifiée vers le contrôle, pas une preuve indépendante de son stockage,
+de NamespaceUID, de PVC, de confinement ou d'identité de processus Kubernetes.
+S5, R1/R3/R4/R5/R7/R10 et la qualification cloud restent ouverts.
+
+Le contrat HTTP R2 expose, sous `/api/v1/brokers/kubernetes/` :
+
+| Méthode et suffixe | Contrat |
+|---|---|
+| GET `session-reservation-protocol` | Identité broker authentifiée, schéma, présence des politiques, effets indisponibles |
+| POST `session-reservations` | Intention V2 exacte ; 201 fraîche, 200 rejeu exact |
+| GET `session-reservations/{id}` | État descriptif de la réservation du broker authentifié |
+| POST `session-reservations/{id}/confirmations` | Version2, nonce `request_id`, `reservation_input_hash` ; ACK lié au même état réservé et au broker |
+| POST `session-reservations/{id}/abandonments` | Clôture V2 `preparation_abandoned`, révision attendue1 et UUID retenu ; CAS/audit/rejeu centraux |
+
+Le tenant vient de l'identité authentifiée, avant le corps et le chemin. Les
+corps/ACK sont limités à64/128KiB, JSON fermé sans membre dupliqué. Chaque
+requête contrôle a un timeout12s, sans redirection, proxy ambiant ou retry
+automatique ; la lecture du corps entrant est limitée à5s. Les secrets sont
+refusés avant persistance/diffusion, les erreurs transport restent opaques.

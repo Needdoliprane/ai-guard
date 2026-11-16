@@ -10,9 +10,9 @@
 //! HTTP/1.1 upgrade of one fixed path to the `v5.channel.k8s.io` subprotocol
 //! only, with no v4 or SPDY fallback. Attach attempts hold their own slots
 //! and never take one of the request slots. The attach route is a plain
-//! function: it initiates the built request with one synchronous poll right
-//! after the consumed guard, and returns that same initiated request for the
-//! owner task of the attempt to await.
+//! function: after the consumed guard and a final absolute-deadline check,
+//! it initiates the built request with one synchronous poll and returns that
+//! same initiated request for the owner task of the attempt to await.
 //!
 //! `allow`, not `expect`: `send_session_effect` is called by the effect
 //! functions of `session_effect`, which are themselves dead outside tests
@@ -254,13 +254,22 @@ impl Transport {
         );
         // The handshake never outlives the caller deadline.
         let deadline = attach.until.min(Instant::now() + ATTACH_HANDSHAKE);
-        // Same order as `send_session_effect`: the transport refuses a raised
-        // cancellation itself, then the consumed guard decides, and no await
-        // or further check intervenes before initiating the built request.
+        // Same authorization order as `send_session_effect`: the transport
+        // refuses a raised cancellation itself, then the consumed guard
+        // decides. No await intervenes before the final clock fence and the
+        // first poll of the built request.
         if cancelled.load(Ordering::Acquire) {
             return Err(refused);
         }
         guard.check_before_send(SessionEffectKindV2::Attach, &digest, binding, cancelled)?;
+        // Tokio 1.54.1 Timeout::poll polls its inner future before its delay
+        // (src/time/timeout.rs). An already elapsed timeout can therefore
+        // initiate `execute` on its first poll. Fence the absolute deadline
+        // here, including time spent constructing and authorizing the request,
+        // before marking or initiating any HTTP work.
+        if Instant::now() >= deadline {
+            return Err(KubernetesSessionRuntimeError::AttachDeadline);
+        }
         attach.attempt.admit_initiation();
         let pending = self.client.execute(request);
         // The whole opening owns its request, its bound and its key: it

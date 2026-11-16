@@ -11,9 +11,11 @@ use axum::{body::to_bytes, extract::rejection::PathRejection};
 use serde::Serialize;
 
 const MAX_INPUT: usize = 80 * 1024;
+mod lifecycle;
 
 pub(super) fn routes() -> Router<GatewayState> {
     Router::new()
+        .merge(lifecycle::routes())
         .route(
             "/kubernetes/session-reservations/{id}/control-recovery",
             post(recover),

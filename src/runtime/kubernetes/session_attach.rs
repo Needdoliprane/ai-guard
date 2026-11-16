@@ -1540,11 +1540,11 @@ impl KubernetesRuntime {
     /// owner of the attempt: dropping it then records
     /// `AttachIdentityUnproven` with the cause `CallerGone`, returns the
     /// attach slot at that moment, and nothing was sent. The transport
-    /// initiates the request with one synchronous poll, right after the
-    /// consumed guard, and the initiated request goes to the owner task with
-    /// no await in between. From then on the owner task ends the attempt
-    /// with or without this future: dropping this future makes no end and
-    /// returns no slot. A pending upgrade ends at its answer or at its
+    /// initiates the request with one synchronous poll after the consumed
+    /// guard and final deadline check, and the initiated request goes to the
+    /// owner task with no await in between. From then on the owner task ends
+    /// the attempt with or without this future: dropping this future makes
+    /// no end and returns no slot. A pending upgrade ends at its answer or at its
     /// handshake bound, a stream at its deadline, and the record stays
     /// readable through `join`.
     ///
