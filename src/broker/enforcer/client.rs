@@ -850,6 +850,14 @@ impl EnforcerFullClientV3 {
             return Err(EnforcerError::Conflict);
         }
         slots.remove(&verified.identity.arm().operation_id);
+        // The verified native retirement receipt includes the original's
+        // actual join. This existing semantic exit can also release the
+        // matching prospective payload; a status/Drop cannot reach this port.
+        self.full()?
+            .prospective
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?
+            .remove(&verified.identity.arm().operation_id);
         Ok(())
     }
 
