@@ -71,7 +71,9 @@ enum Command {
         full3_fresh: bool,
         #[arg(long, conflicts_with = "recovery_only")]
         full3_existing: bool,
-        #[arg(long, requires = "full3_fresh")]
+        #[arg(long, conflicts_with_all = ["recovery_only", "full3_fresh", "full3_existing"], requires = "role_name")]
+        legacy_fresh: bool,
+        #[arg(long)]
         role_name: Option<String>,
         #[arg(long, requires = "full3_fresh")]
         installation_id: Option<uuid::Uuid>,
@@ -1316,13 +1318,50 @@ async fn run() -> Result<()> {
             recovery_only,
             full3_fresh,
             full3_existing,
+            legacy_fresh,
             role_name,
             installation_id,
         } => {
             let root = absolute_path(&root)
                 .and_then(|root| Directory::open_existing(&root))
                 .map_err(|_| anyhow::anyhow!("private enforcer root validation failed"))?;
-            if full3_fresh {
+            if !legacy_fresh && !full3_fresh {
+                anyhow::ensure!(
+                    role_name.is_none() && installation_id.is_none(),
+                    "existing/recovery role does not accept fresh role metadata"
+                );
+            }
+            if legacy_fresh {
+                use std::io::Read;
+                let role_name = role_name.ok_or_else(|| {
+                    anyhow::anyhow!("explicit fresh Legacy role name is required")
+                })?;
+                anyhow::ensure!(
+                    installation_id.is_none(),
+                    "Legacy does not accept a Full3 installation binding"
+                );
+                // Private pipe from the actual spawning parent, bounded and
+                // consumed only on this explicit child factory branch.
+                let mut bytes = Vec::with_capacity(17);
+                std::io::stdin().take(17).read_to_end(&mut bytes)?;
+                anyhow::ensure!(
+                    bytes.len() == 16,
+                    "private Legacy launch correlation is missing"
+                );
+                let nonce = uuid::Uuid::from_slice(&bytes)?;
+                anyhow::ensure!(
+                    !nonce.is_nil(),
+                    "private Legacy launch correlation is invalid"
+                );
+                agentsandbox::broker::enforcer::run_internal_legacy_fresh(
+                    &root,
+                    &role_name,
+                    max_slots,
+                    max_recovery_stop_owners,
+                    nonce,
+                )
+                .await?;
+            } else if full3_fresh {
                 let role_name = role_name
                     .ok_or_else(|| anyhow::anyhow!("explicit fresh Full3 role name is required"))?;
                 let installation_id = installation_id.ok_or_else(|| {
@@ -1352,10 +1391,15 @@ async fn run() -> Result<()> {
                 .await?;
             } else {
                 anyhow::ensure!(
-                    max_recovery_stop_owners == 0,
-                    "recovery stop budget requires an explicit recovery role"
+                    role_name.is_none() && installation_id.is_none(),
+                    "existing Legacy does not accept fresh role metadata"
                 );
-                agentsandbox::broker::enforcer::run_internal_enforcer(&root, max_slots).await?;
+                agentsandbox::broker::enforcer::run_internal_enforcer_with_budget(
+                    &root,
+                    max_slots,
+                    max_recovery_stop_owners,
+                )
+                .await?;
             }
         }
         Command::Operator(command) => operations::execute(command).await?,
@@ -1660,6 +1704,64 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn legacy_fresh_requires_explicit_factory_and_preserves_recovery_budget() {
+        let base = [
+            "agentsandbox",
+            "__broker-enforcer",
+            "--root",
+            "/private/fixture",
+            "--max-slots",
+            "1",
+        ];
+        for budget in ["0", "1", "2", "1024"] {
+            let parsed = Cli::try_parse_from(base.into_iter().chain([
+                "--legacy-fresh",
+                "--role-name",
+                "native-legacy",
+                "--max-recovery-stop-owners",
+                budget,
+            ]))
+            .unwrap();
+            let Command::InternalBrokerEnforcer {
+                legacy_fresh: true,
+                full3_fresh: false,
+                full3_existing: false,
+                recovery_only: false,
+                role_name: Some(name),
+                max_recovery_stop_owners,
+                ..
+            } = parsed.command
+            else {
+                panic!("explicit Legacy factory required");
+            };
+            assert_eq!(name, "native-legacy");
+            assert_eq!(max_recovery_stop_owners.to_string(), budget);
+        }
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--legacy-fresh"])).is_err());
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain([
+                "--legacy-fresh",
+                "--role-name",
+                "native-legacy",
+                "--recovery-only"
+            ]))
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain([
+                "--legacy-fresh",
+                "--role-name",
+                "native-legacy",
+                "--max-recovery-stop-owners",
+                "1025"
+            ]))
+            .is_err()
+        );
+        // Parser only: the private stdin pipe and genuine mkdir/lease are
+        // exercised by native tests; this constructs no Fresh permission.
     }
 
     #[test]

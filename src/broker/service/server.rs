@@ -677,13 +677,12 @@ pub async fn serve_selected_owned(
     let mut material = early_material.map(Arc::new);
     let (enforcer, stop_enforcer) = match selection {
         ServiceEnforcerSelectionV1::Legacy => {
-            let role = root
-                .persistent_child("enforcer", true)?
-                .ok_or_else(|| anyhow!("broker stop root is unavailable"))?;
-            let client = EnforcerClient::connect_or_spawn(
-                &role,
+            let client = EnforcerClient::connect_or_spawn_legacy_with_budget(
+                &root,
+                "enforcer",
                 &executable,
                 registry.data.max_enforcer_slots,
+                registry.data.max_recovery_stop_owners,
             )
             .await?;
             (Some(ExecutionEnforcerV1::Legacy(client)), None)
@@ -2443,6 +2442,42 @@ impl Service {
     /// stop. This phase never emits a decision, admission, claim, copy or start.
     async fn restore_stops(&self) {
         let mut restored = 0_usize;
+        if let Ok(ExecutionEnforcerV1::Legacy(client)) = self.full_enforcer() {
+            // Only the actual spawning caller can hold this native-correlated
+            // receipt. Empty-looking DATA or a reconnect cannot create it.
+            let fresh = client.legacy_fresh_startup().await == Ok(true);
+            if fresh && self.material.complete {
+                let root = self.root.clone();
+                let no_previous_source = self
+                    .filesystem(move || {
+                        let Some(journals) = root.persistent_child("journals", false)? else {
+                            return Ok(true);
+                        };
+                        let inventory = journals.persistent_inventory(32)?;
+                        Ok(!inventory.incomplete && inventory.entries.is_empty())
+                    })
+                    .await;
+                if no_previous_source == Ok(true) {
+                    // No recovery reader/scan is opened on this genuine first
+                    // installation. Later profile creation uses its normal
+                    // durable writer; this never reopens a recovery gate.
+                    return;
+                }
+            }
+            // Existing/cold is already fenced by its child constructor. A
+            // fresh role finding ANY previous/unknown journal source must
+            // commit the same native fence before opening that source.
+            self.fenced.store(true, Ordering::SeqCst);
+            if client.legacy_begin_recovery().await.is_err() {
+                // Existing native deadlines and the live daemon's exact
+                // Status/Slots/Cancel transports remain. No unconfirmed
+                // fence authorizes opening a new recovery source scan.
+                eprintln!(
+                    "broker recovery: Legacy native admission fence unavailable; new starts remain refused"
+                );
+                return;
+            }
+        }
         if let Some(stop) = &self.stop_enforcer
             && stop.begin_recovery().await.is_err()
         {
