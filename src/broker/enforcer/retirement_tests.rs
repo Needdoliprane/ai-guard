@@ -17,6 +17,9 @@ mod native_admission_tests;
 #[path = "retirement_prospective_tests.rs"]
 mod prospective_tests;
 
+#[path = "retirement_continuation_regression_tests.rs"]
+mod continuation_regressions;
+
 /// Startup-only opt-in for short Unix socket fixture paths in read-only-root
 /// QA. Keep the historical /tmp default instead of macOS's often long TMPDIR.
 fn short_ipc_fixture_root() -> PathBuf {
@@ -855,6 +858,7 @@ async fn tombstone_retains_capacity_until_real_handle_returns_then_q_is_replayab
         wake: Condvar::new(),
         exit: AtomicBool::new(false),
         runtime_installed: Arc::new(AtomicBool::new(false)),
+        failures: NativeStopFailures::new(),
         owners: full.owners.clone(),
     });
     full.actors

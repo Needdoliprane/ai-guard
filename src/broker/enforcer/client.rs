@@ -73,6 +73,8 @@ struct FullTransport {
     prearm_write_unknown: AtomicBool,
     #[cfg(test)]
     lose_query_reply_after_successes: Mutex<Option<usize>>,
+    #[cfg(test)]
+    lose_next_bind_reply_after_native: AtomicBool,
 }
 struct LocalProspective {
     target: ProspectiveRegistrationV1,
@@ -223,6 +225,13 @@ impl CancelGeneration {
 }
 
 impl EnforcerFullClientV3 {
+    #[cfg(test)]
+    pub(crate) fn lose_next_bind_reply_after_native_for_test(&self) -> EnforcerResult<()> {
+        self.full()?
+            .lose_next_bind_reply_after_native
+            .store(true, Ordering::SeqCst);
+        Ok(())
+    }
     pub(crate) async fn connect_existing(root: &Directory, max_slots: u32) -> EnforcerResult<Self> {
         if !(1..=MAX_SLOTS).contains(&max_slots) {
             return Err(EnforcerError::InvalidInput);
@@ -264,6 +273,8 @@ impl EnforcerFullClientV3 {
                 prearm_write_unknown: AtomicBool::new(false),
                 #[cfg(test)]
                 lose_query_reply_after_successes: Mutex::new(None),
+                #[cfg(test)]
+                lose_next_bind_reply_after_native: AtomicBool::new(false),
             })),
             root: root.clone(),
             executable: PathBuf::new(),
@@ -1284,7 +1295,21 @@ impl Client {
             )),
             _ => None,
         };
-        Ok(match self.full_request(full, command, timeout).await? {
+        #[cfg(test)]
+        let is_bind = matches!(&command, FullCommand::BindProspective { .. });
+        let reply = self.full_request(full, command, timeout).await?;
+        #[cfg(test)]
+        if is_bind
+            && matches!(&reply, FullReply::Registered { .. })
+            && full
+                .lose_next_bind_reply_after_native
+                .swap(false, Ordering::SeqCst)
+        {
+            // Discard only publication of the real authenticated native reply,
+            // before creating a local Original or marking this slot bound.
+            return Err(EnforcerError::Unavailable);
+        }
+        Ok(match reply {
             FullReply::Status { value } => Response::Status { value },
             FullReply::Slots { values } => Response::Slots { values },
             FullReply::Prepared { value } => Response::Prepared { value },

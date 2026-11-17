@@ -1,6 +1,7 @@
 //! Native STOP cells. Their actual OS handles and constructed Tokio contexts
 //! precede confirmation; a permit or a detached spawn is not that receipt.
 use super::*;
+use crate::broker::enforcer::native_stop_failure::CauseTarget;
 use std::sync::mpsc::{self, SyncSender};
 
 pub(super) struct NativeStopWorker {
@@ -52,6 +53,10 @@ fn failed(actor: &StopActor) {
         value.stop_failures = value.stop_failures.saturating_add(1);
     }
 }
+fn target(actor: &StopActor) -> CauseTarget {
+    let value = actor.value.lock().unwrap_or_else(|p| p.into_inner());
+    CauseTarget::fixed(actor.registration.arm_id(), &value.registration_hash)
+}
 
 fn install(actor: Arc<StopActor>, clock: Option<Arc<NativeHostClock>>) -> EnforcerResult<()> {
     #[cfg(test)]
@@ -79,7 +84,8 @@ fn install(actor: Arc<StopActor>, clock: Option<Arc<NativeHostClock>>) -> Enforc
                     .build()
                 {
                     Ok(runtime) => break runtime,
-                    Err(_) => {
+                    Err(error) => {
+                        actor.failures.context_failure(target(&actor), error);
                         failed(&actor);
                         std::thread::sleep(Duration::from_secs(1));
                     }
@@ -87,11 +93,15 @@ fn install(actor: Arc<StopActor>, clock: Option<Arc<NativeHostClock>>) -> Enforc
             };
             actor.native_ready.store(true, Ordering::SeqCst);
             let managed = loop {
-                match runtime.block_on(crate::runtime::ManagedRuntime::reopen(
-                    actor.registration.authority.clone(),
-                )) {
-                    Ok(managed) => break managed,
-                    Err(_) => {
+                match actor.failures.execute(
+                    &runtime,
+                    target(&actor),
+                    crate::runtime::ManagedRuntime::reopen_native(
+                        actor.registration.authority.clone(),
+                    ),
+                ) {
+                    Some(settled) => break settled.value,
+                    None => {
                         failed(&actor);
                         std::thread::sleep(Duration::from_secs(1));
                     }
@@ -110,11 +120,30 @@ fn install(actor: Arc<StopActor>, clock: Option<Arc<NativeHostClock>>) -> Enforc
                     };
                 }
                 if stopping {
-                    let result =
-                        runtime.block_on(managed.stop_snapshot_owned(&actor.registration.owned));
+                    let result = actor.failures.execute(
+                        &runtime,
+                        target(&actor),
+                        managed.stop_snapshot_owned_native(&actor.registration.owned),
+                    );
+                    let failed = match result {
+                        Some(settled) => {
+                            actor
+                                .failures
+                                .observed_stop(target(&actor), settled.value.observation);
+                            if let Some(cause) = settled.value.kill_failure {
+                                actor
+                                    .failures
+                                    .returned(target(&actor), cause, settled.proof);
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        None => true,
+                    };
                     if let Ok(mut value) = actor.value.lock() {
                         value.phase = StopPhaseV1::Quarantined;
-                        if result.is_err() {
+                        if failed {
                             value.stop_failures = value.stop_failures.saturating_add(1);
                         }
                     }
@@ -124,7 +153,10 @@ fn install(actor: Arc<StopActor>, clock: Option<Arc<NativeHostClock>>) -> Enforc
                 std::thread::sleep(Duration::from_millis(250));
             }
         })
-        .map_err(|_| EnforcerError::Unavailable)?;
+        .map_err(|error| {
+            actor.failures.context_failure(target(&actor), error);
+            EnforcerError::Unavailable
+        })?;
     *actor
         .native_worker
         .lock()
@@ -170,12 +202,16 @@ struct AttemptState {
     ready: AtomicBool,
     attempts: AtomicU64,
     failures: AtomicU64,
+    cause_history: Arc<NativeStopFailures>,
     // The target currently in native IO remains visible and owned if a call
     // never returns. Timeout of a transport waiter cannot clear this value.
     current: Mutex<Option<Arc<RestoreRequiredStopV1>>>,
     _lease: EnforcerRoleLeaseV2,
 }
 impl RecoveryAttemptOwner {
+    pub(super) fn failure_facts(&self) -> super::super::native_stop_failure::FailureFacts {
+        self.0.cause_history.facts()
+    }
     pub(super) fn observations(&self) -> (u64, u64, bool) {
         (
             self.0.attempts.load(Ordering::SeqCst),
@@ -197,6 +233,7 @@ impl RecoveryAttemptOwner {
             ready: AtomicBool::new(false),
             attempts: AtomicU64::new(0),
             failures: AtomicU64::new(0),
+            cause_history: NativeStopFailures::new(),
             current: Mutex::new(None),
             _lease: lease,
         });
@@ -216,7 +253,10 @@ impl RecoveryAttemptOwner {
                         .build()
                     {
                         Ok(runtime) => break runtime,
-                        Err(_) => {
+                        Err(error) => {
+                            worker
+                                .cause_history
+                                .context_failure(CauseTarget::context(), error);
                             worker.failures.fetch_add(1, Ordering::SeqCst);
                             std::thread::sleep(Duration::from_secs(1));
                         }
@@ -236,22 +276,53 @@ impl RecoveryAttemptOwner {
                     let mut last_ns = None;
                     let due = request.durable_cancel.is_some()
                         || stop_due(&request.registration, clock.as_deref(), &mut last_ns);
-                    let result = if due {
-                        runtime.block_on(async {
-                            let managed = crate::runtime::ManagedRuntime::reopen(
+                    let target = CauseTarget::retained(
+                        request.registration.arm_id(),
+                        &request.registration_hash,
+                        Arc::clone(&request),
+                    );
+                    let failed = if due {
+                        match worker.cause_history.execute(
+                            &runtime,
+                            target.clone(),
+                            crate::runtime::ManagedRuntime::reopen_native(
                                 request.registration.authority.clone(),
-                            )
-                            .await?;
-                            managed
-                                .stop_snapshot_owned(&request.registration.owned)
-                                .await
-                                .map(|_| ())
-                        })
+                            ),
+                        ) {
+                            Some(managed) => {
+                                match worker.cause_history.execute(
+                                    &runtime,
+                                    target.clone(),
+                                    managed
+                                        .value
+                                        .stop_snapshot_owned_native(&request.registration.owned),
+                                ) {
+                                    Some(settled) => {
+                                        worker.cause_history.observed_stop(
+                                            target.clone(),
+                                            settled.value.observation,
+                                        );
+                                        if let Some(cause) = settled.value.kill_failure {
+                                            worker.cause_history.returned(
+                                                target.clone(),
+                                                cause,
+                                                settled.proof,
+                                            );
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    }
+                                    None => true,
+                                }
+                            }
+                            None => true,
+                        }
                     } else {
-                        Ok(())
+                        false
                     };
                     worker.attempts.fetch_add(1, Ordering::SeqCst);
-                    if result.is_err() {
+                    if failed {
                         worker.failures.fetch_add(1, Ordering::SeqCst);
                     }
                     // This is reached only after the real runtime future has
@@ -261,7 +332,12 @@ impl RecoveryAttemptOwner {
                     }
                 }
             })
-            .map_err(|_| EnforcerError::Unavailable)?;
+            .map_err(|error| {
+                state
+                    .cause_history
+                    .context_failure(CauseTarget::context(), error);
+                EnforcerError::Unavailable
+            })?;
         *state.handle.lock().map_err(|_| EnforcerError::Unhealthy)? = Some(handle);
         start.send(()).map_err(|_| EnforcerError::Unavailable)?;
         // A failed notification keeps the actual native thread/lease/handle.

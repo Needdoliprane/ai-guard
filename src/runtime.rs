@@ -8,6 +8,11 @@ use tokio::{
 };
 use uuid::Uuid;
 mod batch_io;
+mod control_outcome;
+pub(crate) use control_outcome::{
+    NativeCollected, NativeCollectionOutcome, NativeIoPhase, NativeNoChild, NativeRuntimeOutcome,
+    NativeStopFailure, NativeStopResult, NativeUncollectedCall,
+};
 #[cfg(test)]
 mod deadline_driver_tests;
 #[cfg(test)]
@@ -633,6 +638,7 @@ pub struct Runtime {
     anchor: std::sync::Arc<invocation::InvocationAnchor>,
     observer: Option<observation::ObservationSink>,
     observation: Option<observation::Scope>,
+    native_control: Option<control_outcome::NativeControlScope>,
 }
 #[derive(Debug, Serialize)]
 pub struct RuntimeInfo {
@@ -800,6 +806,7 @@ impl Runtime {
             anchor,
             observer: None,
             observation: None,
+            native_control: None,
         })
     }
     /// Optional bounded diagnostics only; never authorizes an operation.
@@ -916,9 +923,28 @@ impl Runtime {
                     && !value.chars().any(char::is_control)),
             "runtime environment override is not an approved absolute control configuration directory"
         );
+        if let Some(scope) = &self.native_control {
+            let (io, armed) = scope.spawn(command, args, environment).await?;
+            let mut owned = io.lock().await;
+            let result = self.collect_cli_capture(&mut owned, armed, duration).await;
+            if owned.is_collected() {
+                scope.collected();
+            } else if owned.collection_unknown() {
+                scope.unknown();
+            }
+            return result;
+        }
         let (mut owned, armed) = self
             .spawn_capture_command(command, args, environment)
             .await?;
+        self.collect_cli_capture(&mut owned, armed, duration).await
+    }
+    async fn collect_cli_capture(
+        &self,
+        owned: &mut batch_io::OwnedBatchIo,
+        armed: Instant,
+        duration: Duration,
+    ) -> Result<Capture> {
         let mut causes = Vec::new();
         let observed = tokio::time::timeout_at(armed + duration, async {
             match owned.wait_event().await {

@@ -26,11 +26,18 @@ pub(super) struct ProspectiveActor {
     worker_owned: AtomicBool,
     pub(super) runtime_installed: Arc<AtomicBool>,
     owners: NativeOwners,
+    pub(super) failures: Arc<NativeStopFailures>,
     #[cfg(test)]
     test_exit: AtomicBool,
 }
 
 impl ProspectiveActor {
+    fn cause_target(&self) -> CauseTarget {
+        CauseTarget::fixed(
+            self.prospective.arm_id(),
+            &self.reservation.prospective_hash,
+        )
+    }
     pub(super) fn reserve_stop(&self) -> EnforcerResult<()> {
         let mut state = self.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
         state.stop_reserved = true;
@@ -105,7 +112,8 @@ impl ProspectiveActor {
                 }
             }) {
             Ok(handle) => handle,
-            Err(_) => {
+            Err(error) => {
+                self.failures.context_failure(self.cause_target(), error);
                 self.worker_owned.store(false, Ordering::SeqCst);
                 self.failed();
                 return Err(EnforcerError::Unavailable);
@@ -127,7 +135,8 @@ impl ProspectiveActor {
                     .build()
                 {
                     Ok(runtime) => break runtime,
-                    Err(_) => {
+                    Err(error) => {
+                        self.failures.context_failure(self.cause_target(), error);
                         self.failed();
                         // The same real thread remains owned. An unavailable
                         // runtime never yields a reservation ACK or replacement.
@@ -138,9 +147,18 @@ impl ProspectiveActor {
             self.runtime_installed.store(true, Ordering::SeqCst);
             self.run_installed(clock, runtime)
         }));
-        if !matches!(result, Ok(Ok(()))) {
-            self.failed();
-            self.owners.actor_exited();
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                self.failures.native_thread_failed(Box::new(error));
+                self.failed();
+                self.owners.actor_exited();
+            }
+            Err(payload) => {
+                self.failures.native_thread_failed(payload);
+                self.failed();
+                self.owners.actor_exited();
+            }
         }
     }
 
@@ -181,19 +199,32 @@ impl ProspectiveActor {
             }
             if stopping {
                 if managed.is_none() {
-                    match runtime
-                        .block_on(ManagedRuntime::reopen(self.prospective.authority.clone()))
-                    {
-                        Ok(value) => managed = Some(value),
-                        Err(_) => self.failed(),
+                    match self.failures.execute(
+                        &runtime,
+                        self.cause_target(),
+                        ManagedRuntime::reopen_native(self.prospective.authority.clone()),
+                    ) {
+                        Some(settled) => managed = Some(settled.value),
+                        None => self.failed(),
                     }
                 }
-                if let Some(managed) = &managed
-                    && runtime
-                        .block_on(managed.stop_snapshot_owned(&self.prospective.owned))
-                        .is_err()
-                {
-                    self.failed();
+                if let Some(managed) = &managed {
+                    match self.failures.execute(
+                        &runtime,
+                        self.cause_target(),
+                        managed.stop_snapshot_owned_native(&self.prospective.owned),
+                    ) {
+                        Some(settled) => {
+                            self.failures
+                                .observed_stop(self.cause_target(), settled.value.observation);
+                            if let Some(cause) = settled.value.kill_failure {
+                                self.failures
+                                    .returned(self.cause_target(), cause, settled.proof);
+                                self.failed();
+                            }
+                        }
+                        None => self.failed(),
+                    }
                 }
             }
             let state = self.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
@@ -276,6 +307,7 @@ impl FullState {
                 wake: Condvar::new(),
                 exit: AtomicBool::new(false),
                 runtime_installed: Arc::clone(&pending.runtime_installed),
+                failures: Arc::clone(&pending.failures),
                 owners: self.owners.clone(),
             });
             state.bound = Some(Arc::clone(&actor));
@@ -391,6 +423,7 @@ impl FullState {
                     wake: Condvar::new(),
                     worker_owned: AtomicBool::new(false),
                     runtime_installed: Arc::new(AtomicBool::new(false)),
+                    failures: NativeStopFailures::new(),
                     owners: self.owners.clone(),
                     #[cfg(test)]
                     test_exit: AtomicBool::new(false),
@@ -642,6 +675,7 @@ impl FullState {
                     wake: Condvar::new(),
                     exit: AtomicBool::new(false),
                     runtime_installed: Arc::clone(&pending.runtime_installed),
+                    failures: Arc::clone(&pending.failures),
                     owners: self.owners.clone(),
                 });
                 state.bound = Some(Arc::clone(&actor));

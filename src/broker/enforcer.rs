@@ -7,6 +7,7 @@ mod client;
 mod diagnostics;
 mod execution;
 pub(crate) mod ledger;
+mod native_stop_failure;
 mod recovery;
 pub(crate) mod retirement;
 mod server;

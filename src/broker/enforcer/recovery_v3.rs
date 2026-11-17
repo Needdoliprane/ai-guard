@@ -237,6 +237,14 @@ pub struct EnforcerStopStatusV3 {
     recovery_attempt_failures: u64,
     #[serde(default)]
     recovery_attempt_in_flight: bool,
+    #[serde(default)]
+    retained_native_causes: u32,
+    #[serde(default)]
+    omitted_settled_causes: u64,
+    #[serde(default)]
+    cause_omissions_exact: bool,
+    #[serde(default)]
+    native_io_uncollected: bool,
     progress: u64,
     transport_health: TransportHealth3,
     clock_healthy: bool,
@@ -265,6 +273,18 @@ impl EnforcerStopStatusV3 {
     }
     pub fn recovery_attempt_in_flight(&self) -> bool {
         self.recovery_attempt_in_flight
+    }
+    pub fn retained_native_causes(&self) -> u32 {
+        self.retained_native_causes
+    }
+    pub fn omitted_settled_causes(&self) -> u64 {
+        self.omitted_settled_causes
+    }
+    pub fn cause_omissions_exact(&self) -> bool {
+        self.cause_omissions_exact
+    }
+    pub fn native_io_uncollected(&self) -> bool {
+        self.native_io_uncollected
     }
     pub fn known_stop_slot_count(&self) -> u32 {
         self.known_stop_slots
@@ -309,6 +329,10 @@ impl EnforcerStopStatusV3 {
             recovery_attempts: value.recovery_attempts,
             recovery_attempt_failures: value.recovery_attempt_failures,
             recovery_attempt_in_flight: value.recovery_attempt_in_flight,
+            retained_native_causes: value.retained_native_causes,
+            omitted_settled_causes: value.omitted_settled_causes,
+            cause_omissions_exact: value.cause_omissions_exact,
+            native_io_uncollected: value.native_io_uncollected,
             progress: value.progress,
             transport_health: if value.transport_healthy {
                 TransportHealth3::Healthy
@@ -338,6 +362,7 @@ impl EnforcerStopStatusV3 {
                         .max_recovery_stop_owners
                         .saturating_sub(self.recovery_attempt_owners)
             || self.owned_active > self.known_stop_slots as usize
+            || self.retained_native_causes > 4 * (self.max_slots + self.max_recovery_stop_owners)
         {
             return Err(EnforcerError::Unauthorized);
         }
@@ -356,6 +381,10 @@ impl EnforcerStopStatusV3 {
             recovery_attempts: self.recovery_attempts,
             recovery_attempt_failures: self.recovery_attempt_failures,
             recovery_attempt_in_flight: self.recovery_attempt_in_flight,
+            retained_native_causes: self.retained_native_causes,
+            omitted_settled_causes: self.omitted_settled_causes,
+            cause_omissions_exact: self.cause_omissions_exact,
+            native_io_uncollected: self.native_io_uncollected,
             progress: self.progress,
             transport_healthy: self.transport_healthy(),
             clock_healthy: self.clock_healthy,

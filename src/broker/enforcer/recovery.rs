@@ -34,6 +34,7 @@ const MAX_RETAINED_STOP_TARGETS: usize = 16_384;
 
 #[path = "recovery_stop_owner.rs"]
 mod recovery_stop_owner;
+use super::native_stop_failure::NativeStopFailures;
 use recovery_stop_owner::{NativeStopWorker, RecoveryAttemptOwner};
 
 #[cfg(test)]
@@ -429,6 +430,15 @@ pub struct EnforcerStopStatusV2 {
     recovery_attempt_failures: u64,
     #[serde(default)]
     recovery_attempt_in_flight: bool,
+    #[serde(default)]
+    retained_native_causes: u32,
+    #[serde(default)]
+    omitted_settled_causes: u64,
+    // Missing diagnostics from an older peer are not exact coverage.
+    #[serde(default)]
+    cause_omissions_exact: bool,
+    #[serde(default)]
+    native_io_uncollected: bool,
     progress: u64,
     transport_healthy: bool,
     clock_healthy: bool,
@@ -456,6 +466,18 @@ impl EnforcerStopStatusV2 {
     }
     pub fn recovery_attempt_in_flight(&self) -> bool {
         self.recovery_attempt_in_flight
+    }
+    pub fn retained_native_causes(&self) -> u32 {
+        self.retained_native_causes
+    }
+    pub fn omitted_settled_causes(&self) -> u64 {
+        self.omitted_settled_causes
+    }
+    pub fn cause_omissions_exact(&self) -> bool {
+        self.cause_omissions_exact
+    }
+    pub fn native_io_uncollected(&self) -> bool {
+        self.native_io_uncollected
     }
     pub fn slot_count(&self) -> usize {
         self.slot_count
@@ -665,13 +687,17 @@ impl RecoveryState {
             .lock()
             .map_err(|_| EnforcerError::Unhealthy)?
             .len();
-        let active_stops = self
-            .slots
-            .lock()
-            .map_err(|_| EnforcerError::Unhealthy)?
-            .values()
-            .filter(|actor| actor.native_installed())
-            .count();
+        let mut failure_facts = super::native_stop_failure::FailureFacts::default();
+        let active_stops = {
+            let slots = self.slots.lock().map_err(|_| EnforcerError::Unhealthy)?;
+            for actor in slots.values() {
+                failure_facts.merge(actor.failures.facts());
+            }
+            slots
+                .values()
+                .filter(|actor| actor.native_installed())
+                .count()
+        };
         let full_slots = self
             .full_stops
             .lock()
@@ -680,6 +706,12 @@ impl RecoveryState {
             .cloned()
             .collect::<Vec<_>>();
         let full = self.full_owner()?;
+        if let Some(full) = &full {
+            failure_facts.merge(full.failure_facts());
+        }
+        if let Some(attempt) = &self.recovery_attempt {
+            failure_facts.merge(attempt.failure_facts());
+        }
         let active_full = full.as_ref().map_or(0, |full| {
             full_slots
                 .iter()
@@ -706,6 +738,10 @@ impl RecoveryState {
             recovery_attempts,
             recovery_attempt_failures,
             recovery_attempt_in_flight,
+            retained_native_causes: failure_facts.retained_causes,
+            omitted_settled_causes: failure_facts.omitted_settled,
+            cause_omissions_exact: failure_facts.omissions_exact,
+            native_io_uncollected: failure_facts.uncollected_io,
             progress: self.progress.load(Ordering::SeqCst),
             transport_healthy: self.transport_healthy.load(Ordering::SeqCst),
             clock_healthy: self.clock_healthy.load(Ordering::SeqCst),
@@ -747,6 +783,7 @@ struct StopActor {
     worker_owned: AtomicBool,
     native_ready: AtomicBool,
     native_worker: Mutex<Option<NativeStopWorker>>,
+    failures: Arc<NativeStopFailures>,
     next_start: Mutex<Instant>,
     _lease: EnforcerRoleLeaseV2,
     #[cfg(test)]
@@ -1333,6 +1370,7 @@ fn reserve(
                 worker_owned: AtomicBool::new(false),
                 native_ready: AtomicBool::new(false),
                 native_worker: Mutex::new(None),
+                failures: NativeStopFailures::new(),
                 next_start: Mutex::new(Instant::now()),
                 _lease: lease,
                 #[cfg(test)]

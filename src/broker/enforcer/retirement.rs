@@ -1,5 +1,6 @@
 //! Live retirement authority. Durable records describe facts; only the owner
 //! of an original actor and its actual native JoinHandle can create witnesses.
+use super::native_stop_failure::{CauseTarget, FailureFacts, NativeStopFailures};
 use super::*;
 use super::{
     ledger::{ClosingCommitted, LedgerCoverageV1, RetirementLedger, TombstoneCommitted},
@@ -116,6 +117,7 @@ struct FullActor {
     // Published only by the real native thread, after NativeOwners retained
     // its handle and this thread constructed its own runtime context.
     runtime_installed: Arc<AtomicBool>,
+    failures: Arc<NativeStopFailures>,
     owners: NativeOwners,
 }
 type FinalResult = EnforcerResult<(RetiredReceiptV1, LedgerHeadV1)>;
@@ -353,6 +355,24 @@ pub(super) struct FullState {
 }
 
 impl FullState {
+    pub(super) fn failure_facts(&self) -> FailureFacts {
+        let mut facts = FailureFacts::default();
+        let mut seen = BTreeSet::new();
+        let actors = self.actors.lock().unwrap_or_else(|p| p.into_inner());
+        for actor in actors.values() {
+            if seen.insert(Arc::as_ptr(&actor.failures) as usize) {
+                facts.merge(actor.failures.facts());
+            }
+        }
+        drop(actors);
+        let prospective = self.prospective.lock().unwrap_or_else(|p| p.into_inner());
+        for actor in prospective.values() {
+            if seen.insert(Arc::as_ptr(&actor.failures) as usize) {
+                facts.merge(actor.failures.facts());
+            }
+        }
+        facts
+    }
     /// Called after committing the shared recovery fence and before its ACK.
     /// This retains every pre-fence admission, including a Register waiting
     /// for native Ready. Closing keeps its real continuation; it is not turned
@@ -1186,6 +1206,9 @@ impl NativeOwners {
 }
 
 impl FullActor {
+    fn cause_target(&self) -> CauseTarget {
+        CauseTarget::fixed(self.registration.arm_id(), &self.digest)
+    }
     fn failed(&self) {
         if let Ok(mut state) = self.state.lock() {
             // Closing is represented in its own latch and never erased by
@@ -1222,9 +1245,13 @@ impl FullActor {
             if self.exit.load(Ordering::SeqCst) {
                 return Ok(());
             }
-            match runtime.block_on(ManagedRuntime::reopen(self.registration.authority.clone())) {
-                Ok(managed) => break managed,
-                Err(_) => {
+            match self.failures.execute(
+                &runtime,
+                self.cause_target(),
+                ManagedRuntime::reopen_native(self.registration.authority.clone()),
+            ) {
+                Some(settled) => break settled.value,
+                None => {
                     self.failed();
                     let state = self.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
                     let _waiting = self
@@ -1275,12 +1302,25 @@ impl FullActor {
             if stopping {
                 // The irreversible reservation happened under exactly the
                 // same mutex as Closing; all runtime IO happens after it.
-                let result =
-                    runtime.block_on(managed.stop_snapshot_owned(&self.registration.owned));
+                let result = self.failures.execute(
+                    &runtime,
+                    self.cause_target(),
+                    managed.stop_snapshot_owned_native(&self.registration.owned),
+                );
                 let mut state = self.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
                 match result {
-                    Ok(observed) => state.status.observation = Some(observed),
-                    Err(_) => {
+                    Some(settled) => {
+                        self.failures
+                            .observed_stop(self.cause_target(), settled.value.observation.clone());
+                        state.status.observation = Some(settled.value.observation);
+                        if let Some(cause) = settled.value.kill_failure {
+                            self.failures
+                                .returned(self.cause_target(), cause, settled.proof);
+                            state.status.stop_failures =
+                                state.status.stop_failures.saturating_add(1);
+                        }
+                    }
+                    None => {
                         state.status.stop_failures = state.status.stop_failures.saturating_add(1)
                     }
                 }

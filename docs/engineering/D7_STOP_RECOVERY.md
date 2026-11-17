@@ -27,6 +27,30 @@ runtime IO retains its cell and handle without unlimited replacements. The
 catch-up cell holds at most its in-flight snapshot and one queued snapshot;
 its actual runtime future must return before another attempt uses that cell.
 
+Each native cell retains the original first error and the latest positively
+settled error, including their typed causes and collected captures. Earlier
+settled errors can be omitted; an explicit checked count records those
+omissions. A third position retains the actual uncollected call, its original
+cause, Child/pipes, partial captures and handles. No error string, task panic,
+missing downcast, lost notification or timeout certifies `NoChild` or
+`Collected`. Only the real spawn/collection producers issue these opaque
+proofs. A cell with pending or unknown IO cannot start another attempt or
+join for retirement. An ordinary collected failure permits the same context
+to retry, and permits catch-up to move fairly to another target. The catch-up
+history retains the exact request beside each retained cause. Besides the
+current/queued snapshots, at most two settled-cause target payloads can remain
+retained, plus bounded captures. This adds no native cell, thread or runtime
+budget.
+The single caught panic payload of a prospective/bound native thread is also
+retained as its original opaque object; it makes custody explicitly unknown
+and does not permit a replacement invocation or Q.
+
+The prospective and bound Full views share the same cause owner. A failed
+kill followed by a successful exact stopped observation keeps both facts;
+a failed follow-up keeps the original kill cause and follow-up cause
+separately. Existing public runtime Result wrappers keep their behavior;
+the crate-private native port supplies this richer result to D7 consumers.
+
 A surplus remains `RecoveryFenced/Incomplete`. The preinstalled catch-up cell
 performs exact reopen/STOP attempts. The control cache retains verified source
 proofs and retries eligible targets in bounded round-robin sweeps. An attempt
@@ -73,3 +97,15 @@ control and use unchanged S=1 with explicit W=2; a W=1 case requires an actual
 catch-up attempt and incomplete result with one active owner. Their unavailable
 runtime fixture proves no container effect. Results belong to their exact
 composed source and executable.
+
+The authenticated native STOP status additionally exposes
+`retained_native_causes`, `omitted_settled_causes`, `cause_omissions_exact`
+and `native_io_uncollected`. These bounded diagnostics grant no Arm, Q,
+terminal or quota right and contain no captured content. Missing diagnostic
+fields from an older peer give no exact omission coverage. This extends only
+the native transport status; public journal recovery records are unchanged.
+Collection and cause regressions use real software Children/pipes and native
+ownership with synthetic Ready/receipt metadata where stated. Their sources
+remain **NOT_RUN** until Luna validates the frozen composition. Default Legacy
+compatibility and missing-owner post-Pending capacity retry remain open with
+the recovery criteria described above.

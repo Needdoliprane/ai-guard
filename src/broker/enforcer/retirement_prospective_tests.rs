@@ -91,6 +91,7 @@ async fn prospective_native_capacity_precedes_receipt_and_bind_reuses_owner() {
         &bound.runtime_installed,
         &pending.runtime_installed
     ));
+    assert!(Arc::ptr_eq(&bound.failures, &pending.failures));
     assert_eq!(fixture.full.admitted.lock().unwrap().len(), 1);
     let (_, replayed, _, _, original) = fixture
         .full

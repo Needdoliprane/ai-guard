@@ -30,6 +30,31 @@ remplacements illimités. Le rattrapage garde au plus le snapshot en cours
 et un snapshot en attente ; son vrai futur runtime doit revenir avant
 qu'une autre tentative utilise cette cellule.
 
+Chaque cellule native conserve la véritable première erreur et la dernière
+erreur positivement collectée, avec leurs causes typées et captures. Les
+anciennes erreurs collectées peuvent être omises ; un compteur vérifié rend
+ces omissions explicites. Une troisième position garde le véritable appel
+non collecté, sa cause originale, Child/pipes, captures partielles et handles.
+Ni chaîne de caractères, panic de tâche, downcast absent, notification perdue
+ni timeout ne certifie `NoChild` ou `Collected`. Seuls les producteurs réels
+de spawn/collecte émettent ces preuves opaques. Une cellule avec IO pending
+ou inconnue ne peut commencer une autre tentative ni rejoindre la retraite.
+Une panne ordinaire collectée permet au même contexte de réessayer et au
+rattrapage de passer équitablement à une autre cible. Son historique garde
+la demande exacte à côté de chaque cause retenue. Outre les snapshots en cours
+et en attente, au plus deux demandes liées aux causes collectées restent
+retenues, avec des captures bornées. Aucun autre budget de cellule, thread
+ou runtime natif n'est ajouté.
+L'unique payload de panic interceptée du thread natif prospectif/liée reste
+aussi conservé comme objet opaque original ; il rend la custody explicitement
+inconnue et ne permet ni remplacement d'invocation ni Q.
+
+Les vues prospective et Full liée partagent le même propriétaire de causes.
+Un kill en erreur suivi d'une observation exacte d'arrêt conserve les deux
+faits ; un suivi en erreur garde séparément la cause du kill et celle du
+suivi. Les wrappers publics Result du runtime conservent leur comportement ;
+le port natif crate-private fournit ce résultat enrichi aux consommateurs D7.
+
 Un surplus reste `RecoveryFenced/Incomplete`. La cellule préinstallée effectue
 de vraies tentatives reopen/STOP exactes. Le cache de contrôle conserve les
 preuves de source et reprend les cibles éligibles par balayage circulaire
@@ -78,3 +103,15 @@ le contrôle cap2 et S=1 inchangé avec W=2 explicite ; le cas W=1 exige une
 vraie tentative de rattrapage et un résultat incomplet avec un propriétaire
 actif. Leur runtime indisponible ne démontre aucun effet conteneur. Les
 résultats restent liés à leur source composée et leur exécutable exacts.
+
+Le status STOP natif authentifié expose aussi `retained_native_causes`,
+`omitted_settled_causes`, `cause_omissions_exact` et `native_io_uncollected`.
+Ces diagnostics bornés ne donnent aucun droit Arm, Q, terminal ou quota et
+ne contiennent aucune capture. L'absence des champs chez un ancien pair
+n'accorde aucune couverture exacte des omissions. Seul le status de transport
+natif est étendu ; les records publics de reprise du journal sont inchangés.
+Les régressions de collecte/causes utilisent de vrais Child/pipes logiciels
+et les propriétaires natifs, avec Ready/reçus synthétiques lorsque précisé.
+Leurs sources restent **NOT_RUN** jusqu'à la validation Luna de la composition
+gelée. Compatibilité Legacy par défaut et reprise de capacité après Pending
+sans owner restent ouvertes avec les critères de reprise décrits ci-dessus.

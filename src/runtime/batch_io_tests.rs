@@ -36,6 +36,71 @@ async fn read_error_preserves_partial_capture_and_does_not_invent_eof() {
     assert_eq!(result.error.unwrap().kind(), io::ErrorKind::Other);
 }
 
+#[derive(Debug)]
+struct RetainedReadCause(Arc<()>);
+impl fmt::Display for RetainedReadCause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("typed fixture read cause")
+    }
+}
+impl std::error::Error for RetainedReadCause {}
+
+struct RetainedFaultAfterData {
+    delivered: bool,
+    error: Option<io::Error>,
+}
+impl AsyncRead for RetainedFaultAfterData {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if !self.delivered {
+            self.delivered = true;
+            buffer.put_slice(b"private-output");
+            Poll::Ready(Ok(()))
+        } else {
+            // Deliberate unit fault through the actual AsyncRead error port,
+            // with the same original error object moved into native custody.
+            Poll::Ready(Err(self.error.take().expect("one read fault")))
+        }
+    }
+}
+
+#[tokio::test]
+async fn retained_read_error_keeps_original_typed_cause_without_eof() {
+    let marker = Arc::new(());
+    let original = io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        RetainedReadCause(Arc::clone(&marker)),
+    );
+    let original_cause = original
+        .get_ref()
+        .unwrap()
+        .downcast_ref::<RetainedReadCause>()
+        .unwrap() as *const RetainedReadCause;
+    let mut reader = Some(RetainedFaultAfterData {
+        delivered: false,
+        error: Some(original),
+    });
+    let mut captured = empty_capture(7);
+    assert!(!capture_retained(&mut reader, &mut captured, 7).await);
+    let retained = captured.error.as_ref().unwrap();
+    let retained_cause = retained
+        .get_ref()
+        .unwrap()
+        .downcast_ref::<RetainedReadCause>()
+        .unwrap();
+    assert!(std::ptr::eq(original_cause, retained_cause));
+    assert!(Arc::ptr_eq(&retained_cause.0, &marker));
+    assert_eq!(retained.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(captured.capture.bytes, b"private");
+    assert_eq!(captured.capture.total_bytes, 14);
+    assert!(captured.capture.truncated);
+    assert!(!captured.eof);
+    // Neither the AsyncRead fixture nor this assertion creates a native receipt.
+}
+
 #[tokio::test]
 async fn bounded_capture_keeps_draining_until_actual_duplex_eof() {
     let (mut writer, reader) = tokio::io::duplex(4);

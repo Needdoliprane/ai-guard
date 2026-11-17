@@ -70,7 +70,7 @@ impl fmt::Debug for BatchIoCollected {
 pub(super) enum BatchIoCollectError {
     NoRuntime,
     AlreadyCollected,
-    JoinFailed(JoinError),
+    JoinFailed(Arc<JoinError>),
 }
 impl fmt::Display for BatchIoCollectError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -89,7 +89,7 @@ impl fmt::Debug for BatchIoCollectError {
 impl std::error::Error for BatchIoCollectError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::JoinFailed(error) => Some(error),
+            Self::JoinFailed(error) => Some(error.as_ref()),
             _ => None,
         }
     }
@@ -116,20 +116,124 @@ struct Input {
 pub(super) struct OwnedBatchIo {
     unstarted: Option<Input>,
     task: Option<JoinHandle<BatchIoCollected>>,
+    control_task: Option<JoinHandle<()>>,
+    control_joined: bool,
     events: mpsc::Receiver<BatchIoEvent>,
     requests: watch::Sender<Requests>,
     collected: bool,
+    unstarted_control: Option<RetainedControlInput>,
+    retained_control: Option<Arc<tokio::sync::Mutex<ControlResources>>>,
+    failed_join: Option<Arc<JoinError>>,
 }
 impl fmt::Debug for OwnedBatchIo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OwnedBatchIo")
             .field("unstarted", &self.unstarted.is_some())
-            .field("task_retained", &self.task.is_some())
+            .field(
+                "task_retained",
+                &(self.task.is_some() || self.control_task.is_some()),
+            )
             .field("collected", &self.collected)
             .finish()
     }
 }
 impl OwnedBatchIo {
+    #[cfg(test)]
+    pub(super) fn abort_retained_control_for_test(&self) {
+        self.control_task
+            .as_ref()
+            .expect("fixture has an actual native IO task")
+            .abort();
+    }
+    #[cfg(test)]
+    pub(super) async fn retained_control_identity_for_test(&self) -> (Option<u32>, bool, bool) {
+        let resources = self
+            .retained_control
+            .as_ref()
+            .expect("retained control fixture")
+            .lock()
+            .await;
+        (
+            resources.child.id(),
+            resources.stdout.is_some(),
+            resources.stderr.is_some(),
+        )
+    }
+    #[cfg(test)]
+    pub(super) async fn collect_aborted_control_fixture(&mut self) {
+        let mut resources = self
+            .retained_control
+            .as_ref()
+            .expect("retained control fixture")
+            .lock()
+            .await;
+        let ControlResources {
+            child,
+            stdout,
+            stderr,
+            out,
+            err,
+            ..
+        } = &mut *resources;
+        let _ = child.start_kill();
+        child.wait().await.expect("collect the exact fixture Child");
+        assert!(capture_retained(stdout, out, 256 * 1024).await);
+        assert!(capture_retained(stderr, err, 64 * 1024).await);
+        // Fixture cleanup only: the application's Unknown phase and original
+        // failed join are unchanged, and no settled native proof is produced.
+        self.collected = true;
+    }
+    pub(super) fn is_collected(&self) -> bool {
+        self.collected
+    }
+    pub(super) fn collection_unknown(&self) -> bool {
+        self.failed_join.is_some()
+    }
+    /// Native-control variant: actual Child, pipes and partial captures live
+    /// outside the task future. A panic/abort of that task cannot drop them.
+    pub(super) fn own_cli_retained_observed(
+        mut child: Child,
+        stdout_limit: usize,
+        stderr_limit: usize,
+        observation: Option<super::observation::Scope>,
+    ) -> Self {
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        // Ordinary control commands never have an archive/stdin writer.
+        drop(child.stdin.take());
+        let resources = Arc::new(tokio::sync::Mutex::new(ControlResources {
+            child,
+            stdout,
+            stderr,
+            out: empty_capture(stdout_limit),
+            err: empty_capture(stderr_limit),
+            causes: Vec::new(),
+            completed: None,
+        }));
+        let (send, events) = mpsc::channel(4);
+        let (requests, receive) = watch::channel(Requests::default());
+        let mut owned = Self {
+            unstarted: None,
+            task: None,
+            control_task: None,
+            control_joined: false,
+            events,
+            requests,
+            collected: false,
+            unstarted_control: Some(RetainedControlInput {
+                resources: Arc::clone(&resources),
+                stdout_limit,
+                stderr_limit,
+                events: send,
+                requests: receive,
+                observation,
+            }),
+            retained_control: Some(resources),
+            failed_join: None,
+        };
+        let _ = owned.start_if_possible();
+        owned
+    }
     /// Infallible transfer. Without a current runtime, Child and archive remain
     /// in unstarted until an async observer can start the same owner task.
     pub(super) fn own(child: Child, input: Option<File>, stdout_limit: usize) -> Self {
@@ -184,9 +288,14 @@ impl OwnedBatchIo {
                 cli_observation,
             }),
             task: None,
+            control_task: None,
+            control_joined: false,
             events,
             requests,
             collected: false,
+            unstarted_control: None,
+            retained_control: None,
+            failed_join: None,
         };
         let _ = owned.start_if_possible();
         owned
@@ -195,11 +304,16 @@ impl OwnedBatchIo {
         if self.collected {
             return Err(BatchIoCollectError::AlreadyCollected);
         }
-        if self.task.is_none() {
+        if let Some(error) = &self.failed_join {
+            return Err(BatchIoCollectError::JoinFailed(Arc::clone(error)));
+        }
+        if self.task.is_none() && self.control_task.is_none() {
             let runtime = tokio::runtime::Handle::try_current()
                 .map_err(|_| BatchIoCollectError::NoRuntime)?;
             if let Some(input) = self.unstarted.take() {
                 self.task = Some(runtime.spawn(run(input)));
+            } else if let Some(input) = self.unstarted_control.take() {
+                self.control_task = Some(runtime.spawn(run_retained_control(input)));
             }
         }
         Ok(())
@@ -232,14 +346,75 @@ impl OwnedBatchIo {
     }
     pub(super) async fn collect(&mut self) -> Result<BatchIoCollected, BatchIoCollectError> {
         self.start_if_possible()?;
+        if self.control_task.is_some() || self.control_joined {
+            if !self.control_joined {
+                let task = self
+                    .control_task
+                    .as_mut()
+                    .ok_or(BatchIoCollectError::AlreadyCollected)?;
+                match task.await {
+                    Ok(()) => {
+                        // Remember the real join before another await; cancelled
+                        // collection must never repoll a Ready JoinHandle.
+                        self.control_joined = true;
+                    }
+                    Err(error) => {
+                        let error = Arc::new(error);
+                        self.failed_join = Some(Arc::clone(&error));
+                        return Err(BatchIoCollectError::JoinFailed(error));
+                    }
+                }
+            }
+            let resources = self
+                .retained_control
+                .as_ref()
+                .ok_or(BatchIoCollectError::AlreadyCollected)?;
+            let outcome = resources
+                .lock()
+                .await
+                .completed
+                .take()
+                .ok_or(BatchIoCollectError::AlreadyCollected)?;
+            self.control_task.take();
+            self.collected = true;
+            return Ok(outcome);
+        }
         let joined = match self.task.as_mut() {
             Some(task) => task.await,
             None => return Err(BatchIoCollectError::AlreadyCollected),
         };
-        // No await between observing Ready and removing the completed handle.
-        self.task.take();
-        self.collected = true;
-        joined.map_err(BatchIoCollectError::JoinFailed)
+        match joined {
+            Ok(outcome) => {
+                // No await between a real successful join and its consumption.
+                self.task.take();
+                self.collected = true;
+                Ok(outcome)
+            }
+            Err(error) => {
+                // Keep the original failed handle and physical resources. A
+                // Ready JoinError is sticky unknown, not a repollable receipt.
+                let error = Arc::new(error);
+                self.failed_join = Some(Arc::clone(&error));
+                Err(BatchIoCollectError::JoinFailed(error))
+            }
+        }
+    }
+}
+
+impl Drop for OwnedBatchIo {
+    fn drop(&mut self) {
+        if self.retained_control.is_some() && !self.collected {
+            // Affine native custody cannot be released by an observer's Drop.
+            // This pins one already charged call; it creates no replacement.
+            let retained = (
+                self.retained_control.take(),
+                self.unstarted_control.take(),
+                self.task.take(),
+                self.control_task.take(),
+                self.failed_join.take(),
+            );
+            std::mem::forget(retained);
+        }
     }
 }
 
@@ -247,6 +422,157 @@ struct ReadCapture {
     capture: Capture,
     eof: bool,
     error: Option<io::Error>,
+}
+fn empty_capture(limit: usize) -> ReadCapture {
+    ReadCapture {
+        capture: Capture {
+            bytes: Vec::with_capacity(limit.min(16 * 1024)),
+            total_bytes: 0,
+            truncated: false,
+        },
+        eof: false,
+        error: None,
+    }
+}
+struct ControlResources {
+    child: Child,
+    stdout: Option<tokio::process::ChildStdout>,
+    stderr: Option<tokio::process::ChildStderr>,
+    out: ReadCapture,
+    err: ReadCapture,
+    causes: Vec<anyhow::Error>,
+    completed: Option<BatchIoCollected>,
+}
+struct RetainedControlInput {
+    resources: Arc<tokio::sync::Mutex<ControlResources>>,
+    stdout_limit: usize,
+    stderr_limit: usize,
+    events: mpsc::Sender<BatchIoEvent>,
+    requests: watch::Receiver<Requests>,
+    observation: Option<super::observation::Scope>,
+}
+async fn capture_retained<R: AsyncRead + Unpin>(
+    reader: &mut Option<R>,
+    captured: &mut ReadCapture,
+    limit: usize,
+) -> bool {
+    let Some(reader) = reader else {
+        captured.error = Some(io::Error::other("batch capture pipe missing"));
+        return false;
+    };
+    let mut buffer = [0; 16 * 1024];
+    loop {
+        let count = match reader.read(&mut buffer).await {
+            Ok(0) => {
+                captured.eof = true;
+                return true;
+            }
+            Ok(count) => count,
+            Err(error) => {
+                captured.error = Some(error);
+                return false;
+            }
+        };
+        captured.capture.total_bytes = captured.capture.total_bytes.saturating_add(count as u64);
+        let retained = limit
+            .saturating_sub(captured.capture.bytes.len())
+            .min(count);
+        captured
+            .capture
+            .bytes
+            .extend_from_slice(&buffer[..retained]);
+        captured.capture.truncated |= retained < count;
+    }
+}
+async fn run_retained_control(input: RetainedControlInput) {
+    let RetainedControlInput {
+        resources,
+        stdout_limit,
+        stderr_limit,
+        events,
+        mut requests,
+        observation,
+    } = input;
+    let mut resources = resources.lock().await;
+    let status = {
+        let ControlResources {
+            child,
+            stdout,
+            stderr,
+            out,
+            err,
+            causes,
+            ..
+        } = &mut *resources;
+        let output = capture_retained(stdout, out, stdout_limit);
+        let errors = capture_retained(stderr, err, stderr_limit);
+        tokio::pin!(output, errors);
+        let (mut out_done, mut err_done) = (false, false);
+        let mut status = None;
+        let mut wait_uncertain = false;
+        let mut fault_sent = false;
+        let mut controls_open = true;
+        let mut control = *requests.borrow_and_update();
+        let mut kill_requested = false;
+        let mut attach_expired = false;
+        let mut capture_expired = false;
+        let mut waited_at = None;
+        loop {
+            if status.is_some() && out_done && err_done {
+                break;
+            }
+            if control.kill_transport && status.is_none() && !wait_uncertain {
+                transport_kill(child, &mut kill_requested, causes, &events, &mut fault_sent);
+            }
+            let attach_until = if status.is_none() && !attach_expired {
+                control.drain_started.map(|t| t + ATTACH_DRAIN)
+            } else {
+                None
+            };
+            let capture_until = if (!out_done || !err_done) && !capture_expired {
+                waited_at.map(|t: Instant| t + CAPTURE_DRAIN)
+            } else {
+                None
+            };
+            tokio::select! {
+                changed = requests.changed(), if controls_open => {
+                    if changed.is_err() { controls_open = false; } else { control = *requests.borrow_and_update(); }
+                }
+                result = child.wait(), if status.is_none() && !wait_uncertain => match result {
+                    Ok(exit) => { super::record_cli_exit(&observation, Some(exit)); status = Some(exit); waited_at = Some(Instant::now()); let _ = events.try_send(BatchIoEvent::Exited(Ok(exit))); }
+                    Err(error) => { super::observation::record(&observation, super::observation::Phase::StopCommandWaitFailed); wait_uncertain = true; let error = Arc::new(error); causes.push(anyhow::Error::new(SharedWaitError(error.clone()))); let _ = events.try_send(BatchIoEvent::Exited(Err(error))); fault(&events, &mut fault_sent); }
+                },
+                eof = &mut output, if !out_done => { out_done = true; if !eof { causes.push(anyhow::anyhow!("stdout capture failed; partial capture retained")); fault(&events, &mut fault_sent); } }
+                eof = &mut errors, if !err_done => { err_done = true; if !eof { causes.push(anyhow::anyhow!("stderr capture failed; partial capture retained")); fault(&events, &mut fault_sent); } }
+                _ = until(attach_until), if attach_until.is_some() => {
+                    attach_expired = true; causes.push(anyhow::anyhow!("CLI attach drain exceeded 10 seconds; collection remains pending")); fault(&events, &mut fault_sent);
+                    if status.is_none() && !wait_uncertain { transport_kill(child, &mut kill_requested, causes, &events, &mut fault_sent); }
+                }
+                _ = until(capture_until), if capture_until.is_some() => { capture_expired = true; causes.push(anyhow::anyhow!("capture drain exceeded 10 seconds; collection remains pending")); fault(&events, &mut fault_sent); }
+                else => pending::<()>().await,
+            }
+        }
+        status
+    };
+    let mut causes = std::mem::take(&mut resources.causes);
+    if let Some(error) = resources.out.error.take() {
+        causes.push(anyhow::Error::new(error).context("stdout read cause"));
+    }
+    if let Some(error) = resources.err.error.take() {
+        causes.push(anyhow::Error::new(error).context("stderr read cause"));
+    }
+    let completed = BatchIoCollected {
+        stdout: std::mem::replace(&mut resources.out.capture, empty_capture(0).capture),
+        stderr: std::mem::replace(&mut resources.err.capture, empty_capture(0).capture),
+        stdout_eof: resources.out.eof,
+        stderr_eof: resources.err.eof,
+        status,
+        errors: causes,
+        retained_input: None,
+    };
+    // Publish the exact captures/causes outside the task's return value before
+    // returning. A failed task join cannot discard this completed payload.
+    resources.completed = Some(completed);
 }
 async fn capture<R: AsyncRead + Unpin>(reader: Option<R>, limit: usize) -> ReadCapture {
     let mut capture = Capture {
