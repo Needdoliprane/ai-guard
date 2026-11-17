@@ -226,7 +226,14 @@ async fn lost_real_restrictive_bind_reply_cannot_become_original_via_register() 
             .await,
         Err(EnforcerError::Unavailable)
     ));
-    assert!(client.has_local_slot(registration.arm_id()).unwrap());
+    assert!(
+        client
+            .0
+            .slots
+            .lock()
+            .unwrap()
+            .contains_key(registration.arm_id())
+    );
     assert!(matches!(
         client
             .register(registration.clone(), generation.clone())
