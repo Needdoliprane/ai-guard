@@ -273,7 +273,7 @@ async fn refused_before_arm(scenario: Refusal) -> Result<()> {
             if matches!(scenario, Refusal::WriterUnknown) {
                 ensure!(executor.enforcer.full3().unwrap().require_new_prearm_identity().is_err(),
                     "unknown pending publication left new identities enabled");
-                ensure!(executor.enforcer.status().await?.slot_count == 0,
+                ensure!(executor.enforcer.status().await?.slot_count() == 0,
                     "native owner was allocated before the failed pending publication");
             }
             let known = match strict {
