@@ -85,9 +85,23 @@ publiée plus tard hérite du gate. Finalisation Register et Prepare le
 revérifient. STOP/Cancel existants et continuations de règlement déjà
 autorisées gardent leurs contrôles. Un ancien daemon incapable de confirmer
 cette opération est refusé, sans takeover, kill ou migration déduite.
-Les nouveaux lancements métier Legacy sont explicitement refusés avant une
-nouvelle RPC Arm, faute de factory native prospective. Leurs anciennes cibles
-STOP gardent leur voie de reprise ; cet écart n'est pas une migration livrée.
+La voie Legacy réellement neuve sélectionnée par défaut dispose désormais de
+sa propre factory native dans le même binaire Rust. L'enfant crée rôle et lock
+V1 seulement par mkdir/create exclusifs réussis et installe les vrais supports
+et ressources S/W. Aucun ledger Full3 ni droit de retraite n'est créé. Un pipe
+stdin privé corrèle le parent qui a réellement lancé cet enfant au nonce et
+à l'epoch authentifiés de la factory. Le nonce seul est DATA, sans permission.
+Seul ce parent garde la provenance Fresh ; aucune reconnexion ne la reconstruit
+depuis un status, nonce, timeout ou rôle paraissant vide.
+
+La reprise initiale est sautée seulement avec cette provenance native, des
+éléments de contrôle complets et un inventaire journal strictement absent/vide.
+Toute source antérieure ou inconnue confirme BeginRecovery Legacy avant scan.
+Les rôles existing/cold sont fenced avant publication. Un vieux daemon vivant
+sans nouvelle capacité prospective authentifiée refuse une nouvelle Arm et un
+nouveau scan de reprise ; ses anciens chemins Status/Slots/Cancel/STOP et
+owners natifs restent. Ni kill, takeover, rekey, adoption de répertoire ni
+conversion Full3 silencieuse.
 La séquence pré-Arm persiste la demande Pending exacte, réserve son owner
 natif S, puis consomme le grant natif unique d'échange Arm avant la RPC.
 Un refus de capacité après Pending mais avant installation conserve la même
@@ -113,5 +127,29 @@ natif est étendu ; les records publics de reprise du journal sont inchangés.
 Les régressions de collecte/causes utilisent de vrais Child/pipes logiciels
 et les propriétaires natifs, avec Ready/reçus synthétiques lorsque précisé.
 Leurs sources restent **NOT_RUN** jusqu'à la validation Luna de la composition
-gelée. Compatibilité Legacy par défaut et reprise de capacité après Pending
-sans owner restent ouvertes avec les critères de reprise décrits ci-dessus.
+gelée. La composition ports/native Legacy demande sa propre revue et ses
+tests ; aucun ancien résultat ne la qualifie. Reprise de capacité après Pending
+sans owner et réouverture métier automatique d'un rôle froid restent ouvertes
+avec les critères de reprise ci-dessus.
+
+Legacy négocie une réponse fermée distincte : version, epoch, S/W, génération
+de reprise, corrélation de lancement, cibles connues observées, `owned_active`
+(null explicite si inconnu) et caractère incomplet. Le status V1 ne gagne aucun
+champ : son compte et Shutdown utilisent le même registre natif incluant les
+prospectifs. Les données de reprise du client gardent au plus 16 384
+registrations, sans allouer d'owner ni acquitter le rattrapage. Begin consomme
+l'échange natif unique ; le client prend son nonce avant connect/write.
+Register générique, perte de Begin/Bind et rejeu de reçu ne recréent pas
+Original. Assignation/préclaim/Q Full3 restent propres à Full3.
+
+Pour un ancien rôle vivant, garder la connexion de contrôle existante et
+utiliser lorsque disponible le Cancel normal de l'opération exacte avec UUID
+de commande stable. Examiner status, preuves de reprise et observations runtime
+réelles ; le journal ne prouve pas un drain physique. Source/fence indisponible
+reste inconnu, jamais zéro activité. Récupérer auth/ancres originales par
+maintenance contrôlée ; ne pas supprimer un rôle pour forcer Fresh. Ce lot ne
+fournit ni drain automatique, retraite/quota Legacy, réouverture du gate ni
+migration qualifiée. Claim/start exige toujours la vraie voie ManagedRuntime/
+Ready et une campagne moteur autorisée distincte. Les nouvelles fixtures
+logicielles Legacy emploient vrais owners, contextes Tokio et IPC avec
+invocation indisponible, sans SyntheticReady, effet moteur ou succès Claim/start.

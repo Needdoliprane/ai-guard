@@ -79,9 +79,22 @@ a Full view published later inherits that gate. Register finalization and
 Prepare check it again. Existing STOP/Cancel and already authorized settlement
 continuations retain their controls. An old daemon unable to acknowledge
 this operation is refused, without takeover, daemon kill or inferred migration.
-Fresh Legacy business launches are explicitly refused before a new Arm RPC
-because that path has no prospective native factory. Its existing STOP targets
-retain their recovery path; this compatibility gap is not a completed migration.
+The default genuinely fresh Legacy path now selects its own exclusive native
+factory in the same Rust binary. The child creates its role and V1 lock only
+through successful exclusive mkdir/create; it installs the actual native
+support and S/W resources. It creates no Full3 ledger or retirement authority.
+A private stdin pipe correlates the spawning parent with that factory's
+authenticated nonce and epoch. The nonce alone is DATA, not permission. Only
+that actual parent holds Fresh startup provenance; reconnecting cannot recover
+it from status, a nonce, a timeout or an empty-looking role.
+
+Initial recovery is skipped only with that native provenance, complete control
+material, and a strictly absent/empty journal inventory. Any prior or unknown
+source commits Legacy BeginRecovery before its scan. Existing/cold roles start
+fenced before publication. A live old daemon without the new authenticated
+prospective capability refuses fresh Arm and new recovery scans; its existing
+Status/Slots/Cancel/STOP paths and native owners remain. There is no kill,
+takeover, rekey, directory adoption or silent Full3 conversion.
 The pre-Arm sequence persists the exact Pending request, reserves its native
 S owner, then consumes the native one-time Arm-exchange grant before the RPC.
 If capacity refuses after Pending but before an owner is installed, the same
@@ -106,6 +119,29 @@ fields from an older peer give no exact omission coverage. This extends only
 the native transport status; public journal recovery records are unchanged.
 Collection and cause regressions use real software Children/pipes and native
 ownership with synthetic Ready/receipt metadata where stated. Their sources
-remain **NOT_RUN** until Luna validates the frozen composition. Default Legacy
-compatibility and missing-owner post-Pending capacity retry remain open with
-the recovery criteria described above.
+remain **NOT_RUN** until Luna validates the frozen composition. The Legacy
+ports/native composition needs its own review and tests; no earlier result
+qualifies it. Missing-owner post-Pending capacity retry and automatic business
+reopening of a cold role remain open with the recovery criteria above.
+
+Legacy negotiates a separate closed capability response with version, epoch,
+S/W, recovery generation, native launch correlation, observed known slots,
+`owned_active` (explicit null when unknown) and incompleteness. V1 status gains
+no fields: its slot count and Shutdown use the same native registry, including
+prospective entries. Client recovery DATA retention is bounded separately to
+16,384 registrations; it does not allocate owners or acknowledge catch-up.
+Begin consumes the native one-time exchange; the client takes its nonce before
+connect/write. Generic Register, lost Begin/Bind and receipt replay cannot
+recreate Original. Full3 assignment/preclaim/Q behavior stays Full3-only.
+
+For an old live role, keep the existing control connection and use the normal
+exact-operation Cancel with its stable command UUID where available. Examine
+status, recorded recovery evidence and real runtime observations; journal data
+is not a physical drain. Unavailable source/fence stays unknown, never zero
+activity. Restore missing original auth/anchors through controlled maintenance;
+do not remove a role to force Fresh. This lot provides no automatic drain,
+Legacy quota retirement, gate reopening or qualified migration. Genuine
+Claim/start still requires the actual ManagedRuntime/Ready path and a separate
+admitted engine campaign. New Legacy software fixtures use real native owners,
+Tokio contexts and IPC with unavailable invocation metadata, no SyntheticReady
+and no engine effect or positive Claim/start claim.

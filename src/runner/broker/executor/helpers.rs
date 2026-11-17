@@ -109,10 +109,7 @@ impl Execution<'_> {
         let pending = if let Some(previous) = previous_arm {
             without_response(&previous)
         } else {
-            let full = self.executor.enforcer.full3().context(
-                "fresh Arm refused: the legacy enforcer has no native pre-ACK reservation; select a fresh Full3 role; existing armed STOP recovery remains available",
-            )?;
-            full.require_new_prearm_identity().context(
+            self.executor.enforcer.require_new_prearm_identity().context(
                 "fresh Arm refused: prior pending publication is unknown; controlled reconciliation is required",
             )?;
             self.generation_current()?;
@@ -170,9 +167,7 @@ impl Execution<'_> {
         // and validating the exact configuration/allocation. Historical
         // pending DATA may reconnect to that same owner, never allocate one.
         if !acknowledged_arm {
-            let full = self.executor.enforcer.full3().context(
-                "fresh Arm refused: the legacy enforcer has no native pre-ACK reservation; select a fresh Full3 role; existing armed STOP recovery remains available",
-            )?;
+            let enforcer = &self.executor.enforcer;
             let Operation::Arm { request, owned, .. } = &pending else {
                 return Err(anyhow!("prospective Arm target is missing"));
             };
@@ -205,24 +200,51 @@ impl Execution<'_> {
                 })
                 .await
             {
-                full.fence_unknown_prearm_write()?;
+                enforcer.fence_unknown_prearm_write()?;
                 return Err(
                     error.context("pending Arm publication is unknown; no Arm RPC was issued")
                 );
             }
-            full.reserve_prospective(
-                target.clone(),
-                self.context.cancel_generation().clone(),
-                !newly_requested_arm,
-            )
-            .await
-            .context(diagnostics::BrokerStep::Registration)?;
-            self.generation_current()?;
-            let exchange = full
+            enforcer
+                .reserve_prospective(
+                    target.clone(),
+                    self.context.cancel_generation().clone(),
+                    !newly_requested_arm,
+                )
+                .await
+                .context(diagnostics::BrokerStep::Registration)?;
+            if let Err(error) = self.generation_current() {
+                if let ExecutionEnforcerV1::Legacy(client) = enforcer {
+                    if let Err(cancel) = client
+                        .legacy_cancel_prospective(
+                            &target,
+                            self.context.cancel_generation().current(),
+                        )
+                        .await
+                    {
+                        return Err(error.context(cancel));
+                    }
+                }
+                return Err(error);
+            }
+            let exchange = enforcer
                 .begin_prospective_arm_exchange(&target, self.context.cancel_generation())
                 .await
                 .context(diagnostics::BrokerStep::Registration)?;
-            self.generation_current()?;
+            if let Err(error) = self.generation_current() {
+                if let ExecutionEnforcerV1::Legacy(client) = enforcer {
+                    if let Err(cancel) = client
+                        .legacy_cancel_prospective(
+                            &target,
+                            self.context.cancel_generation().current(),
+                        )
+                        .await
+                    {
+                        return Err(error.context(cancel));
+                    }
+                }
+                return Err(error);
+            }
             fresh_original = newly_requested_arm && exchange.permits_original();
             prospective_exchange = Some(if fresh_original {
                 exchange
@@ -276,8 +298,6 @@ impl Execution<'_> {
         let slot = if !acknowledged_arm {
             self.executor
                 .enforcer
-                .full3()
-                .context("prospective Full3 owner is unavailable")?
                 .bind_prospective(
                     registration,
                     self.context.cancel_generation().clone(),

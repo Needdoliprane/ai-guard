@@ -44,7 +44,9 @@ pub use retirement::{
     run_internal_full3_existing, run_internal_full3_existing_with_budget, run_internal_full3_fresh,
     run_internal_full3_fresh_with_budget,
 };
-pub use server::run_internal_enforcer;
+pub use server::{
+    run_internal_enforcer, run_internal_enforcer_with_budget, run_internal_legacy_fresh,
+};
 
 const MAX_SLOTS: u32 = 1024;
 const MAX_FRAME: u32 = 512 * 1024;
@@ -506,6 +508,69 @@ impl ProspectiveReservationV1 {
     }
 }
 
+/// Authenticated native observations, separate from the closed V1 status.
+/// The launch nonce correlates one actual private child spawn; DATA alone
+/// cannot reconstruct the launcher's process-local Fresh startup receipt.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LegacyProspectiveCapabilitiesV1 {
+    version: u32,
+    #[serde(deserialize_with = "crate::broker::retirement::strict_uuid")]
+    epoch: Uuid,
+    max_slots: u32,
+    max_recovery_stop_owners: u32,
+    #[serde(deserialize_with = "deserialize_legacy_optional")]
+    recovery_generation: Option<u64>,
+    #[serde(deserialize_with = "deserialize_legacy_optional_uuid")]
+    fresh_launch_nonce: Option<Uuid>,
+    known_stop_slots: u32,
+    #[serde(deserialize_with = "deserialize_legacy_optional")]
+    owned_active: Option<u32>,
+    recovery_incomplete: bool,
+}
+impl LegacyProspectiveCapabilitiesV1 {
+    fn validate(&self, epoch: Uuid, slots: u32, recovery: u32) -> EnforcerResult<()> {
+        if self.version != 1
+            || self.epoch != epoch
+            || self.epoch.is_nil()
+            || self.max_slots != slots
+            || !(1..=MAX_SLOTS).contains(&slots)
+            || self.max_recovery_stop_owners != recovery
+            || recovery > MAX_SLOTS
+            || self
+                .recovery_generation
+                .is_some_and(|value| value == 0 || value == u64::MAX)
+            || self.fresh_launch_nonce.is_some_and(|nonce| nonce.is_nil())
+            || self.known_stop_slots > slots + recovery.saturating_sub(1)
+            || self
+                .owned_active
+                .is_some_and(|owned| owned > self.known_stop_slots)
+        {
+            return Err(EnforcerError::Unauthorized);
+        }
+        Ok(())
+    }
+}
+fn deserialize_legacy_optional<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Option<T>, D::Error> {
+    Option::<T>::deserialize(d)
+}
+fn deserialize_legacy_optional_uuid<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Uuid>, D::Error> {
+    let value = Option::<String>::deserialize(d)?;
+    value
+        .map(|raw| {
+            let parsed = Uuid::parse_str(&raw).map_err(D::Error::custom)?;
+            if parsed.is_nil() || parsed.hyphenated().to_string() != raw {
+                return Err(D::Error::custom("invalid native nonce"));
+            }
+            Ok(parsed)
+        })
+        .transpose()
+}
+
 fn hex_hash(value: &str) -> bool {
     value.len() == 64
         && value
@@ -611,6 +676,29 @@ struct Authentication {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
+    ProspectiveCapabilities {},
+    ReserveProspective {
+        prospective: Box<ProspectiveRegistrationV1>,
+        generation: u64,
+        replay_only: bool,
+    },
+    BeginProspectiveArmExchange {
+        reservation: ProspectiveReservationV1,
+        generation: u64,
+    },
+    BindProspective {
+        reservation: ProspectiveReservationV1,
+        registration: Box<RegistrationV1>,
+        generation: u64,
+        observe_only: bool,
+        #[serde(deserialize_with = "deserialize_legacy_optional_uuid")]
+        original_exchange_nonce: Option<Uuid>,
+    },
+    CancelProspective {
+        reservation: ProspectiveReservationV1,
+        generation: u64,
+    },
+    BeginRecovery {},
     Status {},
     Watch {},
     Slots {
@@ -636,6 +724,19 @@ enum Request {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Response {
+    ProspectiveCapabilities {
+        value: LegacyProspectiveCapabilitiesV1,
+    },
+    ProspectiveReserved {
+        reservation: ProspectiveReservationV1,
+    },
+    ProspectiveArmExchange {
+        #[serde(deserialize_with = "deserialize_legacy_optional_uuid")]
+        original_exchange_nonce: Option<Uuid>,
+    },
+    RecoveryBegun {
+        generation: u64,
+    },
     Status {
         value: EnforcerStatusV1,
     },
