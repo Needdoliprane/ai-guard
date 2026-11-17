@@ -43,15 +43,11 @@ services:
     profiles: [keycloak-demo-http]
     image: ${AI_GUARD_DEMO_CONTROL_IMAGE:-agentsandbox-control:local}
     command:
-      - ingress
-      - --gateway-listen
+      - http-relay
+      - --listen
       - 0.0.0.0:${AI_GUARD_DEMO_IDP_PORT:-18080}
-      - --dashboard-listen
-      - 127.0.0.1:18081
       - --container-listen
-      - --gateway-upstream
-      - http://keycloak-demo:${AI_GUARD_DEMO_IDP_PORT:-18080}
-      - --dashboard-upstream
+      - --upstream
       - http://keycloak-demo:${AI_GUARD_DEMO_IDP_PORT:-18080}
     user: "1000:1000"
     read_only: true

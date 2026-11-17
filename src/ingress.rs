@@ -901,4 +901,36 @@ mod tests {
         .await
         .expect("body drop must cancel upstream before its one-second read deadline");
     }
+
+    #[tokio::test]
+    async fn ingress_router_for_http_relay_has_no_control_route_and_rejects_bad_origins() {
+        use tower::ServiceExt;
+        for invalid in [
+            "http://model:8080/prefix",
+            "http://user:pass@model:8080",
+            "http://model:8080?x=1",
+            "ftp://model:8080",
+        ] {
+            assert!(ingress_router(invalid).is_err(), "{invalid}");
+        }
+        let upstream = serve(Router::new().fallback(any(|request: Request| async move {
+            request.uri().path().to_string()
+        })))
+        .await;
+        let router = ingress_router(&upstream.url).unwrap();
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/control/api/v1/control/protocol")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let forwarded_path = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(forwarded_path, "/control/api/v1/control/protocol");
+    }
 }

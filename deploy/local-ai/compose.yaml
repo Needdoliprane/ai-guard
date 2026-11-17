@@ -44,7 +44,7 @@ services:
     restart: "no"
   local-ai-ingress:
     image: ${AI_GUARD_CONTROL_IMAGE:-agentsandbox-control:local}
-    command: ["ingress", "--gateway-listen", "0.0.0.0:8080", "--dashboard-listen", "127.0.0.1:8081", "--container-listen", "--gateway-upstream", "http://model:8080", "--dashboard-upstream", "http://model:8080"]
+    command: ["http-relay", "--listen", "0.0.0.0:8080", "--container-listen", "--upstream", "http://model:8080"]
     user: "1000:1000"
     read_only: true
     cap_drop: [ALL]

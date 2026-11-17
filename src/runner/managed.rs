@@ -2072,6 +2072,30 @@ async fn post_saved_terminal(client: &AuditClient, state: &PlanState) -> Result<
     Ok(())
 }
 
+fn build_command_requested_event(plan: &RunPlan) -> Result<Value> {
+    let mut requested = event(
+        plan,
+        "command.requested",
+        json!({
+            "request_id": plan.request.request_id,
+            "profile": plan.options.profile,
+            "network": plan.options.network,
+            "image": plan.options.image,
+            "runtime": plan.options.runtime,
+            "provider": plan.options.provider,
+            "mediation": launch_mediation_metadata(),
+        }),
+    );
+    if let Some(mode) = plan.request.execution_mode {
+        requested["data"]["execution_mode"] = serde_json::to_value(mode)?;
+    }
+    if let Some(resolution) = &plan.request.provider_resolution {
+        requested["data"]["provider_resolution"] = serde_json::to_value(resolution)?;
+    }
+    requested["command"] = serde_json::to_value(&plan.request.command)?;
+    Ok(requested)
+}
+
 pub(super) async fn execute_plan(
     mut plan: RunPlan,
     credentials: Option<CredentialFile>,
@@ -2099,18 +2123,7 @@ pub(super) async fn execute_plan(
             .is_none(),
         "this session already has a durable checkpoint; use worker-resume instead of launching again"
     );
-    let mut requested = event(
-        &plan,
-        "command.requested",
-        json!({"request_id":plan.request.request_id,"profile":plan.options.profile,"network":plan.options.network,"image":plan.options.image,"runtime":plan.options.runtime,"provider":plan.options.provider}),
-    );
-    if let Some(mode) = plan.request.execution_mode {
-        requested["data"]["execution_mode"] = serde_json::to_value(mode)?;
-    }
-    if let Some(resolution) = &plan.request.provider_resolution {
-        requested["data"]["provider_resolution"] = serde_json::to_value(resolution)?;
-    }
-    requested["command"] = serde_json::to_value(&plan.request.command)?;
+    let requested = build_command_requested_event(&plan)?;
     client.post_control_event(requested).await?;
     let (receipt, decision) = authorize_plan(&mut plan, &client, supplied.as_deref()).await?;
     let tenant = check_identity(&client, None).await?;
@@ -3114,32 +3127,31 @@ fn sync_postprocessing_summary(client: &AuditClient, state: &PlanState) -> Resul
     // ownership. A different current value belongs to another producer and is
     // retained opaquely; its text never determines a failure category.
     let mut projection = payload.summary_projection;
-    if let Some(previous) = &mut projection {
-        if !previous.acknowledged
-            && (summary.postprocessing_error == previous.intended
-                || content_hash("ai-guard:summary-error:v1", &summary.postprocessing_error)?
-                    == previous.previous_digest)
-        {
-            if summary.postprocessing_error != previous.intended {
-                state.update(|plan| {
-                    let result = plan
-                        .managed
-                        .as_mut()
-                        .context("missing checkpoint")?
-                        .result
-                        .as_mut()
-                        .context("summary disappeared")?;
-                    result.postprocessing_error = previous.intended.clone();
-                    Ok(())
-                })?;
-                summary.postprocessing_error = previous.intended.clone();
-            }
-            previous.acknowledged = true;
-            update_postprocessing(state, client, |payload| {
-                payload.summary_projection = projection.clone();
+    if let Some(previous) = &mut projection
+        && !previous.acknowledged
+        && (summary.postprocessing_error == previous.intended
+            || content_hash("ai-guard:summary-error:v1", &summary.postprocessing_error)?
+                == previous.previous_digest)
+    {
+        if summary.postprocessing_error != previous.intended {
+            state.update(|plan| {
+                let result = plan
+                    .managed
+                    .as_mut()
+                    .context("missing checkpoint")?
+                    .result
+                    .as_mut()
+                    .context("summary disappeared")?;
+                result.postprocessing_error = previous.intended.clone();
                 Ok(())
             })?;
+            summary.postprocessing_error = previous.intended.clone();
         }
+        previous.acknowledged = true;
+        update_postprocessing(state, client, |payload| {
+            payload.summary_projection = projection.clone();
+            Ok(())
+        })?;
     }
     let external = match &projection {
         Some(previous)
@@ -4321,6 +4333,50 @@ pub(super) async fn stop_worker(
         "No owned terminal worker proof is available; helper/volume evidence and reservation remain retained.",
     )
 }
+async fn publish_export_audit_events(
+    client: &AuditClient,
+    plan: &RunPlan,
+    worker_id: Option<&str>,
+    legacy_local_read: bool,
+    destination: &Path,
+    report: &workspace::ExportReport,
+) -> Result<()> {
+    let manifest_digest = content_hash("ai-guard:workspace-manifest:v1", &report.manifest)?;
+    let destination_hash = content_hash(
+        "ai-guard:export-destination:v1",
+        &destination.to_string_lossy(),
+    )?;
+    let mut policy_data = json!({
+        "version": 1,
+        "request_id": plan.request.request_id,
+        "manifest_digest": manifest_digest,
+        "destination_hash": destination_hash,
+        "omitted_entries": report.omitted_entries,
+        "files": report.manifest.len(),
+    });
+    let mut completed_data = json!({
+        "files": report.manifest.len(),
+        "omitted_entries": report.omitted_entries,
+        "manifest_digest": manifest_digest,
+        "destination_hash": destination_hash,
+    });
+    if let Some(worker_id) = worker_id {
+        policy_data["worker_id"] = json!(worker_id);
+        completed_data["worker_id"] = json!(worker_id);
+    }
+    if legacy_local_read {
+        policy_data["legacy_local_read"] = json!(true);
+        completed_data["legacy_local_read"] = json!(true);
+    }
+    // Emit the descriptive policy summary on the generic audit stream before the
+    // control completion event, leaving closed broker.batch.export facts intact.
+    client
+        .post_event(event(plan, "workspace.export.policy", policy_data))
+        .await?;
+    emit(client, plan, "workspace.export.completed", completed_data).await?;
+    Ok(())
+}
+
 pub(super) async fn export_workspace(
     session: Uuid,
     output: PathBuf,
@@ -4329,6 +4385,7 @@ pub(super) async fn export_workspace(
     program: Option<&Path>,
     adopt: bool,
 ) -> Result<usize> {
+    let destination = crate::control_fs::absolute_path(&output)?;
     let (state, client, _guard) = locked_session(session, config, gateway).await?;
     let worker = state.worker()?;
     anyhow::ensure!(
@@ -4350,11 +4407,13 @@ pub(super) async fn export_workspace(
         )
     })
     .await??;
-    emit(
+    publish_export_audit_events(
         &client,
         &plan,
-        "workspace.export.completed",
-        json!({"files":report.manifest.len(),"omitted_entries":report.omitted_entries}),
+        Some(&worker.worker_id),
+        false,
+        &destination,
+        &report,
     )
     .await?;
     Ok(report.manifest.len())
@@ -4384,6 +4443,7 @@ pub(super) async fn export_legacy_workspace(
         adopt,
         "legacy export has no durable invocation; explicitly approve it with --adopt-runtime-program"
     );
+    let destination = crate::control_fs::absolute_path(&output)?;
     let approved = approved_runtime(&plan.options, program)?;
     let token = read_token(&config.join("secrets/runner"))?;
     let client = AuditClient::new(gateway, &token)?;
@@ -4490,13 +4550,7 @@ pub(super) async fn export_legacy_workspace(
         )
     })
     .await??;
-    emit(
-        &client,
-        &plan,
-        "workspace.export.completed",
-        json!({"files":report.manifest.len(),"omitted_entries":report.omitted_entries,"legacy_local_read":true}),
-    )
-    .await?;
+    publish_export_audit_events(&client, &plan, None, true, &destination, &report).await?;
     Ok(report.manifest.len())
 }
 
@@ -4626,4 +4680,360 @@ async fn recover_import(
         emit(client,&plan,"workspace.import.cleanup.failed",json!({"container_id":found.handle.id(),"error":crate::redaction::clip(&redacted_error(&client.redactor,&error),1000)})).await?;
     }
     Ok(true)
+}
+
+#[cfg(all(test, unix))]
+mod export_and_mediation_tests {
+    use super::*;
+    use crate::{
+        api::{GatewayState, TenantGateway, gateway_router},
+        audit::{EventQuery, Store},
+        policy::Policy,
+    };
+    use std::os::unix::fs::PermissionsExt;
+
+    struct LiveTestGateway {
+        _directory: tempfile::TempDir,
+        store: Arc<Store>,
+        client: AuditClient,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for LiveTestGateway {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+
+    impl LiveTestGateway {
+        async fn start() -> Self {
+            let directory = tempfile::Builder::new()
+                .permissions(fs::Permissions::from_mode(0o700))
+                .tempdir()
+                .unwrap();
+            let store = Arc::new(
+                Store::open(
+                    &directory.path().join("audit.sqlite"),
+                    Redactor::new(vec![]),
+                    1000,
+                )
+                .unwrap(),
+            );
+            let state = GatewayState::for_tenants(
+                vec![TenantGateway {
+                    tenant_id: "local".into(),
+                    store: store.clone(),
+                    runner_token: "fixture-runner".into(),
+                    viewer_token: "fixture-viewer".into(),
+                }],
+                Policy::default(),
+                None,
+                Redactor::new(vec![]),
+            )
+            .unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let client = AuditClient::new(
+                &format!("http://{}", listener.local_addr().unwrap()),
+                "fixture-runner",
+            )
+            .unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, gateway_router(state)).await.unwrap();
+            });
+            Self {
+                _directory: directory,
+                store,
+                client,
+                server,
+            }
+        }
+    }
+
+    fn build_fixture_plan(root: &Path, with_provider: bool) -> RunPlan {
+        let project = root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("README.txt"), "ordinary project data").unwrap();
+        let config = root.join("config");
+        if !config.exists() {
+            crate::operations::initialize_config(&config).unwrap();
+        }
+        let mut options = RunOptions {
+            project: project.clone(),
+            config_dir: config.clone(),
+            gateway: "http://127.0.0.1:1".into(),
+            runtime: RuntimeKind::Docker,
+            runtime_program: None,
+            runtime_endpoint: Some("unix:///fixture.sock".into()),
+            image: "worker:fixture".into(),
+            profile: if with_provider { "observe" } else { "strict" }.into(),
+            network: if with_provider {
+                NetworkMode::Bridge
+            } else {
+                NetworkMode::None
+            },
+            allow_rootful_runtime: false,
+            timeout: 5,
+            provider: "generic".into(),
+            client: None,
+            auth_mode: None,
+            client_profile: None,
+            providers_file: None,
+            prompt: None,
+            model: None,
+            approve_hash: None,
+            capture_output: false,
+            interactive: false,
+            secret_env_file: None,
+            argv: if with_provider {
+                Vec::new()
+            } else {
+                vec!["/usr/bin/id".into()]
+            },
+        };
+        if with_provider {
+            let source = project.join(".env");
+            fs::write(&source, "OPENAI_API_KEY=fixture-provider-secret-value\n").unwrap();
+            fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).unwrap();
+            write_json_new(
+                &config.join("providers.json"),
+                &crate::provider::ProviderConfigV1 {
+                    version: 1,
+                    default_profile: Some("codex-api".into()),
+                    auto_priority: vec!["codex-api".into()],
+                    profiles: vec![crate::provider::ProviderProfileV1 {
+                        id: "codex-api".into(),
+                        revision: 1,
+                        client: crate::provider::ClientKind::Codex,
+                        auth_mode: crate::provider::AuthMode::Api,
+                        model: None,
+                        credential: crate::provider::CredentialSourceV1::ApiEnvFile {
+                            path: source,
+                            key: Some("OPENAI_API_KEY".into()),
+                        },
+                    }],
+                },
+            )
+            .unwrap();
+            options.client = Some("codex".into());
+            options.auth_mode = Some(crate::provider::AuthPreference::Api);
+            options.prompt = Some("inspect".into());
+        }
+        choose_plan(options).unwrap()
+    }
+
+    #[tokio::test]
+    async fn command_requested_event_includes_launch_only_mediation_and_passes_control_ingest() {
+        let gateway = LiveTestGateway::start().await;
+        for with_provider in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().canonicalize().unwrap();
+            let plan = build_fixture_plan(&root, with_provider);
+            let before_hash = crate::policy::request_hash(&plan.request);
+            let requested = build_command_requested_event(&plan).unwrap();
+            assert_eq!(
+                requested["data"]["mediation"],
+                json!({"scope": "launch_only", "tool_decision_channel": false})
+            );
+            assert_eq!(crate::policy::request_hash(&plan.request), before_hash);
+            gateway.client.post_control_event(requested).await.unwrap();
+        }
+        let rows = gateway
+            .store
+            .events(&EventQuery {
+                order: Some("asc".into()),
+                ..EventQuery::default()
+            })
+            .unwrap();
+        let requested_rows: Vec<_> = rows
+            .iter()
+            .filter(|row| row.event.kind == "command.requested")
+            .collect();
+        assert_eq!(requested_rows.len(), 2);
+        for row in requested_rows {
+            assert_eq!(
+                row.event.data["mediation"],
+                json!({"scope": "launch_only", "tool_decision_channel": false})
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn export_audit_events_bind_manifest_and_destination_hashes_without_raw_paths() {
+        let gateway = LiveTestGateway::start().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let plan = build_fixture_plan(&root, false);
+
+        let mut tar_builder = tar::Builder::new(Vec::new());
+        let mut kept_header = tar::Header::new_gnu();
+        let kept_bytes = b"verified exported content";
+        kept_header.set_entry_type(tar::EntryType::Regular);
+        kept_header.set_mode(0o644);
+        kept_header.set_size(kept_bytes.len() as u64);
+        tar_builder
+            .append_data(&mut kept_header, "kept.txt", &kept_bytes[..])
+            .unwrap();
+        let mut hidden_header = tar::Header::new_gnu();
+        let hidden_bytes = b"[core]\n";
+        hidden_header.set_entry_type(tar::EntryType::Regular);
+        hidden_header.set_mode(0o644);
+        hidden_header.set_size(hidden_bytes.len() as u64);
+        tar_builder
+            .append_data(&mut hidden_header, ".git/config", &hidden_bytes[..])
+            .unwrap();
+        let archive = tar_builder.into_inner().unwrap();
+
+        let secret_parent = root.join("secret-customer-canary-dir");
+        fs::create_dir(&secret_parent).unwrap();
+        let managed_dest = secret_parent.join("export-managed-out");
+        let managed_report = workspace::extract_workspace_with_report(
+            archive.as_slice(),
+            &managed_dest,
+            &plan.options.project,
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(managed_report.manifest.len(), 1);
+        assert_eq!(managed_report.omitted_entries, 1);
+
+        let managed_abs = crate::control_fs::absolute_path(&managed_dest).unwrap();
+        publish_export_audit_events(
+            &gateway.client,
+            &plan,
+            Some("worker-export-1"),
+            false,
+            &managed_abs,
+            &managed_report,
+        )
+        .await
+        .unwrap();
+
+        let legacy_dest = secret_parent.join("export-legacy-out");
+        let legacy_report = workspace::extract_workspace_with_report(
+            archive.as_slice(),
+            &legacy_dest,
+            &plan.options.project,
+            Limits::default(),
+        )
+        .unwrap();
+        let legacy_abs = crate::control_fs::absolute_path(&legacy_dest).unwrap();
+        publish_export_audit_events(
+            &gateway.client,
+            &plan,
+            None,
+            true,
+            &legacy_abs,
+            &legacy_report,
+        )
+        .await
+        .unwrap();
+
+        let expected_manifest_digest =
+            content_hash("ai-guard:workspace-manifest:v1", &managed_report.manifest).unwrap();
+        let expected_managed_dest_hash = content_hash(
+            "ai-guard:export-destination:v1",
+            &managed_abs.to_string_lossy(),
+        )
+        .unwrap();
+        let expected_legacy_dest_hash = content_hash(
+            "ai-guard:export-destination:v1",
+            &legacy_abs.to_string_lossy(),
+        )
+        .unwrap();
+        assert_ne!(expected_managed_dest_hash, expected_legacy_dest_hash);
+
+        let rows = gateway
+            .store
+            .events(&EventQuery {
+                order: Some("asc".into()),
+                ..EventQuery::default()
+            })
+            .unwrap();
+        let policies: Vec<_> = rows
+            .iter()
+            .filter(|row| row.event.kind == "workspace.export.policy")
+            .collect();
+        let completions: Vec<_> = rows
+            .iter()
+            .filter(|row| row.event.kind == "workspace.export.completed")
+            .collect();
+        assert_eq!(policies.len(), 2);
+        assert_eq!(completions.len(), 2);
+
+        assert_eq!(policies[0].event.data["version"], 1);
+        assert_eq!(
+            policies[0].event.data["request_id"],
+            plan.request.request_id
+        );
+        assert_eq!(
+            policies[0].event.data["manifest_digest"],
+            expected_manifest_digest
+        );
+        assert_eq!(
+            policies[0].event.data["destination_hash"],
+            expected_managed_dest_hash
+        );
+        assert_eq!(policies[0].event.data["omitted_entries"], 1);
+        assert_eq!(policies[0].event.data["files"], 1);
+        assert_eq!(policies[0].event.data["worker_id"], "worker-export-1");
+
+        assert_eq!(completions[0].event.data["files"], 1);
+        assert_eq!(completions[0].event.data["omitted_entries"], 1);
+        assert_eq!(
+            completions[0].event.data["manifest_digest"],
+            expected_manifest_digest
+        );
+        assert_eq!(
+            completions[0].event.data["destination_hash"],
+            expected_managed_dest_hash
+        );
+        assert_eq!(completions[0].event.data["worker_id"], "worker-export-1");
+        assert!(completions[0].event.data.get("legacy_local_read").is_none());
+
+        assert_eq!(
+            policies[1].event.data["destination_hash"],
+            expected_legacy_dest_hash
+        );
+        assert_eq!(policies[1].event.data["legacy_local_read"], true);
+        assert!(policies[1].event.data.get("worker_id").is_none());
+
+        assert_eq!(
+            completions[1].event.data["destination_hash"],
+            expected_legacy_dest_hash
+        );
+        assert_eq!(completions[1].event.data["legacy_local_read"], true);
+        assert!(completions[1].event.data.get("worker_id").is_none());
+
+        for row in policies.into_iter().chain(completions) {
+            let serialized = serde_json::to_string(&row.event).unwrap();
+            for sensitive_fragment in [
+                "secret-customer-canary-dir",
+                "export-managed-out",
+                "export-legacy-out",
+            ] {
+                assert!(
+                    !serialized.contains(sensitive_fragment),
+                    "raw destination fragment leaked in {}: {serialized}",
+                    row.event.kind
+                );
+            }
+        }
+
+        let traversal_err = export_workspace(
+            Uuid::new_v4(),
+            PathBuf::from("../escape"),
+            &root.join("missing-config"),
+            "http://127.0.0.1:1",
+            None,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            traversal_err
+                .to_string()
+                .contains("control path must not contain parent traversal"),
+            "{traversal_err}"
+        );
+    }
 }

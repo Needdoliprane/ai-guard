@@ -1931,6 +1931,24 @@ fn validate_credential_scope(
     Ok(())
 }
 
+pub(crate) fn launch_mediation_metadata() -> Value {
+    json!({
+        "scope": "launch_only",
+        "tool_decision_channel": false,
+    })
+}
+
+fn resolved_provider_diagnostic_json(
+    resolution: &crate::provider::ProviderResolutionV1,
+) -> Result<String> {
+    let mut payload = serde_json::to_value(resolution)?;
+    let object = payload
+        .as_object_mut()
+        .context("resolved provider payload must serialize as a JSON object")?;
+    object.insert("mediation".into(), launch_mediation_metadata());
+    Ok(serde_json::to_string(&payload)?)
+}
+
 pub async fn run(options: RunOptions) -> Result<RunSummary> {
     let supplied_approval = options.approve_hash.clone();
     let mut plan = choose_plan(options)?;
@@ -1957,7 +1975,10 @@ pub async fn run(options: RunOptions) -> Result<RunSummary> {
     let redactor = client.redactor.clone();
     client.validate_identity_payload(&plan.request)?;
     if let Some(resolution) = &plan.request.provider_resolution {
-        eprintln!("Resolved provider: {}", serde_json::to_string(resolution)?);
+        eprintln!(
+            "Resolved provider: {}",
+            resolved_provider_diagnostic_json(resolution)?
+        );
         if resolution.auth_mode == crate::provider::AuthMode::Api {
             eprintln!("API mode: usage is billed by the provider.");
         }
@@ -2117,10 +2138,12 @@ mod event_transport_tests {
         OldGateway,
     }
 
+    type SeenRequests = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
     struct TestGateway {
         _directory: tempfile::TempDir,
         store: Arc<Store>,
-        seen: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+        seen: SeenRequests,
         client: AuditClient,
         server: tokio::task::JoinHandle<()>,
     }
@@ -2715,5 +2738,29 @@ mod tests {
     #[test]
     fn ipv6_loopback_is_an_allowed_local_gateway() {
         assert!(AuditClient::new("http://[::1]:8787", "local-token-value").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolved_provider_diagnostic_exposes_launch_only_mediation_without_changing_plan_hashes() {
+        let (_temporary, options) = managed_fixture();
+        let plan = choose_plan(options).unwrap();
+        let before_request = serde_json::to_vec(&plan.request).unwrap();
+        let before_hash = crate::policy::request_hash(&plan.request);
+        let resolution = plan.request.provider_resolution.as_ref().unwrap();
+        let before_resolution = serde_json::to_vec(resolution).unwrap();
+
+        let rendered = resolved_provider_diagnostic_json(resolution).unwrap();
+        let parsed: Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(
+            parsed["mediation"],
+            json!({"scope": "launch_only", "tool_decision_channel": false})
+        );
+        assert_eq!(parsed["client"], "codex");
+        assert_eq!(parsed["auth_mode"], "api");
+
+        assert_eq!(serde_json::to_vec(&plan.request).unwrap(), before_request);
+        assert_eq!(crate::policy::request_hash(&plan.request), before_hash);
+        assert_eq!(serde_json::to_vec(resolution).unwrap(), before_resolution);
     }
 }

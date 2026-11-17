@@ -310,6 +310,7 @@ fn provider_status(config_dir: &Path, providers_file: Option<&Path>) -> Result<s
         "version": 1, "status": "configured", "profiles": profiles,
         "default_profile": providers.default_profile, "auto_priority": providers.auto_priority,
         "credentials_verified": false, "worker_capabilities_verified": false,
+        "mediation": crate::runner::launch_mediation_metadata(),
         "next_action": "Select a profile explicitly for run. Credentials are validated before authorization; image client capabilities and real authentication require qualification."
     }))
 }
@@ -1097,4 +1098,28 @@ async fn compose(
         .await?;
     println!("{}", String::from_utf8_lossy(&output.bytes));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_status_exposes_launch_only_mediation_metadata() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let config_dir = root.join(".agentsandbox");
+        let env_file = root.join("private-provider.env");
+        initialize_provider_references(&config_dir, &env_file).unwrap();
+
+        let status = provider_status(&config_dir, None).unwrap();
+        assert_eq!(status["version"], 1);
+        assert_eq!(status["status"], "configured");
+        assert_eq!(
+            status["mediation"],
+            serde_json::json!({"scope": "launch_only", "tool_decision_channel": false})
+        );
+        assert!(!status.to_string().contains("private-provider.env"));
+    }
 }

@@ -15,16 +15,40 @@ static FLAG_SECRET: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)(--(?:[a-z0-9]+[-_])*(?:api[-_]?key|token|password|passwd|secret|credential))\s+(?:"[^"]*"|'[^']*'|[^\s,;]+)"#).unwrap()
 });
 static TOKEN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,}|AIza[A-Za-z0-9_-]{25,}|AKIA[A-Z0-9]{16})\b|aigh1_[A-Fa-f0-9]{64}").unwrap()
+    Regex::new(r"\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,}|AIza[A-Za-z0-9_-]{25,}|AKIA[A-Z0-9]{16}|eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\b|aigh1_[A-Fa-f0-9]{64}").unwrap()
 });
 static URL_AUTH: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@\s:]+:[^/@\s]+@").unwrap());
 
+fn normalize_key(key: &str) -> String {
+    let trimmed = key.trim_start_matches('-');
+    let mut normalized = String::with_capacity(trimmed.len() + 4);
+    let chars: Vec<char> = trimmed.chars().collect();
+    for (idx, &ch) in chars.iter().enumerate() {
+        if ch == '-' {
+            normalized.push('_');
+            continue;
+        }
+        if ch.is_ascii_uppercase() {
+            let prev = idx.checked_sub(1).map(|i| chars[i]);
+            let next = chars.get(idx + 1).copied();
+            let boundary = prev.is_some_and(|p| {
+                p != '-'
+                    && (p.is_ascii_lowercase()
+                        || p.is_ascii_digit()
+                        || (p.is_ascii_uppercase() && next.is_some_and(|n| n.is_ascii_lowercase())))
+            });
+            if boundary {
+                normalized.push('_');
+            }
+        }
+        normalized.push(ch.to_ascii_lowercase());
+    }
+    normalized
+}
+
 fn sensitive_key(key: &str) -> bool {
-    let key = key
-        .trim_start_matches('-')
-        .to_ascii_lowercase()
-        .replace('-', "_");
+    let key = normalize_key(key);
     [
         "authorization",
         "cookie",
@@ -63,9 +87,10 @@ pub struct Redactor {
 }
 impl Redactor {
     pub fn new(secrets: Vec<String>) -> Self {
-        Self {
-            secrets: secrets.into_iter().filter(|s| s.len() >= 4).collect(),
-        }
+        let mut secrets: Vec<String> = secrets.into_iter().filter(|s| s.len() >= 4).collect();
+        secrets.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
+        secrets.dedup();
+        Self { secrets }
     }
     /// Extend a redaction dictionary without exposing or mutating its values.
     /// Captured diagnostics must merge private runtime and caller secrets
@@ -76,12 +101,7 @@ impl Redactor {
     /// Combine literal dictionaries without changing either source. Longer
     /// values precede their prefixes so masking cannot expose a secret suffix.
     pub fn union(&self, other: &Self) -> Self {
-        let mut combined = self.with_secrets(other.secrets.iter().cloned());
-        combined
-            .secrets
-            .sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
-        combined.secrets.dedup();
-        combined
+        self.with_secrets(other.secrets.iter().cloned())
     }
     /// Require exact membership for every known literal secret in `other`.
     /// Conservatively require descending lengths to mask longer secrets first;
@@ -326,11 +346,15 @@ mod tests {
     fn union_masks_longer_secrets_before_known_prefixes_and_deduplicates() {
         let prefix = Redactor::new(vec!["fixture-prefix".into()]);
         let longer = Redactor::new(vec!["fixture-prefix-canary-tail".into()]);
-        let legacy_order = Redactor::new(vec![
+        let normalized_order = Redactor::new(vec![
             "fixture-prefix".into(),
             "fixture-prefix-canary-tail".into(),
         ]);
-        assert!(!legacy_order.covers(&longer));
+        assert!(normalized_order.covers(&longer));
+        assert_eq!(
+            normalized_order.text("fixture-prefix-canary-tail fixture-prefix"),
+            "[REDACTED] [REDACTED]"
+        );
         let combined = prefix.union(&longer);
         assert_eq!(
             combined.text("fixture-prefix-canary-tail fixture-prefix"),
@@ -338,11 +362,121 @@ mod tests {
         );
         assert_eq!(combined.union(&longer).secrets, combined.secrets);
         assert!(combined.covers(&prefix) && combined.covers(&longer));
-        assert!(combined.covers(&legacy_order));
+        assert!(combined.covers(&normalized_order));
     }
     #[test]
     fn leaves_readable_safe_text_and_utf8() {
         let r = Redactor::new(vec![]);
         assert_eq!(r.text("Événement : cargo test"), "Événement : cargo test");
+    }
+    #[test]
+    fn new_and_with_secrets_sort_descending_satisfy_covers_and_mask_long_before_short() {
+        let longer_only = Redactor::new(vec!["fixture-prefix-canary-tail".into()]);
+        let ordered = Redactor::new(vec![
+            "fixture-prefix".into(),
+            "fixture-prefix-canary-tail".into(),
+            "abc".into(),
+            "fixture-prefix".into(),
+        ]);
+        assert!(ordered.covers(&longer_only));
+        assert_eq!(
+            ordered.text("fixture-prefix-canary-tail fixture-prefix abc"),
+            "[REDACTED] [REDACTED] abc"
+        );
+        let extended = Redactor::new(vec!["fixture-prefix".into()])
+            .with_secrets(["fixture-prefix-canary-tail".into(), "fixture-prefix".into()]);
+        assert!(extended.covers(&longer_only));
+        assert_eq!(
+            extended.text("fixture-prefix-canary-tail fixture-prefix"),
+            "[REDACTED] [REDACTED]"
+        );
+        let tied = Redactor::new(vec!["bbbb".into(), "aaaa".into(), "bbbb".into()]);
+        assert_eq!(tied.secrets, vec!["aaaa".to_string(), "bbbb".to_string()]);
+    }
+    #[test]
+    fn masks_camelcase_sensitive_keys_while_preserving_snake_and_kebab_keys() {
+        let r = Redactor::new(vec![]);
+        let input = json!({
+            "accessToken": "canary-access-token",
+            "apiKey": "canary-api-key",
+            "clientSecret": "canary-client-secret",
+            "privateKey": "canary-private-key",
+            "refreshToken": "canary-refresh-token",
+            "idToken": "canary-id-token",
+            "sessionToken": "canary-session-token",
+            "authToken": "canary-auth-token",
+            "customApiKey": "canary-custom-api-key",
+            "APIToken": "canary-acronym-api-token",
+            "api_key": "canary-snake-api-key",
+            "api-key": "canary-kebab-api-key",
+            "Set-Cookie": "canary-set-cookie",
+            "X-API-Key": "canary-header-api-key",
+            "argv": ["tool", "--accessToken", "canary-argv-camel", "--api-key", "canary-argv-kebab"],
+            "sessionId": "safe-session-id",
+            "publicKey": "safe-public-key",
+            "tokenCount": 42,
+            "clientId": "safe-client-id"
+        });
+        let redacted = r.value(&input);
+        for secret in [
+            "canary-access-token",
+            "canary-api-key",
+            "canary-client-secret",
+            "canary-private-key",
+            "canary-refresh-token",
+            "canary-id-token",
+            "canary-session-token",
+            "canary-auth-token",
+            "canary-custom-api-key",
+            "canary-acronym-api-token",
+            "canary-snake-api-key",
+            "canary-kebab-api-key",
+            "canary-set-cookie",
+            "canary-header-api-key",
+            "canary-argv-camel",
+            "canary-argv-kebab",
+        ] {
+            assert!(
+                !redacted.to_string().contains(secret),
+                "sensitive field value leaked: {secret}"
+            );
+        }
+        assert_eq!(redacted["sessionId"], "safe-session-id");
+        assert_eq!(redacted["publicKey"], "safe-public-key");
+        assert_eq!(redacted["tokenCount"], 42);
+        assert_eq!(redacted["clientId"], "safe-client-id");
+    }
+    #[test]
+    fn masks_bare_three_segment_base64url_jwt_tokens() {
+        let r = Redactor::new(vec![]);
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyLTEifQ.c2lnbmF0dXJlX3ZhbHVl";
+        let jwt_urlsafe =
+            "eyJ0eXAiOiJKV1QtXzEifQ.eyJzY29wZV9hIjoiYWJjLV8ifQ.c2lnX2FiYy0xMjM0NTY3ODkw";
+        let masked = r.text(&format!("token={jwt} next {jwt_urlsafe}"));
+        assert!(!masked.contains("eyJhbGci"));
+        assert!(!masked.contains("eyJzdWI"));
+        assert!(!masked.contains("c2lnbmF0dXJl"));
+        assert!(!masked.contains("eyJ0eXAi"));
+        assert!(!masked.contains("c2lnX2FiYy"));
+        assert_eq!(masked, "token=[REDACTED] next [REDACTED]");
+        let structured = r.value(&json!({"note": format!("raw {jwt}")}));
+        assert_eq!(structured["note"], "raw [REDACTED]");
+        assert_eq!(r.text("eyJshort.eyJshort"), "eyJshort.eyJshort");
+    }
+    #[test]
+    fn captured_text_truncated_in_middle_of_long_overlapping_secret_masks_cleanly() {
+        let r = Redactor::new(vec![
+            "fixture-prefix".into(),
+            "fixture-prefix-canary-tail".into(),
+        ]);
+        let truncated_mid_long = r.captured_text(b"output fixture-prefix-can", true);
+        assert_eq!(truncated_mid_long, "output [REDACTED]");
+        assert!(!truncated_mid_long.contains("-can"));
+        assert_eq!(
+            r.captured_text(b"output fixture-prefix-canary-tail", false),
+            "output [REDACTED]"
+        );
+        let untruncated_full = r.captured_text(b"fixture-prefix-canary-tail", false);
+        assert_eq!(untruncated_full, "[REDACTED]");
     }
 }

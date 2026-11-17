@@ -84,6 +84,8 @@ enum Command {
     Dashboard(DashboardArgs),
     /// Relais de confiance sans secrets vers les deux services internes.
     Ingress(IngressArgs),
+    /// Fixed-destination single-listener HTTP relay without control routes.
+    HttpRelay(HttpRelayArgs),
     /// Isolated model TLS transport; fixed model:8080 upstream, no control credentials.
     ModelIngress(ModelIngressArgs),
     /// Provision local TLS volumes explicitly, without starting model/gateway.
@@ -363,6 +365,16 @@ struct IngressArgs {
     control_upstream: String,
     #[arg(long, default_value = "http://dashboard:4000")]
     dashboard_upstream: String,
+}
+#[derive(Args)]
+struct HttpRelayArgs {
+    #[arg(long)]
+    listen: SocketAddr,
+    #[arg(long)]
+    container_listen: bool,
+    /// Fixed HTTP(S) upstream origin; no /control route is exposed.
+    #[arg(long)]
+    upstream: String,
 }
 #[derive(Args)]
 struct ModelIngressArgs {
@@ -1231,6 +1243,26 @@ async fn run() -> Result<()> {
                 }
             }
         }
+        Command::HttpRelay(args) => {
+            validate_bind(args.listen, args.container_listen)?;
+            let router = agentsandbox::ingress::ingress_router(&args.upstream)?;
+            let shutdown = shutdown_signal()?;
+            let listener = tokio::net::TcpListener::bind(args.listen).await?;
+            eprintln!(
+                "HTTP relay {} — fixed destination without secrets or control route",
+                listener.local_addr()?
+            );
+            serve_http(
+                listener,
+                router,
+                shutdown,
+                agentsandbox::http_listener_bounds::ListenerBounds::new(
+                    128,
+                    std::time::Duration::from_secs(15),
+                )?,
+            )
+            .await?;
+        }
         Command::ModelIngress(args) => {
             validate_bind(args.listen, args.container_listen)?;
             let identity = agentsandbox::tls::ServerIdentity::from_files(
@@ -1804,6 +1836,57 @@ mod tests {
             ])
             .is_ok()
         );
+    }
+
+    #[test]
+    fn http_relay_requires_listen_and_upstream_without_control_route() {
+        assert!(Cli::try_parse_from(["agentsandbox", "http-relay"]).is_err());
+        assert!(
+            Cli::try_parse_from(["agentsandbox", "http-relay", "--listen", "127.0.0.1:8080"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "agentsandbox",
+                "http-relay",
+                "--upstream",
+                "http://model:8080"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "agentsandbox",
+                "http-relay",
+                "--listen",
+                "127.0.0.1:8080",
+                "--upstream",
+                "http://model:8080",
+                "--control-upstream",
+                "http://gateway:8788"
+            ])
+            .is_err()
+        );
+        let parsed = Cli::try_parse_from([
+            "agentsandbox",
+            "http-relay",
+            "--listen",
+            "0.0.0.0:8080",
+            "--container-listen",
+            "--upstream",
+            "http://model:8080",
+        ])
+        .unwrap();
+        let Command::HttpRelay(args) = parsed.command else {
+            panic!("expected HttpRelay subcommand");
+        };
+        assert_eq!(args.listen, "0.0.0.0:8080".parse::<SocketAddr>().unwrap());
+        assert!(args.container_listen);
+        assert_eq!(args.upstream, "http://model:8080");
+        assert!(validate_bind(args.listen, false).is_err());
+        assert!(validate_bind(args.listen, args.container_listen).is_ok());
+        assert!(agentsandbox::ingress::ingress_router(&args.upstream).is_ok());
+        assert!(agentsandbox::ingress::ingress_router("http://model:8080/extra").is_err());
     }
 
     #[test]

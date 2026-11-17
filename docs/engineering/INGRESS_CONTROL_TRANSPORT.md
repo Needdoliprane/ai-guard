@@ -131,6 +131,7 @@ devient pas un reçu durable valide.
 |---|---|---|
 | `gateway` | `--control-listen <SocketAddr>` facultatif | Ajoute le listener privé à racine contrôle ; absent, seul le nest `/control` du listener habituel existe. Adresse distincte de `--listen`, règles `--container-listen` conservées. Tous les listeners configurés sont liés avant de servir. |
 | `ingress` | `--control-upstream <origin>` requis | Origine fixe dédiée, distincte de `--gateway-upstream` ; aucun défaut vers le public. Absence ou origine invalide refuse la configuration. |
+| `http-relay` | `--listen <SocketAddr>`, `--upstream <origin>` requis (`--container-listen` facultatif) | Relais HTTP mono-listener à destination fixe sans route `/control` ni second listener dashboard ; utilisé par les piles auxiliaires [keycloak-demo](../../deploy/keycloak-demo/compose.yaml) et [local-ai](../../deploy/local-ai/compose.yaml) qui ne relaient pas le contrôle ai-guard. |
 
 Comme les autres origines du relais, l'origine doit être HTTP(S), sans credential,
 chemin autre que `/`, querystring ou fragment. La disponibilité de cette
@@ -145,7 +146,13 @@ local [fichiers](../../deploy/docker/compose.jev-local-tls.example.yaml) et
 Ils utilisent `--control-listen 0.0.0.0:8788` au gateway et
 `--control-upstream http://gateway:8788` à l'ingress. Le port 8788 reste interne,
 sans nouveau port hôte. Les réseaux internes, projections de secrets existantes
-du gateway et absence de secret propre au relais sont conservés.
+du gateway et absence de secret propre au relais sont conservés. Les piles
+auxiliaires [Keycloak DEMO](../../deploy/keycloak-demo/compose.yaml) et
+[modèle local HTTP](../../deploy/local-ai/compose.yaml), qui n'exposent aucun
+transport de contrôle ai-guard, utilisent la sous-commande dédiée `http-relay`
+(listener HTTP unique sans `/control` ni second listener dashboard) ; ce choix est
+vérifié par l'analyse des arguments Compose et des tests unitaires CLI/routeur, sans
+exécution Compose/Docker runtime.
 
 Ne pas ajouter `/control` à `--gateway` ou à l'origine du registre broker : ces
 champs restent des origines sans chemin. Le consommateur choisit le chemin
