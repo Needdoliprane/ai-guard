@@ -179,6 +179,35 @@ async fn close_broker(broker: &mut Option<Child>, allow_already_reaped: bool) ->
     Ok(())
 }
 
+fn closed_status_reply(reply: &BrokerReplyV1) -> String {
+    match reply {
+        BrokerReplyV1::Status { status } => format!(
+            "kind=status code=none state={:?} executor_error={:?}",
+            status.state, status.executor_error
+        ),
+        BrokerReplyV1::Error { code } => {
+            format!("kind=error code={code:?} executor_error=none")
+        }
+        other => {
+            let kind = match other {
+                BrokerReplyV1::Accepted { .. } => "accepted",
+                BrokerReplyV1::Rejected { .. } => "rejected",
+                BrokerReplyV1::RelayStatus { .. } => "relay_status",
+                BrokerReplyV1::RecoveryStatus { .. } => "recovery_status",
+                BrokerReplyV1::RecoveryStatusV2 { .. } => "recovery_status_v2",
+                BrokerReplyV1::RecoveryInventory { .. } => "recovery_inventory",
+                BrokerReplyV1::Page { .. } => "page",
+                BrokerReplyV1::CommandAcknowledged { .. } => "command_acknowledged",
+                BrokerReplyV1::AbandonRequested { .. } => "abandon_requested",
+                BrokerReplyV1::AbandonedBeforeClaim { .. } => "abandoned_before_claim",
+                BrokerReplyV1::ExportAcknowledged { .. } => "export_acknowledged",
+                BrokerReplyV1::Status { .. } | BrokerReplyV1::Error { .. } => unreachable!(),
+            };
+            format!("kind={kind} code=none executor_error=none")
+        }
+    }
+}
+
 #[tokio::test]
 async fn actual_service_cli_private_pipe_fresh_then_existing_cold_fence() -> Result<()> {
     let mut f = Fixture::new()?;
@@ -372,6 +401,7 @@ async fn actual_old_v1_peer_refuses_current_service_arm_and_retains_exact_stop()
     let mut gateway = Gateway::start(&f).await?;
     let mut peer_child: Option<Child> = None;
     let mut broker: Option<Child> = None;
+    let mut capture: Option<BrokerStderr> = None;
     let outcome:Result<()> = async {
         // Even mkdir/auth/old-peer spawn failures must reach gateway join and
         // fail-closed fixture preservation, rather than bypassing teardown.
@@ -396,16 +426,24 @@ async fn actual_old_v1_peer_refuses_current_service_arm_and_retains_exact_stop()
         let failure_before=before["values"][0]["stop_failures"].as_u64().context("old native reopen progress counter")?;
         ensure!(peer.capabilities().await.is_err(),"selected artifact is not an unsupported old peer");
         let epoch=peer.endpoint.epoch();let old_announcements=announcements(&role)?;let lock=fs::metadata(role.join(".owner.lock"))?;let auth=fs::read(role.join("auth"))?;
-        broker=Some(serve(&config,&f.root)?);wait_broker(&state.join("broker"),broker.as_mut().unwrap()).await?;
+        capture=Some(BrokerStderr::create(&f)?);
+        broker=Some(serve_with_stderr(&config,&f.root,capture.as_ref().context("owned stderr capture missing")?)?);
+        wait_broker(&state.join("broker"),broker.as_mut().context("owned broker missing")?).await?;
+        ensure!(capture.as_ref().context("owned stderr capture missing")?.startup_fence_confirmed()?,"old-peer native startup fence was not confirmed");
         let submitted=Uuid::new_v4();
         let payload=service::encode_submit(&SubmitV1{version:1,operation_id:submitted,project:source,execution:RequestedExecutionV1::Command{argv:vec!["/usr/bin/id".into()]},timeout_seconds:Some(30),capture_output:false})?;
         let reply=service::request(&state,PROFILE,TOKEN,BrokerCommandV1::Submit{payload}).await?;
+        // This product record exists only at the first failing start gate,
+        // before any later preparation failure could mask its removal. GETs
+        // cannot discriminate it: authentication and reconciliation share
+        // that route concurrently, so no temporal GET delta is asserted.
+        ensure!(capture.as_ref().context("owned stderr capture missing")?.exact_start_gate_refusal(submitted)?,"exact native start_gate refusal witness missing or duplicated");
         match reply {
-            BrokerReplyV1::Rejected{operation_id,phase:RejectionPhaseV1::SubmissionPreparation,code:RejectionCodeV1::PreparationFailed,..} if operation_id==submitted => {
+            BrokerReplyV1::Rejected{operation_id,phase:RejectionPhaseV1::SubmissionPreparation,code:RejectionCodeV1::PreparationFailed,record_hash,replayed} if operation_id==submitted => {
+                ensure!(!replayed&&record_hash.len()==64&&record_hash.bytes().all(|v|v.is_ascii_digit()||(b'a'..=b'f').contains(&v)),"exact first durable rejection receipt missing");
                 let detail=service::request(&state,PROFILE,TOKEN,BrokerCommandV1::Status{operation_id:submitted}).await?;
-                ensure!(matches!(detail,BrokerReplyV1::Status{status} if status.executor_error==Some(BrokerErrorCodeV1::NeedsReconciliation)),"refusal was not the actual reconciliation/admission gate");
+                ensure!(matches!(&detail,BrokerReplyV1::Error{code:BrokerErrorCodeV1::Unavailable}),"fenced Status reply mismatch: {}",closed_status_reply(&detail));
             }
-            BrokerReplyV1::Error{code:BrokerErrorCodeV1::NeedsReconciliation}=>{}
             _=>anyhow::bail!("old-peer request did not reach the actual admission refusal"),
         }
         ensure!(gateway.gets.load(Ordering::SeqCst)>0&&gateway.posts.load(Ordering::SeqCst)==0,"request did not authenticate or emitted Arm/Claim/control POST");
@@ -443,5 +481,8 @@ async fn actual_old_v1_peer_refuses_current_service_arm_and_retains_exact_stop()
     }
     let gateway_cleanup = gateway.close().await;
     cleanup = combine(cleanup, gateway_cleanup);
+    if let Some(capture) = capture.take() {
+        cleanup = combine(cleanup, capture.check_bound());
+    }
     finish(&mut f, outcome, cleanup)
 }
