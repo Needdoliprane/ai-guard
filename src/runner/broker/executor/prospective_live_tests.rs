@@ -6,8 +6,7 @@ use crate::{
     api::{GatewayState, TenantGateway, gateway_router},
     broker::{
         clock::NativeHostClock,
-        discovery::load_endpoint,
-        enforcer::{EnforcerClient, retirement::test_support::ProspectiveFixture},
+        enforcer::retirement::test_support::ProspectiveFixture,
         journal::retirement_live_fixture::{
             INVOCATION_DATA_PROGRAM, LiveFixture, live_fixture_with_created_helper_for_prospective,
             live_fixture_with_pending_arm_for_prospective,
@@ -17,7 +16,7 @@ use crate::{
     redaction::Redactor,
     runtime::{Runtime, RuntimeKind},
 };
-use std::{os::unix::fs::PermissionsExt, path::Path, sync::atomic::AtomicUsize};
+use std::{path::Path, sync::atomic::AtomicUsize};
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 
 const RUNNER: &str = "runner-prospective-boundary-aaaaaaaaaaaaaaaaaaaaaaaa";
@@ -116,58 +115,6 @@ impl Gateway {
     }
 }
 
-struct LegacyFixture {
-    files: tempfile::TempDir,
-    client: EnforcerClient,
-    task: JoinHandle<crate::broker::enforcer::EnforcerResult<()>>,
-}
-impl LegacyFixture {
-    async fn start() -> Result<Self> {
-        let files = tempfile::Builder::new()
-            .prefix("d7-v1-")
-            .permissions(std::fs::Permissions::from_mode(0o700))
-            .tempdir_in(std::fs::canonicalize("/tmp")?)?;
-        let root = Directory::open_existing(files.path())?;
-        let auth = root.persistent_create("auth", &[0x42; 32])?;
-        auth.persistent_sync()?;
-        root.sync()?;
-        let serving = root.clone();
-        let task = tokio::spawn(async move {
-            crate::broker::enforcer::run_internal_enforcer(&serving, 1).await
-        });
-        let expires = std::time::Instant::now() + Duration::from_secs(5);
-        while load_endpoint(&root)?.is_none() {
-            ensure!(
-                std::time::Instant::now() < expires,
-                "legacy fixture endpoint unavailable"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        // A live actual V1 endpoint exists. This deliberately missing path
-        // prevents this connection helper from starting any subprocess.
-        let client =
-            EnforcerClient::connect_or_spawn(&root, Path::new("/not-executed/prospective-test"), 1)
-                .await?;
-        Ok(Self {
-            files,
-            client,
-            task,
-        })
-    }
-    async fn finish(self) -> Result<()> {
-        let result = async {
-            self.client.shutdown_if_idle().await?;
-            tokio::time::timeout(Duration::from_secs(5), self.task).await???;
-            Ok::<_, anyhow::Error>(())
-        }
-        .await;
-        if result.is_err() {
-            let _retained = self.files.keep();
-        }
-        result
-    }
-}
-
 async fn context(fixture: &BoundaryFixture, origin: &str) -> Result<AuthenticatedBatchContext> {
     let runtime = Runtime::with_program(RuntimeKind::Docker, Path::new(INVOCATION_DATA_PROGRAM))?;
     AuthenticatedBatchContext::for_executor_test(
@@ -181,7 +128,6 @@ async fn context(fixture: &BoundaryFixture, origin: &str) -> Result<Authenticate
 
 #[derive(Clone, Copy)]
 enum Refusal {
-    Legacy,
     Capacity,
     Cancelled,
     WriterUnknown,
@@ -194,26 +140,16 @@ async fn refused_before_arm(scenario: Refusal) -> Result<()> {
     let posts = Arc::new(Posts::default());
     let gateway = Gateway::start(listener, &fixture, Arc::clone(&posts)).await?;
     let context = context(&fixture, &origin).await?;
-    let mut native = None;
-    let mut legacy = None;
-    let enforcer = if matches!(scenario, Refusal::Legacy) {
-        let value = LegacyFixture::start().await?;
-        let enforcer = ExecutionEnforcerV1::Legacy(value.client.clone());
-        legacy = Some(value);
-        enforcer
-    } else {
-        let mut value =
-            ProspectiveFixture::start(fixture.journal.scope().installation_id(), 1).await;
-        let full = value.client().await;
-        if matches!(scenario, Refusal::Capacity) {
-            let target = fixture.registration.prospective()?;
-            value.install(&target);
-            full.reserve_prospective(target, context.cancel_generation().clone(), false)
-                .await?;
-        }
-        native = Some(value);
-        ExecutionEnforcerV1::Full3(full)
-    };
+    let mut native =
+        ProspectiveFixture::start(fixture.journal.scope().installation_id(), 1).await;
+    let full = native.client().await;
+    if matches!(scenario, Refusal::Capacity) {
+        let target = fixture.registration.prospective()?;
+        native.install(&target);
+        full.reserve_prospective(target, context.cancel_generation().clone(), false)
+            .await?;
+    }
+    let enforcer = ExecutionEnforcerV1::Full3(full);
     let result = async {
         let writer = WriterClient::start(fixture.journal.clone(), 16, Duration::from_secs(10))?;
         let executor =
@@ -255,15 +191,9 @@ async fn refused_before_arm(scenario: Refusal) -> Result<()> {
         }
         drop(barrier);
         let outcome = attempt.await;
-        let error = outcome
+        let _error = outcome
             .err()
             .context("unprotected fresh Arm was accepted")?;
-        if matches!(scenario, Refusal::Legacy) {
-            ensure!(
-                format!("{error:#}").contains("legacy enforcer has no native pre-ACK reservation"),
-                "legacy refusal was not explicit"
-            );
-        }
         ensure!(
             posts.arm.load(Ordering::SeqCst) == 0 && posts.claim.load(Ordering::SeqCst) == 0,
             "refusal occurred after HTTP Arm/claim"
@@ -312,20 +242,11 @@ async fn refused_before_arm(scenario: Refusal) -> Result<()> {
         Ok(())
     }
     .await;
-    if let Some(value) = native {
-        value.finish().await;
-    }
-    if let Some(value) = legacy {
-        value.finish().await?;
-    }
+    native.finish().await;
     gateway.finish().await?;
     result
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fresh_legacy_refuses_explicitly_before_arm_rpc() {
-    Box::pin(refused_before_arm(Refusal::Legacy)).await.unwrap();
-}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn installed_prospective_capacity_refuses_before_arm_rpc() {
     Box::pin(refused_before_arm(Refusal::Capacity)).await.unwrap();
