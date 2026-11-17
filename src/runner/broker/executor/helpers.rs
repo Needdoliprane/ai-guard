@@ -184,8 +184,8 @@ impl Execution<'_> {
             // unknown first publication fences new local identities; a later
             // empty-looking read cannot cause another Arm to be generated.
             let key = operation_key(&pending);
-            if let Err(error) = self
-                .patch(|draft| {
+            let confirmed = if newly_requested_arm {
+                self.patch(|draft| {
                     if let Some(existing) =
                         draft.operations.iter().find(|op| operation_key(op) == key)
                     {
@@ -199,11 +199,32 @@ impl Execution<'_> {
                     Ok(())
                 })
                 .await
-            {
+            } else {
+                // Preserve the second strict identity check formerly done by
+                // patch, without allocating an unchanged journal revision.
+                async {
+                    let (_, draft) = self.load().await?;
+                    let existing = draft
+                        .operations
+                        .iter()
+                        .find(|op| operation_key(op) == key)
+                        .context("existing pending Arm disappeared")?;
+                    ensure!(
+                        same(&without_response(existing), &pending)?,
+                        "pending Arm identity conflicts"
+                    );
+                    Ok(())
+                }
+                .await
+            };
+            if let Err(error) = confirmed {
                 enforcer.fence_unknown_prearm_write()?;
-                return Err(
-                    error.context("pending Arm publication is unknown; no Arm RPC was issued")
-                );
+                let context = if newly_requested_arm {
+                    "pending Arm publication is unknown; no Arm RPC was issued"
+                } else {
+                    "existing pending Arm confirmation is unavailable; no Arm RPC was issued"
+                };
+                return Err(error.context(context));
             }
             enforcer
                 .reserve_prospective(

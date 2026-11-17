@@ -140,8 +140,7 @@ async fn refused_before_arm(scenario: Refusal) -> Result<()> {
     let posts = Arc::new(Posts::default());
     let gateway = Gateway::start(listener, &fixture, Arc::clone(&posts)).await?;
     let context = context(&fixture, &origin).await?;
-    let mut native =
-        ProspectiveFixture::start(fixture.journal.scope().installation_id(), 1).await;
+    let mut native = ProspectiveFixture::start(fixture.journal.scope().installation_id(), 1).await;
     let full = native.client().await;
     if matches!(scenario, Refusal::Capacity) {
         let target = fixture.registration.prospective()?;
@@ -227,9 +226,13 @@ async fn refused_before_arm(scenario: Refusal) -> Result<()> {
                     let pending: Vec<_> = draft.operations.iter().filter_map(|op| match op {
                         Operation::Arm {request,..} => Some(request), _=>None,
                     }).collect();
-                    ensure!(after.head() == &head && pending.len() == 1
-                        && pending[0].operation_id == arm_id && pending[0].deadline_ns_decimal == deadline,
-                        "refused retry changed pending identity, deadline or durable head");
+                    let head_changed = after.head() != &head;
+                    let count = pending.len();
+                    let id_same = pending.first().is_some_and(|arm| arm.operation_id == arm_id);
+                    let deadline_same = pending.first().is_some_and(|arm| arm.deadline_ns_decimal == deadline);
+                    ensure!(!head_changed && count == 1 && id_same && deadline_same,
+                        "refused retry changed pending identity, deadline or durable head: head_changed={head_changed} count={count} id_same={id_same} deadline_same={deadline_same} revision_before={} revision_after={}",
+                        head.revision(), after.head().revision());
                 }
                 (None, Err(_)) => {}, // Strict publication remains UNKNOWN.
                 _ => return Err(anyhow!("unknown pending publication was silently reclassified")),
@@ -249,16 +252,22 @@ async fn refused_before_arm(scenario: Refusal) -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn installed_prospective_capacity_refuses_before_arm_rpc() {
-    Box::pin(refused_before_arm(Refusal::Capacity)).await.unwrap();
+    Box::pin(refused_before_arm(Refusal::Capacity))
+        .await
+        .unwrap();
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelled_generation_refuses_before_arm_rpc() {
-    Box::pin(refused_before_arm(Refusal::Cancelled)).await.unwrap();
+    Box::pin(refused_before_arm(Refusal::Cancelled))
+        .await
+        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unknown_pending_writer_ack_never_generates_another_arm_or_rpc() {
-    Box::pin(refused_before_arm(Refusal::WriterUnknown)).await.unwrap();
+    Box::pin(refused_before_arm(Refusal::WriterUnknown))
+        .await
+        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
