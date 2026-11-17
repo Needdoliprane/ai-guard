@@ -42,15 +42,32 @@ pub struct Fixture {
     temp: Option<tempfile::TempDir>,
     pub root: PathBuf,
 }
-pub fn finish(fixture: &mut Fixture, outcome: Result<()>, cleanup: Result<()>) -> Result<()> {
-    if outcome.is_err() || cleanup.is_err() {
-        fixture.preserve();
-    }
-    match (outcome, cleanup) {
+pub fn combine(primary: Result<()>, secondary: Result<()>) -> Result<()> {
+    match (primary, secondary) {
         (Err(first), Err(cleanup)) => Err(first.context(cleanup)),
         (Err(first), Ok(())) => Err(first),
         (Ok(()), Err(cleanup)) => Err(cleanup),
         (Ok(()), Ok(())) => Ok(()),
+    }
+}
+pub fn finish(fixture: &mut Fixture, outcome: Result<()>, cleanup: Result<()>) -> Result<()> {
+    combine(outcome, cleanup)?;
+    // Only the caller's positive cleanup result permits removal. Any early
+    // return, panic or cancellation instead reaches the preserving Drop.
+    if let Some(temp) = fixture.temp.take() {
+        if let Err(error) = temp.close() {
+            eprintln!(
+                "private D7 fixture cleanup failed: {}",
+                fixture.root.display()
+            );
+            return Err(error.into());
+        }
+    }
+    Ok(())
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        self.preserve();
     }
 }
 impl Fixture {
@@ -161,10 +178,14 @@ pub async fn fresh_child(parent: &Path, name: &str, s: u32, w: u32, nonce: Uuid)
         .kill_on_drop(true)
         .spawn()?;
     let written = match child.stdin.take() {
-        Some(mut input) => input
-            .write_all(nonce.as_bytes())
-            .await
-            .context("private child nonce write"),
+        Some(mut input) => {
+            match tokio::time::timeout(WAIT, input.write_all(nonce.as_bytes())).await {
+                Ok(result) => result.context("private child nonce write"),
+                Err(error) => {
+                    Err(anyhow::Error::new(error).context("private child nonce write timeout"))
+                }
+            }
+        }
         None => Err(anyhow::anyhow!("private child pipe missing")),
     };
     if let Err(error) = written {

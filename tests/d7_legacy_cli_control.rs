@@ -37,31 +37,53 @@ use std::{
     },
     time::Duration,
 };
-use tokio::{net::TcpListener, process::Command, task::JoinHandle};
+use tokio::{
+    net::TcpListener,
+    process::{Child, Command},
+    sync::oneshot,
+    task::JoinHandle,
+};
 use uuid::Uuid;
 
 struct Gateway {
     url: String,
     namespace: Uuid,
-    task: JoinHandle<()>,
+    task: Option<JoinHandle<std::io::Result<()>>>,
+    shutdown: Option<oneshot::Sender<()>>,
     gets: Arc<AtomicUsize>,
     posts: Arc<AtomicUsize>,
-    _store: Arc<Store>,
+    store: Option<Arc<Store>>,
 }
 impl Drop for Gateway {
     fn drop(&mut self) {
-        self.task.abort();
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if self.task.is_some() || self.store.is_some() {
+            // No Drop/notification proves a join. Keep the exact uncollected
+            // handle and Store; Fixture's fail-closed Drop retains its root.
+            std::mem::forget((self.task.take(), self.store.take()));
+        }
     }
 }
 impl Gateway {
     async fn close(&mut self) -> Result<()> {
-        self.task.abort();
-        match tokio::time::timeout(WAIT, &mut self.task)
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        let task = self.task.as_mut().context("gateway join owner missing")?;
+        match tokio::time::timeout(WAIT, task)
             .await
             .context("test gateway task join timeout")?
         {
-            Err(error) if error.is_cancelled() => Ok(()),
-            Ok(()) => Ok(()),
+            Ok(Ok(())) => {
+                // axum's graceful return has drained its connections. Only
+                // this positive result releases the retained task and Store.
+                self.task.take();
+                self.store.take();
+                Ok(())
+            }
+            Ok(Err(error)) => Err(error.into()),
             Err(error) => Err(error.into()),
         }
     }
@@ -114,43 +136,63 @@ impl Gateway {
                 }
             },
         ));
+        let (shutdown, stopped) = oneshot::channel();
         let task = tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = stopped.await;
+                })
+                .await
         });
         Ok(Self {
             url,
             namespace,
-            task,
+            task: Some(task),
+            shutdown: Some(shutdown),
             gets,
             posts,
-            _store: store,
+            store: Some(store),
         })
     }
+}
+
+async fn close_broker(broker: &mut Option<Child>, allow_already_reaped: bool) -> Result<()> {
+    let Some(child) = broker.as_mut() else {
+        return Ok(());
+    };
+    let normal = match child.try_wait() {
+        Ok(None) => normal_broker_stop(child).await,
+        Ok(Some(_)) if allow_already_reaped => Ok(()),
+        Ok(Some(_)) => Err(anyhow::anyhow!("broker exited before requested shutdown")),
+        Err(error) => Err(error.into()),
+    };
+    if normal.is_err() {
+        let collected = kill_fixture_child(child).await;
+        if collected.is_err() {
+            std::mem::forget(broker.take());
+        } else {
+            broker.take();
+        }
+        return combine(normal, collected);
+    }
+    broker.take();
+    Ok(())
 }
 
 #[tokio::test]
 async fn actual_service_cli_private_pipe_fresh_then_existing_cold_fence() -> Result<()> {
     let mut f = Fixture::new()?;
     let mut gateway = Gateway::start(&f).await?;
-    let (config, state, _) = registry(&f, &gateway.url, gateway.namespace, 1, 1)?;
-    ensure!(
-        fs::read_dir(state.join("journals"))?.next().is_none(),
-        "fixture journal inventory not empty"
-    );
-    ensure!(
-        !state.join("enforcer").exists(),
-        "fixture role must genuinely not exist"
-    );
-    let mut broker = match serve(&config, &f.root) {
-        Ok(child) => child,
-        Err(error) => {
-            f.preserve();
-            return Err(error);
-        }
-    };
+    let mut broker: Option<Child> = None;
     let mut helper: Option<Peer> = None;
     let outcome:Result<()> = async {
-        wait_broker(&state.join("broker"),&mut broker).await?;
+        // Every fallible setup step after the gateway is live shares this
+        // outcome/cleanup scope, including registry, inventory and spawn.
+        let (config,state,_)=registry(&f,&gateway.url,gateway.namespace,1,1)?;
+        ensure!(fs::read_dir(state.join("journals"))?.next().is_none(),"fixture journal inventory not empty");
+        ensure!(!state.join("enforcer").exists(),"fixture role must genuinely not exist");
+        broker=Some(serve(&config,&f.root)?);
+        wait_broker(&state.join("broker"),broker.as_mut().context("owned broker missing")?).await?;
         let peer=Peer::read(&state.join("enforcer"))?;helper=Some(peer.clone());
         let first=peer.capabilities().await?;
         ensure!(first["version"]==1&&first["max_slots"]==1&&first["max_recovery_stop_owners"]==1,"actual native configuration differs");
@@ -162,16 +204,28 @@ async fn actual_service_cli_private_pipe_fresh_then_existing_cold_fence() -> Res
         // Actual private CLI factory collision, with its own private stdin
         // pipe: EEXIST cannot adopt the first role or replace its auth/epoch.
         let mut collision=fresh_child(&state,"enforcer",1,1,Uuid::new_v4()).await?;
-        let status=match tokio::time::timeout(WAIT,collision.wait()).await {Ok(Ok(status))=>status,Ok(Err(error))=>{let cleanup=kill_fixture_child(&mut collision).await;if cleanup.is_err(){std::mem::forget(collision);}return Err(error.into());},Err(error)=>{let cleanup=kill_fixture_child(&mut collision).await;if cleanup.is_err(){std::mem::forget(collision);}return Err(error.into());}};
+        let status=match tokio::time::timeout(WAIT,collision.wait()).await {
+            Ok(Ok(status))=>status,
+            Ok(Err(error))=>{
+                let cleanup=kill_fixture_child(&mut collision).await;
+                if cleanup.is_err(){std::mem::forget(collision);}
+                return combine(Err(error.into()),cleanup);
+            },
+            Err(error)=>{
+                let cleanup=kill_fixture_child(&mut collision).await;
+                if cleanup.is_err(){std::mem::forget(collision);}
+                return combine(Err(error.into()),cleanup);
+            },
+        };
         ensure!(!status.success(),"colliding real fresh child adopted an existing directory");
         ensure!(announcements(&peer.role)?==original_announcements,"collision published another role");
         ensure!(peer.capabilities().await?["epoch"]==first["epoch"],"collision replaced native epoch");
-        normal_broker_stop(&mut broker).await?;
+        normal_broker_stop(broker.as_mut().context("owned broker missing")?).await?;
         peer.idle_shutdown().await?;wait_lease_released(&peer.role).await?;helper=None;
         // Real relaunch on original existing role: source remains truly empty,
         // which still cannot reconstruct Fresh provenance or reopen admission.
-        broker=serve(&config,&f.root)?;
-        wait_broker_new(&state.join("broker"),&mut broker,1).await?;
+        broker=Some(serve(&config,&f.root)?);
+        wait_broker_new(&state.join("broker"),broker.as_mut().context("owned broker missing")?,1).await?;
         let cold=Peer::read(&state.join("enforcer"))?;helper=Some(cold.clone());
         let second=cold.capabilities().await?;
         ensure!(second["epoch"]!=first["epoch"]&&second["fresh_launch_nonce"].is_null()&&second["recovery_generation"].as_u64().is_some_and(|g|g>0),"actual existing constructor did not fence before service publication");
@@ -184,31 +238,17 @@ async fn actual_service_cli_private_pipe_fresh_then_existing_cold_fence() -> Res
         ensure!(gateway.posts.load(Ordering::SeqCst)==0,"control Arm/Claim or other POST occurred");
         Ok(())
     }.await;
-    let mut cleanup = match broker.try_wait() {
-        Ok(None) => normal_broker_stop(&mut broker).await,
-        Ok(Some(_)) => Ok(()),
-        Err(error) => Err(error.into()),
-    };
-    if cleanup.is_err() {
-        let killed = kill_fixture_child(&mut broker).await;
-        if killed.is_err() {
-            std::mem::forget(broker);
-        }
-    }
+    let mut cleanup = close_broker(&mut broker, true).await;
     if let Some(peer) = helper {
         let stopped = async {
             peer.idle_shutdown().await?;
             wait_lease_released(&peer.role).await
         }
         .await;
-        if cleanup.is_ok() {
-            cleanup = stopped;
-        }
+        cleanup = combine(cleanup, stopped);
     }
     let gateway_cleanup = gateway.close().await;
-    if cleanup.is_ok() {
-        cleanup = gateway_cleanup;
-    }
+    cleanup = combine(cleanup, gateway_cleanup);
     finish(&mut f, outcome, cleanup)
 }
 
@@ -330,25 +370,23 @@ async fn actual_old_v1_peer_refuses_current_service_arm_and_retains_exact_stop()
     let old = old_binary()?;
     let mut f = Fixture::new()?;
     let mut gateway = Gateway::start(&f).await?;
-    let (config, state, source) = registry(&f, &gateway.url, gateway.namespace, 2, 0)?;
-    let role = state.join("enforcer");
-    fs::create_dir(&role)?;
-    fs::set_permissions(&role, fs::Permissions::from_mode(0o700))?;
-    private(&role.join("auth"), &[0x5a; 32])?;
-    let mut peer_child = Command::new(&old)
-        .args(["__broker-enforcer", "--root"])
-        .arg(&role)
-        .args(["--max-slots", "2"])
-        .env_clear()
-        .current_dir(&f.root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()?;
-    let mut broker: Option<tokio::process::Child> = None;
+    let mut peer_child: Option<Child> = None;
+    let mut broker: Option<Child> = None;
     let outcome:Result<()> = async {
-        let peer=wait_peer(&role,&mut peer_child).await?;
+        // Even mkdir/auth/old-peer spawn failures must reach gateway join and
+        // fail-closed fixture preservation, rather than bypassing teardown.
+        let (config,state,source)=registry(&f,&gateway.url,gateway.namespace,2,0)?;
+        let role=state.join("enforcer");
+        fs::create_dir(&role)?;
+        fs::set_permissions(&role,fs::Permissions::from_mode(0o700))?;
+        private(&role.join("auth"),&[0x5a;32])?;
+        peer_child=Some(Command::new(&old)
+            .args(["__broker-enforcer","--root"]).arg(&role)
+            .args(["--max-slots","2"])
+            .env_clear().current_dir(&f.root)
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+            .kill_on_drop(true).spawn()?);
+        let peer=wait_peer(&role,peer_child.as_mut().context("owned old peer missing")?).await?;
         let (registration,prospective,digest)=target(&role,&gateway.url,gateway.namespace)?;
         let arm=prospective["arm"]["operation_id"].as_str().context("synthetic exact arm")?.to_owned();
         let retained=peer.rpc(json!({"kind":"register","registration":registration,"generation":0,"observe_only":true})).await?;
@@ -387,34 +425,23 @@ async fn actual_old_v1_peer_refuses_current_service_arm_and_retains_exact_stop()
         let status=after.rpc(json!({"kind":"status"})).await?;
         ensure!(status["kind"]=="status"&&status["value"]["slot_count"]==1&&status["value"]["max_slots"]==2&&status["value"]["healthy"]==true,"old V1 Status stopped reporting its retained target");
         let now=fs::metadata(role.join(".owner.lock"))?;ensure!(auth==fs::read(role.join("auth"))?&&(now.dev(),now.ino())==(lock.dev(),lock.ino()),"old anchors were rewritten");
-        ensure!(peer_child.try_wait()?.is_none(),"old peer was terminated by the refusal");
+        ensure!(peer_child.as_mut().context("owned old peer missing")?.try_wait()?.is_none(),"old peer was terminated by the refusal");
         // NotReady is explicit unknown engine readiness, not an active STOP
         // coverage/effect claim. Exact retained target+Cancel/epoch/anchors are
         // the old-peer compatibility oracles; there is no actual container.
         Ok(())
     }.await;
-    let mut cleanup = Ok(());
-    if let Some(child) = broker.as_mut() {
-        cleanup = normal_broker_stop(child).await;
-        if cleanup.is_err() {
-            let killed = kill_fixture_child(child).await;
-            if killed.is_err() {
-                if let Some(child) = broker.take() {
-                    std::mem::forget(child);
-                }
-            }
+    let mut cleanup = close_broker(&mut broker, false).await;
+    if let Some(child) = peer_child.as_mut() {
+        let peer_cleanup = kill_fixture_child(child).await;
+        if peer_cleanup.is_err() {
+            std::mem::forget(peer_child.take());
+        } else {
+            peer_child.take();
         }
-    }
-    let peer_cleanup = kill_fixture_child(&mut peer_child).await;
-    if peer_cleanup.is_err() {
-        std::mem::forget(peer_child);
-    }
-    if cleanup.is_ok() {
-        cleanup = peer_cleanup;
+        cleanup = combine(cleanup, peer_cleanup);
     }
     let gateway_cleanup = gateway.close().await;
-    if cleanup.is_ok() {
-        cleanup = gateway_cleanup;
-    }
+    cleanup = combine(cleanup, gateway_cleanup);
     finish(&mut f, outcome, cleanup)
 }
