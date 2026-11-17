@@ -5,6 +5,7 @@ use agentsandbox::{
         clock::{HostClock, NativeHostClock},
         enforcer::RegistrationV1,
         local_ipc::{EndpointRecordV1, read_frame, write_frame},
+        service::protocol::BrokerErrorCodeV1,
     },
     control::{ArmReceiptV1, ArmV1},
     control_fs::Directory,
@@ -19,7 +20,7 @@ use std::{
     io::{Read, Write},
     os::{
         fd::AsRawFd,
-        unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     },
     path::{Path, PathBuf},
     process::Stdio,
@@ -37,6 +38,173 @@ pub const TENANT: &str = "tenant-d7-real-cli";
 pub const PROFILE: &str = "d7-real-cli";
 pub const TOKEN: &str = "synthetic-d7-cli-runner-aaaaaaaaaaaaaaaa";
 pub const WAIT: Duration = Duration::from_secs(15);
+pub const MAX_BROKER_STDERR_BYTES: usize = 1024 * 1024;
+
+pub struct BrokerStderr {
+    file: fs::File,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GateComponent {
+    Broker,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GateEvent {
+    LaunchAdmissionRefused,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GateStage {
+    StartGate,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartGateRecord {
+    version: u8,
+    component: GateComponent,
+    event: GateEvent,
+    stage: GateStage,
+    operation_id: Uuid,
+    reason_code: BrokerErrorCodeV1,
+}
+const STARTUP_FENCE_MARKER: &[u8] =
+    b"broker recovery: Legacy native admission fence unavailable; new starts remain refused";
+
+fn complete_records(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+    bytes
+        .split_inclusive(|byte| *byte == b'\n')
+        .filter_map(|record| record.strip_suffix(b"\n"))
+}
+fn startup_fence_record(bytes: &[u8]) -> bool {
+    complete_records(bytes).any(|record| record == STARTUP_FENCE_MARKER)
+}
+fn exact_start_gate_record(bytes: &[u8], operation: Uuid) -> bool {
+    let mut count = 0usize;
+    for record in complete_records(bytes) {
+        if let Ok(StartGateRecord {
+            version: 1,
+            component: GateComponent::Broker,
+            event: GateEvent::LaunchAdmissionRefused,
+            stage: GateStage::StartGate,
+            operation_id,
+            reason_code: BrokerErrorCodeV1::NeedsReconciliation,
+        }) = serde_json::from_slice::<StartGateRecord>(record)
+            && operation_id == operation
+        {
+            count += 1;
+        }
+    }
+    count == 1
+}
+impl BrokerStderr {
+    pub fn create(fixture: &Fixture) -> Result<Self> {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(fixture.root.join("legacy-broker.stderr"))?;
+        Ok(Self { file })
+    }
+    fn stdio(&self) -> Result<Stdio> {
+        Ok(self.file.try_clone()?.into())
+    }
+    fn read_bounded(&self) -> Result<Vec<u8>> {
+        let metadata = self.file.metadata()?;
+        // SAFETY: read-only UID query for this owned private capture.
+        ensure!(
+            metadata.is_file()
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.mode() & 0o7777 == 0o600
+                && metadata.len() <= MAX_BROKER_STDERR_BYTES as u64,
+            "private broker stderr metadata/size differs"
+        );
+        let mut bytes = Vec::new();
+        let mut buffer = [0u8; 4096];
+        loop {
+            let remaining = (MAX_BROKER_STDERR_BYTES + 1).saturating_sub(bytes.len());
+            if remaining == 0 {
+                break;
+            }
+            let count = self
+                .file
+                .read_at(&mut buffer[..remaining.min(4096)], bytes.len() as u64)?;
+            if count == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..count]);
+        }
+        ensure!(
+            bytes.len() <= MAX_BROKER_STDERR_BYTES
+                && self.file.metadata()?.len() <= MAX_BROKER_STDERR_BYTES as u64,
+            "private broker stderr exceeded its bound"
+        );
+        Ok(bytes)
+    }
+    pub fn startup_fence_confirmed(&self) -> Result<bool> {
+        Ok(startup_fence_record(&self.read_bounded()?))
+    }
+    pub fn exact_start_gate_refusal(&self, operation: Uuid) -> Result<bool> {
+        Ok(exact_start_gate_record(&self.read_bounded()?, operation))
+    }
+    pub fn check_bound(&self) -> Result<()> {
+        self.read_bounded().map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod framing_tests {
+    use super::*;
+
+    #[test]
+    fn only_lf_terminated_gate_and_startup_records_count() {
+        let operation = Uuid::from_u128(1);
+        let value = serde_json::json!({
+            "version":1,"component":"broker","event":"launch_admission_refused",
+            "stage":"start_gate","operation_id":operation,"reason_code":"needs_reconciliation"
+        });
+        let without_lf = serde_json::to_vec(&value).unwrap();
+        // A complete JSON object alone still is not a complete emitted frame.
+        assert!(serde_json::from_slice::<StartGateRecord>(&without_lf).is_ok());
+        assert!(!exact_start_gate_record(&without_lf, operation));
+        let mut complete = without_lf.clone();
+        complete.push(b'\n');
+        assert!(exact_start_gate_record(&complete, operation));
+        assert!(!exact_start_gate_record(&complete, Uuid::from_u128(2)));
+
+        let mut foreign_tail = complete.clone();
+        foreign_tail.extend_from_slice(b"{\"foreign_record_in_progress\":");
+        assert!(exact_start_gate_record(&foreign_tail, operation));
+        let mut pending_duplicate = complete.clone();
+        pending_duplicate.extend_from_slice(&without_lf);
+        assert!(exact_start_gate_record(&pending_duplicate, operation));
+        let mut duplicate = complete.clone();
+        duplicate.extend_from_slice(&complete);
+        assert!(!exact_start_gate_record(&duplicate, operation));
+
+        let mut wrong_reason = value.clone();
+        wrong_reason["reason_code"] = serde_json::json!("unavailable");
+        let mut wrong_reason = serde_json::to_vec(&wrong_reason).unwrap();
+        wrong_reason.push(b'\n');
+        assert!(!exact_start_gate_record(&wrong_reason, operation));
+        let mut extra_field = value;
+        extra_field["extra"] = serde_json::json!(true);
+        let mut extra_field = serde_json::to_vec(&extra_field).unwrap();
+        extra_field.push(b'\n');
+        assert!(!exact_start_gate_record(&extra_field, operation));
+
+        assert!(!startup_fence_record(STARTUP_FENCE_MARKER));
+        let mut startup = STARTUP_FENCE_MARKER.to_vec();
+        startup.push(b'\n');
+        assert!(startup_fence_record(&startup));
+        startup.extend_from_slice(b"foreign_record_in_progress");
+        assert!(startup_fence_record(&startup));
+        assert!(!startup_fence_record(b"foreign_record_in_progress"));
+        assert!(!exact_start_gate_record(&[], operation));
+    }
+}
 
 pub struct Fixture {
     temp: Option<tempfile::TempDir>,
@@ -143,6 +311,12 @@ pub fn registry(
     Ok((path, root, source))
 }
 pub fn serve(config: &Path, root: &Path) -> Result<Child> {
+    serve_stderr(config, root, Stdio::null())
+}
+pub fn serve_with_stderr(config: &Path, root: &Path, capture: &BrokerStderr) -> Result<Child> {
+    serve_stderr(config, root, capture.stdio()?)
+}
+fn serve_stderr(config: &Path, root: &Path, stderr: Stdio) -> Result<Child> {
     Ok(Command::new(BIN)
         .args(["broker", "serve", "--config"])
         .arg(config)
@@ -150,7 +324,7 @@ pub fn serve(config: &Path, root: &Path) -> Result<Child> {
         .current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(stderr)
         .kill_on_drop(true)
         .spawn()?)
 }
