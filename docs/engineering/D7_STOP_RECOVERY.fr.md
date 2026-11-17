@@ -102,6 +102,17 @@ sans nouvelle capacité prospective authentifiée refuse une nouvelle Arm et un
 nouveau scan de reprise ; ses anciens chemins Status/Slots/Cancel/STOP et
 owners natifs restent. Ni kill, takeover, rekey, adoption de répertoire ni
 conversion Full3 silencieuse.
+
+Quand le premier gate de start dans la préparation Submit refuse, le broker
+tente un unique diagnostic JSON sur stderr, au plus 256 octets avec le saut de
+ligne : `version=1`, `component=broker`, `event=launch_admission_refused`,
+`stage=start_gate`, l'`operation_id` exact et le `BrokerErrorCodeV1` sérialisé
+fermé dans `reason_code`. Aucune erreur libre, credential, profil, commande ni
+chemin n'y figure. Une écriture en erreur ou courte peut omettre ce diagnostic ;
+elle ne change aucun résultat et ne constitue pas un audit durable. Le rejet
+durable existant fait foi. Sous fence, la projection Status peut répondre
+`Unavailable` sans exposer la cause de préparation locale au processus.
+
 La séquence pré-Arm persiste la demande Pending exacte, réserve son owner
 natif S, puis consomme le grant natif unique d'échange Arm avant la RPC.
 Un refus de capacité après Pending mais avant installation conserve la même

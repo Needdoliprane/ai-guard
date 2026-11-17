@@ -1837,7 +1837,25 @@ impl Service {
         };
         // Every failure after reservation completes the same durable ticket.
         let prepared = async {
-            self.require_starts().await?;
+            if let Err(code) = self.require_starts().await {
+                // Best-effort diagnostic only; the existing durable rejection
+                // below remains authoritative. No free-form error is emitted.
+                if let Ok(mut diagnostic) = serde_json::to_vec(&json!({
+                    "version": 1,
+                    "component": "broker",
+                    "event": "launch_admission_refused",
+                    "stage": "start_gate",
+                    "operation_id": operation,
+                    "reason_code": code,
+                })) && diagnostic.len() < 256
+                {
+                    diagnostic.push(b'\n');
+                    // One bounded, fallible attempt; even a short write must
+                    // not change the refusal or add a retry/owner.
+                    let _ = std::io::Write::write(&mut std::io::stderr(), &diagnostic);
+                }
+                return Err(code);
+            }
             if job.cancel.current() != preparation_generation {
                 return Err(BrokerErrorCodeV1::Interrupted);
             }

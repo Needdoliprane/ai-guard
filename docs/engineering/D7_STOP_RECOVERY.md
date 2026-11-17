@@ -95,6 +95,17 @@ fenced before publication. A live old daemon without the new authenticated
 prospective capability refuses fresh Arm and new recovery scans; its existing
 Status/Slots/Cancel/STOP paths and native owners remain. There is no kill,
 takeover, rekey, directory adoption or silent Full3 conversion.
+
+When the first start gate in Submit preparation refuses, the broker attempts
+one stderr JSON diagnostic, at most 256 bytes including its newline:
+`version=1`, `component=broker`, `event=launch_admission_refused`,
+`stage=start_gate`, the exact `operation_id`, and the closed serialized
+`BrokerErrorCodeV1` as `reason_code`. It includes no free-form error, credential,
+profile, command or path. A failed or short write can omit this diagnostic;
+it changes no result and is not a durable audit. The existing durable rejection
+remains authoritative. A fenced Status projection can return `Unavailable`
+without exposing the process-local preparation cause.
+
 The pre-Arm sequence persists the exact Pending request, reserves its native
 S owner, then consumes the native one-time Arm-exchange grant before the RPC.
 If capacity refuses after Pending but before an owner is installed, the same
