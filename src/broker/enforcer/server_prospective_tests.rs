@@ -20,6 +20,20 @@ const CHILD: &str = "broker::enforcer::server::prospective::tests::native_legacy
 const WAIT: Duration = Duration::from_secs(8);
 static OBSERVED: OnceLock<Mutex<Weak<State>>> = OnceLock::new();
 static PAUSE_RESERVE_ACK: AtomicBool = AtomicBool::new(false);
+static PAUSE_FAILURE_PUBLICATION: AtomicBool = AtomicBool::new(false);
+static INVALIDATION_REACHED: AtomicBool = AtomicBool::new(false);
+static RUNTIME_REJECTIONS: AtomicU64 = AtomicU64::new(0);
+pub(super) fn record_runtime_rejection() {
+    RUNTIME_REJECTIONS.fetch_add(1, Ordering::SeqCst);
+}
+pub(super) fn after_runtime_invalidation() {
+    if PAUSE_FAILURE_PUBLICATION.load(Ordering::SeqCst) {
+        INVALIDATION_REACHED.store(true, Ordering::SeqCst);
+        while PAUSE_FAILURE_PUBLICATION.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
 pub(super) async fn before_reserve_ack() {
     while PAUSE_RESERVE_ACK.load(Ordering::SeqCst) {
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -189,6 +203,25 @@ pub(super) fn registration(root: &Path) -> RegistrationV1 {
 }
 
 async fn exercise(mode: &str, parent: &Directory) {
+    if mode == "sealed_catchup_custody" {
+        let lease = crate::broker::discovery::EnforcerRoleLeaseV2::create_new(
+            parent.create_enforcer_root("sealed").unwrap(),
+        )
+        .unwrap();
+        let root = parent.persistent_child("sealed", false).unwrap().unwrap();
+        let owner = RecoveryAttemptOwner::install(
+            lease.clone(),
+            Some(Arc::new(NativeHostClock::new().unwrap())),
+        )
+        .unwrap();
+        catchup_custody_case(owner, &root).await;
+        drop(lease);
+        assert!(matches!(
+            crate::broker::discovery::EnforcerRoleLeaseV2::acquire_existing(&root),
+            Err(crate::broker::local_ipc::IpcError::Conflict)
+        ));
+        return;
+    }
     if mode == "missing_lock" {
         let root = private_directory(&parent.path().join("missing-lock"));
         root.persistent_create("auth", &[0x5a; 32])
@@ -232,7 +265,7 @@ async fn exercise(mode: &str, parent: &Directory) {
         return;
     }
     let w = match mode {
-        "budget_w1" => 1,
+        "budget_w1" | "legacy_catchup_custody" => 1,
         "budget_w2" => 2,
         _ => 0,
     };
@@ -245,6 +278,67 @@ async fn exercise(mode: &str, parent: &Directory) {
     let root = parent.persistent_child("r", false).unwrap().unwrap();
     wait_for(|| load_endpoint(&root).unwrap().is_some()).await;
     let first = registration(root.path());
+    if mode == "legacy_catchup_custody" {
+        let owner = native.recovery_attempt.as_ref().unwrap().clone();
+        let marker = Arc::new(());
+        let weak_marker = Arc::downgrade(&marker);
+        owner.fixture_pause_attempt(true);
+        let current = owner.fixture_schedule_legacy(first);
+        wait_for(|| owner.observations().2).await;
+        let queued = owner.fixture_schedule_legacy(registration(root.path()));
+        owner.fixture_native_panic(marker);
+        let weak_cause = owner.fixture_cause_weak();
+        owner.fixture_pause_attempt(false);
+        wait_for(|| owner.fixture_thread_finished()).await;
+        let weak_state = Arc::downgrade(&native);
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        drop(owner);
+        drop(native);
+        wait_for(|| weak_state.upgrade().is_none()).await;
+        assert!(weak_cause.upgrade().is_some());
+        assert!(weak_marker.upgrade().is_some());
+        assert!(current.upgrade().is_some() && queued.upgrade().is_some());
+        assert!(matches!(
+            RoleLease::acquire_existing(&root),
+            Err(crate::broker::local_ipc::IpcError::Conflict)
+        ));
+        return;
+    }
+    if mode == "old_custody" {
+        assert!(matches!(
+            restore(&root, &first).await,
+            Response::Registered { .. }
+        ));
+        let actor = native
+            .slots
+            .lock()
+            .unwrap()
+            .get(first.arm_id())
+            .unwrap()
+            .clone();
+        let marker = Arc::new(());
+        let weak_marker = Arc::downgrade(&marker);
+        *actor.native_panic.lock().unwrap() = Some(marker);
+        let weak_actor = Arc::downgrade(&actor);
+        let joined = native.owners.fixture_join_counter();
+        wait_for(|| actor.failures.facts().uncollected_io).await;
+        let weak_state = Arc::downgrade(&native);
+        drop(actor);
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        drop(native);
+        wait_for(|| weak_state.upgrade().is_none() && joined.load(Ordering::SeqCst) >= 2).await;
+        // Both real joins completed (progress + old STOP). Neither is a
+        // Stopped/Q proof and the actual opaque payload remains upper-owned.
+        assert!(weak_actor.upgrade().is_some());
+        assert!(weak_marker.upgrade().is_some());
+        assert!(matches!(
+            RoleLease::acquire_existing(&root),
+            Err(crate::broker::local_ipc::IpcError::Conflict)
+        ));
+        return;
+    }
     if mode == "cold" {
         assert!(matches!(
             rpc(&root, Request::ShutdownIfIdle {}).await,
@@ -393,6 +487,128 @@ async fn exercise(mode: &str, parent: &Directory) {
     let original_identity = pending.native_identity.lock().unwrap().prospective.unwrap();
     assert_eq!(original_thread, original_identity.0);
     assert_eq!(native.owned_active().unwrap(), Some(1));
+    if mode == "cancel_generation" || mode == "replay_generation" {
+        if mode == "cancel_generation" {
+            assert!(matches!(
+                rpc(
+                    &root,
+                    Request::CancelProspective {
+                        reservation: reserved.clone(),
+                        generation: 10
+                    }
+                )
+                .await,
+                Response::Acknowledged {}
+            ));
+        } else {
+            assert!(matches!(
+                rpc(
+                    &root,
+                    Request::ReserveProspective {
+                        prospective: Box::new(first.prospective().unwrap()),
+                        generation: 10,
+                        replay_only: true
+                    }
+                )
+                .await,
+                Response::ProspectiveReserved { .. }
+            ));
+        }
+        match rpc(
+            &root,
+            Request::BindProspective {
+                reservation: reserved,
+                registration: Box::new(first),
+                generation: 0,
+                observe_only: true,
+                original_exchange_nonce: None,
+            },
+        )
+        .await
+        {
+            Response::Registered { value, .. } => {
+                assert_eq!(value.generation, 10);
+                assert!(value.prepared_once);
+            }
+            _ => panic!("restrictive Bind must retain admitted Cancel generation"),
+        }
+        assert_eq!(pending.state.lock().unwrap().current_generation, 10);
+        assert_eq!(pending.reservation.cancel_generation, 0);
+        server.abort();
+        return;
+    }
+    if matches!(
+        mode,
+        "prospective_custody" | "bound_custody" | "prepare_invalidation"
+    ) {
+        if mode != "prospective_custody" {
+            assert!(matches!(
+                rpc(
+                    &root,
+                    Request::BindProspective {
+                        reservation: reserved.clone(),
+                        registration: Box::new(first.clone()),
+                        generation: 0,
+                        observe_only: true,
+                        original_exchange_nonce: None
+                    }
+                )
+                .await,
+                Response::Registered { .. }
+            ));
+        }
+        let marker = Arc::new(());
+        let weak_marker = Arc::downgrade(&marker);
+        if mode == "prepare_invalidation" {
+            PAUSE_FAILURE_PUBLICATION.store(true, Ordering::SeqCst);
+        }
+        *pending.native_panic.lock().unwrap() = Some(marker);
+        if mode == "prepare_invalidation" {
+            wait_for(|| INVALIDATION_REACHED.load(Ordering::SeqCst)).await;
+            assert!(!pending.runtime_installed.load(Ordering::SeqCst));
+            assert!(!native.owners.failed());
+            RUNTIME_REJECTIONS.store(0, Ordering::SeqCst);
+            expect_error(
+                rpc(
+                    &root,
+                    Request::Prepare {
+                        arm_id: first.arm_id().into(),
+                        registration_hash: first.digest().unwrap(),
+                        generation: 0,
+                    },
+                )
+                .await,
+                EnforcerError::NotReady,
+            );
+            assert_eq!(RUNTIME_REJECTIONS.load(Ordering::SeqCst), 1);
+            // No Ready phase is fabricated. This proves the actual installed
+            // guard executes before older phase/health publication, not a
+            // positive ManagedRuntime Ready or a successful business Prepare.
+            PAUSE_FAILURE_PUBLICATION.store(false, Ordering::SeqCst);
+        }
+        wait_for(|| native.owners.keyed_finished(pending.key)).await;
+        let weak_pending = Arc::downgrade(&pending);
+        let weak_cause = Arc::downgrade(&pending.failures);
+        let mut handle = native.owners.take_retiring(pending.key).unwrap();
+        tokio::task::spawn_blocking(move || handle.join())
+            .await
+            .unwrap()
+            .unwrap();
+        let weak_state = Arc::downgrade(&native);
+        drop(pending);
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        drop(native);
+        wait_for(|| weak_state.upgrade().is_none()).await;
+        assert!(weak_pending.upgrade().is_some());
+        assert!(weak_cause.upgrade().is_some());
+        assert!(weak_marker.upgrade().is_some());
+        assert!(matches!(
+            RoleLease::acquire_existing(&root),
+            Err(crate::broker::local_ipc::IpcError::Conflict)
+        ));
+        return;
+    }
     match mode {
         "capacity" => {
             let second = registration(root.path());
@@ -597,6 +813,23 @@ async fn exercise(mode: &str, parent: &Directory) {
     server.abort();
 }
 
+async fn catchup_custody_case(owner: RecoveryAttemptOwner, root: &Directory) {
+    let marker = Arc::new(());
+    let weak_marker = Arc::downgrade(&marker);
+    let weak_cause = owner.fixture_cause_weak();
+    owner.fixture_pause_attempt(true);
+    let current = owner.fixture_schedule_legacy(registration(root.path()));
+    wait_for(|| owner.observations().2).await;
+    let queued = owner.fixture_schedule_legacy(registration(root.path()));
+    owner.fixture_native_panic(marker);
+    owner.fixture_pause_attempt(false);
+    wait_for(|| owner.fixture_thread_finished()).await;
+    drop(owner);
+    assert!(weak_marker.upgrade().is_some());
+    assert!(weak_cause.upgrade().is_some());
+    assert!(current.upgrade().is_some() && queued.upgrade().is_some());
+}
+
 #[tokio::test]
 #[ignore = "owned software subprocess helper"]
 async fn native_legacy_prospective_child() {
@@ -702,4 +935,36 @@ fn unchanged_s1_w2_has_two_owners_and_one_real_catchup() {
 #[test]
 fn unchanged_s1_w1_has_one_owner_surplus_attempt_and_incomplete() {
     run_child("budget_w1");
+}
+#[test]
+fn prospective_panic_payload_survives_native_join_and_listener_loss() {
+    run_child("prospective_custody");
+}
+#[test]
+fn bound_panic_payload_survives_native_join_and_listener_loss() {
+    run_child("bound_custody");
+}
+#[test]
+fn old_stop_panic_payload_survives_both_real_joins_and_state_loss() {
+    run_child("old_custody");
+}
+#[test]
+fn legacy_catchup_panic_keeps_real_current_queue_and_raw_payload() {
+    run_child("legacy_catchup_custody");
+}
+#[test]
+fn sealed_catchup_panic_keeps_real_lease_queue_and_raw_payload() {
+    run_child("sealed_catchup_custody");
+}
+#[test]
+fn cancel_before_bind_retains_monotone_generation_ten() {
+    run_child("cancel_generation");
+}
+#[test]
+fn replay_only_before_bind_retains_monotone_generation_ten() {
+    run_child("replay_generation");
+}
+#[test]
+fn native_installation_invalidation_vetoes_prepare_before_failure_publication() {
+    run_child("prepare_invalidation");
 }

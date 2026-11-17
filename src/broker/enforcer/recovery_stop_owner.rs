@@ -195,6 +195,7 @@ fn stop_due(
 /// One W cell is reserved for real bounded catch-up attempts. It has a real
 /// runtime and retained handle before the role is published. An attempt does
 /// not issue an active-coverage ACK, retire a target or release its quota.
+#[derive(Clone)]
 pub(in crate::broker::enforcer) struct RecoveryAttemptOwner(Arc<AttemptState>);
 enum AttemptLease {
     Sealed {
@@ -234,11 +235,21 @@ impl AttemptRequest {
     }
 }
 struct AttemptState {
-    sender: SyncSender<AttemptRequest>,
+    sender: SyncSender<Arc<AttemptRequest>>,
+    // Keep queued snapshots under the same upper owner after native panic or
+    // return. A closure-local Receiver would drop this real queue on unwind.
+    receiver: Mutex<mpsc::Receiver<Arc<AttemptRequest>>>,
     handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     ready: AtomicBool,
     stopping: AtomicBool,
     outstanding: AtomicU64,
+    normal_idle_exit: AtomicBool,
+    native_failed: Option<Arc<AtomicBool>>,
+    // The historical sealed transport has no NativeOwners at construction.
+    // Its single W context therefore pins this ACTUAL lease/handle/queue cell
+    // until process exit. This is one bounded native owner, not a new pool or
+    // permission from DATA; no join/timeout/Q clears unknown custody.
+    sealed_lease_pin: Mutex<Option<Arc<AttemptState>>>,
     attempts: AtomicU64,
     failures: AtomicU64,
     cause_history: Arc<NativeStopFailures>,
@@ -246,6 +257,10 @@ struct AttemptState {
     // never returns. Timeout of a transport waiter cannot clear this value.
     current: Mutex<Option<Arc<AttemptRequest>>>,
     _lease: AttemptLease,
+    #[cfg(test)]
+    before_attempt_pause: AtomicBool,
+    #[cfg(test)]
+    native_panic: Mutex<Option<Arc<()>>>,
 }
 impl RecoveryAttemptOwner {
     pub(super) fn failure_facts(&self) -> super::super::native_stop_failure::FailureFacts {
@@ -261,36 +276,60 @@ impl RecoveryAttemptOwner {
                 .map_or(true, |current| current.is_some()),
         )
     }
-    pub(super) fn install(
+    pub(in crate::broker::enforcer) fn install(
         lease: EnforcerRoleLeaseV2,
         clock: Option<Arc<NativeHostClock>>,
     ) -> EnforcerResult<Self> {
-        Self::install_owned(AttemptLease::Sealed { _lease: lease }, clock)
+        Self::install_owned(AttemptLease::Sealed { _lease: lease }, clock, None)
     }
     pub(in crate::broker::enforcer) fn install_legacy(
         lease: Arc<crate::broker::discovery::RoleLease>,
         clock: Arc<NativeHostClock>,
+        owners: &crate::broker::enforcer::server::lifetime::NativeOwners,
     ) -> EnforcerResult<Self> {
         lease.revalidate()?;
-        Self::install_owned(AttemptLease::Legacy { _lease: lease }, Some(clock))
+        Self::install_owned(
+            AttemptLease::Legacy { _lease: lease },
+            Some(clock),
+            Some(owners),
+        )
     }
     fn install_owned(
         lease: AttemptLease,
         clock: Option<Arc<NativeHostClock>>,
+        owners: Option<&crate::broker::enforcer::server::lifetime::NativeOwners>,
     ) -> EnforcerResult<Self> {
-        let (sender, receiver) = mpsc::sync_channel::<AttemptRequest>(1);
+        let (sender, receiver) = mpsc::sync_channel::<Arc<AttemptRequest>>(1);
         let state = Arc::new(AttemptState {
             sender,
+            receiver: Mutex::new(receiver),
             handle: Mutex::new(None),
             ready: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
             outstanding: AtomicU64::new(0),
+            normal_idle_exit: AtomicBool::new(false),
+            native_failed: owners.map(|owner| owner.failure_latch()),
+            sealed_lease_pin: Mutex::new(None),
             attempts: AtomicU64::new(0),
             failures: AtomicU64::new(0),
             cause_history: NativeStopFailures::new(),
             current: Mutex::new(None),
             _lease: lease,
+            #[cfg(test)]
+            before_attempt_pause: AtomicBool::new(false),
+            #[cfg(test)]
+            native_panic: Mutex::new(None),
         });
+        if let Some(owners) = owners {
+            // Actual cell/queue/custody, not a diagnostic or JoinHandle alone.
+            // This precedes spawn as well as every possible runtime/panic exit.
+            owners.retain_legacy_catchup(Self(Arc::clone(&state)))?;
+        } else {
+            *state
+                .sealed_lease_pin
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)? = Some(Arc::clone(&state));
+        }
         let (start, started) = mpsc::sync_channel(1);
         let (ready, installed) = mpsc::sync_channel(1);
         let worker = Arc::clone(&state);
@@ -325,12 +364,16 @@ impl RecoveryAttemptOwner {
                         {
                             break;
                         }
-                        let request = match receiver.recv_timeout(Duration::from_millis(25)) {
+                        let request = match worker
+                            .receiver
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .recv_timeout(Duration::from_millis(25))
+                        {
                             Ok(request) => request,
                             Err(mpsc::RecvTimeoutError::Timeout) => continue,
                             Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         };
-                        let request = Arc::new(request);
                         // Keep the full exact request/Cancel while all runtime IO
                         // is pending. The control cache retains its original proof.
                         let Ok(mut current) = worker.current.lock() else {
@@ -338,6 +381,15 @@ impl RecoveryAttemptOwner {
                         };
                         *current = Some(Arc::clone(&request));
                         drop(current);
+                        #[cfg(test)]
+                        {
+                            while worker.before_attempt_pause.load(Ordering::SeqCst) {
+                                std::thread::sleep(Duration::from_millis(10));
+                            }
+                            if let Some(payload) = worker.native_panic.lock().unwrap().take() {
+                                std::panic::panic_any(payload);
+                            }
+                        }
                         let mut last_ns = None;
                         let registration = request.registration();
                         let due = request.forced_stop()
@@ -398,11 +450,21 @@ impl RecoveryAttemptOwner {
                         }
                         worker.outstanding.fetch_sub(1, Ordering::SeqCst);
                     }
+                    if worker.stopping.load(Ordering::SeqCst)
+                        && worker.outstanding.load(Ordering::SeqCst) == 0
+                    {
+                        worker.normal_idle_exit.store(true, Ordering::SeqCst);
+                    }
                 }));
                 worker.ready.store(false, Ordering::SeqCst);
                 if let Err(payload) = result {
                     worker.cause_history.native_thread_failed(payload);
                     worker.failures.fetch_add(1, Ordering::SeqCst);
+                }
+                if !worker.normal_idle_exit.load(Ordering::SeqCst) {
+                    if let Some(failed) = &worker.native_failed {
+                        failed.store(true, Ordering::SeqCst);
+                    }
                 }
             })
             .map_err(|error| {
@@ -433,6 +495,9 @@ impl RecoveryAttemptOwner {
         })
     }
     fn try_schedule_owned(&self, request: AttemptRequest) -> EnforcerResult<()> {
+        self.try_schedule_arc(Arc::new(request))
+    }
+    fn try_schedule_arc(&self, request: Arc<AttemptRequest>) -> EnforcerResult<()> {
         if !self.0.ready.load(Ordering::SeqCst) || self.0.stopping.load(Ordering::SeqCst) {
             return Err(EnforcerError::NotReady);
         }
@@ -487,6 +552,55 @@ impl RecoveryAttemptOwner {
             .ok_or(EnforcerError::Unhealthy)?;
         tokio::task::spawn_blocking(move || handle.join().map_err(|_| EnforcerError::Unhealthy))
             .await
-            .map_err(|_| EnforcerError::Unhealthy)?
+            .map_err(|_| EnforcerError::Unhealthy)??;
+        if !self.known_idle_joined() {
+            return Err(EnforcerError::Unhealthy);
+        }
+        Ok(())
+    }
+    pub(in crate::broker::enforcer) fn known_idle_joined(&self) -> bool {
+        self.0.normal_idle_exit.load(Ordering::SeqCst)
+            && self.0.outstanding.load(Ordering::SeqCst) == 0
+            && self.0.current.lock().is_ok_and(|current| current.is_none())
+            && self.0.handle.lock().is_ok_and(|handle| handle.is_none())
+            && !self.0.cause_history.facts().uncollected_io
+    }
+    #[cfg(test)]
+    pub(in crate::broker::enforcer) fn fixture_pause_attempt(&self, pause: bool) {
+        self.0.before_attempt_pause.store(pause, Ordering::SeqCst);
+    }
+    #[cfg(test)]
+    pub(in crate::broker::enforcer) fn fixture_native_panic(&self, payload: Arc<()>) {
+        *self.0.native_panic.lock().unwrap() = Some(payload);
+    }
+    #[cfg(test)]
+    pub(in crate::broker::enforcer) fn fixture_cause_weak(
+        &self,
+    ) -> std::sync::Weak<NativeStopFailures> {
+        Arc::downgrade(&self.0.cause_history)
+    }
+    #[cfg(test)]
+    pub(in crate::broker::enforcer) fn fixture_schedule_legacy(
+        &self,
+        registration: RegistrationV1,
+    ) -> std::sync::Weak<dyn std::any::Any + Send + Sync> {
+        let digest = registration.digest().unwrap();
+        let request = Arc::new(AttemptRequest::Legacy {
+            registration,
+            digest,
+        });
+        let opaque: Arc<dyn std::any::Any + Send + Sync> = request.clone();
+        let weak = Arc::downgrade(&opaque);
+        self.try_schedule_arc(request).unwrap();
+        weak
+    }
+    #[cfg(test)]
+    pub(in crate::broker::enforcer) fn fixture_thread_finished(&self) -> bool {
+        self.0
+            .handle
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|handle| handle.is_finished())
     }
 }

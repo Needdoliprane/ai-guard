@@ -19,6 +19,14 @@ pub(super) fn observe_state(state: &Arc<State>) {
 pub(super) fn fixture_registration(root: &std::path::Path) -> RegistrationV1 {
     tests::registration(root)
 }
+#[cfg(test)]
+pub(super) fn record_runtime_rejection() {
+    tests::record_runtime_rejection();
+}
+#[cfg(test)]
+pub(super) fn after_runtime_invalidation() {
+    tests::after_runtime_invalidation();
+}
 
 pub(super) struct LegacyAdmission {
     pub(super) generation: u64,
@@ -43,6 +51,9 @@ struct PendingState {
     stop_reserved: bool,
     stop_failures: u64,
     exchange: ExchangePhase,
+    // Separate from immutable reservation pins: every admitted STOP updates
+    // this monotone generation even while no bound registration exists.
+    current_generation: u64,
 }
 pub(super) struct ProspectiveActor {
     prospective: ProspectiveRegistrationV1,
@@ -58,6 +69,8 @@ pub(super) struct ProspectiveActor {
     native_identity: Arc<Mutex<NativeIdentity>>,
     #[cfg(test)]
     pub(super) test_exit: Arc<AtomicBool>,
+    #[cfg(test)]
+    native_panic: Arc<Mutex<Option<Arc<()>>>>,
 }
 impl ProspectiveActor {
     #[cfg(test)]
@@ -171,6 +184,8 @@ impl ProspectiveActor {
             self.run_installed(clock, runtime)
         }));
         self.runtime_installed.store(false, Ordering::SeqCst);
+        #[cfg(test)]
+        after_runtime_invalidation();
         match result {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
@@ -197,6 +212,10 @@ impl ProspectiveActor {
             #[cfg(test)]
             if self.test_exit.load(Ordering::SeqCst) {
                 return Ok(());
+            }
+            #[cfg(test)]
+            if let Some(payload) = self.native_panic.lock().unwrap().take() {
+                std::panic::panic_any(payload);
             }
             let live = clock.sample().ok().is_some_and(|sample| {
                 sample.continuous_ns().is_ok_and(|now| {
@@ -360,12 +379,9 @@ impl State {
             return Err(EnforcerError::Conflict);
         }
         actor.reserve_stop()?;
-        if let Some(bound) = &actor
-            .state
-            .lock()
-            .map_err(|_| EnforcerError::Unhealthy)?
-            .bound
-        {
+        let mut pending = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        pending.current_generation = pending.current_generation.max(generation);
+        if let Some(bound) = &pending.bound {
             let mut value = bound.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
             value.generation = value.generation.max(generation);
         }
@@ -404,7 +420,8 @@ impl State {
                 }
                 if replay_only {
                     actor.reserve_stop()?;
-                    let value = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+                    let mut value = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+                    value.current_generation = value.current_generation.max(generation);
                     if let Some(bound) = &value.bound {
                         let mut status =
                             bound.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
@@ -454,6 +471,7 @@ impl State {
                         stop_reserved: false,
                         stop_failures: 0,
                         exchange: ExchangePhase::NotIssued,
+                        current_generation: generation,
                     }),
                     wake: Condvar::new(),
                     worker_owned: AtomicBool::new(false),
@@ -464,6 +482,8 @@ impl State {
                     native_identity: Arc::new(Mutex::new(NativeIdentity::default())),
                     #[cfg(test)]
                     test_exit: Arc::new(AtomicBool::new(false)),
+                    #[cfg(test)]
+                    native_panic: Arc::new(Mutex::new(None)),
                 });
                 admission
                     .entries
@@ -584,6 +604,7 @@ impl State {
                 return Err(EnforcerError::NotReady);
             }
             let mut value = pending.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+            value.current_generation = value.current_generation.max(generation);
             if !observe_only {
                 if value.stop_reserved {
                     return Err(EnforcerError::NotReady);
@@ -611,7 +632,7 @@ impl State {
                     actor.stop.store(true, Ordering::SeqCst);
                     let mut bound = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
                     bound.prepared_once = true;
-                    bound.generation = bound.generation.max(generation);
+                    bound.generation = bound.generation.max(value.current_generation);
                 }
                 (Arc::clone(actor), true)
             } else {
@@ -629,7 +650,7 @@ impl State {
                         registration_hash: digest,
                         phase: SlotPhaseV1::Initializing,
                         prepared_once: observe_only,
-                        generation,
+                        generation: value.current_generation,
                         clock: None,
                         observation: None,
                         stop_failures: value.stop_failures,
@@ -643,6 +664,8 @@ impl State {
                     native_identity: Arc::clone(&pending.native_identity),
                     #[cfg(test)]
                     test_exit: Arc::clone(&pending.test_exit),
+                    #[cfg(test)]
+                    native_panic: Arc::clone(&pending.native_panic),
                 });
                 value.stop_reserved |= observe_only;
                 value.bound = Some(Arc::clone(&actor));

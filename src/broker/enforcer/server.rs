@@ -40,8 +40,8 @@ struct State {
     max_recovery_stop_owners: u32,
     capability: [u8; 32],
     clock: Arc<NativeHostClock>,
-    slots: Mutex<BTreeMap<String, Arc<Actor>>>,
-    prospective: Mutex<BTreeMap<String, Arc<ProspectiveActor>>>,
+    slots: Arc<Mutex<BTreeMap<String, Arc<Actor>>>>,
+    prospective: Arc<Mutex<BTreeMap<String, Arc<ProspectiveActor>>>>,
     admission: Mutex<LegacyAdmission>,
     recovery_requested: AtomicBool,
     recovery_attempt: Option<RecoveryAttemptOwner>,
@@ -66,6 +66,8 @@ struct Actor {
     native_identity: Arc<Mutex<prospective::NativeIdentity>>,
     #[cfg(test)]
     test_exit: Arc<AtomicBool>,
+    #[cfg(test)]
+    native_panic: Arc<Mutex<Option<Arc<()>>>>,
 }
 
 /// Internal entry point of the same executable. The caller opens an existing
@@ -151,19 +153,23 @@ async fn run_legacy(
     clock.sample().map_err(|_| EnforcerError::Unhealthy)?;
     let (shutdown, mut shutdown_receiver) = watch::channel(false);
     let progress_done = Arc::new(AtomicBool::new(false));
+    let permanent = max_slots + max_recovery_stop_owners.saturating_sub(1);
+    let (owners, joiner) =
+        NativeOwners::start(Arc::clone(&lease), Arc::clone(&progress_done), permanent)?;
+    let slots = Arc::new(Mutex::new(BTreeMap::new()));
+    let prospective = Arc::new(Mutex::new(BTreeMap::new()));
+    owners.retain_legacy_targets(Arc::clone(&slots), Arc::clone(&prospective))?;
     // The single reserved catch-up context precedes endpoint publication. It
     // retains this same lease and never consumes an accepted target's owner.
     let recovery_attempt = if max_recovery_stop_owners > 0 {
         Some(RecoveryAttemptOwner::install_legacy(
             Arc::clone(&lease),
             Arc::clone(&clock),
+            &owners,
         )?)
     } else {
         None
     };
-    let permanent = max_slots + max_recovery_stop_owners.saturating_sub(1);
-    let (owners, joiner) =
-        NativeOwners::start(Arc::clone(&lease), Arc::clone(&progress_done), permanent)?;
     let state = Arc::new(State {
         _lease: Arc::clone(&lease),
         owners: owners.clone(),
@@ -172,8 +178,8 @@ async fn run_legacy(
         max_recovery_stop_owners,
         capability: secret,
         clock,
-        slots: Mutex::new(BTreeMap::new()),
-        prospective: Mutex::new(BTreeMap::new()),
+        slots,
+        prospective,
         admission: Mutex::new(LegacyAdmission::new(fresh)),
         recovery_requested: AtomicBool::new(!fresh),
         recovery_attempt,
@@ -209,6 +215,7 @@ async fn run_legacy(
                     if let Some(attempt) = &state.recovery_attempt {
                         attempt.finish_legacy_idle().await?;
                     }
+                    state.owners.release_legacy_idle_custody()?;
                     listener_owner.take().ok_or(EnforcerError::Unhealthy)?
                         .finish_idle().await?;
                     return Ok(());
@@ -469,6 +476,7 @@ async fn dispatch(state: &Arc<State>, request: Request) -> EnforcerResult<Respon
                 .validate_clock_check(&current)
                 .map_err(|_| EnforcerError::NotReady)?;
             let mut value = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+            check_runtime_installed(&actor)?;
             if generation == u64::MAX
                 || value.generation != generation
                 || value.phase != SlotPhaseV1::Ready
@@ -547,6 +555,15 @@ impl Actor {
             .map(|value| value.clone())
             .map_err(|_| EnforcerError::Unhealthy)
     }
+}
+
+fn check_runtime_installed(actor: &Actor) -> EnforcerResult<()> {
+    if !actor.runtime_installed.load(Ordering::SeqCst) {
+        #[cfg(test)]
+        prospective::record_runtime_rejection();
+        return Err(EnforcerError::NotReady);
+    }
+    Ok(())
 }
 
 async fn register(
@@ -629,6 +646,8 @@ async fn register(
                 native_identity: Arc::new(Mutex::new(prospective::NativeIdentity::default())),
                 #[cfg(test)]
                 test_exit: Arc::new(AtomicBool::new(false)),
+                #[cfg(test)]
+                native_panic: Arc::new(Mutex::new(None)),
             });
             // Capacity is retained even if thread creation or authority reopening
             // fails. No failed preparation can turn into a claimed Ready slot.
@@ -731,6 +750,8 @@ fn start_actor(
             }));
             if let Err(payload) = result {
                 actor.runtime_installed.store(false, Ordering::SeqCst);
+                #[cfg(test)]
+                prospective::after_runtime_invalidation();
                 actor.failures.native_thread_failed(payload);
                 actor_failed(&actor);
             }
@@ -764,6 +785,10 @@ fn run_bound_actor(
         #[cfg(test)]
         if actor.test_exit.load(Ordering::SeqCst) {
             return;
+        }
+        #[cfg(test)]
+        if let Some(payload) = actor.native_panic.lock().unwrap().take() {
+            std::panic::panic_any(payload);
         }
         match actor.failures.execute(
             &runtime,

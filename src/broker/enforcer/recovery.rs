@@ -612,6 +612,14 @@ impl RecoveryState {
         if budget > MAX_SLOTS {
             return Err(EnforcerError::InvalidInput);
         }
+        if self.recovery_attempt.is_some() || self.max_recovery_stop_owners != 0 {
+            // The one native W catch-up cell cannot be replaced or multiplied
+            // by another budget installation, including after its worker exits.
+            return Err(EnforcerError::Conflict);
+        }
+        // Consume the one configured W installation before native creation;
+        // an ambiguous constructor/notification must not mint a retry pool.
+        self.max_recovery_stop_owners = budget;
         if budget > 0 {
             // One real runtime context is reserved before any active W cell
             // can be accepted. It cannot be borrowed from an accepted target.
@@ -620,7 +628,6 @@ impl RecoveryState {
                 self.clock.clone(),
             )?);
         }
-        self.max_recovery_stop_owners = budget;
         Ok(())
     }
     fn begin_recovery(&self) -> EnforcerResult<u64> {
