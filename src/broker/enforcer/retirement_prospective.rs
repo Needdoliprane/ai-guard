@@ -240,7 +240,7 @@ impl FullState {
     /// Caller holds the shared admission gate. This is an exact continuation
     /// of a native pre-Arm owner, never a factory from a recovered record.
     /// It returns only a STOP status, with no registration/original grant.
-    pub(super) fn restore_prospective_stop(
+    pub(in crate::broker::enforcer) fn restore_prospective_stop(
         &self,
         registration: &RegistrationV1,
         generation: u64,
