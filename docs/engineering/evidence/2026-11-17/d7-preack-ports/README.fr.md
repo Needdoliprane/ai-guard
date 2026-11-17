@@ -2,6 +2,10 @@
 
 Ce lot borné configuration/client/exécuteur appartient à l’option A approuvée.
 Commit source : `f73e9a4895cd160f5158ced944c39c7d6959ecca` (sept chemins Rust).
+Le complément `bc607344a94ddf860ee93715163fb2aad1035a46` libère aussi la rétention
+prospective cliente par le port Q existant vérifiant le vrai join natif.
+Le complément `7477848815bd1e88671cbd6c247184ad07b31b9d` consomme le nonce
+Original avant le transport Bind : une réponse inconnue ne permet pas sa réémission.
 Il doit être composé avec l’admission native et les propriétaires STOP. Il ne
 constitue pas un correctif utilisable séparément. Compilation, corps des
 régressions et revue indépendante sont **NOT_RUN** sur cette source. Aucun
@@ -61,6 +65,8 @@ reprise contrôlée exige une continuation distincte relue prouvant le
 non-engagement natif. Aucun pool caché d’intérêts propriétaires, nouvel Arm
 automatique ou migration implicite n’est ajouté. Ces limites interdisent de
 présenter le candidat comme une remédiation D7 complète.
+L’assertion dédiée de second Reserve/S=1 après Q vérifié reste absente ; les
+parents de retraite existants ne constituent pas cette preuve de réutilisation.
 
 Seuls rustfmt et `git diff --check` ont été exécutés sur ce lot (RC0). Voir
 l’[état typé](TESTS.json). Docker, Podman, Kubernetes, fournisseurs, mesures de

@@ -4,6 +4,8 @@
   "scope": "D7 pre-ACK configuration, client and executor source candidate",
   "base": "cbaa40182268a830189e41c8246c94c8ceae2de5",
   "source_commit": "f73e9a4895cd160f5158ced944c39c7d6959ecca",
+  "source_followup_commit": "bc607344a94ddf860ee93715163fb2aad1035a46",
+  "source_transport_followup_commit": "7477848815bd1e88671cbd6c247184ad07b31b9d",
   "qualification": false,
   "findings_closed": [],
   "checks": [
@@ -19,6 +21,7 @@
     {"name": "broker::service::profile::tests::registry_v2_accepts_explicit_minimal_docker_start_profile", "status": "NOT_RUN"},
     {"name": "tests::recovery_stop_budget_is_explicit_bounded_and_preserved_at_full3_genesis", "status": "NOT_RUN"},
     {"name": "native non-engagement availability recovery after unowned pending refusal", "status": "NOT_RUN", "note": "OPEN: no new owner inferred from pending DATA"},
+    {"name": "second Reserve with S=1 after verified native Q", "status": "NOT_RUN", "note": "dedicated assertion not yet present; existing retirement parents are not equivalent"},
     {"name": "real engines, providers, cloud, resource and latency qualification", "status": "NOT_RUN"}
   ]
 }

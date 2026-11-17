@@ -2,6 +2,10 @@
 
 This is the bounded configuration/client/executor portion of approved option A.
 Source commit: `f73e9a4895cd160f5158ced944c39c7d6959ecca` (seven Rust paths).
+Follow-up `bc607344a94ddf860ee93715163fb2aad1035a46` also releases the matching
+client prospective retention through the existing verified native-join Q port.
+Follow-up `7477848815bd1e88671cbd6c247184ad07b31b9d` consumes the Original nonce
+before Bind transport, so an unknown reply cannot cause its re-export.
 It must be composed with the native admission and STOP-owner implementation.
 It is not an independently usable fix. Compilation, all regression bodies and
 independent review are **NOT_RUN** for this source. No D7 finding, production
@@ -60,6 +64,8 @@ new Original on retry, and no quota is released. Controlled recovery needs a
 distinct reviewed continuation proving native non-engagement. There is no
 hidden intent-owner pool, automatic new Arm or implicit migration. These
 limits prevent claiming complete D7 remediation from this candidate.
+The dedicated second-Reserve/S=1 assertion after verified Q is not yet present;
+existing retirement parents must not be presented as that reuse proof.
 
 Only rustfmt and `git diff --check` have run for this portion (RC0). See
 [typed status](TESTS.json). Docker, Podman, Kubernetes, provider calls, resource
