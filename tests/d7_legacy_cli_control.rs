@@ -28,7 +28,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::Read,
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::PathBuf,
     process::Stdio,
     sync::{
