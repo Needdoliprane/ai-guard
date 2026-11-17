@@ -1,0 +1,505 @@
+{
+  "schema": 1,
+  "date": "2026-11-17",
+  "kind": "DATED_PRIVATE_D7_NATIVE17_PROGRESS_EVIDENCE",
+  "public_code_commit": "e794e45de243951f401a0ff0df741307cff01c00",
+  "documentation_only": true,
+  "new_software_executions_for_this_documentation": 0,
+  "production_qualification": false,
+  "production_gates_closed": 0,
+  "strict_clippy_gate": "OPEN",
+  "private_evidence_retained": true,
+  "d1_late_finalizer": {
+    "public_evidence": "../runtime-observation-and-d1-late-finalizer/results.json",
+    "source_archive_sha256": "c755fb525e98c9bfe768cb5f4fd2f13890318dfe99416e60e06939ad342db3b9",
+    "PASS": 12,
+    "real_CLI_Gateway_SQLite_cases": 4,
+    "root_case_verification_sha256": "231ab7198e09cb6c664a447e147b681ad78945d51eb8387896972ae4c0dfa24c",
+    "scope": "Software Store/quota finalization only; real engines/TTY/cold recovery not qualified."
+  },
+  "campaigns": [
+    {
+      "id": "d7_r5",
+      "source_scope": "PRIVATE_FROZEN_SOURCE_NOT_PUBLIC_CODE",
+      "source_archive_sha256": "653e2abebda300f6b636dfc24183981d0d6006c759df2484b96dc73f4def2cce",
+      "files": 2956,
+      "check_all_targets": {
+        "status": "PASS",
+        "return_code": 0,
+        "command_receipt_sha256": "3bf949596058aa26440d2813c57fc46a192ef6c7601813477834e8b02889d825",
+        "root_verification_sha256": "0dc3779005077fe90c9c26f7b85c2faa099bf2350ef8773cb5d03beeeb76234c"
+      },
+      "lib_no_run": {
+        "status": "PASS",
+        "return_code": 0,
+        "command_receipt_sha256": "1e8e963704f205591f935fe1848a5786904c26d40280a72309700eb61c3c47f0",
+        "root_verification_sha256": "b213e2a35ad899cc521174bddd6191ad71d3c6cabf6a00c748c0b99f6c887b83"
+      },
+      "artifact_sha256": "8942fc94fb59515a90dbb32735b3778930085713a0b9278247305195de5b6900",
+      "results": {
+        "PASS": 28,
+        "FAIL": 1,
+        "NOT_RUN": 5,
+        "actual_invocations": 29,
+        "invocations_per_executed_case": 1,
+        "stack_failure_return_code": -6,
+        "stack_failure_signal": "SIGABRT",
+        "stack_failure_before_oracle": true
+      },
+      "root_first20_sha256": "d4891e8f49eda546c6f4d5f0b79e882b65eefc9606cb7c22455f42862855c69e",
+      "root_additional14_sha256": "a02f7ce3d6835c9396ffff72ad646b5af5a5c65156814448c17f1a9af03254a4",
+      "executor_first20_sha256": "0dcb4d2d65f3fe50ea429c17464a8958aca1d721fc5125c714c2570ab62c05c6",
+      "executor_additional14_sha256": "b82a97be5c9ffce683b6bf5f0abe4967d2d35ac75608a80a4a4115799a4c7047",
+      "cases": [
+        {
+          "fqn": "broker::enforcer::recovery::recovery_v3::tests::review_regressions::hardening::fixed_transcripts_and_mac_domains_match_independent_literal_vectors",
+          "status": "PASS",
+          "return_code": 0,
+          "stdout_sha256": "cd3d1451feb5dac5dc5b2bd29d8de213131dcb1d265fef10c466b8e57b70e578",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "fqn": "runtime::control_outcome::tests::native_stop_failure_keeps_primary_and_followup_causes_and_exposes_primary_source",
+          "status": "PASS",
+          "return_code": 0,
+          "stdout_sha256": "60346a78bb750a311d812dd9645395cd0d3c1f108193b72f240ddba6d9936a16",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "fqn": "runtime::control_outcome::tests::refused_environment_has_positive_no_child_outcome",
+          "status": "PASS",
+          "return_code": 0,
+          "stdout_sha256": "9626ed72de9850ac87d08a847aba0aabd06332ef8cfffb177e6f661256b10db4",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "fqn": "runtime::control_outcome::tests::actual_nonzero_native_cli_retains_original_error_capture_and_observation_order",
+          "status": "PASS",
+          "return_code": 0,
+          "stdout_sha256": "541b180ae57bf47d24f8a7416a5d6ef4476169f595e9cdd94e0b4734d1ad432a",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "fqn": "runtime::control_outcome::tests::cancelled_collection_keeps_same_io_then_moves_original_cause_once",
+          "status": "PASS",
+          "return_code": 0,
+          "stdout_sha256": "f2a2b9b198e942b364b4f83e811aa3233664b6f71351ff1cfb985d8eccdaf2f2",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "fqn": "runtime::control_outcome::tests::lost_io_task_keeps_actual_child_and_pipes_and_refuses_reuse",
+          "status": "PASS",
+          "return_code": 0,
+          "stdout_sha256": "8ac680ed106aa2668177b4f743523ff5a7a41a058c4fcaff40f8406d00be1398",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "fqn": "runtime::batch_io::tests::retained_read_error_keeps_original_typed_cause_without_eof",
+          "status": "PASS",
+          "return_code": 0,
+          "stdout_sha256": "f342db6547d04de29716be89e049e8576fd72b90a5da713f6e3461438e2f06c8",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "fqn": "broker::enforcer::native_stop_failure::tests::caught_native_panic_keeps_original_opaque_payload_and_marks_unknown",
+          "status": "PASS",
+          "return_code": 0,
+          "stdout_sha256": "91c4d7c6a9223110c124b060f3c70142cc895bb42ad58e377b648dd14e3fb883",
+          "stderr_sha256": "1f3653326d4a3b8652c9a02577dc22bc08ef0593357a14042b8b49eafcd5a8f3"
+        },
+        {
+          "fqn": "broker::enforcer::native_stop_failure::tests::native_no_child_errors_keep_first_object_and_a_bounded_settled_tail",
+          "status": "PASS",
+          "return_code": 0,
+          "stdout_sha256": "018e65e5994675b15aecacd6a8b14a5bf417fb4eadd642bf0a77d0b4200d060c",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "fqn": "broker::enforcer::retirement::tests::continuation_regressions::bound_native_actor_retains_the_real_unavailable_runtime_cause",
+          "status": "PASS",
+          "return_code": 0,
+          "stdout_sha256": "1449967b26e9c01d720b17572707ccc374fde4a8b83306b7b9f451c8c13b355a",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "fqn": "broker::enforcer::retirement::tests::continuation_regressions::verified_native_q_releases_s1_for_the_next_exact_prospective_arm",
+          "status": "PASS",
+          "return_code": 0,
+          "stdout_sha256": "ff6cc872b9bc910abeca290159f5dceee84e81e67d876ab830b7f777ffa026e5",
+          "stderr_sha256": "c8101a2a664e593db2ed9e5bc25d9dd2e0870dbf67aab54bb36beefa58e8c856"
+        },
+        {
+          "fqn": "broker::enforcer::retirement::tests::continuation_regressions::lost_bind_reply_then_generic_register_cannot_reexport_original_nonce",
+          "status": "PASS",
+          "return_code": 0,
+          "stdout_sha256": "7317c03be88fe45247e0cc93711a12d07513ccb74459866145d43a5f7da17312",
+          "stderr_sha256": "1933abdae19f07563050488eeb5ea73105e66d7905fb67d6e48f95e3e2be3471"
+        },
+        {
+          "fqn": "broker::service::server::cancel_retry_tests::recovery_multi_arm_tests::d7_recovery_capacity_tests::d7_two_slot_report_is_a_separate_capacity_control",
+          "status": "PASS",
+          "return_code": 0,
+          "stdout_sha256": "3136790fcd31dc367b7249ba95e296e9742fd1eec61ca0d34ed76388fa868312",
+          "stderr_sha256": "2369d64245eabb9a4f57ac9705286828b4da6367c6f884fdfab516e57450679d"
+        },
+        {
+          "fqn": "broker::service::server::cancel_retry_tests::recovery_multi_arm_tests::d7_recovery_capacity_tests::d7_one_slot_report_leaves_no_ack_without_stop_cancel_coverage",
+          "status": "PASS",
+          "return_code": 0,
+          "stdout_sha256": "f3c4658c57560ad1990d25ce214da74ff03f44c372df6ef13c065c871d0ecf12",
+          "stderr_sha256": "2ebd0f93fec16c2b98bc6ae22715d72ccde5594582a463760995357d588512ae"
+        },
+        {
+          "fqn": "broker::service::server::cancel_retry_tests::recovery_multi_arm_tests::d7_recovery_capacity_tests::d7_one_slot_cancel_projection_leaves_no_ack_without_coverage",
+          "status": "PASS",
+          "return_code": 0,
+          "stdout_sha256": "271222e912458687f54bb5cf9d4ad3e04631a886c92e3e15644d4f6fa03bc31c",
+          "stderr_sha256": "685d2d98880cd5bed30be05f266d045035b7417ecf514a8b561174f0c6ea7d4e"
+        },
+        {
+          "fqn": "broker::service::server::cancel_retry_tests::recovery_multi_arm_tests::d7_recovery_capacity_tests::d7_reserved_catchup_attempts_surplus_without_active_coverage_ack",
+          "status": "PASS",
+          "return_code": 0,
+          "stdout_sha256": "145849261506666f10d7d1c4be83521b7593ea0f9189069c5af9b1c38edf05f8",
+          "stderr_sha256": "81a40fd38d9e67d869d5e1ca870012bba2c8de5acf1585fd29d32e8c647ad047"
+        },
+        {
+          "fqn": "broker::enforcer::retirement::tests::native_admission_tests::recovery_fence_retains_register_waiting_for_native_ready",
+          "status": "PASS",
+          "return_code": 0,
+          "stdout_sha256": "e75a464219a51c6e97b1ca14e01d8ac9cf1b1750c982dd1cf573dae7a2206010",
+          "stderr_sha256": "33a8cf992a582074d5c8df7163d9d396b54a2008f8c7133d6dba9d18e40954f6"
+        },
+        {
+          "fqn": "broker::enforcer::retirement::tests::native_admission_tests::recovery_fence_refuses_late_prepare_but_keeps_exact_cancel",
+          "status": "PASS",
+          "return_code": 0,
+          "stdout_sha256": "428c2058466b5c59cc720ab305905620d52918451dab4443e77370e7e5e2ba3f",
+          "stderr_sha256": "7b63a323f577a5ce4ebe012d417c0d1f9e75a639f69d3ba2910c6d3ce6e04f50"
+        },
+        {
+          "fqn": "broker::enforcer::retirement::tests::native_admission_tests::full_constructed_after_recovery_scan_cannot_reopen_shared_admission",
+          "status": "PASS",
+          "return_code": 0,
+          "stdout_sha256": "6dcba3fca765b20b0766bc27d6c696a44187d1399c9faf56e56693665955cdb5",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "fqn": "broker::enforcer::retirement::tests::native_admission_tests::recovery_intent_refuses_original_before_waiting_for_its_commit_gate",
+          "status": "PASS",
+          "return_code": 0,
+          "stdout_sha256": "1300386890c3cbf6204e3651492670ea58134526a32bfe5660e957e9306baa2e",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "fqn": "broker::enforcer::retirement::tests::prospective_tests::prospective_native_capacity_precedes_receipt_and_bind_reuses_owner",
+          "status": "PASS",
+          "return_code": 0,
+          "failure_kind": null,
+          "stdout_sha256": "d7d037171bc10050e412e6eaf8ff57be95abe84d0b1daee333ad50b40d0c8194",
+          "stderr_sha256": "c06f20d18276cf3b7afcce76d6f475c34197ead67965a8b38b9a6ebce8748528"
+        },
+        {
+          "fqn": "broker::enforcer::retirement::tests::prospective_tests::historical_pending_and_receipt_cannot_create_a_prospective_owner",
+          "status": "PASS",
+          "return_code": 0,
+          "failure_kind": null,
+          "stdout_sha256": "1ff54964019ac286dc510ba4032310ddbdaf2c3967491b41d117659be468a699",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "fqn": "broker::enforcer::retirement::tests::prospective_tests::fenced_unbound_reservation_accepts_only_exact_stop_reconciliation",
+          "status": "PASS",
+          "return_code": 0,
+          "failure_kind": null,
+          "stdout_sha256": "f9557d58e838ca6b4761d655ba1e753cb89f4fb28ee644f60421875dafb7dae0",
+          "stderr_sha256": "4aa405fcae8276ffaa81648f0a3a5130f34b734ec644c8d380beef5954fe0051"
+        },
+        {
+          "fqn": "broker::enforcer::retirement::tests::prospective_tests::divergent_bind_token_retains_the_installed_exact_native_owner",
+          "status": "PASS",
+          "return_code": 0,
+          "failure_kind": null,
+          "stdout_sha256": "3a7e25c341c7971e0a552110890d6cd7e62b9ffe2d6f3d31f044ccb7892a2ee3",
+          "stderr_sha256": "1335c64814f942f2fe13e7c7bc3a37fc0397f3968665ace98a353bd0160e4d38"
+        },
+        {
+          "fqn": "broker::enforcer::retirement::tests::prospective_tests::lost_begin_exchange_ack_cannot_recover_an_original_from_replay",
+          "status": "PASS",
+          "return_code": 0,
+          "failure_kind": null,
+          "stdout_sha256": "400a1e1534034c55ca8d4ca386ff01a286e268495b0636e83aa9781dfb3ac766",
+          "stderr_sha256": "0ff33e85decd14ca93448c5f2a7093dee42601222afb98eb14b9ae383307789c"
+        },
+        {
+          "fqn": "broker::enforcer::retirement::tests::register_ack_discarded_then_new_client_replay_cannot_recreate_original_witness",
+          "status": "PASS",
+          "return_code": 0,
+          "failure_kind": null,
+          "stdout_sha256": "71a1b0c25e574428d42b8f48f33747e9912a480b298d2707b4fcdce2f93c55eb",
+          "stderr_sha256": "0920627f8526dd0e0038e516d362ceab38238171cb9143d59cc97d1a74c59d21"
+        },
+        {
+          "fqn": "broker::enforcer::retirement::tests::tombstone_retains_capacity_until_real_handle_returns_then_q_is_replayable",
+          "status": "PASS",
+          "return_code": 0,
+          "failure_kind": null,
+          "stdout_sha256": "51f3e474b04f5ce6641e6304f084e2da056ae0e5bd1fc15541dcee4c6bfc165b",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "fqn": "broker::enforcer::retirement::tests::full_retire_waiters_and_eof_do_not_exhaust_independent_stop_admission",
+          "status": "PASS",
+          "return_code": 0,
+          "failure_kind": null,
+          "stdout_sha256": "037d91061d2d6e211ee1af5e9f60723e7aa6c8c9a54ae12514c57d0d0bf51ee2",
+          "stderr_sha256": "f34aea3fc8835e68e6a0cd10545f3b51a2f8ac5a4e6586a4bfa19401111ba11a"
+        },
+        {
+          "fqn": "runner::broker::executor::helpers::prospective_live_tests::fresh_legacy_refuses_explicitly_before_arm_rpc",
+          "status": "FAIL",
+          "return_code": -6,
+          "failure_kind": "SIGABRT_STACK_OVERFLOW_BEFORE_ORACLE",
+          "stdout_sha256": "22f0038451432d48db270f54c07e35e00954bfeaee4732cfcb4e6d974af7f8f5",
+          "stderr_sha256": "292f82edc224190ad1c91107cc8f713919b79844954d16ef20d352eeaa1acaf3"
+        },
+        {
+          "fqn": "runner::broker::executor::helpers::prospective_live_tests::installed_prospective_capacity_refuses_before_arm_rpc",
+          "status": "NOT_RUN",
+          "return_code": null,
+          "reason": "STOP_AFTER_STACK_ABORT"
+        },
+        {
+          "fqn": "runner::broker::executor::helpers::prospective_live_tests::cancelled_generation_refuses_before_arm_rpc",
+          "status": "NOT_RUN",
+          "return_code": null,
+          "reason": "STOP_AFTER_STACK_ABORT"
+        },
+        {
+          "fqn": "runner::broker::executor::helpers::prospective_live_tests::unknown_pending_writer_ack_never_generates_another_arm_or_rpc",
+          "status": "NOT_RUN",
+          "return_code": null,
+          "reason": "STOP_AFTER_STACK_ABORT"
+        },
+        {
+          "fqn": "runner::broker::executor::helpers::prospective_live_tests::lost_arm_ack_replays_same_owner_and_deadline_without_claim",
+          "status": "NOT_RUN",
+          "return_code": null,
+          "reason": "STOP_AFTER_STACK_ABORT"
+        },
+        {
+          "fqn": "broker::service::profile::tests::registry_v2_accepts_explicit_minimal_docker_start_profile",
+          "status": "NOT_RUN",
+          "return_code": null,
+          "reason": "STOP_AFTER_STACK_ABORT"
+        }
+      ],
+      "limits": [
+        "No real engine/provider/cloud qualification.",
+        "Legacy Fresh/Pending owner availability remains open.",
+        "R6 results do not replace this dated R5 failure."
+      ]
+    },
+    {
+      "id": "d7_r6_case9",
+      "source_scope": "PRIVATE_TEST_ONLY_SUCCESSOR",
+      "source_archive_sha256": "8d17467678e34dc605a19f046537b33cc3168b10bdf6ef8a5b94cce6d23256d3",
+      "files": 2956,
+      "code_change": "ONE_CFG_TEST_EXPRESSION_HEAP_BOUNDARY_BOX_PIN",
+      "production_code_changed": false,
+      "stack_clock_deadline_oracles_changed": false,
+      "check_all_targets": "NOT_RUN_ON_R6",
+      "lib_no_run": {
+        "status": "PASS",
+        "return_code": 0,
+        "command_receipt_sha256": "99039496c4538b281e18066027d97583cbe5e187dff6bb8423dca7c009433fdb",
+        "root_verification_sha256": "bacb9cf5ffe6dc7b50fd9efef339e9a306c50be0d92558cd673e19c11da17cc4"
+      },
+      "artifact_sha256": "35fec1a3ee658cbbf8c55451780919379ce572aff46e66196e7220a8066241a2",
+      "results": {
+        "PASS": 1,
+        "FAIL": 0,
+        "selected_cases": 1,
+        "other5_R5_cases_still_NOT_RUN": true,
+        "R5_28_PASS_transferred": false
+      },
+      "case": {
+        "fqn": "runner::broker::executor::helpers::prospective_live_tests::fresh_legacy_refuses_explicitly_before_arm_rpc",
+        "status": "PASS",
+        "return_code": 0,
+        "executor_receipt_sha256": "04a15abab56720912dcf2c662b1ea33c003e2ae8cf940585be32f9d98c7fe38a",
+        "root_verification_sha256": "6ceb504e72ab74ba3692c23c1c00279055c6050b45bf480c89e28d45f734be0a"
+      },
+      "limits": [
+        "One new invocation on R6 only; no 29-case aggregate or rerun claim.",
+        "Former case 9 is obsolete and NOT_ADMITTED on newer Legacy Native+Ports source."
+      ]
+    },
+    {
+      "id": "d7_legacy_native_ports_r1",
+      "source_scope": "PRIVATE_INTERMEDIATE_SOURCE_CHECKED_NOT_PUBLIC_CODE",
+      "source_archive_sha256": "0dce799ce61beb0afd5166eaada97637de5cc4b3bfc5b6f9bb4bbf787cbfee89",
+      "files": 2962,
+      "manifest_sha256": "53c159b3497961ba8de25b2c97f194796ede1838af972c75e68fd3eabd5916b7",
+      "postimage_CAS_sha256": "7d913f99da370a17fb1aeaba7193736a8f1b9c28dfa07a111125d0546018ee9c",
+      "test_listing": "NOT_RUN",
+      "tests": "NOT_RUN",
+      "old_case9_status": "OBSOLETE_NOT_ADMITTED_ON_THIS_SOURCE",
+      "historical_results_transferred": false,
+      "successor_status": "REAL_CLI_REGRESSIONS_IN_REVIEW_COMPILE_AND_TEST_NOT_RUN",
+      "limits": [
+        "Old case 9 exercises neither genuine Fresh construction nor an actual old V1 peer on this new source.",
+        "The R1 all-targets check failed; no behavioral execution or result credit for the uncompiled correction.",
+        "D7 R5 check PASS is not transferred to this newer source."
+      ],
+      "source_index_sha256": "7d3d87dd689e4d8efcfcdff5b48df52fdbf92b2a2321bf090d713bb4995cc3f0",
+      "check_all_targets": {
+        "status": "FAIL",
+        "return_code": 101,
+        "error_count": 1,
+        "error_code": "E0599",
+        "message": "no method named has_local_slot found for EnforcerClient",
+        "file": "src/broker/enforcer/client_legacy_tests.rs",
+        "line": 229,
+        "warning_emissions": 153,
+        "command_receipt_sha256": "15bbef111bf31cda8f1338b9f066b573d2bf48d9806d85071d9170db12cc5478",
+        "root_verification_sha256": "67ab96678b2b7ab3c71e58583e402c720dfd713373c551fe983682c2502029a0",
+        "no_behavioral_execution": true,
+        "source_unchanged": true
+      },
+      "lib_no_run": "NOT_RUN",
+      "author_correction": {
+        "commit_short": "07c9679",
+        "scope": "TEST_LOCAL_MAP_ASSERTION",
+        "compilation": "NOT_RUN",
+        "tests": "NOT_RUN",
+        "result_credit": false
+      }
+    },
+    {
+      "id": "native17_common_r5",
+      "source_scope": "PRIVATE_COMMON_SOURCE_NOT_PUBLIC_CODE",
+      "source_archive_sha256": "a3e9ca09dd4e91bd5ca486329e1cd40dae9cffa0619c3c6b4316d8b885fd9512",
+      "source_index_sha256": "c879997505c1c9a190a85f22c7c60e5f99bdb808d5f09592aee6f4ad6c60319b",
+      "files": 3521,
+      "check_all_targets": {
+        "status": "PASS",
+        "return_code": 0,
+        "command_receipt_sha256": "0e466180d0ba5ca1f1955091a5a3e2074a33ed19400b149caf265da96815aec9",
+        "root_verification_sha256": "2e7c91366e2559d064bcd08d27ba713585cf0c00085a027d54434145a5c4a8ed",
+        "warning_emissions": 2454
+      },
+      "lib_no_run_initial": {
+        "status": "RESOURCE_ABORT",
+        "return_code": -15,
+        "command_receipt_sha256": "f8530a4429ad2aef4ae3b99312330eba1a01af321a3d2e078410ea30418d2e75",
+        "root_verification_sha256": "501302c388268b5b17cca3281b7c63429b85b61039249630019db864f574cc4c",
+        "tests_executed": 0
+      },
+      "lib_no_run_successor": {
+        "status": "PASS",
+        "return_code": 0,
+        "command_receipt_sha256": "044540e16fe12520f329a99ef49c02e11913e0f94b115263893f7c1fbe6e757d",
+        "root_verification_sha256": "0dc396349778b5e58cd9c4d5091856b0963c3da9ba7b766ffee3b838d2b1c1df",
+        "artifact_sha256": "0d0d8d36849323cc6975d27a1efd42c00056a27675fd2cd3df5a2b7fb0649ab3",
+        "listed_total_including_ignored": 2516,
+        "ignored_subset": 22,
+        "nonignored": 2494,
+        "both_cases_exact_nonignored": true
+      },
+      "results": {
+        "PASS": 0,
+        "FAIL": 2,
+        "selected_cases": 2,
+        "invocations_per_case": 1,
+        "harness_failures": 0,
+        "retries": 0,
+        "other_historical19": "NOT_RUN"
+      },
+      "executor_receipt_sha256": "f03634fcaf8d3edd1e4e404ca4278f4af92502f4820152a911066664a70ca15c",
+      "root_verification_sha256": "8a70c0410c924fe650d2521fe35972fc308b06ee0fe97670826b5b7bee943e80",
+      "cases": [
+        {
+          "fqn": "audit::execution17::native_broker_backup_fixture17::presence_fixture17::real_enrolled_broker_heartbeat_self_wire17",
+          "status": "FAIL",
+          "return_code": 101,
+          "duration_seconds": 60.523414916,
+          "result_sha256": "c02f8d8d1656265de3d736768ad0b5cf5a584c6058721c5c8e7cc556586721b5",
+          "stderr_sha256": "c916a302d62f3dbd05dbd59e417f5b7caf946777895d0df141871bb578f70072",
+          "typed_cause": "human_authority_epoch_expired",
+          "observed_stage": "source17_backup_snapshot_postcheck_refused_owners_retained",
+          "writer_elapsed_ms": null
+        },
+        {
+          "fqn": "audit::execution17::repin_test_support::authentication_startup_tests::native_oidc_human17_tests::actual_a17_b16_auth5_oidc_admission_keeps_native_personal_ceiling_and_original_context17",
+          "status": "FAIL",
+          "return_code": 101,
+          "duration_seconds": 54.589874334,
+          "result_sha256": "0a4b9ece2cb9f97dcfae461cb81f97e6e2e46f84148a4cbe36ac797b8c4fae89",
+          "stderr_sha256": "882607d7be4f823536f055ad225dee57f7fa536d234bcc39bc515f64e8b1e375",
+          "typed_cause": "human_authority_epoch_expired",
+          "observed_stage": "TransactionMutations",
+          "writer_elapsed_ms": 1999
+        }
+      ],
+      "product_epoch_seconds": 2,
+      "timing_interpretation": {
+        "wall_phases_only": true,
+        "CPU_measurement": false,
+        "lock_wait_measurement": false,
+        "mathematical_gate_hold_bound": false,
+        "SourceEpochReleased_mark_after_drop": true,
+        "typed_actual_epoch_check_is_authoritative": true
+      },
+      "remediation_status": "TWO_PRIVATE_REMEDIATIONS_IN_PROGRESS_NOT_PUBLIC_CODE",
+      "positive_native_path_qualified": false,
+      "format_and_strict_clippy": "NOT_RUN_ON_THIS_SOURCE"
+    }
+  ],
+  "command_templates": {
+    "check": [
+      "cargo",
+      "check",
+      "--all-targets",
+      "--locked",
+      "--offline",
+      "--message-format=json",
+      "-j1"
+    ],
+    "lib_build": [
+      "cargo",
+      "test",
+      "--lib",
+      "--no-run",
+      "--locked",
+      "--offline",
+      "--message-format=json",
+      "-j1"
+    ],
+    "case": [
+      "AI_GUARD_LIBTEST",
+      "--exact",
+      "AI_GUARD_FQN",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "case_outer_bound_seconds": 180,
+    "scope": "Portable forms of recorded commands; exact frozen source, pinned toolchain and QA profiles required. No command newly executed for this document.",
+    "QA_profile": {
+      "dev_and_test": {
+        "opt-level": 0,
+        "debug": 0,
+        "debug-assertions": true,
+        "overflow-checks": true,
+        "codegen-units": 256,
+        "incremental": false
+      }
+    }
+  },
+  "global_limits": [
+    "No historical software result transfers to another source or public e794 code.",
+    "No global functional percentage, release qualification or gate closure follows.",
+    "Real engines/providers/IdP/TTY/recovery/100worker qualification remains separate.",
+    "Private proofs and archives remain intact; no raw private report or machine path is published."
+  ]
+}

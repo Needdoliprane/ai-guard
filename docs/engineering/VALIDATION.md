@@ -1,5 +1,13 @@
 # Validation courante
 
+## 17 novembre — D7 et Native17 : résultats privés distincts
+
+Le [relevé EN/FR et son JSON](evidence/2026-11-17/d7-native17-progress/README.fr.md) séparent le code public `e794e45` des gels privés. D7 R5 `653e2abe…` : check toutes cibles et build libtest RC0, **28 PASS / 1 FAIL de pile avant oracle / 5 NOT_RUN**. R6 `8d174676…` ne change que la mise en tas d’une expression de fixture : nouveau build RC0 et **un seul cas 9 PASS**, sans réexécution/transfert des 28 PASS R5. Legacy Native+Ports R1 `0dce799c…` échoue au check toutes cibles RC101 sur un E0599 de fixture ; correction `07c9679` non recompilée, build libtest/listes/tests NOT_RUN et ancien cas 9 obsolète, non admis sur cette source.
+
+Le commun Native17 R5 `a3e9ca09…` passe check toutes cibles RC0 et build libtest RC0 après une première interruption pour ressources, RC−15, conservée. Deux cas réels, une invocation chacun : **0 PASS / 2 FAIL RC101**, sans défaut de harnais ni relance. Backup : cause typée `human_authority_epoch_expired` retenue ; OIDC : `TransactionMutations`, 1 999 ms. L’époque produit reste 2 s ; phases et durées incluent ordonnancement/attentes et ne prouvent ni coût CPU, ni attente de verrou, ni borne exacte de tenue du gate. Reçu Root `8a70c0410c924fe650d2521fe35972fc308b06ee0fe97670826b5b7bee943e80`, preuve libtest `0dc396349778b5e58cd9c4d5091856b0963c3da9ba7b766ffee3b838d2b1c1df`.
+
+Les remédiations D7 et Native17 restent privées et en cours. Aucun nouveau code de ces lots n’est publié par ce relevé, aucune qualification n’est transférée ; Clippy strict et **les 12 gates restent ouverts**. Aucune nouvelle exécution n’a été lancée pour cette mise à jour documentaire.
+
 ## 17 novembre — relevé runtime et finalisation tardive D1
 
 [Douze cas logiciels ciblés](evidence/2026-11-17/runtime-observation-and-d1-late-finalizer/README.fr.md) passent sur le gel `c755fb52…db3b9`, dont quatre vrais CLI/Gateway/SQLite avec moteur Rust de fixture : terminal unique, faute Managed tardive et quota/instance conservés pour Created/Unknown. Le relevé facultatif est borné, sans attente dans STOP, et ne remplace pas l’audit durable. Le précédent FAIL de sonde reste historique ; la régression lit désormais la capture dans son véritable propriétaire d’erreur. Compilation des trois tests et six listes vérifiées ; Clippy toutes cibles de cette révision RC0 non strict, 528 émissions d’avertissement, 0 erreur ; 21 émissions supplémentaires restent suivies. Ni moteur réel, reprise froide, fournisseur, scénario A1/A2/B1 complet ni capacité 100 ne sont qualifiés. **0/12 gates clos**.

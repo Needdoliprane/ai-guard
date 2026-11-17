@@ -8,6 +8,12 @@
 
 Base de l’intégration D1 : `961045788784b277a7a9eaa5e8f411275d7147e0`, dont le code produit avant D1 est celui de `a3981316d5a0ff1678dee7d943971fa845991e84`. Ce changement intègre les huit fichiers Rust D1. Clippy D1 toutes cibles sur la source composée `74d60de1…b7b` : **RC0 non strict, 507 émissions d’avertissement et 0 erreur**. Reçu `dc43ad33…0e0a2` ; gate strict ouvert. Les 324 395 octets de l’ancien suivi restent intacts dans l’[archive adjacente](CURRENT_STATE_HISTORY_20261116.md), SHA-256 `3dfd04cc353bb1f3455ad4eb066778abe0c79862cd197927abdb1077f8eda254`. Les preuves détaillées restent dans [VALIDATION.md](VALIDATION.md).
 
+## 17 novembre — D7 et Native17 : preuves privées distinctes
+
+Le code public reste `e794e45`. Les [gels privés et leurs reçus](evidence/2026-11-17/d7-native17-progress/README.fr.md) ne constituent pas du code livré sur cette branche : D7 R5 `653e2abe…` passe check/build libtest puis **28 PASS / 1 FAIL de pile / 5 NOT_RUN** ; R6 `8d174676…`, test-only, apporte **un nouveau PASS du seul cas 9**, sans transfert des 28 PASS. Le check Legacy Native+Ports R1 `0dce799c…` échoue RC101 sur un E0599 de fixture ; la correction `07c9679` n’est pas recompilée, les tests restent NOT_RUN et l’ancien cas 9 est obsolète.
+
+Le commun Native17 R5 `a3e9ca09…` passe check toutes cibles et build libtest, puis ses deux diagnostics réels donnent **0 PASS / 2 FAIL RC101** sur l’époque inchangée de 2 s. La cause du backup est désormais typée et retenue ; OIDC refuse à `TransactionMutations`, 1 999 ms. Ces durées ne mesurent ni CPU ni attente de verrou. Deux remédiations privées sont en cours, sans correction publique ni qualification déduite. Clippy strict reste ouvert ; **0/12 gates clos**.
+
 ## Faits vérifiés et portée — 16 novembre 2026
 
 | Périmètre | État constaté et source |
@@ -19,14 +25,14 @@ Base de l’intégration D1 : `961045788784b277a7a9eaa5e8f411275d7147e0`, dont l
 
 ## Écarts ouverts et travaux privés
 
-D1 exige encore l’injection exacte de la faute tardive Managed à travers le finalizer Store/quota, le vrai TTY interactif et les garanties d’abandon/reprise froide. L’unité Managed et les tests PTY ne ferment pas ces parcours. Le résultat Native17 privé reste séparé ; heartbeat/self ne remplace pas le checkpoint **Full**, son installation/profil, la reprise ou la supersession.
+La faute tardive Managed jusqu’au finalizer Store/quota est désormais couverte logiciellement par les quatre CLI/Gateway/SQLite inclus dans les douze PASS du 17 novembre. Le vrai TTY interactif, les moteurs réels et les garanties d’abandon/reprise froide restent ouverts ; les unités Managed et PTY ne les qualifient pas. Les résultats Native17 privés restent séparés ; heartbeat/self ne remplace pas le checkpoint **Full**, son installation/profil, la reprise ou la supersession.
 
 La cible conserve les parcours complets, le contrôle réseau Rust, l’audit, l’arrêt/reprise, la restauration et les qualifications réelles : A1/A2/B1, Codex CLI et Claude Code chacun par API et abonnement, Docker/Podman/Kubernetes, TLS et 100 workers. Les preuves partielles ne les qualifient pas. [Mandat](../../AGENTS.md), [contrat d’architecture](ARCHITECTURE_CONTRACT.md), [identité et configuration](../sso.md), [gates](PRODUCTION_READINESS.md).
 
 ## Priorités de qualification
 
-1. Compléter les parcours D1 encore ouverts : faute tardive jusqu’au Store/quota, vrai TTY, abandon et reprise. Conserver causes, possession, révocation et drainage.
-2. Expliquer le refus du heartbeat enrôlé Native17 sur sa source privée, puis qualifier séparément les parcours restants et Full ; aucun ancien PASS n’est transféré.
+1. Qualifier les parcours D1 encore ouverts : moteurs réels, vrai TTY, abandon et reprise. Conserver la preuve logicielle du finalizer Store/quota, les causes, la possession, la révocation et le drainage.
+2. Analyser les deux refus d’époque du commun Native17 R5 et vérifier les remédiations privées sur leurs propres sources, puis qualifier séparément les parcours restants et Full ; aucun ancien PASS n’est transféré.
 3. Relier chaque lot relu à ses preuves réelles et qualifier les plateformes requises. Les [audits run-2](AUDIT_RUN_2_20261110.md), le [plan](IMPLEMENTATION_PLAN.md) et la [stratégie de tests](TEST_STRATEGY.md) gardent leurs fonctions distinctes.
 
 ## Index de compatibilité historique — gel bf31a743
