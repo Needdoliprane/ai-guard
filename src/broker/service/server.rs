@@ -694,17 +694,19 @@ pub async fn serve_selected_owned(
                 .persistent_child(role_name.as_deref().unwrap_or("enforcer"), false)?
                 .ok_or_else(|| anyhow!("broker stop root is unavailable"))?;
             let stop = if sealed {
-                EnforcerStopClient::connect_or_spawn_existing_sealed(
+                EnforcerStopClient::connect_or_spawn_existing_sealed_with_budget(
                     &role,
                     &executable,
                     registry.data.max_enforcer_slots,
+                    registry.data.max_recovery_stop_owners,
                 )
                 .await?
             } else {
-                EnforcerStopClient::connect_or_spawn_for_recovery(
+                EnforcerStopClient::connect_or_spawn_for_recovery_with_budget(
                     &role,
                     &executable,
                     registry.data.max_enforcer_slots,
+                    registry.data.max_recovery_stop_owners,
                 )
                 .await?
             };
@@ -731,12 +733,13 @@ pub async fn serve_selected_owned(
                 verify_fresh_installation(&scan_root, &scan_registry, &scan_material)
             })
             .await??;
-            let client = EnforcerFullClientV3::spawn_fresh(
+            let client = EnforcerFullClientV3::spawn_fresh_with_budget(
                 &root,
                 &role_name,
                 &executable,
                 registry.data.installation_id,
                 registry.data.max_enforcer_slots,
+                registry.data.max_recovery_stop_owners,
             )
             .await?;
             client.verify_installation(registry.data.installation_id)?;
@@ -751,7 +754,17 @@ pub async fn serve_selected_owned(
                 EnforcerFullClientV3::connect_existing(&role, registry.data.max_enforcer_slots)
                     .await?;
             client.verify_installation(registry.data.installation_id)?;
-            (Some(ExecutionEnforcerV1::Full3(client)), None)
+            // This same native lease/epoch closes Original admission before
+            // the broker reads any recovery source. The Full handle remains
+            // for existing Q/F settlements; snapshots use the STOP-only port.
+            let stop = EnforcerStopClient::connect_or_spawn_existing_sealed_with_budget(
+                &role,
+                &executable,
+                registry.data.max_enforcer_slots,
+                registry.data.max_recovery_stop_owners,
+            )
+            .await?;
+            (Some(ExecutionEnforcerV1::Full3(client)), Some(stop))
         }
     };
     let material = if let Some(material) = material {
@@ -1045,9 +1058,9 @@ impl Service {
         self.stop_enforcer.is_some()
     }
     fn full_enforcer(&self) -> Result<&ExecutionEnforcerV1, BrokerErrorCodeV1> {
-        if self.recovery_only() {
-            return Err(BrokerErrorCodeV1::NeedsReconciliation);
-        }
+        // A Full3 handle already owned before recovery can still settle its
+        // existing Q/F continuations while the separate STOP port fences new
+        // starts. A pure StopsOnly service has no such handle to return.
         let enforcer = self
             .enforcer
             .as_ref()
@@ -2430,8 +2443,20 @@ impl Service {
     /// stop. This phase never emits a decision, admission, claim, copy or start.
     async fn restore_stops(&self) {
         let mut restored = 0_usize;
+        if let Some(stop) = &self.stop_enforcer
+            && stop.begin_recovery().await.is_err()
+        {
+            self.fenced.store(true, Ordering::SeqCst);
+            eprintln!(
+                "broker recovery: native admission fence is unavailable; source transfer refused"
+            );
+            return;
+        }
         if !self.material.complete {
             self.fenced.store(true, Ordering::SeqCst);
+            if let Some(stop) = &self.stop_enforcer {
+                stop.mark_recovery_incomplete().await;
+            }
         }
         let root = self.root.clone();
         let expected = self.profiles.keys().cloned().collect::<BTreeSet<_>>();
@@ -2450,6 +2475,9 @@ impl Service {
             .await;
         if inventory != Ok(false) {
             self.fenced.store(true, Ordering::SeqCst);
+            if let Some(stop) = &self.stop_enforcer {
+                stop.mark_recovery_incomplete().await;
+            }
             eprintln!("broker recovery: unknown or unsafe journal profile; new starts fenced");
         }
         // Registry validation caps profiles at 32. Poll every retained profile
@@ -2468,6 +2496,9 @@ impl Service {
                 Ok(count) => restored = restored.saturating_add(count),
                 Err(_) => {
                     self.fenced.store(true, Ordering::SeqCst);
+                    if let Some(stop) = &self.stop_enforcer {
+                        stop.mark_recovery_incomplete().await;
+                    }
                     eprintln!(
                         "broker recovery: a configured journal could not be completely restored; new starts fenced"
                     );
@@ -2476,7 +2507,11 @@ impl Service {
         }
         if let Some(enforcer) = &self.stop_enforcer {
             match enforcer.status().await {
-                Ok(status) if status.transport_healthy() && status.slot_count() == restored => {}
+                Ok(status)
+                    if status.transport_healthy()
+                        && status.recovery_fenced()
+                        && !status.recovery_incomplete()
+                        && status.owned_active() == restored => {}
                 _ => eprintln!(
                     "broker recovery: STOP transport or target coverage incomplete; admission remains fenced"
                 ),
@@ -3427,18 +3462,23 @@ async fn restore_recovered_job_pass(
         job.result(Some(BrokerErrorCodeV1::NeedsReconciliation));
         return (0, true);
     };
-    if let Some(enforcer) = stop_enforcer {
-        if pass != RestorePass::All {
-            return (0, true);
-        }
-        // There are no retirement P/Q records in this transport version. No
-        // old Q/R+ is admitted or manufactured. Once retirement is connected,
-        // its metadata-only reconciliation must precede Restore of that Arm;
-        // an unrelated failure must keep this per-job sweep advancing.
+    if let Some(stop) = stop_enforcer {
+        // This port produces STOP owners only. Existing Full3 P/Q/F metadata
+        // reconciliation precedes that Arm's Pending pass; it never creates
+        // a Q/R+ or Original capability from a restored snapshot.
         // The client owns retention and control confirmations for the whole
         // job independently of this waiter; the count is not a runtime effect.
-        let (restored, partial) = enforcer
-            .restore_report_job(Arc::clone(&report), index, job.cancel.current())
+        let (restored, partial) = stop
+            .restore_report_job_pass(
+                Arc::clone(&report),
+                index,
+                job.cancel.current(),
+                match pass {
+                    RestorePass::All => None,
+                    RestorePass::RequiredOnly => Some(false),
+                    RestorePass::PendingOnly => Some(true),
+                },
+            )
             .await;
         if partial || !recovered.managed_workspace() {
             job.result(Some(BrokerErrorCodeV1::NeedsReconciliation));

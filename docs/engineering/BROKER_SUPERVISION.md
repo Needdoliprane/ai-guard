@@ -66,6 +66,12 @@ Le sommeil, un moteur inaccessible ou un gestionnaire désactivé empêchent une
 
 L'audit de l'armement préalable couvre déjà précisément l'arrêt à échéance. L'intention d'application et les observations sont proposées à un outbox privé borné par **enqueue non bloquant**, sans conditionner le stop à leur fsync. Un writer disque isolé effectue les writes/fsync et retourne des confirmations ; sa panne, sa file pleine ou un syscall bloqué ne sont jamais attendus par l'ordonnanceur. Aucun mutex détenu par ce writer, `PlanState::update`, HTTP ou postprocessing ne protège le snapshot nécessaire au stop : chaque armement dispose d'une cible immuable vérifiée en mémoire, avec sa propre capacité runtime réservée. Une intention non confirmée n'est pas présentée comme durable.
 
+Le [candidat D7 de propriétaires STOP de reprise](D7_STOP_RECOVERY.fr.md)
+([EN](D7_STOP_RECOVERY.md)) explicite les budgets S/W, la cellule réservée au
+rattrapage, l'installation native avant ACK et le refus de fausse couverture.
+Ses tests et sa qualification restent attachés à leurs preuves propres ; ce
+contrat n'est pas déclaré satisfait par la seule présence du code candidat.
+
 Les nouvelles admissions/armements exigent leur vraie durabilité et restent refusés tant que le writer ne progresse pas. Pour les armements déjà engagés, l'ordonnanceur tente le stop indépendamment du writer et conserve au plus un état de résultat borné par job en mémoire ; aucune capture illimitée. Après retour du stockage, réconcilier les identités exactes sans double opération. Si la mémoire de résultat disparaît pendant la panne, retrouver les observations sur le même CID conservé ; ne pas affirmer qu'une preuve locale non écrite a survécu. Pas de cleanup, faux ACK, prix, allocation zéro ou quota libéré pour compenser cette perte.
 
 Disque plein/readonly ou fsync suspendu : un armement durable et sa cible encore lisible ou vérifiée en mémoire permettent l'arrêt déjà autorisé, en exposant le défaut de journal. Après restart, si preuve du CID et gateway sont tous deux indisponibles : récupération contrôlée requise, aucun kill large. La séparation empêche la contention du journal de bloquer le code de stop ; elle ne rend pas accessible un moteur ou un exécutable lui-même bloqué par l'OS.

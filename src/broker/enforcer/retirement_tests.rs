@@ -11,6 +11,12 @@ use std::{
     sync::mpsc::sync_channel,
 };
 
+#[path = "native_admission_tests.rs"]
+mod native_admission_tests;
+
+#[path = "retirement_prospective_tests.rs"]
+mod prospective_tests;
+
 /// Startup-only opt-in for short Unix socket fixture paths in read-only-root
 /// QA. Keep the historical /tmp default instead of macOS's often long TMPDIR.
 fn short_ipc_fixture_root() -> PathBuf {
@@ -44,6 +50,7 @@ pub(super) struct SyntheticReadyControl {
     return_allowed: AtomicBool,
     force_exit: AtomicBool,
     stop_observed: AtomicBool,
+    ready_allowed: AtomicBool,
 }
 static SYNTHETIC_READY: OnceLock<Mutex<BTreeMap<Uuid, Arc<SyntheticReadyControl>>>> =
     OnceLock::new();
@@ -70,11 +77,13 @@ pub(super) fn synthetic_ready_original(actor: &Arc<FullActor>) -> Option<Enforce
         if !state.gate.is_closing() {
             let stopping = state.gate.stop_reserved;
             control.stop_observed.store(stopping, Ordering::SeqCst);
-            state.status.phase = if stopping {
-                SlotPhaseV1::Stopping
-            } else {
-                SlotPhaseV1::Ready
-            };
+            if stopping || control.ready_allowed.load(Ordering::SeqCst) {
+                state.status.phase = if stopping {
+                    SlotPhaseV1::Stopping
+                } else {
+                    SlotPhaseV1::Ready
+                };
+            }
         }
         let _waiting = actor
             .wake
@@ -102,12 +111,16 @@ pub(super) struct OriginalIpcFixture {
     state: Arc<super::super::recovery::RecoveryState>,
     server: Option<tokio::task::JoinHandle<EnforcerResult<()>>>,
     controls: Vec<(Uuid, Arc<SyntheticReadyControl>)>,
+    max_slots: u32,
 }
 impl OriginalIpcFixture {
     async fn start() -> Self {
         Self::start_for_installation(Uuid::new_v4()).await
     }
     pub(super) async fn start_for_installation(installation_id: Uuid) -> Self {
+        Self::start_with_capacity(installation_id, 8).await
+    }
+    pub(super) async fn start_with_capacity(installation_id: Uuid, max_slots: u32) -> Self {
         use crate::broker::local_ipc::PrivateListener;
         let files = tempfile::Builder::new()
             .prefix("f3r-")
@@ -125,9 +138,12 @@ impl OriginalIpcFixture {
         let root = ledger.lease().ledger_root().clone();
         capability(&root, true).unwrap();
         let listener = PrivateListener::bind_new(&ledger.lease().listener_root().unwrap()).unwrap();
-        let state =
-            super::super::recovery::full_fixture_state(Arc::clone(&ledger), listener.endpoint(), 8)
-                .unwrap();
+        let state = super::super::recovery::full_fixture_state(
+            Arc::clone(&ledger),
+            listener.endpoint(),
+            max_slots,
+        )
+        .unwrap();
         ledger
             .lease()
             .publish_endpoint(listener.endpoint())
@@ -145,6 +161,7 @@ impl OriginalIpcFixture {
             state,
             server: Some(server),
             controls: Vec::new(),
+            max_slots,
         }
     }
     pub(super) fn install(
@@ -152,12 +169,20 @@ impl OriginalIpcFixture {
         registration: &RegistrationV1,
         allow_return: bool,
     ) -> Arc<SyntheticReadyControl> {
-        let id = Uuid::parse_str(&registration.arm.operation_id).unwrap();
+        self.install_arm(registration.arm_id(), allow_return)
+    }
+    pub(super) fn install_arm(
+        &mut self,
+        arm_id: &str,
+        allow_return: bool,
+    ) -> Arc<SyntheticReadyControl> {
+        let id = Uuid::parse_str(arm_id).unwrap();
         let control = Arc::new(SyntheticReadyControl {
             actor: Mutex::new(Weak::new()),
             return_allowed: AtomicBool::new(allow_return),
             force_exit: AtomicBool::new(false),
             stop_observed: AtomicBool::new(false),
+            ready_allowed: AtomicBool::new(true),
         });
         assert!(
             synthetic_registry()
@@ -170,9 +195,66 @@ impl OriginalIpcFixture {
         control
     }
     pub(super) async fn client(&self) -> super::super::client::EnforcerFullClientV3 {
-        super::super::client::EnforcerFullClientV3::connect_existing(&self.root, 8)
+        super::super::client::EnforcerFullClientV3::connect_existing(&self.root, self.max_slots)
             .await
             .unwrap()
+    }
+    pub(super) async fn register_new(
+        &self,
+        client: &super::super::client::EnforcerFullClientV3,
+        registration: RegistrationV1,
+        generation: CancelGeneration,
+    ) -> EnforcerResult<EnforcedSlot> {
+        let target = prospective_registration(&registration);
+        client
+            .reserve_prospective(target.clone(), generation.clone(), false)
+            .await?;
+        let exchange = client
+            .begin_prospective_arm_exchange(&target, &generation)
+            .await?;
+        client
+            .bind_prospective(registration, generation, exchange)
+            .await
+    }
+    async fn raw_bind(
+        &self,
+        registration: RegistrationV1,
+        generation: u64,
+        observe_only: bool,
+    ) -> EnforcerResult<FullReply> {
+        let reservation = match self
+            .raw(FullCommand::ReserveProspective {
+                prospective: Box::new(prospective_registration(&registration)),
+                generation,
+                replay_only: false,
+            })
+            .await?
+        {
+            FullReply::ProspectiveReserved { reservation } => reservation,
+            FullReply::Error { code } => return Err(code),
+            _ => return Err(EnforcerError::Conflict),
+        };
+        let original_exchange_nonce = match self
+            .raw(FullCommand::BeginProspectiveArmExchange {
+                reservation: reservation.clone(),
+                generation,
+            })
+            .await?
+        {
+            FullReply::ProspectiveArmExchange {
+                original_exchange_nonce,
+            } => original_exchange_nonce,
+            FullReply::Error { code } => return Err(code),
+            _ => return Err(EnforcerError::Conflict),
+        };
+        self.raw(FullCommand::BindProspective {
+            reservation,
+            registration: Box::new(registration),
+            generation,
+            observe_only,
+            original_exchange_nonce,
+        })
+        .await
     }
     pub(super) async fn stop_client(
         &self,
@@ -180,7 +262,7 @@ impl OriginalIpcFixture {
         crate::broker::enforcer::EnforcerStopClient::connect_or_spawn_existing_sealed(
             &self.root,
             &std::env::current_exe().map_err(|_| EnforcerError::Unavailable)?,
-            8,
+            self.max_slots,
         )
         .await
     }
@@ -238,7 +320,7 @@ impl OriginalIpcFixture {
             &capability(&self.root, false)?,
             endpoint.epoch(),
             &binding,
-            8,
+            self.max_slots,
         )
         .await?;
         Ok((stream, session))
@@ -298,6 +380,10 @@ impl OriginalIpcFixture {
         for (_, control) in &self.controls {
             control.force();
         }
+        self.full
+            .finish_unbound_prospective_fixture()
+            .await
+            .unwrap();
         let actors: Vec<_> = self.full.actors.lock().unwrap().values().cloned().collect();
         for actor in actors {
             if let Ok(mut handle) = self.full.owners.take_retiring(actor.key) {
@@ -376,11 +462,7 @@ async fn register_ack_discarded_then_new_client_replay_cannot_recreate_original_
     // any EnforcedSlot/live original capability is created for the caller.
     assert!(matches!(
         fixture
-            .raw(FullCommand::Register {
-                registration: Box::new(lost_registration.clone()),
-                generation: 0,
-                observe_only: false
-            })
+            .raw_bind(lost_registration.clone(), 0, false)
             .await
             .unwrap(),
         FullReply::Registered {
@@ -424,8 +506,8 @@ async fn register_ack_discarded_then_new_client_replay_cannot_recreate_original_
     let fresh_registration = registration(fixture.root.path());
     fixture.install(&fresh_registration, false);
     let generation = CancelGeneration::new();
-    let original = recovered
-        .register(fresh_registration.clone(), generation.clone())
+    let original = fixture
+        .register_new(&recovered, fresh_registration.clone(), generation.clone())
         .await
         .unwrap();
     // A replay through the SAME owner retains its already-issued capability.
@@ -446,12 +528,12 @@ async fn claim_reservation_cannot_be_consumed_for_another_slot_or_pending_arm() 
     let b = registration(fixture.root.path());
     fixture.install(&a, false);
     fixture.install(&b, false);
-    let slot_a = client
-        .register(a.clone(), CancelGeneration::new())
+    let slot_a = fixture
+        .register_new(&client, a.clone(), CancelGeneration::new())
         .await
         .unwrap();
-    let slot_b = client
-        .register(b.clone(), CancelGeneration::new())
+    let slot_b = fixture
+        .register_new(&client, b.clone(), CancelGeneration::new())
         .await
         .unwrap();
     let reservation = slot_a.reserve_claim(0).unwrap();
@@ -466,8 +548,8 @@ async fn claim_reservation_cannot_be_consumed_for_another_slot_or_pending_arm() 
     slot_b.revoke_unused(Uuid::new_v4()).await.unwrap();
     let c = registration(fixture.root.path());
     fixture.install(&c, false);
-    let slot_c = client
-        .register(c.clone(), CancelGeneration::new())
+    let slot_c = fixture
+        .register_new(&client, c.clone(), CancelGeneration::new())
         .await
         .unwrap();
     let reservation = slot_c.reserve_claim(0).unwrap();
@@ -489,8 +571,8 @@ async fn two_jobs_can_finalize_and_replay_the_same_retirement_uuid_independently
         let mut registration = registration(fixture.root.path());
         registration.receipt.control_namespace_uuid = shared_namespace.clone();
         fixture.install(&registration, true);
-        let slot = client
-            .register(registration, CancelGeneration::new())
+        let slot = fixture
+            .register_new(&client, registration, CancelGeneration::new())
             .await
             .unwrap();
         let unused = slot.revoke_unused(retirement_id).await.unwrap();
@@ -500,6 +582,8 @@ async fn two_jobs_can_finalize_and_replay_the_same_retirement_uuid_independently
             FullReply::Status { .. } => ("status", None),
             FullReply::Slots { .. } => ("slots", None),
             FullReply::Registered { .. } => ("registered", None),
+            FullReply::ProspectiveReserved { .. } => ("prospective_reserved", None),
+            FullReply::ProspectiveArmExchange { .. } => ("prospective_arm_exchange", None),
             FullReply::Prepared { .. } => ("prepared", None),
             FullReply::Revoked { .. } => ("revoked", None),
             FullReply::Retirement {
@@ -527,8 +611,8 @@ async fn two_jobs_can_finalize_and_replay_the_same_retirement_uuid_independently
     let mut divergent = registration(fixture.root.path());
     divergent.receipt.control_namespace_uuid = shared_namespace;
     fixture.install(&divergent, true);
-    let slot = client
-        .register(divergent, CancelGeneration::new())
+    let slot = fixture
+        .register_new(&client, divergent, CancelGeneration::new())
         .await
         .unwrap();
     let unused = slot.revoke_unused(retirement_id).await.unwrap();
@@ -549,16 +633,16 @@ async fn full_retire_waiters_and_eof_do_not_exhaust_independent_stop_admission()
     let client = fixture.client().await;
     let blocked_registration = registration(fixture.root.path());
     let blocked = fixture.install(&blocked_registration, false);
-    let slot = client
-        .register(blocked_registration, CancelGeneration::new())
+    let slot = fixture
+        .register_new(&client, blocked_registration, CancelGeneration::new())
         .await
         .unwrap();
     let unused = slot.revoke_unused(Uuid::new_v4()).await.unwrap();
     let (identity, command) = fixture.command(&unused, Uuid::new_v4());
     let other = registration(fixture.root.path());
     let other_control = fixture.install(&other, false);
-    let _other_slot = client
-        .register(other.clone(), CancelGeneration::new())
+    let _other_slot = fixture
+        .register_new(&client, other.clone(), CancelGeneration::new())
         .await
         .unwrap();
     let mut waiters = Vec::new();
@@ -673,6 +757,17 @@ fn registration(root: &Path) -> RegistrationV1 {
     .unwrap()
 }
 
+fn prospective_registration(registration: &RegistrationV1) -> ProspectiveRegistrationV1 {
+    ProspectiveRegistrationV1::new(
+        registration.control_origin_hash.clone(),
+        registration.tenant_id.clone(),
+        registration.arm.clone(),
+        registration.authority.clone(),
+        registration.owned.clone(),
+    )
+    .unwrap()
+}
+
 #[tokio::test]
 async fn tombstone_retains_capacity_until_real_handle_returns_then_q_is_replayable() {
     let files = tempfile::Builder::new()
@@ -689,7 +784,7 @@ async fn tombstone_retains_capacity_until_real_handle_returns_then_q_is_replayab
         .unwrap(),
     );
     let epoch = Uuid::new_v4();
-    let admitted = Arc::new(Mutex::new(BTreeMap::new()));
+    let admitted = NativeAdmissionRegistry::fresh();
     let full = FullState::new(
         Arc::clone(&ledger),
         epoch,
@@ -759,6 +854,7 @@ async fn tombstone_retains_capacity_until_real_handle_returns_then_q_is_replayab
         }),
         wake: Condvar::new(),
         exit: AtomicBool::new(false),
+        runtime_installed: Arc::new(AtomicBool::new(false)),
         owners: full.owners.clone(),
     });
     full.actors

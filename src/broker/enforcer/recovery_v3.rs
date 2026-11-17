@@ -221,6 +221,22 @@ pub struct EnforcerStopStatusV3 {
     granted_role: RequestedRole,
     known_stop_slots: u32,
     max_slots: u32,
+    #[serde(default)]
+    max_recovery_stop_owners: u32,
+    #[serde(default)]
+    recovery_attempt_owners: u32,
+    #[serde(default)]
+    owned_active: usize,
+    #[serde(default)]
+    recovery_fenced: bool,
+    #[serde(default)]
+    recovery_incomplete: bool,
+    #[serde(default)]
+    recovery_attempts: u64,
+    #[serde(default)]
+    recovery_attempt_failures: u64,
+    #[serde(default)]
+    recovery_attempt_in_flight: bool,
     progress: u64,
     transport_health: TransportHealth3,
     clock_healthy: bool,
@@ -229,6 +245,27 @@ pub struct EnforcerStopStatusV3 {
     retirement_count: RetirementCount3,
 }
 impl EnforcerStopStatusV3 {
+    pub fn max_recovery_stop_owners(&self) -> u32 {
+        self.max_recovery_stop_owners
+    }
+    pub fn owned_active(&self) -> usize {
+        self.owned_active
+    }
+    pub fn recovery_fenced(&self) -> bool {
+        self.recovery_fenced
+    }
+    pub fn recovery_incomplete(&self) -> bool {
+        self.recovery_incomplete
+    }
+    pub fn recovery_attempts(&self) -> u64 {
+        self.recovery_attempts
+    }
+    pub fn recovery_attempt_failures(&self) -> u64 {
+        self.recovery_attempt_failures
+    }
+    pub fn recovery_attempt_in_flight(&self) -> bool {
+        self.recovery_attempt_in_flight
+    }
     pub fn known_stop_slot_count(&self) -> u32 {
         self.known_stop_slots
     }
@@ -264,6 +301,14 @@ impl EnforcerStopStatusV3 {
             known_stop_slots: u32::try_from(value.slot_count)
                 .map_err(|_| EnforcerError::Capacity)?,
             max_slots: value.max_slots,
+            max_recovery_stop_owners: value.max_recovery_stop_owners,
+            recovery_attempt_owners: value.recovery_attempt_owners,
+            owned_active: value.owned_active,
+            recovery_fenced: value.recovery_fenced,
+            recovery_incomplete: value.recovery_incomplete,
+            recovery_attempts: value.recovery_attempts,
+            recovery_attempt_failures: value.recovery_attempt_failures,
+            recovery_attempt_in_flight: value.recovery_attempt_in_flight,
             progress: value.progress,
             transport_health: if value.transport_healthy {
                 TransportHealth3::Healthy
@@ -285,7 +330,14 @@ impl EnforcerStopStatusV3 {
             || self.retirement_count != unknown_retirements()
             || !(1..=MAX_SLOTS).contains(&self.max_slots)
             || self.max_slots != session.max_slots
-            || self.known_stop_slots > self.max_slots
+            || self.max_recovery_stop_owners > MAX_SLOTS
+            || self.recovery_attempt_owners > self.max_recovery_stop_owners.min(1)
+            || self.known_stop_slots
+                > self.max_slots
+                    + self
+                        .max_recovery_stop_owners
+                        .saturating_sub(self.recovery_attempt_owners)
+            || self.owned_active > self.known_stop_slots as usize
         {
             return Err(EnforcerError::Unauthorized);
         }
@@ -296,6 +348,14 @@ impl EnforcerStopStatusV3 {
             epoch: self.epoch.0,
             slot_count: self.known_stop_slots as usize,
             max_slots: self.max_slots,
+            max_recovery_stop_owners: self.max_recovery_stop_owners,
+            recovery_attempt_owners: self.recovery_attempt_owners,
+            owned_active: self.owned_active,
+            recovery_fenced: self.recovery_fenced,
+            recovery_incomplete: self.recovery_incomplete,
+            recovery_attempts: self.recovery_attempts,
+            recovery_attempt_failures: self.recovery_attempt_failures,
+            recovery_attempt_in_flight: self.recovery_attempt_in_flight,
             progress: self.progress,
             transport_healthy: self.transport_healthy(),
             clock_healthy: self.clock_healthy,
@@ -970,7 +1030,12 @@ async fn serve_full_command(
         } else {
             request.command.clone()
         };
-        let wait = if matches!(&command, FullCommand::Register { .. }) {
+        let wait = if matches!(
+            &command,
+            FullCommand::Register { .. }
+                | FullCommand::ReserveProspective { .. }
+                | FullCommand::BindProspective { .. }
+        ) {
             REGISTER_TIMEOUT
         } else {
             IO_TIMEOUT
@@ -1624,15 +1689,37 @@ impl Request3 {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum ReplyValue3 {
-    StatusStops { value: EnforcerStopStatusV3 },
-    StopReserved { value: StopSlotV1, replayed: bool },
-    StopStatus { value: StopSlotV1 },
-    StopAccepted { value: StopSlotV1 },
-    Error { code: EnforcerError },
+    RecoveryFenced {
+        generation: u64,
+        max_recovery_stop_owners: u32,
+    },
+    StatusStops {
+        value: EnforcerStopStatusV3,
+    },
+    StopReserved {
+        value: StopSlotV1,
+        replayed: bool,
+    },
+    StopStatus {
+        value: StopSlotV1,
+    },
+    StopAccepted {
+        value: StopSlotV1,
+    },
+    Error {
+        code: EnforcerError,
+    },
 }
 impl ReplyValue3 {
     fn from_legacy(value: StopResponse, binding: &str) -> EnforcerResult<Self> {
         Ok(match value {
+            StopResponse::RecoveryFenced {
+                generation,
+                max_recovery_stop_owners,
+            } => Self::RecoveryFenced {
+                generation,
+                max_recovery_stop_owners,
+            },
             StopResponse::StatusStops { value } => Self::StatusStops {
                 value: EnforcerStopStatusV3::from_legacy(value, binding)?,
             },
@@ -1646,6 +1733,13 @@ impl ReplyValue3 {
     }
     pub(super) fn into_legacy(self) -> StopResponse {
         match self {
+            Self::RecoveryFenced {
+                generation,
+                max_recovery_stop_owners,
+            } => StopResponse::RecoveryFenced {
+                generation,
+                max_recovery_stop_owners,
+            },
             Self::StatusStops { value } => StopResponse::StatusStops {
                 value: value.legacy(),
             },
@@ -1881,6 +1975,41 @@ impl fmt::Debug for EnforcerStopClientV3 {
     }
 }
 impl EnforcerStopClientV3 {
+    pub async fn connect_or_spawn_existing_sealed_with_budget(
+        root: &Directory,
+        executable: &Path,
+        max_slots: u32,
+        max_recovery_stop_owners: u32,
+    ) -> EnforcerResult<Self> {
+        Ok(Self {
+            inner: EnforcerStopClient::connect_existing_sealed_protocol_budget(
+                root,
+                executable,
+                max_slots,
+                max_recovery_stop_owners,
+                StopProtocol::V3,
+            )
+            .await?,
+        })
+    }
+    pub async fn connect_or_spawn_for_recovery_with_budget(
+        root: &Directory,
+        executable: &Path,
+        max_slots: u32,
+        max_recovery_stop_owners: u32,
+    ) -> EnforcerResult<Self> {
+        Ok(Self {
+            inner: EnforcerStopClient::connect_with_affinity_budget(
+                root,
+                executable,
+                max_slots,
+                max_recovery_stop_owners,
+                StopProtocol::V3,
+                StopAffinity::Legacy,
+            )
+            .await?,
+        })
+    }
     pub async fn connect_or_spawn_existing_sealed(
         root: &Directory,
         executable: &Path,
@@ -1924,6 +2053,7 @@ impl EnforcerStopClientV3 {
         match value {
             ReplyValue3::StatusStops { value }
                 if value.max_slots == self.inner.0.max_slots
+                    && value.max_recovery_stop_owners == self.inner.0.max_recovery_stop_owners
                     && current_epoch == Some(connection.epoch)
                     && !self.inner.0.watch_failed.load(Ordering::SeqCst) =>
             {

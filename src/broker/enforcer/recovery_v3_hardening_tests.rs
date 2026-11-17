@@ -334,6 +334,14 @@ fn fixed_transcripts_and_mac_domains_match_independent_literal_vectors() {
         granted_role: RequestedRole::StopsOnly,
         known_stop_slots: 0,
         max_slots: 8,
+        max_recovery_stop_owners: 0,
+        recovery_attempt_owners: 0,
+        owned_active: 0,
+        recovery_fenced: false,
+        recovery_incomplete: false,
+        recovery_attempts: 0,
+        recovery_attempt_failures: 0,
+        recovery_attempt_in_flight: false,
         progress: 1,
         transport_health: TransportHealth3::Healthy,
         clock_healthy: false,
@@ -352,7 +360,7 @@ fn fixed_transcripts_and_mac_domains_match_independent_literal_vectors() {
         proof: empty_proof(),
     };
     let s = format!(
-        r#"{{"admission_available":false,"clock_healthy":false,"epoch":"{epoch}","granted_role":"stops_only","known_stop_slots":0,"ledger_state":{ledger},"max_slots":8,"progress":1,"retirement_count":{{"reason":"ledger_unverified","state":"unknown"}},"root_binding":"{binding}","transport_health":"healthy"}}"#
+        r#"{{"admission_available":false,"clock_healthy":false,"epoch":"{epoch}","granted_role":"stops_only","known_stop_slots":0,"ledger_state":{ledger},"max_recovery_stop_owners":0,"max_slots":8,"owned_active":0,"progress":1,"recovery_attempt_failures":0,"recovery_attempt_in_flight":false,"recovery_attempt_owners":0,"recovery_attempts":0,"recovery_fenced":false,"recovery_incomplete":false,"retirement_count":{{"reason":"ledger_unverified","state":"unknown"}},"root_binding":"{binding}","transport_health":"healthy"}}"#
     );
     let w = format!(
         r#"["watch_v3",3,"{sid}","{epoch}","{}",0,{s}]"#,

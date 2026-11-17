@@ -92,6 +92,7 @@ The following is a **complete Registry wire version2 template** for a new Docker
   "installation_id": "<new-installation-uuid>",
   "root": "/absolute/private/ai-guard/broker-state",
   "max_enforcer_slots": 8,
+  "max_recovery_stop_owners": 0,
   "profiles": [
     {
       "id": "strict-docker",
@@ -164,7 +165,8 @@ For new Docker configuration, select `docker_minimal` explicitly as in the compl
 | Registry field | Meaning and bounds |
 |---|---|
 | `installation_id`, `root` | Stable installation identity and durable private state root. Replacing them does not recover an existing installation. |
-| `max_enforcer_slots` | 1–1024 retained stop targets, shared by the service; helpers also use capacity. This is not a qualified worker-count setting. |
+| `max_enforcer_slots` | S: 1–1024 native Original/pre-Arm cells shared by the service; helpers also use capacity. Recovery may use available S cells. This is not a qualified worker-count setting. |
+| `max_recovery_stop_owners` | W: 0–1024 additional native STOP cells, default 0. For W>0, one stays reserved for catch-up; permanent recovery capacity is S + max(W−1, 0). This adds runtime/thread/memory resources and no start capacity. |
 | `profiles`, `id` | 1–32 profiles; unique IDs, 1–80 ASCII letters/digits/`_`/`-`. |
 | `policy_profile`, `network` | `strict`, `review` or `observe`; `none` or `bridge`. Bridge is outbound connectivity, not a destination allowlist. |
 | `max_timeout_seconds`, `allow_capture_output` | Duration 1–86400 seconds; capture must be enabled here before a client can request it. Without a requested timeout, Submit uses the smaller of 300 seconds and this limit. |
@@ -198,6 +200,8 @@ This command installs no systemd unit or launchd job and makes no logout, reboot
 
 The enforcer's private IPC authentication belongs to the broker state and is separate from runner/viewer credentials. Existing authentication is read without rewriting it. If it is missing from a role that already has state, startup refuses to generate a replacement. Preserve the role root, its history and coherent private backups; recover the original authentication through controlled maintenance. Erasing history to obtain an apparently empty root is not a recovery procedure.
 
+The D7 candidate refuses a fresh Arm through the default Legacy selection before sending that RPC: Legacy has no native prospective factory. A new installation can explicitly select its one-time fresh Full3 role with `broker serve --config "$AIGUARD_BROKER_CONFIG" --enforcer-full3-new guarded`. The role must actually be new; never replace existing state to satisfy this check. A retained role selected with `--enforcer-full3-existing guarded` enters native recovery with admission fenced and preserves existing settlement/STOP owners. Automatic business reopening after this recovery is not provided. These compatibility and recovery-availability gaps remain open; the [D7 contract and source validation status](../../engineering/D7_STOP_RECOVERY.md) do not qualify this candidate.
+
 ### Recover authorised stops with admission closed
 
 For an existing installation that needs only to restore its proved stop targets, start the explicit restricted service:
@@ -211,6 +215,8 @@ This mode requires the existing private roots, role locks, IPC authentication an
 The service requests protocol 2's `StopsOnly` capability explicitly. It restores only targets proved by retained journal readers, keeps their original container identity and deadline, and retains durable cancellations for replay after reconnection. Start admission remains closed for the lifetime of this service: Submit, approve, resume and export cannot acquire a Full capability. Status, list, recovery-status and cancel retain their normal authentication and data dependencies; this mode does not reactivate an inactive gateway.
 
 For each recovery batch, the broker retains validated targets within its configured capacity before waiting for their individual control confirmations. Losing the client waiting for that request does not discard these targets while the broker remains running. Independent targets continue after a target fails; the result reports partial coverage. A confirmation refers to the guardian instance and target revision acknowledged at that point, not to a worker observed stopped. After a broker crash, recovery still requires the retained durable journal.
+
+Choose W explicitly before starting the role; changing a live registry does not install new native resources. With S=1/W=2, two recovered targets can retain permanent owners and one separate catch-up cell stays available. With S=1/W=1, a second target gets real bounded attempts but no active-coverage confirmation. Surplus, unavailable/incomplete source or pending native installation remains incomplete. The authenticated native STOP transport status distinguishes installed active owners from retained discovery targets and returned attempts; a blocked native call retains its cell and snapshot. W=0 cannot promise catch-up progress for a surplus. The public `recovery-status` journal view remains distinct and is not an active-owner certificate.
 
 An accepted stop reservation or cancellation confirms neither a runtime effect nor a terminal result. Partial journal coverage remains partial. The recovery transport does not prove that an older start is drained, finalise a retirement or permit a new worker to replace an ambiguous one. Missing or unsafe roots, authentication, locks or sockets require controlled recovery of those exact anchors; a new root or credential is not a substitute.
 

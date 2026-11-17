@@ -28,6 +28,13 @@ const RETRY_WINDOW: Duration = Duration::from_secs(10);
 const MAX_PENDING_ATTEMPTS: usize = 16;
 const MAX_FULL_CONNECTIONS: usize = 24;
 const MAX_STOP_CONNECTIONS: usize = 32;
+// Discovery retains its verified source independently of the much smaller
+// active native S/W budget. This is a DATA bound, never an execution permit.
+const MAX_RETAINED_STOP_TARGETS: usize = 16_384;
+
+#[path = "recovery_stop_owner.rs"]
+mod recovery_stop_owner;
+use recovery_stop_owner::{NativeStopWorker, RecoveryAttemptOwner};
 
 #[cfg(test)]
 #[path = "recovery_affinity_tests.rs"]
@@ -406,6 +413,22 @@ pub struct EnforcerStopStatusV2 {
     epoch: Uuid,
     slot_count: usize,
     max_slots: u32,
+    #[serde(default)]
+    max_recovery_stop_owners: u32,
+    #[serde(default)]
+    recovery_attempt_owners: u32,
+    #[serde(default)]
+    owned_active: usize,
+    #[serde(default)]
+    recovery_fenced: bool,
+    #[serde(default)]
+    recovery_incomplete: bool,
+    #[serde(default)]
+    recovery_attempts: u64,
+    #[serde(default)]
+    recovery_attempt_failures: u64,
+    #[serde(default)]
+    recovery_attempt_in_flight: bool,
     progress: u64,
     transport_healthy: bool,
     clock_healthy: bool,
@@ -413,6 +436,27 @@ pub struct EnforcerStopStatusV2 {
     ledger_state: LedgerState,
 }
 impl EnforcerStopStatusV2 {
+    pub fn max_recovery_stop_owners(&self) -> u32 {
+        self.max_recovery_stop_owners
+    }
+    pub fn owned_active(&self) -> usize {
+        self.owned_active
+    }
+    pub fn recovery_fenced(&self) -> bool {
+        self.recovery_fenced
+    }
+    pub fn recovery_incomplete(&self) -> bool {
+        self.recovery_incomplete
+    }
+    pub fn recovery_attempts(&self) -> u64 {
+        self.recovery_attempts
+    }
+    pub fn recovery_attempt_failures(&self) -> u64 {
+        self.recovery_attempt_failures
+    }
+    pub fn recovery_attempt_in_flight(&self) -> bool {
+        self.recovery_attempt_in_flight
+    }
     pub fn slot_count(&self) -> usize {
         self.slot_count
     }
@@ -432,6 +476,8 @@ impl EnforcerStopStatusV2 {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum StopRequest {
+    BeginRecovery {},
+    RecoveryIncomplete {},
     StatusStops {},
     WatchStops {},
     RestoreRequiredStop {
@@ -448,16 +494,34 @@ enum StopRequest {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum StopResponse {
-    StatusStops { value: EnforcerStopStatusV2 },
-    StopReserved { value: StopSlotV1, replayed: bool },
-    StopStatus { value: StopSlotV1 },
-    StopAccepted { value: StopSlotV1 },
-    Error { code: EnforcerError },
+    RecoveryFenced {
+        generation: u64,
+        max_recovery_stop_owners: u32,
+    },
+    StatusStops {
+        value: EnforcerStopStatusV2,
+    },
+    StopReserved {
+        value: StopSlotV1,
+        replayed: bool,
+    },
+    StopStatus {
+        value: StopSlotV1,
+    },
+    StopAccepted {
+        value: StopSlotV1,
+    },
+    Error {
+        code: EnforcerError,
+    },
 }
 
 pub(super) struct RecoveryState {
     pub(super) epoch: Uuid,
     pub(super) max_slots: u32,
+    pub(super) max_recovery_stop_owners: u32,
+    recovery_attempt: Option<RecoveryAttemptOwner>,
+    recovery_incomplete: AtomicBool,
     pub(super) capability: [u8; 32],
     pub(super) root_binding: String,
     pub(super) clock: Option<Arc<NativeHostClock>>,
@@ -498,13 +562,16 @@ impl RecoveryState {
         Self {
             epoch,
             max_slots,
+            max_recovery_stop_owners: 0,
+            recovery_attempt: None,
+            recovery_incomplete: AtomicBool::new(false),
             capability,
             root_binding,
             clock,
             lease,
             transport_v3: None,
             full: Mutex::new(None),
-            admitted: Arc::new(Mutex::new(BTreeMap::new())),
+            admitted: super::retirement::NativeAdmissionRegistry::fresh(),
             full_stops: Mutex::new(BTreeMap::new()),
             full_connections: Arc::new(tokio::sync::Semaphore::new(MAX_FULL_CONNECTIONS)),
             stop_connections: Arc::new(tokio::sync::Semaphore::new(MAX_STOP_CONNECTIONS)),
@@ -517,6 +584,31 @@ impl RecoveryState {
             #[cfg(test)]
             faults: TestFaults::from_environment(),
         }
+    }
+    fn install_recovery_budget(&mut self, budget: u32) -> EnforcerResult<()> {
+        if budget > MAX_SLOTS {
+            return Err(EnforcerError::InvalidInput);
+        }
+        if budget > 0 {
+            // One real runtime context is reserved before any active W cell
+            // can be accepted. It cannot be borrowed from an accepted target.
+            self.recovery_attempt = Some(RecoveryAttemptOwner::install(
+                self.lease.clone().ok_or(EnforcerError::UnsafeFilesystem)?,
+                self.clock.clone(),
+            )?);
+        }
+        self.max_recovery_stop_owners = budget;
+        Ok(())
+    }
+    fn begin_recovery(&self) -> EnforcerResult<u64> {
+        let generation = self.admitted.begin_recovery()?;
+        if let Some(full) = self.full_owner()? {
+            full.reserve_recovery_stops()?;
+        }
+        Ok(generation)
+    }
+    fn active_capacity(&self) -> usize {
+        self.max_slots as usize + self.max_recovery_stop_owners.saturating_sub(1) as usize
     }
     fn retain_transport_v3(
         &mut self,
@@ -573,10 +665,47 @@ impl RecoveryState {
             .lock()
             .map_err(|_| EnforcerError::Unhealthy)?
             .len();
+        let active_stops = self
+            .slots
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?
+            .values()
+            .filter(|actor| actor.native_installed())
+            .count();
+        let full_slots = self
+            .full_stops
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let full = self.full_owner()?;
+        let active_full = full.as_ref().map_or(0, |full| {
+            full_slots
+                .iter()
+                .filter(|slot| {
+                    full.native_stop_installed(&slot.arm_id, &slot.registration_hash)
+                        .is_ok()
+                })
+                .count()
+        });
+        let (recovery_attempts, recovery_attempt_failures, recovery_attempt_in_flight) = self
+            .recovery_attempt
+            .as_ref()
+            .map_or((0, 0, false), RecoveryAttemptOwner::observations);
         Ok(EnforcerStopStatusV2 {
             epoch: self.epoch,
             slot_count,
             max_slots: self.max_slots,
+            max_recovery_stop_owners: self.max_recovery_stop_owners,
+            recovery_attempt_owners: u32::from(self.recovery_attempt.is_some()),
+            owned_active: active_stops + active_full,
+            recovery_fenced: self.admitted.fenced(),
+            recovery_incomplete: self.recovery_incomplete.load(Ordering::SeqCst)
+                || active_stops + active_full != slot_count,
+            recovery_attempts,
+            recovery_attempt_failures,
+            recovery_attempt_in_flight,
             progress: self.progress.load(Ordering::SeqCst),
             transport_healthy: self.transport_healthy.load(Ordering::SeqCst),
             clock_healthy: self.clock_healthy.load(Ordering::SeqCst),
@@ -616,6 +745,8 @@ struct StopActor {
     stop: AtomicBool,
     // This is startup ownership, never join/quiescence/retirement evidence.
     worker_owned: AtomicBool,
+    native_ready: AtomicBool,
+    native_worker: Mutex<Option<NativeStopWorker>>,
     next_start: Mutex<Instant>,
     _lease: EnforcerRoleLeaseV2,
     #[cfg(test)]
@@ -626,6 +757,13 @@ struct StopActor {
     fault_marker: Option<PathBuf>,
 }
 impl StopActor {
+    fn native_installed(&self) -> bool {
+        self.native_ready.load(Ordering::SeqCst)
+            && self
+                .native_worker
+                .lock()
+                .is_ok_and(|owner| owner.as_ref().is_some_and(NativeStopWorker::is_live))
+    }
     fn snapshot(&self) -> EnforcerResult<StopSlotV1> {
         self.value
             .lock()
@@ -640,22 +778,54 @@ pub async fn run_internal_recovery_enforcer(
     root: &Directory,
     max_slots: u32,
 ) -> EnforcerResult<()> {
-    if !(1..=MAX_SLOTS).contains(&max_slots) {
+    run_internal_recovery_enforcer_with_budget(root, max_slots, 0).await
+}
+pub async fn run_internal_recovery_enforcer_with_budget(
+    root: &Directory,
+    max_slots: u32,
+    max_recovery_stop_owners: u32,
+) -> EnforcerResult<()> {
+    if !(1..=MAX_SLOTS).contains(&max_slots) || max_recovery_stop_owners > MAX_SLOTS {
         return Err(EnforcerError::InvalidInput);
     }
     let capability = capability(root, false)?;
     let lease = EnforcerRoleLeaseV2::acquire_existing(root)?;
-    run_listener(root, max_slots, capability, lease, None, false).await
+    run_listener(
+        root,
+        max_slots,
+        max_recovery_stop_owners,
+        capability,
+        lease,
+        None,
+        false,
+    )
+    .await
 }
 
 pub(super) async fn run_full_listener(
     ledger: Arc<super::ledger::RetirementLedger>,
     max_slots: u32,
 ) -> EnforcerResult<()> {
+    run_full_listener_with_budget(ledger, max_slots, 0).await
+}
+pub(super) async fn run_full_listener_with_budget(
+    ledger: Arc<super::ledger::RetirementLedger>,
+    max_slots: u32,
+    max_recovery_stop_owners: u32,
+) -> EnforcerResult<()> {
     let lease = ledger.lease();
     let root = lease.ledger_root().clone();
     let capability = capability(&root, false)?;
-    run_listener(&root, max_slots, capability, lease, Some(ledger), false).await
+    run_listener(
+        &root,
+        max_slots,
+        max_recovery_stop_owners,
+        capability,
+        lease,
+        Some(ledger),
+        false,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -692,14 +862,31 @@ pub(super) async fn run_full_existing_listener(
     root: &Directory,
     max_slots: u32,
 ) -> EnforcerResult<()> {
+    run_full_existing_listener_with_budget(root, max_slots, 0).await
+}
+pub(super) async fn run_full_existing_listener_with_budget(
+    root: &Directory,
+    max_slots: u32,
+    max_recovery_stop_owners: u32,
+) -> EnforcerResult<()> {
     let capability = capability(root, false)?;
     let lease = EnforcerRoleLeaseV2::acquire_existing(root)?;
-    run_listener(root, max_slots, capability, lease, None, true).await
+    run_listener(
+        root,
+        max_slots,
+        max_recovery_stop_owners,
+        capability,
+        lease,
+        None,
+        true,
+    )
+    .await
 }
 
 async fn run_listener(
     root: &Directory,
     max_slots: u32,
+    max_recovery_stop_owners: u32,
     capability: [u8; 32],
     lease: EnforcerRoleLeaseV2,
     full_ledger: Option<Arc<super::ledger::RetirementLedger>>,
@@ -715,6 +902,12 @@ async fn run_listener(
         NativeHostClock::new().ok().map(Arc::new),
         Some(lease.clone()),
     );
+    if full_ledger.is_none() {
+        // The real lease owns this restrictive latch before either ledger
+        // scan, endpoint publication or asynchronous Full construction.
+        state.admitted = super::retirement::NativeAdmissionRegistry::recovery_fenced();
+    }
+    state.install_recovery_budget(max_recovery_stop_owners)?;
     if let Some(ledger) = full_ledger {
         *state.full.lock().map_err(|_| EnforcerError::Unhealthy)? =
             Some(super::retirement::FullState::new(
@@ -747,6 +940,9 @@ async fn run_listener(
                     state.clock.clone(),
                     Arc::clone(&state.admitted),
                 )
+                // Admission -> publication is the one lock order. The newly
+                // constructed Full inherits this lease's existing fence.
+                && let Ok(_admission) = state.admitted.lock()
                 && let Ok(mut retained) = state.full.lock()
             {
                 *retained = Some(full);
@@ -921,6 +1117,17 @@ async fn serve_connection_with_permit(
 }
 fn dispatch(state: &Arc<RecoveryState>, request: StopRequest) -> EnforcerResult<StopResponse> {
     match request {
+        StopRequest::BeginRecovery {} => Ok(StopResponse::RecoveryFenced {
+            generation: state.begin_recovery()?,
+            max_recovery_stop_owners: state.max_recovery_stop_owners,
+        }),
+        StopRequest::RecoveryIncomplete {} => {
+            state.recovery_incomplete.store(true, Ordering::SeqCst);
+            Ok(StopResponse::RecoveryFenced {
+                generation: state.begin_recovery()?,
+                max_recovery_stop_owners: state.max_recovery_stop_owners,
+            })
+        }
         StopRequest::StatusStops {} => Ok(StopResponse::StatusStops {
             value: state.status()?,
         }),
@@ -1027,6 +1234,7 @@ fn reserve(
     request: RestoreRequiredStopV1,
 ) -> EnforcerResult<StopResponse> {
     request.validate()?;
+    state.begin_recovery()?;
     let mut admitted = state
         .admitted
         .lock()
@@ -1034,9 +1242,27 @@ fn reserve(
     let full = state.full_owner()?;
     if let Some(full) = &full {
         full.check_restore(&request.registration.arm.operation_id)?;
-        if let Some(status) =
-            full.restore_existing(&request.registration, request.cancel_generation)?
-        {
+        let existing = full.restore_existing(&request.registration, request.cancel_generation)?;
+        let existing = match existing {
+            Some(status) => Some(status),
+            None => full.restore_prospective_stop(
+                &request.registration,
+                request.cancel_generation,
+                request.durable_cancel.is_some(),
+            )?,
+        };
+        if let Some(status) = existing {
+            full.native_stop_installed(
+                &request.registration.arm.operation_id,
+                &request.registration_hash,
+            )?;
+            if request.durable_cancel.is_some() {
+                full.cancel(
+                    &request.registration.arm.operation_id,
+                    &request.registration_hash,
+                    request.cancel_generation,
+                )?;
+            }
             let mut retained = state
                 .full_stops
                 .lock()
@@ -1055,6 +1281,7 @@ fn reserve(
                     stop_failures: 0,
                 });
             update_full_stop(slot, &status);
+            seed_stop_cancel(slot, &request)?;
             return Ok(StopResponse::StopReserved {
                 value: slot.clone(),
                 replayed,
@@ -1074,7 +1301,18 @@ fn reserve(
             if let Some(full) = &full {
                 full.check_new_stop_admission()?;
             }
-            if admitted.len() >= state.max_slots as usize || admitted.contains_key(&key) {
+            if admitted.contains_key(&key) {
+                // A native Original/prospective identity cannot be replaced
+                // by a Capacity fallback or an unrelated STOP cell.
+                return Err(EnforcerError::Conflict);
+            }
+            if admitted.len() >= state.active_capacity() {
+                state.recovery_incomplete.store(true, Ordering::SeqCst);
+                if let Some(attempt) = &state.recovery_attempt {
+                    // Scheduling an exact attempt is not active ownership.
+                    // The source/cache and its cause remain retained.
+                    let _ = attempt.try_schedule(request);
+                }
                 return Err(EnforcerError::Capacity);
             }
             let lease = state.lease.clone().ok_or(EnforcerError::UnsafeFilesystem)?;
@@ -1091,8 +1329,10 @@ fn reserve(
                     cancel_prefix: Vec::new(),
                     stop_failures: 0,
                 }),
-                stop: AtomicBool::new(false),
+                stop: AtomicBool::new(request.durable_cancel.is_some()),
                 worker_owned: AtomicBool::new(false),
+                native_ready: AtomicBool::new(false),
+                native_worker: Mutex::new(None),
                 next_start: Mutex::new(Instant::now()),
                 _lease: lease,
                 #[cfg(test)]
@@ -1108,13 +1348,52 @@ fn reserve(
         }
     };
     drop(admitted);
+    {
+        let mut value = actor.value.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        // This also handles a replay carrying a later verified Cancel prefix.
+        // Admission confirms the latest requested Cancel in native RAM before
+        // returning, even if the separate delivery RPC/ACK is then lost.
+        let order = prefix_order(&value.cancel_prefix, &request.cancel_prefix)?;
+        value.generation = value.generation.max(request.cancel_generation);
+        if order != std::cmp::Ordering::Less {
+            value.cancel_command_id = request
+                .durable_cancel
+                .as_ref()
+                .map(|cancel| cancel.command_id);
+            value.durable_cancel = request.durable_cancel.clone();
+            value.cancel_prefix = request.cancel_prefix.clone();
+        }
+        if value.durable_cancel.is_some() {
+            value.phase = StopPhaseV1::StopRequested;
+            actor.stop.store(true, Ordering::SeqCst);
+        }
+    }
     // Reservation precedes spawning. No runtime reopen, thread creation or
     // engine IO occurs while the actor map is locked, including on failure.
     ensure_stop_actor(Arc::clone(&actor), state.clock.clone());
+    if !actor.native_installed() {
+        return Err(EnforcerError::NotReady);
+    }
     Ok(StopResponse::StopReserved {
         value: actor.snapshot()?,
         replayed,
     })
+}
+fn seed_stop_cancel(slot: &mut StopSlotV1, request: &RestoreRequiredStopV1) -> EnforcerResult<()> {
+    let order = prefix_order(&slot.cancel_prefix, &request.cancel_prefix)?;
+    slot.generation = slot.generation.max(request.cancel_generation);
+    if order != std::cmp::Ordering::Less {
+        slot.cancel_command_id = request
+            .durable_cancel
+            .as_ref()
+            .map(|cancel| cancel.command_id);
+        slot.durable_cancel = request.durable_cancel.clone();
+        slot.cancel_prefix = request.cancel_prefix.clone();
+    }
+    if slot.durable_cancel.is_some() {
+        slot.phase = StopPhaseV1::StopRequested;
+    }
+    Ok(())
 }
 fn update_full_stop(slot: &mut StopSlotV1, status: &EnforcerSlotStatusV1) {
     slot.generation = slot.generation.max(status.generation);
@@ -1127,125 +1406,7 @@ fn update_full_stop(slot: &mut StopSlotV1, status: &EnforcerSlotStatusV1) {
     };
 }
 fn ensure_stop_actor(actor: Arc<StopActor>, clock: Option<Arc<NativeHostClock>>) -> bool {
-    if actor.worker_owned.load(Ordering::SeqCst) {
-        return false;
-    }
-    let Ok(mut next) = actor.next_start.lock() else {
-        return false;
-    };
-    if *next > Instant::now()
-        || actor
-            .worker_owned
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-    {
-        return false;
-    }
-    *next = Instant::now() + Duration::from_secs(1);
-    drop(next);
-    if start_stop_actor(Arc::clone(&actor), clock).is_err() {
-        if let Ok(mut value) = actor.value.lock() {
-            value.phase = StopPhaseV1::Quarantined;
-            value.stop_failures = value.stop_failures.saturating_add(1);
-        }
-        // spawn returned Err: no OS thread ever owned this attempt. A runtime
-        // reopen failure inside a live thread never clears this ownership.
-        actor.worker_owned.store(false, Ordering::SeqCst);
-    }
-    true
-}
-fn start_stop_actor(
-    actor: Arc<StopActor>,
-    clock: Option<Arc<NativeHostClock>>,
-) -> EnforcerResult<()> {
-    #[cfg(test)]
-    if actor.fail_spawn_once.swap(false, Ordering::SeqCst) {
-        record_fault(&actor.fault_marker);
-        return Err(EnforcerError::Unavailable);
-    }
-    #[cfg(test)]
-    let spawned_marker = actor
-        .started_marker
-        .as_ref()
-        .map(|marker| marker.with_extension("spawned"));
-    std::thread::Builder::new()
-        .name("enforcer-recovered-stop".into())
-        .stack_size(1024 * 1024)
-        .spawn(move || {
-            #[cfg(test)]
-            record_started(&actor.started_marker);
-            let runtime = loop {
-                match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(runtime) => break runtime,
-                    Err(_) => {
-                        if let Ok(mut value) = actor.value.lock() {
-                            value.phase = StopPhaseV1::Quarantined;
-                            value.stop_failures = value.stop_failures.saturating_add(1);
-                        }
-                        // Keep the same OS thread while its runtime resources
-                        // are unavailable. No second worker or fake join.
-                        std::thread::sleep(Duration::from_secs(1));
-                    }
-                }
-            };
-            let managed = loop {
-                match runtime.block_on(crate::runtime::ManagedRuntime::reopen(
-                    actor.registration.authority.clone(),
-                )) {
-                    Ok(managed) => break managed,
-                    Err(_) => {
-                        if let Ok(mut value) = actor.value.lock() {
-                            value.phase = StopPhaseV1::Quarantined;
-                            value.stop_failures = value.stop_failures.saturating_add(1);
-                        }
-                        std::thread::sleep(Duration::from_secs(1));
-                    }
-                }
-            };
-            let mut stopping = false;
-            let mut last_ns = None;
-            loop {
-                let live = clock
-                    .as_ref()
-                    .and_then(|clock| clock.sample().ok())
-                    .is_some_and(|sample| {
-                        let Ok(now) = sample.continuous_ns() else {
-                            return false;
-                        };
-                        let monotone = last_ns.is_none_or(|last| now >= last);
-                        last_ns = Some(now);
-                        monotone && actor.registration.arm.validate_clock_check(&sample).is_ok()
-                    });
-                stopping |= !live || actor.stop.load(Ordering::SeqCst);
-                if let Ok(mut value) = actor.value.lock() {
-                    value.phase = if stopping {
-                        StopPhaseV1::StopRequested
-                    } else {
-                        StopPhaseV1::StopReady
-                    };
-                }
-                if stopping {
-                    let result =
-                        runtime.block_on(managed.stop_snapshot_owned(&actor.registration.owned));
-                    if let Ok(mut value) = actor.value.lock() {
-                        value.phase = StopPhaseV1::Quarantined;
-                        if result.is_err() {
-                            value.stop_failures = value.stop_failures.saturating_add(1);
-                        }
-                    }
-                }
-                // A transport/observation success is never a drained old start or
-                // a retirement witness. Keep the exact CID and original deadline.
-                std::thread::sleep(Duration::from_millis(250));
-            }
-        })
-        .map_err(|_| EnforcerError::Unavailable)?;
-    #[cfg(test)]
-    record_marker(&spawned_marker);
-    Ok(())
+    recovery_stop_owner::ensure(actor, clock)
 }
 
 /// An authenticated StopsOnly capability. No Deref, From, start guard or Full
@@ -1329,6 +1490,7 @@ struct StopClient {
     root: Directory,
     executable: PathBuf,
     max_slots: u32,
+    max_recovery_stop_owners: u32,
     capability: [u8; 32],
     protocol: StopProtocol,
     affinity: StopAffinity,
@@ -1348,6 +1510,7 @@ struct StopCache {
     epoch: Option<Uuid>,
     observation_version: u64,
     next_attempt: u64,
+    retry_cursor: Option<String>,
     entries: BTreeMap<String, PendingRestore>,
 }
 struct PendingRestore {
@@ -1433,6 +1596,22 @@ impl EnforcerStopClient {
     ) -> EnforcerResult<Self> {
         Self::connect_with_protocol(root, executable, max_slots, StopProtocol::V2).await
     }
+    pub async fn connect_or_spawn_for_recovery_with_budget(
+        root: &Directory,
+        executable: &Path,
+        max_slots: u32,
+        max_recovery_stop_owners: u32,
+    ) -> EnforcerResult<Self> {
+        Self::connect_with_affinity_budget(
+            root,
+            executable,
+            max_slots,
+            max_recovery_stop_owners,
+            StopProtocol::V2,
+            StopAffinity::Legacy,
+        )
+        .await
+    }
     async fn connect_with_protocol(
         root: &Directory,
         executable: &Path,
@@ -1451,10 +1630,35 @@ impl EnforcerStopClient {
     ) -> EnforcerResult<Self> {
         Self::connect_existing_sealed_protocol(root, executable, max_slots, StopProtocol::V3).await
     }
+    pub async fn connect_or_spawn_existing_sealed_with_budget(
+        root: &Directory,
+        executable: &Path,
+        max_slots: u32,
+        max_recovery_stop_owners: u32,
+    ) -> EnforcerResult<Self> {
+        Self::connect_existing_sealed_protocol_budget(
+            root,
+            executable,
+            max_slots,
+            max_recovery_stop_owners,
+            StopProtocol::V3,
+        )
+        .await
+    }
     async fn connect_existing_sealed_protocol(
         root: &Directory,
         executable: &Path,
         max_slots: u32,
+        protocol: StopProtocol,
+    ) -> EnforcerResult<Self> {
+        Self::connect_existing_sealed_protocol_budget(root, executable, max_slots, 0, protocol)
+            .await
+    }
+    async fn connect_existing_sealed_protocol_budget(
+        root: &Directory,
+        executable: &Path,
+        max_slots: u32,
+        max_recovery_stop_owners: u32,
         protocol: StopProtocol,
     ) -> EnforcerResult<Self> {
         if !(1..=MAX_SLOTS).contains(&max_slots) || !executable.is_absolute() {
@@ -1466,10 +1670,11 @@ impl EnforcerStopClient {
         })
         .await
         .map_err(|_| EnforcerError::Unavailable)??;
-        Self::connect_with_affinity(
+        Self::connect_with_affinity_budget(
             root,
             executable,
             max_slots,
+            max_recovery_stop_owners,
             protocol,
             StopAffinity::ExistingFull3(expected),
         )
@@ -1482,7 +1687,20 @@ impl EnforcerStopClient {
         protocol: StopProtocol,
         affinity: StopAffinity,
     ) -> EnforcerResult<Self> {
-        if !(1..=MAX_SLOTS).contains(&max_slots) || !executable.is_absolute() {
+        Self::connect_with_affinity_budget(root, executable, max_slots, 0, protocol, affinity).await
+    }
+    async fn connect_with_affinity_budget(
+        root: &Directory,
+        executable: &Path,
+        max_slots: u32,
+        max_recovery_stop_owners: u32,
+        protocol: StopProtocol,
+        affinity: StopAffinity,
+    ) -> EnforcerResult<Self> {
+        if !(1..=MAX_SLOTS).contains(&max_slots)
+            || max_recovery_stop_owners > MAX_SLOTS
+            || !executable.is_absolute()
+        {
             return Err(EnforcerError::InvalidInput);
         }
         root.revalidate()
@@ -1492,6 +1710,7 @@ impl EnforcerStopClient {
             root: root.clone(),
             executable: executable.into(),
             max_slots,
+            max_recovery_stop_owners,
             capability,
             protocol,
             affinity,
@@ -1511,6 +1730,9 @@ impl EnforcerStopClient {
             owners.borrow_mut().push(Arc::downgrade(&client.0));
         });
         client.ensure_open().await?;
+        // Capability negotiation is a real authenticated native operation.
+        // An old daemon cannot be treated as fenced from broker DATA/status.
+        client.begin_recovery().await?;
         tokio::spawn(monitor_recovery(Arc::downgrade(&client.0)));
         Ok(client)
     }
@@ -1573,7 +1795,12 @@ impl EnforcerStopClient {
         }
         let lease = EnforcerRoleLeaseV2::acquire_existing(&self.0.root)?;
         drop(lease);
-        super::client::spawn_recovery_helper(&self.0.root, &self.0.executable, self.0.max_slots)?;
+        super::client::spawn_recovery_helper_with_budget(
+            &self.0.root,
+            &self.0.executable,
+            self.0.max_slots,
+            self.0.max_recovery_stop_owners,
+        )?;
         let expires = Instant::now() + RETRY_WINDOW;
         loop {
             match self.open_observed().await {
@@ -1769,6 +1996,7 @@ impl EnforcerStopClient {
             (epoch, StopResponse::StatusStops { value })
                 if value.epoch == epoch
                     && value.max_slots == self.0.max_slots
+                    && value.max_recovery_stop_owners == self.0.max_recovery_stop_owners
                     && !value.admission_available
                     && !self.0.watch_failed.load(Ordering::SeqCst) =>
             {
@@ -1776,6 +2004,25 @@ impl EnforcerStopClient {
             }
             _ => Err(EnforcerError::Unavailable),
         }
+    }
+    pub(crate) async fn begin_recovery(&self) -> EnforcerResult<u64> {
+        match self.request(StopRequest::BeginRecovery {}).await? {
+            (
+                _,
+                StopResponse::RecoveryFenced {
+                    generation,
+                    max_recovery_stop_owners,
+                },
+            ) if generation > 0 && max_recovery_stop_owners == self.0.max_recovery_stop_owners => {
+                Ok(generation)
+            }
+            _ => Err(EnforcerError::Unauthorized),
+        }
+    }
+    pub(crate) async fn mark_recovery_incomplete(&self) {
+        // Restrictive information only. A lost notification cannot authorize
+        // coverage or reopen the native Original admission gate.
+        let _ = self.request(StopRequest::RecoveryIncomplete {}).await;
     }
     #[cfg(test)]
     pub(crate) async fn negotiate_v3_frame_for_test(
@@ -1893,7 +2140,7 @@ impl EnforcerStopClient {
     }
     fn retain_in(
         cache: &mut StopCache,
-        max_slots: u32,
+        _max_slots: u32,
         mut retained: RetainedRestore,
     ) -> EnforcerResult<String> {
         let key = retained.request.registration.arm.operation_id.clone();
@@ -1932,7 +2179,7 @@ impl EnforcerStopClient {
                 // its eventual ACK cannot clear this new desired revision.
             }
         } else {
-            if cache.entries.len() >= max_slots as usize {
+            if cache.entries.len() >= MAX_RETAINED_STOP_TARGETS {
                 return Err(EnforcerError::Capacity);
             }
             cache.entries.insert(
@@ -2066,9 +2313,14 @@ impl EnforcerStopClient {
             match self.claim(&key)? {
                 Claim::Acknowledged => return Ok(()),
                 Claim::Attempt(attempt) => {
-                    self.spawn_attempt(attempt)
+                    match self
+                        .spawn_attempt(attempt)
                         .await
-                        .map_err(|_| EnforcerError::Unavailable)??;
+                        .map_err(|_| EnforcerError::Unavailable)?
+                    {
+                        Ok(()) | Err(EnforcerError::NotReady) => {}
+                        Err(error) => return Err(error),
+                    }
                     // A successful RPC can now be historical (or a newer
                     // desired revision can exist). Count only the current
                     // epoch/revision ACK on the next claim, never that RPC alone.
@@ -2098,6 +2350,9 @@ impl EnforcerStopClient {
     }
     async fn restore_prepared_batch(&self, prepared: RetainedBatch) -> RestoreBatchResult {
         let (keys, mut outcome) = self.retain_batch(prepared);
+        if outcome.failure.is_some() {
+            self.mark_recovery_incomplete().await;
+        }
         if keys.is_empty() {
             return outcome;
         }
@@ -2143,10 +2398,14 @@ impl EnforcerStopClient {
                 outcome.failure.get_or_insert(EnforcerError::Unhealthy);
             }
         }
+        if outcome.failure.is_some() {
+            self.mark_recovery_incomplete().await;
+        }
         outcome
     }
     async fn perform_attempt(&self, mut retained: RetainedRestore) -> EnforcerResult<Uuid> {
         self.0.affinity.check_retained(&retained)?;
+        self.begin_recovery().await?;
         let owner = retained.owner.clone();
         tokio::task::spawn_blocking(move || owner.revalidate())
             .await
@@ -2191,6 +2450,20 @@ impl EnforcerStopClient {
         job_index: usize,
         generation: u64,
     ) -> (usize, bool) {
+        self.restore_report_job_pass(report, job_index, generation, None)
+            .await
+    }
+    pub(crate) async fn restore_report_job_pass(
+        &self,
+        report: Arc<StopRecoveryReportV1>,
+        job_index: usize,
+        generation: u64,
+        pending_only: Option<bool>,
+    ) -> (usize, bool) {
+        let source_incomplete = report.incomplete();
+        if source_incomplete {
+            self.mark_recovery_incomplete().await;
+        }
         let affinity = self.0.affinity.clone();
         let receiver = self.start_owned_batch(move || {
             let Some(job) = report.jobs().get(job_index) else {
@@ -2199,6 +2472,17 @@ impl EnforcerStopClient {
             job.stops()
                 .iter()
                 .enumerate()
+                .filter(|(_, target)| {
+                    use crate::broker::retirement_checkpoint::RetirementEntryV1;
+                    !matches!(target.retirement(), Some(RetirementEntryV1::Final(_)))
+                        && pending_only.is_none_or(|wanted| {
+                            wanted
+                                == matches!(
+                                    target.retirement(),
+                                    Some(RetirementEntryV1::Pending(_))
+                                )
+                        })
+                })
                 .map(|(index, target)| {
                     let cancel = target
                         .cancel_after_arm()
@@ -2226,19 +2510,32 @@ impl EnforcerStopClient {
             .await
             .unwrap_or_else(|_| RestoreBatchResult::failed(EnforcerError::Unavailable));
         // These are control confirmations, never observed stopped workers.
-        (outcome.confirmed, outcome.failure.is_some())
+        (
+            outcome.confirmed,
+            source_incomplete || outcome.failure.is_some(),
+        )
     }
     pub(crate) async fn deliver_projection(
         &self,
         projection: Arc<CancelStopProjectionV1>,
         generation: u64,
     ) -> EnforcerResult<()> {
+        let source_incomplete = projection.incomplete();
+        if source_incomplete {
+            self.mark_recovery_incomplete().await;
+        }
         let affinity = self.0.affinity.clone();
         let receiver = self.start_owned_batch(move || {
             projection
                 .stops()
                 .iter()
                 .enumerate()
+                .filter(|(_, target)| {
+                    !matches!(
+                        target.retirement(),
+                        Some(crate::broker::retirement_checkpoint::RetirementEntryV1::Final(_))
+                    )
+                })
                 .map(|(index, target)| {
                     let prefix = projection
                         .cancel_prefix_for_stop(index)
@@ -2256,7 +2553,11 @@ impl EnforcerStopClient {
                 .collect()
         });
         let outcome = receiver.await.map_err(|_| EnforcerError::Unavailable)?;
-        outcome.failure.map_or(Ok(()), Err)
+        match outcome.failure {
+            Some(error) => Err(error),
+            None if source_incomplete => Err(EnforcerError::Unavailable),
+            None => Ok(()),
+        }
     }
 }
 type WatchReader = (
@@ -2337,8 +2638,8 @@ async fn monitor_recovery(weak: std::sync::Weak<StopClient>) {
             .cache
             .lock()
             .ok()
-            .map(|cache| {
-                cache
+            .map(|mut cache| {
+                let mut eligible = cache
                     .entries
                     .iter()
                     .filter(|(_, entry)| {
@@ -2348,9 +2649,17 @@ async fn monitor_recovery(weak: std::sync::Weak<StopClient>) {
                                 entry.acknowledged != Some((epoch, entry.revision))
                             })
                     })
-                    .take(MAX_PENDING_ATTEMPTS)
                     .map(|(key, _)| key.clone())
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+                if let Some(cursor) = &cache.retry_cursor {
+                    let start = eligible.partition_point(|key| key <= cursor);
+                    eligible.rotate_left(start);
+                }
+                eligible.truncate(MAX_PENDING_ATTEMPTS);
+                if let Some(last) = eligible.last() {
+                    cache.retry_cursor = Some(last.clone());
+                }
+                eligible
             })
             .unwrap_or_default();
         for key in keys {

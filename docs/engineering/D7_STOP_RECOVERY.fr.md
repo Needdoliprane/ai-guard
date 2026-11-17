@@ -1,0 +1,80 @@
+# D7 : propriétaires STOP natifs de reprise
+
+[English](D7_STOP_RECOVERY.md). Candidat du 17 novembre 2026. Compilation,
+régressions logicielles et revue indépendante de ce candidat restent
+**NOT_RUN** jusqu'à leurs preuves distinctes. Ce document ne qualifie ni
+moteur, ni échéance physique, ni gate de production.
+
+Le registre accepte `max_recovery_stop_owners` (`W`, défaut `0`, plage
+`0..=1024`) indépendamment de `max_enforcer_slots` (`S`, inchangé). L'enforcer
+privé reçoit `--max-recovery-stop-owners`. W ajoute des ressources STOP, jamais
+de capacité Original/start. Pour W>0, une cellule est réservée au rattrapage
+avant publication de l'endpoint ; W−1 cellules gardent des propriétaires STOP
+permanents supplémentaires. Capacité permanente : **S + max(W−1, 0)**, dans
+un budget natif total S+W. S=1/W=2 possède deux cibles et garde une cellule
+de rattrapage. S=1/W=1 possède une cible et tente le surplus. W=0 ne fournit
+aucune ressource de rattrapage.
+
+Chaque cible acceptée conserve son snapshot immuable vérifié en RAM,
+identité/échéance originales, dernier Cancel admis, lease native du rôle,
+vrai handle du thread et contexte runtime construit. `StopReserved` suit
+l'installation ; un contexte non construit ne reçoit aucun ACK de couverture
+active. Ni erreur moteur ni observation d'arrêt ne retirent un propriétaire.
+Ces cellules ne créent ni nouvelle Arm, nonce Original, Q/R+, éviction,
+ni libération de quota.
+
+La sélection STOP ne lit aucun catalogue de découverte et ne prend aucun
+mutex writer/HTTP. Les contrôles natifs d'exécutable/endpoint et de snapshot
+exact restent. Une IO runtime bloquée conserve cellule et handle, sans
+remplacements illimités. Le rattrapage garde au plus le snapshot en cours
+et un snapshot en attente ; son vrai futur runtime doit revenir avant
+qu'une autre tentative utilise cette cellule.
+
+Un surplus reste `RecoveryFenced/Incomplete`. La cellule préinstallée effectue
+de vraies tentatives reopen/STOP exactes. Le cache de contrôle conserve les
+preuves de source et reprend les cibles éligibles par balayage circulaire
+borné. Une tentative ne donne ni ACK de couverture active ni retraite et
+ne draine pas un ancien start. `recovery_attempts` compte les tentatives
+revenues, y compris le contrôle concluant qu'aucun arrêt n'était dû ;
+`recovery_attempt_failures` conserve les résultats inconnus/en erreur.
+Une erreur moteur ne compte jamais comme une observation d'arrêt.
+`recovery_attempt_in_flight` reste vrai tant que le véritable appel natif
+n'est pas revenu ; un timeout de transport ne libère ni snapshot ni cellule.
+
+La rétention de découverte est bornée séparément à 16 384 cibles distinctes
+par client STOP. Preuves et requêtes pending sont des données, pas des
+propriétaires actifs. Une source hors limite, incomplète, divergente ou
+indisponible laisse la reprise incomplète, sans éviction. Rapport eager,
+transfert sérialisé, requêtes retenues et snapshots actifs comptent tous
+dans la mémoire : aucune garantie de mémoire constante pour un historique
+arbitraire. Chaque cellule demande une pile de 1 Mio, plus ses véritables
+ressources runtime, IO, snapshot et transfert. Mémoire physique/FD et latence
+restent à mesurer sur la plateforme choisie.
+Une cellule S prospective conserve son snapshot original et la registration
+liée au vrai reçu : au plus deux contenus de snapshot par cellule S, avec
+le même unique thread/runtime natif, jusqu'à sa véritable sortie.
+
+`BeginRecovery`, authentifié, confirme le gate natif partagé par toutes les
+vues Full de la lease. Le rôle froid est fenced avant le scan ; une Full
+publiée plus tard hérite du gate. Finalisation Register et Prepare le
+revérifient. STOP/Cancel existants et continuations de règlement déjà
+autorisées gardent leurs contrôles. Un ancien daemon incapable de confirmer
+cette opération est refusé, sans takeover, kill ou migration déduite.
+Les nouveaux lancements métier Legacy sont explicitement refusés avant une
+nouvelle RPC Arm, faute de factory native prospective. Leurs anciennes cibles
+STOP gardent leur voie de reprise ; cet écart n'est pas une migration livrée.
+La séquence pré-Arm persiste la demande Pending exacte, réserve son owner
+natif S, puis consomme le grant natif unique d'échange Arm avant la RPC.
+Un refus de capacité après Pending mais avant installation conserve la même
+identité/échéance. Une reprise sans owner natif refuse de recréer Original
+depuis ces données. La disponibilité de reprise de ce cas reste un écart
+ouvert ; aucun cleanup synthétique ou quota libéré ne le clôture.
+
+Le status distingue S/W, cellules de rattrapage, propriétaires actifs installés,
+fence/reprise incomplète et tentatives revenues. Santé du transport et comptes
+ne prouvent ni couverture exhaustive de source, conteneurs arrêtés, drain
+d'ancien start ni déploiement qualifié. Les régressions à deux cibles gardent
+le contrôle cap2 et S=1 inchangé avec W=2 explicite ; le cas W=1 exige une
+vraie tentative de rattrapage et un résultat incomplet avec un propriétaire
+actif. Leur runtime indisponible ne démontre aucun effet conteneur. Les
+résultats restent liés à leur source composée et leur exécutable exacts.
