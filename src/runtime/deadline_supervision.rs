@@ -428,6 +428,7 @@ pub(super) struct Supervisor<S: Future<Output = NativeStop>> {
     deadline: Instant,
     attach: Option<ExitStatus>,
     io_finished: bool,
+    observation: Option<super::observation::Scope>,
 }
 
 impl<S: Future<Output = NativeStop>> Supervisor<S> {
@@ -442,6 +443,7 @@ impl<S: Future<Output = NativeStop>> Supervisor<S> {
             stop: Box::pin(stop),
             attach: None,
             io_finished: false,
+            observation: None,
         }
     }
     pub fn with_work(mut self, work: Arc<WorkObservation>) -> Self {
@@ -449,6 +451,10 @@ impl<S: Future<Output = NativeStop>> Supervisor<S> {
         self
     }
 
+    pub fn with_observation(mut self, observation: Option<super::observation::Scope>) -> Self {
+        self.observation = observation;
+        self
+    }
     pub fn closing(&self) -> bool {
         self.cause.get().is_some()
     }
@@ -508,7 +514,15 @@ impl<S: Future<Output = NativeStop>> Supervisor<S> {
         match event {
             Event::Observed(result) => return Some(result),
             Event::Exited(External::Latched) => {}
-            Event::Deadline => self.latch(Cause::Deadline),
+            Event::Deadline => {
+                if let Some(trace) = &self.observation {
+                    trace.at(
+                        super::observation::Phase::DeadlineObservedByPoller,
+                        Some(self.deadline),
+                    );
+                }
+                self.latch(Cause::Deadline);
+            }
             Event::Interrupted(signal) => {
                 self.latch(Cause::Interrupted);
                 self.errors.push(match signal {

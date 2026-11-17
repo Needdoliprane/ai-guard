@@ -107,6 +107,8 @@ struct Input {
     stderr_limit: usize,
     events: mpsc::Sender<BatchIoEvent>,
     requests: watch::Receiver<Requests>,
+    observation: Option<super::observation::Scope>,
+    cli_observation: Option<super::observation::Scope>,
 }
 
 /// NonClone observer. Its JoinHandle remains here across cancelled collect waits.
@@ -131,18 +133,40 @@ impl OwnedBatchIo {
     /// Infallible transfer. Without a current runtime, Child and archive remain
     /// in unstarted until an async observer can start the same owner task.
     pub(super) fn own(child: Child, input: Option<File>, stdout_limit: usize) -> Self {
-        Self::own_with_input(child, input, stdout_limit, STDERR_LIMIT)
+        Self::own_with_input(child, input, stdout_limit, STDERR_LIMIT, None, None)
     }
     /// The same physical owner for an ordinary control CLI command. The caller
     /// supplies its existing capture limits (256/64 KiB for capture_cli).
     pub(super) fn own_cli(child: Child, stdout_limit: usize, stderr_limit: usize) -> Self {
-        Self::own_with_input(child, None, stdout_limit, stderr_limit)
+        Self::own_with_input(child, None, stdout_limit, stderr_limit, None, None)
+    }
+    pub(super) fn own_cli_observed(
+        child: Child,
+        stdout_limit: usize,
+        stderr_limit: usize,
+        observation: Option<super::observation::Scope>,
+    ) -> Self {
+        if observation.is_none() {
+            Self::own_cli(child, stdout_limit, stderr_limit)
+        } else {
+            Self::own_with_input(child, None, stdout_limit, stderr_limit, None, observation)
+        }
+    }
+    pub(super) fn own_observed(
+        child: Child,
+        input: Option<File>,
+        stdout_limit: usize,
+        observation: Option<super::observation::Scope>,
+    ) -> Self {
+        Self::own_with_input(child, input, stdout_limit, STDERR_LIMIT, observation, None)
     }
     fn own_with_input(
         child: Child,
         input: Option<File>,
         stdout_limit: usize,
         stderr_limit: usize,
+        observation: Option<super::observation::Scope>,
+        cli_observation: Option<super::observation::Scope>,
     ) -> Self {
         // At most one coalesced Fault and either a real exit or a wait error.
         // No notification send may block the physical owner.
@@ -156,6 +180,8 @@ impl OwnedBatchIo {
                 stderr_limit,
                 events: send,
                 requests: receive,
+                observation,
+                cli_observation,
             }),
             task: None,
             events,
@@ -330,6 +356,8 @@ async fn run(input: Input) -> BatchIoCollected {
         stderr_limit,
         events,
         mut requests,
+        observation,
+        cli_observation,
     } = input;
     // All original native owners are already in this future. Extract all pipes
     // and build all owning futures before the first await, including error paths.
@@ -393,11 +421,15 @@ async fn run(input: Input) -> BatchIoCollected {
             result = child.wait(), if status.is_none() && !wait_uncertain => {
                 match result {
                     Ok(exit) => {
+                        super::observation::record(&observation, super::observation::Phase::AttachExited);
+                        super::record_cli_exit(&cli_observation, Some(exit));
                         status = Some(exit);
                         waited_at = Some(Instant::now());
                         let _ = events.try_send(BatchIoEvent::Exited(Ok(exit)));
                     }
                     Err(error) => {
+                        super::observation::record(&observation, super::observation::Phase::AttachWaitFailed);
+                        super::observation::record(&cli_observation, super::observation::Phase::StopCommandWaitFailed);
                         wait_uncertain = true;
                         let error = Arc::new(error);
                         errors.push(anyhow::Error::new(SharedWaitError(error.clone())));
@@ -407,6 +439,7 @@ async fn run(input: Input) -> BatchIoCollected {
                 }
             }
             result = &mut out, if out_result.is_none() => {
+                super::observation::record(&observation, if result.eof { super::observation::Phase::StdoutEof } else { super::observation::Phase::StdoutReadFailed });
                 if let Some(error) = result.error.as_ref() {
                     let kind = error.kind();
                     errors.push(anyhow::anyhow!("stdout capture failed ({kind:?}); partial capture retained"));
@@ -415,6 +448,7 @@ async fn run(input: Input) -> BatchIoCollected {
                 out_result = Some(result);
             }
             result = &mut err, if err_result.is_none() => {
+                super::observation::record(&observation, if result.eof { super::observation::Phase::StderrEof } else { super::observation::Phase::StderrReadFailed });
                 if let Some(error) = result.error.as_ref() {
                     let kind = error.kind();
                     errors.push(anyhow::anyhow!("stderr capture failed ({kind:?}); partial capture retained"));

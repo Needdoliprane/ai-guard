@@ -1,5 +1,9 @@
 # Gates de qualification production
 
+## 17 novembre — relevé runtime et finalisation tardive D1
+
+[Douze cas logiciels ciblés](evidence/2026-11-17/runtime-observation-and-d1-late-finalizer/README.fr.md) passent sur le gel `c755fb52…db3b9`, dont quatre vrais CLI/Gateway/SQLite avec moteur Rust de fixture : terminal unique, faute Managed tardive et quota/instance conservés pour Created/Unknown. Le relevé facultatif est borné, sans attente dans STOP, et ne remplace pas l’audit durable. Le précédent FAIL de sonde reste historique ; la régression lit désormais la capture dans son véritable propriétaire d’erreur. Compilation des trois tests et six listes vérifiées ; Clippy toutes cibles de cette révision RC0 non strict, 528 émissions d’avertissement, 0 erreur ; 21 émissions supplémentaires restent suivies. Ni moteur réel, reprise froide, fournisseur, scénario A1/A2/B1 complet ni capacité 100 ne sont qualifiés. **0/12 gates clos**.
+
 ## 16 novembre — D1 : quatorze PASS logiciels, aucune qualification globale
 
 Le [lot D1](evidence/2026-11-16/control-monitor-prestart-fix/README.md) corrige l’admission préstart au premier effet et conserve le propriétaire, les causes/captures et le terminal natif connu. **14 PASS** vérifient quatre vrais CLI ai-guard/Gateway/SQLite avec moteur Rust de fixture et dix unités/voisins Managed, PTY et deadline sur leur source exacte. La fenêtre post-ACK reste 60 s ; aucun réglage de sûreté n’a été réduit. Les deux fichiers D7 cfg(test) de la composition sont exclus du commit D1.

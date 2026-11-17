@@ -1478,6 +1478,28 @@ Complément de compatibilité du même lot : les quatre UUID de faits workers et
 
 Le format de restitution UTC reste dans le domaine RFC3339 à année sur quatre chiffres et vérifie le même instant et les nanosecondes par aller-retour. Une source `observed_at` obligatoire RFC3339 valide mais non représentable dans ce domaine devient null/unknown ; une source brute invalide reste refusée comme erreur de stockage. Le statut absent reste interdit pour cette source obligatoire. Cette correction ne modifie aucun contrat d’observation historique.
 
+## 17 novembre 2026 — D7, propriétaires d’arrêt et budget de récupération
+
+Le mainteneur autorise l’option A de la proposition D7 R2 relue : code Rust et
+tests logiciels locaux de propriétaires d’arrêt réellement installés avant
+acquittement, avec snapshot immuable et ressources propres à chaque exécution
+acceptée. Cet accord ne couvre aucune action sur un moteur ou une infrastructure
+cloud et ne constitue pas une validation du correctif.
+
+La récupération utilise un budget explicite distinct du plafond historique des
+gardiens. Un budget de récupération non nul réserve une capacité de rattrapage
+avant les admissions permanentes ; cette capacité ne peut pas être empruntée à
+un propriétaire déjà accepté. Le diagnostic distingue découverte, tentative et
+couverture effective. Un surplus reste `RecoveryFenced/Incomplete`, sans faux
+acquittement, nouvelle autorité de démarrage ou libération de quota.
+
+La prévention réserve le propriétaire natif avant le RPC d’armement et conserve
+identité, échéance et ressources lors d’une réponse ambiguë. Le fence natif doit
+également interdire une publication Full tardive. Les garanties existantes ne
+sont pas remplacées par un catalogue paginé ou un simple permis de sémaphore.
+Le [registre run-2](AUDIT_RUN_2_20261110.md) conserve reproduction, état courant
+et limites ; les preuves du nouveau code restent à produire.
+
 ## 15 novembre 2026 — créer et intervenir depuis le dashboard
 
 Le mainteneur autorise création de session et courte consigne sur une session existante, en un seul lot de développement, une branche et un worktree. Ce sont des cibles produit obligatoires et non des fonctions déclarées disponibles. [Contrat EN](SESSION_CONTROL.md), [contrat FR](SESSION_CONTROL.fr.md) et [vues](../ui.md#créer-et-intervenir-sur-une-session--cible-autorisée-le-15-novembre-2026) portent les exigences.

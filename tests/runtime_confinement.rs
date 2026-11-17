@@ -11,9 +11,15 @@ use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 use std::{fs, path::Path, time::Duration};
 use uuid::Uuid;
+#[cfg(unix)]
+#[path = "runtime_confinement/observation_harness.rs"]
+mod observation_harness;
+#[cfg(unix)]
+use observation_harness::{Qualification, receipt};
 
+#[cfg(unix)]
 async fn execute(
-    runtime: &Runtime,
+    runtime: &Qualification,
     session: Uuid,
     image: &str,
     argv: &[&str],
@@ -31,7 +37,8 @@ async fn execute(
         .await
 }
 
-async fn inspect(runtime: &Runtime, name: &str, field: &str) -> Result<Value> {
+#[cfg(unix)]
+async fn inspect(runtime: &Qualification, name: &str, field: &str) -> Result<Value> {
     let output = runtime
         .cli(
             &[
@@ -164,6 +171,7 @@ fn configuration_rejection_does_not_unwind() {
     assert!(rejected.unwrap().is_err());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 #[ignore = "requires an explicitly selected real engine and built worker image; retains session volume and evidence"]
 async fn real_worker_confinement_copy_export_and_timeout() -> Result<()> {
@@ -174,27 +182,169 @@ async fn real_worker_confinement_copy_export_and_timeout() -> Result<()> {
     };
     let image = std::env::var("AGENTSANDBOX_TEST_IMAGE")
         .context("set AGENTSANDBOX_TEST_IMAGE to a deliberately selected built image")?;
-    let runtime = match std::env::var_os("AGENTSANDBOX_TEST_RUNTIME_PROGRAM") {
-        Some(program) => Runtime::with_program(kind, Path::new(&program))?,
-        None => Runtime::new(kind)?,
+    let program = std::env::var_os("AGENTSANDBOX_TEST_RUNTIME_PROGRAM")
+        .context("set AGENTSANDBOX_TEST_RUNTIME_PROGRAM to the explicitly approved CLI")?;
+    let endpoint = std::env::var("AGENTSANDBOX_TEST_RUNTIME_ENDPOINT")
+        .context("set AGENTSANDBOX_TEST_RUNTIME_ENDPOINT explicitly")?;
+    let evidence = tempfile::Builder::new()
+        .prefix("ai-guard-runtime-confinement-")
+        .tempdir()?
+        .keep();
+    eprintln!("retained evidence={}", evidence.display());
+    receipt(
+        &evidence.join("INCONCLUSIVE.json"),
+        &serde_json::json!({"status":"INCONCLUSIVE","scope":"runtime confinement only; no gateway audit or provider"}),
+    )?;
+    let (sink, collector) =
+        agentsandbox::runtime::observation::ObservationCollector::bounded(2048)?;
+    let raw = Runtime::with_program(kind, Path::new(&program))?.with_observation(sink);
+    let managed = match kind {
+        RuntimeKind::Docker => {
+            agentsandbox::runtime::ManagedRuntime::connect_docker_with_runtime(
+                Uuid::new_v4(),
+                &endpoint,
+                raw.clone(),
+            )
+            .await?
+        }
+        RuntimeKind::Podman => {
+            // Reuse a separately admitted authority marker. This test never
+            // bootstraps/replaces a Podman marker or removes its volume.
+            let path = std::env::var_os("AGENTSANDBOX_TEST_PODMAN_AUTHORITY")
+                .context("existing approved Podman authority file required")?;
+            let binding: agentsandbox::runtime::RuntimeAuthority =
+                serde_json::from_slice(&fs::read(path)?)?;
+            ensure!(
+                binding.endpoint == endpoint && binding.kind == kind,
+                "Podman authority differs from explicit selection"
+            );
+            agentsandbox::runtime::ManagedRuntime::reopen_with_runtime(binding, raw.clone()).await?
+        }
+    };
+    let runtime = Qualification {
+        managed,
+        raw,
+        evidence: evidence.clone(),
     };
     let info = runtime
+        .managed
         .doctor(std::env::var("AGENTSANDBOX_TEST_ALLOW_ROOTFUL").as_deref() == Ok("1"))
         .await?;
     eprintln!(
         "runtime={} rootless={} server={:?}",
         info.runtime, info.rootless, info.server_version
     );
-    let evidence = tempfile::Builder::new()
-        .prefix("ai-guard-runtime-confinement-")
-        .tempdir()?
-        .keep();
+    let (finish, finished) = tokio::sync::oneshot::channel();
+    let writer = tokio::spawn(observation_harness::persist(
+        collector,
+        evidence.join("monotonic.jsonl"),
+        finished,
+    ));
+    let timeout_operation = std::cell::Cell::new(None);
+    let observed_session = std::cell::Cell::new(None);
+    let outcome = confinement_case(
+        &runtime,
+        &evidence,
+        &image,
+        &timeout_operation,
+        &observed_session,
+    )
+    .await;
+    let inventory_result: Result<()> = async {
+        if let Some(session) = observed_session.get() {
+            let inventory = runtime
+                .cli(
+                    &[
+                        "ps".into(),
+                        "--all".into(),
+                        "--no-trunc".into(),
+                        "--filter".into(),
+                        format!("label=agentsandbox.session={session}"),
+                        "--format".into(),
+                        "{{.ID}}".into(),
+                    ],
+                    Duration::from_secs(10),
+                )
+                .await;
+            match inventory {
+                Ok(inventory) => {
+                    // These are technical IDs only; preserve unknown/nonterminal
+                    // resources without any cleanup, retry or broad stop.
+                    let ids = String::from_utf8(inventory.bytes)?;
+                    ensure!(
+                        ids.lines().all(|id| id.len() == 64
+                            && id
+                                .bytes()
+                                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))),
+                        "inventory IDs unavailable; INCONCLUSIVE"
+                    );
+                    receipt(
+                        &evidence.join("final-session-inventory.json"),
+                        &serde_json::json!({"session":session,"truncated":inventory.truncated,"ids":ids.lines().collect::<Vec<_>>()}),
+                    )?;
+                    ensure!(
+                        !inventory.truncated && ids.trim().is_empty(),
+                        "exact session still has resources; retained for diagnosis"
+                    );
+                }
+                Err(error) => return Err(error.context("final inventory unknown; INCONCLUSIVE")),
+            }
+        }
+        Ok(())
+    }.await;
+    let finish_result = finish
+        .send(())
+        .map_err(|_| anyhow::anyhow!("diagnostic finish receiver unavailable; INCONCLUSIVE"));
+    // Always await the actual consumer before retaining all concurrent outcomes.
+    let (consumer_joined, diagnostics) = match writer.await {
+        Ok(result) => (true, result),
+        Err(error) => (
+            false,
+            Err(anyhow::Error::new(error).context("diagnostic consumer failed; INCONCLUSIVE")),
+        ),
+    };
+    let timeline = match &diagnostics {
+        Ok(events) => match timeout_operation.get() {
+            Some(operation) => observation_harness::require_timeout_timeline(events, operation),
+            None => Err(anyhow::anyhow!("timeout phase not reached; INCONCLUSIVE")),
+        },
+        // The actual consumer error is retained below; do not invent events.
+        Err(_) => Ok(()),
+    };
+    let case_receipt = receipt(
+        &evidence.join("case-outcome.json"),
+        &serde_json::json!({"probe_outcome":if outcome.is_ok() { "COMPLETED" } else { "FAIL" },"inventory_known_empty":inventory_result.is_ok(),"diagnostic_consumer_joined":consumer_joined,"diagnostics_complete":diagnostics.is_ok()}),
+    );
+    let _events = observation_harness::finish_case(
+        outcome,
+        inventory_result,
+        diagnostics,
+        finish_result,
+        case_receipt,
+        timeline,
+    )?;
+    receipt(
+        &evidence.join("complete.json"),
+        &serde_json::json!({"status":"PASS","scope":"runtime confinement only","audit_e2e":"NOT_RUN"}),
+    )?;
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn confinement_case(
+    runtime: &Qualification,
+    evidence: &Path,
+    image: &str,
+    timeout_operation: &std::cell::Cell<Option<Uuid>>,
+    observed_session: &std::cell::Cell<Option<Uuid>>,
+) -> Result<()> {
     let source = evidence.join("original");
     fs::create_dir(&source)?;
     fs::write(source.join("original.txt"), "original unchanged")?;
     fs::write(source.join(".env"), "PRIVATE_TEST_VALUE=excluded-fixture")?;
     let prepared = prepare_workspace(&source, Limits::default())?;
     let session = Uuid::new_v4();
+    observed_session.set(Some(session));
     let volume = agentsandbox::runtime::volume_name(session);
     eprintln!(
         "retained evidence={} session={} volume={}",
@@ -202,6 +352,10 @@ async fn real_worker_confinement_copy_export_and_timeout() -> Result<()> {
         session,
         volume
     );
+    receipt(
+        &evidence.join("session.json"),
+        &serde_json::json!({"session":session,"volume":volume,"retained":true}),
+    )?;
     runtime.create_volume(session).await?;
     let import = ContainerSpec::new(
         session,
@@ -237,20 +391,26 @@ async fn real_worker_confinement_copy_export_and_timeout() -> Result<()> {
         vec!["/bin/cat".into(), "/proc/self/status".into()],
         NetworkMode::None,
     )?;
-    let name = probe.name();
     let expected_volume = volume.clone();
     let observed = runtime
-        .execute(&probe, None, Duration::from_secs(20), 32 * 1024, |_| {
-            let name = name.clone();
-            let volume = expected_volume.clone();
-            let runtime = &runtime;
-            async move {
-                let host = inspect(runtime, &name, "HostConfig").await?;
-                let mounts = inspect(runtime, &name, "Mounts").await?;
-                let user = inspect(runtime, &name, "Config.User").await?;
-                validate_configuration(&host, &mounts, &user, &volume)
-            }
-        })
+        .execute(
+            &probe,
+            None,
+            Duration::from_secs(20),
+            32 * 1024,
+            |observed| {
+                let id = observed.id.clone();
+                let volume = expected_volume.clone();
+                let runtime = &runtime;
+                async move {
+                    let id = id.context("native instance ID missing")?;
+                    let host = inspect(runtime, &id, "HostConfig").await?;
+                    let mounts = inspect(runtime, &id, "Mounts").await?;
+                    let user = inspect(runtime, &id, "Config.User").await?;
+                    validate_configuration(&host, &mounts, &user, &volume)
+                }
+            },
+        )
         .await?;
     assert_eq!(observed.state.exit_code, 0);
     let status = String::from_utf8(observed.stdout.bytes)?;
@@ -284,17 +444,24 @@ async fn real_worker_confinement_copy_export_and_timeout() -> Result<()> {
     )?;
     let rejected_name = rejected_probe.name();
     let rejected = runtime
-        .execute(&rejected_probe, None, Duration::from_secs(20), 1024, |_| {
-            let name = rejected_name.clone();
-            let wrong_volume = format!("{volume}-intentional-mismatch");
-            let runtime = &runtime;
-            async move {
-                let host = inspect(runtime, &name, "HostConfig").await?;
-                let mounts = inspect(runtime, &name, "Mounts").await?;
-                let user = inspect(runtime, &name, "Config.User").await?;
-                validate_configuration(&host, &mounts, &user, &wrong_volume)
-            }
-        })
+        .execute(
+            &rejected_probe,
+            None,
+            Duration::from_secs(20),
+            1024,
+            |observed| {
+                let id = observed.id.clone();
+                let wrong_volume = format!("{volume}-intentional-mismatch");
+                let runtime = &runtime;
+                async move {
+                    let id = id.context("native instance ID missing")?;
+                    let host = inspect(runtime, &id, "HostConfig").await?;
+                    let mounts = inspect(runtime, &id, "Mounts").await?;
+                    let user = inspect(runtime, &id, "Config.User").await?;
+                    validate_configuration(&host, &mounts, &user, &wrong_volume)
+                }
+            },
+        )
         .await;
     assert!(
         rejected
@@ -419,18 +586,36 @@ async fn real_worker_confinement_copy_export_and_timeout() -> Result<()> {
     .await?;
     assert_eq!(changed.state.exit_code, 0);
     let started = std::time::Instant::now();
-    let timeout = execute(
-        &runtime,
+    let timeout_spec = ContainerSpec::new(
         session,
+        ContainerPurpose::Run,
         &image,
-        &["/bin/sleep", "60"],
-        Duration::from_secs(1),
-    )
-    .await?;
+        vec!["/bin/sleep".into(), "60".into()],
+        NetworkMode::None,
+    )?;
+    timeout_operation.set(Some(timeout_spec.operation_id()));
+    let timeout = runtime
+        .execute(
+            &timeout_spec,
+            None,
+            Duration::from_secs(1),
+            64 * 1024,
+            |_| async { Ok(()) },
+        )
+        .await?;
     assert!(timeout.timed_out);
     assert_ne!(timeout.state.exit_code, 0);
-    assert!(
-        started.elapsed() < Duration::from_secs(30),
+    ensure!(
+        !timeout.stdout.truncated && !timeout.stderr.truncated,
+        "timeout captures truncated; INCONCLUSIVE"
+    );
+    let whole_call_elapsed = started.elapsed();
+    receipt(
+        &evidence.join("timeout-whole-call.json"),
+        &serde_json::json!({"operation":timeout_spec.operation_id(),"elapsed_ns":whole_call_elapsed.as_nanos(),"worker_timeout_seconds":1,"whole_call_guard_seconds":30}),
+    )?;
+    ensure!(
+        whole_call_elapsed < Duration::from_secs(30),
         "worker did not stop promptly at the broker timeout"
     );
     eprintln!("PASS broker timeout stops its worker; volume retained");

@@ -1,5 +1,9 @@
 # Validation courante
 
+## 17 novembre — relevé runtime et finalisation tardive D1
+
+[Douze cas logiciels ciblés](evidence/2026-11-17/runtime-observation-and-d1-late-finalizer/README.fr.md) passent sur le gel `c755fb52…db3b9`, dont quatre vrais CLI/Gateway/SQLite avec moteur Rust de fixture : terminal unique, faute Managed tardive et quota/instance conservés pour Created/Unknown. Le relevé facultatif est borné, sans attente dans STOP, et ne remplace pas l’audit durable. Le précédent FAIL de sonde reste historique ; la régression lit désormais la capture dans son véritable propriétaire d’erreur. Compilation des trois tests et six listes vérifiées ; Clippy toutes cibles de cette révision RC0 non strict, 528 émissions d’avertissement, 0 erreur ; 21 émissions supplémentaires restent suivies. Ni moteur réel, reprise froide, fournisseur, scénario A1/A2/B1 complet ni capacité 100 ne sont qualifiés. **0/12 gates clos**.
+
 ## 16 novembre — D1 : quatorze cas logiciels du correctif vérifiés
 
 Sur la source `74d60de1c9348615b7c1a34bf8df55fa91bf5448b6c0b1d2197ef3aef0b02b7b` (2 932 fichiers), **14 cas exacts PASS**, une invocation chacun : quatre vrais CLI ai-guard (`agentsandbox`)/Gateway/SQLite, deux unités Managed/PTY, trois voisins PTY et cinq deadline. Le moteur est une fixture Rust ; aucun Codex CLI, Claude Code, fournisseur ou daemon Docker/Podman n’est testé. Les huit fichiers Rust D1 à intégrer sont exacts ; les deux fichiers D7 supplémentaires sont cfg(test) et exclus du commit D1.

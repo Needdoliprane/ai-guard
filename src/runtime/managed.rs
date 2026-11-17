@@ -912,6 +912,25 @@ impl ManagedRuntime {
         }
         parse_runtime_info(self.binding.kind, &output.bytes, allow_rootful)
     }
+    /// Diagnostic operation identity only, never a start/cleanup permission.
+    pub async fn resolve_image_observed(&self, operation: Uuid, image_ref: &str) -> Result<String> {
+        let mut scoped = self.clone();
+        scoped.runtime = self.runtime.observed_operation(operation);
+        super::observation::record(
+            &scoped.runtime.observation,
+            super::observation::Phase::ImageResolutionRequested,
+        );
+        let result = scoped.resolve_image(image_ref).await;
+        super::observation::record(
+            &scoped.runtime.observation,
+            if result.is_ok() {
+                super::observation::Phase::ImageResolutionReturned
+            } else {
+                super::observation::Phase::ImageResolutionFailed
+            },
+        );
+        result
+    }
     pub async fn resolve_image(&self, image_ref: &str) -> Result<String> {
         validate_image(image_ref)?;
         self.verify_authority().await?;
@@ -1418,6 +1437,41 @@ impl ManagedRuntime {
             !duration.is_zero() && duration <= Duration::from_secs(24 * 60 * 60),
             "runtime timeout must be between 1 second and 24 hours"
         );
+        let mut scoped = self.clone();
+        scoped.runtime = self.runtime.observed_operation(spec.operation_id());
+        super::observation::record(
+            &scoped.runtime.observation,
+            super::observation::Phase::Submitted,
+        );
+        let result = scoped
+            .execute_retained_observed(spec, input, duration, stdout_limit, on_created, on_started)
+            .await;
+        super::observation::record(
+            &scoped.runtime.observation,
+            if result.is_ok() {
+                super::observation::Phase::OperationReturnedOk
+            } else {
+                super::observation::Phase::OperationReturnedError
+            },
+        );
+        result
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_retained_observed<C, CFut, F, Fut>(
+        &self,
+        spec: &ContainerSpec,
+        input: Option<std::fs::File>,
+        duration: Duration,
+        stdout_limit: usize,
+        on_created: C,
+        on_started: F,
+    ) -> Result<ManagedRetainedExecution>
+    where
+        C: FnOnce(OwnedContainerSnapshot) -> CFut,
+        CFut: Future<Output = Result<StartDirective>>,
+        F: FnMut(ContainerObservation) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
         let handle = self.create_owned_handle(spec).await?;
         self.execute_owned(
             spec,
@@ -1439,6 +1493,10 @@ impl ManagedRuntime {
             "managed creation requires control-assigned names"
         );
         self.verify_authority().await?;
+        super::observation::record(
+            &self.runtime.observation,
+            super::observation::Phase::CreateRequested,
+        );
         let output = self
             .cli(
                 &spec.create_args(self.binding.kind)?,
@@ -1452,6 +1510,10 @@ impl ManagedRuntime {
             .filter(|id| !output.truncated && valid_immutable_id(id))
             .context("runtime create response is ambiguous; ownership unknown, no adoption, stop or cleanup attempted")?
             .to_owned();
+        super::observation::record(
+            &self.runtime.trace_target(&id),
+            super::observation::Phase::Created,
+        );
         Ok(ContainerHandle {
             authority_fingerprint: self.binding.fingerprint(),
             session: spec.session,
@@ -1851,6 +1913,26 @@ impl ManagedRuntime {
         committed: &ContainerObservation,
     ) -> Result<()> {
         self.validate_handle(handle)?;
+        let mut scoped = self.clone();
+        scoped.runtime = self.runtime.observed_operation(handle.operation_id());
+        let trace = scoped.runtime.trace_target(handle.id());
+        super::observation::record(&trace, super::observation::Phase::CleanupRequested);
+        let result = scoped.cleanup_terminal_observed(handle, committed).await;
+        super::observation::record(
+            &trace,
+            if result.is_ok() {
+                super::observation::Phase::CleanupReturnedOk
+            } else {
+                super::observation::Phase::CleanupReturnedError
+            },
+        );
+        result
+    }
+    async fn cleanup_terminal_observed(
+        &self,
+        handle: &ContainerHandle,
+        committed: &ContainerObservation,
+    ) -> Result<()> {
         let now = self.observe(handle).await?;
         now.validate_terminal(self.binding.kind, committed)?;
         ensure!(

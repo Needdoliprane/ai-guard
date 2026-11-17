@@ -19,6 +19,7 @@ mod invocation;
 pub mod kubernetes;
 pub(crate) mod launch_profile;
 mod managed;
+pub mod observation;
 pub(crate) use managed::relay::{RelayExecError, RelayExecPermit, RelayExecTransport};
 pub(crate) mod model_tls;
 mod prestart;
@@ -630,6 +631,8 @@ pub struct Runtime {
     pub kind: RuntimeKind,
     invocation: InvocationBindingV1,
     anchor: std::sync::Arc<invocation::InvocationAnchor>,
+    observer: Option<observation::ObservationSink>,
+    observation: Option<observation::Scope>,
 }
 #[derive(Debug, Serialize)]
 pub struct RuntimeInfo {
@@ -769,6 +772,19 @@ impl AttemptFailure {
     }
 }
 
+fn record_cli_exit(trace: &Option<observation::Scope>, status: Option<std::process::ExitStatus>) {
+    if let Some(status) = status {
+        observation::record(
+            trace,
+            if status.success() {
+                observation::Phase::StopCommandExitedOk
+            } else {
+                observation::Phase::StopCommandExitedError
+            },
+        );
+    }
+}
+
 impl Runtime {
     pub fn new(kind: RuntimeKind) -> Result<Self> {
         Self::from_invocation(kind, InvocationBindingV1::factory(kind)?)
@@ -782,7 +798,25 @@ impl Runtime {
             kind,
             invocation,
             anchor,
+            observer: None,
+            observation: None,
         })
+    }
+    /// Optional bounded diagnostics only; never authorizes an operation.
+    pub fn with_observation(mut self, observer: observation::ObservationSink) -> Self {
+        self.observer = Some(observer);
+        self.observation = None;
+        self
+    }
+    fn observed_operation(&self, operation: Uuid) -> Self {
+        let mut runtime = self.clone();
+        runtime.observation = self.observer.as_ref().map(|sink| sink.operation(operation));
+        runtime
+    }
+    fn trace_target(&self, target: &str) -> Option<observation::Scope> {
+        self.observation
+            .as_ref()
+            .map(|scope| scope.instance(target))
     }
     pub fn invocation(&self) -> &InvocationBindingV1 {
         &self.invocation
@@ -817,11 +851,15 @@ impl Runtime {
             // Full second check and spawn stay in one non-awaiting unit. No
             // scheduler-resumption gap is inserted after the final check.
             runtime.anchor.verify(&runtime.invocation, runtime.kind)?;
+            let stop = args.first().map(String::as_str) == Some("kill") && args.len() == 2;
+            let trace = if stop { runtime.trace_target(&args[1]) } else { None };
+            observation::record(&trace, observation::Phase::StopSpawnRequested);
             let child = command.args(args).envs(environment)
                 .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
                 .with_context(|| format!("{} is unavailable; install and start a container runtime. No local fallback exists", runtime.kind))?;
             let armed = Instant::now();
-            Ok((batch_io::OwnedBatchIo::own_cli(child, 256 * 1024, 64 * 1024), armed))
+            observation::record(&trace, observation::Phase::StopSpawnReturned);
+            Ok((batch_io::OwnedBatchIo::own_cli_observed(child, 256 * 1024, 64 * 1024, trace), armed))
         }).await
     }
     pub async fn cli(&self, args: &[String], duration: Duration) -> Result<Capture> {
@@ -837,6 +875,33 @@ impl Runtime {
             .await
     }
     async fn capture_cli(
+        &self,
+        command: Command,
+        args: &[String],
+        duration: Duration,
+        environment: &[(&str, &str)],
+    ) -> Result<Capture> {
+        let stop = args.first().map(String::as_str) == Some("kill") && args.len() == 2;
+        let trace = if stop {
+            self.trace_target(&args[1])
+        } else {
+            None
+        };
+        observation::record(&trace, observation::Phase::StopInvocationRequested);
+        let result = self
+            .capture_cli_inner(command, args, duration, environment)
+            .await;
+        observation::record(
+            &trace,
+            if result.is_ok() {
+                observation::Phase::StopInvocationReturnedOk
+            } else {
+                observation::Phase::StopInvocationReturnedError
+            },
+        );
+        result
+    }
+    async fn capture_cli_inner(
         &self,
         command: Command,
         args: &[String],
@@ -1050,7 +1115,8 @@ impl Runtime {
         F: FnMut(RuntimeState) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
-        self.execute_attempt(spec, input, duration, stdout_limit, on_started)
+        self.observed_operation(spec.operation_id())
+            .execute_attempt(spec, input, duration, stdout_limit, on_started)
             .await
             .map_err(AttemptFailure::retained_error)
     }
@@ -1070,6 +1136,7 @@ impl Runtime {
         Fut: Future<Output = Result<()>>,
     {
         match self
+            .observed_operation(spec.operation_id())
             .execute_attempt(spec, input, duration, stdout_limit, on_started)
             .await
         {
@@ -1275,8 +1342,10 @@ impl Runtime {
                 .await
                 .map_err(Failure::unmoved)?;
         }
+        let trace = self.trace_target(&instance.target);
         let runtime = self.clone();
         let authority = managed.map(|(authority, _)| authority.clone());
+        let spawn_trace = trace.clone();
         let target = instance.target.clone();
         let (io, start) = deadline_supervision::checked_blocking(move || {
             // The original complete final command check stays adjacent to the
@@ -1293,15 +1362,20 @@ impl Runtime {
             if let Some(veto) = legacy_veto {
                 veto.check(&target)?;
             }
+            observation::record(&spawn_trace, observation::Phase::StartSpawnRequested);
             let child = command
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
                 .context("cannot attach to the session container")?;
             let armed = Instant::now();
+            observation::record(&spawn_trace, observation::Phase::StartSpawnReturned);
+            if let Some(trace) = &spawn_trace {
+                trace.at(observation::Phase::DeadlineArmed, Some(armed + duration));
+            }
             // Own Child and all stdio before the blocking result can be yielded.
             Ok((
-                batch_io::OwnedBatchIo::own(child, input, stdout_limit),
+                batch_io::OwnedBatchIo::own_observed(child, input, stdout_limit, spawn_trace),
                 armed,
             ))
         })
@@ -1312,7 +1386,9 @@ impl Runtime {
         let stop_cause = cause.clone();
         let stop_work = work.clone();
         let stop = self.stop_batch_native(instance, managed, &stop_work, &stop_cause);
-        let mut supervisor = Supervisor::new(io, deadline, cause, stop).with_work(work.clone());
+        let mut supervisor = Supervisor::new(io, deadline, cause, stop)
+            .with_work(work.clone())
+            .with_observation(trace.clone());
         let mut interval = tokio::time::interval(Duration::from_millis(200));
         let mut observed_start = false;
         let notification = Notification::new();
@@ -1408,8 +1484,12 @@ impl Runtime {
         // No consuming timeout: the same IO owner's handle is awaited to actual
         // completion. Its own unchanged budgets retain late outcomes/causes.
         let mut collected = match supervisor.io.collect().await {
-            Ok(io) => Some(io),
+            Ok(io) => {
+                observation::record(&trace, observation::Phase::DrainCollected);
+                Some(io)
+            }
             Err(error) => {
+                observation::record(&trace, observation::Phase::DrainCollectionFailed);
                 supervisor.errors.push(anyhow::Error::new(error));
                 None
             }
@@ -1485,6 +1565,10 @@ impl Runtime {
         cause: &deadline_supervision::CauseLatch,
     ) -> deadline_supervision::NativeStop {
         use deadline_supervision::{Cause, NativeStop, StopEvidence};
+        observation::record(
+            &self.trace_target(&instance.target),
+            observation::Phase::StopRequested,
+        );
         let binding = match managed {
             Some((authority, baseline)) => {
                 work.require_binding(authority, &instance.target, baseline)
@@ -1563,7 +1647,17 @@ impl Runtime {
         } else {
             work.require_direct_target(self, target)?;
         }
-        work.inspect().await
+        let result = work.inspect().await;
+        if result
+            .as_ref()
+            .is_ok_and(|state| state.validate_terminal(self.kind).is_ok())
+        {
+            observation::record(
+                &self.trace_target(target),
+                observation::Phase::TerminalInspected,
+            );
+        }
+        result
     }
 
     /// Same operation ordering as the bare Runtime's original error fallback.

@@ -1,0 +1,158 @@
+{
+  "schema": 1,
+  "source_archive_sha256": "c755fb525e98c9bfe768cb5f4fd2f13890318dfe99416e60e06939ad342db3b9",
+  "canonical_base_commit": "cbaa40182268a830189e41c8246c94c8ceae2de5",
+  "platform": "macOS ARM64",
+  "toolchain": "1.99.1-aarch64-apple-darwin",
+  "stage_root_sha256": "de85f8874a2b7b12ef3b27537d17894f2d7d5a79afa9165b8e21bdef47a77ac6",
+  "executor_case_receipt_sha256": "902ea0a6bcd7f8e31cd259d72a0c57be2fd799fb99e0d2c297a1af9b5569c56b",
+  "root_case_verification_sha256": "231ab7198e09cb6c664a447e147b681ad78945d51eb8387896972ae4c0dfa24c",
+  "test_invocations": {
+    "arguments": [
+      "--exact",
+      "FQN",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "per_case_timeout_seconds": 180,
+    "attempts_per_case": 1,
+    "cases": [
+      {
+        "index": 1,
+        "fqn": "runtime::observation::tests::stop_invocation_refusal_does_not_claim_spawn_or_cli_exit",
+        "stdout_sha256": "1a38a58c508040f5043bfcf557c10743204f144d33d5b41ce64fbc7832c66fd3",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "rc": 0,
+        "duration_seconds": 22.825
+      },
+      {
+        "index": 2,
+        "fqn": "runtime::observation::tests::actual_nonzero_stop_cli_exit_is_distinct_from_unknown_status",
+        "stdout_sha256": "4cc6816ae3b413f36362faac59fb87dee7831de171e4485b61ebb42fbede936c",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "rc": 0,
+        "duration_seconds": 30.591
+      },
+      {
+        "index": 3,
+        "fqn": "runtime::observation::tests::control_probe_timeout_collects_the_same_real_child_and_both_pipes",
+        "stdout_sha256": "137a80b6650ea95635303d13703b906caf937197e5760b572791329b8040431a",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "rc": 0,
+        "duration_seconds": 31.349
+      },
+      {
+        "index": 4,
+        "fqn": "runtime::observation::tests::saturated_diagnostics_preserve_actual_deadline_stop_and_child_collection",
+        "stdout_sha256": "6d7963ec8cf11f55636f103d05a3591270dd8c0aa7e73b78ffb928a558897fb0",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "rc": 0,
+        "duration_seconds": 0.03
+      },
+      {
+        "index": 5,
+        "fqn": "runtime::observation::tests::disconnected_or_uncontrolled_identifier_marks_trace_lost",
+        "stdout_sha256": "280772d66356f7c9868c79ce94e540c0732cf75768a31f25f5dadeb972624b68",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "rc": 0,
+        "duration_seconds": 0.026
+      },
+      {
+        "index": 6,
+        "fqn": "runtime::batch_io::tests::ordinary_cli_uses_its_own_two_capture_limits_in_the_same_owner",
+        "stdout_sha256": "c0c4674af6d61fd43544e580c5499fe88069dd2cb59c0bf004e8d8da7d18b402",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "rc": 0,
+        "duration_seconds": 0.024
+      },
+      {
+        "index": 7,
+        "fqn": "runtime::batch_io::tests::read_error_preserves_partial_capture_and_does_not_invent_eof",
+        "stdout_sha256": "d87a0167cf9941e290cb45ca36992ddc9acb2a8b743f0775100e4e46abdced04",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "rc": 0,
+        "duration_seconds": 0.014
+      },
+      {
+        "index": 8,
+        "fqn": "observation_harness::tests::secondary_failures_keep_the_real_primary_cli_capture_and_all_causes",
+        "stdout_sha256": "1064d674cc3102229c016e5132e9540036ca6e3601cf7b9e3ee28ae9949510d9",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "rc": 0,
+        "duration_seconds": 1.47
+      },
+      {
+        "index": 9,
+        "fqn": "canary_completed_transport_reaches_real_store_finalizer_once",
+        "stdout_sha256": "abd456607e2f408eb42d976823ce7947f3aa47d64a85d416f474fdcd147afea5",
+        "stderr_sha256": "0de1d00df94685db6aafaca0000ad5603ed44626fd7dda1023e9187b36603827",
+        "rc": 0,
+        "duration_seconds": 7.063
+      },
+      {
+        "index": 10,
+        "fqn": "late_managed_inspect_failure_finalizes_same_native_terminal_once",
+        "stdout_sha256": "1c11a343c178bed294e0b3dc049836ce233ddeae8e32cc962d78f2e4973b203c",
+        "stderr_sha256": "cbcef48467120be677d6ee83f884ee71ac835b029897ffad21be08802f7b2103",
+        "rc": 0,
+        "duration_seconds": 3.808
+      },
+      {
+        "index": 11,
+        "fqn": "late_managed_inspect_failure_with_created_fallback_keeps_quota_and_instance",
+        "stdout_sha256": "2f8b1891e38b996f499163668b5f9e0fb31fda88f413287288a581252a5e4160",
+        "stderr_sha256": "d2855bf7c916beb6985ce00ef0a589725c74c743f2ca3e7d6c02dd73d1ae4521",
+        "rc": 0,
+        "duration_seconds": 2.781
+      },
+      {
+        "index": 12,
+        "fqn": "late_managed_inspect_failure_with_unknown_fallback_keeps_quota_and_instance",
+        "stdout_sha256": "29a02cb11982e1f868568db384a63551db02c23f0c90346444202fcb6090bed2",
+        "stderr_sha256": "f4a46b440bc69548abf58ee7643877f15e6d94a806d52cdac1c69eb040ef8b73",
+        "rc": 0,
+        "duration_seconds": 2.735
+      }
+    ]
+  },
+  "results": {
+    "PASS": 12,
+    "FAIL": 0,
+    "NOT_RUN_in_selected_cases": 0
+  },
+  "source_reviews_sha256": [
+    "54de89af087eae2737ff42ea503dbcf1f9408c78ff025150e50a8f69b5c915b3",
+    "47c98b44cd4141916aad19566e7059ffa9ba630dd368679a8d24dd7bfb666341",
+    "06e41da4adf1e60148e27bf8381d427e8cfb9b8e215ee93008c32917b48101d0"
+  ],
+  "scope": "Native Rust software tests; D1 real ai-guard CLI/Gateway/SQLite plus Rust engine fixture",
+  "historical_failure": "Previous source97884337... had 2 PASS then failed probe stderr assertion. Nonzero capture moves stderr into retained RuntimeCommandFailure; test corrected to read that actual cause. Prior FAIL retained, no new product-loss finding.",
+  "execution_note": "Executor initially wrote raw evidence into development worktree; original bytes were copied to private evidence root and independently verified. Absolute released binaries match the compiled QA artifacts. No duplicate execution.",
+  "NOT_RUN": [
+    "Docker engine",
+    "Podman engine",
+    "Kubernetes cluster",
+    "AI provider",
+    "Full three-worker scenario",
+    "Cold broker recovery",
+    "100-worker capacity"
+  ],
+  "qualification": false,
+  "clippy": {
+    "all_targets": true,
+    "locked_offline": true,
+    "rc": 0,
+    "warning_emissions": 528,
+    "compiler_errors": 0,
+    "strict": false,
+    "receipt_sha256": "24ff22c37ba3f6f8a9718adf7b8024727378571094c7a23192f708632c452e2e",
+    "new_emissions_to_follow_up": {
+      "dead_code_own_batch_io": 1,
+      "redundant_closure_harness": 1,
+      "needless_borrow_physical_fixture": 19
+    },
+    "baseline_note": "The previous source emitted507warnings including2D1styleemissions; the current source adds21 emissions listed here. No strict gate closed.",
+    "stdout_sha256": "06cdb5608391ea0d576b1fc8f9005ad9c3e33449d58ea492efbf2cb8457f48d9",
+    "stderr_sha256": "07222c3e422ffc50dae8a90b6b785cba311fc63080126a25bb3be43afc7767a0"
+  }
+}
