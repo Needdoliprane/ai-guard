@@ -1,3 +1,5 @@
+use super::native_stop_failure::{CauseTarget, NativeStopFailures};
+use super::recovery::RecoveryAttemptOwner;
 use super::*;
 use crate::{
     broker::{
@@ -19,18 +21,32 @@ use tokio::{net::UnixStream, sync::watch};
 pub(super) mod lifetime;
 use lifetime::{ListenerOwner, NativeOwners};
 
+#[path = "server_prospective.rs"]
+mod prospective;
+use prospective::{LegacyAdmission, ProspectiveActor};
+
 #[cfg(test)]
 #[path = "server_lifetime_tests.rs"]
 mod lifetime_tests;
+#[cfg(test)]
+#[path = "server_prospective_fixture.rs"]
+pub(super) mod test_support;
 
 struct State {
     _lease: Arc<RoleLease>,
     owners: NativeOwners,
     epoch: Uuid,
     max_slots: u32,
+    max_recovery_stop_owners: u32,
     capability: [u8; 32],
     clock: Arc<NativeHostClock>,
-    slots: Mutex<BTreeMap<String, Arc<Actor>>>,
+    slots: Arc<Mutex<BTreeMap<String, Arc<Actor>>>>,
+    prospective: Arc<Mutex<BTreeMap<String, Arc<ProspectiveActor>>>>,
+    admission: Mutex<LegacyAdmission>,
+    recovery_requested: AtomicBool,
+    recovery_attempt: Option<RecoveryAttemptOwner>,
+    fresh_launch_nonce: Option<Uuid>,
+    recovery_incomplete: AtomicBool,
     closing: AtomicBool,
     healthy: AtomicBool,
     progress: AtomicU64,
@@ -43,32 +59,132 @@ struct Actor {
     state: Mutex<EnforcerSlotStatusV1>,
     usable: AtomicBool,
     stop: AtomicBool,
+    runtime_installed: Arc<AtomicBool>,
+    failures: Arc<NativeStopFailures>,
+    original: bool,
+    #[cfg(test)]
+    native_identity: Arc<Mutex<prospective::NativeIdentity>>,
+    #[cfg(test)]
+    test_exit: Arc<AtomicBool>,
+    #[cfg(test)]
+    native_panic: Arc<Mutex<Option<Arc<()>>>>,
 }
 
 /// Internal entry point of the same executable. The caller opens an existing
 /// private role root; this function neither installs nor manages an OS service.
 pub async fn run_internal_enforcer(root: &Directory, max_slots: u32) -> EnforcerResult<()> {
-    if !(1..=MAX_SLOTS).contains(&max_slots) {
+    run_internal_enforcer_with_budget(root, max_slots, 0).await
+}
+
+/// Existing Legacy namespaces are never a fresh admission factory. Cold roles
+/// are fenced before the listener, scan or any endpoint publication.
+pub async fn run_internal_enforcer_with_budget(
+    root: &Directory,
+    max_slots: u32,
+    max_recovery_stop_owners: u32,
+) -> EnforcerResult<()> {
+    let lease = Arc::new(RoleLease::acquire_existing(root)?);
+    let secret = capability(root, false)?;
+    run_legacy(lease, secret, max_slots, max_recovery_stop_owners, None).await
+}
+
+/// The child itself consumes mkdirat provenance and exclusively creates the
+/// empty V1 lock and auth. A serialized claim or empty-looking existing root
+/// cannot enter this branch; failure preserves its partial namespace.
+pub async fn run_internal_legacy_fresh(
+    parent: &Directory,
+    role_name: &str,
+    max_slots: u32,
+    max_recovery_stop_owners: u32,
+    launch_nonce: Uuid,
+) -> EnforcerResult<()> {
+    validate_budget(max_slots, max_recovery_stop_owners)?;
+    if launch_nonce.is_nil() {
         return Err(EnforcerError::InvalidInput);
     }
-    let lease = Arc::new(RoleLease::acquire(root)?);
-    let secret = capability(root, false)?;
+    let fresh = parent
+        .create_enforcer_root(role_name)
+        .map_err(|_| EnforcerError::UnsafeFilesystem)?;
+    let lease = Arc::new(RoleLease::create_new(fresh)?);
+    let mut secret = [0; 32];
+    use std::io::Read;
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut secret))
+        .map_err(|_| EnforcerError::Unavailable)?;
+    let auth = lease
+        .root()
+        .persistent_create("auth", &secret)
+        .map_err(|_| EnforcerError::UnsafeFilesystem)?;
+    auth.persistent_sync()
+        .map_err(|_| EnforcerError::UnsafeFilesystem)?;
+    lease
+        .root()
+        .sync()
+        .map_err(|_| EnforcerError::UnsafeFilesystem)?;
+    run_legacy(
+        lease,
+        secret,
+        max_slots,
+        max_recovery_stop_owners,
+        Some(launch_nonce),
+    )
+    .await
+}
+
+fn validate_budget(max_slots: u32, recovery: u32) -> EnforcerResult<()> {
+    if !(1..=MAX_SLOTS).contains(&max_slots) || recovery > MAX_SLOTS {
+        return Err(EnforcerError::InvalidInput);
+    }
+    Ok(())
+}
+
+async fn run_legacy(
+    lease: Arc<RoleLease>,
+    secret: [u8; 32],
+    max_slots: u32,
+    max_recovery_stop_owners: u32,
+    fresh_launch_nonce: Option<Uuid>,
+) -> EnforcerResult<()> {
+    let fresh = fresh_launch_nonce.is_some();
+    validate_budget(max_slots, max_recovery_stop_owners)?;
     let listener_root = lease.listener_root()?;
     let listener = PrivateListener::bind_new(&listener_root)?;
     let clock = Arc::new(NativeHostClock::new().map_err(|_| EnforcerError::Unhealthy)?);
     clock.sample().map_err(|_| EnforcerError::Unhealthy)?;
     let (shutdown, mut shutdown_receiver) = watch::channel(false);
     let progress_done = Arc::new(AtomicBool::new(false));
+    let permanent = max_slots + max_recovery_stop_owners.saturating_sub(1);
     let (owners, joiner) =
-        NativeOwners::start(Arc::clone(&lease), Arc::clone(&progress_done), max_slots)?;
+        NativeOwners::start(Arc::clone(&lease), Arc::clone(&progress_done), permanent)?;
+    let slots = Arc::new(Mutex::new(BTreeMap::new()));
+    let prospective = Arc::new(Mutex::new(BTreeMap::new()));
+    owners.retain_legacy_targets(Arc::clone(&slots), Arc::clone(&prospective))?;
+    // The single reserved catch-up context precedes endpoint publication. It
+    // retains this same lease and never consumes an accepted target's owner.
+    let recovery_attempt = if max_recovery_stop_owners > 0 {
+        Some(RecoveryAttemptOwner::install_legacy(
+            Arc::clone(&lease),
+            Arc::clone(&clock),
+            &owners,
+        )?)
+    } else {
+        None
+    };
     let state = Arc::new(State {
         _lease: Arc::clone(&lease),
         owners: owners.clone(),
         epoch: listener.endpoint().epoch(),
         max_slots,
+        max_recovery_stop_owners,
         capability: secret,
         clock,
-        slots: Mutex::new(BTreeMap::new()),
+        slots,
+        prospective,
+        admission: Mutex::new(LegacyAdmission::new(fresh)),
+        recovery_requested: AtomicBool::new(!fresh),
+        recovery_attempt,
+        fresh_launch_nonce,
+        recovery_incomplete: AtomicBool::new(!fresh),
         closing: AtomicBool::new(false),
         healthy: AtomicBool::new(true),
         progress: AtomicU64::new(1),
@@ -82,6 +198,10 @@ pub async fn run_internal_enforcer(root: &Directory, max_slots: u32) -> Enforcer
     ));
     #[cfg(test)]
     lifetime_tests::observe_state(&state);
+    #[cfg(test)]
+    prospective::observe_state(&state);
+    #[cfg(test)]
+    test_support::observe_state(&state);
     start_progress(Arc::clone(&state), Arc::clone(&progress_done))?;
     lease.publish_endpoint(listener.endpoint())?;
     let connections = Arc::new(tokio::sync::Semaphore::new(32));
@@ -92,6 +212,10 @@ pub async fn run_internal_enforcer(root: &Directory, max_slots: u32) -> Enforcer
                     return Err(EnforcerError::Unavailable);
                 }
                 if *shutdown_receiver.borrow() {
+                    if let Some(attempt) = &state.recovery_attempt {
+                        attempt.finish_legacy_idle().await?;
+                    }
+                    state.owners.release_legacy_idle_custody()?;
                     listener_owner.take().ok_or(EnforcerError::Unhealthy)?
                         .finish_idle().await?;
                     return Ok(());
@@ -230,11 +354,14 @@ async fn serve_connection(mut stream: UnixStream, state: Arc<State>) -> Enforcer
 async fn dispatch(state: &Arc<State>, request: Request) -> EnforcerResult<Response> {
     match request {
         Request::Status {} => {
-            let slots = state.slots.lock().map_err(|_| EnforcerError::Unhealthy)?;
+            let admitted = state
+                .admission
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)?;
             Ok(Response::Status {
                 value: EnforcerStatusV1 {
                     epoch: state.epoch,
-                    slot_count: slots.len(),
+                    slot_count: admitted.entries.len(),
                     max_slots: state.max_slots,
                     progress: state.progress.load(Ordering::SeqCst),
                     healthy: state.admission_healthy() && !state.closing.load(Ordering::SeqCst),
@@ -242,6 +369,72 @@ async fn dispatch(state: &Arc<State>, request: Request) -> EnforcerResult<Respon
             })
         }
         Request::Watch {} => Err(EnforcerError::InvalidInput),
+        Request::ProspectiveCapabilities {} => {
+            let admitted = state
+                .admission
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)?;
+            let owned_active = state.owned_active()?;
+            let known_stop_slots =
+                u32::try_from(admitted.entries.len()).map_err(|_| EnforcerError::Unhealthy)?;
+            Ok(Response::ProspectiveCapabilities {
+                value: LegacyProspectiveCapabilitiesV1 {
+                    version: 1,
+                    epoch: state.epoch,
+                    max_slots: state.max_slots,
+                    max_recovery_stop_owners: state.max_recovery_stop_owners,
+                    recovery_generation: (admitted.generation != 0).then_some(admitted.generation),
+                    fresh_launch_nonce: state.fresh_launch_nonce,
+                    known_stop_slots,
+                    owned_active,
+                    recovery_incomplete: state.recovery_incomplete.load(Ordering::SeqCst)
+                        || owned_active != Some(known_stop_slots),
+                },
+            })
+        }
+        Request::ReserveProspective {
+            prospective,
+            generation,
+            replay_only,
+        } => Ok(Response::ProspectiveReserved {
+            reservation: state
+                .reserve_prospective(*prospective, generation, replay_only)
+                .await?,
+        }),
+        Request::BeginProspectiveArmExchange {
+            reservation,
+            generation,
+        } => Ok(Response::ProspectiveArmExchange {
+            original_exchange_nonce: state
+                .begin_prospective_arm_exchange(&reservation, generation)?,
+        }),
+        Request::BindProspective {
+            reservation,
+            registration,
+            generation,
+            observe_only,
+            original_exchange_nonce,
+        } => {
+            state
+                .bind_prospective(
+                    reservation,
+                    *registration,
+                    generation,
+                    observe_only,
+                    original_exchange_nonce,
+                )
+                .await
+        }
+        Request::CancelProspective {
+            reservation,
+            generation,
+        } => {
+            state.cancel_prospective(&reservation, generation)?;
+            Ok(Response::Acknowledged {})
+        }
+        Request::BeginRecovery {} => Ok(Response::RecoveryBegun {
+            generation: state.begin_recovery()?,
+        }),
         Request::Slots { arm_ids } => {
             if arm_ids.is_empty()
                 || arm_ids.len() > MAX_SLOT_QUERY
@@ -267,6 +460,11 @@ async fn dispatch(state: &Arc<State>, request: Request) -> EnforcerResult<Respon
             registration_hash,
             generation,
         } => {
+            let admitted = state
+                .admission
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)?;
+            state.check_original(&admitted)?;
             if !state.admission_healthy() {
                 return Err(EnforcerError::Unhealthy);
             }
@@ -278,11 +476,13 @@ async fn dispatch(state: &Arc<State>, request: Request) -> EnforcerResult<Respon
                 .validate_clock_check(&current)
                 .map_err(|_| EnforcerError::NotReady)?;
             let mut value = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+            check_runtime_installed(&actor)?;
             if generation == u64::MAX
                 || value.generation != generation
                 || value.phase != SlotPhaseV1::Ready
                 || !actor.usable.load(Ordering::SeqCst)
                 || actor.stop.load(Ordering::SeqCst)
+                || !actor.original
             {
                 return Err(EnforcerError::NotReady);
             }
@@ -301,6 +501,10 @@ async fn dispatch(state: &Arc<State>, request: Request) -> EnforcerResult<Respon
             registration_hash,
             generation,
         } => {
+            let _admitted = state
+                .admission
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)?;
             let actor = state.actor(&arm_id, &registration_hash)?;
             let mut value = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
             if generation < value.generation {
@@ -311,9 +515,15 @@ async fn dispatch(state: &Arc<State>, request: Request) -> EnforcerResult<Respon
             Ok(Response::Acknowledged {})
         }
         Request::ShutdownIfIdle {} => {
-            let slots = state.slots.lock().map_err(|_| EnforcerError::Unhealthy)?;
-            if !slots.is_empty() {
+            let admitted = state
+                .admission
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)?;
+            if !admitted.entries.is_empty() {
                 return Err(EnforcerError::NotIdle);
+            }
+            if let Some(attempt) = &state.recovery_attempt {
+                attempt.reserve_legacy_idle_shutdown()?;
             }
             state.closing.store(true, Ordering::SeqCst);
             Ok(Response::Acknowledged {})
@@ -336,6 +546,9 @@ impl State {
     }
 }
 impl Actor {
+    fn cause_target(&self) -> CauseTarget {
+        CauseTarget::fixed(self.registration.arm_id(), &self.digest)
+    }
     fn snapshot(&self) -> EnforcerResult<EnforcerSlotStatusV1> {
         self.state
             .lock()
@@ -344,17 +557,38 @@ impl Actor {
     }
 }
 
+fn check_runtime_installed(actor: &Actor) -> EnforcerResult<()> {
+    if !actor.runtime_installed.load(Ordering::SeqCst) {
+        #[cfg(test)]
+        prospective::record_runtime_rejection();
+        return Err(EnforcerError::NotReady);
+    }
+    Ok(())
+}
+
 async fn register(
     state: &Arc<State>,
     registration: RegistrationV1,
     generation: u64,
     observe_only: bool,
 ) -> EnforcerResult<Response> {
-    if (generation == u64::MAX && !observe_only) || !state.admission_healthy() {
-        return Err(EnforcerError::Unhealthy);
-    }
     let digest = registration.digest()?;
+    if observe_only {
+        state.begin_recovery()?;
+        let retained_prospective = state
+            .prospective
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?
+            .contains_key(registration.arm_id());
+        if retained_prospective {
+            return state.restore_prospective(registration, generation).await;
+        }
+    }
     let (actor, replayed) = {
+        let mut admitted = state
+            .admission
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?;
         let mut slots = state.slots.lock().map_err(|_| EnforcerError::Unhealthy)?;
         if state.closing.load(Ordering::SeqCst) {
             return Err(EnforcerError::Unavailable);
@@ -363,16 +597,30 @@ async fn register(
             if actor.digest != digest {
                 return Err(EnforcerError::Conflict);
             }
-            if observe_only {
-                actor
-                    .state
-                    .lock()
-                    .map_err(|_| EnforcerError::Unhealthy)?
-                    .prepared_once = true;
+            // A generic receipt replay can never recover Original. Only the
+            // in-process prospective continuation may bind that authority.
+            let mut value = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+            value.prepared_once = true;
+            value.generation = value.generation.max(generation);
+            if observe_only || state.recovery_requested.load(Ordering::SeqCst) {
+                actor.stop.store(true, Ordering::SeqCst);
             }
+            drop(value);
             (Arc::clone(actor), true)
         } else {
-            if slots.len() >= state.max_slots as usize {
+            if !observe_only {
+                return Err(EnforcerError::NotReady);
+            }
+            if admitted.entries.contains(registration.arm_id()) {
+                // An already installed unbound prospective owner is the only
+                // possible continuation for this identity; never duplicate it.
+                return Err(EnforcerError::Conflict);
+            }
+            if admitted.entries.len() >= state.permanent_capacity() {
+                state.recovery_incomplete.store(true, Ordering::SeqCst);
+                if let Some(attempt) = &state.recovery_attempt {
+                    let _ = attempt.try_schedule_legacy(registration);
+                }
                 return Err(EnforcerError::Capacity);
             }
             let actor = Arc::new(Actor {
@@ -381,7 +629,7 @@ async fn register(
                     arm_id: registration.arm.operation_id.clone(),
                     registration_hash: digest.clone(),
                     phase: SlotPhaseV1::Initializing,
-                    prepared_once: observe_only,
+                    prepared_once: true,
                     generation,
                     clock: None,
                     observation: None,
@@ -390,7 +638,16 @@ async fn register(
                 registration,
                 digest,
                 usable: AtomicBool::new(false),
-                stop: AtomicBool::new(false),
+                stop: AtomicBool::new(true),
+                runtime_installed: Arc::new(AtomicBool::new(false)),
+                failures: NativeStopFailures::new(),
+                original: false,
+                #[cfg(test)]
+                native_identity: Arc::new(Mutex::new(prospective::NativeIdentity::default())),
+                #[cfg(test)]
+                test_exit: Arc::new(AtomicBool::new(false)),
+                #[cfg(test)]
+                native_panic: Arc::new(Mutex::new(None)),
             });
             // Capacity is retained even if thread creation or authority reopening
             // fails. No failed preparation can turn into a claimed Ready slot.
@@ -398,6 +655,9 @@ async fn register(
                 actor.registration.arm.operation_id.clone(),
                 Arc::clone(&actor),
             );
+            admitted
+                .entries
+                .insert(actor.registration.arm_id().to_owned());
             (actor, false)
         }
     };
@@ -430,11 +690,26 @@ async fn register(
         REGISTER_TIMEOUT - Duration::from_secs(1)
     };
     let expires = Instant::now() + wait;
-    while !actor.usable.load(Ordering::SeqCst) {
+    while if observe_only {
+        !actor.runtime_installed.load(Ordering::SeqCst)
+    } else {
+        !actor.usable.load(Ordering::SeqCst)
+    } {
         if Instant::now() >= expires {
             return Err(EnforcerError::NotReady);
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    // A native Ready publication is not an admission bypass after recovery.
+    let admitted = state
+        .admission
+        .lock()
+        .map_err(|_| EnforcerError::Unhealthy)?;
+    if state.owners.failed() {
+        return Err(EnforcerError::Unhealthy);
+    }
+    if !observe_only {
+        state.check_original(&admitted)?;
     }
     Ok(Response::Registered {
         value: Box::new(actor.snapshot()?),
@@ -447,6 +722,8 @@ fn start_actor(
     clock: Arc<NativeHostClock>,
     owners: NativeOwners,
 ) -> EnforcerResult<std::thread::JoinHandle<()>> {
+    let failures = Arc::clone(&actor.failures);
+    let target = actor.cause_target();
     std::thread::Builder::new()
         .name("enforcer-stop".into())
         .stack_size(1024 * 1024)
@@ -454,31 +731,35 @@ fn start_actor(
             let _exit = lifetime::ActorExit(owners);
             #[cfg(test)]
             let _lifetime_actor = lifetime_tests::actor_before_reopen(&actor);
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(runtime) => runtime,
-                Err(_) => {
-                    actor_failed(&actor);
-                    return;
-                }
-            };
-            let managed = loop {
-                match runtime.block_on(ManagedRuntime::reopen(actor.registration.authority.clone()))
-                {
-                    Ok(managed) => break managed,
-                    Err(_) => {
-                        actor_failed(&actor);
-                        std::thread::sleep(Duration::from_secs(1));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let runtime = loop {
+                    match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(runtime) => break runtime,
+                        Err(error) => {
+                            actor.failures.context_failure(actor.cause_target(), error);
+                            actor_failed(&actor);
+                            std::thread::sleep(Duration::from_secs(1));
+                        }
                     }
-                }
-            };
-            // Stop machinery and invocation are ready before this release. No
-            // event dispatcher, writer or HTTP is used by the remaining loop.
-            run_actor(actor, clock, runtime, managed);
+                };
+                actor.runtime_installed.store(true, Ordering::SeqCst);
+                run_bound_actor(&actor, clock, Box::new(runtime));
+            }));
+            if let Err(payload) = result {
+                actor.runtime_installed.store(false, Ordering::SeqCst);
+                #[cfg(test)]
+                prospective::after_runtime_invalidation();
+                actor.failures.native_thread_failed(payload);
+                actor_failed(&actor);
+            }
         })
-        .map_err(|_| EnforcerError::Unavailable)
+        .map_err(|error| {
+            failures.context_failure(target, error);
+            EnforcerError::Unavailable
+        })
 }
 
 fn actor_failed(actor: &Actor) {
@@ -488,15 +769,55 @@ fn actor_failed(actor: &Actor) {
     }
 }
 
+fn run_bound_actor(
+    actor: &Arc<Actor>,
+    clock: Arc<NativeHostClock>,
+    runtime: Box<tokio::runtime::Runtime>,
+) {
+    #[cfg(test)]
+    if let Ok(mut identity) = actor.native_identity.lock() {
+        identity.bound = Some((
+            std::thread::current().id(),
+            (&*runtime as *const tokio::runtime::Runtime) as usize,
+        ));
+    }
+    let managed = loop {
+        #[cfg(test)]
+        if actor.test_exit.load(Ordering::SeqCst) {
+            return;
+        }
+        #[cfg(test)]
+        if let Some(payload) = actor.native_panic.lock().unwrap().take() {
+            std::panic::panic_any(payload);
+        }
+        match actor.failures.execute(
+            &runtime,
+            actor.cause_target(),
+            ManagedRuntime::reopen_native(actor.registration.authority.clone()),
+        ) {
+            Some(managed) => break managed.value,
+            None => {
+                actor_failed(actor);
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+    };
+    run_actor(Arc::clone(actor), clock, runtime, managed);
+}
+
 fn run_actor(
     actor: Arc<Actor>,
     clock: Arc<NativeHostClock>,
-    runtime: tokio::runtime::Runtime,
+    runtime: Box<tokio::runtime::Runtime>,
     managed: ManagedRuntime,
 ) {
     let mut last_ns = None;
     let mut stopping = actor.stop.load(Ordering::SeqCst);
     loop {
+        #[cfg(test)]
+        if actor.test_exit.load(Ordering::SeqCst) {
+            return;
+        }
         let sample = clock.sample();
         let live = match &sample {
             Ok(sample) => {
@@ -527,12 +848,36 @@ fn run_actor(
             stopping = true;
         }
         if stopping {
-            let result = runtime.block_on(managed.stop_snapshot_owned(&actor.registration.owned));
+            let result = actor.failures.execute(
+                &runtime,
+                actor.cause_target(),
+                managed.stop_snapshot_owned_native(&actor.registration.owned),
+            );
+            let mut observation = None;
+            let failed = match result {
+                Some(settled) => {
+                    observation = Some(settled.value.observation.clone());
+                    actor
+                        .failures
+                        .observed_stop(actor.cause_target(), settled.value.observation);
+                    if let Some(cause) = settled.value.kill_failure {
+                        actor
+                            .failures
+                            .returned(actor.cause_target(), cause, settled.proof);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                None => true,
+            };
             if let Ok(mut value) = actor.state.lock() {
                 value.phase = SlotPhaseV1::Quarantined;
-                match result {
-                    Ok(observation) => value.observation = Some(observation),
-                    Err(_) => value.stop_failures = value.stop_failures.saturating_add(1),
+                if let Some(observation) = observation {
+                    value.observation = Some(observation);
+                }
+                if failed {
+                    value.stop_failures = value.stop_failures.saturating_add(1);
                 }
             }
             // A stop observation is not D5 fencing. Even a currently stopped

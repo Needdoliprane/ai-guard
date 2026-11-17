@@ -54,6 +54,34 @@ fn fs_error(error: anyhow::Error) -> IpcError {
 }
 
 impl RoleLease {
+    /// Native Legacy fresh factory. Only the child that successfully created
+    /// this namespace by mkdirat can create its empty V1 lock. EEXIST never
+    /// adopts a previous role, even when its lock appears empty.
+    pub(crate) fn create_new(
+        fresh: crate::control_fs::persistent::ExclusiveEnforcerRoot,
+    ) -> IpcResult<Self> {
+        let root = fresh.into_directory();
+        root.revalidate().map_err(fs_error)?;
+        let lock = root
+            .persistent_create(".owner.lock", &[])
+            .map_err(fs_error)?;
+        if !lock.persistent_try_lock().map_err(fs_error)? {
+            return Err(IpcError::Conflict);
+        }
+        lock.persistent_sync().map_err(fs_error)?;
+        root.persistent_child("endpoints", true).map_err(fs_error)?;
+        root.persistent_child("announcements", true)
+            .map_err(fs_error)?;
+        root.durable_bootstrap().map_err(fs_error)?;
+        let lease = Self { root, lock };
+        lease.revalidate()?;
+        Ok(lease)
+    }
+
+    pub(crate) fn root(&self) -> &Directory {
+        &self.root
+    }
+
     /// Recovery of a broker V1 role never creates a lock or bootstraps storage.
     /// The empty-file contract remains V1; nonempty V2 locks are not upgraded
     /// or reinterpreted by this path.

@@ -1,5 +1,11 @@
 # Synthèse courante — 17 novembre 2026
 
+## 17 novembre — contribution D7 intégrée, qualification ouverte
+
+Le code D7 provient du commit `6a32771` : propriétaires STOP natifs réservés avant acquittement, capacité explicite et admission de reprise fermée ; un Pending déjà confirmé est relu strictement sans publier une révision vide. Les [preuves EN/FR et les FQN](evidence/2026-11-17/d7-native-stop-owners/README.fr.md) séparent chaque source : le gel Legacy R5 `6c5554cd…` (2 964 fichiers) passe check toutes cibles, build libtest puis **16 cas lib exacts PASS**, chacun invoqué une fois, aucun ignoré. Clippy toutes cibles rend **RC0 non strict, 561 émissions d’avertissement, zéro erreur** ; la gate stricte reste ouverte.
+
+Le gel R4 `5b82fdd` conserve ses **4 PASS / 1 FAIL / 15 NOT_RUN**, dont un vrai ancien binaire V1 explicitement invoqué et réussi. Ces PASS ne sont pas transférés à R5 ; les erreurs antérieures restent datées. Réouverture métier froide, Pending sans owner retenu, retraite/Q Legacy, libération de quota, STOP physique, moteurs réels et capacité 100 restent ouverts. **Aucun fingerprint global d’audit ni aucun des 12 gates n’est clos.**
+
 ## 17 novembre — relevé runtime et finalisation tardive D1
 
 [Douze cas logiciels ciblés](evidence/2026-11-17/runtime-observation-and-d1-late-finalizer/README.fr.md) passent sur le gel `c755fb52…db3b9`, dont quatre vrais CLI/Gateway/SQLite avec moteur Rust de fixture : terminal unique, faute Managed tardive et quota/instance conservés pour Created/Unknown. Le relevé facultatif est borné, sans attente dans STOP, et ne remplace pas l’audit durable. Le précédent FAIL de sonde reste historique ; la régression lit désormais la capture dans son véritable propriétaire d’erreur. Compilation des trois tests et six listes vérifiées ; Clippy toutes cibles de cette révision RC0 non strict, 528 émissions d’avertissement, 0 erreur ; 21 émissions supplémentaires restent suivies. Ni moteur réel, reprise froide, fournisseur, scénario A1/A2/B1 complet ni capacité 100 ne sont qualifiés. **0/12 gates clos**.
@@ -8,11 +14,11 @@
 
 Base de l’intégration D1 : `961045788784b277a7a9eaa5e8f411275d7147e0`, dont le code produit avant D1 est celui de `a3981316d5a0ff1678dee7d943971fa845991e84`. Ce changement intègre les huit fichiers Rust D1. Clippy D1 toutes cibles sur la source composée `74d60de1…b7b` : **RC0 non strict, 507 émissions d’avertissement et 0 erreur**. Reçu `dc43ad33…0e0a2` ; gate strict ouvert. Les 324 395 octets de l’ancien suivi restent intacts dans l’[archive adjacente](CURRENT_STATE_HISTORY_20261116.md), SHA-256 `3dfd04cc353bb1f3455ad4eb066778abe0c79862cd197927abdb1077f8eda254`. Les preuves détaillées restent dans [VALIDATION.md](VALIDATION.md).
 
-## 17 novembre — D7 et Native17 : preuves privées distinctes
+## Relevé antérieur du 17 novembre — D7 et Native17 privés
 
-Le code public reste `e794e45`. Les [gels privés et leurs reçus](evidence/2026-11-17/d7-native17-progress/README.fr.md) ne constituent pas du code livré sur cette branche : D7 R5 `653e2abe…` passe check/build libtest puis **28 PASS / 1 FAIL de pile / 5 NOT_RUN** ; R6 `8d174676…`, test-only, apporte **un nouveau PASS du seul cas 9**, sans transfert des 28 PASS. Le check Legacy Native+Ports R1 `0dce799c…` échoue RC101 sur un E0599 de fixture ; la correction `07c9679` n’est pas recompilée, les tests restent NOT_RUN et l’ancien cas 9 est obsolète.
+Au relevé `2773bb2`, le code public restait `e794e45`. Les [gels privés et leurs reçus](evidence/2026-11-17/d7-native17-progress/README.fr.md) ne constituent pas du code livré sur cette branche : D7 R5 `653e2abe…` passe check/build libtest puis **28 PASS / 1 FAIL de pile / 5 NOT_RUN** ; R6 `8d174676…`, test-only, apporte **un nouveau PASS du seul cas 9**, sans transfert des 28 PASS. Le check Legacy Native+Ports R1 `0dce799c…` échoue RC101 sur un E0599 de fixture ; la correction `07c9679` n’est pas recompilée, les tests restent NOT_RUN et l’ancien cas 9 est obsolète.
 
-Le commun Native17 R5 `a3e9ca09…` passe check toutes cibles et build libtest, puis ses deux diagnostics réels donnent **0 PASS / 2 FAIL RC101** sur l’époque inchangée de 2 s. La cause du backup est désormais typée et retenue ; OIDC refuse à `TransactionMutations`, 1 999 ms. Ces durées ne mesurent ni CPU ni attente de verrou. Deux remédiations privées sont en cours, sans correction publique ni qualification déduite. Clippy strict reste ouvert ; **0/12 gates clos**.
+Le commun Native17 R5 `a3e9ca09…` passe check toutes cibles et build libtest, puis ses deux diagnostics réels donnent **0 PASS / 2 FAIL RC101** sur l’époque inchangée de 2 s. La cause du backup est désormais typée et retenue ; OIDC refuse à `TransactionMutations`, 1 999 ms. Ces durées ne mesurent ni CPU ni attente de verrou. Deux remédiations étaient alors en cours, sans correction publique ni qualification déduite. Clippy strict reste ouvert ; **0/12 gates clos**.
 
 ## Faits vérifiés et portée — 16 novembre 2026
 

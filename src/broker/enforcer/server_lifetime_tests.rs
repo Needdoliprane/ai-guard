@@ -456,6 +456,15 @@ impl OwnedCase {
                 .map_err(|_| "role canonicalization failed")?,
         )
         .map_err(|_| "role open failed")?;
+        // This fixture is explicitly an existing/cold V1 role. Its empty lock
+        // must already be durable; the server no longer bootstraps a missing
+        // lock into fresh admission merely because the directory is empty.
+        let lock = root
+            .persistent_create(".owner.lock", &[])
+            .map_err(|_| "fixture existing V1 lock failed")?;
+        lock.persistent_sync()
+            .map_err(|_| "fixture V1 lock sync failed")?;
+        root.sync().map_err(|_| "fixture V1 root sync failed")?;
         let auth = root
             .persistent_create("auth", &FIXTURE_KEY)
             .map_err(|_| "fixture auth failed")?;

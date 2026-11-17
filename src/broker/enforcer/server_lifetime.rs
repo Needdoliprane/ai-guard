@@ -3,8 +3,12 @@
 //! There is one joiner per acquired role lease. It never mutates a slot or
 //! claims retirement: legacy actors can run until process exit.
 
-use super::{EnforcerError, EnforcerResult, RoleLease, State};
+use super::{
+    Actor, EnforcerError, EnforcerResult, ProspectiveActor, RecoveryAttemptOwner, RoleLease, State,
+};
 use crate::broker::discovery::EnforcerRoleLeaseV2;
+#[cfg(test)]
+use std::sync::atomic::AtomicU64;
 use std::{
     collections::BTreeMap,
     panic::{AssertUnwindSafe, catch_unwind},
@@ -26,11 +30,7 @@ enum LeaseOwner {
 impl LeaseOwner {
     fn revalidate(&self) -> EnforcerResult<()> {
         match self {
-            Self::Legacy(lease) => {
-                // Legacy bootstrap ordering and its validation are unchanged.
-                let _retained = lease;
-                Ok(())
-            }
+            Self::Legacy(lease) => lease.revalidate().map_err(Into::into),
             Self::Sealed(lease) => lease.revalidate().map_err(Into::into),
         }
     }
@@ -54,6 +54,22 @@ pub(in crate::broker::enforcer) struct NativeOwners {
     lease: LeaseOwner,
     failed: Arc<AtomicBool>,
     keyed: Arc<Mutex<BTreeMap<Uuid, KeyedHandle>>>,
+    legacy_custody: Arc<Mutex<LegacyCustody>>,
+    #[cfg(test)]
+    joined_native: Arc<AtomicU64>,
+}
+
+// These are aliases to the SAME native cells/maps used by the listener. This
+// adds no admission pool, runtime or thread. The independent joiner owns their
+// actual snapshots/raw causes even after a native thread and State disappear.
+#[derive(Default)]
+struct LegacyCustody {
+    targets: Option<LegacyTargets>,
+    catchup: Option<RecoveryAttemptOwner>,
+}
+struct LegacyTargets {
+    slots: Arc<Mutex<BTreeMap<String, Arc<Actor>>>>,
+    prospective: Arc<Mutex<BTreeMap<String, Arc<ProspectiveActor>>>>,
 }
 
 enum Work {
@@ -83,17 +99,25 @@ pub(in crate::broker::enforcer) struct NativeHandle {
     handle: Option<JoinHandle<()>>,
     lease: LeaseOwner,
     failed: Arc<AtomicBool>,
+    #[cfg(test)]
+    joined_native: Arc<AtomicU64>,
 }
 
 impl NativeHandle {
     pub(in crate::broker::enforcer) fn join(&mut self) -> EnforcerResult<()> {
         // join consumes the handle even when its thread panicked. The joiner's
         // outer owner still retains the same lease and all remaining handles.
-        self.handle
+        let result = self
+            .handle
             .take()
             .ok_or(EnforcerError::Unhealthy)?
             .join()
-            .map_err(|_| EnforcerError::Unhealthy)
+            .map_err(|_| EnforcerError::Unhealthy);
+        #[cfg(test)]
+        if result.is_ok() {
+            self.joined_native.fetch_add(1, Ordering::SeqCst);
+        }
+        result
     }
 }
 
@@ -125,6 +149,7 @@ struct Joiner {
     actor_not_started: bool,
     ended: Option<bool>,
     keyed: Arc<Mutex<BTreeMap<Uuid, KeyedHandle>>>,
+    _legacy_custody: Arc<Mutex<LegacyCustody>>,
 }
 
 impl NativeOwners {
@@ -165,6 +190,7 @@ impl NativeOwners {
         let (sender, receiver) = sync_channel(actor_limit + 2);
         let failed = Arc::new(AtomicBool::new(false));
         let keyed = Arc::new(Mutex::new(BTreeMap::new()));
+        let legacy_custody = Arc::new(Mutex::new(LegacyCustody::default()));
         let joiner = Joiner {
             _lease: lease.clone(),
             receiver,
@@ -177,6 +203,7 @@ impl NativeOwners {
             actor_not_started: false,
             ended: None,
             keyed: Arc::clone(&keyed),
+            _legacy_custody: Arc::clone(&legacy_custody),
         };
         // Refuse startup before progress, actors or IPC admission if this
         // owner cannot be created. No new flock or discovery format is used.
@@ -191,6 +218,9 @@ impl NativeOwners {
                 lease,
                 failed,
                 keyed,
+                legacy_custody,
+                #[cfg(test)]
+                joined_native: Arc::new(AtomicU64::new(0)),
             },
             handle,
         ))
@@ -198,6 +228,75 @@ impl NativeOwners {
 
     pub(in crate::broker::enforcer) fn failed(&self) -> bool {
         self.failed.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn retain_legacy_targets(
+        &self,
+        slots: Arc<Mutex<BTreeMap<String, Arc<Actor>>>>,
+        prospective: Arc<Mutex<BTreeMap<String, Arc<ProspectiveActor>>>>,
+    ) -> EnforcerResult<()> {
+        let mut custody = self
+            .legacy_custody
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        if custody.targets.is_some() {
+            return Err(EnforcerError::Conflict);
+        }
+        custody.targets = Some(LegacyTargets { slots, prospective });
+        Ok(())
+    }
+    pub(in crate::broker::enforcer) fn retain_legacy_catchup(
+        &self,
+        attempt: RecoveryAttemptOwner,
+    ) -> EnforcerResult<()> {
+        let mut custody = self
+            .legacy_custody
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        if custody.targets.is_none() || custody.catchup.is_some() {
+            return Err(EnforcerError::Conflict);
+        }
+        custody.catchup = Some(attempt);
+        Ok(())
+    }
+    pub(in crate::broker::enforcer) fn failure_latch(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.failed)
+    }
+    #[cfg(test)]
+    pub(super) fn fixture_join_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.joined_native)
+    }
+    pub(super) fn release_legacy_idle_custody(&self) -> EnforcerResult<()> {
+        let mut custody = self
+            .legacy_custody
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        if let Some(targets) = &custody.targets {
+            if !targets
+                .slots
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)?
+                .is_empty()
+                || !targets
+                    .prospective
+                    .lock()
+                    .map_err(|_| EnforcerError::Unhealthy)?
+                    .is_empty()
+            {
+                return Err(EnforcerError::NotIdle);
+            }
+        }
+        if self.failed()
+            || custody
+                .catchup
+                .as_ref()
+                .is_some_and(|attempt| !attempt.known_idle_joined())
+        {
+            return Err(EnforcerError::Unhealthy);
+        }
+        custody.catchup.take();
+        custody.targets.take();
+        Ok(())
     }
 
     pub(in crate::broker::enforcer) fn actor_exited(&self) {
@@ -209,6 +308,8 @@ impl NativeOwners {
             handle: Some(handle),
             lease: self.lease.clone(),
             failed: Arc::clone(&self.failed),
+            #[cfg(test)]
+            joined_native: Arc::clone(&self.joined_native),
         }
     }
 
@@ -241,6 +342,40 @@ impl NativeOwners {
         }
         keyed.insert(key.arm_id, KeyedHandle { key, native });
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(in crate::broker::enforcer) fn keyed_thread_id(
+        &self,
+        key: ActorKey,
+    ) -> EnforcerResult<std::thread::ThreadId> {
+        let keyed = self.keyed.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        let owned = keyed
+            .get(&key.arm_id)
+            .filter(|owned| owned.key == key)
+            .ok_or(EnforcerError::Conflict)?;
+        Ok(owned
+            .native
+            .handle
+            .as_ref()
+            .ok_or(EnforcerError::Unhealthy)?
+            .thread()
+            .id())
+    }
+    #[cfg(test)]
+    pub(super) fn keyed_finished(&self, key: ActorKey) -> bool {
+        self.keyed
+            .lock()
+            .unwrap()
+            .get(&key.arm_id)
+            .filter(|owner| owner.key == key)
+            .is_some_and(|owner| {
+                owner
+                    .native
+                    .handle
+                    .as_ref()
+                    .is_some_and(|handle| handle.is_finished())
+            })
     }
 
     pub(in crate::broker::enforcer) fn take_retiring(
@@ -557,6 +692,9 @@ mod tests {
             lease: LeaseOwner::Legacy(Arc::clone(&lease)),
             failed: Arc::clone(&failed),
             keyed: Arc::new(Mutex::new(BTreeMap::new())),
+            legacy_custody: Arc::new(Mutex::new(LegacyCustody::default())),
+            #[cfg(test)]
+            joined_native: Arc::new(AtomicU64::new(0)),
         };
         let (handle, release, exited) = owned_thread();
         assert_busy(&root);
@@ -587,6 +725,9 @@ mod tests {
             lease: LeaseOwner::Legacy(Arc::clone(&lease)),
             failed: Arc::clone(&failed),
             keyed: Arc::new(Mutex::new(BTreeMap::new())),
+            legacy_custody: Arc::new(Mutex::new(LegacyCustody::default())),
+            #[cfg(test)]
+            joined_native: Arc::new(AtomicU64::new(0)),
         };
         let (handle, release, exited) = owned_thread();
         assert_busy(&root);

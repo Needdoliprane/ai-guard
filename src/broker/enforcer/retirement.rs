@@ -1,5 +1,6 @@
 //! Live retirement authority. Durable records describe facts; only the owner
 //! of an original actor and its actual native JoinHandle can create witnesses.
+use super::native_stop_failure::{CauseTarget, FailureFacts, NativeStopFailures};
 use super::*;
 use super::{
     ledger::{ClosingCommitted, LedgerCoverageV1, RetirementLedger, TombstoneCommitted},
@@ -24,6 +25,10 @@ use std::{
 };
 use tokio::sync::watch;
 
+#[path = "retirement_prospective.rs"]
+mod prospective;
+use prospective::ProspectiveActor;
+
 /// Explicit new sealed authority. The child creates this root itself and is
 /// never handed a reconstructible creation capability through argv.
 pub async fn run_internal_full3_fresh(
@@ -32,7 +37,20 @@ pub async fn run_internal_full3_fresh(
     installation_id: Uuid,
     max_slots: u32,
 ) -> EnforcerResult<()> {
-    if !(1..=MAX_SLOTS).contains(&max_slots) || installation_id.is_nil() {
+    run_internal_full3_fresh_with_budget(parent, name, installation_id, max_slots, 0).await
+}
+
+pub async fn run_internal_full3_fresh_with_budget(
+    parent: &crate::control_fs::Directory,
+    name: &str,
+    installation_id: Uuid,
+    max_slots: u32,
+    max_recovery_stop_owners: u32,
+) -> EnforcerResult<()> {
+    if !(1..=MAX_SLOTS).contains(&max_slots)
+        || max_recovery_stop_owners > MAX_SLOTS
+        || installation_id.is_nil()
+    {
         return Err(EnforcerError::InvalidInput);
     }
     let parent = parent.clone();
@@ -49,17 +67,33 @@ pub async fn run_internal_full3_fresh(
     })
     .await
     .map_err(|_| EnforcerError::Unavailable)??;
-    super::recovery::run_full_listener(ledger, max_slots).await
+    super::recovery::run_full_listener_with_budget(ledger, max_slots, max_recovery_stop_owners)
+        .await
 }
 
 pub async fn run_internal_full3_existing(
     root: &crate::control_fs::Directory,
     max_slots: u32,
 ) -> EnforcerResult<()> {
-    if !(1..=MAX_SLOTS).contains(&max_slots) {
+    run_internal_full3_existing_with_budget(root, max_slots, 0).await
+}
+
+/// The recovery budget is distinct from the unchanged Original capacity.
+/// Existing roots still enter through the restrictive native recovery role.
+pub async fn run_internal_full3_existing_with_budget(
+    root: &crate::control_fs::Directory,
+    max_slots: u32,
+    max_recovery_stop_owners: u32,
+) -> EnforcerResult<()> {
+    if !(1..=MAX_SLOTS).contains(&max_slots) || max_recovery_stop_owners > MAX_SLOTS {
         return Err(EnforcerError::InvalidInput);
     }
-    super::recovery::run_full_existing_listener(root, max_slots).await
+    super::recovery::run_full_existing_listener_with_budget(
+        root,
+        max_slots,
+        max_recovery_stop_owners,
+    )
+    .await
 }
 
 fn data<T>(result: crate::broker::journal::JournalResult<T>) -> EnforcerResult<T> {
@@ -80,6 +114,10 @@ struct FullActor {
     // Only T permits the original thread to return normally. Closing alone
     // keeps the thread and lease retained if durable publication is unknown.
     exit: AtomicBool,
+    // Published only by the real native thread, after NativeOwners retained
+    // its handle and this thread constructed its own runtime context.
+    runtime_installed: Arc<AtomicBool>,
+    failures: Arc<NativeStopFailures>,
     owners: NativeOwners,
 }
 type FinalResult = EnforcerResult<(RetiredReceiptV1, LedgerHeadV1)>;
@@ -87,8 +125,76 @@ type FinalResult = EnforcerResult<(RetiredReceiptV1, LedgerHeadV1)>;
 pub(super) enum RegistryOwner {
     Full,
     Restored,
+    Prospective,
 }
-pub(super) type AdmissionRegistry = Arc<Mutex<BTreeMap<String, RegistryOwner>>>;
+/// The admission policy belongs to the same native owner as its retained
+/// registrations. Every Full view, including one published after a scan,
+/// receives this one registry. Constructing a view cannot reopen admission.
+pub(super) struct NativeAdmissionRegistry {
+    entries: Mutex<BTreeMap<String, RegistryOwner>>,
+    recovery_requested: AtomicBool,
+    // Written only while entries is locked. Zero is the exclusive fresh
+    // generation; this protocol has no transition back from recovery.
+    recovery_generation: AtomicU64,
+}
+pub(super) type AdmissionRegistry = Arc<NativeAdmissionRegistry>;
+
+impl NativeAdmissionRegistry {
+    /// Only the exclusive fresh-root factory may select this constructor.
+    pub(super) fn fresh() -> AdmissionRegistry {
+        Arc::new(Self {
+            entries: Mutex::new(BTreeMap::new()),
+            recovery_requested: AtomicBool::new(false),
+            recovery_generation: AtomicU64::new(0),
+        })
+    }
+
+    /// Existing/cold roles start closed before reading any recovery source.
+    pub(super) fn recovery_fenced() -> AdmissionRegistry {
+        Arc::new(Self {
+            entries: Mutex::new(BTreeMap::new()),
+            recovery_requested: AtomicBool::new(true),
+            recovery_generation: AtomicU64::new(1),
+        })
+    }
+
+    pub(super) fn lock(
+        &self,
+    ) -> std::sync::LockResult<std::sync::MutexGuard<'_, BTreeMap<String, RegistryOwner>>> {
+        self.entries.lock()
+    }
+
+    /// Restrictive intent precedes the gate. The returned generation confirms
+    /// its native commit; cancellation of an RPC waiter cannot undo either.
+    pub(super) fn begin_recovery(&self) -> EnforcerResult<u64> {
+        self.recovery_requested.store(true, Ordering::SeqCst);
+        let _admitted = self.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        let current = self.recovery_generation.load(Ordering::SeqCst);
+        let generation = if current == 0 { 1 } else { current };
+        self.recovery_generation.store(generation, Ordering::SeqCst);
+        Ok(generation)
+    }
+
+    pub(super) fn fenced(&self) -> bool {
+        self.recovery_requested.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn recovery_generation(&self) -> Option<u64> {
+        match self.recovery_generation.load(Ordering::SeqCst) {
+            0 => None,
+            generation => Some(generation),
+        }
+    }
+
+    /// Caller holds this registry's admission lock through the mutation or
+    /// grant. A failed/poisoned gate never yields a new Original or Prepare.
+    fn check_original(&self) -> EnforcerResult<()> {
+        if self.fenced() {
+            return Err(EnforcerError::NotReady);
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -103,6 +209,23 @@ pub(super) enum FullCommand {
         registration: Box<RegistrationV1>,
         generation: u64,
         observe_only: bool,
+    },
+    ReserveProspective {
+        prospective: Box<ProspectiveRegistrationV1>,
+        generation: u64,
+        replay_only: bool,
+    },
+    BeginProspectiveArmExchange {
+        reservation: ProspectiveReservationV1,
+        generation: u64,
+    },
+    BindProspective {
+        reservation: ProspectiveReservationV1,
+        registration: Box<RegistrationV1>,
+        generation: u64,
+        observe_only: bool,
+        #[serde(deserialize_with = "strict_optional_uuid")]
+        original_exchange_nonce: Option<Uuid>,
     },
     Prepare {
         arm_id: String,
@@ -151,6 +274,13 @@ pub(super) enum FullReply {
         actor_nonce: Uuid,
         #[serde(deserialize_with = "strict_optional_uuid")]
         original_registration_nonce: Option<Uuid>,
+    },
+    ProspectiveReserved {
+        reservation: ProspectiveReservationV1,
+    },
+    ProspectiveArmExchange {
+        #[serde(deserialize_with = "strict_optional_uuid")]
+        original_exchange_nonce: Option<Uuid>,
     },
     Prepared {
         value: Box<EnforcerSlotStatusV1>,
@@ -212,6 +342,9 @@ pub(super) struct FullState {
     admitted: AdmissionRegistry,
     clock: Option<Arc<NativeHostClock>>,
     actors: Mutex<BTreeMap<Uuid, Arc<FullActor>>>,
+    // These are actual pre-Arm native owners, charged to S before the RPC.
+    // A bound entry retains its original cell until the real native Q path.
+    prospective: Mutex<BTreeMap<Uuid, Arc<ProspectiveActor>>>,
     retiring: Mutex<BTreeMap<RetirementOperationKey, RetiringOperation>>,
     closed_arms: Mutex<BTreeSet<Uuid>>,
     closed: AtomicBool,
@@ -222,6 +355,63 @@ pub(super) struct FullState {
 }
 
 impl FullState {
+    pub(super) fn failure_facts(&self) -> FailureFacts {
+        let mut facts = FailureFacts::default();
+        let mut seen = BTreeSet::new();
+        let actors = self.actors.lock().unwrap_or_else(|p| p.into_inner());
+        for actor in actors.values() {
+            if seen.insert(Arc::as_ptr(&actor.failures) as usize) {
+                facts.merge(actor.failures.facts());
+            }
+        }
+        drop(actors);
+        let prospective = self.prospective.lock().unwrap_or_else(|p| p.into_inner());
+        for actor in prospective.values() {
+            if seen.insert(Arc::as_ptr(&actor.failures) as usize) {
+                facts.merge(actor.failures.facts());
+            }
+        }
+        facts
+    }
+    /// Called after committing the shared recovery fence and before its ACK.
+    /// This retains every pre-fence admission, including a Register waiting
+    /// for native Ready. Closing keeps its real continuation; it is not turned
+    /// into a STOP/absence/join proof. No ledger or runtime IO is performed.
+    pub(super) fn reserve_recovery_stops(&self) -> EnforcerResult<()> {
+        let mut wakes = Vec::new();
+        let mut pending_wakes = Vec::new();
+        {
+            let _admitted = self.admitted.lock().map_err(|_| EnforcerError::Unhealthy)?;
+            if self.admitted.recovery_generation().is_none() {
+                return Err(EnforcerError::NotReady);
+            }
+            let actors = self.actors.lock().map_err(|_| EnforcerError::Unhealthy)?;
+            for actor in actors.values() {
+                let mut state = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+                if !state.gate.is_closing() {
+                    state.gate.reserve_stop()?;
+                    state.status.phase = SlotPhaseV1::Stopping;
+                    wakes.push(Arc::clone(actor));
+                }
+            }
+            let pending = self
+                .prospective
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)?;
+            for actor in pending.values() {
+                actor.reserve_stop()?;
+                pending_wakes.push(Arc::clone(actor));
+            }
+        }
+        for actor in wakes {
+            actor.wake.notify_all();
+        }
+        for actor in pending_wakes {
+            actor.wake();
+        }
+        Ok(())
+    }
+
     async fn ledger_io<T, F>(self: &Arc<Self>, promised: bool, operation: F) -> EnforcerResult<T>
     where
         T: Send + 'static,
@@ -332,6 +522,21 @@ impl FullState {
         let actor = self.actor(arm_id, digest)?;
         let state = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
         Ok(state.status.clone())
+    }
+
+    /// Positive installation evidence comes from the retained native worker,
+    /// never from Ready/status, a digest, a semaphore or a spawned task alone.
+    /// The receipt says nothing about a runtime effect or an old start drain.
+    pub(super) fn native_stop_installed(&self, arm_id: &str, digest: &str) -> EnforcerResult<()> {
+        let actor = self.actor(arm_id, digest)?;
+        let state = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        if state.gate.is_closing()
+            || self.owners.failed()
+            || !actor.runtime_installed.load(Ordering::SeqCst)
+        {
+            return Err(EnforcerError::NotReady);
+        }
+        Ok(())
     }
     pub(super) fn check_restore(&self, arm_id: &str) -> EnforcerResult<()> {
         let arm_id = Uuid::parse_str(arm_id).map_err(|_| EnforcerError::InvalidInput)?;
@@ -485,6 +690,10 @@ impl FullState {
         }
         actors.remove(&arm_id);
         drop(actors);
+        self.prospective
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?
+            .remove(&arm_id);
         self.admitted
             .lock()
             .map_err(|_| EnforcerError::Unhealthy)?
@@ -549,6 +758,46 @@ impl FullState {
             } => {
                 let (value, replayed, binding, actor_nonce, original_registration_nonce) = self
                     .register(*registration, generation, observe_only)
+                    .await?;
+                Ok(FullReply::Registered {
+                    value: Box::new(value),
+                    replayed,
+                    binding,
+                    actor_nonce,
+                    original_registration_nonce,
+                })
+            }
+            FullCommand::ReserveProspective {
+                prospective,
+                generation,
+                replay_only,
+            } => Ok(FullReply::ProspectiveReserved {
+                reservation: self
+                    .reserve_prospective(*prospective, generation, replay_only)
+                    .await?,
+            }),
+            FullCommand::BeginProspectiveArmExchange {
+                reservation,
+                generation,
+            } => Ok(FullReply::ProspectiveArmExchange {
+                original_exchange_nonce: self
+                    .begin_prospective_arm_exchange(&reservation, generation)?,
+            }),
+            FullCommand::BindProspective {
+                reservation,
+                registration,
+                generation,
+                observe_only,
+                original_exchange_nonce,
+            } => {
+                let (value, replayed, binding, actor_nonce, original_registration_nonce) = self
+                    .bind_prospective(
+                        reservation,
+                        *registration,
+                        generation,
+                        observe_only,
+                        original_exchange_nonce,
+                    )
                     .await?;
                 Ok(FullReply::Registered {
                     value: Box::new(value),
@@ -661,6 +910,7 @@ impl FullState {
             admitted,
             clock,
             actors: Mutex::new(BTreeMap::new()),
+            prospective: Mutex::new(BTreeMap::new()),
             retiring: Mutex::new(BTreeMap::new()),
             closed_arms: Mutex::new(closed_arms),
             closed: AtomicBool::new(false),
@@ -716,19 +966,19 @@ impl FullState {
         }
         let digest = registration.digest()?;
         let (actor, replayed) = {
-            let mut admitted = self.admitted.lock().map_err(|_| EnforcerError::Unhealthy)?;
+            let admitted = self.admitted.lock().map_err(|_| EnforcerError::Unhealthy)?;
             if self.closed.load(Ordering::SeqCst) || self.owners.failed() {
                 return Err(EnforcerError::Unhealthy);
             }
             if admitted.get(&registration.arm.operation_id) == Some(&RegistryOwner::Restored) {
                 return Err(EnforcerError::Conflict);
             }
-            let mut actors = self.actors.lock().map_err(|_| EnforcerError::Unhealthy)?;
+            let actors = self.actors.lock().map_err(|_| EnforcerError::Unhealthy)?;
             if let Some(actor) = actors.get(&arm_id) {
                 if actor.digest != digest {
                     return Err(EnforcerError::Conflict);
                 }
-                if observe_only {
+                if observe_only || self.admitted.fenced() {
                     let mut state = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
                     if state.gate.is_closing() {
                         return Err(EnforcerError::Conflict);
@@ -738,72 +988,18 @@ impl FullState {
                 }
                 (Arc::clone(actor), true)
             } else {
-                if admitted.len() >= self.max_slots as usize {
-                    return Err(EnforcerError::Capacity);
+                if admitted.get(&registration.arm.operation_id) == Some(&RegistryOwner::Prospective)
+                {
+                    // A native pending owner exists, but its receipt has not
+                    // been bound by the exact reservation yet.
+                    return Err(EnforcerError::Conflict);
                 }
-                let actor = Arc::new(FullActor {
-                    registration,
-                    digest: digest.clone(),
-                    key: ActorKey {
-                        arm_id,
-                        epoch: self.epoch,
-                        nonce: Uuid::new_v4(),
-                    },
-                    original_registration_nonce: Uuid::new_v4(),
-                    state: Mutex::new(ActorState {
-                        status: EnforcerSlotStatusV1 {
-                            arm_id: arm_id.to_string(),
-                            registration_hash: digest.clone(),
-                            phase: SlotPhaseV1::Initializing,
-                            prepared_once: observe_only,
-                            generation,
-                            clock: None,
-                            observation: None,
-                            stop_failures: 0,
-                        },
-                        gate: OriginalGate::new(!observe_only),
-                    }),
-                    wake: Condvar::new(),
-                    exit: AtomicBool::new(false),
-                    owners: self.owners.clone(),
-                });
-                actors.insert(arm_id, Arc::clone(&actor));
-                admitted.insert(
-                    actor.registration.arm.operation_id.clone(),
-                    RegistryOwner::Full,
-                );
-                (actor, false)
+                // The real prospective native owner must precede the central
+                // Arm RPC. A receipt-bearing DATA record cannot create one
+                // afterward, even on an otherwise fresh Full listener.
+                return Err(EnforcerError::NotReady);
             }
         };
-        if !replayed {
-            let work = Arc::clone(&actor);
-            let clock = self.clock.clone();
-            let (retained, start) = std::sync::mpsc::sync_channel(1);
-            match std::thread::Builder::new()
-                .name("enforcer-full-stop".into())
-                .stack_size(1024 * 1024)
-                .spawn(move || {
-                    // The actor cannot publish Ready before its exact native
-                    // handle belongs to NativeOwners. A concurrent Register
-                    // replay therefore cannot retire across a handoff gap.
-                    if start.recv().is_ok() {
-                        work.run(clock);
-                    } else {
-                        work.failed();
-                        work.owners.actor_exited();
-                    }
-                }) {
-                Ok(handle) => {
-                    self.owners.actor_keyed(actor.key, handle)?;
-                    retained.send(()).map_err(|_| EnforcerError::Unhealthy)?;
-                }
-                Err(_) => {
-                    actor.failed();
-                    self.owners.actor_exited();
-                    return Err(EnforcerError::Unavailable);
-                }
-            }
-        }
         let expires = Instant::now()
             + if observe_only {
                 POLL
@@ -811,6 +1007,13 @@ impl FullState {
                 REGISTER_TIMEOUT - Duration::from_secs(1)
             };
         loop {
+            if !observe_only {
+                // Do not wait for the old Ready timeout after recovery has
+                // already made this native owner restrictive. The owner and
+                // handle remain retained even when this waiter returns.
+                let _admitted = self.admitted.lock().map_err(|_| EnforcerError::Unhealthy)?;
+                self.admitted.check_original()?;
+            }
             let (ready, value) = {
                 let state = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
                 if state.gate.is_closing() {
@@ -822,6 +1025,16 @@ impl FullState {
                 )
             };
             if ready {
+                // Register may have waited for ledger/native Ready while a
+                // recovery fence committed. Keep its real actor and resources,
+                // but never publish a usable late Original grant.
+                let _admitted = self.admitted.lock().map_err(|_| EnforcerError::Unhealthy)?;
+                if !observe_only {
+                    self.admitted.check_original()?;
+                }
+                if self.owners.failed() || !actor.runtime_installed.load(Ordering::SeqCst) {
+                    return Err(EnforcerError::NotReady);
+                }
                 let binding = data(Full3RegistrationBindingV1::new(
                     arm_id,
                     data(RetirementDigestV1::parse(&digest))?,
@@ -888,6 +1101,8 @@ impl FullState {
         digest: &str,
         generation: u64,
     ) -> EnforcerResult<EnforcerSlotStatusV1> {
+        let _admitted = self.admitted.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        self.admitted.check_original()?;
         let actor = self.actor(arm_id, digest)?;
         let clock = self.clock.as_ref().ok_or(EnforcerError::Unhealthy)?;
         let sample = clock.sample().map_err(|_| EnforcerError::Unhealthy)?;
@@ -991,6 +1206,9 @@ impl NativeOwners {
 }
 
 impl FullActor {
+    fn cause_target(&self) -> CauseTarget {
+        CauseTarget::fixed(self.registration.arm_id(), &self.digest)
+    }
     fn failed(&self) {
         if let Ok(mut state) = self.state.lock() {
             // Closing is represented in its own latch and never erased by
@@ -1002,33 +1220,38 @@ impl FullActor {
         }
     }
 
-    fn run(self: Arc<Self>, clock: Option<Arc<NativeHostClock>>) {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            #[cfg(test)]
-            if let Some(result) = tests::synthetic_ready_original(&self) {
-                return result;
-            }
-            self.run_inner(clock)
-        }));
-        if !matches!(result, Ok(Ok(()))) {
-            self.failed();
-            self.owners.actor_exited();
+    /// The prospective factory transfers its already installed runtime to
+    /// this same native actor; binding never starts a second OS thread.
+    fn run_installed(
+        self: &Arc<Self>,
+        clock: Option<Arc<NativeHostClock>>,
+        runtime: tokio::runtime::Runtime,
+    ) -> EnforcerResult<()> {
+        self.runtime_installed.store(true, Ordering::SeqCst);
+        #[cfg(test)]
+        if let Some(result) = tests::synthetic_ready_original(self) {
+            return result;
         }
+        self.run_inner(clock, runtime)
     }
-    fn run_inner(&self, clock: Option<Arc<NativeHostClock>>) -> EnforcerResult<()> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|_| EnforcerError::Unhealthy)?;
+    fn run_inner(
+        &self,
+        clock: Option<Arc<NativeHostClock>>,
+        runtime: tokio::runtime::Runtime,
+    ) -> EnforcerResult<()> {
         let managed = loop {
             // Reopen performs info/inspect only. It is owned by this native
             // thread, so its real return is drained by the retained join.
             if self.exit.load(Ordering::SeqCst) {
                 return Ok(());
             }
-            match runtime.block_on(ManagedRuntime::reopen(self.registration.authority.clone())) {
-                Ok(managed) => break managed,
-                Err(_) => {
+            match self.failures.execute(
+                &runtime,
+                self.cause_target(),
+                ManagedRuntime::reopen_native(self.registration.authority.clone()),
+            ) {
+                Some(settled) => break settled.value,
+                None => {
                     self.failed();
                     let state = self.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
                     let _waiting = self
@@ -1079,12 +1302,25 @@ impl FullActor {
             if stopping {
                 // The irreversible reservation happened under exactly the
                 // same mutex as Closing; all runtime IO happens after it.
-                let result =
-                    runtime.block_on(managed.stop_snapshot_owned(&self.registration.owned));
+                let result = self.failures.execute(
+                    &runtime,
+                    self.cause_target(),
+                    managed.stop_snapshot_owned_native(&self.registration.owned),
+                );
                 let mut state = self.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
                 match result {
-                    Ok(observed) => state.status.observation = Some(observed),
-                    Err(_) => {
+                    Some(settled) => {
+                        self.failures
+                            .observed_stop(self.cause_target(), settled.value.observation.clone());
+                        state.status.observation = Some(settled.value.observation);
+                        if let Some(cause) = settled.value.kill_failure {
+                            self.failures
+                                .returned(self.cause_target(), cause, settled.proof);
+                            state.status.stop_failures =
+                                state.status.stop_failures.saturating_add(1);
+                        }
+                    }
+                    None => {
                         state.status.stop_failures = state.status.stop_failures.saturating_add(1)
                     }
                 }

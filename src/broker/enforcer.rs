@@ -7,6 +7,7 @@ mod client;
 mod diagnostics;
 mod execution;
 pub(crate) mod ledger;
+mod native_stop_failure;
 mod recovery;
 pub(crate) mod retirement;
 mod server;
@@ -37,9 +38,15 @@ pub(crate) use execution::ExecutionEnforcerV1;
 pub use recovery::{
     EnforcerStopClient, EnforcerStopClientV3, EnforcerStopStatusV2, EnforcerStopStatusV3,
     StopPhaseV1, StopSlotV1, run_internal_recovery_enforcer,
+    run_internal_recovery_enforcer_with_budget,
 };
-pub use retirement::{run_internal_full3_existing, run_internal_full3_fresh};
-pub use server::run_internal_enforcer;
+pub use retirement::{
+    run_internal_full3_existing, run_internal_full3_existing_with_budget, run_internal_full3_fresh,
+    run_internal_full3_fresh_with_budget,
+};
+pub use server::{
+    run_internal_enforcer, run_internal_enforcer_with_budget, run_internal_legacy_fresh,
+};
 
 const MAX_SLOTS: u32 = 1024;
 const MAX_FRAME: u32 = 512 * 1024;
@@ -253,6 +260,115 @@ impl RegistrationV1 {
     }
 
     fn validate(&self) -> EnforcerResult<()> {
+        let _validated_target = self.prospective()?;
+        self.receipt
+            .validate_for_arm(&self.arm)
+            .map_err(|_| EnforcerError::InvalidInput)
+    }
+
+    pub(crate) fn prospective(&self) -> EnforcerResult<ProspectiveRegistrationV1> {
+        ProspectiveRegistrationV1::new(
+            self.control_origin_hash.clone(),
+            self.tenant_id.clone(),
+            self.arm.clone(),
+            self.authority.clone(),
+            self.owned.clone(),
+        )
+    }
+
+    pub(crate) fn arm(&self) -> &ArmV1 {
+        &self.arm
+    }
+    pub(crate) fn arm_id(&self) -> &str {
+        &self.arm.operation_id
+    }
+    pub(crate) fn receipt(&self) -> &ArmReceiptV1 {
+        &self.receipt
+    }
+    pub(crate) fn control_origin_hash(&self) -> &str {
+        &self.control_origin_hash
+    }
+    pub(crate) fn tenant_id(&self) -> &str {
+        &self.tenant_id
+    }
+    pub(crate) fn digest(&self) -> EnforcerResult<String> {
+        self.validate()?;
+        // Full private binding, including invocation, not authority.fingerprint
+        // alone. Serialization traverses structs and ordered invocation maps.
+        let bytes = serde_json::to_vec(self).map_err(|_| EnforcerError::InvalidInput)?;
+        if bytes.len() > 256 * 1024 {
+            return Err(EnforcerError::InvalidInput);
+        }
+        let mut digest = Sha256::new();
+        digest.update(b"ai-guard:enforcer-registration:v1\0");
+        digest.update(bytes);
+        Ok(hex::encode(digest.finalize()))
+    }
+}
+
+/// Exact immutable STOP target reserved before an Arm exchange. This is data;
+/// only the authenticated native factory can install an owner from it. It has
+/// no receipt, no Original grant and no start permission.
+#[derive(Clone, Serialize)]
+pub(crate) struct ProspectiveRegistrationV1 {
+    control_origin_hash: String,
+    tenant_id: String,
+    arm: ArmV1,
+    authority: RuntimeAuthority,
+    owned: OwnedContainerSnapshot,
+}
+impl<'de> Deserialize<'de> for ProspectiveRegistrationV1 {
+    fn deserialize<D: Deserializer<'de>>(decoder: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            control_origin_hash: String,
+            tenant_id: String,
+            arm: ArmV1,
+            authority: RuntimeAuthority,
+            #[serde(deserialize_with = "deserialize_owned")]
+            owned: OwnedContainerSnapshot,
+        }
+        let mut ignored = false;
+        let wire: Wire = serde_ignored::deserialize(decoder, |_| ignored = true)
+            .map_err(|_| D::Error::custom("invalid private prospective target"))?;
+        if ignored {
+            return Err(D::Error::custom("invalid private prospective target"));
+        }
+        Self::new(
+            wire.control_origin_hash,
+            wire.tenant_id,
+            wire.arm,
+            wire.authority,
+            wire.owned,
+        )
+        .map_err(|_| D::Error::custom("invalid private prospective target"))
+    }
+}
+impl fmt::Debug for ProspectiveRegistrationV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ProspectiveRegistrationV1(<private stop target>)")
+    }
+}
+impl ProspectiveRegistrationV1 {
+    pub(crate) fn new(
+        control_origin_hash: String,
+        tenant_id: String,
+        arm: ArmV1,
+        authority: RuntimeAuthority,
+        owned: OwnedContainerSnapshot,
+    ) -> EnforcerResult<Self> {
+        let value = Self {
+            control_origin_hash,
+            tenant_id,
+            arm,
+            authority,
+            owned,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+    pub(crate) fn validate(&self) -> EnforcerResult<()> {
         let invalid = || EnforcerError::InvalidInput;
         self.authority
             .validate_docker_launch_profile()
@@ -266,9 +382,6 @@ impl RegistrationV1 {
             return Err(invalid());
         }
         self.arm.validate().map_err(|_| invalid())?;
-        self.receipt
-            .validate_for_arm(&self.arm)
-            .map_err(|_| invalid())?;
         crate::tenancy::validate_tenant_id(&self.tenant_id).map_err(|_| invalid())?;
         let inspection = &self.arm.inspection;
         let handle = &self.owned.handle;
@@ -325,8 +438,11 @@ impl RegistrationV1 {
     pub(crate) fn arm_id(&self) -> &str {
         &self.arm.operation_id
     }
-    pub(crate) fn receipt(&self) -> &ArmReceiptV1 {
-        &self.receipt
+    pub(crate) fn authority(&self) -> &RuntimeAuthority {
+        &self.authority
+    }
+    pub(crate) fn owned(&self) -> &OwnedContainerSnapshot {
+        &self.owned
     }
     pub(crate) fn control_origin_hash(&self) -> &str {
         &self.control_origin_hash
@@ -334,19 +450,125 @@ impl RegistrationV1 {
     pub(crate) fn tenant_id(&self) -> &str {
         &self.tenant_id
     }
+    pub(crate) fn matches_registration(&self, registration: &RegistrationV1) -> EnforcerResult<()> {
+        registration.validate()?;
+        if self.digest()? != registration.prospective()?.digest()? {
+            return Err(EnforcerError::Conflict);
+        }
+        Ok(())
+    }
     pub(crate) fn digest(&self) -> EnforcerResult<String> {
         self.validate()?;
-        // Full private binding, including invocation, not authority.fingerprint
-        // alone. Serialization traverses structs and ordered invocation maps.
         let bytes = serde_json::to_vec(self).map_err(|_| EnforcerError::InvalidInput)?;
         if bytes.len() > 256 * 1024 {
             return Err(EnforcerError::InvalidInput);
         }
         let mut digest = Sha256::new();
-        digest.update(b"ai-guard:enforcer-registration:v1\0");
+        digest.update(b"ai-guard:enforcer-prospective:v1\0");
         digest.update(bytes);
         Ok(hex::encode(digest.finalize()))
     }
+}
+
+/// Acknowledgement from a real native prospective owner, bound to its epoch,
+/// admission generation and exact pending Arm. Serialized bytes never create
+/// an Original grant; the server checks its retained owner on every use.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProspectiveReservationV1 {
+    #[serde(deserialize_with = "crate::broker::retirement::strict_uuid")]
+    epoch: Uuid,
+    admission_generation: u64,
+    cancel_generation: u64,
+    #[serde(deserialize_with = "crate::broker::retirement::strict_uuid")]
+    reservation_nonce: Uuid,
+    arm_id: String,
+    prospective_hash: String,
+}
+impl ProspectiveReservationV1 {
+    pub(crate) fn validate_for(
+        &self,
+        prospective: &ProspectiveRegistrationV1,
+        epoch: Uuid,
+        cancel_generation: u64,
+    ) -> EnforcerResult<()> {
+        if self.epoch.is_nil()
+            || self.epoch != epoch
+            || self.reservation_nonce.is_nil()
+            || self.admission_generation == u64::MAX
+            || self.cancel_generation == u64::MAX
+            || self.cancel_generation != cancel_generation
+            || !hex_hash(&self.prospective_hash)
+            || self.arm_id != prospective.arm_id()
+            || self.prospective_hash != prospective.digest()?
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        Ok(())
+    }
+}
+
+/// Authenticated native observations, separate from the closed V1 status.
+/// The launch nonce correlates one actual private child spawn; DATA alone
+/// cannot reconstruct the launcher's process-local Fresh startup receipt.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LegacyProspectiveCapabilitiesV1 {
+    version: u32,
+    #[serde(deserialize_with = "crate::broker::retirement::strict_uuid")]
+    epoch: Uuid,
+    max_slots: u32,
+    max_recovery_stop_owners: u32,
+    #[serde(deserialize_with = "deserialize_legacy_optional")]
+    recovery_generation: Option<u64>,
+    #[serde(deserialize_with = "deserialize_legacy_optional_uuid")]
+    fresh_launch_nonce: Option<Uuid>,
+    known_stop_slots: u32,
+    #[serde(deserialize_with = "deserialize_legacy_optional")]
+    owned_active: Option<u32>,
+    recovery_incomplete: bool,
+}
+impl LegacyProspectiveCapabilitiesV1 {
+    fn validate(&self, epoch: Uuid, slots: u32, recovery: u32) -> EnforcerResult<()> {
+        if self.version != 1
+            || self.epoch != epoch
+            || self.epoch.is_nil()
+            || self.max_slots != slots
+            || !(1..=MAX_SLOTS).contains(&slots)
+            || self.max_recovery_stop_owners != recovery
+            || recovery > MAX_SLOTS
+            || self
+                .recovery_generation
+                .is_some_and(|value| value == 0 || value == u64::MAX)
+            || self.fresh_launch_nonce.is_some_and(|nonce| nonce.is_nil())
+            || self.known_stop_slots > slots + recovery.saturating_sub(1)
+            || self
+                .owned_active
+                .is_some_and(|owned| owned > self.known_stop_slots)
+        {
+            return Err(EnforcerError::Unauthorized);
+        }
+        Ok(())
+    }
+}
+fn deserialize_legacy_optional<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Option<T>, D::Error> {
+    Option::<T>::deserialize(d)
+}
+fn deserialize_legacy_optional_uuid<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Uuid>, D::Error> {
+    let value = Option::<String>::deserialize(d)?;
+    value
+        .map(|raw| {
+            let parsed = Uuid::parse_str(&raw).map_err(D::Error::custom)?;
+            if parsed.is_nil() || parsed.hyphenated().to_string() != raw {
+                return Err(D::Error::custom("invalid native nonce"));
+            }
+            Ok(parsed)
+        })
+        .transpose()
 }
 
 fn hex_hash(value: &str) -> bool {
@@ -454,6 +676,29 @@ struct Authentication {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
+    ProspectiveCapabilities {},
+    ReserveProspective {
+        prospective: Box<ProspectiveRegistrationV1>,
+        generation: u64,
+        replay_only: bool,
+    },
+    BeginProspectiveArmExchange {
+        reservation: ProspectiveReservationV1,
+        generation: u64,
+    },
+    BindProspective {
+        reservation: ProspectiveReservationV1,
+        registration: Box<RegistrationV1>,
+        generation: u64,
+        observe_only: bool,
+        #[serde(deserialize_with = "deserialize_legacy_optional_uuid")]
+        original_exchange_nonce: Option<Uuid>,
+    },
+    CancelProspective {
+        reservation: ProspectiveReservationV1,
+        generation: u64,
+    },
+    BeginRecovery {},
     Status {},
     Watch {},
     Slots {
@@ -479,6 +724,19 @@ enum Request {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Response {
+    ProspectiveCapabilities {
+        value: LegacyProspectiveCapabilitiesV1,
+    },
+    ProspectiveReserved {
+        reservation: ProspectiveReservationV1,
+    },
+    ProspectiveArmExchange {
+        #[serde(deserialize_with = "deserialize_legacy_optional_uuid")]
+        original_exchange_nonce: Option<Uuid>,
+    },
+    RecoveryBegun {
+        generation: u64,
+    },
     Status {
         value: EnforcerStatusV1,
     },

@@ -92,6 +92,7 @@ Ce qui suit est un **template complet du registre wire version2** pour une nouve
   "installation_id": "<new-installation-uuid>",
   "root": "/absolute/private/ai-guard/broker-state",
   "max_enforcer_slots": 8,
+  "max_recovery_stop_owners": 0,
   "profiles": [
     {
       "id": "strict-docker",
@@ -167,7 +168,8 @@ Pour une nouvelle configuration Docker, sélectionner explicitement `docker_mini
 | Champ du registre | Sens et bornes |
 |---|---|
 | `installation_id`, `root` | Identité stable d'installation et racine privée d'état durable. Les remplacer ne reprend pas une installation existante. |
-| `max_enforcer_slots` | 1–1024 cibles d'arrêt retenues, partagées par le service ; les helpers consomment aussi cette capacité. Ce n'est pas un réglage de nombre de workers qualifié. |
+| `max_enforcer_slots` | S : 1–1024 cellules natives Original/pré-Arm partagées par le service ; les helpers consomment aussi cette capacité. La reprise peut utiliser les cellules S disponibles. Ce n'est pas un nombre de workers qualifié. |
+| `max_recovery_stop_owners` | W : 0–1024 cellules STOP natives supplémentaires, défaut 0. Pour W>0, une reste réservée au rattrapage ; capacité permanente de reprise S + max(W−1, 0). Ajoute des ressources runtime/thread/mémoire, aucun droit de start. |
 | `profiles`, `id` | 1–32 profils ; IDs uniques de 1–80 lettres/chiffres ASCII/`_`/`-`. |
 | `policy_profile`, `network` | `strict`, `review` ou `observe` ; `none` ou `bridge`. Bridge est une connectivité sortante, pas une liste de destinations autorisées. |
 | `max_timeout_seconds`, `allow_capture_output` | Durée de 1–86400 secondes ; la capture doit être activée ici pour qu'un client puisse la demander. Sans durée demandée, Submit utilise le minimum entre 300 secondes et cette limite. |
@@ -201,6 +203,10 @@ Cette commande n'installe aucune unité systemd ou tâche launchd et ne revendiq
 
 L'authentification IPC privée du gardien appartient à l'état du broker et reste distincte des credentials runner/viewer. Une authentification existante est lue sans réécriture. Si elle manque dans un rôle possédant déjà un état, le démarrage refuse d'en générer une autre. Préserver la racine du rôle, son historique et les sauvegardes privées cohérentes ; récupérer l'authentification originale sous maintenance contrôlée. Effacer l'historique pour obtenir une racine apparemment vide n'est pas une procédure de reprise.
 
+Le candidat Legacy D7 raccorde l'installation réellement neuve sélectionnée par défaut à sa propre factory native prospective, avec le budget S/W configuré. Le même enfant Rust crée exclusivement rôle et lock V1 puis possède le contexte STOP exact avant la RPC Arm. Il ne sélectionne pas Full3. Seul le parent qui a réellement lancé cet enfant garde une provenance Fresh corrélée au natif ; une reconnexion ou un répertoire existant paraissant vide ne la recrée pas. La reprise initiale est sautée seulement si provenance, éléments de contrôle complets et inventaire journal strictement absent/vide concordent. Les rôles existing/cold restent fenced avant scan ; la réouverture métier automatique n'est pas fournie. L'[état de validation source D7](../../engineering/D7_STOP_RECOVERY.fr.md) reste NOT_RUN pour cette nouvelle composition jusqu'à sa revue et ses contrôles Root/Luna distincts. Un vrai Claim/start exige toujours ManagedRuntime/Ready réel et une qualification moteur séparée.
+
+Un ancien daemon vivant sans nouvelle capacité prospective/fence authentifiée refuse les nouvelles RPC Arm et les nouveaux scans de reprise. Ses anciens chemins Status/Slots/Cancel/STOP et owners natifs restent, sans takeover ni migration automatique. Garder rôle et connexion de contrôle originaux, utiliser lorsque disponible le Cancel de l'opération exacte avec UUID de commande stable et examiner preuves de reprise et observations runtime avant de conclure au drain. Une couverture indisponible reste inconnue. Auth/ancres manquantes exigent une restauration contrôlée, ni suppression/rekey ni détour Full3. Ce candidat ne fournit ni drain Legacy automatique, retraite/quota, réouverture du gate froid ni migration qualifiée.
+
 ### Reprendre les arrêts autorisés avec admission fermée
 
 Pour une installation existante qui doit uniquement restaurer ses cibles d'arrêt prouvées, démarrer explicitement le service restreint :
@@ -214,6 +220,8 @@ Ce mode exige les racines privées, verrous de rôle, authentification IPC et na
 Le service demande explicitement la capacité `StopsOnly` du protocole2. Il restaure uniquement les cibles prouvées par des lecteurs de journal retenus, conserve leur identité de conteneur et leur échéance originales, et retient les annulations durables pour les rejouer après reconnexion. L'admission reste fermée pendant toute la vie de ce service : Submit, approve, resume et export ne peuvent pas obtenir de capacité Full. Status, list, recovery-status et cancel conservent leurs dépendances normales d'authentification et de données ; ce mode ne réactive pas un gateway inactif.
 
 Pour chaque lot de reprise, le broker retient les cibles validées dans sa capacité configurée avant d'attendre leurs confirmations individuelles de contrôle. La disparition du client attendant cette demande ne les efface pas tant que le broker fonctionne. Les cibles indépendantes continuent après l'échec d'une cible ; le résultat signale une couverture partielle. Une confirmation porte sur l'instance du gardien et la révision de cible acquittées à cet instant, pas sur un worker observé arrêté. Après un crash du broker, la reprise exige toujours le journal durable conservé.
+
+Choisir W explicitement avant de démarrer le rôle ; modifier un registre vivant n'installe aucune nouvelle ressource native. Avec S=1/W=2, deux cibles gardent un owner permanent et une cellule distincte reste disponible au rattrapage. Avec S=1/W=1, la seconde cible reçoit de vraies tentatives bornées sans confirmation de couverture active. Surplus, source indisponible/incomplète ou installation native pending restent incomplets. Le status authentifié du transport STOP natif distingue les owners actifs installés des données de découverte retenues et des tentatives revenues ; un appel natif bloqué conserve sa cellule et son snapshot. W=0 ne promet pas de progression de rattrapage pour un surplus. La vue publique journal `recovery-status` reste distincte et ne certifie pas les owners actifs.
 
 Une réservation d'arrêt ou une annulation acceptée ne confirme ni effet runtime ni résultat terminal. Une couverture partielle du journal reste partielle. Le transport de reprise ne prouve pas le drainage d'un ancien démarrage, ne finalise pas un retrait et n'autorise pas un nouveau worker à remplacer une cible ambiguë. Des racines, authentifications, verrous ou sockets manquants ou dangereux nécessitent une récupération contrôlée de ces ancres exactes ; une nouvelle racine ou un nouveau credential ne les remplace pas.
 

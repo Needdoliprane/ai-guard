@@ -1,12 +1,18 @@
 # Validation courante
 
-## 17 novembre — D7 et Native17 : résultats privés distincts
+## 17 novembre — contribution D7 intégrée, qualification ouverte
+
+Le code D7 provient du commit `6a32771` : propriétaires STOP natifs réservés avant acquittement, capacité explicite et admission de reprise fermée ; un Pending déjà confirmé est relu strictement sans publier une révision vide. Les [preuves EN/FR et les FQN](evidence/2026-11-17/d7-native-stop-owners/README.fr.md) séparent chaque source : le gel Legacy R5 `6c5554cd…` (2 964 fichiers) passe check toutes cibles, build libtest puis **16 cas lib exacts PASS**, chacun invoqué une fois, aucun ignoré. Clippy toutes cibles rend **RC0 non strict, 561 émissions d’avertissement, zéro erreur** ; la gate stricte reste ouverte.
+
+Le gel R4 `5b82fdd` conserve ses **4 PASS / 1 FAIL / 15 NOT_RUN**, dont un vrai ancien binaire V1 explicitement invoqué et réussi. Ces PASS ne sont pas transférés à R5 ; les erreurs antérieures restent datées. Réouverture métier froide, Pending sans owner retenu, retraite/Q Legacy, libération de quota, STOP physique, moteurs réels et capacité 100 restent ouverts. **Aucun fingerprint global d’audit ni aucun des 12 gates n’est clos.**
+
+## Relevé antérieur du 17 novembre — résultats D7 et Native17 privés
 
 Le [relevé EN/FR et son JSON](evidence/2026-11-17/d7-native17-progress/README.fr.md) séparent le code public `e794e45` des gels privés. D7 R5 `653e2abe…` : check toutes cibles et build libtest RC0, **28 PASS / 1 FAIL de pile avant oracle / 5 NOT_RUN**. R6 `8d174676…` ne change que la mise en tas d’une expression de fixture : nouveau build RC0 et **un seul cas 9 PASS**, sans réexécution/transfert des 28 PASS R5. Legacy Native+Ports R1 `0dce799c…` échoue au check toutes cibles RC101 sur un E0599 de fixture ; correction `07c9679` non recompilée, build libtest/listes/tests NOT_RUN et ancien cas 9 obsolète, non admis sur cette source.
 
 Le commun Native17 R5 `a3e9ca09…` passe check toutes cibles RC0 et build libtest RC0 après une première interruption pour ressources, RC−15, conservée. Deux cas réels, une invocation chacun : **0 PASS / 2 FAIL RC101**, sans défaut de harnais ni relance. Backup : cause typée `human_authority_epoch_expired` retenue ; OIDC : `TransactionMutations`, 1 999 ms. L’époque produit reste 2 s ; phases et durées incluent ordonnancement/attentes et ne prouvent ni coût CPU, ni attente de verrou, ni borne exacte de tenue du gate. Reçu Root `8a70c0410c924fe650d2521fe35972fc308b06ee0fe97670826b5b7bee943e80`, preuve libtest `0dc396349778b5e58cd9c4d5091856b0963c3da9ba7b766ffee3b838d2b1c1df`.
 
-Les remédiations D7 et Native17 restent privées et en cours. Aucun nouveau code de ces lots n’est publié par ce relevé, aucune qualification n’est transférée ; Clippy strict et **les 12 gates restent ouverts**. Aucune nouvelle exécution n’a été lancée pour cette mise à jour documentaire.
+À ce relevé, les remédiations D7 et Native17 restaient privées et en cours. Aucun nouveau code de ces lots n’était publié par ce relevé, aucune qualification n’est transférée ; Clippy strict et **les 12 gates restent ouverts**. Aucune nouvelle exécution n’a été lancée pour cette mise à jour documentaire.
 
 ## 17 novembre — relevé runtime et finalisation tardive D1
 

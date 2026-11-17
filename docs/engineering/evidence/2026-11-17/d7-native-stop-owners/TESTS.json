@@ -1,0 +1,278 @@
+{
+  "schema": 1,
+  "date": "2026-11-17",
+  "scope": "D7 targeted local software evidence; no full-matrix or production qualification",
+  "documentation": {
+    "english": "README.md",
+    "french": "README.fr.md",
+    "contract_english": "../../../D7_STOP_RECOVERY.md",
+    "contract_french": "../../../D7_STOP_RECOVERY.fr.md"
+  },
+  "source": {
+    "revision": "R5",
+    "commit": "6a32771ce76961f45d163767879d4ba08eeabcec",
+    "parent_commit": "5b82fdd57d652fba179a980c4f7843a5193494fa",
+    "files": 2964,
+    "archive_sha256": "6c5554cd211c93abf44584b353dfef0bba04f9c975ec0ef920536dcfb6c24a19",
+    "source_index_sha256": "7b520ff1272784c5ee20e55d306fe43ccf909906873bfca343c7848bad93140f",
+    "manifest_sha256": "f87172be682775cd08631bb24af79517bdb72fd8329d2f6d21a0a7115efb17cc",
+    "source_review": {
+      "verdict": "GO_SOURCE_ONLY",
+      "proof_sha256": "f23a437897c73be0c420df3d0091851237e49ea5bced99e9abaac778711a16d1"
+    }
+  },
+  "build_and_listing": {
+    "status": "PASS",
+    "verification_sha256": "d6da2ce5a7c8a448f66ff06db030f6d2eb5a1ff9befdbb6976defe162c22734b",
+    "compilation_receipts": [
+      {
+        "return_code": 0,
+        "receipt_sha256": "6073b820eba4b89a04f1d885b68152204d49fe367e3d1c061f212403a52e7e08"
+      },
+      {
+        "return_code": 0,
+        "receipt_sha256": "46b0fc4979cd98b6d623fe470d253984ef869f0b1a66f9bd00be5a049928228f"
+      }
+    ],
+    "library_test_artifact": {
+      "sha256": "a52a89a3f63f6bb3cb2468e295857de7f8790f90bdda7457b2f57f1c563c32a9",
+      "bytes": 316888336,
+      "profile": {
+        "opt_level": "0",
+        "debuginfo": 0,
+        "debug_assertions": true,
+        "overflow_checks": true,
+        "test": true
+      },
+      "fresh": false
+    },
+    "listed_tests_including_ignored": 1772,
+    "listed_ignored_subset": 24,
+    "listing_is_execution": false
+  },
+  "clippy": {
+    "status": "PASS_NONSTRICT",
+    "scope": "all-targets",
+    "return_code": 0,
+    "elapsed_seconds": 84.19949625,
+    "warning_emissions": 561,
+    "errors": 0,
+    "strict": false,
+    "strict_gate_closed": false,
+    "new_warning_attribution": "UNKNOWN_WITHOUT_COMPARABLE_BASELINE",
+    "source_files_unchanged": 2964,
+    "verification_sha256": "58e02364570af6d9351d3def6076ffeee1f2dc829a63c59479d140df35dd7407",
+    "receipt_sha256": "819e28bc229d863b96c1f844ec5c99961a3d66dd4926f4ec20f3e0780faffb7c"
+  },
+  "R5_targeted_library_execution": {
+    "status": "PASS",
+    "counts": {
+      "PASS": 16,
+      "FAIL": 0,
+      "NOT_RUN": 0,
+      "ignored": 0
+    },
+    "invocations_per_case": 1,
+    "verification_sha256": "d843e66b682ee85ec877f16661ff357483b6c88b2564cfcef155be34cd6c01f4",
+    "behavioral_receipt_sha256": "c0f423e8538ff5b1d4cd6b25c6950a801be266dc211e2cfe38c287cc4dbf2395",
+    "source_and_binary_unchanged": true,
+    "cases": [
+      {
+        "fqn": "runner::broker::executor::helpers::prospective_live_tests::installed_prospective_capacity_refuses_before_arm_rpc",
+        "status": "PASS",
+        "return_code": 0,
+        "exact_one_test_verified": true
+      },
+      {
+        "fqn": "runner::broker::executor::helpers::prospective_live_tests::cancelled_generation_refuses_before_arm_rpc",
+        "status": "PASS",
+        "return_code": 0,
+        "exact_one_test_verified": true
+      },
+      {
+        "fqn": "runner::broker::executor::helpers::prospective_live_tests::unknown_pending_writer_ack_never_generates_another_arm_or_rpc",
+        "status": "PASS",
+        "return_code": 0,
+        "exact_one_test_verified": true
+      },
+      {
+        "fqn": "runner::broker::executor::helpers::prospective_live_tests::lost_arm_ack_replays_same_owner_and_deadline_without_claim",
+        "status": "PASS",
+        "return_code": 0,
+        "exact_one_test_verified": true
+      },
+      {
+        "fqn": "broker::service::profile::tests::registry_v2_accepts_explicit_minimal_docker_start_profile",
+        "status": "PASS",
+        "return_code": 0,
+        "exact_one_test_verified": true
+      },
+      {
+        "fqn": "broker::enforcer::retirement::tests::continuation_regressions::bound_native_actor_retains_the_real_unavailable_runtime_cause",
+        "status": "PASS",
+        "return_code": 0,
+        "exact_one_test_verified": true
+      },
+      {
+        "fqn": "broker::enforcer::retirement::tests::continuation_regressions::verified_native_q_releases_s1_for_the_next_exact_prospective_arm",
+        "status": "PASS",
+        "return_code": 0,
+        "exact_one_test_verified": true
+      },
+      {
+        "fqn": "broker::enforcer::retirement::tests::continuation_regressions::lost_bind_reply_then_generic_register_cannot_reexport_original_nonce",
+        "status": "PASS",
+        "return_code": 0,
+        "exact_one_test_verified": true
+      },
+      {
+        "fqn": "broker::service::server::cancel_retry_tests::recovery_multi_arm_tests::d7_recovery_capacity_tests::d7_two_slot_report_is_a_separate_capacity_control",
+        "status": "PASS",
+        "return_code": 0,
+        "exact_one_test_verified": true
+      },
+      {
+        "fqn": "broker::service::server::cancel_retry_tests::recovery_multi_arm_tests::d7_recovery_capacity_tests::d7_one_slot_report_leaves_no_ack_without_stop_cancel_coverage",
+        "status": "PASS",
+        "return_code": 0,
+        "exact_one_test_verified": true
+      },
+      {
+        "fqn": "broker::service::server::cancel_retry_tests::recovery_multi_arm_tests::d7_recovery_capacity_tests::d7_one_slot_cancel_projection_leaves_no_ack_without_coverage",
+        "status": "PASS",
+        "return_code": 0,
+        "exact_one_test_verified": true
+      },
+      {
+        "fqn": "broker::service::server::cancel_retry_tests::recovery_multi_arm_tests::d7_recovery_capacity_tests::d7_reserved_catchup_attempts_surplus_without_active_coverage_ack",
+        "status": "PASS",
+        "return_code": 0,
+        "exact_one_test_verified": true
+      },
+      {
+        "fqn": "broker::enforcer::retirement::tests::native_admission_tests::recovery_fence_retains_register_waiting_for_native_ready",
+        "status": "PASS",
+        "return_code": 0,
+        "exact_one_test_verified": true
+      },
+      {
+        "fqn": "broker::enforcer::retirement::tests::native_admission_tests::recovery_fence_refuses_late_prepare_but_keeps_exact_cancel",
+        "status": "PASS",
+        "return_code": 0,
+        "exact_one_test_verified": true
+      },
+      {
+        "fqn": "broker::enforcer::retirement::tests::native_admission_tests::full_constructed_after_recovery_scan_cannot_reopen_shared_admission",
+        "status": "PASS",
+        "return_code": 0,
+        "exact_one_test_verified": true
+      },
+      {
+        "fqn": "broker::enforcer::retirement::tests::native_admission_tests::recovery_intent_refuses_original_before_waiting_for_its_commit_gate",
+        "status": "PASS",
+        "return_code": 0,
+        "exact_one_test_verified": true
+      }
+    ],
+    "scope_limit": "Actual targeted test invocations with software fixtures; no engine or physical STOP effect qualification."
+  },
+  "historical_campaigns": {
+    "results_transferred_to_R5": false,
+    "cross_source_PASS_sum": false,
+    "R4": {
+      "commit": "5b82fdd57d652fba179a980c4f7843a5193494fa",
+      "counts": {
+        "PASS": 4,
+        "FAIL": 1,
+        "NOT_RUN": 15
+      },
+      "verification_sha256": "74c8c244608d38c3e7acb1601ffef5332311220834e4a487ffe5400b14f162d4",
+      "behavioral_receipt_sha256": "028804d13b1bfd650180feb47e44ecf1688d0dbda2f382c95beadb6584ce587f",
+      "cases": [
+        {
+          "fqn": "fixture::framing_tests::only_lf_terminated_gate_and_startup_records_count",
+          "status": "PASS",
+          "return_code": 0
+        },
+        {
+          "fqn": "broker::enforcer::client::legacy::tests::lost_real_restrictive_bind_reply_cannot_become_original_via_register",
+          "status": "PASS",
+          "return_code": 0
+        },
+        {
+          "fqn": "actual_old_v1_peer_refuses_current_service_arm_and_retains_exact_stop",
+          "status": "PASS",
+          "return_code": 0
+        },
+        {
+          "fqn": "broker::enforcer::client::legacy::tests::negotiated_legacy_counts_are_closed_bounded_and_keep_unknown_distinct",
+          "status": "PASS",
+          "return_code": 0
+        },
+        {
+          "fqn": "runner::broker::executor::helpers::prospective_live_tests::installed_prospective_capacity_refuses_before_arm_rpc",
+          "status": "FAIL",
+          "return_code": 101
+        }
+      ],
+      "old_V1": {
+        "fqn": "actual_old_v1_peer_refuses_current_service_arm_and_retains_exact_stop",
+        "explicit_ignored_invocation": true,
+        "status": "PASS",
+        "artifact_sha256": "9fe59fc815660c5df96611da824734023424e8b0b01fb2bb3aaf3d9708270c59"
+      },
+      "failed_case_individual_changed_values": "UNKNOWN_NOT_CAPTURED; empty retry revision is a source inference, not a historical observed value"
+    },
+    "R2_library": {
+      "commit": "a3c5370c98c14eacd5e02e3f48c70ce902f6223a",
+      "counts": {
+        "PASS": 24,
+        "FAIL": 1,
+        "NOT_RUN": 17
+      },
+      "behavioral_receipt_sha256": "466edb384facb30c0430e166105d535d8985ab444f9bc986c1d9f448792d79e7",
+      "failed_register_return": "UNKNOWN_NOT_CAPTURED"
+    },
+    "R2_CLI": {
+      "commit": "a3c5370c98c14eacd5e02e3f48c70ce902f6223a",
+      "counts": {
+        "PASS": 2,
+        "FAIL": 1,
+        "NOT_RUN": 0
+      },
+      "behavioral_receipt_sha256": "850b7edf91849c7b67e9b99f72989d7bc7b7a2defba9c07ae2441392d4cd07ff",
+      "original_old_V1_Status_detail_frame": "NOT_CAPTURED",
+      "counts_scope": "Only the three CLI selections; not the aggregate admission receipt",
+      "aggregate_receipt_counts": {
+        "PASS": 2,
+        "FAIL": 1,
+        "NOT_RUN": 42
+      },
+      "aggregate_receipt_scope": "45 admitted cases: three CLI invocations then42 library cases not started in this campaign; later independent library campaign remains separate"
+    }
+  },
+  "source_behavior": {
+    "native_owner": "Genuine fresh Legacy ReserveProspective ACK follows installation of a real native thread and runtime context, exact retained STOP snapshot and lease; Bind keeps that same owner.",
+    "capacity": "One registry, fresh Original capacity at most S; total native owner-cell budget S+W. With W>0, one catch-up cell and S+max(W-1,0) permanent cells. No second S pool.",
+    "recovery": "New cold/existing Legacy roles start fenced. Active-coverage acknowledgement requires the corresponding reserved native STOP owner; refusal or unknown coverage does not permit new starts or replace the old daemon. DATA does not reopen admission.",
+    "Pending_retry": "First creation publishes Pending. Existing Pending is strictly reread and matched without an empty revision; missing/divergent state refuses before Arm RPC. No CAS across the native await is claimed."
+  },
+  "qualification": {
+    "production_gates_closed_by_this_evidence": 0,
+    "production_gate_count": 12,
+    "global_audit_fingerprints_closed": [],
+    "full_test_matrix_executed": false,
+    "physical_STOP_or_engine_qualification": false,
+    "hundred_workers_qualified": false,
+    "open_limits": [
+      "automatic cold business reopen",
+      "Pending with no retained native owner",
+      "Legacy retirement/Q and quota release",
+      "physical STOP, deadline and IO collection effects",
+      "real Docker/Podman engines and Kubernetes coverage",
+      "100-worker scale",
+      "synchronous stderr latency and capture writer-volume bounds"
+    ],
+    "no_production_ready_claim": true
+  }
+}

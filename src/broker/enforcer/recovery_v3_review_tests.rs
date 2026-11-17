@@ -717,6 +717,7 @@ fn isolated_client(root: &Directory, protocol: StopProtocol) -> EnforcerStopClie
         root: root.clone(),
         executable: std::env::current_exe().unwrap(),
         max_slots: 8,
+        max_recovery_stop_owners: 0,
         capability: [0x5a; 32],
         protocol,
         affinity: StopAffinity::Legacy,

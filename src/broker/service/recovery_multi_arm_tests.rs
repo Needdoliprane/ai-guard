@@ -535,3 +535,6 @@ async fn recovery_report_job_retains_all_arms_before_an_abandoned_bootstrap_wait
 
 #[path = "d5_ledger_tests.rs"]
 mod d5_ledger_tests;
+
+#[path = "d7_recovery_capacity_tests.rs"]
+mod d7_recovery_capacity_tests;

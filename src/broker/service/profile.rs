@@ -26,6 +26,10 @@ pub(super) struct RegistryWireV1 {
     pub(super) installation_id: Uuid,
     pub(super) root: PathBuf,
     pub(super) max_enforcer_slots: u32,
+    /// Additional native recovery cells. A positive budget reserves one cell
+    /// for bounded catch-up, leaving W-1 for permanently accepted STOP owners.
+    #[serde(default)]
+    pub(super) max_recovery_stop_owners: u32,
     pub(super) profiles: Vec<ControlProfileV1>,
     #[serde(default)]
     pub(super) additional_control_secret_files: Vec<PathBuf>,
@@ -70,6 +74,8 @@ struct RegistryWireV2 {
     installation_id: Uuid,
     root: PathBuf,
     max_enforcer_slots: u32,
+    #[serde(default)]
+    max_recovery_stop_owners: u32,
     profiles: Vec<ControlProfileV2>,
     #[serde(default)]
     additional_control_secret_files: Vec<PathBuf>,
@@ -244,6 +250,7 @@ impl Registry {
                     installation_id: wire.installation_id,
                     root: wire.root,
                     max_enforcer_slots: wire.max_enforcer_slots,
+                    max_recovery_stop_owners: wire.max_recovery_stop_owners,
                     profiles,
                     additional_control_secret_files: wire.additional_control_secret_files,
                 }
@@ -257,6 +264,10 @@ impl Registry {
         ensure!(
             (1..=1024).contains(&data.max_enforcer_slots),
             "invalid broker stop capacity"
+        );
+        ensure!(
+            data.max_recovery_stop_owners <= 1024,
+            "invalid broker recovery stop capacity"
         );
         ensure!(
             (1..=32).contains(&data.profiles.len()),
@@ -694,6 +705,7 @@ mod tests {
             "the V1 positive control must expose its configured profile"
         );
         assert!(legacy.start_profile("strict-docker") == PrearmedStartProfile::Legacy);
+        assert_eq!(legacy.data.max_recovery_stop_owners, 0);
 
         let mut v2 = v1;
         v2["version"] = json!(2);
@@ -720,6 +732,39 @@ mod tests {
             "the V2 registry must expose its configured profile"
         );
         assert!(strict.start_profile("strict-docker") == PrearmedStartProfile::DockerMinimal);
+        assert_eq!(strict.data.max_recovery_stop_owners, 0);
+        // Exercise both real private-file decoders and the shared loader
+        // validation, without opening any referenced runtime or credential.
+        for version in [1, 2] {
+            for budget in [0_u32, 1, 1024, 1025, u32::MAX] {
+                let mut configured = v2.clone();
+                configured["version"] = json!(version);
+                if version == 1 {
+                    configured["profiles"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("prearmed_start_profile");
+                }
+                configured["max_recovery_stop_owners"] = json!(budget);
+                let file = directory
+                    .persistent_create(
+                        &format!("recovery-budget-{version}-{budget}.json"),
+                        &serde_json::to_vec(&configured).unwrap(),
+                    )
+                    .unwrap();
+                file.persistent_sync().unwrap();
+                directory.sync().unwrap();
+                let loaded = Registry::load(file.path());
+                if budget <= 1024 {
+                    assert_eq!(loaded.unwrap().data.max_recovery_stop_owners, budget);
+                } else {
+                    assert!(
+                        loaded.is_err(),
+                        "out-of-range native recovery capacity was accepted"
+                    );
+                }
+            }
+        }
         // Every variant uses the real private-file parser. Referenced paths and
         // endpoints remain unopened data, including explicit Legacy in V2.
         for variant in 0..7 {

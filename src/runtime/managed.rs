@@ -763,6 +763,23 @@ impl ManagedRuntime {
         let runtime = Runtime::from_invocation(binding.kind, invocation)?;
         Self::reopen_with_runtime(binding, runtime).await
     }
+    /// Native control outcome for an already charged STOP cell. This is not
+    /// an adoption/start capability and never derives collection from Display.
+    pub(crate) async fn reopen_native(binding: RuntimeAuthority) -> NativeRuntimeOutcome<Self> {
+        let runtime = match binding
+            .invocation
+            .clone()
+            .ok_or(ManagedRuntimeError::InvocationMigrationRequired)
+            .map_err(anyhow::Error::from)
+            .and_then(|invocation| Runtime::from_invocation(binding.kind, invocation))
+        {
+            Ok(runtime) => runtime,
+            Err(error) => return super::control_outcome::no_child(Err(error)),
+        };
+        let scope = super::control_outcome::NativeControlScope::new(runtime);
+        let result = Self::validated_reopen(binding, scope.runtime()).await;
+        scope.finish(result)
+    }
     pub async fn reopen_with_runtime(binding: RuntimeAuthority, runtime: Runtime) -> Result<Self> {
         let invocation = binding
             .invocation
@@ -1336,6 +1353,24 @@ impl ManagedRuntime {
         &self,
         owned: &OwnedContainerSnapshot,
     ) -> Result<ContainerObservation> {
+        self.stop_snapshot_owned_result(owned)
+            .await
+            .map(|result| result.observation)
+    }
+    pub(crate) async fn stop_snapshot_owned_native(
+        &self,
+        owned: &OwnedContainerSnapshot,
+    ) -> NativeRuntimeOutcome<NativeStopResult> {
+        let scope = super::control_outcome::NativeControlScope::new(self.runtime.clone());
+        let mut scoped = self.clone();
+        scoped.runtime = scope.runtime();
+        let result = scoped.stop_snapshot_owned_result(owned).await;
+        scope.finish(result)
+    }
+    async fn stop_snapshot_owned_result(
+        &self,
+        owned: &OwnedContainerSnapshot,
+    ) -> Result<NativeStopResult> {
         self.validate_handle(&owned.handle)?;
         ensure!(
             owned.observation.id.as_deref() == Some(owned.handle.id.as_str())
@@ -1343,7 +1378,7 @@ impl ManagedRuntime {
                 && owned.observation.fingerprint_version() == owned.handle.fingerprint_version(),
             "owned stop snapshot does not match its handle"
         );
-        self.stop_snapshot_target(&owned.handle.id, &owned.observation)
+        self.stop_snapshot_target_result(&owned.handle.id, &owned.observation)
             .await
     }
     pub(super) async fn stop_snapshot_target(
@@ -1351,6 +1386,15 @@ impl ManagedRuntime {
         id: &str,
         baseline: &ContainerObservation,
     ) -> Result<ContainerObservation> {
+        self.stop_snapshot_target_result(id, baseline)
+            .await
+            .map(|result| result.observation)
+    }
+    async fn stop_snapshot_target_result(
+        &self,
+        id: &str,
+        baseline: &ContainerObservation,
+    ) -> Result<NativeStopResult> {
         ensure!(
             valid_immutable_id(id)
                 && baseline.id.as_deref() == Some(id)
@@ -1368,7 +1412,10 @@ impl ManagedRuntime {
         let observed = self.observe_id(id, baseline.fingerprint_version()).await?;
         observed.validate_identity_allocation(baseline)?;
         if stopped_process(&observed) {
-            return Ok(observed);
+            return Ok(NativeStopResult {
+                observation: observed,
+                kill_failure: None,
+            });
         }
         ensure!(
             observed.process.running == Some(true)
@@ -1381,14 +1428,38 @@ impl ManagedRuntime {
         // kill_target revalidates engine authority immediately before the effect.
         // A failed command can race a natural exit; only the next exact inspection
         // can establish the result. Inspect and kill are not an atomic engine API.
-        let _ = self.kill_target(id).await;
-        let observed = self.observe_id(id, baseline.fingerprint_version()).await?;
-        observed.validate_identity_allocation(baseline)?;
-        ensure!(
-            stopped_process(&observed),
-            "runtime did not prove the exact owned snapshot stopped"
-        );
-        Ok(observed)
+        let kill_failure = self.kill_target(id).await.err();
+        if self.runtime.native_control.as_ref().is_some_and(|scope| {
+            matches!(
+                scope.phase(),
+                NativeIoPhase::Pending | NativeIoPhase::Unknown
+            )
+        }) {
+            // Do not emit a follow-up CLI over a still-owned/unknown native
+            // command. Its exact original error and scope remain together.
+            return Err(kill_failure
+                .unwrap_or_else(|| anyhow::anyhow!("owned kill has no native collection proof")));
+        }
+        let followed = async {
+            let observed = self.observe_id(id, baseline.fingerprint_version()).await?;
+            observed.validate_identity_allocation(baseline)?;
+            ensure!(
+                stopped_process(&observed),
+                "runtime did not prove the exact owned snapshot stopped"
+            );
+            Ok(observed)
+        }
+        .await;
+        match followed {
+            Ok(observation) => Ok(NativeStopResult {
+                observation,
+                kill_failure,
+            }),
+            Err(followup_failure) => Err(anyhow::Error::new(NativeStopFailure {
+                kill_failure,
+                followup_failure,
+            })),
+        }
     }
     /// Legacy handle-only stop for callers without a captured sandbox baseline.
     /// Managed supervision must use stop_snapshot_owned instead.

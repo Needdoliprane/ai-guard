@@ -4,7 +4,8 @@
 
 use super::{
     CancelGeneration, EnforcedSlot, EnforcerClient, EnforcerError, EnforcerFullClientV3,
-    EnforcerResult, EnforcerStatusV1, RegistrationV1,
+    EnforcerResult, EnforcerStatusV1, ProspectiveRegistrationV1, RegistrationV1,
+    client::ProspectiveArmExchange,
 };
 use crate::{
     broker::{
@@ -28,6 +29,74 @@ impl From<EnforcerClient> for ExecutionEnforcerV1 {
 }
 
 impl ExecutionEnforcerV1 {
+    pub(crate) fn require_new_prearm_identity(&self) -> EnforcerResult<()> {
+        match self {
+            Self::Legacy(client) => client.legacy_require_new_prearm_identity(),
+            Self::Full3(client) => client.require_new_prearm_identity(),
+        }
+    }
+    pub(crate) fn fence_unknown_prearm_write(&self) -> EnforcerResult<()> {
+        match self {
+            Self::Legacy(client) => client.legacy_fence_unknown_prearm_write(),
+            Self::Full3(client) => client.fence_unknown_prearm_write(),
+        }
+    }
+    pub(crate) async fn reserve_prospective(
+        &self,
+        target: ProspectiveRegistrationV1,
+        generation: CancelGeneration,
+        replay_only: bool,
+    ) -> EnforcerResult<()> {
+        match self {
+            Self::Legacy(client) => {
+                client
+                    .legacy_reserve_prospective(target, generation, replay_only)
+                    .await
+            }
+            Self::Full3(client) => {
+                client
+                    .reserve_prospective(target, generation, replay_only)
+                    .await
+            }
+        }
+    }
+    pub(crate) async fn begin_prospective_arm_exchange(
+        &self,
+        target: &ProspectiveRegistrationV1,
+        generation: &CancelGeneration,
+    ) -> EnforcerResult<ProspectiveArmExchange> {
+        match self {
+            Self::Legacy(client) => {
+                client
+                    .legacy_begin_prospective_arm_exchange(target, generation)
+                    .await
+            }
+            Self::Full3(client) => {
+                client
+                    .begin_prospective_arm_exchange(target, generation)
+                    .await
+            }
+        }
+    }
+    pub(crate) async fn bind_prospective(
+        &self,
+        registration: RegistrationV1,
+        generation: CancelGeneration,
+        exchange: ProspectiveArmExchange,
+    ) -> EnforcerResult<EnforcedSlot> {
+        match self {
+            Self::Legacy(client) => {
+                client
+                    .legacy_bind_prospective(registration, generation, exchange)
+                    .await
+            }
+            Self::Full3(client) => {
+                client
+                    .bind_prospective(registration, generation, exchange)
+                    .await
+            }
+        }
+    }
     pub(crate) fn full3(&self) -> Option<&EnforcerFullClientV3> {
         match self {
             Self::Full3(client) => Some(client),

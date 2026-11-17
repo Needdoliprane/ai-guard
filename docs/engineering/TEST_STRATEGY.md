@@ -1,5 +1,11 @@
 # Stratégie de qualification
 
+## 17 novembre — sélection D7 et portée des sources
+
+Le [relevé D7 EN/FR](evidence/2026-11-17/d7-native-stop-owners/README.fr.md) et son JSON donnent 16 FQN lib réellement réussis sur le gel `6c5554cd…` / commit `6a32771`, après reproduction du défaut de révision vide sur R4. Les 15 cas alors non exécutés ont été lancés sur R5 avec le cas corrigé ; les quatre PASS R4, dont l’ancien V1 explicitement invoqué, restent attachés à R4. Check toutes cibles, build libtest et Clippy toutes cibles RC0 non strict vérifiés ; 561 émissions d’avertissement, gate stricte ouverte. Les listes contiennent 1 772 tests **dont** 24 ignorés ; ces 24 ne s’ajoutent pas au total et aucun n’est compté PASS par défaut.
+
+Le gel privé Native17 R8 `a44ad948…`, distinct du public et de D7, passe quatre régressions de transport Root mais conserve deux FAIL natifs d’époque sur de nouvelles fixtures : heartbeat à `grant_apply`, OIDC à `TransactionMembershipAppend`. Ni leur issue durable ni une performance suffisante ne sont déduites. Les essais moteur, reprise froide, restauration et capacité restent à qualifier ; une fixture de métadonnées ne démontre pas un STOP de worker.
+
 ## 17 novembre — relevé runtime et finalisation tardive D1
 
 [Douze cas logiciels ciblés](evidence/2026-11-17/runtime-observation-and-d1-late-finalizer/README.fr.md) passent sur le gel `c755fb52…db3b9`, dont quatre vrais CLI/Gateway/SQLite avec moteur Rust de fixture : terminal unique, faute Managed tardive et quota/instance conservés pour Created/Unknown. Le relevé facultatif est borné, sans attente dans STOP, et ne remplace pas l’audit durable. Le précédent FAIL de sonde reste historique ; la régression lit désormais la capture dans son véritable propriétaire d’erreur. Compilation des trois tests et six listes vérifiées ; Clippy toutes cibles de cette révision RC0 non strict, 528 émissions d’avertissement, 0 erreur ; 21 émissions supplémentaires restent suivies. Ni moteur réel, reprise froide, fournisseur, scénario A1/A2/B1 complet ni capacité 100 ne sont qualifiés. **0/12 gates clos**.

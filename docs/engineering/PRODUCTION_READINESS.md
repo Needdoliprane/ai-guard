@@ -1,5 +1,9 @@
 # Gates de qualification production
 
+## 17 novembre — D7 : preuve logicielle supplémentaire
+
+La [contribution D7](evidence/2026-11-17/d7-native-stop-owners/README.fr.md) intègre le code issu de `6a32771`, avec 16 tests lib ciblés PASS sur son gel et Clippy RC0 **non strict** (561 émissions). Elle ne clôture aucun gate : reprise froide/retirement, quota, STOP physique, Docker/Podman/Kubernetes et dimensionnement restent ouverts. Les résultats de sources antérieures restent séparés. **0/12 gates clos** ; aucune release qualifiée.
+
 ## 17 novembre — relevé runtime et finalisation tardive D1
 
 [Douze cas logiciels ciblés](evidence/2026-11-17/runtime-observation-and-d1-late-finalizer/README.fr.md) passent sur le gel `c755fb52…db3b9`, dont quatre vrais CLI/Gateway/SQLite avec moteur Rust de fixture : terminal unique, faute Managed tardive et quota/instance conservés pour Created/Unknown. Le relevé facultatif est borné, sans attente dans STOP, et ne remplace pas l’audit durable. Le précédent FAIL de sonde reste historique ; la régression lit désormais la capture dans son véritable propriétaire d’erreur. Compilation des trois tests et six listes vérifiées ; Clippy toutes cibles de cette révision RC0 non strict, 528 émissions d’avertissement, 0 erreur ; 21 émissions supplémentaires restent suivies. Ni moteur réel, reprise froide, fournisseur, scénario A1/A2/B1 complet ni capacité 100 ne sont qualifiés. **0/12 gates clos**.
