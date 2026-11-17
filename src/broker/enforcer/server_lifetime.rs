@@ -26,11 +26,7 @@ enum LeaseOwner {
 impl LeaseOwner {
     fn revalidate(&self) -> EnforcerResult<()> {
         match self {
-            Self::Legacy(lease) => {
-                // Legacy bootstrap ordering and its validation are unchanged.
-                let _retained = lease;
-                Ok(())
-            }
+            Self::Legacy(lease) => lease.revalidate().map_err(Into::into),
             Self::Sealed(lease) => lease.revalidate().map_err(Into::into),
         }
     }
@@ -241,6 +237,25 @@ impl NativeOwners {
         }
         keyed.insert(key.arm_id, KeyedHandle { key, native });
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(in crate::broker::enforcer) fn keyed_thread_id(
+        &self,
+        key: ActorKey,
+    ) -> EnforcerResult<std::thread::ThreadId> {
+        let keyed = self.keyed.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        let owned = keyed
+            .get(&key.arm_id)
+            .filter(|owned| owned.key == key)
+            .ok_or(EnforcerError::Conflict)?;
+        Ok(owned
+            .native
+            .handle
+            .as_ref()
+            .ok_or(EnforcerError::Unhealthy)?
+            .thread()
+            .id())
     }
 
     pub(in crate::broker::enforcer) fn take_retiring(

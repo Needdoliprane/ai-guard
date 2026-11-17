@@ -35,7 +35,8 @@ const MAX_RETAINED_STOP_TARGETS: usize = 16_384;
 #[path = "recovery_stop_owner.rs"]
 mod recovery_stop_owner;
 use super::native_stop_failure::NativeStopFailures;
-use recovery_stop_owner::{NativeStopWorker, RecoveryAttemptOwner};
+use recovery_stop_owner::NativeStopWorker;
+pub(super) use recovery_stop_owner::RecoveryAttemptOwner;
 
 #[cfg(test)]
 #[path = "recovery_affinity_tests.rs"]

@@ -195,24 +195,63 @@ fn stop_due(
 /// One W cell is reserved for real bounded catch-up attempts. It has a real
 /// runtime and retained handle before the role is published. An attempt does
 /// not issue an active-coverage ACK, retire a target or release its quota.
-pub(super) struct RecoveryAttemptOwner(Arc<AttemptState>);
+pub(in crate::broker::enforcer) struct RecoveryAttemptOwner(Arc<AttemptState>);
+enum AttemptLease {
+    Sealed {
+        _lease: EnforcerRoleLeaseV2,
+    },
+    Legacy {
+        _lease: Arc<crate::broker::discovery::RoleLease>,
+    },
+}
+enum AttemptRequest {
+    Recovery(RestoreRequiredStopV1),
+    // No source, ledger identity or durable Cancel is fabricated for V1.
+    // This is an exact, stop-only bounded attempt after native fencing.
+    Legacy {
+        registration: RegistrationV1,
+        digest: String,
+    },
+}
+impl AttemptRequest {
+    fn registration(&self) -> &RegistrationV1 {
+        match self {
+            Self::Recovery(value) => &value.registration,
+            Self::Legacy { registration, .. } => registration,
+        }
+    }
+    fn forced_stop(&self) -> bool {
+        match self {
+            Self::Recovery(value) => value.durable_cancel.is_some(),
+            Self::Legacy { .. } => true,
+        }
+    }
+    fn digest(&self) -> &str {
+        match self {
+            Self::Recovery(value) => &value.registration_hash,
+            Self::Legacy { digest, .. } => digest,
+        }
+    }
+}
 struct AttemptState {
-    sender: SyncSender<RestoreRequiredStopV1>,
+    sender: SyncSender<AttemptRequest>,
     handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     ready: AtomicBool,
+    stopping: AtomicBool,
+    outstanding: AtomicU64,
     attempts: AtomicU64,
     failures: AtomicU64,
     cause_history: Arc<NativeStopFailures>,
     // The target currently in native IO remains visible and owned if a call
     // never returns. Timeout of a transport waiter cannot clear this value.
-    current: Mutex<Option<Arc<RestoreRequiredStopV1>>>,
-    _lease: EnforcerRoleLeaseV2,
+    current: Mutex<Option<Arc<AttemptRequest>>>,
+    _lease: AttemptLease,
 }
 impl RecoveryAttemptOwner {
     pub(super) fn failure_facts(&self) -> super::super::native_stop_failure::FailureFacts {
         self.0.cause_history.facts()
     }
-    pub(super) fn observations(&self) -> (u64, u64, bool) {
+    pub(in crate::broker::enforcer) fn observations(&self) -> (u64, u64, bool) {
         (
             self.0.attempts.load(Ordering::SeqCst),
             self.0.failures.load(Ordering::SeqCst),
@@ -226,11 +265,26 @@ impl RecoveryAttemptOwner {
         lease: EnforcerRoleLeaseV2,
         clock: Option<Arc<NativeHostClock>>,
     ) -> EnforcerResult<Self> {
-        let (sender, receiver) = mpsc::sync_channel::<RestoreRequiredStopV1>(1);
+        Self::install_owned(AttemptLease::Sealed { _lease: lease }, clock)
+    }
+    pub(in crate::broker::enforcer) fn install_legacy(
+        lease: Arc<crate::broker::discovery::RoleLease>,
+        clock: Arc<NativeHostClock>,
+    ) -> EnforcerResult<Self> {
+        lease.revalidate()?;
+        Self::install_owned(AttemptLease::Legacy { _lease: lease }, Some(clock))
+    }
+    fn install_owned(
+        lease: AttemptLease,
+        clock: Option<Arc<NativeHostClock>>,
+    ) -> EnforcerResult<Self> {
+        let (sender, receiver) = mpsc::sync_channel::<AttemptRequest>(1);
         let state = Arc::new(AttemptState {
             sender,
             handle: Mutex::new(None),
             ready: AtomicBool::new(false),
+            stopping: AtomicBool::new(false),
+            outstanding: AtomicU64::new(0),
             attempts: AtomicU64::new(0),
             failures: AtomicU64::new(0),
             cause_history: NativeStopFailures::new(),
@@ -244,92 +298,111 @@ impl RecoveryAttemptOwner {
             .name("enforcer-recovery-attempt".into())
             .stack_size(1024 * 1024)
             .spawn(move || {
-                if started.recv().is_err() {
-                    return;
-                }
-                let runtime = loop {
-                    match tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                    {
-                        Ok(runtime) => break runtime,
-                        Err(error) => {
-                            worker
-                                .cause_history
-                                .context_failure(CauseTarget::context(), error);
-                            worker.failures.fetch_add(1, Ordering::SeqCst);
-                            std::thread::sleep(Duration::from_secs(1));
-                        }
-                    }
-                };
-                worker.ready.store(true, Ordering::SeqCst);
-                let _ = ready.try_send(());
-                while let Ok(request) = receiver.recv() {
-                    let request = Arc::new(request);
-                    // Keep the full exact request/Cancel while all runtime IO
-                    // is pending. The control cache retains its original proof.
-                    let Ok(mut current) = worker.current.lock() else {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if started.recv().is_err() {
                         return;
-                    };
-                    *current = Some(Arc::clone(&request));
-                    drop(current);
-                    let mut last_ns = None;
-                    let due = request.durable_cancel.is_some()
-                        || stop_due(&request.registration, clock.as_deref(), &mut last_ns);
-                    let target = CauseTarget::retained(
-                        request.registration.arm_id(),
-                        &request.registration_hash,
-                        Arc::clone(&request),
-                    );
-                    let failed = if due {
-                        match worker.cause_history.execute(
-                            &runtime,
-                            target.clone(),
-                            crate::runtime::ManagedRuntime::reopen_native(
-                                request.registration.authority.clone(),
-                            ),
-                        ) {
-                            Some(managed) => {
-                                match worker.cause_history.execute(
-                                    &runtime,
-                                    target.clone(),
-                                    managed
-                                        .value
-                                        .stop_snapshot_owned_native(&request.registration.owned),
-                                ) {
-                                    Some(settled) => {
-                                        worker.cause_history.observed_stop(
-                                            target.clone(),
-                                            settled.value.observation,
-                                        );
-                                        if let Some(cause) = settled.value.kill_failure {
-                                            worker.cause_history.returned(
-                                                target.clone(),
-                                                cause,
-                                                settled.proof,
-                                            );
-                                            true
-                                        } else {
-                                            false
-                                        }
-                                    }
-                                    None => true,
-                                }
+                    }
+                    let runtime = loop {
+                        match tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                        {
+                            Ok(runtime) => break runtime,
+                            Err(error) => {
+                                worker
+                                    .cause_history
+                                    .context_failure(CauseTarget::context(), error);
+                                worker.failures.fetch_add(1, Ordering::SeqCst);
+                                std::thread::sleep(Duration::from_secs(1));
                             }
-                            None => true,
                         }
-                    } else {
-                        false
                     };
-                    worker.attempts.fetch_add(1, Ordering::SeqCst);
-                    if failed {
-                        worker.failures.fetch_add(1, Ordering::SeqCst);
+                    worker.ready.store(true, Ordering::SeqCst);
+                    let _ = ready.try_send(());
+                    loop {
+                        if worker.stopping.load(Ordering::SeqCst)
+                            && worker.outstanding.load(Ordering::SeqCst) == 0
+                        {
+                            break;
+                        }
+                        let request = match receiver.recv_timeout(Duration::from_millis(25)) {
+                            Ok(request) => request,
+                            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        };
+                        let request = Arc::new(request);
+                        // Keep the full exact request/Cancel while all runtime IO
+                        // is pending. The control cache retains its original proof.
+                        let Ok(mut current) = worker.current.lock() else {
+                            return;
+                        };
+                        *current = Some(Arc::clone(&request));
+                        drop(current);
+                        let mut last_ns = None;
+                        let registration = request.registration();
+                        let due = request.forced_stop()
+                            || stop_due(registration, clock.as_deref(), &mut last_ns);
+                        let target = CauseTarget::retained(
+                            registration.arm_id(),
+                            request.digest(),
+                            Arc::clone(&request),
+                        );
+                        let failed = if due {
+                            match worker.cause_history.execute(
+                                &runtime,
+                                target.clone(),
+                                crate::runtime::ManagedRuntime::reopen_native(
+                                    registration.authority.clone(),
+                                ),
+                            ) {
+                                Some(managed) => {
+                                    match worker.cause_history.execute(
+                                        &runtime,
+                                        target.clone(),
+                                        managed
+                                            .value
+                                            .stop_snapshot_owned_native(&registration.owned),
+                                    ) {
+                                        Some(settled) => {
+                                            worker.cause_history.observed_stop(
+                                                target.clone(),
+                                                settled.value.observation,
+                                            );
+                                            if let Some(cause) = settled.value.kill_failure {
+                                                worker.cause_history.returned(
+                                                    target.clone(),
+                                                    cause,
+                                                    settled.proof,
+                                                );
+                                                true
+                                            } else {
+                                                false
+                                            }
+                                        }
+                                        None => true,
+                                    }
+                                }
+                                None => true,
+                            }
+                        } else {
+                            false
+                        };
+                        worker.attempts.fetch_add(1, Ordering::SeqCst);
+                        if failed {
+                            worker.failures.fetch_add(1, Ordering::SeqCst);
+                        }
+                        // This is reached only after the real runtime future has
+                        // returned/collected. It releases an attempt, not an Arm.
+                        if let Ok(mut current) = worker.current.lock() {
+                            *current = None;
+                        }
+                        worker.outstanding.fetch_sub(1, Ordering::SeqCst);
                     }
-                    // This is reached only after the real runtime future has
-                    // returned/collected. It releases an attempt, not an Arm.
-                    if let Ok(mut current) = worker.current.lock() {
-                        *current = None;
-                    }
+                }));
+                worker.ready.store(false, Ordering::SeqCst);
+                if let Err(payload) = result {
+                    worker.cause_history.native_thread_failed(payload);
+                    worker.failures.fetch_add(1, Ordering::SeqCst);
                 }
             })
             .map_err(|error| {
@@ -347,7 +420,20 @@ impl RecoveryAttemptOwner {
         Ok(Self(state))
     }
     pub(super) fn try_schedule(&self, request: RestoreRequiredStopV1) -> EnforcerResult<()> {
-        if !self.0.ready.load(Ordering::SeqCst) {
+        self.try_schedule_owned(AttemptRequest::Recovery(request))
+    }
+    pub(in crate::broker::enforcer) fn try_schedule_legacy(
+        &self,
+        registration: RegistrationV1,
+    ) -> EnforcerResult<()> {
+        let digest = registration.digest()?;
+        self.try_schedule_owned(AttemptRequest::Legacy {
+            registration,
+            digest,
+        })
+    }
+    fn try_schedule_owned(&self, request: AttemptRequest) -> EnforcerResult<()> {
+        if !self.0.ready.load(Ordering::SeqCst) || self.0.stopping.load(Ordering::SeqCst) {
             return Err(EnforcerError::NotReady);
         }
         if !self
@@ -360,9 +446,47 @@ impl RecoveryAttemptOwner {
         {
             return Err(EnforcerError::Unhealthy);
         }
-        self.0
+        self.0.outstanding.fetch_add(1, Ordering::SeqCst);
+        if self.0.stopping.load(Ordering::SeqCst) {
+            self.0.outstanding.fetch_sub(1, Ordering::SeqCst);
+            return Err(EnforcerError::Unavailable);
+        }
+        let result = self
+            .0
             .sender
             .try_send(request)
-            .map_err(|_| EnforcerError::Capacity)
+            .map_err(|_| EnforcerError::Capacity);
+        if result.is_err() {
+            self.0.outstanding.fetch_sub(1, Ordering::SeqCst);
+        }
+        result
+    }
+    pub(in crate::broker::enforcer) fn reserve_legacy_idle_shutdown(&self) -> EnforcerResult<()> {
+        if !matches!(self.0._lease, AttemptLease::Legacy { .. })
+            || self.0.outstanding.load(Ordering::SeqCst) != 0
+        {
+            return Err(EnforcerError::NotIdle);
+        }
+        self.0.stopping.store(true, Ordering::SeqCst);
+        if self.0.outstanding.load(Ordering::SeqCst) != 0 {
+            return Err(EnforcerError::NotIdle);
+        }
+        Ok(())
+    }
+    pub(in crate::broker::enforcer) async fn finish_legacy_idle(&self) -> EnforcerResult<()> {
+        if !self.0.stopping.load(Ordering::SeqCst) || self.0.outstanding.load(Ordering::SeqCst) != 0
+        {
+            return Err(EnforcerError::NotIdle);
+        }
+        let handle = self
+            .0
+            .handle
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?
+            .take()
+            .ok_or(EnforcerError::Unhealthy)?;
+        tokio::task::spawn_blocking(move || handle.join().map_err(|_| EnforcerError::Unhealthy))
+            .await
+            .map_err(|_| EnforcerError::Unhealthy)?
     }
 }
