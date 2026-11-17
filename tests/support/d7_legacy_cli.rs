@@ -68,6 +68,35 @@ struct StartGateRecord {
     operation_id: Uuid,
     reason_code: BrokerErrorCodeV1,
 }
+const STARTUP_FENCE_MARKER: &[u8] =
+    b"broker recovery: Legacy native admission fence unavailable; new starts remain refused";
+
+fn complete_records(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+    bytes
+        .split_inclusive(|byte| *byte == b'\n')
+        .filter_map(|record| record.strip_suffix(b"\n"))
+}
+fn startup_fence_record(bytes: &[u8]) -> bool {
+    complete_records(bytes).any(|record| record == STARTUP_FENCE_MARKER)
+}
+fn exact_start_gate_record(bytes: &[u8], operation: Uuid) -> bool {
+    let mut count = 0usize;
+    for record in complete_records(bytes) {
+        if let Ok(StartGateRecord {
+            version: 1,
+            component: GateComponent::Broker,
+            event: GateEvent::LaunchAdmissionRefused,
+            stage: GateStage::StartGate,
+            operation_id,
+            reason_code: BrokerErrorCodeV1::NeedsReconciliation,
+        }) = serde_json::from_slice::<StartGateRecord>(record)
+            && operation_id == operation
+        {
+            count += 1;
+        }
+    }
+    count == 1
+}
 impl BrokerStderr {
     pub fn create(fixture: &Fixture) -> Result<Self> {
         let file = fs::OpenOptions::new()
@@ -115,32 +144,65 @@ impl BrokerStderr {
         Ok(bytes)
     }
     pub fn startup_fence_confirmed(&self) -> Result<bool> {
-        const MARKER: &[u8] = b"broker recovery: Legacy native admission fence unavailable; new starts remain refused";
-        Ok(self
-            .read_bounded()?
-            .split(|byte| *byte == b'\n')
-            .any(|line| line == MARKER))
+        Ok(startup_fence_record(&self.read_bounded()?))
     }
     pub fn exact_start_gate_refusal(&self, operation: Uuid) -> Result<bool> {
-        let mut count = 0usize;
-        for line in self.read_bounded()?.split(|byte| *byte == b'\n') {
-            if let Ok(StartGateRecord {
-                version: 1,
-                component: GateComponent::Broker,
-                event: GateEvent::LaunchAdmissionRefused,
-                stage: GateStage::StartGate,
-                operation_id,
-                reason_code: BrokerErrorCodeV1::NeedsReconciliation,
-            }) = serde_json::from_slice::<StartGateRecord>(line)
-                && operation_id == operation
-            {
-                count += 1;
-            }
-        }
-        Ok(count == 1)
+        Ok(exact_start_gate_record(&self.read_bounded()?, operation))
     }
     pub fn check_bound(&self) -> Result<()> {
         self.read_bounded().map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod framing_tests {
+    use super::*;
+
+    #[test]
+    fn only_lf_terminated_gate_and_startup_records_count() {
+        let operation = Uuid::from_u128(1);
+        let value = serde_json::json!({
+            "version":1,"component":"broker","event":"launch_admission_refused",
+            "stage":"start_gate","operation_id":operation,"reason_code":"needs_reconciliation"
+        });
+        let without_lf = serde_json::to_vec(&value).unwrap();
+        // A complete JSON object alone still is not a complete emitted frame.
+        assert!(serde_json::from_slice::<StartGateRecord>(&without_lf).is_ok());
+        assert!(!exact_start_gate_record(&without_lf, operation));
+        let mut complete = without_lf.clone();
+        complete.push(b'\n');
+        assert!(exact_start_gate_record(&complete, operation));
+        assert!(!exact_start_gate_record(&complete, Uuid::from_u128(2)));
+
+        let mut foreign_tail = complete.clone();
+        foreign_tail.extend_from_slice(b"{\"foreign_record_in_progress\":");
+        assert!(exact_start_gate_record(&foreign_tail, operation));
+        let mut pending_duplicate = complete.clone();
+        pending_duplicate.extend_from_slice(&without_lf);
+        assert!(exact_start_gate_record(&pending_duplicate, operation));
+        let mut duplicate = complete.clone();
+        duplicate.extend_from_slice(&complete);
+        assert!(!exact_start_gate_record(&duplicate, operation));
+
+        let mut wrong_reason = value.clone();
+        wrong_reason["reason_code"] = serde_json::json!("unavailable");
+        let mut wrong_reason = serde_json::to_vec(&wrong_reason).unwrap();
+        wrong_reason.push(b'\n');
+        assert!(!exact_start_gate_record(&wrong_reason, operation));
+        let mut extra_field = value;
+        extra_field["extra"] = serde_json::json!(true);
+        let mut extra_field = serde_json::to_vec(&extra_field).unwrap();
+        extra_field.push(b'\n');
+        assert!(!exact_start_gate_record(&extra_field, operation));
+
+        assert!(!startup_fence_record(STARTUP_FENCE_MARKER));
+        let mut startup = STARTUP_FENCE_MARKER.to_vec();
+        startup.push(b'\n');
+        assert!(startup_fence_record(&startup));
+        startup.extend_from_slice(b"foreign_record_in_progress");
+        assert!(startup_fence_record(&startup));
+        assert!(!startup_fence_record(b"foreign_record_in_progress"));
+        assert!(!exact_start_gate_record(&[], operation));
     }
 }
 
