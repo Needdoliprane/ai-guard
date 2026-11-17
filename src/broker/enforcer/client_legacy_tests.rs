@@ -206,6 +206,9 @@ async fn lost_real_restrictive_bind_reply_cannot_become_original_via_register() 
     let registration = registration(fixture.root().path());
     let target = registration.prospective().unwrap();
     let generation = CancelGeneration::new();
+    let arm_id = registration.arm_id().to_owned();
+    let digest = registration.digest().unwrap();
+    let expected_generation = generation.current();
     client
         .legacy_reserve_prospective(target.clone(), generation.clone(), false)
         .await
@@ -215,6 +218,7 @@ async fn lost_real_restrictive_bind_reply_cannot_become_original_via_register() 
         .await
         .unwrap()
         .into_restrictive();
+    assert!(!exchange.permits_original());
     client
         .legacy_transport()
         .unwrap()
@@ -226,32 +230,104 @@ async fn lost_real_restrictive_bind_reply_cannot_become_original_via_register() 
             .await,
         Err(EnforcerError::Unavailable)
     ));
-    assert!(
-        client
+    let local = client
+        .0
+        .slots
+        .lock()
+        .unwrap()
+        .get(&arm_id)
+        .cloned()
+        .unwrap();
+    let retained = client.retained_prospective(&target, &generation).unwrap();
+    let check_local = |acknowledged| {
+        let current = client
             .0
             .slots
             .lock()
             .unwrap()
-            .contains_key(registration.arm_id())
+            .get(&arm_id)
+            .cloned()
+            .unwrap();
+        assert!(Arc::ptr_eq(&local, &current));
+        assert!(Arc::ptr_eq(
+            &retained,
+            &client.retained_prospective(&target, &generation).unwrap()
+        ));
+        assert!(Arc::ptr_eq(&local.generation.0, &generation.0));
+        assert!(local.digest == digest);
+        assert_eq!(generation.current(), expected_generation);
+        let (status, _) = &*local.status.lock().unwrap();
+        assert!(status.arm_id == arm_id && status.registration_hash == digest);
+        assert_eq!(status.generation, expected_generation);
+        assert!(status.prepared_once);
+        assert!(*local.stop.borrow());
+        assert_eq!(local.acknowledged.load(Ordering::SeqCst), acknowledged);
+        assert_eq!(retained.bound.load(Ordering::SeqCst), acknowledged);
+        assert!(!local.latch.claim_reserved());
+        assert!(retained.original_exchange_nonce.lock().unwrap().is_none());
+    };
+    let check_native = || async {
+        let Response::Slots { values } = client
+            .0
+            .request(
+                Request::Slots {
+                    arm_ids: vec![arm_id.clone()],
+                },
+                IO_TIMEOUT,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected closed native Slots reply");
+        };
+        assert_eq!(values.len(), 1);
+        assert!(values[0].arm_id == arm_id && values[0].registration_hash == digest);
+        assert_eq!(values[0].generation, expected_generation);
+        assert!(values[0].prepared_once);
+        let owners = client.legacy_capabilities().await.unwrap();
+        assert_eq!(owners.known_stop_slots, 1);
+        assert_eq!(owners.owned_active, Some(1));
+    };
+    check_local(false);
+    check_native().await;
+    let retry = client
+        .register(registration.clone(), generation.clone())
+        .await;
+    let outcome = match &retry {
+        Ok(_) => "Ok".to_owned(),
+        Err(code) => format!("Err({code:?})"),
+    };
+    // The restrictive Bind succeeded natively before its reply was lost.
+    // stop_reserved refuses this replay before the absent-nonce check.
+    assert!(
+        matches!(&retry, Err(EnforcerError::NotReady)),
+        "generic register replay outcome={outcome}"
     );
-    assert!(matches!(
-        client
-            .register(registration.clone(), generation.clone())
-            .await,
-        Err(EnforcerError::Unauthorized)
-    ));
+    drop(retry);
+    check_local(false);
+    check_native().await;
     let replay = client
         .legacy_begin_prospective_arm_exchange(&target, &generation)
         .await
         .unwrap();
     assert!(!replay.permits_original());
     let slot = client
-        .legacy_bind_prospective(registration, generation, replay)
+        .legacy_bind_prospective(registration, generation.clone(), replay)
         .await
         .unwrap();
+    assert!(Arc::ptr_eq(&slot.local, &local));
     assert!(slot.local.status.lock().unwrap().0.prepared_once);
+    check_local(true);
+    check_native().await;
+    assert!(matches!(
+        slot.reserve_claim(expected_generation),
+        Err(EnforcerError::NotReady)
+    ));
+    assert!(!local.latch.claim_reserved());
     assert_eq!(client.status().await.unwrap().slot_count(), 1);
     drop(slot);
+    drop(local);
+    drop(retained);
     drop(client);
     fixture.finish().await;
 }
