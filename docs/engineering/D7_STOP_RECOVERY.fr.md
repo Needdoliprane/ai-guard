@@ -112,6 +112,9 @@ chemin n'y figure. Une écriture en erreur ou courte peut omettre ce diagnostic 
 elle ne change aucun résultat et ne constitue pas un audit durable. Le rejet
 durable existant fait foi. Sous fence, la projection Status peut répondre
 `Unavailable` sans exposer la cause de préparation locale au processus.
+La borne porte sur les octets et l'unique essai, sans garantie de latence de
+l'écriture stderr synchrone ; ce diagnostic best-effort ne prouve ni audit
+durable ni STOP.
 
 La séquence pré-Arm persiste la demande Pending exacte, réserve son owner
 natif S, puis consomme le grant natif unique d'échange Arm avant la RPC.

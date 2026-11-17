@@ -105,6 +105,9 @@ profile, command or path. A failed or short write can omit this diagnostic;
 it changes no result and is not a durable audit. The existing durable rejection
 remains authoritative. A fenced Status projection can return `Unavailable`
 without exposing the process-local preparation cause.
+The byte and single-attempt bound does not guarantee synchronous stderr write
+latency; this best-effort diagnostic proves neither durable audit completion
+nor STOP.
 
 The pre-Arm sequence persists the exact Pending request, reserves its native
 S owner, then consumes the native one-time Arm-exchange grant before the RPC.
