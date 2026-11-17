@@ -189,13 +189,24 @@ pub(crate) fn abandonment_event_data(
 /// Optional service-test setup; the existing default fixture remains unchanged.
 /// The manual binding is a real private file/manifest/blob, never a live proof.
 pub(crate) fn live_fixture_with_gateway(origin: &str, manual_credential: bool) -> LiveFixture {
-    live_fixture_with_gateway_inner(origin, manual_credential, None, false)
+    live_fixture_with_gateway_inner(origin, manual_credential, None, false, false)
+}
+
+/// Synthetic Created checkpoint with no pending Arm in the journal. The
+/// independent Store still contains this fixture's baseline Arm; callers use
+/// this state only to prove refusal before any new Arm HTTP request.
+pub(crate) fn live_fixture_with_created_helper_for_prospective(origin: &str) -> LiveFixture {
+    live_fixture_with_gateway_inner(origin, true, None, false, true)
+}
+
+pub(crate) fn live_fixture_with_pending_arm_for_prospective(origin: &str) -> LiveFixture {
+    live_fixture_with_gateway_inner(origin, true, None, true, false)
 }
 
 /// Keep the real Arm request durable while its actual Store reply is not yet
 /// locally acknowledged. Registration remains data and is not used to start.
 pub(crate) fn live_fixture_with_pending_arm() -> LiveFixture {
-    live_fixture_with_gateway_inner("http://127.0.0.1:8787", false, None, true)
+    live_fixture_with_gateway_inner("http://127.0.0.1:8787", false, None, true, false)
 }
 
 /// Service fixtures must freeze the same explicit program that their routing
@@ -206,7 +217,13 @@ pub(crate) fn live_fixture_with_gateway_and_program(
     manual_credential: bool,
     runtime_program: &std::path::Path,
 ) -> LiveFixture {
-    live_fixture_with_gateway_inner(origin, manual_credential, Some(runtime_program), false)
+    live_fixture_with_gateway_inner(
+        origin,
+        manual_credential,
+        Some(runtime_program),
+        false,
+        false,
+    )
 }
 
 fn live_fixture_with_gateway_inner(
@@ -214,6 +231,7 @@ fn live_fixture_with_gateway_inner(
     manual_credential: bool,
     runtime_program: Option<&std::path::Path>,
     pending_arm: bool,
+    created_only: bool,
 ) -> LiveFixture {
     use crate::{
         audit::Store,
@@ -544,9 +562,11 @@ fn live_fixture_with_gateway_inner(
     )
     .unwrap();
     append(&mut head, runner, vec![helper_prepared], history.clone());
-    history.push(pending(operations.last().unwrap()));
+    if !created_only {
+        history.push(pending(operations.last().unwrap()));
+    }
     append(&mut head, runner, helpers.clone(), history.clone());
-    let registration = if pending_arm {
+    let registration = if pending_arm || created_only {
         let SupervisionOperationV1::Arm {
             request,
             response: Some(response),

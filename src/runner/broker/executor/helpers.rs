@@ -3,6 +3,10 @@ use super::journal::{same, without_response};
 use super::*;
 use futures_util::{FutureExt, future::BoxFuture};
 
+#[cfg(all(test, unix))]
+#[path = "prospective_live_tests.rs"]
+mod prospective_live_tests;
+
 struct PreparedHelper {
     worker: WorkerV1,
     draft: Draft,
@@ -59,6 +63,19 @@ impl Execution<'_> {
         owned: OwnedContainerSnapshot,
         helper: Option<(&HelperExecutionPolicyV1, &HelperPermissionV1)>,
     ) -> Result<PrearmedStartDirective> {
+        self.arm_and_claim_bound(runtime.binding(), owned, helper)
+            .await
+    }
+
+    // Keep the production entry bound to the real ManagedRuntime Created
+    // callback. Unit fixtures can exercise only this control-plane boundary
+    // with explicit synthetic Created metadata, without invoking a runtime.
+    async fn arm_and_claim_bound(
+        &self,
+        binding: &crate::runtime::RuntimeAuthority,
+        owned: OwnedContainerSnapshot,
+        helper: Option<(&HelperExecutionPolicyV1, &HelperPermissionV1)>,
+    ) -> Result<PrearmedStartDirective> {
         let (job, draft) = self.load().await?;
         let parent = draft.worker()?.clone();
         let subject = match helper {
@@ -82,9 +99,22 @@ impl Execution<'_> {
                 _ => None,
             });
         let newly_requested_arm = previous_arm.is_none();
+        let acknowledged_arm = matches!(
+            previous_arm.as_ref(),
+            Some(Operation::Arm {
+                response: Some(_),
+                ..
+            })
+        );
         let pending = if let Some(previous) = previous_arm {
             without_response(&previous)
         } else {
+            let full = self.executor.enforcer.full3().context(
+                "fresh Arm refused: the legacy enforcer has no native pre-ACK reservation; select a fresh Full3 role; existing armed STOP recovery remains available",
+            )?;
+            full.require_new_prearm_identity().context(
+                "fresh Arm refused: prior pending publication is unknown; controlled reconciliation is required",
+            )?;
             self.generation_current()?;
             let clock = self.executor.clock.sample()?;
             let timeout_seconds = helper
@@ -106,7 +136,7 @@ impl Execution<'_> {
                 intent_hash: job.intent_hash().into(),
                 subject,
                 inspection,
-                authority_binding_hash: runtime.binding().fingerprint(),
+                authority_binding_hash: binding.fingerprint(),
                 configuration_fingerprint_version: owned
                     .observation
                     .configuration_fingerprint_version
@@ -128,6 +158,78 @@ impl Execution<'_> {
                 response: None,
             }
         };
+        let arm_owned = match &pending {
+            Operation::Arm { owned, .. } => owned.clone(),
+            _ => return Err(anyhow!("prospective Arm target is missing")),
+        };
+        let mut prospective_exchange = None;
+        let mut fresh_original = false;
+        // The native owner must already retain the immutable target, runtime
+        // and exclusive S capacity before the gateway can acknowledge an Arm.
+        // The managed runtime invokes this path only after inspecting Created
+        // and validating the exact configuration/allocation. Historical
+        // pending DATA may reconnect to that same owner, never allocate one.
+        if !acknowledged_arm {
+            let full = self.executor.enforcer.full3().context(
+                "fresh Arm refused: the legacy enforcer has no native pre-ACK reservation; select a fresh Full3 role; existing armed STOP recovery remains available",
+            )?;
+            let Operation::Arm { request, owned, .. } = &pending else {
+                return Err(anyhow!("prospective Arm target is missing"));
+            };
+            let target = crate::broker::enforcer::ProspectiveRegistrationV1::new(
+                hex::encode(Sha256::digest(
+                    self.context.scope().gateway_origin().as_bytes(),
+                )),
+                self.context.scope().tenant_id().into(),
+                request.clone(),
+                binding.clone(),
+                owned.clone(),
+            )?;
+            // Fix the identity/deadline durably before native allocation. An
+            // unknown first publication fences new local identities; a later
+            // empty-looking read cannot cause another Arm to be generated.
+            let key = operation_key(&pending);
+            if let Err(error) = self
+                .patch(|draft| {
+                    if let Some(existing) =
+                        draft.operations.iter().find(|op| operation_key(op) == key)
+                    {
+                        ensure!(
+                            same(&without_response(existing), &pending)?,
+                            "pending Arm identity conflicts"
+                        );
+                    } else {
+                        draft.operations.push(pending.clone());
+                    }
+                    Ok(())
+                })
+                .await
+            {
+                full.fence_unknown_prearm_write()?;
+                return Err(
+                    error.context("pending Arm publication is unknown; no Arm RPC was issued")
+                );
+            }
+            full.reserve_prospective(
+                target.clone(),
+                self.context.cancel_generation().clone(),
+                !newly_requested_arm,
+            )
+            .await
+            .context(diagnostics::BrokerStep::Registration)?;
+            self.generation_current()?;
+            let exchange = full
+                .begin_prospective_arm_exchange(&target, self.context.cancel_generation())
+                .await
+                .context(diagnostics::BrokerStep::Registration)?;
+            self.generation_current()?;
+            fresh_original = newly_requested_arm && exchange.permits_original();
+            prospective_exchange = Some(if fresh_original {
+                exchange
+            } else {
+                exchange.into_restrictive()
+            });
+        }
         let (arm, _, committed) = self
             .rpc_checked_at_head(pending, None)
             .await
@@ -151,7 +253,7 @@ impl Execution<'_> {
             .into_parts(self.operation, self.context.scope())
             .context(diagnostics::BrokerStep::ArmExchange)?;
         if let Some(full) = self.executor.enforcer.full3()
-            && newly_requested_arm
+            && fresh_original
         {
             self.context.preclaim().announce_registration(
                 self.operation,
@@ -167,11 +269,25 @@ impl Execution<'_> {
             self.context.scope().tenant_id().into(),
             request.clone(),
             response.receipt.clone(),
-            runtime.binding().clone(),
-            owned,
+            binding.clone(),
+            arm_owned,
         )
         .context(diagnostics::BrokerStep::Registration)?;
-        let slot = if self.executor.enforcer.full3().is_some() && !newly_requested_arm {
+        let slot = if !acknowledged_arm {
+            self.executor
+                .enforcer
+                .full3()
+                .context("prospective Full3 owner is unavailable")?
+                .bind_prospective(
+                    registration,
+                    self.context.cancel_generation().clone(),
+                    prospective_exchange
+                        .take()
+                        .context("native Arm exchange phase is unavailable")?,
+                )
+                .await
+                .map_err(anyhow::Error::from)
+        } else if self.executor.enforcer.full3().is_some() {
             self.restore_assigned_slot(registration).await
         } else {
             self.executor
@@ -195,7 +311,12 @@ impl Execution<'_> {
             }
         })
         .context(diagnostics::BrokerStep::Registration)?;
-        if self.executor.enforcer.full3().is_some() && newly_requested_arm {
+        if !acknowledged_arm && !fresh_original {
+            // A replayed pending Arm can obtain its exact receipt and STOP
+            // binding, but cannot reconstruct the original fresh permission.
+            return Ok(PrearmedStartDirective::ObserveOnly);
+        }
+        if self.executor.enforcer.full3().is_some() && fresh_original {
             let binding = slot.full3_registration_binding()?;
             let mut confirmed = false;
             for _ in 0..16 {

@@ -65,8 +65,40 @@ struct FullTransport {
     ledger: crate::broker::retirement::LedgerIdentityV1,
     binding: String,
     registrations: Mutex<BTreeMap<String, RetainedFullRegistration>>,
+    // Retained before the Arm RPC. An unknown outcome or a dropped waiter
+    // cannot remove its exact pending identity, snapshot or native reservation.
+    prospective: Mutex<BTreeMap<String, Arc<LocalProspective>>>,
+    // A failed/unknown first pending publication cannot cause another Arm ID
+    // to be generated from a later empty-looking journal read.
+    prearm_write_unknown: AtomicBool,
     #[cfg(test)]
     lose_query_reply_after_successes: Mutex<Option<usize>>,
+}
+struct LocalProspective {
+    target: ProspectiveRegistrationV1,
+    digest: String,
+    generation: CancelGeneration,
+    reservation: Mutex<Option<ProspectiveReservationV1>>,
+    bound: AtomicBool,
+    original_exchange_nonce: Mutex<Option<Uuid>>,
+}
+/// Process capability created only from the authenticated native phase
+/// transition. It is never deserialized, cloned or reconstructed from DATA.
+pub(crate) struct ProspectiveArmExchange {
+    epoch: Uuid,
+    arm_id: String,
+    prospective_hash: String,
+    generation: u64,
+    original_exchange_nonce: Option<Uuid>,
+}
+impl ProspectiveArmExchange {
+    pub(crate) fn permits_original(&self) -> bool {
+        self.original_exchange_nonce.is_some()
+    }
+    pub(crate) fn into_restrictive(mut self) -> Self {
+        self.original_exchange_nonce = None;
+        self
+    }
 }
 struct OriginalRegistration {
     nonce: Uuid,
@@ -228,6 +260,8 @@ impl EnforcerFullClientV3 {
                 ledger,
                 binding,
                 registrations: Mutex::new(BTreeMap::new()),
+                prospective: Mutex::new(BTreeMap::new()),
+                prearm_write_unknown: AtomicBool::new(false),
                 #[cfg(test)]
                 lose_query_reply_after_successes: Mutex::new(None),
             })),
@@ -279,6 +313,17 @@ impl EnforcerFullClientV3 {
         installation_id: Uuid,
         max_slots: u32,
     ) -> EnforcerResult<Self> {
+        Self::spawn_fresh_with_budget(parent, name, executable, installation_id, max_slots, 0).await
+    }
+
+    pub(crate) async fn spawn_fresh_with_budget(
+        parent: &Directory,
+        name: &str,
+        executable: &Path,
+        installation_id: Uuid,
+        max_slots: u32,
+        max_recovery_stop_owners: u32,
+    ) -> EnforcerResult<Self> {
         if name.is_empty()
             || name.len() > 100
             || name == "."
@@ -289,6 +334,7 @@ impl EnforcerFullClientV3 {
             || !executable.is_absolute()
             || installation_id.is_nil()
             || !(1..=MAX_SLOTS).contains(&max_slots)
+            || max_recovery_stop_owners > MAX_SLOTS
         {
             return Err(EnforcerError::InvalidInput);
         }
@@ -306,6 +352,7 @@ impl EnforcerFullClientV3 {
             HelperMode::Full3Fresh {
                 name,
                 installation_id,
+                max_recovery_stop_owners,
             },
         )?;
         let expires = Instant::now() + REGISTER_TIMEOUT;
@@ -335,6 +382,221 @@ impl EnforcerFullClientV3 {
     ) -> EnforcerResult<EnforcedSlot> {
         self.0
             .register_current(registration, generation, false)
+            .await
+    }
+    pub(crate) fn require_new_prearm_identity(&self) -> EnforcerResult<()> {
+        if self.full()?.prearm_write_unknown.load(Ordering::SeqCst) {
+            return Err(EnforcerError::NotReady);
+        }
+        Ok(())
+    }
+    pub(crate) fn fence_unknown_prearm_write(&self) -> EnforcerResult<()> {
+        self.full()?
+            .prearm_write_unknown
+            .store(true, Ordering::SeqCst);
+        Ok(())
+    }
+    /// Called only from the managed runtime's validated Created callback,
+    /// before persisting/sending an Arm. A historical pending Arm may only
+    /// reconnect to an already installed exact prospective owner.
+    pub(crate) async fn reserve_prospective(
+        &self,
+        target: ProspectiveRegistrationV1,
+        generation: CancelGeneration,
+        replay_only: bool,
+    ) -> EnforcerResult<()> {
+        let full = self.full()?;
+        let expected = generation.current();
+        if expected == u64::MAX {
+            return Err(EnforcerError::NotReady);
+        }
+        let digest = target.digest()?;
+        let retained = {
+            let mut values = full
+                .prospective
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)?;
+            if let Some(old) = values.get(target.arm_id()) {
+                if old.digest != digest || !Arc::ptr_eq(&old.generation.0, &generation.0) {
+                    return Err(EnforcerError::Conflict);
+                }
+                Arc::clone(old)
+            } else {
+                if values.len() >= self.0.0.max_slots as usize {
+                    return Err(EnforcerError::Capacity);
+                }
+                let retained = Arc::new(LocalProspective {
+                    target,
+                    digest,
+                    generation,
+                    reservation: Mutex::new(None),
+                    bound: AtomicBool::new(false),
+                    original_exchange_nonce: Mutex::new(None),
+                });
+                values.insert(retained.target.arm_id().to_owned(), Arc::clone(&retained));
+                retained
+            }
+        };
+        // Never hold the client map across the native factory/handshake. The
+        // server rechecks its shared admission generation after every wait.
+        let reply = self
+            .0
+            .0
+            .full_request(
+                full,
+                FullCommand::ReserveProspective {
+                    prospective: Box::new(retained.target.clone()),
+                    generation: expected,
+                    replay_only,
+                },
+                REGISTER_TIMEOUT,
+            )
+            .await?;
+        let FullReply::ProspectiveReserved { reservation } = reply else {
+            return Err(match reply {
+                FullReply::Error { code } => code,
+                _ => EnforcerError::Unauthorized,
+            });
+        };
+        reservation.validate_for(
+            &retained.target,
+            self.epoch(),
+            reservation.cancel_generation,
+        )?;
+        if (!replay_only && expected != reservation.cancel_generation)
+            || (replay_only && expected < reservation.cancel_generation)
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        let mut previous = retained
+            .reservation
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        if let Some(old) = previous.as_ref() {
+            if serde_json::to_vec(old).map_err(|_| EnforcerError::InvalidInput)?
+                != serde_json::to_vec(&reservation).map_err(|_| EnforcerError::InvalidInput)?
+            {
+                return Err(EnforcerError::Conflict);
+            }
+        } else {
+            *previous = Some(reservation);
+        }
+        // Cancellation during native installation is restrictive and retains
+        // the installed STOP owner, while forbidding the subsequent Arm RPC.
+        if retained.generation.current() != expected {
+            return Err(EnforcerError::NotReady);
+        }
+        Ok(())
+    }
+    pub(crate) async fn begin_prospective_arm_exchange(
+        &self,
+        target: &ProspectiveRegistrationV1,
+        generation: &CancelGeneration,
+    ) -> EnforcerResult<ProspectiveArmExchange> {
+        let expected = generation.current();
+        if expected == u64::MAX {
+            return Err(EnforcerError::NotReady);
+        }
+        let full = self.full()?;
+        let retained = full
+            .prospective
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?
+            .get(target.arm_id())
+            .cloned()
+            .ok_or(EnforcerError::NotReady)?;
+        if retained.digest != target.digest()?
+            || !Arc::ptr_eq(&retained.generation.0, &generation.0)
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        let reservation = retained
+            .reservation
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?
+            .clone()
+            .ok_or(EnforcerError::NotReady)?;
+        // Clear any previous process grant before sending. If this reply is
+        // lost, the native monotone phase cannot issue an Original again.
+        *retained
+            .original_exchange_nonce
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)? = None;
+        let reply = self
+            .0
+            .0
+            .full_request(
+                full,
+                FullCommand::BeginProspectiveArmExchange {
+                    reservation,
+                    generation: expected,
+                },
+                REGISTER_TIMEOUT,
+            )
+            .await?;
+        let FullReply::ProspectiveArmExchange {
+            original_exchange_nonce,
+        } = reply
+        else {
+            return Err(match reply {
+                FullReply::Error { code } => code,
+                _ => EnforcerError::Unauthorized,
+            });
+        };
+        if original_exchange_nonce.is_some_and(|nonce| nonce.is_nil()) {
+            return Err(EnforcerError::Unauthorized);
+        }
+        if generation.current() != expected {
+            return Err(EnforcerError::NotReady);
+        }
+        Ok(ProspectiveArmExchange {
+            epoch: self.epoch(),
+            arm_id: target.arm_id().into(),
+            prospective_hash: retained.digest.clone(),
+            generation: expected,
+            original_exchange_nonce,
+        })
+    }
+    pub(crate) async fn bind_prospective(
+        &self,
+        registration: RegistrationV1,
+        generation: CancelGeneration,
+        exchange: ProspectiveArmExchange,
+    ) -> EnforcerResult<EnforcedSlot> {
+        let observe_only = !exchange.permits_original();
+        {
+            let values = self
+                .full()?
+                .prospective
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)?;
+            let retained = values
+                .get(registration.arm_id())
+                .ok_or(EnforcerError::NotReady)?;
+            retained.target.matches_registration(&registration)?;
+            if exchange.epoch != self.epoch()
+                || exchange.arm_id != registration.arm_id()
+                || exchange.prospective_hash != retained.digest
+                || exchange.generation != generation.current()
+            {
+                return Err(EnforcerError::Conflict);
+            }
+            if !Arc::ptr_eq(&retained.generation.0, &generation.0)
+                || retained
+                    .reservation
+                    .lock()
+                    .map_err(|_| EnforcerError::Unhealthy)?
+                    .is_none()
+            {
+                return Err(EnforcerError::Conflict);
+            }
+            *retained
+                .original_exchange_nonce
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)? = exchange.original_exchange_nonce;
+        }
+        self.0
+            .register_current(registration, generation, observe_only)
             .await
     }
     pub(crate) async fn restore(
@@ -648,6 +910,13 @@ impl EnforcerFullClientV3 {
             return Err(EnforcerError::Conflict);
         }
         slots.remove(arm_id);
+        // Only the verified native Final/join path above can release this
+        // client's prospective retention. A cancelled waiter never does.
+        self.full()?
+            .prospective
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?
+            .remove(arm_id);
         verified.local_completion = Some(Arc::clone(owner));
         Ok(())
     }
@@ -906,11 +1175,59 @@ impl Client {
                 registration,
                 generation,
                 observe_only,
-            } => FullCommand::Register {
-                registration,
-                generation,
-                observe_only,
-            },
+            } => {
+                let reservation = {
+                    let values = full
+                        .prospective
+                        .lock()
+                        .map_err(|_| EnforcerError::Unhealthy)?;
+                    match values.get(registration.arm_id()) {
+                        Some(retained) if !retained.bound.load(Ordering::SeqCst) => {
+                            retained.target.matches_registration(&registration)?;
+                            let reservation = retained
+                                .reservation
+                                .lock()
+                                .map_err(|_| EnforcerError::Unhealthy)?
+                                .clone()
+                                .ok_or(EnforcerError::NotReady)?;
+                            reservation.validate_for(
+                                &retained.target,
+                                self.endpoint.epoch(),
+                                reservation.cancel_generation,
+                            )?;
+                            if (!observe_only && generation != reservation.cancel_generation)
+                                || (observe_only && generation < reservation.cancel_generation)
+                            {
+                                return Err(EnforcerError::Conflict);
+                            }
+                            let original_exchange_nonce = if observe_only {
+                                None
+                            } else {
+                                *retained
+                                    .original_exchange_nonce
+                                    .lock()
+                                    .map_err(|_| EnforcerError::Unhealthy)?
+                            };
+                            Some((reservation, original_exchange_nonce))
+                        }
+                        _ => None,
+                    }
+                };
+                match reservation {
+                    Some((reservation, original_exchange_nonce)) => FullCommand::BindProspective {
+                        reservation,
+                        registration,
+                        generation,
+                        observe_only,
+                        original_exchange_nonce,
+                    },
+                    None => FullCommand::Register {
+                        registration,
+                        generation,
+                        observe_only,
+                    },
+                }
+            }
             Request::Prepare {
                 arm_id,
                 registration_hash,
@@ -939,6 +1256,12 @@ impl Client {
                 registration,
                 generation,
                 observe_only,
+            }
+            | FullCommand::BindProspective {
+                registration,
+                generation,
+                observe_only,
+                ..
             } => Some((
                 registration.arm.operation_id.clone(),
                 registration.digest()?,
@@ -998,6 +1321,14 @@ impl Client {
                                 .map(|nonce| OriginalRegistration { nonce }),
                         },
                     );
+                }
+                if let Some(prospective) = full
+                    .prospective
+                    .lock()
+                    .map_err(|_| EnforcerError::Unhealthy)?
+                    .get(&value.arm_id)
+                {
+                    prospective.bound.store(true, Ordering::SeqCst);
                 }
                 Response::Registered { value, replayed }
             }
@@ -2335,7 +2666,29 @@ pub(super) fn spawn_recovery_helper(
     executable: &Path,
     max_slots: u32,
 ) -> EnforcerResult<()> {
-    spawn_helper_mode(root, executable, max_slots, true)
+    spawn_recovery_helper_with_budget(root, executable, max_slots, 0)
+}
+
+pub(super) fn spawn_recovery_helper_with_budget(
+    root: &Directory,
+    executable: &Path,
+    max_slots: u32,
+    max_recovery_stop_owners: u32,
+) -> EnforcerResult<()> {
+    if !(1..=MAX_SLOTS).contains(&max_slots)
+        || max_recovery_stop_owners > MAX_SLOTS
+        || !executable.is_absolute()
+    {
+        return Err(EnforcerError::InvalidInput);
+    }
+    spawn_helper_config(
+        root,
+        executable,
+        max_slots,
+        HelperMode::Recovery {
+            max_recovery_stop_owners,
+        },
+    )
 }
 
 fn spawn_helper_mode(
@@ -2349,7 +2702,9 @@ fn spawn_helper_mode(
         executable,
         max_slots,
         if recovery_only {
-            HelperMode::Recovery
+            HelperMode::Recovery {
+                max_recovery_stop_owners: 0,
+            }
         } else {
             HelperMode::Legacy
         },
@@ -2358,10 +2713,13 @@ fn spawn_helper_mode(
 
 enum HelperMode<'a> {
     Legacy,
-    Recovery,
+    Recovery {
+        max_recovery_stop_owners: u32,
+    },
     Full3Fresh {
         name: &'a str,
         installation_id: Uuid,
+        max_recovery_stop_owners: u32,
     },
 }
 
@@ -2405,19 +2763,27 @@ fn spawn_helper_config(
         .stderr(Stdio::null());
     match mode {
         HelperMode::Legacy => {}
-        HelperMode::Recovery => {
-            command.arg("--recovery-only");
+        HelperMode::Recovery {
+            max_recovery_stop_owners,
+        } => {
+            command
+                .arg("--recovery-only")
+                .arg("--max-recovery-stop-owners")
+                .arg(max_recovery_stop_owners.to_string());
         }
         HelperMode::Full3Fresh {
             name,
             installation_id,
+            max_recovery_stop_owners,
         } => {
             command
                 .arg("--full3-fresh")
                 .arg("--role-name")
                 .arg(name)
                 .arg("--installation-id")
-                .arg(installation_id.to_string());
+                .arg(installation_id.to_string())
+                .arg("--max-recovery-stop-owners")
+                .arg(max_recovery_stop_owners.to_string());
         }
     }
     // SAFETY: only async-signal-safe syscalls; no parent lock, token, socket or

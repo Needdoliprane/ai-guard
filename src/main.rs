@@ -63,6 +63,8 @@ enum Command {
         root: PathBuf,
         #[arg(long)]
         max_slots: u32,
+        #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u32).range(0..=1024))]
+        max_recovery_stop_owners: u32,
         #[arg(long)]
         recovery_only: bool,
         #[arg(long, conflicts_with_all = ["recovery_only", "full3_existing"], requires_all = ["role_name", "installation_id"])]
@@ -1310,6 +1312,7 @@ async fn run() -> Result<()> {
         Command::InternalBrokerEnforcer {
             root,
             max_slots,
+            max_recovery_stop_owners,
             recovery_only,
             full3_fresh,
             full3_existing,
@@ -1325,20 +1328,33 @@ async fn run() -> Result<()> {
                 let installation_id = installation_id.ok_or_else(|| {
                     anyhow::anyhow!("explicit fresh Full3 installation is required")
                 })?;
-                agentsandbox::broker::enforcer::run_internal_full3_fresh(
+                agentsandbox::broker::enforcer::run_internal_full3_fresh_with_budget(
                     &root,
                     &role_name,
                     installation_id,
                     max_slots,
+                    max_recovery_stop_owners,
                 )
                 .await?;
             } else if full3_existing {
-                agentsandbox::broker::enforcer::run_internal_full3_existing(&root, max_slots)
-                    .await?;
+                agentsandbox::broker::enforcer::run_internal_full3_existing_with_budget(
+                    &root,
+                    max_slots,
+                    max_recovery_stop_owners,
+                )
+                .await?;
             } else if recovery_only {
-                agentsandbox::broker::enforcer::run_internal_recovery_enforcer(&root, max_slots)
-                    .await?;
+                agentsandbox::broker::enforcer::run_internal_recovery_enforcer_with_budget(
+                    &root,
+                    max_slots,
+                    max_recovery_stop_owners,
+                )
+                .await?;
             } else {
+                anyhow::ensure!(
+                    max_recovery_stop_owners == 0,
+                    "recovery stop budget requires an explicit recovery role"
+                );
                 agentsandbox::broker::enforcer::run_internal_enforcer(&root, max_slots).await?;
             }
         }
@@ -1566,6 +1582,7 @@ mod tests {
             recovery.command,
             Command::InternalBrokerEnforcer {
                 recovery_only: true,
+                max_recovery_stop_owners: 0,
                 ..
             }
         ));
@@ -1582,6 +1599,64 @@ mod tests {
             legacy.command,
             Command::InternalBrokerEnforcer {
                 recovery_only: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn recovery_stop_budget_is_explicit_bounded_and_preserved_at_full3_genesis() {
+        let base = [
+            "agentsandbox",
+            "__broker-enforcer",
+            "--root",
+            "/private/fixture",
+            "--max-slots",
+            "8",
+        ];
+        for mode in ["--recovery-only", "--full3-existing"] {
+            for budget in ["0", "1", "1024"] {
+                let parsed = Cli::try_parse_from(base.into_iter().chain([
+                    mode,
+                    "--max-recovery-stop-owners",
+                    budget,
+                ]))
+                .unwrap();
+                let Command::InternalBrokerEnforcer {
+                    max_recovery_stop_owners,
+                    ..
+                } = parsed.command
+                else {
+                    panic!("explicit internal role is required");
+                };
+                assert_eq!(max_recovery_stop_owners.to_string(), budget);
+            }
+            for invalid in ["-1", "1025", "4294967295"] {
+                assert!(
+                    Cli::try_parse_from(base.into_iter().chain([
+                        mode,
+                        "--max-recovery-stop-owners",
+                        invalid,
+                    ]))
+                    .is_err()
+                );
+            }
+        }
+        let fresh = Cli::try_parse_from(base.into_iter().chain([
+            "--full3-fresh",
+            "--role-name",
+            "fresh-role",
+            "--installation-id",
+            "11111111-1111-4111-8111-111111111111",
+            "--max-recovery-stop-owners",
+            "1",
+        ]))
+        .unwrap();
+        assert!(matches!(
+            fresh.command,
+            Command::InternalBrokerEnforcer {
+                full3_fresh: true,
+                max_recovery_stop_owners: 1,
                 ..
             }
         ));
