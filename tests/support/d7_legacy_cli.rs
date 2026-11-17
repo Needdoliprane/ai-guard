@@ -168,9 +168,15 @@ pub async fn fresh_child(parent: &Path, name: &str, s: u32, w: u32, nonce: Uuid)
         None => Err(anyhow::anyhow!("private child pipe missing")),
     };
     if let Err(error) = written {
-        let _ = child.start_kill();
-        let _ = tokio::time::timeout(WAIT, child.wait()).await;
-        return Err(error);
+        return match kill_fixture_child(&mut child).await {
+            Ok(()) => Err(error),
+            Err(cleanup) => {
+                // Keep the directly owned child handle if its real collection
+                // did not complete; the caller also retains the private root.
+                std::mem::forget(child);
+                Err(error.context(cleanup))
+            }
+        };
     }
     Ok(child)
 }
