@@ -324,7 +324,7 @@ async fn refused_before_arm(scenario: Refusal) -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fresh_legacy_refuses_explicitly_before_arm_rpc() {
-    refused_before_arm(Refusal::Legacy).await.unwrap();
+    Box::pin(refused_before_arm(Refusal::Legacy)).await.unwrap();
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn installed_prospective_capacity_refuses_before_arm_rpc() {
