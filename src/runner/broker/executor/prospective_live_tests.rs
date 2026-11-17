@@ -328,21 +328,21 @@ async fn fresh_legacy_refuses_explicitly_before_arm_rpc() {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn installed_prospective_capacity_refuses_before_arm_rpc() {
-    refused_before_arm(Refusal::Capacity).await.unwrap();
+    Box::pin(refused_before_arm(Refusal::Capacity)).await.unwrap();
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelled_generation_refuses_before_arm_rpc() {
-    refused_before_arm(Refusal::Cancelled).await.unwrap();
+    Box::pin(refused_before_arm(Refusal::Cancelled)).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unknown_pending_writer_ack_never_generates_another_arm_or_rpc() {
-    refused_before_arm(Refusal::WriterUnknown).await.unwrap();
+    Box::pin(refused_before_arm(Refusal::WriterUnknown)).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lost_arm_ack_replays_same_owner_and_deadline_without_claim() {
-    let result = lost_ack().await;
+    let result = Box::pin(lost_ack()).await;
     result.unwrap();
 }
 async fn lost_ack() -> Result<()> {
