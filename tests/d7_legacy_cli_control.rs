@@ -156,13 +156,14 @@ impl Gateway {
     }
 }
 
-async fn close_broker(broker: &mut Option<Child>) -> Result<()> {
+async fn close_broker(broker: &mut Option<Child>, allow_already_reaped: bool) -> Result<()> {
     let Some(child) = broker.as_mut() else {
         return Ok(());
     };
     let normal = match child.try_wait() {
         Ok(None) => normal_broker_stop(child).await,
-        Ok(Some(_)) => Ok(()),
+        Ok(Some(_)) if allow_already_reaped => Ok(()),
+        Ok(Some(_)) => Err(anyhow::anyhow!("broker exited before requested shutdown")),
         Err(error) => Err(error.into()),
     };
     if normal.is_err() {
@@ -237,7 +238,7 @@ async fn actual_service_cli_private_pipe_fresh_then_existing_cold_fence() -> Res
         ensure!(gateway.posts.load(Ordering::SeqCst)==0,"control Arm/Claim or other POST occurred");
         Ok(())
     }.await;
-    let mut cleanup = close_broker(&mut broker).await;
+    let mut cleanup = close_broker(&mut broker, true).await;
     if let Some(peer) = helper {
         let stopped = async {
             peer.idle_shutdown().await?;
@@ -430,7 +431,7 @@ async fn actual_old_v1_peer_refuses_current_service_arm_and_retains_exact_stop()
         // the old-peer compatibility oracles; there is no actual container.
         Ok(())
     }.await;
-    let mut cleanup = close_broker(&mut broker).await;
+    let mut cleanup = close_broker(&mut broker, false).await;
     if let Some(child) = peer_child.as_mut() {
         let peer_cleanup = kill_fixture_child(child).await;
         if peer_cleanup.is_err() {
