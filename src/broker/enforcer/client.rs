@@ -676,6 +676,7 @@ impl EnforcerFullClientV3 {
         self.0.0.endpoint.epoch()
     }
     pub(crate) async fn require_admission_ready(&self) -> EnforcerResult<()> {
+        self.require_new_prearm_identity()?;
         self.0.0.check_health()?;
         match self
             .0
@@ -1208,13 +1209,18 @@ impl Client {
                             {
                                 return Err(EnforcerError::Conflict);
                             }
+                            // Consume before connect/write, not after an ACK.
+                            // An unknown Bind must never re-export the same
+                            // Original grant through a generic Register retry.
+                            let mut original = retained
+                                .original_exchange_nonce
+                                .lock()
+                                .map_err(|_| EnforcerError::Unhealthy)?;
+                            let original_exchange_nonce = original.take();
                             let original_exchange_nonce = if observe_only {
                                 None
                             } else {
-                                *retained
-                                    .original_exchange_nonce
-                                    .lock()
-                                    .map_err(|_| EnforcerError::Unhealthy)?
+                                original_exchange_nonce
                             };
                             Some((reservation, original_exchange_nonce))
                         }
