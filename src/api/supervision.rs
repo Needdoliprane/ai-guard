@@ -1,9 +1,9 @@
 //! HTTP bindings for the versioned, tenant-scoped supervision Store.
 use super::*;
 use crate::control::{
-    AdmissionResultV1, ArmResultV1, ArmV1, ArmedStartClaimV1, ControlProtocolV1, ExportRequestV1,
-    HelperClaimResultV1, HelperCleanupV1, HelperObservationV1, HelperStartClaimV1,
-    MutationReceiptV1, MutationResultV1, SupervisedAdmissionV1,
+    AdmissionResultV1, ArmResultV1, ArmV1, ArmedStartClaimV1, ControlCapabilitiesV1,
+    ControlProtocolV1, ExportRequestV1, HelperClaimResultV1, HelperCleanupV1, HelperObservationV1,
+    HelperStartClaimV1, MutationReceiptV1, MutationResultV1, SupervisedAdmissionV1,
 };
 use axum::{extract::FromRequestParts, http::request::Parts};
 
@@ -11,6 +11,7 @@ use axum::{extract::FromRequestParts, http::request::Parts};
 pub(super) fn routes() -> Router<GatewayState> {
     Router::new()
         .route("/control/protocol", get(protocol))
+        .route("/control/capabilities", get(capabilities))
         .route("/workers/supervised-reservations", post(reserve))
         .route("/workers/{id}/arms", post(arm))
         .route("/workers/{id}/arms/{arm_id}", get(read_arm))
@@ -75,6 +76,37 @@ impl FromRequestParts<GatewayState> for ProtocolIdentity {
         let ReadIdentity(tenant, role) = ReadIdentity::from_request_parts(parts, state).await?;
         Ok(Self::Legacy(tenant, role))
     }
+}
+
+/// Refuses before authentication unless the private control gate admitted it.
+struct PrivateControlTransport;
+
+impl FromRequestParts<GatewayState> for PrivateControlTransport {
+    type Rejection = (StatusCode, Json<Value>);
+
+    async fn from_request_parts(parts: &mut Parts, _: &GatewayState) -> ApiResult<Self> {
+        parts
+            .extensions
+            .get::<super::control_transport::ControlTransportRequest>()
+            .map(|_| Self)
+            .ok_or_else(|| error(StatusCode::NOT_FOUND, "Route inconnue."))
+    }
+}
+
+async fn capabilities(
+    _private: PrivateControlTransport,
+    RunnerIdentity(tenant): RunnerIdentity,
+) -> ApiResult<Json<ControlCapabilitiesV1>> {
+    tenant
+        .blocking(true, move |tenant| {
+            let capabilities = tenant.store.control_capabilities().map_err(control_error)?;
+            // The answer must match the identity that asked, not only the Store.
+            if capabilities.tenant_id != tenant.tenant_id {
+                return Err(control_error(anyhow::anyhow!("tenant binding mismatch")));
+            }
+            Ok(Json(capabilities))
+        })
+        .await
 }
 
 async fn protocol(identity: ProtocolIdentity) -> ApiResult<Json<ControlProtocolV1>> {

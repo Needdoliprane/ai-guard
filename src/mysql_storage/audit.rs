@@ -346,6 +346,34 @@ impl VerifiedPrefix {
     }
 }
 
+/// The authenticated technical credential collides with a human or workload
+/// binding in the verified prefix of this very transaction. Nothing is written.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ControlGuardRefused(pub ControlCollision);
+
+impl fmt::Display for ControlGuardRefused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("control credential is ambiguous with another identity class")
+    }
+}
+impl std::error::Error for ControlGuardRefused {}
+
+tokio::task_local! {
+    static CONTROL_GUARD: [u8; 32];
+}
+
+/// Run one Store operation with the authenticated technical digest bound to
+/// its write transaction. The collision check runs against the same verified
+/// snapshot as the append, so a binding committed between an earlier presence
+/// read and this write cannot be missed. A projection that cannot be verified
+/// refuses the write.
+pub async fn with_control_guard<F: std::future::Future>(
+    digest: [u8; 32],
+    operation: F,
+) -> F::Output {
+    CONTROL_GUARD.scope(digest, operation).await
+}
+
 enum Mutation<'a> {
     Initialize,
     InitializeSupervised,
@@ -1074,6 +1102,29 @@ impl MysqlAuditStore {
             .context("MySQL supervision genesis missing")
     }
 
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    /// Verified capabilities of this target. An operation is announced only
+    /// when its MySQL port, replay and export are all implemented; the
+    /// identity and workload projections are verified first. No operation of
+    /// the broker supervision contract is ported to MySQL yet, so the
+    /// answer is the empty set bound to the verified tenant and namespace.
+    pub async fn control_capabilities(&self) -> Result<crate::control::ControlCapabilitiesV1> {
+        self.verify_control_projections().await?;
+        let capabilities = crate::control::ControlCapabilitiesV1 {
+            version: 1,
+            role: "runner".into(),
+            tenant_id: self.tenant.clone(),
+            control_namespace_uuid: Some(self.namespace.clone()),
+            storage: crate::control::ControlStorageBackendV1::Mysql,
+            operations: Vec::new(),
+        };
+        capabilities.validate()?;
+        Ok(capabilities)
+    }
+
     pub async fn supervision_origin(&self) -> Result<MysqlSupervisionOrigin> {
         let (prefix, _, retained) = self.read_verified(None, None).await?;
         Ok(MysqlSupervisionOrigin {
@@ -1381,6 +1432,11 @@ impl MysqlAuditStore {
             .verify_bound_origin(tx, bound, prior, confirmed, None)
             .await?;
         *origin = retained;
+        if let Ok(digest) = CONTROL_GUARD.try_with(|digest| *digest) {
+            if let Some(collision) = prefix.control_credential_presence(&digest)? {
+                return Err(ControlGuardRefused(collision).into());
+            }
+        }
         let mut head = prefix.head;
         let (event, kind) = match operation {
             Mutation::Initialize => {

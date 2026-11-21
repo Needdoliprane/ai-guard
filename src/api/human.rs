@@ -432,6 +432,12 @@ pub(super) fn reject_control_collision(
     }
     let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
     for (index, tenant) in state.tenants.iter().enumerate() {
+        // MySQL tenants are checked once, with the workload family, from a
+        // single verified snapshot (see workload::reject_control_collision).
+        #[cfg(feature = "mysql-storage")]
+        if tenant.store.mysql().is_some() {
+            continue;
+        }
         let lane = own
             .filter(|(source, _)| *source == index)
             .map(|(_, lane)| lane);

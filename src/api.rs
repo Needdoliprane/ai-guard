@@ -138,6 +138,16 @@ fn storage_capability_refusal(
     )
 }
 fn unavailable(failure: anyhow::Error) -> (StatusCode, Json<Value>) {
+    #[cfg(feature = "mysql-storage")]
+    if failure
+        .downcast_ref::<crate::mysql_storage::audit::ControlGuardRefused>()
+        .is_some()
+    {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Classes d'identité ambiguës : accès refusé.",
+        );
+    }
     if let Some(refusal) =
         failure.downcast_ref::<crate::tenant_store::StorageCapabilityUnavailable>()
     {
@@ -790,6 +800,13 @@ impl TenantState {
         )
         .await
     }
+    /// Digest of the authenticated technical credential, for guards that must
+    /// run inside the write transaction. Absent without a control proof.
+    fn control_guard(&self) -> Option<[u8; 32]> {
+        let proof = self.control_proof.as_ref()?;
+        let token = bearer(&proof.headers)?;
+        Some(Sha256::digest(token.as_bytes()).into())
+    }
     fn write_quota(&self) -> ApiResult<()> {
         Self::take_write_slot(&self.rate)
     }
@@ -1042,7 +1059,12 @@ async fn ingest(
                     "Ce namespace est réservé aux opérations du contrôle.",
                 ));
             }
-            Ok(Json(tenant.store.append(event).map_err(unavailable)?))
+            Ok(Json(
+                tenant
+                    .store
+                    .append_guarded(event, tenant.control_guard())
+                    .map_err(unavailable)?,
+            ))
         })
         .await
 }

@@ -73,6 +73,43 @@ impl TenantStore {
         }
     }
 
+    /// The MySQL tenant, for operations ported only to that backend's own
+    /// transaction model.
+    #[cfg(feature = "mysql-storage")]
+    pub fn mysql(&self) -> Option<&Arc<MysqlTenant>> {
+        match self {
+            Self::Mysql(store) => Some(store),
+            Self::Sqlite(_) => None,
+        }
+    }
+
+    /// Append with the authenticated technical credential bound to the write
+    /// transaction on MySQL. SQLite keeps its existing authorization seam.
+    pub fn append_guarded(&self, event: Event, guard: Option<[u8; 32]>) -> Result<StoredEvent> {
+        match self {
+            Self::Sqlite(store) => store.append(event),
+            #[cfg(feature = "mysql-storage")]
+            Self::Mysql(store) => store.append_guarded(event, guard),
+        }
+    }
+
+    /// Capabilities proven against the selected backend's own verified state.
+    pub fn control_capabilities(&self) -> Result<crate::control::ControlCapabilitiesV1> {
+        match self {
+            Self::Sqlite(store) => {
+                let state = store.supervision_state()?;
+                let capabilities = crate::control::ControlCapabilitiesV1::from_sqlite_state(
+                    store.tenant_id(),
+                    &state,
+                );
+                capabilities.validate()?;
+                Ok(capabilities)
+            }
+            #[cfg(feature = "mysql-storage")]
+            Self::Mysql(store) => store.control_capabilities(),
+        }
+    }
+
     pub fn backend_name(&self) -> &'static str {
         match self {
             Self::Sqlite(_) => "sqlite",
@@ -261,6 +298,9 @@ mod mysql {
                 handle,
             )))
         }
+        pub fn control_capabilities(&self) -> Result<crate::control::ControlCapabilitiesV1> {
+            self.block(self.store.control_capabilities())
+        }
         pub fn covers_redaction(&self, additional: &Redactor) -> bool {
             self.store.redactor_covers(additional)
         }
@@ -275,6 +315,31 @@ mod mysql {
         }
         pub fn append(&self, event: Event) -> Result<StoredEvent> {
             self.block(self.store.append(event))
+        }
+        /// The technical digest is checked against the verified identity and
+        /// workload projections of the append's own transaction.
+        pub fn append_guarded(&self, event: Event, guard: Option<[u8; 32]>) -> Result<StoredEvent> {
+            match guard {
+                Some(digest) => self.block(crate::mysql_storage::audit::with_control_guard(
+                    digest,
+                    self.store.append(event),
+                )),
+                None => self.append(event),
+            }
+        }
+        /// One verified snapshot answers human and workload presence.
+        pub fn control_presence(
+            &self,
+            digest: &[u8; 32],
+        ) -> Result<Option<crate::mysql_storage::audit::ControlCollision>> {
+            self.block(self.store.verify_control_credential_presence(digest))
+        }
+        /// A positive from the last fully verified read; opens no connection.
+        pub fn known_control_collision(
+            &self,
+            digest: &[u8; 32],
+        ) -> crate::mysql_storage::audit::KnownControlCollision {
+            self.store.known_control_collision(digest)
         }
         pub fn entities(&self, sandboxes: bool) -> Result<Vec<Value>> {
             self.block(self.store.entities(sandboxes))

@@ -409,6 +409,15 @@ pub(super) fn reject_control_collision(
     }
     let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
     for (index, tenant) in state.tenants.iter().enumerate() {
+        // A MySQL tenant answers human and workload presence from one verified
+        // snapshot, in this lane's already admitted blocking job.
+        #[cfg(feature = "mysql-storage")]
+        if let Some(mysql) = tenant.store.mysql() {
+            if let Some(response) = mysql_collision(mysql, &digest, own, index) {
+                return response;
+            }
+            continue;
+        }
         let lookup = if let Some((_, lane)) = own.filter(|(source, _)| *source == index) {
             state
                 .io_scope
@@ -432,6 +441,31 @@ pub(super) fn reject_control_collision(
         }
     }
     Ok(())
+}
+
+/// `Some` ends the scan: an ambiguity refuses, an unavailable own tenant
+/// refuses, an unavailable sibling is tolerated like any other backend.
+#[cfg(feature = "mysql-storage")]
+fn mysql_collision(
+    mysql: &crate::tenant_store::MysqlTenant,
+    digest: &[u8; 32],
+    own: Option<(usize, store_io::Lane)>,
+    index: usize,
+) -> Option<ApiResult<()>> {
+    use crate::mysql_storage::audit::KnownControlCollision;
+    let own_tenant = own.is_some_and(|(source, _)| source == index);
+    if matches!(
+        mysql.known_control_collision(digest),
+        KnownControlCollision::Known(_)
+    ) {
+        return Some(Err(ambiguous()));
+    }
+    match mysql.control_presence(digest) {
+        Ok(Some(_)) => Some(Err(ambiguous())),
+        Ok(None) => None,
+        Err(error) if own_tenant => Some(Err(unavailable(error))),
+        Err(_) => None,
+    }
 }
 
 /// Negative class guard for an independently verified human proof. The caller
