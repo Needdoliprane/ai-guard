@@ -37,7 +37,7 @@ fn workload_registry_policy_is_optional_closed_and_prevalidated_against_human_re
     std::fs::write(&path, value.to_string()).unwrap();
     let configured = load(&path).unwrap();
     validate_policies(&configured, 64).unwrap();
-    assert!(!configured[0].data.exists());
+    assert!(!configured[0].storage.sqlite_path().unwrap().exists());
     value["tenants"][0]["workload_audit_policy"]["tenant"]["events"] = json!(41);
     std::fs::write(&path, value.to_string()).unwrap();
     assert!(validate_policies(&load(&path).unwrap(), 64).is_err());

@@ -373,7 +373,7 @@ fn consumes_canonical_session_policies_and_keeps_legacy_defaults_disabled() {
         sorted
     );
     assert_eq!(std::fs::read(&registry_path).unwrap(), original);
-    assert!(!configured.data.exists());
+    assert!(!configured.storage.sqlite_path().unwrap().exists());
 }
 
 #[test]
@@ -432,7 +432,7 @@ fn validates_in_memory_session_policy_limits_before_database_creation() {
         })
         .collect();
     assert!(super::validate_policies(&tenants, 10_000).is_err());
-    assert!(!tenants[0].data.exists());
+    assert!(!tenants[0].storage.sqlite_path().unwrap().exists());
 }
 
 #[test]
@@ -474,7 +474,7 @@ fn accepts_empty_session_allowlists_without_inventing_default_approvals() {
             .is_empty()
     );
     assert_eq!(std::fs::read(&registry_path).unwrap(), original);
-    assert!(!tenants[0].data.exists());
+    assert!(!tenants[0].storage.sqlite_path().unwrap().exists());
 }
 
 #[test]
@@ -513,7 +513,7 @@ fn accepts_sixty_four_distinct_brokers_for_each_session_recovery_policy() {
         64
     );
     assert_eq!(std::fs::read(&registry_path).unwrap(), original);
-    assert!(!tenants[0].data.exists());
+    assert!(!tenants[0].storage.sqlite_path().unwrap().exists());
 }
 
 #[test]
@@ -551,7 +551,7 @@ fn enforces_exact_canonical_session_reservation_policy_byte_boundary() {
                 load(&registry_path).expect("exactly 16 KiB canonical policy is accepted");
             super::validate_policies(&tenants, 10_000).unwrap();
             assert_eq!(std::fs::read(&registry_path).unwrap(), original);
-            assert!(!tenants[0].data.exists());
+            assert!(!tenants[0].storage.sqlite_path().unwrap().exists());
         }
     }
     assert_eq!(serde_json::to_vec(&policy).unwrap().len(), 16_385);

@@ -226,12 +226,12 @@ impl ResolvedInputs {
                 tenant_id: Some(tenant.tenant_id.clone()),
                 storage_binding:
                     agentsandbox::human_authority::startup::observe_human_storage_binding(
-                        &tenant.data,
+                        tenant.storage.sqlite_path()?,
                     )?,
                 required_format: 13,
             };
             result.push(LegacySourceInput {
-                path: tenant.data.clone(),
+                path: tenant.storage.sqlite_path()?.to_owned(),
                 tenant_id: source.tenant_id.clone(),
                 options: self.options_for(&source, max_events)?,
             });
@@ -284,8 +284,12 @@ impl ResolvedInputs {
         let configured: BTreeSet<_> = self
             .tenants
             .iter()
-            .map(|t| (t.tenant_id.as_str(), t.data.as_path()))
-            .collect();
+            .map(|t| {
+                t.storage
+                    .sqlite_path()
+                    .map(|path| (t.tenant_id.as_str(), path))
+            })
+            .collect::<Result<_>>()?;
         let expected: BTreeSet<_> = recovery
             .target_sources
             .iter()
