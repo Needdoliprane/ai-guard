@@ -1,3 +1,4 @@
+pub mod activity_channel;
 pub mod adapters;
 pub mod api;
 pub mod audit;
