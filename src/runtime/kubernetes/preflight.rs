@@ -287,9 +287,14 @@ pub(super) fn validate_admitted(requested: &Value, admitted: &Value) -> Kubernet
         || admitted
             .pointer("/metadata/ownerReferences")
             .is_some_and(|value| value != &json!([]))
-        || admitted
-            .pointer("/metadata/finalizers")
-            .is_some_and(|value| value != &json!([]))
+        || match requested.pointer("/metadata/finalizers") {
+            // A request without finalizers (V1 held and V2 r1) admits none.
+            None => admitted
+                .pointer("/metadata/finalizers")
+                .is_some_and(|value| value != &json!([])),
+            // An effectful r2 request admits exactly its own finalizers.
+            Some(expected) => admitted.pointer("/metadata/finalizers") != Some(expected),
+        }
     {
         return Err(KubernetesError::PreflightProfileChanged);
     }

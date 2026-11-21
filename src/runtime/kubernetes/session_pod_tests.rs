@@ -574,3 +574,158 @@ fn render_refuses_a_workspace_claim_not_named_for_this_attempt() {
     // Control: the claim named for this attempt and authority renders.
     assert!(KubernetesSessionPodRequestV2::render(intent, binding, claim).is_ok());
 }
+
+fn effectful(rendered: &Rendered, purpose: SessionPodPurposeV2) -> KubernetesSessionPodRequestV2 {
+    KubernetesSessionPodRequestV2::render_effectful(
+        &rendered.intent,
+        &rendered.binding,
+        &rendered.claim,
+        purpose,
+    )
+    .unwrap()
+}
+
+#[test]
+fn effectful_session_pod_adds_only_the_terminal_finalizer_and_the_v3_mode() {
+    let rendered = rendered_case();
+    let r1 = pod_of(&rendered.request);
+    let r2_request = effectful(&rendered, SessionPodPurposeV2::Session);
+    let r2 = pod_of(&r2_request);
+    assert_eq!(
+        r2["metadata"]["finalizers"],
+        json!(["ai-guard.io/session-terminal"])
+    );
+    assert_eq!(
+        r2["spec"]["containers"][0]["command"],
+        json!(["/usr/local/bin/ai-guard-provider", "kubernetes-session-v3"])
+    );
+    // Everything else is the reviewed r1 request.
+    let mut expected = r1.clone();
+    expected["metadata"]["finalizers"] = json!(["ai-guard.io/session-terminal"]);
+    expected["spec"]["containers"][0]["command"] =
+        json!(["/usr/local/bin/ai-guard-provider", "kubernetes-session-v3"]);
+    assert_eq!(r2, expected);
+    assert_eq!(
+        r2_request.target().pod_name(),
+        rendered.request.target().pod_name()
+    );
+    assert_ne!(
+        r2_request.target().request_sha256(),
+        rendered.request.target().request_sha256()
+    );
+    // The r1 bytes are unchanged by the r2 renderer.
+    assert_eq!(
+        r1["spec"]["containers"][0]["command"],
+        json!([
+            "/usr/local/bin/ai-guard-provider",
+            "kubernetes-session-wait-v2"
+        ])
+    );
+    assert!(r1["metadata"].get("finalizers").is_none());
+}
+
+#[test]
+fn effectful_export_helper_mounts_the_attempt_claim_read_only_under_its_own_name() {
+    let rendered = rendered_case();
+    let ids = rendered.intent.ids().unwrap();
+    let export_request = effectful(&rendered, SessionPodPurposeV2::Export);
+    let export = pod_of(&export_request);
+    assert_eq!(
+        export["metadata"]["name"],
+        json!(format!("ai-guard-export-{}", ids.attempt_id.simple()))
+    );
+    assert_eq!(
+        export["metadata"]["labels"]["ai-guard/purpose"],
+        json!("export-v2")
+    );
+    assert_eq!(
+        export["metadata"]["finalizers"],
+        json!(["ai-guard.io/session-terminal"])
+    );
+    assert_eq!(
+        export["spec"]["containers"][0]["command"],
+        json!([
+            "/usr/local/bin/ai-guard-provider",
+            "kubernetes-workspace-export-v3"
+        ])
+    );
+    assert_eq!(
+        export["spec"]["containers"][0]["volumeMounts"][0],
+        json!({"mountPath":"/workspace","name":"workspace","readOnly":true})
+    );
+    assert_eq!(
+        export["spec"]["volumes"][0],
+        json!({"name":"workspace","persistentVolumeClaim":{
+            "claimName":format!("ai-guard-ws-{}", ids.attempt_id.simple()),"readOnly":true}})
+    );
+    assert_eq!(export["spec"]["activeDeadlineSeconds"], json!(1800));
+    assert_eq!(
+        export["spec"]["schedulingGates"],
+        json!([{"name":"ai-guard.io/session-v2"}])
+    );
+    assert_eq!(
+        export_request.target().pod_name(),
+        format!("ai-guard-export-{}", ids.attempt_id.simple())
+    );
+}
+
+#[test]
+fn central_rederivation_reproduces_the_exact_effectful_request() {
+    let rendered = rendered_case();
+    for purpose in [SessionPodPurposeV2::Session, SessionPodPurposeV2::Export] {
+        let request = effectful(&rendered, purpose);
+        let (bytes, digest) = effectful_request_bytes(&rendered.intent, purpose).unwrap();
+        assert_eq!(bytes, request.bytes());
+        assert_eq!(digest, request.target().request_sha256());
+    }
+}
+
+#[test]
+fn effectful_admitted_response_needs_exactly_its_own_finalizer() {
+    let rendered = rendered_case();
+    let request = effectful(&rendered, SessionPodPurposeV2::Session);
+    let response = admitted(&request);
+    assert!(
+        validate_declared_admitted_session_pod(&request, &serde_json::to_vec(&response).unwrap())
+            .is_ok()
+    );
+    for finalizers in [
+        json!([]),
+        json!(["ai-guard.io/session-terminal", "example.com/hold"]),
+        json!(["example.com/hold"]),
+    ] {
+        let changed = replace(&response, "/metadata/finalizers", finalizers.clone());
+        assert_eq!(
+            validate_declared_admitted_session_pod(
+                &request,
+                &serde_json::to_vec(&changed).unwrap()
+            )
+            .unwrap_err(),
+            KubernetesSessionRuntimeError::ProfileChanged,
+            "{finalizers}"
+        );
+    }
+    let mut stripped = response.clone();
+    stripped["metadata"]
+        .as_object_mut()
+        .unwrap()
+        .remove("finalizers");
+    assert!(
+        validate_declared_admitted_session_pod(&request, &serde_json::to_vec(&stripped).unwrap())
+            .is_err()
+    );
+    // An r1 request still admits no finalizer at all.
+    let r1 = admitted(&rendered.request);
+    let with_finalizer = replace(
+        &r1,
+        "/metadata/finalizers",
+        json!(["ai-guard.io/session-terminal"]),
+    );
+    assert!(
+        validate_declared_admitted_session_pod(
+            &rendered.request,
+            &serde_json::to_vec(&with_finalizer).unwrap()
+        )
+        .is_err()
+    );
+}
