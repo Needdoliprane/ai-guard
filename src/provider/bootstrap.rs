@@ -297,26 +297,31 @@ fn help_facts(client: ClientKind, transport: ClientTransport, help: &str) -> Res
     })
 }
 
-/// Managed hook configurations shipped in `images/provider-activity/`; the
-/// worker image installs exactly one of them per client, read-only.
-const CLAUDE_ACTIVITY_V1: &[u8] =
-    include_bytes!("../../images/provider-activity/claude-code/managed-settings.v1.json");
-const CLAUDE_ACTIVITY_V1_ONFAILURE: &[u8] =
-    include_bytes!("../../images/provider-activity/claude-code/managed-settings.v1-onfailure.json");
-const CODEX_ACTIVITY_V1: &[u8] =
-    include_bytes!("../../images/provider-activity/codex/requirements.toml");
+/// SHA-256 of the managed hook configurations shipped in
+/// `images/provider-activity/`; the worker image installs exactly one of them
+/// per client, read-only. A unit test recomputes them from those files, so the
+/// image build stages that compile this library need no extra input.
+const CLAUDE_ACTIVITY_V1_SHA256: &str =
+    "d48e956269d67e48d3fab8bf3cc9f9310353230a85e7db8ff2189ed93d0ac7f3";
+const CLAUDE_ACTIVITY_V1_ONFAILURE_SHA256: &str =
+    "5cbd734bbac216717bf8a6afcf3a899207ee890dcc33e15ceb52ceabf8f3b308";
+const CODEX_ACTIVITY_V1_SHA256: &str =
+    "4522907b33691f430fe5cca3cc16547acb9bf4a7cbe1a286db43e9425714b1a7";
 const CLAUDE_MANAGED_SETTINGS: &str = "/etc/claude-code/managed-settings.json";
 const CODEX_REQUIREMENTS: &str = "/etc/codex/requirements.toml";
 const MANAGED_CONFIG_LIMIT: u64 = 64 * 1024;
 const ACTIVITY_REFUSAL: &str = "activity_unavailable: the provider activity hook configuration is absent, not a root-owned read-only file, or not an expected version";
 
-fn managed_activity_config(client: ClientKind) -> (&'static Path, &'static [&'static [u8]]) {
+fn managed_activity_config(client: ClientKind) -> (&'static Path, &'static [&'static str]) {
     match client {
         ClientKind::ClaudeCode => (
             Path::new(CLAUDE_MANAGED_SETTINGS),
-            &[CLAUDE_ACTIVITY_V1, CLAUDE_ACTIVITY_V1_ONFAILURE],
+            &[
+                CLAUDE_ACTIVITY_V1_SHA256,
+                CLAUDE_ACTIVITY_V1_ONFAILURE_SHA256,
+            ],
         ),
-        ClientKind::Codex => (Path::new(CODEX_REQUIREMENTS), &[CODEX_ACTIVITY_V1]),
+        ClientKind::Codex => (Path::new(CODEX_REQUIREMENTS), &[CODEX_ACTIVITY_V1_SHA256]),
     }
 }
 
@@ -332,7 +337,7 @@ fn activity_check(condition: bool) -> Result<()> {
 /// `owner`, without any write bit, in an `owner`-owned directory that group
 /// and others cannot write, and byte-identical to one expected version. The
 /// bytes are read from the same no-follow descriptor whose metadata is checked.
-fn verify_managed_activity_config(path: &Path, expected: &[&[u8]], owner: u32) -> Result<()> {
+fn verify_managed_activity_config(path: &Path, expected: &[&str], owner: u32) -> Result<()> {
     let parent = path.parent().ok_or_else(|| anyhow!(ACTIVITY_REFUSAL))?;
     let directory = std::fs::symlink_metadata(parent).map_err(|_| anyhow!(ACTIVITY_REFUSAL))?;
     activity_check(
@@ -361,12 +366,10 @@ fn verify_managed_activity_config(path: &Path, expected: &[&[u8]], owner: u32) -
     file.take(MANAGED_CONFIG_LIMIT + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| anyhow!(ACTIVITY_REFUSAL))?;
-    let digest = Sha256::digest(&bytes);
+    let digest = hex::encode(Sha256::digest(&bytes));
     activity_check(
         bytes.len() as u64 <= MANAGED_CONFIG_LIMIT
-            && expected
-                .iter()
-                .any(|candidate| Sha256::digest(candidate) == digest),
+            && expected.iter().any(|candidate| *candidate == digest),
     )
 }
 
@@ -755,6 +758,34 @@ mod tests {
         unsafe { libc::geteuid() }
     }
 
+    /// The repository file, read at test time (never compiled into the lib).
+    fn shipped(relative: &str) -> Vec<u8> {
+        std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("images/provider-activity")
+                .join(relative),
+        )
+        .unwrap()
+    }
+    const CLAUDE_V1: &str = "claude-code/managed-settings.v1.json";
+    const CLAUDE_V1_ONFAILURE: &str = "claude-code/managed-settings.v1-onfailure.json";
+    const CODEX_V1: &str = "codex/requirements.toml";
+
+    #[test]
+    fn compiled_digests_are_those_of_the_shipped_hook_files() {
+        for (relative, digest) in [
+            (CLAUDE_V1, CLAUDE_ACTIVITY_V1_SHA256),
+            (CLAUDE_V1_ONFAILURE, CLAUDE_ACTIVITY_V1_ONFAILURE_SHA256),
+            (CODEX_V1, CODEX_ACTIVITY_V1_SHA256),
+        ] {
+            assert_eq!(
+                hex::encode(Sha256::digest(shipped(relative))),
+                digest,
+                "images/provider-activity/{relative} changed: update its digest in bootstrap.rs"
+            );
+        }
+    }
+
     fn refused(result: Result<()>) {
         let error = result.unwrap_err();
         assert!(error.to_string().starts_with("activity_unavailable:"));
@@ -766,23 +797,28 @@ mod tests {
         let (_, claude) = managed_activity_config(ClientKind::ClaudeCode);
         let (_, codex) = managed_activity_config(ClientKind::Codex);
         let directory = private_dir(0o755);
+        let (claude_v1, claude_onfailure, codex_v1) = (
+            shipped(CLAUDE_V1),
+            shipped(CLAUDE_V1_ONFAILURE),
+            shipped(CODEX_V1),
+        );
         for (bytes, expected) in [
-            (CLAUDE_ACTIVITY_V1, claude),
-            (CLAUDE_ACTIVITY_V1_ONFAILURE, claude),
-            (CODEX_ACTIVITY_V1, codex),
+            (claude_v1.as_slice(), claude),
+            (claude_onfailure.as_slice(), claude),
+            (codex_v1.as_slice(), codex),
         ] {
             let path = installed(directory.path(), bytes, 0o444);
             verify_managed_activity_config(&path, expected, own_uid()).unwrap();
             std::fs::remove_file(&path).unwrap();
         }
         // Changed bytes, another client's file, a writable file, another owner.
-        let mut changed = CLAUDE_ACTIVITY_V1.to_vec();
+        let mut changed = claude_v1.clone();
         changed.extend_from_slice(b" ");
         for (bytes, mode, owner) in [
             (changed.as_slice(), 0o444, own_uid()),
-            (CODEX_ACTIVITY_V1, 0o444, own_uid()),
-            (CLAUDE_ACTIVITY_V1, 0o644, own_uid()),
-            (CLAUDE_ACTIVITY_V1, 0o440, own_uid().wrapping_add(1)),
+            (codex_v1.as_slice(), 0o444, own_uid()),
+            (claude_v1.as_slice(), 0o644, own_uid()),
+            (claude_v1.as_slice(), 0o440, own_uid().wrapping_add(1)),
         ] {
             let path = installed(directory.path(), bytes, mode);
             refused(verify_managed_activity_config(&path, claude, owner));
@@ -794,23 +830,20 @@ mod tests {
             claude,
             own_uid(),
         ));
-        let target = installed(directory.path(), CLAUDE_ACTIVITY_V1, 0o444);
+        let target = installed(directory.path(), &claude_v1, 0o444);
         let link = directory.path().join("link.json");
         std::os::unix::fs::symlink(&target, &link).unwrap();
         refused(verify_managed_activity_config(&link, claude, own_uid()));
         let open = private_dir(0o777);
-        let path = installed(open.path(), CLAUDE_ACTIVITY_V1, 0o444);
+        let path = installed(open.path(), &claude_v1, 0o444);
         refused(verify_managed_activity_config(&path, claude, own_uid()));
     }
 
     #[test]
     fn shipped_hook_configs_call_the_fixed_client_for_every_allowlisted_event() {
         use crate::activity_channel::wire::{CODEX_EVENTS, EventV1};
-        for (bytes, on_failure) in [
-            (CLAUDE_ACTIVITY_V1, None),
-            (CLAUDE_ACTIVITY_V1_ONFAILURE, Some("block")),
-        ] {
-            let settings: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        for (relative, on_failure) in [(CLAUDE_V1, None), (CLAUDE_V1_ONFAILURE, Some("block"))] {
+            let settings: serde_json::Value = serde_json::from_slice(&shipped(relative)).unwrap();
             assert_eq!(settings["allowManagedHooksOnly"], serde_json::json!(true));
             let hooks = settings["hooks"].as_object().unwrap();
             assert_eq!(hooks.len(), EventV1::ALL.len());
@@ -831,7 +864,7 @@ mod tests {
                 assert_eq!(commands[0]["onFailure"].as_str(), on_failure);
             }
         }
-        let codex = std::str::from_utf8(CODEX_ACTIVITY_V1).unwrap();
+        let codex = String::from_utf8(shipped(CODEX_V1)).unwrap();
         assert!(codex.contains("\nallow_managed_hooks_only = true\n"));
         assert_eq!(codex.matches("[[hooks.").count(), 2 * CODEX_EVENTS.len());
         for event in CODEX_EVENTS {

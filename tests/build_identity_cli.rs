@@ -3,7 +3,7 @@ use agentsandbox::build_identity::{BuildStatusV1, Component, MAX_STATUS_BYTES};
 use std::process::{Command, Stdio};
 
 const CARGO_VERSION: &str = env!("CARGO_PKG_VERSION");
-const TOOLS: [(&str, &str); 6] = [
+const TOOLS: [(&str, &str); 7] = [
     (env!("CARGO_BIN_EXE_agentsandbox"), "agentsandbox"),
     (env!("CARGO_BIN_EXE_ai-guard-diagnose"), "ai-guard-diagnose"),
     (env!("CARGO_BIN_EXE_ai-guard-provider"), "ai-guard-provider"),
@@ -13,6 +13,7 @@ const TOOLS: [(&str, &str); 6] = [
         env!("CARGO_BIN_EXE_ai-guard-audit-checkpoint"),
         "ai-guard-audit-checkpoint",
     ),
+    (env!("CARGO_BIN_EXE_ai-guard-activity"), "ai-guard-activity"),
 ];
 
 fn invoke(binary: &str, arguments: &[&str]) -> std::process::Output {
@@ -42,7 +43,7 @@ fn invoke(binary: &str, arguments: &[&str]) -> std::process::Output {
 }
 
 #[test]
-fn six_real_tools_report_one_version_without_configuration_or_external_tools() {
+fn seven_real_tools_report_one_version_without_configuration_or_external_tools() {
     for (binary, component) in TOOLS {
         for flag in ["--version", "-V"] {
             let output = invoke(binary, &[flag]);
@@ -73,7 +74,7 @@ fn six_real_tools_report_one_version_without_configuration_or_external_tools() {
 }
 
 #[test]
-fn six_real_tools_refuse_extra_version_arguments_before_bootstrap() {
+fn seven_real_tools_refuse_extra_version_arguments_before_bootstrap() {
     for (binary, component) in TOOLS {
         for arguments in [
             vec!["--version", "--help"],

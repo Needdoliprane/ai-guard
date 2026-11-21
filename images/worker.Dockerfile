@@ -7,8 +7,6 @@ FROM rust-toolchain AS provider-build
 WORKDIR /build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src/ ./src/
-# The provider bootstrap compiles the expected managed hook configurations in.
-COPY images/provider-activity/ ./images/provider-activity/
 ARG AI_GUARD_VERSION=""
 ARG AI_GUARD_BUILD_ID=""
 ARG AI_GUARD_BUILD_REVISION=""

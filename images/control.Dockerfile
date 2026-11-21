@@ -18,8 +18,6 @@ FROM rust:1.99.1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc
 WORKDIR /build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src/ ./src/
-# The library compiles the expected provider activity hook configurations in.
-COPY images/provider-activity/ ./images/provider-activity/
 ARG AI_GUARD_VERSION=""
 ARG AI_GUARD_BUILD_ID=""
 ARG AI_GUARD_BUILD_REVISION=""
