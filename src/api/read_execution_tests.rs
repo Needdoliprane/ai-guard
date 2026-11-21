@@ -405,15 +405,9 @@ async fn viewer_integrity_store_work_stays_off_runtime_worker() {
         .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir()
         .unwrap();
-    let store = Arc::new(
-        Store::open_for_tenant(
-            &directory.path().join("audit.sqlite"),
-            "tenant-a",
-            Redactor::new(vec![]),
-            100,
-        )
-        .unwrap(),
-    );
+    let path = directory.path().join("audit.sqlite");
+    let store =
+        Arc::new(Store::open_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 100).unwrap());
     // Each string stays below Redactor::value's 32 KiB string limit. A single
     // 100,000-byte string would be clipped before persistence.
     let filler = vec!["x".repeat(25_000); 4];
@@ -475,6 +469,27 @@ async fn viewer_integrity_store_work_stays_off_runtime_worker() {
     assert!(setup_integrity.valid);
     let expected_count = setup_integrity.event_count;
     assert!(expected_count >= fixture.len() as u64);
+
+    let tenant = state.tenants[0].clone();
+    let router = gateway_router(state);
+    let history = "/api/v1/events";
+    let (status, page) = human_get(&router, &viewer, &format!("{history}?limit=1"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["next_cursor"], page["items"][0]["seq"]);
+    for filter in [
+        "from=invalid".into(),
+        "to=invalid".into(),
+        format!("q={}", "x".repeat(257)),
+    ] {
+        let (status, body) =
+            human_get(&router, &viewer, &format!("{history}?{filter}"), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body, json!({"error":"Filtre invalide."}));
+    }
+    let (status, _) = human_get(&router, "unknown", &format!("{history}?from=invalid"), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
     let observations = observe(&actual_store);
     let control_store = Arc::clone(&actual_store);
     let control_worker = tokio::spawn(async move {
@@ -493,7 +508,6 @@ async fn viewer_integrity_store_work_stays_off_runtime_worker() {
     assert!(control.iter().any(|sample| sample.call == Call::Integrity));
     assert!(control.iter().all(|sample| sample.thread != control_worker));
 
-    let router = gateway_router(state);
     let (worker, status) = tokio::spawn(async move {
         let worker = thread::current().id();
         let response = router
@@ -522,4 +536,18 @@ async fn viewer_integrity_store_work_stays_off_runtime_worker() {
         request.iter().all(|sample| sample.thread != worker),
         "viewer authentication or integrity ran synchronous Store work on its runtime worker: {request:?}"
     );
+
+    let db = rusqlite::Connection::open(path).unwrap();
+    db.execute(
+        "UPDATE events SET hash='tampered' WHERE seq=(SELECT MAX(seq) FROM events)",
+        [],
+    )
+    .unwrap();
+    assert!(!actual_store.integrity().unwrap().valid);
+    // Exercise the read handler after identity selection. A router-level 503
+    // alone could come from the collision check using the same unavailable Store.
+    let (status, _) = list_events(ReadIdentity(tenant, "viewer"), Query(EventQuery::default()))
+        .await
+        .unwrap_err();
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 }

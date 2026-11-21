@@ -20,11 +20,22 @@ use std::{
 
 pub mod authentication;
 mod capacity;
-mod event_query;
+pub(crate) mod capacity_policy;
 pub use capacity::WorkloadAuditPolicyV1;
-pub use capacity::{AuditCapacityFailureV1, AuditCapacityPolicyV1, AuditCapacityV1};
+pub use capacity_policy::{AuditCapacityFailureV1, AuditCapacityPolicyV1, AuditCapacityV1};
+pub(crate) mod decision_codec;
+pub use decision_codec::DecisionFailure;
+pub(crate) mod entities;
+pub(crate) mod event_codec;
+mod event_query;
 pub use event_query::EventQuery;
 pub(crate) use event_query::InvalidEventFilter;
+pub(crate) mod overview;
+pub(crate) mod supervision_admission;
+pub(crate) mod supervision_genesis;
+pub(crate) mod worker_admission;
+pub(crate) mod worker_transition;
+use event_codec::digest;
 
 pub(crate) const D5_CONTROL_EVENT_KINDS: &[&str] = &[
     "broker.abandon-before-claim.requested",
@@ -154,6 +165,8 @@ mod broker_checkpoint_migration;
 #[cfg(test)]
 mod broker_checkpoint_migration_tests;
 mod broker_registry;
+#[cfg(feature = "mysql-storage")]
+pub(crate) use broker_registry::prepared_admin as prepared_broker_admin;
 #[cfg(test)]
 mod capacity_tests;
 #[cfg(test)]
@@ -165,7 +178,7 @@ mod human_brokers;
 mod human_modern;
 pub(crate) use human_modern::HumanDiscoveryGeneration;
 mod human_workers;
-mod identity;
+pub(crate) mod identity;
 mod kubernetes_admission;
 pub(crate) mod kubernetes_session;
 mod metadata;
@@ -200,14 +213,14 @@ mod kubernetes_session_migration_tests;
 pub(crate) mod read_test_observer;
 mod relay;
 mod relay_admission;
-mod workload;
+pub(crate) mod workload;
 pub(crate) use broker_registry::owned_supervision::{OwnedBrokerWindow, OwnedRetainedSourceFacts};
-pub(crate) use control::expected_worker_transition;
 pub(crate) use human::HumanProfileSnapshotV1;
 pub(crate) use human::{HumanEventFilterV1, HumanEventPollV1, HumanStorePageV1};
 pub(crate) use human_brokers::HumanBrokerFrameV1;
 pub(crate) use human_brokers::owned::{OwnedHumanBrokerPageV1, OwnedHumanBrokerStorePageV1};
 pub(crate) use human_workers::HumanWorkerFrameV1;
+pub(crate) use worker_transition::expected_worker_transition;
 pub(crate) use workload::owned_broker_identity::OwnedBrokerBindingStepV1;
 pub mod signed_checkpoint;
 mod storage;
@@ -223,24 +236,6 @@ pub struct Integrity {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DecisionFailure {
-    Conflict,
-    AmbiguousHistory,
-    ApprovalRequired,
-    InvalidRequest,
-}
-impl std::fmt::Display for DecisionFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::Conflict => "request identity already belongs to different content",
-            Self::AmbiguousHistory => "decision history has missing or ambiguous metadata",
-            Self::ApprovalRequired => "approved phase requires a durable review and its exact hash",
-            Self::InvalidRequest => "invalid request identity or approval phase",
-        })
-    }
-}
-impl std::error::Error for DecisionFailure {}
 pub struct Store {
     tenant_id: String,
     db: Mutex<Connection>,
@@ -702,16 +697,6 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
     Ok(false)
 }
 
-fn digest(seq: i64, received: &str, prev: &str, payload: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(b"agentsandbox:audit:v1\0");
-    h.update(seq.to_be_bytes());
-    for s in [received, prev, payload] {
-        h.update(s.as_bytes());
-        h.update([0]);
-    }
-    hex::encode(h.finalize())
-}
 fn row_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredEvent> {
     let payload: String = row.get(4)?;
     let event = serde_json::from_str(&payload).map_err(|e| {
@@ -1219,31 +1204,15 @@ impl Store {
         }
         result
     }
-    fn prepare_event(&self, mut event: Event) -> anyhow::Result<(Event, String)> {
+    fn prepare_event(&self, event: Event) -> anyhow::Result<(Event, String)> {
         anyhow::ensure!(
             self.permanently_healthy(),
             "audit integrity failure is latched; recovery required"
         );
-        event.validate()?;
-        event.timestamp = chrono::DateTime::parse_from_rfc3339(&event.timestamp)?
-            .with_timezone(&chrono::Utc)
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let event: Event =
-            serde_json::from_value(self.redactor.value(&serde_json::to_value(event)?))?;
-        let payload = serde_json::to_string(&event)?;
-        anyhow::ensure!(
-            payload.len() <= 131_072,
-            "event exceeds 128 KiB after redaction"
-        );
-        Ok((event, payload))
+        event_codec::prepare_event(&self.redactor, event)
     }
     pub fn append(&self, event: Event) -> anyhow::Result<StoredEvent> {
-        anyhow::ensure!(
-            !event_kind_in_namespace(&event.kind, "control")
-                && event.kind != RETIREMENT_RESUME_EVENT_KIND
-                && !crate::relay::admission::reserved_kind(&event.kind),
-            "control events require typed mutation"
-        );
+        event_codec::require_ordinary_kind(&event.kind)?;
         let (event, payload) = self.prepare_event(event)?;
         let mut db = self
             .db
@@ -1755,11 +1724,7 @@ impl Store {
             .checked_add(stored_payload_bytes)
             .context("audit byte usage overflow")?;
         let hash = digest(seq, &received, &prev, &payload);
-        let decision = event.decision.as_ref().map(|d| match d.outcome {
-            Outcome::Allow => "allow",
-            Outcome::Deny => "deny",
-            Outcome::Review => "review",
-        });
+        let decision = event.decision.as_ref().map(|d| d.outcome.as_str());
         let mutation = (|| -> anyhow::Result<()> {
             let inserted = tx.execute("INSERT INTO events(seq,id,received_at,prev_hash,hash,payload,kind,agent_id,sandbox_id,project_id,decision) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",params![seq,event.id,received,prev,hash,payload,event.kind,event.agent_id,event.sandbox_id,event.project_id,decision])?;
             let updated = tx.execute(
@@ -1802,31 +1767,7 @@ impl Store {
         request: &DecisionRequest,
         proposed: Option<(Decision, Value)>,
     ) -> anyhow::Result<Option<StoredEvent>> {
-        if uuid::Uuid::parse_str(&request.request_id).is_err()
-            || (!request.human_approved && request.approval_hash.is_some())
-            || !policy::valid_provider_context(request)
-        {
-            return Err(DecisionFailure::InvalidRequest.into());
-        }
-        let hash = policy::request_hash(request);
-        // Check the approval before even considering a cached allow.
-        if request.human_approved && request.approval_hash.as_deref() != Some(hash.as_str()) {
-            return Err(DecisionFailure::ApprovalRequired.into());
-        }
-        // Never persist or replay a key that masking would make unfindable.
-        // Keep masking enabled, and reject this request instead of weakening
-        // secret protection or manufacturing a second durable identity.
-        let mut identity = json!({"kind":"security.decision","source":"gateway","provenance":"observed","request_id":request.request_id,"request_hash":hash,"profile":request.profile,"human_approved":request.human_approved});
-        if let Some(mode) = request.execution_mode {
-            // Absence retains the exact historical batch identity and payload.
-            identity["execution_mode"] = serde_json::to_value(mode)?;
-        }
-        if let Some(resolution) = &request.provider_resolution {
-            identity["provider_resolution"] = serde_json::to_value(resolution)?;
-        }
-        if self.redactor.value(&identity) != identity {
-            return Err(DecisionFailure::InvalidRequest.into());
-        }
+        let hash = decision_codec::validate_request(request, &self.redactor)?;
         let mut db = self
             .db
             .lock()
@@ -1840,55 +1781,12 @@ impl Store {
             self.commit_checked(tx)?;
             return Ok(None);
         };
-        let mut event = Event::new("security.decision");
-        event.project_id = request.project_id.clone();
-        event.sandbox_id = request.sandbox_id.clone();
-        event.agent_id = request.agent_id.clone();
-        event.session_id = request.session_id.clone();
-        event.correlation_id = request.correlation_id.clone();
-        event.trace_id = request.trace_id.clone();
-        event.command = Some(request.command.clone());
-        event.decision = Some(decision);
-        event.data = json!({"request_id":request.request_id,"request_hash":hash,"profile":request.profile,"human_approved":request.human_approved,"jev":jev});
-        if let Some(mode) = request.execution_mode {
-            event.data["execution_mode"] = serde_json::to_value(mode)?;
-        }
-        if let Some(resolution) = &request.provider_resolution {
-            event.data["provider_resolution"] = serde_json::to_value(resolution)?;
-        }
+        let event = decision_codec::build_event(request, &hash, decision, jev)?;
         let (event, payload) = self.prepare_event(event)?;
         let stored = self.append_in_transaction(&tx, event, payload)?;
         self.commit_checked(tx)?;
         Ok(Some(stored))
     }
-    /// Missing is the historical batch form. A present unknown or null mode is
-    /// ambiguous history, never permission to reinterpret it as batch.
-    fn decision_execution_mode(data: &Value) -> anyhow::Result<Option<ExecutionModeV1>> {
-        match data.get("execution_mode") {
-            None => Ok(None),
-            Some(value) => serde_json::from_value::<ExecutionModeV1>(value.clone())
-                .map(Some)
-                .map_err(|_| DecisionFailure::AmbiguousHistory.into()),
-        }
-    }
-
-    fn decision_provider_resolution(
-        data: &Value,
-    ) -> anyhow::Result<Option<crate::provider::ProviderResolutionV1>> {
-        match data.get("provider_resolution") {
-            None => Ok(None),
-            Some(value) => {
-                let resolution: crate::provider::ProviderResolutionV1 =
-                    serde_json::from_value(value.clone())
-                        .map_err(|_| DecisionFailure::AmbiguousHistory)?;
-                resolution
-                    .validate()
-                    .map_err(|_| DecisionFailure::AmbiguousHistory)?;
-                Ok(Some(resolution))
-            }
-        }
-    }
-
     fn lookup_decision(
         db: &Connection,
         request: &DecisionRequest,
@@ -1898,65 +1796,7 @@ impl Store {
         let events = statement
             .query_map([&request.request_id], row_event)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut initial: Option<StoredEvent> = None;
-        let mut approved: Option<StoredEvent> = None;
-        for stored in events {
-            let event = &stored.event;
-            let data = &event.data;
-            let Some(old_hash) = data.get("request_hash").and_then(Value::as_str) else {
-                return Err(DecisionFailure::AmbiguousHistory.into());
-            };
-            if old_hash != hash {
-                return Err(DecisionFailure::Conflict.into());
-            }
-            let Some(phase) = data.get("human_approved").and_then(Value::as_bool) else {
-                return Err(DecisionFailure::AmbiguousHistory.into());
-            };
-            if event.source != "gateway"
-                || event.provenance != "observed"
-                || event.decision.is_none()
-                || data.get("profile").and_then(Value::as_str) != Some(request.profile.as_str())
-                || data.get("jev").is_none()
-                || Self::decision_execution_mode(data)? != request.execution_mode
-                || Self::decision_provider_resolution(data)? != request.provider_resolution
-            {
-                return Err(DecisionFailure::AmbiguousHistory.into());
-            }
-            let slot = if phase { &mut approved } else { &mut initial };
-            if slot.replace(stored).is_some() {
-                return Err(DecisionFailure::AmbiguousHistory.into());
-            }
-        }
-        if approved.is_some()
-            && !initial.as_ref().is_some_and(|event| {
-                event
-                    .event
-                    .decision
-                    .as_ref()
-                    .is_some_and(|decision| decision.outcome == Outcome::Review)
-            })
-        {
-            return Err(DecisionFailure::AmbiguousHistory.into());
-        }
-        if let (Some(initial), Some(approved)) = (&initial, &approved)
-            && approved.seq <= initial.seq
-        {
-            return Err(DecisionFailure::AmbiguousHistory.into());
-        }
-        if request.human_approved {
-            if !initial.as_ref().is_some_and(|event| {
-                event
-                    .event
-                    .decision
-                    .as_ref()
-                    .is_some_and(|decision| decision.outcome == Outcome::Review)
-            }) {
-                return Err(DecisionFailure::ApprovalRequired.into());
-            }
-            Ok(approved)
-        } else {
-            Ok(initial)
-        }
+        decision_codec::find_receipt(events, request, hash)
     }
     pub fn integrity(&self) -> anyhow::Result<Integrity> {
         #[cfg(test)]
@@ -2090,14 +1930,7 @@ impl Store {
             let payload: String = row.get(4)?;
             let parsed = serde_json::from_str::<Event>(&payload);
             let projection_valid = if let Ok(e) = parsed {
-                let decision = e.decision.map(|d| {
-                    match d.outcome {
-                        Outcome::Allow => "allow",
-                        Outcome::Deny => "deny",
-                        Outcome::Review => "review",
-                    }
-                    .to_string()
-                });
+                let decision = e.decision.map(|d| d.outcome.as_str().to_string());
                 e.id == row.get::<_, String>(5)?
                     && e.kind == row.get::<_, String>(6)?
                     && e.agent_id == row.get(7)?
@@ -2223,90 +2056,13 @@ impl Store {
         } else {
             "SELECT payload FROM events WHERE agent_id IS NOT NULL ORDER BY seq"
         })?;
-        let mut out: BTreeMap<String, Value> = BTreeMap::new();
-        let mut declared = crate::declared_agents::DeclaredAgentProjection::default();
+        let mut projection = entities::Projection::new(sandboxes);
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
-            let e: Event = serde_json::from_str(&row.get::<_, String>(0)?)?;
-            if !sandboxes {
-                declared.observe(&e);
-                if e.kind == "agent.declared"
-                    && e.provenance == "declared"
-                    && (e.data.get("provider_agent_id").is_some()
-                        || e.data.get("declared_agent_id").is_some())
-                {
-                    continue;
-                }
-            }
-            let id = if sandboxes {
-                e.sandbox_id.clone()
-            } else {
-                e.agent_id.clone()
-            };
-            let Some(id) = id else { continue };
-            let item=out.entry(id.clone()).or_insert_with(||if sandboxes {json!({"id":id,"engine":null,"image":null,"profile":null,"status":"unknown","project_id":e.project_id,"session_id":e.session_id,"network":null,"started_at":null,"resources":null,"mounts":[]})} else {json!({"id":id,"provider":null,"name":id,"status":"unknown","parent_id":e.parent_agent_id,"project_id":e.project_id,"sandbox_id":e.sandbox_id,"model":null,"session_id":e.session_id,"started_at":null,"last_activity":null,"task":null,"compatibility":e.coverage,"provenance":e.provenance})});
-            if e.provenance == "observed" {
-                let state = match e.kind.as_str() {
-                    "agent.started" | "command.started" => Some("running"),
-                    "agent.completed" | "agent.stopped" | "command.completed" => Some("completed"),
-                    "agent.failed" | "command.failed" | "sandbox.failed" => Some("error"),
-                    "runtime.execution.error" => Some("unknown"),
-                    "sandbox.created" | "session.started" => Some("ready"),
-                    "sandbox.stopped" => Some("stopped"),
-                    "security.decision"
-                        if e.decision
-                            .as_ref()
-                            .is_some_and(|d| d.outcome == Outcome::Deny) =>
-                    {
-                        Some("blocked")
-                    }
-                    _ => None,
-                };
-                if let Some(status) = state {
-                    item["status"] = json!(status);
-                }
-                if e.kind == "command.started"
-                    || e.kind == "agent.started"
-                    || e.kind == "sandbox.created"
-                {
-                    item["started_at"] = json!(e.timestamp);
-                }
-                if e.kind == "sandbox.metrics" {
-                    item["resources"] = e.data.clone();
-                }
-            }
-            if !sandboxes {
-                item["last_activity"] = json!(e.timestamp);
-            }
-            let fields: &[&str] = if sandboxes {
-                &["engine", "image", "profile", "network", "mounts"]
-            } else {
-                &["provider", "name", "model", "task"]
-            };
-            if item.get("field_provenance").is_none() {
-                item["field_provenance"] = json!({});
-            }
-            if e.provenance == "observed" && !sandboxes {
-                item["compatibility"] = json!(e.coverage);
-            }
-            for key in fields {
-                if let Some(v) = e.data.get(*key).filter(|v| !v.is_null()) {
-                    let prior_observed = item["field_provenance"][*key] == "observed";
-                    if (sandboxes && e.provenance != "observed")
-                        || (prior_observed && e.provenance != "observed")
-                    {
-                        continue;
-                    }
-                    item[*key] = v.clone();
-                    item["field_provenance"][*key] = json!(e.provenance);
-                }
-            }
+            let event: Event = serde_json::from_str(&row.get::<_, String>(0)?)?;
+            projection.observe(&event);
         }
-        let mut items: Vec<Value> = out.into_values().collect();
-        if !sandboxes {
-            items.extend(declared.finish());
-        }
-        Ok(items)
+        Ok(projection.finish())
     }
     pub fn overview(&self) -> anyhow::Result<Value> {
         let agents = self.entities(false)?;
@@ -2324,9 +2080,17 @@ impl Store {
             )?)
         };
         let pending:i64=db.query_row("SELECT count(*) FROM events e WHERE e.kind='security.decision' AND e.decision='review' AND NOT EXISTS(SELECT 1 FROM events later WHERE later.kind='security.decision' AND later.seq>e.seq AND json_extract(later.payload,'$.data.request_id')=json_extract(e.payload,'$.data.request_id'))",[],|r|r.get(0))?;
-        Ok(
-            json!({"counts":{"agents":agents.iter().filter(|a|a["status"]=="running" && a["provenance"]=="observed").count(),"subagents":agents.iter().filter(|a|a["status"]=="running" && a["provenance"]=="observed" && !a["parent_id"].is_null()).count(),"declared_agents":agents.iter().filter(|a|a["status"]=="running" && a["provenance"]=="declared").count(),"declared_subagents":agents.iter().filter(|a|a["status"]=="running" && a["provenance"]=="declared" && !a["parent_id"].is_null()).count(),"sandboxes":sandboxes.len(),"commands":count("kind='command.requested'")?,"allowed":count("kind='security.decision' AND decision='allow'")?,"denied":count("kind='security.decision' AND decision='deny'")?,"pending":pending,"security":count("kind LIKE 'security.%'")?},"health":{"collector":if self.healthy(){"ok"}else{"degraded"},"engine":"unknown","jev":"disabled"},"resources":{"cpu_percent":null,"memory_bytes":null},"coverage":"observed","timestamp":chrono::Utc::now().to_rfc3339(),"sequence":db.query_row("SELECT COALESCE(MAX(seq),0) FROM events",[],|r|r.get::<_,i64>(0))?}),
-        )
+        let counts = overview::EventCounts {
+            commands: count("kind='command.requested'")?,
+            allowed: count("kind='security.decision' AND decision='allow'")?,
+            denied: count("kind='security.decision' AND decision='deny'")?,
+            pending,
+            security: count("kind LIKE 'security.%'")?,
+        };
+        let sequence = db.query_row("SELECT COALESCE(MAX(seq),0) FROM events", [], |row| {
+            row.get(0)
+        })?;
+        Ok(counts.render(&agents, sandboxes.len(), sequence, self.healthy()))
     }
 }
 

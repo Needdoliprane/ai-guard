@@ -1,5 +1,8 @@
 //! Broker projections are reconstructed from typed, durable control events.
-use super::*;
+use super::{
+    workload::projection::{ProjectionCell, ProjectionRows},
+    *,
+};
 use crate::broker_registry::*;
 use chrono::{DateTime, Duration, Utc};
 
@@ -12,6 +15,8 @@ pub(super) mod federation;
 pub(super) mod owned_checkpoint;
 mod owned_reconciliation;
 pub(super) mod owned_supervision;
+#[cfg(feature = "mysql-storage")]
+pub(crate) mod prepared_admin;
 
 pub(super) const SCHEMA: [(&str, &str, &str); 6] = [
     (
@@ -449,19 +454,19 @@ pub(super) fn initialize(store: &Store, tx: &Transaction<'_>) -> anyhow::Result<
 }
 
 type SqlRow = Vec<rusqlite::types::Value>;
-fn text_value(value: impl Into<String>) -> rusqlite::types::Value {
-    rusqlite::types::Value::Text(value.into())
+fn text_value(value: impl Into<String>) -> ProjectionCell {
+    ProjectionCell::Text(value.into())
 }
-fn int_value(value: u64) -> anyhow::Result<rusqlite::types::Value> {
-    Ok(rusqlite::types::Value::Integer(i64::try_from(value)?))
+fn int_value(value: u64) -> anyhow::Result<ProjectionCell> {
+    Ok(ProjectionCell::Integer(i64::try_from(value)?))
 }
-fn broker_row(broker: &BrokerV1, seq: i64) -> anyhow::Result<SqlRow> {
+fn broker_row(broker: &BrokerV1, seq: i64) -> anyhow::Result<Vec<ProjectionCell>> {
     Ok(vec![
         text_value(&broker.broker_id),
         int_value(broker.grant_revision)?,
         int_value(broker.heartbeat_revision)?,
         text_value(serde_json::to_string(broker)?),
-        rusqlite::types::Value::Integer(seq),
+        ProjectionCell::Integer(seq),
     ])
 }
 fn runtime_name(kind: BrokerRuntimeKindV1) -> anyhow::Result<String> {
@@ -540,12 +545,50 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         projection.apply(&record, &tenant, stored.seq)?;
     }
     require(seen_genesis)?;
-    let mut expected: BTreeMap<&str, Vec<SqlRow>> = BTreeMap::new();
+    let mut expected = projection_rows(&projection, genesis_seq, &genesis_hash)?;
+    for (table, query) in QUERIES {
+        let mut statement = db.prepare(query)?;
+        let width = statement.column_count();
+        let actual = statement
+            .query_map([], |row| {
+                (0..width)
+                    .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                    .collect::<rusqlite::Result<SqlRow>>()
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let expected = expected.remove(table).map(|rows| {
+            rows.into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|cell| match cell {
+                            ProjectionCell::Integer(value) => {
+                                rusqlite::types::Value::Integer(value)
+                            }
+                            ProjectionCell::Text(value) => rusqlite::types::Value::Text(value),
+                        })
+                        .collect::<SqlRow>()
+                })
+                .collect::<Vec<_>>()
+        });
+        anyhow::ensure!(
+            expected == Some(actual),
+            "broker registry projection differs from audit: {table}"
+        );
+    }
+    Ok(())
+}
+
+fn projection_rows(
+    projection: &Projection,
+    genesis_seq: i64,
+    genesis_hash: &str,
+) -> anyhow::Result<ProjectionRows> {
+    let mut expected = ProjectionRows::new();
     expected.insert(
         "broker_registry_meta",
         vec![vec![
-            rusqlite::types::Value::Integer(1),
-            rusqlite::types::Value::Integer(genesis_seq),
+            ProjectionCell::Integer(1),
+            ProjectionCell::Integer(genesis_seq),
             text_value(genesis_hash),
         ]],
     );
@@ -580,7 +623,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
                 vec![
                     text_value(id),
                     text_value(owner),
-                    rusqlite::types::Value::Integer(*seq),
+                    ProjectionCell::Integer(*seq),
                 ]
             })
             .collect(),
@@ -594,29 +637,14 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
                 Ok(vec![
                     text_value(id),
                     text_value(hash),
-                    rusqlite::types::Value::Integer(*seq),
+                    ProjectionCell::Integer(*seq),
                     text_value(&broker.broker_id),
                     text_value(serde_json::to_string(broker)?),
                 ])
             })
             .collect::<anyhow::Result<Vec<_>>>()?,
     );
-    for (table, query) in QUERIES {
-        let mut statement = db.prepare(query)?;
-        let width = statement.column_count();
-        let actual = statement
-            .query_map([], |row| {
-                (0..width)
-                    .map(|column| row.get::<_, rusqlite::types::Value>(column))
-                    .collect::<rusqlite::Result<SqlRow>>()
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        anyhow::ensure!(
-            expected.remove(table) == Some(actual),
-            "broker registry projection differs from audit: {table}"
-        );
-    }
-    Ok(())
+    Ok(expected)
 }
 
 fn load_broker(db: &Connection, id: &str) -> anyhow::Result<Option<BrokerV1>> {

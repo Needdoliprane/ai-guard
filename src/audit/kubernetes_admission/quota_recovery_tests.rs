@@ -557,8 +557,9 @@ fn expired_creator_grant_recovers_through_current_successor_without_revocation()
 #[test]
 fn recovery_requires_the_current_grants_historical_authority_and_preserves_quota_on_audit_refusal()
 {
-    use crate::audit::capacity::{AuditCapacityFailureV1, AuditCapacityV1, WorkloadAuditPolicyV1};
+    use crate::audit::capacity::WorkloadAuditPolicyV1;
     use crate::audit::kubernetes_admission::recovery::PreparedRecovery;
+    use crate::audit::{AuditCapacityFailureV1, AuditCapacityV1};
     let f = Fixture::new();
     let f = Fixture {
         store: f

@@ -3,6 +3,9 @@ use super::*;
 use crate::control::MigrationReportV1;
 use crate::identity::*;
 
+pub(crate) mod projection;
+use projection::{Genesis, Projection, ProjectionCell, Record, conflict, invalid};
+
 /// One bounded, transaction-consistent metadata observation. This is neither
 /// an authorization capability nor a substitute for the audited human profile.
 pub(crate) struct AuthenticationMembershipSnapshotV1 {
@@ -39,6 +42,17 @@ fn require_approval_capability_format(
         return Err(IdentityFailureV1::MigrationRequired.into());
     }
     Ok(())
+}
+
+pub(crate) fn require_replay_capabilities(
+    mutation: &IdentityMutationV1,
+    version: i64,
+    broker_access: bool,
+    worker_access: bool,
+) -> anyhow::Result<()> {
+    super::human_brokers::require_mutation_capability(mutation, broker_access)?;
+    super::human_workers::require_mutation_capability(mutation, worker_access)?;
+    require_approval_capability_format(mutation, version)
 }
 
 pub(super) const SCHEMA: [(&str, &str, &str); 11] = [
@@ -138,14 +152,6 @@ const QUERIES: [(&str, &str); 7] = [
     ),
 ];
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Genesis {
-    version: u32,
-    control_namespace_uuid: String,
-    previous_seq: i64,
-    previous_hash: String,
-}
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HumanAccessGenesis {
@@ -157,40 +163,6 @@ struct HumanAccessGenesis {
     authorization_revision: u64,
     previous_seq: i64,
     previous_hash: String,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Record {
-    version: u32,
-    authorization_revision: u64,
-    input_hash: String,
-    mutation: IdentityMutationV1,
-}
-#[derive(Default)]
-struct Projection {
-    accounts: BTreeMap<String, (HumanAccountV1, i64)>,
-    credentials: BTreeMap<String, (LocalCredentialV1, i64)>,
-    memberships: BTreeMap<String, (MembershipV1, i64)>,
-    resources: BTreeMap<String, (ResourceGrantV1, i64)>,
-    operations: BTreeMap<String, (String, i64)>,
-    revision: u64,
-}
-type SqlRow = Vec<rusqlite::types::Value>;
-type ProjectionRows = BTreeMap<&'static str, Vec<SqlRow>>;
-
-fn invalid(ok: bool) -> anyhow::Result<()> {
-    if ok {
-        Ok(())
-    } else {
-        Err(IdentityFailureV1::InvalidRequest.into())
-    }
-}
-fn conflict(ok: bool) -> anyhow::Result<()> {
-    if ok {
-        Ok(())
-    } else {
-        Err(IdentityFailureV1::Conflict.into())
-    }
 }
 pub(super) fn require_identity(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -249,10 +221,6 @@ pub(super) fn require_human_read(tx: &CheckedTransaction<'_>) -> anyhow::Result<
         Err(IdentityFailureV1::MigrationRequired.into())
     }
 }
-fn revision(previous: Option<u64>, expected: u64, next: u64) -> anyhow::Result<()> {
-    conflict(previous.unwrap_or(0) == expected)?;
-    invalid(expected.checked_add(1) == Some(next))
-}
 pub(super) fn authorization_revision(db: &Connection) -> anyhow::Result<u64> {
     let revision: i64 = db.query_row(
         "SELECT authorization_revision FROM identity_meta WHERE singleton=1",
@@ -260,277 +228,6 @@ pub(super) fn authorization_revision(db: &Connection) -> anyhow::Result<u64> {
         |r| r.get(0),
     )?;
     u64::try_from(revision).context("negative identity authorization revision")
-}
-
-impl Projection {
-    fn account_exists(&self, principal: &PrincipalRefV1) -> anyhow::Result<()> {
-        invalid(self.accounts.contains_key(&principal.key()?))
-    }
-    fn member_exists(&self, principal: &PrincipalRefV1, organization: &str) -> bool {
-        self.memberships.values().any(|(m, _)| {
-            &m.principal == principal && m.active && m.organization_scope == organization
-        })
-    }
-    fn apply(
-        &mut self,
-        mutation: &IdentityMutationV1,
-        tenant: &str,
-        seq: i64,
-    ) -> anyhow::Result<()> {
-        mutation.validate()?;
-        invalid(!self.operations.contains_key(&mutation.operation_id))?;
-        match &mutation.actor {
-            PrincipalRefV1::LegacyControl {
-                role: LegacyControlRoleV1::Runner,
-                ..
-            } => {}
-            principal if principal.is_human() => {
-                let actor = self
-                    .accounts
-                    .get(&principal.key()?)
-                    .ok_or(IdentityFailureV1::PermissionDenied)?;
-                invalid(actor.0.active)?;
-                let (capability, organization) = match &mutation.change {
-                    IdentityChangeV1::ResourceGrant { grant, .. } => {
-                        (HumanCapabilityV1::ManageGrants, &grant.organization_scope)
-                    }
-                    IdentityChangeV1::Membership { membership, .. } => (
-                        HumanCapabilityV1::ManageMemberships,
-                        &membership.organization_scope,
-                    ),
-                    // Accounts and credentials are provisioned by the trusted
-                    // operator in this schema foundation, not a tenant role.
-                    _ => return Err(IdentityFailureV1::PermissionDenied.into()),
-                };
-                if !self.memberships.values().any(|(m, _)| {
-                    m.active
-                        && &m.principal == principal
-                        && m.organization_scope == *organization
-                        && m.capabilities.contains(&capability)
-                }) {
-                    return Err(IdentityFailureV1::PermissionDenied.into());
-                }
-            }
-            _ => return Err(IdentityFailureV1::PermissionDenied.into()),
-        }
-        match &mutation.change {
-            IdentityChangeV1::Account {
-                expected_revision,
-                account,
-            } => {
-                let key = account.principal.key()?;
-                revision(
-                    self.accounts.get(&key).map(|a| a.0.revision),
-                    *expected_revision,
-                    account.revision,
-                )?;
-                self.accounts.insert(key, (account.clone(), seq));
-            }
-            IdentityChangeV1::Credential {
-                expected_revision,
-                binding: credential,
-            } => {
-                self.account_exists(&credential.principal)?;
-                let old = self.credentials.get(&credential.credential_id);
-                revision(
-                    old.map(|c| c.0.revision),
-                    *expected_revision,
-                    credential.revision,
-                )?;
-                invalid(old.is_none_or(|c| c.0.principal == credential.principal))?;
-                conflict(!self.credentials.values().any(|(c, _)| {
-                    c.sha256_digest == credential.sha256_digest
-                        && c.credential_id != credential.credential_id
-                }))?;
-                self.credentials
-                    .insert(credential.credential_id.clone(), (credential.clone(), seq));
-            }
-            IdentityChangeV1::Membership {
-                expected_revision,
-                membership,
-            } => {
-                invalid(membership.tenant_id == tenant)?;
-                self.account_exists(&membership.principal)?;
-                let old = self.memberships.get(&membership.membership_id);
-                revision(
-                    old.map(|m| m.0.revision),
-                    *expected_revision,
-                    membership.revision,
-                )?;
-                invalid(old.is_none_or(|m| {
-                    m.0.principal == membership.principal
-                        && m.0.organization_scope == membership.organization_scope
-                }))?;
-                // Organization administrators may retain or remove an existing
-                // tenant-wide grant, but only trusted control may introduce or
-                // reactivate it. Identity and organization are immutable above.
-                if mutation.actor.is_human()
-                    && membership
-                        .capabilities
-                        .contains(&HumanCapabilityV1::ReadBrokerRegistry)
-                    && old.is_none_or(|(previous, _)| {
-                        !previous
-                            .capabilities
-                            .contains(&HumanCapabilityV1::ReadBrokerRegistry)
-                            || (!previous.active && membership.active)
-                    })
-                {
-                    return Err(IdentityFailureV1::PermissionDenied.into());
-                }
-                if mutation.actor.is_human()
-                    && membership
-                        .capabilities
-                        .contains(&HumanCapabilityV1::ReadWorkerRegistry)
-                    && old.is_none_or(|(previous, _)| {
-                        !previous
-                            .capabilities
-                            .contains(&HumanCapabilityV1::ReadWorkerRegistry)
-                            || (!previous.active && membership.active)
-                    })
-                {
-                    return Err(IdentityFailureV1::PermissionDenied.into());
-                }
-                conflict(!self.memberships.values().any(|(m, _)| {
-                    m.principal == membership.principal
-                        && m.organization_scope == membership.organization_scope
-                        && m.membership_id != membership.membership_id
-                }))?;
-                self.memberships
-                    .insert(membership.membership_id.clone(), (membership.clone(), seq));
-            }
-            IdentityChangeV1::ResourceGrant {
-                expected_revision,
-                grant,
-            } => {
-                let key = grant.resource.key()?;
-                // Only the operator may establish a resource's first binding.
-                // A tombstone remains an assigned resource, retaining its org.
-                if mutation.actor.is_human()
-                    && self.resources.get(&key).is_none_or(|previous| {
-                        previous.0.organization_scope != grant.organization_scope
-                    })
-                {
-                    return Err(IdentityFailureV1::PermissionDenied.into());
-                }
-                invalid(grant.tenant_id == tenant)?;
-                self.account_exists(&grant.owner)?;
-                invalid(self.member_exists(&grant.owner, &grant.organization_scope))?;
-                for share in &grant.shares {
-                    self.account_exists(&share.principal)?;
-                    invalid(self.member_exists(&share.principal, &grant.organization_scope))?;
-                }
-                invalid(
-                    self.resources
-                        .get(&key)
-                        .is_none_or(|g| g.0.organization_scope == grant.organization_scope),
-                )?;
-                revision(
-                    self.resources.get(&key).map(|g| g.0.revision),
-                    *expected_revision,
-                    grant.revision,
-                )?;
-                self.resources.insert(key, (grant.clone(), seq));
-            }
-        }
-        self.revision = self
-            .revision
-            .checked_add(1)
-            .ok_or(IdentityFailureV1::InvalidRequest)?;
-        i64::try_from(self.revision)
-            .context("identity authorization revision exceeds SQLite integer range")?;
-        self.operations
-            .insert(mutation.operation_id.clone(), (mutation.input_hash()?, seq));
-        Ok(())
-    }
-    fn rows(&self, genesis: &StoredEvent) -> anyhow::Result<ProjectionRows> {
-        use rusqlite::types::Value as Sql;
-        let text = |s: String| Sql::Text(s);
-        let int = |i: i64| Sql::Integer(i);
-        let mut result: BTreeMap<_, Vec<_>> =
-            QUERIES.iter().map(|(t, _)| (*t, Vec::new())).collect();
-        result
-            .get_mut("identity_meta")
-            .context("missing identity table")?
-            .push(vec![
-                int(1),
-                int(i64::try_from(self.revision)?),
-                int(genesis.seq),
-                text(genesis.hash.clone()),
-            ]);
-        for (key, (account, seq)) in &self.accounts {
-            result
-                .get_mut("identity_accounts")
-                .context("missing identity table")?
-                .push(vec![
-                    text(key.clone()),
-                    text(serde_json::to_string(account)?),
-                    int(*seq),
-                ]);
-        }
-        for (id, (c, seq)) in &self.credentials {
-            result
-                .get_mut("identity_credentials")
-                .context("missing identity table")?
-                .push(vec![
-                    text(id.clone()),
-                    text(c.principal.key()?),
-                    text(c.sha256_digest.clone()),
-                    int(i64::from(c.active)),
-                    text(serde_json::to_string(c)?),
-                    int(*seq),
-                ]);
-        }
-        for (id, (m, seq)) in &self.memberships {
-            result
-                .get_mut("identity_memberships")
-                .context("missing identity table")?
-                .push(vec![
-                    text(id.clone()),
-                    text(m.principal.key()?),
-                    text(m.organization_scope.clone()),
-                    int(i64::from(m.active)),
-                    text(serde_json::to_string(m)?),
-                    int(*seq),
-                ]);
-        }
-        for (key, (g, seq)) in &self.resources {
-            let kind = serde_json::to_value(g.resource.kind)?
-                .as_str()
-                .context("invalid resource kind")?
-                .to_owned();
-            result
-                .get_mut("identity_resources")
-                .context("missing identity table")?
-                .push(vec![
-                    text(key.clone()),
-                    text(kind),
-                    text(g.resource.resource_id.clone()),
-                    text(g.owner.key()?),
-                    int(i64::from(g.active)),
-                    text(serde_json::to_string(g)?),
-                    int(*seq),
-                ]);
-            let mut shares = g
-                .shares
-                .iter()
-                .map(|s| Ok((s.principal.key()?, serde_json::to_string(&s.permissions)?)))
-                .collect::<anyhow::Result<Vec<_>>>()?;
-            shares.sort();
-            for (principal, permissions) in shares {
-                result
-                    .get_mut("identity_shares")
-                    .context("missing identity table")?
-                    .push(vec![text(key.clone()), text(principal), text(permissions)]);
-            }
-        }
-        for (id, (hash, seq)) in &self.operations {
-            result
-                .get_mut("identity_operations")
-                .context("missing identity table")?
-                .push(vec![text(id.clone()), text(hash.clone()), int(*seq)]);
-        }
-        Ok(result)
-    }
 }
 
 fn genesis(db: &Connection) -> anyhow::Result<StoredEvent> {
@@ -551,10 +248,7 @@ fn genesis(db: &Connection) -> anyhow::Result<StoredEvent> {
         |r| r.get(0),
     )?;
     invalid(
-        input.version == 4
-            && input.control_namespace_uuid == namespace
-            && input.previous_seq == seq - 1
-            && input.previous_hash == stored.prev_hash
+        input.matches(&namespace, seq, &stored.prev_hash)
             && hash == stored.hash
             && stored.event.kind == "control.identity.genesis"
             && stored.event.source == "gateway"
@@ -792,20 +486,22 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
                 && stored.event.provenance == "observed"
                 && stored.event.coverage == "observed",
         )?;
-        let record: Record = serde_json::from_value(stored.event.data.clone())?;
-        invalid(record.version == 1 && record.input_hash == record.mutation.input_hash()?)?;
-        super::human_brokers::require_mutation_capability(&record.mutation, seen_broker_access)?;
-        super::human_workers::require_mutation_capability(&record.mutation, seen_worker_access)?;
-        require_approval_capability_format(&record.mutation, version)?;
+        let record = Record::decode_replay(&stored.event.data)?;
+        require_replay_capabilities(
+            &record.mutation,
+            version,
+            seen_broker_access,
+            seen_worker_access,
+        )?;
         projection.apply(&record.mutation, &tenant, stored.seq)?;
         ensure_resource_known(db, &record.mutation, stored.seq)?;
-        invalid(record.authorization_revision == projection.revision)?;
+        record.verify_revision(&projection)?;
     }
     invalid(seen_genesis)?;
     invalid(([5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&version)) == seen_human_access)?;
     invalid(([7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&version)) == seen_broker_access)?;
     invalid((matches!(version, 10 | 11 | 12 | 13 | 14 | 15)) == seen_worker_access)?;
-    let mut expected = projection.rows(&genesis)?;
+    let mut expected = projection.rows(genesis.seq, &genesis.hash)?;
     for (table, query) in QUERIES {
         let mut statement = db.prepare(query)?;
         let width = statement.column_count();
@@ -816,12 +512,26 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
                     .collect::<rusqlite::Result<Vec<_>>>()
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let expected_rows = expected.remove(table).map(|rows| {
+            rows.into_iter()
+                .map(|row| row.into_iter().map(rusqlite::types::Value::from).collect())
+                .collect()
+        });
         anyhow::ensure!(
-            Some(actual) == expected.remove(table),
+            Some(actual) == expected_rows,
             "identity projection differs from audit: {table}"
         );
     }
     Ok(())
+}
+
+impl From<ProjectionCell> for rusqlite::types::Value {
+    fn from(value: ProjectionCell) -> Self {
+        match value {
+            ProjectionCell::Integer(value) => Self::Integer(value),
+            ProjectionCell::Text(value) => Self::Text(value),
+        }
+    }
 }
 
 // Mutation preflight reads only the accounts, memberships and unique bindings

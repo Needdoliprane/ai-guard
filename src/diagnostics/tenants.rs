@@ -53,8 +53,12 @@ fn fields(refusal: &Refusal) -> &'static [&'static str] {
         (FindingCode::RegistryTenantIdInvalid | FindingCode::RegistryTenantIdDuplicate, _) => {
             &[REGISTRY_IDS]
         }
+        (FindingCode::RegistryStorageInvalid | FindingCode::RegistryMySqlUnavailable, _) => {
+            &["tenants[].storage"]
+        }
         (FindingCode::RegistryReferenceEmpty, _) => &[
             "tenants[].data",
+            "tenants[].storage.path",
             "tenants[].runner_token_file",
             "tenants[].viewer_token_file",
         ],
@@ -97,16 +101,11 @@ pub(crate) fn inspect(context: &mut Context, path: &Path, max_events: u64) -> Re
     if inspection.read {
         context.opened(ContentRole::TenantRegistry, path);
     }
-    for tenant in &inspection.tenants {
-        for key_file in [&tenant.runner_token_file, &tenant.viewer_token_file]
-            .into_iter()
-            .flatten()
-        {
-            context.never_opened.add(key_file);
-        }
-        if let Some(store) = &tenant.data {
-            context.never_opened.add_store(store);
-        }
+    for path in &inspection.protected_paths.files {
+        context.never_opened.add(path);
+    }
+    for path in &inspection.protected_paths.stores {
+        context.never_opened.add_store(path);
     }
     inspection
 }
@@ -345,5 +344,82 @@ pub(crate) fn correspondence(
         // Any other pair of version and plan is refused as such by the
         // inspection of the OIDC file; an empty registry by its own.
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diagnostics::{DiagnoseArgs, build_report};
+    use clap::Parser;
+    use serde_json::json;
+    use std::{
+        ffi::OsStr,
+        fs,
+        os::unix::fs::{MetadataExt, PermissionsExt},
+    };
+
+    #[derive(Parser)]
+    struct TestCommand {
+        #[command(flatten)]
+        arguments: DiagnoseArgs,
+    }
+
+    #[tokio::test]
+    async fn a_mysql_private_reference_does_not_open_as_a_gateway_ca() {
+        let dir = tempfile::tempdir().unwrap();
+        let writer_password = dir.path().join("writer-password");
+        let alias = dir.path().canonicalize().unwrap().join("writer-password");
+        let registry = dir.path().join("tenants.json");
+        fs::write(&writer_password, "synthetic-mysql-secret-must-not-be-read").unwrap();
+        fs::set_permissions(&writer_password, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(fs::metadata(&alias).unwrap().nlink(), 1);
+        let args = TestCommand::try_parse_from([
+            OsStr::new("ai-guard-diagnose"),
+            OsStr::new("--tenants-file"),
+            registry.as_os_str(),
+            OsStr::new("--gateway-ca-file"),
+            alias.as_os_str(),
+        ])
+        .unwrap();
+
+        let valid = json!({"version":1,"tenants":[{
+            "tenant_id":"tenant-a","runner_token_file":"runner","viewer_token_file":"viewer",
+            "storage":{"backend":"mysql","host":"db.example.invalid","port":3306,
+                "database":"audit_a","username":"writer_a","namespace":"5657019d-5302-4ced-922f-406aa3d8ec5c",
+                "password_file":"writer-password","ca_file":"mysql-ca.pem",
+                "authentication":{"mode":"password_and_mtls","client_cert_file":"mysql-client.pem","client_key_file":"mysql-client.key"}
+            }
+        }]});
+        let mut invalid_port = valid.clone();
+        invalid_port["tenants"][0]["storage"]["port"] = json!(0);
+        let mut incomplete_mtls = valid.clone();
+        incomplete_mtls["tenants"][0]["storage"]["authentication"]
+            .as_object_mut()
+            .unwrap()
+            .remove("client_key_file");
+        for (document, code) in [
+            (valid, FindingCode::RegistryMySqlUnavailable),
+            (invalid_port, FindingCode::RegistryJsonInvalid),
+            (incomplete_mtls, FindingCode::RegistryJsonInvalid),
+        ] {
+            fs::write(&registry, serde_json::to_vec(&document).unwrap()).unwrap();
+            let report = build_report(&args.arguments).await.unwrap();
+            assert!(report.findings.iter().any(|finding| finding.code == code));
+            assert!(
+                report
+                    .findings
+                    .iter()
+                    .any(|finding| finding.code
+                        == FindingCode::TrustCaReferenceIsACredentialReference)
+            );
+            assert_eq!(
+                report.mode.files_read_for_content,
+                [ContentRole::TenantRegistry]
+            );
+            let rendered = serde_json::to_string(&report).unwrap();
+            assert!(!rendered.contains("synthetic-mysql-secret-must-not-be-read"));
+            assert!(!rendered.contains("writer-password"));
+        }
     }
 }

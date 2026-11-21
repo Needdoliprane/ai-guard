@@ -3,41 +3,17 @@ use agentsandbox::control::kubernetes_session::{
     KubernetesSessionControlRecoveryPolicyV2, KubernetesSessionRecoveryPolicyV2,
     KubernetesSessionReservationPolicyV2,
 };
+use agentsandbox::diagnostics::gateway_files::{
+    decode_tenant_registry, read_tenant_registry_file, sqlite_path_for_gateway,
+};
 pub(crate) mod human_sources;
 use anyhow::{Context, Result};
 pub use human_sources::{load_owned_sources, load_owned_tenants, validate_human_mode};
 use serde::Deserialize;
 use std::{
     collections::BTreeSet,
-    io::Read,
     path::{Path, PathBuf},
 };
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Registry {
-    version: u32,
-    tenants: Vec<TenantFiles>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TenantFiles {
-    tenant_id: String,
-    data: PathBuf,
-    runner_token_file: PathBuf,
-    viewer_token_file: PathBuf,
-    #[serde(default)]
-    worker_quota: agentsandbox::control::QuotaPolicyV1,
-    audit_capacity_policy: Option<agentsandbox::audit::AuditCapacityPolicyV1>,
-    workload_audit_policy: Option<agentsandbox::audit::WorkloadAuditPolicyV1>,
-    relay_retention_policy: Option<agentsandbox::relay::RelayRetentionPolicyV1>,
-    held_create_policy:
-        Option<agentsandbox::control::kubernetes_admission::KubernetesHeldCreatePolicyV1>,
-    session_reservation_policy: Option<KubernetesSessionReservationPolicyV2>,
-    session_recovery_policy: Option<KubernetesSessionRecoveryPolicyV2>,
-    session_control_recovery_policy: Option<KubernetesSessionControlRecoveryPolicyV2>,
-}
 
 pub struct ConfiguredTenant {
     pub tenant_id: String,
@@ -267,26 +243,7 @@ pub fn migrate_authentication(
 }
 
 pub fn load(path: &Path) -> Result<Vec<ConfiguredTenant>> {
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    let file = options
-        .open(path)
-        .context("Registre de tenants inaccessible")?;
-    anyhow::ensure!(
-        file.metadata()?.is_file(),
-        "Le registre doit être un fichier régulier"
-    );
-    let mut bytes = Vec::new();
-    file.take(1_048_577).read_to_end(&mut bytes)?;
-    anyhow::ensure!(
-        bytes.len() <= 1_048_576,
-        "Registre de tenants trop volumineux"
-    );
+    let bytes = read_tenant_registry_file(path)?;
     load_registry_bytes(path, &bytes, crate::read_token)
 }
 
@@ -305,17 +262,7 @@ fn load_registry_bytes(
     bytes: &[u8],
     mut load_token: impl FnMut(&Path) -> Result<String>,
 ) -> Result<Vec<ConfiguredTenant>> {
-    let registry: Registry =
-        agentsandbox::human_authority::migration::operator::decode_closed(bytes, 1_048_576, 256)
-            .context("Registre de tenants invalide")?;
-    anyhow::ensure!(
-        registry.version == 1,
-        "Version de registre de tenants inconnue"
-    );
-    anyhow::ensure!(
-        !registry.tenants.is_empty(),
-        "Le registre de tenants est vide"
-    );
+    let registry = decode_tenant_registry(bytes)?;
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -330,10 +277,21 @@ fn load_registry_bytes(
             parent.join(value)
         })
     };
+    // A later unsupported backend must stop the whole registry before any
+    // earlier tenant's credentials are opened.
+    let tenants = registry
+        .tenants
+        .into_iter()
+        .map(|tenant| {
+            let data = sqlite_path_for_gateway(tenant.data.as_deref(), tenant.storage.as_ref())?;
+            let data = resolve(data.to_owned())?;
+            Ok((tenant, data))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let mut ids = BTreeSet::new();
     let mut credentials = BTreeSet::new();
-    let mut result = Vec::new();
-    for tenant in registry.tenants {
+    let mut result = Vec::with_capacity(tenants.len());
+    for (tenant, data) in tenants {
         tenant
             .worker_quota
             .validate()
@@ -363,7 +321,6 @@ fn load_registry_bytes(
             ids.insert(tenant.tenant_id.clone()),
             "Identifiant de tenant dupliqué"
         );
-        let data = resolve(tenant.data)?;
         let runner_token_file = resolve(tenant.runner_token_file)?;
         let viewer_token_file = resolve(tenant.viewer_token_file)?;
         let runner_token = load_token(&runner_token_file)?;
@@ -677,6 +634,120 @@ mod tests {
         assert!(!tenants[0].data.exists());
         assert_eq!(tenants[0].runner_token, "r".repeat(48));
         assert_eq!(tenants[0].viewer_token, "v".repeat(48));
+    }
+
+    #[test]
+    fn explicit_sqlite_resolves_the_same_relative_path_as_historical_data() {
+        use agentsandbox::diagnostics::gateway_files::inspect_registry;
+
+        let (_dir, path, mut registry) = fixture();
+        std::fs::write(&path, registry.to_string()).unwrap();
+        let expected = load(&path).unwrap().remove(0).data;
+        let tenant = registry["tenants"][0].as_object_mut().unwrap();
+        tenant.remove("data").unwrap();
+        tenant.insert(
+            "storage".into(),
+            json!({"backend":"sqlite","path":"a.sqlite"}),
+        );
+        std::fs::write(&path, registry.to_string()).unwrap();
+        assert_eq!(load(&path).unwrap().remove(0).data, expected);
+        assert!(!expected.exists());
+        let inspection = inspect_registry(&path, 100_000);
+        assert!(inspection.refusals.is_empty());
+        assert_eq!(inspection.tenants[0].data.as_ref(), Some(&expected));
+    }
+
+    #[test]
+    fn storage_refusals_match_diagnostics_before_any_credential_is_read() {
+        use agentsandbox::diagnostics::{
+            catalogue::FindingCode,
+            gateway_files::{TenantStorageRefusal, inspect_registry},
+        };
+
+        let (_dir, path, mut registry) = fixture();
+        registry["tenants"].as_array_mut().unwrap().push(json!({
+            "tenant_id":"tenant-b","runner_token_file":"second-runner","viewer_token_file":"second-viewer"
+        }));
+        let mysql = json!({
+            "backend":"mysql","host":"db.example.invalid","port":3306,"database":"audit_b",
+            "username":"writer_b","namespace":"5657019d-5302-4ced-922f-406aa3d8ec5c",
+            "password_file":"sql/password","ca_file":"sql/ca.pem","authentication":{"mode":"password"}
+        });
+        let mut mtls = mysql.clone();
+        mtls["authentication"] = json!({
+            "mode":"password_and_mtls","client_cert_file":"sql/client.pem","client_key_file":"sql/client.key"
+        });
+        let mut incomplete_mtls = mtls.clone();
+        incomplete_mtls["authentication"]
+            .as_object_mut()
+            .unwrap()
+            .remove("client_key_file");
+        let mut password_with_cert = mysql.clone();
+        password_with_cert["authentication"]["client_cert_file"] = json!("sql/client.pem");
+        let mut invalid_host = mysql.clone();
+        invalid_host["host"] = json!("https://db.example.invalid:3306");
+        let mut invalid_port = mysql.clone();
+        invalid_port["port"] = json!(0);
+        let mut unknown = mysql.clone();
+        unknown["backend"] = json!("fixture-value-must-not-appear");
+        use TenantStorageRefusal::{InvalidMySqlProfile, InvalidSelection, MySqlUnavailable};
+
+        let mut check = |data, storage, cause| {
+            let code = match cause {
+                Some(MySqlUnavailable) => FindingCode::RegistryMySqlUnavailable,
+                Some(_) => FindingCode::RegistryStorageInvalid,
+                None => FindingCode::RegistryJsonInvalid,
+            };
+            let tenant = registry["tenants"][1].as_object_mut().unwrap();
+            tenant.remove("data");
+            tenant.remove("storage");
+            for (field, entry) in [("data", data), ("storage", storage)] {
+                if let Some(entry) = entry {
+                    tenant.insert(field.into(), entry);
+                }
+            }
+            let bytes = serde_json::to_vec(&registry).unwrap();
+            let mut credentials_read = 0;
+            let result = load_registry_bytes(&path, &bytes, |_| {
+                credentials_read += 1;
+                anyhow::bail!("fixture credential reader called");
+            });
+            assert_eq!(credentials_read, 0, "{code:?}");
+            let refusal = result.err().expect("the gateway accepted the storage");
+            assert_eq!(
+                refusal.downcast_ref::<TenantStorageRefusal>().copied(),
+                cause
+            );
+            if cause.is_none() {
+                assert_eq!(format!("{refusal:#}"), "Registre de tenants invalide");
+            }
+            std::fs::write(&path, bytes).unwrap();
+            let inspection = inspect_registry(&path, 100_000);
+            assert_eq!(
+                inspection
+                    .refusals
+                    .iter()
+                    .map(|refusal| refusal.code)
+                    .collect::<Vec<_>>(),
+                [code]
+            );
+        };
+        check(None, Some(mysql.clone()), Some(MySqlUnavailable));
+        check(None, Some(mtls), Some(MySqlUnavailable));
+        check(Some(json!("b.sqlite")), Some(mysql), Some(InvalidSelection));
+        check(None, None, Some(InvalidSelection));
+        check(None, Some(invalid_host), Some(InvalidMySqlProfile));
+        check(Some(json!("b.sqlite")), Some(json!(null)), None);
+        check(
+            Some(json!(null)),
+            Some(json!({"backend":"sqlite","path":"b.sqlite"})),
+            None,
+        );
+        for malformed in [incomplete_mtls, password_with_cert, invalid_port, unknown] {
+            check(None, Some(malformed), None);
+        }
+        assert!(!path.with_file_name("a.sqlite").exists());
+        assert!(!path.with_file_name("b.sqlite").exists());
     }
 
     #[test]
