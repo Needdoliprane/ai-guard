@@ -25,7 +25,7 @@ test("l’identité conserve une version d’autorisation opaque et la révision
 test("un contexte garde chaque capacité que le contrôle peut accorder et refuse un nom inconnu", () => {
   const all = ["read_metadata", "read_content", "export", "read_tenant_metadata", "manage_memberships", "manage_grants",
     "read_broker_registry", "read_worker_registry", "approve_launch", "read_memberships", "read_configuration",
-    "launch_session", "send_session_message"];
+    "launch_session", "send_session_message", "approve_egress"];
   const identity = { version: 1, principal, display_name: "Alice", authentication: { method: "local_credential", credential_id: uuid, expires_at: null },
     contexts: [{ ...context, mode: "administration", capabilities: all }], contexts_complete: true };
   assert.deepEqual(parseHumanIdentity(identity).contexts[0].capabilities, all);

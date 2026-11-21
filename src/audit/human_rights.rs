@@ -11,6 +11,10 @@
 use super::*;
 use crate::identity::*;
 
+#[cfg(all(test, unix))]
+#[path = "human_rights_tests.rs"]
+mod tests;
+
 pub(super) const GENESIS_KIND: &str = "control.identity.human_rights.genesis";
 /// The only versioned constant of this fence. It never changes `user_version`.
 pub(crate) const MARKER_VERSION: u32 = 2;
@@ -40,7 +44,16 @@ struct Genesis {
 pub(crate) fn read_action_requires_marker(action: &str) -> bool {
     matches!(
         action,
-        "summary" | "memberships" | "quota" | "usage" | "configuration"
+        "summary"
+            | "memberships"
+            | "quota"
+            | "usage"
+            | "configuration"
+            | "session_launch_options"
+            | "session_preparation"
+            | "session_launch_receipt"
+            | "session_messages"
+            | "session_attribution"
     )
 }
 
@@ -112,6 +125,12 @@ pub(super) fn validate_capability(db: &Connection, version: i64) -> anyhow::Resu
     Ok(())
 }
 
+/// Whether the explicit human rights maintenance still has a step to install.
+/// A later step joins this list with its own installed check.
+pub(super) fn maintenance_pending(db: &Connection) -> anyhow::Result<bool> {
+    Ok(!installed(db)?)
+}
+
 pub(super) fn installed(db: &Connection) -> anyhow::Result<bool> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
     Ok(format_admits_marker(version) && genesis(db)?.is_some())
@@ -133,6 +152,9 @@ pub(super) fn require_mutation_capability(
 
 impl Store {
     /// Whether this store's identity chain carries the validated marker.
+    /// Advisory, for offline maintenance and diagnostics: it skips the checked
+    /// transaction's health latch, and every write re-checks the marker inside
+    /// its own checked transaction.
     pub fn human_rights_installed(&self) -> anyhow::Result<bool> {
         let db = self
             .db

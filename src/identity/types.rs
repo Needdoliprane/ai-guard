@@ -92,9 +92,31 @@ pub enum HumanCapabilityV1 {
     /// Personal right to send an instruction to an authorized session.
     /// Separate from LaunchSession and every read. Requires the marker.
     SendSessionMessage,
+    /// Administration right to approve or revoke bounded egress grants of the
+    /// tenant. Delegable by an organization administrator who holds it, never
+    /// beyond it. Requires the marker.
+    ApproveEgress,
 }
 
 impl HumanCapabilityV1 {
+    /// Every capability, in wire order: the single list other lists are
+    /// checked against (CLI flags, dashboard parser, guides).
+    pub const ALL: [Self; 14] = [
+        Self::ReadMetadata,
+        Self::ReadContent,
+        Self::Export,
+        Self::ReadTenantMetadata,
+        Self::ManageMemberships,
+        Self::ManageGrants,
+        Self::ReadBrokerRegistry,
+        Self::ReadWorkerRegistry,
+        Self::ApproveLaunch,
+        Self::ReadMemberships,
+        Self::ReadConfiguration,
+        Self::LaunchSession,
+        Self::SendSessionMessage,
+        Self::ApproveEgress,
+    ];
     pub(crate) fn is_administration(self) -> bool {
         matches!(
             self,
@@ -105,6 +127,7 @@ impl HumanCapabilityV1 {
                 | Self::ReadWorkerRegistry
                 | Self::ReadMemberships
                 | Self::ReadConfiguration
+                | Self::ApproveEgress
         )
     }
     /// Capabilities that may enter a history only after the explicit, backed-up
@@ -116,6 +139,7 @@ impl HumanCapabilityV1 {
                 | Self::ReadConfiguration
                 | Self::LaunchSession
                 | Self::SendSessionMessage
+                | Self::ApproveEgress
         )
     }
     /// Only trusted authenticated/offline control may introduce or reactivate

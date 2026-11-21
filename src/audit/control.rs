@@ -1239,10 +1239,16 @@ impl Store {
                 (from_version, to_version)
             }
             Maintenance::HumanRights => {
-                invalid(
-                    super::human_rights::format_admits_marker(version)
-                        && !super::human_rights::installed(&preflight)?,
-                )?;
+                // Legacy stores only; an owned 14/15 store receives the marker
+                // through its journaled source maintenance.
+                anyhow::ensure!(
+                    (10..=13).contains(&version),
+                    "migrate-human-rights requires the worker registry marker: store formats 10 to 13 (this store is format {version}; run migrate-control up to --target-version 10 first)"
+                );
+                anyhow::ensure!(
+                    super::human_rights::maintenance_pending(&preflight)?,
+                    "the human rights marker is already installed on this store; nothing was changed"
+                );
                 let version = u32::try_from(version)?;
                 (version, version)
             }
@@ -1313,8 +1319,12 @@ impl Store {
                 && current.head_hash == expected.head_hash,
         )?;
         if step == Maintenance::HumanRights {
-            conflict(!super::human_rights::installed(&tx)?)?;
-            self.initialize_human_rights(&tx)?;
+            conflict(super::human_rights::maintenance_pending(&tx)?)?;
+            // Each step installs only what this store still lacks, in order,
+            // in the one transaction that follows the verified backup.
+            if !super::human_rights::installed(&tx)? {
+                self.initialize_human_rights(&tx)?;
+            }
             validate_schema(&tx, false)?;
             validate(&tx)?;
             Self::validate_metadata(&tx, &self.tenant_id)?;

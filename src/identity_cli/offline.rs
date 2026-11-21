@@ -257,9 +257,11 @@ pub(super) fn provision(args: ProvisionArgs) -> Result<()> {
     );
     ensure!(
         !args.capabilities.iter().any(|cap| {
-            crate::identity::HumanCapabilityV1::from(*cap).requires_human_rights_marker()
+            let capability = crate::identity::HumanCapabilityV1::from(*cap);
+            capability.requires_human_rights_marker()
+                || capability == crate::identity::HumanCapabilityV1::ApproveLaunch
         }) || control.store.human_rights_installed()?,
-        "read-memberships, read-configuration, launch-session and send-session-message require explicit migrate-human-rights before preparing a local identity"
+        "approve-launch, read-memberships, read-configuration, launch-session, send-session-message and approve-egress require explicit migrate-human-rights before preparing a local identity"
     );
     let secret = generate_local_credential()
         .map_err(|_| anyhow::anyhow!("credential generation failed; no identity was activated"))?;

@@ -218,6 +218,9 @@ fn marker_requires_the_worker_registry_marker_and_leaves_the_store_unchanged() {
     assert!(!store.human_rights_installed().unwrap());
 }
 
+/// A broad property: the downcast store also fails the schema checks of format 9.
+/// The marker checks themselves are proven against forged markers in
+/// src/audit/human_rights_tests.rs.
 #[test]
 fn a_schema_downcast_cannot_hide_the_human_rights_marker() {
     let files = support::private_tempdir();
@@ -302,4 +305,367 @@ fn organization_administrators_cannot_introduce_control_only_capabilities() {
             },
         }))
         .unwrap();
+}
+
+fn membership_change(
+    actor: Option<&PrincipalRefV1>,
+    membership: &MembershipV1,
+    capabilities: &[HumanCapabilityV1],
+    active: bool,
+) -> IdentityMutationV1 {
+    let change = IdentityChangeV1::Membership {
+        expected_revision: membership.revision,
+        membership: MembershipV1 {
+            revision: membership.revision + 1,
+            active,
+            capabilities: capabilities.iter().copied().collect(),
+            ..membership.clone()
+        },
+    };
+    match actor {
+        Some(actor) => by(actor.clone(), change),
+        None => control(change),
+    }
+}
+fn next(
+    membership: &MembershipV1,
+    capabilities: &[HumanCapabilityV1],
+    active: bool,
+) -> MembershipV1 {
+    MembershipV1 {
+        revision: membership.revision + 1,
+        active,
+        capabilities: capabilities.iter().copied().collect(),
+        ..membership.clone()
+    }
+}
+
+#[test]
+fn a_mutation_cannot_introduce_a_fenced_capability_before_the_marker() {
+    let files = support::private_tempdir();
+    let path = files.path().join("tenant.sqlite");
+    let store = migrated(&path, true);
+    let (member, membership) = preparation(&[HumanCapabilityV1::ReadMetadata]);
+    store.provision_local_human(&member).unwrap();
+    let head = store.head().unwrap();
+    for capability in NEW_CAPABILITIES.into_iter().chain([
+        HumanCapabilityV1::ApproveEgress,
+        HumanCapabilityV1::ApproveLaunch,
+    ]) {
+        assert_eq!(
+            refusal(store.mutate_identity(&membership_change(
+                None,
+                &membership,
+                &[HumanCapabilityV1::ReadMetadata, capability],
+                true
+            ))),
+            Some(IdentityFailureV1::MigrationRequired),
+            "trusted control cannot add {capability:?} before the marker either"
+        );
+        assert_eq!(store.head().unwrap(), head);
+    }
+}
+
+#[test]
+fn approve_launch_enters_a_legacy_history_only_after_the_marker() {
+    let files = support::private_tempdir();
+    let path = files.path().join("tenant.sqlite");
+    let store = migrated(&path, true);
+    let (approver, _) = preparation(&[
+        HumanCapabilityV1::ReadMetadata,
+        HumanCapabilityV1::ApproveLaunch,
+    ]);
+    assert_eq!(
+        refusal(store.provision_local_human(&approver)),
+        Some(IdentityFailureV1::MigrationRequired)
+    );
+    store
+        .migrate_human_rights_v2(&path.with_extension("exact13"))
+        .unwrap();
+    store.provision_local_human(&approver).unwrap();
+    let head = store.head().unwrap();
+    drop(store);
+    let reopened =
+        Store::open_existing_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 1000).unwrap();
+    assert_eq!(reopened.head().unwrap(), head);
+}
+
+#[test]
+fn control_only_capabilities_are_kept_or_removed_never_reintroduced_by_an_administrator() {
+    let files = support::private_tempdir();
+    let path = files.path().join("tenant.sqlite");
+    let store = migrated(&path, true);
+    store
+        .migrate_human_rights_v2(&path.with_extension("exact13"))
+        .unwrap();
+    let (admin, admin_membership) = preparation(&[
+        HumanCapabilityV1::ManageMemberships,
+        HumanCapabilityV1::ReadMetadata,
+        HumanCapabilityV1::ReadContent,
+    ]);
+    store.provision_local_human(&admin).unwrap();
+    let (member, member_membership) = preparation(&[
+        HumanCapabilityV1::ReadMetadata,
+        HumanCapabilityV1::LaunchSession,
+    ]);
+    store.provision_local_human(&member).unwrap();
+    let actor = Some(&admin_membership.principal);
+    use HumanCapabilityV1 as C;
+    // Keep: the existing control-only right survives another change.
+    store
+        .mutate_identity(&membership_change(
+            actor,
+            &member_membership,
+            &[C::ReadMetadata, C::ReadContent, C::LaunchSession],
+            true,
+        ))
+        .unwrap();
+    let kept = next(
+        &member_membership,
+        &[C::ReadMetadata, C::ReadContent, C::LaunchSession],
+        true,
+    );
+    // Remove: allowed.
+    store
+        .mutate_identity(&membership_change(actor, &kept, &[C::ReadMetadata], true))
+        .unwrap();
+    let removed = next(&kept, &[C::ReadMetadata], true);
+    // Re-add after removal: refused.
+    let head = store.head().unwrap();
+    assert_eq!(
+        refusal(store.mutate_identity(&membership_change(
+            actor,
+            &removed,
+            &[C::ReadMetadata, C::LaunchSession],
+            true
+        ))),
+        Some(IdentityFailureV1::PermissionDenied)
+    );
+    assert_eq!(store.head().unwrap(), head);
+    // Reactivation of an inactive membership that holds it: refused.
+    store
+        .mutate_identity(&membership_change(
+            None,
+            &removed,
+            &[C::ReadMetadata, C::LaunchSession],
+            false,
+        ))
+        .unwrap();
+    let inactive = next(&removed, &[C::ReadMetadata, C::LaunchSession], false);
+    assert_eq!(
+        refusal(store.mutate_identity(&membership_change(
+            actor,
+            &inactive,
+            &[C::ReadMetadata, C::LaunchSession],
+            true
+        ))),
+        Some(IdentityFailureV1::PermissionDenied),
+        "reactivating a control-only right is introducing it again"
+    );
+    // Self-grant of a new capability: refused.
+    assert_eq!(
+        refusal(store.mutate_identity(&membership_change(
+            actor,
+            &admin_membership,
+            &[
+                C::ManageMemberships,
+                C::ReadMetadata,
+                C::ReadContent,
+                C::ReadMemberships
+            ],
+            true
+        ))),
+        Some(IdentityFailureV1::PermissionDenied)
+    );
+    drop(store);
+    Store::open_existing_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 1000).unwrap();
+}
+
+fn known_session(store: &Store, session: &str) {
+    let mut event = agentsandbox::model::Event::new("fixture.authorized");
+    event.session_id = Some(session.into());
+    store.append(event).unwrap();
+}
+fn session_grant(
+    owner: &PrincipalRefV1,
+    session: &str,
+    shares: Vec<ResourceShareV1>,
+    revision: u64,
+) -> ResourceGrantV1 {
+    ResourceGrantV1 {
+        version: 1,
+        tenant_id: "tenant-a".into(),
+        organization_scope: "organization-a".into(),
+        resource: ResourceRefV1 {
+            kind: ResourceKindV1::Session,
+            resource_id: session.into(),
+        },
+        owner: owner.clone(),
+        revision,
+        active: true,
+        shares,
+    }
+}
+
+#[test]
+fn launch_grant_does_not_revoke_unrelated_contexts() {
+    let files = support::private_tempdir();
+    let path = files.path().join("tenant.sqlite");
+    let store = migrated(&path, true);
+    store
+        .migrate_human_rights_v2(&path.with_extension("exact13"))
+        .unwrap();
+    let (a, a_membership) = preparation(&[HumanCapabilityV1::ReadMetadata]);
+    store.provision_local_human(&a).unwrap();
+    let (b, b_membership) = preparation(&[HumanCapabilityV1::ReadMetadata]);
+    store.provision_local_human(&b).unwrap();
+    let revision = store.identity_authorization_revision().unwrap();
+    let scope = store
+        .authorize_human_context(
+            &b_membership.principal,
+            &b_membership.membership_id,
+            b_membership.revision,
+            ContextModeV1::Personal,
+        )
+        .unwrap();
+    known_session(&store, "session-launched-by-a");
+    store
+        .mutate_identity(&control(IdentityChangeV1::ResourceGrant {
+            expected_revision: 0,
+            grant: session_grant(&a_membership.principal, "session-launched-by-a", vec![], 1),
+        }))
+        .unwrap();
+    assert_eq!(
+        store.identity_authorization_revision().unwrap(),
+        revision,
+        "a first binding only adds rights"
+    );
+    let resource = ResourceRefV1 {
+        kind: ResourceKindV1::Session,
+        resource_id: "session-launched-by-a".into(),
+    };
+    assert!(
+        store
+            .authorized_resource_grant(&scope, &resource, ResourcePermissionV1::Metadata)
+            .unwrap()
+            .is_none(),
+        "B's context is still current and still does not see A's session"
+    );
+    drop(store);
+    Store::open_existing_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 1000).unwrap();
+}
+
+#[test]
+fn grant_reduction_still_revokes_contexts() {
+    let files = support::private_tempdir();
+    let path = files.path().join("tenant.sqlite");
+    let store = migrated(&path, true);
+    store
+        .migrate_human_rights_v2(&path.with_extension("exact13"))
+        .unwrap();
+    let (a, a_membership) = preparation(&[HumanCapabilityV1::ReadMetadata]);
+    store.provision_local_human(&a).unwrap();
+    let (b, b_membership) = preparation(&[HumanCapabilityV1::ReadMetadata]);
+    store.provision_local_human(&b).unwrap();
+    known_session(&store, "session-shared-then-withdrawn");
+    let shared = session_grant(
+        &a_membership.principal,
+        "session-shared-then-withdrawn",
+        vec![ResourceShareV1 {
+            principal: b_membership.principal.clone(),
+            permissions: [ResourcePermissionV1::Metadata].into_iter().collect(),
+        }],
+        1,
+    );
+    store
+        .mutate_identity(&control(IdentityChangeV1::ResourceGrant {
+            expected_revision: 0,
+            grant: shared.clone(),
+        }))
+        .unwrap();
+    let scope = store
+        .authorize_human_context(
+            &b_membership.principal,
+            &b_membership.membership_id,
+            b_membership.revision,
+            ContextModeV1::Personal,
+        )
+        .unwrap();
+    let resource = shared.resource.clone();
+    assert!(
+        store
+            .authorized_resource_grant(&scope, &resource, ResourcePermissionV1::Metadata)
+            .unwrap()
+            .is_some()
+    );
+    let revision = store.identity_authorization_revision().unwrap();
+    store
+        .mutate_identity(&control(IdentityChangeV1::ResourceGrant {
+            expected_revision: 1,
+            grant: ResourceGrantV1 {
+                revision: 2,
+                shares: vec![],
+                ..shared
+            },
+        }))
+        .unwrap();
+    assert_eq!(
+        store.identity_authorization_revision().unwrap(),
+        revision + 1
+    );
+    assert_eq!(
+        refusal(store.authorized_resource_grant(&scope, &resource, ResourcePermissionV1::Metadata)),
+        Some(IdentityFailureV1::ContextRevoked),
+        "a context issued before the withdrawal no longer reads"
+    );
+}
+
+fn cli_error(output: &std::process::Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn the_operator_maintenance_requires_its_attestation_and_explains_each_refusal() {
+    let files = support::private_tempdir();
+    let path = files.path().join("tenant.sqlite");
+    let head = migrated(&path, true).head().unwrap();
+    let unattested = Command::new(env!("CARGO_BIN_EXE_agentsandbox"))
+        .args(["migrate-human-rights", "--data"])
+        .arg(&path)
+        .args(["--tenant-id", "tenant-a", "--backup"])
+        .arg(files.path().join("unattested.backup"))
+        .args(["--max-events", "1000"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!unattested.status.success());
+    assert!(!files.path().join("unattested.backup").exists());
+    let reopened =
+        Store::open_existing_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 1000).unwrap();
+    assert_eq!(reopened.head().unwrap(), head);
+    assert!(!reopened.human_rights_installed().unwrap());
+    drop(reopened);
+
+    assert!(
+        migrate_cli(&path, &files.path().join("first.backup"))
+            .status
+            .success()
+    );
+    let again = migrate_cli(&path, &files.path().join("second.backup"));
+    assert!(!again.status.success());
+    assert!(
+        cli_error(&again).contains("already installed"),
+        "{}",
+        cli_error(&again)
+    );
+
+    let old_path = files.path().join("schema9.sqlite");
+    drop(migrated(&old_path, false));
+    let old = migrate_cli(&old_path, &files.path().join("schema9.backup"));
+    assert!(!old.status.success());
+    assert!(
+        cli_error(&old).contains("formats 10 to 13"),
+        "{}",
+        cli_error(&old)
+    );
 }

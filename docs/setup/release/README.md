@@ -16,6 +16,13 @@ component observations, migration/restore and rollout for this candidate are
 **NOT_RUN in this documentation lot**. The dated manifest/verify results above
 keep their original source; they do not qualify this new composition.
 
+**Downgrades after an identity marker.** Explicit store maintenance such as
+`migrate-human-rights` appends an identity-chain marker that earlier releases
+refuse to replay: after it, an earlier release no longer opens the tenant
+store. Going back requires restoring the backup that maintenance wrote, which
+discards every audit event recorded after it. See the
+[identity guide](../identity/README.md#enable-the-human-rights-capabilities).
+
 ### Read the delivered identity
 
 `Cargo.toml [package].version` is the canonical ai-guard product version,

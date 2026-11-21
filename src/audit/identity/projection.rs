@@ -17,6 +17,10 @@ pub(crate) struct Projection {
     pub(super) resources: BTreeMap<String, (ResourceGrantV1, i64)>,
     pub(super) operations: BTreeMap<String, (String, i64)>,
     pub(super) revision: u64,
+    /// After the human rights marker, a grant that binds a resource for the
+    /// first time only adds rights: it keeps the tenant authorization revision,
+    /// so it revokes no live context. Every other change still advances it.
+    pub(super) additive_resource_grants: bool,
 }
 
 pub(super) fn invalid(ok: bool) -> anyhow::Result<()> {
@@ -89,6 +93,7 @@ impl Projection {
             }
             _ => return Err(IdentityFailureV1::PermissionDenied.into()),
         }
+        let mut keeps_revision = false;
         match &mutation.change {
             IdentityChangeV1::Account {
                 expected_revision,
@@ -193,13 +198,17 @@ impl Projection {
                     *expected_revision,
                     grant.revision,
                 )?;
+                keeps_revision =
+                    self.additive_resource_grants && !self.resources.contains_key(&key);
                 self.resources.insert(key, (grant.clone(), seq));
             }
         }
-        self.revision = self
-            .revision
-            .checked_add(1)
-            .ok_or(IdentityFailureV1::InvalidRequest)?;
+        if !keeps_revision {
+            self.revision = self
+                .revision
+                .checked_add(1)
+                .ok_or(IdentityFailureV1::InvalidRequest)?;
+        }
         i64::try_from(self.revision)
             .context("identity authorization revision exceeds SQLite integer range")?;
         self.operations

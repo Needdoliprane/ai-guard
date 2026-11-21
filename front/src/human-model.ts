@@ -3,7 +3,7 @@ export type ResourceKind = "session" | "sandbox" | "agent" | "project";
 /** Closed list of the capabilities the Rust control can place in a context. Presence is a server fact, not a permission check. */
 export const CAPABILITIES = ["read_metadata", "read_content", "export", "read_tenant_metadata", "manage_memberships", "manage_grants",
   "read_broker_registry", "read_worker_registry", "approve_launch", "read_memberships", "read_configuration", "launch_session",
-  "send_session_message"] as const;
+  "send_session_message", "approve_egress"] as const;
 export type Capability = typeof CAPABILITIES[number];
 export type Principal = { kind: "human_local"; installation_id: string; account_id: string } |
   { kind: "human_oidc"; issuer: string; subject: string };

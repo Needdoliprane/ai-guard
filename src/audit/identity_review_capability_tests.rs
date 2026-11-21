@@ -94,8 +94,8 @@ fn approval_membership_requires_exact_format_fourteen_even_when_inactive() {
     let ordinary = provision();
     let mut approval = with_approval(ordinary.clone());
     for version in 1..=15 {
-        assert!(require_approval_capability_format(&ordinary.mutations[2], version).is_ok());
-        let result = require_approval_capability_format(&approval.mutations[2], version);
+        assert!(require_approval_capability_format(&ordinary.mutations[2], version, false).is_ok());
+        let result = require_approval_capability_format(&approval.mutations[2], version, false);
         assert_eq!(result.is_ok(), version == 14, "format {version}");
         if let Err(error) = result {
             assert_eq!(
@@ -108,7 +108,9 @@ fn approval_membership_requires_exact_format_fourteen_even_when_inactive() {
         panic!("test fixture requires a membership");
     };
     membership.active = false;
-    assert!(require_approval_capability_format(&approval.mutations[2], 13).is_err());
+    assert!(require_approval_capability_format(&approval.mutations[2], 13, false).is_err());
+    // On a legacy store the explicit human rights marker admits it.
+    assert!(require_approval_capability_format(&approval.mutations[2], 13, true).is_ok());
 }
 
 #[test]
