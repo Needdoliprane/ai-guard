@@ -303,3 +303,26 @@ fn ci_guards_the_reviewed_licence_list() {
     let text = fs::read_to_string(list).expect("reviewed licence list is committed");
     assert!(text.lines().any(|line| line.trim() == "MIT OR Apache-2.0"));
 }
+
+#[test]
+fn native_binary_list_comes_from_cargo_and_is_not_hard_coded() {
+    let release = workflow("release.yaml");
+    assert!(
+        release.contains("select(.kind | index(\"bin\"))"),
+        "binary list must come from cargo metadata"
+    );
+    let manifest =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).unwrap();
+    for name in [
+        "ai-guard-provider",
+        "ai-guard-relay",
+        "ai-guard-diagnose",
+        "ai-guard-activity",
+    ] {
+        assert!(
+            !release.contains(&format!("bin/{name}")),
+            "{name} must not be named in release.yaml: the list is derived from Cargo"
+        );
+    }
+    assert!(manifest.contains("agentsandbox"));
+}
