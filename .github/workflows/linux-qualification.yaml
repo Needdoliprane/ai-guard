@@ -1,0 +1,310 @@
+name: Linux x86_64 engine qualification
+
+# Manual recipe. It runs the ignored real-engine selectors of this commit against rootless Docker
+# and rootless Podman on GitHub-hosted ubuntu-24.04 (x86_64) runners and uploads receipts plus an
+# engine inventory. It qualifies nothing by itself: read the receipts, then record the result in
+# docs/engineering/. Docker and Podman are separate jobs. The runner image, engine versions and
+# kernel settings are recorded in each inventory, not assumed.
+#
+# Not covered here: Podman confinement (it needs a separately admitted authority marker),
+# provider/subscription journeys, MySQL profiles, Kubernetes, macOS. No secret is used.
+
+on:
+  workflow_dispatch:
+    inputs:
+      engine:
+        description: Engine to qualify
+        required: true
+        default: both
+        type: choice
+        options: [both, docker, podman]
+      release_tag:
+        description: Optional release tag (draft or published). When set, its x86_64 archive is downloaded, checked against SHA256SUMS and its CLI is run against the engine. Leave empty to skip.
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-qualification-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    name: ${{ matrix.engine }} rootless
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: ${{ fromJSON(inputs.engine == 'both' && '["docker","podman"]' || format('["{0}"]', inputs.engine)) }}
+    env:
+      ENGINE: ${{ matrix.engine }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      RUST_MIN_STACK: '8388608'
+      AI_GUARD_BUILD_REVISION: ${{ github.sha }}
+      QA_BASE_IMAGE: debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prepare the evidence directory and record the host
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          evidence="$RUNNER_TEMP/qa-evidence/$ENGINE"
+          mkdir -p -m 700 "$RUNNER_TEMP/qa-evidence" "$evidence" "$evidence/tmp"
+          printf 'EVIDENCE=%s\n' "$evidence" >> "$GITHUB_ENV"
+          # The retained fixtures of the Rust tests are created under TMPDIR.
+          printf 'TMPDIR=%s\n' "$evidence/tmp" >> "$GITHUB_ENV"
+          {
+            echo "commit=$GITHUB_SHA run=$GITHUB_RUN_ID attempt=$GITHUB_RUN_ATTEMPT engine=$ENGINE"
+            uname -a
+            cat /etc/os-release
+            id
+            nproc
+            free -m
+            df -k "$RUNNER_TEMP"
+            rustc -vV
+            cargo -V
+          } > "$evidence/host.txt" 2>&1
+          sysctl kernel.apparmor_restrict_unprivileged_userns kernel.unprivileged_userns_clone user.max_user_namespaces \
+            > "$evidence/userns-before.txt" 2>&1 || true
+
+      - name: Install the rootless engine prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          packages=(uidmap dbus-user-session slirp4netns fuse-overlayfs)
+          if [[ "$ENGINE" == docker ]]; then
+            packages+=(docker-ce-rootless-extras)
+          else
+            packages+=(podman)
+          fi
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends "${packages[@]}"
+          # Rootless engines need a subordinate id range and a runtime directory for this user.
+          user=$(id -un)
+          grep -q "^$user:" /etc/subuid || echo "$user:100000:65536" | sudo tee -a /etc/subuid >/dev/null
+          grep -q "^$user:" /etc/subgid || echo "$user:100000:65536" | sudo tee -a /etc/subgid >/dev/null
+          sudo install -d -o "$user" -m 700 "/run/user/$(id -u)"
+          printf 'XDG_RUNTIME_DIR=/run/user/%s\n' "$(id -u)" >> "$GITHUB_ENV"
+
+      - name: Allow user namespaces for the engine binaries (narrow AppArmor profile first)
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$EVIDENCE/apparmor.txt"
+          # Ubuntu 24.04 denies capabilities inside unprivileged user namespaces to unconfined programs.
+          # Grant `userns` only to the binaries that create them for this engine.
+          if [[ "$ENGINE" == docker ]]; then
+            binaries=(/usr/bin/rootlesskit)
+          else
+            binaries=(/usr/bin/podman /usr/bin/buildah /usr/bin/crun /usr/bin/runc)
+          fi
+          for binary in "${binaries[@]}"; do
+            [[ -x "$binary" ]] || { echo "skip $binary: not installed" >> "$log"; continue; }
+            profile="qa-userns-$(basename "$binary")"
+            {
+              echo 'abi <abi/4.0>,'
+              echo 'include <tunables/global>'
+              echo "profile $profile $binary flags=(unconfined) {"
+              echo '  userns,'
+              echo '}'
+            } | sudo tee "/etc/apparmor.d/$profile" >/dev/null
+            if sudo apparmor_parser -r "/etc/apparmor.d/$profile" >> "$log" 2>&1; then
+              echo "loaded $profile for $binary" >> "$log"
+            else
+              echo "FAILED to load $profile" >> "$log"
+            fi
+          done
+          echo "profile route finished; the engine probe below decides whether the sysctl fallback is needed" >> "$log"
+
+      - name: Start the rootless engine and probe it
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$EVIDENCE/engine-start.txt"
+          probe() {
+            if [[ "$ENGINE" == docker ]]; then
+              DOCKER_HOST="unix://$XDG_RUNTIME_DIR/docker.sock" docker info >/dev/null 2>&1
+            else
+              podman info >/dev/null 2>&1 && podman unshare true >/dev/null 2>&1
+            fi
+          }
+          start() {
+            if [[ "$ENGINE" == docker ]]; then
+              pkill -u "$(id -u)" -f dockerd-rootless || true
+              nohup dockerd-rootless.sh > "$EVIDENCE/dockerd-rootless.log" 2>&1 &
+            else
+              pkill -u "$(id -u)" -f 'podman system service' || true
+              mkdir -p "$XDG_RUNTIME_DIR/podman"
+              nohup podman system service --time=0 "unix://$XDG_RUNTIME_DIR/podman/podman.sock" > "$EVIDENCE/podman-service.log" 2>&1 &
+            fi
+            for _ in $(seq 1 60); do
+              probe && return 0
+              sleep 1
+            done
+            return 1
+          }
+          if start; then
+            echo "engine started with the narrow AppArmor profile route only" >> "$log"
+          else
+            echo "PROFILE ROUTE FAILED; falling back to the sysctl for this job only" >> "$log"
+            sysctl kernel.apparmor_restrict_unprivileged_userns >> "$log" 2>&1 || true
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 >> "$log" 2>&1
+            echo "FALLBACK=sysctl" >> "$EVIDENCE/apparmor.txt"
+            start || { echo "engine still unusable after the fallback" >> "$log"; exit 1; }
+            echo "engine started after the sysctl fallback" >> "$log"
+          fi
+          sysctl kernel.apparmor_restrict_unprivileged_userns kernel.unprivileged_userns_clone user.max_user_namespaces \
+            > "$EVIDENCE/userns-after.txt" 2>&1 || true
+          if [[ "$ENGINE" == docker ]]; then
+            printf 'AGENTSANDBOX_TEST_RUNTIME=docker\nAGENTSANDBOX_TEST_RUNTIME_PROGRAM=/usr/bin/docker\nAGENTSANDBOX_TEST_RUNTIME_ENDPOINT=unix://%s/docker.sock\nDOCKER_HOST=unix://%s/docker.sock\n' \
+              "$XDG_RUNTIME_DIR" "$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
+          else
+            printf 'AGENTSANDBOX_TEST_RUNTIME=podman\nAGENTSANDBOX_TEST_PODMAN_MODE=rootless\nAGENTSANDBOX_TEST_RUNTIME_PROGRAM=/usr/bin/podman\nAGENTSANDBOX_TEST_RUNTIME_ENDPOINT=unix://%s/podman/podman.sock\n' \
+              "$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build the worker image and prepare the immutable QA image
+        shell: bash
+        run: |
+          set -euo pipefail
+          cli=$(command -v "$ENGINE")
+          "$cli" build --file images/worker.Dockerfile --tag ai-guard-qa-worker:ci . 2>&1 | tee "$EVIDENCE/worker-build.log" | tail -n 20
+          "$cli" pull "$QA_BASE_IMAGE" >/dev/null
+          image_id() {
+            local id
+            id=$("$cli" image inspect --format '{{.Id}}' "$1")
+            [[ "$id" == sha256:* ]] || id="sha256:$id"
+            [[ "$id" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::unexpected image ID for $1"; exit 1; }
+            printf '%s' "$id"
+          }
+          worker_id=$(image_id ai-guard-qa-worker:ci)
+          qa_id=$(image_id "$QA_BASE_IMAGE")
+          printf 'WORKER_IMAGE_ID=%s\nQA_IMAGE_ID=%s\n' "$worker_id" "$qa_id" >> "$GITHUB_ENV"
+          printf 'worker_image=%s\nqa_image=%s\nqa_base=%s\n' "$worker_id" "$qa_id" "$QA_BASE_IMAGE" > "$EVIDENCE/images.txt"
+
+      - name: Record the engine inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          cli=$(command -v "$ENGINE")
+          {
+            "$cli" version
+            "$cli" info
+          } > "$EVIDENCE/engine-info.txt" 2>&1 || true
+          jq -n \
+            --arg engine "$ENGINE" --arg commit "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" \
+            --arg runner_image "${ImageOS:-unknown}/${ImageVersion:-unknown}" \
+            --arg kernel "$(uname -r)" --arg worker "$WORKER_IMAGE_ID" --arg qa "$QA_IMAGE_ID" \
+            --arg engine_version "$("$cli" --version)" \
+            --arg userns_before "$(tr '\n' ' ' < "$EVIDENCE/userns-before.txt")" \
+            --arg userns_after "$(tr '\n' ' ' < "$EVIDENCE/userns-after.txt")" \
+            --arg apparmor_fallback "$(grep -c '^FALLBACK=sysctl' "$EVIDENCE/apparmor.txt" || true)" \
+            '{schema: 1, engine: $engine, engine_version: $engine_version, commit: $commit, run_id: $run,
+              runner_image: $runner_image, kernel: $kernel, worker_image_id: $worker, qa_image_id: $qa,
+              userns_before: $userns_before, userns_after: $userns_after,
+              sysctl_fallback_used: ($apparmor_fallback != "0")}' > "$EVIDENCE/inventory.json"
+          cat "$EVIDENCE/inventory.json"
+
+      - name: Run the release archive CLI against the engine (only when a tag was given)
+        if: inputs.release_tag != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          archive="ai-guard-$RELEASE_TAG-x86_64-unknown-linux-gnu.tar.gz"
+          dir="$RUNNER_TEMP/release-archive"
+          mkdir -m 700 "$dir"
+          cd "$dir"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$archive" --pattern SHA256SUMS
+          grep -F "  $archive" SHA256SUMS | sha256sum -c -
+          tar -xzf "$archive"
+          cli="$dir/${archive%.tar.gz}/bin/agentsandbox"
+          "$cli" version --json | tee "$EVIDENCE/release-cli-version.json"
+          if [[ "$ENGINE" == docker ]]; then
+            endpoint="$AGENTSANDBOX_TEST_RUNTIME_ENDPOINT"
+          else
+            endpoint=local
+          fi
+          "$cli" doctor --runtime "$ENGINE" --runtime-program "$AGENTSANDBOX_TEST_RUNTIME_PROGRAM" \
+            --runtime-endpoint "$endpoint" 2>&1 | tee "$EVIDENCE/release-cli-doctor.txt"
+
+      - name: Fetch dependencies
+        run: cargo fetch --locked --target host-tuple
+
+      - name: Three workers across two tenants, then explicit stop of A1
+        shell: bash
+        env:
+          AGENTSANDBOX_TEST_IMAGE: ${{ env.QA_IMAGE_ID }}
+        run: |
+          set -euo pipefail
+          cargo test --locked --offline --test runtime_user_journey -- --ignored --exact --test-threads=1 \
+            real_cli_runs_three_independent_workers_across_two_tenants \
+            real_cli_explicit_stop_releases_only_a1_across_two_tenants 2>&1 | tee "$EVIDENCE/runtime_user_journey.log"
+
+      - name: Export after one audited worker (Docker only, the selector requires it)
+        if: matrix.engine == 'docker'
+        shell: bash
+        env:
+          AGENTSANDBOX_TEST_IMAGE: ${{ env.QA_IMAGE_ID }}
+        run: |
+          set -euo pipefail
+          cargo test --locked --offline --test runtime_user_journey -- --ignored --exact --test-threads=1 \
+            real_cli_copies_a_project_and_exports_after_one_audited_worker 2>&1 | tee "$EVIDENCE/runtime_export.log"
+
+      - name: Runtime confinement of the real worker image (Docker only)
+        if: matrix.engine == 'docker'
+        shell: bash
+        env:
+          AGENTSANDBOX_TEST_IMAGE: ${{ env.WORKER_IMAGE_ID }}
+        run: |
+          set -euo pipefail
+          cargo test --locked --offline --test runtime_confinement -- --ignored --exact --test-threads=1 \
+            real_worker_confinement_copy_export_and_timeout 2>&1 | tee "$EVIDENCE/runtime_confinement.log"
+
+      - name: Terminal persistence after a rejected audit
+        shell: bash
+        env:
+          AGENTSANDBOX_TEST_IMAGE: ${{ env.WORKER_IMAGE_ID }}
+        run: |
+          set -euo pipefail
+          if [[ "$ENGINE" == podman ]]; then
+            export AGENTSANDBOX_TEST_RUNTIME_ENDPOINT=local
+          fi
+          cargo test --locked --offline --test runtime_terminal_persistence -- --ignored --exact --test-threads=1 \
+            rejected_terminal_audit_keeps_the_real_terminal_instance_inspectable 2>&1 | tee "$EVIDENCE/runtime_terminal_persistence.log"
+
+      - name: Record the job status
+        if: always()
+        shell: bash
+        run: |
+          jq -n --arg status "${{ job.status }}" --arg engine "$ENGINE" --arg commit "$GITHUB_SHA" \
+            '{schema: 1, engine: $engine, commit: $commit, job_status: $status,
+              note: "Ignored real-engine selectors on a GitHub-hosted runner; see inventory.json. Not a qualification of macOS, Kubernetes, providers or MySQL."}' \
+            > "$EVIDENCE/status.json"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: qualification-${{ matrix.engine }}
+          # The Rust fixtures keep ephemeral gateway tokens under secrets/ and fake credential files:
+          # they are excluded from the upload.
+          path: |
+            ${{ runner.temp }}/qa-evidence/${{ matrix.engine }}/
+            !${{ runner.temp }}/qa-evidence/${{ matrix.engine }}/**/secrets/**
+            !${{ runner.temp }}/qa-evidence/${{ matrix.engine }}/**/*.env
+            !${{ runner.temp }}/qa-evidence/${{ matrix.engine }}/**/*.sqlite*
+          if-no-files-found: error
+          retention-days: 14
