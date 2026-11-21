@@ -929,12 +929,8 @@ impl Runtime {
         environment: &[(&str, &str)],
     ) -> Result<Capture> {
         ensure!(
-            environment
-                .iter()
-                .all(|(key, value)| *key == "AGENTSANDBOX_CONFIG_DIR"
-                    && std::path::Path::new(value).is_absolute()
-                    && !value.chars().any(char::is_control)),
-            "runtime environment override is not an approved absolute control configuration directory"
+            retained_cli::approved_environment(environment),
+            "runtime environment override is not an approved control configuration directory or publication port"
         );
         if let Some(scope) = &self.native_control {
             let (io, armed) = scope.spawn(command, args, environment).await?;

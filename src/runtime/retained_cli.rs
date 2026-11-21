@@ -497,9 +497,9 @@ impl Runtime {
     /// engine command, bounded by `duration` from its spawn.
     ///
     /// Refused before anything is spawned: more than 128 arguments, more than
-    /// 64 KiB of arguments or a NUL byte; an environment other than at most one
-    /// absolute `AGENTSANDBOX_CONFIG_DIR` of at most 4096 bytes without control
-    /// characters; a zero or over-30-minute bound; a retained command already
+    /// 64 KiB of arguments or a NUL byte; an environment other than the
+    /// distinct entries `AGENTSANDBOX_CONFIG_DIR` (absolute, at most 4096 bytes, no control
+    /// characters), `AI_GUARD_GATEWAY_PORT` and `AI_GUARD_DASHBOARD_PORT` (decimal `1..=65535`, no leading zero); a zero or over-30-minute bound; a retained command already
     /// owned by this process. Capacity is decided before a stop request is
     /// looked at.
     pub fn cli_env_retained(
@@ -569,19 +569,94 @@ impl Control {
     }
 }
 
+/// The environment a control CLI command may carry. Each name appears at most once and carries one
+/// value of a closed kind: the absolute control configuration directory of the operator, or one of
+/// the two host loopback publication ports that `deploy/*/compose.yaml` reads (`1..=65535`, decimal
+/// digits only). Nothing else reaches the engine CLI: its environment is otherwise empty.
+pub(crate) fn approved_environment(environment: &[(&str, &str)]) -> bool {
+    const NAMES: [&str; 3] = [
+        "AGENTSANDBOX_CONFIG_DIR",
+        "AI_GUARD_GATEWAY_PORT",
+        "AI_GUARD_DASHBOARD_PORT",
+    ];
+    environment.len() <= NAMES.len()
+        && environment
+            .iter()
+            .enumerate()
+            .all(|(index, (key, _))| !environment[..index].iter().any(|(seen, _)| seen == key))
+        && environment.iter().all(|(key, value)| match *key {
+            "AGENTSANDBOX_CONFIG_DIR" => {
+                value.len() <= MAX_ENVIRONMENT_VALUE_BYTES
+                    && std::path::Path::new(value).is_absolute()
+                    && !value.chars().any(char::is_control)
+            }
+            "AI_GUARD_GATEWAY_PORT" | "AI_GUARD_DASHBOARD_PORT" => {
+                // No sign, no leading zero (it would be ambiguous for Compose), 1..=65535.
+                value.len() <= 5
+                    && !value.starts_with('0')
+                    && value.bytes().all(|byte| byte.is_ascii_digit())
+                    && value.parse::<u16>().is_ok()
+            }
+            _ => false,
+        })
+}
+
 fn approved(argv: &[String], duration: Duration, environment: &[(&str, &str)]) -> bool {
     argv.len() <= MAX_ARGUMENTS
         && argv.iter().map(String::len).sum::<usize>() <= MAX_ARGUMENT_BYTES
         && argv.iter().all(|argument| !argument.contains('\0'))
-        && environment.len() <= 1
-        && environment.iter().all(|(key, value)| {
-            *key == "AGENTSANDBOX_CONFIG_DIR"
-                && value.len() <= MAX_ENVIRONMENT_VALUE_BYTES
-                && std::path::Path::new(value).is_absolute()
-                && !value.chars().any(char::is_control)
-        })
+        && approved_environment(environment)
         && !duration.is_zero()
         && duration <= MAX_DURATION
+}
+
+#[cfg(test)]
+mod approved_environment_tests {
+    use super::approved_environment;
+
+    #[test]
+    fn the_control_directory_and_the_two_publication_ports_are_approved() {
+        assert!(approved_environment(&[]));
+        assert!(approved_environment(&[(
+            "AGENTSANDBOX_CONFIG_DIR",
+            "/control"
+        )]));
+        assert!(approved_environment(&[("AI_GUARD_GATEWAY_PORT", "18787")]));
+        assert!(approved_environment(&[
+            ("AGENTSANDBOX_CONFIG_DIR", "/control"),
+            ("AI_GUARD_GATEWAY_PORT", "1"),
+            ("AI_GUARD_DASHBOARD_PORT", "65535"),
+        ]));
+    }
+
+    #[test]
+    fn any_other_name_port_form_or_repetition_is_refused() {
+        for refused in [
+            vec![("PATH", "/usr/bin")],
+            vec![("AGENTSANDBOX_GATEWAY_PORT", "8787")],
+            vec![("AI_GUARD_GATEWAY_PORT", "0")],
+            vec![("AI_GUARD_GATEWAY_PORT", "65536")],
+            vec![("AI_GUARD_GATEWAY_PORT", "+8787")],
+            vec![("AI_GUARD_GATEWAY_PORT", "0x1f90")],
+            vec![("AI_GUARD_GATEWAY_PORT", "")],
+            vec![("AI_GUARD_GATEWAY_PORT", "00001")],
+            vec![("AI_GUARD_DASHBOARD_PORT", "4000\n")],
+            vec![("AGENTSANDBOX_CONFIG_DIR", "relative")],
+            vec![("AGENTSANDBOX_CONFIG_DIR", "/control\n")],
+            vec![
+                ("AI_GUARD_GATEWAY_PORT", "8787"),
+                ("AI_GUARD_GATEWAY_PORT", "8788"),
+            ],
+            vec![
+                ("AGENTSANDBOX_CONFIG_DIR", "/a"),
+                ("AI_GUARD_GATEWAY_PORT", "8787"),
+                ("AI_GUARD_DASHBOARD_PORT", "4000"),
+                ("PATH", "/usr/bin"),
+            ],
+        ] {
+            assert!(!approved_environment(&refused), "{refused:?}");
+        }
+    }
 }
 
 /// What an owner thread shares with its observer.
