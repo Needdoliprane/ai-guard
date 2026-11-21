@@ -10,7 +10,7 @@ Ce guide explique comment télécharger une release d'ai-guard, vérifier ce que
 
 | Fichier | Contenu |
 |---|---|
-| `ai-guard-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` | Binaires natifs (`bin/`), `LICENSE`, `THIRD-PARTY-NOTICES`, `BUILD-INFO`. Construite sur Ubuntu 22.04. |
+| `ai-guard-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` | Binaires natifs (`bin/`, sans le générateur d'AC de démonstration, qui reste un outil local), `LICENSE`, `THIRD-PARTY-NOTICES`, `BUILD-INFO`. Construite sur Ubuntu 22.04. |
 | `ai-guard-vX.Y.Z-aarch64-apple-darwin.tar.gz` | Idem pour macOS sur puce Apple. Construite sur macOS 15. |
 | `ai-guard-vX.Y.Z-frontend.tar.gz` | Le bundle compilé du dashboard, avec la licence de Vite. |
 | `ai-guard-vX.Y.Z-release-metadata.tar.gz` | `manifest/release-manifest.json`, `manifest/sbom.cdx.json`, le `manifest/SHA256SUMS` propre à l'outil, `BUILD-INFO`, `LICENSE`. |

@@ -10,7 +10,7 @@ Use this guide to download an ai-guard release, check what you downloaded, insta
 
 | File | Content |
 |---|---|
-| `ai-guard-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` | Native binaries (`bin/`), `LICENSE`, `THIRD-PARTY-NOTICES`, `BUILD-INFO`. Built on Ubuntu 22.04. |
+| `ai-guard-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` | Native binaries (`bin/`, without the demo CA generator, which stays a local tool), `LICENSE`, `THIRD-PARTY-NOTICES`, `BUILD-INFO`. Built on Ubuntu 22.04. |
 | `ai-guard-vX.Y.Z-aarch64-apple-darwin.tar.gz` | The same for macOS on Apple silicon. Built on macOS 15. |
 | `ai-guard-vX.Y.Z-frontend.tar.gz` | The compiled dashboard bundle, with the Vite licence. |
 | `ai-guard-vX.Y.Z-release-metadata.tar.gz` | `manifest/release-manifest.json`, `manifest/sbom.cdx.json`, the tool's own `manifest/SHA256SUMS`, `BUILD-INFO`, `LICENSE`. |

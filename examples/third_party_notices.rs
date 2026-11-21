@@ -7,14 +7,21 @@
 //! through build or dev dependencies are not linked into the binaries and are left out.
 //!
 //! ```text
-//! cargo run --locked --offline --example third_party_notices -- notices --output FILE
-//! cargo run --locked --offline --example third_party_notices -- check --allowed FILE
+//! cargo run --locked --offline --example third_party_notices -- notices --allowed LIST --output FILE
+//! cargo run --locked --offline --example third_party_notices -- check --allowed LIST
 //! ```
 //!
-//! `check` fails when a linked crate has no licence expression, no licence file, or an expression
-//! that is not listed in the reviewed allow-list. A `Cargo.lock` change that brings in a new
-//! expression therefore needs a reviewed edit of that list. The sources must be present locally:
-//! run `cargo fetch --locked` first.
+//! Both modes apply the same reviewed list (`.github/third-party-license-expressions.txt`):
+//!
+//! - a bare line is an accepted SPDX expression;
+//! - `no-expression: NAME VERSION` accepts one crate that declares no expression (its licence file
+//!   must still be present, and a person has reviewed it);
+//! - `no-text: NAME VERSION` accepts one crate that has an expression but ships no licence text.
+//!
+//! Anything else fails: an unlisted expression, an unlisted crate without expression, an unlisted
+//! crate without text. A `Cargo.lock` change that brings such a crate therefore needs a reviewed edit
+//! of the list. The sources must be present locally: run `cargo fetch --locked` first. Unit tests run
+//! with `cargo test --example third_party_notices`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
@@ -25,15 +32,65 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const ROOT_PACKAGE: &str = "agentsandbox";
-const LICENSE_PREFIXES: [&str; 5] = ["license", "licence", "copying", "unlicense", "notice"];
+const LICENSE_PREFIXES: [&str; 6] = [
+    "license",
+    "licence",
+    "copying",
+    "copyright",
+    "unlicense",
+    "notice",
+];
+const LICENSE_DIRECTORIES: [&str; 2] = ["licenses", "licences"];
 const MAX_TEXT_BYTES: u64 = 256 * 1024;
 
+#[derive(Debug)]
 struct Krate {
     name: String,
     version: String,
     expression: Option<String>,
     source: String,
     texts: Vec<(String, String)>,
+}
+
+impl Krate {
+    fn id(&self) -> String {
+        format!("{} {}", self.name, self.version)
+    }
+}
+
+/// The reviewed list: accepted expressions and the individually reviewed exceptions.
+#[derive(Debug, Default)]
+struct Policy {
+    expressions: BTreeSet<String>,
+    no_expression: BTreeSet<String>,
+    no_text: BTreeSet<String>,
+}
+
+impl Policy {
+    fn parse(text: &str) -> Result<Self, String> {
+        let mut policy = Policy::default();
+        for (number, raw) in text.lines().enumerate() {
+            let line = raw.split(" #").next().unwrap_or("").trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let exception = |rest: &str| -> Result<String, String> {
+                let parts: Vec<_> = rest.split_whitespace().collect();
+                match parts.as_slice() {
+                    [name, version] => Ok(format!("{name} {version}")),
+                    _ => Err(format!("line {}: expected `NAME VERSION`", number + 1)),
+                }
+            };
+            if let Some(rest) = line.strip_prefix("no-expression:") {
+                policy.no_expression.insert(exception(rest)?);
+            } else if let Some(rest) = line.strip_prefix("no-text:") {
+                policy.no_text.insert(exception(rest)?);
+            } else {
+                policy.expressions.insert(line.to_owned());
+            }
+        }
+        Ok(policy)
+    }
 }
 
 fn main() {
@@ -56,14 +113,17 @@ fn run() -> Result<(), String> {
             _ => return Err(format!("unknown option {flag}")),
         }
     }
+    let path = allowed.ok_or("--allowed LIST is required")?;
+    let list = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let policy = Policy::parse(&list)?;
     let krates = linked_crates()?;
+    let problems = problems(&krates, &policy);
+    if !problems.is_empty() {
+        return Err(problems.join("\n"));
+    }
     match mode.as_str() {
         "notices" => {
             let output = output.ok_or("notices needs --output FILE")?;
-            let problems = problems(&krates, None);
-            if !problems.is_empty() {
-                return Err(problems.join("\n"));
-            }
             std::fs::write(&output, render(&krates))
                 .map_err(|e| format!("{}: {e}", output.display()))?;
             eprintln!(
@@ -74,46 +134,41 @@ fn run() -> Result<(), String> {
             Ok(())
         }
         "check" => {
-            let path = allowed.ok_or("check needs --allowed FILE")?;
-            let list =
-                std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            let allowed: BTreeSet<String> = list
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty() && !line.starts_with('#'))
-                .map(str::to_owned)
-                .collect();
-            let problems = problems(&krates, Some(&allowed));
-            if problems.is_empty() {
-                eprintln!(
-                    "{} linked crates: licence expressions accepted",
-                    krates.len()
-                );
-                Ok(())
-            } else {
-                Err(problems.join("\n"))
-            }
+            eprintln!(
+                "{} linked crates: licence expressions and texts accepted",
+                krates.len()
+            );
+            Ok(())
         }
         _ => Err("expected `notices` or `check`".into()),
     }
 }
 
-fn problems(krates: &[Krate], allowed: Option<&BTreeSet<String>>) -> Vec<String> {
+fn problems(krates: &[Krate], policy: &Policy) -> Vec<String> {
     let mut found = Vec::new();
     for k in krates {
-        let id = format!("{} {}", k.name, k.version);
+        let id = k.id();
         match &k.expression {
-            None if k.texts.is_empty() => {
-                found.push(format!("{id}: no licence expression and no licence file"))
+            None => {
+                if !policy.no_expression.contains(&id) {
+                    found.push(format!(
+                        "{id}: declares no licence expression and is not in the reviewed `no-expression:` list"
+                    ));
+                }
+                if k.texts.is_empty() {
+                    found.push(format!("{id}: no licence expression and no licence text"));
+                }
             }
-            None => {}
             Some(expression) => {
-                if let Some(allowed) = allowed {
-                    if !allowed.contains(expression) {
-                        found.push(format!(
-                            "{id}: licence expression `{expression}` is not in the reviewed allow-list"
-                        ));
-                    }
+                if !policy.expressions.contains(expression) {
+                    found.push(format!(
+                        "{id}: licence expression `{expression}` is not in the reviewed list"
+                    ));
+                }
+                if k.texts.is_empty() && !policy.no_text.contains(&id) {
+                    found.push(format!(
+                        "{id}: ships no licence text and is not in the reviewed `no-text:` list"
+                    ));
                 }
             }
         }
@@ -121,27 +176,13 @@ fn problems(krates: &[Krate], allowed: Option<&BTreeSet<String>>) -> Vec<String>
     found
 }
 
-fn linked_crates() -> Result<Vec<Krate>, String> {
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-    let output = Command::new(cargo)
-        .args([
-            "metadata",
-            "--locked",
-            "--offline",
-            "--all-features",
-            "--format-version",
-            "1",
-        ])
-        .output()
-        .map_err(|e| format!("cannot run cargo metadata: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "cargo metadata failed (run `cargo fetch --locked` first): {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let meta: Value =
-        serde_json::from_slice(&output.stdout).map_err(|e| format!("metadata JSON: {e}"))?;
+/// Crates reachable from the root through normal dependencies, with their licence information.
+/// `texts` reads the licence files of a package directory; it is a parameter so that tests can
+/// feed a fixture instead of a registry checkout.
+fn crates_from(
+    meta: &Value,
+    texts: &dyn Fn(&Path, Option<&str>) -> Result<Vec<(String, String)>, String>,
+) -> Result<Vec<Krate>, String> {
     let packages = meta["packages"]
         .as_array()
         .ok_or("metadata has no packages")?;
@@ -173,6 +214,7 @@ fn linked_crates() -> Result<Vec<Krate>, String> {
             .into_iter()
             .flatten()
         {
+            // `kind: null` is a normal dependency; "dev" and "build" edges are not linked.
             let normal = dep["dep_kinds"]
                 .as_array()
                 .is_some_and(|kinds| kinds.iter().any(|kind| kind["kind"].is_null()));
@@ -193,11 +235,6 @@ fn linked_crates() -> Result<Vec<Krate>, String> {
         let dir = Path::new(manifest)
             .parent()
             .ok_or("manifest without parent")?;
-        if !dir.is_dir() {
-            return Err(format!(
-                "sources of {id} are not present; run `cargo fetch --locked`"
-            ));
-        }
         krates.push(Krate {
             name: package["name"].as_str().unwrap_or_default().to_owned(),
             version: package["version"].as_str().unwrap_or_default().to_owned(),
@@ -205,11 +242,50 @@ fn linked_crates() -> Result<Vec<Krate>, String> {
                 .as_str()
                 .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" ")),
             source: package["source"].as_str().unwrap_or("path").to_owned(),
-            texts: license_texts(dir, package["license_file"].as_str())?,
+            texts: texts(dir, package["license_file"].as_str())?,
         });
     }
     krates.sort_by(|a, b| (&a.name, &a.version).cmp(&(&b.name, &b.version)));
     Ok(krates)
+}
+
+fn linked_crates() -> Result<Vec<Krate>, String> {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let output = Command::new(cargo)
+        .args([
+            "metadata",
+            "--locked",
+            "--offline",
+            "--all-features",
+            "--format-version",
+            "1",
+        ])
+        .output()
+        .map_err(|e| format!("cannot run cargo metadata: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "cargo metadata failed (run `cargo fetch --locked` first): {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let meta: Value =
+        serde_json::from_slice(&output.stdout).map_err(|e| format!("metadata JSON: {e}"))?;
+    crates_from(&meta, &|dir, declared| {
+        if !dir.is_dir() {
+            return Err(format!(
+                "sources in {} are not present; run `cargo fetch --locked`",
+                dir.display()
+            ));
+        }
+        license_texts(dir, declared)
+    })
+}
+
+fn is_license_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    LICENSE_PREFIXES
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
 }
 
 fn license_texts(dir: &Path, declared: Option<&str>) -> Result<Vec<(String, String)>, String> {
@@ -220,13 +296,18 @@ fn license_texts(dir: &Path, declared: Option<&str>) -> Result<Vec<(String, Stri
     for entry in std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
         let entry = entry.map_err(|e| e.to_string())?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        let lower = name.to_ascii_lowercase();
-        if entry.file_type().map_err(|e| e.to_string())?.is_file()
-            && LICENSE_PREFIXES
-                .iter()
-                .any(|prefix| lower.starts_with(prefix))
-        {
+        let kind = entry.file_type().map_err(|e| e.to_string())?;
+        if kind.is_file() && is_license_name(&name) {
             names.insert(name);
+        } else if kind.is_dir() && LICENSE_DIRECTORIES.contains(&name.to_ascii_lowercase().as_str())
+        {
+            // REUSE-style `LICENSES/<id>.txt`: one level only.
+            for inner in std::fs::read_dir(entry.path()).map_err(|e| e.to_string())? {
+                let inner = inner.map_err(|e| e.to_string())?;
+                if inner.file_type().map_err(|e| e.to_string())?.is_file() {
+                    names.insert(format!("{name}/{}", inner.file_name().to_string_lossy()));
+                }
+            }
         }
     }
     let mut texts = Vec::new();
@@ -275,7 +356,7 @@ fn render(krates: &[Krate]) -> String {
     let mut without_text = BTreeSet::new();
     for k in krates {
         if k.texts.is_empty() {
-            without_text.insert(format!("{} {}", k.name, k.version));
+            without_text.insert(k.id());
         }
         for (_, text) in &k.texts {
             let digest = hex::encode(Sha256::digest(text.as_bytes()));
@@ -283,12 +364,12 @@ fn render(krates: &[Krate]) -> String {
                 .entry(digest)
                 .or_insert_with(|| (text.clone(), BTreeSet::new()))
                 .1
-                .insert(format!("{} {}", k.name, k.version));
+                .insert(k.id());
         }
     }
     if !without_text.is_empty() {
         out.push_str("\n## Crates without a licence file in their package\n\n");
-        out.push_str("Only the SPDX expression declared by the crate is available for these:\n\n");
+        out.push_str("Only the SPDX expression declared by the crate is available for these (reviewed individually):\n\n");
         for id in &without_text {
             let _ = writeln!(out, "- {id}");
         }
@@ -306,4 +387,149 @@ fn render(krates: &[Krate]) -> String {
         out.push_str("\n~~~~\n");
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn package(name: &str, license: Option<&str>) -> Value {
+        json!({
+            "id": name, "name": name, "version": "1.0.0", "license": license,
+            "license_file": null, "source": "registry+fixture",
+            "manifest_path": format!("/fixture/{name}/Cargo.toml"),
+        })
+    }
+
+    /// root -> a (normal) -> d (normal); root -> dev_only (dev); root -> build_only (build).
+    fn metadata() -> Value {
+        let edge = |pkg: &str, kind: Value| json!({"pkg": pkg, "dep_kinds": [{"kind": kind, "target": null}]});
+        json!({
+            "packages": [
+                package(ROOT_PACKAGE, Some("Apache-2.0")),
+                package("a", Some("MIT")),
+                package("d", Some("MIT OR Apache-2.0")),
+                package("dev_only", Some("GPL-3.0")),
+                package("build_only", Some("GPL-3.0")),
+            ],
+            "resolve": {"nodes": [
+                {"id": ROOT_PACKAGE, "deps": [
+                    edge("a", Value::Null), edge("dev_only", json!("dev")), edge("build_only", json!("build"))]},
+                {"id": "a", "deps": [edge("d", Value::Null)]},
+                {"id": "d", "deps": []},
+                {"id": "dev_only", "deps": []},
+                {"id": "build_only", "deps": []},
+            ]},
+        })
+    }
+
+    fn with_texts(files: &[(&str, &str)]) -> Vec<Krate> {
+        let files: HashMap<String, String> = files
+            .iter()
+            .map(|(name, text)| (format!("/fixture/{name}"), (*text).to_owned()))
+            .collect();
+        crates_from(&metadata(), &|dir, _| {
+            Ok(files
+                .get(dir.to_str().unwrap())
+                .map(|text| vec![("LICENSE".to_owned(), text.clone())])
+                .unwrap_or_default())
+        })
+        .unwrap()
+    }
+
+    fn policy(text: &str) -> Policy {
+        Policy::parse(text).unwrap()
+    }
+
+    #[test]
+    fn only_normal_edges_are_linked() {
+        let names: Vec<_> = with_texts(&[]).into_iter().map(|k| k.name).collect();
+        assert_eq!(names, ["a", "d"]);
+    }
+
+    #[test]
+    fn accepted_when_listed_and_texts_present() {
+        let krates = with_texts(&[("a", "text a"), ("d", "text d")]);
+        assert!(problems(&krates, &policy("MIT\nMIT OR Apache-2.0\n")).is_empty());
+    }
+
+    #[test]
+    fn unlisted_expression_is_refused() {
+        let krates = with_texts(&[("a", "text a"), ("d", "text d")]);
+        let found = problems(&krates, &policy("MIT\n"));
+        assert_eq!(found.len(), 1);
+        assert!(found[0].contains("d 1.0.0") && found[0].contains("MIT OR Apache-2.0"));
+    }
+
+    #[test]
+    fn missing_text_is_refused_unless_reviewed() {
+        let krates = with_texts(&[("a", "text a")]);
+        let list = "MIT\nMIT OR Apache-2.0\n";
+        let found = problems(&krates, &policy(list));
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains("d 1.0.0") && m.contains("no licence text"))
+        );
+        let reviewed = format!("{list}no-text: d 1.0.0  # reviewed: expression only\n");
+        assert!(problems(&krates, &policy(&reviewed)).is_empty());
+    }
+
+    #[test]
+    fn no_expression_is_refused_even_with_a_licence_file_unless_listed() {
+        let mut metadata = metadata();
+        metadata["packages"][1]["license"] = Value::Null;
+        let krates = crates_from(&metadata, &|_, _| {
+            Ok(vec![(
+                "LICENSE".to_owned(),
+                "GNU GENERAL PUBLIC LICENSE".to_owned(),
+            )])
+        })
+        .unwrap();
+        let list = "MIT OR Apache-2.0\n";
+        let found = problems(&krates, &policy(list));
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains("a 1.0.0") && m.contains("no-expression"))
+        );
+        let reviewed = format!("{list}no-expression: a 1.0.0\n");
+        assert!(problems(&krates, &policy(&reviewed)).is_empty());
+    }
+
+    #[test]
+    fn no_expression_and_no_text_is_always_refused() {
+        let mut metadata = metadata();
+        metadata["packages"][1]["license"] = Value::Null;
+        let krates = crates_from(&metadata, &|_, _| Ok(Vec::new())).unwrap();
+        let list = "MIT OR Apache-2.0\nno-expression: a 1.0.0\nno-text: a 1.0.0\n";
+        let found = problems(&krates, &policy(list));
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains("no licence expression and no licence text"))
+        );
+    }
+
+    #[test]
+    fn exception_lines_need_a_name_and_a_version() {
+        assert!(Policy::parse("no-text: only-a-name\n").is_err());
+    }
+
+    #[test]
+    fn discovery_reads_copyright_files_and_reuse_directories() {
+        let dir = std::env::temp_dir().join(format!("third-party-notices-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("LICENSES")).unwrap();
+        std::fs::write(dir.join("COPYRIGHT"), "Copyright holders").unwrap();
+        std::fs::write(dir.join("LICENSES/MIT.txt"), "MIT text").unwrap();
+        std::fs::write(dir.join("README.md"), "not a licence").unwrap();
+        let names: Vec<_> = license_texts(&dir, None)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.0)
+            .collect();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(names, ["COPYRIGHT", "LICENSES/MIT.txt"]);
+    }
 }

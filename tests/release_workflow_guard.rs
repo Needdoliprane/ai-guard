@@ -248,81 +248,219 @@ fn frontend_archive_keeps_its_vite_attribution_requirement() {
     );
 }
 
+/// The lines of one job of a workflow (two-space `jobs:` children, as these workflows are written).
+fn job(text: &str, name: &str) -> Vec<String> {
+    let header = format!("  {name}:");
+    let mut lines = text.lines().skip_while(|line| *line != header);
+    let mut body = vec![
+        lines
+            .next()
+            .unwrap_or_else(|| panic!("job {name}"))
+            .to_owned(),
+    ];
+    for line in lines {
+        let top_level =
+            line.starts_with("  ") && !line.starts_with("   ") && !line.starts_with("  #");
+        if top_level || (!line.starts_with(' ') && !line.is_empty()) {
+            break;
+        }
+        body.push(line.to_owned());
+    }
+    body
+}
+
+/// `needs:` of a job as a set, read only from the job's own four-space key (not from comments or steps).
+fn needs(job: &[String]) -> std::collections::BTreeSet<String> {
+    let line = job
+        .iter()
+        .find(|line| line.starts_with("    needs:"))
+        .expect("job has needs");
+    line.trim_start_matches("    needs:")
+        .trim()
+        .trim_matches(|c| c == '[' || c == ']')
+        .split(',')
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// The shell text of every `run:` step of a job, without shell comment lines.
+fn run_blocks(job: &[String]) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut index = 0;
+    while index < job.len() {
+        let line = &job[index];
+        let trimmed = line.trim_start();
+        let key = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+        if let Some(rest) = key.strip_prefix("run:") {
+            let indent = line.len() - trimmed.len();
+            let mut block = vec![rest.trim().to_owned()];
+            index += 1;
+            while index < job.len() {
+                let next = &job[index];
+                let next_indent = next.len() - next.trim_start().len();
+                if !next.trim().is_empty() && next_indent <= indent + 1 {
+                    break;
+                }
+                if !next.trim_start().starts_with('#') {
+                    block.push(next.trim().to_owned());
+                }
+                index += 1;
+            }
+            blocks.push(block.join("\n"));
+        } else {
+            index += 1;
+        }
+    }
+    blocks
+}
+
+fn names(items: &[&str]) -> std::collections::BTreeSet<String> {
+    items.iter().map(|item| (*item).to_owned()).collect()
+}
+
 #[test]
 fn no_tag_can_exist_before_the_metadata_job_succeeds() {
     let release = workflow("release.yaml");
-    let section = |name: &str| -> String {
-        let header = format!("  {name}:");
-        let mut lines = release.lines().skip_while(|line| *line != header);
-        let mut body = vec![lines.next().unwrap_or_else(|| panic!("job {name}"))];
-        for line in lines {
-            let top_level =
-                line.starts_with("  ") && !line.starts_with("   ") && !line.starts_with("  #");
-            if top_level {
-                break;
-            }
-            body.push(line);
-        }
-        body.join("\n")
-    };
-    assert!(
-        section("tag").contains("needs: [verify, metadata]"),
-        "tag must wait for metadata"
+    assert_eq!(needs(&job(&release, "tag")), names(&["verify", "metadata"]));
+    assert_eq!(needs(&job(&release, "build")), names(&["verify", "tag"]));
+    assert_eq!(
+        needs(&job(&release, "draft")),
+        names(&["verify", "tag", "metadata", "build"])
     );
-    assert!(
-        section("draft").contains("needs: [verify, tag, metadata, build]"),
-        "draft must wait for metadata"
-    );
-    let metadata = section("metadata");
-    assert!(metadata.contains("release manifest") && metadata.contains("--source-only"));
-    assert!(metadata.contains("third_party_notices"));
+    let metadata = run_blocks(&job(&release, "metadata")).join("\n");
+    assert!(metadata.contains("release manifest") && metadata.contains("release verify"));
+    assert!(metadata.contains("--source-only"));
 }
 
 #[test]
 fn draft_publishes_and_digest_checks_the_metadata_assets() {
     let release = workflow("release.yaml");
+    let draft = run_blocks(&job(&release, "draft")).join("\n");
     for needle in [
         "ai-guard-$RELEASE_TAG-release-metadata.tar.gz",
         "ai-guard-$RELEASE_TAG-sbom.cdx.json",
         "files=(\"${archives[@]}\" \"$sbom\" SHA256SUMS)",
         "shasum -a 256 \"${archives[@]}\" \"$sbom\" > SHA256SUMS",
         "run=%s\\nrepository=%s",
+        ".metadata.component.version == $version",
     ] {
-        assert!(release.contains(needle), "release.yaml lost: {needle}");
+        assert!(
+            draft.contains(needle),
+            "the draft job's run steps lost: {needle}"
+        );
     }
+    let build = run_blocks(&job(&release, "build")).join("\n");
+    assert!(build.contains("run=%s\\nrepository=%s") && build.contains("THIRD-PARTY-NOTICES"));
 }
 
 #[test]
-fn ci_guards_the_reviewed_licence_list() {
+fn ci_runs_the_licence_guard_and_its_unit_tests_in_the_rust_job() {
     let ci = workflow("ci.yaml");
-    assert!(ci.contains(
-        "third_party_notices -- check --allowed .github/third-party-license-expressions.txt"
+    let rust = run_blocks(&job(&ci, "rust-check")).join("\n");
+    assert!(rust.contains(
+        "--example third_party_notices -- check --allowed .github/third-party-license-expressions.txt"
     ));
-    let list =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/third-party-license-expressions.txt");
-    let text = fs::read_to_string(list).expect("reviewed licence list is committed");
-    assert!(text.lines().any(|line| line.trim() == "MIT OR Apache-2.0"));
+    assert!(rust.contains("--example third_party_notices"));
+    let list = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/third-party-license-expressions.txt"),
+    )
+    .expect("reviewed licence list is committed");
+    assert!(list.lines().any(|line| line.trim() == "MIT OR Apache-2.0"));
+}
+
+fn bin_stems() -> Vec<String> {
+    let mut stems: Vec<String> =
+        fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bin"))
+            .unwrap()
+            .filter_map(|entry| {
+                let path = entry.unwrap().path();
+                (path.extension().is_some_and(|ext| ext == "rs"))
+                    .then(|| path.file_stem().unwrap().to_string_lossy().into_owned())
+            })
+            .collect();
+    stems.sort();
+    stems
 }
 
 #[test]
 fn native_binary_list_comes_from_cargo_and_is_not_hard_coded() {
     let release = workflow("release.yaml");
+    let verify = run_blocks(&job(&release, "verify")).join("\n");
     assert!(
-        release.contains("select(.kind | index(\"bin\"))"),
-        "binary list must come from cargo metadata"
+        verify.contains("select(.kind | index(\"bin\"))") && verify.contains(". - ($excluded"),
+        "the list must come from cargo metadata minus the declared exclusions"
     );
-    let manifest =
-        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).unwrap();
-    for name in [
-        "ai-guard-provider",
-        "ai-guard-relay",
-        "ai-guard-diagnose",
-        "ai-guard-activity",
-    ] {
+    // No binary named anywhere in the workflow, except the single exclusion declaration and the
+    // mandatory `bin/agentsandbox`.
+    let outside: String = release
+        .lines()
+        .filter(|line| !line.contains("EXCLUDED_BINARIES:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for stem in bin_stems() {
         assert!(
-            !release.contains(&format!("bin/{name}")),
-            "{name} must not be named in release.yaml: the list is derived from Cargo"
+            !outside.contains(&stem),
+            "{stem} is named in release.yaml outside EXCLUDED_BINARIES"
         );
     }
-    assert!(manifest.contains("agentsandbox"));
+    let mut at = 0;
+    while let Some(found) = outside[at..].find("bin/") {
+        let name: String = outside[at + found + 4..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            .collect();
+        assert!(
+            name.is_empty() || name == "agentsandbox",
+            "release.yaml names a literal bin/{name}"
+        );
+        at += found + 4;
+    }
+}
+
+#[test]
+fn the_demo_ca_generator_is_excluded_from_the_archives_and_the_exclusion_is_not_stale() {
+    let release = workflow("release.yaml");
+    let line = release
+        .lines()
+        .find(|line| line.trim_start().starts_with("EXCLUDED_BINARIES:"))
+        .expect("the exclusion is declared once, in the verify job");
+    let excluded: Vec<&str> = line
+        .trim_start()
+        .trim_start_matches("EXCLUDED_BINARIES:")
+        .split_whitespace()
+        .collect();
+    assert_eq!(excluded, ["ai-guard-demo-pki"]);
+    let stems = bin_stems();
+    for name in excluded {
+        assert!(
+            stems.iter().any(|stem| stem == name),
+            "{name} no longer exists: drop the exclusion"
+        );
+    }
+    assert!(
+        job(&release, "verify")
+            .iter()
+            .any(|l| l.contains("EXCLUDED_BINARIES"))
+    );
+}
+
+#[test]
+fn qualification_validates_the_release_tag_and_uploads_only_an_allow_list() {
+    let qualification = workflow("linux-qualification.yaml");
+    let runs = run_blocks(&job(&qualification, "qualify")).join("\n");
+    // The tag is validated and compared with the dispatched commit before it is used.
+    let validate = runs
+        .find("release_tag must look like")
+        .expect("tag validation");
+    let download = runs.find("gh release download").expect("download");
+    assert!(validate < download);
+    assert!(runs.contains("release_tag_commit"));
+    // Upload: only the assembled directory, never the fixture tree.
+    assert!(qualification.contains("qa-evidence/${{ matrix.engine }}/upload/"));
+    assert!(!qualification.contains("qa-evidence/${{ matrix.engine }}/\n"));
+    assert!(runs.contains("looks like it holds a credential"));
+    assert!(runs.contains("sysctl_fallback_used"));
+    // The job that runs sudo and the tests never receives a write token.
+    assert!(!qualification.contains("contents: write"));
 }

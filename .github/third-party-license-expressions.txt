@@ -1,5 +1,6 @@
 # Licence expressions accepted for crates linked into the native ai-guard binaries.
-# Checked by `cargo run --example third_party_notices -- check --allowed <this file>` in CI.
+# Checked by `cargo run --example third_party_notices -- check|notices --allowed <this file>` (CI and release).
+# Line forms: an accepted SPDX expression; `no-expression: NAME VERSION`; `no-text: NAME VERSION`.
 # A Cargo.lock change that brings an expression not listed here fails CI: review the new licence
 # (copyleft obligations, redistribution, attribution) and add the exact expression in the same change.
 # Initial list generated from Cargo.lock on 2026-11-21 (350 crates, all features). Every expression is
@@ -30,3 +31,11 @@ Unlicense OR MIT
 Unlicense/MIT
 Zlib
 Zlib OR Apache-2.0 OR MIT
+
+# Crates whose published package ships no licence text. Their SPDX expression is listed in the notices
+# table and in a dedicated section. OPEN for the maintainers: fetch the upstream licence text and ship it
+# (or replace the crate) before a release that claims complete attribution.
+no-text: keyed_priority_queue 0.4.2
+no-text: r-efi 5.3.0
+no-text: r-efi 6.0.0
+no-text: rsqlite-vfs 0.2.0

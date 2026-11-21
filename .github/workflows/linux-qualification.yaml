@@ -19,7 +19,7 @@ on:
         type: choice
         options: [both, docker, podman]
       release_tag:
-        description: Optional release tag (draft or published). When set, its x86_64 archive is downloaded, checked against SHA256SUMS and its CLI is run against the engine. Leave empty to skip.
+        description: Optional tag of a PUBLISHED release (a draft is not visible to this read-only token). When set, the workflow must be dispatched on that tag's commit; its x86_64 archive is downloaded, checked against SHA256SUMS and its CLI is run against the engine. Leave empty to skip.
         required: false
         default: ''
         type: string
@@ -78,6 +78,25 @@ jobs:
           } > "$evidence/host.txt" 2>&1
           sysctl kernel.apparmor_restrict_unprivileged_userns kernel.unprivileged_userns_clone user.max_user_namespaces \
             > "$evidence/userns-before.txt" 2>&1 || true
+
+      - name: Validate the release tag and compare it with the dispatched commit
+        if: inputs.release_tag != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ ${#RELEASE_TAG} -gt 64 || ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+            echo "::error::release_tag must look like v0.1.0 or v0.1.0-rc.1"
+            exit 1
+          fi
+          tag_commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)
+          [[ "$tag_commit" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::cannot resolve the release tag to a commit"; exit 1; }
+          printf 'release_tag=%s release_tag_commit=%s dispatched_commit=%s\n' "$RELEASE_TAG" "$tag_commit" "$GITHUB_SHA" >> "$EVIDENCE/host.txt"
+          if [[ "$tag_commit" != "$GITHUB_SHA" ]]; then
+            echo "::error::The tests run from $GITHUB_SHA but $RELEASE_TAG points to $tag_commit; dispatch this workflow on the tag's commit"
+            exit 1
+          fi
 
       - name: Install the rootless engine prerequisites
         shell: bash
@@ -290,21 +309,57 @@ jobs:
         if: always()
         shell: bash
         run: |
-          jq -n --arg status "${{ job.status }}" --arg engine "$ENGINE" --arg commit "$GITHUB_SHA" \
-            '{schema: 1, engine: $engine, commit: $commit, job_status: $status,
-              note: "Ignored real-engine selectors on a GitHub-hosted runner; see inventory.json. Not a qualification of macOS, Kubernetes, providers or MySQL."}' \
+          [[ -n "${EVIDENCE:-}" && -d "$EVIDENCE" ]] || exit 0
+          fallback=false
+          grep -qs '^FALLBACK=sysctl' "$EVIDENCE/apparmor.txt" && fallback=true
+          jq -n --arg status "${{ job.status }}" --arg engine "$ENGINE" --arg commit "$GITHUB_SHA" --argjson fallback "$fallback" \
+            '{schema: 1, engine: $engine, commit: $commit, job_status: $status, sysctl_fallback_used: $fallback,
+              note: "Ignored real-engine selectors on a GitHub-hosted runner; see inventory.json. Not a qualification of macOS, Kubernetes, providers or MySQL. When sysctl_fallback_used is true the default Ubuntu 24.04 user-namespace restriction was lifted for the tests."}' \
             > "$EVIDENCE/status.json"
+          {
+            echo "### $ENGINE rootless on $GITHUB_SHA"
+            echo "- job status: ${{ job.status }}"
+            echo "- sysctl fallback used (default Ubuntu userns restriction lifted): $fallback"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Assemble the upload from an allow-list and scan it for secrets
+        id: collect
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "${EVIDENCE:-}" && -d "$EVIDENCE" ]] || { echo "::error::no evidence directory"; exit 1; }
+          upload="$EVIDENCE/upload"
+          mkdir -m 700 "$upload" "$upload/receipts"
+          # Only these named files leave the runner. The Rust fixture trees (gateway configuration,
+          # tokens, databases, retained volumes) are never uploaded.
+          for file in host.txt userns-before.txt userns-after.txt apparmor.txt engine-start.txt engine-info.txt \
+            images.txt inventory.json status.json release-cli-version.json release-cli-doctor.txt worker-build.log \
+            dockerd-rootless.log podman-service.log runtime_user_journey.log runtime_export.log \
+            runtime_confinement.log runtime_terminal_persistence.log; do
+            if [[ -f "$EVIDENCE/$file" ]]; then cp "$EVIDENCE/$file" "$upload/$file"; fi
+          done
+          index=0
+          while IFS= read -r -d '' file; do
+            index=$((index + 1))
+            cp "$file" "$upload/receipts/$(printf '%03d' "$index")-$(basename "$file")"
+          done < <(find "$EVIDENCE/tmp" -type f -size -2048k -not -path '*/secrets/*' \
+            \( -name case-outcome.json -o -name complete.json -o -name final-session-inventory.json \
+               -o -name INCONCLUSIVE.json -o -name timeout-whole-call.json \) -print0)
+          # Backstop to the allow-list: refuse the upload when something looks like a credential.
+          if grep -RIEil -e 'bearer[[:space:]]+[a-z0-9._~+/=-]{16,}' \
+            -e '-----BEGIN [A-Z ]*PRIVATE KEY-----' \
+            -e '(token|secret|password|api[_-]?key)["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"']?[a-z0-9._~+/=-]{20,}' \
+            -e 'sk-[a-z0-9_-]{20,}' -e 'gh[pousr]_[a-z0-9]{30,}' "$upload"; then
+            echo "::error::A file selected for upload looks like it holds a credential; nothing is uploaded"
+            exit 1
+          fi
+          find "$upload" -type f | sort > "$upload/MANIFEST.txt"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
+        if: always() && steps.collect.outcome == 'success'
         with:
           name: qualification-${{ matrix.engine }}
-          # The Rust fixtures keep ephemeral gateway tokens under secrets/ and fake credential files:
-          # they are excluded from the upload.
-          path: |
-            ${{ runner.temp }}/qa-evidence/${{ matrix.engine }}/
-            !${{ runner.temp }}/qa-evidence/${{ matrix.engine }}/**/secrets/**
-            !${{ runner.temp }}/qa-evidence/${{ matrix.engine }}/**/*.env
-            !${{ runner.temp }}/qa-evidence/${{ matrix.engine }}/**/*.sqlite*
+          path: ${{ runner.temp }}/qa-evidence/${{ matrix.engine }}/upload/
           if-no-files-found: error
           retention-days: 14

@@ -23,6 +23,9 @@ jobs:
       contents: read
     env:
       RELEASE_TAG: ${{ inputs.tag }}
+      # Binaries built by `cargo build --bins` that are not shipped in the native archives. The
+      # test-CA generator stays a local tool (AGENTS.md); list names separated by spaces.
+      EXCLUDED_BINARIES: ai-guard-demo-pki
     outputs:
       tag: ${{ steps.gate.outputs.tag }}
       sha: ${{ steps.gate.outputs.sha }}
@@ -70,9 +73,10 @@ jobs:
           version=${RELEASE_TAG#v}
           metadata=$(cargo metadata --locked --offline --no-deps --format-version 1)
           jq -e --arg version "$version" '.packages[] | select(.name == "agentsandbox") | .version == $version' <<< "$metadata" >/dev/null
-          native_binaries=$(jq -er '
+          native_binaries=$(jq -er --arg excluded "$EXCLUDED_BINARIES" '
             [.packages[] | select(.name == "agentsandbox")] | select(length == 1)
             | [.[0].targets[] | select(.kind | index("bin")) | .name] | sort
+            | . - ($excluded | split(" ") | map(select(length > 0)))
             | if index("agentsandbox") != null and length == (unique | length) and
                 all(.[]; type == "string" and test("\\A[A-Za-z0-9_.-]+\\z") and . != "." and . != "..")
               then join(" ") else error("Invalid agentsandbox binary targets") end
@@ -128,7 +132,9 @@ jobs:
           for file in release-manifest.json sbom.cdx.json SHA256SUMS; do
             install -m 0644 "$RUNNER_TEMP/private/parent/manifest/$file" "$package/manifest/$file"
           done
-          jq -e '.bomFormat == "CycloneDX" and .specVersion == "1.6"' "$package/manifest/sbom.cdx.json" >/dev/null
+          jq -e --arg version "${RELEASE_TAG#v}" '
+            .bomFormat == "CycloneDX" and .specVersion == "1.6" and .metadata.component.version == $version
+          ' "$package/manifest/sbom.cdx.json" >/dev/null
           install -m 0644 LICENSE "$package/"
           printf 'tag=%s\ncommit=%s\nrun=%s\nrepository=%s\n' \
             "$RELEASE_TAG" "$RELEASE_SHA" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY" > "$package/BUILD-INFO"
@@ -261,7 +267,8 @@ jobs:
           # Every crate source is needed to read the licence texts, whatever the target.
           cargo fetch --locked
           cargo run --quiet --release --locked --offline --target "$RUST_TARGET" \
-            --example third_party_notices -- notices --output "$package/THIRD-PARTY-NOTICES"
+            --example third_party_notices -- notices --allowed .github/third-party-license-expressions.txt \
+            --output "$package/THIRD-PARTY-NOTICES"
           test -s "$package/THIRD-PARTY-NOTICES"
           read -r -a programs <<< "$NATIVE_BINARIES"
           test "${#programs[@]}" -gt 0
@@ -485,8 +492,11 @@ jobs:
             echo "::error::The standalone SBOM differs from the SBOM inside the metadata archive"
             exit 1
           fi
-          if ! jq -e '.bomFormat == "CycloneDX" and .specVersion == "1.6" and (.components | type == "array" and length > 0)' "$sbom" >/dev/null; then
-            echo "::error::The SBOM is not a nonempty CycloneDX 1.6 document"
+          if ! jq -e --arg version "${RELEASE_TAG#v}" '
+            .bomFormat == "CycloneDX" and .specVersion == "1.6" and
+            (.components | type == "array" and length > 0) and .metadata.component.version == $version
+          ' "$sbom" >/dev/null; then
+            echo "::error::The SBOM is not a nonempty CycloneDX 1.6 document for the release version"
             exit 1
           fi
           shasum -a 256 "${archives[@]}" "$sbom" > SHA256SUMS

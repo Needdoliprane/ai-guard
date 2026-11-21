@@ -29,4 +29,4 @@ Seule la dernière release publiée est considérée pour les correctifs. ai-gua
 
 ## Vérifier les artefacts de release
 
-Les archives de release sont publiées avec `SHA256SUMS`, un SBOM CycloneDX et un fichier `BUILD-INFO` dans chaque archive qui la lie au tag, au commit et au run du workflow. **Rien n'est signé cryptographiquement** : les sommes détectent une corruption, pas une page de release compromise. La procédure de vérification est dans le [guide d'installation](docs/setup/release/install.fr.md).
+Les archives de release sont publiées avec `SHA256SUMS`, un SBOM CycloneDX et un fichier `BUILD-INFO` dans chaque archive qui consigne son tag, son commit et son run de workflow. **Rien n'est signé cryptographiquement** : les sommes détectent une corruption, pas une page de release compromise. La procédure de vérification est dans le [guide d'installation](docs/setup/release/install.fr.md).

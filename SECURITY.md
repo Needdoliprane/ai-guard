@@ -29,4 +29,4 @@ Only the latest published release is considered for fixes. ai-guard has not been
 
 ## Verifying release artifacts
 
-Release archives are published with `SHA256SUMS`, a CycloneDX SBOM and a `BUILD-INFO` file in each archive that binds it to the tag, commit and workflow run. **Nothing is cryptographically signed**: checksums detect corruption, not a compromised release page. The verification procedure is in [the installation guide](docs/setup/release/install.md).
+Release archives are published with `SHA256SUMS`, a CycloneDX SBOM and a `BUILD-INFO` file in each archive that records its tag, commit and workflow run. **Nothing is cryptographically signed**: checksums detect corruption, not a compromised release page. The verification procedure is in [the installation guide](docs/setup/release/install.md).

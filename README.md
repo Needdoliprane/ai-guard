@@ -117,7 +117,7 @@ Examples contain public values only. Create a **new** private configuration file
 
 Application code outside the frontend is Rust. See [AGENTS.md](AGENTS.md) for architecture, coding rules and targeted verification. Product behavior changes must update the English/French guides and configuration examples in the same change. Auxiliary Keycloak, Qwen and test-CA experiments stay local and ignored; product security and runtime regressions remain in the repository.
 
-Apache-2.0. The private vulnerability-reporting channel must be established before public release.
+Apache-2.0. Vulnerabilities are reported privately through GitHub Security Advisories; see [SECURITY.md](SECURITY.md) ([FR](SECURITY.fr.md)).
 
 ## Additional guides
 
