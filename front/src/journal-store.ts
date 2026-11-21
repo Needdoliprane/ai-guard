@@ -72,6 +72,8 @@ export class JournalStore {
   #retries = 0;
   #retryTimer: unknown = null;
   #liveSince: number | null = null;
+  // If a page had more rows, its cursor retains that poll's upper bound across a reconnect.
+  #liveWindow: "open" | "interrupted" | null = null;
 
   constructor(reads: JournalReads, clock: SupervisionClock, onChange: () => void, resource: ResourceRef | null = null) {
     this.#reads = reads; this.#clock = clock; this.#onChange = onChange; this.#state = initial(resource);
@@ -92,8 +94,12 @@ export class JournalStore {
   #stopStream(state: LiveState, message = "") {
     this.#stream.abort(); this.#stream = new AbortController();
     if (this.#retryTimer !== null) { this.#clock.clearTimer(this.#retryTimer); this.#retryTimer = null; }
-    this.#liveSince = null;
+    this.#liveSince = null; this.#liveWindow = null;
     this.#state.live = state; this.#state.liveMessage = message;
+  }
+  #markLiveGap() {
+    this.#state.stale = true;
+    if (this.#liveWindow) this.#liveWindow = "interrupted";
   }
   /** Withdraw data whose current access could not be revalidated. */
   #withdraw(clearProfile = true) {
@@ -175,17 +181,22 @@ export class JournalStore {
     void this.#reads.listen(this.#selection(cursor), signal, (page, position) => {
       if (!current()) return;
       this.#position = position; this.#retries = 0;
-      this.#receive(page.items); this.#publish();
+      this.#receive(page.items);
+      if (page.items.length && !page.has_more) {
+        if (this.#liveWindow !== "interrupted" && !state.error) state.stale = false;
+        this.#liveWindow = null;
+      } else if (page.has_more && !this.#liveWindow) this.#liveWindow = "open";
+      this.#publish();
     }, (status) => {
       if (!current() || status === "connecting" && this.#retries) return;
       state.live = status === "closed" ? "off" : status;
-      // A reconnection resumes from the last delivered position; until then the window may miss events.
-      if (status === "retrying") { state.stale = true; this.#liveSince = null; }
-      else if (status === "live") { state.stale = !!state.error; state.liveMessage = ""; this.#liveSince = this.#clock.now(); }
+      if (status === "retrying") { this.#markLiveGap(); this.#liveSince = null; }
+      // The HTTP connection says nothing about backlog. An empty poll has no audit frame to confirm it.
+      else if (status === "live") { state.liveMessage = ""; this.#liveSince = this.#clock.now(); }
       this.#publish();
     }).catch((error: unknown) => {
       if (!current() || this.#settled(error, generation)) return;
-      state.stale = true;
+      this.#markLiveGap();
       if (error instanceof HumanApiError && error.retryAction === "retry") { this.#retryLive(generation, sourceError(error).message); return; }
       state.live = "refused";
       state.liveMessage = error instanceof HumanApiError && error.retryAction === "close_unused_streams" ?

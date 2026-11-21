@@ -136,6 +136,57 @@ pub(super) async fn human_get(
 }
 
 #[tokio::test]
+async fn dashboard_reports_read_capacity_and_can_reload_after_recovery() {
+    let directory = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let store = Arc::new(
+        Store::open(
+            &directory.path().join("audit.sqlite"),
+            Redactor::new(vec![]),
+            100,
+        )
+        .unwrap(),
+    );
+    let viewer = "fixture-viewer";
+    let state = GatewayState::new(
+        store,
+        "fixture-runner".into(),
+        viewer.into(),
+        Policy::default(),
+        None,
+        Redactor::new(vec![]),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = format!("http://{}", listener.local_addr().unwrap());
+    let router = gateway_router(state.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let dashboard =
+        dashboard_router(&upstream, viewer.into(), directory.path().to_owned()).unwrap();
+    let slots: Vec<_> = (0..4)
+        .map(|_| {
+            state.tenants[0]
+                .io
+                .admit(store_io::Lane::Read, false)
+                .unwrap()
+        })
+        .collect();
+
+    let path = "/api/events?limit=100";
+    let (status, unavailable) = human_get(&dashboard, viewer, path, None).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(unavailable["error"]["code"], "capacity_exhausted");
+    assert_eq!(unavailable["error"]["retry_action"], "retry");
+
+    drop(slots);
+    let (status, available) = human_get(&dashboard, viewer, path, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(available["items"].is_array());
+    server.abort();
+}
+
+#[tokio::test]
 async fn source_read_admission_rejects_before_opening_local_authentication_transactions() {
     let (_directory, state, token) = local_identity_state();
     let observations = observe(&state.tenants[1].store);

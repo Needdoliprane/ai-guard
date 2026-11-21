@@ -13,17 +13,25 @@
 #[path = "../tests/support/supervision_seed.rs"]
 mod supervision_seed;
 
-use agentsandbox::identity::{HumanCapabilityV1, ResourceKindV1};
+use agentsandbox::{
+    audit::EventQuery,
+    identity::{
+        ContextModeV1, HUMAN_MAX_PAGE_ITEMS, HumanCapabilityV1, PrincipalRefV1, ResourceKindV1,
+    },
+};
 use anyhow::Context;
 use clap::Parser;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{os::unix::fs::PermissionsExt, path::PathBuf};
+use std::{collections::BTreeSet, os::unix::fs::PermissionsExt, path::PathBuf};
 use supervision_seed::{Seed, SeedOptions, post_heartbeat, resource_event, serve};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use uuid::Uuid;
 
 const MAX_COMMAND_BYTES: usize = 4096;
 const MAX_APPENDED_EVENTS: usize = 500;
+const MAX_EXPORT_RECEIPTS: usize = 25;
+const HUMAN_READ_KIND: &str = "control.identity.access";
 
 #[derive(Parser)]
 #[command(about = "Test-only supervision stack over synthetic data")]
@@ -58,8 +66,34 @@ enum Command {
     RevokeBroker {
         broker: String,
     },
+    ReadExportReceipts {
+        receipts: Vec<ExportReceipt>,
+    },
     Heartbeat,
     Stop,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExportReceipt {
+    audit_event_id: Uuid,
+    request_id: Uuid,
+}
+
+// Decode the closed projection that the Store itself appends for a human
+// read. This receipt has no resource selector, view, or event content.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExportAudit {
+    version: u32,
+    request_id: Uuid,
+    principal: PrincipalRefV1,
+    membership_id: String,
+    mode: ContextModeV1,
+    membership_revision: u64,
+    authorization_revision: u64,
+    action: String,
+    result_count: usize,
 }
 
 fn checked_directories(arguments: &Arguments) -> anyhow::Result<()> {
@@ -119,6 +153,90 @@ fn ready(seed: &Seed, dashboard: &str) -> Value {
     })
 }
 
+fn read_export_receipts(seed: &Seed, receipts: Vec<ExportReceipt>) -> anyhow::Result<Value> {
+    anyhow::ensure!(
+        (1..=MAX_EXPORT_RECEIPTS).contains(&receipts.len()),
+        "invalid export receipt count"
+    );
+    let actor = seed
+        .accounts
+        .get("user_a1")
+        .context("test export actor absent")?;
+    let mut requests = BTreeSet::new();
+    let mut previous_sequence = 0;
+    let mut proof = Vec::with_capacity(receipts.len());
+    for receipt in receipts {
+        anyhow::ensure!(
+            !receipt.audit_event_id.is_nil()
+                && !receipt.request_id.is_nil()
+                && requests.insert(receipt.request_id),
+            "invalid or duplicate export receipt"
+        );
+        let event_id = receipt.audit_event_id.to_string();
+        let events = seed
+            .a
+            .events(&EventQuery {
+                kind: Some(HUMAN_READ_KIND.into()),
+                q: Some(event_id.clone()),
+                limit: Some(2),
+                ..Default::default()
+            })
+            .map_err(|_| anyhow::anyhow!("export receipt lookup failed"))?;
+        let [stored] = events.as_slice() else {
+            anyhow::bail!("export receipt missing or ambiguous in the tenant audit");
+        };
+        let event = &stored.event;
+        anyhow::ensure!(
+            event.id == event_id
+                && event.kind == HUMAN_READ_KIND
+                && event.source == "gateway"
+                && event.provenance == "observed"
+                && event.coverage == "observed"
+                && stored.seq > previous_sequence
+                && chrono::DateTime::parse_from_rfc3339(&stored.received_at).is_ok(),
+            "stored event is not an in-order gateway export receipt"
+        );
+        let audit: ExportAudit = serde_json::from_value(event.data.clone())
+            .map_err(|_| anyhow::anyhow!("invalid stored export receipt"))?;
+        anyhow::ensure!(
+            audit.version == 1
+                && audit.action == "export"
+                && audit.request_id == receipt.request_id
+                && audit.principal == actor.principal
+                && audit.mode == ContextModeV1::Personal
+                && audit.membership_id == actor.membership.membership_id
+                && audit.membership_revision == actor.membership.revision
+                && actor.membership.tenant_id == seed.a.tenant_id()
+                && audit.result_count <= HUMAN_MAX_PAGE_ITEMS,
+            "stored export receipt differs from the selected test actor or scope"
+        );
+        previous_sequence = stored.seq;
+        proof.push(json!({
+            "audit_event_id": event.id,
+            "request_id": audit.request_id,
+            "sequence": stored.seq,
+            "received_at": stored.received_at,
+            "tenant_id": seed.a.tenant_id(),
+            "principal": audit.principal,
+            "mode": audit.mode,
+            "membership_id": audit.membership_id,
+            "membership_revision": audit.membership_revision,
+            "authorization_revision": audit.authorization_revision,
+            "result_count": audit.result_count,
+            "source": event.source,
+            "provenance": event.provenance,
+            "coverage": event.coverage,
+            "action": audit.action,
+        }));
+    }
+    let chain = seed
+        .a
+        .integrity()
+        .map_err(|_| anyhow::anyhow!("tenant audit verification failed"))?;
+    anyhow::ensure!(chain.valid, "tenant audit chain is invalid");
+    Ok(json!({ "chain_valid": true, "receipts": proof }))
+}
+
 async fn apply(
     command: Command,
     seed: &mut Seed,
@@ -159,6 +277,7 @@ async fn apply(
             seed.revoke_broker(&broker)?;
             Ok(json!({}))
         }
+        Command::ReadExportReceipts { receipts } => read_export_receipts(seed, receipts),
         Command::Heartbeat => {
             post_heartbeat(seed, served).await?;
             Ok(json!({}))

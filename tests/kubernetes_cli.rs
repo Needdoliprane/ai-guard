@@ -1,5 +1,7 @@
-//! Real CLI subprocesses and owned loopback TLS endpoints. API responses are
-//! fixtures; these tests do not qualify a cluster, confinement or admission.
+//! Real CLI subprocesses with owned loopback Kubernetes fixtures or a control
+//! gateway. These tests cover neither a cluster nor runtime confinement.
+#[path = "kubernetes_cli/session_r2.rs"]
+mod session_r2;
 mod support;
 
 use agentsandbox::{
@@ -33,6 +35,11 @@ const CLUSTER_UID: &str = "11111111-1111-4111-8111-111111111111";
 const NAMESPACE_UID: &str = "22222222-2222-4222-8222-222222222222";
 const TOKEN: &str = "public-kubernetes-cli-fixture-token-000000000000";
 const BODY_CANARY: &str = "private-fixture-body-must-not-enter-cli-output";
+
+#[tokio::test]
+async fn operator_session_cli_reports_and_replays_the_before_effect_reservation() {
+    session_r2::exercise().await;
+}
 
 #[tokio::test]
 async fn kubernetes_doctor_is_an_available_read_only_cli_command() {

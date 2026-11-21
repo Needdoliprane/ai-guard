@@ -17,7 +17,12 @@ const sha256 = /^[0-9a-f]{64}$/;
 const maxExportBytes = 32 * 1024 * 1024;
 const models = { codex: "gpt-6-luna", claude_code: "claude-haiku-5-5" };
 class Blocked extends Error {}
-class EvidenceError extends Error {}
+class EvidenceError extends Error {
+  constructor(message, httpStatus) {
+    super(message);
+    this.httpStatus = httpStatus;
+  }
+}
 
 function required(name) {
   const value = process.env[name]?.trim();
@@ -46,7 +51,7 @@ async function readJson(origin, path, viewer) {
   });
   if (!response.ok) {
     await response.body?.cancel();
-    throw new EvidenceError(`Lecture ${path.split("?")[0]} en erreur HTTP ${response.status}.`);
+    throw new EvidenceError(`Lecture ${path.split("?")[0]} en erreur HTTP ${response.status}.`, response.status);
   }
   return response.json();
 }
@@ -524,21 +529,31 @@ async function main() {
     [gateway, dashboard].map((origin) => readJson(origin, "/api/v1/identity", viewer)));
   assert.ok(identity?.role === "viewer" && typeof identity.tenant_id === "string", "Identité viewer attendue.");
   assert.ok(isDeepStrictEqual(proxiedIdentity, identity), "Le dashboard et la gateway doivent attester la même identité.");
+  if (preflight && expectWorkerProvenance) {
+    stage = "provenance du worker";
+    // Read through the authenticated proxy before opening the live views and their concurrent reads.
+    let workers;
+    try {
+      workers = await readJson(dashboard, "/api/v1/federation/workers?limit=1", viewer);
+    } catch (error) {
+      if (error instanceof EvidenceError && Number.isInteger(error.httpStatus)) {
+        throw new Blocked(`Lecture du registre Workers indisponible (HTTP ${error.httpStatus}).`);
+      }
+      if (error instanceof SyntaxError) throw new Blocked("Réponse JSON invalide pour le registre Workers.");
+      throw new Blocked("Erreur de transport à la lecture du registre Workers.");
+    }
+    if (workers?.source !== "tenant_worker_broker_registry" || !Array.isArray(workers.items)) {
+      throw new Blocked("Format du registre Workers invalide (source ou items).");
+    }
+    stage = "identité viewer";
+  }
   await page.getByLabel("Jeton de lecture", { exact: true }).fill(viewer);
   await page.getByRole("button", { name: "Ouvrir la supervision", exact: true }).click();
   await page.getByRole("heading", { name: "Vue d’ensemble", exact: true }).waitFor();
   await page.locator(".topbar").getByText(`Client : ${identity.tenant_id}`, { exact: true }).waitFor();
   checks.push(stage);
   if (preflight) {
-    if (expectWorkerProvenance) {
-      stage = "provenance du worker";
-      try {
-        const workers = await readJson(dashboard, "/api/v1/federation/workers?limit=1", viewer);
-        assert.ok(workers?.source === "tenant_worker_broker_registry" && Array.isArray(workers.items),
-          "Registre Workers de la candidate requis.");
-      } catch { throw new Blocked("Lecture du registre Workers indisponible sur ce tableau de bord."); }
-      checks.push(stage);
-    }
+    if (expectWorkerProvenance) checks.push("provenance du worker");
     return { mode: "preflight", browser: browser.version() };
   }
 

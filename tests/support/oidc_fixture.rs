@@ -89,12 +89,15 @@ impl Drop for ControlledIssuer {
 }
 impl ControlledIssuer {
     pub async fn new() -> Self {
-        Self::with_transport(None).await
+        Self::with_transport(None, |_| Router::new()).await
     }
     pub async fn with_tls(identity: super::test_product::tls::ServerIdentity) -> Self {
-        Self::with_transport(Some(identity)).await
+        Self::with_transport(Some(identity), |_| Router::new()).await
     }
-    async fn with_transport(identity: Option<super::test_product::tls::ServerIdentity>) -> Self {
+    pub(super) async fn with_transport(
+        identity: Option<super::test_product::tls::ServerIdentity>,
+        extra_routes: impl FnOnce(&str) -> Router,
+    ) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let scheme = if identity.is_some() { "https" } else { "http" };
         let issuer = format!("{scheme}://{}/realm", listener.local_addr().unwrap());
@@ -120,7 +123,7 @@ impl ControlledIssuer {
                 if let Some(barrier)=&barrier {barrier.entered.notify_one();barrier.release.notified().await;}
                 Response::builder().header("content-type", "application/json").body(Body::from(value.to_string())).unwrap()
             }
-        }).with_state(endpoint_state);
+        }).with_state(endpoint_state).merge(extra_routes(&issuer));
         let task = tokio::spawn(async move {
             if let Some(identity) = identity {
                 super::test_product::tls::serve(
@@ -179,22 +182,7 @@ impl ControlledIssuer {
         roles: &[&str],
         salt: &str,
     ) -> String {
-        let now = chrono::Utc::now().timestamp();
-        let mut claims = json!({"iss":self.issuer,"sub":subject,"aud":if nonce.is_some() {client} else {"guard-api"},
-            "azp":client,"exp":now+120,"iat":now,"jti":salt,"roles":roles});
-        if let Some(nonce) = nonce {
-            claims["nonce"] = json!(nonce);
-        } else {
-            claims["typ"] = json!("Bearer");
-        }
-        let mut header = Header::new(Algorithm::RS256);
-        header.kid = Some("controlled-1".into());
-        jsonwebtoken::encode(
-            &header,
-            &claims,
-            &EncodingKey::from_rsa_der(&hex::decode(RSA_DER_HEX).unwrap()),
-        )
-        .unwrap()
+        signed_token(&self.issuer, client, subject, nonce, roles, salt, 120)
     }
     pub fn login_response(&self, nonce: &str, subject: &str, salt: &str) -> String {
         self.login_response_with_roles(nonce, subject, salt, &[])
@@ -249,4 +237,31 @@ impl ControlledIssuer {
         )
         .unwrap()
     }
+}
+
+pub(super) fn signed_token(
+    issuer: &str,
+    client: &str,
+    subject: &str,
+    nonce: Option<&str>,
+    roles: &[&str],
+    id: &str,
+    lifetime: i64,
+) -> String {
+    let now = chrono::Utc::now().timestamp();
+    let mut claims = json!({"iss":issuer,"sub":subject,"aud":if nonce.is_some() {client} else {"guard-api"},
+        "azp":client,"exp":now+lifetime,"iat":now,"jti":id,"roles":roles});
+    if let Some(nonce) = nonce {
+        claims["nonce"] = json!(nonce);
+    } else {
+        claims["typ"] = json!("Bearer");
+    }
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some("controlled-1".into());
+    jsonwebtoken::encode(
+        &header,
+        &claims,
+        &EncodingKey::from_rsa_der(&hex::decode(RSA_DER_HEX).unwrap()),
+    )
+    .unwrap()
 }

@@ -102,6 +102,7 @@ export class ControlDashboard {
   #generation = 0;
   #timer: ReturnType<typeof setTimeout> | undefined;
   #workerLinks: { slot: HTMLElement; entity: Pick<Agent, "session_id" | "sandbox_id" | "field_provenance"> } | null = null;
+  #pendingRelatedRead: { slot: HTMLElement } | null = null;
   #workerEntities: { slot: HTMLElement; worker: WorkerRecord } | null = null;
   #relatedEntities: (worker: WorkerRecord) => HTMLElement;
 
@@ -122,12 +123,14 @@ export class ControlDashboard {
     this.#usage = collection();
     this.#quota = resource();
     this.#workerLinks = null;
+    this.#pendingRelatedRead = null;
     this.#workerEntities = null;
   }
   unmount() { this.#slot = null; this.#view = null; }
   mount(slot: HTMLElement, view: ControlView) {
     this.#slot = slot;
     this.#view = view;
+    if (view === "workers") this.#discardDetachedWorkerRead();
     this.#render();
     const current = this.#current();
     if (!current.value || current.stale || current.error ||
@@ -149,7 +152,16 @@ export class ControlDashboard {
   }
   relationshipsChanged() { this.#render(); }
   #hasWorkerLinks() {
-    return !!this.#workerLinks?.slot.isConnected && !!this.#workerLinks.slot.closest("dialog")?.open;
+    return this.#isWorkerLinkOpen(this.#workerLinks?.slot);
+  }
+  #isWorkerLinkOpen(slot: HTMLElement | undefined) {
+    return !!slot?.isConnected && !!slot.closest("dialog")?.open;
+  }
+  #discardDetachedWorkerRead() {
+    if (!this.#pendingRelatedRead || this.#isWorkerLinkOpen(this.#pendingRelatedRead.slot)) return;
+    // The next consumer can use the last accepted page while the detached read finishes.
+    this.#pendingRelatedRead = null;
+    this.#workers.loading = false;
   }
   #schedule() {
     if (this.#timer !== undefined || this.#closed || (!this.#view && !this.#hasWorkerLinks())) return;
@@ -174,20 +186,25 @@ export class ControlDashboard {
   }
   async #load<T>(target: Collection<T>, cursor: string | null, history: (string | null)[],
     kind: "workers" | "usage", parse: (input: unknown) => ControlPage<T>) {
+    const relatedSlot = kind === "workers" && this.#view !== "workers" && this.#hasWorkerLinks() ? this.#workerLinks?.slot : undefined;
     await this.#read(target, controlPageUrl(kind, cursor), parse, () => {
       target.cursor = cursor;
       target.history = history;
-    });
+    }, relatedSlot);
   }
-  async #read<T>(target: Resource<T>, path: string, parse: (input: unknown) => T, accepted?: () => void) {
+  async #read<T>(target: Resource<T>, path: string, parse: (input: unknown) => T, accepted?: () => void, relatedSlot?: HTMLElement) {
     if (this.#closed || target.loading) return;
+    const relatedRead = relatedSlot ? { slot: relatedSlot } : null;
+    if (relatedRead) this.#pendingRelatedRead = relatedRead;
+    const isCurrent = () => !this.#closed && (!relatedRead || this.#pendingRelatedRead === relatedRead);
+    const acceptsResult = () => isCurrent() && (!relatedRead || this.#isWorkerLinkOpen(relatedSlot));
     const generation = this.#generation;
     target.loading = true;
     target.error = "";
     this.#render();
     try {
       const received = parse(await this.#client.get<unknown>(path));
-      if (this.#closed) return;
+      if (!acceptsResult()) return;
       target.value = received;
       target.loadedAt = new Date().toISOString();
       target.stale = generation !== this.#generation;
@@ -198,11 +215,13 @@ export class ControlDashboard {
         this.#onAuthError();
         return;
       }
+      if (!acceptsResult()) return;
       target.error = failure(error);
       target.stale = true;
     } finally {
-      target.loading = false;
-      if (!this.#closed) {
+      if (isCurrent()) {
+        if (relatedRead) this.#pendingRelatedRead = null;
+        target.loading = false;
         this.#render();
         if (target.stale && !target.error) this.#schedule();
       }
@@ -296,11 +315,16 @@ export class ControlDashboard {
   }
   #renderWorkers() {
     const page = this.#workers.value;
+    let evaluation: HTMLTimeElement | null = null;
+    if (page?.evaluated_at) {
+      evaluation = el("time", "", formatDate(page.evaluated_at, true));
+      evaluation.dateTime = page.evaluated_at;
+    }
     return el("section", "panel control-panel",
       el("div", "panel-heading", el("div", "", el("h2", "", "Registre des workers"),
         el("p", "", "État durable du contrôle. Le dernier état runtime reste une observation datée, distincte d’une disponibilité actuelle."),
         el("p", "muted", "Les brokers indiqués sont les propriétaires historiques des autorités du lancement et de l’inspection. Une association peut être enregistrée après ces faits : elle ne prouve pas quel broker les a effectués. Inventaire runtime inconnu."),
-        page?.evaluated_at ? el("p", "muted", `Évaluation serveur : ${formatDate(page.evaluated_at, true)}. Une transaction par page ; traversée live, sans total ni instantané global.`) : null,
+        evaluation ? el("p", "muted", "Évaluation serveur : ", evaluation, ". Une transaction par page ; traversée live, sans total ni instantané global.") : null,
         el("p", "control-scroll-hint", "Faites défiler le tableau horizontalement pour consulter toutes les colonnes."))),
       this.#registryLimit(),
       !page ? this.#empty(this.#workers.loading ? "Chargement des workers…" : "Registre indisponible",
@@ -374,6 +398,13 @@ export class ControlDashboard {
   #entityWorkers(entity: Pick<Agent, "session_id" | "sandbox_id" | "field_provenance">): HTMLElement {
     const slot = el("section", "agent-worker-links");
     slot.setAttribute("aria-label", "Workers liés explicitement");
+    this.#discardDetachedWorkerRead();
+    if (!entity.session_id && !entity.sandbox_id) {
+      this.#workerLinks = null;
+      slot.append(el("h3", "", "Workers liés explicitement"),
+        el("p", "muted", "Identifiant de session ou de runtime inconnu."));
+      return slot;
+    }
     this.#workerLinks = { slot, entity };
     this.#renderWorkerLinks();
     // The caller inserts the section in its modal before a request can re-render it.
@@ -439,6 +470,7 @@ export class ControlDashboard {
         const worker = parseWorker(await this.#client.get<unknown>(workerUrl(id)));
         if (this.#closed || !dialog.open || !dialog.isConnected) return;
         const observation = worker.last_observation;
+        const inspection = observation?.inspection;
         const yesNo = (input: boolean | null | undefined) => input == null ? "Inconnu" : input ? "Oui" : "Non";
         const raw = el("pre", "code-block");
         raw.textContent = JSON.stringify(worker, null, 2);
@@ -455,6 +487,8 @@ export class ControlDashboard {
             value("Allocation incohérente constatée", worker.allocation_inconsistent ? "Oui · aucune durée déduite" : "Non signalée"),
             value("Runtime", worker.launch.runtime_kind), value("Profil", worker.launch.profile),
             value("Autorité déclarée du lancement", worker.launch.authority_id ?? "Inconnue"),
+            value("Empreinte de l’image de lancement", worker.launch.image_id),
+            value("Empreinte du plan de lancement", worker.spec_hash),
             value("Fournisseur", worker.launch.provider), value("Conteneur", worker.attempt.container_id),
             value("Nom runtime stable", worker.attempt.stable_name), value("Volume de travail", worker.attempt.volume_name),
             value("Capacité CPU allouée", `${formatMetric(worker.launch.cpu_millis)} milliCPU`),
@@ -464,8 +498,11 @@ export class ControlDashboard {
           el("h3", "", "Dernière observation runtime"),
           !observation ? el("p", "muted", "Aucune observation reçue. L’état et la durée runtime restent inconnus.") :
             el("dl", "detail-grid", value("Observé le", formatDate(observation.observed_at, true)),
-              value("Autorité de la dernière inspection enregistrée", observation.inspection?.authority_id ?? "Inconnue"),
-              value("Runtime de l’inspection enregistrée", observation.inspection?.runtime_kind ?? "Inconnu"),
+              value("Autorité de la dernière inspection enregistrée", inspection?.authority_id ?? "Inconnue"),
+              value("Runtime de l’inspection enregistrée", inspection?.runtime_kind),
+              value("Conteneur inspecté", inspection?.container_id),
+              value("Empreinte de l’image inspectée", inspection?.image_id),
+              value("Empreinte du plan liée à l’inspection", inspection?.spec_hash),
               value("État inspecté", observation.status), value("En cours lors de l’inspection", yesNo(observation.running)),
               value("Début observé", formatDate(observation.started_at, true)), value("Fin observée", formatDate(observation.finished_at, true)),
               value("Code de sortie", observation.exit_code), value("Arrêt mémoire (OOM)", yesNo(observation.oom_killed)),

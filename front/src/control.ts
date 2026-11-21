@@ -3,8 +3,15 @@ import type { Agent, Sandbox } from "./types.ts";
 export type ControlView = "workers" | "quota" | "usage";
 export type WorkerState = "reserved" | "preparing" | "created" | "start_issued" |
   "running" | "stopping" | "terminal" | "in_doubt" | "cancelled";
+interface RuntimeInspection {
+  authority_id: string | null;
+  runtime_kind: "docker" | "podman";
+  container_id: string | null;
+  image_id: string | null;
+  spec_hash: string | null;
+}
 export interface RuntimeObservation {
-  inspection: { authority_id: string | null; runtime_kind: "docker" | "podman" } | null;
+  inspection: RuntimeInspection | null;
   observed_at: string;
   status: string;
   running: boolean | null;
@@ -19,12 +26,14 @@ export interface WorkerRecord {
   state: WorkerState;
   quota_held: boolean;
   revision: number;
+  spec_hash: string | null;
   launch: {
     version: number;
     session_id: string;
     profile: string;
     runtime_kind: "docker" | "podman";
     authority_id: string | null;
+    image_id: string | null;
     provider: string;
     cpu_millis: number;
     memory_bytes: number;
@@ -124,12 +133,20 @@ function authority(value: unknown): string | null {
     new TextEncoder().encode(value).byteLength > 256 || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) return contract();
   return value;
 }
-function inspection(value: unknown): RuntimeObservation["inspection"] {
+function optionalFingerprint(value: unknown, prefix = ""): string | null {
+  if (value == null) return null;
+  if (!text(value) || !value.startsWith(prefix) || value.length !== prefix.length + 64 ||
+    !/^[a-f0-9]{64}$/.test(value.slice(prefix.length))) return contract();
+  return value;
+}
+function inspection(value: unknown): RuntimeInspection | null {
   if (value == null) return null;
   if (!record(value)) return contract();
   const runtime = value.runtime_kind;
   if (runtime !== "docker" && runtime !== "podman") return contract();
-  return { authority_id: authority(value.authority_id), runtime_kind: runtime };
+  return { authority_id: authority(value.authority_id), runtime_kind: runtime,
+    container_id: optionalFingerprint(value.container_id), image_id: optionalFingerprint(value.image_id, "sha256:"),
+    spec_hash: optionalFingerprint(value.spec_hash) };
 }
 function observation(value: unknown): boolean {
   if (value === null) return true;
@@ -161,12 +178,13 @@ export function parseWorker(value: unknown): WorkerRecord {
   return {
     worker_id: source.worker_id, state: source.state, quota_held: source.quota_held,
     revision: source.revision, unknown_reason: source.unknown_reason,
+    spec_hash: optionalFingerprint(value.spec_hash),
     observed_started_at: source.observed_started_at, allocation_inconsistent: source.allocation_inconsistent,
     cleanup_removed: source.cleanup_removed, cleanup_error: source.cleanup_error,
     launch: {
       version: source.launch.version, session_id: source.launch.session_id,
       profile: source.launch.profile, runtime_kind: source.launch.runtime_kind,
-      authority_id: authority(source.launch.authority_id),
+      authority_id: authority(launch.authority_id), image_id: optionalFingerprint(launch.image_id, "sha256:"),
       provider: source.launch.provider, cpu_millis: source.launch.cpu_millis,
       memory_bytes: source.launch.memory_bytes, pids_limit: source.launch.pids_limit,
       timeout_seconds: source.launch.timeout_seconds, network: source.launch.network,

@@ -1,6 +1,6 @@
 //! Explicit local client. Discovering a missing broker never starts one.
 use super::{
-    profile::SubmitV1,
+    profile::{Registry, SubmitV1},
     protocol::{BrokerCommandV1, BrokerReplyV1, EnvelopeV1, ReplyEnvelopeV1},
 };
 use crate::{
@@ -8,10 +8,74 @@ use crate::{
         discovery::load_endpoint,
         local_ipc::{read_frame, write_frame},
     },
-    control_fs::{Directory, absolute_path},
+    control_fs::{Directory, PrivateFile, absolute_path},
 };
 use anyhow::{Result, anyhow, ensure};
-use std::{path::Path, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+/// Retain a single private credential identity for the duration of a CLI operation.
+pub struct BrokerClient {
+    root: PathBuf,
+    profile: String,
+    credential: PrivateFile,
+    registry_source: Option<(PrivateFile, Directory)>,
+    selection_source: Option<PrivateFile>,
+}
+
+impl BrokerClient {
+    pub fn open(root: PathBuf, profile: String, token_file: &Path) -> Result<Self> {
+        let credential = PrivateFile::open(token_file, 4096)
+            .map_err(|_| anyhow!("private broker credential file is unavailable or unsafe"))?;
+        Ok(Self {
+            root,
+            profile,
+            credential,
+            registry_source: None,
+            selection_source: None,
+        })
+    }
+
+    /// Load the named profile from an absolute private broker registry.
+    pub fn open_from_config(config: &Path, profile: String) -> Result<Self> {
+        Self::from_registry(Registry::load(config)?, profile, None)
+    }
+
+    pub(super) fn from_registry(
+        registry: Registry,
+        profile: String,
+        selection_source: Option<PrivateFile>,
+    ) -> Result<Self> {
+        let token_file = &registry.profile(&profile)?.runner_token_file;
+        let mut client = Self::open(registry.data.root.clone(), profile, token_file)?;
+        client.registry_source = Some((registry.source, registry.source_directory));
+        client.selection_source = selection_source;
+        Ok(client)
+    }
+
+    pub async fn request(&self, command: BrokerCommandV1) -> Result<BrokerReplyV1> {
+        if let Some(source) = &self.selection_source {
+            source
+                .persistent_revalidate()
+                .map_err(|_| anyhow!("private broker selection changed"))?;
+        }
+        if let Some((source, directory)) = &self.registry_source {
+            source
+                .revalidate()
+                .and_then(|()| directory.revalidate())
+                .map_err(|_| anyhow!("private broker configuration changed"))?;
+        }
+        self.credential
+            .revalidate()
+            .map_err(|_| anyhow!("broker credential file changed"))?;
+        let credential = std::str::from_utf8(self.credential.bytes())
+            .map_err(|_| anyhow!("invalid broker credential file"))?
+            .trim();
+        request(&self.root, &self.profile, credential, command).await
+    }
+}
 
 pub fn encode_submit(submit: &SubmitV1) -> Result<String> {
     let bytes = serde_json::to_vec(submit).map_err(|_| anyhow!("invalid broker submission"))?;

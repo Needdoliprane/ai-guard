@@ -280,12 +280,17 @@ impl Execution<'_> {
         Ok(())
     }
 
-    pub(super) async fn emit_event(&self, event: crate::model::Event) -> Result<()> {
+    fn redact_for_outbox(&self, event: serde_json::Value) -> Result<crate::model::Event> {
         // Freeze redaction before the outbox entry. POST uses exactly these
         // bytes/UUID/timestamp again after a lost HTTP or writer ACK.
         let event: crate::model::Event =
-            serde_json::from_value(self.client.redactor.value(&serde_json::to_value(event)?))?;
+            serde_json::from_value(self.client.redactor.value(&event))?;
         event.validate()?;
+        Ok(event)
+    }
+
+    pub(super) async fn emit_event(&self, event: crate::model::Event) -> Result<()> {
+        let event = self.redact_for_outbox(serde_json::to_value(event)?)?;
         self.executor
             .writer
             .enqueue_event(self.operation, event.clone())
@@ -469,6 +474,17 @@ impl Execution<'_> {
         let bytes = completion
             .bytes
             .context("export transport bytes are unavailable; destination was not recreated")?;
+        self.publish_export(target, bytes)
+            .await
+            .map(ControlFlow::Continue)
+    }
+
+    pub(super) async fn publish_export(
+        &self,
+        target: ValidatedExportTarget,
+        bytes: Vec<u8>,
+    ) -> Result<ExportCompletion> {
+        let (_, draft) = self.load().await?;
         self.generation_current()?;
         let name = target
             .destination()
@@ -488,30 +504,39 @@ impl Execution<'_> {
         // Keep the closed export V1 fact and IPC acknowledgement unchanged.
         // This separate descriptive event extends the generic audit stream;
         // its absence in historical exports means unknown, never zero.
-        self.fact_event(
-            "workspace.export.policy",
-            &ExportPolicyFactsV1 {
-                version: 1,
-                request_id,
-                manifest_digest: manifest_digest.clone(),
-                omitted_entries: report.omitted_entries,
-            },
-        )
-        .await?;
+        let policy = ExportPolicyFactsV1 {
+            version: 1,
+            request_id,
+            manifest_digest: manifest_digest.clone(),
+            omitted_entries: report.omitted_entries,
+        };
+        let files = report.manifest.len();
         let result = ExportFactsV1 {
             version: 1,
             request_id,
             destination_ref,
             destination_intent_hash,
             manifest_digest: manifest_digest.clone(),
-            files: report.manifest.len(),
+            files,
         };
-        self.fact_event("broker.batch.export", &result).await?;
-        Ok(ControlFlow::Continue(ExportCompletion {
+        let event =
+            |kind, data| self.redact_for_outbox(crate::runner::event(&draft.run.plan, kind, data));
+        let events = vec![
+            event("workspace.export.policy", serde_json::to_value(policy)?)?,
+            event("broker.batch.export", serde_json::to_value(result)?)?,
+        ];
+        // Publish both observations in one revision before either POST so a
+        // lost response can replay the same audit facts and export receipt.
+        self.executor
+            .writer
+            .enqueue_events(self.operation, events)
+            .await?;
+        self.replay_events().await?;
+        Ok(ExportCompletion {
             request_id,
             manifest_digest,
-            files: report.manifest.len(),
-        }))
+            files,
+        })
     }
 }
 

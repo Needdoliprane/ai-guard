@@ -18,6 +18,8 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
+#[cfg(test)]
+mod cookie_fixation_tests;
 mod gateway;
 mod registry;
 use gateway::{admit, callback, logout, native_intent, refresh, rotate, start, tokens};
@@ -61,6 +63,7 @@ struct PendingRefresh {
 struct BrowserTransaction {
     pending: Option<PendingLogin>,
     expected_state: [u8; 32],
+    expected_correlation_token: [u8; 32],
     transaction_id: Uuid,
     operation_id: Uuid,
     session_id: Uuid,
@@ -97,6 +100,7 @@ enum Delivery {
 }
 struct PendingDelivery {
     result: Delivery,
+    expected_correlation_token: [u8; 32],
     created: Instant,
 }
 struct ExchangeMarker {
@@ -104,6 +108,7 @@ struct ExchangeMarker {
     // Retain this even before proof. If admission succeeds but the callback
     // disappears before delivery, reap must close that exact admitted session.
     session_id: Uuid,
+    expected_correlation_token: [u8; 32],
     created: Instant,
 }
 #[derive(Default)]
@@ -380,7 +385,7 @@ async fn status(State(state): State<GatewayState>, headers: HeaderMap) -> ApiRes
         .await
 }
 fn status_sync(State(state): State<GatewayState>, headers: HeaderMap) -> ApiResult<Response> {
-    let mut response = Json(match &state.oidc {
+    let response = Json(match &state.oidc {
         Some(oidc) => json!({"version":1,"enabled":true,"issuer":oidc.config.provider.issuer,"provider_label":oidc.config.provider_label}),
         None => json!({"version":1,"enabled":false}),
     }).into_response();
@@ -399,19 +404,7 @@ fn status_sync(State(state): State<GatewayState>, headers: HeaderMap) -> ApiResu
             return Err(capacity());
         }
         drop(registry);
-        if correlation_cookie(&headers)?.is_none() {
-            let raw =
-                hex::encode(crate::identity::random_bytes().map_err(|_| audit_unavailable())?);
-            response.headers_mut().insert(
-                header::SET_COOKIE,
-                HeaderValue::from_str(&cookie(
-                    &raw,
-                    oidc.config.web_origin.starts_with("https://"),
-                    false,
-                ))
-                .map_err(|_| audit_unavailable())?,
-            );
-        }
+        correlation_cookie(&headers)?;
     }
     Ok(response)
 }

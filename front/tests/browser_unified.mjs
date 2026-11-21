@@ -15,6 +15,26 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const scenario = process.env.AI_GUARD_UNIFIED_SCENARIO || "full";
 const ids = ["00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002", "00000000-0000-4000-8000-000000000003"];
 const session = "10000000-0000-4000-8000-000000000001";
+let partialProvenance = false;
+function withProvenance(worker) {
+  return {
+    ...worker,
+    spec_hash: "a".repeat(64),
+    allocation_inconsistent: true,
+    unknown_reason: "allocation history is inconsistent; explicit reconciliation required",
+    launch: { ...worker.launch, authority_id: "fixture-launch-authority", image_id: partialProvenance ? undefined : `sha256:${"b".repeat(64)}`,
+      credential_names: ["FIXTURE_EXCLUDED_FIELD"] },
+    attempt: { ...worker.attempt, container_id: "c".repeat(64) },
+    last_observation: {
+      observed_at: "2026-11-06T01:02:00.000Z", status: "exited", running: false,
+      started_at: null, finished_at: null, exit_code: 0, oom_killed: false, restart_count: 0,
+      inspection: { authority_id: "fixture-inspection-authority", runtime_kind: "docker",
+        container_id: partialProvenance ? null : "d".repeat(64),
+        image_id: partialProvenance ? null : `sha256:${"e".repeat(64)}`,
+        spec_hash: partialProvenance ? undefined : "f".repeat(64) },
+    },
+  };
+}
 const worker = (tenant, related = true) => ({
   worker_id: tenant === "b" ? ids[2] : related ? ids[1] : ids[0],
   state: "in_doubt", quota_held: true, revision: 1,
@@ -51,8 +71,9 @@ const server = createServer(async (request, response) => {
       response.writeHead(503); response.end(); return;
     }
     if (url.pathname === "/api/agents") return json(response, entityMode === "invalid" && tenant === "a" ? {} : {
-      items: [{ id: `agent-${tenant}`, name: tenant === "a" ? agentName : "Agent B", session_id: session,
-        sandbox_id: `sandbox-${tenant}`, provenance: "observed", field_provenance: { session_id: "declared", sandbox_id: "declared" } }],
+      items: [{ id: `agent-${tenant}`, name: tenant === "a" ? agentName : "Agent B", provenance: "observed",
+        ...(entityMode === "unidentified" ? {} : { session_id: session, sandbox_id: `sandbox-${tenant}`,
+          field_provenance: { session_id: "declared", sandbox_id: "declared" } }) }],
     });
     if (url.pathname === "/api/sandboxes") return json(response, { items: entityMode === "missing" ? [] : [{ id: `sandbox-${tenant}`,
       session_id: session, engine: "docker", network: "none" }] });
@@ -63,15 +84,20 @@ const server = createServer(async (request, response) => {
       response.writeHead(502); response.end(); return;
     }
     if (url.pathname === "/api/v1/federation/workers") {
+      if (workerMode === "forbidden") { response.writeHead(403); response.end(); return; }
       if (workerMode === "outage" && tenant === "a") { response.writeHead(503); response.end(); return; }
       const related = tenant === "b" || url.searchParams.has("cursor") || ["single", "updated"].includes(workerMode);
-      const item = worker(tenant, related);
+      const base = worker(tenant, related);
+      const item = scenario === "worker-provenance" ? withProvenance(base) : base;
       if (workerMode === "updated") item.worker_id = ids[2];
       // The first page intentionally has a matching runtime name but an unrelated session.
       if (!related) item.attempt.stable_name = "Agent A";
       return json(response, { items: [item], next_cursor: related ? null : ids[0] });
     }
-    if (url.pathname === `/api/v1/workers/${worker(tenant).worker_id}`) return json(response, worker(tenant));
+    if (url.pathname === `/api/v1/workers/${worker(tenant).worker_id}`) {
+      const item = worker(tenant);
+      return json(response, scenario === "worker-provenance" ? withProvenance(item) : item);
+    }
     if (url.pathname === "/api/v1/usage") return json(response, { items: [{
       worker_id: worker(tenant).worker_id, attempt_id: ids[0], terminal_observation_id: ids[0],
       started_at: "2026-11-01T12:00:00Z", finished_at: "2026-11-01T12:00:01Z", duration_ns: "1000000000",
@@ -121,6 +147,7 @@ const login = async (tenant) => {
 const navigate = async (name) => page.getByRole("link", { name, exact: true }).click();
 const modal = () => page.getByRole("dialog");
 const links = () => modal().locator(".agent-worker-links");
+const workerReads = () => requests.filter(({ path }) => path.startsWith("/api/v1/federation/workers?"));
 const openAgent = async () => {
   await navigate("Agents");
   await page.getByRole("button", { name: "Détails", exact: true }).click();
@@ -158,7 +185,72 @@ const focusEvidence = async () => page.evaluate(() => {
 });
 const runRegression = async () => {
   const findings = [];
-  if (scenario === "usage-links") {
+  if (scenario === "worker-provenance") {
+    await restart();
+    await navigate("Workers");
+    const workerDetails = page.locator(".control-view tbody tr").filter({ hasText: ids[1] })
+      .getByRole("button", { name: "Détails", exact: true });
+    for (const partial of [false, true]) {
+      partialProvenance = partial;
+      await workerDetails.click();
+      const source = withProvenance(worker("a"));
+      const inspection = source.last_observation.inspection;
+      await modal().getByRole("heading", { name: "Dernière observation runtime", exact: true }).waitFor();
+      for (const [label, expected] of [
+        ["Autorité déclarée du lancement", source.launch.authority_id],
+        ["Empreinte de l’image de lancement", source.launch.image_id],
+        ["Empreinte du plan de lancement", source.spec_hash],
+        ["Autorité de la dernière inspection enregistrée", inspection.authority_id],
+        ["Runtime de l’inspection enregistrée", inspection.runtime_kind],
+        ["Conteneur inspecté", inspection.container_id],
+        ["Empreinte de l’image inspectée", inspection.image_id],
+        ["Empreinte du plan liée à l’inspection", inspection.spec_hash],
+      ]) {
+        const value = modal().locator(".key-value")
+          .filter({ has: page.getByText(label, { exact: true }) }).locator("dd");
+        assert.deepEqual(await value.allTextContents(), [expected ?? "Inconnu"], label);
+      }
+      assert.equal(await modal().getByText("FIXTURE_EXCLUDED_FIELD", { exact: false }).count(), 0);
+      await page.keyboard.press("Escape");
+    }
+    assert.equal(requests.filter(({ path, tenant }) => path === `/api/v1/workers/${ids[1]}` && tenant === "a").length, 2);
+  } else if (scenario === "agent-registry-reopen") {
+    await restart();
+    assert.equal(workerReads().length, 0, "Le détail Agent part d’un registre encore non lu");
+    workerMode = "outage";
+    await hold("/api/v1/federation/workers?");
+    await openAgent();
+    await held();
+    await links().getByRole("status").getByText("Chargement…", { exact: true }).waitFor();
+    assert.equal(await links().getByText(/Aucune correspondance/).count(), 0);
+    await page.keyboard.press("Escape");
+    workerMode = "single";
+    await openAgent();
+    const activeLink = links().getByRole("button", { name: ids[1], exact: true });
+    try {
+      await activeLink.waitFor();
+      assert.equal(workerReads().length, 2, "Le nouveau détail lit le registre rétabli sans attendre le détail fermé");
+    } finally {
+      await release();
+    }
+    assert.equal(await activeLink.isVisible(), true, "Le 503 tardif n’efface pas le lien du nouveau détail");
+    assert.equal(await links().getByRole("alert").count(), 0, "Le 503 tardif ne rend pas le nouveau détail périmé");
+    await page.keyboard.press("Escape");
+    await openAgent();
+    await activeLink.waitFor();
+    assert.equal(workerReads().length, 2, "Un détail suivant réutilise la page autorisée encore fraîche");
+    workerMode = "forbidden";
+    emit("control.worker.transition");
+    await page.getByLabel("Jeton de lecture").waitFor();
+    assert.equal(await page.locator(".app-shell, dialog").count(), 0, "Un refus courant retire le détail et les données");
+    entityMode = "unidentified";
+    await login("a");
+    const beforeUnidentified = workerReads().length;
+    await openAgent();
+    await links().getByText("Identifiant de session ou de runtime inconnu.", { exact: true }).waitFor();
+    assert.equal(await links().getByText(/Aucune correspondance/).count(), 0);
+    assert.equal(workerReads().length, beforeUnidentified, "Sans identifiant de relation, aucun registre n’est nécessaire");
+  } else if (scenario === "usage-links") {
     for (const destination of ["Agent A", "sandbox-a"]) {
       await restart(); await openUsageWorker();
       await modal().getByRole("button", { name: destination, exact: true }).click();
@@ -231,7 +323,7 @@ try {
   } else {
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   await login("a");
-  assert.equal(requests.filter((item) => item.path.startsWith("/api/v1/workers")).length, 0);
+  assert.equal(workerReads().length, 0);
   await openAgent();
   await links().getByText("Données indisponibles", { exact: true }).waitFor();
   assert.equal(await links().getByText(/Aucune correspondance/).count(), 0, "Une erreur initiale ne signifie pas absence de worker");
@@ -299,6 +391,7 @@ try {
     "Échap après navigation entre détails rejoint le titre de la vue lorsque le déclencheur a disparu");
   // A transport can finish before logout while its JavaScript continuation arrives after login B.
   await openAgent();
+  await links().getByRole("status").getByText("Lecture réussie", { exact: true }).waitFor();
   await hold("/api/v1/federation/workers?");
   await links().getByRole("button", { name: "Première page", exact: true }).click();
   await held();

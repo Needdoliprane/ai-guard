@@ -11,6 +11,9 @@ use std::{
 };
 use tokio::{net::TcpListener, sync::watch, task::JoinHandle};
 
+#[path = "browser_fixture/egress.rs"]
+mod egress;
+
 const ENABLE: &str = "AI_GUARD_OWNED_BROWSER_FIXTURE";
 const DIST: &str = "AI_GUARD_OWNED_BROWSER_DIST";
 const CONTROL: &str = "AI_GUARD_OWNED_BROWSER_CONTROL";
@@ -32,10 +35,10 @@ struct Config {
 }
 
 impl Config {
-    fn load() -> Result<Self> {
+    fn load(opt_in: &str) -> Result<Self> {
         ensure!(
-            matches!(std::env::var(ENABLE).as_deref(), Ok("run-v1")),
-            "owned browser fixture requires explicit run-v1 opt-in"
+            std::env::var(ENABLE).is_ok_and(|mode| mode == opt_in),
+            "owned browser fixture requires its explicit opt-in"
         );
         let dist = absolute_env(DIST)?;
         ensure!(
@@ -433,7 +436,7 @@ struct Receipt {
     received_at: String,
 }
 
-fn export_receipts(root: &Directory, path: &Path) -> Result<()> {
+fn export_receipts(root: &Directory, path: &Path, tenant: &str) -> Result<()> {
     let connection = rusqlite::Connection::open_with_flags(
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
@@ -465,7 +468,7 @@ fn export_receipts(root: &Directory, path: &Path) -> Result<()> {
     publish(
         root,
         "RECEIPTS.json",
-        &json!({"version":1,"tenant_id":"B","complete":complete,"limit":RECEIPT_LIMIT,"records":receipts}),
+        &json!({"version":1,"tenant_id":tenant,"complete":complete,"limit":RECEIPT_LIMIT,"records":receipts}),
     )?;
     Ok(())
 }
@@ -474,7 +477,7 @@ fn export_receipts(root: &Directory, path: &Path) -> Result<()> {
 #[ignore = "explicit owned browser QA only; requires private control root and admitted frontend dist"]
 async fn serve_owned_browser_fixture() -> Result<()> {
     let started = Instant::now();
-    let config = Config::load()?;
+    let config = Config::load("run-v1")?;
     let deadline = started + Duration::from_secs(config.seconds) - CLOSE_RESERVE;
     let (fixture, event_ids) = seed()?;
     let (bundle, credentials, tokens) = fixture.owned_startup();
@@ -514,7 +517,7 @@ async fn serve_owned_browser_fixture() -> Result<()> {
     // cleanup path. Unlock before waiting for actual HTTP/blocking usages.
     let unlocked = lock.release().is_ok();
     let stopped = servers.close().await;
-    let receipts = export_receipts(&config.root, &database);
+    let receipts = export_receipts(&config.root, &database, "B");
     publish(
         &config.root,
         "CLOSED.json",

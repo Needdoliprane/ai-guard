@@ -1,0 +1,22 @@
+# Docker-only fixture for a fresh DEMO with occupied host control ports.
+# Prepare with a reviewed manifest whose Web origin matches the IdP import.
+services:
+  setup:
+    command: ["setup", "prepare", "--input", "-", "--output-dir", "/data/installation"]
+  dashboard:
+    command:
+      - dashboard
+      - --listen
+      - 0.0.0.0:4000
+      - --container-listen
+      - --upstream
+      - http://gateway:8787
+      - --shared-tenants
+      - --oidc-web-origin
+      - "http://127.0.0.1:${AI_GUARD_TEST_SSO_DASHBOARD_PORT:?Choose a free loopback dashboard port}"
+      - --front-dir
+      - /app/front
+  ingress:
+    ports: !override
+      - "127.0.0.1:${AI_GUARD_TEST_SSO_GATEWAY_PORT:?Choose a free loopback gateway port}:8787"
+      - "127.0.0.1:${AI_GUARD_TEST_SSO_DASHBOARD_PORT:?Choose a free loopback dashboard port}:4000"

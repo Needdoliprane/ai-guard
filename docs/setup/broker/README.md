@@ -22,14 +22,14 @@ Before starting the service, prepare these installation values:
 | Gateway origin | The real authorized origin: HTTPS, or HTTP loopback for a deliberate local installation, without credentials, path, query or fragment. |
 | Tenant and namespace | The actual `tenant_id` and `control_namespace_uuid` returned by the authenticated control, as described below. Registry strings are expectations, not identity grants. |
 | Runner files | Existing private `0600` credential sources with private parents. Reference their paths; never print their contents or put them in command arguments. |
-| Runtime endpoint | An explicit absolute local Unix socket URL for Docker, such as `unix:///absolute/engine/docker.sock`. Podman also accepts its explicit `local` endpoint. Use the account/context intended for the jobs. |
+| Runtime endpoint | An explicit absolute local Unix socket URL, such as `unix:///absolute/engine/docker.sock`. Podman accepts `local` on a native Linux or FreeBSD host. Use the account intended for the jobs. |
 | Source and export roots | Existing allowed directories with safe ownership, permissions and ancestry. Source and export trees must be disjoint. Export roots must also be physically separate from broker/configuration storage. Avoid broad roots containing control data. |
 
 Rootless operation is the normal requirement. `allow_rootful_runtime: true` is a deliberate exception for an installation that requires it, including Docker Desktop configurations that do not report rootless operation. It is not an isolation equivalence. Keep `network: "none"` unless a separately reviewed job profile requires outbound access.
 
 ## Require an active compatible control
 
-Broker RPCs authenticate their **presented** credential afresh against `GET /control/api/v1/control/protocol` on the published origin. The broker requires `role: "runner"`, the configured tenant and namespace, `schema_version` 3 through 10 and the `broker_supervision_v1` protocol. Submit, approve, resume and export also require `active: true`. Status, list, recovery-status and cancel can authenticate against an inactive compatible control; their other dependencies and safety checks still apply. Being the same Unix UID is transport access, not tenant authentication.
+Broker RPCs authenticate their **presented** credential afresh against `GET /control/api/v1/control/protocol` on the published origin. The broker requires `role: "runner"`, the configured tenant and namespace, `schema_version` 3 through 13 and the `broker_supervision_v1` protocol. Submit, approve, resume and export also require `active: true`. Status, list, recovery-status and cancel can authenticate against an inactive compatible control; their other dependencies and safety checks still apply. The same Unix UID grants transport access. The gateway still authenticates the tenant.
 
 Read the real tenant, namespace, role and supervision state before writing the registry. Replace the binary, origin and private credential path with your installation values:
 
@@ -82,7 +82,7 @@ This human registry differs from private Registry2 below and the local IPC `brok
 
 ## Write the private operator registry
 
-`broker serve --config` is the only reader of this registry. The CLI does not source dotenv or merge shell settings into it. The registry sets runtime, image, policy, filesystem roots and provider references; a submitting client cannot override those controls. `--profile` on broker client commands selects a registry `id`, whereas the decision policy is the registry's `policy_profile`.
+`broker serve --config` loads this registry to enforce the runtime, image, policy, filesystem roots and provider references. The client flag `--broker-config` resolves the IPC target and token file for the selected profile. The commands read registry values directly from the JSON file. The server enforces those controls. `--profile` on broker client commands and `--broker-profile` on `run` select a registry `id`. The decision policy comes from `policy_profile`.
 
 The following is a **complete Registry wire version2 template** for a new Docker installation. Replace every `<...>` value and every `/absolute/...` reference with reviewed installation values before loading it. The two UUID placeholders must be non-nil UUIDs; the installation UUID is newly assigned to this installation, while the namespace UUID and tenant come from the real authenticated control. Paths and the image are illustrative references, not installed resources. No credential value belongs in this JSON.
 
@@ -203,6 +203,19 @@ The enforcer's private IPC authentication belongs to the broker state and is sep
 The D7 Legacy candidate connects the default genuinely new installation to its own native prospective factory, with the configured S/W budget. The same Rust child exclusively creates its role and V1 lock, then owns the exact STOP context before the Arm RPC. It does not select Full3. Only the parent that actually launched that child retains native-correlated Fresh startup provenance; a reconnect or an apparently empty existing directory cannot recreate it. Initial recovery is skipped only when that provenance, complete control material and a strictly absent/empty journal inventory all agree. Existing/cold roles remain fenced before scans; automatic business reopening is not provided. The [D7 source validation status](../../engineering/D7_STOP_RECOVERY.md) remains NOT_RUN for this new composition until its separate Root/Luna review and checks. A true Claim/start still needs actual ManagedRuntime/Ready and separate engine qualification.
 
 An old live daemon without the new authenticated prospective/fence capability refuses new Arm RPCs and new recovery scans. Its existing Status/Slots/Cancel/STOP paths and native owners remain; there is no takeover or automatic migration. Keep the original role and control connection, use the exact-operation Cancel with a stable command UUID where available, and inspect recovery evidence plus actual runtime observations before concluding drain. Unavailable coverage remains unknown. Missing authentication/anchors require controlled restoration, not deletion/rekeying or a Full3 detour. This candidate provides no automatic Legacy drain, quota retirement, cold-gate reopening or qualified migration.
+
+### Plan broker recovery under a service manager
+
+Run the planner with the installation's existing executable, private registry and sealed Full3 role. Select `systemd` on Linux or `launchd` on macOS. The executable and registry are resolved on that host under the effective control account.
+
+```sh
+"$AIGUARD_BIN" broker service plan --platform "$AIGUARD_SERVICE_PLATFORM" \
+  --config "$AIGUARD_BROKER_CONFIG" --enforcer-full3-existing "$AIGUARD_ENFORCER_ROLE"
+```
+
+The JSON on stdout gives the account, registry root, exact arguments, proposed unit file and a diff against an empty baseline. The plan records the installed state as unknown. The command is read-only. File installation and activation are separate operator actions. A missing OS account or unsafe registry is a refusal. The systemd file has no boot target registration and the launchd file is disabled by default.
+
+The proposed service depends on an independently started, sealed Full3 role for the same installation. At service startup, the broker authenticates that role and checks its health and capacity. Recovery leaves new admissions closed even when the broker publishes its endpoint. The STOP path can start a separate recovery helper if the original endpoint disappears. Its lifetime under either service manager, automatic recovery after reboot and recovery from a frozen process require separate validation. [Supervision contract](../../engineering/BROKER_SUPERVISION.md#installation-et-visibilité)
 
 ### Recover authorised stops with admission closed
 
@@ -330,6 +343,37 @@ If `--operation-id` is omitted, the CLI generates one and prints `Operation: UUI
 Status and list report cached journal/control facts. `accepted`, `reserved_in_process`, `interrupted`, `rejected` and `absent` are local job states, not runtime terminal states. Inspect `last_decision`, `review_request_hash`, `pending_rpc_count`, `worker_state`, `quota_held`, `runtime_status`, `last_observed_at` and `executor_error` together. Null or unavailable facts remain unknown. `executor_task_running: false` does not prove that a container stopped.
 
 List limits are 1–100, default20. Continue with `--after <next_after-uuid>` only when the reply returns that cursor. A page is not a tenant-wide total or a snapshot across pages. Corruption, incomplete state and access errors must not be treated as empty activity.
+
+### Wait for a supervised batch from `run`
+
+From the native control account, publish the selection of an allowed profile in the private registry used by `broker serve`. Choose a new selection directory under an existing private parent, outside the registry profiles’ import and export roots. `prepare-client` binds the selection to the registry and profile ID. The runner token stays in its private file. This command can run before the broker starts.
+
+If a workspace root is absent under the same parent as the selection, use ASCII names that differ beyond letter case or choose a different private parent. This lets the check distinguish the paths before the directory is created.
+
+```sh
+AIGUARD_BROKER_SELECTION="/absolute/private/ai-guard/operator/client-selection"
+"$AIGUARD_BIN" broker prepare-client --broker-config "$AIGUARD_BROKER_CONFIG" \
+  --profile "$AIGUARD_BROKER_PROFILE" --destination "$AIGUARD_BROKER_SELECTION"
+```
+
+With the broker running, `run` submits one batch and waits for the result. The broker owns the job and its execution deadline. Keep the operation UUID printed to stderr, or supply it before submission to recover a lost reply.
+
+```sh
+"$AIGUARD_BIN" run --broker-selection "$AIGUARD_BROKER_SELECTION" \
+  --operation-id "$AIGUARD_OPERATION" --project "$AIGUARD_PROJECT" --timeout 30 \
+  -- /usr/bin/id
+
+"$AIGUARD_BIN" broker result --broker-selection "$AIGUARD_BROKER_SELECTION" \
+  --operation-id "$AIGUARD_OPERATION"
+```
+
+The other forms remain available. With `--broker-config`, use `--broker-profile` for `run` and `--profile` for `broker` commands. With an explicit root, use `--broker-root`, `--broker-profile` and `--broker-token-file` for `run`, or `--root`, `--profile` and `--token-file` for `broker`. Choose one form. A registry change interrupts result polling. Once the operator has verified the registry, publish a new selection in a new directory and query the operation using its original UUID.
+
+To make the selection the default in a control-account session, set `AGENTSANDBOX_BROKER_SELECTION` to the absolute path of the published directory. `run` and `broker` client commands then use it without `--broker-selection`. The flag takes precedence over the environment setting. A missing or invalid directory causes the command to refuse. Unset the variable before using a different connection form, direct execution options or interactive mode.
+
+Omit `--timeout` to use the profile’s limit. `--broker-wait-seconds` limits the CLI wait independently, with a default of 600 seconds. Ctrl-C sends a request to cancel the same operation. A second Ctrl-C ends the wait after acknowledgement. Query `broker result` with the same UUID after losing the client or its reply. A terminal result requires the durable observations and acknowledgements for the exit, workspace scan and cleanup. `pending` and `ambiguous` preserve incomplete state. This entry point is for batch. It rejects explicit local runtime, gateway, policy and interactive options while a broker is selected.
+
+Once the broker has accepted an operation, an `Unavailable` reply to its result lookup makes the CLI read the same UUID again within the remaining wait. Any cancellation acknowledgement remains valid.
 
 ## Approve, cancel and resume with stable identities
 

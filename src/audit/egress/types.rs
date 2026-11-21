@@ -147,7 +147,7 @@ impl EgressStoreLimitsV1 {
         result.validate()?;
         Ok(result)
     }
-    pub(super) fn validate(&self) -> anyhow::Result<()> {
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
         valid(
             self.version == 1
                 && (1..=4096).contains(&self.active_heads)

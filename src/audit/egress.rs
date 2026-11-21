@@ -27,7 +27,8 @@ pub(super) use mutation::TerminalReservation;
 mod migration;
 pub(crate) use migration::VerifiedEgressSourceBackup;
 pub(super) use migration::{
-    install_format15, prepare_backup, resume_backup, validate_maintenance_identity,
+    confirm_format15, install_format15, maintenance_prefix, prepare_backup, resume_backup,
+    validate_maintenance_identity,
 };
 
 #[cfg(all(test, unix))]

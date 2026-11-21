@@ -4,8 +4,11 @@
 use agentsandbox::{
     api::{GatewayState, TenantGateway, gateway_router},
     audit::Store,
-    broker::service::{self, RequestedExecutionV1, SubmitV1, encode_submit, protocol::*},
-    control::WorkerStateV1,
+    broker::{
+        local_ipc::{EndpointRecordV1, read_frame, write_frame},
+        service::{self, RequestedExecutionV1, SubmitV1, encode_submit, protocol::*},
+    },
+    control::{WorkerMutationV1, WorkerStateV1, WorkerTransitionV1},
     control_fs::Directory,
     operations::initialize_config,
     policy::Policy,
@@ -14,13 +17,14 @@ use agentsandbox::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use axum::{
-    body::Body,
+    body::{Body, to_bytes},
     extract::{Request, State},
     http::{Method, StatusCode},
     middleware::{self, Next},
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     io,
@@ -56,10 +60,29 @@ pub struct Faults {
     pub claims: AtomicUsize,
     pub sends: AtomicUsize,
     pub acks: AtomicUsize,
+    // The admission test leaves the real supervised reservation route open.
+    // Later worker mutations are refused before the gateway can commit them.
+    before_import: Option<std::sync::Mutex<Vec<WorkerMutationV1>>>,
 }
 async fn fault(State(f): State<Arc<Faults>>, request: Request, next: Next) -> Response {
     if request.method() == Method::POST {
         let path = request.uri().path();
+        let worker_path = path.strip_prefix("/control").unwrap_or(path);
+        if let Some(prepare) = &f.before_import
+            && worker_path.starts_with("/api/v1/workers/")
+            && worker_path != "/api/v1/workers/supervised-reservations"
+        {
+            if worker_path.ends_with("/transitions")
+                && let Ok(bytes) = to_bytes(request.into_body(), 128 * 1024).await
+                && let Ok(mutation) = serde_json::from_slice::<WorkerMutationV1>(&bytes)
+                && matches!(&mutation.transition, WorkerTransitionV1::Prepare)
+                && let Ok(mut seen) = prepare.lock()
+                && seen.len() < 2
+            {
+                seen.push(mutation);
+            }
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
         if matches!(
             path,
             "/api/v1/relay/messages" | "/control/api/v1/relay/messages"
@@ -142,6 +165,40 @@ fn fresh(root: &Path, tenant: &str) -> Result<Arc<Store>> {
     store.migrate_workload_v6(&root.join(format!("{tenant}-before6.sqlite")))?;
     Ok(Arc::new(store))
 }
+async fn start_fixture_enforcer(root: &Path, broker_root: &Path) -> Result<Child> {
+    let enforcer_root = private_dir(broker_root, "enforcer")?;
+    // The relay fixture retains its existing guardian configuration.
+    private_file(&enforcer_root.join("auth"), &[0x51; 32])?;
+    let mut enforcer = Command::new(BIN)
+        .args(["__broker-enforcer", "--root"])
+        .arg(&enforcer_root)
+        .args(["--max-slots", "32"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(diagnostic(&root.join("enforcer.stderr"))?)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("HOME", root)
+        .current_dir(root)
+        .kill_on_drop(true)
+        .spawn()?;
+    timeout(Duration::from_secs(10), async {
+        loop {
+            ensure!(
+                enforcer.try_wait()?.is_none(),
+                "native fixture enforcer exited"
+            );
+            if std::fs::read_dir(enforcer_root.join("announcements"))
+                .is_ok_and(|mut entries| entries.next().is_some())
+            {
+                return Ok::<_, anyhow::Error>(());
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await??;
+    Ok(enforcer)
+}
 #[path = "broker_relay_runtime.rs"]
 mod runtime;
 use runtime::{Engine, engine_connection};
@@ -171,6 +228,12 @@ pub struct Fixture {
 }
 impl Fixture {
     pub async fn new(worker_timeout: u32) -> Result<Self> {
+        Self::open(worker_timeout, false).await
+    }
+    pub async fn new_codex_admission(worker_timeout: u32) -> Result<Self> {
+        Self::open(worker_timeout, true).await
+    }
+    async fn open(worker_timeout: u32, admission_only: bool) -> Result<Self> {
         let base = std::fs::canonicalize(std::env::temp_dir())?;
         let root = tempfile::Builder::new()
             .prefix("rh-")
@@ -185,6 +248,7 @@ impl Fixture {
             claims: AtomicUsize::new(0),
             sends: AtomicUsize::new(0),
             acks: AtomicUsize::new(0),
+            before_import: admission_only.then(std::sync::Mutex::default),
         });
         let app = gateway_router(GatewayState::for_tenants(
             vec![
@@ -300,11 +364,6 @@ impl Fixture {
         let ops = private_dir(root.as_path(), "ops")?;
         let operations = vec![ops.join("a1"), ops.join("a2")];
         let broker_root = private_dir(root.as_path(), "b")?;
-        let enforcer_root = private_dir(&broker_root, "enforcer")?;
-        // The internal enforcer correctly refuses an uninitialized auth file.
-        // This private dummy IPC capability is fixture-local; worker authority
-        // is still issued later through the real workload API/CLI.
-        private_file(&enforcer_root.join("auth"), &[0x51; 32])?;
         let mut profiles = Vec::new();
         for (id, tenant, store, token) in [
             ("a", "tenant-a", &a, &runner_a),
@@ -314,7 +373,31 @@ impl Fixture {
             initialize_config(&config)?;
             let mut profile = json!({"id":id,"gateway":origin,"tenant_id":tenant,"control_namespace_uuid":store.supervision_state()?.control_namespace_uuid,"config_dir":config,"runner_token_file":token,"runtime":"docker","runtime_program":program,"runtime_endpoint":"unix:///software-relay-fixture.sock","image":IMAGE,"policy_profile":"strict","network":"none","allow_rootful_runtime":false,"max_timeout_seconds":worker_timeout,"allow_capture_output":false,"managed_clients":false,"providers_file":null,"manual_credential_file":null,"source_roots":[sources],"export_roots":[exports],"prearmed_start_profile":{"version":1,"mode":"docker_minimal"}});
             if id == "a" {
-                profile["relay"] = json!({"version":1,"workload_operations":operations});
+                if admission_only {
+                    let key = operator.join("synthetic-codex.env");
+                    private_file(
+                        &key,
+                        b"OPENAI_API_KEY=synthetic-broker-admission-test-value\n",
+                    )?;
+                    let providers = config.join("providers.json");
+                    private_file(
+                        &providers,
+                        &serde_json::to_vec(&json!({
+                            "version": 1,
+                            "profiles": [{
+                                "id": "codex-api", "revision": 1, "client": "codex",
+                                "auth_mode": "api", "model": "gpt-6-luna",
+                                "credential": { "kind": "api_env_file", "path": key }
+                            }]
+                        }))?,
+                    )?;
+                    profile["managed_clients"] = json!(true);
+                    profile["providers_file"] = json!(providers);
+                    profile["policy_profile"] = json!("observe");
+                    profile["network"] = json!("bridge");
+                } else {
+                    profile["relay"] = json!({"version":1,"workload_operations":operations});
+                }
             }
             profiles.push(profile);
         }
@@ -325,35 +408,12 @@ impl Fixture {
                 &json!({"version":2,"installation_id":Uuid::new_v4(),"root":broker_root,"max_enforcer_slots":32,"profiles":profiles,"additional_control_secret_files":[]}),
             )?,
         )?;
-        let mut enforcer = Command::new(BIN)
-            .args(["__broker-enforcer", "--root"])
-            .arg(&enforcer_root)
-            .args(["--max-slots", "32"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(diagnostic(&root.join("enforcer.stderr"))?)
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-            .env("HOME", root.as_path())
-            .current_dir(root.as_path())
-            .kill_on_drop(true)
-            .spawn()?;
-        timeout(Duration::from_secs(10), async {
-            loop {
-                ensure!(
-                    enforcer.try_wait()?.is_none(),
-                    "native fixture enforcer exited"
-                );
-                if std::fs::read_dir(enforcer_root.join("announcements"))
-                    .is_ok_and(|mut entries| entries.next().is_some())
-                {
-                    break;
-                }
-                sleep(Duration::from_millis(20)).await;
-            }
-            Ok::<_, anyhow::Error>(())
-        })
-        .await??;
+        let enforcer = if admission_only {
+            // The actual broker must create and attest the new role itself.
+            None
+        } else {
+            Some(start_fixture_enforcer(root.as_path(), &broker_root).await?)
+        };
         let mut fixture = Self {
             root,
             a,
@@ -366,15 +426,66 @@ impl Fixture {
             registry,
             runner_a,
             broker: None,
-            enforcer: Some(enforcer),
+            enforcer,
             engine,
             engine_stop: Some(engine_stop),
             engine_task,
             server_stop: Some(server_stop),
             server_task,
         };
-        fixture.start_broker().await?;
+        if let Err(error) = fixture.start_broker().await {
+            if admission_only {
+                let cleanup = fixture.close().await;
+                return Err(error.context(if cleanup.is_ok() {
+                    "admission fixture broker did not start"
+                } else {
+                    "admission fixture broker did not start and cleanup is unconfirmed"
+                }));
+            }
+            return Err(error);
+        }
         Ok(fixture)
+    }
+    pub fn runner_file(&self) -> &Path {
+        &self.runner_a
+    }
+    pub async fn wait_before_import(&self) -> Result<WorkerMutationV1> {
+        let boundary = self
+            .faults
+            .before_import
+            .as_ref()
+            .context("admission-only fixture required")?;
+        timeout(Duration::from_secs(25), async {
+            loop {
+                if let Some(prepare) = boundary
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("admission boundary poisoned"))?
+                    .first()
+                    .cloned()
+                {
+                    return Ok::<_, anyhow::Error>(prepare);
+                }
+                sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .context("broker did not attempt Prepare after admission")?
+    }
+    async fn assert_admission_engine_untouched(&self) -> Result<()> {
+        let engine = self.engine.lock().await;
+        ensure!(
+            engine.containers.is_empty()
+                && engine.volumes.is_empty()
+                && engine.execs.is_empty()
+                && !engine.calls.iter().flatten().any(|part| {
+                    matches!(
+                        part.as_str(),
+                        "create" | "start" | "exec" | "run" | "kill" | "stop" | "rm"
+                    )
+                }),
+            "admission fixture reached a runtime mutation"
+        );
+        Ok(())
     }
     pub async fn start_broker(&mut self) -> Result<()> {
         ensure!(self.broker.is_none(), "broker already owned");
@@ -785,10 +896,23 @@ impl Fixture {
     pub async fn close(mut self) -> Result<()> {
         for child in [&mut self.broker, &mut self.enforcer] {
             if let Some(mut owned) = child.take() {
-                let _ = owned.kill().await;
-                let _ = timeout(Duration::from_secs(5), owned.wait()).await?;
+                if owned.try_wait()?.is_none() {
+                    owned.start_kill()?;
+                    timeout(Duration::from_secs(5), owned.wait()).await??;
+                }
             }
         }
+        let guardian = if self.faults.before_import.is_some() {
+            timeout(
+                Duration::from_secs(15),
+                close_admission_guardian(&self.broker_root),
+            )
+            .await
+            .context("admission guardian cleanup was not confirmed")
+            .and_then(|result| result)
+        } else {
+            Ok(())
+        };
         if let Some(stop) = self.engine_stop.take() {
             let _ = stop.send(());
         }
@@ -797,12 +921,112 @@ impl Fixture {
             let _ = stop.send(());
         }
         timeout(Duration::from_secs(5), &mut self.server_task).await???;
+        let untouched = if self.faults.before_import.is_some() {
+            self.assert_admission_engine_untouched().await
+        } else {
+            Ok(())
+        };
+        untouched?;
+        guardian?;
         ensure!(
             self.engine.lock().await.errors.is_empty(),
             "synthetic runtime fixture errors"
         );
         Ok(())
     }
+}
+async fn close_admission_guardian(broker_root: &Path) -> Result<()> {
+    let role = broker_root.join("enforcer");
+    match std::fs::symlink_metadata(&role) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+        Ok(_) => {}
+    }
+    let role = Directory::open_existing(&role)?;
+    let announcements = Directory::open_existing(&role.path().join("announcements"))?;
+    ensure!(
+        std::fs::read_dir(announcements.path())?.count() == 1,
+        "fresh admission guardian did not publish exactly one endpoint"
+    );
+    let publication = announcements.read_private_file("e-0001.json", 4096)?;
+    let record: Value = serde_json::from_slice(publication.bytes())?;
+    ensure!(
+        record["version"] == 1 && record["sequence"] == 1,
+        "invalid guardian publication"
+    );
+    let endpoint: EndpointRecordV1 = serde_json::from_value(record["endpoint"].clone())?;
+    let endpoints = Directory::open_existing(&role.path().join("endpoints"))?;
+    let capability = role.read_private_file("auth", 32)?;
+    ensure!(
+        capability.bytes().len() == 32,
+        "invalid private fixture capability size"
+    );
+
+    // This one request uses only the already published endpoint. It cannot
+    // start or reconnect to a replacement process. The guardian enforces idle.
+    let wait = Duration::from_secs(3);
+    let mut stream = endpoint.connect_checked(&endpoints).await?;
+    let challenge: Value = read_frame(&mut stream, 1024, wait).await?;
+    let epoch = serde_json::from_value::<Uuid>(challenge["epoch"].clone())?;
+    let nonce = serde_json::from_value::<Uuid>(challenge["nonce"].clone())?;
+    ensure!(
+        epoch == endpoint.epoch() && !nonce.is_nil(),
+        "guardian epoch differs from its publication"
+    );
+    capability.revalidate()?;
+    publication.revalidate()?;
+    let mut proof = Sha256::new();
+    proof.update(b"ai-guard:enforcer-auth:v1\0");
+    proof.update(capability.bytes());
+    proof.update(epoch.as_bytes());
+    proof.update(nonce.as_bytes());
+    write_frame(
+        &mut stream,
+        &json!({"proof": format!("{:x}", proof.finalize())}),
+        1024,
+        wait,
+    )
+    .await?;
+    write_frame(
+        &mut stream,
+        &json!({"kind": "shutdown_if_idle"}),
+        1024,
+        wait,
+    )
+    .await?;
+    let reply: Value = read_frame(&mut stream, 1024, wait).await?;
+    ensure!(
+        reply == json!({"kind": "acknowledged"}),
+        "idle guardian shutdown refused"
+    );
+    drop(stream);
+
+    let socket = endpoints.path().join(endpoint.directory_name()).join("s");
+    timeout(Duration::from_secs(5), async {
+        loop {
+            match UnixStream::connect(&socket).await {
+                Ok(stream) => drop(stream),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+                    ) =>
+                {
+                    endpoints.revalidate()?;
+                    publication.revalidate()?;
+                    ensure!(
+                        std::fs::read_dir(announcements.path())?.count() == 1,
+                        "guardian was replaced during shutdown"
+                    );
+                    return Ok::<_, anyhow::Error>(());
+                }
+                Err(error) => return Err(error.into()),
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .context("guardian acknowledged shutdown but its IPC remained reachable")?
 }
 impl Drop for Fixture {
     fn drop(&mut self) {

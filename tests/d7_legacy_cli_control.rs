@@ -192,6 +192,7 @@ fn closed_status_reply(reply: &BrokerReplyV1) -> String {
             let kind = match other {
                 BrokerReplyV1::Accepted { .. } => "accepted",
                 BrokerReplyV1::Rejected { .. } => "rejected",
+                BrokerReplyV1::Result { .. } => "result",
                 BrokerReplyV1::RelayStatus { .. } => "relay_status",
                 BrokerReplyV1::RecoveryStatus { .. } => "recovery_status",
                 BrokerReplyV1::RecoveryStatusV2 { .. } => "recovery_status_v2",

@@ -1,4 +1,4 @@
-//! Public read-only workspace-claim inspection against an owned loopback TLS
+//! Library and CLI workspace-claim inspection against an owned loopback TLS
 //! peer. Claim bodies are declared fixtures: they never qualify a provisioner,
 //! ReadWriteOncePod exclusivity, capacity enforcement or any cluster effect.
 mod support;
@@ -15,7 +15,7 @@ use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::PathBuf,
-    process::Stdio,
+    process::{Output, Stdio},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -31,14 +31,16 @@ const TENANT: &str = "GET /api/v1/namespaces/tenant-a";
 
 struct Behavior {
     namespace_uid: String,
+    namespace_uid_after_claim: Option<String>,
     pvc: Value,
     requests: Vec<String>,
 }
 struct Peer {
-    _root: tempfile::TempDir,
+    root: tempfile::TempDir,
     ca: PathBuf,
     token: PathBuf,
-    endpoint: String,
+    authority: KubernetesAuthorityV1,
+    authority_file: PathBuf,
     state: Arc<Mutex<Behavior>>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -73,18 +75,28 @@ impl Peer {
             "TLS fixture preparation failed"
         );
         let ca = root_path.join("ca.pem");
-        fs::write(&ca, fs::read(pki.join("root-ca.pem")).unwrap()).unwrap();
-        fs::set_permissions(&ca, fs::Permissions::from_mode(0o600)).unwrap();
+        private_write(&ca, &fs::read(pki.join("root-ca.pem")).unwrap());
         let token = root_path.join("bearer");
-        fs::write(&token, TOKEN).unwrap();
-        fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).unwrap();
+        private_write(&token, TOKEN.as_bytes());
         let identity =
             ServerIdentity::from_files(&pki.join("server-chain.pem"), &pki.join("server.key"))
                 .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("https://{}", listener.local_addr().unwrap());
+        let authority = KubernetesAuthorityV1::new(
+            Uuid::from_u128(1),
+            &endpoint,
+            CLUSTER_UID,
+            "tenant-a",
+            NAMESPACE_UID,
+            PrivateFile::open(&ca, 65536).unwrap().digest(),
+        )
+        .unwrap();
+        let authority_file = root_path.join("authority.json");
+        private_write(&authority_file, &serde_json::to_vec(&authority).unwrap());
         let state = Arc::new(Mutex::new(Behavior {
             namespace_uid: NAMESPACE_UID.into(),
+            namespace_uid_after_claim: None,
             pvc: bound_pvc(),
             requests: Vec::new(),
         }));
@@ -95,33 +107,51 @@ impl Peer {
                 .unwrap();
         });
         Self {
-            _root: root,
+            root,
             ca,
             token,
-            endpoint,
+            authority,
+            authority_file,
             state,
             task,
         }
     }
     fn runtime(&self) -> KubernetesRuntime {
-        let ca = PrivateFile::open(&self.ca, 65536).unwrap();
-        let authority = KubernetesAuthorityV1::new(
-            Uuid::from_u128(1),
-            &self.endpoint,
-            CLUSTER_UID,
-            "tenant-a",
-            NAMESPACE_UID,
-            ca.digest(),
-        )
-        .unwrap();
-        let credentials =
-            KubernetesCredentials::bearer(ca, PrivateFile::open(&self.token, 8192).unwrap());
-        KubernetesRuntime::connect(authority, credentials).unwrap()
+        let credentials = KubernetesCredentials::bearer(
+            PrivateFile::open(&self.ca, 65536).unwrap(),
+            PrivateFile::open(&self.token, 8192).unwrap(),
+        );
+        KubernetesRuntime::connect(self.authority.clone(), credentials).unwrap()
+    }
+    async fn inspect_cli(&self, name: &str) -> Output {
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_agentsandbox"));
+        command
+            .env_clear()
+            .current_dir(self.root.path())
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .args(["kubernetes", "inspect-workspace", "--claim-name", name])
+            .arg("--authority-file")
+            .arg(&self.authority_file)
+            .arg("--ca-file")
+            .arg(&self.ca)
+            .arg("--token-file")
+            .arg(&self.token);
+        tokio::time::timeout(Duration::from_secs(50), command.output())
+            .await
+            .expect("workspace inspection CLI exceeded its test budget")
+            .unwrap()
     }
     fn requests(&self) -> Vec<String> {
         self.state.lock().unwrap().requests.clone()
     }
 }
+
+fn private_write(path: &std::path::Path, bytes: &[u8]) {
+    fs::write(path, bytes).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+}
+
 fn bound_pvc() -> Value {
     json!({
         "apiVersion":"v1","kind":"PersistentVolumeClaim",
@@ -152,6 +182,9 @@ async fn handler(State(state): State<Arc<Mutex<Behavior>>>, request: Request<Bod
         "/api/v1/namespaces/tenant-a" => json!({"apiVersion":"v1","kind":"Namespace",
             "metadata":{"name":"tenant-a","uid":state.namespace_uid},"status":{"phase":"Active"}}),
         _ if path == format!("/api/v1/namespaces/tenant-a/persistentvolumeclaims/{CLAIM}") => {
+            if let Some(namespace_uid) = state.namespace_uid_after_claim.take() {
+                state.namespace_uid = namespace_uid;
+            }
             state.pvc.clone()
         }
         _ => return Response::builder().status(404).body(Body::empty()).unwrap(),
@@ -252,5 +285,166 @@ async fn workspace_claim_inspection_refuses_a_changed_namespace_before_the_pvc_g
         !requests
             .iter()
             .any(|line| line.contains("persistentvolumeclaims"))
+    );
+}
+
+#[tokio::test]
+async fn inspect_workspace_cli_reports_the_exact_claim_with_no_admission() {
+    let peer = Peer::new().await;
+    let output = peer.inspect_cli(CLAIM).await;
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let observed_at = report["claim"]["observed_at"].as_str().unwrap();
+    assert!(chrono::DateTime::parse_from_rfc3339(observed_at).is_ok());
+    assert_eq!(
+        report,
+        json!({
+            "version": 1,
+            "admission_available": false,
+            "authority_id": peer.authority.authority_id(),
+            "claim": {
+                "version": 1,
+                "authority_fingerprint": peer.authority.fingerprint(),
+                "namespace": "tenant-a",
+                "name": CLAIM,
+                "uid": CLAIM_UID,
+                "resource_version": "77",
+                "storage_class_name": "csi-rwop",
+                "volume_name": "pvc-fixture-a",
+                "capacity": "2Gi",
+                "access_mode": "ReadWriteOncePod",
+                "observed_at": observed_at,
+            },
+        })
+    );
+    let pvc = format!("GET /api/v1/namespaces/tenant-a/persistentvolumeclaims/{CLAIM}");
+    assert_eq!(
+        peer.requests(),
+        [KUBE_SYSTEM, TENANT, pvc.as_str(), KUBE_SYSTEM, TENANT]
+    );
+}
+
+#[tokio::test]
+async fn inspect_workspace_cli_distinguishes_storage_prerequisites() {
+    let peer = Peer::new().await;
+    let mut pending = bound_pvc();
+    pending["status"] = json!({"phase": "Pending"});
+    pending["spec"]
+        .as_object_mut()
+        .unwrap()
+        .remove("volumeName");
+    let mut unsupported_mode = bound_pvc();
+    unsupported_mode["spec"]["accessModes"] = json!(["ReadWriteOnce"]);
+    unsupported_mode["status"]["accessModes"] = json!(["ReadWriteOnce"]);
+    let mut missing_class = bound_pvc();
+    missing_class["spec"]
+        .as_object_mut()
+        .unwrap()
+        .remove("storageClassName");
+    let mut malformed_status_modes = pending.clone();
+    malformed_status_modes["status"]["accessModes"] = json!("ReadWriteOncePod");
+    let mut malformed_volume_name = pending.clone();
+    malformed_volume_name["spec"]["volumeName"] = json!(1);
+    let mut malformed_capacity = pending.clone();
+    malformed_capacity["status"]["capacity"] = json!({"storage": "unknown"});
+    let mut empty_mode = pending.clone();
+    empty_mode["spec"]["accessModes"] = json!([""]);
+    let mut unknown_mode = pending.clone();
+    unknown_mode["status"]["accessModes"] = json!(["FutureMode"]);
+
+    let invalid =
+        "Kubernetes workspace inspection returned an invalid namespace or claim observation";
+    let pvc = format!("GET /api/v1/namespaces/tenant-a/persistentvolumeclaims/{CLAIM}");
+    let expected = [KUBE_SYSTEM, TENANT, pvc.as_str(), KUBE_SYSTEM, TENANT];
+    for (claim, diagnostic, reads) in [
+        (pending, "Kubernetes workspace claim is Pending", 5),
+        (
+            unsupported_mode,
+            "Kubernetes workspace claim requires ReadWriteOncePod as its only access mode",
+            5,
+        ),
+        (
+            missing_class,
+            "Kubernetes workspace claim has no named StorageClass",
+            5,
+        ),
+        (malformed_status_modes, invalid, 3),
+        (malformed_volume_name, invalid, 3),
+        (malformed_capacity, invalid, 3),
+        (empty_mode, invalid, 3),
+        (unknown_mode, invalid, 3),
+    ] {
+        let before = peer.requests().len();
+        peer.state.lock().unwrap().pvc = claim;
+        let output = peer.inspect_cli(CLAIM).await;
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        let error = std::str::from_utf8(&output.stderr).unwrap();
+        assert!(error.contains(diagnostic), "expected {diagnostic}");
+        assert!(!error.contains(TOKEN) && !error.contains("csi-rwop"));
+        assert_eq!(peer.requests()[before..], expected[..reads]);
+    }
+}
+
+#[tokio::test]
+async fn inspect_workspace_cli_revalidates_authority_before_reporting_storage_prerequisites() {
+    let peer = Peer::new().await;
+    {
+        let mut state = peer.state.lock().unwrap();
+        state.pvc["status"] = json!({"phase": "Pending"});
+        state.namespace_uid_after_claim = Some("44444444-4444-4444-8444-444444444444".into());
+    }
+    let output = peer.inspect_cli(CLAIM).await;
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error = std::str::from_utf8(&output.stderr).unwrap();
+    assert!(error.contains("Kubernetes cluster or namespace identity differs"));
+    assert!(!error.contains("Pending"));
+    let pvc = format!("GET /api/v1/namespaces/tenant-a/persistentvolumeclaims/{CLAIM}");
+    assert_eq!(
+        peer.requests(),
+        [KUBE_SYSTEM, TENANT, pvc.as_str(), KUBE_SYSTEM, TENANT]
+    );
+}
+
+#[tokio::test]
+async fn inspect_workspace_cli_refuses_an_invalid_name_before_any_request() {
+    let peer = Peer::new().await;
+    let output = peer.inspect_cli("InvalidFixtureName").await;
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error = std::str::from_utf8(&output.stderr).unwrap();
+    assert!(error.contains("Kubernetes workspace claim name must be a lowercase DNS label"));
+    assert!(!error.contains("InvalidFixtureName"));
+    assert!(peer.requests().is_empty());
+}
+
+#[tokio::test]
+async fn inspect_workspace_cli_refuses_a_protected_name_before_any_request() {
+    let peer = Peer::new().await;
+    let output = peer.inspect_cli(TOKEN).await;
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error = std::str::from_utf8(&output.stderr).unwrap();
+    assert!(error.contains("workspace claim name contains protected credential material"));
+    assert!(!error.contains(TOKEN));
+    assert!(peer.requests().is_empty());
+}
+
+#[tokio::test]
+async fn inspect_workspace_cli_refuses_a_claim_observation_that_would_echo_credentials() {
+    let peer = Peer::new().await;
+    peer.state.lock().unwrap().pvc["spec"]["storageClassName"] = json!(TOKEN);
+    let output = peer.inspect_cli(CLAIM).await;
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error = std::str::from_utf8(&output.stderr).unwrap();
+    assert!(error.contains("output contains protected credential material"));
+    assert!(!error.contains(TOKEN));
+    let pvc = format!("GET /api/v1/namespaces/tenant-a/persistentvolumeclaims/{CLAIM}");
+    assert_eq!(
+        peer.requests(),
+        [KUBE_SYSTEM, TENANT, pvc.as_str(), KUBE_SYSTEM, TENANT]
     );
 }

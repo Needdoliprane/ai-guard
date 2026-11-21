@@ -35,6 +35,9 @@ pub(crate) enum KubernetesSessionRuntimeError {
     InstanceReplaced,
     InstanceRestarted,
     WorkspaceClaimInvalid,
+    WorkspaceClaimPending,
+    WorkspaceClaimAccessMode,
+    WorkspaceClaimStorageClass,
     /// A local precondition, the consumed guard or a cancellation refused
     /// the effect: no effect request was sent.
     EffectRefusedBeforeSend,
@@ -69,7 +72,10 @@ impl fmt::Display for KubernetesSessionRuntimeError {
             Self::InstanceRestarted => f.write_str(
                 "Kubernetes session container restarted; its identity is no longer exact",
             ),
-            Self::WorkspaceClaimInvalid => f.write_str(
+            Self::WorkspaceClaimInvalid
+            | Self::WorkspaceClaimPending
+            | Self::WorkspaceClaimAccessMode
+            | Self::WorkspaceClaimStorageClass => f.write_str(
                 "Kubernetes session workspace claim is not a bound ReadWriteOncePod claim for this attempt",
             ),
             Self::EffectRefusedBeforeSend => f.write_str(
@@ -97,6 +103,17 @@ impl fmt::Display for KubernetesSessionRuntimeError {
     }
 }
 impl std::error::Error for KubernetesSessionRuntimeError {}
+
+impl KubernetesSessionRuntimeError {
+    fn is_workspace_prerequisite(&self) -> bool {
+        matches!(
+            self,
+            Self::WorkspaceClaimPending
+                | Self::WorkspaceClaimAccessMode
+                | Self::WorkspaceClaimStorageClass
+        )
+    }
+}
 
 type Outcome<T> = Result<T, KubernetesSessionRuntimeError>;
 const INVALID: KubernetesSessionRuntimeError =
@@ -202,6 +219,21 @@ pub(crate) fn parse_workspace_claim(
     pvc: Value,
     observed_at: &str,
 ) -> Outcome<KubernetesSessionWorkspaceClaimV2> {
+    parse_workspace_claim_detailed(authority, name, pvc, observed_at).map_err(|error| {
+        if error.is_workspace_prerequisite() {
+            KubernetesSessionRuntimeError::WorkspaceClaimInvalid
+        } else {
+            error
+        }
+    })
+}
+
+fn parse_workspace_claim_detailed(
+    authority: &KubernetesAuthorityV1,
+    name: &str,
+    pvc: Value,
+    observed_at: &str,
+) -> Outcome<KubernetesSessionWorkspaceClaimV2> {
     let invalid = KubernetesSessionRuntimeError::WorkspaceClaimInvalid;
     authority
         .validate()
@@ -222,7 +254,6 @@ pub(crate) fn parse_workspace_claim(
         }
         Some(_) => false,
     };
-    let access_modes = json!([READ_WRITE_ONCE_POD]);
     if !valid_dns_label(name)
         || text("/apiVersion") != Some("v1")
         || text("/kind") != Some("PersistentVolumeClaim")
@@ -232,12 +263,9 @@ pub(crate) fn parse_workspace_claim(
             .get("deletionTimestamp")
             .is_some_and(|value| !value.is_null())
         || !finalizers
-        || text("/status/phase") != Some("Bound")
         || pvc
             .pointer("/spec/volumeMode")
             .is_some_and(|mode| mode.as_str() != Some("Filesystem"))
-        || pvc.pointer("/spec/accessModes") != Some(&access_modes)
-        || pvc.pointer("/status/accessModes") != Some(&access_modes)
         || pvc
             .pointer("/spec/dataSource")
             .is_some_and(|source| !source.is_null())
@@ -247,25 +275,92 @@ pub(crate) fn parse_workspace_claim(
     {
         return Err(invalid);
     }
-    let capacity = observation::quantity(pvc.pointer("/status/capacity/storage"))
-        .ok()
-        .flatten()
-        .ok_or(invalid)?;
+    let uid = required("/metadata/uid")?;
+    let resource_version = required("/metadata/resourceVersion")?;
+    if !valid_uid(&uid) || !valid_resource_version(&resource_version) {
+        return Err(invalid);
+    }
+    let pending = match text("/status/phase") {
+        Some("Bound") => false,
+        Some("Pending") => true,
+        _ => return Err(invalid),
+    };
+    let requested_rwop =
+        read_write_once_pod_only(pvc.pointer("/spec/accessModes").ok_or(invalid)?)?;
+    let observed_rwop = pvc
+        .pointer("/status/accessModes")
+        .map(read_write_once_pod_only)
+        .transpose()?;
+    let volume_name = pvc
+        .pointer("/spec/volumeName")
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|name| valid_subdomain(name))
+                .ok_or(invalid)
+        })
+        .transpose()?;
+    let capacity = match pvc.pointer("/status/capacity") {
+        None if pending => None,
+        Some(Value::Object(capacity)) => capacity.get("storage"),
+        _ => return Err(invalid),
+    };
+    let capacity = capacity
+        .map(|value| {
+            observation::quantity(Some(value))
+                .ok()
+                .flatten()
+                .ok_or(invalid)
+        })
+        .transpose()?;
+    if !pending && (observed_rwop.is_none() || volume_name.is_none() || capacity.is_none()) {
+        return Err(invalid);
+    }
+    let storage_class_name = match pvc.pointer("/spec/storageClassName") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(name)) if name.is_empty() => None,
+        Some(Value::String(name)) if valid_subdomain(name) => Some(name.clone()),
+        _ => return Err(invalid),
+    };
+    if !requested_rwop || observed_rwop == Some(false) {
+        return Err(KubernetesSessionRuntimeError::WorkspaceClaimAccessMode);
+    }
+    let storage_class_name =
+        storage_class_name.ok_or(KubernetesSessionRuntimeError::WorkspaceClaimStorageClass)?;
+    if pending {
+        return Err(KubernetesSessionRuntimeError::WorkspaceClaimPending);
+    }
     let wire = ClaimWire {
         version: 1,
         authority_fingerprint: authority.fingerprint(),
         namespace: authority.namespace().into(),
         name: name.into(),
-        uid: required("/metadata/uid")?,
-        resource_version: required("/metadata/resourceVersion")?,
-        storage_class_name: required("/spec/storageClassName")?,
-        volume_name: required("/spec/volumeName")?,
-        capacity,
+        uid,
+        resource_version,
+        storage_class_name,
+        volume_name: volume_name.ok_or(invalid)?.into(),
+        capacity: capacity.ok_or(invalid)?,
         access_mode: READ_WRITE_ONCE_POD.into(),
         observed_at: observed_at.into(),
     };
     wire.validate()?;
     Ok(KubernetesSessionWorkspaceClaimV2(wire))
+}
+
+fn read_write_once_pod_only(value: &Value) -> Outcome<bool> {
+    let invalid = KubernetesSessionRuntimeError::WorkspaceClaimInvalid;
+    let modes = value.as_array().ok_or(invalid)?;
+    if modes.is_empty()
+        || !modes.iter().all(|mode| {
+            matches!(
+                mode.as_str(),
+                Some("ReadWriteOnce" | "ReadOnlyMany" | "ReadWriteMany" | READ_WRITE_ONCE_POD)
+            )
+        })
+    {
+        return Err(invalid);
+    }
+    Ok(matches!(modes.as_slice(), [mode] if mode.as_str() == Some(READ_WRITE_ONCE_POD)))
 }
 
 /// Exact retained instance. Created only by `validate_admitted_session_pod`
@@ -663,27 +758,54 @@ impl KubernetesRuntime {
         &self,
         name: &str,
     ) -> KubernetesResult<KubernetesSessionWorkspaceClaimV2> {
+        self.inspect_workspace_claim(name, false)
+            .await
+            .map_err(|error| match error {
+                KubernetesSessionRuntimeError::Kubernetes(error) => error,
+                _ => KubernetesError::InvalidResponse,
+            })
+    }
+
+    /// Same inspection with closed prerequisite diagnostics for the operator CLI.
+    pub(crate) async fn inspect_session_workspace_claim_detailed(
+        &self,
+        name: &str,
+    ) -> Outcome<KubernetesSessionWorkspaceClaimV2> {
+        self.inspect_workspace_claim(name, true).await
+    }
+
+    async fn inspect_workspace_claim(
+        &self,
+        name: &str,
+        diagnose_prerequisites: bool,
+    ) -> Outcome<KubernetesSessionWorkspaceClaimV2> {
+        use KubernetesSessionRuntimeError::Kubernetes;
         if !valid_dns_label(name) {
-            return Err(KubernetesError::InvalidAuthority);
+            return Err(Kubernetes(KubernetesError::InvalidAuthority));
         }
-        self.verify_active_authority().await?;
+        self.verify_active_authority().await.map_err(Kubernetes)?;
         let namespace = self.binding.namespace();
         let pvc: Value = self
             .transport
             .get_unique(&format!(
                 "/api/v1/namespaces/{namespace}/persistentvolumeclaims/{name}"
             ))
-            .await?;
+            .await
+            .map_err(Kubernetes)?;
         let observed_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-        let claim =
-            parse_workspace_claim(&self.binding, name, pvc, &observed_at).map_err(|error| {
-                match error {
-                    KubernetesSessionRuntimeError::Kubernetes(error) => error,
-                    _ => KubernetesError::InvalidResponse,
-                }
-            })?;
-        self.verify_active_authority().await?;
-        Ok(claim)
+        let claim = if diagnose_prerequisites {
+            parse_workspace_claim_detailed(&self.binding, name, pvc, &observed_at)
+        } else {
+            parse_workspace_claim(&self.binding, name, pvc, &observed_at)
+        };
+        if claim.is_ok()
+            || claim
+                .as_ref()
+                .is_err_and(KubernetesSessionRuntimeError::is_workspace_prerequisite)
+        {
+            self.verify_active_authority().await.map_err(Kubernetes)?;
+        }
+        claim
     }
 
     /// Names come only from a rendered target and are revalidated before any

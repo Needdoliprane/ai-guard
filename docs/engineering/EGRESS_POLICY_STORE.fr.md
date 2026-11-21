@@ -6,6 +6,8 @@ Ce guide décrit le registre interne Rust et la maintenance explicite du format 
 
 Le registre conserve les politiques dans la base SQLite existante du tenant sélectionné : révisions immuables, head courant, reçus d'opération exacts et réserves terminales logiques. Il ne résout aucun nom, ne connecte aucune socket, n'émet aucun permis de connexion, n'applique aucune révocation runtime, n'expose aucune route HTTP et ne confère aucun droit réseau humain. G05/G07/G11 restent ouverts. `revoke_requested` ne signifie jamais qu'une connexion existante est fermée.
 
+Sur la candidate V1, `broker policy` utilise l’API technique réservée d’une Store15 déjà publiée. Le Journal nominatif affiche le remplacement et la demande de révocation d’une politique de session selon les droits de métadonnées de cette session. Il nomme la couverture du registre. Les décisions de connexion relèvent du raccord egress runtime. [Rejeux CLI et navigateur](../../tests/e2e/README.md#observer-le-registre-des-politiques-egress)
+
 ## Autorité et transactions
 
 Les méthodes privées `Store::egress_replace_policy_scoped` et `egress_revoke_policy_scoped` exigent le vrai `OwnedSourceToken` retenu, un `HumanSourcesWriteEpoch` valide et un `AuthenticatedReviewRunnerCredential`. La même transaction SQLite contrôlée vérifie source physique, marqueur, incarnation et binding review actif avant la recherche d'opération puis avant commit. L'acteur effectif porte explicitement `machine_control`, avec credential authentifié et identité du binding. Le propriétaire humain du binding n'est pas désigné comme approbateur.

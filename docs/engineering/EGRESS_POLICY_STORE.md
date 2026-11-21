@@ -6,6 +6,8 @@ This guide describes the internal Rust policy registry and explicit SQLite forma
 
 The registry retains policies in the existing SQLite database of the selected tenant. It provides immutable revisions, a current head, exact operation receipts and logical terminal reservations. It does not resolve names, connect sockets, issue connection permits, apply revocation to a runtime, expose an HTTP route or grant a human network permission. G05/G07/G11 remain open. `revoke_requested` never means that an existing connection was closed.
 
+On the V1 candidate, `broker policy` uses the reserved technical API on a previously published Store15. The human Journal shows session policy replacements and revocation requests only to a context with access to that session's metadata. It labels the evidence as policy-registry coverage and leaves connection decisions to the runtime egress path. [CLI and browser replay](../../tests/e2e/README.md#observer-le-registre-des-politiques-egress)
+
 ## Authority and transactions
 
 The private `Store::egress_replace_policy_scoped` and `egress_revoke_policy_scoped` methods require the actual retained `OwnedSourceToken`, a live `HumanSourcesWriteEpoch`, and an `AuthenticatedReviewRunnerCredential`. The same checked SQLite transaction verifies the source's physical backing, marker, incarnation and live review binding before operation lookup and again before commit. The effective actor is explicitly `machine_control`, with the authenticated credential and binding identity. The binding's human owner is not attributed as approver.

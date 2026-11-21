@@ -157,6 +157,7 @@ async fn oidc_is_explicitly_disabled_without_provider_configuration() {
         StatusCode::OK,
         "the public status must distinguish disabled OIDC from a missing route"
     );
+    assert!(response.headers().get("set-cookie").is_none());
     assert_eq!(response.headers()["cache-control"], "no-store");
     assert_eq!(response.headers()["referrer-policy"], "no-referrer");
     let value: Value =

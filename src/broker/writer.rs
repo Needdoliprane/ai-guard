@@ -30,6 +30,8 @@ use std::{
     },
     time::Duration,
 };
+#[cfg(test)]
+use std::{sync::OnceLock, time::Instant};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
@@ -180,9 +182,7 @@ enum Command {
     },
     #[cfg(test)]
     TestAdvanceReplyBarrier {
-        entered: oneshot::Sender<()>,
-        release: mpsc::Receiver<()>,
-        fail_before_ack: bool,
+        barrier: ArmedAdvanceReplyBarrier,
         reply: Reply<()>,
     },
     PendingRetirementEvents {
@@ -235,6 +235,10 @@ enum Command {
         reply: Reply<Option<AcceptedJobV1>>,
     },
     Status {
+        operation_id: Uuid,
+        reply: Reply<Option<JournalStatusV1>>,
+    },
+    ReadResult {
         operation_id: Uuid,
         reply: Reply<Option<JournalStatusV1>>,
     },
@@ -367,16 +371,17 @@ impl ClientState {
     ) -> JournalResult<T> {
         tokio::runtime::Handle::try_current().map_err(|_| JournalError::Io)?;
         let (reply, receive) = oneshot::channel();
+        let command = command(reply);
+        let result_read = matches!(&command, Command::ReadResult { .. });
         #[cfg(test)]
         {
             use super::journal::cost_measurement::{self, WriterKind};
-            let command = command(reply);
             let context = self as *const Self as usize;
             let cost = match &command {
                 Command::Load { operation_id, .. } => {
                     cost_measurement::caller(context, WriterKind::Load, *operation_id)
                 }
-                Command::Status { operation_id, .. } => {
+                Command::Status { operation_id, .. } | Command::ReadResult { operation_id, .. } => {
                     cost_measurement::caller(context, WriterKind::Status, *operation_id)
                 }
                 _ => None,
@@ -403,16 +408,14 @@ impl ClientState {
             }
             // Same timeout and nested error mapping as receive. Only this
             // test branch can distinguish reception from an actor's Io reply.
-            let mut waiter = status_cache::WaiterGuard::new(Arc::clone(&self.status_cache));
-            let completed = tokio::time::timeout(self.timeout, receive).await;
-            let received = matches!(&completed, Ok(Ok(_)));
-            if received {
+            let mut waiter = (!result_read)
+                .then(|| status_cache::WaiterGuard::new(Arc::clone(&self.status_cache)));
+            let completed = self.receive_reply(receive).await;
+            let received = completed.is_ok();
+            if received && let Some(waiter) = &mut waiter {
                 waiter.acknowledged();
             }
-            let result = match completed {
-                Ok(Ok(result)) => result,
-                _ => Err(JournalError::Io),
-            };
+            let result = completed.and_then(|result| result);
             if let Some(cost) = cost {
                 cost.finish(received, result.is_ok());
             }
@@ -420,23 +423,34 @@ impl ClientState {
         }
         #[cfg(not(test))]
         {
-            match self.sender.try_send(command(reply)) {
+            match self.sender.try_send(command) {
                 Ok(()) => {}
                 Err(mpsc::TrySendError::Full(_)) => return Err(JournalError::Busy),
                 Err(mpsc::TrySendError::Disconnected(_)) => return Err(JournalError::Io),
             }
             // A lost reply never removes or cancels the actor's typed command.
-            self.receive(receive).await
+            if result_read {
+                self.receive_reply(receive).await?
+            } else {
+                self.receive(receive).await
+            }
         }
     }
     async fn receive<T>(&self, receive: oneshot::Receiver<JournalResult<T>>) -> JournalResult<T> {
         let mut waiter = status_cache::WaiterGuard::new(Arc::clone(&self.status_cache));
-        let result = tokio::time::timeout(self.timeout, receive)
-            .await
-            .map_err(|_| JournalError::Io)?
-            .map_err(|_| JournalError::Io)?;
+        let result = self.receive_reply(receive).await?;
         waiter.acknowledged();
         result
+    }
+
+    async fn receive_reply<T>(
+        &self,
+        receive: oneshot::Receiver<JournalResult<T>>,
+    ) -> JournalResult<JournalResult<T>> {
+        tokio::time::timeout(self.timeout, receive)
+            .await
+            .map_err(|_| JournalError::Io)?
+            .map_err(|_| JournalError::Io)
     }
 }
 
@@ -630,9 +644,83 @@ impl Drop for WriterPauseGuard {
     }
 }
 #[cfg(test)]
+struct ArmedAdvanceReplyBarrier {
+    entered: oneshot::Sender<()>,
+    release: mpsc::Receiver<()>,
+    fail_before_ack: bool,
+    cleanup_trace: Option<Arc<CleanupAdvanceTrace>>,
+}
+
+#[cfg(test)]
+struct CleanupAdvanceTrace {
+    operation: Uuid,
+    expected: RevisionRefV1,
+    input_hash: String,
+    taken: OnceLock<Instant>,
+    durable: Arc<OnceLock<Instant>>,
+    returned: OnceLock<(Instant, Option<JournalError>)>,
+    reply_returned: OnceLock<(Instant, bool)>,
+}
+
+#[cfg(test)]
+impl CleanupAdvanceTrace {
+    fn matches(
+        &self,
+        operation: Uuid,
+        expected: &RevisionRefV1,
+        next: &BrokerCheckpointV3,
+    ) -> bool {
+        use super::checkpoint::SupervisionOperationV1;
+        self.operation == operation
+            && &self.expected == expected
+            && matches!(
+                next.broker().supervision().operations().last(),
+                Some(SupervisionOperationV1::HelperCleanup { request, response: None })
+                    if request.input_hash().is_ok_and(|hash| hash == self.input_hash)
+            )
+    }
+
+    fn report(&self, start: Instant, cutoff: Instant) -> String {
+        let elapsed_ms = |at: Instant| {
+            at.checked_duration_since(start)
+                .filter(|_| at <= cutoff)
+                .map(|elapsed| elapsed.as_millis())
+        };
+        let taken = self.taken.get().copied().and_then(elapsed_ms);
+        let durable = self.durable.get().copied().and_then(elapsed_ms);
+        let returned = self.returned.get().and_then(|(at, error)| {
+            elapsed_ms(*at).map(|ms| match error {
+                Some(error) => format!("{ms}:{error:?}"),
+                None => format!("{ms}:ok"),
+            })
+        });
+        let reply = self.reply_returned.get().and_then(|(at, sent)| {
+            elapsed_ms(*at).map(|ms| {
+                let outcome = if *sent { "accepted" } else { "receiver_closed" };
+                format!("{ms}:{outcome}")
+            })
+        });
+        format!(
+            "actor_taken_ms={} current_durable_ms={} journal_return_ms_and_result={} reply_return_ms_and_result={}",
+            taken
+                .map(|ms| ms.to_string())
+                .as_deref()
+                .unwrap_or("UNKNOWN"),
+            durable
+                .map(|ms| ms.to_string())
+                .as_deref()
+                .unwrap_or("UNKNOWN"),
+            returned.as_deref().unwrap_or("UNKNOWN"),
+            reply.as_deref().unwrap_or("UNKNOWN"),
+        )
+    }
+}
+
+#[cfg(test)]
 pub(crate) struct AdvanceReplyBarrier {
     entered: Option<oneshot::Receiver<()>>,
     release: mpsc::Sender<()>,
+    cleanup_trace: Option<Arc<CleanupAdvanceTrace>>,
 }
 #[cfg(test)]
 impl AdvanceReplyBarrier {
@@ -642,6 +730,11 @@ impl AdvanceReplyBarrier {
             .expect("one owned barrier waiter")
             .await
             .expect("actor reached its real reply barrier");
+    }
+    pub(crate) fn cleanup_trace_for_test(&self, start: Instant, cutoff: Instant) -> Option<String> {
+        self.cleanup_trace
+            .as_ref()
+            .map(|trace| trace.report(start, cutoff))
     }
 }
 #[cfg(test)]
@@ -685,19 +778,51 @@ impl WriterClient {
         &self,
         fail_before_ack: bool,
     ) -> JournalResult<AdvanceReplyBarrier> {
+        self.install_advance_reply_barrier_for_test(fail_before_ack, None)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn cleanup_advance_reply_barrier_for_test(
+        &self,
+        operation: Uuid,
+        expected: RevisionRefV1,
+        input_hash: String,
+    ) -> JournalResult<AdvanceReplyBarrier> {
+        let trace = CleanupAdvanceTrace {
+            operation,
+            expected,
+            input_hash,
+            taken: OnceLock::new(),
+            durable: Arc::new(OnceLock::new()),
+            returned: OnceLock::new(),
+            reply_returned: OnceLock::new(),
+        };
+        self.install_advance_reply_barrier_for_test(true, Some(Arc::new(trace)))
+            .await
+    }
+
+    #[cfg(test)]
+    async fn install_advance_reply_barrier_for_test(
+        &self,
+        fail_before_ack: bool,
+        cleanup_trace: Option<Arc<CleanupAdvanceTrace>>,
+    ) -> JournalResult<AdvanceReplyBarrier> {
         let (entered, observed) = oneshot::channel();
         let (release, wait) = mpsc::channel();
         let guard = AdvanceReplyBarrier {
             entered: Some(observed),
             release,
+            cleanup_trace: cleanup_trace.clone(),
         };
-        self.call(move |reply| Command::TestAdvanceReplyBarrier {
+        let barrier = ArmedAdvanceReplyBarrier {
             entered,
             release: wait,
             fail_before_ack,
-            reply,
-        })
-        .await?;
+            cleanup_trace,
+        };
+        self.call(move |reply| Command::TestAdvanceReplyBarrier { barrier, reply })
+            .await?;
         Ok(guard)
     }
     /// Last actor-acknowledged control facts only, never a fresh filesystem or
@@ -906,6 +1031,25 @@ impl WriterClient {
         })
         .await
     }
+
+    /// Strict read for Result. Losing this waiter cannot hide a mutation.
+    /// The actor still invalidates retained status on a real journal failure.
+    pub(crate) async fn result_status(
+        &self,
+        operation_id: Uuid,
+    ) -> JournalResult<Option<JournalStatusV1>> {
+        let _ = self.0.status_cache.read(operation_id)?;
+        let status = self
+            .call(move |reply| Command::ReadResult {
+                operation_id,
+                reply,
+            })
+            .await?;
+        // A fault on the owned actor or its service guard stops publication
+        // even if the strict read itself produced a successful reply.
+        let _ = self.0.status_cache.read(operation_id)?;
+        Ok(status)
+    }
     pub async fn list(&self, after: Option<Uuid>, limit: u32) -> JournalResult<JournalPageV1> {
         self.call(move |reply| Command::List {
             after,
@@ -1046,7 +1190,7 @@ fn serve_backend(
     // contain no ClientState/sender and cannot prevent graceful queue closure.
     let mut cold_quarantine = Vec::new();
     #[cfg(test)]
-    let mut advance_reply_barrier: Option<(oneshot::Sender<()>, mpsc::Receiver<()>, bool)> = None;
+    let mut advance_reply_barrier: Option<ArmedAdvanceReplyBarrier> = None;
     while let Ok(command) = receiver.recv() {
         match command {
             Command::CompleteColdAudit { mut input, reply } => {
@@ -1148,16 +1292,9 @@ fn serve_backend(
                 );
             }
             #[cfg(test)]
-            Command::TestAdvanceReplyBarrier {
-                entered,
-                release,
-                fail_before_ack,
-                reply,
-            } => {
+            Command::TestAdvanceReplyBarrier { barrier, reply } => {
                 assert!(
-                    advance_reply_barrier
-                        .replace((entered, release, fail_before_ack))
-                        .is_none(),
+                    advance_reply_barrier.replace(barrier).is_none(),
                     "one pending actor reply barrier"
                 );
                 let _ = respond(
@@ -1383,6 +1520,10 @@ fn serve_backend(
             Command::Status {
                 operation_id,
                 reply,
+            }
+            | Command::ReadResult {
+                operation_id,
+                reply,
             } => {
                 #[cfg(test)]
                 use super::journal::cost_measurement::{self, WriterKind};
@@ -1434,9 +1575,20 @@ fn serve_backend(
                 reply,
             } => {
                 #[cfg(test)]
+                let cleanup_trace = advance_reply_barrier
+                    .as_ref()
+                    .and_then(|barrier| barrier.cleanup_trace.as_ref())
+                    .filter(|trace| trace.matches(operation_id, &expected, &next))
+                    .cloned();
+                #[cfg(test)]
+                let durable_observer = cleanup_trace.as_ref().map(|trace| {
+                    let _ = trace.taken.set(Instant::now());
+                    super::journal::CurrentDurableObserver::install(Arc::clone(&trace.durable))
+                });
+                #[cfg(test)]
                 if advance_reply_barrier
                     .as_ref()
-                    .is_some_and(|(_, _, fail)| *fail)
+                    .is_some_and(|barrier| barrier.fail_before_ack)
                 {
                     super::journal::fail_next_cold_ack_for_test();
                 }
@@ -1444,11 +1596,19 @@ fn serve_backend(
                     .full()
                     .and_then(|journal| advance_lifecycle(journal, operation_id, expected, &next));
                 #[cfg(test)]
-                if let Some((entered, release, _)) = advance_reply_barrier.take() {
-                    let _ = entered.send(());
-                    // After the actual Journal call, without any filesystem
-                    // mutex held. Drop of the owned test guard releases it.
-                    let _ = release.recv_timeout(Duration::from_secs(10));
+                {
+                    drop(durable_observer);
+                    if let Some(trace) = &cleanup_trace {
+                        let _ = trace
+                            .returned
+                            .set((Instant::now(), result.as_ref().err().copied()));
+                    }
+                    if let Some(barrier) = advance_reply_barrier.take() {
+                        let _ = barrier.entered.send(());
+                        // After the actual Journal call, without any filesystem
+                        // mutex held. Drop of the owned test guard releases it.
+                        let _ = barrier.release.recv_timeout(Duration::from_secs(10));
+                    }
                 }
                 let update = result
                     .as_ref()
@@ -1459,7 +1619,15 @@ fn serve_backend(
                             next: &next,
                         }
                     });
+                #[cfg(not(test))]
                 let _ = respond(&backend, &status, reply, result, update, true);
+                #[cfg(test)]
+                {
+                    let outcome = respond(&backend, &status, reply, result, update, true);
+                    if let Some(trace) = &cleanup_trace {
+                        let _ = trace.reply_returned.set((Instant::now(), outcome.is_ok()));
+                    }
+                }
             }
             Command::AppendLocal {
                 operation_id,

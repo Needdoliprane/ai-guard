@@ -2412,3 +2412,5 @@ pub(super) enum FaultStage {
 mod launch_profile_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(super) use tests::CurrentDurableObserver;

@@ -13,6 +13,7 @@ use std::{
     collections::BTreeSet,
     io::Write,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    path::PathBuf,
 };
 use supervision_seed::{Seed, SeedOptions, Served, post_heartbeat, serve};
 
@@ -32,12 +33,19 @@ struct Reply {
 
 impl Stack {
     async fn start(options: SeedOptions) -> Self {
+        Self::start_with_front(options, None).await
+    }
+
+    async fn start_with_front(options: SeedOptions, front: Option<PathBuf>) -> Self {
         let files = support::private_tempdir();
         let seed = Seed::build(files.path(), options)
             .unwrap_or_else(|error| panic!("build the supervision seed: {error:#}"));
-        let front = files.path().join("front");
-        std::fs::create_dir(&front).unwrap();
-        std::fs::write(front.join("index.html"), "<title>test frontend</title>").unwrap();
+        let front = front.unwrap_or_else(|| {
+            let front = files.path().join("front");
+            std::fs::create_dir(&front).unwrap();
+            std::fs::write(front.join("index.html"), "<title>test frontend</title>").unwrap();
+            front
+        });
         let served = serve(&seed, front).await.expect("serve the test stack");
         Self {
             seed,
@@ -278,6 +286,201 @@ async fn admin_reads_one_hundred_workers_and_all_brokers_in_one_composition() {
         assert!(!encoded.contains(foreign.as_str()));
     }
     assert!(stack.seed.a.integrity().unwrap().valid);
+}
+
+#[tokio::test]
+#[ignore = "requires compiled frontend, Node.js, Playwright, and Chromium"]
+async fn chromium_reads_bounded_supervision_window_without_cross_tenant_data() {
+    use agentsandbox::audit::EventQuery;
+    use serde_json::json;
+    use std::{path::Path, process::Stdio, time::Duration};
+    use tokio::io::AsyncWriteExt;
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let front = std::env::var_os("AI_GUARD_TEST_FRONT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("front/dist"));
+    assert!(
+        front.is_absolute() && front.join("index.html").is_file(),
+        "the browser recipe needs an absolute compiled frontend directory"
+    );
+    let mut stack = Stack::start_with_front(
+        SeedOptions {
+            workers: 120,
+            events: 60,
+            ..SeedOptions::default()
+        },
+        Some(front),
+    )
+    .await;
+    post_heartbeat(&mut stack.seed, &stack.served)
+        .await
+        .expect("the authenticated fixture heartbeat is accepted");
+    let heads = (stack.seed.a.head().unwrap(), stack.seed.b.head().unwrap());
+    let broker_ids_a: Vec<_> = stack
+        .seed
+        .brokers
+        .values()
+        .map(|broker| &broker.broker_id)
+        .collect();
+    let input = serde_json::to_vec(&json!({
+        "dashboard": stack.served.dashboard,
+        "accounts": {
+            "a": {"tenant":"tenant-a", "token": stack.token("admin_a"),
+                "workerIds":stack.seed.worker_ids_a, "brokerIds":broker_ids_a},
+            "b": {"tenant":"tenant-b", "token": stack.token("admin_b"),
+                "workerIds":stack.seed.worker_ids_b, "brokerIds":stack.seed.broker_ids_b}
+        }
+    }))
+    .unwrap();
+    let mut driver = tokio::process::Command::new("node");
+    driver
+        .current_dir(root)
+        .arg(root.join("front/tests/browser_supervision_scale_live.mjs"))
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    for key in [
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "NODE_PATH",
+        "CODEX_PRIMARY_RUNTIME_NODE_MODULES",
+        "PLAYWRIGHT_BROWSERS_PATH",
+        "PLAYWRIGHT_CHROMIUM_EXECUTABLE",
+        "AI_GUARD_TEST_ARTIFACT_DIR",
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            driver.env(key, value);
+        }
+    }
+    let result = tokio::time::timeout(Duration::from_secs(60), async move {
+        let mut child = driver.spawn()?;
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(&input).await?;
+        drop(stdin);
+        child.wait_with_output().await
+    })
+    .await
+    .expect("Chromium supervision recipe exceeded its deadline")
+    .expect("could not run the Chromium supervision driver");
+    let report: Value = serde_json::from_slice(&result.stdout).unwrap_or(Value::Null);
+    let status = match report["status"].as_str() {
+        Some(status @ ("PASS" | "FAIL" | "BLOCKED")) => status,
+        _ => "UNKNOWN",
+    };
+    let stage = match report["stage"].as_str() {
+        Some(
+            stage @ ("configuration" | "chromium" | "login_a" | "first_page_a" | "next_page_a"
+            | "filter_a" | "logout_a" | "login_b" | "first_page_b" | "logout_b"
+            | "complete"),
+        ) => stage,
+        _ => "unknown",
+    };
+    println!("synthetic_registry_scale status={status} stage={stage}");
+    if let Some(diagnostic) = report["diagnostic"].as_str().filter(|code| {
+        [
+            "browser_route_blocked",
+            "dashboard_document",
+            "login_form",
+            "identity_missing",
+            "identity_http",
+            "identity_json",
+            "identity_scope",
+            "administration_scope",
+            "context_render",
+            "fleet_response_missing",
+            "fleet_http",
+            "fleet_query",
+        ]
+        .contains(code)
+    }) {
+        println!("browser_diagnostic={diagnostic}");
+    }
+    for field in ["identityHttp", "fleetHttp", "dashboardHttp"] {
+        if let Some(code) = report[field]
+            .as_u64()
+            .filter(|code| (100..=599).contains(code))
+        {
+            println!("{field}={code}");
+        }
+    }
+    if let Some(directory) = report["artifacts"]["directory"].as_str().filter(|name| {
+        name.strip_prefix("browser-failure-").is_some_and(|suffix| {
+            suffix.len() == 6 && suffix.bytes().all(|b| b.is_ascii_alphanumeric())
+        })
+    }) && let Some(files) = report["artifacts"]["files"].as_array()
+    {
+        for file in ["page.html", "page.png"] {
+            if files.iter().any(|entry| entry == file) {
+                println!("artifact={directory}/{file}");
+            }
+        }
+    }
+    let isolation = report["isolation"].as_bool().unwrap_or(false);
+    assert!(
+        result.status.success()
+            && report["mode"] == "synthetic_registry_scale"
+            && status == "PASS"
+            && stage == "complete"
+            && isolation
+            && report["provenance"] == "tenant_federation_registry"
+            && report["coverage"] == "partial"
+            && report["runtimeInventory"] == "unknown",
+        "Chromium supervision recipe failed at {stage}, exit status {}",
+        result.status
+    );
+    for (field, expected) in [
+        ("aWorkers", 120),
+        ("aBrokers", 3),
+        ("bWorkers", 1),
+        ("bBrokers", 1),
+        ("firstPageA", 100),
+        ("pagesA", 2),
+        ("visibleFilteredA", 1),
+    ] {
+        assert_eq!(
+            report[field].as_u64(),
+            Some(expected),
+            "unexpected browser result {field}"
+        );
+        println!("{field}={expected}");
+    }
+    for (tenant, account, store, head, workers, brokers) in [
+        ("a", "admin_a", &stack.seed.a, heads.0, &[20, 100][..], 3),
+        ("b", "admin_b", &stack.seed.b, heads.1, &[1][..], 1),
+    ] {
+        let principal = serde_json::to_value(&stack.seed.accounts[account].principal).unwrap();
+        let result_counts = |kind: &str| {
+            store
+                .events(&EventQuery {
+                    after: Some(head),
+                    kind: Some(kind.into()),
+                    ..Default::default()
+                })
+                .unwrap()
+                .into_iter()
+                .map(|event| {
+                    assert!(event.event.data["principal"] == principal);
+                    assert!(event.event.data["mode"] == "administration");
+                    event.event.data["result_count"].as_u64().unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+        let worker_reads = result_counts("control.identity.workers.access");
+        let broker_reads = result_counts("control.identity.brokers.access");
+        assert!(workers.iter().all(|count| worker_reads.contains(count)));
+        assert_eq!(worker_reads.len(), broker_reads.len());
+        assert!(broker_reads.iter().all(|count| *count == brokers));
+        assert!(store.integrity().unwrap().valid);
+        println!(
+            "tenant_{tenant}_audited_registry_pages={}",
+            worker_reads.len()
+        );
+    }
+    println!("synthetic_registry_scale isolation=true coverage=partial runtime_inventory=unknown");
 }
 
 #[tokio::test]

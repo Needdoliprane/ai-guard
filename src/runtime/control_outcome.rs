@@ -63,8 +63,21 @@ pub(crate) enum NativeIoPhase {
     Unknown,
 }
 
+/// Evidence from one owned stop operation. None of these observations
+/// identifies who caused the process to stop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OwnedStopObservation {
+    /// The first inspection found the instance already stopped or not yet started.
+    AlreadyStopped,
+    /// The engine acknowledged the kill and a follow-up inspection found it stopped.
+    EngineAcknowledged,
+    /// The follow-up inspection found it stopped without an acknowledged kill.
+    Unconfirmed,
+}
+
 pub(crate) struct NativeStopResult {
     pub(crate) observation: ContainerObservation,
+    pub(crate) stop_observation: OwnedStopObservation,
     // The containing Collected proof covers every CLI used by this result.
     pub(crate) kill_failure: Option<anyhow::Error>,
 }

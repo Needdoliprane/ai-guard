@@ -290,8 +290,9 @@ impl Drop for ActorLifetime {
     }
 }
 
-/// A queued strict call whose reply waiter disappears has an unknown outcome.
-/// This retains no sender/lease and never cancels the actor's accepted work.
+/// Revokes retained status when a guarded call loses its reply waiter. The
+/// distinct Result read does not take this guard. A failure reported by the
+/// actor is still handled by `StatusCache::reply`, independently of the waiter.
 pub(super) struct WaiterGuard {
     cache: Arc<StatusCache>,
     acknowledged: bool,

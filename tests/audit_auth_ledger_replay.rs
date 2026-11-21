@@ -652,27 +652,22 @@ async fn web_login(f: &Fixture, subject: &str) -> (StatusCode, Value) {
         .await
         .unwrap();
     assert_eq!(seeded.status(), StatusCode::OK);
-    let cookie = seeded.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_owned();
-    let web_request = |path: &str, cookie: &str| {
-        Request::post(path)
+    assert!(seeded.headers().get("set-cookie").is_none());
+    let web_request = |path: &str, cookie: Option<&str>, body: Value| {
+        let mut request = Request::post(path)
             .header("content-type", "application/json")
-            .header("cookie", cookie)
             .header("origin", &f.config.web_origin)
             .header("sec-fetch-site", "same-origin")
-            .header("sec-fetch-mode", "cors")
-            .body(Body::from(json!({"version": 1}).to_string()))
-            .unwrap()
+            .header("sec-fetch-mode", "cors");
+        if let Some(cookie) = cookie {
+            request = request.header("cookie", cookie);
+        }
+        request.body(Body::from(body.to_string())).unwrap()
     };
     let response = f
         .router
         .clone()
-        .oneshot(web_request("/auth/oidc/start", &cookie))
+        .oneshot(web_request("/auth/oidc/start", None, json!({"version": 1})))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -685,6 +680,7 @@ async fn web_login(f: &Fixture, subject: &str) -> (StatusCode, Value) {
         .to_owned();
     let start: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 35_000).await.unwrap()).unwrap();
+    let correlation_token = start["correlation_token"].as_str().unwrap().to_owned();
     let url = reqwest::Url::parse(start["authorization_url"].as_str().unwrap()).unwrap();
     let params = url
         .query_pairs()
@@ -706,7 +702,11 @@ async fn web_login(f: &Fixture, subject: &str) -> (StatusCode, Value) {
     let response = f
         .router
         .clone()
-        .oneshot(web_request("/auth/oidc/tokens", &cookie))
+        .oneshot(web_request(
+            "/auth/oidc/tokens",
+            Some(&cookie),
+            json!({"version": 1, "correlation_token": correlation_token}),
+        ))
         .await
         .unwrap();
     let status = response.status();

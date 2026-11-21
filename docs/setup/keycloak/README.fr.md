@@ -22,7 +22,7 @@ Ces quatre variables configurent le fournisseur d'identité local :
 | Variable | Valeur par défaut | Signification |
 |---|---|---|
 | `AI_GUARD_DEMO_IDP_HOST` | `keycloak.ai-guard.test` | Nom DNS public, sans schéma ni chemin ; également alias du réseau interne. |
-| `AI_GUARD_DEMO_IDP_PORT` | `18080` | Même port HTTP public et conteneur. Choisir un port libre supérieur à 1024, différent de 18081. |
+| `AI_GUARD_DEMO_IDP_PORT` | `18080` | Port HTTP public et conteneur. Le transport DEMO d’ai-guard exige le port 18080 avec l’alias `keycloak.ai-guard.test`. |
 | `AI_GUARD_DEMO_WEB_ORIGIN` | `http://127.0.0.1:4000` | Origine exacte du dashboard, sans slash final, chemin, query ou fragment. |
 | `AI_GUARD_DEMO_CONTROL_IMAGE` | `agentsandbox-control:local` | Image de contrôle ai-guard préparée, utilisée uniquement comme ingress DEMO. |
 
@@ -34,7 +34,7 @@ Conservez `-p ai-guard-keycloak` dans chaque commande Compose d'identité. Les e
 
 Configurez le DNS local pour que `keycloak.ai-guard.test` résolve uniquement vers le loopback hôte. Une entrée hosts administrée par l'opérateur peut utiliser `127.0.0.1 keycloak.ai-guard.test`. Préservez les entrées existantes. Navigateur, CLI et contrôle conteneurisé doivent utiliser le même nom public d'issuer ; remplacer ce nom par `localhost`, un nom de service conteneur ou une IP crée un autre issuer. Le réseau Compose fournit son alias interne indépendamment du DNS hôte.
 
-Avec les valeurs par défaut, l'issuer exact est `http://keycloak.ai-guard.test:18080/realms/ai-guard-demo`. L'origine du dashboard est `http://127.0.0.1:4000` ; le port habituel du gateway est 8787. Le port 18081 est un second listener de l'ingress, lié au loopback de son propre conteneur et non publié.
+L’issuer exact de la DEMO avec l’alias canonique est `http://keycloak.ai-guard.test:18080/realms/ai-guard-demo`. Par défaut, le dashboard utilise `http://127.0.0.1:4000` et le gateway utilise le port 8787.
 
 Choisissez un nom de projet neuf. Les commandes emploient `ai-guard-keycloak` ; avant le premier démarrage, vérifiez qu'aucune ressource ne porte déjà son label de projet :
 

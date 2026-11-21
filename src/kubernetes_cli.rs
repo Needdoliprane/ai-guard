@@ -1,4 +1,4 @@
-//! Explicit Kubernetes diagnostics, dry-run and held-CREATE reconciliation.
+//! Explicit Kubernetes diagnostics, workspace inspection, dry-run and held-CREATE reconciliation.
 //! No ambient configuration, credential discovery or workload admission.
 use crate::{
     broker::held_create_client::{HeldCreateClientScope, HeldCreateControlClient},
@@ -15,13 +15,14 @@ use crate::{
         BeforeKubernetesPreflightGuard, KubernetesAdmissionGapV1, KubernetesAuthorityV1,
         KubernetesCredentials, KubernetesDiagnosticsV1, KubernetesError,
         KubernetesPreflightObservationV1, KubernetesPreflightPlanV1, KubernetesPreflightTargetV1,
-        KubernetesPrerequisitesV1, KubernetesRuntime,
+        KubernetesPrerequisitesV1, KubernetesRuntime, KubernetesSessionWorkspaceClaimV2,
         admission::{
             coordinator::CoordinatorError,
             journal::{AdmissionJournal, AdmissionJournalProtection},
             journal_io::JournalIo,
             remote_coordinator::RemoteHeldCreateCoordinator,
         },
+        session_instance::KubernetesSessionRuntimeError,
     },
 };
 use clap::{ArgGroup, Args, Subcommand};
@@ -60,6 +61,8 @@ enum KubernetesCommand {
     Session(sessions::SessionArgs),
     /// Inspect an explicit Kubernetes authority over HTTPS; never admit work.
     Doctor(DoctorCommandArgs),
+    /// Inspect one existing workspace claim in the configured namespace using GET requests only.
+    InspectWorkspace(WorkspaceInspectionArgs),
     /// Audit and inspect a closed Pod profile using server-side dry-run; never start work.
     Preflight(PreflightArgs),
     /// Confirm a retained held-CREATE result using its exact control history.
@@ -73,6 +76,15 @@ struct DoctorCommandArgs {
     /// Query the current identity's explicit permissions with SSAR POSTs; never grant admission.
     #[arg(long)]
     check_permissions: bool,
+}
+
+#[derive(Args)]
+struct WorkspaceInspectionArgs {
+    #[command(flatten)]
+    connection: DoctorArgs,
+    /// Exact DNS label of an existing workspace claim in the configured namespace.
+    #[arg(long, value_name = "NAME")]
+    claim_name: String,
 }
 
 #[derive(Args)]
@@ -157,6 +169,12 @@ pub enum KubernetesCliError {
     InvalidAuthority,
     InvalidCredentials,
     Inspection(KubernetesError),
+    InvalidWorkspaceClaimName,
+    InvalidWorkspaceObservation,
+    WorkspaceClaimPending,
+    WorkspaceClaimAccessMode,
+    WorkspaceClaimStorageClass,
+    ProtectedWorkspaceInput,
     ProtectedOutput,
     OutputUnavailable,
     InvalidPlan,
@@ -181,6 +199,12 @@ impl std::fmt::Display for KubernetesCliError {
             Self::InvalidAuthority => f.write_str("Kubernetes authority configuration is invalid or unavailable; use an unchanged private authority file"),
             Self::InvalidCredentials => f.write_str("Kubernetes private credentials or trust are invalid or unavailable; verify the explicit private files"),
             Self::Inspection(error) => std::fmt::Display::fmt(error, f),
+            Self::InvalidWorkspaceClaimName => f.write_str("Kubernetes workspace claim name must be a lowercase DNS label of at most 63 characters"),
+            Self::InvalidWorkspaceObservation => f.write_str("Kubernetes workspace inspection returned an invalid namespace or claim observation; verify the configured namespace and the Bound ReadWriteOncePod claim"),
+            Self::WorkspaceClaimPending => f.write_str("Kubernetes workspace claim is Pending. Verify that its StorageClass supports ReadWriteOncePod through CSI and uses Immediate binding"),
+            Self::WorkspaceClaimAccessMode => f.write_str("Kubernetes workspace claim requires ReadWriteOncePod as its only access mode"),
+            Self::WorkspaceClaimStorageClass => f.write_str("Kubernetes workspace claim has no named StorageClass. Use a claim with a StorageClass that supports ReadWriteOncePod through CSI and uses Immediate binding"),
+            Self::ProtectedWorkspaceInput => f.write_str("Kubernetes workspace claim name contains protected credential material; use the name of the existing claim"),
             Self::ProtectedOutput => f.write_str("Kubernetes diagnostic output contains protected credential material; inspect the source privately"),
             Self::OutputUnavailable => f.write_str("Kubernetes diagnostic output is unavailable"),
             Self::InvalidPlan => f.write_str("Kubernetes admission preflight plan is invalid or unavailable; use a private closed plan bound to this authority"),
@@ -250,6 +274,7 @@ pub async fn execute(args: KubernetesArgs) -> Result<(), KubernetesCliError> {
             .await
             .map_err(KubernetesCliError::Session),
         KubernetesCommand::Doctor(args) => doctor(args).await,
+        KubernetesCommand::InspectWorkspace(args) => inspect_workspace(args).await,
         KubernetesCommand::Preflight(args) => preflight(args).await,
         KubernetesCommand::ReconcileHeldCreate(args) => reconcile_held_create(args).await,
     }
@@ -259,6 +284,14 @@ struct LoadedConnection {
     source: PrivateFile,
     runtime: KubernetesRuntime,
     protected: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct WorkspaceInspectionReportV1 {
+    version: u32,
+    admission_available: bool,
+    authority_id: Uuid,
+    claim: KubernetesSessionWorkspaceClaimV2,
 }
 
 fn load_connection(args: DoctorArgs) -> Result<LoadedConnection, KubernetesCliError> {
@@ -338,7 +371,58 @@ async fn doctor(args: DoctorCommandArgs) -> Result<(), KubernetesCliError> {
         admission_gap_reasons,
         prerequisites,
     };
-    let value = serde_json::to_value(&report).map_err(|_| KubernetesCliError::OutputUnavailable)?;
+    write_inspection_report(&report, &source, &redactor)
+}
+
+async fn inspect_workspace(args: WorkspaceInspectionArgs) -> Result<(), KubernetesCliError> {
+    let LoadedConnection {
+        source,
+        runtime,
+        protected,
+    } = load_connection(args.connection)?;
+    let redactor = Redactor::new(protected);
+    if redactor.text(&args.claim_name) != args.claim_name {
+        return Err(KubernetesCliError::ProtectedWorkspaceInput);
+    }
+    let claim = runtime
+        .inspect_session_workspace_claim_detailed(&args.claim_name)
+        .await
+        .map_err(|error| match error {
+            KubernetesSessionRuntimeError::Kubernetes(KubernetesError::InvalidAuthority) => {
+                KubernetesCliError::InvalidWorkspaceClaimName
+            }
+            KubernetesSessionRuntimeError::Kubernetes(KubernetesError::InvalidResponse) => {
+                KubernetesCliError::InvalidWorkspaceObservation
+            }
+            KubernetesSessionRuntimeError::Kubernetes(error) => {
+                KubernetesCliError::Inspection(error)
+            }
+            KubernetesSessionRuntimeError::WorkspaceClaimPending => {
+                KubernetesCliError::WorkspaceClaimPending
+            }
+            KubernetesSessionRuntimeError::WorkspaceClaimAccessMode => {
+                KubernetesCliError::WorkspaceClaimAccessMode
+            }
+            KubernetesSessionRuntimeError::WorkspaceClaimStorageClass => {
+                KubernetesCliError::WorkspaceClaimStorageClass
+            }
+            _ => KubernetesCliError::InvalidWorkspaceObservation,
+        })?;
+    let report = WorkspaceInspectionReportV1 {
+        version: 1,
+        admission_available: false,
+        authority_id: runtime.binding().authority_id(),
+        claim,
+    };
+    write_inspection_report(&report, &source, &redactor)
+}
+
+fn write_inspection_report(
+    report: &impl Serialize,
+    source: &PrivateFile,
+    redactor: &Redactor,
+) -> Result<(), KubernetesCliError> {
+    let value = serde_json::to_value(report).map_err(|_| KubernetesCliError::OutputUnavailable)?;
     if redactor.value_unclipped(&value) != value {
         return Err(KubernetesCliError::ProtectedOutput);
     }
@@ -346,7 +430,7 @@ async fn doctor(args: DoctorCommandArgs) -> Result<(), KubernetesCliError> {
         .revalidate()
         .map_err(|_| KubernetesCliError::InvalidAuthority)?;
     let mut bytes =
-        serde_json::to_vec(&report).map_err(|_| KubernetesCliError::OutputUnavailable)?;
+        serde_json::to_vec(report).map_err(|_| KubernetesCliError::OutputUnavailable)?;
     bytes.push(b'\n');
     let mut stdout = std::io::stdout().lock();
     stdout

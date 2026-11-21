@@ -1,6 +1,9 @@
 //! Explicit stopped-consumer14→15 operation. No normal opener auto-migrates.
 use super::*;
-use crate::human_authority::{HumanSourceKindV1, maintenance::HumanMaintenanceSourceToken};
+use crate::human_authority::{
+    HumanSourceKindV1, SourceStorageBindingV1, maintenance::HumanMaintenanceSourceToken,
+};
+use std::path::PathBuf;
 
 fn physical(
     store: &Store,
@@ -36,6 +39,16 @@ fn verify14(store: &Store, db: &Connection, prefix: &(i64, String)) -> anyhow::R
     Ok(integrity.event_count)
 }
 
+fn backup_path(token: &HumanMaintenanceSourceToken, path: &Path) -> anyhow::Result<PathBuf> {
+    let path = crate::control_fs::absolute_path(path)?;
+    let parent = crate::control_fs::Directory::open_existing(
+        path.parent().context("backup parent required")?,
+    )?;
+    ensure(parent.physical_identity()? != token.descriptor().storage_binding.parent_identity())
+        .context("egress backup parent must differ from source parent")?;
+    Ok(path)
+}
+
 /// Proof borrows a real maintenance token and retains the verified backup's
 /// own filesystem identity. A path/receipt/serialized manifest cannot mint it.
 pub(crate) struct VerifiedEgressSourceBackup<'a> {
@@ -46,6 +59,29 @@ pub(crate) struct VerifiedEgressSourceBackup<'a> {
     backing: StoreStorage,
 }
 impl VerifiedEgressSourceBackup<'_> {
+    /// Describe the existing proof for the journal without opening a raw file.
+    pub(crate) fn journal_observation(
+        &self,
+        token: &HumanMaintenanceSourceToken,
+    ) -> anyhow::Result<(
+        SourceStorageBindingV1,
+        review_authority::AuthorityReceiptV1,
+        u64,
+    )> {
+        token.check()?;
+        ensure(token.same_guard_and_source(self.token))?;
+        let binding = self.backing.retained_binding()?;
+        token.check()?;
+        Ok((
+            binding,
+            review_authority::AuthorityReceiptV1 {
+                seq: self.source_head.0,
+                hash: self.source_head.1.clone(),
+            },
+            self.event_count,
+        ))
+    }
+
     fn verify(&self, store: &Store) -> anyhow::Result<()> {
         self.token.check()?;
         ensure(self.source_binding == store.backing.identity_key())?;
@@ -74,18 +110,7 @@ pub(in crate::audit) fn prepare_backup<'a>(
     physical(store, tx, token)?;
     let prefix = audit_head(tx)?;
     let count = verify14(store, tx, &prefix)?;
-    let path = crate::control_fs::absolute_path(path)?;
-    let parent = crate::control_fs::Directory::open_existing(
-        path.parent().context("backup parent required")?,
-    )?;
-    let source_parent = crate::control_fs::Directory::open_existing(
-        store
-            .backing
-            .path()
-            .parent()
-            .context("source parent required")?,
-    )?;
-    ensure(parent.physical_identity()? != source_parent.physical_identity()?)?;
+    let path = backup_path(token, path)?;
     let (backing, initialization) = StoreStorage::create_new(&path)?;
     let mut destination = Connection::open_with_flags(
         backing.path(),
@@ -154,33 +179,90 @@ pub(in crate::audit) fn validate_maintenance_identity(
     token.check().map_err(Into::into)
 }
 
+pub(in crate::audit) fn maintenance_prefix(
+    store: &Store,
+    tx: &Transaction<'_>,
+    token: &HumanMaintenanceSourceToken,
+    before_install: bool,
+) -> anyhow::Result<review_authority::AuthorityReceiptV1> {
+    physical(store, tx, token)?;
+    validate_maintenance_identity(tx, token)?;
+    let format: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    let (seq, hash) = if format == 14 {
+        audit_head(tx)?
+    } else {
+        ensure(!before_install)?;
+        let p = replay(tx)?;
+        let g = &p.genesis.as_ref().ok_or(EgressStoreFailure::Integrity)?.0;
+        (g.previous_seq, g.previous_hash.clone())
+    };
+    Ok(review_authority::AuthorityReceiptV1 { seq, hash })
+}
+
 pub(in crate::audit) fn resume_backup<'a>(
     store: &Store,
     tx: &Transaction<'_>,
     token: &'a HumanMaintenanceSourceToken,
     path: &Path,
 ) -> anyhow::Result<VerifiedEgressSourceBackup<'a>> {
-    physical(store, tx, token)?;
-    validate_maintenance_identity(tx, token)?;
-    let format: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    let prefix = if format == 14 {
-        audit_head(tx)?
-    } else {
-        let p = replay(tx)?;
-        let g = &p.genesis.as_ref().ok_or(EgressStoreFailure::Integrity)?.0;
-        (g.previous_seq, g.previous_hash.clone())
-    };
-    let (backing, _guard) = StoreStorage::open_existing(path)?;
+    let prefix = maintenance_prefix(store, tx, token, false)?;
+    let path = backup_path(token, path)?;
+    let (backing, _guard) = StoreStorage::open_existing(&path)?;
     let proof = VerifiedEgressSourceBackup {
         token,
         source_binding: store.backing.identity_key(),
-        source_head: prefix.clone(),
-        event_count: u64::try_from(prefix.0)?,
+        source_head: (prefix.seq, prefix.hash),
+        event_count: u64::try_from(prefix.seq)?,
         backing,
     };
     proof.verify(store)?;
     physical(store, tx, token)?;
     Ok(proof)
+}
+
+fn validate_install_inputs(
+    store: &Store,
+    tx: &Transaction<'_>,
+    token: &HumanMaintenanceSourceToken,
+    backup: &VerifiedEgressSourceBackup<'_>,
+    limits: &EgressStoreLimitsV1,
+) -> anyhow::Result<()> {
+    physical(store, tx, token)?;
+    ensure(token.same_guard_and_source(backup.token))?;
+    backup.verify(store)?;
+    limits.validate()
+}
+
+fn read_installed_receipt(
+    store: &Store,
+    tx: &Transaction<'_>,
+    token: &HumanMaintenanceSourceToken,
+    backup: &VerifiedEgressSourceBackup<'_>,
+    limits: &EgressStoreLimitsV1,
+) -> anyhow::Result<review_authority::AuthorityReceiptV1> {
+    validate_maintenance_identity(tx, token)?;
+    let p = replay(tx)?;
+    let (genesis, seq, hash) = p.genesis.as_ref().ok_or(EgressStoreFailure::Integrity)?;
+    cas(genesis.limits == *limits
+        && (genesis.previous_seq, &genesis.previous_hash)
+            == (backup.source_head.0, &backup.source_head.1))?;
+    physical(store, tx, token)?;
+    Ok(review_authority::AuthorityReceiptV1 {
+        seq: *seq,
+        hash: hash.clone(),
+    })
+}
+
+pub(in crate::audit) fn confirm_format15(
+    store: &Store,
+    tx: &Transaction<'_>,
+    token: &HumanMaintenanceSourceToken,
+    backup: &VerifiedEgressSourceBackup<'_>,
+    limits: &EgressStoreLimitsV1,
+) -> anyhow::Result<review_authority::AuthorityReceiptV1> {
+    validate_install_inputs(store, tx, token, backup, limits)?;
+    ensure(tx.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))? == 15)?;
+    read_installed_receipt(store, tx, token, backup, limits)
 }
 
 pub(in crate::audit) fn install_format15(
@@ -190,21 +272,10 @@ pub(in crate::audit) fn install_format15(
     backup: &VerifiedEgressSourceBackup<'_>,
     limits: &EgressStoreLimitsV1,
 ) -> anyhow::Result<review_authority::AuthorityReceiptV1> {
-    physical(store, tx, token)?;
-    ensure(token.same_guard_and_source(backup.token))?;
-    backup.verify(store)?;
-    limits.validate()?;
+    validate_install_inputs(store, tx, token, backup, limits)?;
     let format: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if format == 15 {
-        validate_maintenance_identity(tx, token)?;
-        let p = replay(tx)?;
-        let (g, seq, hash) = p.genesis.as_ref().ok_or(EgressStoreFailure::Integrity)?;
-        cas(g.limits == *limits && (g.previous_seq, g.previous_hash.clone()) == backup.source_head)?;
-        physical(store, tx, token)?;
-        return Ok(review_authority::AuthorityReceiptV1 {
-            seq: *seq,
-            hash: hash.clone(),
-        });
+        return read_installed_receipt(store, tx, token, backup, limits);
     }
     ensure(format == 14 && audit_head(tx)? == backup.source_head)?;
     verify14(store, tx, &backup.source_head)?;

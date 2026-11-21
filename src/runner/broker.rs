@@ -235,7 +235,8 @@ fn prepare_submission(
 /// Pure reconstruction of the current runner data, including approval state.
 /// It does not resolve providers, inspect sources, or grant runtime authority.
 pub struct BrokerRunState {
-    plan: RunPlan,
+    // Drafts move through nested journal futures on the broker worker stack.
+    plan: Box<RunPlan>,
 }
 
 impl fmt::Debug for BrokerRunState {
@@ -254,7 +255,7 @@ impl BrokerRunState {
         let checkpoint = job.checkpoint();
         checkpoint.canonical_bytes()?;
         checkpoint.validate_request(intent)?;
-        let plan = RunPlan {
+        let plan = Box::new(RunPlan {
             version: intent.plan_version(),
             operation_id: intent.operation_id(),
             options: intent.initial_options().run_options(),
@@ -270,7 +271,7 @@ impl BrokerRunState {
                 }
             }),
             credential_source: None,
-        };
+        });
         validate_provider_plan(&plan).map_err(|_| JournalError::Conflict)?;
         Ok(Self { plan })
     }

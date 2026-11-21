@@ -54,7 +54,7 @@ fn workload_policy_file_is_local_and_migration6_is_an_explicit_cli_target() {
             "--backup",
             "backup.sqlite",
             "--target-version",
-            "7",
+            "14",
             "--confirm-control-stopped"
         ])
         .is_err()

@@ -15,6 +15,7 @@ use std::{
     cell::{Cell, RefCell},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::{Arc, OnceLock},
     thread,
     time::{Duration, Instant},
 };
@@ -31,12 +32,32 @@ impl Drop for ChildGuard {
 }
 
 thread_local! {
+    static CURRENT_DURABLE_OBSERVER: RefCell<Option<Arc<OnceLock<Instant>>>> = const { RefCell::new(None) };
     static FAIL_ONCE: Cell<Option<FaultStage>> = const { Cell::new(None) };
     static CRASH_ADVANCE_ARMED: Cell<bool> = const { Cell::new(false) };
     static MOVE_BINDING_ONCE: RefCell<Option<(FaultStage, PathBuf, PathBuf)>> = const { RefCell::new(None) };
 }
 
+pub(in crate::broker) struct CurrentDurableObserver(Option<Arc<OnceLock<Instant>>>);
+impl CurrentDurableObserver {
+    pub(in crate::broker) fn install(observed: Arc<OnceLock<Instant>>) -> Self {
+        Self(CURRENT_DURABLE_OBSERVER.replace(Some(observed)))
+    }
+}
+impl Drop for CurrentDurableObserver {
+    fn drop(&mut self) {
+        CURRENT_DURABLE_OBSERVER.replace(self.0.take());
+    }
+}
+
 pub(super) fn checkpoint(stage: FaultStage) -> JournalResult<()> {
+    if stage == FaultStage::CurrentDurable {
+        CURRENT_DURABLE_OBSERVER.with_borrow(|slot| {
+            if let Some(observed) = slot {
+                let _ = observed.set(Instant::now());
+            }
+        });
+    }
     let move_binding = MOVE_BINDING_ONCE.with(|slot| {
         let mut slot = slot.borrow_mut();
         if slot

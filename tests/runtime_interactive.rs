@@ -1,4 +1,4 @@
-//! Real Docker qualification of the interactive CLI through an isolated PTY.
+//! Real engine qualification of the interactive CLI through an isolated PTY.
 //! Ignored by default: it starts retained worker instances on an explicitly
 //! selected local daemon. It never invokes a provider or uses real credentials.
 //!
@@ -22,15 +22,34 @@
 //!   -- --ignored --exact --nocapture --test-threads=1
 //! ```
 //!
+//! For Podman, use the full image ID in the selected Podman store and the
+//! absolute Podman executable and local Unix socket. Set `QA_PODMAN_MODE`
+//! to `rootless` or `rootful` to match that endpoint. Rootful mode requires
+//! explicit approval with `AGENTSANDBOX_TEST_ALLOW_ROOTFUL=1`. Leave that
+//! flag unset in rootless mode. An image built in Docker is not automatically
+//! present in Podman's store. The test preflights Podman read-only and the CLI
+//! binds its own authority in a new private configuration during the run.
+//!
+//! ```sh
+//! AGENTSANDBOX_TEST_RUNTIME=podman \
+//! AGENTSANDBOX_TEST_PODMAN_MODE="$QA_PODMAN_MODE" \
+//! AGENTSANDBOX_TEST_RUNTIME_PROGRAM="$QA_PODMAN_BIN" \
+//! AGENTSANDBOX_TEST_RUNTIME_ENDPOINT="$QA_PODMAN_ENDPOINT" \
+//! AGENTSANDBOX_TEST_INTERACTIVE_IMAGE="$QA_PODMAN_PROBE_IMAGE_ID" \
+//! cargo test --locked --offline -j1 --release --test runtime_interactive \
+//!   podman_interactive_records_controller_deadline_and_owned_stop_outcome \
+//!   -- --ignored --exact --nocapture --test-threads=1
+//! ```
+//!
 //! The verdict reports `engine_acknowledged` for a controller stop acknowledged
-//! by Docker. It reports `already_stopped` only when the TTY timer's own
-//! deadline was also recorded and the same worker was observed terminal.
+//! by the selected engine. It reports `already_stopped` only when the TTY
+//! timer's own deadline was recorded and the same worker was observed terminal.
 use agentsandbox::{
     api::{GatewayState, TenantGateway, gateway_router},
     audit::{EventQuery, Store},
     control::{
-        AllocationProvenanceV1, NetworkV1, QuotaPolicyV1, RuntimeStatusV1, WorkerMutationV1,
-        WorkerStateV1, WorkerTransitionV1,
+        AllocationProvenanceV1, NetworkV1, QuotaPolicyV1, RuntimeKindV1, RuntimeStatusV1,
+        WorkerMutationV1, WorkerStateV1, WorkerTransitionV1,
     },
     operations::initialize_config,
     policy::Policy,
@@ -39,6 +58,7 @@ use agentsandbox::{
         AuditClient, CleanupState, ControlDeadlineKind, ControlStopObservation, RunSummary,
         read_token,
     },
+    runtime::{Runtime, RuntimeKind},
 };
 use anyhow::{Context, Result, ensure};
 use axum::{
@@ -93,52 +113,106 @@ struct TerminalFacts {
 }
 
 async fn inspect_terminal_before_ack(
-    docker_program: &str,
+    runtime: RuntimeKind,
+    program: &str,
     endpoint: &str,
     container_id: &str,
 ) -> Result<TerminalFacts> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(10),
-        tokio::process::Command::new(docker_program)
-            .kill_on_drop(true)
-            .args([
-                "--host",
-                endpoint,
+    let output = match runtime {
+        RuntimeKind::Docker => {
+            let output = tokio::time::timeout(
+                Duration::from_secs(10),
+                tokio::process::Command::new(program)
+                    .kill_on_drop(true)
+                    .args([
+                        "--host",
+                        endpoint,
+                        "inspect",
+                        "--format",
+                        "{{.Id}}\n{{.HostConfig.LogConfig.Type}}\n{{json .HostConfig.LogConfig.Config}}\n{{.Config.Tty}} {{.Config.OpenStdin}} {{.Config.StdinOnce}}\n{{.State.Running}} {{.State.ExitCode}} {{.State.OOMKilled}}",
+                        container_id,
+                    ])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .output(),
+            )
+            .await
+            .context("pre-ACK Docker inspect exceeded deadline")??;
+            ensure!(output.status.success(), "pre-ACK Docker inspect failed");
+            output.stdout
+        }
+        RuntimeKind::Podman => {
+            let engine = Runtime::with_program(runtime, std::path::Path::new(program))?;
+            let mut args = podman_target(endpoint);
+            // Podman's container Go template uses .ID. Image inspect uses .Id.
+            args.extend([
+                "container",
                 "inspect",
                 "--format",
-                "{{.Id}}\n{{.HostConfig.LogConfig.Type}}\n{{json .HostConfig.LogConfig.Config}}\n{{.Config.Tty}} {{.Config.OpenStdin}} {{.Config.StdinOnce}}\n{{.State.Running}} {{.State.ExitCode}} {{.State.OOMKilled}}",
+                "{{.ID}}\n{{.HostConfig.LogConfig.Type}}\n{{json .HostConfig.LogConfig}}\n{{.Config.Tty}} {{.Config.OpenStdin}} {{.Config.StdinOnce}}\n{{.State.Running}} {{.State.ExitCode}} {{.State.OOMKilled}} {{.State.Status}}",
                 container_id,
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output(),
-    )
-    .await
-    .context("pre-ACK Docker inspect exceeded deadline")??;
-    ensure!(output.status.success(), "pre-ACK Docker inspect failed");
-    let lines: Vec<_> = std::str::from_utf8(&output.stdout)?.lines().collect();
+            ].map(str::to_owned));
+            let output = engine.cli(&args, Duration::from_secs(10)).await?;
+            ensure!(
+                !output.truncated,
+                "pre-ACK Podman inspect exceeded its bound"
+            );
+            output.bytes
+        }
+    };
+    let lines: Vec<_> = std::str::from_utf8(&output)?.lines().collect();
     ensure!(
         lines.len() == 5 && lines[0] == container_id,
         "pre-ACK inspect did not return the exact container and scalar shape"
     );
     let streams: Vec<_> = lines[3].split_whitespace().collect();
     let state: Vec<_> = lines[4].split_whitespace().collect();
-    ensure!(
-        streams.len() == 3 && state.len() == 3,
-        "pre-ACK inspect returned malformed scalar facts"
-    );
+    let [tty, open_stdin, stdin_once] = streams.as_slice() else {
+        anyhow::bail!("pre-ACK inspect returned malformed stream facts");
+    };
+    let (running, exit_code, oom_killed) = match (runtime, state.as_slice()) {
+        (RuntimeKind::Docker, [running, exit_code, oom_killed])
+        | (RuntimeKind::Podman, [running, exit_code, oom_killed, "exited" | "stopped"]) => {
+            (running, exit_code, oom_killed)
+        }
+        _ => anyhow::bail!("pre-ACK inspect returned invalid terminal state facts"),
+    };
+    let log_options_empty = match runtime {
+        RuntimeKind::Docker => matches!(lines[2], "{}" | "null"),
+        RuntimeKind::Podman => {
+            // The Podman projection exposes Path, Tag and Size separately.
+            let log: serde_json::Value = serde_json::from_str(lines[2])?;
+            let log = log
+                .as_object()
+                .context("invalid Podman log configuration")?;
+            log.get("Type").and_then(serde_json::Value::as_str) == Some("none")
+                && log.iter().all(|(field, value)| match field.as_str() {
+                    "Type" => true,
+                    "Config" => {
+                        value.is_null() || value.as_object().is_some_and(|map| map.is_empty())
+                    }
+                    "Path" | "Tag" => value.is_null() || value.as_str() == Some(""),
+                    "Size" => value.is_null() || matches!(value.as_str(), Some("" | "0B" | "-1B")),
+                    _ => false,
+                })
+        }
+    };
     Ok(TerminalFacts {
         container_id: lines[0].to_owned(),
         logs_none: lines[1] == "none",
-        log_options_empty: matches!(lines[2], "{}" | "null"),
-        tty: streams[0] == "true",
-        open_stdin: streams[1] == "true",
-        stdin_once: streams[2] == "true",
-        running: state[0] == "true",
-        exit_code: state[1].parse()?,
-        oom_killed: state[2].parse()?,
+        log_options_empty,
+        tty: tty.parse()?,
+        open_stdin: open_stdin.parse()?,
+        stdin_once: stdin_once.parse()?,
+        running: running.parse()?,
+        exit_code: exit_code.parse()?,
+        oom_killed: oom_killed.parse()?,
     })
+}
+
+fn podman_target(endpoint: &str) -> Vec<String> {
+    ["--remote", "--url", endpoint].map(str::to_owned).into()
 }
 
 struct HostPty {
@@ -1087,7 +1161,8 @@ fn local_pty_host_driver_help_smoke() -> Result<()> {
 }
 
 async fn private_gateway(
-    docker_program: &str,
+    runtime: RuntimeKind,
+    runtime_program: &str,
     endpoint: &str,
 ) -> Result<(
     std::path::PathBuf,
@@ -1130,12 +1205,12 @@ async fn private_gateway(
     let url = format!("http://{}", listener.local_addr()?);
     let inspections = Arc::new(Mutex::new(Vec::<Option<TerminalFacts>>::new()));
     let captured_inspections = inspections.clone();
-    let docker_program = docker_program.to_owned();
+    let runtime_program = runtime_program.to_owned();
     let endpoint = endpoint.to_owned();
     let app =
         gateway_router(state).layer(middleware::from_fn(move |request: Request, next: Next| {
             let captured = captured_inspections.clone();
-            let docker_program = docker_program.clone();
+            let runtime_program = runtime_program.clone();
             let endpoint = endpoint.clone();
             async move {
                 let path = request.uri().path();
@@ -1159,7 +1234,8 @@ async fn private_gateway(
                     // real gateway commits/ACKs it, then forward the request
                     // bytes to the gateway.
                     let facts = match inspect_terminal_before_ack(
-                        &docker_program,
+                        runtime,
+                        &runtime_program,
                         &endpoint,
                         &observation.inspection.container_id,
                     )
@@ -1212,7 +1288,8 @@ async fn docker_interactive_cli_forwards_tty_input_resize_and_worker_exit() -> R
     );
     let image = std::env::var("AGENTSANDBOX_TEST_INTERACTIVE_IMAGE")
         .context("select the separately built interactive probe image after approval")?;
-    let (root, gateway, store, server, inspections) = private_gateway(DOCKER, &endpoint).await?;
+    let (root, gateway, store, server, inspections) =
+        private_gateway(RuntimeKind::Docker, DOCKER, &endpoint).await?;
     let config = root.join("config");
     let project = root.join("project");
     fs::create_dir(&project)?;
@@ -1383,7 +1460,8 @@ async fn docker_interactive_raw_keys_preserve_control_and_utf8_bytes() -> Result
     );
     let image = std::env::var("AGENTSANDBOX_TEST_INTERACTIVE_IMAGE")
         .context("select the separately built raw-key probe image after approval")?;
-    let (root, gateway, store, server, inspections) = private_gateway(DOCKER, &endpoint).await?;
+    let (root, gateway, store, server, inspections) =
+        private_gateway(RuntimeKind::Docker, DOCKER, &endpoint).await?;
     let config = root.join("config");
     let project = root.join("project");
     fs::create_dir(&project)?;
@@ -1533,7 +1611,8 @@ async fn docker_interactive_double_ctrl_x_stops_only_the_owned_worker() -> Resul
     );
     let image = std::env::var("AGENTSANDBOX_TEST_INTERACTIVE_IMAGE")
         .context("select the separately built interactive probe image after approval")?;
-    let (root, gateway, store, server, inspections) = private_gateway(DOCKER, &endpoint).await?;
+    let (root, gateway, store, server, inspections) =
+        private_gateway(RuntimeKind::Docker, DOCKER, &endpoint).await?;
     let config = root.join("config");
     let project = root.join("project");
     fs::create_dir(&project)?;
@@ -1702,25 +1781,119 @@ async fn docker_interactive_double_ctrl_x_stops_only_the_owned_worker() -> Resul
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires the explicitly selected local Docker daemon and pinned interactive probe image"]
 async fn docker_interactive_records_controller_deadline_and_owned_stop_outcome() -> Result<()> {
+    interactive_records_controller_deadline_and_owned_stop_outcome(RuntimeKind::Docker).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires the explicitly selected local Podman endpoint, mode, and pinned interactive probe image"]
+async fn podman_interactive_records_controller_deadline_and_owned_stop_outcome() -> Result<()> {
+    interactive_records_controller_deadline_and_owned_stop_outcome(RuntimeKind::Podman).await
+}
+
+async fn preflight_podman_tty(
+    program: &std::path::Path,
+    endpoint: &str,
+    image: &str,
+    allow_rootful: bool,
+) -> Result<()> {
+    let rootless = match std::env::var("AGENTSANDBOX_TEST_PODMAN_MODE").as_deref() {
+        Ok("rootless") => {
+            ensure!(
+                !allow_rootful,
+                "rootless Podman conflicts with rootful approval"
+            );
+            true
+        }
+        Ok("rootful") => {
+            ensure!(
+                allow_rootful,
+                "rootful Podman requires AGENTSANDBOX_TEST_ALLOW_ROOTFUL=1"
+            );
+            false
+        }
+        _ => anyhow::bail!("set AGENTSANDBOX_TEST_PODMAN_MODE=rootless or rootful explicitly"),
+    };
+    let engine = Runtime::with_program(RuntimeKind::Podman, program)?;
+    let mut args = podman_target(endpoint);
+    args.extend(["info", "--format", "json"].map(str::to_owned));
+    let output = engine.cli(&args, Duration::from_secs(15)).await?;
+    ensure!(!output.truncated, "Podman info exceeded its bound");
+    let info: serde_json::Value = serde_json::from_slice(&output.bytes)?;
+    ensure!(
+        info.pointer("/host/security/rootless")
+            .and_then(serde_json::Value::as_bool)
+            == Some(rootless),
+        "Podman endpoint does not attest the requested mode"
+    );
+
+    // Inspect only the selected local cache. The real CLI creates and pins
+    // its authority in the private QA configuration after durable admission.
+    let mut args = podman_target(endpoint);
+    args.extend(
+        [
+            "image",
+            "inspect",
+            "--format",
+            "{{.Id}} {{.Config.User}}",
+            image,
+        ]
+        .map(str::to_owned),
+    );
+    let output = engine
+        .cli(&args, Duration::from_secs(15))
+        .await
+        .context("the selected Podman image must already be in its local store")?;
+    ensure!(
+        !output.truncated,
+        "Podman image identity exceeded its bound"
+    );
+    let facts: Vec<_> = std::str::from_utf8(&output.bytes)?
+        .split_whitespace()
+        .collect();
+    let [identity, "1000:1000"] = facts.as_slice() else {
+        anyhow::bail!("Podman probe image must report its identity and UID:GID 1000:1000");
+    };
+    ensure!(
+        image.strip_prefix("sha256:") == Some(identity.strip_prefix("sha256:").unwrap_or(identity)),
+        "local Podman probe image identity differed"
+    );
+    Ok(())
+}
+
+async fn interactive_records_controller_deadline_and_owned_stop_outcome(
+    runtime: RuntimeKind,
+) -> Result<()> {
     const TIMEOUT_SECONDS: u32 = 120;
     const TTY_DEADLINE: &str = "authorized worker duration elapsed";
-    let docker = std::env::var("AGENTSANDBOX_TEST_RUNTIME_PROGRAM")
-        .context("select the absolute Docker executable")?;
-    let program = std::path::Path::new(&docker);
+    let runtime_name = runtime.program();
+    match std::env::var("AGENTSANDBOX_TEST_RUNTIME") {
+        Ok(selected) if selected == runtime_name => {}
+        Err(std::env::VarError::NotPresent) if runtime == RuntimeKind::Docker => {}
+        _ => anyhow::bail!("select AGENTSANDBOX_TEST_RUNTIME={runtime_name} for this test"),
+    }
+    let runtime_program = std::env::var("AGENTSANDBOX_TEST_RUNTIME_PROGRAM")
+        .with_context(|| format!("select the absolute {runtime} executable"))?;
+    let program = std::path::Path::new(&runtime_program);
     ensure!(
         program.is_absolute() && program.is_file(),
-        "the Docker executable must be an existing absolute path"
+        "the {runtime} executable must be an existing absolute path"
     );
     let endpoint = std::env::var("AGENTSANDBOX_TEST_RUNTIME_ENDPOINT")
-        .context("select a local Docker Unix socket")?;
+        .with_context(|| format!("select a local {runtime} Unix socket"))?;
     let socket = std::path::Path::new(
         endpoint
             .strip_prefix("unix://")
-            .context("the Docker endpoint must use unix://")?,
+            .context("the runtime endpoint must use unix://")?,
     );
     ensure!(
-        socket.is_absolute() && fs::metadata(socket)?.file_type().is_socket(),
-        "the Docker endpoint must be an existing absolute Unix socket"
+        socket.is_absolute()
+            && !endpoint.contains(['?', '#', '@'])
+            && !endpoint.chars().any(char::is_control)
+            && !socket
+                .components()
+                .any(|part| part == std::path::Component::ParentDir)
+            && fs::metadata(socket)?.file_type().is_socket(),
+        "the {runtime} endpoint must be an existing absolute Unix socket"
     );
     let image = std::env::var("AGENTSANDBOX_TEST_INTERACTIVE_IMAGE")
         .context("select the immutable ID of the local interactive probe image")?;
@@ -1728,10 +1901,19 @@ async fn docker_interactive_records_controller_deadline_and_owned_stop_outcome()
         image.strip_prefix("sha256:").is_some_and(|id| {
             id.len() == 64 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
         }),
-        "the interactive probe image must be pinned by its full Docker image ID"
+        "the interactive probe image must be pinned by its full local image ID"
     );
+    let allow_rootful = std::env::var("AGENTSANDBOX_TEST_ALLOW_ROOTFUL").as_deref() == Ok("1");
+    if runtime == RuntimeKind::Podman {
+        preflight_podman_tty(program, &endpoint, &image, allow_rootful).await?;
+    }
+    let runtime_kind = match runtime {
+        RuntimeKind::Docker => RuntimeKindV1::Docker,
+        RuntimeKind::Podman => RuntimeKindV1::Podman,
+    };
 
-    let (root, gateway, store, server, inspections) = private_gateway(&docker, &endpoint).await?;
+    let (root, gateway, store, server, inspections) =
+        private_gateway(runtime, &runtime_program, &endpoint).await?;
     let config = root.join("config");
     let project = root.join("project");
     let original = project.join("original.txt");
@@ -1746,9 +1928,9 @@ async fn docker_interactive_records_controller_deadline_and_owned_stop_outcome()
         "--gateway",
         &gateway,
         "--runtime",
-        "docker",
+        runtime_name,
         "--runtime-program",
-        &docker,
+        &runtime_program,
         "--runtime-endpoint",
         &endpoint,
         "--image",
@@ -1766,7 +1948,7 @@ async fn docker_interactive_records_controller_deadline_and_owned_stop_outcome()
     .into_iter()
     .map(str::to_owned)
     .collect();
-    if std::env::var("AGENTSANDBOX_TEST_ALLOW_ROOTFUL").as_deref() == Ok("1") {
+    if allow_rootful {
         args.push("--allow-rootful-runtime".into());
     }
     args.extend(["--", "/usr/local/bin/ai-guard-interactive-probe", "wait"].map(str::to_owned));
@@ -1809,6 +1991,7 @@ async fn docker_interactive_records_controller_deadline_and_owned_stop_outcome()
         worker.state == WorkerStateV1::Terminal
             && worker.attempt.start_operation_id.is_some()
             && worker.launch.image_id == image
+            && worker.launch.runtime_kind == runtime_kind
             && worker.launch.timeout_seconds == TIMEOUT_SECONDS
             && worker.launch.network == NetworkV1::None
             && worker.launch.provider == "generic"
@@ -1824,7 +2007,7 @@ async fn docker_interactive_records_controller_deadline_and_owned_stop_outcome()
         let [Some(terminal)] = inspections.as_slice() else {
             let confirmed = inspections.iter().flatten().count();
             anyhow::bail!(
-                "expected one independent pre-ACK Docker inspection; attempts={}, confirmed={confirmed}",
+                "expected one independent pre-ACK {runtime} inspection; attempts={}, confirmed={confirmed}",
                 inspections.len()
             );
         };
@@ -1838,7 +2021,7 @@ async fn docker_interactive_records_controller_deadline_and_owned_stop_outcome()
         terminal.container_id == container_id
             && terminal.tty
             && terminal.open_stdin
-            && terminal.stdin_once
+            && terminal.stdin_once == (runtime == RuntimeKind::Docker)
             && terminal.logs_none
             && terminal.log_options_empty
             && !terminal.running
@@ -1849,7 +2032,7 @@ async fn docker_interactive_records_controller_deadline_and_owned_stop_outcome()
             && observed.running == Some(false)
             && observed.oom_killed == Some(false)
             && observed.exit_code == Some(terminal.exit_code),
-        "the durable worker terminal disagrees with the independent Docker inspection"
+        "the durable worker terminal disagrees with the independent {runtime} inspection"
     );
 
     let output = tokio::time::timeout(

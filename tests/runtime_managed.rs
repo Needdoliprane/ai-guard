@@ -609,7 +609,8 @@ fn podman_authority_bootstrap_is_explicit_and_marker_loss_remains_unknown() {
             .unwrap()
             .block_on(async {
                 let id = Uuid::new_v4();
-                let error = ManagedRuntime::connect_podman(id, "local")
+                let endpoint = format!("unix://{}", root.join("podman.sock").display());
+                let error = ManagedRuntime::connect_podman(id, &endpoint)
                     .await
                     .unwrap_err();
                 assert!(matches!(
@@ -620,10 +621,31 @@ fn podman_authority_bootstrap_is_explicit_and_marker_loss_remains_unknown() {
                     !root.join("log").exists(),
                     "connecting must not bootstrap infrastructure"
                 );
+                let rootful = root.join("podman_rootful");
+                fs::write(&rootful, "").unwrap();
+                let denied = ManagedRuntime::bootstrap_podman_with_runtime(
+                    id,
+                    &endpoint,
+                    fixture_runtime(RuntimeKind::Podman),
+                )
+                .await
+                .unwrap_err();
+                assert!(
+                    denied
+                        .to_string()
+                        .contains("runtime does not report rootless mode")
+                );
+                let log = root.join("log");
+                assert_eq!(fs::read_to_string(&log).unwrap(), "info json\n");
+                for marker in ["marker_name", "marker_nonce", "marker_authority"] {
+                    assert!(!root.join(marker).exists());
+                }
+                fs::remove_file(rootful).unwrap();
+                fs::remove_file(log).unwrap();
                 fs::write(root.join("marker_create_error"), "once").unwrap();
                 let failed = ManagedRuntime::bootstrap_podman_with_runtime(
                     Uuid::new_v4(),
-                    "local",
+                    &endpoint,
                     fixture_runtime(RuntimeKind::Podman),
                 )
                 .await
@@ -646,7 +668,7 @@ fn podman_authority_bootstrap_is_explicit_and_marker_loss_remains_unknown() {
                 fs::remove_file(root.join("marker_create_error")).unwrap();
                 let managed = ManagedRuntime::bootstrap_podman_with_runtime(
                     id,
-                    "local",
+                    &endpoint,
                     fixture_runtime(RuntimeKind::Podman),
                 )
                 .await

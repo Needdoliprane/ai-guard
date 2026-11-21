@@ -2,6 +2,70 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ApiClient, ApiError, eventUrl } from "../src/api.ts";
 
+test("trois lectures ponctuelles partagent les créneaux jusqu’à consommation du JSON ou du blob", { timeout: 3000 }, async (t) => {
+  const paths = [];
+  const complete = new Map();
+  const client = new ApiClient("fixture-viewer", async (path) => {
+    paths.push(path);
+    if (path === "/api/integrity" || path === "/api/events") return Response.json({ valid: true });
+    return new Response(new ReadableStream({
+      start(controller) {
+        complete.set(path, () => {
+          controller.enqueue(new TextEncoder().encode('{"valid":true}'));
+          controller.close();
+          complete.delete(path);
+        });
+      },
+    }));
+  });
+  t.after(() => {
+    for (const release of complete.values()) release();
+    client.close();
+  });
+  const overview = client.get("/api/overview");
+  const agents = client.get("/api/agents");
+  const exported = client.export();
+  const integrity = client.get("/api/integrity");
+  const events = client.get("/api/events");
+  const all = Promise.allSettled([overview, agents, exported, integrity, events]);
+  await new Promise(setImmediate);
+  assert.deepEqual(paths, ["/api/overview", "/api/agents", "/api/export?format=jsonl"]);
+  complete.get("/api/export?format=jsonl")();
+  await exported;
+  await Promise.all([integrity, events]);
+  assert.deepEqual(paths.slice(3), ["/api/integrity", "/api/events"], "Le prochain créneau suit l’ordre d’arrivée");
+  complete.get("/api/overview")();
+  complete.get("/api/agents")();
+  assert.ok((await all).every(({ status }) => status === "fulfilled"));
+});
+
+test("le flux garde sa place et la déconnexion annule les lectures en attente", { timeout: 3000 }, async (t) => {
+  const requested = [];
+  const client = new ApiClient("fixture-viewer", (path, { signal }) => {
+    requested.push(path);
+    if (path === "/api/stream") return Promise.resolve(new Response(new ReadableStream({
+      start(controller) { signal.addEventListener("abort", () => controller.close(), { once: true }); },
+    }), { headers: { "content-type": "text/event-stream" } }));
+    return new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+  });
+  t.after(() => client.close());
+  const reads = Promise.allSettled(["/api/overview", "/api/agents", "/api/sandboxes", "/api/integrity"]
+    .map((path) => client.get(path)));
+  const ready = Promise.withResolvers();
+  const stream = client.listen(0, () => {}, (status) => {
+    if (status === "live") ready.resolve();
+  }, () => {});
+  try {
+    await ready.promise;
+    assert.deepEqual(requested, ["/api/overview", "/api/agents", "/api/sandboxes", "/api/stream"]);
+  } finally {
+    client.close();
+  }
+  assert.ok((await reads).every(({ status }) => status === "rejected"));
+  await stream;
+  assert.ok(!requested.includes("/api/integrity"), "La lecture en attente ne repart pas après fermeture");
+});
+
 test("l’export reprend tous les filtres actifs sans reprendre la pagination", async () => {
   const filters = {
     q: "printf données",

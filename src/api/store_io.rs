@@ -116,7 +116,7 @@ impl Scope {
         Ok(operation(&lease.store))
     }
 }
-fn capacity() -> (StatusCode, Json<Value>) {
+pub(super) fn capacity() -> (StatusCode, Json<Value>) {
     (
         StatusCode::TOO_MANY_REQUESTS,
         Json(json!({"error":{

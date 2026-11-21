@@ -57,11 +57,23 @@ Les résultats du 13 novembre concernent uniquement les sélections du [relevé 
   Ce travail ne modifie pas cette route.
 - **Inspecter l'autorité Kubernetes** avec la commande existante en lecture
   seule `agentsandbox kubernetes doctor` (voir le [guide Kubernetes](../kubernetes/README.fr.md#lancer-le-diagnostic-cli-en-lecture-seule)).
+- **Inspecter un claim de workspace existant** avec la commande en lecture
+  seule `agentsandbox kubernetes inspect-workspace --claim-name "$QA_KUBE_CLAIM"`.
+  Fournir les mêmes options explicites d'autorité, d'AC et d'authentification
+  que pour `doctor`. L'identité doit disposer du GET sur le PVC nommé dans
+  le namespace de l'autorité. Un nom de PVC contenant des données
+  d'authentification protégées est refusé avant la première requête.
+  La commande distingue un claim Pending, un mode d’accès incompatible et
+  une classe de stockage non nommée. Elle revérifie les ancrages de l’autorité
+  avant de rendre ces diagnostics. Ses lectures portent sur le PVC nommé et
+  les ancrages de l’autorité.
+  Le JSON renvoie la projection vérifiée du claim,
+  son UID et `admission_available: false`.
+  [Commandes de rejeu](../../../tests/e2e/README.md#rejouer-le-diagnostic-et-le-prévol-kubernetes-sur-docker-desktop)
 - Préparer/réouvrir, lire l'état central et abandonner une réservation de
   session avant effet avec la [CLI R2](#12-http-broker-r2-et-cli-avant-effet).
-  L'inspection du claim de workspace et le rapport de réconciliation runtime
-  restent des mécanismes de bibliothèque ; ces commandes n'appellent pas
-  l'API Kubernetes.
+  Ces commandes n'appellent pas l'API Kubernetes. Le rapport de
+  réconciliation runtime reste un mécanisme de bibliothèque.
 
 Ne pas modifier, renommer ou supprimer les fichiers d'un répertoire de journal
 V2 pour « débloquer » une session. Le journal est une preuve ; un refus signale
@@ -236,7 +248,13 @@ inspectés ; sinon il est absent du rapport sérialisé (et non `null`).
 
 ## 8. Plan futur de qualification Docker Desktop à un nœud (non exécuté)
 
-Rien ci-dessous n'a été exécuté. **Chaque étape qui modifie le cluster exige
+Le plan complet ci-dessous reste à exécuter. Une recette plus étroite sur
+Docker Desktop v1.36.1 a vérifié le DNS sur TCP entre deux pods du même nœud,
+avec refus distinct en entrée et en sortie, puis reprise. L'étape 4a et la suite
+d'effets de session demandent leurs propres observations.
+[Rejouer la recette NetworkPolicy locale](../../../tests/e2e/README.md#vérifier-lapplication-des-networkpolicy-locales)
+
+**Chaque étape qui modifie le cluster exige
 une autorisation explicite du mainteneur**, que ce travail n'accorde pas.
 Chaque étape consigne son oracle et ses preuves, et s'arrête au premier oracle
 discriminant, refus ou plafond.
@@ -267,12 +285,12 @@ discriminant, refus ou plafond.
 
 ### 8.2 Prérequis de stockage
 
-- Une StorageClass dont le provisionneur prend en charge `ReadWriteOncePod`. La
-  [documentation des modes d'accès](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#access-modes)
-  de Kubernetes devrait le restreindre aux volumes CSI (EXT-10a, à vérifier pour
-  v1.36). La classe par défaut `hostpath` de Docker Desktop devrait utiliser un
-  provisionneur non CSI (EXT-10b, à vérifier) ; l'étape 3 est donc
-  probablement `BLOCKED` avec la classe par défaut.
+- Une StorageClass dont le provisionneur prend en charge `ReadWriteOncePod`.
+  Kubernetes v1.36 réserve ce mode aux volumes CSI. Sur le cluster Docker
+  Desktop v1.36.1 inspecté, `hostpath` et `standard` utilisent tous deux
+  `rancher.io/local-path` avec `WaitForFirstConsumer`. Le cluster ne déclarait
+  aucun pilote CSI, donc la recette de stockage réelle est `BLOCKED`.
+  [Modes d'accès Kubernetes v1.36](https://v1-36.docs.kubernetes.io/docs/concepts/storage/persistent-volumes/#access-modes)
 - [`volumeBindingMode`](https://kubernetes.io/docs/concepts/storage/storage-classes/#volume-binding-mode)
   doit valoir `Immediate`. Avec `WaitForFirstConsumer`, un claim n'est jamais
   `Bound` avant le rendu de la requête ; le plan consigne alors `BLOCKED`. Lier
@@ -292,7 +310,7 @@ mainteneur.
 | 0 | Consigner l'environnement de 8.1. | Versions et contexte conservés. | Contexte autre que `docker-desktop`. |
 | 1 | (Exige une autorisation explicite du mainteneur, non accordée par ce travail.) Provisionner le Namespace du tenant avec Pod Security `restricted` `v1.36`, une NetworkPolicy de refus par défaut en entrée et en sortie, un ServiceAccount sans montage automatique de jeton et un Role portant les permissions de la section 7, à partir d'un modèle revu à ce moment. `delete` n'est accordé que pour l'étape d'arrêt ultérieure. | Objets créés et leurs UID conservés. Une NetworkPolicy créée ne prouve pas son application (étape 4a). | Toute création partielle : inspecter, ne jamais supprimer puis recréer. |
 | 2 | `agentsandbox kubernetes doctor --check-permissions` avec l'identité du broker. | Rapport conservé. Ses douze revues d'accès fixes incluent `patch pods`, `update pods`, `delete pods` et `create pods/attach` ; reste à confirmer que `create` est bien le verbe vérifié pour un upgrade WebSocket d'attachement (EXT-8). `delete pods` doit rester refusé jusqu'à l'étape d'arrêt ; `update pods`, exec, logs, Secrets, bindings et demandes de jeton doivent être refusés. | Tout refus des revues, ou l'une de ces permissions refusées accordée. |
-| 3 | (Exige une autorisation explicite du mainteneur, non accordée par ce travail.) L'opérateur crée un PVC `ReadWriteOncePod` nommé pour une tentative ; `inspect_session_workspace_claim` le renvoie `Bound` avec son UID. Cela exige le patch proposé 0004 ; le profil de QA admis n'a pas de réseau (`--network none`), donc une exécution de QA contre un cluster exigerait un profil réseau admis séparément. | Projection du claim conservée. | Classe sans RWOP ou `WaitForFirstConsumer` : `BLOCKED`. |
+| 3 | (Exige une autorisation explicite du mainteneur, non accordée par ce travail.) L'opérateur crée un PVC `ReadWriteOncePod` nommé pour une tentative. La commande `kubernetes inspect-workspace` vérifie en lecture seule qu'il est `Bound` et retourne son UID. | Projection du claim conservée. | Classe sans RWOP ou `WaitForFirstConsumer` : `BLOCKED`. |
 
 ### 8.4 Suite d'effets (toute BLOCKED)
 

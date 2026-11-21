@@ -327,7 +327,7 @@ async fn anonymous_web_pressure(fixture: &Fixture) {
     let oidc = fixture.state.oidc.as_ref().unwrap();
     let before = oidc.audit.verify().unwrap();
     for _ in 0..224 {
-        // Only setup's anonymous rate window is advanced. The224 transactions
+        // Only setup's anonymous rate window is advanced. The 224 transactions
         // are produced by status+start, never inserted into the private map.
         reset_start_window(oidc);
         let response = gateway_router(fixture.state.clone())
@@ -339,13 +339,7 @@ async fn anonymous_web_pressure(fixture: &Fixture) {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let cookie = response.headers()["set-cookie"]
-            .to_str()
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .to_owned();
+        assert!(response.headers().get("set-cookie").is_none());
         let response = gateway_router(fixture.state.clone())
             .oneshot(
                 Request::post("/auth/oidc/start")
@@ -353,7 +347,6 @@ async fn anonymous_web_pressure(fixture: &Fixture) {
                     .header("origin", "http://127.0.0.1:18100")
                     .header("sec-fetch-site", "same-origin")
                     .header("sec-fetch-mode", "cors")
-                    .header("cookie", cookie)
                     .body(Body::from(json!({"version":1}).to_string()))
                     .unwrap(),
             )
@@ -364,6 +357,7 @@ async fn anonymous_web_pressure(fixture: &Fixture) {
             StatusCode::OK,
             "real public start must reach discovery/PKCE"
         );
+        assert!(response.headers().get("set-cookie").is_some());
         let bytes = axum::body::to_bytes(response.into_body(), 35_000)
             .await
             .unwrap();
@@ -374,24 +368,27 @@ async fn anonymous_web_pressure(fixture: &Fixture) {
                 .unwrap()
                 .contains("code_challenge=")
         );
+        let correlation_token = value["correlation_token"].as_str().unwrap();
+        assert_eq!(correlation_token.len(), 64);
     }
     assert_eq!(
         oidc.audit.verify().unwrap(),
         before,
         "anonymous setup must not spend durable capacity"
     );
-    let registry = oidc.registry.lock().unwrap();
-    assert_eq!(registry.transactions.len(), 224);
-    assert_eq!(anonymous_slots(&registry), 224);
-    assert!(
-        registry
-            .transactions
-            .values()
-            .all(|entry| entry.pending.is_some()
-                && entry.created.elapsed()
-                    < Duration::from_secs(oidc.config.provider.limits.pkce_ttl_seconds))
-    );
-    drop(registry);
+    {
+        let registry = oidc.registry.lock().unwrap();
+        assert_eq!(registry.transactions.len(), 224);
+        assert_eq!(anonymous_slots(&registry), 224);
+        assert!(
+            registry
+                .transactions
+                .values()
+                .all(|entry| entry.pending.is_some()
+                    && entry.created.elapsed()
+                        < Duration::from_secs(oidc.config.provider.limits.pkce_ttl_seconds))
+        );
+    }
     assert_eq!(
         request(&fixture.state, json!({"kind":"login"}), None)
             .await

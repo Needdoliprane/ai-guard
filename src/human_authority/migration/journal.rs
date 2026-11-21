@@ -401,7 +401,7 @@ fn validate_confirmed(progress: &Progress) -> Result<()> {
     Ok(())
 }
 
-fn create_document(
+pub(super) fn create_document(
     directory: &Directory,
     name: &str,
     bytes: &[u8],

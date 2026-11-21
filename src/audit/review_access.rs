@@ -95,12 +95,24 @@ impl<'e> HumanSourceAccess<'e> {
     }
 }
 
+#[derive(Debug)]
+pub(super) struct UnknownAuditSchema;
+
+impl std::fmt::Display for UnknownAuditSchema {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("unsupported audit schema version")
+    }
+}
+
+impl std::error::Error for UnknownAuditSchema {}
+
 pub(super) fn require_legacy(db: &Connection) -> anyhow::Result<()> {
     let format: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if !(1..=13).contains(&format) {
-        return Err(ReviewAuthorityFailure::Required.into());
+    match format {
+        1..=13 => Ok(()),
+        14 | 15 => Err(ReviewAuthorityFailure::Required.into()),
+        _ => Err(UnknownAuditSchema.into()),
     }
-    Ok(())
 }
 
 pub(super) fn validate_context(

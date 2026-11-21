@@ -8,9 +8,10 @@ use crate::human_authority::{
     HumanSourceKindV1, HumanSourcesConfigurationV1, HumanStorageProfileV1, OwnedHumanSources,
     SourceStorageBindingV1,
     maintenance::{
-        HumanMaintenanceResolvedViewV1, HumanMaintenanceSourceToken, HumanMaintenanceSourceV1,
-        HumanMaintenanceViewV1, HumanSourcesMaintenanceConfigurationV1,
-        HumanSourcesMaintenanceGuard, HumanSourcesMaintenancePlanV1,
+        HumanMaintenanceActiveManifestV1, HumanMaintenanceResolvedViewV1,
+        HumanMaintenanceSourceToken, HumanMaintenanceSourceV1, HumanMaintenanceViewV1,
+        HumanSourcesMaintenanceConfigurationV1, HumanSourcesMaintenanceGuard,
+        HumanSourcesMaintenancePlanV1,
     },
 };
 use std::{ffi::OsStr, os::unix::fs::PermissionsExt};
@@ -1261,6 +1262,367 @@ fn complete_migration15(
     }
 }
 
+pub(super) fn assert_neighbor_store14_head_is_anchored_during_egress_upgrade() {
+    use crate::control_fs::publication::FAIL_AFTER_RENAME;
+    use crate::human_authority::migration::egress_journal::RetainedEgressIntent;
+
+    let base = BaseFixture::new(&["A", "B"]);
+    let anchors = base.migrate_all();
+    let manifest_name = "active14-before-egress.json";
+    let prior_owner = base.owner(&anchors, manifest_name, 14);
+    let prior = &base.plan.target;
+    let neighbor_id = prior.sources[1].source_id;
+    let expected_head = {
+        let source = prior_owner.source_token(neighbor_id).unwrap();
+        let startup = base.startup(1, &source);
+        let epoch = prior_owner.try_write_epoch().unwrap();
+        startup
+            .append_incarnation(&epoch, &source, Uuid::new_v4(), 0)
+            .unwrap()
+    };
+    assert!(expected_head.seq > anchors[1].seq);
+    let configuration = Directory::open_existing(base.plan_file.path().parent().unwrap()).unwrap();
+    let prior_file = PrivateFile::open(
+        &configuration.path().join(manifest_name),
+        crate::human_authority::MAX_HUMAN_MANIFEST_BYTES as u64,
+    )
+    .unwrap();
+    let closure = prior_owner.closure();
+    let manifest = HumanMaintenanceActiveManifestV1 {
+        storage_binding: binding(&configuration, manifest_name),
+        closure_id: closure.closure_id,
+        closure_revision: closure.closure_revision,
+        closure_digest: closure.closure_digest.clone(),
+    };
+    drop(prior_owner);
+    {
+        let guard_without_manifest = base.maintenance();
+        let token = guard_without_manifest.target_source(neighbor_id).unwrap();
+        let error = Store::observe_unchanged_review_format14(&token).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<authority::ReviewAuthorityFailure>(),
+            Some(&authority::ReviewAuthorityFailure::Required)
+        );
+    }
+
+    let mut plan = base.plan.clone();
+    plan.migration_id = Uuid::new_v4();
+    plan.prior = Some(prior.clone());
+    plan.prior_active_manifest = Some(manifest);
+    plan.target.sources[0].required_format = 15;
+    let resolve = |view: &HumanMaintenanceViewV1| {
+        HumanMaintenanceResolvedViewV1::new(
+            view.sources.clone(),
+            view.configuration.clone(),
+            base.configuration_files.clone(),
+        )
+        .unwrap()
+    };
+    let plan_file = configuration
+        .persistent_create(
+            "maintenance-a15-b14.json",
+            &serde_json::to_vec(&plan).unwrap(),
+        )
+        .unwrap();
+    let acquire = || {
+        HumanSourcesMaintenanceGuard::acquire(
+            plan_file.clone(),
+            HumanSourcesMaintenanceConfigurationV1::new(
+                Some(resolve(prior)),
+                resolve(&plan.target),
+                Some(prior_file.clone()),
+            ),
+        )
+        .unwrap()
+    };
+    let guard = acquire();
+    let selected = guard
+        .target_source(plan.target.sources[0].source_id)
+        .unwrap();
+    let neighbor = guard.target_source(neighbor_id).unwrap();
+    let error = Store::observe_unchanged_review_format14(&selected).unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<authority::ReviewAuthorityFailure>(),
+        Some(&authority::ReviewAuthorityFailure::Required)
+    );
+    assert_eq!(
+        Store::observe_unchanged_review_format14(&neighbor).unwrap(),
+        expected_head
+    );
+
+    let journal = base
+        .root
+        .persistent_child("egress-intent", true)
+        .unwrap()
+        .unwrap();
+    let backup_parent = base
+        .root
+        .persistent_child("egress-backup", true)
+        .unwrap()
+        .unwrap();
+    let copy = backup_parent.path().join("other-copy.sqlite");
+    let limits = EgressStoreLimitsV1::default();
+    let initial = maintenance_source_state(&base);
+    assert_eq!(initial.format, 14);
+    let opened = base.open_maintenance(0, &selected);
+    let intent = opened
+        .with_review_maintenance_writer(&selected, |writer| {
+            assert!(
+                RetainedEgressIntent::resume(
+                    &selected,
+                    writer,
+                    journal.clone(),
+                    backup_parent.clone(),
+                    &limits,
+                )
+                .is_err()
+            );
+            assert!(journal.persistent_entries(1)?.is_empty());
+            FAIL_AFTER_RENAME.with(|fault| fault.set(true));
+            let interrupted = RetainedEgressIntent::prepare(
+                &selected,
+                writer,
+                journal.clone(),
+                backup_parent.clone(),
+                &limits,
+            )
+            .map(|_| ())
+            .unwrap_err();
+            assert_eq!(
+                interrupted.to_string(),
+                "egress journal publication durability unknown"
+            );
+            assert_eq!(maintenance_source_state(&base), initial);
+            assert!(
+                RetainedEgressIntent::prepare(
+                    &selected,
+                    writer,
+                    journal.clone(),
+                    backup_parent.clone(),
+                    &limits,
+                )
+                .is_err()
+            );
+            let intent = RetainedEgressIntent::resume(
+                &selected,
+                writer,
+                journal.clone(),
+                backup_parent.clone(),
+                &limits,
+            )?;
+            let backup_path = intent.backup_path()?;
+            assert_eq!(backup_path, backup_parent.path().join("source.sqlite"));
+            assert!(intent.resume_backup(writer).is_err());
+            assert!(!backup_path.exists());
+
+            let unframed = RetainedEgressIntent::prepare(
+                &selected,
+                writer,
+                base.root.exclusive_child("egress-unframed-journal")?,
+                base.root.exclusive_child("egress-unframed-backup")?,
+                &limits,
+            )?;
+            let unframed_path = unframed.backup_path()?;
+            let unframed_backup = writer.prepare_egress_backup(&selected, &unframed_path)?;
+            assert!(unframed.resume_backup(writer).is_err());
+            assert!(unframed.prepare_backup(writer).is_err());
+            unframed_backup.journal_observation(&selected)?;
+            assert_eq!(maintenance_source_state(&base), initial);
+
+            FAIL_AFTER_RENAME.with(|fault| fault.set(true));
+            let interrupted = intent.prepare_backup(writer).map(|_| ()).unwrap_err();
+            assert_eq!(
+                interrupted.to_string(),
+                "egress journal publication durability unknown"
+            );
+            assert!(intent.prepare_backup(writer).is_err());
+            let backup = intent.resume_backup(writer)?;
+            writer.prepare_egress_backup(&selected, &copy)?;
+            let pending = backup.install_format15(writer)?;
+            assert_eq!(pending.seq, initial.head.0 + 1);
+            drop(backup);
+            Ok(intent)
+        })
+        .unwrap();
+    assert_eq!(maintenance_source_state(&base), initial);
+    let uncommitted = intent
+        .confirm_committed(Redactor::new(vec![]), 10_000)
+        .unwrap_err();
+    assert_eq!(
+        uncommitted.downcast_ref::<EgressStoreFailure>(),
+        Some(&EgressStoreFailure::Integrity)
+    );
+    assert_eq!(journal.persistent_entries(3).unwrap().len(), 2);
+    let applied = opened
+        .with_review_maintenance_writer(&selected, |writer| {
+            let backup = intent.resume_backup(writer)?;
+            let receipt = backup.install_format15(writer)?;
+            writer.commit()?;
+            Ok(receipt)
+        })
+        .unwrap();
+    let committed = maintenance_source_state(&base);
+    assert_eq!(committed.format, 15);
+    assert_eq!(
+        Store::observe_unchanged_review_format14(&neighbor).unwrap(),
+        expected_head
+    );
+    drop(intent);
+    drop(opened);
+    drop(selected);
+    drop(neighbor);
+    drop(guard);
+    let guard = acquire();
+    let selected = guard
+        .target_source(plan.target.sources[0].source_id)
+        .unwrap();
+    let reopened = base.open_maintenance(0, &selected);
+    let retained = reopened
+        .with_review_maintenance_writer(&selected, |writer| {
+            let changed_limits = EgressStoreLimitsV1::new(1, 16_384, 16 * 1_048_576)?;
+            let conflict = RetainedEgressIntent::resume(
+                &selected,
+                writer,
+                journal.clone(),
+                backup_parent.clone(),
+                &changed_limits,
+            )
+            .map(|_| ())
+            .unwrap_err();
+            assert_eq!(conflict.to_string(), "egress intent differs");
+            let new_journal = base
+                .root
+                .persistent_child("egress-intent-too-late", true)?
+                .unwrap();
+            let new_backup = base
+                .root
+                .persistent_child("egress-backup-too-late", true)?
+                .unwrap();
+            let installed = RetainedEgressIntent::prepare(
+                &selected,
+                writer,
+                new_journal.clone(),
+                new_backup,
+                &limits,
+            )
+            .map(|_| ())
+            .unwrap_err();
+            assert_eq!(
+                installed.downcast_ref::<EgressStoreFailure>(),
+                Some(&EgressStoreFailure::Integrity)
+            );
+            assert!(new_journal.persistent_entries(1)?.is_empty());
+            let retained = RetainedEgressIntent::resume(
+                &selected,
+                writer,
+                journal.clone(),
+                backup_parent.clone(),
+                &limits,
+            )?;
+            retained.resume_backup(writer)?;
+            Ok(retained)
+        })
+        .unwrap();
+    drop(reopened);
+    let abandoned = journal
+        .exclusive_child(&format!("egress15-stage-{}", Uuid::new_v4()))
+        .unwrap();
+    let partial = abandoned.persistent_create("record-v1.json", b"{").unwrap();
+    FAIL_AFTER_RENAME.with(|fault| fault.set(true));
+    let interrupted = retained
+        .confirm_committed(Redactor::new(vec![]), 10_000)
+        .unwrap_err();
+    assert_eq!(
+        interrupted.to_string(),
+        "egress journal publication durability unknown"
+    );
+    assert_eq!(maintenance_source_state(&base), committed);
+    let read_record = |slot| {
+        journal
+            .persistent_child(slot, false)
+            .unwrap()
+            .unwrap()
+            .persistent_read("record-v1.json", 128 * 1024, &[])
+            .unwrap()
+            .unwrap()
+    };
+    let confirmation = read_record("egress15-confirmed-v2");
+    let intent_file = read_record("egress15-intent-v2");
+    let frame = read_record("egress15-backup-v2");
+    assert_eq!(
+        serde_json::from_slice::<Value>(confirmation.bytes()).unwrap(),
+        json!({
+            "version": 1,
+            "intent_digest": intent_file.digest(),
+            "backup_digest": frame.digest(),
+            "receipt": {"seq": applied.seq, "hash": applied.hash},
+        }),
+    );
+    drop(retained);
+    drop(selected);
+    drop(guard);
+    let guard = acquire();
+    let selected = guard
+        .target_source(plan.target.sources[0].source_id)
+        .unwrap();
+    let reopened = base.open_maintenance(0, &selected);
+    let retained = reopened
+        .with_review_maintenance_writer(&selected, |writer| {
+            RetainedEgressIntent::resume(
+                &selected,
+                writer,
+                journal.clone(),
+                backup_parent.clone(),
+                &limits,
+            )
+        })
+        .unwrap();
+    drop(reopened);
+    let confirmed = retained
+        .confirm_committed(Redactor::new(vec![]), 10_000)
+        .unwrap();
+    assert_eq!(confirmed, applied);
+    partial.persistent_revalidate().unwrap();
+    assert_eq!(partial.bytes(), b"{");
+    confirmation.persistent_revalidate().unwrap();
+    assert_eq!(maintenance_source_state(&base), committed);
+    assert_eq!(
+        Store::observe_unchanged_review_format14(&guard.target_source(neighbor_id).unwrap())
+            .unwrap(),
+        expected_head
+    );
+
+    // Both backups were produced by SQLite before the commit. Preserve the
+    // original to test an ordinary copy substitution after closing owners.
+    let move_backup = |from: &str, to: &str| {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let old = backup_parent.path().join(format!("{from}{suffix}"));
+            let new = backup_parent.path().join(format!("{to}{suffix}"));
+            assert!(!new.exists());
+            if old.exists() {
+                std::fs::rename(old, new).unwrap();
+            }
+        }
+    };
+    move_backup("source.sqlite", "original-preserved.sqlite");
+    move_backup("other-copy.sqlite", "source.sqlite");
+    let reopened = base.open_maintenance(0, &selected);
+    reopened
+        .with_review_maintenance_writer(&selected, |writer| {
+            writer.resume_egress_backup(&selected, &retained.backup_path()?)?;
+            Ok(())
+        })
+        .unwrap();
+    drop(reopened);
+    let mismatch = retained
+        .confirm_committed(Redactor::new(vec![]), 10_000)
+        .unwrap_err();
+    assert_eq!(mismatch.to_string(), "egress backup record differs");
+    frame.persistent_revalidate().unwrap();
+    confirmation.persistent_revalidate().unwrap();
+    assert_eq!(maintenance_source_state(&base), committed);
+}
+
 pub(super) fn assert_format14_compatibility_and_migration_refusals() {
     let base = BaseFixture::new(&["A"]);
     let anchors = base.migrate_all();
@@ -1311,7 +1673,10 @@ struct MaintenanceSourceState {
     quota: i64,
 }
 fn maintenance_source_state(base: &BaseFixture) -> MaintenanceSourceState {
-    let db = base.stores[0].db.lock().unwrap();
+    store_source_state(&base.stores[0])
+}
+fn store_source_state(store: &Store) -> MaintenanceSourceState {
+    let db = store.db.lock().unwrap();
     MaintenanceSourceState {
         format: db
             .pragma_query_value(None, "user_version", |r| r.get(0))
@@ -1329,6 +1694,554 @@ fn maintenance_source_state(base: &BaseFixture) -> MaintenanceSourceState {
             .unwrap(),
     }
 }
+pub(super) fn assert_format15_confirmation_only_reads_committed_receipt() {
+    let base = BaseFixture::new(&["A"]);
+    base.migrate_all();
+    let prepared = prepare_maintenance15(&base).unwrap();
+    let guard = prepared.acquire(&base).unwrap();
+    let token = guard
+        .target_source(prepared.plan.target.sources[0].source_id)
+        .unwrap();
+    let limits = EgressStoreLimitsV1::default();
+    let backup_path = base.backup_path(1);
+    let confirm = |token: &HumanMaintenanceSourceToken, limits: &EgressStoreLimitsV1| {
+        Store::confirm_egress_format15(token, Redactor::new(vec![]), 10_000, &backup_path, limits)
+    };
+    let opened = base.open_maintenance(0, &token);
+    let initial = maintenance_source_state(&base);
+    opened
+        .with_review_maintenance_writer(&token, |writer| {
+            writer.prepare_egress_backup(&token, &backup_path)?;
+            Ok(())
+        })
+        .unwrap();
+
+    let before_commit = confirm(&token, &limits).unwrap_err();
+    assert_eq!(
+        before_commit.downcast_ref::<EgressStoreFailure>(),
+        Some(&EgressStoreFailure::Integrity)
+    );
+    assert_eq!(maintenance_source_state(&base), initial);
+
+    let pending = opened
+        .with_review_maintenance_writer(&token, |writer| {
+            let backup = writer.resume_egress_backup(&token, &backup_path)?;
+            let receipt = writer.install_egress_format15(&token, &backup, &limits)?;
+            writer.commit()?;
+            Ok(receipt)
+        })
+        .unwrap();
+    // Drop all maintenance capabilities without recording an acknowledgement.
+    // The expected receipt stays only in the oracle.
+    drop(opened);
+    drop(token);
+    drop(guard);
+    let committed = maintenance_source_state(&base);
+    assert_eq!(committed.format, 15);
+    assert_eq!((pending.seq, pending.hash.clone()), committed.head);
+    assert_eq!(pending.seq, initial.head.0 + 1);
+    let reacquired = prepared.acquire(&base).unwrap();
+    let token = reacquired
+        .target_source(prepared.plan.target.sources[0].source_id)
+        .unwrap();
+    assert_eq!(confirm(&token, &limits).unwrap(), pending);
+    let different_limits = EgressStoreLimitsV1::new(1, 16_384, 16 * 1_048_576).unwrap();
+    let different = confirm(&token, &different_limits).unwrap_err();
+    assert_eq!(
+        different.downcast_ref::<EgressStoreFailure>(),
+        Some(&EgressStoreFailure::Conflict)
+    );
+    assert_eq!(maintenance_source_state(&base), committed);
+}
+
+// Cross-process loss of the E1 acknowledgement. The parent prepares the real
+// A15/B14 maintenance union, then re-executes this exact test with a phase
+// variable. The child runs the real journal publication and SQLite commit,
+// writes a test-only oracle and dies by SIGKILL: no destructor, unlock,
+// SQLite close or acknowledgement runs. Only the parent judges the recovery.
+const XPROC_TEST: &str = "audit::egress::tests::maintenance_confirmation_recovers_committed_genesis_after_child_process_kill";
+const XPROC_PHASE: &str = "AI_GUARD_EGRESS15_XPROC_PHASE";
+const XPROC_ROOT: &str = "AI_GUARD_EGRESS15_XPROC_ROOT";
+const XPROC_ORACLE: &str = "AI_GUARD_EGRESS15_XPROC_ORACLE";
+const XPROC_AFTER_COMMIT: &str = "after-sqlite-commit";
+const XPROC_AFTER_CONFIRMATION: &str = "after-confirmation-record";
+const XPROC_PLAN: &str = "maintenance-a15-b14-xproc.json";
+const XPROC_PRIOR_MANIFEST: &str = "active14-before-xproc.json";
+const XPROC_JOURNAL: &str = "egress-intent-xproc";
+const XPROC_BACKUP: &str = "egress-backup-xproc";
+const XPROC_INTENT_RECORD: &str = "egress15-intent-v2";
+const XPROC_BACKUP_RECORD: &str = "egress15-backup-v2";
+const XPROC_CONFIRMED_RECORD: &str = "egress15-confirmed-v2";
+// Harness observation bound only, widened for a host under load 70-200 (the
+// child normally ends far earlier by SIGKILL); no product deadline changes.
+const XPROC_CHILD_BOUND: std::time::Duration = std::time::Duration::from_secs(720);
+
+fn xproc_sha256(path: &std::path::Path) -> String {
+    use sha2::Digest as _;
+    hex::encode(sha2::Sha256::digest(std::fs::read(path).unwrap()))
+}
+
+fn xproc_genesis_rows(store: &Store) -> (i64, Vec<(i64, String)>, i64) {
+    let db = store.db.lock().unwrap();
+    let genesis = db
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind='control.egress_policy.genesis'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let meta = db
+        .prepare("SELECT genesis_seq,genesis_hash FROM egress_policy_meta")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    let operations = db
+        .query_row("SELECT count(*) FROM egress_policy_operations", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    (genesis, meta, operations)
+}
+
+fn xproc_journal_names(journal: &Directory) -> Vec<String> {
+    let entries = journal.persistent_entries(8).unwrap();
+    assert!(entries.iter().all(|entry| entry.directory));
+    let mut names: Vec<_> = entries.into_iter().map(|entry| entry.name).collect();
+    names.sort_unstable();
+    names
+}
+
+// Main SQLite files only: WAL/SHM sidecars may legitimately appear on reads,
+// and the reserved per-directory SQLite open lock is not a backup.
+fn xproc_backup_mains(parent: &Directory) -> Vec<String> {
+    let mut names: Vec<_> = std::fs::read_dir(parent.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| {
+            name != ".ai-guard-sqlite-open.lock"
+                && !["-wal", "-shm", "-journal"]
+                    .iter()
+                    .any(|s| name.ends_with(s))
+        })
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+/// Reopen plan, prior manifest and configuration files by path, as a fresh
+/// process must, and take one real nonblocking maintenance guard.
+fn acquire_xproc_maintenance(
+    root: &Directory,
+) -> (HumanSourcesMaintenancePlanV1, HumanSourcesMaintenanceGuard) {
+    let configuration = root
+        .persistent_child("configuration", false)
+        .unwrap()
+        .unwrap();
+    let plan_file = PrivateFile::open(&configuration.path().join(XPROC_PLAN), 512 * 1024).unwrap();
+    let plan: HumanSourcesMaintenancePlanV1 = serde_json::from_slice(plan_file.bytes()).unwrap();
+    let prior_file = PrivateFile::open(
+        &configuration.path().join(XPROC_PRIOR_MANIFEST),
+        crate::human_authority::MAX_HUMAN_MANIFEST_BYTES as u64,
+    )
+    .unwrap();
+    let files: Vec<_> = plan
+        .target
+        .configuration
+        .files
+        .iter()
+        .map(|file| {
+            (
+                file.kind,
+                PrivateFile::open(&file.storage_binding.path(), 1_048_576).unwrap(),
+            )
+        })
+        .collect();
+    let resolve = |view: &HumanMaintenanceViewV1| {
+        HumanMaintenanceResolvedViewV1::new(
+            view.sources.clone(),
+            view.configuration.clone(),
+            files.clone(),
+        )
+        .unwrap()
+    };
+    let guard = HumanSourcesMaintenanceGuard::acquire(
+        plan_file,
+        HumanSourcesMaintenanceConfigurationV1::new(
+            Some(resolve(plan.prior.as_ref().unwrap())),
+            resolve(&plan.target),
+            Some(prior_file),
+        ),
+    )
+    .unwrap();
+    (plan, guard)
+}
+
+fn xproc_die_without_acknowledgement(
+    oracle: &std::path::Path,
+    phase: &str,
+    receipt: &authority::AuthorityReceiptV1,
+    backup_parent: &Directory,
+    journal: &Directory,
+) -> ! {
+    let confirmed = journal
+        .path()
+        .join(XPROC_CONFIRMED_RECORD)
+        .join("record-v1.json");
+    let record = json!({
+        "phase": phase,
+        "pid": std::process::id(),
+        "receipt": receipt,
+        "backup_sha256": xproc_sha256(&backup_parent.path().join("source.sqlite")),
+        "confirmed_record_sha256": confirmed.exists().then(|| xproc_sha256(&confirmed)),
+    });
+    // Test-only oracle outside every product path; it is no acknowledgement.
+    std::fs::write(oracle, serde_json::to_vec(&record).unwrap()).unwrap();
+    // SAFETY: signal to this very process. SIGKILL cannot be caught or
+    // ignored, so no destructor, flock/SQLite close or acknowledgement runs.
+    unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
+    unreachable!("SIGKILL returned to the cross-process child")
+}
+
+fn xproc_child(phase: &str) -> ! {
+    use crate::human_authority::migration::egress_journal::RetainedEgressIntent;
+    assert!(
+        matches!(phase, XPROC_AFTER_COMMIT | XPROC_AFTER_CONFIRMATION),
+        "unknown cross-process phase {phase}"
+    );
+    let root =
+        Directory::open_existing(std::path::Path::new(&std::env::var_os(XPROC_ROOT).unwrap()))
+            .unwrap();
+    let oracle = std::path::PathBuf::from(std::env::var_os(XPROC_ORACLE).unwrap());
+    let (plan, guard) = acquire_xproc_maintenance(&root);
+    let source = &plan.target.sources[0];
+    let selected = guard.target_source(source.source_id).unwrap();
+    let journal = root
+        .persistent_child(XPROC_JOURNAL, false)
+        .unwrap()
+        .unwrap();
+    let backup_parent = root.persistent_child(XPROC_BACKUP, false).unwrap().unwrap();
+    let limits = EgressStoreLimitsV1::default();
+    let opened = Store::open_review_maintenance_for_tenant(
+        &source.storage_binding.path(),
+        source.tenant_id.as_deref().unwrap(),
+        Redactor::new(vec![]),
+        10_000,
+        &selected,
+    )
+    .unwrap();
+    let (intent, receipt) = opened
+        .with_review_maintenance_writer(&selected, |writer| {
+            let intent = RetainedEgressIntent::prepare(
+                &selected,
+                writer,
+                journal.clone(),
+                backup_parent.clone(),
+                &limits,
+            )?;
+            let backup = intent.prepare_backup(writer)?;
+            let receipt = backup.install_format15(writer)?;
+            writer.commit()?;
+            drop(backup);
+            if phase == XPROC_AFTER_COMMIT {
+                // COMMIT returned; the receipt never leaves this closure.
+                xproc_die_without_acknowledgement(
+                    &oracle,
+                    phase,
+                    &receipt,
+                    &backup_parent,
+                    &journal,
+                );
+            }
+            Ok((intent, receipt))
+        })
+        .unwrap();
+    drop(opened);
+    let confirmed = intent
+        .confirm_committed(Redactor::new(vec![]), 10_000)
+        .unwrap();
+    assert_eq!(confirmed, receipt);
+    // Confirmation record published; its result is never acknowledged.
+    xproc_die_without_acknowledgement(&oracle, phase, &receipt, &backup_parent, &journal)
+}
+
+pub(super) fn assert_format15_confirmation_recovers_after_child_process_kill() {
+    if let Ok(phase) = std::env::var(XPROC_PHASE) {
+        xproc_child(&phase);
+    }
+    for phase in [XPROC_AFTER_COMMIT, XPROC_AFTER_CONFIRMATION] {
+        xproc_parent(phase);
+    }
+}
+
+fn xproc_parent(phase: &str) {
+    use crate::human_authority::migration::egress_journal::RetainedEgressIntent;
+    use std::os::unix::process::ExitStatusExt;
+
+    let base = BaseFixture::new(&["A", "B"]);
+    let anchors = base.migrate_all();
+    let prior_owner = base.owner(&anchors, XPROC_PRIOR_MANIFEST, 14);
+    let neighbor_id = base.plan.target.sources[1].source_id;
+    let expected_head = {
+        let source = prior_owner.source_token(neighbor_id).unwrap();
+        let startup = base.startup(1, &source);
+        let epoch = prior_owner.try_write_epoch().unwrap();
+        startup
+            .append_incarnation(&epoch, &source, Uuid::new_v4(), 0)
+            .unwrap()
+    };
+    assert!(expected_head.seq > anchors[1].seq);
+    let configuration = Directory::open_existing(base.plan_file.path().parent().unwrap()).unwrap();
+    let closure = prior_owner.closure();
+    let manifest = HumanMaintenanceActiveManifestV1 {
+        storage_binding: binding(&configuration, XPROC_PRIOR_MANIFEST),
+        closure_id: closure.closure_id,
+        closure_revision: closure.closure_revision,
+        closure_digest: closure.closure_digest.clone(),
+    };
+    drop(prior_owner);
+    let mut plan = base.plan.clone();
+    plan.migration_id = Uuid::new_v4();
+    plan.prior = Some(base.plan.target.clone());
+    plan.prior_active_manifest = Some(manifest);
+    plan.target.sources[0].required_format = 15;
+    drop(
+        configuration
+            .persistent_create(XPROC_PLAN, &serde_json::to_vec(&plan).unwrap())
+            .unwrap(),
+    );
+    let journal = base
+        .root
+        .persistent_child(XPROC_JOURNAL, true)
+        .unwrap()
+        .unwrap();
+    let backup_parent = base
+        .root
+        .persistent_child(XPROC_BACKUP, true)
+        .unwrap()
+        .unwrap();
+    let backup_path = backup_parent.path().join("source.sqlite");
+    let initial = maintenance_source_state(&base);
+    assert_eq!(initial.format, 14);
+    let neighbor_initial = store_source_state(&base.stores[1]);
+    assert_eq!(neighbor_initial.format, 14);
+    assert_eq!(
+        neighbor_initial.head,
+        (expected_head.seq, expected_head.hash.clone())
+    );
+    assert!(journal.persistent_entries(1).unwrap().is_empty());
+    assert!(!backup_path.exists());
+
+    // Same binary, same --exact filter; the phase variable selects the child.
+    let observation = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap())
+        .unwrap();
+    let oracle = observation.path().join("oracle.json");
+    let stdout_path = observation.path().join("child.stdout");
+    let stderr_path = observation.path().join("child.stderr");
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([XPROC_TEST, "--exact", "--test-threads=1", "--nocapture"])
+        .env(XPROC_PHASE, phase)
+        .env(XPROC_ROOT, base.root.path())
+        .env(XPROC_ORACLE, &oracle)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::fs::File::create(&stdout_path).unwrap())
+        .stderr(std::fs::File::create(&stderr_path).unwrap())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > XPROC_CHILD_BOUND {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("cross-process child {phase} exceeded the harness observation bound");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let child_output = || {
+        format!(
+            "child stdout:\n{}\nchild stderr:\n{}",
+            std::fs::read_to_string(&stdout_path).unwrap_or_default(),
+            std::fs::read_to_string(&stderr_path).unwrap_or_default()
+        )
+    };
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGKILL),
+        "child {phase} must die by SIGKILL after its durable step ({status}); {}",
+        child_output()
+    );
+    assert_ne!(child.id(), std::process::id());
+    let record: Value = serde_json::from_slice(&std::fs::read(oracle.as_path()).unwrap()).unwrap();
+    assert_eq!(record["phase"], phase);
+    assert_eq!(record["pid"].as_u64(), Some(u64::from(child.id())));
+    let pending: authority::AuthorityReceiptV1 =
+        serde_json::from_value(record["receipt"].clone()).unwrap();
+    let backup_digest = record["backup_sha256"].as_str().unwrap().to_owned();
+    let child_confirmation = record["confirmed_record_sha256"]
+        .as_str()
+        .map(str::to_owned);
+    assert_eq!(
+        child_confirmation.is_some(),
+        phase == XPROC_AFTER_CONFIRMATION
+    );
+
+    // Only the dead child committed: one genesis at head, B and backup intact.
+    let committed = maintenance_source_state(&base);
+    assert_eq!(committed.format, 15);
+    assert_eq!((pending.seq, pending.hash.clone()), committed.head);
+    assert_eq!(pending.seq, initial.head.0 + 1);
+    let migrated = (1, vec![(pending.seq, pending.hash.clone())], 0);
+    assert_eq!(xproc_genesis_rows(&base.stores[0]), migrated);
+    assert_eq!(store_source_state(&base.stores[1]), neighbor_initial);
+    assert_eq!(xproc_sha256(&backup_path), backup_digest);
+    assert_eq!(xproc_backup_mains(&backup_parent), vec!["source.sqlite"]);
+    let mut records = vec![XPROC_BACKUP_RECORD, XPROC_INTENT_RECORD];
+    if phase == XPROC_AFTER_CONFIRMATION {
+        records.insert(1, XPROC_CONFIRMED_RECORD);
+    }
+    assert_eq!(xproc_journal_names(&journal), records);
+    let confirmed_path = journal
+        .path()
+        .join(XPROC_CONFIRMED_RECORD)
+        .join("record-v1.json");
+    if let Some(digest) = &child_confirmation {
+        assert_eq!(&xproc_sha256(&confirmed_path), digest);
+    }
+
+    // Fresh view: the dead child's flocks are gone. A new migration and a
+    // reinstall from the retained backup are refused before any effect.
+    let (_, guard) = acquire_xproc_maintenance(&base.root);
+    let selected = guard
+        .target_source(plan.target.sources[0].source_id)
+        .unwrap();
+    let neighbor = guard.target_source(neighbor_id).unwrap();
+    assert_eq!(
+        Store::observe_unchanged_review_format14(&neighbor).unwrap(),
+        expected_head
+    );
+    let limits = EgressStoreLimitsV1::default();
+    let reopened = base.open_maintenance(0, &selected);
+    let retained = reopened
+        .with_review_maintenance_writer(&selected, |writer| {
+            let late_journal = base
+                .root
+                .persistent_child("egress-intent-xproc-late", true)?
+                .unwrap();
+            let late_backup = base
+                .root
+                .persistent_child("egress-backup-xproc-late", true)?
+                .unwrap();
+            let late = RetainedEgressIntent::prepare(
+                &selected,
+                writer,
+                late_journal.clone(),
+                late_backup,
+                &limits,
+            )
+            .map(|_| ())
+            .unwrap_err();
+            assert_eq!(
+                late.downcast_ref::<EgressStoreFailure>(),
+                Some(&EgressStoreFailure::Integrity)
+            );
+            assert!(late_journal.persistent_entries(1)?.is_empty());
+            let retained = RetainedEgressIntent::resume(
+                &selected,
+                writer,
+                journal.clone(),
+                backup_parent.clone(),
+                &limits,
+            )?;
+            let backup = retained.resume_backup(writer)?;
+            assert!(backup.install_format15(writer).is_err());
+            drop(backup);
+            Ok(retained)
+        })
+        .unwrap();
+    drop(reopened);
+    assert_eq!(maintenance_source_state(&base), committed);
+
+    // The confirmation attaches to the existing commit, idempotently.
+    for _ in 0..2 {
+        assert_eq!(
+            retained
+                .confirm_committed(Redactor::new(vec![]), 10_000)
+                .unwrap(),
+            pending
+        );
+    }
+    assert_eq!(
+        xproc_journal_names(&journal),
+        vec![
+            XPROC_BACKUP_RECORD,
+            XPROC_CONFIRMED_RECORD,
+            XPROC_INTENT_RECORD
+        ]
+    );
+    let read_record = |slot: &str| {
+        journal
+            .persistent_child(slot, false)
+            .unwrap()
+            .unwrap()
+            .persistent_read("record-v1.json", 128 * 1024, &[])
+            .unwrap()
+            .unwrap()
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(read_record(XPROC_CONFIRMED_RECORD).bytes()).unwrap(),
+        json!({
+            "version": 1,
+            "intent_digest": read_record(XPROC_INTENT_RECORD).digest(),
+            "backup_digest": read_record(XPROC_BACKUP_RECORD).digest(),
+            "receipt": {"seq": pending.seq, "hash": pending.hash},
+        }),
+    );
+    if let Some(digest) = &child_confirmation {
+        assert_eq!(&xproc_sha256(&confirmed_path), digest);
+    }
+    let confirm = |limits: &EgressStoreLimitsV1| {
+        Store::confirm_egress_format15(
+            &selected,
+            Redactor::new(vec![]),
+            10_000,
+            &backup_path,
+            limits,
+        )
+    };
+    assert_eq!(confirm(&limits).unwrap(), pending);
+    let different_limits = EgressStoreLimitsV1::new(1, 16_384, 16 * 1_048_576).unwrap();
+    assert_eq!(
+        confirm(&different_limits)
+            .unwrap_err()
+            .downcast_ref::<EgressStoreFailure>(),
+        Some(&EgressStoreFailure::Conflict)
+    );
+
+    // No second migration, the backup is kept, the Store14 neighbor unchanged.
+    assert_eq!(maintenance_source_state(&base), committed);
+    assert_eq!(xproc_genesis_rows(&base.stores[0]), migrated);
+    assert_eq!(store_source_state(&base.stores[1]), neighbor_initial);
+    assert_eq!(
+        Store::observe_unchanged_review_format14(&neighbor).unwrap(),
+        expected_head
+    );
+    assert_eq!(xproc_sha256(&backup_path), backup_digest);
+    assert_eq!(xproc_backup_mains(&backup_parent), vec!["source.sqlite"]);
+    eprintln!(
+        "egress15 cross-process {phase}: child pid {} ended by SIGKILL; receipt seq {} recovered \
+         unchanged; Store14 neighbor head seq {} unchanged",
+        child.id(),
+        pending.seq,
+        expected_head.seq
+    );
+}
+
 pub(super) fn assert_stopped_consumer_maintenance_refusal_is_typed_and_effect_free() {
     use crate::human_authority::HumanAuthorityFailure;
     let base = BaseFixture::new(&["A"]);

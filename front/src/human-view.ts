@@ -37,6 +37,8 @@ export type HumanResumeIntent = ResumeIntent<ViewPreferences>;
 const RESUME_PENDING = "Reprise confirmée. Le contrôle propose encore le contexte expiré : vos accès sont relus dans un instant, puis la vue se rouvre sans autre action.";
 /** Shown when the tab was hidden before a confirmed resume reopened the view, whatever the control proposes meanwhile: nothing reopens by itself any more. */
 const RESUME_INTERRUPTED = "Reprise interrompue : l’onglet a été masqué avant que la vue se rouvre, et rien ne se rouvre dans un onglet masqué. Vos accès sont relus à votre retour sur l’onglet ; si le contrôle propose alors un contexte de mêmes droits, la reprise vous sera proposée de nouveau et attendra votre confirmation.";
+const IDENTITY_REVALIDATION_FAILED = "Revalidation des accès impossible. ";
+const RESOURCE_STREAM_HIDDEN = "Flux suspendu · onglet masqué";
 function badge(label: string, tone = "neutral") { return el("span", `badge badge-${tone}`, label); }
 function action(label: string, key: string, call: () => void, disabled = false) {
   const node = button(label, "button button-secondary", call); node.dataset.focusKey = key; node.disabled = disabled; return node;
@@ -134,9 +136,21 @@ export class HumanDashboard {
   #refreshTimer: ReturnType<typeof setTimeout> | undefined;
   #closed = false;
   #mounted = false;
+  // Navigation cancels individual streams too, but only suspension requires a fresh identity before resuming.
+  #resourceStreamNeedsAccess = false;
+  #visibilityGeneration = 0;
   #visibility = () => {
+    if (this.#closed) return;
     if (document.visibilityState !== "visible") {
+      this.#visibilityGeneration++;
       this.#streamAbort.abort(); this.#supervision?.suspend(); this.#journal?.suspend();
+      if (!this.#api.readBudgetStopped && this.#usesResourceStream()) {
+        this.#resourceStreamNeedsAccess = true;
+        this.#invalidation++;
+        this.#resources.stale = true; this.#events.stale = true;
+        this.#streamStatus = RESOURCE_STREAM_HIDDEN;
+        this.#render();
+      }
       if (this.#resumeConfirmed) {
         this.#resumeConfirmed = false; this.#resumeInterrupted = true;
         clearTimeout(this.#resumeTimer); this.#resumeTimer = undefined;
@@ -144,21 +158,32 @@ export class HumanDashboard {
       }
       return;
     }
-    if (this.#closed) return;
     // No read while the budget is stopped: the unified views still leave their suspension and name that reason.
     if (this.#api.readBudgetStopped) { this.#resumeViews(); return; }
     if (this.#mode === "brokers" && this.#brokerForbidden || this.#mode === "workers" && this.#workerForbidden || this.#mode === "federation" && this.#federationForbidden) return;
-    const generation = this.#generation;
-    void this.#loadIdentity().then((success) => {
-      if (this.#closed || generation !== this.#generation || !this.#context) return;
-      // The unified views resume even when the identity could not be read: their own read reports the real
-      // state (unreachable, refused, context lost) with its retry, instead of a suspension that is over.
-      this.#resumeViews();
-      if (!success) return;
-      if (["resources", "events"].includes(this.#mode)) this.#startStream();
-      this.#refreshActive(true);
-    });
+    void this.#revalidateVisibleContext();
   };
+  async #revalidateVisibleContext(operatorRetry = false) {
+    if (this.#closed || document.visibilityState !== "visible") return;
+    if (!this.#api.readBudgetStopped && this.#resourceStreamAwaitingAccess()) this.#streamStatus = "Flux suspendu · accès à relire";
+    const generation = this.#generation;
+    const visibility = this.#visibilityGeneration;
+    const success = await this.#loadIdentity(operatorRetry);
+    if (this.#closed || generation !== this.#generation || !this.#context || document.visibilityState !== "visible") return;
+    // A second suspension during the read still needs its own revalidation after the loading latch is released.
+    if (visibility !== this.#visibilityGeneration) {
+      if (!this.#api.readBudgetStopped) await this.#revalidateVisibleContext();
+      else this.#resumeViews();
+      return;
+    }
+    // The unified views resume even when the identity could not be read: their own read reports the real
+    // state (unreachable, refused, context lost) with its retry, instead of a suspension that is over.
+    this.#resumeViews();
+    if (!success) return;
+    this.#resourceStreamNeedsAccess = false;
+    if (this.#usesResourceStream()) this.#startStream();
+    this.#refreshActive(true);
+  }
   #resumeViews() {
     if (document.visibilityState !== "visible") return;
     this.#supervision?.resume(); this.#journal?.resume();
@@ -309,6 +334,7 @@ export class HumanDashboard {
     this.#scope.abort(); this.#scope = new AbortController();
     this.#selectionAbort.abort(); this.#selectionAbort = new AbortController();
     this.#streamAbort.abort(); this.#exportAbort.abort(); this.#detailAbort.abort();
+    this.#resourceStreamNeedsAccess = false;
     clearTimeout(this.#refreshTimer); this.#refreshTimer = undefined;
     this.#context = null; this.#journalProfile = null; this.#selection = null; this.#resources = readState(); this.#events = readState();
     this.#closeSupervision(); this.#supervisionPreferences = defaultSupervisionPreferences();
@@ -467,7 +493,8 @@ export class HumanDashboard {
     this.#render(); this.#page?.querySelector<HTMLElement>("h1")?.focus({ preventScroll: true });
   }
   #refreshActive(automatic: boolean) {
-    if (this.#closed || this.#api.readBudgetStopped || automatic && document.visibilityState !== "visible") return;
+    if (this.#closed || this.#api.readBudgetStopped || automatic &&
+      (document.visibilityState !== "visible" || this.#resourceStreamAwaitingAccess())) return;
     // The unified view runs its own bounded cycle; only an explicit action reads from here.
     if (this.#mode === "supervision") { if (!automatic) void this.#supervision?.refresh(); return; }
     if (this.#mode === "journal") { if (!automatic) void this.#journal?.reload(); return; }
@@ -525,7 +552,9 @@ export class HumanDashboard {
     // activation and keeps the focus, so that the same key asks again once that read ended.
     const refresh = action("Actualiser", "human-refresh", () => {
       if (this.#refreshReading()) return;
-      if (this.#mode === "contexts") void this.#loadIdentity(); else this.#refreshActive(false);
+      if (this.#mode === "contexts") void this.#loadIdentity();
+      else if (this.#resourceStreamAwaitingAccess()) this.#visibility();
+      else this.#refreshActive(false);
     }, this.#api.readBudgetStopped || (this.#mode === "brokers" && (this.#brokers.loading || this.#brokerForbidden) || this.#mode === "workers" && (this.#workers.loading || this.#workerForbidden) || this.#mode === "federation" && (this.#federation.loading || this.#federationForbidden)));
     refresh.setAttribute("aria-disabled", String(this.#refreshReading()));
     this.#navigation.replaceChildren(row, refresh);
@@ -584,6 +613,7 @@ export class HumanDashboard {
     if (this.#mode === "brokers" && this.#canBrokers() && !this.#brokerForbidden) {
       await this.#loadBrokers(undefined, undefined, false, true); return;
     }
+    if (this.#resourceStreamAwaitingAccess()) { await this.#revalidateVisibleContext(true); return; }
     const generation = this.#generation; const mode = this.#mode;
     const success = mode === "resources" && this.#canResources() ? await this.#loadResources(undefined, undefined, true) :
       mode === "events" && this.#selection && this.#canResources() ? await this.#loadEvents(undefined, undefined, true) : null;
@@ -602,6 +632,7 @@ export class HumanDashboard {
     try {
       const identity = await this.#api.identity();
       if (this.#closed || generation !== this.#generation && this.#context) return;
+      if (this.#identityError && this.#message === IDENTITY_REVALIDATION_FAILED + this.#identityError) this.#message = "";
       this.#identity = identity; this.#identityError = "";
       this.#evaluateResume();
       return true;
@@ -614,7 +645,7 @@ export class HumanDashboard {
           this.#identityError = failure(error); this.#message = "Revalidation des accès refusée. Les données du contexte ont été retirées ; relisez vos accès.";
         } else {
           this.#identityError = failure(error); this.#resources.stale = true; this.#events.stale = true; this.#brokers.stale = true; this.#workers.stale = true; this.#federation.stale = true;
-          this.#message = this.#context ? `Revalidation des accès impossible. ${failure(error)}` : this.#message;
+          this.#message = this.#context ? IDENTITY_REVALIDATION_FAILED + this.#identityError : this.#message;
         }
       }
       if (!abandoned) return false;
@@ -931,7 +962,8 @@ export class HumanDashboard {
     }, { once: true });
   }
   async #loadResources(cursor = this.#resources.cursor, history = this.#resources.history, operatorRetry = false) {
-    if (!this.#canResources() || this.#mode !== "resources" || this.#closed || this.#resources.loading || this.#api.readBudgetStopped && !operatorRetry) return;
+    if (!this.#canResources() || this.#mode !== "resources" || this.#closed || this.#resources.loading ||
+      this.#resourceStreamAwaitingAccess() || this.#api.readBudgetStopped && !operatorRetry) return;
     const state = this.#resources; const generation = this.#generation; const invalidation = this.#invalidation;
     state.loading = true; this.#render();
     try {
@@ -995,7 +1027,8 @@ export class HumanDashboard {
   }
   async #loadEvents(cursor = this.#events.cursor, history = this.#events.history, operatorRetry = false) {
     const selection = this.#selection;
-    if (!selection || this.#mode !== "events" || !this.#canResources() || this.#closed || this.#events.loading || this.#api.readBudgetStopped && !operatorRetry) return;
+    if (!selection || this.#mode !== "events" || !this.#canResources() || this.#closed || this.#events.loading ||
+      this.#resourceStreamAwaitingAccess() || this.#api.readBudgetStopped && !operatorRetry) return;
     const state = this.#events; const generation = this.#generation; const selected = this.#selectionGeneration; const invalidation = this.#invalidation;
     state.loading = true; this.#render();
     try {
@@ -1006,7 +1039,7 @@ export class HumanDashboard {
     } catch (error) {
       if (this.#closed || generation !== this.#generation || selected !== this.#selectionGeneration || error instanceof HumanSuperseded) return;
       if (error instanceof HumanApiError && ["permission_denied", "not_found"].includes(error.code)) {
-        this.#denySelection(error.message); void this.#loadResources(); return;
+        this.#denySelection(error.message); this.#refreshActive(true); return;
       }
       state.error = failure(error); state.stale = true;
     } finally { state.loading = false; if (!this.#closed && generation === this.#generation && selected === this.#selectionGeneration) { this.#render(); if (state.stale && !state.error) this.#schedule(); } }
@@ -1029,13 +1062,25 @@ export class HumanDashboard {
               el("p", "muted", `Source : ${item.metadata.source} · Reçu le ${formatDate(item.metadata.received_at, true)}`),
               el("div", "detail-badges", badge(`Provenance : ${item.metadata.provenance}`), badge(`Couverture : ${item.metadata.coverage}`),
                 item.metadata.decision ? badge(`Décision : ${item.metadata.decision}`) : badge("Décision non fournie"))),
-            action("Détails", `human-event-${index}`, () => { void this.#showEvent(item); }, this.#snapshotOnly())))),
+            action("Détails", `human-event-${index}`, () => { void this.#showEvent(item); }, this.#snapshotOnly() || this.#resourceStreamAwaitingAccess())))),
       this.#pagination(state, (next, previous) => { void this.#loadEvents(next, previous); }), this.#renderExport());
   }
+  #usesResourceStream() {
+    return this.#canResources() && !this.#snapshotOnly() && (this.#mode === "resources" || this.#mode === "events");
+  }
+  #resourceStreamAwaitingAccess() { return this.#resourceStreamNeedsAccess && this.#usesResourceStream(); }
   #startStream() {
-    this.#streamAbort.abort(); this.#streamAbort = new AbortController(); this.#streamError = "";
+    this.#streamAbort.abort(); this.#streamError = "";
     if (this.#snapshotOnly()) { this.#streamStatus = "Direct indisponible pour ce profil"; return; }
-    if (!this.#canResources() || !["resources", "events"].includes(this.#mode) || this.#closed || this.#api.readBudgetStopped || document.visibilityState !== "visible") return;
+    if (!this.#usesResourceStream() || this.#closed || this.#api.readBudgetStopped) return;
+    const hidden = document.visibilityState !== "visible";
+    if (hidden || this.#resourceStreamAwaitingAccess()) {
+      this.#resourceStreamNeedsAccess = true;
+      const status = hidden ? RESOURCE_STREAM_HIDDEN : "Flux suspendu · accès à relire";
+      if (this.#streamStatus !== status) { this.#streamStatus = status; this.#render(); }
+      return;
+    }
+    this.#streamAbort = new AbortController();
     const generation = this.#generation; const selected = this.#selectionGeneration;
     const mode = this.#mode;
     const signal = this.#streamAbort.signal;
@@ -1052,7 +1097,7 @@ export class HumanDashboard {
       if (signal.aborted || this.#closed || generation !== this.#generation || selected !== this.#selectionGeneration || error instanceof HumanSuperseded) return;
       this.#streamStatus = "Flux déconnecté · lectures ponctuelles seulement";
       if (this.#selection && error instanceof HumanApiError && ["permission_denied", "not_found"].includes(error.code)) {
-        this.#denySelection(error.message); void this.#loadResources(); return;
+        this.#denySelection(error.message); this.#refreshActive(true); return;
       }
       this.#streamError = failure(error); this.#resources.stale = true; this.#events.stale = true; this.#render();
     });
@@ -1066,7 +1111,7 @@ export class HumanDashboard {
     }, 1000);
   }
   async #showEvent(item: HumanEvent) {
-    if (this.#snapshotOnly()) return;
+    if (this.#snapshotOnly() || this.#resourceStreamAwaitingAccess()) return;
     const selection = this.#selection; if (!selection || this.#mode !== "events" || !this.#canResources() || this.#api.readBudgetStopped) return;
     this.#detailAbort.abort(); this.#detailAbort = new AbortController(); const request = ++this.#detailGeneration;
     this.#dialog?.remove();
@@ -1093,7 +1138,7 @@ export class HumanDashboard {
       body.replaceChildren(el("p", "muted", `${selection.view === "metadata" ? "Métadonnées uniquement" : "Contenu autorisé"} · Reçu du contrôle le ${formatDate(page.read_receipt.received_at, true)}. Ce reçu atteste l’enregistrement de la lecture, pas une chaîne d’audit complète.`), data);
     } catch (error) {
       if (this.#closed || generation !== this.#generation || selected !== this.#selectionGeneration || request !== this.#detailGeneration || !dialog.open || error instanceof HumanSuperseded) return;
-      if (error instanceof HumanApiError && ["permission_denied", "not_found"].includes(error.code)) { this.#denySelection(error.message); void this.#loadResources(); return; }
+      if (error instanceof HumanApiError && ["permission_denied", "not_found"].includes(error.code)) { this.#denySelection(error.message); this.#refreshActive(true); return; }
       body.replaceChildren(this.#error(failure(error), () => { void this.#showEvent(item); }));
     }
   }
@@ -1104,13 +1149,15 @@ export class HumanDashboard {
     status.setAttribute("role", "status");
     return el("section", "human-export", el("h3", "", "Exporter cette sélection"),
       el("p", "muted", "JSON · ressource et projection affichées ci-dessus. Limites de cet onglet : 25 pages, 4 Mio, 60 secondes. Le fichier est proposé seulement à la fin de la sélection autorisée, avec ses reçus de lecture."),
-      action(`Exporter ${this.#selection?.view === "content" ? "le contenu" : "les métadonnées"}`, "human-export", () => { void this.#export(); }, !covered || !permitted || this.#exporting),
+      action(`Exporter ${this.#selection?.view === "content" ? "le contenu" : "les métadonnées"}`, "human-export", () => { void this.#export(); },
+        !covered || !permitted || this.#exporting || this.#resourceStreamAwaitingAccess()),
       this.#exporting ? action("Annuler l’export", "human-export-cancel", () => this.#exportAbort.abort()) : null,
       !covered ? el("p", "muted", "Export indisponible pour ce profil, même lorsque le droit d’export est accordé.") : null,
       !permitted ? el("p", "muted", "Le contrôle n’accorde pas le droit d’export pour cette ressource.") : null, status);
   }
   async #export() {
-    const selection = this.#selection; if (!selection || this.#mode !== "events" || !this.#canResources() || !selection.item.permissions.export || this.#snapshotOnly() || this.#exporting || this.#api.readBudgetStopped) return;
+    if (this.#snapshotOnly() || this.#resourceStreamAwaitingAccess()) return;
+    const selection = this.#selection; if (!selection || this.#mode !== "events" || !this.#canResources() || !selection.item.permissions.export || this.#exporting || this.#api.readBudgetStopped) return;
     this.#exportAbort.abort(); this.#exportAbort = new AbortController(); const signal = this.#exportAbort.signal;
     const generation = this.#generation; const selected = this.#selectionGeneration;
     this.#exporting = true; this.#exportPages = 0; this.#exportBytes = 0; this.#exportMessage = ""; this.#render();
@@ -1129,7 +1176,7 @@ export class HumanDashboard {
       this.#exportMessage = "Sélection autorisée entièrement reçue ; téléchargement proposé. Aucun total de tenant n’est déduit.";
     } catch (error) {
       if (this.#closed || generation !== this.#generation || selected !== this.#selectionGeneration || error instanceof HumanSuperseded) return;
-      if (error instanceof HumanApiError && ["permission_denied", "not_found"].includes(error.code)) { this.#denySelection(error.message); void this.#loadResources(); return; }
+      if (error instanceof HumanApiError && ["permission_denied", "not_found"].includes(error.code)) { this.#denySelection(error.message); this.#refreshActive(true); return; }
       this.#exportMessage = signal.aborted ? "Export annulé. Aucun fichier partiel n’a été téléchargé." :
         error instanceof DOMException && error.name === "TimeoutError" ? "Export arrêté après 60 secondes. Aucun fichier partiel n’a été téléchargé." : failure(error);
     } finally { if (!this.#closed && generation === this.#generation && selected === this.#selectionGeneration) { this.#exporting = false; this.#render(); } }

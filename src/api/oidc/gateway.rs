@@ -6,12 +6,18 @@ use crate::oidc::{OidcClientKind, OidcError, TokenBundle};
 
 #[cfg(test)]
 #[path = "admission_tests.rs"]
-mod admission_tests;
+pub(super) mod admission_tests;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Version {
     version: u32,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TokensRequest {
+    version: u32,
+    correlation_token: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1514,19 +1520,24 @@ pub(super) async fn start(
 ) -> ApiResult<Response> {
     let oidc = configured(&state)?;
     web(&oidc, request.headers())?;
-    let correlation = correlation_cookie(request.headers())?.ok_or_else(invalid_request)?;
+    correlation_cookie(request.headers())?;
     let body: Version = json_body(request).await?;
     if body.version != 1 {
         return Err(invalid_request());
     }
-    let key = raw_digest(&correlation);
     let tx = Uuid::new_v4();
     let operation = Uuid::new_v4();
     let session = Uuid::new_v4();
     let preparation = Arc::clone(&oidc);
-    state
+    let (fresh_cookie, correlation_token, key) = state
         .blocking_identity(move |_state| {
             let oidc = preparation;
+            let fresh_cookie =
+                hex::encode(crate::identity::random_bytes().map_err(|_| audit_unavailable())?);
+            let correlation_token =
+                hex::encode(crate::identity::random_bytes().map_err(|_| audit_unavailable())?);
+            let key = raw_digest(&fresh_cookie);
+            let expected_correlation_token = raw_digest(&correlation_token);
             let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
             reap(&oidc, &mut registry)?;
             if registry.transactions.contains_key(&key)
@@ -1536,20 +1547,21 @@ pub(super) async fn start(
                 return Err(conflict());
             }
             reserve_anonymous(&mut registry)?;
-            // A caller-created correlation cookie is not an authenticated identity.
+            // A caller-created correlation cookie is ignored and replaced.
             // The durable intention is created only by install after verification.
             registry.transactions.insert(
                 key,
                 BrowserTransaction {
                     pending: None,
                     expected_state: [0; 32],
+                    expected_correlation_token,
                     transaction_id: tx,
                     operation_id: operation,
                     session_id: session,
                     created: Instant::now(),
                 },
             );
-            Ok(())
+            Ok((fresh_cookie, correlation_token, key))
         })
         .await?;
     let pending = async {
@@ -1565,14 +1577,20 @@ pub(super) async fn start(
             match pending {
                 Ok(pending) => {
                     let url = pending.authorization_url().to_owned();
-                    let state = reqwest::Url::parse(&url)
-                        .ok()
-                        .and_then(|url| {
-                            url.query_pairs()
-                                .find(|(key, _)| key == "state")
-                                .map(|(_, value)| value.into_owned())
-                        })
-                        .ok_or_else(invalid_request)?;
+                    let Some(state) = reqwest::Url::parse(&url).ok().and_then(|url| {
+                        url.query_pairs()
+                            .find(|(key, _)| key == "state")
+                            .map(|(_, value)| value.into_owned())
+                    }) else {
+                        if registry
+                            .transactions
+                            .get(&key)
+                            .is_some_and(|entry| entry.transaction_id == tx)
+                        {
+                            registry.transactions.remove(&key);
+                        }
+                        return Err(invalid_request());
+                    };
                     let entry = registry
                         .transactions
                         .get_mut(&key)
@@ -1586,12 +1604,16 @@ pub(super) async fn start(
                         .ok_or_else(conflict)?;
                     entry.expected_state = raw_digest(&state);
                     entry.pending = Some(pending);
-                    let mut response =
-                        Json(json!({"version":1,"authorization_url":url})).into_response();
+                    let mut response = Json(json!({
+                        "version": 1,
+                        "authorization_url": url,
+                        "correlation_token": correlation_token
+                    }))
+                    .into_response();
                     response.headers_mut().insert(
                         header::SET_COOKIE,
                         HeaderValue::from_str(&cookie(
-                            &correlation,
+                            &fresh_cookie,
                             oidc.config.web_origin.starts_with("https://"),
                             false,
                         ))
@@ -1600,7 +1622,13 @@ pub(super) async fn start(
                     Ok(response)
                 }
                 Err(error) => {
-                    registry.transactions.remove(&key);
+                    if registry
+                        .transactions
+                        .get(&key)
+                        .is_some_and(|entry| entry.transaction_id == tx)
+                    {
+                        registry.transactions.remove(&key);
+                    }
                     Err(provider_error(error))
                 }
             }
@@ -1663,6 +1691,7 @@ pub(super) async fn callback(
                 ExchangeMarker {
                     transaction_id: transaction.transaction_id,
                     session_id: transaction.session_id,
+                    expected_correlation_token: transaction.expected_correlation_token,
                     created: Instant::now(),
                 },
             );
@@ -1732,13 +1761,11 @@ pub(super) async fn callback(
     state
         .blocking_identity(move |_state| {
             let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
-            if registry
+            let exchange = registry
                 .exchanging
                 .remove(&key)
-                .is_none_or(|entry| entry.transaction_id != transaction.transaction_id)
-            {
-                return Err(conflict());
-            }
+                .filter(|entry| entry.transaction_id == transaction.transaction_id)
+                .ok_or_else(conflict)?;
             if registry.deliveries.contains_key(&key) {
                 return Err(conflict());
             }
@@ -1746,6 +1773,7 @@ pub(super) async fn callback(
                 key,
                 PendingDelivery {
                     result: outcome,
+                    expected_correlation_token: exchange.expected_correlation_token,
                     created: Instant::now(),
                 },
             );
@@ -1780,19 +1808,22 @@ pub(super) async fn tokens(
     web(&oidc, request.headers())?;
     let correlation = correlation_cookie(request.headers())?.ok_or_else(invalid_request)?;
     let key = raw_digest(&correlation);
-    let body: Version = json_body(request).await?;
-    if body.version != 1 {
+    let body: TokensRequest = json_body(request).await?;
+    if body.version != 1 || !hex_digest(&body.correlation_token) {
         return Err(invalid_request());
     }
+    let presented_token = raw_digest(&body.correlation_token);
     state
         .blocking_identity(move |_state| {
-            let entry = oidc
-                .registry
-                .lock()
-                .map_err(|_| audit_unavailable())?
-                .deliveries
-                .remove(&key)
-                .ok_or_else(conflict)?;
+            let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
+            let entry = registry.deliveries.get(&key).ok_or_else(conflict)?;
+            // Constant-time equality via subtle::ConstantTimeEq (CtOutput).
+            if hmac::digest::CtOutput::<Sha256>::new(presented_token.into())
+                != hmac::digest::CtOutput::<Sha256>::new(entry.expected_correlation_token.into())
+            {
+                return Err(credential_invalid());
+            }
+            let entry = registry.deliveries.remove(&key).ok_or_else(conflict)?;
             let mut response = if entry.created.elapsed() >= Duration::from_secs(30) {
                 credential_invalid().into_response()
             } else {

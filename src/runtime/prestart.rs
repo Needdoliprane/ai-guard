@@ -6,6 +6,7 @@ use std::fmt;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RuntimePrestartStage {
+    ObserveOnly,
     AuthorityBeforeSpawn,
     InvocationBeforeSpawn,
     StopBeforeSpawn,
@@ -21,6 +22,13 @@ pub(crate) struct RuntimePrestartStageFailure {
 }
 
 impl RuntimePrestartStageFailure {
+    pub(crate) fn observe_only() -> Self {
+        Self {
+            stage: RuntimePrestartStage::ObserveOnly,
+            container_id: None,
+        }
+    }
+
     pub(crate) fn new(stage: RuntimePrestartStage, container_id: &str) -> Self {
         let valid = container_id.len() == 64
             && container_id

@@ -337,11 +337,15 @@ Validating the file with an external CycloneDX tool is your choice; no such tool
 ```sh
 "$AIGUARD_BIN" release verify --source . --manifest "$RELEASE_PARENT/cli-1" --artifact target/release/agentsandbox
 "$AIGUARD_BIN" release verify --source . --manifest "$RELEASE_PARENT/inputs-1" --source-only
+"$AIGUARD_BIN" release verify --source . --manifest "$RELEASE_PARENT/cli-1" \
+  --expect-manifest-sha256 "$APPROVED_MANIFEST_SHA256" --artifact target/release/agentsandbox
 ```
+
+For an approved candidate, obtain `APPROVED_MANIFEST_SHA256` from the release owner over a trusted channel independent of the bundle. Supply the SHA-256 of the exact bytes of `release-manifest.json` as 64 lowercase hexadecimal characters. The report records when the supplied digest matches. Trust in this check depends on how you received that digest.
 
 `release verify` takes the declared provider versions from the manifest; it has no version option. It works in this order and reports the first outcome that applies:
 
-1. It reads `release-manifest.json`, `sbom.cdx.json` and `SHA256SUMS` from `--manifest`: each must be a regular file with a single link, owned by root or by you, not writable by group or others and at most 16 MiB, in a directory chain that follows the ancestor rule of [before you start](#before-you-start).
+1. It validates the form of `--expect-manifest-sha256` when supplied. It reads `release-manifest.json` and compares its exact bytes against that digest before reading `sbom.cdx.json` and `SHA256SUMS`. Each file must be regular, with a single link, owned by root or by you, protected from writes by group and others and at most 16 MiB. Its directory chain follows the ancestor rule of [before you start](#before-you-start).
 2. It reads the manifest header leniently. A file that is not an ai-guard release manifest, another `format_version` or another producer is `UNVERIFIED`, before any strict check and before the source is prepared.
 3. It checks `SHA256SUMS`, the canonical form of the manifest and its declared provider versions.
 4. Unless `--source-only` is given, it hashes every `--artifact` under the [artefact rules](#bind-artefacts).
@@ -361,6 +365,7 @@ The success block repeats the lines of `release manifest`, with `artifacts  <k>/
 
 | Category | Cause |
 |---|---|
+| `manifest-digest` | The exact bytes of `release-manifest.json` have a different SHA-256 from the operator's expected digest. |
 | `sums` | A document does not match its line in `SHA256SUMS`. |
 | `format` | `SHA256SUMS` is not exactly its two lines; or the manifest has an unknown field, is not in canonical form, names a build argument outside format 1 or declares an inadmissible provider version. |
 | `source` | The source digest differs; at most ten changed, added and removed paths are named. When no path is listed, the first differing field of `source` is named instead (`no entry differs, source.<field> differs`). This is decided right after the preparation, before the locks are read, so a change that format 1 cannot read, such as a lock line it refuses, is reported here. |

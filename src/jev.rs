@@ -10,9 +10,12 @@ mod rules;
 mod transport;
 mod trust;
 pub use backend::{JevBackend, SelectionSource};
+pub use local::MAX_LOCAL_JEV_TIMEOUT_SECONDS;
 pub use rules::RuleCatalog;
 pub use transport::validate_transport_configuration;
 pub use trust::JevTrust;
+
+pub const DEFAULT_JEV_TIMEOUT_SECONDS: u64 = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -183,8 +186,13 @@ impl JevClient {
             (0.0..=1.0).contains(&min_confidence),
             "invalid Jev confidence threshold"
         );
-        let transport =
-            transport::JsonTransport::new(endpoint, Some(key), allow_local_http, trust)?;
+        let transport = transport::JsonTransport::new(
+            endpoint,
+            Some(key),
+            allow_local_http,
+            trust,
+            DEFAULT_JEV_TIMEOUT_SECONDS,
+        )?;
         Ok(Self {
             transport,
             model,

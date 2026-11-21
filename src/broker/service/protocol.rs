@@ -2,11 +2,13 @@
 //! envelope, never to Submit bytes, job data, errors or replies.
 use crate::{
     broker::journal::{RejectionCodeV1, RejectionPhaseV1},
-    control::{RuntimeStatusV1, WorkerStateV1},
+    control::{AdmissionRefusalV1, RuntimeStatusV1, WorkerStateV1},
 };
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::PathBuf};
 use uuid::Uuid;
+
+pub const JOB_RESULT_VERSION: u32 = 1;
 
 pub use super::recovery_inventory::{
     RecoveryInventoryCoverageV1, RecoveryInventoryEntryV1, RecoveryInventoryIssueCodeV1,
@@ -29,6 +31,11 @@ pub enum BrokerCommandV1 {
         payload: String,
     },
     Status {
+        operation_id: Uuid,
+    },
+    /// Read the independently versioned batch result for this operation.
+    Result {
+        version: u32,
         operation_id: Uuid,
     },
     /// Local relay attachment metadata only; never a runtime or workload proof.
@@ -162,6 +169,71 @@ pub struct JobStatusV1 {
     pub last_decision: Option<crate::model::Decision>,
     pub executor_task_running: bool,
     pub executor_error: Option<BrokerErrorCodeV1>,
+}
+
+/// A batch result projected from the authenticated profile's durable journal.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobResultV1 {
+    pub version: u32,
+    pub operation_id: Uuid,
+    pub cancel_requested: bool,
+    pub outcome: JobResultOutcomeV1,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum JobResultOutcomeV1 {
+    Pending,
+    Review {
+        request_hash: String,
+        decision: crate::model::Decision,
+    },
+    Refused {
+        reason: JobRefusalV1,
+    },
+    /// Durable cancellation before runtime work or confirmed cancellation of
+    /// the reservation before creation.
+    Cancelled,
+    Terminal {
+        result: TerminalJobResultV1,
+    },
+    Ambiguous {
+        reason: BrokerErrorCodeV1,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum JobRefusalV1 {
+    Submission {
+        phase: RejectionPhaseV1,
+        code: RejectionCodeV1,
+    },
+    Decision {
+        decision: crate::model::Decision,
+    },
+    Admission {
+        code: AdmissionRefusalV1,
+    },
+}
+
+/// Confirmed runtime exit, audit acknowledgements and final workspace facts.
+/// The exit code comes from container observation, independent of any attach.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalJobResultV1 {
+    pub session_id: Uuid,
+    pub volume: String,
+    pub container_id: String,
+    pub exit_code: i64,
+    pub oom_killed: Option<bool>,
+    pub changed_files: usize,
+    pub manifest_digest: String,
+    pub output_captured: bool,
+    pub result_audit_seq: i64,
+    pub scan_audit_seq: i64,
+    pub cleanup_audit_seq: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -377,6 +449,9 @@ pub enum BrokerReplyV1 {
     },
     Status {
         status: JobStatusV1,
+    },
+    Result {
+        result: JobResultV1,
     },
     RelayStatus {
         status: RelayStatusV1,

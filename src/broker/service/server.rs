@@ -5,7 +5,7 @@ use super::{
     jobs::{self, Job, ProfileJobs, RunningJob},
     profile::{ControlProfileV1, Registry, SubmitV1},
     protocol::*,
-    targets,
+    result, targets,
 };
 use crate::{
     broker::{
@@ -93,9 +93,15 @@ mod full_owner_tests;
 #[cfg(test)]
 #[path = "full_signal_owner_tests.rs"]
 mod full_signal_owner_tests;
+#[cfg(test)]
+#[path = "owned_ipc_peer.rs"]
+mod owned_ipc_peer;
 #[cfg(all(test, unix))]
 #[path = "preclaim_live_tests.rs"]
 mod preclaim_live_tests;
+#[cfg(test)]
+#[path = "result_auth_tests.rs"]
+mod result_auth_tests;
 #[cfg(all(test, unix))]
 #[path = "retirement_audit_tests.rs"]
 mod retirement_audit_tests;
@@ -1530,9 +1536,17 @@ impl Service {
         {
             return Err(BrokerErrorCodeV1::InvalidInput);
         }
+        if matches!(
+            &envelope.request,
+            BrokerCommandV1::Result { version, operation_id }
+                if *version != JOB_RESULT_VERSION || operation_id.is_nil()
+        ) {
+            return Err(BrokerErrorCodeV1::InvalidInput);
+        }
         let read_only = matches!(
             envelope.request,
             BrokerCommandV1::Status { .. }
+                | BrokerCommandV1::Result { .. }
                 | BrokerCommandV1::RelayStatus { .. }
                 | BrokerCommandV1::List { .. }
                 | BrokerCommandV1::RecoveryStatus { .. }
@@ -1592,7 +1606,20 @@ impl Service {
                 )
                 .await;
         }
-        let writer = self.writer(&profile.id, &verified.scope).await?;
+        let writer = if matches!(&envelope.request, BrokerCommandV1::Result { .. }) {
+            if self.recovery_only()
+                || self.fenced.load(Ordering::SeqCst)
+                || self.stopping.load(Ordering::SeqCst)
+            {
+                return Err(BrokerErrorCodeV1::NeedsReconciliation);
+            }
+            self.profile_writers(&profile.id, &verified.scope, false)
+                .await?
+                .full()
+                .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?
+        } else {
+            self.writer(&profile.id, &verified.scope).await?
+        };
         let jobs = self.profile_jobs(&profile.id)?;
         if !read_only && self.stopping.load(Ordering::SeqCst) {
             return Err(BrokerErrorCodeV1::Unavailable);
@@ -1627,6 +1654,30 @@ impl Service {
                         }
                         None => jobs::status(operation_id, None, local.as_deref()),
                     },
+                }))
+            }
+            BrokerCommandV1::Result { operation_id, .. } => {
+                if self.fenced.load(Ordering::SeqCst) || self.stopping.load(Ordering::SeqCst) {
+                    return Err(BrokerErrorCodeV1::NeedsReconciliation);
+                }
+                // Sample before the durable read so a concurrently finishing
+                // task cannot make a pre-completion head look abandoned.
+                let execution = request
+                    .jobs
+                    .known(operation_id)
+                    .as_deref()
+                    .map(Job::execution_status)
+                    .unwrap_or_default();
+                let durable = request
+                    .writer
+                    .result_status(operation_id)
+                    .await
+                    .map_err(jobs::journal_error)?;
+                if self.fenced.load(Ordering::SeqCst) || self.stopping.load(Ordering::SeqCst) {
+                    return Err(BrokerErrorCodeV1::NeedsReconciliation);
+                }
+                Ok(Response::reply(BrokerReplyV1::Result {
+                    result: result::project(operation_id, durable, execution),
                 }))
             }
             BrokerCommandV1::RelayStatus { operation_id } => {

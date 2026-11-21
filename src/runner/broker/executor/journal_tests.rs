@@ -8,14 +8,18 @@ mod export_retirement_tests;
 use super::*;
 use crate::{
     api::{GatewayState, gateway_router},
-    audit::Store,
+    audit::{EventQuery, Store},
     broker::{
         clock::NativeHostClock,
-        discovery::load_endpoint,
-        enforcer::EnforcerClient,
+        discovery::{RoleLease, load_endpoint},
+        enforcer::{EnforcerClient, run_internal_legacy_fresh},
         intent::ExecutionIntentV1,
-        journal::{BindingInputs, ControlSecrets, FsExclusions, Journal, ReserveResult},
+        journal::{
+            BindingInputs, ControlSecrets, FsExclusions, Journal, JournalLimitsV1, ReserveResult,
+            RevisionRefV1,
+        },
         outbox::{BrokerCheckpointV4, OutboxEventV1},
+        service::protocol::BrokerErrorCodeV1,
     },
     control_fs::{Directory, PrivateFile},
     model::Event,
@@ -30,8 +34,8 @@ use serde_json::{Value, json};
 use std::{
     cell::{Cell, RefCell},
     fs,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    path::PathBuf,
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
         Mutex as StdMutex,
@@ -366,17 +370,35 @@ impl Drop for NativeChild {
         let _ = self.0.wait();
     }
 }
+const FRESH_PEER_PARENT: &str = "AI_GUARD_TEST_RECOVERY_FRESH_PEER_PARENT";
+const FRESH_PEER_NONCE: &str = "AI_GUARD_TEST_RECOVERY_FRESH_PEER_NONCE";
+
+#[test]
+#[ignore = "only launched by the cancelled recovery fixture"]
+fn native_fresh_recovery_peer_child() {
+    let path = PathBuf::from(std::env::var_os(FRESH_PEER_PARENT).unwrap());
+    let parent = Directory::open_existing(&path).unwrap();
+    let nonce = Uuid::parse_str(&std::env::var(FRESH_PEER_NONCE).unwrap()).unwrap();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(run_internal_legacy_fresh(&parent, "enforcer", 8, 0, nonce))
+        .unwrap();
+}
+
 impl NativePeer {
     async fn empty(fixture: &Fixture) -> Self {
-        let path = fixture.root.path().canonicalize().unwrap().join("enforcer");
-        fs::create_dir(&path).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
-        let root = Directory::open_existing(&path).unwrap();
-        root.persistent_create("auth", &[61; 32])
-            .unwrap()
-            .persistent_sync()
-            .unwrap();
-        root.sync().unwrap();
+        Self::start(fixture, None).await
+    }
+
+    async fn for_admission(fixture: &Fixture) -> Self {
+        Self::start(fixture, Some(Uuid::new_v4())).await
+    }
+
+    async fn start(fixture: &Fixture, fresh_nonce: Option<Uuid>) -> Self {
+        let path = fixture.root.path().canonicalize().unwrap();
+        let parent = Directory::open_existing(&path).unwrap();
         let executable = std::env::current_exe().unwrap();
         let stderr = fs::OpenOptions::new()
             .write(true)
@@ -384,37 +406,66 @@ impl NativePeer {
             .mode(0o600)
             .open(fixture.root.path().join("enforcer.stderr"))
             .unwrap();
-        let mut child = NativeChild(
-            Command::new(&executable)
+        let mut command = Command::new(&executable);
+        command
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(stderr));
+        if let Some(nonce) = fresh_nonce {
+            // The owned child creates the missing role with the genuine
+            // factory. Reopening an existing role leaves it cold-fenced.
+            assert!(
+                parent
+                    .persistent_child("enforcer", false)
+                    .unwrap()
+                    .is_none()
+            );
+            command
+                .args([
+                    "--exact",
+                    "runner::broker::executor::journal::tests::native_fresh_recovery_peer_child",
+                    "--ignored",
+                ])
+                .env(FRESH_PEER_PARENT, parent.path())
+                .env(FRESH_PEER_NONCE, nonce.to_string());
+        } else {
+            // Seed an empty Legacy V1 role and release its lease before recovery.
+            let lease =
+                RoleLease::create_new(parent.create_enforcer_root("enforcer").unwrap()).unwrap();
+            let root = lease.root();
+            root.persistent_create("auth", &[61; 32])
+                .unwrap()
+                .persistent_sync()
+                .unwrap();
+            root.sync().unwrap();
+            command
                 .args([
                     "--exact",
                     "broker::enforcer::client::retained_cancel_tests::native_cancel_server_child",
                     "--ignored",
                 ])
-                .env_clear()
-                .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-                .env("AI_GUARD_TEST_RETAINED_CANCEL_ROOT", &path)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::from(stderr))
-                .spawn()
-                .unwrap(),
-        );
+                .env("AI_GUARD_TEST_RETAINED_CANCEL_ROOT", root.path());
+        }
+        let mut child = NativeChild(command.spawn().unwrap());
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         let mut owned = Self {
             client: loop {
-                if load_endpoint(&root).unwrap().is_some() {
+                if let Some(root) = parent.persistent_child("enforcer", false).unwrap()
+                    && load_endpoint(&root).unwrap().is_some()
+                {
                     break EnforcerClient::connect_or_spawn(&root, &executable, 8)
                         .await
                         .unwrap();
                 }
                 assert!(
                     child.0.try_wait().unwrap().is_none(),
-                    "empty native child exited"
+                    "native fixture child exited before IPC was ready"
                 );
                 assert!(
                     tokio::time::Instant::now() < deadline,
-                    "empty native child did not publish IPC"
+                    "native fixture child did not publish IPC"
                 );
                 tokio::time::sleep(Duration::from_millis(10)).await;
             },
@@ -422,6 +473,15 @@ impl NativePeer {
         };
         assert!(owned.child.0.try_wait().unwrap().is_none());
         assert_eq!(owned.client.status().await.unwrap().slot_count(), 0);
+        if let Some(nonce) = fresh_nonce {
+            let capabilities =
+                serde_json::to_value(owned.client.legacy_capabilities().await.unwrap()).unwrap();
+            assert!(
+                capabilities.get("fresh_launch_nonce") == Some(&json!(nonce)),
+                "native fixture child nonce mismatch"
+            );
+            owned.client.require_admission_ready().await.unwrap();
+        }
         owned
     }
     async fn close(mut self) {
@@ -727,4 +787,500 @@ async fn unknown_failure_is_durable_public_and_opaque_without_runtime_authority(
     );
     assert!(!serde_json::to_string(checkpoint).unwrap().contains(private));
     assert!(!serde_json::to_string(&public).unwrap().contains(private));
+}
+
+const EXPORT_POLICY: &str = "workspace.export.policy";
+const EXPORT_RESULT: &str = "broker.batch.export";
+
+struct ExportPublicationFixture {
+    source: PathBuf,
+    destination: PathBuf,
+    control: Directory,
+    context: AuthenticatedBatchContext,
+    enforcer: EnforcerClient,
+    operation: Uuid,
+    request: Uuid,
+    profile: Value,
+    initial_head: RevisionRefV1,
+    archive: Vec<u8>,
+    manifest_digest: String,
+}
+
+impl ExportPublicationFixture {
+    async fn new(fixture: &Fixture) -> Result<Self> {
+        let root = fixture.root.path().canonicalize()?;
+        for name in ["source", "worker-copy", "exports", "export-control"] {
+            let path = root.join(name);
+            fs::create_dir(&path)?;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+        }
+        let source = root.join("source");
+        let worker_copy = root.join("worker-copy");
+        fs::write(source.join("note.txt"), b"original\n")?;
+        fs::write(worker_copy.join("note.txt"), b"exported\n")?;
+        fs::set_permissions(
+            worker_copy.join("note.txt"),
+            fs::Permissions::from_mode(0o644),
+        )?;
+        let prepared = workspace::prepare_workspace(&worker_copy, Limits::default())?;
+        let manifest_digest = content_hash("ai-guard:workspace-manifest:v1", &prepared.manifest)?;
+        let archive = fs::read(prepared.archive.path())?;
+        let exports = root.join("exports");
+        let destination = exports.join("new-result");
+        let control = Directory::open_existing(&root.join("export-control"))?;
+        let operation = Uuid::new_v4();
+        let request = Uuid::new_v4();
+        let scope = &fixture.scope;
+        let profile = json!({
+            "id":scope.profile_id(), "gateway":scope.gateway_origin(),
+            "tenant_id":scope.tenant_id(), "control_namespace_uuid":scope.control_namespace_uuid(),
+            "config_dir":fixture.config.path(), "runner_token_file":root.join("unused.token"),
+            "runtime":"docker", "runtime_program":std::env::current_exe()?, "runtime_endpoint":"unix:///unused-export-fixture.sock",
+            "image":"agentsandbox-worker:local", "policy_profile":"strict", "network":"none",
+            "allow_rootful_runtime":false, "max_timeout_seconds":60, "allow_capture_output":false,
+            "managed_clients":false, "source_roots":[source], "export_roots":[exports]
+        });
+        let enforcer = EnforcerClient::unavailable_for_test(&control)?;
+        let runtime = Runtime::unavailable_for_test(RuntimeKind::Docker, &control)?;
+        assert!(
+            runtime.command().is_err(),
+            "export fixture must have no engine"
+        );
+        let context = AuthenticatedBatchContext::for_executor_test(
+            fixture.client.clone(),
+            scope.clone(),
+            fixture.config.clone(),
+            runtime,
+        )
+        .await?;
+        let initial_head = fixture.accept(operation, false).head().clone();
+        Ok(Self {
+            source,
+            destination,
+            control,
+            context,
+            enforcer,
+            operation,
+            request,
+            profile,
+            initial_head,
+            archive,
+            manifest_digest,
+        })
+    }
+
+    fn target(&self, path: &Path) -> Result<ValidatedExportTarget, BrokerErrorCodeV1> {
+        ValidatedExportTarget::for_executor_test(
+            &self.control,
+            self.profile.clone(),
+            self.context.scope(),
+            self.operation,
+            self.request,
+            path,
+        )
+    }
+
+    fn executor(&self, writer: &WriterClient) -> Result<BatchExecutor> {
+        Ok(BatchExecutor::new(
+            writer.clone(),
+            self.enforcer.clone(),
+            Arc::new(NativeHostClock::new()?),
+        ))
+    }
+
+    fn assert_published_files(&self) -> Result<u64> {
+        assert_eq!(fs::read(self.source.join("note.txt"))?, b"original\n");
+        assert_eq!(fs::read(self.destination.join("note.txt"))?, b"exported\n");
+        Ok(fs::metadata(&self.destination)?.ino())
+    }
+}
+
+fn export_events(store: &Store, kind: &str) -> Result<Vec<crate::model::StoredEvent>> {
+    store.events(&EventQuery {
+        kind: Some(kind.into()),
+        ..EventQuery::default()
+    })
+}
+
+async fn reopen_export_writer(fixture: &Fixture, limits: JournalLimitsV1) -> Result<WriterClient> {
+    let journal_root =
+        Directory::open_existing(&fixture.root.path().canonicalize()?.join("journal"))?;
+    let secrets = ControlSecrets::new(vec![])?;
+    let journal = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match Journal::open(
+                &journal_root,
+                fixture.scope.clone(),
+                &FsExclusions::new(),
+                limits.clone(),
+                secrets.clone(),
+            ) {
+                Err(JournalError::Busy) => tokio::time::sleep(Duration::from_millis(10)).await,
+                result => break result,
+            }
+        }
+    })
+    .await
+    .context("previous journal owner did not drain")??;
+    Ok(WriterClient::start(journal, 8, Duration::from_secs(10))?)
+}
+
+#[tokio::test]
+async fn published_export_replays_when_the_policy_audit_response_is_lost() -> Result<()> {
+    use crate::broker::enforcer::EnforcerError;
+
+    let mut fixture = Fixture::new().await;
+    let export = ExportPublicationFixture::new(&fixture).await?;
+    let executor = export.executor(fixture.writer())?;
+    let execution = Execution::open(&executor, export.operation, &export.context).await?;
+    let (entered, release) = fixture.pause_next_audit_response_for_test();
+    {
+        // Execute the production phase after the engine helper supplied its
+        // archive. The gateway pauses its first response after real commit.
+        let publishing =
+            execution.publish_export(export.target(&export.destination)?, export.archive.clone());
+        tokio::pin!(publishing);
+        tokio::time::timeout(Duration::from_secs(15), async {
+            tokio::select! {
+                reply = &mut publishing => {
+                    reply?;
+                    anyhow::bail!("export completed before the audit response boundary");
+                }
+                committed = entered => committed.context("audit response barrier ended early"),
+            }
+        })
+        .await
+        .context("the policy audit did not reach its committed response boundary")??;
+        // Drop the wait before releasing the already-committed response.
+    }
+    let _ = release.send(());
+    let published_inode = export.assert_published_files()?;
+    let initial_policy = export_events(&fixture.store, EXPORT_POLICY)?;
+    assert_eq!(initial_policy.len(), 1);
+    assert!(export_events(&fixture.store, EXPORT_RESULT)?.is_empty());
+    let pending_job = fixture
+        .writer()
+        .load(export.operation)
+        .await?
+        .context("accepted job missing")?;
+    let pending = pending_job
+        .broker_checkpoint_v4()
+        .context("export outbox missing")?
+        .events();
+    assert_eq!(
+        pending
+            .iter()
+            .map(|entry| entry.event().kind.as_str())
+            .collect::<Vec<_>>(),
+        [EXPORT_POLICY, EXPORT_RESULT],
+        "published export must retain both audit facts before the first HTTP response"
+    );
+    assert!(pending.iter().all(|entry| entry.audit_seq().is_none()));
+    let retained_ids: Vec<_> = pending.iter().map(|entry| entry.event_id()).collect();
+    assert_ne!(retained_ids[0], retained_ids[1]);
+    assert!(retained_ids.iter().all(|id| *id != export.request));
+    for id in &retained_ids {
+        assert_eq!(
+            pending_job
+                .outbox_receipt(*id, None)
+                .context("export fact has no pending receipt")?
+                .head(),
+            pending_job.head()
+        );
+    }
+
+    drop(execution);
+    drop(executor);
+    fixture.close_journal_owners_for_cold_test();
+    let writer = reopen_export_writer(&fixture, Default::default()).await?;
+    let executor = export.executor(&writer)?;
+    let resumed = Execution::open(&executor, export.operation, &export.context).await?;
+    let outcome = Box::pin(resumed.export(export.target(&export.destination)?)).await?;
+    let ControlFlow::Continue(receipt) = outcome else {
+        anyhow::bail!("published export did not return its retained receipt");
+    };
+    assert_eq!(receipt.request_id, export.request);
+    assert_eq!(receipt.manifest_digest, export.manifest_digest);
+    assert_eq!(receipt.files, 1);
+    assert_eq!(export.assert_published_files()?, published_inode);
+    let divergent = export.destination.with_file_name("other-result");
+    assert!(matches!(
+        export.target(&divergent),
+        Err(BrokerErrorCodeV1::Conflict)
+    ));
+    assert!(!divergent.exists());
+    assert_eq!(
+        fs::read_dir(export.destination.parent().unwrap())?.count(),
+        1
+    );
+
+    let policy = export_events(&fixture.store, EXPORT_POLICY)?;
+    let completion = export_events(&fixture.store, EXPORT_RESULT)?;
+    assert_eq!(policy.len(), 1);
+    assert_eq!(completion.len(), 1);
+    assert_eq!(policy[0].seq, initial_policy[0].seq);
+    assert_eq!(policy[0].event.id, initial_policy[0].event.id);
+    assert_eq!(policy[0].hash, initial_policy[0].hash);
+    assert_eq!(policy[0].event.data["omitted_entries"], 0);
+    let current = writer
+        .load(export.operation)
+        .await?
+        .context("reopened job missing")?;
+    let confirmed = current
+        .broker_checkpoint_v4()
+        .context("reopened outbox missing")?
+        .events();
+    assert_eq!(confirmed.len(), 2);
+    for (index, row) in [&policy[0], &completion[0]].into_iter().enumerate() {
+        assert_eq!(Uuid::parse_str(&row.event.id)?, retained_ids[index]);
+        assert_eq!(confirmed[index].event_id(), retained_ids[index]);
+        assert_eq!(confirmed[index].audit_seq(), Some(row.seq));
+    }
+    // The positive result has no live guardian to contact, even during replay.
+    assert!(matches!(
+        export.enforcer.status().await,
+        Err(EnforcerError::Unhealthy)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn published_export_at_the_journal_limit_is_preserved_without_a_receipt() -> Result<()> {
+    let mut fixture = Fixture::new().await;
+    let export = ExportPublicationFixture::new(&fixture).await?;
+    let last_revision = u32::try_from(export.initial_head.revision())?;
+    let limits = JournalLimitsV1::new(
+        256 * 1024 * 1024,
+        512,
+        last_revision + 1,
+        1024 * 1024 * 1024,
+        65536,
+        256,
+    )?;
+    fixture.close_journal_owners_for_cold_test();
+    let published_inode = {
+        let writer = reopen_export_writer(&fixture, limits).await?;
+        let executor = export.executor(&writer)?;
+        let execution = Execution::open(&executor, export.operation, &export.context).await?;
+        // Run the actual post-helper publication with a readable head and no
+        // room for another revision. This fails after exclusive rename/fsync.
+        let error = execution
+            .publish_export(export.target(&export.destination)?, export.archive.clone())
+            .await
+            .expect_err("the writer limit must prevent a confirmed export receipt");
+        assert!(matches!(
+            error.downcast_ref(),
+            Some(JournalError::LimitExceeded)
+        ));
+        export.assert_published_files()?
+    };
+
+    let reopened = reopen_export_writer(&fixture, Default::default()).await?;
+    let executor = export.executor(&reopened)?;
+    let execution = Execution::open(&executor, export.operation, &export.context).await?;
+    // Supply the archive again at the same production boundary, with the
+    // writer limit removed, to exercise the refusal of an existing leaf.
+    let retry = execution
+        .publish_export(export.target(&export.destination)?, export.archive.clone())
+        .await
+        .expect_err("a new writer must not adopt or replace a published directory");
+    assert_eq!(
+        retry.root_cause().to_string(),
+        "export destination already exists; nothing overwritten"
+    );
+    assert_eq!(export.assert_published_files()?, published_inode);
+    let divergent = export.destination.with_file_name("other-result");
+    assert!(matches!(
+        export.target(&divergent),
+        Err(BrokerErrorCodeV1::Conflict)
+    ));
+    assert!(!divergent.exists());
+    assert_eq!(
+        fs::read_dir(export.destination.parent().unwrap())?.count(),
+        1
+    );
+    let job = reopened
+        .load(export.operation)
+        .await?
+        .context("reopened job missing")?;
+    assert_eq!(job.head(), &export.initial_head);
+    assert!(job.broker_checkpoint_v4().is_none());
+    assert!(export_events(&fixture.store, EXPORT_POLICY)?.is_empty());
+    assert!(export_events(&fixture.store, EXPORT_RESULT)?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn decision_ack_publication_and_generation_gate_are_distinct() -> Result<()> {
+    let fixture = Fixture::new().await;
+    for lose_ack in [true, false] {
+        boxed_execution_phase(|| check_decision_ack_return(&fixture, lose_ack)).await?;
+    }
+    Ok(())
+}
+
+async fn check_decision_ack_return(fixture: &Fixture, lose_ack: bool) -> Result<()> {
+    let runtime = Runtime::unavailable_for_test(RuntimeKind::Docker, &fixture.config)?;
+    let context = AuthenticatedBatchContext::for_executor_test(
+        fixture.client.clone(),
+        fixture.scope.clone(),
+        fixture.config.clone(),
+        runtime,
+    )
+    .await?;
+    let writer = fixture.writer();
+    let executor = BatchExecutor::new(
+        writer.clone(),
+        EnforcerClient::unavailable_for_test(&fixture.config)?,
+        Arc::new(NativeHostClock::new()?),
+    );
+    let operation = Uuid::new_v4();
+    let accepted = fixture.accept(operation, false);
+    let request = accepted.checkpoint().0.current_request.clone();
+    let pending = Operation::Decision {
+        request: request.clone(),
+        response: None,
+    };
+    let execution = Execution::open(&executor, operation, &context).await?;
+    ensure!(
+        execution.generation_current().is_ok(),
+        "fixture generation must be current"
+    );
+    let posts_before = fixture.requests.load(Ordering::SeqCst);
+    let audit_before = fixture.store.head()?;
+
+    // Place the existing Writer barrier on the ACK, never on the pending write.
+    execution
+        .patch(|draft| {
+            ensure!(
+                draft.operations.is_empty() && draft.run.plan.managed.is_none(),
+                "fixture must precede any decision or admission"
+            );
+            draft.operations.push(pending.clone());
+            Ok(())
+        })
+        .await?;
+    let mut barrier = writer.advance_reply_barrier_for_test(lose_ack).await?;
+    let mut rpc = boxed_execution_phase(|| execution.rpc_checked_at_head(pending, None));
+    tokio::select! {
+        _ = &mut rpc => return Err(anyhow!("Decision returned before its Writer reply barrier")),
+        reached = tokio::time::timeout(Duration::from_secs(5), barrier.entered()) => {
+            reached.context("Decision ACK Writer barrier not reached")?;
+        }
+    }
+    // Use the strict journal while the Writer reply is still held. The barrier
+    // alone can also be reached after a failed journal call.
+    let durable = fixture
+        .journal()
+        .load(operation)?
+        .context("decision checkpoint missing")?;
+    let checkpoint = Draft::from_job(&durable)?;
+    let [
+        Operation::Decision {
+            request: stored_request,
+            response: Some(durable_answer),
+        },
+    ] = checkpoint.operations.as_slice()
+    else {
+        return Err(anyhow!(
+            "decision ACK must already be durable before the Writer reply"
+        ));
+    };
+    let receipt = durable_answer.receipt();
+    let events = fixture.store.events(&EventQuery {
+        kind: Some("security.decision".into()),
+        limit: Some(4),
+        ..Default::default()
+    })?;
+    ensure!(
+        durable.head().revision() == accepted.head().revision() + 2
+            && checkpoint.run.plan.managed.is_none()
+            && same(stored_request, &request)?
+            && durable_answer.decision().outcome == Outcome::Allow
+            && receipt.request_id == request.request_id
+            && receipt.request_hash == crate::policy::request_hash(&request)
+            && receipt.audit_seq == audit_before + 1
+            && events
+                .iter()
+                .any(|event| event.seq == receipt.audit_seq && event.hash == receipt.audit_hash)
+            && fixture.requests.load(Ordering::SeqCst) == posts_before + 1,
+        "journal ACK must match the one durable Allow decision while its reply is held"
+    );
+    let expected_answer = durable_answer.clone();
+    drop(checkpoint);
+    drop(barrier);
+    let returned = rpc.await;
+    ensure!(
+        execution.phase() == LocalFailurePhaseV1::Decision
+            && execution.generation_current().is_ok(),
+        "decision exchange must leave a current generation in Decision"
+    );
+    if lose_ack {
+        ensure!(
+            matches!(returned, Err(ref error) if matches!(error.downcast_ref::<JournalError>(), Some(JournalError::Io))),
+            "the durable decision must not be returned after loss of the Writer ACK"
+        );
+    } else {
+        let (completed, fresh, returned_head) = returned?;
+        let Operation::Decision {
+            response: Some(answer),
+            ..
+        } = completed
+        else {
+            return Err(anyhow!("successful Writer ACK did not return a decision"));
+        };
+        ensure!(
+            !fresh && returned_head.head == *durable.head() && same(&answer, &expected_answer)?,
+            "the returned decision must be the exact durable acknowledgement"
+        );
+
+        // Current generation crosses into the real preparation method. This
+        // test enforcer refuses before the method can touch workspace or runtime.
+        let valid = boxed_execution_phase(|| execution.prepare_active(&accepted, answer.clone()))
+            .await
+            .err()
+            .context("fixture enforcer permitted workspace preparation")?;
+        ensure!(
+            execution.phase() == LocalFailurePhaseV1::WorkspacePreparation
+                && matches!(
+                    valid.downcast_ref::<crate::broker::enforcer::EnforcerError>(),
+                    Some(crate::broker::enforcer::EnforcerError::Unhealthy)
+                ),
+            "current generation must enter WorkspacePreparation before the enforcer refusal"
+        );
+
+        // A separate execution starts again at Decision on this same retained job.
+        let stale = Execution::open(&executor, operation, &context).await?;
+        ensure!(
+            stale.generation_current().is_ok(),
+            "new execution must start current"
+        );
+        context.cancel_generation().invalidate();
+        let refused = boxed_execution_phase(|| stale.prepare_active(&accepted, answer))
+            .await
+            .err()
+            .context("stale generation advanced to workspace preparation")?;
+        ensure!(
+            stale.phase() == LocalFailurePhaseV1::Decision
+                && stale.generation_current().is_err()
+                && refused.to_string() == "execution generation was cancelled",
+            "generation rejection must precede the WorkspacePreparation marker"
+        );
+    }
+    ensure!(
+        fixture.requests.load(Ordering::SeqCst) == posts_before + 1,
+        "Decision endpoint must observe exactly one request through the end of this variant"
+    );
+    ensure!(
+        fixture.store.head()? == audit_before + 1
+            && fixture.store.workers()?.is_empty()
+            && fixture
+                .journal()
+                .load(operation)?
+                .context("retained decision missing")?
+                .head()
+                == durable.head(),
+        "the canary must leave only the one decision and its two journal revisions"
+    );
+    Ok(())
 }

@@ -52,6 +52,44 @@ async fn value(app: &Router, path: &str, token: &str) -> Value {
 }
 
 #[tokio::test]
+async fn health_reports_an_observed_unsupported_audit_schema() {
+    let directory = support::private_tempdir();
+    let path = directory.path().join("a.sqlite");
+    let tenant = tenant(&path, "tenant-a", "a", "v");
+    let store = Arc::clone(&tenant.store);
+    let state =
+        GatewayState::for_tenants(vec![tenant], Policy::default(), None, Redactor::new(vec![]))
+            .unwrap();
+    let app = gateway_router(state);
+    let local = rusqlite::Connection::open(&path).unwrap();
+    local.pragma_update(None, "user_version", 999).unwrap();
+
+    let previous = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(previous.status(), StatusCode::OK);
+    assert!(store.integrity().is_err());
+
+    let degraded = app
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(degraded.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
 async fn authenticated_identity_scopes_ingestion_history_export_and_derived_views() {
     let directory = support::private_tempdir();
     let state = GatewayState::for_tenants(

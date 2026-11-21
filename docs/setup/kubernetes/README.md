@@ -295,7 +295,7 @@ agentsandbox broker control-info \
 ```
 
 Use its exact `control_namespace_uuid`, a runner identity and compatible
-schema 3–11 with `broker_supervision_v1`. The gateway must be an HTTPS origin
+schema 3–13 with `broker_supervision_v1`. The gateway must be an HTTPS origin
 or an explicitly selected HTTP loopback origin; this file does not add private
 CA or mTLS options to the gateway connection. `runner_token_file` is an
 absolute path to a private file containing at most 4 KiB, not a token value. The control runner

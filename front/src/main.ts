@@ -11,10 +11,14 @@ import { FRONTEND_IDENTITY } from "./frontend-version.ts";
 import { buildIdentityFooter } from "./build-identity-view.ts";
 import { relatedAgents, relatedSandboxes, workerRelation } from "./control.ts";
 import type { WorkerRecord } from "./control.ts";
+import type { BrokerCapture } from "./model.ts";
 import {
   asText,
+  brokerBatchResultDetails,
   brokerFailureDetails,
+  brokerWorkspaceDetails,
   buildAgentForest,
+  decisionEvaluationDetails,
   eventSummary,
   formatBytes,
   formatDate,
@@ -631,7 +635,7 @@ async function readHealth() {
 async function loadInitial() {
   const current = client;
   if (!current) return;
-  await Promise.all([refreshSummary(), loadEvents()]);
+  await Promise.all([loadEvents(), refreshSummary()]);
   if (current !== client) return;
   void readHealth();
   healthTimer = setInterval(() => {
@@ -2009,6 +2013,101 @@ function showSandbox(sandbox: Sandbox) {
     rawBlock(sandbox),
   );
 }
+function brokerWorkspaceContent(event: AuditEvent) {
+  const workspace = brokerWorkspaceDetails(event);
+  if (!workspace) {
+    return [el("p", "detail-task", "Détails de fichiers indisponibles. L’événement reçu reste consultable dans Données brutes.")];
+  }
+  if (workspace.kind === "export") {
+    return [
+      el("h3", "", "Export publié"),
+      el(
+        "dl", "detail-grid",
+        labelValue("Fichiers publiés", workspace.files),
+        labelValue("Empreinte du manifeste", workspace.manifestDigest),
+        labelValue("Demande d’export", workspace.requestId),
+      ),
+    ];
+  }
+  const changeLabels = { created: "Créé", modified: "Modifié", deleted: "Supprimé" };
+  return [el("section", "",
+    el("h3", "", "Modifications observées"),
+    el(
+      "dl", "detail-grid",
+      labelValue("Nombre de modifications", workspace.changedFiles),
+      labelValue("Empreinte du manifeste", workspace.manifestDigest),
+    ),
+    workspace.truncated
+      ? el("p", "detail-task", `${formatMetric(workspace.changes.length)} modifications détaillées sur ${formatMetric(workspace.changedFiles)}.`)
+      : null,
+    workspace.changes.length ? el(
+      "div", "table-scroll",
+      el(
+        "table", "entity-table workspace-change-table",
+        el("thead", "", el("tr", "", ...["Chemin", "Changement", "Empreinte avant", "Empreinte après"].map(
+          (label) => el("th", "", label),
+        ))),
+        el("tbody", "", ...workspace.changes.map((change) => el(
+          "tr", "",
+          el("td", "mono", change.path),
+          el("td", "", changeLabels[change.change]),
+          el("td", "mono", change.beforeSha256 ?? "—"),
+          el("td", "mono", change.afterSha256 ?? "—"),
+        ))),
+      ),
+    ) : null,
+  )];
+}
+
+function brokerCaptureContent(title: string, label: string, capture: BrokerCapture) {
+  const states = { retained: "Texte conservé", not_retained: "Texte non conservé", unknown: "Inconnue" };
+  return el("section", "",
+    el("h3", "", title),
+    el("dl", "detail-grid", labelValue(label, states[capture.state])),
+    capture.text === null ? null : textBlock(capture.text === "" ? "Sortie vide" : capture.text),
+    capture.truncated ? el("p", "muted", "Flux tronqué lors de la collecte.") : null,
+    capture.textClipped ? el("p", "muted", "Texte conservé tronqué par le broker.") : null);
+}
+
+function brokerBatchCommandContent(event: AuditEvent) {
+  const result = brokerBatchResultDetails(event);
+  if (!result) return [el("p", "detail-task", "Résultat broker indisponible. Les données reçues restent consultables dans Données brutes.")];
+  return [
+    ...(event.command ? [el("h3", "", "Arguments reçus"), rawBlock(event.command.argv ?? null)] : []),
+    el("h3", "", "Résultat de l’exécution"),
+    el("dl", "detail-grid",
+      event.command ? labelValue("Répertoire", event.command.cwd) : null,
+      labelValue("Code de sortie observé", result.observedExitCode),
+      labelValue("Début observé", formatDate(result.startedAt, true)),
+      labelValue("Fin observée", formatDate(result.finishedAt, true)),
+      labelValue("Arrêt mémoire (OOM)", result.oomKilled === null ? null : result.oomKilled ? "Oui" : "Non"),
+      labelValue("Code de sortie du transport", result.transportExitCode),
+      labelValue("Durée du transport", result.transportDurationMs === null ? null : result.transportDurationMs + " ms"),
+    ),
+    brokerCaptureContent("Sortie standard", "Capture de la sortie standard", result.stdout),
+    brokerCaptureContent("Sortie d’erreur", "Capture de la sortie d’erreur", result.stderr),
+  ];
+}
+
+function decisionEvaluationContent(event: AuditEvent) {
+  const evaluation = decisionEvaluationDetails(event);
+  if (!evaluation) return null;
+  return el("section", "",
+    el("h3", "", "Évaluation complémentaire"),
+    el("dl", "detail-grid",
+      labelValue("Évaluateur", evaluation.evaluator),
+      labelValue("État de l’évaluation", evaluation.evaluationState),
+      evaluation.selectionSource ? labelValue("Sélection de l’évaluateur", evaluation.selectionSource) : null,
+      evaluation.requestedModel ? labelValue("Modèle demandé", evaluation.requestedModel) : null,
+      evaluation.returnedModel ? labelValue("Modèle retourné", evaluation.returnedModel) : null,
+      evaluation.advice ? labelValue("Avis du modèle", evaluation.advice) : null,
+    ),
+    evaluation.localAdvisory
+      ? el("p", "detail-task", "Le modèle local intervient à titre consultatif. L’autorisation d’exécuter relève de la politique Rust.")
+      : null,
+  );
+}
+
 function showEvent(event: AuditEvent) {
   const failure = brokerFailureDetails(event);
   const { body } = openDialog(event.kind, `ÉVÉNEMENT #${event.seq}`);
@@ -2039,6 +2138,10 @@ function showEvent(event: AuditEvent) {
             "L’observation porte sur l’échec du broker. L’état final de l’exécution reste à confirmer.",
           ),
         );
+        return;
+      }
+      if (event.kind === "broker.batch.result") {
+        content.replaceChildren(...brokerBatchCommandContent(event));
         return;
       }
       if (!event.command && !event.result) {
@@ -2117,6 +2220,8 @@ function showEvent(event: AuditEvent) {
             "L’observation porte sur l’échec du broker. La phase et l’étape situent le signalement ; l’état final de l’exécution reste à confirmer.",
           ),
         ]
+      : event.kind === "broker.batch.scan" || event.kind === "broker.batch.export"
+      ? brokerWorkspaceContent(event)
       : [
           el("h3", "", "Décision"),
           el(
@@ -2127,6 +2232,7 @@ function showEvent(event: AuditEvent) {
           ),
           el("p", "detail-task", asText(event.decision?.reason)),
         ];
+    const evaluation = decisionEvaluationContent(event);
     content.replaceChildren(
       el(
         "div",
@@ -2151,6 +2257,7 @@ function showEvent(event: AuditEvent) {
         labelValue("Trace", event.trace_id),
       ),
       ...details,
+      ...(evaluation ? [evaluation] : []),
       el("h3", "", "Chaînage d’audit"),
       el(
         "dl",

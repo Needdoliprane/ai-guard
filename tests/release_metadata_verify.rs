@@ -9,16 +9,19 @@ mod harness;
 #[path = "release_metadata/support.rs"]
 mod support;
 
+use agentsandbox::build_identity::{BuildStatusV1, Component};
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
+    process::Stdio,
+    time::{Duration, Instant},
 };
 use support::{
-    MANIFEST_FILE, Outcome, PROVENANCE, SBOM_FILE, SUMS_FILE, Scenario, artifact_arguments,
-    copy_documents, copy_tree, edit_file, make_public_directories, manifest_json, rewrite_manifest,
-    sha256_hex, sums_text,
+    MANIFEST_FILE, Outcome, PROVENANCE, SBOM_FILE, SUMS_FILE, Scenario, arguments,
+    artifact_arguments, copy_documents, copy_tree, documents, edit_file, make_private_directory,
+    make_public_directories, manifest_json, repository, rewrite_manifest, sha256_hex, sums_text,
 };
 
 /// One change applied to a fresh copy of a source.
@@ -159,6 +162,280 @@ fn verify_matches_an_unchanged_source_and_its_artifacts_from_another_location() 
         outcome.describe()
     );
     scenario.assert_tmp_empty("after release verify");
+}
+
+async fn run_distribution_command(
+    program: &Path,
+    directory: &Path,
+    temporary: &Path,
+    args: &[OsString],
+) -> Outcome {
+    let started = Instant::now();
+    let child = tokio::process::Command::new(program)
+        .args(args)
+        .current_dir(directory)
+        .env_clear()
+        .env("TMPDIR", temporary)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("SETUP: start an explicit native distribution command");
+    let output = tokio::time::timeout(Duration::from_secs(60), child.wait_with_output())
+        .await
+        .expect("native distribution command exceeded its time bound")
+        .expect("SETUP: native distribution command output");
+    Outcome {
+        status: output.status,
+        stdout: String::from_utf8(output.stdout).unwrap(),
+        stderr: String::from_utf8(output.stderr).unwrap(),
+        elapsed: started.elapsed(),
+    }
+}
+
+#[tokio::test]
+async fn verified_native_files_run_from_a_fresh_private_installation() {
+    let sandbox = tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let work = sandbox.path().canonicalize().unwrap();
+    let candidate = repository().canonicalize().unwrap();
+    let verifier = Path::new(env!("CARGO_BIN_EXE_agentsandbox"));
+    let public_license = candidate.join("LICENSE");
+    let inputs = [
+        verifier,
+        Path::new(env!("CARGO_BIN_EXE_ai-guard-diagnose")),
+        public_license.as_path(),
+    ];
+    let temporary = work.join("tmp");
+    let consumer = work.join("consumer");
+    make_private_directory(&temporary);
+    make_private_directory(&consumer);
+
+    let issued = work.join("issued");
+    let mut manifest_args = arguments(&["release", "manifest", "--source"]);
+    manifest_args.extend([
+        candidate.as_os_str().to_owned(),
+        "--output".into(),
+        issued.clone().into(),
+    ]);
+    manifest_args.extend(artifact_arguments(&inputs));
+    run_distribution_command(verifier, &consumer, &temporary, &manifest_args)
+        .await
+        .succeeded("issue a manifest of the candidate's public build inputs and native files");
+    let issued_documents = documents(&issued);
+    let expected_manifest = sha256_hex(&issued_documents[0]);
+    let manifest: serde_json::Value = serde_json::from_slice(&issued_documents[0]).unwrap();
+
+    let delivery = work.join("distribution");
+    let delivered_documents = delivery.join("manifest");
+    copy_documents(&issued, &delivered_documents);
+    let received = documents(&delivered_documents);
+    assert_eq!(received, issued_documents);
+    assert_eq!(
+        received[2],
+        sums_text(&received[0], &received[1]).into_bytes()
+    );
+
+    let delivered_source = delivery.join("source");
+    make_private_directory(&delivered_source);
+    // Copy only the public inputs named by the manifest just issued by the
+    // trusted test binary. Neither repository-local state nor target is copied.
+    for item in manifest["source"]["entries"].as_array().unwrap() {
+        let relative = Path::new(item["path"].as_str().unwrap());
+        assert!(!relative.as_os_str().is_empty());
+        assert!(
+            relative
+                .components()
+                .all(|part| matches!(part, std::path::Component::Normal(_)))
+        );
+        let output = delivered_source.join(relative);
+        make_public_directories(output.parent().unwrap());
+        assert_eq!(
+            fs::copy(candidate.join(relative), &output).unwrap(),
+            item["bytes"].as_u64().unwrap()
+        );
+    }
+    let payload = delivery.join("payload");
+    let prefix = work.join("installed");
+    make_private_directory(&payload);
+    make_private_directory(&prefix);
+    for input in inputs {
+        let name = input.file_name().unwrap();
+        let transferred = payload.join(name);
+        fs::copy(input, &transferred).unwrap();
+        let installed = prefix.join(name);
+        fs::copy(&transferred, &installed).unwrap();
+        let mode = if name == OsStr::new("LICENSE") {
+            0o600
+        } else {
+            0o700
+        };
+        fs::set_permissions(installed, fs::Permissions::from_mode(mode)).unwrap();
+    }
+    assert_eq!(
+        fs::read(prefix.join("LICENSE")).unwrap(),
+        fs::read(public_license).unwrap()
+    );
+
+    let installed_cli = prefix.join("agentsandbox");
+    let installed_diagnose = prefix.join("ai-guard-diagnose");
+    let installed_license = prefix.join("LICENSE");
+    let verify_arguments = |source: &Path| {
+        let mut args = arguments(&["release", "verify", "--source"]);
+        args.extend([
+            source.as_os_str().to_owned(),
+            "--manifest".into(),
+            delivered_documents.clone().into(),
+            "--expect-manifest-sha256".into(),
+            expected_manifest.clone().into(),
+        ]);
+        args
+    };
+    let installed_artifacts =
+        artifact_arguments(&[&installed_cli, &installed_diagnose, &installed_license]);
+    let mut verify = verify_arguments(&delivered_source);
+    verify.extend(installed_artifacts.clone());
+    let verified = run_distribution_command(verifier, &consumer, &temporary, &verify).await;
+    assert_match(
+        &verified,
+        "verify the exact installed files from the relocated distribution",
+    );
+    assert!(verified.stdout.contains("artifacts  3/3 matched"));
+
+    let version = run_distribution_command(
+        &installed_cli,
+        &consumer,
+        &temporary,
+        &arguments(&["version", "--json"]),
+    )
+    .await;
+    version.succeeded("run the verified CLI outside the checkout");
+    let status =
+        BuildStatusV1::from_json(version.stdout.as_bytes(), Component::Agentsandbox).unwrap();
+    assert_eq!(status, BuildStatusV1::current(Component::Agentsandbox));
+    let missing = consumer.join("config");
+    let mut diagnose_args = arguments(&["--json", "--config-dir"]);
+    diagnose_args.push(missing.as_os_str().to_owned());
+    let diagnose =
+        run_distribution_command(&installed_diagnose, &consumer, &temporary, &diagnose_args).await;
+    assert_eq!(diagnose.status.code(), Some(3), "{}", diagnose.describe());
+    let report: serde_json::Value = serde_json::from_str(&diagnose.stdout).unwrap();
+    assert_eq!(report["schema"], "ai-guard-diagnose-report");
+    assert_eq!(report["mode"]["network"], "none");
+    assert_eq!(report["mode"]["credential_contents_read"], "none");
+    assert!(
+        report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| {
+                finding["code"] == "layout.target_absent"
+                    && finding["action"]
+                        .as_str()
+                        .unwrap()
+                        .contains("agentsandbox init --config-dir")
+            })
+    );
+    assert!(!missing.exists());
+    assert!(fs::read_dir(&consumer).unwrap().next().is_none());
+
+    let replacement = work.join("rejected");
+    make_private_directory(&replacement);
+    let replacement_cli = replacement.join("agentsandbox");
+    let placeholder = fs::File::create_new(&replacement_cli).unwrap();
+    fs::set_permissions(&replacement_cli, fs::Permissions::from_mode(0o600)).unwrap();
+    placeholder
+        .set_len(fs::metadata(&installed_cli).unwrap().len())
+        .unwrap();
+    drop(placeholder);
+    let mut substituted = verify_arguments(&delivered_source);
+    substituted.extend(artifact_arguments(&[
+        &replacement_cli,
+        &installed_diagnose,
+        &installed_license,
+    ]));
+    let refused = run_distribution_command(verifier, &consumer, &temporary, &substituted).await;
+    assert_divergent(
+        &refused,
+        "artifact-changed",
+        "same-name, same-length replacement",
+    );
+
+    let mut retained = verify_arguments(&candidate);
+    retained.extend(installed_artifacts);
+    let retained = run_distribution_command(verifier, &consumer, &temporary, &retained).await;
+    assert_match(
+        &retained,
+        "the originating source and the good installation still verify",
+    );
+    assert_eq!(documents(&delivered_documents), issued_documents);
+    assert!(fs::read_dir(&temporary).unwrap().next().is_none());
+    println!(
+        "{}",
+        serde_json::json!({
+            "manifest_sha256":expected_manifest,
+            "source_sha256":manifest["source"]["digest"]["value"],
+            "native_files_verified":3,
+            "diagnose":"layout.target_absent",
+            "replacement":"artifact-changed",
+            "original_source_and_installation":"MATCH",
+        })
+    );
+}
+
+#[test]
+fn verify_checks_the_expected_manifest_digest_before_source_and_artifacts() {
+    let selected = published(&[]);
+    let scenario = &selected.scenario;
+    let manifest_bytes = fs::read(selected.manifest.join(MANIFEST_FILE)).expect("SETUP: manifest");
+    let digest = sha256_hex(&manifest_bytes);
+    let expected = [OsString::from("--expect-manifest-sha256"), digest.into()];
+    let mut all = artefact_arguments_of(&selected.artifacts);
+    all.extend(expected.iter().cloned());
+    let outcome = scenario.verify(scenario.source(), &selected.manifest, &all);
+    assert_match(&outcome, "selected manifest with its expected digest");
+    assert!(outcome.stdout.contains("expected manifest SHA-256 matched"));
+    assert!(outcome.stdout.contains("artifacts  2/2 matched"));
+
+    let other_artifact = scenario.artifact("agentsandbox-next", b"another candidate\n");
+    let other_artifacts = artifact_arguments(&[other_artifact.as_path()]);
+    let other_manifest = scenario.published("other-release", &other_artifacts);
+    let outcome = scenario.verify(scenario.source(), &other_manifest, &other_artifacts);
+    assert_match(
+        &outcome,
+        "another valid manifest without an expected digest",
+    );
+
+    let unavailable = scenario.base.join("unavailable");
+    let mut arguments = artifact_arguments(&[&unavailable.join("agentsandbox-next")]);
+    arguments.extend(expected);
+    let outcome = scenario.verify(&unavailable, &other_manifest, &arguments);
+    assert_divergent(
+        &outcome,
+        "manifest-digest",
+        "another valid manifest with the selected digest",
+    );
+    scenario.assert_before_preparation(&outcome, "a different manifest digest");
+}
+
+#[test]
+fn verify_refuses_invalid_expected_manifest_digests_before_reading_inputs() {
+    let scenario = Scenario::new();
+    let unavailable = scenario.base.join("unavailable");
+    for digest in ["abcd".to_owned(), "A".repeat(64), "g".repeat(64)] {
+        let arguments = [OsString::from("--expect-manifest-sha256"), digest.into()];
+        let outcome = scenario.verify(&unavailable, &unavailable, &arguments);
+        let context = "an invalid expected manifest digest";
+        assert_unverified(
+            &outcome,
+            "--expect-manifest-sha256 must be 64 lowercase hexadecimal",
+            context,
+        );
+        scenario.assert_before_preparation(&outcome, context);
+    }
 }
 
 #[test]

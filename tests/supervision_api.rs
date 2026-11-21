@@ -1231,6 +1231,58 @@ async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_bloc
     )
     .await;
     assert_eq!(worker.state, WorkerStateV1::Terminal);
+    let before_export = fixture.a.integrity().unwrap();
+    assert!(before_export.valid);
+    let quota_policy = agentsandbox::control::QuotaPolicyV1::default();
+    let accounting = |store: &Store| {
+        (
+            serde_json::to_value(store.worker_quota(&quota_policy).unwrap()).unwrap(),
+            store.worker_usage().unwrap(),
+        )
+    };
+    let before_accounting = accounting(&fixture.a);
+    assert_eq!(before_accounting.0["held_workers"], 0);
+    assert!(
+        before_accounting
+            .1
+            .iter()
+            .any(|allocation| { allocation.worker_id == worker.worker_id && !allocation.billable })
+    );
+    let directory = fixture._directory.path().canonicalize().unwrap();
+    let restored_path = directory.join("pre-export.sqlite");
+    {
+        use rusqlite::{
+            Connection, OpenFlags,
+            backup::{Backup, StepResult},
+        };
+
+        // Both connections are owned by SQLite. This private, quiescent
+        // fixture uses the online backup API to include committed WAL pages.
+        let source = Connection::open_with_flags(
+            directory.join("a.sqlite"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        let mut destination_options = std::fs::OpenOptions::new();
+        destination_options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            destination_options.mode(0o600);
+        }
+        drop(destination_options.open(&restored_path).unwrap());
+        let mut destination = Connection::open_with_flags(
+            &restored_path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        let backup = Backup::new(&source, &mut destination).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while backup.step(256).unwrap() != StepResult::Done {
+            assert!(Instant::now() < deadline, "private SQLite backup timed out");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
     let export = ExportRequestV1 {
         version: 1,
         operation_id: Uuid::new_v4().to_string(),
@@ -1250,6 +1302,10 @@ async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_bloc
     .await;
     assert_eq!(export_response.status(), StatusCode::OK);
     let export_receipt: MutationReceiptV1 = response_json(export_response).await;
+    let granted = fixture.a.integrity().unwrap();
+    assert!(granted.valid);
+    assert_eq!(granted.event_count, before_export.event_count + 1);
+    assert_eq!(granted.head_hash, export_receipt.audit_hash);
 
     // An independent open is maintenance-only. Reads and exact consumed
     // replay remain available, while fresh operations are refused atomically.
@@ -1263,19 +1319,23 @@ async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_bloc
         .unwrap(),
     );
     assert!(!reopened.supervision_state().unwrap().active);
-    let reopened_state = GatewayState::for_tenants(
-        vec![TenantGateway {
-            tenant_id: "tenant-a".into(),
-            store: Arc::clone(&reopened),
-            runner_token: fixture.runner_a.clone(),
-            viewer_token: fixture.viewer_a.clone(),
-        }],
-        Policy::default(),
-        None,
-        Redactor::new(vec![]),
-    )
-    .unwrap();
-    let reopened_router = gateway_router(reopened_state);
+    let maintenance_router = |store: &Arc<Store>| {
+        gateway_router(
+            GatewayState::for_tenants(
+                vec![TenantGateway {
+                    tenant_id: "tenant-a".into(),
+                    store: Arc::clone(store),
+                    runner_token: fixture.runner_a.clone(),
+                    viewer_token: fixture.viewer_a.clone(),
+                }],
+                Policy::default(),
+                None,
+                Redactor::new(vec![]),
+            )
+            .unwrap(),
+        )
+    };
+    let reopened_router = maintenance_router(&reopened);
     let reopened_protocol = send(
         &reopened_router,
         Method::GET,
@@ -1334,9 +1394,103 @@ async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_bloc
     assert_eq!(refused["code"], "supervision_inactive");
     assert_eq!(reopened.head().unwrap(), reopened_head);
 
+    assert_eq!(reopened_head, export_receipt.audit_seq);
+    let replayed_export = json_request(
+        &reopened_router,
+        Method::POST,
+        &export_path,
+        Some(&fixture.runner_a),
+        &export,
+    )
+    .await;
+    assert_eq!(replayed_export.status(), StatusCode::OK);
+    assert_eq!(
+        response_json::<MutationReceiptV1>(replayed_export).await,
+        export_receipt
+    );
+    assert_eq!(reopened.head().unwrap(), reopened_head);
+    let mut divergent_export = export.clone();
+    divergent_export.destination_intent_hash = HASH_C.into();
+    let mut fresh_export = export.clone();
+    fresh_export.operation_id = Uuid::new_v4().to_string();
+    fresh_export.destination_ref = Uuid::new_v4().to_string();
+    for (input, status, code) in [
+        (divergent_export, StatusCode::CONFLICT, "worker_conflict"),
+        (
+            fresh_export,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "supervision_inactive",
+        ),
+    ] {
+        let refused = json_request(
+            &reopened_router,
+            Method::POST,
+            &export_path,
+            Some(&fixture.runner_a),
+            &input,
+        )
+        .await;
+        assert_eq!(refused.status(), status);
+        assert_eq!(response_json::<Value>(refused).await["code"], code);
+        assert_eq!(reopened.head().unwrap(), reopened_head);
+    }
+    assert_eq!(accounting(&reopened), before_accounting);
+    let after = reopened.integrity().unwrap();
+    assert!(after.valid);
+    assert_eq!(after.event_count, granted.event_count);
+    assert_eq!(after.head_hash, granted.head_hash);
+
+    let restored = Arc::new(
+        Store::open_existing_for_tenant(&restored_path, "tenant-a", Redactor::new(vec![]), 10_000)
+            .unwrap(),
+    );
+    let restored_router = maintenance_router(&restored);
+    let restored_state = restored.supervision_state().unwrap();
+    assert!(!restored_state.active);
+    assert_eq!(
+        restored_state.schema_version,
+        reopened_protocol.schema_version
+    );
+    assert_eq!(
+        restored_state.control_namespace_uuid,
+        reopened_protocol.control_namespace_uuid
+    );
+    let retained_worker = restored.worker(&worker.worker_id).unwrap().unwrap();
+    assert_eq!(retained_worker.state, WorkerStateV1::Terminal);
+    assert_eq!(
+        retained_worker.attempt.attempt_id,
+        worker.attempt.attempt_id
+    );
+    assert!(!retained_worker.quota_held);
+    let absent_grant = json_request(
+        &restored_router,
+        Method::POST,
+        &export_path,
+        Some(&fixture.runner_a),
+        &export,
+    )
+    .await;
+    assert_eq!(absent_grant.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response_json::<Value>(absent_grant).await["code"],
+        "supervision_inactive"
+    );
+    assert_eq!(accounting(&restored), before_accounting);
+    let after_restore = restored.integrity().unwrap();
+    assert!(after_restore.valid);
+    assert_eq!(after_restore.event_count, before_export.event_count);
+    assert_eq!(after_restore.head_hash, before_export.head_hash);
+
+    // This separate reservation fixture writes its own decision before testing
+    // the maintenance refusal. Keep it outside the export audit comparison.
     let mut fresh_reservation = admission(&reopened);
     fresh_reservation.operation_id = Uuid::new_v4().to_string();
     let reopened_reservation_head = reopened.head().unwrap();
+    assert_eq!(reopened_reservation_head, reopened_head + 1);
+    assert_eq!(
+        reopened_reservation_head,
+        fresh_reservation.receipt.audit_seq
+    );
     let refused_reservation = json_request(
         &reopened_router,
         Method::POST,
@@ -1351,7 +1505,6 @@ async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_bloc
     );
     assert_eq!(reopened.head().unwrap(), reopened_reservation_head);
     assert_eq!(fixture.a.head().unwrap(), reopened_reservation_head);
-    let _ = export_receipt;
 }
 
 #[tokio::test]

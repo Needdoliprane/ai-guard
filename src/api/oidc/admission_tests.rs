@@ -16,7 +16,7 @@ use crate::identity::*;
 // The shared issuer's other fault controls are exercised by integration targets.
 #[allow(dead_code)]
 #[path = "../../../tests/support/oidc_fixture.rs"]
-mod controlled;
+pub(in crate::api::oidc) mod controlled;
 
 #[path = "admission_capacity_tests.rs"]
 mod capacity_tests;

@@ -1,7 +1,7 @@
 //! Private configuration and real authentication SQLite only; no IdP request.
 #![cfg(unix)]
 
-use super::tests::oidc_fixture;
+use super::tests::oidc_v1_fixture;
 use super::*;
 use agentsandbox::{
     audit::authentication::{
@@ -78,7 +78,7 @@ fn directory_entries(directory: &Path) -> BTreeSet<std::ffi::OsString> {
 
 #[tokio::test]
 async fn version_two_configuration_initializes_v4_and_reopens_the_exact_plan() {
-    let (directory, path, config) = oidc_fixture();
+    let (directory, path, config) = oidc_v1_fixture();
     let plan = capacity_plan(&config.authentication_audit.policy);
     let policy_before = document(&path)["authentication_audit"]["policy"].clone();
     configure_v2(&path, &plan);
@@ -108,7 +108,7 @@ async fn version_two_configuration_initializes_v4_and_reopens_the_exact_plan() {
 
 #[tokio::test]
 async fn changed_valid_capacity_plan_is_refused_without_mutating_the_ledger() {
-    let (directory, path, config) = oidc_fixture();
+    let (directory, path, config) = oidc_v1_fixture();
     let plan = capacity_plan(&config.authentication_audit.policy);
     configure_v2(&path, &plan);
     drop(load_oidc(&path, true, Redactor::new(vec![])).unwrap());
@@ -140,7 +140,7 @@ async fn changed_valid_capacity_plan_is_refused_without_mutating_the_ledger() {
 
 #[tokio::test]
 async fn explicit_v3_to_v4_migration_requires_cfg2_and_preserves_history_and_new_backup() {
-    let (directory, path, config) = oidc_fixture();
+    let (directory, path, config) = oidc_v1_fixture();
     let plan = capacity_plan(&config.authentication_audit.policy);
     let policy_before = document(&path)["authentication_audit"]["policy"].clone();
     drop(load_oidc(&path, true, Redactor::new(vec![])).unwrap());
@@ -278,15 +278,22 @@ async fn incompatible_versions_and_invalid_plans_are_refused_before_database_cre
         "invalid-plan-version",
         "duplicate-tenant",
     ] {
-        let (directory, path, config) = oidc_fixture();
+        let (directory, path, config) = oidc_v1_fixture();
         let plan = capacity_plan(&config.authentication_audit.policy);
         let mut value = document(&path);
         match case {
             "v1-with-plan" => {
+                value["version"] = json!(1);
                 value["authentication_audit"]["capacity_plan"] =
                     serde_json::to_value(&plan).unwrap();
             }
-            "v2-without-plan" => value["version"] = json!(2),
+            "v2-without-plan" => {
+                value["version"] = json!(2);
+                value["authentication_audit"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("capacity_plan");
+            }
             "invalid-plan-version" | "duplicate-tenant" => {
                 let mut invalid = plan;
                 if case == "invalid-plan-version" {

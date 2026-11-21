@@ -11,7 +11,7 @@ mod batch_io;
 mod control_outcome;
 pub(crate) use control_outcome::{
     NativeCollected, NativeCollectionOutcome, NativeIoPhase, NativeNoChild, NativeRuntimeOutcome,
-    NativeStopFailure, NativeStopResult, NativeUncollectedCall,
+    NativeStopFailure, NativeStopResult, NativeUncollectedCall, OwnedStopObservation,
 };
 #[cfg(test)]
 mod deadline_driver_tests;
@@ -26,10 +26,13 @@ pub(crate) mod launch_profile;
 mod managed;
 pub mod observation;
 pub(crate) use managed::relay::{RelayExecError, RelayExecPermit, RelayExecTransport};
+pub(crate) use managed::selected_podman_target_args;
 pub(crate) mod model_tls;
 mod prestart;
 pub mod retained_cli;
 pub mod terminal;
+#[cfg(unix)]
+pub(crate) use invocation::control_service_account;
 pub use invocation::{ExecutableDirectoryIdentityV1, ExecutableIdentityV1, InvocationBindingV1};
 pub use managed::{
     ContainerHandle, ManagedPrearmedExecution, ManagedPrearmedOutcome, ManagedRetainedExecution,
@@ -350,6 +353,16 @@ impl ContainerSpec {
             !self.security_preset.is_interactive() || matches!(self.purpose, ContainerPurpose::Run),
             "the interactive preset is reserved for worker execution"
         );
+        let (home_mount_flag, home_mount) = match runtime {
+            RuntimeKind::Docker => (
+                "--tmpfs",
+                "/home/agent:rw,nosuid,nodev,size=64m,uid=1000,gid=1000,mode=700",
+            ),
+            RuntimeKind::Podman => (
+                "--mount",
+                "type=tmpfs,destination=/home/agent,tmpfs-size=64m,tmpfs-mode=0700,notmpcopyup,U=true,nosuid,nodev",
+            ),
+        };
         let mut args = vec![
             "create".into(),
             "--pull=never".into(),
@@ -393,8 +406,8 @@ impl ContainerSpec {
             "/workspace".into(),
             "--tmpfs".into(),
             "/tmp:rw,nosuid,nodev,noexec,size=256m,mode=1777".into(),
-            "--tmpfs".into(),
-            "/home/agent:rw,nosuid,nodev,size=64m,uid=1000,gid=1000,mode=700".into(),
+            home_mount_flag.into(),
+            home_mount.into(),
             "--env".into(),
             "HOME=/home/agent".into(),
             "--env".into(),
@@ -1041,11 +1054,35 @@ impl Runtime {
         Ok(io.stdout)
     }
     pub async fn doctor(&self, allow_rootful: bool) -> Result<RuntimeInfo> {
-        let args = match self.kind {
-            RuntimeKind::Docker => vec!["info".into(), "--format".into(), "{{json .}}".into()],
-            RuntimeKind::Podman => vec!["info".into(), "--format".into(), "json".into()],
+        self.doctor_on(Vec::new(), allow_rootful).await
+    }
+    /// Read the Podman session target without creating a managed authority.
+    pub async fn diagnose_podman(
+        &self,
+        endpoint: &str,
+        allow_rootful: bool,
+    ) -> Result<(RuntimeInfo, Capture)> {
+        ensure!(
+            self.kind == RuntimeKind::Podman,
+            "Podman diagnostics require an approved Podman executable"
+        );
+        let mut target = selected_podman_target_args(endpoint)?;
+        let info = self.doctor_on(target.clone(), allow_rootful).await?;
+        target.push("version".into());
+        let version = self.cli(&target, Duration::from_secs(15)).await?;
+        ensure!(
+            !version.truncated,
+            "runtime version exceeds its response bound"
+        );
+        Ok((info, version))
+    }
+    async fn doctor_on(&self, mut target: Vec<String>, allow_rootful: bool) -> Result<RuntimeInfo> {
+        let format = match self.kind {
+            RuntimeKind::Docker => "{{json .}}",
+            RuntimeKind::Podman => "json",
         };
-        let output = self.cli(&args, Duration::from_secs(15)).await?;
+        target.extend(["info".into(), "--format".into(), format.into()]);
+        let output = self.cli(&target, Duration::from_secs(15)).await?;
         if output.truncated {
             bail!("runtime info exceeds its response bound");
         }
@@ -2379,7 +2416,7 @@ pub fn parse_container_observation(
 }
 fn parse_container_observation_version(
     bytes: &[u8],
-    _kind: RuntimeKind,
+    kind: RuntimeKind,
     fingerprint_version: u32,
 ) -> Result<ContainerObservation> {
     ensure!(
@@ -2504,7 +2541,11 @@ fn parse_container_observation_version(
         restart_count,
         process,
         allocation,
-        configuration_fingerprint: managed::configuration_fingerprint(bytes, fingerprint_version),
+        configuration_fingerprint: managed::configuration_fingerprint(
+            bytes,
+            fingerprint_version,
+            kind,
+        ),
         configuration_fingerprint_version: (fingerprint_version != 1)
             .then_some(fingerprint_version),
         observed_at: chrono::Utc::now(),

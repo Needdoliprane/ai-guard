@@ -3,10 +3,15 @@ use crate::{
     model::{DecisionRequest, Outcome},
     redaction::Redactor,
 };
-use serde::Deserialize;
+use serde::{
+    Deserialize, Deserializer,
+    de::{MapAccess, Visitor, value::MapAccessDeserializer},
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+// The runner and HTTP relay allow 15 seconds. Leave time for the gateway's audit.
+pub const MAX_LOCAL_JEV_TIMEOUT_SECONDS: u64 = 12;
 const MAX_TOKENS: u16 = 256;
 const TEMPERATURE: u8 = 0;
 const STREAM: bool = false;
@@ -60,7 +65,43 @@ struct Usage {
     prompt_tokens: u64,
     completion_tokens: u64,
     total_tokens: u64,
+    // Validate the llama.cpp cache count while preserving the existing audit fields.
+    #[serde(
+        default,
+        rename = "prompt_tokens_details",
+        deserialize_with = "deserialize_cached_prompt_tokens",
+        skip_serializing
+    )]
+    cached_prompt_tokens: Option<u64>,
 }
+
+fn deserialize_cached_prompt_tokens<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    struct DetailsObject;
+
+    impl<'de> Visitor<'de> for DetailsObject {
+        type Value = u64;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("an object containing only cached_tokens")
+        }
+
+        fn visit_map<M: MapAccess<'de>>(self, map: M) -> Result<u64, M::Error> {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Details {
+                cached_tokens: u64,
+            }
+
+            Details::deserialize(MapAccessDeserializer::new(map))
+                .map(|details| details.cached_tokens)
+        }
+    }
+
+    deserializer.deserialize_map(DetailsObject).map(Some)
+}
+
 impl LocalClient {
     pub(super) fn new(
         endpoint: &str,
@@ -68,12 +109,17 @@ impl LocalClient {
         model: String,
         local_http: bool,
         trust: JevTrust,
+        timeout_seconds: u64,
     ) -> Result<Self, JevError> {
-        if model.trim().is_empty() || model.len() > 128 || model.chars().any(char::is_control) {
+        if !(1..=MAX_LOCAL_JEV_TIMEOUT_SECONDS).contains(&timeout_seconds)
+            || model.trim().is_empty()
+            || model.len() > 128
+            || model.chars().any(char::is_control)
+        {
             return Err(JevError::InvalidConfiguration);
         }
         Ok(Self {
-            transport: JsonTransport::new(endpoint, key, local_http, trust)?,
+            transport: JsonTransport::new(endpoint, key, local_http, trust, timeout_seconds)?,
             model,
         })
     }
@@ -145,6 +191,9 @@ impl LocalClient {
         }
         if envelope.usage.as_ref().is_some_and(|usage| {
             usage.prompt_tokens.checked_add(usage.completion_tokens) != Some(usage.total_tokens)
+                || usage
+                    .cached_prompt_tokens
+                    .is_some_and(|cached| cached > usage.prompt_tokens)
         }) {
             return Err(JevError::InvalidResponse);
         }
@@ -201,6 +250,7 @@ mod tests {
                 "fixture-local-model".into(),
                 true,
                 JevTrust::default(),
+                crate::jev::DEFAULT_JEV_TIMEOUT_SECONDS,
             )
             .unwrap();
             let request: DecisionRequest = serde_json::from_value(json!({
@@ -274,5 +324,44 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn local_usage_accepts_only_consistent_llama_cpp_cached_tokens() {
+        let redactor = Redactor::new(vec![]);
+        let mut envelope: Value = serde_json::from_slice(&response(json!({
+            "outcome":"review", "reason":"Review the scope."
+        })))
+        .unwrap();
+        envelope["model"] = json!("qwen2.5-0.5b-q4km");
+        let totals = json!({"prompt_tokens":82,"completion_tokens":29,"total_tokens":111});
+        envelope["usage"] = totals.clone();
+        let parse = |envelope: &Value| {
+            LocalClient::parse(&serde_json::to_vec(envelope).unwrap(), &redactor)
+        };
+
+        for cached_tokens in [0, 82] {
+            envelope["usage"]["prompt_tokens_details"] = json!({"cached_tokens":cached_tokens});
+            let (outcome, metadata) = parse(&envelope).unwrap();
+            assert_eq!(outcome, Outcome::Review);
+            assert_eq!(metadata["qualification"], "not_qualified_to_authorize");
+            assert_eq!(metadata["model"], "qwen2.5-0.5b-q4km");
+            assert_eq!(metadata["usage"], totals);
+        }
+
+        for details in [
+            json!({"cached_tokens":83}),
+            json!({"cached_tokens":-1}),
+            json!({"cached_tokens":0,"unknown":0}),
+            json!({}),
+            json!([0]),
+            Value::Null,
+        ] {
+            let mut invalid = envelope.clone();
+            invalid["usage"]["prompt_tokens_details"] = details;
+            assert_eq!(parse(&invalid).unwrap_err(), JevError::InvalidResponse);
+        }
+        envelope["usage"]["unknown"] = json!(0);
+        assert_eq!(parse(&envelope).unwrap_err(), JevError::InvalidResponse);
     }
 }

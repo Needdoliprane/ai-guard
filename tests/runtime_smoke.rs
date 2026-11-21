@@ -1,10 +1,17 @@
 //! Requires a real, deliberately selected engine and the running control plane.
 //! Kept ignored in normal CI: argument/unit tests are not runtime isolation proof.
+//! Set AGENTSANDBOX_TEST_RUNTIME_ENDPOINT to the QA Unix socket to use the
+//! same explicit target for the run and its probes. Native Podman also accepts
+//! `local`. The Docker default uses the control account's current context.
 use agentsandbox::{
     runner::{self, AuditClient, RunOptions},
     runtime::{NetworkMode, RuntimeKind},
 };
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Component, Path, PathBuf},
+    time::Duration,
+};
 
 fn local_gateway(value: &str) -> bool {
     reqwest::Url::parse(value).is_ok_and(|url| {
@@ -47,6 +54,69 @@ fn smoke_gateway_is_a_loopback_origin_before_any_credentials_are_loaded() {
     }
 }
 
+fn runtime_probe_target(
+    runtime: RuntimeKind,
+    endpoint: Option<&str>,
+) -> anyhow::Result<Vec<String>> {
+    let Some(endpoint) = endpoint.or((runtime == RuntimeKind::Podman).then_some("local")) else {
+        return Ok(Vec::new());
+    };
+    if runtime == RuntimeKind::Podman && endpoint == "local" {
+        anyhow::ensure!(
+            cfg!(any(target_os = "linux", target_os = "freebsd")),
+            "Podman local mode requires a native engine; select an explicit Unix socket"
+        );
+        return Ok(vec!["--remote=false".into()]);
+    }
+    let path = endpoint.strip_prefix("unix://").map(Path::new);
+    anyhow::ensure!(
+        path.is_some_and(|path| path.is_absolute()
+            && !path.components().any(|part| part == Component::ParentDir))
+            && endpoint.len() <= 4096
+            && !endpoint.chars().any(char::is_control)
+            && !endpoint.contains(['?', '#', '@']),
+        "runtime smoke endpoint must be an absolute local Unix socket"
+    );
+    Ok(match runtime {
+        RuntimeKind::Docker => vec!["--host".into(), endpoint.into()],
+        RuntimeKind::Podman => vec!["--remote".into(), "--url".into(), endpoint.into()],
+    })
+}
+
+#[test]
+fn smoke_runtime_probes_use_the_selected_local_target() {
+    let endpoint = "unix:///private/qa/engine.sock";
+    assert_eq!(
+        runtime_probe_target(RuntimeKind::Docker, Some(endpoint)).unwrap(),
+        ["--host", endpoint]
+    );
+    assert_eq!(
+        runtime_probe_target(RuntimeKind::Podman, Some(endpoint)).unwrap(),
+        ["--remote", "--url", endpoint]
+    );
+    assert!(
+        runtime_probe_target(RuntimeKind::Docker, None)
+            .unwrap()
+            .is_empty()
+    );
+    for endpoint in [None, Some("local")] {
+        let target = runtime_probe_target(RuntimeKind::Podman, endpoint);
+        if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+            assert_eq!(target.unwrap(), ["--remote=false"]);
+        } else {
+            assert!(target.is_err());
+        }
+    }
+    for endpoint in [
+        "",
+        "local",
+        "tcp://127.0.0.1:2375",
+        "unix:///qa/../engine.sock",
+    ] {
+        assert!(runtime_probe_target(RuntimeKind::Docker, Some(endpoint)).is_err());
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires built images, an explicitly selected real Docker/Podman engine, and a running gateway; not executed in the authoring environment"]
 async fn real_worker_copy_uid_and_export_preserve_the_original_project() {
@@ -68,6 +138,12 @@ async fn real_worker_copy_uid_and_export_preserve_the_original_project() {
     );
     let image = std::env::var("AGENTSANDBOX_TEST_IMAGE")
         .unwrap_or_else(|_| "agentsandbox-worker:local".into());
+    let runtime_endpoint = match std::env::var("AGENTSANDBOX_TEST_RUNTIME_ENDPOINT") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => panic!("runtime smoke endpoint must be UTF-8"),
+    };
+    let engine_target = runtime_probe_target(runtime, runtime_endpoint.as_deref()).unwrap();
     let source = tempfile::tempdir().unwrap().keep();
     eprintln!("Retained runtime QA source: {}", source.display());
     fs::write(source.join("original.txt"), "original unchanged").unwrap();
@@ -78,7 +154,7 @@ async fn real_worker_copy_uid_and_export_preserve_the_original_project() {
         gateway: gateway.clone(),
         runtime,
         runtime_program: std::env::var_os("AGENTSANDBOX_TEST_RUNTIME_PROGRAM").map(PathBuf::from),
-        runtime_endpoint: None,
+        runtime_endpoint,
         image,
         profile: "strict".into(),
         network: NetworkMode::None,
@@ -178,18 +254,14 @@ async fn real_worker_copy_uid_and_export_preserve_the_original_project() {
         None => agentsandbox::runtime::Runtime::new(runtime),
     }
     .unwrap();
-    let before_denial = engine
-        .cli(
-            &[
-                "volume".into(),
-                "ls".into(),
-                "--format".into(),
-                "{{.Name}}".into(),
-            ],
-            std::time::Duration::from_secs(15),
-        )
-        .await
-        .unwrap();
+    let probe = |args: &[&str]| {
+        let mut command = engine_target.clone();
+        command.extend(args.iter().map(|argument| (*argument).to_owned()));
+        let engine = &engine;
+        async move { engine.cli(&command, Duration::from_secs(15)).await }
+    };
+    let volume_list = ["volume", "ls", "--format", "{{.Name}}"];
+    let before_denial = probe(&volume_list).await.unwrap();
     assert!(!before_denial.truncated);
     let before_names: std::collections::BTreeSet<_> = std::str::from_utf8(&before_denial.bytes)
         .unwrap()
@@ -216,20 +288,16 @@ async fn real_worker_copy_uid_and_export_preserve_the_original_project() {
     assert_eq!(denied_events[0]["decision"]["outcome"], "deny");
     let denied_session =
         uuid::Uuid::parse_str(denied_events[0]["sandbox_id"].as_str().unwrap()).unwrap();
-    let containers = engine
-        .cli(
-            &[
-                "ps".into(),
-                "--all".into(),
-                "--filter".into(),
-                format!("label=agentsandbox.session={denied_session}"),
-                "--format".into(),
-                "{{.Names}}".into(),
-            ],
-            std::time::Duration::from_secs(15),
-        )
-        .await
-        .unwrap();
+    let containers = probe(&[
+        "ps",
+        "--all",
+        "--filter",
+        &format!("label=agentsandbox.session={denied_session}"),
+        "--format",
+        "{{.Names}}",
+    ])
+    .await
+    .unwrap();
     assert!(!containers.truncated);
     assert!(
         containers.bytes.is_empty(),
@@ -237,18 +305,7 @@ async fn real_worker_copy_uid_and_export_preserve_the_original_project() {
     );
     // Also require a positive control in the same successful engine response,
     // so an unsupported filter or engine outage cannot look like absence.
-    let volumes = engine
-        .cli(
-            &[
-                "volume".into(),
-                "ls".into(),
-                "--format".into(),
-                "{{.Name}}".into(),
-            ],
-            std::time::Duration::from_secs(15),
-        )
-        .await
-        .unwrap();
+    let volumes = probe(&volume_list).await.unwrap();
     assert!(!volumes.truncated);
     let volume_names = std::str::from_utf8(&volumes.bytes).unwrap();
     assert!(volume_names.lines().any(|name| name == id.volume));

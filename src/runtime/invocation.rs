@@ -58,6 +58,46 @@ impl std::fmt::Debug for InvocationAnchor {
     }
 }
 
+#[cfg(test)]
+impl super::Runtime {
+    /// Executor fixtures that must complete without any runtime invocation.
+    pub(crate) fn unavailable_for_test(
+        kind: RuntimeKind,
+        root: &crate::control_fs::Directory,
+    ) -> Result<Self> {
+        Ok(Self {
+            kind,
+            invocation: InvocationBindingV1 {
+                // The normal command path refuses this before the account or
+                // filesystem validation. There is no approved executable.
+                policy_version: 0,
+                kind,
+                approved_entry: PathBuf::new(),
+                canonical_program: PathBuf::new(),
+                file_identity: ExecutableIdentityV1 {
+                    device: 0,
+                    inode: 0,
+                    owner: 0,
+                    group: 0,
+                    mode: 0,
+                    length: 0,
+                    sha256: String::new(),
+                },
+                executable_directory: None,
+                environment: BTreeMap::new(),
+                cwd: root.path().to_owned(),
+            },
+            anchor: Arc::new(InvocationAnchor {
+                directory: Arc::new(root.try_clone_file()?),
+                basename: OsString::new(),
+            }),
+            observer: None,
+            observation: None,
+            native_control: None,
+        })
+    }
+}
+
 impl std::fmt::Debug for InvocationBindingV1 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InvocationBindingV1")
@@ -320,7 +360,7 @@ fn hash_bounded(reader: impl Read, initial_length: u64) -> Result<String> {
         .checked_add(1)
         .context("runtime executable length cannot be bounded")?;
     let mut reader = reader.take(bound);
-    let mut hash = Sha256::new();
+    let mut hash = ring::digest::Context::new(&ring::digest::SHA256);
     let mut buffer = [0; 64 * 1024];
     let mut total = 0_u64;
     loop {
@@ -335,7 +375,7 @@ fn hash_bounded(reader: impl Read, initial_length: u64) -> Result<String> {
         total == initial_length,
         "runtime executable grew or was truncated during verification"
     );
-    Ok(hex::encode(hash.finalize()))
+    Ok(hex::encode(hash.finish().as_ref()))
 }
 
 #[cfg(unix)]
@@ -523,8 +563,8 @@ fn effective_uid() -> u32 {
 }
 
 #[cfg(unix)]
-fn account_home() -> Result<PathBuf> {
-    use std::{ffi::CStr, os::unix::ffi::OsStrExt};
+fn with_effective_account<T>(inspect: impl FnOnce(u32, &libc::passwd) -> Result<T>) -> Result<T> {
+    let uid = effective_uid();
     let mut storage = vec![0_u8; 16 * 1024];
     loop {
         let mut account = std::mem::MaybeUninit::<libc::passwd>::uninit();
@@ -533,7 +573,7 @@ fn account_home() -> Result<PathBuf> {
         // output pointers. No pointer is read until the call reports success.
         let status = unsafe {
             libc::getpwuid_r(
-                effective_uid(),
+                uid,
                 account.as_mut_ptr(),
                 storage.as_mut_ptr().cast(),
                 storage.len(),
@@ -548,19 +588,55 @@ fn account_home() -> Result<PathBuf> {
             status == 0 && !result.is_null(),
             "control OS account home is unavailable"
         );
-        // SAFETY: successful getpwuid_r initialized account and its strings point
-        // into storage, which remains alive while the home is copied.
+        // SAFETY: successful getpwuid_r initialized account. Its strings point
+        // into storage, which remains alive for the callback.
         let account = unsafe { account.assume_init() };
-        ensure!(
-            !account.pw_dir.is_null(),
-            "control OS account home is unavailable"
-        );
-        let home = PathBuf::from(std::ffi::OsStr::from_bytes(
-            unsafe { CStr::from_ptr(account.pw_dir) }.to_bytes(),
-        ));
-        validate_absolute(&home)?;
-        return Ok(home);
+        return inspect(uid, &account);
     }
+}
+
+#[cfg(unix)]
+fn account_home_from_record(account: &libc::passwd) -> Result<PathBuf> {
+    use std::{ffi::CStr, os::unix::ffi::OsStrExt};
+    ensure!(
+        !account.pw_dir.is_null(),
+        "control OS account home is unavailable"
+    );
+    // SAFETY: the caller retains the getpwuid_r buffer during inspection.
+    let home = PathBuf::from(std::ffi::OsStr::from_bytes(
+        unsafe { CStr::from_ptr(account.pw_dir) }.to_bytes(),
+    ));
+    validate_absolute(&home)?;
+    Ok(home)
+}
+
+#[cfg(unix)]
+fn account_home() -> Result<PathBuf> {
+    with_effective_account(|_, account| account_home_from_record(account))
+}
+
+#[cfg(unix)]
+pub(crate) fn control_service_account() -> Result<(u32, String)> {
+    ensure!(
+        effective_uid() != 0,
+        "broker service plan requires a non-root control account"
+    );
+    with_effective_account(|uid, account| {
+        account_home_from_record(account)?;
+        ensure!(
+            account.pw_uid == uid && !account.pw_name.is_null(),
+            "control OS account name is unavailable"
+        );
+        // SAFETY: the account buffer is retained and the name pointer is non-null.
+        let name = unsafe { std::ffi::CStr::from_ptr(account.pw_name) }
+            .to_str()
+            .context("control OS account name is not UTF-8")?;
+        ensure!(
+            !name.is_empty() && !name.chars().any(char::is_control),
+            "control OS account name is invalid"
+        );
+        Ok((uid, name.to_owned()))
+    })
 }
 
 fn standard_environment() -> Result<BTreeMap<String, String>> {
@@ -678,9 +754,11 @@ mod bounded_read_tests {
 
     #[test]
     fn exact_content_is_hashed_and_truncation_is_refused() {
-        let digest = hash_bounded(b"exact".as_slice(), 5).unwrap();
-        assert_eq!(digest, hex::encode(Sha256::digest(b"exact")));
-        assert!(hash_bounded(b"short".as_slice(), 6).is_err());
+        let bytes = b"repeated executable contents".repeat(5_000);
+        let length = bytes.len() as u64;
+        let digest = hash_bounded(bytes.as_slice(), length).unwrap();
+        assert_eq!(digest, hex::encode(Sha256::digest(&bytes)));
+        assert!(hash_bounded(bytes.as_slice(), length + 1).is_err());
     }
 }
 

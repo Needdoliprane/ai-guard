@@ -1180,8 +1180,18 @@ impl Store {
             .store(false, Ordering::Release);
         Ok(())
     }
+    fn require_live_legacy(&self, db: &Connection) -> anyhow::Result<()> {
+        let result = review_access::require_legacy(db);
+        if let Err(error) = &result
+            && error.is::<review_access::UnknownAuditSchema>()
+        {
+            let mut lease = self.lock_supervision_lease()?;
+            self.storage_failure(&mut lease, error);
+        }
+        result
+    }
     fn verify_storage(&self, db: &Connection) -> anyhow::Result<()> {
-        review_access::require_legacy(db)?;
+        self.require_live_legacy(db)?;
         let mut lease = self.lock_supervision_lease()?;
         let result = (|| {
             self.recover_suspended(db, &mut lease)?;
@@ -1194,7 +1204,7 @@ impl Store {
         result
     }
     fn verify_diagnostic_backing(&self, db: &Connection) -> anyhow::Result<()> {
-        review_access::require_legacy(db)?;
+        self.require_live_legacy(db)?;
         let mut lease = self.lock_supervision_lease()?;
         let result = (|| {
             // A permanently fenced Store remains readable for diagnosis, but
@@ -1306,9 +1316,20 @@ impl Store {
             .record(read_test_observer::Call::BeginChecked);
         // db has already been acquired by the caller. Validate after that wait
         // and before lease/recovery/cache/replay, including on legacy handles.
-        review_access::validate_context(self, db, source_access, operation_class)?;
+        if source_access.is_some() {
+            review_access::validate_context(self, db, source_access, operation_class)?;
+        } else {
+            self.require_live_legacy(db)?;
+        }
         let mut lease = self.lock_access_lease(source_access)?;
-        review_access::validate_context(self, db, source_access, operation_class)?;
+        if let Err(error) =
+            review_access::validate_context(self, db, source_access, operation_class)
+        {
+            if error.is::<review_access::UnknownAuditSchema>() {
+                self.storage_failure(&mut lease, &error);
+            }
+            return Err(error);
+        }
         if let Err(error) =
             self.recover_suspended_with_access(db, &mut lease, source_access, operation_class)
         {
@@ -1330,7 +1351,14 @@ impl Store {
         // new_unchecked additionally refuses an already-open transaction.
         let connection: &'a Connection = db;
         let tx = Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
-        review_access::validate_context(self, &tx, source_access, operation_class)?;
+        if let Err(error) =
+            review_access::validate_context(self, &tx, source_access, operation_class)
+        {
+            if error.is::<review_access::UnknownAuditSchema>() {
+                self.storage_failure(&mut lease, &error);
+            }
+            return Err(error);
+        }
         if let Err(error) = self.backing.verify(&tx) {
             self.storage_failure(&mut lease, &error);
             return Err(error);
@@ -1938,7 +1966,7 @@ impl Store {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        review_access::require_legacy(&db)?;
+        self.require_live_legacy(&db)?;
         let mut lease = self.lock_supervision_lease()?;
         let result = (|| -> anyhow::Result<Integrity> {
             if self.permanently_healthy() {
@@ -2363,6 +2391,17 @@ mod incremental_integrity_tests {
             assert!(!store.healthy(), "{statement}");
             assert!(store.append(Event::new("fixture.after_tamper")).is_err());
         }
+
+        let (_directory, store) = fixture();
+        store
+            .db
+            .lock()
+            .unwrap()
+            .execute_batch("PRAGMA user_version=999")
+            .unwrap();
+        assert!(store.healthy());
+        assert!(store.append(Event::new("fixture.invalid_schema")).is_err());
+        assert!(!store.healthy());
     }
 
     #[test]

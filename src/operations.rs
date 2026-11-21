@@ -1,7 +1,4 @@
-use crate::{
-    runner::{self, RunOptions},
-    runtime::RuntimeKind,
-};
+use crate::{runner, runtime::RuntimeKind};
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use std::{
@@ -11,7 +8,9 @@ use std::{
     time::Duration,
 };
 
+mod broker_run;
 mod source_snapshot;
+pub use broker_run::RunCommand;
 
 #[derive(Subcommand, Debug)]
 pub enum OperatorCommand {
@@ -32,7 +31,7 @@ pub enum OperatorCommand {
         /// Absolute engine program approved by the control operator.
         #[arg(long)]
         runtime_program: Option<PathBuf>,
-        /// Explicit Docker Unix endpoint; otherwise resolve the control account's context once.
+        /// Explicit Unix endpoint. Docker defaults to the control account's context; Podman local requires a native engine.
         #[arg(long)]
         runtime_endpoint: Option<String>,
         #[arg(long)]
@@ -87,7 +86,7 @@ pub enum OperatorCommand {
         config_dir: PathBuf,
     },
     /// Ask policy permission, import a filtered copy, and execute inside a worker.
-    Run(Box<RunOptions>),
+    Run(Box<RunCommand>),
     /// Read this session's worker from its authenticated tenant registry.
     WorkerStatus {
         #[arg(long)]
@@ -224,6 +223,9 @@ pub enum ReleaseCommand {
         source: PathBuf,
         #[arg(long)]
         manifest: PathBuf,
+        /// Independently obtained SHA-256 of the exact release-manifest.json bytes (64 lowercase hex).
+        #[arg(long, value_name = "HEX64")]
+        expect_manifest_sha256: Option<String>,
         /// Built file listed in the manifest; repeat for each listed file.
         #[arg(long = "artifact", value_name = "FILE")]
         artifacts: Vec<PathBuf>,
@@ -408,17 +410,27 @@ pub async fn execute(command: OperatorCommand) -> Result<()> {
             runtime_endpoint,
             allow_rootful_runtime,
         } => {
-            let runtime = selected_runtime(
-                runtime,
-                runtime_program.as_deref(),
-                runtime_endpoint.as_deref(),
-                None,
-            )
-            .await?;
-            let info = runtime.doctor(allow_rootful_runtime).await?;
-            let version = runtime
-                .cli(&["version".into()], Duration::from_secs(15))
+            let (info, version) = if runtime == RuntimeKind::Podman {
+                approved_operator_runtime(runtime, runtime_program.as_deref())?
+                    .diagnose_podman(
+                        runtime_endpoint.as_deref().unwrap_or("local"),
+                        allow_rootful_runtime,
+                    )
+                    .await?
+            } else {
+                let runtime = selected_runtime(
+                    runtime,
+                    runtime_program.as_deref(),
+                    runtime_endpoint.as_deref(),
+                    None,
+                )
                 .await?;
+                let info = runtime.doctor(allow_rootful_runtime).await?;
+                let version = runtime
+                    .cli(&["version".into()], Duration::from_secs(15))
+                    .await?;
+                (info, version)
+            };
             println!(
                 "{}\n{}",
                 serde_json::to_string_pretty(&info)?,
@@ -562,11 +574,7 @@ pub async fn execute(command: OperatorCommand) -> Result<()> {
             compose(&runtime, &source, &config, &["down"]).await?;
             println!("Control-plane services stopped. Audit and session volumes retained.");
         }
-        OperatorCommand::Run(options) => {
-            let summary = runner::run(*options).await?;
-            println!("{}", serde_json::to_string_pretty(&summary)?);
-            require_successful_run(&summary)?;
-        }
+        OperatorCommand::Run(command) => command.execute().await?,
         OperatorCommand::WorkerStatus {
             session,
             config_dir,
@@ -721,16 +729,22 @@ impl OperatorRuntime {
             .await
     }
 }
+fn approved_operator_runtime(
+    kind: RuntimeKind,
+    program: Option<&Path>,
+) -> Result<crate::runtime::Runtime> {
+    match program {
+        Some(program) => crate::runtime::Runtime::with_program(kind, program),
+        None => crate::runtime::Runtime::new(kind),
+    }
+}
 async fn selected_runtime(
     kind: RuntimeKind,
     program: Option<&Path>,
     endpoint: Option<&str>,
     source: Option<&Path>,
 ) -> Result<OperatorRuntime> {
-    let runtime = match program {
-        Some(program) => crate::runtime::Runtime::with_program(kind, program)?,
-        None => crate::runtime::Runtime::new(kind)?,
-    };
+    let runtime = approved_operator_runtime(kind, program)?;
     if let Some(source) = source {
         runner::exclude_project_runtime(&runtime, source)?;
     }

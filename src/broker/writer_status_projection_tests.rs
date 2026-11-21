@@ -163,6 +163,65 @@ async fn retirement_audit_conflict_for_a_missing_observed_job_closes_the_status_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn result_read_timeout_keeps_acknowledged_status_readable() {
+    let (_root, journal) = private_journal();
+    let job = accepted(&journal);
+    let operation = job.operation_id();
+    let mut writer = WriterClient::start(journal, 8, Duration::from_secs(10)).unwrap();
+    writer
+        .last_confirmed_status(operation)
+        .await
+        .unwrap()
+        .unwrap();
+    let pause = writer.pause_for_test().await.unwrap();
+    assert!(pause.is_paused());
+    // The actor is already paused. Give the read a zero reply budget without
+    // introducing a disk-speed threshold or altering the production timeout.
+    Arc::get_mut(&mut writer.0).unwrap().timeout = Duration::ZERO;
+    assert!(matches!(
+        writer.result_status(operation).await,
+        Err(JournalError::Io)
+    ));
+    let retained = writer
+        .last_confirmed_status(operation)
+        .now_or_never()
+        .expect("a lost read cannot invalidate the retained head")
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.entry().head(), Some(job.head()));
+    drop(pause);
+    Arc::get_mut(&mut writer.0).unwrap().timeout = Duration::from_secs(10);
+    let Some(JournalStatusV1::Accepted(read)) = writer.result_status(operation).await.unwrap()
+    else {
+        panic!("the intact journal must still supply the operation");
+    };
+    assert_eq!(read.head(), job.head());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn result_read_checks_the_service_fence_after_a_queued_read() {
+    let (_root, journal) = private_journal();
+    let job = accepted(&journal);
+    let operation = job.operation_id();
+    let writer = WriterClient::start(journal, 8, Duration::from_secs(10)).unwrap();
+    let fence = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(AtomicBool::new(false));
+    writer.bind_status_service(&fence, &stop);
+    writer
+        .last_confirmed_status(operation)
+        .await
+        .unwrap()
+        .unwrap();
+    let pause = writer.pause_for_test().await.unwrap();
+    let read = writer.result_status(operation);
+    tokio::pin!(read);
+    assert!(read.as_mut().now_or_never().is_none());
+    fence.store(true, Ordering::SeqCst);
+    drop(pause);
+    assert!(matches!(read.await, Err(JournalError::Io)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn last_confirmed_status_publishes_after_ack_and_polls_do_no_full_or_sync() {
     use crate::{
         broker::journal::cost_measurement::{Measurement as JournalMeasurement, WriterKind},
@@ -318,6 +377,10 @@ async fn abandoned_mutation_waiter_invalidates_projection_while_actor_keeps_its_
     assert!(matches!(
         writer.last_confirmed_status(operation).await,
         Err(JournalError::Corrupt)
+    ));
+    assert!(matches!(
+        writer.result_status(operation).now_or_never(),
+        Some(Err(JournalError::Corrupt))
     ));
     drop(barrier);
     let Some(JournalStatusV1::Accepted(strict)) = writer.status(operation).await.unwrap() else {

@@ -1,7 +1,10 @@
 //! SQLite namespace policy. SQLite's VFS exclusively owns open main/SHM files.
 //! Private directories and qualified DAC/ACL semantics protect against other
 //! local UIDs, not the control UID, root or storage administrators.
-use crate::control_fs::{Directory, PrivateEntryIdentity, absolute_path};
+use crate::{
+    control_fs::{Directory, PrivateEntryIdentity, absolute_path},
+    human_authority::SourceStorageBindingV1,
+};
 use anyhow::{Context, Result, ensure};
 use rusqlite::Connection;
 use std::{
@@ -9,7 +12,10 @@ use std::{
     fs::{File, OpenOptions},
     os::{
         fd::AsRawFd,
-        unix::{ffi::OsStrExt, fs::OpenOptionsExt},
+        unix::{
+            ffi::OsStrExt,
+            fs::{MetadataExt, OpenOptionsExt},
+        },
     },
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -199,6 +205,32 @@ impl StoreStorage {
         (self.path.clone(), self.identity)
     }
 
+    /// Describe the retained main and parent using metadata only.
+    pub(super) fn retained_binding(&self) -> Result<SourceStorageBindingV1> {
+        self.verify_names()?;
+        let ((parent_device, parent_inode), entry) = self
+            .parent
+            .private_entry_same_mount_with_parent(&self.name)?;
+        ensure!(
+            entry == self.identity,
+            "retained SQLite main identity differs"
+        );
+        let (source_device, source_inode) = entry.physical_identity();
+        let file_name = self
+            .name
+            .to_str()
+            .context("retained SQLite filename is not UTF-8")?;
+        self.verify_names()?;
+        Ok(SourceStorageBindingV1 {
+            parent_path: self.parent.path().to_owned(),
+            file_name: file_name.to_owned(),
+            parent_device,
+            parent_inode,
+            source_device,
+            source_inode,
+        })
+    }
+
     /// Metadata/ACL only. Never opens a database or shared-memory inode.
     pub(super) fn verify_names(&self) -> Result<()> {
         self.verify_names_inner().map_err(|error| {
@@ -252,6 +284,11 @@ impl StoreStorage {
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
             .open(&self.path)?;
+        let facts = file.metadata()?;
+        ensure!(
+            facts.is_file() && (facts.dev(), facts.ino()) == self.identity.physical_identity(),
+            "closed SQLite file synchronization identity differs"
+        );
         file.sync_all()?;
         drop(file);
         self.verify_names()?;

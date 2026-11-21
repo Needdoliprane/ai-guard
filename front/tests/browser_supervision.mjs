@@ -3,7 +3,9 @@
 // private test SQLite stores, no runtime and no worker execution. Nothing here is imported by the app.
 //
 //   AI_GUARD_SUPERVISION_SCENARIO  fleet (default) | partial | correlation | rights | revoked | isolation | expiry |
-//                                  resume | ttl | journal | keyboard | focus | regions | details | states | load | journal-older-recovery
+//                                  resume | ttl | journal | keyboard | focus | regions | details | states | load |
+//                                  resource-recovery | correlation-recovery | resource-stream-recovery | resource-stream-late-denial
+//                                  resource-stream-visibility-race | journal-catch-up | journal-older-recovery | human-export
 //                                  (ttl waits for a real 300-second context expiry)
 //
 // Prerequisite: the playwright package (1.64.x) and its Chromium. It is not a dependency of the frontend
@@ -13,7 +15,8 @@
 //   AI_GUARD_SUPERVISION_ARTIFACTS directory for screenshots (default: a new temporary directory)
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, chmod, mkdir, mkdtemp } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { access, chmod, mkdir, mkdtemp, readFile, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -23,9 +26,12 @@ import { saveBrowserFailure } from "./browser_failure.mjs";
 import { installBrowserGuard } from "./browser_live.mjs";
 
 const scenario = process.env.AI_GUARD_SUPERVISION_SCENARIO || "fleet";
-const journalRecovery = scenario === "journal-older-recovery";
+const guardedRecovery = ["partial", "keyboard", "resource-recovery", "correlation-recovery", "resource-stream-recovery", "resource-stream-late-denial",
+  "resource-stream-visibility-race", "journal-catch-up", "journal-older-recovery", "human-export", "ttl", "isolation", "journal"].includes(scenario);
+const authenticatedFailure = ["partial", "keyboard", "revoked", "human-export", "ttl", "isolation", "journal"].includes(scenario);
+const privateFailure = guardedRecovery || authenticatedFailure;
 const blocked = (reason) => { console.error(`BLOCKED: ${reason}. Scenario ${scenario} is NOT_RUN.`); process.exit(2); };
-if (journalRecovery && (process.env.DEBUG || process.env.PWDEBUG || process.env.NODE_DEBUG))
+if (privateFailure && (process.env.DEBUG || process.env.PWDEBUG || process.env.NODE_DEBUG))
   blocked("disable debug logs for the authenticated browser recipe");
 const require = createRequire(import.meta.url);
 let chromium;
@@ -42,11 +48,13 @@ for (const path of [binary, join(front, "index.html")])
   await access(path).catch(() => blocked(`${path} is missing: build the supervision_stack example and the frontend first`));
 
 const sizes = { fleet: [120, 300], partial: [24, 60], correlation: [120, 300], rights: [24, 60], revoked: [24, 60], isolation: [24, 60], expiry: [24, 60],
-  resume: [24, 60], ttl: [24, 60], journal: [24, 1500], keyboard: [24, 60], focus: [120, 300], regions: [24, 300], details: [24, 60], states: [24, 60], load: [300, 60], "journal-older-recovery": [24, 300] };
+  resume: [24, 60], ttl: [24, 60], journal: [24, 1500], keyboard: [24, 60], focus: [120, 300], regions: [24, 300], details: [24, 60], states: [24, 60], load: [300, 60],
+  "resource-recovery": [24, 60], "correlation-recovery": [24, 60], "resource-stream-recovery": [24, 60], "resource-stream-late-denial": [24, 60],
+  "resource-stream-visibility-race": [24, 60], "journal-catch-up": [24, 60], "journal-older-recovery": [24, 300], "human-export": [24, 60] };
 const [workers, events] = sizes[scenario] ?? blocked(`unknown scenario ${scenario}`);
 const stateDir = await mkdtemp(join(tmpdir(), "ai-guard-supervision-state-")); await chmod(stateDir, 0o700);
 const artifacts = process.env.AI_GUARD_SUPERVISION_ARTIFACTS || await mkdtemp(join(tmpdir(), "ai-guard-supervision-browser-"));
-await mkdir(artifacts, { recursive: true, ...(journalRecovery ? { mode: 0o700 } : {}) });
+await mkdir(artifacts, { recursive: true, ...(privateFailure ? { mode: 0o700 } : {}) });
 
 // The stack prints its credentials once on stdout; this parent keeps them in memory only.
 const stack = spawn(binary, ["--front-dir", front, "--state-dir", stateDir, "--workers", String(workers), "--events", String(events)],
@@ -69,11 +77,11 @@ const a = ids.tenant_a; const b = ids.tenant_b;
 const sortedWorkersA = [...a.workers].sort();
 
 const browser = await chromium.launch({ headless: true, chromiumSandbox: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined,
-  ...(journalRecovery ? { args: ["--no-proxy-server", "--host-resolver-rules=EXCLUDE 127.0.0.1, MAP * ~NOTFOUND"] } : {}) })
+  ...(guardedRecovery ? { args: ["--no-proxy-server", "--host-resolver-rules=EXCLUDE 127.0.0.1, MAP * ~NOTFOUND"] } : {}) })
   .catch(() => { stack.kill("SIGKILL"); blocked("Chromium failed to launch with its sandbox"); });
 // A browser that cannot open its page is closed at once, with the stack: no process outlives this script.
 const opened = await (async () => { const context = await browser.newContext({ viewport: { width: 1440, height: 1050 },
-  ...(journalRecovery ? { serviceWorkers: "block" } : {}) }); return { context, page: await context.newPage() }; })()
+  ...(guardedRecovery ? { serviceWorkers: "block" } : {}) }); return { context, page: await context.newPage() }; })()
   .catch(async (error) => { await browser.close().catch(() => {}); stack.kill("SIGKILL"); blocked(`Chromium could not open a page (${String(error?.message ?? error).split("\n")[0]})`); });
 const { context, page } = opened; page.setDefaultTimeout(15000);
 const errors = []; page.on("pageerror", (error) => errors.push(error.message));
@@ -92,14 +100,14 @@ const streamStarts = () => requests.filter((path) => path.startsWith("/api/v1/hu
 const openStreams = async () => { for (let attempt = 0; attempt < 30 && streamStarts() > streamEnds.length; attempt++) await page.waitForTimeout(100); return streamStarts() - streamEnds.length; };
 // One browser clock for expiry checks and timers, advanced only by the expiry scenarios. The scenarios fire
 // the refresh cycle (30 s or 2 min) and the freshness tick (10 s) of the unified view instead of waiting.
-await page.addInitScript(() => {
+await page.addInitScript((trackResourcePoll) => {
   const NativeDate = Date; const nativeNow = Date.now; const nativeTimeout = window.setTimeout; const nativeClear = window.clearTimeout; const nativeInterval = window.setInterval; let advance = 0;
   window.Date = new Proxy(NativeDate, {
     apply: () => new NativeDate(nativeNow() + advance).toString(),
     construct: (target, args, newTarget) => Reflect.construct(target, args.length ? args : [nativeNow() + advance], newTarget),
   });
   Date.now = () => nativeNow() + advance;
-  window.__supervisionExpiry = []; const cycles = new Map(); const ticks = [];
+  window.__supervisionExpiry = []; const cycles = new Map(); const ticks = []; const resourcePolls = [];
   window.setTimeout = (handler, delay, ...args) => {
     if (typeof handler === "function" && delay > 200000 && delay <= 300100) window.__supervisionExpiry.push(() => handler(...args));
     const id = nativeTimeout(handler, delay, ...args);
@@ -109,12 +117,14 @@ await page.addInitScript(() => {
   window.clearTimeout = (id) => { cycles.delete(id); nativeClear(id); };
   window.setInterval = (handler, delay, ...args) => {
     if (typeof handler === "function" && delay === 10000) ticks.push(() => handler(...args));
+    if (trackResourcePoll && typeof handler === "function" && delay === 30000) resourcePolls.push(() => handler(...args));
     return nativeInterval(handler, delay, ...args);
   };
   window.__supervisionCycle = () => { const due = [...cycles]; cycles.clear(); for (const [id, run] of due) { nativeClear(id); run(); } return due.length; };
   window.__supervisionTick = () => { for (const run of ticks) run(); return ticks.length; };
   window.__supervisionAdvance = (milliseconds) => { advance += milliseconds; };
-});
+  if (trackResourcePoll) window.__resourcePoll = () => { for (const run of resourcePolls) run(); return resourcePolls.length; };
+}, scenario === "resource-stream-late-denial");
 const humanReads = (since = 0) => requests.slice(since).filter((path) => path.startsWith("/api/v1/human/") && !path.startsWith("/api/v1/human/identity"));
 // Independent observations of one scenario: all are reported together at its end.
 const softFailures = [];
@@ -357,6 +367,9 @@ const runFleet = async () => {
 
 /** Contexts that grant one source only: the missing one is announced and never requested. */
 const runPartial = async () => {
+  const guard = await prepareRecoveryGuard();
+  const widths = [1440, 390, 320];
+  recoveryStage = "partial_workers";
   await login("workers_only_a");
   let before = requests.length;
   await supervise("administration", "tenant-a"); await heading("Supervision du tenant.").waitFor(); await ready100(["Workers"]);
@@ -367,9 +380,12 @@ const runPartial = async () => {
   await page.getByText("Brokers : registre non accordé à ce contexte, aucune lecture émise.", { exact: true }).waitFor();
   await page.getByText("Registre des brokers non accordé à ce contexte : seules les associations portées par les lignes de workers sont affichées.", { exact: true }).waitFor();
   assert.equal(await workerRows().count(), 24);
-  await geometry("workers-only", [390, 320]);
+  await noSecret("workers seuls");
+  recoveryStage = "partial_workers_geometry";
+  await geometry("workers-only", widths);
   await logout();
 
+  recoveryStage = "partial_brokers";
   await login("brokers_only_a"); before = requests.length;
   await supervise("administration", "tenant-a"); await ready100(["Brokers"]);
   assert.deepEqual(await tabs(), ["Contextes", "Supervision", "Ressources", "Événements", "Brokers"]);
@@ -377,9 +393,12 @@ const runPartial = async () => {
   assert.equal(await brokerRows().count(), 3);
   assert.equal(await heading("Workers").count(), 0, "aucune table de workers sans capacité");
   await brokerRows().first().getByText("Registre des workers non accordé : associations inconnues", { exact: true }).waitFor();
-  await geometry("brokers-only", [390, 320]);
+  await noSecret("brokers seuls");
+  recoveryStage = "partial_brokers_geometry";
+  await geometry("brokers-only", widths);
   await logout();
 
+  recoveryStage = "partial_personal";
   await login("user_a1"); before = requests.length;
   assert.equal(await button("Superviser administration · tenant-a").count(), 0, "aucun contexte d’administration n’est proposé à ce compte");
   await supervise("personnel", "tenant-a"); await heading("Supervision de mon espace.").waitFor(); await ready100(["Ressources"]);
@@ -395,9 +414,14 @@ const runPartial = async () => {
   await page.getByText("Le registre workers du tenant est réservé à un contexte d’administration portant read_worker_registry.", { exact: true }).waitFor();
   await page.getByText(/Relation non fournie par le contrat nominatif/).waitFor();
   assert.ok(await page.locator(".sv-table tbody tr").count() >= 10, "sessions, agents, sandboxes et projets accordés sont listés");
-  await geometry("personal", [390, 320]);
+  await noSecret("ressources personnelles");
+  recoveryStage = "partial_personal_geometry";
+  await geometry("personal", widths);
   await logout();
   await noSecret("partiel");
+  recoveryStage = "partial_network";
+  assert.deepEqual(guard.violations, [], "le navigateur reste sur l’origine de la fixture");
+  recoveryStage = "complete";
 };
 
 let recoveryStage = "browser_guard";
@@ -411,7 +435,580 @@ async function prepareRecoveryGuard() {
   return guard;
 }
 
+/** Download a complete personal export from Rust and check its page receipts in fixture SQLite. */
+const runHumanExport = async () => {
+  const guard = await prepareRecoveryGuard();
+  const tenant = "tenant-a";
+  const exportPath = "/api/v1/human/export";
+  const isReply = (answer, path) => answer.request().method() === "GET" && new URL(answer.url()).pathname === path;
+  const resourceRow = (id) => page.locator(".human-resource-row").filter({ has: page.getByText(id, { exact: true }) });
+  const openPersonal = async (account, displayName) => {
+    const [answer] = await Promise.all([page.waitForResponse((reply) => isReply(reply, "/api/v1/human/identity")), login(account)]);
+    assert.equal(answer.status(), 200);
+    const identity = await answer.json();
+    const personal = identity.contexts.filter((item) => item.tenant_id === tenant && item.mode === "personal");
+    assert.equal(identity.display_name, displayName);
+    assert.equal(identity.principal.kind, "human_local");
+    assert.equal(personal.length, 1);
+    await button(`Ouvrir personnel · ${tenant}`).click();
+    return { principal: identity.principal, selected: personal[0] };
+  };
 
+  recoveryStage = "export_owner_login";
+  const { principal, selected } = await openPersonal("user_a1", "Supervision test user A1");
+  assert.ok(selected.capabilities.includes("read_content") && selected.capabilities.includes("export"));
+  recoveryStage = "export_owner_preview";
+  const resource = { kind: "session", resource_id: a.session_owned_by_user_a1 };
+  await resourceRow(resource.resource_id).getByRole("button", { name: "Contenu", exact: true }).click();
+  await heading("Session · Contenu autorisé").waitFor();
+  await page.locator(".human-event-panel .human-event-row").first().waitFor();
+
+  recoveryStage = "export_owner_download";
+  const wire = [];
+  let downloads = 0;
+  page.on("download", () => { downloads++; });
+  const observeExport = (answer) => { if (isReply(answer, exportPath)) wire.push(answer); };
+  page.on("response", observeExport);
+  const [download] = await Promise.all([page.waitForEvent("download"), button("Exporter le contenu").click()]);
+  page.off("response", observeExport);
+  await page.getByText(/^Sélection autorisée entièrement reçue/).waitFor();
+  assert.match(download.suggestedFilename(), new RegExp(`^ai-guard-session-${resource.resource_id}-content-\\d{4}-\\d{2}-\\d{2}\\.json$`));
+  const path = await download.path();
+  assert.ok((await stat(path)).size <= 4 * 1024 * 1024);
+  const bytes = await readFile(path);
+  for (const token of secrets) assert.ok(!bytes.includes(token));
+  const exported = JSON.parse(bytes.toString("utf8"));
+  assert.equal(exported.format, "ai-guard-human-export-v1");
+  assert.equal(exported.coverage, "authorized_selection");
+  assert.equal(exported.selection_complete, true);
+  assert.equal(exported.authorization_version, selected.authorization_version);
+  assert.deepEqual(exported.selection, { view: "content", resource, tenant_id: tenant, organization_scope: selected.organization_scope, mode: "personal" });
+
+  recoveryStage = "export_owner_page_chain";
+  assert.equal(wire.length, 2, "la session dense dépasse une page d’export de 25 événements");
+  const pages = [];
+  let cursor = null;
+  for (const [index, answer] of wire.entries()) {
+    const url = new URL(answer.url());
+    assert.deepEqual(Object.fromEntries(url.searchParams), { limit: "25", view: "content",
+      resource_kind: resource.kind, resource_id: resource.resource_id, ...(cursor === null ? {} : { cursor }) });
+    assert.equal(await answer.request().headerValue("X-AiGuard-Context"), selected.id);
+    assert.equal(answer.status(), 200);
+    const body = await answer.json();
+    const last = index === wire.length - 1;
+    assert.equal(body.context_id, selected.id);
+    assert.equal(body.authorization_version, selected.authorization_version);
+    assert.equal(body.view, "content");
+    assert.equal(body.coverage, "authorized_selection");
+    assert.equal(body.selection_complete, last);
+    assert.equal(body.has_more, !last);
+    assert.ok(last ? body.next_cursor === null : typeof body.next_cursor === "string" && body.next_cursor.length > 0);
+    cursor = body.next_cursor;
+    pages.push({ items: body.items, read_receipt: body.read_receipt });
+  }
+  assert.deepEqual(exported.pages, pages);
+  assert.equal(pages[0].items.length, 25);
+  const events = pages.flatMap(({ items }) => items);
+  assert.ok(events.length > 25 && new Set(events.map((item) => item.metadata.id)).size === events.length);
+  for (const item of events) assert.deepEqual(item.metadata.resource, resource);
+  const example = events.find((item) => item.content?.data?.label === "supervision-test-0");
+  assert.deepEqual(example?.content.command.argv, ["/usr/bin/printf", "step-0"]);
+  assert.equal(example.metadata.source, "adapter");
+  assert.equal(example.metadata.provenance, "observed");
+  assert.equal(example.metadata.coverage, "native");
+
+  recoveryStage = "export_owner_receipts";
+  const audit = await command({ command: "read_export_receipts",
+    receipts: pages.map(({ read_receipt: { audit_event_id, request_id } }) => ({ audit_event_id, request_id })) });
+  assert.equal(audit.chain_valid, true);
+  assert.equal(audit.receipts.length, pages.length);
+  let previousSequence = 0;
+  for (const [index, receipt] of audit.receipts.entries()) {
+    const { items, read_receipt: wireReceipt } = pages[index];
+    const { audit_event_id, request_id, received_at, tenant_id, mode, source, provenance, coverage, action, result_count } = receipt;
+    assert.deepEqual({ audit_event_id, request_id, received_at }, wireReceipt);
+    assert.deepEqual({ tenant_id, mode, source, provenance, coverage, action, result_count },
+      { tenant_id: tenant, mode: "personal", source: "gateway", provenance: "observed", coverage: "observed", action: "export", result_count: items.length });
+    assert.deepEqual(receipt.principal, principal);
+    assert.ok(Number.isSafeInteger(receipt.sequence) && receipt.sequence > previousSequence);
+    previousSequence = receipt.sequence;
+  }
+  await logout();
+
+  recoveryStage = "export_metadata_only_denial";
+  const reader = await openPersonal("user_a2", "Supervision test user A2");
+  assert.deepEqual(reader.selected.capabilities, ["read_metadata"]);
+  const shared = resourceRow(a.session_shared_with_user_a2);
+  assert.equal(await shared.getByRole("button", { name: "Contenu", exact: true }).isDisabled(), true);
+  await shared.getByRole("button", { name: "Métadonnées", exact: true }).click();
+  await heading("Session · Métadonnées").waitFor();
+  await page.locator(".human-event-panel .human-event-row").first().waitFor();
+  await page.getByText("Le contrôle n’accorde pas le droit d’export pour cette ressource.", { exact: true }).waitFor();
+  assert.equal(await button("Exporter les métadonnées").isDisabled(), true);
+  assert.equal(requests.filter((request) => request.startsWith(exportPath + "?")).length, wire.length);
+  const query = new URLSearchParams({ limit: "25", view: "metadata", resource_kind: "session", resource_id: a.session_shared_with_user_a2 });
+  const denied = await page.evaluate(async ({ url, token, contextId }) => {
+    const response = await fetch(url, { headers: { Authorization: `Bearer ${token}`, "X-AiGuard-Context": contextId },
+      cache: "no-store", credentials: "omit", redirect: "error", signal: AbortSignal.timeout(8000) });
+    const body = await response.json();
+    return { status: response.status, code: body.error?.code, hasPage: Object.hasOwn(body, "items") || Object.hasOwn(body, "read_receipt") };
+  }, { url: `${exportPath}?${query}`, token: accounts.user_a2, contextId: reader.selected.id });
+  assert.deepEqual(denied, { status: 403, code: "permission_denied", hasPage: false });
+  assert.equal(downloads, 1);
+  await logout();
+  await noSecret("export nominatif");
+  assert.equal(guard.violations.length, 0);
+  console.log(JSON.stringify({ mode: "human_export_rust_sqlite", tenant, context_mode: "personal",
+    pages: pages.length, events: events.length, sqlite_receipts: audit.receipts.length, metadata_only_status: denied.status,
+    export_sha256: createHash("sha256").update(bytes).digest("hex"), browser: browser.version() }));
+  recoveryStage = "complete";
+};
+
+/** The resources read fails alone, recovers, then loses its grant while its last page is stale. */
+const runResourceRecovery = async () => {
+  const guard = await prepareRecoveryGuard();
+  const resourcesPath = "/api/v1/human/resources?limit=100";
+  const resourcesUrl = recoveryOrigin + resourcesPath;
+  const registryAnswer = () => page.waitForResponse((response) => response.request().method() === "GET" && response.url() === recoveryOrigin + fleetUrl);
+  const resourcesAnswer = () => page.waitForResponse((response) => response.request().method() === "GET" && response.url() === resourcesUrl);
+  const resourcesPanel = page.locator(".sv-panel", { has: heading("Ressources autorisées") });
+  const resourceIds = () => resourcesPanel.locator("tbody tr > td:nth-child(2) .sv-id").allTextContents();
+  const resourcePresentation = source("Ressources");
+  const staleNotice = resourcePresentation.getByText("Contrôle injoignable · dernière lecture conservée", { exact: true });
+  const readTime = resourcePresentation.getByText(/^Lu le /);
+  const sentinel = "agent-planner";
+  const notice = page.locator(".sv-errors [role=alert]");
+  const dialog = page.getByRole("dialog");
+
+  recoveryStage = "initial_read";
+  await login("admin_a");
+  const [loaded, fleet] = await Promise.all([resourcesAnswer(), registryAnswer(), supervise("administration", "tenant-a")]);
+  assert.equal(loaded.status(), 200);
+  assert.equal(fleet.status(), 200);
+  await ready100();
+  await page.getByLabel("Rythme d’actualisation").selectOption("0");
+  const initialIds = await resourceIds();
+  assert.ok(initialIds.includes(sentinel) && initialIds.length > 1);
+
+  async function loseResources() {
+    const lastRead = await readTime.textContent();
+    const before = requests.length;
+    // The fault applies to one GET on the fixture origin; the registry request still reaches Rust.
+    await page.route(resourcesUrl, (route) => route.abort("connectionrefused"));
+    const [, registry] = await Promise.all([
+      page.waitForEvent("requestfailed", (request) => request.url() === resourcesUrl && request.method() === "GET"),
+      registryAnswer(), button("Actualiser maintenant").click(),
+    ]);
+    assert.equal(registry.status(), 200);
+    await staleNotice.waitFor();
+    await ready100(["Workers", "Brokers"]);
+    await notice.getByRole("button", { name: "Réessayer", exact: true }).waitFor();
+    assert.deepEqual(humanReads(before).sort(), [fleetUrl, resourcesPath].sort());
+    assert.deepEqual(await resourceIds(), initialIds, "la fenêtre de ressources réussie reste disponible seule en état périmé");
+    assert.equal(await readTime.textContent(), lastRead, "la date de dernière lecture réussie est conservée");
+    await page.getByText(`Ressources : ${initialIds.length} lignes de la dernière lecture réussie, périmées.`, { exact: true }).waitFor();
+  }
+
+  recoveryStage = "resources_stale";
+  await loseResources();
+  recoveryStage = "resources_recovered";
+  await page.unroute(resourcesUrl);
+  const [recovered, healthy] = await Promise.all([
+    resourcesAnswer(), registryAnswer(), notice.getByRole("button", { name: "Réessayer", exact: true }).click(),
+  ]);
+  assert.equal(recovered.status(), 200);
+  assert.equal(healthy.status(), 200);
+  await ready100();
+  assert.deepEqual(await resourceIds(), initialIds);
+  assert.equal(await staleNotice.count(), 0);
+  assert.equal(await notice.count(), 0);
+
+  recoveryStage = "withdrawal_while_stale";
+  await loseResources();
+  await resourcesPanel.locator("tbody tr").filter({ has: page.getByText(sentinel, { exact: true }) })
+    .getByRole("button", { name: "Détails", exact: true }).click();
+  await dialog.getByText(sentinel, { exact: true }).waitFor();
+  await command({ command: "set_capabilities", account: "admin_a", capabilities: ["read_broker_registry", "read_worker_registry"] });
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await heading("Choisir un contexte.").waitFor();
+  await page.getByText("Les accès ont changé. Choisissez à nouveau un contexte autorisé.", { exact: true }).waitFor();
+  await purged("retrait des ressources pendant la panne", [sentinel]);
+  assert.equal(await page.getByRole("button", { name: /^Reprendre/ }).count(), 0);
+
+  recoveryStage = "reduced_scope";
+  const beforeReduced = requests.length;
+  const [registry] = await Promise.all([registryAnswer(), supervise("administration", "tenant-a")]);
+  assert.equal(registry.status(), 200);
+  await ready100(["Workers", "Brokers"]);
+  await resourcePresentation.getByText("Non accordé", { exact: true }).waitFor();
+  await page.getByText("Ressources : accès non accordé à ce contexte, aucune lecture émise.", { exact: true }).waitFor();
+  assert.deepEqual(humanReads(beforeReduced), [fleetUrl]);
+  assert.equal(await workerRows().count(), workers);
+  assert.deepEqual(await resourceIds(), []);
+  assert.equal(await page.getByText(sentinel, { exact: true }).count(), 0);
+  assert.equal(await staleNotice.count(), 0);
+  assert.equal(await notice.count(), 0);
+  await page.unroute(resourcesUrl);
+  await logout();
+  await noSecret("reprise et retrait de la source ressources");
+  assert.equal(guard.violations.length, 0, "le navigateur reste sur l’origine de la fixture");
+  recoveryStage = "complete";
+};
+
+/** A session resource is readable even when the worker registry has never supplied a page. */
+const runCorrelationRecovery = async () => {
+  const guard = await prepareRecoveryGuard();
+  const fleet = recoveryOrigin + fleetUrl;
+  const resources = recoveryOrigin + "/api/v1/human/resources?limit=100";
+  const session = a.session_owned_by_user_a1;
+  const resourcesPanel = page.locator(".sv-panel", { has: heading("Ressources autorisées") });
+  const row = resourcesPanel.locator("tbody tr").filter({ has: page.getByText(session, { exact: true }) });
+  const dialog = page.getByRole("dialog");
+  const unknown = "Registre des workers non chargé : correspondance inconnue.";
+  const falseEmpty = /^Aucun worker de la fenêtre chargée ne déclare cette session/;
+
+  recoveryStage = "resource_without_registry";
+  await login("admin_a");
+  await page.route(fleet, (route) => route.abort("connectionrefused"));
+  const [loaded] = await Promise.all([
+    page.waitForResponse((response) => response.url() === resources && response.request().method() === "GET"),
+    page.waitForEvent("requestfailed", (request) => request.url() === fleet && request.method() === "GET"),
+    supervise("administration", "tenant-a"),
+  ]);
+  assert.equal(loaded.status(), 200);
+  await ready100(["Ressources"]);
+  await heading("Workers inconnus").waitFor();
+  await page.getByLabel("Rythme d’actualisation").selectOption("0");
+  await row.waitFor();
+
+  recoveryStage = "worker_correlation_unavailable";
+  await row.getByRole("button", { name: "Détails", exact: true }).click();
+  await dialog.getByText(session, { exact: true }).waitFor();
+  assert.equal(await dialog.getByText(falseEmpty).count(), 0);
+  assert.equal(await row.getByText(falseEmpty).count(), 0);
+  await dialog.getByText(unknown, { exact: true }).waitFor();
+  await row.getByText(unknown, { exact: true }).waitFor();
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "detached" });
+
+  recoveryStage = "worker_correlation_recovered";
+  await page.unroute(fleet);
+  const [recovered] = await Promise.all([
+    page.waitForResponse((response) => response.url() === fleet && response.request().method() === "GET"),
+    page.locator(".sv-errors [role=alert]").getByRole("button", { name: "Réessayer", exact: true }).click(),
+  ]);
+  assert.equal(recovered.status(), 200);
+  const payload = await recovered.json();
+  const matches = payload.workers.items.filter((worker) => worker.session_id === session);
+  assert.equal(matches.length, 1);
+  await ready100();
+  await row.getByText("1 worker(s) de la fenêtre chargée déclarent cette session", { exact: true }).waitFor();
+  await row.getByRole("button", { name: "Détails", exact: true }).click();
+  await dialog.getByRole("button", { name: `Ouvrir le worker ${matches[0].worker_id}`, exact: true }).waitFor();
+  assert.equal(await dialog.getByText(unknown, { exact: true }).count(), 0);
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "detached" });
+  await logout();
+  await noSecret("reprise de la corrélation workers");
+  assert.equal(guard.violations.length, 0);
+  recoveryStage = "complete";
+};
+
+/** The real resource stream is cancelled while hidden; identity can fail when the tab becomes visible again. */
+const runResourceStreamRecovery = async (lateDenial = false) => {
+  const guard = await prepareRecoveryGuard();
+  const identityPath = "/api/v1/human/identity";
+  const streamPath = "/api/v1/human/stream";
+  const resourcesPath = "/api/v1/human/resources";
+  const isGet = (request, path) => request.method() === "GET" && new URL(request.url()).pathname === path;
+  const response = (path) => page.waitForResponse((answer) => isGet(answer.request(), path));
+  const stream = page.locator(".stream-pill");
+  const panel = page.locator(".human-resource-panel");
+  const rows = () => panel.locator(".human-resource-row .control-id").allTextContents();
+  const accessWarning = page.getByRole("alert").filter({ hasText: /^Revalidation des accès impossible\./ });
+
+  recoveryStage = "resource_stream_connected";
+  await login("user_a2");
+  const [initial] = await Promise.all([response(streamPath), button("Ouvrir personnel · tenant-a").click()]);
+  assert.equal(initial.status(), 200);
+  await page.getByText("Flux autorisé connecté", { exact: true }).waitFor();
+  await panel.getByText(a.session_owned_by_user_a2, { exact: true }).waitFor();
+  const initialIds = (await rows()).sort();
+  assert.deepEqual(initialIds, [a.session_owned_by_user_a2, a.session_shared_with_user_a2].sort());
+  assert.equal(await openStreams(), 1);
+
+  let releaseDenial;
+  const delayedEvents = (url) => url.origin === recoveryOrigin && url.pathname === "/api/v1/human/events" &&
+    url.searchParams.get("resource_id") === a.session_owned_by_user_a2;
+  if (lateDenial) {
+    recoveryStage = "resource_events_read_pending";
+    const gate = new Promise((resolve) => { releaseDenial = resolve; });
+    await page.route(delayedEvents, async (route) => {
+      await gate;
+      await route.fulfill({ status: 403, json: { error: { code: "permission_denied",
+        message: "This context does not permit this read.", retry_action: "review_permissions" } } });
+    });
+    await Promise.all([
+      page.waitForRequest((request) => delayedEvents(new URL(request.url())) && request.method() === "GET"),
+      panel.locator(".human-resource-row").filter({ has: page.getByText(a.session_owned_by_user_a2, { exact: true }) })
+        .getByRole("button", { name: "Métadonnées", exact: true }).click(),
+    ]);
+    await heading("Événements autorisés.").waitFor();
+  }
+
+  recoveryStage = "resource_stream_return_offline";
+  await visibility("hidden");
+  assert.equal(await openStreams(), 0, "le navigateur a réellement annulé son flux nominatif");
+  const beforeDenial = requests.length;
+  if (lateDenial) {
+    const denied = page.waitForResponse((answer) => delayedEvents(new URL(answer.url())));
+    releaseDenial();
+    assert.equal((await denied).status(), 403);
+    await heading("Ressources autorisées.").waitFor();
+    await page.unroute(delayedEvents);
+  }
+  const hiddenStatus = await stream.innerText();
+  const startsBefore = streamStarts();
+  await context.setOffline(true);
+  const identityFailed = page.waitForEvent("requestfailed", (request) => isGet(request, identityPath));
+  await visibility("visible");
+  await identityFailed;
+  await accessWarning.waitFor();
+  assert.equal(await openStreams(), 0);
+  assert.equal(streamStarts(), startsBefore);
+  const offlineStatus = await stream.innerText();
+  if (!lateDenial) assert.equal(offlineStatus, "Flux suspendu · accès à relire");
+  assert.equal(hiddenStatus, "Flux suspendu · onglet masqué");
+  const stale = panel.getByText(/^(Données à actualiser|Données périmées · dernière lecture conservée)$/);
+  if (!lateDenial) await stale.waitFor();
+  const retainedStale = await stale.count() === 1;
+  assert.deepEqual((await rows()).sort(), initialIds);
+
+  recoveryStage = "resource_stream_revalidated";
+  await context.setOffline(false);
+  const before = requests.length;
+  let beforeRefresh = before;
+  if (lateDenial) {
+    assert.equal(await page.evaluate(() => window.__resourcePoll()), 1);
+    await panel.locator(".human-resource-row").filter({ has: page.getByText(a.session_shared_with_user_a2, { exact: true }) })
+      .getByRole("button", { name: "Métadonnées", exact: true }).click();
+    await heading("Événements autorisés.").waitFor();
+    await button("Ressources").click();
+    await heading("Ressources autorisées.").waitFor();
+    await settle();
+    beforeRefresh = requests.length;
+  }
+  const refresh = button("Actualiser");
+  await refresh.focus();
+  const replies = Promise.allSettled([response(identityPath), response(streamPath), response(resourcesPath)]);
+  await page.keyboard.press("Enter");
+  if (lateDenial) {
+    const firstPath = () => requests.slice(before).map((path) => path.split("?")[0])
+      .find((path) => [identityPath, resourcesPath, streamPath].includes(path));
+    const first = firstPath() ?? new URL((await page.waitForRequest((request) =>
+      [identityPath, resourcesPath, streamPath].some((path) => isGet(request, path)))).url()).pathname;
+    if (first !== identityPath) recoveryStage = "resource_read_before_access";
+    assert.equal(first, identityPath, "aucune lecture des ressources ou du flux avant revalidation des accès");
+    assert.equal(offlineStatus, "Flux suspendu · accès à relire");
+    assert.equal(retainedStale, true);
+    assert.deepEqual(requests.slice(before, beforeRefresh).filter((path) => path.startsWith("/api/v1/human/")), [],
+      "le poll et la navigation entre Ressources et Événements n’émettent aucune lecture avant revalidation");
+    assert.deepEqual(requests.slice(beforeDenial, before).filter((path) => path.split("?")[0] === resourcesPath), [],
+      "le refus d’une sélection ne déclenche pas de nouveau GET quand le flux est suspendu");
+  }
+  for (const reply of await replies) { assert.equal(reply.status, "fulfilled"); assert.equal(reply.value.status(), 200); }
+  await page.getByText("Flux autorisé connecté", { exact: true }).waitFor();
+  await panel.getByText("Lecture réussie", { exact: true }).waitFor();
+  assert.equal(await accessWarning.count(), 0);
+  assert.deepEqual((await rows()).sort(), initialIds);
+  assert.equal(streamStarts(), startsBefore + 1);
+  const after = requests.slice(before).map((path) => path.split("?")[0]);
+  assert.equal(after.filter((path) => path === identityPath).length, 1);
+  assert.ok(after.indexOf(identityPath) < after.indexOf(streamPath), "le flux est repris après relecture des accès");
+  assert.equal(await page.evaluate(() => document.activeElement?.textContent), "Actualiser");
+  await logout();
+  assert.equal(await openStreams(), 0);
+  await noSecret("reprise du flux nominatif");
+  assert.equal(guard.violations.length, 0);
+  recoveryStage = "complete";
+};
+
+/** A reply sent for an earlier activation cannot reopen the direct flow across another hide. */
+const runResourceStreamVisibilityRace = async () => {
+  const guard = await prepareRecoveryGuard();
+  const identityPath = "/api/v1/human/identity";
+  const eventsPath = "/api/v1/human/events";
+  const streamPath = "/api/v1/human/stream";
+  const isReply = (answer, path) => answer.request().method() === "GET" && new URL(answer.url()).pathname === path;
+  // The client captures fetch at login. Arm the delay only after reaching the event view.
+  await page.addInitScript((path) => {
+    const fetch = window.fetch;
+    const release = [];
+    let holding = false;
+    window.__heldVisibilityReplies = 0;
+    window.__holdVisibilityReplies = () => { holding = true; };
+    window.__nextVisibilityReply = () => release.shift()?.();
+    window.__clearVisibilityReplies = () => { holding = false; for (const pending of release.splice(0)) pending(); };
+    window.fetch = async (input, options) => {
+      const url = new URL(input instanceof Request ? input.url : input, window.location.origin);
+      const method = options?.method ?? (input instanceof Request ? input.method : "GET");
+      const answer = await fetch(input, options);
+      if (holding && url.origin === location.origin && url.pathname === path && method === "GET") {
+        await new Promise((resolve) => { release.push(resolve); window.__heldVisibilityReplies++; });
+      }
+      return answer;
+    };
+  }, identityPath);
+  recoveryStage = "resource_visibility_event_ready";
+  await login("user_a1");
+  await button("Ouvrir personnel · tenant-a").click();
+  const row = page.locator(".human-resource-row").filter({ has: page.getByText(a.session_owned_by_user_a1, { exact: true }) });
+  const [initial] = await Promise.all([page.waitForResponse((answer) => isReply(answer, eventsPath)),
+    row.getByRole("button", { name: "Métadonnées", exact: true }).click()]);
+  assert.equal(initial.status(), 200);
+  const detail = page.locator(".human-event-row").first().getByRole("button", { name: "Détails", exact: true });
+  const exportButton = button("Exporter les métadonnées");
+  await detail.waitFor();
+  assert.equal(await detail.isEnabled(), true);
+  assert.equal(await exportButton.isEnabled(), true);
+  await page.getByText("Flux autorisé connecté", { exact: true }).waitFor();
+  await visibility("hidden");
+  assert.equal(await openStreams(), 0);
+
+  await page.evaluate(() => window.__holdVisibilityReplies());
+  const before = requests.length;
+  const startsBefore = streamStarts();
+  try {
+    recoveryStage = "resource_visibility_first_read_held";
+    const [first] = await Promise.all([page.waitForResponse((answer) => isReply(answer, identityPath)), visibility("visible")]);
+    assert.equal(first.status(), 200);
+    await page.waitForFunction(() => window.__heldVisibilityReplies === 1);
+    await visibility("hidden");
+    await visibility("visible");
+    await settle();
+    assert.equal(identityReads(before), 1);
+    assert.deepEqual(humanReads(before), []);
+
+    recoveryStage = "resource_visibility_waiting_current_read";
+    const next = page.waitForRequest((request) => new URL(request.url()).pathname.startsWith("/api/v1/human/"));
+    await page.evaluate(() => window.__nextVisibilityReply());
+    const nextRead = await next;
+    const nextPath = new URL(nextRead.url()).pathname;
+    assert.equal(nextPath, identityPath, "la réponse de la première activation ne rouvre pas les lectures");
+    assert.equal((await nextRead.response()).status(), 200);
+    await page.waitForFunction(() => window.__heldVisibilityReplies === 2);
+    assert.equal(identityReads(before), 2);
+    await page.getByText("Flux suspendu · accès à relire", { exact: true }).waitFor();
+    assert.equal(await detail.isDisabled(), true);
+    assert.equal(await exportButton.isDisabled(), true);
+    assert.deepEqual(humanReads(before), []);
+
+    recoveryStage = "resource_visibility_current_read_accepted";
+    const replies = Promise.all([page.waitForResponse((answer) => isReply(answer, streamPath)),
+      page.waitForResponse((answer) => isReply(answer, eventsPath))]);
+    await page.evaluate(() => window.__nextVisibilityReply());
+    for (const answer of await replies) assert.equal(answer.status(), 200);
+    await page.getByText("Flux autorisé connecté", { exact: true }).waitFor();
+    await page.locator(".human-event-panel").getByText("Lecture réussie", { exact: true }).waitFor();
+    assert.equal(await detail.isEnabled(), true);
+    assert.equal(await exportButton.isEnabled(), true);
+    assert.equal(streamStarts(), startsBefore + 1);
+  } finally {
+    await page.evaluate(() => window.__clearVisibilityReplies());
+  }
+  await logout();
+  assert.equal(await openStreams(), 0);
+  await noSecret("reprise du flux après deux activations");
+  assert.equal(guard.violations.length, 0);
+  recoveryStage = "complete";
+};
+
+/** HTTP 200 opens the stream. A delivered batch or a new read establishes how current the rows are. */
+const runJournalCatchUp = async () => {
+  const guard = await prepareRecoveryGuard();
+  const streamPath = "/api/v1/human/stream";
+  const recentPath = "/api/v1/human/events/recent";
+  const pathIs = (request, path) => request.method() === "GET" && new URL(request.url()).pathname === path;
+  const reply = (path) => page.waitForResponse((answer) => pathIs(answer.request(), path));
+  const journalRead = page.locator(".sv-journal .sv-source", { hasText: "Journal" });
+  const stale = journalRead.getByText("Données périmées · dernière lecture conservée", { exact: true });
+  const fresh = journalRead.getByText("Lecture réussie", { exact: true });
+  const reload = button("Relire depuis les plus récents");
+  const table = page.locator(".sv-journal [data-event-id]");
+  const eventIds = () => table.evaluateAll((rows) => rows.map((row) => row.dataset.eventId));
+
+  // Cancel only the armed request, once, in the browser. Every completed response and SSE event is real.
+  await page.addInitScript((path) => {
+    const fetch = window.fetch;
+    let armed = false;
+    window.__armJournalStream = () => { armed = true; };
+    window.fetch = (input, options) => {
+      const url = new URL(input instanceof Request ? input.url : input, location.origin);
+      if (!armed || url.origin !== location.origin || url.pathname !== path || options?.method !== "GET") return fetch(input, options);
+      armed = false;
+      const interruption = new AbortController();
+      window.__interruptJournalStream = () => interruption.abort();
+      return fetch(input, { ...options, signal: AbortSignal.any([options.signal, interruption.signal]) });
+    };
+  }, streamPath);
+
+  recoveryStage = "journal_live_before_disconnect";
+  await login("user_a1"); await supervise("personnel", "tenant-a"); await ready100(["Ressources"]);
+  await page.evaluate(() => window.__armJournalStream());
+  const [initial] = await Promise.all([reply(streamPath), button("Journal").click()]);
+  assert.equal(initial.status(), 200);
+  await direct("Direct connecté").waitFor(); await fresh.waitFor(); await table.first().waitFor();
+  const cached = await eventIds();
+  assert.ok(cached.length > 0 && cached.length <= 100);
+
+  const reconnect = async (armNext) => {
+    if (armNext) await page.evaluate(() => window.__armJournalStream());
+    const reconnected = reply(streamPath);
+    const closed = page.waitForEvent("requestfailed", (request) => pathIs(request, streamPath));
+    await page.evaluate(() => window.__interruptJournalStream());
+    await closed;
+    await direct("Direct déconnecté · reconnexion").waitFor(); await stale.waitFor();
+    assert.equal((await reconnected).status(), 200);
+    await direct("Direct connecté").waitFor();
+  };
+  recoveryStage = "journal_reconnected_without_catch_up";
+  const before = requests.length;
+  await reconnect(true);
+  assert.equal(await stale.count(), 1, "l’ouverture HTTP du flux ne prouve pas la fraîcheur du Journal");
+  assert.equal(await fresh.count(), 0);
+  assert.deepEqual(await eventIds(), cached);
+  assert.equal(await reload.isEnabled(), true);
+  assert.deepEqual(humanReads(before).map((path) => path.split("?")[0]), [streamPath]);
+
+  recoveryStage = "journal_catch_up_delivered";
+  await command({ command: "append_event", resource_kind: "session", resource_id: a.session_owned_by_user_a1, count: 3 });
+  await page.getByText("3 événement(s) reçu(s) depuis la dernière lecture", { exact: true }).waitFor();
+  await fresh.waitFor();
+  const after = await eventIds();
+  assert.equal(new Set(after).size, cached.length + 3);
+  assert.deepEqual(after.slice(3), cached);
+
+  recoveryStage = "journal_quiet_stream_manual_reload";
+  await reconnect(false);
+  assert.equal(await stale.count(), 1);
+  const beforeReload = requests.length;
+  await reload.focus();
+  const refreshed = Promise.all([reply(recentPath), reply(streamPath)]);
+  await page.keyboard.press("Enter");
+  for (const answer of await refreshed) assert.equal(answer.status(), 200);
+  await fresh.waitFor(); await direct("Direct connecté").waitFor();
+  assert.deepEqual(await eventIds(), after.slice(0, 100));
+  assert.deepEqual(humanReads(beforeReload).map((path) => path.split("?")[0]), [recentPath, streamPath]);
+  assert.equal(await page.evaluate(() => document.activeElement?.textContent), "Relire depuis les plus récents");
+
+  await logout();
+  assert.equal(await openStreams(), 0);
+  await noSecret("rattrapage du Journal");
+  assert.equal(guard.violations.length, 0);
+  recoveryStage = "complete";
+};
+
+/** Only the older page failed. Retry its exact position while the established direct keeps adding events. */
 const runJournalOlderRecovery = async () => {
   const guard = await prepareRecoveryGuard();
   const recentPath = "/api/v1/human/events/recent";
@@ -675,6 +1272,8 @@ const runRights = async () => {
 
 /** Data of one tenant or context never survives into another one, including a late response. */
 const runIsolation = async () => {
+  const guard = await prepareRecoveryGuard();
+  recoveryStage = "isolation_context_switch";
   const search = page.getByLabel("Rechercher dans les lignes chargées");
   await login("admin_a"); await supervise("administration", "tenant-a"); await ready100();
   await search.fill("typed-in-administration");
@@ -692,19 +1291,57 @@ const runIsolation = async () => {
   // A read of A answered by the control but not yet delivered when A signs out: the page aborts it, so
   // nothing of it can reach the next session. (A late answer that is delivered is covered without a
   // browser by supervision-store.test.mjs, « une réponse tardive après fermeture ne repeuple rien ».)
+  recoveryStage = "isolation_hold_a_reply";
+  const contextA = contexts.filter(Boolean).at(-1);
+  assert.ok(contextA);
+  const endpoint = recoveryOrigin + fleetUrl;
+  const matchesFleet = (url) => url.href === endpoint;
   const aborted = []; let held = 0;
-  const failed = (request) => { if (new URL(request.url()).pathname === "/api/v1/human/federation/workers") aborted.push(request.failure()?.errorText ?? ""); };
+  let heldRequest, heldStatus, heldPage;
+  const failed = (request) => {
+    if (new URL(request.url()).pathname === "/api/v1/human/federation/workers")
+      aborted.push({ request, reason: request.failure()?.errorText ?? "" });
+  };
   page.on("requestfailed", failed);
-  await page.route(fleetRoute, async (route) => { await route.fetch(); held++; });
+  await page.route(matchesFleet, async (route) => {
+    const request = route.request();
+    if (request.method() !== "GET" || request.frame() !== page.mainFrame() ||
+        await request.headerValue("X-AiGuard-Context") !== contextA || heldRequest) return route.fallback();
+    // The page route runs before the context guard. Relay only this exact origin, path and context.
+    heldRequest = request;
+    try {
+      const reply = await route.fetch({ maxRedirects: 0, maxRetries: 0 });
+      heldStatus = reply.status();
+      if (reply.url() === endpoint && heldStatus === 200) heldPage = await reply.json();
+    } catch { /* The scenario reports a missing successful server reply below. */ }
+    held++;
+  });
   await button("Actualiser maintenant").click();
   await page.waitForFunction(() => { const node = document.querySelector('[data-focus-key="sv-refresh"]'); return node?.disabled === true || node?.getAttribute("aria-disabled") === "true"; });
   for (let attempt = 0; attempt < 50 && !held; attempt++) await page.waitForTimeout(100);
   assert.equal(held, 1, "la réponse de A est retenue après son retour du contrôle");
+  assert.equal(heldStatus, 200);
+  assert.equal(heldPage?.workers?.context_id, contextA);
+  assert.equal(heldPage.brokers.context_id, contextA);
+  assert.deepEqual(heldPage.workers.items.map(({ worker_id }) => worker_id).sort(), sortedWorkersA);
+  recoveryStage = "isolation_cancel_a_on_logout";
   await logout();
   for (let attempt = 0; attempt < 30 && !aborted.length; attempt++) await page.waitForTimeout(100);
-  assert.deepEqual(aborted, ["net::ERR_ABORTED"], "la déconnexion annule la lecture en vol de A, avant toute connexion de B");
-  page.off("requestfailed", failed); await page.unroute(fleetRoute);
-  await login("admin_b"); await supervise("administration", "tenant-b"); await ready100();
+  assert.deepEqual(aborted.map(({ reason }) => reason), ["net::ERR_ABORTED"], "la déconnexion annule la lecture en vol de A, avant toute connexion de B");
+  assert.equal(aborted[0].request, heldRequest);
+  page.off("requestfailed", failed); await page.unroute(matchesFleet);
+  recoveryStage = "isolation_read_b";
+  await login("admin_b");
+  const [replyB] = await Promise.all([page.waitForResponse((reply) => reply.url() === endpoint && reply.request().method() === "GET"),
+    supervise("administration", "tenant-b")]);
+  assert.equal(replyB.status(), 200);
+  const pageB = await replyB.json();
+  const contextB = await replyB.request().headerValue("X-AiGuard-Context");
+  assert.ok(contextB && contextB !== contextA);
+  assert.equal(pageB.workers.context_id, contextB);
+  assert.equal(pageB.brokers.context_id, contextB);
+  assert.deepEqual(pageB.workers.items.map(({ worker_id }) => worker_id), b.workers);
+  await ready100();
   assert.equal(await workerRows().count(), 1, "seule la ligne de B est affichée");
   text = await bodyText();
   assert.ok(text.includes(b.workers[0]));
@@ -713,6 +1350,8 @@ const runIsolation = async () => {
   const used = new Set(contexts.filter(Boolean));
   assert.ok(used.size >= 3, "chaque contexte sélectionné a son propre identifiant opaque");
   await logout(); await noSecret("isolation");
+  assert.equal(guard.violations.length, 0);
+  recoveryStage = "complete";
 };
 
 /**
@@ -1630,6 +2269,9 @@ const runStates = async () => {
   assert.equal(await direct("Direct refusé").count(), 0, "une indisponibilité temporaire n’est pas un refus du contrôle");
   await page.unroute(streamRoute);
   await direct("Direct connecté").waitFor({ timeout: 20000 });
+  await journalRead.getByText("Données périmées · dernière lecture conservée", { exact: true }).waitFor();
+  await button("Relire depuis les plus récents").click();
+  await direct("Direct connecté").waitFor();
   await journalRead.getByText("Lecture réussie", { exact: true }).waitFor();
   // A real refusal stops at once and tells what to do.
   const tooMany = { error: { code: "capacity_exhausted", message: "Concurrent stream capacity is full.", retry_action: "close_unused_streams" } };
@@ -1733,6 +2375,8 @@ const runExpiry = async () => {
 
 /** Real expiry after 300 seconds: the control offers a different context; the person confirms the resume. */
 const runTtl = async () => {
+  const guard = await prepareRecoveryGuard();
+  recoveryStage = "ttl_initial_context";
   const search = page.getByLabel("Rechercher dans les lignes chargées");
   await login("admin_a"); await supervise("administration", "tenant-a"); await ready100();
   await search.fill("running");
@@ -1740,11 +2384,13 @@ const runTtl = async () => {
   const firstContext = contexts.filter(Boolean).at(-1);
   const started = Date.now(); const beforeWait = requests.length; const clocks = () => page.evaluate(() => ({ wall: Date.now(), monotonic: performance.now() }));
   const clock0 = await clocks();
+  recoveryStage = "ttl_wait_expiry";
   await heading("Choisir un contexte.").waitFor({ timeout: 330000 });
   const waited = Date.now() - started; const atExpiry = requests.length; const clock1 = await clocks();
   console.log(`ttl: browser wall clock advanced ${Math.round((clock1.wall - clock0.wall) - (clock1.monotonic - clock0.monotonic))} ms more than its monotonic clock`);
   assert.ok(waited >= 240000, `le contexte a vécu ${Math.round(waited / 1000)} s avant son expiration réelle`);
   await purged("expiration réelle", sortedWorkersA);
+  recoveryStage = "ttl_resume_offer";
   const resume = page.getByRole("button", { name: "Reprendre la supervision · administration · tenant-a", exact: true });
   // The control keeps offering the expired context until its own lifetime ends. The dashboard reads the
   // identity three more times by itself; after that only an explicit refresh of the list reads it again.
@@ -1761,6 +2407,7 @@ const runTtl = async () => {
   assert.ok(caused >= 1 && caused <= 4 + explicit, `au plus quatre lectures d’identité automatiques (constaté : ${caused}, dont ${explicit} explicites)`);
   assert.deepEqual(humanReads(atExpiry), [], "aucune donnée n’est relue avant la confirmation");
   await purged("avant confirmation", sortedWorkersA);
+  recoveryStage = "ttl_resume_confirmed";
   await page.keyboard.press("Enter");
   await heading("Supervision du tenant.").waitFor(); await ready100();
   assert.equal(await search.inputValue(), "running", "le filtre saisi est rétabli");
@@ -1774,27 +2421,44 @@ const runTtl = async () => {
   assert.deepEqual(humanReads(atExpiry).sort(), ["/api/v1/human/federation/workers?worker_limit=100&broker_limit=100", "/api/v1/human/resources?limit=100"]);
   console.log(`ttl: context lived ${Math.round(waited / 1000)} s after its selection, ${caused} identity read(s) before the offer`);
   await logout();
+  assert.equal(guard.violations.length, 0);
+  recoveryStage = "complete";
 };
 
 /** Journal: newest first over a dense real history, live without replay, reconnection without duplicate. */
 const runJournal = async () => {
+  const guard = await prepareRecoveryGuard();
   const panel = page.locator(".sv-journal"); const rows = () => panel.locator("tbody tr");
   const eventIds = () => rows().evaluateAll((nodes) => nodes.map((node) => node.dataset.eventId));
   const summary = () => panel.locator(".sv-summary").innerText();
   const streams = (since) => requests.slice(since).filter((path) => path.startsWith("/api/v1/human/stream"));
   const recents = (since) => requests.slice(since).filter((path) => path.startsWith("/api/v1/human/events/recent"));
+  const headPath = "/api/v1/human/events/recent?limit=100&view=metadata";
+  const readHead = async (action) => {
+    const [reply] = await Promise.all([page.waitForResponse((answer) =>
+      answer.url() === recoveryOrigin + headPath && answer.request().method() === "GET"), action()]);
+    assert.equal(reply.status(), 200);
+    const body = await reply.json();
+    assert.ok(typeof body.live_cursor === "string" && body.live_cursor.length > 0);
+    return body;
+  };
+  const streamCursor = (path) => new URL(path, recoveryOrigin).searchParams.get("cursor");
+
+  recoveryStage = "journal_initial_page";
   await login("admin_a"); await supervise("administration", "tenant-a"); await ready100();
   assert.deepEqual(await tabs(), ["Contextes", "Supervision", "Journal", "Ressources", "Événements", "Brokers", "Workers", "Fédération"]);
   await page.getByLabel("Rythme d’actualisation").selectOption("0");
   await page.getByText("Actualisation manuelle : aucune lecture sans action de votre part.", { exact: true }).waitFor();
   let before = requests.length;
-  await button("Journal").click(); await heading("Journal des événements autorisés.").waitFor();
+  const initialHead = await readHead(() => button("Journal").click());
+  await heading("Journal des événements autorisés.").waitFor();
   await panel.locator(".sv-source", { hasText: "Journal" }).getByText("Lecture réussie", { exact: true }).waitFor();
   await direct("Direct connecté").waitFor();
   assert.equal(await page.locator(".sv:not(.sv-journal)").count(), 0, "la vue quittée ne garde aucune ligne");
-  assert.deepEqual(recents(before), ["/api/v1/human/events/recent?limit=100&view=metadata"], "une seule page : les cent plus récents d’un historique de plus de 1 500 événements");
+  assert.deepEqual(recents(before), [headPath], "une seule page : les cent plus récents d’un historique de plus de 1 500 événements");
   assert.equal(streams(before).length, 1);
   assert.match(streams(before)[0], /^\/api\/v1\/human\/stream\?limit=100&view=metadata&cursor=[^&]+$/, "le direct part de la position de la page lue");
+  assert.equal(streamCursor(streams(before)[0]), initialHead.live_cursor);
   assert.equal(await rows().count(), 100);
   assert.equal(await summary(), "100 événements affichés sur 100 chargés · des événements plus anciens existent au contrôle");
   const initial = await eventIds(); assert.equal(new Set(initial).size, 100);
@@ -1802,6 +2466,7 @@ const runJournal = async () => {
   assert.equal(await rows().count(), 100, "le direct ne rejoue pas l’historique");
 
   // Real events appended by the control appear on top, without any new page read.
+  recoveryStage = "journal_live_append";
   before = requests.length;
   const appended = (await command({ command: "append_event", resource_kind: "session", resource_id: a.session_owned_by_user_a1, count: 3 })).event_ids;
   await page.getByText("103 événements affichés sur 103 chargés · des événements plus anciens existent au contrôle", { exact: true }).waitFor();
@@ -1814,6 +2479,7 @@ const runJournal = async () => {
 
   // The tab is hidden: the stream is closed. Events appended meanwhile are read when it comes back,
   // from the newest, on a new stream position. (Only the browser's visibility state is driven by the test.)
+  recoveryStage = "journal_resume_cursor";
   assert.equal(await openStreams(), 1, "un seul flux ouvert pendant le direct");
   await visibility("hidden");
   await direct("Direct suspendu · onglet masqué").waitFor();
@@ -1823,17 +2489,19 @@ const runJournal = async () => {
   before = requests.length;
   await page.waitForTimeout(1500);
   assert.deepEqual(humanReads(before), [], "aucune lecture ni flux onglet masqué");
-  await visibility("visible");
+  const resumedHead = await readHead(() => visibility("visible"));
   await direct("Direct connecté").waitFor({ timeout: 20000 });
   await page.getByText("100 événements affichés sur 100 chargés · des événements plus anciens existent au contrôle", { exact: true }).waitFor();
   const afterReturn = await eventIds();
   assert.equal(new Set(afterReturn).size, 100, "aucun doublon après la reprise");
   assert.deepEqual(afterReturn.slice(0, 5), [...missed].reverse().concat([...appended].reverse()), "les événements manqués sont en tête, puis ceux déjà reçus");
-  assert.deepEqual(recents(before), ["/api/v1/human/events/recent?limit=100&view=metadata"], "une relecture depuis les plus récents");
+  assert.deepEqual(recents(before), [headPath], "une relecture depuis les plus récents");
   assert.equal(streams(before).length, 1);
   assert.match(streams(before)[0], /&cursor=/, "le nouveau flux part de la position de la page relue, jamais du début");
+  assert.equal(streamCursor(streams(before)[0]), resumedHead.live_cursor);
 
   // Older pages on request; a server-side limit to one resource; back to the whole selection.
+  recoveryStage = "journal_pagination_and_links";
   before = requests.length;
   await button("Charger 100 événements plus anciens").click();
   await page.getByText("200 événements affichés sur 200 chargés · des événements plus anciens existent au contrôle", { exact: true }).waitFor();
@@ -1848,7 +2516,7 @@ const runJournal = async () => {
   assert.equal(await rows().filter({ hasText: "Refusé" }).count(), denied);
   assert.match(await summary(), new RegExp(`^${denied} événements affichés sur 300 chargés`));
   await button("Réinitialiser").click();
-  await geometry("journal", [1440, 390, 320], { also: [["list", ".sv-toolbar-journal"]] });
+  await geometry("journal", [1440, 390, 320], { shots: false });
   before = requests.length;
   await rows().filter({ hasText: a.session_owned_by_user_a1 }).first().getByRole("button", { name: "Limiter à cette ressource", exact: true }).click();
   await panel.getByText("Limité côté serveur à", { exact: false }).waitFor();
@@ -1885,23 +2553,34 @@ const runJournal = async () => {
   assert.equal(await openStreams(), 0, "la déconnexion termine le flux");
 
   // Another account reads its own authorized selection only, live included.
-  await login("user_a2"); await supervise("personnel", "tenant-a"); await button("Journal").click();
+  recoveryStage = "journal_a2_selection";
+  await login("user_a2"); await supervise("personnel", "tenant-a");
+  const personalHead = await readHead(() => button("Journal").click());
+  assert.ok(personalHead.items.every(({ metadata }) => metadata.resource.resource_id !== a.session_owned_by_user_a1));
+  assert.ok(personalHead.items.every(({ metadata }) => !appended.includes(metadata.id) && !missed.includes(metadata.id)));
   await direct("Direct connecté").waitFor();
   const own = await rows().count(); assert.ok(own > 0 && own <= 100);
   let text = await panel.innerText();
   assert.ok(!text.includes(a.session_owned_by_user_a1), "aucun événement d’une session non partagée");
-  await command({ command: "append_event", resource_kind: "session", resource_id: a.session_owned_by_user_a1, count: 2 });
-  await command({ command: "append_event", resource_kind: "session", resource_id: a.session_owned_by_user_a2, count: 1 });
+  const privateIds = (await command({ command: "append_event", resource_kind: "session", resource_id: a.session_owned_by_user_a1, count: 2 })).event_ids;
+  const ownIds = (await command({ command: "append_event", resource_kind: "session", resource_id: a.session_owned_by_user_a2, count: 1 })).event_ids;
   await panel.getByText("1 événement(s) reçu(s) depuis la dernière lecture", { exact: true }).waitFor();
   text = await panel.innerText();
   assert.ok(!text.includes(a.session_owned_by_user_a1), "le direct ne livre que la sélection autorisée");
   assert.equal(await rows().count(), own + 1);
+  const personalIds = await eventIds();
+  assert.deepEqual(personalIds.slice(0, 1), ownIds);
+  assert.ok([...appended, ...missed, ...privateIds].every((id) => !personalIds.includes(id)));
   await logout(); await noSecret("journal");
+  assert.equal(guard.violations.length, 0);
+  recoveryStage = "complete";
 };
 
 /** Keyboard only, eight destinations, reduced motion. */
 const runKeyboard = async () => {
+  const guard = await prepareRecoveryGuard();
   await page.emulateMedia({ reducedMotion: "reduce" });
+  recoveryStage = "keyboard_context";
   await login("admin_a");
   const press = async (key, until, limit = 80) => {
     for (let count = 0; count < limit; count++) { if (await page.evaluate(until)) return; await page.keyboard.press(key); }
@@ -1910,6 +2589,7 @@ const runKeyboard = async () => {
   await press("Tab", () => document.activeElement?.textContent === "Superviser administration · tenant-a");
   await page.keyboard.press("Enter"); await heading("Supervision du tenant.").waitFor(); await ready100();
   assert.equal(await page.evaluate(() => document.activeElement?.tagName), "H1", "le titre de la vue reçoit le focus à l’ouverture");
+  recoveryStage = "keyboard_filters_and_details";
   await press("Tab", () => document.activeElement?.id === "sv-worker-search");
   await page.keyboard.type("running");
   assert.equal(await page.evaluate(() => document.activeElement?.id), "sv-worker-search", "la saisie garde le focus");
@@ -1929,6 +2609,7 @@ const runKeyboard = async () => {
   await page.keyboard.press("Escape"); await dialog.waitFor({ state: "detached" });
   assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("data-focus-key")), key, "Échap rend le focus à la ligne d’origine");
   // Eight destinations: the bar stays one scrollable row on small screens and the open one is visible.
+  recoveryStage = "keyboard_compact_navigation";
   await geometry("keyboard", [390, 320], { shots: false });
   // The bar itself by keyboard: every destination that takes focus is entirely visible, clear of the edge
   // fade that signals more destinations. « Événements » is disabled without a selected resource.
@@ -1954,6 +2635,7 @@ const runKeyboard = async () => {
       }
     }
   }
+  recoveryStage = "keyboard_federation";
   await press("Tab", () => document.activeElement?.textContent === "Fédération", 10);
   await page.keyboard.press("Enter");
   await heading("Workers et brokers du tenant.").waitFor();
@@ -1965,6 +2647,9 @@ const runKeyboard = async () => {
   assert.deepEqual(bar, { visible: true, fits: true, transition: "0s", behavior: "auto" }, "destination ouverte visible, aucun débordement, aucun mouvement animé");
   await page.setViewportSize({ width: 1440, height: 1050 });
   await logout();
+  recoveryStage = "keyboard_network";
+  assert.deepEqual(guard.violations, [], "le navigateur reste sur l’origine de la fixture");
+  recoveryStage = "complete";
 };
 
 /** Dense registry: 300 real rows loaded in three pages, 200 rendered, filtering stays usable. A measure, not a qualification. */
@@ -2009,16 +2694,26 @@ let failure = null;
 try {
   await ({ journal: runJournal, keyboard: runKeyboard, load: runLoad, fleet: runFleet, partial: runPartial, correlation: runCorrelation, rights: runRights, revoked: runRevoked,
     isolation: runIsolation, expiry: runExpiry, resume: runResume, ttl: runTtl, focus: runFocus, regions: runRegions, details: runDetails, states: runStates,
-    "journal-older-recovery": runJournalOlderRecovery })[scenario]();
+    "resource-recovery": runResourceRecovery, "correlation-recovery": runCorrelationRecovery,
+    "resource-stream-recovery": runResourceStreamRecovery, "resource-stream-late-denial": () => runResourceStreamRecovery(true),
+    "resource-stream-visibility-race": runResourceStreamVisibilityRace, "journal-catch-up": runJournalCatchUp,
+    "journal-older-recovery": runJournalOlderRecovery, "human-export": runHumanExport })[scenario]();
   assert.deepEqual(softFailures, [], "observations indépendantes du scénario");
   assert.deepEqual(errors, [], "aucune erreur JavaScript de page");
   console.log(`browser_supervision scenario=${scenario} PASS workers=${workers} events=${events} artifacts=${artifacts}`);
 } catch (error) {
   failure = error;
-  if (journalRecovery) {
-    const mayCapture = recoveryOrigin && page.url() === recoveryOrigin + "/";
+  if (privateFailure) {
+    let mayCapture = recoveryOrigin && page.url() === recoveryOrigin + "/";
+    if (authenticatedFailure) {
+      const dashboard = URL.parse(ready.dashboard);
+      mayCapture = dashboard?.protocol === "http:" && dashboard.hostname === "127.0.0.1" &&
+        page.url() === dashboard.origin + "/" &&
+        await page.locator(".human-shell").isVisible().catch(() => false) &&
+        await page.getByLabel("Credential personnel local", { exact: true }).count().catch(() => 1) === 0;
+    }
     const snapshot = mayCapture ? await saveBrowserFailure(page, { directory: artifacts, secrets }) : null;
-    console.error(`browser_supervision scenario=${scenario} FAIL stage=${recoveryStage}`);
+    console.error(`browser_supervision scenario=${scenario} FAIL stage=${guardedRecovery ? recoveryStage : "revocation"}`);
     if (snapshot) for (const file of snapshot.files) console.error(`artifact=${join(artifacts, snapshot.directory, file)}`);
   } else {
     if (softFailures.length) console.error(`observations indépendantes en échec avant l’arrêt :\n- ${softFailures.join("\n- ")}`);
@@ -2030,4 +2725,4 @@ try {
   if (stack.exitCode === null) { stack.stdin.write(`${JSON.stringify({ command: "stop" })}\n`); stack.stdin.end(); }
   await new Promise((resolve) => { const timer = setTimeout(() => { stack.kill("SIGKILL"); resolve(); }, 5000); stack.once("exit", () => { clearTimeout(timer); resolve(); }); if (stack.exitCode !== null) { clearTimeout(timer); resolve(); } });
 }
-if (failure) { if (!journalRecovery) console.error(failure); process.exit(1); }
+if (failure) { if (!privateFailure) console.error(failure); process.exit(1); }

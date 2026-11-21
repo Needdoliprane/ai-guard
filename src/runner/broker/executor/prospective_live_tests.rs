@@ -6,10 +6,10 @@ use crate::{
     api::{GatewayState, TenantGateway, gateway_router},
     broker::{
         clock::NativeHostClock,
-        enforcer::retirement::test_support::ProspectiveFixture,
+        enforcer::{EnforcerClient, retirement::test_support::ProspectiveFixture},
         journal::retirement_live_fixture::{
             INVOCATION_DATA_PROGRAM, LiveFixture, live_fixture_with_created_helper_for_prospective,
-            live_fixture_with_pending_arm_for_prospective,
+            live_fixture_with_gateway, live_fixture_with_pending_arm_for_prospective,
         },
     },
     control_fs::Directory,
@@ -54,8 +54,10 @@ impl Drop for BoundaryFixture {
 
 #[derive(Default)]
 struct Posts {
+    total: AtomicUsize,
     arm: AtomicUsize,
     claim: AtomicUsize,
+    cleanup: AtomicUsize,
 }
 struct Gateway {
     stop: oneshot::Sender<()>,
@@ -80,11 +82,20 @@ impl Gateway {
             None,
             Redactor::new(vec![]),
         )?;
+        let cleanup_path = format!(
+            "/control/api/v1/workers/{}/helper-cleanup",
+            fixture.registration.arm().worker_id
+        );
         let app = gateway_router(state).layer(axum::middleware::from_fn(
             move |request: axum::extract::Request, next: axum::middleware::Next| {
                 let posts = Arc::clone(&posts);
+                let is_cleanup = request.uri().path() == cleanup_path.as_str();
                 async move {
                     if request.method() == axum::http::Method::POST {
+                        posts.total.fetch_add(1, Ordering::SeqCst);
+                        if is_cleanup {
+                            posts.cleanup.fetch_add(1, Ordering::SeqCst);
+                        }
                         if request.uri().path().ends_with("/arms") {
                             posts.arm.fetch_add(1, Ordering::SeqCst);
                         }
@@ -360,4 +371,213 @@ async fn lost_ack() -> Result<()> {
     native.finish().await;
     gateway.finish().await?;
     result
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn import_cleanup_reconciles_same_pending_after_writer_ack_loss() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let origin = format!("http://{}", listener.local_addr()?);
+    let fixture = BoundaryFixture::from(live_fixture_with_gateway(&origin, true));
+    let posts = Arc::new(Posts::default());
+    let gateway = Gateway::start(listener, &fixture, Arc::clone(&posts)).await?;
+    let exercise =
+        boxed_execution_phase(|| exercise_import_cleanup(&fixture, &origin, &posts)).await;
+    let stopped = gateway.finish().await;
+    exercise.and(stopped)
+}
+
+async fn exercise_import_cleanup(
+    fixture: &BoundaryFixture,
+    origin: &str,
+    posts: &Posts,
+) -> Result<()> {
+    let context = context(fixture, origin).await?;
+    let writer = WriterClient::start(fixture.journal.clone(), 16, Duration::from_secs(10))?;
+    let executor = BatchExecutor::new(
+        writer.clone(),
+        EnforcerClient::unavailable_for_test(context.config())?,
+        Arc::new(NativeHostClock::new()?),
+    );
+    let operation = fixture.intent.operation_id();
+    let execution = Execution::open(&executor, operation, &context).await?;
+    let arm = fixture.registration.arm();
+    let ArmSubjectV1::Helper {
+        helper_id,
+        purpose: HelperPurposeV1::Import,
+        ..
+    } = &arm.subject
+    else {
+        return Err(anyhow!("fixture must contain an acknowledged Import Arm"));
+    };
+    let arm_receipt = fixture.registration.receipt();
+    // Both requests are synthetic data. No runtime or guardian can consume the claim.
+    boxed_execution_phase(|| {
+        execution.rpc(Operation::HelperClaim {
+            request: HelperStartClaimV1 {
+                version: 1,
+                operation_id: Uuid::new_v4().to_string(),
+                helper_id: helper_id.clone(),
+                emitter_id: Uuid::new_v4().to_string(),
+                arm_receipt: arm_receipt.clone(),
+                clock_check: arm.clock.clone(),
+            },
+            response: None,
+        })
+    })
+    .await
+    .context("seed durable Import claim")?;
+    let finished_at = "2026-10-30T12:00:02Z".to_owned();
+    boxed_execution_phase(|| {
+        execution.rpc(Operation::HelperObservation {
+            request: HelperObservationV1 {
+                version: 1,
+                operation_id: Uuid::new_v4().to_string(),
+                helper_id: helper_id.clone(),
+                arm_receipt: arm_receipt.clone(),
+                verification: None,
+                observation: RuntimeObservationV1 {
+                    inspection: arm.inspection.clone(),
+                    observed_at: finished_at.clone(),
+                    status: RuntimeStatusV1::Exited,
+                    running: Some(false),
+                    started_at: Some("2026-10-30T12:00:00Z".into()),
+                    finished_at: Some(finished_at),
+                    exit_code: Some(0),
+                    oom_killed: Some(false),
+                    restart_count: Some(0),
+                },
+            },
+            response: None,
+        })
+    })
+    .await
+    .context("seed durable Import terminal observation")?;
+
+    let request = HelperCleanupV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        helper_id: helper_id.clone(),
+        arm_receipt: arm_receipt.clone(),
+        removed: true,
+        error: None,
+    };
+    let pending = Operation::HelperCleanup {
+        request: request.clone(),
+        response: None,
+    };
+    let audit_head = fixture.store.head()?;
+    let posts_before = posts.total.load(Ordering::SeqCst);
+    let expected = writer
+        .load(operation)
+        .await?
+        .context("terminal Import job missing")?
+        .head()
+        .clone();
+    let revision = expected.revision();
+    let mut barrier = writer
+        .cleanup_advance_reply_barrier_for_test(operation, expected, request.input_hash()?)
+        .await?;
+    let mut attempt = boxed_execution_phase(|| execution.rpc(pending.clone()));
+    let started = tokio::time::Instant::now();
+    let deadline = started + Duration::from_secs(5);
+    let failure = tokio::select! {
+        result = &mut attempt => {
+            let category = match result {
+                Ok(_) => "ok".to_owned(),
+                Err(error) => error.downcast_ref::<JournalError>()
+                    .map_or_else(|| "non_journal_error".to_owned(), |error| format!("{error:?}")),
+            };
+            Some(("Cleanup returned before its Writer reply barrier", category))
+        }
+        reached = tokio::time::timeout_at(deadline, barrier.entered()) => reached
+            .err()
+            .map(|_| ("Cleanup did not reach its real Writer reply barrier", "deadline_elapsed".to_owned())),
+    };
+    if let Some((message, category)) = failure {
+        let sampled = tokio::time::Instant::now();
+        let http_cleanup_entries = posts.cleanup.load(Ordering::SeqCst);
+        let http_new_post_entries = posts.total.load(Ordering::SeqCst) - posts_before;
+        let trace = barrier
+            .cleanup_trace_for_test(started.into_std(), sampled.min(deadline).into_std())
+            .unwrap_or_else(|| "UNKNOWN".to_owned());
+        drop(attempt);
+        drop(barrier);
+        return Err(anyhow!(
+            "{message}; cleanup_trace cause={category} observed_ms={} {trace} http_cleanup_path_entries_at_sample={http_cleanup_entries} http_post_entries_since_seed_at_sample={http_new_post_entries}",
+            sampled.duration_since(started).as_millis()
+        ));
+    }
+    drop(barrier);
+    let error = attempt
+        .await
+        .err()
+        .context("lost Writer ACK accepted for Cleanup")?;
+    ensure!(
+        matches!(error.downcast_ref::<JournalError>(), Some(JournalError::Io)),
+        "expected the Writer's uncertain publication error"
+    );
+    let (pending_revision, saved) = import_cleanup_checkpoint(&execution).await?;
+    ensure!(
+        pending_revision == revision + 1 && same(&saved, &pending)?,
+        "the exact pending Cleanup must have committed before the lost ACK"
+    );
+    ensure!(
+        posts.total.load(Ordering::SeqCst) == posts_before
+            && posts.cleanup.load(Ordering::SeqCst) == 0
+            && fixture
+                .store
+                .worker_operation(&request.operation_id)?
+                .is_none()
+            && fixture.store.head()? == audit_head,
+        "Cleanup reached the gateway or Store before the Writer returned an ACK"
+    );
+    drop(execution);
+
+    let resumed = Execution::open(&executor, operation, &context).await?;
+    boxed_execution_phase(|| resumed.reconcile_pending()).await?;
+    let (ack_revision, saved) = import_cleanup_checkpoint(&resumed).await?;
+    ensure!(
+        ack_revision == pending_revision + 1 && same(&without_response(&saved), &pending)?,
+        "reconciliation must ACK the original Cleanup request"
+    );
+    let Operation::HelperCleanup {
+        response: Some(ack),
+        ..
+    } = saved
+    else {
+        return Err(anyhow!("durable Cleanup ACK missing after reconciliation"));
+    };
+    let receipt = fixture
+        .store
+        .worker_operation(&request.operation_id)?
+        .context("reconciled Cleanup Store receipt missing")?;
+    ensure!(
+        posts.total.load(Ordering::SeqCst) == posts_before + 1
+            && posts.cleanup.load(Ordering::SeqCst) == 1
+            && fixture.store.head()? == audit_head + 1
+            && receipt == ack
+            && ack.audit_seq == audit_head + 1
+            && ack.operation_id == request.operation_id
+            && ack.input_hash == request.input_hash()?
+            && ack.worker_id.as_deref() == Some(arm_receipt.worker_id.as_str())
+            && ack.revision.is_none(),
+        "reconciliation must persist one matching Store receipt and journal ACK"
+    );
+    Ok(())
+}
+
+async fn import_cleanup_checkpoint(execution: &Execution<'_>) -> Result<(u64, Operation)> {
+    let (job, draft) = execution.load().await?;
+    let mut cleanups = draft
+        .operations
+        .into_iter()
+        .filter(|op| matches!(op, Operation::HelperCleanup { .. }));
+    let cleanup = cleanups
+        .next()
+        .context("Cleanup missing in the durable journal")?;
+    ensure!(
+        cleanups.next().is_none(),
+        "multiple Cleanup operations in the durable journal"
+    );
+    Ok((job.head().revision(), cleanup))
 }

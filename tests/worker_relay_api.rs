@@ -230,19 +230,22 @@ fn send(grant: &RelayGrantV1, body: &str) -> RelaySendV1 {
     }
 }
 fn router(a: Arc<Store>, b: Arc<Store>) -> Router {
+    router_with_runner_tokens(a, b, ["a", "b"])
+}
+fn router_with_runner_tokens(a: Arc<Store>, b: Arc<Store>, runners: [&str; 2]) -> Router {
     gateway_router(
         GatewayState::for_tenants(
             vec![
                 TenantGateway {
                     tenant_id: "tenant-a".into(),
                     store: a,
-                    runner_token: "a".repeat(48),
+                    runner_token: runners[0].repeat(48),
                     viewer_token: "v".repeat(48),
                 },
                 TenantGateway {
                     tenant_id: "tenant-b".into(),
                     store: b,
-                    runner_token: "b".repeat(48),
+                    runner_token: runners[1].repeat(48),
                     viewer_token: "w".repeat(48),
                 },
             ],
@@ -2361,4 +2364,357 @@ async fn directed_worker_messages_are_tenant_scoped_idempotent_and_do_not_duplic
     );
     assert!(a.integrity().unwrap().valid);
     assert!(b.integrity().unwrap().valid);
+}
+
+async fn start_reopened_relay_gateway(
+    directory: &Path,
+) -> anyhow::Result<(
+    tokio::process::Child,
+    tokio::io::BufReader<tokio::process::ChildStderr>,
+    String,
+)> {
+    use anyhow::Context;
+    use std::{io::Write, os::unix::fs::OpenOptionsExt, process::Stdio, time::Duration};
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let mut tenants = Vec::new();
+    for (tenant, runner, viewer, max_active_workers) in [("a", "r", "v", 2), ("b", "s", "w", 1)] {
+        let runner_file = format!("{tenant}-runner");
+        let viewer_file = format!("{tenant}-viewer");
+        for (file, token) in [(&runner_file, runner), (&viewer_file, viewer)] {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(directory.join(file))?
+                .write_all(token.repeat(48).as_bytes())?;
+        }
+        tenants.push(json!({
+            "tenant_id": format!("tenant-{tenant}"),
+            "data": format!("tenant-{tenant}.sqlite"),
+            "runner_token_file": runner_file,
+            "viewer_token_file": viewer_file,
+            "worker_quota": QuotaPolicyV1 {max_active_workers, ..Default::default()},
+        }));
+    }
+    let config = directory.join("reopened-tenants.json");
+    std::fs::write(
+        &config,
+        serde_json::to_vec(&json!({"version":1,"tenants":tenants}))?,
+    )?;
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_agentsandbox"))
+        .args([
+            "gateway",
+            "--listen",
+            "127.0.0.1:0",
+            "--max-events",
+            "10000",
+            "--tenants-file",
+        ])
+        .arg(&config)
+        .arg("--policy")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("policies/default.json"))
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut stderr = BufReader::new(child.stderr.take().context("gateway stderr unavailable")?);
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(15), stderr.read_line(&mut line)).await??;
+    let address: std::net::SocketAddr = line
+        .strip_prefix("Gateway ")
+        .and_then(|line| line.split_whitespace().next())
+        .context("the gateway did not report readiness")?
+        .parse()?;
+    anyhow::ensure!(address.ip().is_loopback(), "gateway is not on loopback");
+    Ok((child, stderr, format!("http://{address}")))
+}
+
+async fn read_reopened_gateway(
+    http: &reqwest::Client,
+    origin: &str,
+    route: &str,
+    token: &str,
+) -> anyhow::Result<Value> {
+    Ok(http
+        .get(format!("{origin}/api/v1/{route}"))
+        .bearer_auth(token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?)
+}
+
+#[tokio::test]
+async fn reopened_gateway_keeps_three_worker_quotas_terminal_usage_and_directed_audit_separate()
+-> anyhow::Result<()> {
+    use std::time::Duration;
+
+    let directory = support::private_tempdir();
+    let a = Arc::new(fresh(directory.path(), "tenant-a", 10000));
+    let b = Arc::new(fresh(directory.path(), "tenant-b", 10000));
+    let a1 = running_worker(&a);
+    let a2 = running_worker(&a);
+    let b1 = running_worker(&b);
+    let a1_token = "1".repeat(48);
+    let a2_token = "2".repeat(48);
+    bind(&a, &a1, &a1_token);
+    bind(&a, &a2, &a2_token);
+    bind(&b, &b1, &"3".repeat(48));
+
+    // Synthetic runtime observations above populate the real Store. Use the
+    // real HTTP handlers over TCP while those same stores are still active.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let warm_origin = format!("http://{}", listener.local_addr()?);
+    let (shutdown, stopped) = tokio::sync::oneshot::channel();
+    // Keep the gateway's redaction dictionary disjoint from fixture image
+    // and manifest digests. The real terminal HTTP mutation checks both.
+    let app = router_with_runner_tokens(a.clone(), b.clone(), ["r", "s"]);
+    let warm_gateway = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await
+    });
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let grant = directed(&a1, &a2, 300);
+    let message = send(&grant, "cold-gateway relay canary body");
+    let response = http
+        .post(format!("{warm_origin}/api/v1/relay/grants"))
+        .bearer_auth("r".repeat(48))
+        .json(&grant)
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(
+        response.json::<RelayReceiptV1>().await?.resource_id,
+        grant.grant_id
+    );
+    let relay_url = format!("{warm_origin}/api/v1/relay/messages");
+    let response = http
+        .post(&relay_url)
+        .bearer_auth(&a1_token)
+        .json(&message)
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let sent: RelayReceiptV1 = response.json().await?;
+    let response = http
+        .post(&relay_url)
+        .bearer_auth(&a1_token)
+        .json(&message)
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let replay: RelayReceiptV1 = response.json().await?;
+    assert_eq!(
+        replay,
+        RelayReceiptV1 {
+            replayed: true,
+            ..sent.clone()
+        }
+    );
+    let inbox: RelayInboxV1 = http
+        .get(&relay_url)
+        .bearer_auth(&a2_token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(inbox.items.len(), 1);
+    let received = &inbox.items[0];
+    assert_eq!(received.metadata.message_id, sent.resource_id);
+    assert_eq!(received.metadata.grant_id, grant.grant_id);
+    assert_eq!(received.metadata.channel, grant.channel);
+    assert_eq!(received.metadata.source, grant.source);
+    assert_eq!(received.metadata.destination, grant.destination);
+    assert_eq!(received.body, message.body);
+
+    // Leave both A endpoints Running. Their prior exact send is otherwise
+    // eligible, so the cold refusal exercises loss of the active authority.
+    let mut observation = parent_observation(
+        &b1,
+        RuntimeStatusV1::Exited,
+        false,
+        Some("2026-10-30T12:00:03Z"),
+        Some(0),
+    );
+    observation.observed_at = "2026-10-30T12:00:04Z".into();
+    let terminal = mutation(&b1, WorkerTransitionV1::Observe { observation });
+    let terminal_url = format!("{warm_origin}/api/v1/workers/{}/transitions", b1.worker_id);
+    let response = http
+        .post(&terminal_url)
+        .bearer_auth("s".repeat(48))
+        .json(&terminal)
+        .send()
+        .await?
+        .error_for_status()?;
+    let first_terminal: MutationResultV1 = response.json().await?;
+    assert_eq!(first_terminal.worker.state, WorkerStateV1::Terminal);
+    assert!(!first_terminal.worker.quota_held);
+    let again: MutationResultV1 = http
+        .post(&terminal_url)
+        .bearer_auth("s".repeat(48))
+        .json(&terminal)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(first_terminal.receipt, again.receipt);
+
+    let audit_a = serde_json::to_value(a.integrity()?)?;
+    let audit_b = serde_json::to_value(b.integrity()?)?;
+    assert_eq!(audit_a["valid"], true);
+    assert_eq!(audit_b["valid"], true);
+    let _ = shutdown.send(());
+    tokio::time::timeout(Duration::from_secs(15), warm_gateway).await???;
+    drop(a);
+    drop(b);
+
+    let (mut child, _stderr, origin) = start_reopened_relay_gateway(directory.path()).await?;
+    for (token, workers, held) in [
+        ("v".repeat(48), vec![&a1, &a2], vec![&a1, &a2]),
+        ("w".repeat(48), vec![&first_terminal.worker], vec![]),
+    ] {
+        let protocol = read_reopened_gateway(&http, &origin, "control/protocol", &token).await?;
+        assert_eq!(protocol["schema_version"], 6);
+        assert_eq!(protocol["active"], false);
+        let page = read_reopened_gateway(&http, &origin, "workers", &token).await?;
+        let actual: Vec<WorkerV1> = serde_json::from_value(page["items"].clone())?;
+        assert_eq!(actual.len(), workers.len());
+        for expected in workers {
+            assert!(actual.iter().any(|row| row.worker_id == expected.worker_id
+                && row.attempt.attempt_id == expected.attempt.attempt_id
+                && row.state == expected.state
+                && row.quota_held == expected.quota_held));
+        }
+        let quota: QuotaUsageV1 =
+            serde_json::from_value(read_reopened_gateway(&http, &origin, "quota", &token).await?)?;
+        assert_eq!(quota.policy.max_active_workers as usize, actual.len());
+        assert_eq!(quota.held_workers as usize, held.len());
+        assert_eq!(
+            quota.held_cpu_millis,
+            held.iter()
+                .map(|worker| u64::from(worker.launch.cpu_millis))
+                .sum::<u64>()
+        );
+        assert_eq!(
+            quota.held_memory_bytes,
+            held.iter()
+                .map(|worker| worker.launch.memory_bytes)
+                .sum::<u64>()
+        );
+    }
+    assert_eq!(
+        read_reopened_gateway(&http, &origin, "usage", &"v".repeat(48)).await?["items"],
+        json!([])
+    );
+    let usage = read_reopened_gateway(&http, &origin, "usage", &"w".repeat(48)).await?;
+    let allocations: Vec<AllocationV1> = serde_json::from_value(usage["items"].clone())?;
+    assert_eq!(allocations.len(), 1);
+    let allocation = &allocations[0];
+    assert_eq!(allocation.worker_id, b1.worker_id);
+    assert_eq!(allocation.attempt_id, b1.attempt.attempt_id);
+    assert_eq!(allocation.terminal_observation_id, terminal.operation_id);
+    assert_eq!(allocation.duration_ns, "3000000000");
+    assert_eq!(allocation.source.authority_id, b1.launch.authority_id);
+    assert_eq!(allocation.source.spec_hash, b1.spec_hash);
+    assert_eq!(
+        allocation.cpu_millicore_nanoseconds,
+        (3_000_000_000_u128 * u128::from(b1.launch.cpu_millis)).to_string()
+    );
+    assert_eq!(
+        allocation.memory_byte_nanoseconds,
+        (3_000_000_000_u128 * u128::from(b1.launch.memory_bytes)).to_string()
+    );
+    assert!(!allocation.billable);
+
+    let refused = http
+        .post(format!("{origin}/api/v1/relay/messages"))
+        .bearer_auth(&a1_token)
+        .json(&message)
+        .send()
+        .await?;
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        refused.json::<Value>().await?["error"]["code"],
+        "workload_forbidden"
+    );
+    for (viewer, integrity) in [("v", audit_a), ("w", audit_b)] {
+        let token = viewer.repeat(48);
+        assert_eq!(
+            read_reopened_gateway(&http, &origin, "integrity", &token).await?,
+            integrity
+        );
+        let rows = read_reopened_gateway(&http, &origin, "export?format=json", &token).await?;
+        assert_eq!(
+            rows.as_array().expect("audit export rows").len() as u64,
+            integrity["event_count"].as_u64().expect("audit count")
+        );
+        assert_eq!(
+            rows.as_array()
+                .and_then(|rows| rows.last())
+                .map(|row| &row["hash"]),
+            Some(&integrity["head_hash"])
+        );
+        let relay_rows = rows
+            .as_array()
+            .expect("audit export rows")
+            .iter()
+            .filter(|row| {
+                row["kind"] == "control.relay.mutation"
+                    && row["data"]["operation_id"] == message.operation_id
+            })
+            .collect::<Vec<_>>();
+        if viewer == "v" {
+            assert_eq!(relay_rows.len(), 1);
+            assert_eq!(relay_rows[0]["seq"], sent.audit_seq);
+            assert_eq!(relay_rows[0]["hash"], sent.audit_hash);
+            assert_eq!(
+                relay_rows[0]["data"]["resource"]["metadata"],
+                serde_json::to_value(&received.metadata)?
+            );
+        } else {
+            assert!(relay_rows.is_empty());
+        }
+        let exported = serde_json::to_string(&rows)?;
+        assert!(!exported.contains(&message.body));
+        for private in [a1_token.as_str(), a2_token.as_str()] {
+            assert!(!exported.contains(private));
+        }
+        let hidden_workers = if viewer == "v" {
+            vec![&b1]
+        } else {
+            vec![&a1, &a2]
+        };
+        for hidden in hidden_workers {
+            assert!(!exported.contains(&hidden.worker_id));
+        }
+    }
+    child.kill().await?;
+    assert_eq!(
+        rows(
+            &directory.path().join("tenant-a.sqlite"),
+            "SELECT COUNT(*) FROM relay_messages"
+        ),
+        1
+    );
+    assert_eq!(
+        rows(
+            &directory.path().join("tenant-b.sqlite"),
+            "SELECT COUNT(*) FROM relay_messages"
+        ),
+        0
+    );
+    Ok(())
 }

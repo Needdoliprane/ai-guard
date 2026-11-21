@@ -146,6 +146,7 @@ struct ProduceRequest {
 struct VerifyRequest {
     source: PathBuf,
     manifest: PathBuf,
+    expect_manifest_sha256: Option<String>,
     artifacts: Vec<PathBuf>,
     source_only: bool,
 }
@@ -181,12 +182,14 @@ pub(super) async fn execute(command: ReleaseCommand) -> Result<()> {
         ReleaseCommand::Verify {
             source,
             manifest,
+            expect_manifest_sha256,
             artifacts,
             source_only,
         } => {
             let request = VerifyRequest {
                 source,
                 manifest,
+                expect_manifest_sha256,
                 artifacts,
                 source_only,
             };
@@ -665,8 +668,8 @@ async fn verify(request: VerifyRequest, stop: Option<&Interruption>) -> Result<(
     }
 }
 
-/// The order of the comparison is fixed (CONTRACT section 4): the manifest
-/// directory is read, its header probed, then its sums and canonical form are
+/// Compare the manifest bytes to the expected SHA-256 when supplied, before
+/// reading the companion files. Then the header is probed, its sums and canonical form are
 /// checked, artefacts are hashed, the source is prepared and its digest
 /// compared with the one the manifest binds, then it is derived, and the
 /// derived documents are compared with the given ones.
@@ -677,6 +680,7 @@ async fn judge(
     let VerifyRequest {
         source,
         manifest,
+        expect_manifest_sha256,
         artifacts: paths,
         source_only,
     } = request;
@@ -686,6 +690,12 @@ async fn judge(
         }
         .into());
     }
+    if expect_manifest_sha256
+        .as_deref()
+        .is_some_and(|expected| !lowercase_hex64(expected))
+    {
+        return Err(Unverified::InvalidManifestDigest.into());
+    }
     let directory =
         control_fs::absolute_path(&manifest).map_err(|error| unreadable("--manifest", error))?;
     let read = |name: &'static str| {
@@ -693,13 +703,20 @@ async fn judge(
             .map_err(|error| unreadable(name, error))
     };
     let manifest_bytes = read(document::MANIFEST_FILE)?;
+    let manifest_sha256 = sha256_hex(&manifest_bytes);
+    if expect_manifest_sha256
+        .as_deref()
+        .is_some_and(|expected| expected != manifest_sha256.as_str())
+    {
+        return Err(Divergence::ManifestDigest.into());
+    }
     let sbom_bytes = read(document::SBOM_FILE)?;
     let sums_bytes = read(document::SUMS_FILE)?;
 
     compare::probe(&manifest_bytes)?;
 
     let (manifest_sum, sbom_sum) = document::parse_sums(&sums_bytes).map_err(format_divergence)?;
-    if manifest_sum != sha256_hex(&manifest_bytes) {
+    if manifest_sum != manifest_sha256 {
         return Err(Divergence::Sums {
             file: document::MANIFEST_FILE,
         }
@@ -802,11 +819,11 @@ async fn judge(
             given.artifacts.len()
         )
     };
-    Ok([
+    let mut report = vec![
         heading,
         format!(
             "manifest   sha256={} format={}/{} producer={} {}",
-            sha256_hex(&manifest_bytes),
+            manifest_sha256,
             given.format,
             given.format_version,
             given.producer.name,
@@ -822,7 +839,10 @@ async fn judge(
         identity_line(&given.build.inputs_identity.value, &inputs),
         "target     unknown (not observed)".to_owned(),
         artifacts_line,
-        LIMITS_LINE.to_owned(),
-    ]
-    .join("\n"))
+    ];
+    if expect_manifest_sha256.is_some() {
+        report.push("expected manifest SHA-256 matched (declared by the operator)".to_owned());
+    }
+    report.push(LIMITS_LINE.to_owned());
+    Ok(report.join("\n"))
 }

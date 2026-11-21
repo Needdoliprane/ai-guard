@@ -1,6 +1,6 @@
 use super::{
-    BackendFailure, JevClient, JevError, JevTrust, RuleCatalog, local::LocalClient,
-    transport::bounded_json,
+    BackendFailure, DEFAULT_JEV_TIMEOUT_SECONDS, JevClient, JevError, JevTrust, RuleCatalog,
+    local::LocalClient, transport::bounded_json,
 };
 use crate::{
     model::{DecisionRequest, Outcome},
@@ -71,6 +71,26 @@ impl JevBackend {
         source: SelectionSource,
         trust: JevTrust,
     ) -> Result<Self, JevError> {
+        Self::local_openai_with_trust_and_timeout(
+            endpoint,
+            key,
+            model,
+            allow_local_http,
+            source,
+            trust,
+            DEFAULT_JEV_TIMEOUT_SECONDS,
+        )
+    }
+
+    pub fn local_openai_with_trust_and_timeout(
+        endpoint: &str,
+        key: Option<String>,
+        model: String,
+        allow_local_http: bool,
+        source: SelectionSource,
+        trust: JevTrust,
+        timeout_seconds: u64,
+    ) -> Result<Self, JevError> {
         Ok(Self {
             engine: Engine::LocalOpenAI(LocalClient::new(
                 endpoint,
@@ -78,6 +98,7 @@ impl JevBackend {
                 model,
                 allow_local_http,
                 trust,
+                timeout_seconds,
             )?),
             source,
         })
@@ -194,5 +215,45 @@ impl JevBackend {
         }
         bounded_json(&metadata).map_err(|_| JevError::ResponseTooLarge)?;
         Ok(BackendEvaluation { outcome, metadata })
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn local_jev_timeout_changes_only_the_effective_deadline_and_fingerprint() {
+    let endpoint = "http://127.0.0.1:18090/v1/chat/completions";
+    let model = "fixture-local-model";
+    let source = SelectionSource::Programmatic;
+    let default = JevBackend::local_openai(endpoint, None, model.into(), true, source)
+        .unwrap()
+        .metadata("configured");
+    assert_eq!(default["configuration"]["transport"]["timeout_seconds"], 5);
+    assert_eq!(
+        default["config_sha256"],
+        "a933f30098865fd1c33e5c4abd0665ca6a41198f8dcb5e6f41d954ff75d2ce35"
+    );
+
+    let configured = |seconds| {
+        JevBackend::local_openai_with_trust_and_timeout(
+            endpoint,
+            None,
+            model.into(),
+            true,
+            source,
+            JevTrust::default(),
+            seconds,
+        )
+    };
+    assert_eq!(configured(5).unwrap().metadata("configured"), default);
+    let longer = configured(12).unwrap().metadata("configured");
+    let mut expected = default["configuration"].clone();
+    expected["transport"]["timeout_seconds"] = json!(12);
+    assert_eq!(longer["configuration"], expected);
+    assert_ne!(longer["config_sha256"], default["config_sha256"]);
+    for invalid in [0, 13] {
+        assert!(matches!(
+            configured(invalid),
+            Err(JevError::InvalidConfiguration)
+        ));
     }
 }

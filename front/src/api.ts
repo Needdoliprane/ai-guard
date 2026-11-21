@@ -21,11 +21,15 @@ export class ApiError extends Error {
 }
 
 export type StreamStatus = "connecting" | "live" | "retrying" | "closed";
+// The tenant allows four concurrent reads. Keep one for the live stream's audit polls.
+const MAX_VIEWER_READS = 3;
 export class ApiClient {
   #token: string;
   #fetcher: typeof fetch;
   #onAuthError: (() => void) | undefined;
   #controller = new AbortController();
+  #activeReads = 0;
+  #waitingReads: (() => void)[] = [];
   constructor(token: string, fetcher: typeof fetch = fetch, onAuthError?: () => void) {
     this.#token = token;
     this.#fetcher = fetcher;
@@ -35,9 +39,40 @@ export class ApiClient {
     this.#controller.abort();
     this.#token = "";
   }
-  async #request(path: string, stream = false, cursor = 0, onAuthError = this.#onAuthError): Promise<Response> {
+  #waitForRead(signal: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const start = () => {
+        signal.removeEventListener("abort", abort);
+        resolve();
+      };
+      const abort = () => {
+        const index = this.#waitingReads.indexOf(start);
+        if (index >= 0) this.#waitingReads.splice(index, 1);
+        reject(signal.reason);
+      };
+      this.#waitingReads.push(start);
+      signal.addEventListener("abort", abort, { once: true });
+    });
+  }
+  async #read<T>(path: string, readBody: (response: Response) => Promise<T>): Promise<T> {
     if (!this.#token || this.#controller.signal.aborted)
       throw new Error("Session fermée.");
+    // Queueing and consuming the body share the existing deadline.
+    const signal = AbortSignal.any([this.#controller.signal, AbortSignal.timeout(15000)]);
+    if (this.#activeReads >= MAX_VIEWER_READS) await this.#waitForRead(signal);
+    else this.#activeReads++;
+    try {
+      return await readBody(await this.#request(path, signal));
+    } finally {
+      const next = this.#waitingReads.shift();
+      if (next) next();
+      else this.#activeReads--;
+    }
+  }
+  async #request(path: string, signal: AbortSignal, cursor?: number, onAuthError = this.#onAuthError): Promise<Response> {
+    if (!this.#token || this.#controller.signal.aborted)
+      throw new Error("Session fermée.");
+    signal.throwIfAborted();
     if (
       path !== "/api/v1/identity" && !isControlReadPath(path) && !/^\/api\/(overview|agents|sandboxes|events|stream|export|integrity)(?:\?[^#]*)?$/.test(
         path,
@@ -46,9 +81,9 @@ export class ApiClient {
       throw new Error("Route de lecture non autorisée.");
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.#token}`,
-      Accept: stream ? "text/event-stream" : "application/json",
+      Accept: cursor === undefined ? "application/json" : "text/event-stream",
     };
-    if (stream && cursor > 0) headers["Last-Event-ID"] = String(cursor);
+    if (cursor !== undefined && cursor > 0) headers["Last-Event-ID"] = String(cursor);
     const fetcher = this.#fetcher;
     const response = await fetcher(path, {
       method: "GET",
@@ -56,12 +91,7 @@ export class ApiClient {
       credentials: "omit",
       redirect: "error",
       cache: "no-store",
-      signal: stream
-        ? this.#controller.signal
-        : AbortSignal.any([
-            this.#controller.signal,
-            AbortSignal.timeout(15000),
-          ]),
+      signal,
     });
     if (!response.ok) {
       if ((response.status === 401 || response.status === 403) && !this.#controller.signal.aborted) {
@@ -78,7 +108,7 @@ export class ApiClient {
     return response;
   }
   async get<T>(path: string): Promise<T> {
-    return (await this.#request(path)).json() as Promise<T>;
+    return this.#read(path, (response) => response.json() as Promise<T>);
   }
   async identity(): Promise<ViewerIdentity> {
     const value = await this.get<unknown>("/api/v1/identity");
@@ -104,7 +134,7 @@ export class ApiClient {
       const value = filters[name];
       if (value) query.set(name, value);
     }
-    return (await this.#request(`/api/export?${query.toString()}`)).blob();
+    return this.#read(`/api/export?${query.toString()}`, (response) => response.blob());
   }
   async listen(
     cursor: number,
@@ -116,7 +146,7 @@ export class ApiClient {
     while (!this.#controller.signal.aborted) {
       onStatus(attempt ? "retrying" : "connecting");
       try {
-        const response = await this.#request("/api/stream", true, cursor, this.#onAuthError ?? onAuthError);
+        const response = await this.#request("/api/stream", this.#controller.signal, cursor, this.#onAuthError ?? onAuthError);
         if (
           !response.body ||
           !response.headers.get("content-type")?.includes("text/event-stream")

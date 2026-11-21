@@ -953,59 +953,61 @@ impl<'a> Execution<'a> {
             }
             return Ok(ControlFlow::Continue(terminal));
         }
-        let callback = |owned: OwnedContainerSnapshot| async move {
-            self.patch(|draft| {
-                let managed = draft
+        let callback = |owned: OwnedContainerSnapshot| {
+            boxed_execution_phase(|| async move {
+                self.patch(|draft| {
+                    let managed = draft
+                        .run
+                        .plan
+                        .managed
+                        .as_mut()
+                        .context("managed state disappeared")?;
+                    if let Some(previous) = &managed.owned {
+                        ensure!(
+                            same(&previous.handle, &owned.handle)?,
+                            "owned worker changed"
+                        );
+                        owned
+                            .observation
+                            .validate_identity_allocation(&previous.observation)?;
+                    } else {
+                        managed.owned = Some(owned.clone());
+                    }
+                    Ok(())
+                })
+                .await
+                .context(diagnostics::BrokerStep::OwnershipCommit)?;
+                let (_, draft) = self
+                    .load()
+                    .await
+                    .context(diagnostics::BrokerStep::OwnershipReload)?;
+                if draft.worker()?.attempt.created_inspection.is_none() {
+                    let inspection = managed::inspection(draft.worker()?, &owned.observation)
+                        .context(diagnostics::BrokerStep::CreatedInspection)?;
+                    boxed_execution_phase(|| {
+                        self.mutate(WorkerTransitionV1::Created { inspection })
+                    })
+                    .await
+                    .context(diagnostics::BrokerStep::CreatedExchange)?;
+                }
+                let durable = draft
                     .run
                     .plan
                     .managed
-                    .as_mut()
-                    .context("managed state disappeared")?;
-                if let Some(previous) = &managed.owned {
-                    ensure!(
-                        same(&previous.handle, &owned.handle)?,
-                        "owned worker changed"
-                    );
-                    owned
-                        .observation
-                        .validate_identity_allocation(&previous.observation)?;
-                } else {
-                    managed.owned = Some(owned.clone());
-                }
-                Ok(())
+                    .as_ref()
+                    .and_then(|m| m.owned.clone())
+                    .context("worker ownership was not persisted")?;
+                boxed_execution_phase(|| self.arm_and_claim(runtime, durable, None)).await
             })
-            .await
-            .context(diagnostics::BrokerStep::OwnershipCommit)?;
-            let (_, draft) = self
-                .load()
-                .await
-                .context(diagnostics::BrokerStep::OwnershipReload)?;
-            if draft.worker()?.attempt.created_inspection.is_none() {
-                self.mutate(WorkerTransitionV1::Created {
-                    inspection: managed::inspection(draft.worker()?, &owned.observation)
-                        .context(diagnostics::BrokerStep::CreatedInspection)?,
-                })
-                .await
-                .context(diagnostics::BrokerStep::CreatedExchange)?;
-            }
-            let durable = draft
-                .run
-                .plan
-                .managed
-                .as_ref()
-                .and_then(|m| m.owned.clone())
-                .context("worker ownership was not persisted")?;
-            self.arm_and_claim(runtime, durable, None).await
         };
         let relay_spec = spec.clone();
         let started = |observation: ContainerObservation| {
             let relay_spec = relay_spec.clone();
-            async move {
+            boxed_execution_phase(|| async move {
                 let (_, draft) = self.load().await?;
-                self.mutate(WorkerTransitionV1::Observe {
-                    observation: managed::observation_dto(draft.worker()?, &observation)?,
-                })
-                .await?;
+                let observation = managed::observation_dto(draft.worker()?, &observation)?;
+                boxed_execution_phase(|| self.mutate(WorkerTransitionV1::Observe { observation }))
+                    .await?;
                 if let Some(relays) = &self.executor.relays {
                     let (current, _) = self.load().await?;
                     relays
@@ -1019,19 +1021,29 @@ impl<'a> Execution<'a> {
                         .await?;
                 }
                 Ok(())
-            }
+            })
         };
+        // Construct each runtime future outside this phase's poll frame.
         let retained = if let Some(owned) = owned {
             // An owned instance is always reopened by immutable CID. A stored
             // claim is only observed; the callback cannot reconstruct its permit.
-            runtime
-                .start_owned_prearmed_retained(&spec, &owned, None, 1024 * 1024, callback, started)
-                .await?
+            boxed_execution_phase(|| {
+                runtime.start_owned_prearmed_retained(
+                    &spec,
+                    &owned,
+                    None,
+                    1024 * 1024,
+                    callback,
+                    started,
+                )
+            })
+            .await?
         } else {
             self.generation_current()?;
-            runtime
-                .execute_prearmed_retained(&spec, None, 1024 * 1024, callback, started)
-                .await?
+            boxed_execution_phase(|| {
+                runtime.execute_prearmed_retained(&spec, None, 1024 * 1024, callback, started)
+            })
+            .await?
         };
         let retained = match retained {
             crate::runtime::ManagedPrearmedOutcome::Executed(retained) => retained,

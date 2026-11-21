@@ -5,6 +5,7 @@
 //! a known commit is preserved when a subsequent journal/startup step fails.
 //! This module creates no session, Ready value, route, permission or worker.
 
+pub(crate) mod egress_journal;
 mod journal;
 pub mod operator;
 mod sources;

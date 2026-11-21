@@ -9,9 +9,9 @@
 
 use super::{
     HumanAuthorityClosureV1, HumanAuthorityConfigurationV1, HumanAuthorityFailure,
-    HumanConfigurationFileKindV1, HumanSourceDescriptorV1, HumanSourceKindV1,
-    HumanStorageProfileV1, OwnerFilesystemFailure, RetainedConfigurationFile, RetainedParent,
-    SourceStorageBindingV1, acquire_parent_lock, bound_entry, bound_source_entry,
+    HumanAuthorityMarkerReceiptV1, HumanConfigurationFileKindV1, HumanSourceDescriptorV1,
+    HumanSourceKindV1, HumanStorageProfileV1, OwnerFilesystemFailure, RetainedConfigurationFile,
+    RetainedParent, SourceStorageBindingV1, acquire_parent_lock, bound_entry, bound_source_entry,
     check_open_deadline, manifest::valid_digest, open_bound_parent,
 };
 use crate::control_fs::{Directory, PrivateEntryIdentity, PrivateFile};
@@ -297,7 +297,7 @@ struct MaintenanceOwner {
     parents: Vec<RetainedParent>,
     configuration: Vec<RetainedConfigurationFile>,
     plan_file: RetainedDocument,
-    prior_active: Option<RetainedConfigurationFile>,
+    prior_active: Option<RetainedActiveManifest>,
     invalid: AtomicBool,
 }
 
@@ -311,6 +311,11 @@ struct RetainedDocument {
     file: PrivateFile,
     parent: Directory,
     identity: PrivateEntryIdentity,
+}
+
+struct RetainedActiveManifest {
+    file: RetainedConfigurationFile,
+    sources: Vec<HumanSourceDescriptorV1>,
 }
 
 macro_rules! private_debug {
@@ -345,7 +350,7 @@ impl HumanSourcesMaintenanceGuard {
         {
             return Err(HumanAuthorityFailure::ConfigurationMismatch);
         }
-        if let (Some(expected), Some(file)) =
+        let prior_active_sources = if let (Some(expected), Some(file)) =
             (&plan.prior_active_manifest, &actual.prior_active_manifest)
         {
             let old = HumanAuthorityClosureV1::from_bytes(file.bytes())?;
@@ -367,7 +372,10 @@ impl HumanSourcesMaintenanceGuard {
             {
                 return Err(HumanAuthorityFailure::ConfigurationMismatch);
             }
-        }
+            Some(old.sources)
+        } else {
+            None
+        };
         let mut sources = Vec::new();
         let mut targets = BTreeMap::new();
         let mut directories = BTreeMap::<(u64, u64), Directory>::new();
@@ -456,8 +464,12 @@ impl HumanSourcesMaintenanceGuard {
             parent,
             identity,
         };
-        let prior_active = match (&plan.prior_active_manifest, &actual.prior_active_manifest) {
-            (Some(expected), Some(file)) => {
+        let prior_active = match (
+            &plan.prior_active_manifest,
+            &actual.prior_active_manifest,
+            prior_active_sources,
+        ) {
+            (Some(expected), Some(file), Some(sources)) => {
                 let parent = open_bound_parent(&expected.storage_binding)?;
                 let identity = bound_entry(&parent, &expected.storage_binding)?;
                 if protected.contains(&identity) || file.path() != expected.storage_binding.path() {
@@ -466,13 +478,16 @@ impl HumanSourcesMaintenanceGuard {
                 file.persistent_revalidate()
                     .map_err(|_| HumanAuthorityFailure::StorageUnavailable)?;
                 protected.push(identity);
-                Some(RetainedConfigurationFile {
-                    binding: expected.storage_binding.clone(),
-                    parent,
-                    file: file.clone(),
+                Some(RetainedActiveManifest {
+                    file: RetainedConfigurationFile {
+                        binding: expected.storage_binding.clone(),
+                        parent,
+                        file: file.clone(),
+                    },
+                    sources,
                 })
             }
-            (None, None) => None,
+            (None, None, None) => None,
             _ => return Err(HumanAuthorityFailure::ConfigurationMismatch),
         };
         let mut parents = Vec::new();
@@ -551,8 +566,37 @@ impl HumanMaintenanceSourceToken {
         &self.owner.sources[self.owner.targets[&self.source_id]].descriptor
     }
 
+    /// Expected receipt for this in-place source; the caller still checks the
+    /// live token and verifies the receipt against durable replay.
+    pub(crate) fn prior_active_anchor(
+        &self,
+        prior_format: u32,
+    ) -> Result<Option<&HumanAuthorityMarkerReceiptV1>, HumanAuthorityFailure> {
+        let Some(prior) = &self.owner.prior_active else {
+            return Ok(None);
+        };
+        let index = prior
+            .sources
+            .binary_search_by_key(&self.source_id, |source| source.source_id)
+            .map_err(|_| HumanAuthorityFailure::SourceMismatch)?;
+        let source = &prior.sources[index];
+        if source.required_format != prior_format
+            || source.storage_binding != self.descriptor().storage_binding
+        {
+            return Err(HumanAuthorityFailure::SourceMismatch);
+        }
+        Ok(Some(&source.authority_marker_receipt))
+    }
+
     pub(crate) fn migration_id(&self) -> Uuid {
         self.owner.plan.migration_id
+    }
+
+    /// Descriptive plan binding. The caller still checks the live token.
+    pub(in crate::human_authority) fn retained_plan(
+        &self,
+    ) -> (&HumanSourcesMaintenancePlanV1, &str) {
+        (&self.owner.plan, self.owner.plan_file.file.digest())
     }
 }
 
@@ -618,7 +662,11 @@ impl MaintenanceOwner {
                 ));
             }
         }
-        for file in self.configuration.iter().chain(self.prior_active.iter()) {
+        for file in self
+            .configuration
+            .iter()
+            .chain(self.prior_active.iter().map(|prior| &prior.file))
+        {
             bound_entry(&file.parent, &file.binding)?;
             file.file
                 .persistent_revalidate()

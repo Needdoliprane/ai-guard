@@ -32,6 +32,7 @@ struct Setup {
     state: GatewayState,
     policy: KubernetesSessionControlRecoveryPolicyV2,
     intents: Vec<KubernetesSessionReservationIntentV2>,
+    broker: BrokerIdentityV1,
 }
 fn headers(token: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();
@@ -262,6 +263,7 @@ fn setup(count: usize, separate_broker: bool, budget: Option<WorkloadAuditPolicy
         state,
         policy,
         intents,
+        broker: f.identity,
     }
 }
 fn close(intent: &KubernetesSessionReservationIntentV2) -> KubernetesSessionReservationCloseV2 {
@@ -814,6 +816,137 @@ async fn two_real_control_requests_race_close_with_one_cas_append_and_release() 
         assert_eq!(looked_up.receipt,closed.receipt);assert!(looked_up.replayed);
         unchanged(&store,&head,0);Ok(())
     }).await.unwrap();
+}
+
+#[tokio::test]
+async fn broker_close_invalidates_competing_runner_close_and_restart_only_replays_receipt() {
+    let Setup {
+        directory,
+        state,
+        policy,
+        intents,
+        broker,
+    } = setup(1, false, None);
+    let intent = &intents[0];
+    let broker_close = close(intent);
+    let runner_close = close(intent);
+    let winning_close = broker_close.clone();
+    let active_policy = policy.clone();
+
+    let (receipt, head) = with_authenticated_control_recovery_for_test(
+        &state,
+        headers(RUNNER),
+        move |auth, store| {
+            let head = store.head()?;
+            unchanged(&store, &head, 1);
+            let broker_cap = store.authorize_kubernetes_session_reconciliation(
+                &broker,
+                broker_close.reservation_id.as_str(),
+                Some(&broker_close),
+            )?;
+            let observation = store.authorize_kubernetes_session_reconciliation(
+                &broker,
+                broker_close.reservation_id.as_str(),
+                None,
+            )?;
+            let confirmed = store.confirm_kubernetes_session_before_effect(
+                &broker,
+                &observation,
+                broker_close.reservation_id.as_str(),
+            )?;
+            assert_eq!(confirmed.audit_seq(), head);
+            let runner_cap = before_effect(store.authorize_kubernetes_session_control_recovery(
+                auth,
+                &KubernetesSessionControlRecoveryTargetV2::CloseBeforeEffect {
+                    close: runner_close.clone(),
+                },
+                &active_policy,
+            )?);
+
+            // Both capabilities were obtained at revision 1. Order the commits
+            // explicitly so the losing path must recheck the durable state.
+            let committed = store.close_kubernetes_session_before_effect(
+                &broker,
+                &broker_cap,
+                &broker_close,
+            )?;
+            assert!(!committed.replayed);
+            assert_eq!(committed.receipt.operation_id, broker_close.operation_id);
+            assert_eq!(committed.receipt.audit_seq, head + 1);
+            let error = store
+                .close_kubernetes_session_control_before_effect(
+                    auth,
+                    &runner_cap,
+                    &runner_close,
+                    &active_policy,
+                )
+                .unwrap_err();
+            assert_eq!(error.downcast_ref::<Failure>(), Some(&Failure::NotFound));
+            let confirmation = store.confirm_kubernetes_session_before_effect(
+                &broker,
+                &observation,
+                broker_close.reservation_id.as_str(),
+            );
+            assert!(matches!(confirmation, Err(ref error)
+                if error.downcast_ref::<Failure>() == Some(&Failure::PermissionDenied)));
+            unchanged(&store, &(head + 1), 0);
+            Ok((committed.receipt, head + 1))
+        },
+    )
+    .await
+    .unwrap();
+    drop(state);
+
+    let reopened = Store::open_existing_for_tenant(
+        &directory.path().join("tenant.sqlite"),
+        "tenant-a",
+        Redactor::new(vec![]),
+        10_000,
+    )
+    .unwrap();
+    assert!(!reopened.supervision_state().unwrap().active);
+    let state = GatewayState::new(
+        Arc::new(reopened),
+        ROTATED_RUNNER.into(),
+        ROTATED_VIEWER.into(),
+        crate::policy::Policy::default(),
+        None,
+        Redactor::new(vec![]),
+    )
+    .with_kubernetes_session_control_recovery_policies(vec![("tenant-a".into(), policy.clone())])
+    .unwrap();
+    with_authenticated_control_recovery_for_test(
+        &state,
+        headers(ROTATED_RUNNER),
+        move |auth, store| {
+            let exact = KubernetesSessionControlRecoveryTargetV2::CloseBeforeEffect {
+                close: winning_close,
+            };
+            let KubernetesSessionControlRecoveryAuthorizationV2::ReceiptLookup(lookup) =
+                store.authorize_kubernetes_session_control_recovery(auth, &exact, &policy)?
+            else {
+                anyhow::bail!("closed reservation must yield receipt lookup only");
+            };
+            let replay =
+                store.lookup_kubernetes_session_control_recovery_receipt(auth, &lookup, &policy)?;
+            assert!(replay.replayed);
+            assert_eq!(replay.receipt, receipt);
+            assert_eq!(
+                replay.snapshot.state.state,
+                KubernetesSessionReservationStateV2::ClosedBeforeEffect
+            );
+            assert_eq!(replay.snapshot.state.revision, 2);
+            assert!(!replay.snapshot.state.quota_held);
+            assert_eq!(
+                replay.snapshot.state.effect_fence,
+                KubernetesSessionEffectFenceV2::NeverIssued { revision: 0 }
+            );
+            unchanged(&store, &head, 0);
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
 }
 
 #[test]

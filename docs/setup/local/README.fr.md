@@ -36,6 +36,13 @@ Avec Podman :
 "$AIGUARD_BIN" build --runtime podman --source .
 ```
 
+Le diagnostic Podman utilise la même cible que `run`. Sur Linux et FreeBSD,
+la valeur par défaut et `--runtime-endpoint local` désignent le moteur natif.
+Sur macOS, fournir aux deux commandes le socket `unix:///…` explicite de la
+VM Podman choisie. Le diagnostic lit les informations et la version du moteur
+avant toute préparation de session.
+[Options de connexion Podman](https://docs.podman.io/en/stable/markdown/podman.1.html#url-value)
+
 Le fonctionnement normal exige un moteur rootless. Pour utiliser délibérément Docker Desktop ou un daemon qui ne déclare pas ce mode, ajouter `--allow-rootful-runtime` à `doctor`, `build` et à chaque `run`. Cette option autorise explicitement un daemon qui ne déclare pas le mode rootless ; une VM ne démontre pas une isolation équivalente à rootless. Le [diagnostic runtime](../../../src/runtime.rs) lit ce mode déclaré, mais ce parcours ne produit actuellement aucun événement `runtime.security_downgrade`. Sa preuve d'audit durable dédiée reste à implémenter et qualifier. Ne pas fournir de socket moteur ni de mode privilégié aux conteneurs applicatifs.
 
 L'image worker par défaut permet les commandes ordinaires. Pour Codex ou Claude Code, construire les versions des clients décrites dans le [guide fournisseurs](../providers/README.fr.md) avant une session IA.
@@ -297,6 +304,8 @@ Le dashboard présente provenance des sessions, décisions, observations runtime
 Ouvrir un agent ou une sandbox pour consulter ses workers explicitement liés, puis un worker pour retrouver ses agents et sandboxes correspondants. Les liens utilisent les identifiants exacts de session ou de runtime reçus pour le tenant authentifié ; leur provenance est affichée et une session identique ne prouve ni exécution ni délégation. Le registre workers est paginé : parcourir ses pages avant de conclure qu'aucun enregistrement correspondant n'a été reçu. Une lecture échouée conserve un résultat périmé avec une action de reprise ; ce n'est pas un inventaire vide. Les liens rapprochent projections d'audit et registre, sans interroger le moteur ni découvrir des brokers distants.
 
 Dans la table et le détail workers du parcours technique viewer, **Autorité déclarée du lancement** désigne l’autorité du lancement déclaré ; **Autorité de la dernière inspection enregistrée** désigne celle de la dernière inspection enregistrée, avec son runtime et sa date d’observation. Une autorité absente ou `null` reste inconnue, sans repli du lancement vers une inspection. Les identifiants fournis doivent être des chaînes non vides, conservées exactement et limitées à 256 octets UTF-8 sans caractère de contrôle ; une valeur invalide produit une erreur de contrat. Ces champs n’établissent ni l’hôte ou broker associé, ni une disponibilité actuelle ou un inventaire complet. Voir le [contrat de la vue workers](../../ui.md#workers-quotas-et-allocations).
+
+Le détail Worker montre les empreintes de l’image et du plan de lancement. La dernière inspection enregistrée fournit l’identifiant exact du conteneur et ses propres empreintes d’image et de plan. Les champs absents s’affichent comme inconnus.
 
 Un refus 401/403 d'une lecture active ferme la session viewer et retire ses données, y compris les détails ouverts. Se reconnecter avec un credential autorisé ; des actualisations répétées ne rétablissent pas un credential refusé. Une erreur du service est affichée explicitement. Les vues workers, quotas et allocations conservent leurs dernières données réussies avec un avertissement de péremption, dans la même session et le même périmètre, jusqu'à une actualisation réussie.
 

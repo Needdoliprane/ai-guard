@@ -9,9 +9,14 @@ import { access, chmod, lstat, open, readdir, realpath, rename, writeFile } from
 import { createRequire } from "node:module";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { saveBrowserFailure } from "./browser_failure.mjs";
 
 process.umask(0o077);
-const FQN = "api::human_sources::tests::owned_browser_fixture::serve_owned_browser_fixture";
+const fixtureMode = process.env.AI_GUARD_OWNED_BROWSER_FIXTURE;
+const egressMode = fixtureMode === "run-egress-v1";
+const FQN = egressMode
+  ? "api::human_sources::tests::owned_browser_fixture::egress::serve_owned_egress_browser_fixture"
+  : "api::human_sources::tests::owned_browser_fixture::serve_owned_browser_fixture";
 const PRIVATE_CONTENT = "owned-browser-private-content-must-not-appear-in-metadata";
 const QUIET_MS = 33000; // Actual time, covers the existing30s dashboard cycle.
 const must = (condition, code) => { if (!condition) throw new Error(code); };
@@ -22,7 +27,12 @@ const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const shaFile = async (path) => { const hash = createHash("sha256"); for await (const bytes of createReadStream(path)) hash.update(bytes); return hash.digest("hex"); };
 const exists = async (path) => access(path).then(() => true, (error) => { if (error.code === "ENOENT") return false; throw error; });
 const below = (root, path) => { const part = relative(root, path); return part !== "" && part !== ".." && !part.startsWith("../") && !isAbsolute(part); };
+const uuid = (value) => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+const privateValues = [PRIVATE_CONTENT];
+if (egressMode) privateValues.push("owned-egress-fixture.invalid");
+const hasPrivate = (bytes) => privateValues.some((value) => bytes.includes(Buffer.from(value)));
 let stage = "preconditions", child, childDone, browser, context, page, ready, bearer = "", interrupted = false;
+let authenticatedDashboard = false;
 let interruptionSignal = null, terminalResult = null, terminalResultFd;
 let sequence = 0, fixtureStarted = false, fixtureExit = null, interactionDeadline = 0, artifactsAdmitted = false;
 const commands = [], requests = [], wires = [], pendingWires = [], captures = [], pageErrors = [], external = [];
@@ -38,7 +48,7 @@ async function bounded(promise, milliseconds, code) {
 }
 const redact = (text) => {
   let value = String(text).replace(/aigh1_[0-9a-f]+/gi, "[fixture bearer redacted]").replace(/Bearer\s+\S+/gi, "Bearer [redacted]");
-  if (bearer) value = value.split(bearer).join("[fixture bearer redacted]");
+  for (const secret of privateValues) value = value.split(secret).join("[fixture data redacted]");
   return value.slice(0, 4096);
 };
 async function normalizedDirectory(path, empty) {
@@ -82,15 +92,17 @@ async function waitJson(path, cap, deadline, allowInterrupted = false) {
 }
 async function save(name, value) {
   const bytes = Buffer.from(JSON.stringify(value, null, 2) + "\n");
-  must(!bearer || !bytes.includes(Buffer.from(bearer)), "SECRET_IN_ARTIFACT_REFUSED");
+  must(!hasPrivate(bytes), "SECRET_IN_ARTIFACT_REFUSED");
   await writeFile(join(artifacts, name), bytes, { mode: 0o600, flag: "wx" });
 }
 function publishTerminalResult() {
-  terminalResult.status = interrupted ? "FAIL_NOT_QUALIFIED" : !fixtureStarted ? "BLOCKED_NOT_RUN" : failure || cleanupFailure ? "FAIL_NOT_QUALIFIED" : "PASS_THREE_BOUNDED_OWNED_SCENARIOS";
+  terminalResult.status = interrupted ? "FAIL_NOT_QUALIFIED" : !fixtureStarted ? "BLOCKED_NOT_RUN"
+    : failure || cleanupFailure ? "FAIL_NOT_QUALIFIED"
+    : egressMode ? "PASS_OWNED_EGRESS_JOURNAL" : "PASS_THREE_BOUNDED_OWNED_SCENARIOS";
   terminalResult.interrupted = interrupted;
   terminalResult.interruption = interrupted ? { code: "INTERRUPTED", signal: interruptionSignal } : null;
   const bytes = Buffer.from(JSON.stringify(terminalResult, null, 2) + "\n");
-  must(!bearer || !bytes.includes(Buffer.from(bearer)), "SECRET_IN_ARTIFACT_REFUSED");
+  must(!hasPrivate(bytes), "SECRET_IN_ARTIFACT_REFUSED");
   // Retain only this exclusively created result FD. A signal handled during or
   // after publication rewrites it to failure without reopening a mutable path.
   terminalResultFd ??= openSync(join(artifacts, "RESULT.json"), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
@@ -122,18 +134,56 @@ async function command(action, cleanup = false) {
   const ackFile = await waitJson(join(control, "acks", name), 4096, deadline, cleanup);
   const ack = ackFile.value;
   must(object(ack), "ACK_OBJECT");
-  closed(ack, ["version", "sequence", "action", "command_sha256", "status", "own_sqlite_locked", ...(Object.hasOwn(ack, "code") ? ["code"] : [])], "ACK_CLOSED");
+  const fields = ["version", "sequence", "action", "command_sha256", "status"];
+  if (egressMode) {
+    if (action === "revoke_session_policy") fields.push("receipt");
+  } else {
+    fields.push("own_sqlite_locked");
+    if (Object.hasOwn(ack, "code")) fields.push("code");
+  }
+  closed(ack, fields, "ACK_CLOSED");
   must(ack.version === 1 && ack.sequence === sequence && ack.action === action && ack.command_sha256 === digest(bytes), "ACK_CORRELATION");
-  const status = { lock_own_sqlite: "locked", unlock_own_sqlite: "unlocked", stop: "stopping" }[action];
+  const status = { lock_own_sqlite: "locked", unlock_own_sqlite: "unlocked", revoke_session_policy: "revocation_requested", stop: "stopping" }[action];
+  must(ack.status === status, "ACK_REJECTED_OR_WRONG_STATE");
+  if (egressMode && action === "revoke_session_policy") policyReceipt(ack.receipt, "revoke_requested");
+  if (!egressMode) must(ack.own_sqlite_locked === (action === "lock_own_sqlite") && !Object.hasOwn(ack, "code"), "ACK_SQLITE_STATE");
   commands.push({ command: { version: 1, sequence, action }, command_sha256: digest(bytes), ack, ack_sha256: ackFile.sha256 });
-  must(ack.status === status && ack.own_sqlite_locked === (action === "lock_own_sqlite") && !Object.hasOwn(ack, "code"), "ACK_REJECTED_OR_WRONG_STATE");
   return ack;
 }
+function policyReceipt(value, state) {
+  closed(value, ["operation_id", "event_id", "event_seq", "event_hash", "received_at", "revision", "before_epoch", "after_epoch", "state"], "POLICY_RECEIPT_CLOSED");
+  must(uuid(value.operation_id) && value.event_id === value.operation_id
+    && typeof value.event_hash === "string" && /^[0-9a-f]{64}$/.test(value.event_hash)
+    && typeof value.received_at === "string" && Number.isFinite(Date.parse(value.received_at))
+    && [value.event_seq, value.revision, value.after_epoch].every((number) => Number.isSafeInteger(number) && number > 0)
+    && Number.isSafeInteger(value.before_epoch) && value.before_epoch >= 0
+    && value.after_epoch === value.before_epoch + 1 && value.state === state, "POLICY_RECEIPT_FIELDS");
+  return value;
+}
+function validateEgressReady(value) {
+  closed(value, ["version", "mode", "dashboard_url", "tenant_id", "resource", "owner", "reader", "tenant_policy", "session_policy", "budget_seconds", "commands", "acks", "command_limit"], "READY_CLOSED");
+  must(value.mode === "egress_journal" && value.tenant_id === "A", "READY_EGRESS_MODE");
+  closed(value.resource, ["kind", "resource_id"], "READY_RESOURCE");
+  must(value.resource.kind === "session" && typeof value.resource.resource_id === "string"
+    && /^[A-Za-z0-9_-]{1,128}$/.test(value.resource.resource_id), "READY_RESOURCE_SCOPE");
+  for (const [account, name] of [[value.owner, "Synthetic E1 Journal owner"], [value.reader, "Synthetic E1 Journal reader"]]) {
+    closed(account, ["display_name", "bearer"], "READY_ACCOUNT");
+    must(account.display_name === name && typeof account.bearer === "string" && /^aigh1_[0-9a-f]{64}$/.test(account.bearer), "READY_FIXTURE_BEARER");
+  }
+  must(value.owner.bearer !== value.reader.bearer, "READY_DISTINCT_BEARERS");
+  policyReceipt(value.tenant_policy, "active");
+  policyReceipt(value.session_policy, "active");
+  must(value.tenant_policy.event_seq < value.session_policy.event_seq && value.tenant_policy.event_id !== value.session_policy.event_id, "READY_POLICY_ORDER");
+  return value;
+}
 function validateReady(value) {
-  closed(value, ["version", "dashboard_url", "bearer_b", "tenant_id", "resource", "event_ids", "budget_seconds", "commands", "acks", "command_limit"], "READY_CLOSED");
-  must(value.version === 1 && value.tenant_id === "B" && value.budget_seconds === seconds && value.commands === "commands" && value.acks === "acks" && value.command_limit === 32, "READY_PROFILE");
+  must(object(value) && value.version === 1 && value.budget_seconds === seconds &&
+    value.commands === "commands" && value.acks === "acks" && value.command_limit === 32, "READY_PROFILE");
   const url = new URL(value.dashboard_url);
   must(url.protocol === "http:" && url.hostname === "127.0.0.1" && Number(url.port) > 0 && !url.username && !url.password && url.pathname === "/" && !url.search && !url.hash, "READY_LOOPBACK_URL");
+  if (egressMode) return validateEgressReady(value);
+  closed(value, ["version", "dashboard_url", "bearer_b", "tenant_id", "resource", "event_ids", "budget_seconds", "commands", "acks", "command_limit"], "READY_CLOSED");
+  must(value.tenant_id === "B", "READY_PROFILE");
   must(typeof value.bearer_b === "string" && /^aigh1_[0-9a-f]{64}$/.test(value.bearer_b), "READY_FIXTURE_BEARER");
   closed(value.resource, ["kind", "resource_id"], "READY_RESOURCE");
   must(value.resource.kind === "session" && value.resource.resource_id === "owned-browser-session-b", "READY_RESOURCE_SCOPE");
@@ -146,7 +196,6 @@ function requiredReceipt(body) {
   must(object(body), "PAGE_BODY_REQUIRED");
   const receipt = body.read_receipt;
   closed(receipt, ["request_id", "audit_event_id", "received_at"], "PAGE_RECEIPT_REQUIRED");
-  const uuid = (value) => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
   must(uuid(receipt.request_id) && uuid(receipt.audit_event_id) && typeof receipt.received_at === "string" && /^\d{4}-\d\d-\d\dT.+(?:Z|[+-]\d\d:\d\d)$/.test(receipt.received_at) && Number.isFinite(Date.parse(receipt.received_at)), "PAGE_RECEIPT_TYPES");
   return receipt;
 }
@@ -159,13 +208,13 @@ const journalRows = () => journal().locator("tbody tr");
 async function settle() { await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))); }
 async function noSecret() {
   const text = await page.locator("body").innerText();
-  must(!text.includes(bearer) && !text.includes(PRIVATE_CONTENT), "PRIVATE_MATERIAL_RENDERED");
+  must(!hasPrivate(Buffer.from(text)), "PRIVATE_MATERIAL_RENDERED");
 }
 async function captureResponse(response) {
   const path = new URL(response.url()).pathname;
   if (!path.startsWith("/api/v1/human/") || path === "/api/v1/human/stream") return;
   const bytes = await response.body(); must(bytes.length <= 262144, "WIRE_RESPONSE_SIZE");
-  must(!bytes.includes(Buffer.from(bearer)) && !bytes.includes(Buffer.from(PRIVATE_CONTENT)), "PRIVATE_MATERIAL_IN_WIRE");
+  must(!hasPrivate(bytes), "PRIVATE_MATERIAL_IN_WIRE");
   let body; try { body = JSON.parse(bytes.toString("utf8")); } catch { throw new Error("WIRE_RESPONSE_NOT_JSON"); }
   wires.push({ method: response.request().method(), path: new URL(response.url()).pathname + new URL(response.url()).search,
     status: response.status(), bytes: bytes.length, sha256: digest(bytes), body });
@@ -175,7 +224,7 @@ async function readByAction(pathname, status, action) {
   const response = page.waitForResponse((item) => new URL(item.url()).pathname === pathname && item.request().method() === "GET", { timeout: remaining() });
   response.catch(() => {}); // An action failure must not leave an unhandled waiter.
   await action(); const actual = await response; must(actual.status() === status, "UNEXPECTED_REAL_HTTP_STATUS");
-  const bytes = await actual.body(); must(bytes.length <= 262144 && !bytes.includes(Buffer.from(bearer)) && !bytes.includes(Buffer.from(PRIVATE_CONTENT)), "ACTION_WIRE_PRIVACY_OR_SIZE");
+  const bytes = await actual.body(); must(bytes.length <= 262144 && !hasPrivate(bytes), "ACTION_WIRE_PRIVACY_OR_SIZE");
   const body = JSON.parse(bytes.toString("utf8"));
   if (status === 200 && pageAction(pathname) !== null) requiredReceipt(body);
   return body;
@@ -211,6 +260,96 @@ async function refresh(status) {
   must(await page.evaluate(() => document.activeElement?.getAttribute("data-focus-key")) === "human-refresh", "REFRESH_FOCUS_LOST");
   return body;
 }
+
+async function openEgressAccount(account, allowed) {
+  await page.getByLabel("Type d’accès").selectOption("human");
+  await page.getByLabel("Credential personnel local").fill(account.bearer);
+  await button("Ouvrir mon espace").click();
+  await heading("Choisir un contexte.").waitFor({ timeout: remaining() });
+  const resources = await readByAction("/api/v1/human/resources", 200, () => button("Ouvrir personnel · A").click());
+  await heading("Ressources autorisées.").waitFor({ timeout: remaining() });
+  must(Array.isArray(resources.items), "EGRESS_RESOURCE_PAGE");
+  const grant = resources.items.find((item) => item.resource.resource_id === ready.resource.resource_id);
+  if (allowed) {
+    must(grant?.resource.kind === "session" && grant.permissions.metadata === true
+      && grant.permissions.content === false && grant.permissions.export === false, "EGRESS_METADATA_GRANT");
+    await resourcesVisible(resources);
+  } else {
+    must(!grant, "EGRESS_PRIVATE_SESSION_SHARED");
+  }
+  authenticatedDashboard = true;
+}
+
+async function egressSnapshot(body, entries) {
+  must(body.version === 1 && body.view === "metadata" && body.order === "newest_first"
+    && body.coverage === "authorized_selection" && body.stream_mode === "snapshot_only"
+    && body.live_cursor === null && body.next_cursor === null && body.has_more === false, "EGRESS_SNAPSHOT_PROFILE");
+  must(Array.isArray(body.items) && body.items.every((item) => object(item.metadata) && item.content === null), "EGRESS_METADATA_ONLY");
+  const policies = body.items.map((item) => item.metadata)
+    .filter((item) => item.kind.startsWith("control.egress_policy."));
+  must(same(policies.map((item) => item.id), entries.map(({ receipt }) => receipt.event_id)), "EGRESS_POLICY_SELECTION_ORDER");
+  const pageReceipt = requiredReceipt(body);
+  await journal().locator(".sv-source", { hasText: "Journal" }).getByText(pageReceipt.audit_event_id, { exact: false }).waitFor({ timeout: remaining() });
+  await journal().locator(".sv-source", { hasText: "Direct" }).getByText("Direct indisponible pour ce profil", { exact: true }).waitFor({ timeout: remaining() });
+  must(await journalRows().count() === body.items.length, "EGRESS_DOM_PAGE_COUNT");
+  for (const [index, { receipt, kind, label }] of entries.entries()) {
+    const meta = policies[index];
+    closed(meta, ["id", "timestamp", "received_at", "kind", "source", "provenance", "coverage", "resource", "decision"], "EGRESS_EVENT_METADATA_CLOSED");
+    must(meta.kind === kind && meta.source === "gateway" && meta.provenance === "observed"
+      && meta.coverage === "native" && meta.decision === null
+      && meta.resource?.kind === ready.resource.kind && meta.resource?.resource_id === ready.resource.resource_id
+      && Date.parse(meta.received_at) === Date.parse(receipt.received_at), "EGRESS_SQLITE_RECEIPT_TO_WIRE");
+    const row = journal().locator(`tbody tr[data-event-id="${receipt.event_id}"]`);
+    await row.waitFor({ timeout: remaining() });
+    await row.scrollIntoViewIfNeeded({ timeout: remaining() });
+    must(await row.locator('[data-label="Type"] strong').innerText() === label
+      && await row.locator('[data-label="Type"] code').innerText() === kind, "EGRESS_DOM_POLICY_LABEL");
+    await row.locator('[data-label="Décision"]').getByText("Aucune décision de connexion", { exact: true }).waitFor({ timeout: remaining() });
+    await row.locator('[data-label="Provenance"]').getByText("observed · couverture native du registre", { exact: true }).waitFor({ timeout: remaining() });
+    await row.locator('[data-label="Ressource"]').getByText(ready.resource.resource_id, { exact: true }).waitFor({ timeout: remaining() });
+    must((await row.locator('[data-label="Reçu le"] p').first().innerText()).trim().length > 0, "EGRESS_DOM_RECEIVED_TIME");
+  }
+  await noSecret();
+}
+
+async function runEgressJournal() {
+  const replacement = {
+    receipt: ready.session_policy, kind: "control.egress_policy.replaced", label: "Politique réseau remplacée",
+  };
+  stage = "egress_owner_snapshot";
+  await openEgressAccount(ready.owner, true);
+  const journalStart = requests.length;
+  let body = await readByAction("/api/v1/human/events/recent", 200, () => button("Journal").click());
+  await egressSnapshot(body, [replacement]);
+  must(countRecent(journalStart) === 1 && streamRequests(journalStart).length === 0, "EGRESS_INITIAL_JOURNAL_READ");
+
+  stage = "egress_revoke_and_refresh";
+  const { receipt } = await command("revoke_session_policy");
+  must(receipt.event_id !== replacement.receipt.event_id && receipt.event_seq > replacement.receipt.event_seq
+    && receipt.revision === replacement.receipt.revision && receipt.before_epoch === replacement.receipt.after_epoch, "EGRESS_REVOKE_SAME_POLICY");
+  must(await journal().locator(`tr[data-event-id="${receipt.event_id}"]`).count() === 0, "EGRESS_SNAPSHOT_READ_BEFORE_REFRESH");
+  body = await refresh(200);
+  await egressSnapshot(body, [
+    { receipt, kind: "control.egress_policy.revoke_requested", label: "Révocation de politique réseau demandée" },
+    replacement,
+  ]);
+  must(streamRequests(journalStart).length === 0, "EGRESS_UNEXPECTED_STREAM");
+
+  stage = "egress_reader_without_share";
+  await button("Se déconnecter").click();
+  authenticatedDashboard = false;
+  await page.getByLabel("Credential personnel local").waitFor({ timeout: remaining() });
+  await openEgressAccount(ready.reader, false);
+  const readerStart = requests.length;
+  body = await readByAction("/api/v1/human/events/recent", 200, () => button("Journal").click());
+  await egressSnapshot(body, []);
+  must(!body.items.some((item) => item.metadata.resource.resource_id === ready.resource.resource_id)
+    && await journal().locator(`tr[data-event-id="${receipt.event_id}"], tr[data-event-id="${replacement.receipt.event_id}"]`).count() === 0
+    && countRecent(readerStart) === 1 && streamRequests(readerStart).length === 0, "EGRESS_PRIVATE_POLICY_VISIBLE");
+  observed.policy = { replacement: replacement.receipt, revocation_requested: receipt, reader_access: "absent" };
+  must(pageErrors.length === 0 && external.length === 0, "PAGE_ERROR_OR_EXTERNAL_DESTINATION");
+}
+
 function opaqueRgb(value) {
   const match = /^(rgb|rgba)\(([^)]+)\)$/.exec(value);
   must(match !== null, "CURRENT_NAVIGATION_COLOR_SYNTAX_UNSUPPORTED");
@@ -284,67 +423,7 @@ async function screenshot(width, theme) {
   captures.push({ name, width, theme, geometry, sha256: await shaFile(join(artifacts, name)) });
 }
 
-try {
-  must(process.platform === "linux" && process.arch === "arm64" && process.getuid?.() === 1000 && process.getgid?.() === 1000, "ADMITTED_LINUX_ARM64_UID1000_REQUIRED");
-  must(process.env.AI_GUARD_OWNED_BROWSER_FIXTURE === "run-v1", "EXPLICIT_FIXTURE_GUARD_REQUIRED");
-  libtest = process.env.AI_GUARD_OWNED_BROWSER_LIBTEST; dist = process.env.AI_GUARD_OWNED_BROWSER_DIST;
-  control = process.env.AI_GUARD_OWNED_BROWSER_CONTROL; artifacts = process.env.AI_GUARD_OWNED_BROWSER_ARTIFACTS;
-  seconds = Number(process.env.AI_GUARD_OWNED_BROWSER_SECONDS ?? "180");
-  must(Number.isInteger(seconds) && seconds >= 180 && seconds <= 600, "DRIVER_REQUIRES_180_TO_600_SECONDS");
-  const temporary = await realpath(process.env.TMPDIR ?? "/tmp");
-  must(isAbsolute(libtest ?? "") && libtest === resolve(libtest), "ADMITTED_LIBTEST_PATH_REQUIRED");
-  const executable = await lstat(libtest); must(executable.isFile() && !executable.isSymbolicLink() && (executable.mode & 0o111) !== 0, "LIBTEST_REGULAR_EXECUTABLE");
-  must(isAbsolute(dist ?? "") && dist === resolve(dist) && await realpath(dist) === dist, "ADMITTED_DIST_REQUIRED");
-  const index = await lstat(join(dist, "index.html")); must(index.isFile() && !index.isSymbolicLink(), "REAL_DIST_INDEX_REQUIRED");
-  await normalizedDirectory(control, true); await normalizedDirectory(artifacts, true);
-  must(below(temporary, control) && below(temporary, artifacts) && control !== artifacts && !below(control, artifacts) && !below(artifacts, control), "FRESH_CONTROL_AND_ARTIFACTS_UNDER_TMPDIR");
-  must(dist !== control && !below(dist, control) && !below(control, dist) && dist !== artifacts && !below(dist, artifacts) && !below(artifacts, dist), "PRIVATE_DIRECTORIES_MUST_NOT_BE_SERVED");
-  artifactsAdmitted = true;
-  const require = createRequire(import.meta.url); let playwright;
-  try { playwright = require("playwright"); }
-  catch { const modules = process.env.CODEX_PRIMARY_RUNTIME_NODE_MODULES; must(isAbsolute(modules ?? ""), "PLAYWRIGHT_NOT_RESOLVABLE"); playwright = require(join(modules, "playwright")); }
-  observed.libtest_sha256 = await shaFile(libtest); observed.dist_index_sha256 = await shaFile(join(dist, "index.html")); observed.node = process.version;
-  stage = "fixture_start"; const started = Date.now(); interactionDeadline = started + seconds * 1000 - 25000;
-  child = spawn(libtest, ["--ignored", "--exact", FQN, "--nocapture", "--test-threads=1"], { stdio: ["ignore", "pipe", "pipe"],
-    env: { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: process.env.HOME ?? temporary, TMPDIR: temporary, RUST_BACKTRACE: "0",
-      AI_GUARD_OWNED_BROWSER_FIXTURE: "run-v1", AI_GUARD_OWNED_BROWSER_DIST: dist, AI_GUARD_OWNED_BROWSER_CONTROL: control, AI_GUARD_OWNED_BROWSER_SECONDS: String(seconds) } });
-  child.once("spawn", () => { fixtureStarted = true; });
-  childDone = new Promise((resolveDone) => {
-    child.once("error", () => { fixtureExit = { code: null, signal: null, spawn_error: true }; resolveDone(fixtureExit); });
-    child.once("close", (code, signal) => { fixtureExit ??= { code, signal }; resolveDone(fixtureExit); });
-  });
-  for (const name of ["stdout", "stderr"]) child[name].on("data", (bytes) => {
-    output[name].bytes += bytes.length; output[name].hash.update(bytes);
-    if (output[name].bytes > 1048576) { cleanupFailure ??= "FIXTURE_OUTPUT_LIMIT"; if (fixtureExit === null) child.kill("SIGTERM"); }
-  });
-  for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, () => {
-    interrupted = true; interruptionSignal ??= signal; process.exitCode = 1;
-    if (terminalResult) {
-      try { publishTerminalResult(); } catch { cleanupFailure ??= "INTERRUPTED_RESULT_PERSISTENCE_FAILED"; }
-      console.log("browser_owned_snapshot FAIL INTERRUPTED");
-    }
-    void page?.close().catch(() => {});
-  });
-  const readyFile = await waitJson(join(control, "READY.json"), 8192, Date.now() + remaining(90000));
-  ready = validateReady(readyFile.value); bearer = ready.bearer_b;
-  observed.ready_sha256 = readyFile.sha256; observed.ready_public = { ...ready }; delete observed.ready_public.bearer_b;
-  stage = "browser_start";
-  browser = await playwright.chromium.launch({ headless: true, chromiumSandbox: true, timeout: remaining(60000),
-    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined,
-    env: { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: process.env.HOME ?? temporary, TMPDIR: temporary } });
-  observed.browser_version = browser.version();
-  context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: "fr-FR", timezoneId: "UTC", colorScheme: "light" });
-  await context.route("**/*", async (route) => {
-    const url = new URL(route.request().url());
-    if (["about:", "data:", "blob:"].includes(url.protocol) || url.origin === new URL(ready.dashboard_url).origin) return route.continue();
-    external.push({ protocol: url.protocol, hostname: url.hostname }); await route.abort("blockedbyclient");
-  });
-  page = await context.newPage(); page.setDefaultTimeout(remaining()); page.setDefaultNavigationTimeout(remaining());
-  page.on("pageerror", (error) => pageErrors.push(redact(error.message)));
-  page.on("request", (request) => { const url = new URL(request.url()); if (url.pathname.startsWith("/api/v1/human/")) requests.push({ method: request.method(), path: url.pathname + url.search }); });
-  page.on("response", (response) => { const capture = captureResponse(response); capture.catch(() => {}); pendingWires.push(capture); });
-  stage = "login_and_snapshot";
-  await page.goto(ready.dashboard_url);
+async function runOwnedSnapshot() {
   await page.getByLabel("Type d’accès").selectOption("human");
   await page.getByLabel("Credential personnel local").fill(bearer); await button("Ouvrir mon espace").click();
   await heading("Choisir un contexte.").waitFor({ timeout: remaining() });
@@ -405,10 +484,93 @@ try {
   }), "CLOSED_OPERATION_OR_CONTENT_FALLBACK_ATTEMPTED");
   observed.scenario3 = "actual_sqlite_lock_503_withdrawal_restrictive_fact_and_explicit_200_recovery";
   must(pageErrors.length === 0 && external.length === 0, "PAGE_ERROR_OR_EXTERNAL_DESTINATION");
+}
+
+try {
+  must(fixtureMode === "run-v1" || egressMode, "EXPLICIT_FIXTURE_GUARD_REQUIRED");
+  const admittedLinux = process.platform === "linux" && process.arch === "arm64" && process.getuid?.() === 1000 && process.getgid?.() === 1000;
+  const admittedMac = egressMode && process.platform === "darwin" && process.arch === "arm64" && process.geteuid?.() > 0;
+  must(admittedLinux || admittedMac, "ADMITTED_OWNED_BROWSER_PLATFORM_REQUIRED");
+  libtest = process.env.AI_GUARD_OWNED_BROWSER_LIBTEST; dist = process.env.AI_GUARD_OWNED_BROWSER_DIST;
+  control = process.env.AI_GUARD_OWNED_BROWSER_CONTROL; artifacts = process.env.AI_GUARD_OWNED_BROWSER_ARTIFACTS;
+  seconds = Number(process.env.AI_GUARD_OWNED_BROWSER_SECONDS ?? "180");
+  must(Number.isInteger(seconds) && seconds >= 180 && seconds <= 600, "DRIVER_REQUIRES_180_TO_600_SECONDS");
+  const temporary = await realpath(process.env.TMPDIR ?? "/tmp");
+  must(isAbsolute(libtest ?? "") && libtest === resolve(libtest), "ADMITTED_LIBTEST_PATH_REQUIRED");
+  const executable = await lstat(libtest); must(executable.isFile() && !executable.isSymbolicLink() && (executable.mode & 0o111) !== 0, "LIBTEST_REGULAR_EXECUTABLE");
+  must(isAbsolute(dist ?? "") && dist === resolve(dist) && await realpath(dist) === dist, "ADMITTED_DIST_REQUIRED");
+  const index = await lstat(join(dist, "index.html")); must(index.isFile() && !index.isSymbolicLink(), "REAL_DIST_INDEX_REQUIRED");
+  await normalizedDirectory(control, true); await normalizedDirectory(artifacts, true);
+  must(below(temporary, control) && below(temporary, artifacts) && control !== artifacts && !below(control, artifacts) && !below(artifacts, control), "FRESH_CONTROL_AND_ARTIFACTS_UNDER_TMPDIR");
+  must(dist !== control && !below(dist, control) && !below(control, dist) && dist !== artifacts && !below(dist, artifacts) && !below(artifacts, dist), "PRIVATE_DIRECTORIES_MUST_NOT_BE_SERVED");
+  artifactsAdmitted = true;
+  const require = createRequire(import.meta.url); let playwright;
+  try { playwright = require("playwright"); }
+  catch { const modules = process.env.CODEX_PRIMARY_RUNTIME_NODE_MODULES; must(isAbsolute(modules ?? ""), "PLAYWRIGHT_NOT_RESOLVABLE"); playwright = require(join(modules, "playwright")); }
+  observed.libtest_sha256 = await shaFile(libtest); observed.dist_index_sha256 = await shaFile(join(dist, "index.html")); observed.node = process.version;
+  stage = "fixture_start"; const started = Date.now(); interactionDeadline = started + seconds * 1000 - 25000;
+  child = spawn(libtest, ["--ignored", "--exact", FQN, "--nocapture", "--test-threads=1"], { stdio: ["ignore", "pipe", "pipe"],
+    env: { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: process.env.HOME ?? temporary, TMPDIR: temporary, RUST_BACKTRACE: "0",
+      AI_GUARD_OWNED_BROWSER_FIXTURE: fixtureMode, AI_GUARD_OWNED_BROWSER_DIST: dist, AI_GUARD_OWNED_BROWSER_CONTROL: control, AI_GUARD_OWNED_BROWSER_SECONDS: String(seconds) } });
+  child.once("spawn", () => { fixtureStarted = true; });
+  childDone = new Promise((resolveDone) => {
+    child.once("error", () => { fixtureExit = { code: null, signal: null, spawn_error: true }; resolveDone(fixtureExit); });
+    child.once("close", (code, signal) => { fixtureExit ??= { code, signal }; resolveDone(fixtureExit); });
+  });
+  for (const name of ["stdout", "stderr"]) child[name].on("data", (bytes) => {
+    output[name].bytes += bytes.length; output[name].hash.update(bytes);
+    if (output[name].bytes > 1048576) { cleanupFailure ??= "FIXTURE_OUTPUT_LIMIT"; if (fixtureExit === null) child.kill("SIGTERM"); }
+  });
+  for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, () => {
+    interrupted = true; interruptionSignal ??= signal; process.exitCode = 1;
+    if (terminalResult) {
+      try { publishTerminalResult(); } catch { cleanupFailure ??= "INTERRUPTED_RESULT_PERSISTENCE_FAILED"; }
+      console.log("browser_owned_snapshot FAIL INTERRUPTED");
+    }
+    void page?.close().catch(() => {});
+  });
+  const readyFile = await waitJson(join(control, "READY.json"), 8192, Date.now() + remaining(90000));
+  ready = validateReady(readyFile.value);
+  observed.ready_sha256 = readyFile.sha256;
+  observed.ready_public = { ...ready };
+  if (egressMode) {
+    privateValues.push(ready.owner.bearer, ready.reader.bearer);
+    observed.ready_public.owner = { display_name: ready.owner.display_name };
+    observed.ready_public.reader = { display_name: ready.reader.display_name };
+  } else {
+    bearer = ready.bearer_b;
+    privateValues.push(bearer);
+    delete observed.ready_public.bearer_b;
+  }
+  stage = "browser_start";
+  browser = await playwright.chromium.launch({ headless: true, chromiumSandbox: true, timeout: remaining(60000),
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined,
+    ...(egressMode ? { args: ["--no-proxy-server", "--host-resolver-rules=EXCLUDE 127.0.0.1, MAP * ~NOTFOUND"] } : {}),
+    env: { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: process.env.HOME ?? temporary, TMPDIR: temporary } });
+  observed.browser_version = browser.version();
+  context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: "fr-FR", timezoneId: "UTC", colorScheme: "light",
+    ...(egressMode ? { serviceWorkers: "block" } : {}) });
+  await context.route("**/*", async (route) => {
+    const url = new URL(route.request().url());
+    if (["about:", "data:", "blob:"].includes(url.protocol) || url.origin === new URL(ready.dashboard_url).origin) return route.continue();
+    external.push({ protocol: url.protocol, hostname: url.hostname }); await route.abort("blockedbyclient");
+  });
+  page = await context.newPage(); page.setDefaultTimeout(remaining()); page.setDefaultNavigationTimeout(remaining());
+  page.on("pageerror", (error) => pageErrors.push(redact(error.message)));
+  page.on("request", (request) => { const url = new URL(request.url()); if (url.pathname.startsWith("/api/v1/human/")) requests.push({ method: request.method(), path: url.pathname + url.search }); });
+  page.on("response", (response) => { const capture = captureResponse(response); capture.catch(() => {}); pendingWires.push(capture); });
+  stage = "login_and_snapshot";
+  await page.goto(ready.dashboard_url);
+  if (egressMode) await runEgressJournal();
+  else await runOwnedSnapshot();
 } catch (error) { failure = { stage, code: redact(error.message), name: error.name }; }
 finally {
   // No global process discovery, container command or cleanup by name. Control
   // files are retained for Root; consumed commands and evidence are never erased.
+  if (egressMode && failure && authenticatedDashboard) {
+    const capture = await saveBrowserFailure(page, { directory: artifacts, secrets: privateValues });
+    if (capture) captures.push(capture);
+  }
   try { if (browser) await bounded(browser.close({ reason: "owned snapshot test finished" }), 15000, "BROWSER_CLOSE_DEADLINE"); }
   catch { cleanupFailure = "BROWSER_CLOSE_NOT_ESTABLISHED"; }
   if (fixtureStarted && fixtureExit === null) {
@@ -417,11 +579,12 @@ finally {
   if (fixtureStarted) {
     try {
       const ending = await waitJson(join(control, "CLOSED.json"), 4096, Date.now() + 20000, true); closedFixture = ending.value;
-      closed(closedFixture, ["version", "completed", "commands_processed", "sqlite_lock_released", "servers_and_owner_drained", "receipts_exported", "stop_reason"], "CLOSED_SHAPE");
-      must(closedFixture.version === 1 && closedFixture.completed === true && closedFixture.commands_processed === sequence && closedFixture.sqlite_lock_released === true && closedFixture.servers_and_owner_drained === true && closedFixture.receipts_exported === true && closedFixture.stop_reason === "requested", "FIXTURE_CLOSURE_NOT_ESTABLISHED");
+      const extraField = egressMode ? "policy_receipts_verified" : "sqlite_lock_released";
+      closed(closedFixture, ["version", "completed", "commands_processed", extraField, "servers_and_owner_drained", "receipts_exported", "stop_reason"], "CLOSED_SHAPE");
+      must(closedFixture.version === 1 && closedFixture.completed === true && closedFixture.commands_processed === sequence && closedFixture[extraField] === true && closedFixture.servers_and_owner_drained === true && closedFixture.receipts_exported === true && closedFixture.stop_reason === "requested", "FIXTURE_CLOSURE_NOT_ESTABLISHED");
       const exported = await waitJson(join(control, "RECEIPTS.json"), 524288, Date.now() + 10000, true); receipts = exported.value;
       closed(receipts, ["version", "tenant_id", "complete", "limit", "records"], "RECEIPTS_SHAPE");
-      must(receipts.version === 1 && receipts.tenant_id === "B" && receipts.complete === true && receipts.limit === 1000 && Array.isArray(receipts.records) && receipts.records.length <= 1000, "RECEIPTS_INCOMPLETE");
+      must(receipts.version === 1 && receipts.tenant_id === (egressMode ? "A" : "B") && receipts.complete === true && receipts.limit === 1000 && Array.isArray(receipts.records) && receipts.records.length <= 1000, "RECEIPTS_INCOMPLETE");
       const byId = new Map();
       for (const record of receipts.records) { closed(record, ["audit_event_id", "request_id", "action", "received_at"], "RECEIPT_RECORD"); must(["identity", "resources", "events"].includes(record.action) && typeof record.audit_event_id === "string" && typeof record.request_id === "string" && typeof record.received_at === "string", "RECEIPT_RECORD_TYPES"); byId.set(record.audit_event_id, record); }
       must(byId.size === receipts.records.length, "DUPLICATE_DURABLE_RECEIPT_ID");
@@ -459,5 +622,7 @@ finally {
   }
 }
 // No source path, bearer, response body or child diagnostic is printed.
-console.log(interrupted ? "browser_owned_snapshot FAIL INTERRUPTED" : !fixtureStarted ? "browser_owned_snapshot BLOCKED NOT_RUN" : failure || cleanupFailure ? "browser_owned_snapshot FAIL; private result retained" : "browser_owned_snapshot PASS scenarios=3");
+console.log(interrupted ? "browser_owned_snapshot FAIL INTERRUPTED" : !fixtureStarted ? "browser_owned_snapshot BLOCKED NOT_RUN"
+  : failure || cleanupFailure ? "browser_owned_snapshot FAIL; private result retained"
+  : egressMode ? "browser_owned_snapshot PASS scenario=egress_journal" : "browser_owned_snapshot PASS scenarios=3");
 process.exitCode = interrupted ? 1 : !fixtureStarted ? 2 : failure || cleanupFailure ? 1 : 0;

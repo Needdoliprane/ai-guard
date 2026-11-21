@@ -4,7 +4,8 @@ use agentsandbox::{
     control_fs::{Directory, absolute_path},
     gateway_server::GatewayServer,
     jev::{
-        JevBackend, JevClient, JevTrust, RuleCatalog, SelectionSource,
+        DEFAULT_JEV_TIMEOUT_SECONDS, JevBackend, JevClient, JevTrust,
+        MAX_LOCAL_JEV_TIMEOUT_SECONDS, RuleCatalog, SelectionSource,
         validate_credential_separation, validate_transport_configuration,
     },
     operations::{self, OperatorCommand},
@@ -12,7 +13,7 @@ use agentsandbox::{
     redaction::Redactor,
 };
 use anyhow::{Context, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, parser::ValueSource};
 use futures_util::FutureExt;
 use sha2::{Digest, Sha256};
 use std::{
@@ -220,6 +221,9 @@ struct GatewayArgs {
     jev_local_url: Option<String>,
     #[arg(long)]
     jev_local_model: Option<String>,
+    /// Total request deadline in seconds for local-openai only (default 5).
+    #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..=MAX_LOCAL_JEV_TIMEOUT_SECONDS))]
+    jev_local_timeout_seconds: Option<u64>,
     /// Optional local inference credential, separate from every control role.
     #[arg(long)]
     jev_local_key_file: Option<PathBuf>,
@@ -252,6 +256,7 @@ fn select_jev(args: &GatewayArgs, environment: Option<&str>) -> Result<SelectedJ
         || args.jev_min_confidence.is_some();
     let local = args.jev_local_url.is_some()
         || args.jev_local_model.is_some()
+        || args.jev_local_timeout_seconds.is_some()
         || args.jev_local_key_file.is_some();
     let selected = match selection {
         Some(("typesafe", source)) => SelectedJev::TypeSafe(source),
@@ -386,6 +391,13 @@ struct ModelIngressArgs {
     tls_cert_file: PathBuf,
     #[arg(long)]
     tls_key_file: PathBuf,
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        default_value_t = agentsandbox::model_ingress::DEFAULT_MODEL_INGRESS_TIMEOUT_SECONDS,
+        value_parser = clap::value_parser!(u64).range(1..=MAX_LOCAL_JEV_TIMEOUT_SECONDS)
+    )]
+    exchange_timeout_seconds: u64,
 }
 fn read_token(path: &Path) -> Result<String> {
     let mut options = std::fs::OpenOptions::new();
@@ -695,7 +707,17 @@ fn main() -> Result<()> {
 
 #[tokio::main]
 async fn run() -> Result<()> {
-    match Cli::parse().command {
+    let matches = Cli::command().get_matches();
+    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    if let Command::Operator(OperatorCommand::Run(command)) = &mut cli.command {
+        command.set_explicit_timeout(
+            matches
+                .subcommand_matches("run")
+                .and_then(|run| run.value_source("timeout"))
+                == Some(ValueSource::CommandLine),
+        );
+    }
+    match cli.command {
         Command::Version { json } => {
             let args = if json {
                 vec!["version".into(), "--json".into()]
@@ -824,7 +846,7 @@ async fn run() -> Result<()> {
                         validate_credential_separation(key, secrets.iter().map(String::as_str))?;
                         secrets.push(key.clone());
                     }
-                    Some(JevBackend::local_openai_with_trust(
+                    Some(JevBackend::local_openai_with_trust_and_timeout(
                         args.jev_local_url
                             .as_deref()
                             .context("Local Jev URL required")?,
@@ -835,6 +857,8 @@ async fn run() -> Result<()> {
                         args.jev_allow_local_http,
                         source,
                         jev_trust.clone(),
+                        args.jev_local_timeout_seconds
+                            .unwrap_or(DEFAULT_JEV_TIMEOUT_SECONDS),
                     )?)
                 }
             };
@@ -1269,12 +1293,15 @@ async fn run() -> Result<()> {
                 &args.tls_cert_file,
                 &args.tls_key_file,
             )?;
-            let router = agentsandbox::model_ingress::model_ingress_router()?;
+            let router = agentsandbox::model_ingress::model_ingress_router_with_timeout(
+                args.exchange_timeout_seconds,
+            )?;
             let shutdown = shutdown_signal()?;
             let listener = tokio::net::TcpListener::bind(args.listen).await?;
             eprintln!(
-                "Model ingress {} — TLS; TCP32, handshakes8/2s, idle30s, drain5s; fixed model upstream, inference1, health4, body65536/2s, exchange5s",
-                listener.local_addr()?
+                "Model ingress {} — TLS; TCP32, handshakes8/2s, idle30s, drain5s; fixed model upstream, inference1, health4, body65536/2s, exchange{}s",
+                listener.local_addr()?,
+                args.exchange_timeout_seconds
             );
             agentsandbox::tls::serve(listener, router, identity, shutdown).await?;
         }
@@ -1588,6 +1615,55 @@ mod tests {
     }
 
     #[test]
+    fn local_jev_timeout_is_bounded_and_exclusive_to_local_backend() {
+        let local = [
+            "--jev-backend",
+            "local-openai",
+            "--jev-local-url",
+            "http://127.0.0.1:18090/v1/chat/completions",
+            "--jev-local-model",
+            "fixture-local-model",
+        ];
+        let default = gateway_arguments(&local);
+        assert_eq!(default.jev_local_timeout_seconds, None);
+        for (value, seconds) in [("1", 1), ("12", 12)] {
+            let mut arguments = local.to_vec();
+            arguments.extend(["--jev-local-timeout-seconds", value]);
+            let args = gateway_arguments(&arguments);
+            assert_eq!(args.jev_local_timeout_seconds, Some(seconds));
+            assert!(matches!(select_jev(&args, None), Ok(SelectedJev::Local(_))));
+        }
+        for invalid in ["0", "13"] {
+            assert!(
+                Cli::try_parse_from(
+                    ["agentsandbox", "gateway"]
+                        .into_iter()
+                        .chain(local)
+                        .chain(["--jev-local-timeout-seconds", invalid]),
+                )
+                .is_err()
+            );
+        }
+        for mut arguments in [
+            vec![],
+            vec!["--jev-backend", "rust-rules"],
+            vec![
+                "--jev-backend",
+                "typesafe",
+                "--jev-url",
+                "https://typesafe.invalid/v1/systemone",
+                "--jev-key-file",
+                "/nonexistent-fixture/key",
+                "--jev-model",
+                "fixture-typesafe-model",
+            ],
+        ] {
+            arguments.extend(["--jev-local-timeout-seconds", "12"]);
+            assert!(select_jev(&gateway_arguments(&arguments), None).is_err());
+        }
+    }
+
+    #[test]
     fn jev_transport_preflight_and_model_tls_cli_are_explicit() {
         for args in [
             vec![
@@ -1616,19 +1692,34 @@ mod tests {
                 .is::<agentsandbox::jev::JevError>()
         );
         assert!(Cli::try_parse_from(["agentsandbox", "model-ingress"]).is_err());
+        let ingress = [
+            "agentsandbox",
+            "model-ingress",
+            "--tls-cert-file",
+            "/chain",
+            "--tls-key-file",
+            "/key",
+        ];
         assert!(matches!(
-            Cli::try_parse_from([
-                "agentsandbox",
-                "model-ingress",
-                "--tls-cert-file",
-                "/chain",
-                "--tls-key-file",
-                "/key"
-            ])
-            .unwrap()
-            .command,
-            Command::ModelIngress(_)
+            Cli::try_parse_from(ingress).unwrap().command,
+            Command::ModelIngress(args) if args.exchange_timeout_seconds == 5
         ));
+        assert!(matches!(
+            Cli::try_parse_from(ingress.into_iter().chain(["--exchange-timeout-seconds", "8"]))
+                .unwrap()
+                .command,
+            Command::ModelIngress(args) if args.exchange_timeout_seconds == 8
+        ));
+        for invalid in ["0", "13"] {
+            assert!(
+                Cli::try_parse_from(
+                    ingress
+                        .into_iter()
+                        .chain(["--exchange-timeout-seconds", invalid])
+                )
+                .is_err()
+            );
+        }
         assert!(
             Cli::try_parse_from([
                 "agentsandbox",

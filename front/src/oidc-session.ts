@@ -33,10 +33,17 @@ export class OidcSessionError extends Error {
     this.name = "OidcSessionError"; this.code = Object.hasOwn(errors, code) ? code : "identity_unavailable";
   }
 }
+type CorrelationStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+const CORRELATION_KEY = "aiguard.oidc.correlation_token";
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 const text = (value: unknown, max: number): value is string => typeof value === "string" && value.length > 0 && value.length <= max && !/[\u0000-\u0020\u007f-\u009f]/.test(value);
+const hexDigest = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 const uuid = (value: unknown) => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
 const keys = (value: Record<string, unknown>, allowed: string[]) => Object.keys(value).every((key) => allowed.includes(key));
+function defaultStorage(): CorrelationStorage | null {
+  try { return typeof globalThis.sessionStorage !== "undefined" ? globalThis.sessionStorage : null; }
+  catch { return null; }
+}
 function tokenDelivery(value: unknown): Tokens {
   if (!object(value) || !keys(value, ["version", "authentication_id", "generation", "token_type", "access_token", "refresh_token", "expires_at", "expires_in_seconds"]) ||
     value.version !== 1 || !uuid(value.authentication_id) || !Number.isInteger(value.generation) || Number(value.generation) < 1 || Number(value.generation) > 4294967295 ||
@@ -51,6 +58,7 @@ function tokenDelivery(value: unknown): Tokens {
 export class OidcSession {
   #fetch: typeof fetch;
   #events: SessionEvents;
+  #storage: CorrelationStorage | null;
   #tokens: Tokens | null = null;
   #closed = false;
   #generation = 0;
@@ -58,7 +66,13 @@ export class OidcSession {
   #renewal: Promise<void> | null = null;
   #timer: ReturnType<typeof setTimeout> | undefined;
   #status: OidcStatus | null = null;
-  constructor(fetcher: typeof fetch = fetch, events: SessionEvents = {}) { this.#fetch = fetcher; this.#events = events; }
+  constructor(
+    fetcher: typeof fetch = fetch,
+    events: SessionEvents = {},
+    storage: CorrelationStorage | null = defaultStorage(),
+  ) {
+    this.#fetch = fetcher; this.#events = events; this.#storage = storage;
+  }
   get accessToken(): string | null { return this.#tokens?.access_token ?? null; }
   async #request(path: string, method: "GET" | "POST", body?: object, bearer?: string, logout = false): Promise<unknown> {
     const timeout = new AbortController(); const timer = setTimeout(() => timeout.abort(), 8000);
@@ -96,19 +110,43 @@ export class OidcSession {
   }
   async start(): Promise<string> {
     if (this.#closed) throw new OidcSessionError("session_closed");
-    const status = this.#status ?? await this.status(); if (!status.enabled) throw new OidcSessionError("oidc_not_configured");
+    const status = this.#status ?? await this.status();
+    if (this.#closed) throw new OidcSessionError("session_closed");
+    if (!status.enabled) throw new OidcSessionError("oidc_not_configured");
     const value = await this.#request("start", "POST", { version: 1 });
-    if (!object(value) || value.version !== 1 || !keys(value, ["version", "authorization_url"]) || !text(value.authorization_url, 8192)) throw new OidcSessionError("invalid_request");
+    if (this.#closed) throw new OidcSessionError("session_closed");
+    if (
+      !object(value) ||
+      value.version !== 1 ||
+      !keys(value, ["version", "authorization_url", "correlation_token"]) ||
+      !text(value.authorization_url, 8192) ||
+      !hexDigest(value.correlation_token)
+    ) throw new OidcSessionError("invalid_request");
     let url: URL; let issuer: URL;
     try { url = new URL(value.authorization_url); issuer = new URL(status.issuer!); } catch { throw new OidcSessionError("invalid_request"); }
     if ((url.protocol !== "https:" && !(url.protocol === "http:" && issuer.protocol === "http:" && url.origin === issuer.origin)) || url.username || url.password || url.hash) throw new OidcSessionError("invalid_request");
+    if (!this.#storage) throw new OidcSessionError("identity_unavailable");
+    try { this.#storage.setItem(CORRELATION_KEY, value.correlation_token); }
+    catch { throw new OidcSessionError("identity_unavailable"); }
     return value.authorization_url;
   }
   async redeem(): Promise<void> {
     if (this.#closed || this.#tokens) throw new OidcSessionError("session_closed");
     const generation = this.#generation;
-    try { const tokens = tokenDelivery(await this.#request("tokens", "POST", { version: 1 }));
-      if (this.#closed || generation !== this.#generation || tokens.generation !== 1) throw new OidcSessionError("session_closed"); this.#install(tokens);
+    try {
+      let correlationToken: string | null = null;
+      try { correlationToken = this.#storage?.getItem(CORRELATION_KEY) ?? null; }
+      catch { correlationToken = null; }
+      finally {
+        try { this.#storage?.removeItem(CORRELATION_KEY); }
+        catch { correlationToken = null; }
+      }
+      if (!hexDigest(correlationToken)) throw new OidcSessionError("authentication_required");
+      const tokens = tokenDelivery(
+        await this.#request("tokens", "POST", { version: 1, correlation_token: correlationToken }),
+      );
+      if (this.#closed || generation !== this.#generation || tokens.generation !== 1) throw new OidcSessionError("session_closed");
+      this.#install(tokens);
     } catch (error) { this.close(error instanceof OidcSessionError ? error.message : undefined); throw error; }
   }
   #install(tokens: Tokens): void {
@@ -145,6 +183,9 @@ export class OidcSession {
     return value as unknown as OidcLogout;
   }
   close(message = errors.session_closed): void {
-    if (this.#closed) return; this.#closed = true; this.#tokens = null; this.#generation++; clearTimeout(this.#timer); this.#scope.abort(); this.#events.onClose?.(message!);
+    if (this.#closed) return;
+    this.#closed = true; this.#tokens = null; this.#generation++; clearTimeout(this.#timer); this.#scope.abort();
+    try { this.#storage?.removeItem(CORRELATION_KEY); } catch {}
+    this.#events.onClose?.(message!);
   }
 }

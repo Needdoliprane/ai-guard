@@ -25,6 +25,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
 };
+use tower::ServiceExt;
 use uuid::Uuid;
 
 fn command() -> Command {
@@ -1278,6 +1279,89 @@ async fn schema_four_human_get_requires_explicit_migration_without_read_audit() 
 }
 
 #[tokio::test]
+async fn exhausted_read_audit_budget_preserves_operator_diagnostic_in_cli() {
+    let files = support::private_tempdir();
+    let data = files.path().join("audit.sqlite");
+    let reader = files.path().join("reader");
+    initialized_for_http(&data, "tenant-a");
+    success(
+        &provision_command(&data, "tenant-a", &reader, "Budgeted reader")
+            .output()
+            .unwrap(),
+    );
+    let bearer = secret(&reader);
+    let credential = reader.join("credential");
+    let audit = store(&data, "tenant-a");
+    let mut capacity = audit.capacity_policy().clone();
+    capacity.human_principal.events = 2;
+    let audit = Arc::new(audit.with_capacity_policy(capacity).unwrap());
+    let baseline = audit.head().unwrap();
+    let router = gateway_router(GatewayState::new(
+        audit.clone(),
+        "budget-cli-fixture-runner".into(),
+        "budget-cli-fixture-viewer".into(),
+        Policy::default(),
+        None,
+        Redactor::new(vec![]),
+    ));
+    let requests = Arc::new(AtomicUsize::new(0));
+    let observed = requests.clone();
+    let counted = router.clone().layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let observed = observed.clone();
+            async move {
+                observed.fetch_add(1, Ordering::SeqCst);
+                next.run(request).await
+            }
+        },
+    ));
+    let (origin, server) = serve(counted).await;
+    let selected = context(&origin, &credential).await;
+    let args = ["--context", selected.as_str(), "--limit", "1"];
+    let admitted = read(&origin, &credential, "resources", &args).await;
+    no_secret(&admitted, &bearer);
+    let page = json_output(&admitted);
+    assert_eq!(page["context_id"], selected);
+    assert_eq!(page["coverage"], "authorized_selection");
+    assert!(page["read_receipt"]["audit_event_id"].is_string());
+    assert_eq!(audit.head().unwrap(), baseline + 2);
+
+    let actual = router
+        .oneshot(
+            axum::http::Request::get("/api/v1/human/resources?limit=1")
+                .header("authorization", format!("Bearer {bearer}"))
+                .header("x-aiguard-context", &selected)
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(actual.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+    let body = axum::body::to_bytes(actual.into_body(), 4096)
+        .await
+        .unwrap();
+    let envelope: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(envelope["error"]["code"], "audit_read_budget_exhausted");
+    assert_eq!(envelope["error"]["retry_action"], "contact_operator");
+
+    let refused = read(&origin, &credential, "resources", &args).await;
+    no_secret(&refused, &bearer);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(refused.stdout.is_empty());
+    assert_eq!(requests.load(Ordering::SeqCst), 3);
+    assert_eq!(audit.head().unwrap(), baseline + 2);
+    assert!(audit.integrity().unwrap().valid);
+    let diagnostic = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        diagnostic.contains("HTTP 429, audit_read_budget_exhausted, retry_action=contact_operator"),
+        "CLI must preserve the expected public audit-budget diagnostic"
+    );
+    assert!(diagnostic.contains("preserve the existing audit and contact the operator"));
+    assert!(!diagnostic.contains(envelope["error"]["message"].as_str().unwrap()));
+    server.abort();
+}
+
+#[tokio::test]
 async fn migration_error_preserves_public_code_and_local_guidance_without_hostile_body() {
     let fixture = HumanFixture::new(0);
     let bearer = std::fs::read_to_string(&fixture.credential_a1).unwrap();
@@ -1289,9 +1373,15 @@ async fn migration_error_preserves_public_code_and_local_guidance_without_hostil
         let echoed = echoed.clone();
         let observed = observed.clone();
         async move {
-            let code = if observed.fetch_add(1,Ordering::SeqCst) == 0 { "migration_required" } else { "unsupported_future_code" };
-            (axum::http::StatusCode::SERVICE_UNAVAILABLE,[("cache-control","no-store")],axum::Json(json!({"error":{
-                "code":code,"retry_action":"contact_operator", "message":format!("hostile-message-marker {echoed} https://example.invalid/private?bearer={echoed}")
+            use axum::http::StatusCode;
+            let (status, code, action) = match observed.fetch_add(1, Ordering::SeqCst) {
+                0 => (StatusCode::SERVICE_UNAVAILABLE, "migration_required", "contact_operator"),
+                1 => (StatusCode::SERVICE_UNAVAILABLE, "unsupported_future_code", "contact_operator"),
+                2 => (StatusCode::SERVICE_UNAVAILABLE, "audit_read_budget_exhausted", "contact_operator"),
+                _ => (StatusCode::TOO_MANY_REQUESTS, "audit_read_budget_exhausted", "retry"),
+            };
+            (status,[("cache-control","no-store")],axum::Json(json!({"error":{
+                "code":code,"retry_action":action, "message":format!("hostile-message-marker {echoed} https://example.invalid/private?bearer={echoed}")
             }})))
         }
     }));
@@ -1309,16 +1399,23 @@ async fn migration_error_preserves_public_code_and_local_guidance_without_hostil
             && !stderr.contains("example.invalid")
             && !stderr.contains("protocol_error")
     );
-    let unknown = read(&origin, &fixture.credential_a1, "identity", &[]).await;
-    failure(&unknown);
-    no_secret(&unknown, &bearer);
-    let stderr = String::from_utf8_lossy(&unknown.stderr);
-    assert!(stderr.contains("protocol_error"));
-    assert!(
-        !stderr.contains("unsupported_future_code")
-            && !stderr.contains("hostile-message-marker")
-            && !stderr.contains("example.invalid")
-    );
+    for status in [503, 503, 429] {
+        let unknown = read(&origin, &fixture.credential_a1, "identity", &[]).await;
+        failure(&unknown);
+        no_secret(&unknown, &bearer);
+        assert!(unknown.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&unknown.stderr);
+        assert!(stderr.contains(&format!(
+            "HTTP {status}, protocol_error, retry_action=contact_operator"
+        )));
+        assert!(
+            !stderr.contains("unsupported_future_code")
+                && !stderr.contains("audit_read_budget_exhausted")
+                && !stderr.contains("hostile-message-marker")
+                && !stderr.contains("example.invalid")
+        );
+    }
+    assert_eq!(requests.load(Ordering::SeqCst), 4);
     server.abort();
 }
 

@@ -1,5 +1,6 @@
 //! Trusted service integration. IPC authentication is distinct from Unix UID.
 mod client;
+mod client_selection;
 #[cfg(all(test, unix))]
 #[path = "gateway_trust_tests.rs"]
 mod gateway_trust_tests;
@@ -11,14 +12,18 @@ mod recovery_inventory;
 #[cfg(all(test, unix))]
 #[path = "relay_gateway_trust_tests.rs"]
 mod relay_gateway_trust_tests;
+mod result;
 mod retirement_startup;
 mod server;
 mod targets;
-pub use client::{encode_submit, request};
+mod unit_plan;
+pub use client::{BrokerClient, encode_submit, request};
+pub use client_selection::BrokerClientSelection;
 pub use preclaim::{AbandonBeforeClaimV1, PreclaimStateV1};
 pub use profile::{RequestedExecutionV1, SubmitV1};
 pub use server::{ServiceShutdown, serve_selected_owned};
 pub use server::{serve, serve_recovery, serve_selected};
+pub use unit_plan::{ServicePlatform, plan_service_unit};
 
 /// Explicit operator selection. Existing files never promote a legacy service
 /// into Full3, and recovery never requests admission authority.

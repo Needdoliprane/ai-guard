@@ -100,7 +100,7 @@ impl RecoveryFixture {
             handle.block_on(Fixture::new_with_writer_timeout(Duration::from_secs(60)))
         });
         eprintln!("cancelled_recovery_fixture phase=base_ready");
-        let peer = handle.block_on(NativePeer::empty(&base));
+        let peer = handle.block_on(NativePeer::for_admission(&base));
         eprintln!("cancelled_recovery_fixture phase=peer_ready");
         let program = engine_program(base.root.path());
         eprintln!("cancelled_recovery_fixture phase=engine_program_ready");
@@ -404,28 +404,32 @@ impl RecoveryFixture {
         &self,
         driver: &tokio::runtime::Runtime,
     ) -> std::result::Result<(), BatchFailure> {
-        self.run_with_handle(driver.handle())
+        driver.block_on(self.run_fresh())
     }
 
-    /// Drive the same fresh async phases through an existing runtime handle.
-    /// Its owner remains alive so fixture gateway tasks keep their I/O driver.
+    /// The caller must keep the runtime driving I/O while this blocking task runs.
+    /// The cold seed does so by awaiting its blocking task on the same runtime.
     pub(super) fn run_with_handle(
         &self,
         driver: &tokio::runtime::Handle,
     ) -> std::result::Result<(), BatchFailure> {
+        driver.block_on(self.run_fresh())
+    }
+
+    async fn run_fresh(&self) -> std::result::Result<(), BatchFailure> {
         // A new authenticated context and Execution; no old execution survives.
-        let context = driver
-            .block_on(AuthenticatedBatchContext::for_executor_test(
-                self.base.client.clone(),
-                self.base.scope.clone(),
-                self.base.config.clone(),
-                self.runtime.clone(),
-            ))
-            .map_err(|_| BatchFailure)?;
+        let context = AuthenticatedBatchContext::for_executor_test(
+            self.base.client.clone(),
+            self.base.scope.clone(),
+            self.base.config.clone(),
+            self.runtime.clone(),
+        )
+        .await
+        .map_err(|_| BatchFailure)?;
         eprintln!("cancelled_recovery_run phase=context_ready");
         eprintln!("cancelled_recovery_run phase=executor_enter");
-        let result = driver
-            .block_on(self.executor.run(self.operation, &context))
+        let result = Box::pin(self.executor.run(self.operation, &context))
+            .await
             .map(|_| ());
         eprintln!("cancelled_recovery_run phase=executor_complete");
         result
@@ -817,6 +821,7 @@ async fn terminal_pending_seed_with_scope(
         let first = fixture.run_with_handle(&driver);
         assert!(first.is_err(), "the committed terminal response is cut");
         assert!(!fixture.transition_response_cut_pending());
+        eprintln!("cold_recovery_seed phase=cut_return_verified");
         let worker = fixture.worker();
         assert_eq!(worker.state, WorkerStateV1::Terminal);
         assert!(!worker.quota_held);
@@ -826,11 +831,14 @@ async fn terminal_pending_seed_with_scope(
             worker.attempt.container_id.as_deref(),
             Some(container_id.as_str())
         );
+        eprintln!("cold_recovery_seed phase=terminal_store_verified");
         assert!(fixture.cancel_present());
         assert_eq!(fixture.cancel_id(), cancel_id);
+        eprintln!("cold_recovery_seed phase=cancel_journal_verified");
         let usage = fixture.usage();
         assert_eq!(usage.len(), 1);
         assert!(!usage[0].billable);
+        eprintln!("cold_recovery_seed phase=allocation_verified");
 
         let publication = fixture.result_publication_snapshot();
         assert!(!publication.output_acknowledged);
@@ -838,6 +846,7 @@ async fn terminal_pending_seed_with_scope(
         let (event_id, audit_seq) = publication.result_outbox[0];
         assert_eq!(audit_seq, None);
         assert!(publication.stored_result_events.is_empty());
+        eprintln!("cold_recovery_seed phase=result_pending_verified");
         let job = fixture
             .base
             .journal()
@@ -881,9 +890,11 @@ async fn terminal_pending_seed_with_scope(
             ],
             "the complete V4 pending set must be the observed coverage/result pair; do not alter either event to force the fixture"
         );
+        eprintln!("cold_recovery_seed phase=v4_outbox_verified");
         let runtime_call_snapshot = fixture.runtime_calls();
         let decision_request_count = fixture.base.requests.load(Ordering::SeqCst);
         let arm_claim_snapshot = fixture.arm_claim_snapshot();
+        eprintln!("cold_recovery_seed phase=arm_claim_snapshot_ready");
 
         let base = fixture.base.clone();
         let root = base.root.path().to_owned();
@@ -909,10 +920,12 @@ async fn terminal_pending_seed_with_scope(
             ..
         } = fixture;
         driver.block_on(_peer.close());
+        eprintln!("cold_recovery_seed phase=native_owner_closed");
         drop(executor);
         Arc::get_mut(&mut retained_base)
             .expect("cold seed must have one fixture owner")
             .close_journal_owners_for_cold_test();
+        eprintln!("cold_recovery_seed phase=full_journal_owners_dropped");
 
         let profile = Directory::open_existing(&journal_root).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
@@ -940,6 +953,7 @@ async fn terminal_pending_seed_with_scope(
             }
         }
 
+        eprintln!("cold_recovery_seed phase=stop_reader_reopened");
         ColdRecoverySeed {
             base: retained_base,
             root,

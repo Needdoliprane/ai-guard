@@ -330,6 +330,131 @@ async fn explicit_operator_docker_endpoint_bypasses_context_and_rejects_network_
 }
 
 #[tokio::test]
+#[ignore = "requires an approvable OS control account for the native Rust program fixture"]
+async fn podman_doctor_targets_one_endpoint_and_keeps_rootful_refusal_read_only() {
+    const SOCKET: &str = "unix:///podman-doctor-fixture.sock";
+    let temporary = tempfile::tempdir().unwrap();
+    let program = temporary.path().join("podman");
+    fs::rename(marker_program(temporary.path()), &program).unwrap();
+    let call_log = program.with_extension("calls");
+    let case_file = program.with_extension("case");
+    let doctor = |endpoint: Option<&str>| {
+        let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_agentsandbox"));
+        cmd.args(["doctor", "--runtime", "podman", "--runtime-program"])
+            .arg(&program)
+            .env("CONTAINER_HOST", "unix:///unselected-fixture.sock")
+            .env("CONTAINER_CONNECTION", "unselected-fixture")
+            .kill_on_drop(true);
+        if let Some(endpoint) = endpoint {
+            cmd.args(["--runtime-endpoint", endpoint]);
+        }
+        cmd
+    };
+    let mut expected = Vec::new();
+    let calls = || fs::read_to_string(&call_log).unwrap();
+    fs::write(&case_file, "podman-doctor-rootless").unwrap();
+    for (endpoint, prefix) in [
+        (Some(SOCKET), vec!["--remote", "--url", SOCKET]),
+        (Some("local"), vec!["--remote=false"]),
+        (None, vec!["--remote=false"]),
+    ] {
+        let output = tokio::time::timeout(Duration::from_secs(35), doctor(endpoint).output())
+            .await
+            .unwrap()
+            .unwrap();
+        if endpoint != Some(SOCKET) && !cfg!(any(target_os = "linux", target_os = "freebsd")) {
+            assert!(!output.status.success());
+            assert!(output.stdout.is_empty());
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("Podman local mode requires a native engine")
+            );
+            assert_eq!(calls().lines().collect::<Vec<_>>(), expected);
+            continue;
+        }
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut stdout =
+            serde_json::Deserializer::from_slice(&output.stdout).into_iter::<serde_json::Value>();
+        assert_eq!(
+            stdout.next().unwrap().unwrap(),
+            serde_json::json!({
+                "runtime":"podman", "rootless":true, "server_version":"fixture"
+            })
+        );
+        assert_eq!(
+            std::str::from_utf8(&output.stdout[stdout.byte_offset()..])
+                .unwrap()
+                .trim(),
+            "Podman fixture version"
+        );
+
+        let mut info = prefix.clone();
+        info.extend(["info", "--format", "json"]);
+        let mut version = prefix;
+        version.push("version");
+        expected.extend([format!("{info:?}"), format!("{version:?}")]);
+        assert_eq!(calls().lines().collect::<Vec<_>>(), expected);
+    }
+
+    fs::write(&case_file, "podman-doctor-rootful").unwrap();
+    let output = tokio::time::timeout(Duration::from_secs(35), doctor(Some(SOCKET)).output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("runtime does not report rootless mode")
+    );
+    expected.push(format!(
+        "{:?}",
+        ["--remote", "--url", SOCKET, "info", "--format", "json"]
+    ));
+    assert_eq!(calls().lines().collect::<Vec<_>>(), expected);
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        doctor(Some("unix://relative.sock")).output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(calls().lines().collect::<Vec<_>>(), expected);
+}
+
+#[tokio::test]
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+async fn new_podman_run_requires_explicit_socket_on_client_only_platforms() {
+    let temporary = tempfile::tempdir().unwrap();
+    let config = temporary.path().join("uninitialized-control");
+    let mut run = tokio::process::Command::new(env!("CARGO_BIN_EXE_agentsandbox"));
+    run.args(["run", "--runtime", "podman", "--network", "none"])
+        .arg("--project")
+        .arg(temporary.path())
+        .arg("--config-dir")
+        .arg(&config)
+        .args(["--gateway", "http://127.0.0.1:1", "--", "/usr/bin/id"])
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(5), run.output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Podman local mode requires a native engine")
+    );
+    assert!(!config.exists());
+}
+
+#[tokio::test]
 async fn operators_keep_the_original_docker_endpoint_when_context_changes_after_preflight() {
     let temporary = tempfile::tempdir().unwrap();
     for action in ["doctor", "build", "up", "down"] {
@@ -474,7 +599,7 @@ fn copy_public_build_source(destination: &Path) {
 
 fn marker_program(root: &Path) -> std::path::PathBuf {
     let source = root.join("engine.rs");
-    fs::write(&source, r#"
+    fs::write(&source, r##"
 fn main() {
  for name in ["DOCKER_HOST", "DOCKER_CONTEXT", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "AI_GUARD_TEST_PRIVATE"] {
   assert!(std::env::var_os(name).is_none(), "ambient environment was inherited");
@@ -487,10 +612,29 @@ fn main() {
  let args = std::env::args().skip(1).collect::<Vec<_>>();
  let mut calls = std::fs::OpenOptions::new().create(true).append(true).open(executable.with_extension("calls")).unwrap();
  writeln!(calls, "{args:?}").unwrap();
+ let case = std::fs::read_to_string(executable.with_extension("case")).unwrap_or_default();
+ if matches!(case.as_str(), "podman-doctor-rootless" | "podman-doctor-rootful") {
+  for name in ["CONTAINER_HOST", "CONTAINER_CONNECTION"] {
+   assert!(std::env::var_os(name).is_none(), "ambient Podman target was inherited");
+  }
+  let verb = match args.as_slice() {
+   [local, verb @ ..] if local == "--remote=false" => verb,
+   [remote, url, endpoint, verb @ ..] if remote == "--remote" && url == "--url" && endpoint.starts_with("unix:///") => verb,
+   _ => panic!("unselected Podman endpoint"),
+  };
+  match verb {
+   [info, format, json] if info == "info" && format == "--format" && json == "json" => {
+    let rootless = case == "podman-doctor-rootless";
+    println!(r#"{{"host":{{"security":{{"rootless":{rootless}}}}},"version":{{"Version":"fixture"}},"store":{{"graphRoot":"/fixture/graph","runRoot":"/fixture/run"}}}}"#);
+   }
+   [version] if version == "version" => println!("Podman fixture version"),
+   _ => panic!("unexpected Podman diagnostic operation"),
+  }
+  return;
+ }
  let context = executable.with_extension("context");
  let target = args.windows(2).find(|pair| pair[0] == "--host").map(|pair| pair[1].clone())
   .unwrap_or_else(||std::fs::read_to_string(&context).unwrap_or_else(|_|"unix:///first-fixture.sock".into()));
- let case = std::fs::read_to_string(executable.with_extension("case")).unwrap_or_default();
  if args.iter().any(|a| a == "context") {
   println!("{target:?}");
  } else if args.iter().any(|a| a == "info") {
@@ -509,7 +653,7 @@ fn main() {
  }
 }
 
-"#).unwrap();
+"##).unwrap();
     let program = root.join("docker");
     let output =
         std::process::Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))

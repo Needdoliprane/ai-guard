@@ -22,14 +22,14 @@ Avant de démarrer le service, préparer ces valeurs d'installation :
 | Origine gateway | Origine réellement autorisée : HTTPS, ou HTTP loopback pour une installation locale délibérée, sans credential, chemin, querystring ou fragment. |
 | Tenant et namespace | Véritables `tenant_id` et `control_namespace_uuid` renvoyés par le contrôle authentifié, comme indiqué ci-dessous. Les chaînes du registre sont des attentes, pas des droits d'identité. |
 | Fichiers runner | Sources de credentials privées `0600` existantes, avec parents privés. Référencer leurs chemins ; ne jamais afficher leur contenu ou le placer dans les arguments d'une commande. |
-| Endpoint moteur | URL explicite de socket Unix local absolu pour Docker, par exemple `unix:///absolute/engine/docker.sock`. Podman accepte aussi son endpoint explicite `local`. Utiliser le compte/contexte prévu pour les jobs. |
+| Endpoint moteur | URL explicite de socket Unix local absolu, par exemple `unix:///absolute/engine/docker.sock`. Podman accepte `local` sur un hôte natif Linux ou FreeBSD. Utiliser le compte prévu pour les jobs. |
 | Racines source et export | Répertoires autorisés existants, avec propriétaire, permissions et ascendance sûrs. Les arbres source et export sont disjoints. Les racines d'export sont aussi physiquement séparées du stockage broker/configuration. Éviter les racines larges contenant des données de contrôle. |
 
 Le fonctionnement rootless est l'exigence normale. `allow_rootful_runtime: true` est une exception délibérée pour une installation qui en a besoin, y compris certaines configurations Docker Desktop qui ne déclarent pas de fonctionnement rootless. Ce n'est pas une équivalence d'isolation. Garder `network: "none"` sauf si un profil de job relu séparément exige un accès sortant.
 
 ## Exiger un contrôle compatible et actif
 
-Les RPC du broker authentifient de nouveau leur credential **présenté** avec `GET /control/api/v1/control/protocol` sur l'origine publiée. Le broker exige `role: "runner"`, le tenant et le namespace configurés, `schema_version` 3 à 10 et le protocole `broker_supervision_v1`. Submit, approve, resume et export exigent aussi `active: true`. Status, list, recovery-status et cancel peuvent s'authentifier auprès d'un contrôle compatible inactif ; leurs autres dépendances et vérifications de sûreté restent applicables. Un même UID Unix donne accès au transport, pas une authentification tenant.
+Les RPC du broker authentifient de nouveau leur credential **présenté** avec `GET /control/api/v1/control/protocol` sur l'origine publiée. Le broker exige `role: "runner"`, le tenant et le namespace configurés, `schema_version` 3 à 13 et le protocole `broker_supervision_v1`. Submit, approve, resume et export exigent aussi `active: true`. Status, list, recovery-status et cancel peuvent s'authentifier auprès d'un contrôle compatible inactif. Leurs autres dépendances et vérifications de sûreté restent applicables. Un même UID Unix donne accès au transport. Le gateway authentifie le tenant.
 
 Lire les vrais tenant, namespace, rôle et état de supervision avant de rédiger le registre. Remplacer le binaire, l'origine et le chemin de credential privé par les valeurs de l'installation :
 
@@ -82,7 +82,7 @@ Ce registre humain diffère de Registry2 privé ci-dessous et de la liste de job
 
 ## Écrire le registre opérateur privé
 
-`broker serve --config` est le seul lecteur de ce registre. La CLI ne charge pas de dotenv et n'y fusionne pas les réglages du shell. Le registre fixe runtime, image, politique, racines de fichiers et références fournisseurs ; un client de soumission ne peut pas remplacer ces contrôles. `--profile` sur les commandes clientes du broker sélectionne un `id` du registre, tandis que la politique de décision est son champ `policy_profile`.
+`broker serve --config` charge ce registre pour faire appliquer le moteur, l’image, la politique, les racines de fichiers et les références fournisseurs. Le flag client `--broker-config` résout la cible IPC et le fichier de jeton du profil choisi. Les commandes lisent les valeurs du registre directement dans le fichier JSON. Le serveur reste seul à appliquer ces contrôles. `--profile` sur les commandes clientes du broker et `--broker-profile` sur `run` sélectionnent un `id` du registre. La politique de décision est définie par `policy_profile`.
 
 Ce qui suit est un **template complet du registre wire version2** pour une nouvelle installation Docker. Remplacer toutes les valeurs `<...>` et toutes les références `/absolute/...` par celles de l'installation relue avant de le charger. Les deux placeholders UUID doivent devenir des UUID non nuls ; l'UUID d'installation est nouvellement attribué à cette installation, tandis que le namespace et le tenant viennent du véritable contrôle authentifié. Les chemins et l'image sont des références illustratives, pas des ressources installées. Aucune valeur de credential ne doit figurer dans ce JSON.
 
@@ -206,6 +206,19 @@ L'authentification IPC privée du gardien appartient à l'état du broker et res
 Le candidat Legacy D7 raccorde l'installation réellement neuve sélectionnée par défaut à sa propre factory native prospective, avec le budget S/W configuré. Le même enfant Rust crée exclusivement rôle et lock V1 puis possède le contexte STOP exact avant la RPC Arm. Il ne sélectionne pas Full3. Seul le parent qui a réellement lancé cet enfant garde une provenance Fresh corrélée au natif ; une reconnexion ou un répertoire existant paraissant vide ne la recrée pas. La reprise initiale est sautée seulement si provenance, éléments de contrôle complets et inventaire journal strictement absent/vide concordent. Les rôles existing/cold restent fenced avant scan ; la réouverture métier automatique n'est pas fournie. L'[état de validation source D7](../../engineering/D7_STOP_RECOVERY.fr.md) reste NOT_RUN pour cette nouvelle composition jusqu'à sa revue et ses contrôles Root/Luna distincts. Un vrai Claim/start exige toujours ManagedRuntime/Ready réel et une qualification moteur séparée.
 
 Un ancien daemon vivant sans nouvelle capacité prospective/fence authentifiée refuse les nouvelles RPC Arm et les nouveaux scans de reprise. Ses anciens chemins Status/Slots/Cancel/STOP et owners natifs restent, sans takeover ni migration automatique. Garder rôle et connexion de contrôle originaux, utiliser lorsque disponible le Cancel de l'opération exacte avec UUID de commande stable et examiner preuves de reprise et observations runtime avant de conclure au drain. Une couverture indisponible reste inconnue. Auth/ancres manquantes exigent une restauration contrôlée, ni suppression/rekey ni détour Full3. Ce candidat ne fournit ni drain Legacy automatique, retraite/quota, réouverture du gate froid ni migration qualifiée.
+
+### Planifier la reprise du broker sous un gestionnaire de services
+
+Préparer le plan avec l’exécutable, le registre privé et le rôle Full3 scellé de l’installation. Choisir `systemd` sous Linux ou `launchd` sous macOS. L’exécutable et le registre sont résolus sur cet hôte sous le compte de contrôle effectif.
+
+```sh
+"$AIGUARD_BIN" broker service plan --platform "$AIGUARD_SERVICE_PLATFORM" \
+  --config "$AIGUARD_BROKER_CONFIG" --enforcer-full3-existing "$AIGUARD_ENFORCER_ROLE"
+```
+
+Le JSON sur stdout donne le compte, la racine du registre, les arguments exacts, le fichier d’unité proposé et son diff depuis une base vide. L’état installé reste inconnu. La commande fonctionne en lecture seule. L’installation et l’activation sont des actions opérateur distinctes. Un compte OS introuvable ou un registre dangereux produit un refus. Le fichier systemd laisse l’activation au démarrage à configurer séparément. Le fichier launchd est désactivé par défaut.
+
+Le service proposé dépend d’un rôle Full3 déjà démarré indépendamment, scellé pour la même installation. Au démarrage du service, le broker authentifie le rôle et vérifie son état et sa capacité. La reprise garde les nouvelles admissions fermées même quand le broker publie son endpoint. Le chemin STOP peut lancer un assistant de reprise si l’endpoint d’origine disparaît. Sa durée de vie sous chaque gestionnaire, la reprise automatique après redémarrage de l’hôte et la récupération d’un processus figé restent à qualifier séparément. [Contrat de supervision](../../engineering/BROKER_SUPERVISION.md#installation-et-visibilité)
 
 ### Reprendre les arrêts autorisés avec admission fermée
 
@@ -338,6 +351,37 @@ Sans `--operation-id`, la CLI en génère un et affiche `Operation: UUID` avant 
 Status et list exposent les faits journal/contrôle mis en cache. `accepted`, `reserved_in_process`, `interrupted`, `rejected` et `absent` sont des états locaux de job, pas des états terminaux runtime. Examiner ensemble `last_decision`, `review_request_hash`, `pending_rpc_count`, `worker_state`, `quota_held`, `runtime_status`, `last_observed_at` et `executor_error`. Les faits null ou indisponibles restent inconnus. `executor_task_running: false` ne prouve pas qu'un conteneur est arrêté.
 
 La limite de list va de 1 à 100, par défaut20. Continuer avec `--after <next_after-uuid>` seulement si la réponse renvoie ce curseur. Une page n'est ni un total du tenant ni un snapshot entre pages. Corruption, état incomplet et erreur d'accès ne sont jamais une activité vide.
+
+### Attendre un batch supervisé depuis `run`
+
+Depuis le compte de contrôle natif, publier la sélection d’un profil autorisé du registre privé utilisé par `broker serve`. Choisir un dossier de sélection neuf sous un parent privé existant, hors des racines d’import et d’export des profils du registre. `prepare-client` lie cette sélection au registre et à l’identifiant du profil. Le jeton runner reste dans son fichier privé. La commande peut être exécutée avant de démarrer le broker.
+
+Si une racine de workspace est absente sous le même parent que la sélection, utiliser des noms ASCII distincts à la casse près ou choisir un autre parent privé. Le contrôle peut ainsi distinguer les chemins avant la création du dossier.
+
+```sh
+AIGUARD_BROKER_SELECTION="/absolute/private/ai-guard/operator/client-selection"
+"$AIGUARD_BIN" broker prepare-client --broker-config "$AIGUARD_BROKER_CONFIG" \
+  --profile "$AIGUARD_BROKER_PROFILE" --destination "$AIGUARD_BROKER_SELECTION"
+```
+
+Avec le broker actif, `run` soumet un batch et attend le résultat. Le broker détient le job et son échéance. Conserver l’UUID affiché sur la sortie d’erreur ou le fournir avant la soumission pour reprendre après perte d’une réponse.
+
+```sh
+"$AIGUARD_BIN" run --broker-selection "$AIGUARD_BROKER_SELECTION" \
+  --operation-id "$AIGUARD_OPERATION" --project "$AIGUARD_PROJECT" --timeout 30 \
+  -- /usr/bin/id
+
+"$AIGUARD_BIN" broker result --broker-selection "$AIGUARD_BROKER_SELECTION" \
+  --operation-id "$AIGUARD_OPERATION"
+```
+
+Les autres formes restent disponibles. Avec `--broker-config`, utiliser `--broker-profile` pour `run` et `--profile` pour les commandes `broker`. Avec une racine explicite, utiliser `--broker-root`, `--broker-profile` et `--broker-token-file` pour `run`, ou `--root`, `--profile` et `--token-file` pour `broker`. Choisir une seule forme. Une modification du registre pendant l’attente interrompt la lecture côté CLI. Après vérification, publier une nouvelle sélection dans un dossier neuf, puis relire l’opération avec son UUID d’origine.
+
+Pour rendre la sélection disponible par défaut dans une session du compte de contrôle, définir `AGENTSANDBOX_BROKER_SELECTION` au chemin absolu du dossier publié. `run` et les commandes clientes `broker` utilisent alors ce dossier sans `--broker-selection`. Ce flag prend la priorité sur la variable. Un dossier manquant ou invalide entraîne un refus. Pour utiliser une autre forme de connexion, des options d’exécution directe ou le mode interactif, retirer d’abord cette variable de la session.
+
+Omettre `--timeout` pour utiliser la limite du profil. `--broker-wait-seconds` borne l’attente du CLI indépendamment, avec 600 secondes par défaut. Ctrl-C demande l’annulation de la même opération. Un second Ctrl-C termine l’attente après accusé de réception. Après perte du client ou de sa réponse, relire `broker result` avec le même UUID. Un résultat terminal exige des observations et accusés durables de sortie, de scan du workspace et de nettoyage. `pending` et `ambiguous` gardent visibles les états incomplets. Cette entrée concerne le batch. La sélection du broker exclut les options explicites de moteur local, gateway, politique et mode interactif.
+
+Si le broker a accepté l’opération et répond `Unavailable` à la lecture de son résultat, le CLI relit ce même UUID pendant la durée d’attente restante. L’accusé d’annulation éventuel reste acquis.
 
 ## Approuver, annuler et reprendre avec des identités stables
 

@@ -108,7 +108,7 @@ Canal/frames/resize bornés, sans transcript ni log de frappes/écrans ; compteu
 
 ## Installation et visibilité
 
-Les noms `broker serve`, `broker service plan/install/status`, `broker doctor`, `broker drain/reconcile` sont des **interfaces proposées**, pas des commandes existantes. `plan` rend fichiers/diff/compte/racine concrets ; `install` est une action opérateur distincte. Aucun sudo, changement de linger, unité préexistante remplacée ou job launchd chargé par ce document.
+`broker serve` exécute le service au premier plan. `broker service plan` rend le compte, la racine, les arguments, le fichier d’unité et son diff pour la reprise d’un rôle Full3 existant. L’activation et l’installation relèvent d’actions opérateur distinctes. La reprise de ce profil garde les nouvelles admissions fermées. La présence et l’indépendance du rôle et la durée de vie de l’assistant STOP sous le gestionnaire demandent des preuves d’exploitation distinctes. [Commande et prérequis](../setup/broker/README.fr.md#planifier-la-reprise-du-broker-sous-un-gestionnaire-de-services)
 
 [systemd](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html) peut superviser/redémarrer un service ; son timeout de processus n'est pas une limite appliquée à un conteneur externe. [launchd](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html) distingue daemon et agent de session : un LaunchAgent ne qualifie pas une présence après logout. KeepAlive ne prouve pas la récupération d'un processus vivant suspendu/bloqué ; il faut définir/qualifier le mécanisme de détection/récupération correspondant, ou garder ce cas FAIL. Aucune capacité de watchdog macOS n'est supposée déjà livrée.
 

@@ -13,7 +13,10 @@ use agentsandbox::{
         local_ipc::EndpointRecordV1,
         service::{
             RequestedExecutionV1, SubmitV1, encode_submit,
-            protocol::{BrokerCommandV1, BrokerReplyV1, RecoveryStatusV1, RecoveryTargetKindV1},
+            protocol::{
+                BrokerCommandV1, BrokerReplyV1, JobResultOutcomeV1, JobResultV1, RecoveryStatusV1,
+                RecoveryTargetKindV1, TerminalJobResultV1,
+            },
             request,
         },
     },
@@ -27,15 +30,33 @@ use agentsandbox::{
     runner::read_token,
 };
 use anyhow::{Context, Result, bail, ensure};
+use chrono::{DateTime, FixedOffset};
 use harness::{CAPACITY, Evidence, Selection};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{fs, os::unix::process::ExitStatusExt, time::Duration};
-use tokio::time::{Instant, sleep, sleep_until, timeout};
+use std::{
+    fs,
+    os::unix::process::ExitStatusExt,
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
+use tokio::{
+    io::AsyncReadExt,
+    process::Command,
+    time::{Instant, sleep, sleep_until, timeout, timeout_at},
+};
 use uuid::Uuid;
 
 const PROFILE: &str = "g09";
 const NS: u128 = 1_000_000_000;
+const OBSERVATION_GRACE_NS: u128 = 3 * NS;
+
+#[derive(Clone, Copy)]
+enum LostProcess {
+    Broker { scenario_end: Instant },
+    RunCli,
+}
 
 #[test]
 fn batch_failure_marker_keeps_only_validated_metadata() {
@@ -138,14 +159,48 @@ fn batch_failure_marker_rejects_invalid_public_metadata() {
 async fn broker_sigkill_preserves_original_deadline_without_second_start() -> Result<()> {
     let selection = Selection::read()?;
     let evidence = Evidence::new()?;
-    let outcome = timeout(Duration::from_secs(600), run(&selection, &evidence))
-        .await
-        .context("broker runtime qualification exceeded the 600-second global bound")
-        .and_then(|result| result);
+    let scenario_end = Instant::now() + Duration::from_secs(600);
+    let outcome = timeout_at(
+        scenario_end,
+        run(&selection, &evidence, LostProcess::Broker { scenario_end }),
+    )
+    .await
+    .context("broker runtime qualification exceeded the 600-second global bound")
+    .and_then(|result| result);
     evidence.write("result.json", &json!({
         "runtime_test":if outcome.is_ok() { "PASS" } else { "FAIL" },
+        "worker_event_proof":if outcome.is_ok() { "observed_live_and_history_agree" } else { "not_qualified" },
+        "docker_event_continuity":"unknown",
+        "docker_event_scope":"daemon-published create/start effects for the original session; rejected requests and silently omitted daemon events are unobservable",
+        "native_start":selection.native_start,
+        "timeout_seconds":selection.timeout_seconds,
         "cleanup":"NOT_RUN: nonempty guard and exact resources retained; D5 unqualified",
         "scope":"one native control host / selected Docker engine; no Podman, cloud, SIGSTOP or provider qualification"
+    }))?;
+    outcome
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires explicit Docker program/Unix endpoint/image/rootful opt-in; retains the enforcer and QA evidence"]
+async fn broker_run_cli_sigkill_preserves_original_deadline_without_second_start() -> Result<()> {
+    let selection = Selection::read()?;
+    let evidence = Evidence::new()?;
+    let outcome = timeout(
+        Duration::from_secs(600),
+        run(&selection, &evidence, LostProcess::RunCli),
+    )
+    .await
+    .context("broker-routed CLI qualification exceeded the 600-second global bound")
+    .and_then(|result| result);
+    evidence.write("result.json", &json!({
+        "runtime_test":if outcome.is_ok() { "PASS" } else { "FAIL" },
+        "fault":"owned_run_cli_sigkill",
+        "requested_broker_client_source":"published_selection",
+        "broker_selection_input":"environment",
+        "native_start":selection.native_start,
+        "timeout_seconds":selection.timeout_seconds,
+        "cleanup":"normal audited worker removal required; retain enforcer, workspace and evidence; D5 unqualified",
+        "scope":"one native control host / selected Docker engine and the original live broker; no Podman, cloud, SIGSTOP or provider qualification"
     }))?;
     outcome
 }
@@ -187,8 +242,20 @@ async fn inspect_retained_guard_after_runtime_failure() -> Result<()> {
     Ok(())
 }
 
-async fn run(selection: &Selection, evidence: &Evidence) -> Result<()> {
+async fn run(selection: &Selection, evidence: &Evidence, lost: LostProcess) -> Result<()> {
+    let timeout_seconds = selection.timeout_seconds;
+    let sleep_seconds = timeout_seconds + 15;
+    let argv = vec!["/bin/sleep".into(), sleep_seconds.to_string()];
     evidence.write("stage.json", &json!({"stage":"read_only_preflight"}))?;
+    let mut binary_hash = Sha256::new();
+    std::io::copy(&mut fs::File::open(&selection.binary)?, &mut binary_hash)
+        .context("hash selected broker and gateway executable")?;
+    evidence.write(
+        "binary.json",
+        &json!({
+            "path":selection.binary,"sha256":format!("{:x}", binary_hash.finalize())
+        }),
+    )?;
     let engine = selection.docker(&["info", "--format", r#"{"id":{{json .ID}},"os":{{json .OSType}},"architecture":{{json .Architecture}},"memory":{{json .MemTotal}},"security_options":{{json .SecurityOptions}}}"#]).await?;
     let rootless = engine["security_options"]
         .as_array()
@@ -216,7 +283,8 @@ async fn run(selection: &Selection, evidence: &Evidence) -> Result<()> {
         image["id"] == selection.image && image["os"] == "linux",
         "selected local image identity/OS mismatch"
     );
-    evidence.write("preflight.json", &json!({"engine":engine,"image":image,"program":selection.program,"endpoint":selection.endpoint,"allow_rootful":selection.rootful}))?;
+    evidence.write("preflight.json", &json!({"engine":engine,"image":image,"program":selection.program,"endpoint":selection.endpoint,"allow_rootful":selection.rootful,
+        "native_start":selection.native_start,"timeout_seconds":timeout_seconds,"sleep_seconds":sleep_seconds,"observation_tolerance_ns":OBSERVATION_GRACE_NS.to_string()}))?;
 
     let config = evidence.root.join("config");
     initialize_config(&config)?;
@@ -225,12 +293,19 @@ async fn run(selection: &Selection, evidence: &Evidence) -> Result<()> {
     harness::write_private(&source, b"broker G09 original source remains unchanged\n")?;
     let original = Sha256::digest(fs::read(&source)?);
     let policy = Policy {
-        allowed_argv: vec![vec!["/bin/sleep".into(), "20".into()]],
+        allowed_argv: vec![argv.clone()],
         ..Policy::default()
     };
     evidence.write("policy.json", &policy)?;
-    let (mut gateway, origin) =
-        harness::gateway(evidence, &config, &evidence.root.join("policy.json"))?;
+    let (mut gateway, origin) = harness::gateway(
+        selection,
+        evidence,
+        &config,
+        &evidence.root.join("policy.json"),
+    )?;
+    if matches!(lost, LostProcess::RunCli) {
+        gateway.require_graceful_shutdown();
+    }
     let http = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(3))
@@ -255,61 +330,102 @@ async fn run(selection: &Selection, evidence: &Evidence) -> Result<()> {
         initial_quota.held_workers == 0,
         "fresh control unexpectedly holds worker quota"
     );
-    evidence.write("operator/registry.json", &json!({
+    let mut registry = json!({
         "version":1,"installation_id":Uuid::new_v4(),"root":evidence.root.join("b"),"max_enforcer_slots":CAPACITY,
         "profiles":[{"id":PROFILE,"gateway":origin,"tenant_id":"local","control_namespace_uuid":namespace,
             "config_dir":config,"runner_token_file":config.join("secrets/runner"),"runtime":"docker",
             "runtime_program":selection.program,"runtime_endpoint":selection.endpoint,"image":selection.image,
             "policy_profile":"strict","network":"none","allow_rootful_runtime":selection.rootful,
-            "max_timeout_seconds":5,"allow_capture_output":false,"managed_clients":false,
+            "max_timeout_seconds":timeout_seconds,"allow_capture_output":false,"managed_clients":false,
             "source_roots":[evidence.root.join("source")],"export_roots":[evidence.root.join("exports")]}]
-    }))?;
+    });
+    if selection.native_start {
+        registry["version"] = json!(2);
+        registry["profiles"][0]["prearmed_start_profile"] =
+            json!({"version":1,"mode":"docker_minimal"});
+    }
+    evidence.write("operator/registry.json", &registry)?;
     let operation = Uuid::new_v4();
     evidence.write(
         "operation.json",
         &json!({"operation_id":operation,"profile":PROFILE}),
     )?;
-    let mut broker = harness::broker(evidence, 1)?;
+    let mut broker = harness::broker(selection, evidence, 1)?;
+    if matches!(lost, LostProcess::RunCli) {
+        broker.require_graceful_shutdown();
+    }
     wait_broker(evidence, &runner, operation, &mut broker).await?;
+    let daemon_sample_before = Instant::now();
+    let docker_events_since = selection.docker_clock().await?;
     evidence.write("stage.json", &json!({"stage":"submit_real_worker"}))?;
     let payload = encode_submit(&SubmitV1 {
         version: 1,
         operation_id: operation,
         project: evidence.root.join("source"),
-        execution: RequestedExecutionV1::Command {
-            argv: vec!["/bin/sleep".into(), "20".into()],
-        },
-        timeout_seconds: Some(5),
+        execution: RequestedExecutionV1::Command { argv: argv.clone() },
+        timeout_seconds: Some(timeout_seconds),
         capture_output: false,
     })?;
-    match ipc(
-        evidence,
-        &runner,
-        BrokerCommandV1::Submit {
-            payload: payload.clone(),
-        },
-    )
-    .await?
-    {
-        BrokerReplyV1::Accepted {
-            replayed: false,
-            operation_id,
-            ..
-        } if operation_id == operation => {}
-        BrokerReplyV1::Error { code } => bail!("real submission refused before Running: {code}"),
-        _ => bail!("real submission did not produce fresh Accepted"),
-    }
+    let (mut cli, live_events) = match lost {
+        LostProcess::Broker { scenario_end } => {
+            let live = selection
+                .open_worker_event_stream(
+                    docker_events_since,
+                    daemon_sample_before.into_std(),
+                    scenario_end.into_std(),
+                )
+                .await?;
+            evidence.write(
+                "docker-worker-stream-open.json",
+                &json!({"http_status":200,"framing":"http1_chunked","since":docker_events_since,"until":live.until}),
+            )?;
+            match ipc(
+                evidence,
+                &runner,
+                BrokerCommandV1::Submit {
+                    payload: payload.clone(),
+                },
+            )
+            .await?
+            {
+                BrokerReplyV1::Accepted {
+                    replayed: false,
+                    operation_id,
+                    ..
+                } if operation_id == operation => {}
+                BrokerReplyV1::Error { code } => {
+                    bail!("real submission refused before Running: {code}")
+                }
+                _ => bail!("real submission did not produce fresh Accepted"),
+            }
+            (None, Some(live))
+        }
+        LostProcess::RunCli => {
+            evidence.write(
+                "stage.json",
+                &json!({"stage":"prepare_broker_client_selection"}),
+            )?;
+            let client_selection = prepare_broker_client(selection, evidence).await?;
+            let child =
+                harness::run_client(selection, evidence, &client_selection, operation, &argv)?;
+            evidence.write("stage.json", &json!({"stage":"submit_real_worker"}))?;
+            (Some((child, client_selection)), None)
+        }
+    };
     let clock = NativeHostClock::new()?;
     // H8 reached 120 seconds without Running or a coded failure; completion of
     // its Arm reply was not established. Give the whole scenario 600 seconds,
     // bound and stop on an explicit failure, not an intermediate timeout.
-    // The worker's original five-second Arm and every post-Running oracle stay
-    // unchanged. The HTTP query does not enqueue any writer/journal read.
+    // The selected Arm is fixed before Running. The HTTP query does not enqueue
+    // any writer/journal read or extend the original deadline.
     let mut next_failure_poll = Instant::now();
     let mut observed_worker: Option<(String, WorkerStateV1)> = None;
     let worker = loop {
         broker.running()?;
         gateway.running()?;
+        if let Some((child, _)) = &mut cli {
+            child.running()?;
+        }
         let running = if let Some(worker) = harness::only_worker(&http, &origin, &runner).await? {
             if let Some((previous, _)) = &observed_worker {
                 ensure!(
@@ -342,7 +458,7 @@ async fn run(selection: &Selection, evidence: &Evidence) -> Result<()> {
             None
         };
         // One final diagnostic read is required before leaving this phase.
-        // It obeys the same rate bound and can only fail the strict five-second
+        // It obeys the same rate bound and can only fail the strict deadline
         // oracle later; it never grants more execution time to the worker.
         if running.is_some() && Instant::now() < next_failure_poll {
             sleep_until(next_failure_poll).await;
@@ -358,7 +474,7 @@ async fn run(selection: &Selection, evidence: &Evidence) -> Result<()> {
             if let Some(marker) = harness::batch_failure_marker(&page)? {
                 evidence.write("reported-batch-failure.json", &marker)?;
                 bail!(
-                    "FAIL: broker reported a coded batch failure before the planned broker fault; inspect retained diagnostic event"
+                    "FAIL: broker reported a coded batch failure before the planned fault; inspect retained diagnostic event"
                 );
             }
             next_failure_poll = Instant::now() + Duration::from_secs(1);
@@ -403,7 +519,7 @@ async fn run(selection: &Selection, evidence: &Evidence) -> Result<()> {
     ensure!(
         serde_json::to_value(&arm.arm.clock)? == serde_json::to_value(&target.original_clock)?
             && arm.arm.deadline_ns_decimal == target.original_deadline_ns_decimal
-            && arm.arm.timeout_seconds == 5,
+            && arm.arm.timeout_seconds == timeout_seconds,
         "recovery did not preserve the original native Arm"
     );
     evidence.write("guard-before.json", &json!({"status":status,"slot":slot}))?;
@@ -456,13 +572,194 @@ async fn run(selection: &Selection, evidence: &Evidence) -> Result<()> {
     evidence.write("recovery-before.json", &recovery_before)?;
     evidence.write("docker-running.json", &running)?;
     let deadline = arm.arm.deadline_ns_decimal.parse::<u128>()?;
+    ensure!(
+        arm.arm
+            .clock
+            .continuous_ns()?
+            .checked_add(u128::from(timeout_seconds) * NS)
+            == Some(deadline),
+        "reported Arm deadline is not the selected duration after its native sample"
+    );
     let now = clock.sample()?;
     ensure!(
         now.boot_id == arm.arm.clock.boot_id
             && now.method == arm.arm.clock.method
             && now.continuous_ns()? + 150_000_000 < deadline,
-        "Running oracle was too late to kill broker before its original deadline"
+        "Running oracle was too late to signal the selected process before the original deadline"
     );
+    if let Some((mut run_cli, client_selection)) = cli {
+        evidence.write("stage.json", &json!({"stage":"kill_owned_run_cli_only","kill_clock":now,"original_deadline_ns":deadline.to_string()}))?;
+        let cli_pid = run_cli.id();
+        let broker_pid = broker.id();
+        let killed_status = run_cli.kill_owned()?;
+        let killed = clock.sample()?;
+        evidence.write("run-cli-killed.json", &json!({"clock_before":now,"clock_after_reap":killed,"original_deadline_ns":deadline.to_string(),"cli_pid":cli_pid,"broker_pid":broker_pid,"signal":killed_status.signal()}))?;
+        ensure!(
+            killed_status.signal() == Some(libc::SIGKILL)
+                && killed.boot_id == arm.arm.clock.boot_id
+                && killed.method == arm.arm.clock.method
+                && killed.continuous_ns()? < deadline,
+            "owned CLI death/reap before the original Arm deadline was not established"
+        );
+        broker.running()?;
+        evidence.write(
+            "stage.json",
+            &json!({"stage":"read_original_job_without_resubmit"}),
+        )?;
+        // The live broker may already have removed an acknowledged terminal CID.
+        // A Result and exact Docker events independently establish the stop and removal.
+        wait_terminal(
+            evidence,
+            &runner,
+            &http,
+            &origin,
+            operation,
+            &worker.worker_id,
+            Duration::from_secs(u64::from(timeout_seconds) + 35),
+        )
+        .await?;
+        let result = read_result(selection, &client_selection, operation).await?;
+        ensure!(
+            !result.cancel_requested,
+            "run CLI loss unexpectedly requested cancellation"
+        );
+        let JobResultOutcomeV1::Terminal { result: terminal } = &result.outcome else {
+            evidence.write("cli-result-nonterminal.json", &result)?;
+            bail!("original job has no durable terminal result after the CLI died")
+        };
+        let reconciled = harness::only_worker(&http, &origin, &runner)
+            .await?
+            .context("original worker missing after CLI loss")?;
+        let actual = reconciled
+            .last_observation
+            .as_ref()
+            .context("missing central terminal observation")?;
+        let finished = DateTime::parse_from_rfc3339(
+            actual
+                .finished_at
+                .as_deref()
+                .context("central terminal FinishedAt missing")?,
+        )?;
+        ensure!(
+            reconciled.worker_id == worker.worker_id
+                && reconciled.attempt == worker.attempt
+                && reconciled.observed_started_at == worker.observed_started_at
+                && reconciled.launch.authority_id == actual.inspection.authority_id
+                && reconciled.launch.authority_id == worker.launch.authority_id
+                && reconciled.cleanup_removed == Some(true)
+                && actual.running == Some(false)
+                && actual.restart_count == Some(0)
+                && actual.exit_code == Some(137)
+                && actual.oom_killed == Some(false)
+                && actual.inspection.container_id == cid
+                && terminal.session_id.to_string() == worker.launch.session_id
+                && terminal.container_id == cid
+                && terminal.volume == worker.attempt.volume_name
+                && terminal.exit_code == 137
+                && terminal.oom_killed == Some(false)
+                && terminal.changed_files == 0
+                && !terminal.output_captured,
+            "central observation and durable Result do not establish the original worker's clean non-OOM deadline stop"
+        );
+        verify_cli_docker_terminal(
+            selection,
+            evidence,
+            &clock,
+            docker_events_since,
+            &arm,
+            terminal,
+            (docker_started, finished),
+        )
+        .await?;
+        let actual_run_ns = observed_process_duration_ns(docker_started, finished, sleep_seconds)?;
+        evidence.write(
+            "deadline-observation.json",
+            &json!({
+                "original_arm":arm,
+                "docker_started_at":docker_started,"docker_finished_at":finished,
+                "observed_process_duration_ns":actual_run_ns.to_string(),
+                "observation_tolerance_ns":OBSERVATION_GRACE_NS.to_string()
+            }),
+        )?;
+        let after = recovery(evidence, &runner, operation).await?;
+        let worker_arms: Vec<_> = after
+            .known_arms
+            .iter()
+            .filter(|arm| matches!(arm.subject, RecoveryTargetKindV1::Worker))
+            .collect();
+        ensure!(
+            worker_arms.len() == 1
+                && serde_json::to_value(worker_arms[0])? == serde_json::to_value(target)?,
+            "the original worker Arm, deadline or cancel state changed after CLI loss"
+        );
+        let replay = read_result(selection, &client_selection, operation).await?;
+        ensure!(
+            serde_json::to_value(&replay)? == serde_json::to_value(&result)?,
+            "read-only replay changed the original operation result"
+        );
+        let usage: Value = harness::get(&http, &origin, &runner, "usage?limit=100").await?;
+        let allocation = check_usage(&usage, &reconciled, cid)?;
+        let quota: QuotaUsageV1 = harness::get(&http, &origin, &runner, "quota").await?;
+        ensure!(
+            quota.held_workers == 0
+                && quota.held_cpu_millis == 0
+                && quota.held_memory_bytes == 0
+                && !reconciled.quota_held
+                && allocation.source.authority_id == worker.launch.authority_id,
+            "terminal quota was held or allocation lost the original authority"
+        );
+        let audit_after = harness::audit(&http, &origin, &runner).await?;
+        ensure!(
+            harness::worker_emissions(&audit_after, &worker.worker_id)? == emissions,
+            "a second worker Arm or claim appeared after CLI loss"
+        );
+        verify_result_audit(&audit_after, &worker, terminal)?;
+        let integrity: Value = harness::get(&http, &origin, &runner, "integrity").await?;
+        ensure!(
+            integrity["valid"] == true
+                && integrity["event_count"]
+                    .as_u64()
+                    .is_some_and(|count| count > 0),
+            "actual audit integrity is not valid/nonempty"
+        );
+        let guard_after = guard.status().await?;
+        let slot_after = guard.slot_status(&arm.arm.operation_id).await?;
+        ensure!(
+            guard_after.epoch() == epoch && slot_after.prepared_once(),
+            "enforcer epoch or consumed start permit changed after the run CLI died"
+        );
+        if let Some(observation) = slot_after.observation() {
+            ensure!(
+                observation.id.as_deref() == Some(cid)
+                    && observation.process.finished_at == Some(finished)
+                    && observation.process.exit_code == Some(137),
+                "retained enforcer observation differs from the original terminal"
+            );
+        }
+        broker.running()?;
+        gateway.running()?;
+        ensure!(
+            Sha256::digest(fs::read(&source)?) == original
+                && fs::read_dir(evidence.root.join("source"))?.count() == 1,
+            "original source changed"
+        );
+        evidence.write("audit-after.json", &audit_after)?;
+        evidence.write("recovery-after.json", &after)?;
+        evidence.write("worker-after.json", &reconciled)?;
+        evidence.write("cli-job-result.json", &result)?;
+        evidence.write("guard-after-stop.json", &slot_after)?;
+        evidence.write("reconciled.json", &json!({"broker_pid":broker_pid,"broker_live_after_result_replay":true,"enforcer_epoch":epoch,"quota":quota,"allocation":allocation,"integrity":integrity,"source_sha256":hex::encode(original),"original_cid":cid,"deadline_ns":deadline.to_string()}))?;
+        let broker_exit = broker.terminate_owned()?;
+        ensure!(
+            broker_exit.success(),
+            "original broker did not exit gracefully after evidence collection"
+        );
+        ensure!(
+            gateway.terminate_owned()?.success(),
+            "gateway did not exit gracefully after evidence collection"
+        );
+        return Ok(());
+    }
     evidence.write("stage.json", &json!({"stage":"kill_owned_broker_only","kill_clock":now,"original_deadline_ns":deadline.to_string()}))?;
     let killed_pid = broker.id();
     let killed_status = broker.kill_owned()?;
@@ -476,14 +773,14 @@ async fn run(selection: &Selection, evidence: &Evidence) -> Result<()> {
         killed.continuous_ns()? < deadline,
         "broker death/reap occurred after the original deadline; autonomous-stop fault was not established"
     );
-    let terminal = loop {
+    let (terminal, terminal_clock, actual_run_ns) = loop {
         gateway.running()?;
         let observed = selection.inspect(cid).await?; // Absence/inspect error is a failure, never terminal.
         let sample = clock.sample()?;
         let observed_ns = sample.continuous_ns()?;
         ensure!(
-            observed_ns <= deadline + 3 * NS,
-            "FAIL: terminal not observed by original deadline + 3s; sleep20 natural completion cannot pass"
+            observed_ns <= deadline + OBSERVATION_GRACE_NS,
+            "FAIL: terminal not observed by original deadline + 3s"
         );
         ensure!(
             observed["id"] == running["id"]
@@ -510,21 +807,22 @@ async fn run(selection: &Selection, evidence: &Evidence) -> Result<()> {
                     .as_str()
                     .context("terminal FinishedAt missing")?,
             )?;
-            let actual_run_ns = finished
-                .signed_duration_since(docker_started)
-                .num_nanoseconds()
-                .context("terminal process duration is not representable")?;
-            ensure!(
-                actual_run_ns > 0 && actual_run_ns < 20_000_000_000,
-                "sleep20 natural completion or invalid process timestamps cannot qualify deadline stop"
-            );
-            evidence.write("deadline-observation.json", &json!({"original_arm":arm,"observed_clock":sample,"observation_lateness_ns":observed_ns.saturating_sub(deadline).to_string(),"observation_tolerance_ns":(3*NS).to_string(),"observed_process_duration_ns":actual_run_ns.to_string(),"physical_deadline_exactly_5s_qualified":false,"docker":observed}))?;
-            break observed;
+            let actual_run_ns =
+                observed_process_duration_ns(docker_started, finished, sleep_seconds)?;
+            evidence.write("docker-terminal-observed.json", &observed)?;
+            break (observed, sample, actual_run_ns);
         }
         sleep(Duration::from_millis(50)).await;
     };
-    let stop_status = loop {
+    let (stop_status, guard_terminal_received_clock) = loop {
         let slot = guard.slot_status(&arm.arm.operation_id).await?;
+        let received = clock.sample()?;
+        ensure!(
+            received.boot_id == arm.arm.clock.boot_id
+                && received.method == arm.arm.clock.method
+                && received.continuous_ns()? <= deadline + OBSERVATION_GRACE_NS,
+            "guard terminal snapshot was not received on the original clock by deadline + 3s"
+        );
         if slot.phase() == SlotPhaseV1::Quarantined
             && let Some(observation) = slot.observation()
         {
@@ -553,12 +851,8 @@ async fn run(selection: &Selection, evidence: &Evidence) -> Result<()> {
                     && actor_clock.continuous_ns()? >= deadline,
                 "guard terminal snapshot lacks an original-boot deadline clock"
             );
-            break slot;
+            break (slot, received);
         }
-        ensure!(
-            clock.sample()?.continuous_ns()? <= deadline + 3 * NS,
-            "guard failed to retain an exact terminal snapshot by deadline + 3s"
-        );
         sleep(Duration::from_millis(25)).await;
     };
     ensure!(
@@ -566,12 +860,57 @@ async fn run(selection: &Selection, evidence: &Evidence) -> Result<()> {
         "original enforcer epoch/consumed permit changed after broker death"
     );
     evidence.write("guard-after-stop.json", &stop_status)?;
+    // This projection assumes Docker's wall clock stays continuous between the terminal and this sample.
+    let before_clock_probe = clock.sample()?;
+    let docker_clock = selection
+        .docker(&["info", "--format", "{{json .SystemTime}}"])
+        .await?;
+    let after_clock_probe = clock.sample()?;
+    ensure!(
+        before_clock_probe.boot_id == arm.arm.clock.boot_id
+            && after_clock_probe.boot_id == arm.arm.clock.boot_id
+            && before_clock_probe.method == arm.arm.clock.method
+            && after_clock_probe.method == arm.arm.clock.method,
+        "terminal clock projection does not use the original boot and method"
+    );
+    let docker_now = chrono::DateTime::parse_from_rfc3339(
+        docker_clock.as_str().context("Docker SystemTime missing")?,
+    )?;
+    let docker_finished = chrono::DateTime::parse_from_rfc3339(
+        terminal["finished_at"]
+            .as_str()
+            .context("Docker FinishedAt missing")?,
+    )?;
+    let time_since_finish = docker_now
+        .signed_duration_since(docker_finished)
+        .num_nanoseconds()
+        .context("Docker finish-to-sample duration is not representable")?;
+    let earliest_finish = before_clock_probe
+        .continuous_ns()?
+        .checked_sub(u128::try_from(time_since_finish).context("Docker clock precedes terminal")?)
+        .context("Docker terminal wall-clock projection underflowed")?;
+    evidence.write("terminal-clock-projection.json", &json!({
+        "host_before":before_clock_probe,"host_after":after_clock_probe,"docker_wall_sample":docker_clock,
+        "docker_finished_at":terminal["finished_at"],"earliest_finish_ns":earliest_finish.to_string(),
+        "original_deadline_ns":deadline.to_string(),"projection_method":"single_post_fault_wall_sample"
+    }))?;
+    ensure!(
+        earliest_finish >= deadline,
+        "Docker terminal may precede the original Arm deadline"
+    );
+    evidence.write("deadline-observation.json", &json!({
+        "original_arm":arm,"observed_clock":terminal_clock,
+        "guard_terminal_received_clock":guard_terminal_received_clock,
+        "observation_lateness_ns":terminal_clock.continuous_ns()?.saturating_sub(deadline).to_string(),
+        "observation_tolerance_ns":OBSERVATION_GRACE_NS.to_string(),"observed_process_duration_ns":actual_run_ns.to_string(),
+        "physical_deadline_exactly_5s_qualified":false,"docker":terminal
+    }))?;
 
     evidence.write(
         "stage.json",
         &json!({"stage":"restart_same_broker_and_registry"}),
     )?;
-    let mut restarted = harness::broker(evidence, 2)?;
+    let mut restarted = harness::broker(selection, evidence, 2)?;
     wait_broker(evidence, &runner, operation, &mut restarted).await?;
     wait_terminal(
         evidence,
@@ -580,6 +919,7 @@ async fn run(selection: &Selection, evidence: &Evidence) -> Result<()> {
         &origin,
         operation,
         &worker.worker_id,
+        Duration::from_secs(35),
     )
     .await?;
     let after = recovery(evidence, &runner, operation).await?;
@@ -658,6 +998,7 @@ async fn run(selection: &Selection, evidence: &Evidence) -> Result<()> {
         &origin,
         operation,
         &worker.worker_id,
+        Duration::from_secs(35),
     )
     .await?;
     let usage_after: Value = harness::get(&http, &origin, &runner, "usage?limit=100").await?;
@@ -678,6 +1019,50 @@ async fn run(selection: &Selection, evidence: &Evidence) -> Result<()> {
     ensure!(
         final_inspect == inspected_after,
         "original worker changed after terminal replay"
+    );
+    let final_worker = harness::only_worker(&http, &origin, &runner)
+        .await?
+        .context("original worker missing after terminal replay")?;
+    ensure!(
+        final_worker.worker_id == worker.worker_id,
+        "tenant control replaced the original worker after terminal replay"
+    );
+    let session =
+        Uuid::parse_str(&worker.launch.session_id).context("invalid original session ID")?;
+    let live = live_events.context("live Docker worker stream missing")?;
+    let after_resume = selection.docker_clock().await?;
+    let docker_events_until = live.until;
+    ensure!(
+        docker_started < after_resume && after_resume < docker_events_until,
+        "live Docker event stream cutoff does not cover terminal replay"
+    );
+    let observed = live.finish(session).await?;
+    evidence.write("docker-broker-worker-live-events.json", &observed)?;
+    let events = selection
+        .session_worker_events(
+            session,
+            docker_events_since,
+            docker_started,
+            docker_events_until,
+        )
+        .await?;
+    evidence.write(
+        "docker-broker-worker-events.json",
+        &json!({"session":session,"since":docker_events_since,"after_resume":after_resume,"until":docker_events_until,"events":events}),
+    )?;
+    ensure!(
+        events
+            .iter()
+            .filter(|event| event.is_worker_creation_or_start())
+            .eq(observed.iter()),
+        "live Docker worker create/start events disagree with closed history"
+    );
+    let create = exactly_one_docker_event(&events, "create")?;
+    let start = exactly_one_worker_start(&events, cid)?;
+    ensure!(
+        create.wall_ns <= start.wall_ns
+            && DateTime::from_timestamp_nanos(start.wall_ns) < docker_finished,
+        "Docker history does not contain the original worker's create/start before its terminal"
     );
     let integrity: Value = harness::get(&http, &origin, &runner, "integrity").await?;
     ensure!(
@@ -709,6 +1094,312 @@ async fn ipc(evidence: &Evidence, runner: &str, command: BrokerCommandV1) -> Res
     .await
     .context("public broker IPC exceeded 15s")?
 }
+
+async fn broker_client_output(
+    mut command: Command,
+    client_selection: Option<&Path>,
+) -> Result<Vec<u8>> {
+    const OUTPUT_LIMIT: u64 = 64 * 1024;
+    command
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    if let Some(client_selection) = client_selection {
+        command.env(harness::BROKER_SELECTION_ENV, client_selection);
+    }
+    let mut child = command.spawn().context("spawn broker client CLI")?;
+    let stdout = child.stdout.take().context("broker client stdout pipe")?;
+    let read = async {
+        let mut bytes = Vec::new();
+        stdout
+            .take(OUTPUT_LIMIT + 1)
+            .read_to_end(&mut bytes)
+            .await?;
+        ensure!(
+            bytes.len() as u64 <= OUTPUT_LIMIT,
+            "broker client output exceeded bound"
+        );
+        Ok::<_, anyhow::Error>(bytes)
+    };
+    timeout(Duration::from_secs(15), async {
+        let (status, bytes) =
+            tokio::try_join!(async { Ok::<_, anyhow::Error>(child.wait().await?) }, read)?;
+        ensure!(
+            status.success(),
+            "broker client CLI failed (status only: {status})"
+        );
+        Ok(bytes)
+    })
+    .await
+    .context("broker client CLI exceeded 15s")?
+}
+
+async fn prepare_broker_client(selection: &Selection, evidence: &Evidence) -> Result<PathBuf> {
+    // The product publishes into a new child of the existing private operator
+    // directory. Neither the source nor the export tree contains this input.
+    let destination = evidence.root.join("operator/client-selection");
+    let mut command = Command::new(&selection.binary);
+    command
+        .args(["broker", "prepare-client", "--broker-config"])
+        .arg(evidence.root.join("operator/registry.json"))
+        .args(["--profile", PROFILE, "--destination"])
+        .arg(&destination);
+    let stdout = broker_client_output(command, None)
+        .await
+        .context("publish broker client selection")?;
+    ensure!(
+        stdout.is_empty(),
+        "prepare-client unexpectedly wrote to stdout"
+    );
+    let directory = Directory::open_existing(&destination)?;
+    let record = directory.read_private_file("selection.json", 64 * 1024)?;
+    let selected: Value = serde_json::from_slice(record.bytes())
+        .map_err(|_| anyhow::anyhow!("invalid published broker selection record"))?;
+    ensure!(
+        selected["version"] == 1 && selected["profile"] == PROFILE,
+        "published broker selection does not match the fixture profile"
+    );
+    record.revalidate()?;
+    evidence.write(
+        "broker-client-selection.json",
+        &json!({
+            "mode":"published_selection","input":"environment",
+            "profile":PROFILE,"selection_sha256":record.digest()
+        }),
+    )?;
+    Ok(destination)
+}
+
+async fn read_result(
+    selection: &Selection,
+    client_selection: &Path,
+    operation_id: Uuid,
+) -> Result<JobResultV1> {
+    let mut command = Command::new(&selection.binary);
+    command
+        .args(["broker", "result", "--operation-id"])
+        .arg(operation_id.to_string());
+    let output = broker_client_output(command, Some(client_selection))
+        .await
+        .context("read original broker job result")?;
+    match serde_json::from_slice::<BrokerReplyV1>(&output)
+        .map_err(|_| anyhow::anyhow!("invalid result reply from broker CLI"))?
+    {
+        BrokerReplyV1::Result { result }
+            if result.version == 1 && result.operation_id == operation_id =>
+        {
+            Ok(result)
+        }
+        BrokerReplyV1::Error { code } => bail!("Result refused: {code}"),
+        _ => bail!("unexpected result for the original operation"),
+    }
+}
+
+fn observed_process_duration_ns(
+    started: DateTime<FixedOffset>,
+    finished: DateTime<FixedOffset>,
+    sleep_seconds: u32,
+) -> Result<i64> {
+    let duration = finished
+        .signed_duration_since(started)
+        .num_nanoseconds()
+        .context("terminal process duration is not representable")?;
+    ensure!(
+        duration > 0 && i128::from(duration) < i128::from(sleep_seconds) * 1_000_000_000,
+        "natural sleep completion or invalid process timestamps cannot qualify deadline stop"
+    );
+    Ok(duration)
+}
+
+async fn verify_cli_docker_terminal(
+    selection: &Selection,
+    evidence: &Evidence,
+    clock: &NativeHostClock,
+    since: DateTime<FixedOffset>,
+    arm: &ArmResultV1,
+    terminal: &TerminalJobResultV1,
+    (started, finished): (DateTime<FixedOffset>, DateTime<FixedOffset>),
+) -> Result<()> {
+    // This projection assumes Docker's wall clock stays continuous between the events and this sample.
+    let before = clock.sample()?;
+    let docker_now = selection.docker_clock().await?;
+    let after = clock.sample()?;
+    ensure!(
+        [&before, &after]
+            .iter()
+            .all(|sample| sample.boot_id == arm.arm.clock.boot_id
+                && sample.method == arm.arm.clock.method),
+        "Docker event projection does not use the original host clock boot/method"
+    );
+    let events = selection
+        .session_worker_events(terminal.session_id, since, started, docker_now)
+        .await?;
+    evidence.write("docker-cli-worker-events.json", &events)?;
+    // Event history corroborates the unique start for this CID. Physical duration uses inspect timestamps.
+    let start = exactly_one_worker_start(&events, &terminal.container_id)?;
+    let kill = exactly_one_docker_event(&events, "kill")?;
+    let die = exactly_one_docker_event(&events, "die")?;
+    let destroy = exactly_one_docker_event(&events, "destroy")?;
+    let finished_wall = finished
+        .timestamp_nanos_opt()
+        .context("unrepresentable Docker FinishedAt")?;
+    ensure!(
+        kill.signal == "9"
+            && die.exit_code == "137"
+            && start.wall_ns < kill.wall_ns
+            && kill.wall_ns <= die.wall_ns
+            && die.wall_ns <= destroy.wall_ns
+            && start.wall_ns < finished_wall
+            && finished_wall <= die.wall_ns
+            && !events
+                .iter()
+                .any(|event| matches!(event.action.as_str(), "oom" | "restart")),
+        "Docker history does not prove one start followed by SIGKILL, terminal and removal of the exact CID"
+    );
+    let to_host_bounds = |wall_ns: i64| -> Result<(u128, u128)> {
+        let event_time = DateTime::from_timestamp_nanos(wall_ns);
+        let elapsed = docker_now
+            .signed_duration_since(event_time)
+            .num_nanoseconds()
+            .context("Docker event clock delta not representable")?;
+        let elapsed =
+            u128::try_from(elapsed).context("Docker event is later than its clock sample")?;
+        Ok((
+            before
+                .continuous_ns()?
+                .checked_sub(elapsed)
+                .context("earliest host event time underflow")?,
+            after
+                .continuous_ns()?
+                .checked_sub(elapsed)
+                .context("latest host event time underflow")?,
+        ))
+    };
+    let (earliest_kill, _) = to_host_bounds(kill.wall_ns)?;
+    let (earliest_finish, latest_finish) = to_host_bounds(finished_wall)?;
+    let deadline = arm.arm.deadline_ns_decimal.parse::<u128>()?;
+    evidence.write("terminal-clock-projection.json", &json!({
+        "host_before":before,"host_after":after,"docker_wall_sample":docker_now,"docker_finished_at":finished,
+        "earliest_kill_ns":earliest_kill.to_string(),"earliest_finish_ns":earliest_finish.to_string(),
+        "latest_finish_ns":latest_finish.to_string(),"original_deadline_ns":deadline.to_string(),
+        "observation_tolerance_ns":OBSERVATION_GRACE_NS.to_string(),"projection_method":"single_post_fault_wall_sample"
+    }))?;
+    ensure!(
+        earliest_kill >= deadline
+            && earliest_finish >= deadline
+            && latest_finish <= deadline + OBSERVATION_GRACE_NS,
+        "Docker terminal is not established between the original deadline and its three-second allowance"
+    );
+    Ok(())
+}
+
+fn exactly_one_worker_start<'a>(
+    events: &'a [harness::ContainerEvent],
+    cid: &str,
+) -> Result<&'a harness::ContainerEvent> {
+    ensure!(
+        events.iter().all(|event| event.id == cid),
+        "Docker history contains another worker CID for the original session"
+    );
+    exactly_one_docker_event(events, "start")
+}
+
+#[test]
+fn docker_worker_start_oracle_rejects_incomplete_or_duplicate_history() {
+    let original = "a".repeat(64);
+    let replacement = "b".repeat(64);
+    let event = |action: &str, id: &str, wall_ns| harness::ContainerEvent {
+        action: action.to_owned(),
+        id: id.to_owned(),
+        session: "11111111-1111-4111-8111-111111111111".into(),
+        purpose: "run".into(),
+        wall_ns,
+        exit_code: String::new(),
+        signal: String::new(),
+    };
+    assert_eq!(
+        exactly_one_worker_start(
+            &[event("start", &original, 1), event("die", &original, 2)],
+            &original,
+        )
+        .unwrap()
+        .wall_ns,
+        1
+    );
+    for (history, expected_error) in [
+        (vec![event("die", &original, 2)], "omitted the start event"),
+        (
+            vec![event("start", &original, 1), event("start", &original, 2)],
+            "repeated the start event",
+        ),
+        (
+            vec![
+                event("start", &original, 1),
+                event("start", &replacement, 2),
+            ],
+            "another worker CID",
+        ),
+    ] {
+        match exactly_one_worker_start(&history, &original) {
+            Ok(_) => panic!("incomplete or duplicate Docker history passed"),
+            Err(error) => assert!(error.to_string().contains(expected_error)),
+        }
+    }
+}
+
+fn exactly_one_docker_event<'a>(
+    events: &'a [harness::ContainerEvent],
+    action: &str,
+) -> Result<&'a harness::ContainerEvent> {
+    let mut matching = events.iter().filter(|event| event.action == action);
+    let event = matching
+        .next()
+        .with_context(|| format!("Docker history omitted the {action} event"))?;
+    ensure!(
+        matching.next().is_none(),
+        "Docker history repeated the {action} event"
+    );
+    Ok(event)
+}
+
+fn verify_result_audit(
+    events: &[Value],
+    worker: &WorkerV1,
+    terminal: &TerminalJobResultV1,
+) -> Result<()> {
+    let at = |sequence: i64, kind: &str| {
+        events
+            .iter()
+            .find(|event| {
+                event["seq"] == sequence
+                    && event["kind"] == kind
+                    && event["session_id"] == worker.launch.session_id
+            })
+            .with_context(|| format!("missing matching durable {kind} audit event"))
+    };
+    let result = at(terminal.result_audit_seq, "broker.batch.result")?;
+    let scan = at(terminal.scan_audit_seq, "broker.batch.scan")?;
+    let cleanup = at(terminal.cleanup_audit_seq, "control.worker.transition")?;
+    let mutation = &cleanup["data"]["input"]["request"];
+    ensure!(
+        result["data"]["worker_id"] == worker.worker_id
+            && result["data"]["observation"]["id"] == terminal.container_id
+            && result["data"]["observation"]["process"]["exit_code"] == terminal.exit_code
+            && scan["data"]["worker_id"] == worker.worker_id
+            && scan["data"]["manifest_digest"] == terminal.manifest_digest
+            && scan["data"]["changed_files"].as_u64() == u64::try_from(terminal.changed_files).ok()
+            && mutation["worker_id"] == worker.worker_id
+            && mutation["attempt_id"] == worker.attempt.attempt_id
+            && mutation["transition"]["action"] == "cleanup_result"
+            && mutation["transition"]["removed"] == true,
+        "Result audit sequences do not bind the worker, observation, scan and cleanup"
+    );
+    Ok(())
+}
+
 async fn recovery(
     evidence: &Evidence,
     runner: &str,
@@ -782,8 +1473,9 @@ async fn wait_terminal(
     origin: &str,
     operation_id: Uuid,
     worker_id: &str,
+    budget: Duration,
 ) -> Result<()> {
-    let limit = Instant::now() + Duration::from_secs(35);
+    let limit = Instant::now() + budget;
     loop {
         let worker: WorkerV1 =
             harness::get(http, origin, runner, &format!("workers/{worker_id}")).await?;

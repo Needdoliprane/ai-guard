@@ -77,15 +77,21 @@ fn declared_fields(name: &str) -> Vec<String> {
     let start = SOURCE
         .find(&header)
         .unwrap_or_else(|| panic!("gateway_config.rs declares no struct {name}"));
+    let declaration = &SOURCE[..start];
+    let attributes = declaration.strip_suffix("pub(crate) ").unwrap_or(declaration);
     assert!(
-        SOURCE[..start].ends_with("#[derive(Deserialize)]\n#[serde(deny_unknown_fields)]\n"),
+        attributes.ends_with("#[derive(Deserialize)]\n#[serde(deny_unknown_fields)]\n"),
         "{name} is no longer a closed envelope that is only deserialised"
     );
     SOURCE[start + header.len()..]
         .lines()
         .take_while(|line| *line != "}")
         .filter_map(|line| {
-            let (field, _) = line.strip_prefix("    ")?.split_once(':')?;
+            let declaration = line.strip_prefix("    ")?;
+            let (field, _) = declaration
+                .strip_prefix("pub(crate) ")
+                .unwrap_or(declaration)
+                .split_once(':')?;
             (!field.is_empty()
                 && field
                     .bytes()

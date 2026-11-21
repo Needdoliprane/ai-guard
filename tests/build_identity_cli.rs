@@ -2,6 +2,7 @@
 use agentsandbox::build_identity::{BuildStatusV1, Component, MAX_STATUS_BYTES};
 use std::process::{Command, Stdio};
 
+const CARGO_VERSION: &str = env!("CARGO_PKG_VERSION");
 const TOOLS: [(&str, &str); 6] = [
     (env!("CARGO_BIN_EXE_agentsandbox"), "agentsandbox"),
     (env!("CARGO_BIN_EXE_ai-guard-diagnose"), "ai-guard-diagnose"),
@@ -49,7 +50,7 @@ fn six_real_tools_report_one_version_without_configuration_or_external_tools() {
             let text = String::from_utf8(output.stdout).unwrap();
             let lines: Vec<_> = text.lines().collect();
             assert_eq!(lines.len(), 3);
-            assert_eq!(lines[0], format!("{component} 0.0.1"));
+            assert_eq!(lines[0], format!("{component} {CARGO_VERSION}"));
             let identity =
                 serde_json::to_value(BuildStatusV1::current(Component::Agentsandbox)).unwrap();
             assert_eq!(
@@ -102,7 +103,7 @@ fn agentsandbox_static_json_has_the_same_delivery_identity_as_the_library() {
     assert!(
         String::from_utf8(text.stdout)
             .unwrap()
-            .starts_with("agentsandbox 0.0.1\nbuild: ")
+            .starts_with(&format!("agentsandbox {CARGO_VERSION}\nbuild: "))
     );
     let invalid = invoke(
         TOOLS[0].0,

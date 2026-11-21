@@ -27,9 +27,12 @@ fn assert_exact_terminal_reconciliation(case: Case) {
     let before = fixture.worker();
     assert_eq!(before.state, WorkerStateV1::Running);
     assert!(before.quota_held);
+    eprintln!("cancelled recovery phase=before_worker_verified");
     assert!(fixture.usage().is_empty());
+    eprintln!("cancelled recovery phase=before_allocation_verified");
     assert!(fixture.cancel_present());
     let durable_cancel = fixture.cancel_id();
+    eprintln!("cancelled recovery phase=before_cancel_verified");
     let worker_id = before.worker_id.clone();
     let attempt_id = before.attempt.attempt_id.clone();
     let cid = before
@@ -42,13 +45,16 @@ fn assert_exact_terminal_reconciliation(case: Case) {
         .clone()
         .expect("running worker has a durable StartedAt");
     let arm_claim_before = fixture.arm_claim_snapshot();
+    eprintln!("cancelled recovery phase=before_arm_claim_snapshot_ready");
     let runtime_calls_before = fixture.runtime_calls();
     assert!(runtime_calls_before.is_empty());
 
     eprintln!("cancelled recovery phase=run_start");
     let run = fixture.run_sync(&runtime);
     if run.is_err() {
+        eprintln!("cancelled recovery phase=run_returned_err");
         fixture.report_post_run_diagnostic();
+        eprintln!("cancelled recovery phase=post_run_diagnostic_complete");
     }
     run.expect("exact terminal observation should reconcile the cancelled worker");
     eprintln!("cancelled recovery phase=run_complete");

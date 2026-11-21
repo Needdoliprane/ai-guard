@@ -232,7 +232,7 @@ test("le direct signale reconnexion et refus ; un onglet masqué ferme le flux e
   await store.open(); const first = source.streams[0];
   first.onStatus("live"); first.onStatus("retrying");
   assert.equal(store.state.live, "retrying"); assert.equal(store.state.stale, true, "une coupure peut masquer des événements");
-  first.onStatus("live"); assert.equal(store.state.stale, false);
+  first.onStatus("live"); assert.equal(store.state.stale, true, "la connexion seule ne confirme pas le rattrapage");
   time.hide(); store.suspend();
   assert.equal(store.state.live, "suspended"); assert.equal(first.signal.aborted, true);
   const reads = () => source.calls.filter((call) => call.name === "recentEvents").length;
@@ -246,6 +246,26 @@ test("le direct signale reconnexion et refus ; un onglet masqué ferme le flux e
   // With the durable read budget stopped, no stream is opened at all.
   source.readBudgetStopped = true; await store.reload();
   assert.equal(source.streams.length, 2); assert.equal(store.state.live, "refused");
+  store.close();
+});
+
+test("la fin d’une tranche commencée avant la coupure ne confirme pas la fraîcheur", async () => {
+  const { store, source } = open(() => recentPage(newestFirst(10, 5)));
+  await store.open();
+  const stream = source.streams[0];
+  stream.onStatus("live");
+  stream.onPage(eventsPage([eventOf(11, session)], { has_more: true }), "position-11");
+  stream.onStatus("retrying"); stream.onStatus("live");
+  stream.onPage(eventsPage([eventOf(12, session)]), "position-12");
+  assert.equal(store.state.stale, true, "cette tranche était bornée avant la coupure");
+  stream.onPage(eventsPage([]), "position-sans-lot");
+  assert.equal(store.state.stale, true, "une trame vide ne prouve pas le rattrapage");
+  stream.onPage(eventsPage([eventOf(13, session)], { has_more: true }), "position-13");
+  assert.equal(store.state.stale, true, "la tranche suivant la coupure a encore des événements");
+  stream.onPage(eventsPage([eventOf(14, session)]), "position-14");
+  assert.equal(store.state.stale, false);
+  assert.deepEqual(numbers(store), [14, 13, 12, 11, 10, 9, 8, 7, 6]);
+  assert.equal(source.calls.filter((call) => call.name === "recentEvents").length, 1);
   store.close();
 });
 
@@ -347,8 +367,9 @@ test("un refus temporaire du direct est une déconnexion : relances bornées dep
   assert.deepEqual(source.streams[1].selection, { view: "metadata", limit: 100, cursor: "position-after-11" }, "la reprise part de la dernière position livrée, jamais du début");
   // A reconnection that delivers again resets the bound.
   stream = source.streams[1]; stream.onStatus("live");
-  assert.equal(store.state.live, "live"); assert.equal(store.state.stale, false);
+  assert.equal(store.state.live, "live"); assert.equal(store.state.stale, true);
   stream.onPage(eventsPage([eventOf(12, session)]), "position-after-12");
+  assert.equal(store.state.stale, false);
   const delays = [];
   for (let attempt = 0; attempt < 20 && store.state.live !== "off"; attempt++) {
     source.streams.at(-1).reject(new HumanApiError(429, "capacity_exhausted", "Live stream capacity is temporarily full.", "retry")); await tick();
@@ -464,8 +485,10 @@ test("l’annonce du Journal est une phrase sans heure ni compte, muette pendant
   assert.equal(module.journalAnnouncement(store.state), steady, "un lot en direct ne change pas l’annonce");
   stream.onStatus("retrying");
   assert.equal(module.journalAnnouncement(store.state), "Journal : données périmées, dernière lecture conservée. Direct déconnecté, reconnexion en cours.");
-  stream.onStatus("live"); time.hide(); store.suspend();
-  assert.equal(module.journalAnnouncement(store.state), "Journal : lecture réussie. Direct suspendu, onglet masqué.");
+  stream.onStatus("live");
+  assert.equal(module.journalAnnouncement(store.state), "Journal : données périmées, dernière lecture conservée. Direct connecté.");
+  time.hide(); store.suspend();
+  assert.equal(module.journalAnnouncement(store.state), "Journal : données périmées, dernière lecture conservée. Direct suspendu, onglet masqué.");
   store.close();
   assert.equal(module.journalAnnouncement(store.state), null);
   const refused = open(() => { throw new HumanApiError(403, "permission_denied", "Refus permission_denied", "review_permissions"); });

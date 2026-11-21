@@ -349,11 +349,15 @@ Valider le fichier avec un outil CycloneDX externe relève de votre choix ; aucu
 ```sh
 "$AIGUARD_BIN" release verify --source . --manifest "$RELEASE_PARENT/cli-1" --artifact target/release/agentsandbox
 "$AIGUARD_BIN" release verify --source . --manifest "$RELEASE_PARENT/inputs-1" --source-only
+"$AIGUARD_BIN" release verify --source . --manifest "$RELEASE_PARENT/cli-1" \
+  --expect-manifest-sha256 "$APPROVED_MANIFEST_SHA256" --artifact target/release/agentsandbox
 ```
+
+Pour une candidate approuvée, obtenir `APPROVED_MANIFEST_SHA256` du responsable de publication par un canal de confiance indépendant du dossier de livraison. Fournir le SHA-256 des octets exacts de `release-manifest.json` sous forme de 64 caractères hexadécimaux minuscules. Le rapport indique si l’empreinte fournie concorde. La confiance dans ce contrôle dépend du canal par lequel elle a été reçue.
 
 `release verify` prend les versions de fournisseurs déclarées dans le manifeste ; elle n'a pas d'option de version. Elle procède dans cet ordre et rend le premier résultat applicable :
 
-1. Elle lit `release-manifest.json`, `sbom.cdx.json` et `SHA256SUMS` dans `--manifest` : chacun doit être un fichier régulier à lien unique, appartenant à root ou à vous, non inscriptible par le groupe ou les autres et de 16 Mio au plus, dans une chaîne de répertoires conforme à la règle des ancêtres d'[avant de commencer](#before-you-start).
+1. Elle valide la forme de `--expect-manifest-sha256` si l’option est fournie. Elle lit `release-manifest.json` et compare l’empreinte de ses octets exacts à celle attendue avant de lire `sbom.cdx.json` et `SHA256SUMS`. Chaque fichier doit être régulier, à lien unique, appartenir à root ou à l’utilisateur courant, être protégé contre les écritures du groupe et des autres et mesurer au plus 16 Mio. Ses répertoires suivent la règle des ancêtres d'[avant de commencer](#before-you-start).
 2. Elle lit l'en-tête du manifeste de manière tolérante. Un fichier qui n'est pas un manifeste de livraison ai-guard, un autre `format_version` ou un autre producteur donne `UNVERIFIED`, avant tout contrôle strict et avant la préparation de la source.
 3. Elle contrôle `SHA256SUMS`, la forme canonique du manifeste et ses versions de fournisseurs déclarées.
 4. Sauf avec `--source-only`, elle empreinte chaque `--artifact` selon les [règles des artefacts](#bind-artefacts).
@@ -373,6 +377,7 @@ Le bloc de réussite reprend les lignes de `release manifest`, avec `artifacts  
 
 | Catégorie | Cause |
 |---|---|
+| `manifest-digest` | Les octets exacts de `release-manifest.json` ont un SHA-256 différent de l’empreinte attendue par l’opérateur. |
 | `sums` | Un document ne correspond pas à sa ligne de `SHA256SUMS`. |
 | `format` | `SHA256SUMS` n'est pas exactement ses deux lignes ; ou le manifeste contient un champ inconnu, n'est pas sous forme canonique, nomme un argument de build hors du format 1 ou déclare une version de fournisseur inadmissible. |
 | `source` | L'empreinte de source diffère ; au plus dix chemins modifiés, ajoutés et supprimés sont nommés. Lorsqu'aucun chemin n'est listé, le premier champ différent de `source` est nommé à la place (`no entry differs, source.<field> differs`). C'est décidé juste après la préparation, avant la lecture des locks : un changement que le format 1 ne sait pas lire, comme une ligne de lock qu'il refuse, est signalé ici. |

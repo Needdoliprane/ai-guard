@@ -2238,6 +2238,9 @@ async fn verify_dashboard_viewer(s: &DashboardState, token: &str) -> ApiResult<(
             "Identité de lecture invalide.",
         ));
     }
+    if response.status() == StatusCode::TOO_MANY_REQUESTS {
+        return Err(store_io::capacity());
+    }
     if !response.status().is_success() {
         return Err(error(
             StatusCode::BAD_GATEWAY,

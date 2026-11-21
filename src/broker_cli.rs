@@ -1,7 +1,8 @@
 use agentsandbox::{
     broker::service::{
-        self, RequestedExecutionV1, ServiceEnforcerSelectionV1, SubmitV1,
-        protocol::{BrokerCommandV1, BrokerReplyV1},
+        self, BrokerClient, BrokerClientSelection, RequestedExecutionV1,
+        ServiceEnforcerSelectionV1, ServicePlatform, SubmitV1,
+        protocol::{BrokerCommandV1, BrokerReplyV1, JOB_RESULT_VERSION},
     },
     control_fs::{PrivateFile, absolute_path},
     provider::AuthPreference,
@@ -9,7 +10,7 @@ use agentsandbox::{
     runner::AuditClient,
 };
 use anyhow::{Result, anyhow, ensure};
-use clap::{Args, Subcommand};
+use clap::{ArgGroup, Args, Subcommand};
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -34,6 +35,23 @@ enum BrokerCommand {
         gateway: String,
         #[arg(long)]
         token_file: PathBuf,
+    },
+    /// Publish an exact broker profile selection in a new private directory.
+    PrepareClient {
+        /// Absolute path to the private broker registry.
+        #[arg(long)]
+        broker_config: PathBuf,
+        /// Operator-configured broker profile to retain.
+        #[arg(long)]
+        profile: String,
+        /// New absolute directory for the selection.
+        #[arg(long)]
+        destination: PathBuf,
+    },
+    /// Plan the foreground broker service for the local system manager.
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
     },
     /// Run the explicitly configured trusted local broker in the foreground.
     Serve {
@@ -72,6 +90,8 @@ enum BrokerCommand {
     Submit(SubmitArgs),
     /// Read cached journal/control facts for this identity's job.
     Status(OperationArgs),
+    /// Read the durable batch result for this identity's operation.
+    Result(OperationArgs),
     /// Read the retained relay attachment state and its coverage for this job.
     RelayStatus(OperationArgs),
     /// Read confirmed recovery metadata, including when business loading fails.
@@ -133,14 +153,42 @@ enum BrokerCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum ServiceCommand {
+    /// Render a proposed service file and diff on stdout.
+    Plan {
+        #[arg(long, value_enum)]
+        platform: ServicePlatform,
+        /// Absolute path to the existing private broker registry.
+        #[arg(long)]
+        config: PathBuf,
+        /// Existing Full3 role whose guardian must be supervised independently.
+        #[arg(long, value_name = "ROLE", value_parser = parse_enforcer_role)]
+        enforcer_full3_existing: String,
+    },
+}
+
 #[derive(Args)]
+#[command(group(ArgGroup::new("broker_connection")
+    .args(["root", "broker_config", "broker_selection"])
+    .required(true)))]
 struct ConnectionArgs {
+    /// Use the already-running broker at this private root.
+    #[arg(long, requires_all = ["profile", "token_file"])]
+    root: Option<PathBuf>,
+    /// Resolve the broker root and credential from this absolute private broker registry path.
+    #[arg(long, requires = "profile", conflicts_with = "token_file")]
+    broker_config: Option<PathBuf>,
+    /// Use a private broker selection published by broker prepare-client.
+    #[arg(long, env = "AGENTSANDBOX_BROKER_SELECTION", hide_env_values = true,
+        conflicts_with_all = ["profile", "token_file"])]
+    broker_selection: Option<PathBuf>,
+    /// Select an operator-configured broker profile.
     #[arg(long)]
-    root: PathBuf,
-    #[arg(long)]
-    profile: String,
-    #[arg(long)]
-    token_file: PathBuf,
+    profile: Option<String>,
+    /// Private credential file for the selected profile when providing --root.
+    #[arg(long, requires = "root")]
+    token_file: Option<PathBuf>,
 }
 #[derive(Args)]
 struct OperationArgs {
@@ -254,15 +302,40 @@ async fn control_info(gateway: String, token_file: PathBuf) -> Result<()> {
 
 async fn send(connection: ConnectionArgs, command: BrokerCommandV1) -> Result<()> {
     let recovery_inventory = matches!(&command, BrokerCommandV1::RecoveryInventory { .. });
-    let file = PrivateFile::open(&connection.token_file, 4096)
-        .map_err(|_| anyhow!("private broker credential file is unavailable or unsafe"))?;
-    let credential = std::str::from_utf8(file.bytes())
-        .map_err(|_| anyhow!("invalid broker credential file"))?
-        .trim();
-    file.revalidate()
-        .map_err(|_| anyhow!("broker credential file changed"))?;
-    let reply =
-        service::request(&connection.root, &connection.profile, credential, command).await?;
+    let result_request = match &command {
+        BrokerCommandV1::Result {
+            version,
+            operation_id,
+        } => Some((*version, *operation_id)),
+        _ => None,
+    };
+    let client = match (
+        connection.broker_selection,
+        connection.broker_config,
+        connection.root,
+        connection.profile,
+        connection.token_file,
+    ) {
+        (Some(selection), None, None, None, None) => {
+            BrokerClientSelection::open(&selection)?.into_client()?
+        }
+        (None, Some(config), None, Some(profile), None) => {
+            BrokerClient::open_from_config(&config, profile)?
+        }
+        (None, None, Some(root), Some(profile), Some(token_file)) => {
+            BrokerClient::open(root, profile, &token_file)?
+        }
+        _ => return Err(anyhow!("invalid broker selection")),
+    };
+    let reply = client.request(command).await?;
+    if let Some((version, operation_id)) = result_request {
+        ensure!(
+            matches!(&reply, BrokerReplyV1::Result { result }
+                if result.version == version && result.operation_id == operation_id)
+                || matches!(&reply, BrokerReplyV1::Error { .. }),
+            "incompatible or uncorrelated broker result reply"
+        );
+    }
     if recovery_inventory
         && matches!(
             &reply,
@@ -313,6 +386,23 @@ pub async fn execute(args: BrokerArgs) -> Result<()> {
             gateway,
             token_file,
         } => control_info(gateway, token_file).await,
+        BrokerCommand::PrepareClient {
+            broker_config,
+            profile,
+            destination,
+        } => BrokerClientSelection::publish(&destination, &broker_config, &profile),
+        BrokerCommand::Service {
+            command:
+                ServiceCommand::Plan {
+                    platform,
+                    config,
+                    enforcer_full3_existing,
+                },
+        } => {
+            let plan = service::plan_service_unit(platform, &config, &enforcer_full3_existing)?;
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+            Ok(())
+        }
         BrokerCommand::Serve {
             config,
             recovery_only,
@@ -385,6 +475,16 @@ pub async fn execute(args: BrokerArgs) -> Result<()> {
             send(
                 args.connection,
                 BrokerCommandV1::Status {
+                    operation_id: args.operation_id,
+                },
+            )
+            .await
+        }
+        BrokerCommand::Result(args) => {
+            send(
+                args.connection,
+                BrokerCommandV1::Result {
+                    version: JOB_RESULT_VERSION,
                     operation_id: args.operation_id,
                 },
             )
@@ -521,6 +621,81 @@ mod tests {
     struct TestCli {
         #[command(flatten)]
         args: BrokerArgs,
+    }
+
+    #[test]
+    fn broker_service_plan_requires_a_platform_and_an_existing_full3_role() {
+        for platform in ["systemd", "launchd"] {
+            let command = TestCli::try_parse_from([
+                "broker",
+                "service",
+                "plan",
+                "--platform",
+                platform,
+                "--config",
+                "/private/fixture.json",
+                "--enforcer-full3-existing",
+                "full3-qa",
+            ])
+            .unwrap();
+            assert!(matches!(command.args.command,
+                BrokerCommand::Service {
+                    command: ServiceCommand::Plan { enforcer_full3_existing, .. }
+                } if enforcer_full3_existing == "full3-qa"));
+        }
+        for args in [
+            &["--platform", "systemd"][..],
+            &["--enforcer-full3-existing", "full3-qa"][..],
+            &[
+                "--platform",
+                "systemd",
+                "--enforcer-full3-existing",
+                "enforcer",
+            ][..],
+            &["--platform", "systemd", "--enforcer-full3-new", "full3-qa"][..],
+        ] {
+            let mut argv = vec![
+                "broker",
+                "service",
+                "plan",
+                "--config",
+                "/private/fixture.json",
+            ];
+            argv.extend_from_slice(args);
+            assert!(TestCli::try_parse_from(argv).is_err());
+        }
+    }
+
+    #[test]
+    fn broker_service_plan_argv_reparses_the_exact_existing_role() {
+        // The plan renders the role as one argv element to preserve a leading
+        // hyphen. TestCli flattens the outer broker subcommand.
+        let argv = [
+            "/opt/ai guard/agentsandbox",
+            "broker",
+            "serve",
+            "--config",
+            "/private/ai guard/registry.json",
+            "--enforcer-full3-existing=-full3-qa",
+        ];
+        let parsed =
+            TestCli::try_parse_from(std::iter::once(argv[0]).chain(argv[2..].iter().copied()))
+                .unwrap();
+        let BrokerCommand::Serve {
+            config,
+            recovery_only,
+            enforcer_full3_new,
+            enforcer_full3_existing,
+            enforcer_role,
+        } = parsed.args.command
+        else {
+            panic!("planned argv did not select broker serve");
+        };
+        assert_eq!(config, PathBuf::from(argv[4]));
+        assert!(matches!(
+            serve_enforcer_selection(recovery_only, enforcer_full3_new, enforcer_full3_existing, enforcer_role).unwrap(),
+            ServiceEnforcerSelectionV1::Full3Existing { role_name } if role_name == "-full3-qa"
+        ));
     }
 
     #[test]

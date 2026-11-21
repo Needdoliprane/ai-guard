@@ -15,6 +15,13 @@ fn require(value: bool) -> anyhow::Result<()> {
     }
 }
 
+fn verify_store_contents(db: &Connection, tenant: &str) -> anyhow::Result<()> {
+    validate_schema(db, false)?;
+    Store::validate_metadata(db, tenant)?;
+    control::validate(db)?;
+    require(Store::check_integrity(db)?.valid)
+}
+
 enum OpeningAuthority<'a> {
     Maintenance(&'a HumanMaintenanceSourceToken),
     Startup(&'a OwnedSourceToken),
@@ -83,10 +90,7 @@ impl OpeningAuthority<'_> {
                     && u32::try_from(format).ok() == Some(source.descriptor().required_format)
             }
         })?;
-        validate_schema(db, false)?;
-        Store::validate_metadata(db, tenant)?;
-        control::validate(db)?;
-        require(Store::check_integrity(db)?.valid)?;
+        verify_store_contents(db, tenant)?;
         let namespace = authority::namespace(db)?;
         match self {
             Self::Maintenance(token) => {
@@ -104,6 +108,12 @@ impl OpeningAuthority<'_> {
                             && snapshot.anchor.durable_namespace_id == d.durable_namespace_id,
                     )?;
                     if d.required_format == 15 {
+                        if let Some(expected) = token.prior_active_anchor(14)? {
+                            require(
+                                snapshot.anchor_receipt.seq == expected.seq
+                                    && snapshot.anchor_receipt.hash == expected.hash,
+                            )?;
+                        }
                         egress::validate_maintenance_identity(db, token)?;
                     }
                 }
@@ -251,6 +261,15 @@ impl ReviewStoreMaintenance {
 }
 
 impl<'a, 'db> ReviewStoreMaintenanceWriter<'a, 'db> {
+    pub(crate) fn egress_maintenance_prefix(
+        &self,
+        token: &HumanMaintenanceSourceToken,
+        before_install: bool,
+    ) -> anyhow::Result<AuthorityReceiptV1> {
+        self.same_token(token)?;
+        egress::maintenance_prefix(self.store, self.transaction()?, token, before_install)
+    }
+
     pub(crate) fn prepare_egress_backup<'t>(
         &self,
         token: &'t HumanMaintenanceSourceToken,
@@ -652,6 +671,65 @@ impl ReviewStoreStartup {
 }
 
 impl Store {
+    /// Confirm the committed E1 genesis on the exact maintenance source.
+    /// Reuse the read-write maintenance opener and its Immediate transaction.
+    /// Opening may change SQLite journal state or recover or create sidecars.
+    /// Confirmation does not install the schema or append an audit event.
+    pub(crate) fn confirm_egress_format15(
+        token: &HumanMaintenanceSourceToken,
+        redactor: Redactor,
+        max_events: u64,
+        backup_path: &Path,
+        limits: &egress::EgressStoreLimitsV1,
+    ) -> anyhow::Result<AuthorityReceiptV1> {
+        Self::confirm_egress_format15_with(
+            token,
+            redactor,
+            max_events,
+            backup_path,
+            limits,
+            |_, receipt| Ok(receipt),
+        )
+    }
+
+    /// Observe the proven backup and replayed genesis while the new writer is held.
+    pub(crate) fn confirm_egress_format15_with<T>(
+        token: &HumanMaintenanceSourceToken,
+        redactor: Redactor,
+        max_events: u64,
+        backup_path: &Path,
+        limits: &egress::EgressStoreLimitsV1,
+        observe: impl FnOnce(
+            &egress::VerifiedEgressSourceBackup<'_>,
+            AuthorityReceiptV1,
+        ) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        token.check()?;
+        let descriptor = token.descriptor();
+        let tenant = descriptor
+            .tenant_id
+            .as_deref()
+            .ok_or(ReviewAuthorityFailure::Required)?;
+        let reopened = Self::open_review_maintenance_for_tenant(
+            &descriptor.storage_binding.path(),
+            tenant,
+            redactor,
+            max_events,
+            token,
+        )?;
+        reopened.with_review_maintenance_writer(token, |writer| {
+            let backup = writer.resume_egress_backup(token, backup_path)?;
+            let receipt = egress::confirm_format15(
+                writer.store,
+                writer.transaction()?,
+                token,
+                &backup,
+                limits,
+            )?;
+            observe(&backup, receipt)
+        })
+    }
+
     pub(crate) fn open_review_maintenance_for_tenant(
         path: &Path,
         tenant_id: &str,
@@ -692,6 +770,57 @@ impl Store {
             store,
             source: source.clone(),
         })
+    }
+
+    /// Observe one unchanged Store14 in the maintenance union. The returned
+    /// head comes from the same snapshot as the verified prior-manifest anchor.
+    /// SQLite opens read-only. The storage lock and WAL sidecars still apply.
+    pub(crate) fn observe_unchanged_review_format14(
+        token: &HumanMaintenanceSourceToken,
+    ) -> anyhow::Result<AuthorityReceiptV1> {
+        token.check()?;
+        let descriptor = token.descriptor();
+        if descriptor.kind != HumanSourceKindV1::TenantStore || descriptor.required_format != 14 {
+            return Err(ReviewAuthorityFailure::Required.into());
+        }
+        let tenant = descriptor
+            .tenant_id
+            .as_deref()
+            .ok_or(ReviewAuthorityFailure::Required)?;
+        let expected = token
+            .prior_active_anchor(14)?
+            .ok_or(ReviewAuthorityFailure::Required)?;
+        let (backing, _initialization) =
+            StoreStorage::open_existing(&descriptor.storage_binding.path())?;
+        let observer = OpeningAuthority::Maintenance(token);
+        let db = Connection::open_with_flags(
+            backing.path(),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        db.busy_timeout(std::time::Duration::ZERO)?;
+        db.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")?;
+        let tx = Transaction::new_unchecked(&db, rusqlite::TransactionBehavior::Deferred)?;
+        observer.physical(&backing, &tx, tenant)?;
+        require(tx.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))? == 14)?;
+        verify_store_contents(&tx, tenant)?;
+        let snapshot = authority::replay(&tx)?;
+        require(
+            authority::namespace(&tx)? == descriptor.durable_namespace_id
+                && snapshot.anchor.installation_id == descriptor.installation_id
+                && snapshot.anchor.source_id == descriptor.source_id
+                && snapshot.anchor.kind == descriptor.kind
+                && snapshot.anchor.tenant_id == tenant
+                && snapshot.anchor.durable_namespace_id == descriptor.durable_namespace_id
+                && snapshot.anchor_receipt.seq == expected.seq
+                && snapshot.anchor_receipt.hash == expected.hash,
+        )?;
+        let (seq, hash) = audit_head(&tx)?;
+        observer.physical(&backing, &tx, tenant)?;
+        tx.commit()?;
+        observer.physical(&backing, &db, tenant)?;
+        db.close().map_err(|(_, error)| error)?;
+        token.check()?;
+        Ok(AuthorityReceiptV1 { seq, hash })
     }
 }
 

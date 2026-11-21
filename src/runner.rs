@@ -1191,6 +1191,33 @@ pub struct RunSummary {
     pub postprocessing_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport_stop_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_deadline: Option<ControlDeadlineObservation>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlDeadlineKind {
+    OriginalExecutionDeadline,
+    ObservationWindow,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlStopObservation {
+    NoOwnedWorker,
+    AlreadyStopped,
+    EngineAcknowledged,
+    Unconfirmed,
+}
+
+/// The legacy controller's own deadline and the result of its stop request.
+/// An engine acknowledgement does not establish the cause of the exit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlDeadlineObservation {
+    pub deadline: ControlDeadlineKind,
+    pub stop: ControlStopObservation,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1949,7 +1976,17 @@ fn resolved_provider_diagnostic_json(
     Ok(serde_json::to_string(&payload)?)
 }
 
+fn validate_new_runtime_target(options: &RunOptions) -> Result<()> {
+    if options.runtime == RuntimeKind::Podman {
+        crate::runtime::selected_podman_target_args(
+            options.runtime_endpoint.as_deref().unwrap_or("local"),
+        )?;
+    }
+    Ok(())
+}
+
 pub async fn run(options: RunOptions) -> Result<RunSummary> {
+    validate_new_runtime_target(&options)?;
     let supplied_approval = options.approve_hash.clone();
     let mut plan = choose_plan(options)?;
     let config = crate::control_fs::Directory::open_existing(&plan.options.config_dir)?;

@@ -115,7 +115,7 @@ async fn json_response(response: Response) -> (StatusCode, Value) {
     (status, serde_json::from_slice(&body).unwrap())
 }
 
-async fn seed_cookie(router: &Router) -> String {
+async fn check_status_no_cookie(router: &Router) {
     let response = send(
         router,
         Request::get("/auth/oidc/status")
@@ -124,24 +124,19 @@ async fn seed_cookie(router: &Router) -> String {
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
-    response.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_owned()
+    assert!(response.headers().get("set-cookie").is_none());
 }
 
-fn web_post(path: &str, cookie: &str) -> Request<Body> {
-    Request::post(path)
+fn web_post(path: &str, cookie: Option<&str>, body: Value) -> Request<Body> {
+    let mut request = Request::post(path)
         .header("content-type", "application/json")
-        .header("cookie", cookie)
         .header("origin", ORIGIN)
         .header("sec-fetch-site", "same-origin")
-        .header("sec-fetch-mode", "cors")
-        .body(Body::from(json!({"version": 1}).to_string()))
-        .unwrap()
+        .header("sec-fetch-mode", "cors");
+    if let Some(cookie) = cookie {
+        request = request.header("cookie", cookie);
+    }
+    request.body(Body::from(body.to_string())).unwrap()
 }
 
 fn native_request(action: Value) -> Request<Body> {
@@ -167,18 +162,23 @@ fn assert_no_token_exchange(issuer: &ControlledIssuer) {
 async fn unverified_web_start_does_not_consume_durable_authentication_audit() {
     let (_files, issuer, audit, router, _store) = build(1_000).await;
     let before = audit.verify().unwrap().records;
-    let cookie = seed_cookie(&router).await;
-    let response = send(&router, web_post("/auth/oidc/start", &cookie)).await;
+    check_status_no_cookie(&router).await;
+    let response = send(
+        &router,
+        web_post("/auth/oidc/start", None, json!({"version": 1})),
+    )
+    .await;
     assert_eq!(
         response.status(),
         StatusCode::OK,
         "HARNESS INCONCLUSIVE: controlled-issuer preparation did not complete"
     );
+    assert!(response.headers().get("set-cookie").is_some());
     assert_no_token_exchange(&issuer);
     assert_eq!(
         audit.verify().unwrap().records,
         before,
-        "a status-seeded cookie is not an identity proof or a durable audit reservation"
+        "an unauthenticated start is not an identity proof or a durable audit reservation"
     );
 }
 
@@ -188,9 +188,15 @@ async fn anonymous_web_starts_cannot_fill_the_durable_authentication_audit() {
     let before = audit.verify().unwrap().records;
     let mut accepted = 0;
     for _ in 0..24 {
-        let cookie = seed_cookie(&router).await;
-        let (status, _) =
-            json_response(send(&router, web_post("/auth/oidc/start", &cookie)).await).await;
+        check_status_no_cookie(&router).await;
+        let (status, _) = json_response(
+            send(
+                &router,
+                web_post("/auth/oidc/start", None, json!({"version": 1})),
+            )
+            .await,
+        )
+        .await;
         let records = audit.verify().unwrap().records;
         if status == StatusCode::SERVICE_UNAVAILABLE && records != 12 {
             panic!(
@@ -269,14 +275,26 @@ async fn unverified_native_proof_rejection_does_not_consume_durable_audit() {
 async fn unverified_web_callback_rejection_does_not_append_to_the_ledger() {
     let (_files, issuer, audit, router, _store) = build(12).await;
     let before = audit.verify().unwrap().records;
-    let cookie = seed_cookie(&router).await;
-    let (status, start) =
-        json_response(send(&router, web_post("/auth/oidc/start", &cookie)).await).await;
+    check_status_no_cookie(&router).await;
+    let start_response = send(
+        &router,
+        web_post("/auth/oidc/start", None, json!({"version": 1})),
+    )
+    .await;
     assert_eq!(
-        status,
+        start_response.status(),
         StatusCode::OK,
         "HARNESS INCONCLUSIVE: controlled-issuer preparation did not complete"
     );
+    let cookie = start_response.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let (_, start) = json_response(start_response).await;
+    let correlation_token = start["correlation_token"].as_str().unwrap().to_owned();
     let authorization = reqwest::Url::parse(start["authorization_url"].as_str().unwrap()).unwrap();
     let state = authorization
         .query_pairs()
@@ -294,8 +312,18 @@ async fn unverified_web_callback_rejection_does_not_append_to_the_ledger() {
         .body(Body::empty())
         .unwrap();
     assert_eq!(send(&router, request).await.status(), StatusCode::SEE_OTHER);
-    let (status, failure) =
-        json_response(send(&router, web_post("/auth/oidc/tokens", &cookie)).await).await;
+    let (status, failure) = json_response(
+        send(
+            &router,
+            web_post(
+                "/auth/oidc/tokens",
+                Some(&cookie),
+                json!({"version": 1, "correlation_token": correlation_token}),
+            ),
+        )
+        .await,
+    )
+    .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(failure["error"]["code"], "login_cancelled");
     assert_no_token_exchange(&issuer);

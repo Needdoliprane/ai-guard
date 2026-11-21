@@ -186,7 +186,7 @@ V2 resume binds the retained creation inode/owner and planned namespace to the a
 |---|---|
 | Gateway Rust | Owns Web PKCE transactions, validates provider responses and API access tokens, admits sessions, applies claim mapping and control-side permissions, and records authentication audit. |
 | Dashboard Rust | Serves the compiled frontend and proxies only fixed authentication routes to its configured gateway. It does not authenticate users by a business-session cookie. |
-| Browser | Uses the public Web client. Keeps access/refresh tokens in memory after the gateway's one-time delivery. A short-lived opaque cookie correlates the login; it contains no token or PKCE verifier. |
+| Browser | Uses the public Web client. Keeps access/refresh tokens in memory after the gateway's one-time delivery. `POST /auth/oidc/start` rotates a fresh short-lived opaque cookie (never pre-seeded by `/status`) and issues a one-time `correlation_token` kept across the redirect in origin-scoped `sessionStorage` and cleared immediately at `redeem()`/`close()`; neither contains any bearer token or PKCE verifier. |
 | Human CLI | Uses a separate public client, an external browser and an ephemeral loopback listener. Owns its PKCE exchange; the gateway independently validates and admits the access token. |
 | Broker and worker | Keep their separate execution identities. A human SSO login provides no `runner` credential and places no human token in a worker. |
 
@@ -607,7 +607,7 @@ The Rust listeners are HTTP listeners; configuring an HTTPS public origin does n
 
 Open the exact configured dashboard origin. The connection screen checks SSO status and displays the provider label and issuer. Choose **Se connecter avec …**, complete sign-in in the provider, then choose one of the contexts returned by ai-guard. A valid provider account without an approved application membership is refused. A successful sign-in with no authorized resources may show an empty resource page; an authentication, storage or network failure must remain an error.
 
-The gateway consumes its callback and sends the browser to `/auth/oidc/complete` without forwarding code/state query parameters. Tokens are delivered once and kept in memory, outside URLs, Web Storage, logs and exports. Reloading, closing the page or restarting the gateway requires a new explicit sign-in. Do not copy tokens from developer tools into a file or another CLI command. The browser coordinates refresh when a refresh token is available; a refusal or ambiguous result closes the local session. New generations replace the authorized view rather than retaining old context data.
+The gateway consumes its callback and sends the browser to `/auth/oidc/complete` without forwarding code/state query parameters. Tokens are delivered once and kept in memory, outside URLs, Web Storage, logs and exports; only the ephemeral, non-authority `correlation_token` minted by `/start` transits across the redirect in origin-scoped `sessionStorage` and is removed immediately by `redeem()` or `close()`. Reloading, closing the page or restarting the gateway requires a new explicit sign-in. Do not copy tokens from developer tools into a file or another CLI command. The browser coordinates refresh when a refresh token is available; a refusal or ambiguous result closes the local session. New generations replace the authorized view rather than retaining old context data.
 
 Use the application's disconnect action. Local browser state is cleared even when the control/provider cannot confirm logout. Keep the outcomes separate:
 

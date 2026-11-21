@@ -188,8 +188,28 @@ fn managed_checkpoint_mutations_do_not_change_the_intent_hash() {
         },
         postprocessing_error: Some("fixture postprocessing observation".into()),
         transport_stop_reason: None,
+        control_deadline: None,
     };
-    result_changed["managed"]["result"] = serde_json::to_value(result).unwrap();
+    let mut encoded = serde_json::to_value(result).unwrap();
+    assert!(encoded.get("control_deadline").is_none());
+    let legacy: RunSummary = serde_json::from_value(encoded.clone()).unwrap();
+    assert!(legacy.control_deadline.is_none());
+    encoded["control_deadline"] = serde_json::json!({
+        "deadline": "original_execution_deadline",
+        "stop": "engine_acknowledged",
+    });
+    let read: RunSummary = serde_json::from_value(encoded).unwrap();
+    assert_eq!(read.exit_code, 17);
+    assert!(!read.timed_out);
+    assert!(read.transport_stop_reason.is_none());
+    assert_eq!(
+        read.control_deadline,
+        Some(agentsandbox::runner::ControlDeadlineObservation {
+            deadline: agentsandbox::runner::ControlDeadlineKind::OriginalExecutionDeadline,
+            stop: agentsandbox::runner::ControlStopObservation::EngineAcknowledged,
+        })
+    );
+    result_changed["managed"]["result"] = serde_json::to_value(read).unwrap();
     assert_eq!(
         intent_for(&result_changed).intent_hash().unwrap(),
         baseline_hash

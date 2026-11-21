@@ -48,6 +48,32 @@ impl Directory {
         Ok((identity.device, identity.inode))
     }
 
+    /// Check an already retained direct child in this directory's mount domain.
+    pub(crate) fn require_same_mount_child(&self, child: &Self) -> Result<()> {
+        ensure!(
+            child.path().parent() == Some(self.path()),
+            "private child parent differs"
+        );
+        let name = child_name(
+            child
+                .path()
+                .file_name()
+                .context("private child name missing")?,
+        )?;
+        let parent_identity = self.physical_identity()?;
+        let child_identity = child.physical_identity()?;
+        let before = observe_same_mount(&self.0.file, &name, parent_identity, child_identity)?;
+        ensure!(
+            self.physical_identity()? == parent_identity
+                && child.physical_identity()? == child_identity,
+            "private child identity changed during mount inspection"
+        );
+        let after = observe_same_mount(&self.0.file, &name, parent_identity, child_identity)?;
+        ensure!(before == after, "private child mount domain changed");
+        self.revalidate()?;
+        child.revalidate()
+    }
+
     /// Require an existing private regular entry in the parent's actual mount
     /// domain. A file-only mount must not choose a different owner-lock parent.
     /// No descriptor to the entry (including SQLite main/SHM) is opened here.

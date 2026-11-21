@@ -155,6 +155,23 @@ mod tests {
     }
 
     #[test]
+    fn observe_only_reports_its_stage_without_claiming_a_runtime_effect() {
+        let error = anyhow::Error::new(RuntimePrestartStageFailure::observe_only())
+            .context("synthetic private reconciliation context");
+        let diagnostic = failure_report(LocalFailurePhaseV1::ImportVerification, &error);
+        assert_eq!(
+            serde_json::to_value(diagnostic).unwrap(),
+            json!({
+                "version": 1,
+                "phase": "import_verification",
+                "runtime_effect": "unknown",
+                "enforcer": null,
+                "runtime": {"stage": "observe_only", "container_id": null},
+            })
+        );
+    }
+
+    #[test]
     fn broker_context_reports_only_the_fixed_boundary() {
         let private = "synthetic-private-journal-error-keep-out-of-audit";
         for (step, label) in [

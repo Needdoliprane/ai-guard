@@ -74,6 +74,51 @@ Pour vérifier aussi le dashboard après la fin des workers, ajouter les [quatre
 
 Pour la recette en direct, sélectionner `QA_PODMAN_MODE=rootless`, ajouter les mêmes variables Chromium et lancer la commande avec `AGENTSANDBOX_TEST_BROWSER_LIVE=1`. Après le rendu des deux vues tenant, le harnais inspecte ensemble les trois identifiants Podman affichés et rapproche leurs démarrages du registre terminal. Il vérifie les deux déconnexions et la fermeture des flux. Une exécution en mode rootful est refusée avant la création de la fixture live.
 
+## Rejouer un worker Podman avec audit et export
+
+Sur macOS, le conducteur autonome lance une seule commande `/usr/bin/id` via le vrai CLI, avec une échéance de 30 s et le réseau `none`. Il prépare son propre gateway loopback et sa source synthétique. Utiliser Python 3.11 ou ultérieur, un CLI déjà compilé avec son empreinte, un socket Unix explicite et l’identifiant complet d’une image locale en `1000:1000`. Choisir une destination absolue encore inexistante.
+
+```sh
+python3 -B tests/e2e/run_one_podman_cli.py \
+  --cli "$QA_BIN" --cli-sha256 "$QA_CLI_SHA256" \
+  --policy "$PWD/policies/default.json" --podman "$QA_PODMAN_BIN" \
+  --endpoint "$QA_PODMAN_ENDPOINT" --image "$QA_WORKER_IMAGE_ID" \
+  --output "$QA_OUTPUT"
+```
+
+Ajouter `--allow-rootful` pour le seul moteur rootful approuvé. Le conducteur rattache le départ audité, le terminal, l’allocation, l’export et le retrait du conteneur à la même session. Il conserve les codes du CLI et les rapports privés dans `QA_OUTPUT`. Un export qui réussit après reprise conserve le verdict de la soumission initiale.
+
+### Suite Podman avec refus et capture
+
+Utiliser un dossier de contrôle neuf, un gateway Rust sur loopback, un programme Podman approuvé et une image QA déjà présente sur le moteur choisi. L’image doit fournir `/usr/bin/id` et `/bin/tar`, avec `/workspace` inscriptible en `1000:1000`. Préférer un socket Unix explicite. Pour un moteur Podman natif Linux ou FreeBSD, `QA_PODMAN_ENDPOINT=local` sélectionne le mode local.
+
+```sh
+qa_config=$(mktemp -d)
+cargo build --locked --offline -j1 --bin agentsandbox
+target/debug/agentsandbox init --config-dir "$qa_config"
+target/debug/agentsandbox gateway --listen 127.0.0.1:0 \
+  --data "$qa_config/audit.sqlite" \
+  --runner-token-file "$qa_config/secrets/runner" \
+  --viewer-token-file "$qa_config/secrets/viewer" \
+  --policy policies/default.json
+```
+
+Dans un autre terminal, reprendre le chemin du dossier de contrôle et l’origine annoncée par le gateway. Le test lit son propre credential de recette. Ajouter `AGENTSANDBOX_TEST_ALLOW_ROOTFUL=1` uniquement si l’exception rootful a été approuvée. Pendant la comparaison des volumes avant/après le refus, garder le moteur de recette libre d’autres créations de volumes.
+
+```sh
+AGENTSANDBOX_TEST_CONFIG="$QA_CONFIG_DIR" \
+AGENTSANDBOX_TEST_GATEWAY="$QA_GATEWAY_ORIGIN" \
+AGENTSANDBOX_TEST_RUNTIME=podman \
+AGENTSANDBOX_TEST_RUNTIME_PROGRAM="$QA_PODMAN_BIN" \
+AGENTSANDBOX_TEST_RUNTIME_ENDPOINT="$QA_PODMAN_ENDPOINT" \
+AGENTSANDBOX_TEST_IMAGE="$QA_WORKER_IMAGE_ID" \
+  cargo test --locked --offline -j1 --test runtime_smoke \
+  real_worker_copy_uid_and_export_preserve_the_original_project \
+  -- --ignored --exact --nocapture
+```
+
+Cette suite vérifie l’identité non root, la fin et la reprise de la session, le relevé non facturable, le refus avant effet et l’export en préservant la source. Elle peut démarrer jusqu’à trois workers sans fournisseur, successivement, dont le cas de capture en réseau `bridge`. La recette distincte `runtime_terminal_persistence` injecte un refus d’audit terminal et demande une image contenant également `/usr/bin/python3`.
+
 Le [document racine](../../LOCAL_CLOUD_TESTS.md) conserve une proposition détaillée, mais cite des commandes/tests et fonctions absents du checkout initial. **Ne pas exécuter ces commandes en supposant qu'elles existent.** Les nouveaux tests `tenant_api`, `tenant_storage` et `gateway_tenancy` couvrent l'identité/base d'audit A/B ; ils ne lancent pas de worker. Le seul smoke moteur livré initialement est `runtime_smoke`, à exécuter explicitement selon ses prérequis.
 
 Le registre, les quotas, le ledger d'allocation non facturable et le dashboard partagé existent désormais ; leurs preuves logicielles et parcours moteur ciblés sont dans [CURRENT_STATE.md](CURRENT_STATE.md). Les contrats HTTP/SQLite d'identité worker et de relais dirigé, grants, ACK et révocation ont aussi leurs preuves logicielles, détaillées dans les guides workloads [EN](../setup/workloads/README.md)/[FR](../setup/workloads/README.fr.md). Ils ne constituent pas la recette complète à trois workers : le handoff, le canal depuis les conteneurs sans réseau, le déploiement de cette recette et ses douze critères réels, dont la visibilité dashboard, restent ouverts. Les observations de workers construites par les fixtures sont déclarées, pas des inspections moteur. Chaque scénario réel conserve son moteur, version, OS/architecture, mode rootless/rootful, image/digest, commandes, observations, erreurs et volumes de preuve. Aucun volume existant n'est supprimé pour faire passer la recette.

@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   buildAgentForest,
+  brokerBatchResultDetails,
+  brokerWorkspaceDetails,
+  decisionEvaluationDetails,
   matchesFilters,
   projectEvents,
   formatMetric,
@@ -236,6 +239,176 @@ const brokerFailureEvent = {
   },
 };
 
+const observedDecision = {
+  seq: 21, id: "decision-21", timestamp: "2026-11-18T12:00:00Z",
+  kind: "security.decision", source: "gateway", provenance: "observed",
+  decision: { engine: "deterministic", outcome: "allow", rule: "exact_allowlist" },
+};
+
+const withEvaluation = (jev, event = observedDecision) => ({ ...event, data: { jev } });
+
+test("la décision distingue l’évaluateur Rust et le modèle demandé et retourné par TypeSafe", () => {
+  assert.deepEqual(decisionEvaluationDetails(withEvaluation({
+    backend: "rust_rules", status: "evaluated", outcome: "allow", requested_model: "invalide", model: "invalide",
+  })), {
+    evaluator: "Rust déterministe", evaluationState: "Évaluée", selectionSource: null, requestedModel: null,
+    returnedModel: null, advice: null, localAdvisory: false,
+  });
+  assert.deepEqual(decisionEvaluationDetails(withEvaluation({
+    backend: "typesafe", status: "evaluated", requested_model: "jev-latest", model: "jev-1.14.0",
+    outcome: "allow", confidence: 0.95, provider_outcome: "deny",
+  })), {
+    evaluator: "Jev TypeSafe", evaluationState: "Évaluée", selectionSource: null, requestedModel: "jev-latest",
+    returnedModel: "jev-1.14.0", advice: "Autoriser", localAdvisory: false,
+  });
+});
+
+test("la sélection de l’évaluateur affiche seulement les provenances attestées", () => {
+  const evaluation = { backend: "typesafe", status: "evaluated" };
+  for (const [selection_source, label] of [
+    ["cli", "Ligne de commande"],
+    ["environment", "Variables d’environnement"],
+    ["legacy", "Configuration historique"],
+    ["programmatic", "Configuration du gateway"],
+    [undefined, null], [null, null], ["CLI", null], ["inconnu", null], [["cli"], null],
+  ]) {
+    assert.equal(decisionEvaluationDetails(withEvaluation({ ...evaluation, selection_source })).selectionSource, label);
+  }
+  for (const status of ["skipped_local_policy", "unavailable_or_invalid"])
+    assert.equal(decisionEvaluationDetails(withEvaluation({ ...evaluation, status, selection_source: "cli" })).selectionSource,
+      "Ligne de commande");
+});
+
+test("l’avis local conserve le verdict brut du modèle à côté du refus effectif", () => {
+  const event = withEvaluation({
+    backend: "local_openai", status: "evaluated", requested_model: "local-small", model: "local-revision",
+    provider_outcome: "allow", outcome: "review", qualification: "not_qualified_to_authorize",
+  }, { ...observedDecision, decision: { engine: "local_openai", outcome: "deny", rule: "local_openai_review_fail_closed" } });
+  assert.deepEqual(decisionEvaluationDetails(event), {
+    evaluator: "Modèle local", evaluationState: "Évaluée", selectionSource: null, requestedModel: "local-small",
+    returnedModel: "local-revision", advice: "Autoriser", localAdvisory: true,
+  });
+  assert.equal(event.decision.outcome, "deny");
+  assert.equal(decisionEvaluationDetails(withEvaluation({
+    backend: "local_openai", status: "evaluated", outcome: "review",
+  })).advice, null);
+});
+
+test("une panne et une règle locale qui saute l’évaluation gardent des états différents", () => {
+  for (const [status, evaluationState] of [
+    ["unavailable_or_invalid", "Indisponible ou invalide"],
+    ["skipped_local_policy", "Non sollicitée par la politique locale"],
+  ]) {
+    assert.deepEqual(decisionEvaluationDetails(withEvaluation({
+      backend: "local_openai", status, requested_model: "local-small", model: "local-revision",
+      provider_outcome: "allow", reason: "ne pas projeter", error: "ne pas projeter",
+    })), {
+      evaluator: "Modèle local", evaluationState, selectionSource: null, requestedModel: "local-small",
+      returnedModel: null, advice: null, localAdvisory: true,
+    });
+  }
+});
+
+test("les décisions TypeSafe historiques restent lisibles à partir de leur contrat explicite", () => {
+  const answer = { outcome: "allow", confidence: 1, model: "jev-1.14.0", usage: null };
+  assert.deepEqual(decisionEvaluationDetails(withEvaluation(answer)), {
+    evaluator: "Jev TypeSafe", evaluationState: "Évaluée", selectionSource: null, requestedModel: null,
+    returnedModel: "jev-1.14.0", advice: "Autoriser", localAdvisory: false,
+  });
+  const failure = { status: "unavailable_or_invalid" };
+  assert.equal(decisionEvaluationDetails(withEvaluation(failure)), null);
+  assert.equal(decisionEvaluationDetails(withEvaluation(failure, {
+    ...observedDecision, decision: { engine: "jev", outcome: "deny", rule: "jev_unavailable_or_invalid" },
+  })).evaluationState, "Indisponible ou invalide");
+  for (const malformed of [
+    null, { model: "jev-old", outcome: "allow" }, { ...answer, confidence: -1 }, { ...answer, backend: null },
+    { ...answer, outcome: "deny" },
+    { ...answer, backend: "futur", status: "evaluated" }, { ...answer, backend: "typesafe", status: "configured" },
+  ]) assert.equal(decisionEvaluationDetails(withEvaluation(malformed)), null);
+  assert.equal(decisionEvaluationDetails(withEvaluation(answer, { ...observedDecision, decision: null })), null);
+  assert.deepEqual(decisionEvaluationDetails(withEvaluation({ ...answer, outcome: "review", model: "jev\u0085old" }, {
+    ...observedDecision, decision: { engine: "jev", outcome: "deny", rule: "jev_review_fail_closed" },
+  })), {
+    evaluator: "Jev TypeSafe", evaluationState: "Évaluée", selectionSource: null, requestedModel: null,
+    returnedModel: null, advice: "Demander une revue", localAdvisory: false,
+  });
+});
+
+test("seule l’évaluation gateway observée et bornée apporte des champs au détail", () => {
+  const evidence = { backend: "typesafe", status: "evaluated", requested_model: "é".repeat(65),
+    model: "modèle\nretourné", outcome: "unknown" };
+  const event = withEvaluation(evidence);
+  assert.deepEqual(decisionEvaluationDetails(event), {
+    evaluator: "Jev TypeSafe", evaluationState: "Évaluée", selectionSource: null, requestedModel: null,
+    returnedModel: null, advice: null, localAdvisory: false,
+  });
+  for (const update of [{ kind: "command.completed" }, { source: "runner" }, { provenance: "declared" }])
+    assert.equal(decisionEvaluationDetails({ ...event, ...update }), null);
+});
+
+const brokerBatchResult = {
+  ...brokerFailureEvent, kind: "broker.batch.result", command: null, result: null,
+  data: {
+    version: 1,
+    observation: { process: {
+      status: "stopped", running: false, exit_code: 0, oom_killed: null,
+      started_at: "2026-10-29T12:00:00Z", finished_at: "2026-10-29T12:00:01Z",
+    } },
+    transport: null,
+  },
+};
+
+test("une observation terminale du broker reste dans Actions même sans commande récupérée", () => {
+  assert.deepEqual(projectEvents([brokerBatchResult], "actions"), [brokerBatchResult]);
+  const result = brokerBatchResultDetails(brokerBatchResult);
+  assert.equal(result.observedExitCode, 0);
+  assert.equal(result.oomKilled, null);
+  assert.equal(result.transportExitCode, null);
+  assert.equal(result.transportDurationMs, null);
+  assert.equal(result.stdout.state, "unknown");
+  assert.equal(result.stderr.state, "unknown");
+});
+
+test("le code et la durée du transport restent distincts de l’observation et de la capture", () => {
+  const transport = {
+    exit_code: -23, duration_ms_decimal: "340282366920938463463374607431768211455",
+    stdout: { total_bytes: 0, text: "", truncated: false, text_clipped: false },
+    stderr: { total_bytes: 48, text: null, truncated: true, text_clipped: null },
+  };
+  const result = brokerBatchResultDetails({
+    ...brokerBatchResult, data: { ...brokerBatchResult.data, transport },
+  });
+  assert.equal(result.observedExitCode, 0);
+  assert.equal(result.transportExitCode, -23);
+  assert.equal(result.transportDurationMs, transport.duration_ms_decimal);
+  assert.deepEqual(result.stdout, { state: "retained", text: "", truncated: false, textClipped: false });
+  assert.deepEqual(result.stderr, { state: "not_retained", text: null, truncated: true, textClipped: false });
+});
+
+test("le résultat broker invalide laisse inconnus les champs et borne le texte conservé", () => {
+  const text = "é".repeat(16384) + "…[truncated]";
+  const event = {
+    ...brokerBatchResult, result: { exit_code: 137, timed_out: true },
+    data: { version: 1,
+      observation: { process: { ...brokerBatchResult.data.observation.process, running: true, oom_killed: true } },
+      transport: { exit_code: 2147483648, duration_ms_decimal: "340282366920938463463374607431768211456",
+        stdout: { text, truncated: false, text_clipped: true }, stderr: { text: text + "é", text_clipped: true } },
+    },
+  };
+  const result = brokerBatchResultDetails(event);
+  assert.equal(result.observedExitCode, null);
+  assert.equal(result.oomKilled, null);
+  assert.equal(result.transportExitCode, null);
+  assert.equal(result.transportDurationMs, null);
+  assert.equal(result.stdout.text?.length, text.length);
+  assert.deepEqual(result.stdout, { state: "retained", text, truncated: false, textClipped: true });
+  assert.deepEqual(result.stderr, { state: "unknown", text: null, truncated: false, textClipped: false });
+  assert.equal(brokerBatchResultDetails({ ...event, source: "provider" }), null);
+  assert.equal(brokerBatchResultDetails({ ...event, provenance: "declared" }), null);
+  assert.equal(brokerBatchResultDetails({ ...event, data: { ...event.data, version: 2 } }), null);
+  assert.equal(brokerBatchResultDetails({ ...event, kind: "command.failed" }), null);
+});
+
 test("un échec broker v1 présente sa phase et son étape sans confirmer un effet d’exécution", () => {
   for (const [step, label] of [
     ["failure_observed", "Observation d’un échec"],
@@ -261,6 +434,106 @@ test("un échec broker sans commande reste dans Actions sans devenir un incident
   assert.deepEqual(projectEvents(events, "actions").map((event) => event.seq), [5]);
   assert.deepEqual(projectEvents(events, "security"), []);
   assert.deepEqual(projectEvents(events, "overview"), events);
+});
+
+const scanDigest = "a".repeat(64);
+const exportDigest = "b".repeat(64);
+const beforeDigest = "c".repeat(64);
+const afterDigest = "d".repeat(64);
+const exportRequest = "81cfa3ec-3e98-4152-9dea-b89203618b8c";
+const brokerScan = {
+  ...brokerFailureEvent,
+  kind: "broker.batch.scan",
+  coverage: "observed",
+  data: {
+    version: 1,
+    manifest_digest: scanDigest,
+    changed_files: 3,
+    truncated: false,
+    changes: [
+      { path: "src/nouveau.rs", change: "created", before: null, after: { sha256: afterDigest, bytes: 12 } },
+      { path: "modifié.txt", change: "modified", before: { sha256: beforeDigest }, after: { sha256: afterDigest } },
+      { path: "ancien.txt", change: "deleted", before: { sha256: beforeDigest }, after: null },
+    ],
+  },
+};
+const brokerExport = {
+  ...brokerFailureEvent,
+  seq: 6,
+  kind: "broker.batch.export",
+  coverage: "observed",
+  data: {
+    version: 1,
+    manifest_digest: exportDigest,
+    request_id: exportRequest,
+    files: 2,
+    destination_ref: "/private/reports/workspace",
+    destination_intent_hash: "e".repeat(64),
+  },
+};
+
+test("Fichiers montre les événements broker exacts et préserve leur lecture brute", () => {
+  const legacy = { ...brokerScan, kind: "workspace.diff" };
+  const unknownVersion = { ...brokerScan, data: { ...brokerScan.data, version: 2 } };
+  const unrelated = { ...brokerScan, kind: "broker.batch.scan.extra" };
+  const events = [legacy, brokerScan, brokerExport, unknownVersion, unrelated];
+  const files = projectEvents(events, "files");
+  assert.deepEqual(files, [legacy, brokerScan, brokerExport, unknownVersion]);
+  assert.equal(files[3], unknownVersion);
+  assert.equal(brokerWorkspaceDetails(unknownVersion), null);
+  assert.equal(brokerWorkspaceDetails(unrelated), null);
+  assert.equal(eventSummary(unknownVersion), "broker.batch.scan");
+  const oneChange = { ...brokerScan, data: { ...brokerScan.data, changed_files: 1, changes: brokerScan.data.changes.slice(0, 1) } };
+  assert.equal(eventSummary(oneChange), "1 modification observée");
+  assert.equal(eventSummary(brokerExport), "2 fichiers exportés");
+});
+
+test("l’analyse broker distingue création, modification et suppression avec leurs empreintes", () => {
+  assert.deepEqual(brokerWorkspaceDetails(brokerScan), {
+    kind: "scan", changedFiles: 3, manifestDigest: scanDigest, truncated: false,
+    changes: [
+      { path: "src/nouveau.rs", change: "created", beforeSha256: null, afterSha256: afterDigest },
+      { path: "modifié.txt", change: "modified", beforeSha256: beforeDigest, afterSha256: afterDigest },
+      { path: "ancien.txt", change: "deleted", beforeSha256: beforeDigest, afterSha256: null },
+    ],
+  });
+  const partial = { ...brokerScan, data: { ...brokerScan.data, changes: brokerScan.data.changes.slice(0, 1), truncated: true } };
+  assert.equal(brokerWorkspaceDetails(partial).changedFiles, 3);
+  assert.equal(brokerWorkspaceDetails(partial).changes.length, 1);
+  const empty = { ...brokerScan, data: { ...brokerScan.data, changed_files: 0, changes: [] } };
+  assert.equal(brokerWorkspaceDetails(empty).changedFiles, 0);
+});
+
+test("l’export broker projette son propre manifeste, sans la destination", () => {
+  assert.deepEqual(brokerWorkspaceDetails(brokerExport), {
+    kind: "export", files: 2, manifestDigest: exportDigest, requestId: exportRequest,
+  });
+  const empty = { ...brokerExport, data: { ...brokerExport.data, files: 0 } };
+  assert.equal(brokerWorkspaceDetails(empty).files, 0);
+  for (const event of [
+    { ...brokerExport, provenance: "declared" },
+    { ...brokerExport, source: "gateway" },
+    ...[
+      { files: undefined }, { files: -1 }, { files: 20_001 }, { files: "2" }, { version: "1" },
+      { request_id: "00000000-0000-0000-0000-000000000000" },
+      { request_id: exportRequest.toUpperCase() },
+      { manifest_digest: undefined, scan_manifest_digest: scanDigest },
+      { manifest_digest: `${exportDigest}\n` },
+    ].map((data) => ({ ...brokerExport, data: { ...brokerExport.data, ...data } })),
+  ]) assert.equal(brokerWorkspaceDetails(event), null);
+});
+
+test("une analyse incohérente ou hors des bornes ne produit pas de détail structuré", () => {
+  const first = brokerScan.data.changes[0];
+  for (const data of [
+    { changed_files: undefined }, { changed_files: 40_001 }, { truncated: true },
+    { truncated: "false" }, { changes: brokerScan.data.changes.slice(1) },
+    { changed_files: 201, changes: Array(201).fill(first) },
+    ...[
+      { path: "/absolute" }, { path: "src/../elsewhere" }, { path: "src\\other" }, { path: "é".repeat(2049) },
+      { change: "renamed" }, { after: null }, { before: undefined }, { after: { sha256: "inconnu" } },
+    ].map((row) => ({ changes: [{ ...first, ...row }, ...brokerScan.data.changes.slice(1)] })),
+  ]) assert.equal(brokerWorkspaceDetails({ ...brokerScan, data: { ...brokerScan.data, ...data } }), null);
 });
 
 test("les métadonnées broker inconnues restent inconnues sans reprendre de texte arbitraire", () => {
@@ -319,6 +592,7 @@ test("les étapes natives connues complètent les anciens échecs broker sans in
     ["enforcer", "before_claim", "Vérification avant démarrage"],
     ["enforcer", "prepare", "Préparation de l’exécution"],
     ["enforcer", "before_spawn", "Vérification finale avant démarrage"],
+    ["runtime", "observe_only", "Démarrage non émis lors de cette tentative"],
     ["runtime", "authority_before_spawn", "Vérification de l’autorité du moteur"],
     ["runtime", "invocation_before_spawn", "Vérification du programme"],
     ["runtime", "stop_before_spawn", "Vérification de la poursuite du lancement"],

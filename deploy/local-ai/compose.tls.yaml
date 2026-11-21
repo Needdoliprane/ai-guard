@@ -44,7 +44,7 @@ services:
     restart: "no"
   local-ai-ingress:
     image: ${AI_GUARD_CONTROL_IMAGE:-agentsandbox-control:local}
-    command: ["model-ingress", "--listen", "0.0.0.0:8443", "--container-listen", "--tls-cert-file", "/run/ai-guard-tls/server-chain.pem", "--tls-key-file", "/run/secrets/local-judge-server-key"]
+    command: ["model-ingress", "--listen", "0.0.0.0:8443", "--container-listen", "--tls-cert-file", "/run/ai-guard-tls/server-chain.pem", "--tls-key-file", "/run/secrets/local-judge-server-key", "--exchange-timeout-seconds", "${AI_GUARD_LOCAL_RELAY_TIMEOUT_SECONDS:-5}"]
     user: "1000:1000"
     read_only: true
     cap_drop: [ALL]

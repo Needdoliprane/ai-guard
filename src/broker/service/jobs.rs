@@ -485,12 +485,17 @@ impl Job {
         *last = Some(Instant::now());
         true
     }
-    fn enrich(&self, status: &mut JobStatusV1) {
-        status.executor_task_running = self.running.load(Ordering::SeqCst);
-        status.executor_error = match self.error.lock() {
+    pub(super) fn execution_status(&self) -> (bool, Option<BrokerErrorCodeV1>) {
+        let running = self.running.load(Ordering::SeqCst);
+        let error = match self.error.lock() {
             Ok(error) => *error,
             Err(_) => Some(BrokerErrorCodeV1::Unavailable),
         };
+        (running, error)
+    }
+
+    fn enrich(&self, status: &mut JobStatusV1) {
+        (status.executor_task_running, status.executor_error) = self.execution_status();
     }
 }
 

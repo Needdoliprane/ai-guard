@@ -10,6 +10,8 @@ use std::sync::{Arc, Mutex};
 
 #[path = "control_monitor.rs"]
 mod control_monitor;
+#[cfg(all(test, unix))]
+mod stop_replay_tests;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -553,6 +555,9 @@ mod private_state {
             let trusted = crate::control_fs::Directory::open_existing(
                 &crate::control_fs::absolute_path(path)?,
             )?;
+            Self::from_control(trusted)
+        }
+        pub(super) fn from_control(trusted: crate::control_fs::Directory) -> Result<Self> {
             let file = trusted.try_clone_file()?;
             Self::check_directory(&file)?;
             trusted.revalidate()?;
@@ -568,11 +573,10 @@ mod private_state {
         }
         pub(super) fn child(&self, name: &str) -> Result<Self> {
             self.trusted.revalidate()?;
-            let trusted = self.trusted.child(name)?;
-            let file = trusted.try_clone_file()?;
-            Self::check_directory(&file)?;
-            trusted.revalidate()?;
-            Ok(Self { file, trusted })
+            Self::from_control(self.trusted.child(name)?)
+        }
+        pub(super) fn sync(&self) -> Result<()> {
+            self.trusted.sync()
         }
         pub(super) fn read<T: serde::de::DeserializeOwned>(&self, name: &str) -> Result<Option<T>> {
             self.read_bounded(name, 32 * 1024 * 1024)
@@ -794,6 +798,13 @@ mod private_state {
             expected: Option<LockIdentity>,
         ) -> Result<Self> {
             let directory = Directory::root(config)?.child("worker-locks")?;
+            Self::acquire_in(directory, attempt, expected)
+        }
+        pub(super) fn acquire_in(
+            directory: Directory,
+            attempt: Uuid,
+            expected: Option<LockIdentity>,
+        ) -> Result<Self> {
             let name = format!("{attempt}.lock");
             let raw = checked_name(&name)?;
             let fd = unsafe {
@@ -1317,15 +1328,7 @@ async fn prepare_authority_for_launch(
         seed.binding = Some(runtime.binding().clone());
         image
     } else {
-        anyhow::ensure!(
-            endpoint == "local" || endpoint.starts_with("unix:///"),
-            "Podman managed sessions require local or an explicit Unix endpoint; SSH/TCP authority is not implemented"
-        );
-        let mut args = if endpoint == "local" {
-            vec!["--remote=false".into()]
-        } else {
-            vec!["--remote".into(), "--url".into(), endpoint]
-        };
+        let mut args = crate::runtime::selected_podman_target_args(&endpoint)?;
         args.extend([
             "image".into(),
             "inspect".into(),
@@ -1489,10 +1492,11 @@ async fn bound_runtime(
                 "runtime program differs from the durable invocation"
             );
         }
-        let runtime = ManagedRuntime::bootstrap_podman_with_runtime(
+        let runtime = ManagedRuntime::bootstrap_podman_for_launch(
             seed.authority_id,
             &seed.endpoint,
             approved,
+            plan.options.allow_rootful_runtime,
         )
         .await?;
         seed.binding = Some(runtime.binding().clone());
@@ -1622,6 +1626,7 @@ pub(super) fn broker_require_new_archive(config: &Path, operation: Uuid) -> Resu
 pub(super) async fn broker_prepare(input: BrokerPreparation<'_>) -> Result<ManagedCheckpoint> {
     let plan = input.plan;
     anyhow::ensure!(!plan.options.interactive, "broker requires batch mode");
+    super::validate_new_runtime_target(&plan.options)?;
     let root = crate::control_fs::Directory::open_existing(&plan.options.config_dir)?;
     if let Some(profile) = input.launch_profile {
         let mut scope_hash = Sha256::new();
@@ -1758,10 +1763,11 @@ pub(super) async fn broker_runtime(
         let runtime = if let Some(binding) = seed.binding.clone() {
             ManagedRuntime::reopen_with_runtime(binding, approved.clone()).await?
         } else {
-            ManagedRuntime::bootstrap_podman_with_runtime(
+            ManagedRuntime::bootstrap_podman_for_launch(
                 seed.authority_id,
                 &seed.endpoint,
                 approved.clone(),
+                allow_rootful,
             )
             .await?
         };
@@ -2548,7 +2554,7 @@ async fn launch_worker(
         return reject_completed_execution(runtime, client, state, retained, error, None, reason)
             .await;
     }
-    let summary = match finish_execution(runtime, client, state, &retained).await {
+    let summary = match finish_execution(runtime, client, state, &retained, None).await {
         Ok(summary) => summary,
         Err(error) => {
             mark_unknown(
@@ -2578,8 +2584,11 @@ async fn reject_completed_execution(
     execution_error: Option<anyhow::Error>,
     reason: String,
 ) -> Result<RunSummary> {
+    let control_deadline = cause
+        .downcast_ref::<control_monitor::ControlFailure>()
+        .and_then(control_monitor::ControlFailure::deadline_observation);
     let (summary, finalization_error, audit_error) =
-        match finish_execution(runtime, client, state, &retained).await {
+        match finish_execution(runtime, client, state, &retained, control_deadline).await {
             Ok(mut summary) => {
                 let prior = summary.postprocessing_error.take();
                 summary.postprocessing_error = Some(crate::redaction::clip(
@@ -3389,6 +3398,7 @@ async fn finish_execution(
     client: &AuditClient,
     state: &PlanState,
     retained: &crate::runtime::ManagedRetainedExecution,
+    control_deadline: Option<ControlDeadlineObservation>,
 ) -> Result<RunSummary> {
     let plan = state.snapshot()?;
     let execution = retained.result();
@@ -3407,6 +3417,9 @@ async fn finish_execution(
         json!({"runtime_started_at":terminal.process.started_at,"runtime_finished_at":terminal.process.finished_at,"output_captured":plan.options.capture_output,"worker_id":worker.worker_id}),
     );
     let mut result = json!({"exit_code":execution.state.exit_code,"runtime_attach_exit_code":execution.exit_code,"duration_ms":execution.duration_ms,"timed_out":execution.timed_out,"oom_killed":terminal.process.oom_killed,"stdout_bytes":execution.stdout.total_bytes,"stderr_bytes":execution.stderr.total_bytes,"stdout_truncated":execution.stdout.truncated,"stderr_truncated":execution.stderr.truncated});
+    if let Some(observation) = control_deadline {
+        result["control_deadline"] = serde_json::to_value(observation)?;
+    }
     if plan.options.interactive {
         for field in [
             "stdout_bytes",
@@ -3469,6 +3482,7 @@ async fn finish_execution(
         },
         postprocessing_error: None,
         transport_stop_reason: execution.transport_stop_reason.clone(),
+        control_deadline,
     };
     let completed = client.redactor.value(&completed);
     // Two files, deliberately ordered rather than claimed atomic: Pending is
@@ -4237,25 +4251,205 @@ async fn out_of_band_stop(
     };
     let directory = Directory::root(&plan.options.config_dir)?.child("worker-stop-intents")?;
     directory.write(&format!("{}.json", mutation.operation_id), &mutation)?;
-    let result: MutationResultV1 = client
-        .post_control(
-            &format!("api/v1/workers/{}/transitions", worker.worker_id),
-            &mutation,
-        )
-        .await?;
-    anyhow::ensure!(
-        result.receipt.operation_id == mutation.operation_id
-            && result.receipt.input_hash == content_hash("ai-guard:worker-mutation:v1", &mutation)?
-            && result.receipt.audit_seq > 0,
-        "stop intent lacks its exact durable acknowledgement"
-    );
-    validate_worker(&plan, &result.worker)?;
+    let result = submit_stop_intent(client, &plan, &mutation).await?;
     directory.write(
         &format!("{}-ack.json", mutation.operation_id),
         &result.receipt,
     )?;
     Ok(result.worker)
 }
+
+async fn submit_stop_intent(
+    client: &AuditClient,
+    plan: &RunPlan,
+    mutation: &WorkerMutationV1,
+) -> Result<MutationResultV1> {
+    let result: MutationResultV1 = client
+        .post_control(
+            &format!("api/v1/workers/{}/transitions", mutation.worker_id),
+            mutation,
+        )
+        .await?;
+    anyhow::ensure!(
+        result.receipt.operation_id == mutation.operation_id
+            && result.receipt.input_hash == content_hash("ai-guard:worker-mutation:v1", mutation)?
+            && result.receipt.audit_seq > 0,
+        "stop intent lacks its exact durable acknowledgement"
+    );
+    validate_worker(plan, &result.worker)?;
+    Ok(result)
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReservedStopIntentV1 {
+    version: u32,
+    tenant_id: String,
+    gateway_origin: String,
+    session_id: Uuid,
+    admission_operation_id: Uuid,
+    config_root: PathBuf,
+    mutation: WorkerMutationV1,
+}
+
+impl ReservedStopIntentV1 {
+    fn validate(&self, plan: &RunPlan, worker: &WorkerV1) -> Result<u64> {
+        let checkpoint = managed(plan)?;
+        let mutation = &self.mutation;
+        let cancelled_revision = mutation
+            .expected_revision
+            .checked_add(1)
+            .context("reservation cancellation revision is exhausted")?;
+        let revision = if worker.state == WorkerStateV1::Cancelled {
+            cancelled_revision
+        } else {
+            mutation.expected_revision
+        };
+        anyhow::ensure!(
+            self.version == 1
+                && self.tenant_id == checkpoint.tenant_id
+                && self.gateway_origin == checkpoint.gateway_origin
+                && self.session_id == plan.session
+                && self.admission_operation_id == plan.operation_id
+                && self.config_root == checkpoint.config_root
+                && mutation.version == 1
+                && Uuid::parse_str(&mutation.operation_id)
+                    .is_ok_and(|operation| !operation.is_nil()
+                        && operation.to_string() == mutation.operation_id)
+                && mutation.worker_id == worker.worker_id
+                && mutation.attempt_id == worker.attempt.attempt_id
+                && matches!(mutation.transition, WorkerTransitionV1::CancelReserved)
+                && mutation.expected_revision > 0
+                && worker.revision == revision,
+            "saved reservation cancellation differs from the authenticated worker or revision"
+        );
+        Ok(cancelled_revision)
+    }
+
+    fn validate_acknowledgement(
+        &self,
+        receipt: &MutationReceiptV1,
+        worker: &WorkerV1,
+        cancelled_revision: u64,
+    ) -> Result<()> {
+        let mutation = &self.mutation;
+        anyhow::ensure!(
+            receipt.operation_id == mutation.operation_id
+                && receipt.input_hash == content_hash("ai-guard:worker-mutation:v1", mutation)?
+                && receipt.audit_seq > 0
+                && receipt.audit_hash.len() == 64
+                && receipt
+                    .audit_hash
+                    .bytes()
+                    .all(|byte| { byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte) })
+                && receipt.worker_id.as_deref() == Some(mutation.worker_id.as_str())
+                && receipt.revision == Some(cancelled_revision)
+                && worker.worker_id == mutation.worker_id
+                && worker.attempt.attempt_id == mutation.attempt_id
+                && worker.revision == cancelled_revision
+                && worker.state == WorkerStateV1::Cancelled
+                && !worker.quota_held
+                && worker.attempt.container_id.is_none()
+                && worker.attempt.create_operation_id.is_none()
+                && worker.attempt.start_operation_id.is_none(),
+            "reservation cancellation lacks its exact durable acknowledgement"
+        );
+        Ok(())
+    }
+}
+
+async fn reconcile_reserved_stop(
+    client: &AuditClient,
+    state: &PlanState,
+) -> Result<Option<WorkerV1>> {
+    let plan = state.snapshot()?;
+    let previous = state.worker()?;
+    let reserve = previous.state == WorkerStateV1::Reserved;
+    let attempt = Uuid::parse_str(&previous.attempt.attempt_id)?;
+    let config = crate::control_fs::Directory::open_existing(&plan.options.config_dir)?;
+    let Some(journal) = config.persistent_child("worker-stop-intents", reserve)? else {
+        return Ok(None);
+    };
+    let Some(journal) = journal.persistent_child(&attempt.to_string(), reserve)? else {
+        return Ok(None);
+    };
+    let lock = AttemptGuard::acquire_in(Directory::from_control(journal.clone())?, attempt, None)
+        .context("cannot acquire the private reservation cancellation lock")?;
+    let journal = Directory::from_control(journal)?;
+    let worker = refresh_readonly(client, state).await?;
+    anyhow::ensure!(
+        worker.worker_id == previous.worker_id
+            && worker.attempt.attempt_id == previous.attempt.attempt_id
+            && worker.revision >= previous.revision,
+        "gateway worker changed during reservation cancellation"
+    );
+    if !matches!(
+        worker.state,
+        WorkerStateV1::Reserved | WorkerStateV1::Cancelled
+    ) {
+        return Ok(None);
+    }
+    let acknowledged = journal.read_bounded::<MutationReceiptV1>("ack.json", 4096)?;
+    let saved = journal.read_bounded::<ReservedStopIntentV1>("intent.json", 4096)?;
+    anyhow::ensure!(
+        acknowledged.is_none() || saved.is_some(),
+        "saved cancellation acknowledgement lacks its exact intent"
+    );
+    let request = match saved {
+        Some(request) => request,
+        None if worker.state == WorkerStateV1::Cancelled => return Ok(None),
+        None => {
+            let checkpoint = managed(&plan)?;
+            let request = ReservedStopIntentV1 {
+                version: 1,
+                tenant_id: checkpoint.tenant_id.clone(),
+                gateway_origin: checkpoint.gateway_origin.clone(),
+                session_id: plan.session,
+                admission_operation_id: plan.operation_id,
+                config_root: checkpoint.config_root.clone(),
+                mutation: WorkerMutationV1 {
+                    version: 1,
+                    operation_id: Uuid::new_v4().to_string(),
+                    worker_id: worker.worker_id.clone(),
+                    attempt_id: worker.attempt.attempt_id.clone(),
+                    expected_revision: worker.revision,
+                    transition: WorkerTransitionV1::CancelReserved,
+                },
+            };
+            lock.ensure_current()?;
+            journal.write("intent.json", &request)?;
+            request
+        }
+    };
+    let cancelled_revision = request.validate(&plan, &worker)?;
+    if let Some(receipt) = acknowledged {
+        request.validate_acknowledgement(&receipt, &worker, cancelled_revision)?;
+        let current: MutationReceiptV1 = client
+            .get_typed(&format!(
+                "api/v1/workers/operations/{}",
+                request.mutation.operation_id,
+            ))
+            .await?;
+        anyhow::ensure!(
+            current == receipt,
+            "saved reservation cancellation acknowledgement differs from the gateway"
+        );
+        lock.ensure_current()?;
+        // A previous rename may be visible even if its directory sync failed.
+        journal.sync()?;
+        return Ok(Some(worker));
+    }
+
+    // Exact retry distinguishes an uncommitted cancellation from a committed
+    // one with an unavailable response. The Store checks that identity before CAS.
+    lock.ensure_current()?;
+    let result = submit_stop_intent(client, &plan, &request.mutation).await?;
+    request.validate_acknowledgement(&result.receipt, &result.worker, cancelled_revision)?;
+    lock.ensure_current()?;
+    journal.write("ack.json", &result.receipt)?;
+    Ok(Some(result.worker))
+}
+
 pub(super) async fn stop_worker(
     session: Uuid,
     config: &Path,
@@ -4264,6 +4458,18 @@ pub(super) async fn stop_worker(
     adopt: bool,
 ) -> Result<Value> {
     let (state, client) = load_session(session, config, gateway).await?;
+    if matches!(
+        state.worker()?.state,
+        WorkerStateV1::Reserved | WorkerStateV1::Cancelled
+    ) && let Some(acknowledged) = Box::pin(reconcile_reserved_stop(&client, &state)).await?
+    {
+        state.read_worker(acknowledged)?;
+        return action_status(
+            &state,
+            None,
+            "The never-prepared reservation was cancelled durably.",
+        );
+    }
     let worker = state.worker()?;
     if [WorkerStateV1::Cancelled, WorkerStateV1::Terminal].contains(&worker.state) {
         return action_status(
@@ -4272,9 +4478,7 @@ pub(super) async fn stop_worker(
             "Worker is already terminal or cancelled; no stop was emitted.",
         );
     }
-    let transition = if worker.state == WorkerStateV1::Reserved {
-        WorkerTransitionV1::CancelReserved
-    } else if worker.attempt.container_id.is_some() {
+    let transition = if worker.attempt.container_id.is_some() {
         WorkerTransitionV1::Stop
     } else {
         WorkerTransitionV1::Unknown {
@@ -4282,14 +4486,7 @@ pub(super) async fn stop_worker(
         }
     };
     let acknowledged = out_of_band_stop(&client, &state, transition).await?;
-    state.read_worker(acknowledged.clone())?;
-    if acknowledged.state == WorkerStateV1::Cancelled {
-        return action_status(
-            &state,
-            None,
-            "The never-prepared reservation was cancelled durably.",
-        );
-    }
+    state.read_worker(acknowledged)?;
     let (state, client, guard) = match locked_session(session, config, gateway).await {
         Ok(context) => context,
         Err(_) => {
@@ -4749,7 +4946,7 @@ mod export_and_mediation_tests {
         }
     }
 
-    fn build_fixture_plan(root: &Path, with_provider: bool) -> RunPlan {
+    pub(super) fn build_fixture_plan(root: &Path, with_provider: bool) -> RunPlan {
         let project = root.join("project");
         fs::create_dir_all(&project).unwrap();
         fs::write(project.join("README.txt"), "ordinary project data").unwrap();

@@ -7,9 +7,9 @@
 //! a stop request, a step that ended without a result). It is never reported
 //! as a divergence nor as a match.
 //!
-//! A [`Divergence`] means this CLI judged a format-1 manifest of its own
-//! producer and found a difference, or the directory is not a well-formed
-//! format-1 publication (tampering or corruption).
+//! A [`Divergence`] means the supplied bytes differ from the expected digest,
+//! this CLI judged its own format-1 manifest and found a difference, or the
+//! directory is not a well-formed format-1 publication.
 //!
 //! The producer version is the package version of every build of this
 //! package, so the producer check does not identify the CLI build: a change
@@ -37,6 +37,7 @@ pub(super) enum Unverified {
     Conflict {
         reason: &'static str,
     },
+    InvalidManifestDigest,
     /// A stop request ended the comparison before a result. `reason` is
     /// what the interrupted step reported, when that was not the stop itself.
     Interrupted {
@@ -82,6 +83,10 @@ impl fmt::Display for Unverified {
             Self::Conflict { reason } => {
                 write!(formatter, "UNVERIFIED: {reason}; nothing was compared")
             }
+            Self::InvalidManifestDigest => formatter.write_str(
+                "UNVERIFIED: --expect-manifest-sha256 must be 64 lowercase hexadecimal \
+                 characters; nothing was compared",
+            ),
             Self::Interrupted { signal, reason } => {
                 write!(
                     formatter,
@@ -128,6 +133,8 @@ impl fmt::Display for Unverified {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Divergence {
+    /// The manifest bytes do not match the independently supplied expectation.
+    ManifestDigest,
     /// A `SHA256SUMS` line does not match the bytes read.
     Sums {
         file: &'static str,
@@ -161,6 +168,7 @@ pub(super) enum Divergence {
 impl Divergence {
     pub(super) fn category(&self) -> &'static str {
         match self {
+            Self::ManifestDigest => "manifest-digest",
             Self::Sums { .. } => "sums",
             Self::Format { .. } => "format",
             Self::Source(_) => "source",
@@ -196,6 +204,9 @@ impl fmt::Display for Divergence {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "DIVERGENT {}: ", self.category())?;
         match self {
+            Self::ManifestDigest => formatter.write_str(
+                "release-manifest.json does not match the SHA-256 from --expect-manifest-sha256",
+            ),
             Self::Sums { file } => write!(
                 formatter,
                 "{file} does not match its line in {}",

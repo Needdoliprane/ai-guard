@@ -273,6 +273,7 @@ async fn cold_stop_only_reconcile_loop_publishes_pending_v4_without_start_capabi
     assert!(!seed.result_acknowledged());
     assert_eq!(seed.coverage_audit_seq(), None);
     assert!(seed.retained_gateway_is_live());
+    eprintln!("cold_recovery_test phase=seed_verified");
 
     let store = Store::open_for_tenant(
         seed.database(),
@@ -311,6 +312,7 @@ async fn cold_stop_only_reconcile_loop_publishes_pending_v4_without_start_capabi
         seed.scope().gateway_origin()
     );
 
+    eprintln!("cold_recovery_test phase=stop_only_ready");
     let task = tokio::spawn(Arc::clone(&service).reconcile_loop());
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     let mut published_events: Option<(StoredEvent, StoredEvent)> = None;
@@ -335,6 +337,7 @@ async fn cold_stop_only_reconcile_loop_publishes_pending_v4_without_start_capabi
             .find(|event| event.event.id == seed.event_id().to_string());
         if let (Some(coverage), Some(result)) = (coverage, result) {
             published_events = Some((coverage, result));
+            eprintln!("cold_recovery_test phase=event_pair_observed");
             break;
         }
         if tokio::time::Instant::now() >= deadline {
@@ -347,6 +350,7 @@ async fn cold_stop_only_reconcile_loop_publishes_pending_v4_without_start_capabi
         .await
         .expect("reconcile loop observes stopping and joins")
         .expect("reconcile loop task joins");
+    eprintln!("cold_recovery_test phase=loop_joined");
     assert!(matches!(
         service.require_starts().await,
         Err(BrokerErrorCodeV1::NeedsReconciliation)
@@ -407,6 +411,7 @@ async fn cold_stop_only_reconcile_loop_publishes_pending_v4_without_start_capabi
     drop(service);
     drop(jobs);
     drop(enforcer_owner);
+    eprintln!("cold_recovery_test phase=stop_only_owners_dropped");
     let (output_acknowledged, cancel_present, audit_seq, input_hash, coverage, arm_claim_snapshot) =
         pending_result_ack(&seed).await;
     assert_eq!(output_acknowledged, seed.result_acknowledged());
@@ -417,4 +422,5 @@ async fn cold_stop_only_reconcile_loop_publishes_pending_v4_without_start_capabi
     assert_eq!(coverage.1, after_coverage[0].seq);
     assert_eq!(coverage.2, seed.coverage_event_input_hash());
     assert_eq!(arm_claim_snapshot, *seed.arm_claim_snapshot());
+    eprintln!("cold_recovery_test phase=reopened_ack_verified");
 }

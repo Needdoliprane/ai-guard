@@ -695,7 +695,15 @@ impl ManagedRuntime {
         endpoint: &str,
         runtime: Runtime,
     ) -> Result<Self> {
-        validate_endpoint(RuntimeKind::Podman, endpoint)?;
+        Self::bootstrap_podman_for_launch(authority_id, endpoint, runtime, false).await
+    }
+    pub(crate) async fn bootstrap_podman_for_launch(
+        authority_id: Uuid,
+        endpoint: &str,
+        runtime: Runtime,
+        allow_rootful: bool,
+    ) -> Result<Self> {
+        selected_podman_target_args(endpoint)?;
         ensure!(
             runtime.kind == RuntimeKind::Podman,
             "runtime kind conflicts with Podman authority"
@@ -717,7 +725,7 @@ impl ManagedRuntime {
             runtime,
             launch_profile: None,
         };
-        let info = managed.podman_info().await?;
+        let info = managed.podman_info(Some(allow_rootful)).await?;
         let marker = PodmanBinding {
             graph_root: info.store.graph_root,
             run_root: info.store.run_root,
@@ -1051,14 +1059,8 @@ impl ManagedRuntime {
             RuntimeKind::Docker => {
                 command.arg("--host").arg(&self.binding.endpoint);
             }
-            RuntimeKind::Podman if self.binding.endpoint == "local" => {
-                command.arg("--remote=false");
-            }
             RuntimeKind::Podman => {
-                command
-                    .arg("--remote")
-                    .arg("--url")
-                    .arg(&self.binding.endpoint);
+                command.args(podman_target_args(&self.binding.endpoint)?);
             }
         }
         Ok(command)
@@ -1123,7 +1125,7 @@ impl ManagedRuntime {
         );
         Ok(info.id)
     }
-    async fn podman_info(&self) -> Result<PodmanInfo> {
+    async fn podman_info(&self, launch_allow_rootful: Option<bool>) -> Result<PodmanInfo> {
         let output = self
             .cli(
                 &["info".into(), "--format".into(), "json".into()],
@@ -1134,6 +1136,10 @@ impl ManagedRuntime {
             !output.truncated,
             "Podman authority inspection exceeds its bound"
         );
+        // Use the same info response to check launch policy and bind storage.
+        if let Some(allow_rootful) = launch_allow_rootful {
+            parse_runtime_info(RuntimeKind::Podman, &output.bytes, allow_rootful)?;
+        }
         let info: PodmanInfo = serde_json::from_slice(&output.bytes)
             .map_err(|_| anyhow::anyhow!("Podman authority inspection is invalid"))?;
         ensure!(
@@ -1159,7 +1165,7 @@ impl ManagedRuntime {
                     binding.effective_uid == effective_uid(),
                     "Podman control account changed; runtime state is unknown"
                 );
-                let info = self.podman_info().await?;
+                let info = self.podman_info(None).await?;
                 ensure!(
                     info.store.graph_root == binding.graph_root
                         && info.store.run_root == binding.run_root,
@@ -1357,6 +1363,15 @@ impl ManagedRuntime {
             .await
             .map(|result| result.observation)
     }
+    /// Run the same owned stop and report what the engine confirmed.
+    pub(crate) async fn stop_snapshot_owned_observation(
+        &self,
+        owned: &OwnedContainerSnapshot,
+    ) -> Result<OwnedStopObservation> {
+        self.stop_snapshot_owned_result(owned)
+            .await
+            .map(|result| result.stop_observation)
+    }
     pub(crate) async fn stop_snapshot_owned_native(
         &self,
         owned: &OwnedContainerSnapshot,
@@ -1414,6 +1429,7 @@ impl ManagedRuntime {
         if stopped_process(&observed) {
             return Ok(NativeStopResult {
                 observation: observed,
+                stop_observation: OwnedStopObservation::AlreadyStopped,
                 kill_failure: None,
             });
         }
@@ -1453,6 +1469,10 @@ impl ManagedRuntime {
         match followed {
             Ok(observation) => Ok(NativeStopResult {
                 observation,
+                stop_observation: match &kill_failure {
+                    None => OwnedStopObservation::EngineAcknowledged,
+                    Some(_) => OwnedStopObservation::Unconfirmed,
+                },
                 kill_failure,
             }),
             Err(followup_failure) => Err(anyhow::Error::new(NativeStopFailure {
@@ -1764,7 +1784,10 @@ impl ManagedRuntime {
             stop_snapshot = Some(created.clone());
             let (control, legacy_veto) = match on_created(created.clone()).await? {
                 OwnedStartDirective::ObserveOnly => {
-                    bail!("start claim already consumed; owned instance retained without emitting start; reconciliation required");
+                    let error = anyhow::Error::new(RuntimePrestartStageFailure::observe_only());
+                    return Err(error.context(
+                        "owned instance retained for reconciliation without emitting start",
+                    ));
                 }
                 OwnedStartDirective::Legacy(veto) => {
                     ensure!(duration.is_some(), "legacy start cannot authorize prearmed transport");
@@ -2113,6 +2136,23 @@ struct PodmanStore {
     graph_root: String,
     run_root: String,
 }
+pub(crate) fn selected_podman_target_args(endpoint: &str) -> Result<Vec<String>> {
+    // The remote-only client can select a connection despite --remote=false.
+    ensure!(
+        endpoint != "local" || cfg!(any(target_os = "linux", target_os = "freebsd")),
+        "Podman local mode requires a native engine; supply an explicit Unix socket on this platform"
+    );
+    podman_target_args(endpoint)
+}
+
+fn podman_target_args(endpoint: &str) -> Result<Vec<String>> {
+    validate_endpoint(RuntimeKind::Podman, endpoint)?;
+    if endpoint == "local" {
+        return Ok(vec!["--remote=false".into()]);
+    }
+    Ok(vec!["--remote".into(), "--url".into(), endpoint.into()])
+}
+
 fn validate_endpoint(kind: RuntimeKind, endpoint: &str) -> Result<()> {
     if kind == RuntimeKind::Podman && endpoint == "local" {
         return Ok(());
@@ -2133,6 +2173,40 @@ fn validate_endpoint(kind: RuntimeKind, endpoint: &str) -> Result<()> {
         "runtime endpoint must be an absolute Unix socket path"
     );
     Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn podman_diagnostics_and_managed_commands_share_local_targets() {
+    assert_eq!(podman_target_args("local").unwrap(), ["--remote=false"]);
+    let native_target = selected_podman_target_args("local");
+    if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+        assert_eq!(native_target.unwrap(), ["--remote=false"]);
+    } else {
+        assert!(native_target.is_err());
+    }
+    let socket = "unix:///tmp/podman-qa.sock";
+    assert_eq!(
+        selected_podman_target_args(socket).unwrap(),
+        podman_target_args(socket).unwrap(),
+    );
+    assert_eq!(
+        podman_target_args(socket).unwrap(),
+        ["--remote", "--url", socket]
+    );
+    for incompatible in [
+        "",
+        "a-default-connection",
+        "tcp://127.0.0.1:1234",
+        "ssh://elsewhere.invalid/podman.sock",
+        "unix://relative.sock",
+        "unix:///tmp/podman.sock?connection=qa",
+    ] {
+        assert!(
+            selected_podman_target_args(incompatible).is_err(),
+            "{incompatible}"
+        );
+    }
 }
 
 // Configuration is checked while private inspect bytes are in scope, but is not
@@ -2258,8 +2332,32 @@ struct CheckedLog {
     tag: Option<String>,
     size: Option<String>,
 }
-pub(super) fn configuration_fingerprint(bytes: &[u8], version: u32) -> Option<String> {
+pub(super) fn configuration_fingerprint(
+    bytes: &[u8],
+    version: u32,
+    kind: RuntimeKind,
+) -> Option<String> {
     let mut facts: ConfigurationFacts = serde_json::from_slice(bytes).ok()?;
+    if matches!(version, 2 | 3)
+        && kind == RuntimeKind::Podman
+        && facts.config.user == "1000:1000"
+        && let Some(home) = facts.host_config.tmpfs.get_mut("/home/agent")
+        && valid_podman_home_mount(home)
+    {
+        // Podman resolves U to the configured container owner on first start.
+        // Keep the remaining options and their order in the fingerprint.
+        *home = home
+            .split(',')
+            .map(|option| {
+                if option == "U" {
+                    "uid=1000,gid=1000"
+                } else {
+                    option
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+    }
     facts.host_config.cap_drop.sort();
     facts.host_config.security_opt.sort();
     if let Some(add) = facts.host_config.cap_add.as_mut() {
@@ -2310,10 +2408,9 @@ pub(super) fn validate_stream_configuration(
                 .is_none_or(std::collections::BTreeMap::is_empty)
             && log.path.as_deref().is_none_or(str::is_empty)
             && log.tag.as_deref().is_none_or(str::is_empty)
-            && log
-                .size
-                .as_deref()
-                .is_none_or(|size| matches!(size, "" | "0B")),
+            && log.size.as_deref().is_none_or(|size| {
+                matches!(size, "" | "0B") || kind == RuntimeKind::Podman && size == "-1B"
+            }),
         "runtime logging differs from the required none driver without options"
     );
     let import = matches!(spec.purpose, ContainerPurpose::Import);
@@ -2392,23 +2489,20 @@ fn validate_configuration(spec: &ContainerSpec, bytes: &[u8], kind: RuntimeKind)
     }
     ensure!(
         host.tmpfs.len() == 2
-            && host.tmpfs.get("/tmp").is_some_and(|options| valid_tmpfs(
-                options,
-                256 * 1024 * 1024,
-                0o1777,
-                None,
-                true
-            ))
             && host
                 .tmpfs
-                .get("/home/agent")
-                .is_some_and(|options| valid_tmpfs(
-                    options,
-                    64 * 1024 * 1024,
-                    0o700,
-                    Some((1000, 1000)),
-                    false
-                )),
+                .get("/tmp")
+                .zip(host.tmpfs.get("/home/agent"))
+                .is_some_and(|(tmp, home)| match kind {
+                    RuntimeKind::Docker => valid_tmpfs(tmp, 256 * 1024 * 1024, 0o1777, None, true)
+                        && valid_tmpfs(home, 64 * 1024 * 1024, 0o700, Some((1000, 1000)), false),
+                    RuntimeKind::Podman => valid_podman_tmpfs(
+                        tmp,
+                        256 * 1024 * 1024,
+                        0o1777,
+                        &["rw", "nosuid", "nodev", "noexec", "rprivate", "tmpcopyup"],
+                    ) && valid_podman_home_mount(home),
+                }),
         "runtime temporary filesystem limits or restrictions differ from the sandbox preset"
     );
     ensure!(
@@ -2418,10 +2512,17 @@ fn validate_configuration(spec: &ContainerSpec, bytes: &[u8], kind: RuntimeKind)
             && host.network_mode == spec.network.to_string(),
         "runtime isolation or network differs from the authorized specification"
     );
-    ensure!(
-        host.cap_drop
+    let capabilities_dropped = match kind {
+        RuntimeKind::Docker => host
+            .cap_drop
             .iter()
-            .any(|cap| cap.eq_ignore_ascii_case("ALL"))
+            .any(|cap| cap.eq_ignore_ascii_case("ALL")),
+        // Podman reports CapDrop as a difference from its configured default
+        // bounding set. The effective and bounding sets are reported separately.
+        RuntimeKind::Podman => podman_reports_empty_capability_sets(bytes),
+    };
+    ensure!(
+        capabilities_dropped
             && host.cap_add.as_ref().is_none_or(Vec::is_empty)
             && host
                 .security_opt
@@ -2449,6 +2550,22 @@ fn validate_configuration(spec: &ContainerSpec, bytes: &[u8], kind: RuntimeKind)
         "runtime did not prove the exclusive named workspace volume"
     );
     Ok(())
+}
+
+fn podman_reports_empty_capability_sets(bytes: &[u8]) -> bool {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct CapabilitySets {
+        effective_caps: serde_json::Value,
+        bounding_caps: serde_json::Value,
+    }
+    // Podman encodes nil slices as null. A missing field still fails
+    // deserialization and cannot be taken as an empty capability set.
+    serde_json::from_slice::<CapabilitySets>(bytes).is_ok_and(|sets| {
+        [sets.effective_caps, sets.bounding_caps]
+            .iter()
+            .all(|caps| caps.is_null() || caps.as_array().is_some_and(Vec::is_empty))
+    })
 }
 
 fn effective_uid() -> u32 {
@@ -2498,6 +2615,78 @@ mod log_policy_tests {
     }
 
     #[test]
+    fn podman_home_mount_inspection_requires_exact_private_tmpfs_contract() {
+        let worker = spec(ContainerPurpose::Run);
+        let mut observed = facts();
+        observed["Config"]["Labels"] = json!({
+            "agentsandbox.session": worker.session,
+            "agentsandbox.operation": worker.operation_id(),
+            "agentsandbox.purpose": "run",
+        });
+        observed["Mounts"] = json!([{
+            "Type": "volume", "Name": worker.volume(), "Destination": "/workspace", "RW": true,
+        }]);
+        let home = "size=64m,mode=0700,U,nosuid,nodev,rprivate";
+        let tmp = "rw,nosuid,nodev,noexec,size=256m,mode=1777,rprivate,tmpcopyup";
+        observed["HostConfig"]["Tmpfs"] = json!({"/home/agent": home, "/tmp": tmp});
+        observed["HostConfig"]["CapDrop"] = json!(["CAP_CHOWN", "CAP_DAC_OVERRIDE"]);
+        observed["EffectiveCaps"] = json!(null);
+        observed["BoundingCaps"] = json!(null);
+        validate_configuration(&worker, &bytes(&observed), RuntimeKind::Podman).unwrap();
+        let mut reordered = observed.clone();
+        reordered["HostConfig"]["Tmpfs"]["/home/agent"] =
+            json!("nodev,rprivate,U,mode=700,nosuid,size=65536k");
+        validate_configuration(&worker, &bytes(&reordered), RuntimeKind::Podman).unwrap();
+        for (mount, options) in [
+            ("/home/agent", home.replace(",U", "")),
+            ("/home/agent", home.replace(",U", ",U=false")),
+            ("/home/agent", home.replace("64m", "65m")),
+            ("/home/agent", home.replace("0700", "0755")),
+            ("/home/agent", home.replace("nosuid", "suid")),
+            ("/home/agent", home.replace("nodev", "dev")),
+            ("/home/agent", home.replace("rprivate", "rshared")),
+            ("/home/agent", format!("{home},tmpcopyup")),
+            ("/home/agent", format!("{home},ro")),
+            ("/home/agent", format!("{home},uid=1000,gid=1000")),
+            ("/home/agent", format!("{home},size=64m")),
+            ("/tmp", tmp.replace("noexec", "exec")),
+            ("/tmp", tmp.replace("256m", "128m")),
+            ("/tmp", tmp.replace("1777", "0777")),
+            ("/tmp", format!("{tmp},U")),
+        ] {
+            let mut invalid = observed.clone();
+            invalid["HostConfig"]["Tmpfs"][mount] = json!(options);
+            let error =
+                validate_configuration(&worker, &bytes(&invalid), RuntimeKind::Podman).unwrap_err();
+            assert!(
+                error.to_string().contains("temporary filesystem"),
+                "{mount}: {options}"
+            );
+        }
+        let mut extra = observed;
+        extra["HostConfig"]["Tmpfs"]["/var/tmp"] = json!(tmp);
+        assert!(validate_configuration(&worker, &bytes(&extra), RuntimeKind::Podman).is_err());
+    }
+
+    #[test]
+    fn podman_capability_inspection_requires_both_empty_sets() {
+        for empty in [json!(null), json!([])] {
+            let complete = json!({"EffectiveCaps":empty.clone(),"BoundingCaps":empty});
+            assert!(podman_reports_empty_capability_sets(&bytes(&complete)));
+            for field in ["EffectiveCaps", "BoundingCaps"] {
+                let mut missing = complete.clone();
+                missing.as_object_mut().unwrap().remove(field);
+                assert!(!podman_reports_empty_capability_sets(&bytes(&missing)));
+                for value in [json!(["CAP_CHOWN"]), json!(""), json!({}), json!([null])] {
+                    let mut invalid = complete.clone();
+                    invalid[field] = value;
+                    assert!(!podman_reports_empty_capability_sets(&bytes(&invalid)));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn interactive_v3_inspection_binds_tty_and_fixed_term_without_secret_environment() {
         let worker = spec(ContainerPurpose::Run)
             .with_security_preset(crate::control::SecurityPresetV1::FixedSandboxInteractiveV3);
@@ -2510,10 +2699,11 @@ mod log_policy_tests {
         assert!(
             validate_stream_configuration(&worker, &bytes(&observed), RuntimeKind::Podman).is_err()
         );
-        let fingerprint = configuration_fingerprint(&bytes(&observed), 3).unwrap();
+        let fingerprint =
+            configuration_fingerprint(&bytes(&observed), 3, RuntimeKind::Docker).unwrap();
         observed["Config"]["Env"] = json!(["PRIVATE=second-private-value", "TERM=xterm-256color"]);
         assert_eq!(
-            configuration_fingerprint(&bytes(&observed), 3).unwrap(),
+            configuration_fingerprint(&bytes(&observed), 3, RuntimeKind::Docker).unwrap(),
             fingerprint
         );
         for (field, value) in [
@@ -2539,7 +2729,7 @@ mod log_policy_tests {
                 validate_stream_configuration(&worker, &bytes(&invalid), RuntimeKind::Docker)
                     .is_err()
             );
-            assert!(configuration_fingerprint(&bytes(&invalid), 3).is_none());
+            assert!(configuration_fingerprint(&bytes(&invalid), 3, RuntimeKind::Docker).is_none());
         }
         observed["Config"]["StdinOnce"] = json!(false);
         validate_stream_configuration(&worker, &bytes(&observed), RuntimeKind::Podman).unwrap();
@@ -2554,14 +2744,57 @@ mod log_policy_tests {
     }
 
     #[test]
+    fn podman_runtime_fingerprint_binds_the_resolved_home_owner_across_start() {
+        let mut created = facts();
+        created["HostConfig"]["Tmpfs"] = json!({
+            "/tmp": "rw,nosuid,nodev,noexec,size=256m,mode=1777,rprivate,tmpcopyup",
+            "/home/agent": "size=64m,mode=0700,U,nosuid,nodev,rprivate",
+        });
+        created["Config"]["Env"] = json!(["TERM=xterm-256color"]);
+        let mut started = created.clone();
+        started["HostConfig"]["Tmpfs"]["/home/agent"] =
+            json!("size=64m,mode=0700,uid=1000,gid=1000,nosuid,nodev,rprivate");
+        for version in [2, 3] {
+            let fingerprint = |document: &Value| {
+                configuration_fingerprint(&bytes(document), version, RuntimeKind::Podman).unwrap()
+            };
+            assert_eq!(fingerprint(&created), fingerprint(&started));
+            for home in [
+                "size=64m,mode=0700,uid=1001,gid=1000,nosuid,nodev,rprivate",
+                "size=64m,mode=0700,uid=1000,gid=1001,nosuid,nodev,rprivate",
+                "size=64m,mode=0755,U,nosuid,nodev,rprivate",
+                "size=65m,mode=0700,U,nosuid,nodev,rprivate",
+                "size=64m,mode=0700,U=false,nosuid,nodev,rprivate",
+                "size=64m,mode=0700,U,U,nosuid,nodev,rprivate",
+                "size=64m,mode=0700,U,nosuid,nodev,rprivate,tmpcopyup",
+            ] {
+                let mut changed = started.clone();
+                changed["HostConfig"]["Tmpfs"]["/home/agent"] = json!(home);
+                assert_ne!(fingerprint(&created), fingerprint(&changed));
+            }
+            let mut wrong_user = created.clone();
+            wrong_user["Config"]["User"] = json!("1001:1000");
+            assert_ne!(fingerprint(&created), fingerprint(&wrong_user));
+        }
+        assert_ne!(
+            configuration_fingerprint(&bytes(&created), 1, RuntimeKind::Podman).unwrap(),
+            configuration_fingerprint(&bytes(&started), 1, RuntimeKind::Podman).unwrap()
+        );
+        assert_ne!(
+            configuration_fingerprint(&bytes(&created), 2, RuntimeKind::Docker).unwrap(),
+            configuration_fingerprint(&bytes(&started), 2, RuntimeKind::Docker).unwrap()
+        );
+    }
+
+    #[test]
     fn historical_fingerprint_is_unchanged_and_v2_binds_streams_without_environment() {
         let original = facts();
-        let old = configuration_fingerprint(&bytes(&original), 1).unwrap();
+        let old = configuration_fingerprint(&bytes(&original), 1, RuntimeKind::Docker).unwrap();
         assert_eq!(
             old,
             "694ac612677265f6f82c2f02c30d3ff752bfea82541bdd082e65c210639cdf3f"
         );
-        let current = configuration_fingerprint(&bytes(&original), 2).unwrap();
+        let current = configuration_fingerprint(&bytes(&original), 2, RuntimeKind::Docker).unwrap();
         assert_ne!(old, current);
         for (section, field, changed) in [
             ("Config", "Tty", json!(true)),
@@ -2575,17 +2808,23 @@ mod log_policy_tests {
         ] {
             let mut value = original.clone();
             value[section][field] = changed;
-            assert_eq!(configuration_fingerprint(&bytes(&value), 1).unwrap(), old);
+            assert_eq!(
+                configuration_fingerprint(&bytes(&value), 1, RuntimeKind::Docker).unwrap(),
+                old
+            );
             assert_ne!(
-                configuration_fingerprint(&bytes(&value), 2).unwrap(),
+                configuration_fingerprint(&bytes(&value), 2, RuntimeKind::Docker).unwrap(),
                 current
             );
         }
         let mut secret = original.clone();
         secret["Config"]["Env"] = json!(["PRIVATE=different-secret"]);
-        assert_eq!(configuration_fingerprint(&bytes(&secret), 1).unwrap(), old);
         assert_eq!(
-            configuration_fingerprint(&bytes(&secret), 2).unwrap(),
+            configuration_fingerprint(&bytes(&secret), 1, RuntimeKind::Docker).unwrap(),
+            old
+        );
+        assert_eq!(
+            configuration_fingerprint(&bytes(&secret), 2, RuntimeKind::Docker).unwrap(),
             current
         );
         let mut historical = original.clone();
@@ -2597,10 +2836,10 @@ mod log_policy_tests {
             .unwrap()
             .remove("LogConfig");
         assert_eq!(
-            configuration_fingerprint(&bytes(&historical), 1).unwrap(),
+            configuration_fingerprint(&bytes(&historical), 1, RuntimeKind::Docker).unwrap(),
             old
         );
-        assert!(configuration_fingerprint(&bytes(&historical), 2).is_none());
+        assert!(configuration_fingerprint(&bytes(&historical), 2, RuntimeKind::Docker).is_none());
     }
 
     #[test]
@@ -2634,10 +2873,9 @@ mod log_policy_tests {
         ] {
             let mut input = facts();
             input["HostConfig"]["LogConfig"] = value;
-            assert!(
-                validate_stream_configuration(&worker, &bytes(&input), RuntimeKind::Docker)
-                    .is_err()
-            );
+            for kind in [RuntimeKind::Docker, RuntimeKind::Podman] {
+                assert!(validate_stream_configuration(&worker, &bytes(&input), kind).is_err());
+            }
         }
         for field in ["Tty", "OpenStdin", "StdinOnce"] {
             let mut changed = facts();
@@ -2652,11 +2890,21 @@ mod log_policy_tests {
                     .is_err()
             );
         }
-        // Podman's documented inspect shape carries empty auxiliary values.
+        // Podman carries empty auxiliary values and can report -1B for an
+        // unset limit even when the logging driver is none.
         let mut podman = facts();
         podman["HostConfig"]["LogConfig"] =
             json!({"Type":"none","Config":null,"Path":"","Tag":"","Size":"0B"});
         validate_stream_configuration(&worker, &bytes(&podman), RuntimeKind::Podman).unwrap();
+        podman["HostConfig"]["LogConfig"]["Size"] = json!("-1B");
+        validate_stream_configuration(&worker, &bytes(&podman), RuntimeKind::Podman).unwrap();
+        assert!(
+            validate_stream_configuration(&worker, &bytes(&podman), RuntimeKind::Docker).is_err()
+        );
+        podman["HostConfig"]["LogConfig"]["Config"] = json!({"max-size":"1m"});
+        assert!(
+            validate_stream_configuration(&worker, &bytes(&podman), RuntimeKind::Podman).is_err()
+        );
     }
 
     #[test]
@@ -2717,6 +2965,45 @@ struct WorkspaceVolume {
     options: Option<std::collections::BTreeMap<String, String>>,
 }
 
+fn parse_tmpfs_options(options: &str) -> Option<std::collections::BTreeMap<&str, Option<&str>>> {
+    let mut parsed = std::collections::BTreeMap::new();
+    for option in options.split(',') {
+        let (key, value) = option
+            .split_once('=')
+            .map_or((option, None), |(key, value)| (key, Some(value)));
+        if parsed.insert(key, value).is_some() {
+            return None;
+        }
+    }
+    Some(parsed)
+}
+
+fn valid_podman_tmpfs(options: &str, size: u64, mode: u32, flags: &[&str]) -> bool {
+    // Podman 6.1 reports its engine-set ownership through U and leaves the
+    // default read/write flag implicit for an explicit type=tmpfs home mount.
+    let Some(mut parsed) = parse_tmpfs_options(options) else {
+        return false;
+    };
+    let measured_size = parsed.remove("size").flatten().and_then(parse_memory_size);
+    let measured_mode = parsed
+        .remove("mode")
+        .flatten()
+        .and_then(|value| u32::from_str_radix(value, 8).ok());
+    measured_size == Some(size)
+        && measured_mode == Some(mode)
+        && parsed.len() == flags.len()
+        && flags.iter().all(|flag| parsed.get(flag) == Some(&None))
+}
+
+fn valid_podman_home_mount(options: &str) -> bool {
+    valid_podman_tmpfs(
+        options,
+        64 * 1024 * 1024,
+        0o700,
+        &["U", "nosuid", "nodev", "rprivate"],
+    )
+}
+
 fn valid_tmpfs(
     options: &str,
     size: u64,
@@ -2724,15 +3011,9 @@ fn valid_tmpfs(
     owner: Option<(u32, u32)>,
     noexec: bool,
 ) -> bool {
-    let mut parsed = std::collections::BTreeMap::new();
-    for option in options.split(',') {
-        let (key, value) = option
-            .split_once('=')
-            .map_or((option, None), |(key, value)| (key, Some(value)));
-        if parsed.insert(key, value).is_some() {
-            return false;
-        }
-    }
+    let Some(parsed) = parse_tmpfs_options(options) else {
+        return false;
+    };
     if !["rw", "nosuid", "nodev"]
         .iter()
         .all(|flag| parsed.contains_key(flag))

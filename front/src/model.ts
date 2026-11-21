@@ -6,6 +6,7 @@ import type {
   EventPeriod,
   View,
 } from "./types.ts";
+import { boundedText, object, uuid } from "./human-model.ts";
 
 export function parseEntityCollection<T extends { id: string }>(input: unknown): T[] {
   if (!input || typeof input !== "object" || !Array.isArray((input as { items?: unknown }).items))
@@ -155,6 +156,7 @@ const enforcerStageLabels: ReadonlyMap<string, string> = new Map([
   ["before_spawn", "Vérification finale avant démarrage"],
 ]);
 const runtimeStageLabels: ReadonlyMap<string, string> = new Map([
+  ["observe_only", "Démarrage non émis lors de cette tentative"],
   ["authority_before_spawn", "Vérification de l’autorité du moteur"],
   ["invocation_before_spawn", "Vérification du programme"],
   ["stop_before_spawn", "Vérification de la poursuite du lancement"],
@@ -186,10 +188,225 @@ export function brokerFailureDetails(event: AuditEvent) {
   };
 }
 
+export type BrokerCapture = {
+  state: "retained" | "not_retained" | "unknown";
+  text: string | null;
+  truncated: boolean;
+  textClipped: boolean;
+};
+
+const utf8 = new TextEncoder();
+// The audit redactor can expand the captured text before applying its own UTF-8 bound.
+const maxBrokerTextBytes = 32768 + utf8.encode("…[truncated]").byteLength;
+const maxU128 = (1n << 128n) - 1n;
+
+function brokerCapture(value: unknown): BrokerCapture {
+  const facts = object(value) ? value : null;
+  const output = facts?.text;
+  const text = typeof output === "string" && output.length <= maxBrokerTextBytes &&
+    utf8.encode(output).byteLength <= maxBrokerTextBytes ? output : null;
+  return {
+    state: text !== null ? "retained" : output === null ? "not_retained" : "unknown",
+    text,
+    truncated: facts?.truncated === true,
+    textClipped: text !== null && facts?.text_clipped === true,
+  };
+}
+
+function exitCode(value: unknown, minimum: number, maximum: number): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= minimum && value <= maximum ? value : null;
+}
+
+function brokerTime(value: unknown): string | null {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T/.test(value) && Number.isFinite(Date.parse(value)) ? value : null;
+}
+
+export function brokerBatchResultDetails(event: AuditEvent) {
+  if (event.kind !== "broker.batch.result" || event.source !== "runner" ||
+    event.provenance !== "observed" || event.data?.version !== 1) return null;
+  const data = event.data;
+  const process = object(data.observation) && object(data.observation.process) ? data.observation.process : null;
+  const startedAt = brokerTime(process?.started_at);
+  const finishedAt = brokerTime(process?.finished_at);
+  const observedExitCode = exitCode(process?.exit_code, 0, 4294967295);
+  const terminal = (process?.status === "exited" || process?.status === "stopped") && process.running === false &&
+    observedExitCode !== null && startedAt !== null && finishedAt !== null && Date.parse(startedAt) <= Date.parse(finishedAt);
+  const transport = object(data.transport) ? data.transport : null;
+  const duration = transport?.duration_ms_decimal;
+  return {
+    observedExitCode: terminal ? observedExitCode : null,
+    oomKilled: terminal && typeof process.oom_killed === "boolean" ? process.oom_killed : null,
+    startedAt: terminal ? startedAt : null,
+    finishedAt: terminal ? finishedAt : null,
+    transportExitCode: exitCode(transport?.exit_code, -2147483648, 2147483647),
+    transportDurationMs: typeof duration === "string" && /^(?:0|[1-9][0-9]{0,38})$/.test(duration) &&
+      duration.trim() === duration && BigInt(duration) <= maxU128 ? duration : null,
+    stdout: brokerCapture(transport?.stdout),
+    stderr: brokerCapture(transport?.stderr),
+  };
+}
+
+const evaluatorLabels = new Map([
+  ["rust_rules", "Rust déterministe"],
+  ["typesafe", "Jev TypeSafe"],
+  ["local_openai", "Modèle local"],
+]);
+const evaluationStateLabels = new Map([
+  ["evaluated", "Évaluée"],
+  ["skipped_local_policy", "Non sollicitée par la politique locale"],
+  ["unavailable_or_invalid", "Indisponible ou invalide"],
+]);
+const evaluatorSelectionLabels = new Map([
+  ["cli", "Ligne de commande"],
+  ["environment", "Variables d’environnement"],
+  ["legacy", "Configuration historique"],
+  ["programmatic", "Configuration du gateway"],
+]);
+const adviceLabels = new Map([
+  ["allow", "Autoriser"],
+  ["deny", "Refuser"],
+  ["review", "Demander une revue"],
+]);
+
+function modelOnWire(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 128 && utf8.encode(value).byteLength <= 128;
+}
+
+function evaluationModel(value: unknown): string | null {
+  return modelOnWire(value) && !!value.trim() && !/\p{Cc}/u.test(value) ? value : null;
+}
+
+function legacyTypeSafeStatus(evidence: Record<string, unknown>, decision: AuditEvent["decision"]) {
+  if (Object.hasOwn(evidence, "backend")) return null;
+  const fields = Object.keys(evidence);
+  if (fields.length === 1 && evidence.status === "unavailable_or_invalid" &&
+    decision?.outcome === "deny" && decision.engine === "jev" && decision.rule === "jev_unavailable_or_invalid")
+    return "unavailable_or_invalid";
+  // Historical JevAnswer held these four fields before the backend envelope.
+  const outcome = evidence.outcome;
+  if (fields.length !== 4 || !Object.hasOwn(evidence, "usage") ||
+    typeof outcome !== "string" || !adviceLabels.has(outcome) ||
+    typeof evidence.confidence !== "number" || !(evidence.confidence >= 0 && evidence.confidence <= 1) ||
+    !modelOnWire(evidence.model)) return null;
+  const matchesDecision = outcome === "allow" ? decision?.outcome === "allow" && decision.engine === "deterministic"
+    : decision?.outcome === "deny" && decision.engine === "jev" &&
+      decision.rule === (outcome === "deny" ? "jev_deny" : "jev_review_fail_closed");
+  return matchesDecision ? "evaluated" : null;
+}
+
+export function decisionEvaluationDetails(event: AuditEvent) {
+  const evidence = event.data?.jev;
+  if (event.kind !== "security.decision" || event.source !== "gateway" ||
+    event.provenance !== "observed" || !object(evidence)) return null;
+  const historicalStatus = legacyTypeSafeStatus(evidence, event.decision);
+  const backend = historicalStatus ? "typesafe" : evidence.backend;
+  const status = historicalStatus ?? evidence.status;
+  const evaluator = typeof backend === "string" ? evaluatorLabels.get(backend) : undefined;
+  const evaluationState = typeof status === "string" ? evaluationStateLabels.get(status) : undefined;
+  if (!evaluator || !evaluationState) return null;
+  const selection = evidence.selection_source;
+  const localAdvisory = backend === "local_openai";
+  const models = backend === "typesafe" || localAdvisory;
+  const outcome = localAdvisory ? evidence.provider_outcome : evidence.outcome;
+  const advice = localAdvisory && outcome === "unknown" ? "Indéterminé" :
+    typeof outcome === "string" ? adviceLabels.get(outcome) ?? null : null;
+  return {
+    evaluator,
+    evaluationState,
+    selectionSource: typeof selection === "string" ? evaluatorSelectionLabels.get(selection) ?? null : null,
+    requestedModel: models ? evaluationModel(evidence.requested_model) : null,
+    returnedModel: models && status === "evaluated" ? evaluationModel(evidence.model) : null,
+    advice: models && status === "evaluated" ? advice : null,
+    localAdvisory,
+  };
+}
+
+type BrokerWorkspaceChange = {
+  path: string;
+  change: "created" | "modified" | "deleted";
+  beforeSha256: string | null;
+  afterSha256: string | null;
+};
+
+export type BrokerWorkspaceDetails =
+  | {
+      kind: "scan";
+      changedFiles: number;
+      manifestDigest: string;
+      truncated: boolean;
+      changes: BrokerWorkspaceChange[];
+    }
+  | { kind: "export"; files: number; manifestDigest: string; requestId: string };
+
+// The broker diff is over two workspaces and retains at most 200 detail rows.
+const maxWorkspaceEntries = 20_000;
+const maxWorkspaceChanges = 200;
+
+function workspaceCount(value: unknown, maximum: number): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= maximum;
+}
+
+function workspaceDigest(value: unknown): value is string {
+  return typeof value === "string" && value.length === 64 && !/[^0-9a-f]/.test(value);
+}
+
+function workspaceFingerprint(value: unknown): string | undefined {
+  return object(value) && workspaceDigest(value.sha256) ? value.sha256 : undefined;
+}
+
+export function brokerWorkspaceDetails(event: AuditEvent): BrokerWorkspaceDetails | null {
+  if (event.kind !== "broker.batch.scan" && event.kind !== "broker.batch.export") return null;
+  const data = event.data;
+  if (event.source !== "runner" || event.provenance !== "observed" || !object(data) ||
+      data.version !== 1 || !workspaceDigest(data.manifest_digest)) return null;
+  const manifestDigest = data.manifest_digest;
+
+  if (event.kind === "broker.batch.export") {
+    const { files, request_id: requestId } = data;
+    if (!workspaceCount(files, maxWorkspaceEntries) || !uuid(requestId) || requestId.length !== 36 ||
+        requestId !== requestId.toLowerCase() || requestId === "00000000-0000-0000-0000-000000000000") return null;
+    return { kind: "export", files, manifestDigest, requestId };
+  }
+
+  const { changed_files: changedFiles, truncated, changes: items } = data;
+  if (!workspaceCount(changedFiles, 2 * maxWorkspaceEntries) || typeof truncated !== "boolean" ||
+      !Array.isArray(items) || items.length > maxWorkspaceChanges ||
+      (truncated ? items.length >= changedFiles : items.length !== changedFiles)) return null;
+
+  const changes: BrokerWorkspaceChange[] = [];
+  const paths = new Set<string>();
+  let totalPathBytes = 0;
+  for (const item of items) {
+    if (!object(item)) return null;
+    const { path, change, before, after } = item;
+    if (!boundedText(path) || /[\\:]/.test(path) ||
+        path.split("/").some((part) => part === "" || part === "." || part === "..") ||
+        paths.has(path)) return null;
+    const pathBytes = utf8.encode(path).length;
+    totalPathBytes += pathBytes;
+    if (pathBytes > 4096 || totalPathBytes > 110 * 1024) return null;
+    paths.add(path);
+
+    if (change !== "created" && change !== "modified" && change !== "deleted") return null;
+    const beforeSha256 = before === null ? null : workspaceFingerprint(before);
+    const afterSha256 = after === null ? null : workspaceFingerprint(after);
+    if (beforeSha256 === undefined || afterSha256 === undefined ||
+        (beforeSha256 === null) !== (change === "created") ||
+        (afterSha256 === null) !== (change === "deleted")) return null;
+    changes.push({ path, change, beforeSha256, afterSha256 });
+  }
+  return { kind: "scan", changedFiles, manifestDigest, truncated, changes };
+}
+
 export function eventSummary(event: AuditEvent): string {
   const failure = brokerFailureDetails(event);
   if (failure)
     return `Échec signalé · Phase : ${failure.phase} · Étape : ${failure.step} · Effet sur l’exécution : ${failure.runtimeEffect}`;
+  const workspace = brokerWorkspaceDetails(event);
+  if (workspace?.kind === "scan")
+    return `${workspace.changedFiles} ${workspace.changedFiles === 1 ? "modification observée" : "modifications observées"}`;
+  if (workspace?.kind === "export")
+    return `${workspace.files} ${workspace.files === 1 ? "fichier exporté" : "fichiers exportés"}`;
   if (Array.isArray(event.command?.argv) && event.command.argv.length)
     return event.command.argv.map((arg) => asText(arg, "")).join(" ");
   for (const key of ["path", "message", "reason", "task"]) {
@@ -231,7 +448,7 @@ export function projectEvents(events: AuditEvent[], view: View): AuditEvent[] {
   if (view === "actions")
     return events.filter(
       (event) =>
-        event.kind === "broker.batch.failure" ||
+        event.kind === "broker.batch.failure" || event.kind === "broker.batch.result" ||
         event.command ||
         event.decision ||
         /^(command|action|exec)\./.test(event.kind),
@@ -246,6 +463,8 @@ export function projectEvents(events: AuditEvent[], view: View): AuditEvent[] {
   if (view === "files")
     return events.filter(
       (event) =>
+        event.kind === "broker.batch.scan" ||
+        event.kind === "broker.batch.export" ||
         /^(file|files|artifact)\./.test(event.kind) ||
         /^workspace\.(diff|snapshot|export|import)/.test(event.kind),
     );

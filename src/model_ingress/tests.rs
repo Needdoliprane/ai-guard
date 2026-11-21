@@ -24,7 +24,7 @@ async fn model_routes_bounds_and_credentials_are_checked_before_upstream() {
     let task = tokio::spawn(async move {
         axum::serve(listener, fixture).await.unwrap();
     });
-    let app = router(&origin).unwrap();
+    let app = router(&origin, DEFAULT_MODEL_INGRESS_TIMEOUT_SECONDS).unwrap();
     for (method, path, body, expected) in [
         ("GET", "/slots", "", StatusCode::NOT_FOUND),
         (
@@ -127,7 +127,7 @@ async fn model_inference_has_no_queue_and_oversize_response_is_never_success() {
     let task = tokio::spawn(async move {
         axum::serve(listener, fixture).await.unwrap();
     });
-    let app = router(&origin).unwrap();
+    let app = router(&origin, DEFAULT_MODEL_INGRESS_TIMEOUT_SECONDS).unwrap();
     let request = || {
         Request::builder()
             .method("POST")
@@ -168,24 +168,32 @@ async fn slow_request_and_truncated_upstream_never_become_success() {
         socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 64\r\nConnection: close\r\n\r\n{}").await.unwrap();
         socket.shutdown().await.unwrap();
     });
-    let app = router(&origin).unwrap();
-    let stream = async_stream::stream! {
-        yield Ok::<_,std::io::Error>(axum::body::Bytes::from_static(b"{\"stream\":false"));
-        std::future::pending::<()>().await;
+    let app = router(&origin, DEFAULT_MODEL_INGRESS_TIMEOUT_SECONDS).unwrap();
+    let incomplete_request = || {
+        let stream = async_stream::stream! {
+            yield Ok::<_,std::io::Error>(axum::body::Bytes::from_static(b"{\"stream\":false"));
+            std::future::pending::<()>().await;
+        };
+        Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from_stream(stream))
+            .unwrap()
     };
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/chat/completions")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from_stream(stream))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+    let short = router(&origin, 1).unwrap();
+    let (default_response, short_response) = tokio::join!(
+        app.clone().oneshot(incomplete_request()),
+        short.oneshot(incomplete_request())
+    );
+    assert_eq!(
+        default_response.unwrap().status(),
+        StatusCode::REQUEST_TIMEOUT
+    );
+    assert_eq!(
+        short_response.unwrap().status(),
+        StatusCode::GATEWAY_TIMEOUT
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     let response = app
         .oneshot(
@@ -204,4 +212,47 @@ async fn slow_request_and_truncated_upstream_never_become_success() {
         .await
         .unwrap()
         .unwrap();
+}
+
+#[test]
+fn model_ingress_timeout_is_bounded() {
+    assert!(model_ingress_router_with_timeout(0).is_err());
+    assert!(model_ingress_router_with_timeout(1).is_ok());
+    assert!(model_ingress_router_with_timeout(MAX_LOCAL_JEV_TIMEOUT_SECONDS).is_ok());
+    assert!(model_ingress_router_with_timeout(MAX_LOCAL_JEV_TIMEOUT_SECONDS + 1).is_err());
+}
+
+#[tokio::test]
+async fn model_ingress_timeout_covers_delayed_upstream_response() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let fixture = Router::new().fallback(any(move || {
+        seen.fetch_add(1, Ordering::SeqCst);
+        async {
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            Json(json!({"status":"ok"}))
+        }
+    }));
+    let task = tokio::spawn(async move {
+        axum::serve(listener, fixture).await.unwrap();
+    });
+    let request = || {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{\"stream\":false}"))
+            .unwrap()
+    };
+    let default = router(&origin, DEFAULT_MODEL_INGRESS_TIMEOUT_SECONDS).unwrap();
+    let extended = router(&origin, 10).unwrap();
+    let (default, extended) = tokio::join!(default.oneshot(request()), extended.oneshot(request()));
+    task.abort();
+    let _ = task.await;
+
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(default.unwrap().status(), StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(extended.unwrap().status(), StatusCode::OK);
 }

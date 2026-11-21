@@ -22,7 +22,7 @@ These four variables configure the local identity provider:
 | Variable | Default | Meaning |
 |---|---|---|
 | `AI_GUARD_DEMO_IDP_HOST` | `keycloak.ai-guard.test` | Public DNS name, without a scheme or path; also the internal network alias. |
-| `AI_GUARD_DEMO_IDP_PORT` | `18080` | Same public and container HTTP port. Choose a free port above 1024, other than 18081. |
+| `AI_GUARD_DEMO_IDP_PORT` | `18080` | Public and container HTTP port. The ai-guard DEMO transport requires port 18080 with the `keycloak.ai-guard.test` alias. |
 | `AI_GUARD_DEMO_WEB_ORIGIN` | `http://127.0.0.1:4000` | Exact dashboard origin, without a trailing slash, path, query or fragment. |
 | `AI_GUARD_DEMO_CONTROL_IMAGE` | `agentsandbox-control:local` | Prepared ai-guard control image used only as the DEMO ingress. |
 
@@ -34,7 +34,7 @@ Keep `-p ai-guard-keycloak` on every identity Compose command. The examples set 
 
 Configure local DNS so `keycloak.ai-guard.test` resolves only to the host loopback. An operator-managed hosts entry can use `127.0.0.1 keycloak.ai-guard.test`. Preserve existing entries. The browser, CLI and containerised control must use the same public issuer name; replacing that name with `localhost`, a container service name or an IP creates a different issuer. The Compose network supplies the internal alias independently of host DNS.
 
-With the defaults, the exact issuer is `http://keycloak.ai-guard.test:18080/realms/ai-guard-demo`. The dashboard origin is `http://127.0.0.1:4000`; the normal gateway port is 8787. Port 18081 is a second ingress listener inside its container, bound to that container's loopback and unpublished.
+The exact issuer with the canonical DEMO alias is `http://keycloak.ai-guard.test:18080/realms/ai-guard-demo`. The dashboard defaults to `http://127.0.0.1:4000` and the gateway defaults to port 8787.
 
 Choose a new project name. The commands use `ai-guard-keycloak`; before the first start, check that no resources already carry that project label:
 

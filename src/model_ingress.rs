@@ -1,5 +1,6 @@
 //! Fixed-purpose, non-streaming model transport. This relay holds only its
 //! leaf TLS identity; it does not receive or forward control credentials.
+use crate::jev::MAX_LOCAL_JEV_TIMEOUT_SECONDS;
 use axum::{
     Json, Router,
     body::Body,
@@ -12,23 +13,38 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
+
+pub const DEFAULT_MODEL_INGRESS_TIMEOUT_SECONDS: u64 = 5;
 const MAX_BODY: usize = 65_536;
 
 #[derive(Clone)]
 struct Relay {
     origin: reqwest::Url,
     client: reqwest::Client,
+    timeout: Duration,
     inference: Arc<tokio::sync::Semaphore>,
     health: Arc<tokio::sync::Semaphore>,
 }
+
 pub fn model_ingress_router() -> anyhow::Result<Router> {
-    router("http://model:8080")
+    model_ingress_router_with_timeout(DEFAULT_MODEL_INGRESS_TIMEOUT_SECONDS)
 }
-fn router(origin: &str) -> anyhow::Result<Router> {
+
+/// Apply the same timeout to both routes and their upstream HTTP requests.
+pub fn model_ingress_router_with_timeout(timeout_seconds: u64) -> anyhow::Result<Router> {
+    router("http://model:8080", timeout_seconds)
+}
+
+fn router(origin: &str, timeout_seconds: u64) -> anyhow::Result<Router> {
+    anyhow::ensure!(
+        (1..=MAX_LOCAL_JEV_TIMEOUT_SECONDS).contains(&timeout_seconds),
+        "model ingress timeout must be between 1 and {MAX_LOCAL_JEV_TIMEOUT_SECONDS} seconds"
+    );
+    let timeout = Duration::from_secs(timeout_seconds);
     let origin = reqwest::Url::parse(origin)?;
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(2))
-        .timeout(Duration::from_secs(5))
+        .timeout(timeout)
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
@@ -36,6 +52,7 @@ fn router(origin: &str) -> anyhow::Result<Router> {
     Ok(Router::new().fallback(any(forward)).with_state(Relay {
         origin,
         client,
+        timeout,
         inference: Arc::new(tokio::sync::Semaphore::new(1)),
         health: Arc::new(tokio::sync::Semaphore::new(4)),
     }))
@@ -73,7 +90,7 @@ async fn read_request(body: Body) -> Result<Vec<u8>, StatusCode> {
     .unwrap_or(Err(StatusCode::REQUEST_TIMEOUT))
 }
 async fn forward(State(state): State<Relay>, request: Request) -> Response {
-    match tokio::time::timeout(Duration::from_secs(5), forward_inner(state, request)).await {
+    match tokio::time::timeout(state.timeout, forward_inner(state, request)).await {
         Ok(response) => response,
         Err(_) => failure(StatusCode::GATEWAY_TIMEOUT),
     }

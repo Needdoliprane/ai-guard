@@ -336,31 +336,37 @@ async fn login_a(fixture: &Fixture) -> (Value, String) {
         )
         .await
         .unwrap();
+    assert_eq!(seeded.status(), StatusCode::OK, "NV02_SETUP: public status");
+    assert!(seeded.headers().get("set-cookie").is_none());
+    drop(seeded);
+    let start_response = fixture
+        .router
+        .clone()
+        .oneshot(post(
+            "/auth/oidc/start",
+            json!({"version":1}),
+            None,
+            None,
+            true,
+        ))
+        .await
+        .unwrap();
     assert_eq!(
-        seeded.status(),
+        start_response.status(),
         StatusCode::OK,
-        "NV02_SETUP: correlation cookie"
+        "NV02_SETUP: A PKCE start"
     );
-    let cookie = seeded.headers()["set-cookie"]
+    let cookie = start_response.headers()["set-cookie"]
         .to_str()
         .unwrap()
         .split(';')
         .next()
         .unwrap()
         .to_owned();
-    drop(seeded);
-    let (status, start) = response(
-        &fixture.router,
-        post(
-            "/auth/oidc/start",
-            json!({"version":1}),
-            None,
-            Some(&cookie),
-            true,
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "NV02_SETUP: A PKCE start");
+    let start: Value =
+        serde_json::from_slice(&to_bytes(start_response.into_body(), 262_144).await.unwrap())
+            .unwrap();
+    let correlation_token = start["correlation_token"].as_str().unwrap().to_owned();
     let url = reqwest::Url::parse(start["authorization_url"].as_str().unwrap()).unwrap();
     let params = url.query_pairs().collect::<HashMap<_, _>>();
     let nonce = params["nonce"].to_string();
@@ -392,7 +398,7 @@ async fn login_a(fixture: &Fixture) -> (Value, String) {
         &fixture.router,
         post(
             "/auth/oidc/tokens",
-            json!({"version":1}),
+            json!({"version":1,"correlation_token":correlation_token}),
             None,
             Some(&cookie),
             true,

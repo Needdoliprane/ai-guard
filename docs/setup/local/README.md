@@ -36,6 +36,12 @@ For Podman, use:
 "$AIGUARD_BIN" build --runtime podman --source .
 ```
 
+The Podman diagnostic uses the same target as `run`. On Linux and FreeBSD,
+the default and `--runtime-endpoint local` select the native engine. On macOS,
+pass the explicit `unix:///…` socket of the selected Podman machine to both
+commands. The diagnostic reads engine info and version before any session
+preparation. [Podman endpoint options](https://docs.podman.io/en/stable/markdown/podman.1.html#url-value)
+
 The normal requirement is a rootless engine. If you deliberately use Docker Desktop or another daemon that does not report rootless operation, add `--allow-rootful-runtime` to `doctor`, `build` and each `run`. This option explicitly permits a daemon that does not report rootless operation; a VM does not establish equivalence to rootless isolation. The [runtime diagnostic](../../../src/runtime.rs) reads that reported mode, but this path currently emits no `runtime.security_downgrade` event. Its dedicated durable audit evidence remains to be implemented and qualified. Do not grant the application containers an engine socket or privileged mode.
 
 The default worker image supports ordinary commands. For Codex or Claude Code, build the client versions described in the [provider guide](../providers/README.md) before starting an AI session.
@@ -295,6 +301,8 @@ The dashboard presents session provenance, decisions, runtime observations and c
 Open an agent or sandbox to inspect its explicitly linked workers, then open a worker to return to its related agents and sandboxes. Links use exact session or runtime identifiers from the authenticated tenant's data; their provenance is displayed, and a matching session does not prove execution or delegation. The worker registry is paginated: navigate its pages before concluding that no matching record was received. A failed read retains a stale result with a retry action; it is not an empty inventory. The links combine audit projections and registry records, rather than querying an engine or discovering remote brokers.
 
 In the technical viewer's worker table and details, **Autorité déclarée du lancement** identifies the declared launch authority; **Autorité de la dernière inspection enregistrée** identifies the last recorded inspection's authority, alongside its runtime and observation date. An absent or null authority remains unknown, with no fallback from the launch to an inspection. Supplied IDs must be nonempty strings, preserved exactly and limited to 256 UTF-8 bytes without control characters; invalid values produce a contract error. These fields establish neither an associated host or broker, current availability nor a complete inventory. See the [worker view contract](../../ui.md#workers-quotas-et-allocations).
+
+Worker details show the launch image and plan fingerprints. The inspection section shows the exact container ID, image fingerprint and plan fingerprint from the last recorded inspection. Missing fields are shown as unknown.
 
 A 401/403 refusal on an active read closes the viewer session and removes its data, including open details. Reconnect with an authorized credential; repeated refreshes cannot restore a refused credential. A service error is shown explicitly. In the worker, quota and allocation views, the last successful data remains marked stale within the same session and scope until a successful refresh.
 

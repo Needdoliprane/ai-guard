@@ -10,7 +10,7 @@ use agentsandbox::{
     policy::Policy,
     redaction::Redactor,
     runner::{RunOptions, read_token},
-    runtime::{NetworkMode, Runtime, RuntimeKind},
+    runtime::{ManagedRuntime, NetworkMode, Runtime, RuntimeKind},
 };
 use anyhow::{Context, Result, ensure};
 use axum::{
@@ -54,7 +54,21 @@ async fn rejected_terminal_audit_keeps_the_real_terminal_instance_inspectable() 
         Some(program) => Runtime::with_program(kind, program)?,
         None => Runtime::new(kind)?,
     };
-    runtime.doctor(allow_rootful).await?;
+    match kind {
+        RuntimeKind::Docker => {
+            ManagedRuntime::connect_docker_with_runtime(
+                uuid::Uuid::new_v4(),
+                &endpoint,
+                runtime.clone(),
+            )
+            .await?
+            .doctor(allow_rootful)
+            .await?;
+        }
+        RuntimeKind::Podman => {
+            runtime.diagnose_podman(&endpoint, allow_rootful).await?;
+        }
+    }
     let evidence = tempfile::Builder::new()
         .prefix("ai-guard-terminal-audit-")
         .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700))
@@ -170,10 +184,67 @@ async fn rejected_terminal_audit_keeps_the_real_terminal_instance_inspectable() 
     let run_error = outcome
         .context("runner exceeded the qualification deadline")?
         .expect_err("rejected audit must fail the run");
+    let diagnostic = format!("{run_error:#}");
     ensure!(
-        !format!("{run_error:#}").contains(&canary),
+        !diagnostic.contains(&canary),
         "runner error exposed the fake credential value"
     );
+    let rejection_count = rejected
+        .lock()
+        .map_err(|_| anyhow::anyhow!("qualification capture poisoned"))?
+        .len();
+    if rejection_count == 0 {
+        // runner::run flattens RuntimeCommandFailure into bounded, redacted
+        // text. Preserve closed observations from it without printing it.
+        let stage = [
+            (
+                "immutable workspace snapshot is unavailable",
+                "workspace_archive",
+            ),
+            (
+                "immutable workspace snapshot changed; import refused",
+                "workspace_archive",
+            ),
+            (
+                "container creation failed with automatic image pulls disabled",
+                "container_create",
+            ),
+            ("runtime create response is ambiguous", "container_create"),
+            ("runtime inspection exceeds its bound", "container_inspect"),
+            (
+                "runtime inspection lacks required sandbox configuration facts",
+                "container_inspect",
+            ),
+            (
+                "runtime did not prove a fresh never-started instance",
+                "container_inspect",
+            ),
+            (
+                "runtime created allocation differs from the requested bounded limits",
+                "container_inspect",
+            ),
+        ]
+        .into_iter()
+        .find_map(|(message, stage)| diagnostic.contains(message).then_some(stage))
+        .unwrap_or("before_terminal_audit");
+        let engine_failure_prefix = format!("{kind} command failed (");
+        let engine_failure = diagnostic
+            .split_once(engine_failure_prefix.as_str())
+            .map(|(_, tail)| tail);
+        let exit_code = engine_failure
+            .and_then(|tail| tail.strip_prefix("exit status: "))
+            .and_then(|tail| tail.split_once(')'))
+            .and_then(|(code, _)| code.parse::<u8>().ok());
+        let stderr_truncated = engine_failure
+            .and_then(|tail| tail.split_once(", stderr_truncated="))
+            .and_then(|(_, tail)| tail.split_once(']'))
+            .and_then(|(value, _)| value.parse::<bool>().ok());
+        let mentions_keep_id = engine_failure.is_some_and(|tail| tail.contains("keep-id"));
+        anyhow::bail!(
+            "run failed before injected terminal audit refusal: stage={stage} engine_failure_reported={} exit_code={exit_code:?} stderr_truncated={stderr_truncated:?} diagnostic_mentions_keep_id={mentions_keep_id}",
+            engine_failure.is_some()
+        );
+    }
     let workers = store.workers()?;
     ensure!(
         workers.len() == 1,

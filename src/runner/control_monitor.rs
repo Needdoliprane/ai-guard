@@ -1,12 +1,13 @@
 //! Post-start read-only observation: no start, claim, or mandatory audit retry.
 //! Open epochs survive uncertainty; wall timestamps never restore a deadline.
 use super::*;
+use crate::runner::{ControlDeadlineKind, ControlDeadlineObservation, ControlStopObservation};
 use std::future::Future;
 use tokio::{sync::watch, time::Instant};
 
 #[path = "control_monitor/prestart.rs"]
 mod prestart;
-pub(super) use prestart::{PrestartOwner, RejectedLaunch};
+pub(super) use prestart::{ControlFailure, PrestartOwner, RejectedLaunch};
 
 const WINDOW: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -777,6 +778,56 @@ impl RetryWindow {
         }
     }
 }
+#[derive(Debug)]
+struct DeadlineFailure {
+    observation: ControlDeadlineObservation,
+    diagnostic: &'static str,
+}
+impl DeadlineFailure {
+    fn at(
+        deadline: Instant,
+        original_deadline: Instant,
+        diagnostic: &'static str,
+    ) -> anyhow::Error {
+        let deadline = if deadline < original_deadline {
+            ControlDeadlineKind::ObservationWindow
+        } else {
+            ControlDeadlineKind::OriginalExecutionDeadline
+        };
+        anyhow::Error::new(Self {
+            observation: ControlDeadlineObservation {
+                deadline,
+                stop: ControlStopObservation::Unconfirmed,
+            },
+            diagnostic,
+        })
+    }
+}
+impl std::fmt::Display for DeadlineFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.diagnostic)
+    }
+}
+impl std::error::Error for DeadlineFailure {}
+
+async fn stop_after_observation_failure<T, F>(
+    mut result: Result<T>,
+    stop_owned: impl FnOnce() -> F,
+) -> Result<T>
+where
+    F: Future<Output = Result<ControlStopObservation>>,
+{
+    if let Err(error) = &mut result {
+        let stop = stop_owned().await;
+        if let Some(deadline) = error.downcast_mut::<DeadlineFailure>() {
+            // Later supervision can re-inspect the worker. Keep the result of
+            // the stop made for this decision.
+            deadline.observation.stop = stop.unwrap_or(ControlStopObservation::Unconfirmed);
+        }
+    }
+    result
+}
+
 enum Wake<T> {
     Value(T),
     Completed,
@@ -826,73 +877,168 @@ where
     R: FnMut() -> RFut,
     RFut: Future<Output = std::result::Result<Observation, RefreshFailure>>,
     S: FnMut() -> SFut,
-    SFut: Future<Output = Result<()>>,
+    SFut: Future<Output = Result<ControlStopObservation>>,
     J: FnMut(WriteIntent) -> JFut,
     JFut: Future<Output = Result<()>>,
     K: Fn() -> Result<bool>,
 {
+    const DEADLINE_DIAGNOSTIC: &str =
+        "control observation window or original execution deadline expired";
+    const RECOVERY_DIAGNOSTIC: &str =
+        "control recovery write remained unconfirmed; its identity is retained, not rolled back";
+    const DEGRADED_DIAGNOSTIC: &str =
+        "control degraded write remained unconfirmed; its identity is retained, not rolled back";
     let result = async {
         let mut window: Option<RetryWindow> = None;
         let mut sequence = 0u64;
         let mut next_poll = Instant::now();
         loop {
             let deadline = window.as_ref().map_or(original_deadline, |v| v.deadline);
-            match interruptible(tokio::time::sleep_until(next_poll), &mut completed, deadline, &known_stop).await? {
-                Wake::Value(()) => {}, Wake::Completed => break,
+            match interruptible(
+                tokio::time::sleep_until(next_poll),
+                &mut completed,
+                deadline,
+                &known_stop,
+            )
+            .await?
+            {
+                Wake::Value(()) => {}
+                Wake::Completed => break,
                 Wake::Stop => bail!("control stop requested"),
-                Wake::Cancelled => bail!("control monitor cancelled; execution result remains unknown"),
-                Wake::Deadline => bail!("control observation window or original execution deadline expired"),
+                Wake::Cancelled => {
+                    bail!("control monitor cancelled; execution result remains unknown")
+                }
+                Wake::Deadline => {
+                    return Err(DeadlineFailure::at(
+                        deadline,
+                        original_deadline,
+                        DEADLINE_DIAGNOSTIC,
+                    ));
+                }
             }
-            sequence = sequence.checked_add(1).context("control monitor request sequence exhausted")?;
+            sequence = sequence
+                .checked_add(1)
+                .context("control monitor request sequence exhausted")?;
             let request_id = Uuid::new_v4();
             let started = Instant::now();
             let wall = chrono::Utc::now().to_rfc3339();
             // Sample BEFORE awaiting the first failing request. Its timeout is
             // part of the window, never extra time added to sixty seconds.
-            let request_deadline = started.checked_add(policy.request_timeout.min(policy.window)).unwrap_or(started).min(deadline);
-            let response = match interruptible(refresh(), &mut completed, request_deadline, &known_stop).await? {
-                Wake::Value(v) => v, Wake::Completed => break,
-                Wake::Stop => bail!("control stop requested"),
-                Wake::Cancelled => bail!("control monitor cancelled; execution result remains unknown"),
-                Wake::Deadline if Instant::now() < deadline => Err(RefreshFailure::Transient(Transient::Timeout, None)),
-                Wake::Deadline => bail!("control observation window or original execution deadline expired"),
-            };
+            let request_deadline = started
+                .checked_add(policy.request_timeout.min(policy.window))
+                .unwrap_or(started)
+                .min(deadline);
+            let response =
+                match interruptible(refresh(), &mut completed, request_deadline, &known_stop)
+                    .await?
+                {
+                    Wake::Value(v) => v,
+                    Wake::Completed => break,
+                    Wake::Stop => bail!("control stop requested"),
+                    Wake::Cancelled => {
+                        bail!("control monitor cancelled; execution result remains unknown")
+                    }
+                    Wake::Deadline if Instant::now() < deadline => {
+                        Err(RefreshFailure::Transient(Transient::Timeout, None))
+                    }
+                    Wake::Deadline => {
+                        return Err(DeadlineFailure::at(
+                            deadline,
+                            original_deadline,
+                            DEADLINE_DIAGNOSTIC,
+                        ));
+                    }
+                };
             match response {
                 Ok(observed) if observed.stopping => {
                     stop_owned().await?;
-                    match interruptible(std::future::pending::<()>(), &mut completed, deadline, &|| Ok(false)).await? {
+                    match interruptible(
+                        std::future::pending::<()>(),
+                        &mut completed,
+                        deadline,
+                        &|| Ok(false),
+                    )
+                    .await?
+                    {
                         Wake::Completed => break,
+                        // The previous explicit stop remains the cause of this request.
                         _ => bail!("targeted stop requested; execution completion remains unknown"),
                     }
-                },
+                }
                 Ok(observed) => {
                     if let Some(active) = &window {
-                        let intent = WriteIntent::new(JournalAction::Recovered { interval_id: active.interval_id,
-                            recovery: Recovery { request_id, request_sequence: sequence, worker_revision: observed.revision, worker_hash: observed.hash } });
-                        match interruptible(journal(intent), &mut completed, deadline, &known_stop).await? {
+                        let intent = WriteIntent::new(JournalAction::Recovered {
+                            interval_id: active.interval_id,
+                            recovery: Recovery {
+                                request_id,
+                                request_sequence: sequence,
+                                worker_revision: observed.revision,
+                                worker_hash: observed.hash,
+                            },
+                        });
+                        match interruptible(journal(intent), &mut completed, deadline, &known_stop)
+                            .await?
+                        {
                             Wake::Value(result) => result?,
-                            _ => bail!("control recovery write remained unconfirmed; its identity is retained, not rolled back"),
+                            Wake::Deadline => {
+                                return Err(DeadlineFailure::at(
+                                    deadline,
+                                    original_deadline,
+                                    RECOVERY_DIAGNOSTIC,
+                                ));
+                            }
+                            _ => bail!(RECOVERY_DIAGNOSTIC),
                         }
                         window = None;
                     }
-                    next_poll = Instant::now().checked_add(policy.poll).unwrap_or(original_deadline);
-                },
+                    next_poll = Instant::now()
+                        .checked_add(policy.poll)
+                        .unwrap_or(original_deadline);
+                }
                 Err(RefreshFailure::Transient(cause, retry_after)) => {
                     if window.is_none() {
                         let interval_id = Uuid::new_v4();
-                        let active = RetryWindow::start(started, original_deadline, policy.window, interval_id);
-                        let intent = WriteIntent::new(JournalAction::Degraded { interval: DegradedInterval {
-                            interval_id, first_request_id: request_id, first_request_sequence: sequence,
-                            request_started_at: wall, cause, recovery: None } });
-                        match interruptible(journal(intent), &mut completed, active.deadline, &known_stop).await? {
+                        let active = RetryWindow::start(
+                            started,
+                            original_deadline,
+                            policy.window,
+                            interval_id,
+                        );
+                        let intent = WriteIntent::new(JournalAction::Degraded {
+                            interval: DegradedInterval {
+                                interval_id,
+                                first_request_id: request_id,
+                                first_request_sequence: sequence,
+                                request_started_at: wall,
+                                cause,
+                                recovery: None,
+                            },
+                        });
+                        match interruptible(
+                            journal(intent),
+                            &mut completed,
+                            active.deadline,
+                            &known_stop,
+                        )
+                        .await?
+                        {
                             Wake::Value(result) => result?,
-                            _ => bail!("control degraded write remained unconfirmed; its identity is retained, not rolled back"),
+                            Wake::Deadline => {
+                                return Err(DeadlineFailure::at(
+                                    active.deadline,
+                                    original_deadline,
+                                    DEGRADED_DIAGNOSTIC,
+                                ));
+                            }
+                            _ => bail!(DEGRADED_DIAGNOSTIC),
                         }
                         window = Some(active);
                     }
                     let delay = retry_after.unwrap_or(policy.poll).max(policy.poll);
-                    next_poll = Instant::now().checked_add(delay).unwrap_or(original_deadline);
-                },
+                    next_poll = Instant::now()
+                        .checked_add(delay)
+                        .unwrap_or(original_deadline);
+                }
                 Err(failure) => return Err(failure.into()),
             }
         }
@@ -907,12 +1053,11 @@ where
         std::future::poll_fn(|cx| match close.as_mut().poll(cx) {
             std::task::Poll::Ready(result) => std::task::Poll::Ready(result),
             std::task::Poll::Pending => std::task::Poll::Ready(Ok(())),
-        }).await
-    }.await;
-    if result.is_err() {
-        let _ = stop_owned().await;
+        })
+        .await
     }
-    result
+    .await;
+    stop_after_observation_failure(result, stop_owned).await
 }
 // The durable epoch must arm promptly after ACK even before any GET begins.
 // Queueing/creation/fsync all count from the sample before launching the writer.
@@ -927,24 +1072,25 @@ async fn await_epoch_creation<F, S, SFut, K>(
 where
     F: Future<Output = Result<Arc<MonitorJournal>>>,
     S: Fn() -> SFut,
-    SFut: Future<Output = Result<()>>,
+    SFut: Future<Output = Result<ControlStopObservation>>,
     K: Fn() -> Result<bool>,
 {
+    const ARMING_DIAGNOSTIC: &str = "control monitor epoch creation remained unconfirmed";
     let arming_deadline = arming_started
         .checked_add(ARMING_TIMEOUT)
         .unwrap_or(arming_started)
         .min(original_deadline);
     let result = match interruptible(create, completed, arming_deadline, known_stop).await {
         Ok(Wake::Value(result)) => result,
-        Ok(_) => Err(anyhow::anyhow!(
-            "control monitor epoch creation remained unconfirmed"
+        Ok(Wake::Deadline) if arming_deadline == original_deadline => Err(DeadlineFailure::at(
+            arming_deadline,
+            original_deadline,
+            ARMING_DIAGNOSTIC,
         )),
+        Ok(_) => Err(anyhow::anyhow!(ARMING_DIAGNOSTIC)),
         Err(error) => Err(error),
     };
-    if result.is_err() {
-        let _ = stop_owned().await;
-    }
-    result
+    stop_after_observation_failure(result, stop_owned).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -957,7 +1103,7 @@ pub(super) async fn run(
     started: watch::Receiver<bool>,
     original_deadline: Instant,
     owner: Arc<PrestartOwner>,
-) -> std::result::Result<(), prestart::ControlFailure> {
+) -> std::result::Result<(), ControlFailure> {
     if let Err(error) = owner.require_context(runtime, state, guard) {
         let failure = owner.revoke(error);
         owner.retain_stop_until_completed(completed).await;
@@ -1198,7 +1344,7 @@ mod tests {
             },
             || async {
                 stops.fetch_add(1, Ordering::SeqCst);
-                Ok(())
+                Ok(ControlStopObservation::EngineAcknowledged)
             },
             |intent| journal.append(intent),
             || Ok(false),
@@ -1250,7 +1396,7 @@ mod tests {
             },
             || async {
                 stops.fetch_add(1, Ordering::SeqCst);
-                Ok(())
+                Ok(ControlStopObservation::EngineAcknowledged)
             },
             |intent| journal.append(intent),
             || Ok(false),
@@ -1263,6 +1409,93 @@ mod tests {
         assert!(result.unwrap().is_ok());
         assert_eq!(stops.load(Ordering::SeqCst), 0);
         assert!(!closed_record(&journal).await.open);
+    }
+
+    #[tokio::test]
+    async fn post_ack_completion_respects_original_deadline_after_healthy_refresh() {
+        for completes_before_deadline in [true, false] {
+            let root = private_root();
+            let journal = journal(&root);
+            let initial = record(&journal);
+            let (done, completed) = watch::channel(false);
+            let (read, mut observed) = watch::channel(false);
+            let (stop, mut stopped) = watch::channel(false);
+            let reads = AtomicUsize::new(0);
+            let stops = AtomicUsize::new(0);
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let monitor = observe_until_complete(
+                completed,
+                deadline,
+                Policy {
+                    // One healthy read, then the next poll is due after the deadline.
+                    poll: Duration::from_secs(2),
+                    ..Policy::default()
+                },
+                || async {
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    read.send_replace(true);
+                    Ok(healthy())
+                },
+                || async {
+                    stops.fetch_add(1, Ordering::SeqCst);
+                    stop.send_replace(true);
+                    Ok(ControlStopObservation::EngineAcknowledged)
+                },
+                |intent| journal.append(intent),
+                || Ok(false),
+            );
+            let finish = async {
+                observed.wait_for(|seen| *seen).await.unwrap();
+                if completes_before_deadline {
+                    assert!(Instant::now() < deadline);
+                } else {
+                    // Wait for the monitor to act on its deadline before publishing done.
+                    stopped.wait_for(|seen| *seen).await.unwrap();
+                    tokio::time::sleep_until(deadline + Duration::from_millis(1)).await;
+                }
+                done.send_replace(true);
+            };
+            let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(monitor, finish)
+            })
+            .await
+            .expect("monitor and completion did not resolve");
+
+            assert_eq!(reads.load(Ordering::SeqCst), 1);
+            let saved = if completes_before_deadline {
+                result.unwrap();
+                assert_eq!(stops.load(Ordering::SeqCst), 0);
+                let saved = closed_record(&journal).await;
+                assert_eq!(saved.revision, initial.revision + 1);
+                assert_ne!(saved.operation_id, initial.operation_id);
+                saved
+            } else {
+                let failure = result.unwrap_err();
+                assert_eq!(
+                    failure.to_string(),
+                    "control observation window or original execution deadline expired"
+                );
+                assert_eq!(
+                    failure
+                        .downcast_ref::<DeadlineFailure>()
+                        .unwrap()
+                        .observation,
+                    ControlDeadlineObservation {
+                        deadline: ControlDeadlineKind::OriginalExecutionDeadline,
+                        stop: ControlStopObservation::EngineAcknowledged,
+                    }
+                );
+                assert_eq!(stops.load(Ordering::SeqCst), 1);
+                let saved = record(&journal);
+                assert!(saved.open);
+                assert_eq!(saved.revision, initial.revision);
+                assert_eq!(saved.operation_id, initial.operation_id);
+                saved
+            };
+            assert_eq!(saved.epoch_id, initial.epoch_id);
+            assert!(saved.pending.is_none());
+            assert!(saved.intervals.is_empty());
+        }
     }
 
     // Review regression: only epoch closure is blocked. done=true must release
@@ -1288,7 +1521,7 @@ mod tests {
             },
             || async {
                 stops.fetch_add(1, Ordering::SeqCst);
-                Ok(())
+                Ok(ControlStopObservation::EngineAcknowledged)
             },
             |intent| {
                 assert!(matches!(intent.action, JournalAction::ExecutionCompleted));
@@ -1339,7 +1572,7 @@ mod tests {
             || async {
                 stops.fetch_add(1, Ordering::SeqCst);
                 let _ = done.send(true);
-                Ok(())
+                Ok(ControlStopObservation::EngineAcknowledged)
             },
             |intent| journal.append(intent),
             || Ok(false),
@@ -1372,6 +1605,17 @@ mod tests {
             Uuid::from_u128(2),
         );
         assert_eq!(shorter.deadline, first + Duration::from_secs(17));
+        let tied_deadline = first + WINDOW;
+        let tied = RetryWindow::start(first, tied_deadline, WINDOW, Uuid::from_u128(3));
+        let failure = DeadlineFailure::at(tied.deadline, tied_deadline, "test deadline");
+        assert_eq!(
+            failure
+                .downcast_ref::<DeadlineFailure>()
+                .unwrap()
+                .observation
+                .deadline,
+            ControlDeadlineKind::OriginalExecutionDeadline
+        );
     }
     #[tokio::test]
     async fn long_retry_hint_cannot_reset_window_or_trigger_another_read() {
@@ -1397,16 +1641,24 @@ mod tests {
             },
             || async {
                 stops.fetch_add(1, Ordering::SeqCst);
-                Ok(())
+                Err(anyhow::anyhow!("test stop observation unavailable"))
             },
             |intent| journal.append(intent),
             || Ok(false),
         );
-        assert!(
-            tokio::time::timeout(Duration::from_secs(5), monitor)
-                .await
+        let failure = tokio::time::timeout(Duration::from_secs(5), monitor)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            failure
+                .downcast_ref::<DeadlineFailure>()
                 .unwrap()
-                .is_err()
+                .observation,
+            ControlDeadlineObservation {
+                deadline: ControlDeadlineKind::ObservationWindow,
+                stop: ControlStopObservation::Unconfirmed,
+            }
         );
         assert_eq!(reads.load(Ordering::SeqCst), 1);
         assert_eq!(stops.load(Ordering::SeqCst), 1);
@@ -1417,7 +1669,7 @@ mod tests {
     }
     #[tokio::test]
     async fn fatal_read_failures_do_not_enter_retry_window() {
-        for failure in [
+        for failure_kind in [
             RefreshFailure::Unauthorized,
             RefreshFailure::Forbidden,
             RefreshFailure::InvalidResponse,
@@ -1435,17 +1687,22 @@ mod tests {
                 policy(),
                 || async {
                     reads.fetch_add(1, Ordering::SeqCst);
-                    Err(failure)
+                    Err(failure_kind)
                 },
                 || async {
                     stops.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
+                    Ok(ControlStopObservation::EngineAcknowledged)
                 },
                 |intent| journal.append(intent),
                 || Ok(false),
             )
             .await;
-            assert!(result.is_err());
+            let failure = result.unwrap_err();
+            assert!(failure.downcast_ref::<DeadlineFailure>().is_none());
+            assert_eq!(
+                failure.downcast_ref::<RefreshFailure>(),
+                Some(&failure_kind)
+            );
             assert_eq!(reads.load(Ordering::SeqCst), 1);
             assert_eq!(stops.load(Ordering::SeqCst), 1);
             assert!(record(&journal).intervals.is_empty());
@@ -1477,16 +1734,23 @@ mod tests {
                 },
                 || async {
                     stops.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
+                    Ok(ControlStopObservation::AlreadyStopped)
                 },
                 |intent| journal.append(intent),
                 || Ok(false),
             );
-            assert!(
-                tokio::time::timeout(Duration::from_secs(5), monitor)
-                    .await
-                    .unwrap()
-                    .is_err()
+            let failure = tokio::time::timeout(Duration::from_secs(5), monitor)
+                .await
+                .unwrap()
+                .unwrap_err();
+            assert_eq!(
+                failure
+                    .downcast_ref::<DeadlineFailure>()
+                    .map(|failure| failure.observation),
+                (!cancel).then_some(ControlDeadlineObservation {
+                    deadline: ControlDeadlineKind::OriginalExecutionDeadline,
+                    stop: ControlStopObservation::AlreadyStopped,
+                })
             );
             assert_eq!(stops.load(Ordering::SeqCst), 1);
             assert!(record(&journal).open);
@@ -1509,7 +1773,7 @@ mod tests {
                 || async { Err(RefreshFailure::Transient(Transient::Busy, None)) },
                 || async {
                     stops.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
+                    Ok(ControlStopObservation::EngineAcknowledged)
                 },
                 |intent| {
                     *retained.lock().unwrap() = Some(intent);
@@ -1570,7 +1834,7 @@ mod tests {
             },
             || async {
                 stops.fetch_add(1, Ordering::SeqCst);
-                Ok(())
+                Ok(ControlStopObservation::EngineAcknowledged)
             },
             |intent| journal.append(intent),
             || Ok(false),
@@ -1726,7 +1990,7 @@ mod tests {
         let stops = AtomicUsize::new(0);
         let stop = || async {
             stops.fetch_add(1, Ordering::SeqCst);
-            Ok(())
+            Ok(ControlStopObservation::NoOwnedWorker)
         };
         let known_stop = || Ok(false);
         let arming = await_epoch_creation(
@@ -1746,6 +2010,35 @@ mod tests {
             returned.is_ok(),
             stops.load(Ordering::SeqCst)
         );
+        let Err(failure) = returned.unwrap() else {
+            panic!("pending epoch creation should have failed");
+        };
+        assert!(failure.downcast_ref::<DeadlineFailure>().is_none());
+
+        let deadline = Instant::now();
+        let Err(failure) = await_epoch_creation(
+            std::future::pending::<Result<Arc<MonitorJournal>>>(),
+            &mut completed,
+            deadline,
+            deadline,
+            &known_stop,
+            &stop,
+        )
+        .await
+        else {
+            panic!("epoch creation should honor the earlier execution deadline");
+        };
+        assert_eq!(
+            failure
+                .downcast_ref::<DeadlineFailure>()
+                .unwrap()
+                .observation,
+            ControlDeadlineObservation {
+                deadline: ControlDeadlineKind::OriginalExecutionDeadline,
+                stop: ControlStopObservation::NoOwnedWorker,
+            }
+        );
+        assert_eq!(stops.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -3108,7 +3401,7 @@ mod tests {
             },
             || async {
                 stops.fetch_add(1, Ordering::SeqCst);
-                Ok(())
+                Ok(ControlStopObservation::EngineAcknowledged)
             },
             |intent| journal.append(intent),
             || Ok(false),

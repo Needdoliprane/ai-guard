@@ -46,6 +46,50 @@ fn every_worker_creation_requires_an_existing_local_image() {
 }
 
 #[test]
+fn worker_home_tmpfs_uses_the_selected_engines_private_owner_syntax() {
+    for purpose in [
+        ContainerPurpose::Import,
+        ContainerPurpose::Run,
+        ContainerPurpose::Export,
+    ] {
+        let spec = ContainerSpec::new(
+            Uuid::new_v4(),
+            purpose,
+            "worker:fixture",
+            vec!["/usr/bin/id".into()],
+            NetworkMode::None,
+        )
+        .unwrap();
+        let docker = spec.create_args(RuntimeKind::Docker).unwrap();
+        let podman = spec.create_args(RuntimeKind::Podman).unwrap();
+        let home = docker
+            .iter()
+            .position(|arg| arg.starts_with("/home/agent:"))
+            .unwrap();
+        assert_eq!(
+            &docker[home - 1..=home],
+            [
+                "--tmpfs",
+                "/home/agent:rw,nosuid,nodev,size=64m,uid=1000,gid=1000,mode=700"
+            ]
+        );
+        assert_eq!(
+            &podman[home - 1..=home],
+            [
+                "--mount",
+                "type=tmpfs,destination=/home/agent,tmpfs-size=64m,tmpfs-mode=0700,notmpcopyup,U=true,nosuid,nodev"
+            ]
+        );
+        let userns = &["--userns", "keep-id:uid=1000,gid=1000"];
+        assert_eq!(&podman[..home - 1], &docker[..home - 1]);
+        let end = podman.iter().position(|arg| arg == "--").unwrap();
+        assert_eq!(&podman[end - 2..end], userns);
+        assert_eq!(&podman[home + 1..end - 2], &docker[home + 1..end - 2]);
+        assert_eq!(&podman[end..], &docker[end - 2..]);
+    }
+}
+
+#[test]
 fn worker_arguments_confine_a_named_volume_and_preserve_literal_arguments() {
     let session = Uuid::parse_str("bd249f63-d29e-4c62-a7ef-eb23511ca8de").unwrap();
     let spec = ContainerSpec::new(

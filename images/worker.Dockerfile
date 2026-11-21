@@ -34,6 +34,8 @@ COPY --from=provider-build /build/target/release/ai-guard-provider /usr/local/bi
 # The relay helper is immutable product code on the readonly image root. It
 # receives no workload proof, provider credential or control-network access.
 COPY --from=provider-build --chown=0:0 --chmod=0555 /build/target/release/ai-guard-relay /usr/local/bin/ai-guard-relay
+COPY LICENSE /usr/share/licenses/ai-guard/LICENSE
+RUN chmod -R a+rX /usr/share/licenses/ai-guard
 # Optional providers are absent unless an exact operator-chosen version is set.
 # No credentials, provider configuration, or mutable "latest" version is baked in.
 RUN if [ -n "$CODEX_VERSION" ]; then \

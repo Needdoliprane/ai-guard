@@ -1,5 +1,7 @@
 //! Controlled issuer HTTP plus real private authentication/business SQLite.
 //! These regressions do not qualify actual Keycloak, a browser or a runtime.
+#[path = "support/oidc_browser.rs"]
+mod browser;
 #[path = "support/oidc_fixture.rs"]
 mod controlled;
 mod support;
@@ -146,6 +148,14 @@ impl Fixture {
             .with_oidc(OidcGateway::new(config.clone(), audit.clone(), ca).unwrap())
             .unwrap(),
         )
+    }
+    fn map_administration_role(&mut self, role: &str) {
+        self.config.mapping.rules = vec![agentsandbox::api::OidcClaimRuleV1 {
+            claim_path: vec!["roles".into()],
+            equals: role.into(),
+            capabilities: BTreeSet::from([HumanCapabilityV1::ReadTenantMetadata]),
+        }];
+        self.router = Self::router(&self.store, &self.audit, &self.config);
     }
     fn member(&self, subject: &str) {
         let principal = PrincipalRefV1::HumanOidc {
@@ -426,6 +436,306 @@ async fn explicit_cli_admission_limits_contexts_and_does_not_reenroll_on_restart
 }
 
 #[tokio::test]
+#[ignore = "runs the native CLI against loopback HTTP and waits for natural token expiry"]
+async fn native_cli_reads_then_observes_durable_membership_revocation_and_expiry() {
+    use agentsandbox::{audit::authentication::AuthenticationSessionStateV1, model::Event};
+    use axum::{
+        Form, Json,
+        http::{HeaderMap, header},
+        routing,
+    };
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use sha2::{Digest, Sha256};
+    use std::{collections::BTreeMap, process::Stdio, sync::Mutex};
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+        process::ChildStdout,
+    };
+
+    struct Grant {
+        code: String,
+        redirect: String,
+        challenge: String,
+        response: Value,
+    }
+
+    async fn line(out: &mut BufReader<ChildStdout>, timeout: Duration, secrets: &[&str]) -> Value {
+        let mut text = String::new();
+        let mut bounded = out.take(262_145);
+        let bytes = tokio::time::timeout(timeout, bounded.read_line(&mut text))
+            .await
+            .expect("native CLI reply deadline")
+            .expect("read native CLI reply");
+        assert!((1..=262_144).contains(&bytes));
+        assert!(
+            secrets.iter().all(|value| !text.contains(*value)),
+            "native CLI output contains a private value"
+        );
+        serde_json::from_str(&text).expect("typed native CLI reply")
+    }
+
+    const SUBJECT: &str = "native-cli-operator-revocation";
+    const LIFETIME: i64 = 12;
+    let grant = Arc::new(Mutex::new(None::<Grant>));
+    let issuer = ControlledIssuer::with_transport(None, |_| {
+        let pending = Arc::clone(&grant);
+        Router::new().route(
+            "/realm/token",
+            routing::post(
+                move |headers: HeaderMap, Form(form): Form<BTreeMap<String, String>>| {
+                    let pending = Arc::clone(&pending);
+                    async move {
+                        let mut pending = pending.lock().unwrap();
+                        let get = |key: &str| form.get(key).map(String::as_str);
+                        let accepted = pending.as_ref().is_some_and(|grant| {
+                            get("grant_type") == Some("authorization_code")
+                                && get("client_id") == Some("cli-public")
+                                && get("code") == Some(grant.code.as_str())
+                                && get("redirect_uri") == Some(grant.redirect.as_str())
+                                && get("code_verifier").is_some_and(|verifier| {
+                                    URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
+                                        == grant.challenge
+                                })
+                                && !headers.contains_key(header::AUTHORIZATION)
+                                && !form.contains_key("client_secret")
+                        });
+                        if accepted {
+                            (StatusCode::OK, Json(pending.take().unwrap().response))
+                        } else {
+                            (
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({"error":"invalid_grant"})),
+                            )
+                        }
+                    }
+                },
+            ),
+        )
+    })
+    .await;
+    let f = Fixture::with_issuer(support::private_tempdir(), issuer, None).await;
+    f.member(SUBJECT);
+    let mut event = Event::new("fixture.native_cli_resource");
+    event.session_id = Some("cli-authorized-session".into());
+    f.store.append(event).unwrap();
+    let principal = PrincipalRefV1::HumanOidc {
+        issuer: f.issuer.issuer.clone(),
+        subject: SUBJECT.into(),
+    };
+    let actor = PrincipalRefV1::LegacyControl {
+        credential_id: "fixture-operator".into(),
+        role: LegacyControlRoleV1::Runner,
+    };
+    f.store
+        .mutate_identity(&IdentityMutationV1 {
+            version: 1,
+            operation_id: Uuid::new_v4().to_string(),
+            actor: actor.clone(),
+            change: IdentityChangeV1::ResourceGrant {
+                expected_revision: 0,
+                grant: ResourceGrantV1 {
+                    version: 1,
+                    tenant_id: "tenant-a".into(),
+                    organization_scope: "organization-a".into(),
+                    resource: ResourceRefV1 {
+                        kind: ResourceKindV1::Session,
+                        resource_id: "cli-authorized-session".into(),
+                    },
+                    owner: principal.clone(),
+                    revision: 1,
+                    active: true,
+                    shares: vec![],
+                },
+            },
+        })
+        .unwrap();
+    let gateway = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", gateway.local_addr().unwrap());
+    let router = f.router.clone();
+    let task = tokio::spawn(async move { axum::serve(gateway, router).await });
+    let cli_dir = support::private_tempdir();
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_agentsandbox"))
+        .args(["human", "sso", "--gateway", &origin, "--browser", "manual"])
+        .current_dir(cli_dir.path())
+        .env_clear()
+        .env("HOME", cli_dir.path())
+        .env("TMPDIR", cli_dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start native CLI");
+    let mut out = BufReader::new(child.stdout.take().unwrap());
+    let mut input = child.stdin.take().unwrap();
+    let step = Duration::from_secs(5);
+    let authorize = line(&mut out, step, &[]).await;
+    assert_eq!(authorize["status"], "browser_authorization_required");
+    let url = reqwest::Url::parse(authorize["authorization_url"].as_str().unwrap()).unwrap();
+    assert!(
+        url.as_str()
+            .starts_with(&format!("{}/authorize?", f.issuer.issuer))
+    );
+    let query: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
+    assert!(query["client_id"] == "cli-public" && query["code_challenge_method"] == "S256");
+    assert!(query["response_type"] == "code" && query["code_challenge"].len() == 43);
+    assert!(!query.contains_key("client_secret") && !query.contains_key("code_verifier"));
+    let mut callback = reqwest::Url::parse(&query["redirect_uri"]).unwrap();
+    assert!(
+        callback.scheme() == "http"
+            && callback.host_str() == Some("127.0.0.1")
+            && callback.port().is_some()
+            && callback.path() == "/oidc/callback"
+            && callback.username().is_empty()
+            && callback.password().is_none()
+            && callback.query().is_none()
+            && callback.fragment().is_none()
+    );
+    let code = Uuid::new_v4().to_string();
+    let refresh = Uuid::new_v4().to_string();
+    let access = controlled::signed_token(
+        &f.issuer.issuer,
+        "cli-public",
+        SUBJECT,
+        None,
+        &[],
+        "native-live-access",
+        LIFETIME,
+    );
+    let id_token = controlled::signed_token(
+        &f.issuer.issuer,
+        "cli-public",
+        SUBJECT,
+        Some(&query["nonce"]),
+        &[],
+        "native-live-id",
+        LIFETIME,
+    );
+    let secrets = [
+        code.as_str(),
+        refresh.as_str(),
+        access.as_str(),
+        id_token.as_str(),
+    ];
+    *grant.lock().unwrap() = Some(Grant {
+        code: code.clone(),
+        redirect: callback.to_string(),
+        challenge: query["code_challenge"].clone(),
+        response: json!({"token_type":"Bearer", "access_token":access, "id_token":id_token, "refresh_token":refresh, "expires_in":LIFETIME}),
+    });
+    callback
+        .query_pairs_mut()
+        .append_pair("state", &query["state"])
+        .append_pair("code", &code);
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(step)
+        .build()
+        .unwrap()
+        .get(callback)
+        .send()
+        .await
+        .map_err(|error| error.without_url())
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let ready = line(&mut out, step, &secrets).await;
+    assert_eq!(ready["status"], "session_ready");
+    assert_eq!(ready["generation"], 1);
+    assert_eq!(ready["storage"], "foreground_memory_only");
+    assert!(
+        grant.lock().unwrap().is_none(),
+        "provider must accept the actual code exchange"
+    );
+    let session = Uuid::parse_str(ready["authentication_id"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        f.audit.session_current(session).unwrap().unwrap().state,
+        AuthenticationSessionStateV1::Active
+    );
+
+    input.write_all(b"identity\n").await.unwrap();
+    let identity = line(&mut out, step, &secrets).await;
+    assert_eq!(
+        identity["principal"],
+        serde_json::to_value(&principal).unwrap()
+    );
+    assert_eq!(identity["contexts_complete"], true);
+    let contexts = identity["contexts"].as_array().unwrap();
+    assert_eq!(contexts.len(), 1);
+    assert_eq!(contexts[0]["tenant_id"], "tenant-a");
+    let context = contexts[0]["id"].as_str().unwrap();
+    input
+        .write_all(format!("context {context}\n").as_bytes())
+        .await
+        .unwrap();
+    assert_eq!(
+        line(&mut out, step, &secrets).await["status"],
+        "context_selected"
+    );
+    input.write_all(b"resources --limit 1\n").await.unwrap();
+    let page = line(&mut out, step, &secrets).await;
+    assert_eq!(
+        page["items"][0]["resource"]["resource_id"],
+        "cli-authorized-session"
+    );
+    assert!(page["read_receipt"]["audit_event_id"].is_string());
+
+    let mut membership = f.store.identity_memberships(&principal).unwrap().remove(0);
+    let expected_revision = membership.revision;
+    membership.revision += 1;
+    membership.active = false;
+    f.store
+        .mutate_identity(&IdentityMutationV1 {
+            version: 1,
+            operation_id: Uuid::new_v4().to_string(),
+            actor,
+            change: IdentityChangeV1::Membership {
+                expected_revision,
+                membership,
+            },
+        })
+        .unwrap();
+    let head = f.store.head().unwrap();
+    input.write_all(b"resources --limit 1\n").await.unwrap();
+    let denied = line(&mut out, step, &secrets).await;
+    assert_eq!(denied["status"], "command_refused");
+    assert!(
+        denied["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("context_revoked"))
+    );
+    assert!(denied.get("items").is_none());
+    assert_eq!(f.store.head().unwrap(), head);
+    input.write_all(b"identity\n").await.unwrap();
+    let identity = line(&mut out, step, &secrets).await;
+    assert_eq!(identity["contexts_complete"], true);
+    assert_eq!(identity["contexts"], json!([]));
+
+    // Keep stdin open so the observed close can only be the native idle expiry.
+    let closed = line(&mut out, Duration::from_secs(20), &secrets).await;
+    assert_eq!(closed["status"], "session_closed");
+    assert_eq!(closed["local_session"], "closed");
+    assert_eq!(closed["audit"], "recorded");
+    let exit = tokio::time::timeout(step, child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    task.abort();
+    let error = std::str::from_utf8(&exit.stderr).unwrap();
+    assert!(!exit.status.success() && error.contains("OIDC foreground session expired"));
+    assert!(secrets.iter().all(|value| !error.contains(*value)));
+    assert!(matches!(
+        f.audit.session_current(session).unwrap().unwrap().state,
+        AuthenticationSessionStateV1::Closed { .. }
+    ));
+    assert!(f.audit.verify().is_ok() && f.store.integrity().unwrap().valid);
+    assert!(std::fs::read_dir(cli_dir.path()).unwrap().next().is_none());
+    println!(
+        "native_cli_pkce=true authorized_read=true membership_revoked=true expiry_closed=true no_credential_file=true"
+    );
+}
+
+#[tokio::test]
 async fn browser_pkce_callback_is_correlated_consumed_and_delivered_once() {
     let f = Fixture::new().await;
     f.member("web-member");
@@ -451,13 +761,11 @@ async fn browser_pkce_callback_is_correlated_consumed_and_delivered_once() {
         )
         .await
         .unwrap();
-    let cookie = seeded.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_owned();
+    assert_eq!(seeded.status(), StatusCode::OK);
+    assert!(
+        seeded.headers().get("set-cookie").is_none(),
+        "status must not pre-seed aiguard_oidc"
+    );
     let response = f
         .router
         .clone()
@@ -465,7 +773,7 @@ async fn browser_pkce_callback_is_correlated_consumed_and_delivered_once() {
             "/auth/oidc/start",
             json!({"version":1}),
             None,
-            Some(&cookie),
+            None,
             Some(ORIGIN),
         ))
         .await
@@ -486,6 +794,13 @@ async fn browser_pkce_callback_is_correlated_consumed_and_delivered_once() {
     );
     let start: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    let correlation_token = start["correlation_token"].as_str().unwrap().to_owned();
+    assert_eq!(correlation_token.len(), 64);
+    assert!(
+        correlation_token
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    );
     let url = reqwest::Url::parse(start["authorization_url"].as_str().unwrap()).unwrap();
     let params = url
         .query_pairs()
@@ -525,7 +840,7 @@ async fn browser_pkce_callback_is_correlated_consumed_and_delivered_once() {
         f.router.clone(),
         post(
             "/auth/oidc/tokens",
-            json!({"version":1}),
+            json!({"version":1,"correlation_token":correlation_token}),
             None,
             Some(&cookie),
             Some(ORIGIN),
@@ -535,12 +850,12 @@ async fn browser_pkce_callback_is_correlated_consumed_and_delivered_once() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(delivery["access_token"], token);
     assert!(delivery.get("id_token").is_none());
-    assert_ne!(
+    assert_eq!(
         json_response(
             f.router.clone(),
             post(
                 "/auth/oidc/tokens",
-                json!({"version":1}),
+                json!({"version":1,"correlation_token":correlation_token}),
                 None,
                 Some(&cookie),
                 Some(ORIGIN)
@@ -548,7 +863,7 @@ async fn browser_pkce_callback_is_correlated_consumed_and_delivered_once() {
         )
         .await
         .0,
-        StatusCode::OK
+        StatusCode::CONFLICT
     );
     let (status, logout) = json_response(
         f.router.clone(),
@@ -1158,6 +1473,352 @@ async fn web_delivery(f: &Fixture, subject: &str, salt: &str) -> (Value, String)
 }
 
 #[tokio::test]
+async fn successful_web_refresh_withdraws_administration_and_preserves_personal_scope() {
+    use agentsandbox::audit::authentication::AuthenticationSessionStateV1;
+
+    let mut f = Fixture::new().await;
+    let subject = "web-refresh-member";
+    f.member(subject);
+    f.map_administration_role("tenant-admin");
+
+    let get = |path: &str, token: &str, context: Option<&str>| {
+        let mut request = Request::get(path).header("authorization", format!("Bearer {token}"));
+        if let Some(context) = context {
+            request = request.header("x-aiguard-context", context);
+        }
+        request.body(Body::empty()).unwrap()
+    };
+    let identity_path = "/api/v1/human/identity";
+    let resources_path = "/api/v1/human/resources";
+    let (initial, nonce) =
+        web_delivery_roles(&f, subject, "refresh-admin", &["tenant-admin"]).await;
+    let id = Uuid::parse_str(initial["authentication_id"].as_str().unwrap()).unwrap();
+    let previous = initial["access_token"].as_str().unwrap();
+    let (status, identity) =
+        json_response(f.router.clone(), get(identity_path, previous, None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let contexts = identity["contexts"].as_array().unwrap();
+    assert_eq!(contexts.len(), 2);
+    let administration = contexts
+        .iter()
+        .find(|context| context["mode"] == "administration")
+        .unwrap();
+    assert_eq!(administration["tenant_id"], "tenant-a");
+    assert_eq!(
+        administration["capabilities"],
+        json!(["read_metadata", "read_tenant_metadata"])
+    );
+    let admin_context = administration["id"].as_str().unwrap();
+    assert_eq!(
+        json_response(
+            f.router.clone(),
+            get(resources_path, previous, Some(admin_context))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let before_refresh = f.audit.verify().unwrap().records;
+    let expected_next = f.issuer.login_response(&nonce, subject, "refresh-personal");
+    let (status, rotated) = json_response(
+        f.router.clone(),
+        post(
+            "/auth/oidc/refresh",
+            json!({"version":1,"authentication_id":id,"generation":1,
+                "refresh_token":initial["refresh_token"]}),
+            Some(previous),
+            None,
+            Some(ORIGIN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rotated["authentication_id"], initial["authentication_id"]);
+    assert_eq!(rotated["generation"], 2);
+    let next = rotated["access_token"].as_str().unwrap();
+    assert!(next == expected_next);
+    let persisted = f.audit.session_current(id).unwrap().unwrap();
+    assert_eq!(persisted.state, AuthenticationSessionStateV1::Active);
+    assert_eq!(persisted.binding.generation, 2);
+    assert_eq!(f.audit.verify().unwrap().records, before_refresh + 2);
+    assert_eq!(
+        f.issuer
+            .requests()
+            .iter()
+            .filter(|(path, body)| path.ends_with("/token")
+                && body.contains("grant_type=refresh_token"))
+            .count(),
+        1
+    );
+
+    let (status, after) = json_response(f.router.clone(), get(identity_path, next, None)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(after["principal"], identity["principal"]);
+    assert_eq!(after["contexts_complete"], true);
+    let contexts = after["contexts"].as_array().unwrap();
+    assert_eq!(contexts.len(), 1);
+    let personal = &contexts[0];
+    assert_eq!(personal["mode"], "personal");
+    assert_eq!(personal["tenant_id"], "tenant-a");
+    assert_eq!(personal["capabilities"], json!(["read_metadata"]));
+    let personal_context = personal["id"].as_str().unwrap();
+    let before_refusals = f.store.head().unwrap();
+    for (token, expected) in [
+        (previous, StatusCode::UNAUTHORIZED),
+        (next, StatusCode::FORBIDDEN),
+    ] {
+        let (status, response) = json_response(
+            f.router.clone(),
+            get(resources_path, token, Some(admin_context)),
+        )
+        .await;
+        assert_eq!(status, expected);
+        assert!(response.get("items").is_none());
+    }
+    assert_eq!(f.store.head().unwrap(), before_refusals);
+    let (status, page) = json_response(
+        f.router.clone(),
+        get(resources_path, next, Some(personal_context)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page["read_receipt"]["audit_event_id"].is_string());
+}
+
+#[tokio::test]
+#[ignore = "requires front/dist, Node.js, Playwright, and Chromium"]
+async fn chromium_oidc_refresh_withdraws_administration_and_keeps_personal_resources() {
+    use agentsandbox::{api::dashboard_router_with_oidc, model::Event};
+    use std::{
+        path::{Path, PathBuf},
+        process::Stdio,
+    };
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let front = std::env::var_os("AI_GUARD_TEST_FRONT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("front/dist"));
+    assert!(
+        front.is_absolute() && front.join("index.html").is_file(),
+        "build the frontend and use an absolute directory for the Chromium recipe"
+    );
+    let dashboard = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dashboard_origin = format!("http://{}", dashboard.local_addr().unwrap());
+    let redirect_uri =
+        reqwest::Url::parse(&format!("{dashboard_origin}/auth/oidc/callback")).unwrap();
+    let mut browser_issuer = None;
+    let issuer = ControlledIssuer::with_transport(None, |issuer| {
+        let fixture = browser::BrowserIssuer::new(issuer, redirect_uri.clone());
+        let routes = fixture.routes();
+        browser_issuer = Some(fixture);
+        routes
+    })
+    .await;
+    let browser_issuer = browser_issuer.unwrap();
+    let mut f = Fixture::with_issuer(support::private_tempdir(), issuer, None).await;
+    f.config.web_origin = dashboard_origin.clone();
+    f.config.provider.web_redirect_uri = redirect_uri.to_string();
+    f.map_administration_role(browser::ADMIN_ROLE);
+    const OTHER_OWNER: &str = "browser-refresh-other-owner";
+    for subject in [browser::SUBJECT, OTHER_OWNER] {
+        f.member(subject);
+    }
+    for (session, owner) in [
+        ("fixture-personal-session", browser::SUBJECT),
+        ("fixture-admin-only-session", OTHER_OWNER),
+    ] {
+        let mut event = Event::new("fixture.browser_refresh");
+        event.session_id = Some(session.into());
+        f.store.append(event).unwrap();
+        f.store
+            .mutate_identity(&IdentityMutationV1 {
+                version: 1,
+                operation_id: Uuid::new_v4().to_string(),
+                actor: PrincipalRefV1::LegacyControl {
+                    credential_id: "fixture-operator".into(),
+                    role: LegacyControlRoleV1::Runner,
+                },
+                change: IdentityChangeV1::ResourceGrant {
+                    expected_revision: 0,
+                    grant: ResourceGrantV1 {
+                        version: 1,
+                        tenant_id: "tenant-a".into(),
+                        organization_scope: "organization-a".into(),
+                        resource: ResourceRefV1 {
+                            kind: ResourceKindV1::Session,
+                            resource_id: session.into(),
+                        },
+                        owner: PrincipalRefV1::HumanOidc {
+                            issuer: f.issuer.issuer.clone(),
+                            subject: owner.into(),
+                        },
+                        revision: 1,
+                        active: true,
+                        shares: vec![],
+                    },
+                },
+            })
+            .unwrap();
+    }
+
+    let gateway = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_origin = format!("http://{}", gateway.local_addr().unwrap());
+    let dashboard_app =
+        dashboard_router_with_oidc(&gateway_origin, None, front, Some(dashboard_origin.clone()))
+            .unwrap();
+    let gateway_app = f.router.clone();
+    let gateway_task = tokio::spawn(async move { axum::serve(gateway, gateway_app).await });
+    let dashboard_task = tokio::spawn(async move { axum::serve(dashboard, dashboard_app).await });
+
+    let public_status = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap()
+        .get(format!("{dashboard_origin}/auth/oidc/status"))
+        .header("sec-fetch-site", "same-origin")
+        .header("sec-fetch-mode", "cors")
+        .send()
+        .await
+        .expect("the Rust dashboard must serve the public SSO status");
+    let public_http = public_status.status();
+    let public: Value = public_status.json().await.unwrap_or(Value::Null);
+    let metadata_match = public
+        == json!({"version":1,"enabled":true,"issuer":f.issuer.issuer,"provider_label":f.config.provider_label});
+    println!(
+        "oidc_signed_fixture_refresh rust_public_status_http={} metadata_match={metadata_match}",
+        public_http.as_u16()
+    );
+    assert!(public_http == StatusCode::OK && metadata_match);
+
+    let mut driver = tokio::process::Command::new("node");
+    driver
+        .current_dir(root)
+        .arg(root.join("front/tests/browser_oidc_refresh.mjs"))
+        .env_clear()
+        .env("AI_GUARD_TEST_OIDC_DASHBOARD", dashboard_origin)
+        .env("AI_GUARD_TEST_OIDC_ISSUER", &f.issuer.issuer)
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    for key in [
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "NODE_PATH",
+        "CODEX_PRIMARY_RUNTIME_NODE_MODULES",
+        "PLAYWRIGHT_BROWSERS_PATH",
+        "PLAYWRIGHT_CHROMIUM_EXECUTABLE",
+        "AI_GUARD_TEST_ARTIFACT_DIR",
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            driver.env(key, value);
+        }
+    }
+    let result = tokio::time::timeout(Duration::from_secs(60), driver.output()).await;
+    gateway_task.abort();
+    dashboard_task.abort();
+    let result = result
+        .expect("Chromium recipe exceeded its deadline")
+        .expect("could not run the Chromium driver");
+    let report: Value = serde_json::from_slice(&result.stdout).unwrap_or(Value::Null);
+    let status = match report["status"].as_str() {
+        Some(status @ ("PASS" | "FAIL" | "BLOCKED")) => status,
+        _ => "UNKNOWN",
+    };
+    let stage = match report["stage"].as_str() {
+        Some(
+            stage @ ("configuration" | "chromium" | "public_status" | "login" | "admin_read"
+            | "scheduled_refresh" | "admin_purged" | "personal_read" | "complete"),
+        ) => stage,
+        _ => "unknown",
+    };
+    let admin_purge = report["adminPurge"].as_bool().unwrap_or(false);
+    let personal_read = report["personalRead"].as_bool().unwrap_or(false);
+    let old_stream_closed = report["oldStreamClosed"].as_bool().unwrap_or(false);
+    println!(
+        "oidc_signed_fixture_refresh status={status} stage={stage} admin_purge={admin_purge} personal_read={personal_read} old_stream_closed={old_stream_closed}"
+    );
+    if let Some(diagnostic) = report["diagnostic"].as_str().filter(|code| {
+        [
+            "dashboard_navigation_error",
+            "dashboard_navigation_http",
+            "public_status_missing",
+            "public_status_http",
+            "public_status_json",
+            "public_status_version",
+            "public_status_disabled",
+            "public_status_provider",
+            "public_status_issuer",
+            "browser_route_blocked",
+        ]
+        .contains(code)
+    }) {
+        println!("browser_diagnostic={diagnostic}");
+    }
+    for (field, label) in [
+        ("dashboardHttp", "dashboard_http"),
+        ("publicStatusHttp", "browser_public_status_http"),
+    ] {
+        if let Some(code) = report[field]
+            .as_u64()
+            .filter(|code| (100..=599).contains(code))
+        {
+            println!("{label}={code}");
+        }
+    }
+    if let Some(code) = report["publicStatusError"].as_str().filter(|code| {
+        [
+            "origin_denied",
+            "oidc_not_configured",
+            "identity_unavailable",
+            "audit_unavailable",
+            "invalid_request",
+            "capacity_exhausted",
+        ]
+        .contains(code)
+    }) {
+        println!("browser_public_status_error={code}");
+    }
+    if let Some(directory) = report["artifacts"]["directory"].as_str().filter(|name| {
+        name.strip_prefix("browser-failure-").is_some_and(|suffix| {
+            suffix.len() == 6 && suffix.bytes().all(|b| b.is_ascii_alphanumeric())
+        })
+    }) && let Some(files) = report["artifacts"]["files"].as_array()
+    {
+        for file in ["page.html", "page.png"] {
+            if files.iter().any(|entry| entry == file) {
+                println!("artifact={directory}/{file}");
+            }
+        }
+    }
+    assert!(
+        result.status.success()
+            && report["mode"] == "oidc_signed_fixture_refresh"
+            && status == "PASS"
+            && stage == "complete"
+            && admin_purge
+            && personal_read
+            && old_stream_closed,
+        "Chromium recipe failed at {stage}, exit status {}",
+        result.status
+    );
+    assert!(
+        browser_issuer.completed(),
+        "the signed issuer must accept exactly one refresh exchange"
+    );
+    assert_eq!(
+        f.audit.verify().unwrap().records,
+        5,
+        "login and refresh must commit their durable phases"
+    );
+    assert!(f.store.integrity().unwrap().valid);
+    println!(
+        "oidc_signed_fixture_refresh durable_records=5 provider_refresh=true business_audit_valid=true"
+    );
+}
+
+#[tokio::test]
 async fn web_refresh_refuses_terminal_capacity_before_contacting_the_token_endpoint() {
     use agentsandbox::audit::authentication::AuthenticationSessionStateV1;
     let f = Fixture::with_audit_limits(4, 131_072).await;
@@ -1238,25 +1899,32 @@ async fn web_delivery_roles(
         )
         .await
         .unwrap();
-    let cookie = seeded.headers()["set-cookie"]
+    assert_eq!(seeded.status(), StatusCode::OK);
+    assert!(seeded.headers().get("set-cookie").is_none());
+    let start_response = f
+        .router
+        .clone()
+        .oneshot(post(
+            "/auth/oidc/start",
+            json!({"version":1}),
+            None,
+            None,
+            Some(&f.config.web_origin),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(start_response.status(), StatusCode::OK);
+    let cookie = start_response.headers()["set-cookie"]
         .to_str()
         .unwrap()
         .split(';')
         .next()
         .unwrap()
         .to_owned();
-    let (status, start) = json_response(
-        f.router.clone(),
-        post(
-            "/auth/oidc/start",
-            json!({"version":1}),
-            None,
-            Some(&cookie),
-            Some(&f.config.web_origin),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
+    let start: Value =
+        serde_json::from_slice(&to_bytes(start_response.into_body(), 65536).await.unwrap())
+            .unwrap();
+    let correlation_token = start["correlation_token"].as_str().unwrap().to_owned();
     let url = reqwest::Url::parse(start["authorization_url"].as_str().unwrap()).unwrap();
     let params = url
         .query_pairs()
@@ -1284,7 +1952,7 @@ async fn web_delivery_roles(
         f.router.clone(),
         post(
             "/auth/oidc/tokens",
-            json!({"version":1}),
+            json!({"version":1,"correlation_token":correlation_token}),
             None,
             Some(&cookie),
             Some(&f.config.web_origin),
@@ -1671,5 +2339,321 @@ async fn cancelling_owned_web_refresh_future_cleans_pending_capacity_and_fences_
             StatusCode::CREATED,
             "cancelled pending session must release its principal capacity before replacement {index}"
         );
+    }
+}
+
+#[tokio::test]
+async fn v1_planted_cookie_cannot_hijack_browser_token_delivery() {
+    let f = Fixture::new().await;
+    f.member("v1-victim");
+    let planted_value = format!("{}abcd", "c0ffee".repeat(10));
+    let planted_cookie = format!("aiguard_oidc={planted_value}");
+
+    // (1) GET /status never emits Set-Cookie, whether cookie is absent or planted.
+    for header in [None, Some(planted_cookie.as_str())] {
+        let mut req = Request::get("/auth/oidc/status");
+        if let Some(cookie) = header {
+            req = req.header("cookie", cookie);
+        }
+        let status_res = f
+            .router
+            .clone()
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(status_res.status(), StatusCode::OK);
+        assert!(status_res.headers().get("set-cookie").is_none());
+    }
+
+    // (2) POST /start with planted cookie C ignores C, rotates to fresh_cookie,
+    //     and returns an independent 64-hex correlation_token.
+    let start_res = f
+        .router
+        .clone()
+        .oneshot(post(
+            "/auth/oidc/start",
+            json!({"version":1}),
+            None,
+            Some(&planted_cookie),
+            Some(ORIGIN),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(start_res.status(), StatusCode::OK);
+    let set_cookie_header = start_res.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(set_cookie_header.contains("Path=/auth/oidc; HttpOnly; SameSite=Lax; Max-Age=300"));
+    let start_cookie = set_cookie_header.split(';').next().unwrap().to_owned();
+    assert_ne!(start_cookie, planted_cookie);
+    let start_body: Value =
+        serde_json::from_slice(&to_bytes(start_res.into_body(), 65536).await.unwrap()).unwrap();
+    let correlation_token = start_body["correlation_token"].as_str().unwrap().to_owned();
+    assert_eq!(correlation_token.len(), 64);
+    assert!(
+        correlation_token
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    );
+    assert_ne!(format!("aiguard_oidc={correlation_token}"), start_cookie);
+
+    let url = reqwest::Url::parse(start_body["authorization_url"].as_str().unwrap()).unwrap();
+    let params = url
+        .query_pairs()
+        .collect::<std::collections::HashMap<_, _>>();
+    let victim_token = f
+        .issuer
+        .login_response(&params["nonce"], "v1-victim", "v1-victim-login");
+
+    // Old planted cookie cannot complete callback.
+    let stale_callback = f
+        .router
+        .clone()
+        .oneshot(
+            Request::get(format!(
+                "/auth/oidc/callback?code=controlled-code&state={}",
+                params["state"]
+            ))
+            .header("cookie", &planted_cookie)
+            .header("sec-fetch-site", "cross-site")
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stale_callback.status(), StatusCode::CONFLICT);
+
+    // (3) Victim completes callback with rotated cookie.
+    let callback_res = f
+        .router
+        .clone()
+        .oneshot(
+            Request::get(format!(
+                "/auth/oidc/callback?code=controlled-code&state={}",
+                params["state"]
+            ))
+            .header("cookie", &start_cookie)
+            .header("sec-fetch-site", "cross-site")
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(callback_res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(callback_res.headers()["location"], "/auth/oidc/complete");
+
+    // (4) Attacker with old planted cookie C fails: 400 without correlation_token,
+    //     409 with guessed 64-hex correlation_token.
+    let (legacy_status, legacy_body) = json_response(
+        f.router.clone(),
+        Request::post("/auth/oidc/tokens")
+            .header("content-type", "application/json")
+            .header("cookie", &planted_cookie)
+            .header("origin", ORIGIN)
+            .body(Body::from(json!({"version":1}).to_string()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(legacy_status, StatusCode::BAD_REQUEST);
+    assert_eq!(legacy_body["error"]["code"], "invalid_request");
+
+    let wrong_token = "f".repeat(64);
+    assert_ne!(wrong_token, correlation_token);
+    let (planted_status, planted_body) = json_response(
+        f.router.clone(),
+        Request::post("/auth/oidc/tokens")
+            .header("content-type", "application/json")
+            .header("cookie", &planted_cookie)
+            .header("origin", ORIGIN)
+            .body(Body::from(
+                json!({"version":1,"correlation_token":wrong_token}).to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(planted_status, StatusCode::CONFLICT);
+    assert_eq!(planted_body["error"]["code"], "session_conflict");
+
+    // (5) Attacker with rotated cookie and wrong correlation_token fails 401 WITHOUT evicting delivery;
+    //     malformed DTOs fail 400 and cross-site Fetch Metadata fails 403.
+    let (wrong_status, wrong_body) = json_response(
+        f.router.clone(),
+        Request::post("/auth/oidc/tokens")
+            .header("content-type", "application/json")
+            .header("cookie", &start_cookie)
+            .header("origin", ORIGIN)
+            .body(Body::from(
+                json!({"version":1,"correlation_token":wrong_token}).to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(wrong_status, StatusCode::UNAUTHORIZED);
+    assert_eq!(wrong_body["error"]["code"], "credential_invalid");
+
+    for bad_body in [
+        json!({"version":1}),
+        json!({"version":2,"correlation_token":correlation_token}),
+        json!({"version":1,"correlation_token":"short"}),
+        json!({"version":1,"correlation_token":"A".repeat(64)}),
+        json!({"version":1,"correlation_token":correlation_token,"extra":true}),
+    ] {
+        let (bad_status, bad_err) = json_response(
+            f.router.clone(),
+            post(
+                "/auth/oidc/tokens",
+                bad_body,
+                None,
+                Some(&start_cookie),
+                Some(ORIGIN),
+            ),
+        )
+        .await;
+        assert_eq!(bad_status, StatusCode::BAD_REQUEST);
+        assert_eq!(bad_err["error"]["code"], "invalid_request");
+    }
+
+    let (cross_status, cross_err) = json_response(
+        f.router.clone(),
+        Request::post("/auth/oidc/tokens")
+            .header("content-type", "application/json")
+            .header("cookie", &start_cookie)
+            .header("origin", ORIGIN)
+            .header("sec-fetch-site", "cross-site")
+            .body(Body::from(
+                json!({"version":1,"correlation_token":correlation_token}).to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(cross_status, StatusCode::FORBIDDEN);
+    assert_eq!(cross_err["error"], "Requête cross-site refusée.");
+
+    let (same_site_status, same_site_err) = json_response(
+        f.router.clone(),
+        Request::post("/auth/oidc/tokens")
+            .header("content-type", "application/json")
+            .header("cookie", &start_cookie)
+            .header("origin", ORIGIN)
+            .header("sec-fetch-site", "same-site")
+            .body(Body::from(
+                json!({"version":1,"correlation_token":correlation_token}).to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(same_site_status, StatusCode::FORBIDDEN);
+    assert_eq!(same_site_err["error"]["code"], "origin_denied");
+
+    // (6) Legitimate victim with rotated cookie + correlation_token redeems one-shot (200).
+    let victim_res = f
+        .router
+        .clone()
+        .oneshot(
+            Request::post("/auth/oidc/tokens")
+                .header("content-type", "application/json")
+                .header("cookie", &start_cookie)
+                .header("origin", ORIGIN)
+                .header("sec-fetch-site", "same-origin")
+                .header("sec-fetch-mode", "cors")
+                .body(Body::from(
+                    json!({"version":1,"correlation_token":correlation_token}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(victim_res.status(), StatusCode::OK);
+    let clear_header = victim_res.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        clear_header
+            .starts_with("aiguard_oidc=; Path=/auth/oidc; HttpOnly; SameSite=Lax; Max-Age=0")
+    );
+    let victim_delivery: Value =
+        serde_json::from_slice(&to_bytes(victim_res.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(victim_delivery["access_token"], victim_token);
+
+    // (7) Replay returns 409 session_conflict.
+    let (replay_status, replay_body) = json_response(
+        f.router.clone(),
+        post(
+            "/auth/oidc/tokens",
+            json!({"version":1,"correlation_token":correlation_token}),
+            None,
+            Some(&start_cookie),
+            Some(ORIGIN),
+        ),
+    )
+    .await;
+    assert_eq!(replay_status, StatusCode::CONFLICT);
+    assert_eq!(replay_body["error"]["code"], "session_conflict");
+
+    // (8) Victim's bearer authenticates normally.
+    let (ident_status, ident_body) = json_response(
+        f.router.clone(),
+        Request::get("/api/v1/human/identity")
+            .header("authorization", format!("Bearer {victim_token}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(ident_status, StatusCode::OK);
+    assert_eq!(ident_body["principal"]["subject"], "v1-victim");
+}
+
+#[tokio::test]
+async fn v1_cookie_syntax_rejects_malformed_and_duplicate_cookies_without_state_leak() {
+    let f = Fixture::new().await;
+    for bad_cookie in [
+        "aiguard_oidc=bad-value".to_owned(),
+        format!(
+            "aiguard_oidc={}; aiguard_oidc={}",
+            "a".repeat(64),
+            "b".repeat(64)
+        ),
+        format!("aiguard_oidc={}", "a".repeat(4097)),
+    ] {
+        let (st_status, st_err) = json_response(
+            f.router.clone(),
+            Request::get("/auth/oidc/status")
+                .header("cookie", &bad_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(st_status, StatusCode::BAD_REQUEST);
+        assert_eq!(st_err["error"]["code"], "invalid_request");
+
+        let (start_status, start_err) = json_response(
+            f.router.clone(),
+            post(
+                "/auth/oidc/start",
+                json!({"version":1}),
+                None,
+                Some(&bad_cookie),
+                Some(ORIGIN),
+            ),
+        )
+        .await;
+        assert_eq!(start_status, StatusCode::BAD_REQUEST);
+        assert_eq!(start_err["error"]["code"], "invalid_request");
+
+        let (tok_status, tok_err) = json_response(
+            f.router.clone(),
+            post(
+                "/auth/oidc/tokens",
+                json!({"version":1,"correlation_token":"a".repeat(64)}),
+                None,
+                Some(&bad_cookie),
+                Some(ORIGIN),
+            ),
+        )
+        .await;
+        assert_eq!(tok_status, StatusCode::BAD_REQUEST);
+        assert_eq!(tok_err["error"]["code"], "invalid_request");
     }
 }

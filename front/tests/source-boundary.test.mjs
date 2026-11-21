@@ -31,7 +31,7 @@ test("le modèle et l’état de la supervision restent sans DOM ni feuille de s
 });
 
 test("les sources de la supervision n’embarquent aucune donnée d’exemple ni ressource distante", () => {
-  for (const file of files.filter((name) => /supervision|journal|human-continuity/.test(name))) {
+  for (const file of files.filter((name) => /supervision|journal|human-continuity/.test(relative(source, name)))) {
     const text = readFileSync(file, "utf8");
     assert.ok(!/https?:\/\//.test(text), `${relative(source, file)} ne référence aucune URL`);
     // Identifier-shaped literals would be invented rows: every identifier must come from a control read.

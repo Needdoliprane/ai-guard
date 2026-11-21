@@ -321,6 +321,180 @@ fn maintenance_migration_is_explicit_backed_up_and_format14_remains_closed() {
     fixtures::assert_format14_compatibility_and_migration_refusals();
 }
 
+#[test]
+fn maintenance_confirmation_recovers_exact_committed_genesis_without_installing() {
+    fixtures::assert_format15_confirmation_only_reads_committed_receipt();
+}
+
+// The same test re-executes itself (same --exact filter, phase variable). Its
+// child commits Store15 (then, in the second phase, also publishes the journal
+// confirmation) and dies by SIGKILL before any acknowledgement. The parent
+// reopens the synthetic sources and must recover the very same receipt.
+#[test]
+fn maintenance_confirmation_recovers_committed_genesis_after_child_process_kill() {
+    fixtures::assert_format15_confirmation_recovers_after_child_process_kill();
+}
+
+#[test]
+fn maintenance_resume_requires_a_distinct_backup_parent() {
+    use crate::{
+        control_fs::{Directory, PrivateFile},
+        human_authority::{
+            MAX_HUMAN_MANIFEST_BYTES,
+            maintenance::{
+                HumanMaintenanceActiveManifestV1, HumanMaintenanceResolvedViewV1,
+                HumanMaintenanceSourceV1, HumanMaintenanceViewV1,
+                HumanSourcesMaintenanceConfigurationV1, HumanSourcesMaintenanceGuard,
+                HumanSourcesMaintenancePlanV1,
+            },
+            startup::observe_human_storage_binding,
+        },
+    };
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut fixture = Store::owned_control_fixture_for_test(14);
+    let (bundle, credentials, _) = fixture.take_startup();
+    let closure = bundle.owner.closure().clone();
+    let source = &closure.sources[0];
+    let source_path = source.storage_binding.path();
+    let tenant = source.tenant_id.as_deref().unwrap();
+    let manifest_path = credentials.path().parent().unwrap().join("a0-active.json");
+    let prior_manifest =
+        PrivateFile::open(&manifest_path, MAX_HUMAN_MANIFEST_BYTES as u64).unwrap();
+    drop(bundle);
+
+    let temporary = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap())
+        .unwrap();
+    let backup_directory = Directory::open_existing(temporary.path()).unwrap();
+    let prior_sources: Vec<_> = closure
+        .sources
+        .iter()
+        .map(|source| HumanMaintenanceSourceV1 {
+            source_id: source.source_id,
+            kind: source.kind,
+            installation_id: source.installation_id,
+            durable_namespace_id: source.durable_namespace_id,
+            tenant_id: source.tenant_id.clone(),
+            storage_binding: source.storage_binding.clone(),
+            required_format: source.required_format,
+        })
+        .collect();
+    let mut target_sources = prior_sources.clone();
+    target_sources[0].required_format = 15;
+    let plan = HumanSourcesMaintenancePlanV1 {
+        version: 1,
+        migration_id: uuid::Uuid::new_v4(),
+        installation_id: closure.installation_id,
+        prior: Some(HumanMaintenanceViewV1 {
+            sources: prior_sources.clone(),
+            configuration: closure.configuration.clone(),
+        }),
+        target: HumanMaintenanceViewV1 {
+            sources: target_sources,
+            configuration: closure.configuration.clone(),
+        },
+        prior_active_manifest: Some(HumanMaintenanceActiveManifestV1 {
+            storage_binding: observe_human_storage_binding(&manifest_path).unwrap(),
+            closure_id: closure.closure_id,
+            closure_revision: closure.closure_revision,
+            closure_digest: closure.closure_digest.clone(),
+        }),
+        supported_storage_profile: closure.supported_storage_profile,
+    };
+    let files: Vec<_> = closure
+        .configuration
+        .files
+        .iter()
+        .map(|file| {
+            let retained = PrivateFile::open(&file.storage_binding.path(), 1_048_576).unwrap();
+            (file.kind, retained)
+        })
+        .collect();
+    let prior = HumanMaintenanceResolvedViewV1::new(
+        prior_sources,
+        closure.configuration.clone(),
+        files.clone(),
+    )
+    .unwrap();
+    let target = HumanMaintenanceResolvedViewV1::new(
+        plan.target.sources.clone(),
+        plan.target.configuration.clone(),
+        files,
+    )
+    .unwrap();
+    let plan_file = backup_directory
+        .persistent_create("maintenance15.json", &serde_json::to_vec(&plan).unwrap())
+        .unwrap();
+    let guard = HumanSourcesMaintenanceGuard::acquire(
+        plan_file,
+        HumanSourcesMaintenanceConfigurationV1::new(Some(prior), target, Some(prior_manifest)),
+    )
+    .unwrap();
+    let token = guard.target_source(source.source_id).unwrap();
+    assert!(token.prior_active_anchor(14).unwrap() == Some(&source.authority_marker_receipt));
+    let store = Store::open_review_maintenance_for_tenant(
+        &source_path,
+        tenant,
+        Redactor::new(vec![]),
+        10_000,
+        &token,
+    )
+    .unwrap();
+    let read_source_state = || {
+        let db = Connection::open_with_flags(
+            &source_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        let format: u32 = db
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        (format, audit_head(&db).unwrap())
+    };
+    let before = read_source_state();
+    assert_eq!(before.0, 14);
+
+    let backup = backup_directory.path().join("backup.sqlite");
+    store
+        .with_review_maintenance_writer(&token, |writer| {
+            writer.prepare_egress_backup(&token, &backup)?;
+            Ok(())
+        })
+        .unwrap();
+    let bytes = std::fs::read(&backup).unwrap();
+    let source_parent = Directory::open_existing(source_path.parent().unwrap()).unwrap();
+    let misplaced = source_parent.path().join("misplaced-backup.sqlite");
+    drop(
+        source_parent
+            .persistent_create("misplaced-backup.sqlite", &bytes)
+            .unwrap(),
+    );
+
+    store
+        .with_review_maintenance_writer(&token, |writer| {
+            writer.resume_egress_backup(&token, &backup)?;
+            let error = writer
+                .resume_egress_backup(&token, &misplaced)
+                .map(|_| ())
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "egress backup parent must differ from source parent"
+            );
+            assert_eq!(
+                error.downcast_ref::<EgressStoreFailure>(),
+                Some(&EgressStoreFailure::Integrity)
+            );
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(read_source_state(), before);
+    assert_eq!(std::fs::read(&backup).unwrap(), bytes);
+    assert_eq!(std::fs::read(&misplaced).unwrap(), bytes);
+}
+
 // Imported/corrupt history only: public ingestion already refuses this family.
 // Removing the15 lower(kind) selection must make this genuine-source reopen
 // accept a noncanonical extra line and therefore break the refusal assertion.
@@ -394,6 +568,11 @@ fn saturation_helper_propagates_real_source_refusal_and_rejects_clock_error_clas
 #[test]
 fn maintenance_active_owner_refusal_is_typed_at_acquisition_and_effect_free() {
     fixtures::assert_stopped_consumer_maintenance_refusal_is_typed_and_effect_free();
+}
+
+#[test]
+fn maintenance_reads_anchored_store14_neighbor_during_store15_upgrade() {
+    fixtures::assert_neighbor_store14_head_is_anchored_during_egress_upgrade();
 }
 
 #[test]

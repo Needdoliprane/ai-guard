@@ -479,22 +479,29 @@ mod tests {
     use serde_json::json;
 
     #[cfg(unix)]
-    pub(super) fn oidc_fixture() -> (tempfile::TempDir, PathBuf, OidcFile) {
+    pub(super) fn oidc_v1_fixture() -> (tempfile::TempDir, PathBuf, OidcFile) {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         let dir = tempfile::Builder::new()
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir()
             .unwrap();
         let path = dir.path().join("oidc.json");
-        let bytes = include_bytes!("../docs/setup/sso/examples/gateway.https.json");
+        let mut document: serde_json::Value =
+            serde_json::from_str(include_str!("../docs/setup/sso/examples/gateway.https.json"))
+                .unwrap();
+        document["version"] = json!(1);
+        document["authentication_audit"]
+            .as_object_mut()
+            .unwrap()
+            .remove("capacity_plan");
         let mut output = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(&path)
             .unwrap();
-        std::io::Write::write_all(&mut output, bytes).unwrap();
-        let config = serde_json::from_slice(bytes).unwrap();
+        serde_json::to_writer(&mut output, &document).unwrap();
+        let config = serde_json::from_value(document).unwrap();
         (dir, path, config)
     }
 
@@ -504,7 +511,7 @@ mod tests {
     #[tokio::test]
     async fn normal_oidc_configuration_accepts_a_new_v3_audit() {
         use agentsandbox::{audit::authentication::AuthenticationAudit, redaction::Redactor};
-        let (dir, path, config) = oidc_fixture();
+        let (dir, path, config) = oidc_v1_fixture();
         let loaded = load_oidc(&path, true, Redactor::new(vec![]));
         let audit = AuthenticationAudit::open_existing(
             &dir.path().join(config.authentication_audit.path),
@@ -527,7 +534,7 @@ mod tests {
     #[tokio::test]
     async fn normal_oidc_configuration_refuses_v2_without_implicit_migration() {
         use agentsandbox::{audit::authentication::AuthenticationAudit, redaction::Redactor};
-        let (dir, path, config) = oidc_fixture();
+        let (dir, path, config) = oidc_v1_fixture();
         let data = dir.path().join(config.authentication_audit.path);
         let audit = AuthenticationAudit::init_new(
             &data,

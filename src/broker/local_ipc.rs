@@ -90,6 +90,20 @@ impl<'de> Deserialize<'de> for EndpointRecordV1 {
     }
 }
 impl EndpointRecordV1 {
+    #[cfg(test)]
+    pub(crate) fn unavailable_for_test() -> Self {
+        Self(EndpointWireV1 {
+            version: 1,
+            epoch: Uuid::nil(),
+            directory_name: String::new(),
+            directory_device: 0,
+            directory_inode: 0,
+            socket_device: 0,
+            socket_inode: 0,
+            owner_uid: 0,
+        })
+    }
+
     pub fn epoch(&self) -> Uuid {
         self.0.epoch
     }

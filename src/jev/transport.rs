@@ -14,6 +14,7 @@ pub(super) struct JsonTransport {
     key: Option<String>,
     local_http: bool,
     trust: JevTrust,
+    timeout_seconds: u64,
 }
 pub fn validate_transport_configuration(
     endpoint: &str,
@@ -56,6 +57,7 @@ impl JsonTransport {
         key: Option<String>,
         local_http: bool,
         trust: JevTrust,
+        timeout_seconds: u64,
     ) -> Result<Self, JevError> {
         let key = key.map(|value| value.trim().to_owned());
         let endpoint = validate_endpoint(endpoint, local_http, &trust)?;
@@ -67,7 +69,7 @@ impl JsonTransport {
         let client = trust
             .apply_to_client(
                 reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(5))
+                    .timeout(std::time::Duration::from_secs(timeout_seconds))
                     .connect_timeout(std::time::Duration::from_secs(2))
                     .redirect(reqwest::redirect::Policy::none())
                     .retry(reqwest::retry::never())
@@ -81,12 +83,13 @@ impl JsonTransport {
             key,
             local_http,
             trust,
+            timeout_seconds,
         })
     }
     pub(super) fn configuration(&self) -> Value {
         serde_json::json!({
             "endpoint": self.endpoint.as_str(), "credential_present": self.key.is_some(),
-            "allow_loopback_http": self.local_http, "timeout_seconds": 5,
+            "allow_loopback_http": self.local_http, "timeout_seconds": self.timeout_seconds,
             "connect_timeout_seconds": 2, "request_bytes": MAX_BODY, "response_bytes": MAX_BODY,
             "trust":self.trust.configuration(), "automatic_retry":false
         })

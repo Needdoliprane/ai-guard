@@ -1,6 +1,11 @@
 //! One legacy control observer and its final, restrictive start veto.
 //! No DTO/receipt constructor and no Native17/prearmed authority.
 use super::super::*;
+use super::DeadlineFailure;
+use crate::{
+    runner::{ControlDeadlineObservation, ControlStopObservation},
+    runtime::OwnedStopObservation,
+};
 use std::sync::Arc;
 use tokio::{sync::watch, time::Instant};
 
@@ -31,6 +36,13 @@ pub(crate) struct PrestartOwner {
 pub(crate) struct ControlFailure {
     owner: Arc<PrestartOwner>,
     primary: Arc<anyhow::Error>,
+}
+impl ControlFailure {
+    pub(crate) fn deadline_observation(&self) -> Option<ControlDeadlineObservation> {
+        self.primary
+            .downcast_ref::<DeadlineFailure>()
+            .map(|failure| failure.observation)
+    }
 }
 impl std::fmt::Debug for ControlFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -352,7 +364,7 @@ impl PrestartOwner {
         })();
         result.map_err(|error| self.revoke(error).into())
     }
-    pub(crate) async fn stop_owned(&self) -> Result<()> {
+    pub(crate) async fn stop_owned(&self) -> Result<ControlStopObservation> {
         // An uncertain native stop is retained once, not blindly reissued on
         // its Err. The execution's existing native owner/deadline also remains
         // alive; no uncertainty becomes terminal or releases its hold.
@@ -366,10 +378,17 @@ impl PrestartOwner {
             return Err(StopFailure(error).into());
         }
         let result = async {
-            if let Some(owned) = self.state.checkpoint()?.owned {
-                self.runtime.stop_snapshot_owned(&owned).await?;
-            }
-            Ok::<(), anyhow::Error>(())
+            let Some(owned) = self.state.checkpoint()?.owned else {
+                return Ok(ControlStopObservation::NoOwnedWorker);
+            };
+            let observation = self.runtime.stop_snapshot_owned_observation(&owned).await?;
+            Ok::<_, anyhow::Error>(match observation {
+                OwnedStopObservation::AlreadyStopped => ControlStopObservation::AlreadyStopped,
+                OwnedStopObservation::EngineAcknowledged => {
+                    ControlStopObservation::EngineAcknowledged
+                }
+                OwnedStopObservation::Unconfirmed => ControlStopObservation::Unconfirmed,
+            })
         }
         .await;
         result.map_err(|error| {

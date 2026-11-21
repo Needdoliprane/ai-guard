@@ -55,10 +55,21 @@ The 13 November results cover only the selections in the [typed record](../../en
   This work does not change that route.
 - **Inspect the Kubernetes authority** with the existing read-only
   `agentsandbox kubernetes doctor` (see the [Kubernetes guide](../kubernetes/README.md#run-the-read-only-cli-diagnostic)).
+- **Inspect an existing session workspace claim** with the read-only
+  `agentsandbox kubernetes inspect-workspace --claim-name "$QA_KUBE_CLAIM"`.
+  Supply the same explicit authority, CA and authentication flags as for
+  `doctor`. The identity needs GET on the named PVC in the authority namespace.
+  A claim name containing protected authentication material is refused before
+  the first request.
+  The command reports a valid Pending claim, an incompatible access mode, or
+  an unnamed storage class separately. It checks the authority again before
+  returning these diagnostics. It reads the named PVC and its authority anchors.
+  The JSON output contains the verified claim projection, its UID and
+  `admission_available: false`. See [the replay commands](../../../tests/e2e/README.md#rejouer-le-diagnostic-et-le-prévol-kubernetes-sur-docker-desktop).
 - Prepare/reopen, inspect central state and abandon a before-effect session
   reservation through the [R2 CLI](#12-r2-broker-http-and-pre-effect-cli).
-  Workspace-claim inspection and the runtime reconcile report remain library
-  mechanics; these commands perform no Kubernetes API request.
+  These commands perform no Kubernetes API request. The runtime reconcile
+  report remains a library mechanism.
 
 Do not edit, rename or delete files in a V2 journal directory to "unblock" a
 session. The journal is evidence; a refusal means reconciliation is needed.
@@ -217,7 +228,13 @@ inspected; otherwise it is absent from the serialized report (not `null`).
 
 ## 8. Future Docker Desktop single-node qualification plan (not executed)
 
-Nothing below has been run. **Every step that changes the cluster needs an
+The full plan below has not been run. A narrower live test on Docker Desktop
+v1.36.1 verified TCP DNS between two test pods on one node, including distinct
+ingress and egress denials and connection recovery. Step 4a and the session
+effect suite still require their own observations.
+[Replay the local NetworkPolicy test](../../../tests/e2e/README.md#vérifier-lapplication-des-networkpolicy-locales)
+
+**Every step that changes the cluster needs an
 explicit maintainer authorization**, which this work does not grant. Each step
 records its oracle and evidence, and stops at the first discriminating oracle,
 refusal or ceiling.
@@ -246,12 +263,12 @@ refusal or ceiling.
 
 ### 8.2 Storage prerequisites
 
-- A StorageClass whose provisioner supports `ReadWriteOncePod`. The Kubernetes
-  [access modes documentation](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#access-modes)
-  is expected to restrict it to CSI volumes (EXT-10a, to verify for v1.36).
-  Docker Desktop's default `hostpath` class is expected to use a non-CSI
-  provisioner (EXT-10b, to verify), so step 3 is likely `BLOCKED` on the
-  default class.
+- A StorageClass whose provisioner supports `ReadWriteOncePod`. Kubernetes
+  v1.36 supports that mode with CSI volumes. On the inspected Docker Desktop
+  1.36.1 cluster, `hostpath` and `standard` both use
+  `rancher.io/local-path` with `WaitForFirstConsumer`. The cluster listed
+  no CSI driver, so the live storage check is `BLOCKED`.
+  [Kubernetes v1.36 access modes](https://v1-36.docs.kubernetes.io/docs/concepts/storage/persistent-volumes/#access-modes)
 - [`volumeBindingMode`](https://kubernetes.io/docs/concepts/storage/storage-classes/#volume-binding-mode)
   must be `Immediate`. With `WaitForFirstConsumer`, a claim is never `Bound`
   before the request is rendered, so the plan records `BLOCKED`. Binding after
@@ -269,7 +286,7 @@ authorization.
 | 0 | Record the environment of 8.1. | Versions and context retained. | Context other than `docker-desktop`. |
 | 1 | (Requires an explicit maintainer authorization, not granted by this work.) Provision the tenant Namespace with Pod Security `restricted` `v1.36`, a default-deny ingress and egress NetworkPolicy, a ServiceAccount without token automount and a Role with the permissions of section 7, from a template reviewed at that time. `delete` is granted only for the later stop step. | Created objects and their UIDs retained. A created NetworkPolicy is not proof of enforcement (step 4a). | Any partial creation: inspect, never delete and recreate. |
 | 2 | `agentsandbox kubernetes doctor --check-permissions` with the broker identity. | Report retained. Its twelve fixed access reviews include `patch pods`, `update pods`, `delete pods` and `create pods/attach`; whether `create` is the verb checked for a WebSocket attach upgrade is still to confirm (EXT-8). `delete pods` must stay denied until the stop step; `update pods`, exec, logs, Secrets, bindings and token requests must be denied. | Any refusal of the reviews, or any of those denied permissions allowed. |
-| 3 | (Requires an explicit maintainer authorization, not granted by this work.) The operator creates one `ReadWriteOncePod` PVC named for an attempt; `inspect_session_workspace_claim` returns it `Bound` with its UID. This needs proposed patch 0004; the admitted QA profile has no network (`--network none`), so a QA run against a cluster would need a separately admitted network profile. | Claim projection retained. | Class not RWOP-capable or `WaitForFirstConsumer`: `BLOCKED`. |
+| 3 | (Requires an explicit maintainer authorization, not granted by this work.) The operator creates one `ReadWriteOncePod` PVC named for an attempt. The read-only `kubernetes inspect-workspace` CLI verifies that it is `Bound` and returns its UID. | Claim projection retained. | Class not RWOP-capable or `WaitForFirstConsumer`: `BLOCKED`. |
 
 ### 8.4 Effect suite (all BLOCKED)
 

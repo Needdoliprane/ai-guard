@@ -500,6 +500,15 @@ pub(super) fn public_error(status: u16, bytes: &[u8]) -> anyhow::Error {
     let (code, action) = parsed
         .as_ref()
         .map_or(("protocol_error", "contact_operator"), |e| {
+            if e.error.code == "audit_read_budget_exhausted" {
+                return if status == reqwest::StatusCode::TOO_MANY_REQUESTS.as_u16()
+                    && e.error.retry_action == "contact_operator"
+                {
+                    ("audit_read_budget_exhausted", "contact_operator")
+                } else {
+                    ("protocol_error", "contact_operator")
+                };
+            }
             let code = match e.error.code.as_str() {
                 "authentication_required" => "authentication_required",
                 "credential_invalid" => "credential_invalid",
@@ -539,10 +548,14 @@ pub(super) fn public_error(status: u16, bytes: &[u8]) -> anyhow::Error {
                 },
             )
         });
-    let guidance = if code == "migration_required" {
-        "contact the operator to stop the controls and run the explicit schema4 to schema5 migration with a new verified backup"
-    } else {
-        match action {
+    let guidance = match code {
+        "migration_required" => {
+            "contact the operator to stop the controls and run the explicit schema4 to schema5 migration with a new verified backup"
+        }
+        "audit_read_budget_exhausted" => {
+            "preserve the existing audit and contact the operator to review the durable read budget"
+        }
+        _ => match action {
             "authenticate" => "check the private human credential with the operator",
             "select_context" => {
                 "run human identity, then explicitly select a currently offered context"
@@ -553,7 +566,7 @@ pub(super) fn public_error(status: u16, bytes: &[u8]) -> anyhow::Error {
             "reduce_page" => "reduce the page size or review the explicit selection",
             "retry" => "retry explicitly after control availability is restored",
             _ => "contact the operator; preserve existing credentials and data",
-        }
+        },
     };
     anyhow::anyhow!(
         "human access refused: HTTP {status}, {code}, retry_action={action}; {guidance}"

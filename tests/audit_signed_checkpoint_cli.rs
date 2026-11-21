@@ -1809,7 +1809,8 @@ fn a_failed_write_is_an_io_failure_that_keeps_the_partial_file_and_resumes() {
     );
     assert_eq!(failed.stderr, "");
     let error = &failed.json()["errors"][0];
-    assert_eq!(error["detail"]["path"], public_key.to_str().unwrap());
+    let canonical_output = std::fs::canonicalize(&public_key).unwrap();
+    assert_eq!(error["detail"]["path"], canonical_output.to_str().unwrap());
     assert!(
         error["action"]
             .as_str()

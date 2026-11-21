@@ -482,8 +482,10 @@ fn incomplete_or_unknown_lock_content_is_refused_before_any_output() {
         (
             "Cargo.toml and Cargo.lock root differ",
             "Cargo.toml",
-            "version = \"0.1.0\"".into(),
-            "version = \"0.2.0\"".into(),
+            // The scenario uses the repository Cargo.toml (REPOSITORY_FILES):
+            // edit its own package version, whatever its current value.
+            format!("version = \"{}\"", env!("CARGO_PKG_VERSION")),
+            "version = \"999.0.0\"".into(),
             "the lock is stale",
         ),
     ];

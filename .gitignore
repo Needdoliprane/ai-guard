@@ -27,3 +27,6 @@
 !/docs/engineering/evidence/**/local-inference/README.md
 /docs/engineering/evidence/**/local-judge/**
 !/docs/engineering/evidence/**/local-judge/README.md
+
+# Local Qwen cgroup evidence helper
+/tests/e2e/qwen_runtime_evidence.rs

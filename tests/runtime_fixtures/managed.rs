@@ -87,8 +87,9 @@ fn main() {
         }
         "info" => {
             if case == "podman_authority" {
+                let rootless = !root.join("podman_rootful").exists();
                 println!(
-                    r#"{{"store":{{"graphRoot":"/fixture/graph","runRoot":"/fixture/run"}}}}"#
+                    r#"{{"host":{{"security":{{"rootless":{rootless}}}}},"store":{{"graphRoot":"/fixture/graph","runRoot":"/fixture/run"}}}}"#
                 );
                 return;
             }

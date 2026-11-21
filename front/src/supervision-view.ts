@@ -13,7 +13,7 @@ import { accessLines, activityLabel, associationLabel, brokerAuthorityLabel, bro
 import "./supervision.css";
 import type { HumanBroker, HumanContext, HumanEvent, HumanResource, HumanWorker, HumanWorkerAssociation, HumanWorkerTimeStatus, ResourceKind, ResourceRef } from "./human-model.ts";
 import type { FleetFilter, FleetGroup, ResourceFilter, WorkerOrder } from "./supervision-model.ts";
-import type { Source, SourceError, SupervisionClock, SupervisionReads } from "./supervision-store.ts";
+import type { Source, SourceError, SupervisionClock, SupervisionReads, WorkerWindow } from "./supervision-store.ts";
 
 /** What the user typed or chose. It holds no server data and lives as long as the selected context. */
 export interface SupervisionPreferences { fleet: FleetFilter; order: WorkerOrder; brokers: { text: string }; resources: ResourceFilter; cadence: number; rendered: number }
@@ -104,6 +104,12 @@ function denseTable(headers: string[], modifier = ""): DenseTable {
 function emptyState(title: string, description: string) { return el("div", "empty-state sv-empty", el("h3", "", title), el("p", "", description)); }
 function definition(entries: [string, Node | string | null][]) {
   return el("dl", "sv-definition", ...entries.filter(([, value]) => value !== null).map(([name, value]) => el("div", "", el("dt", "", name), el("dd", "", value))));
+}
+function workerCorrelationNotice(source: Source<WorkerWindow>): string | null {
+  if (source.phase === "unavailable") return "Profil workers indisponible : aucune association ne peut être recherchée.";
+  if (source.phase === "not_granted") return "Registre des workers non accordé";
+  if (source.phase === "forbidden") return "Lecture du registre des workers refusée : correspondance inconnue.";
+  return source.value === null ? "Registre des workers non chargé : correspondance inconnue." : null;
 }
 /** The result line of a list. It can take the focus; it is not a live region: the banner region says its count. */
 function summaryLine() { const node = el("p", "sv-summary"); node.tabIndex = -1; return node; }
@@ -524,25 +530,28 @@ export class SupervisionView {
     // The rows it loaded pushed the control down: it kept the focus, so it stays in sight for the next page.
     if (reveal && this.#loadMore.isConnected) this.#loadMore.scrollIntoView({ block: "nearest" });
   }
-  #resourceRow(item: HumanResource, related: number, workersGranted: boolean) {
+  #resourceRow(item: HumanResource, related: number, workerNotice: string | null) {
     return tableRow(cell("Type", badge(resourceKindLabel[item.resource.kind])),
       cell("Identifiant", el("p", "mono sv-id", item.resource.resource_id)),
       cell("Propriétaire", el("p", "muted", item.owner.kind === "human_local" ? `Compte local ${item.owner.account_id}` : `${item.owner.subject} · ${item.owner.issuer}`)),
       cell("Droits de ce contexte", el("p", "muted", [["métadonnées", item.permissions.metadata], ["contenu", item.permissions.content], ["export", item.permissions.export]]
         .map(([name, granted]) => `${name} ${granted ? "oui" : "non"}`).join(" · "))),
-      cell("Corrélation", item.resource.kind === "session" ? el("p", "muted", !workersGranted ? "Registre des workers non accordé" :
-        related ? `${related} worker(s) de la fenêtre chargée déclarent cette session` : "Aucun worker de la fenêtre chargée ne déclare cette session") :
+      cell("Corrélation", item.resource.kind === "session" ? el("p", "muted", workerNotice ??
+        (related ? `${related} worker(s) de la fenêtre chargée déclarent cette session` : "Aucun worker de la fenêtre chargée ne déclare cette session")) :
         el("p", "muted", item.resource.kind === "agent" ? "Relation agent / session / sous-agent non fournie par le contrat nominatif · inconnue" : "Aucune relation fournie par le contrat nominatif")),
       cell("Détail", action("Détails", `sv-resource-${item.resource.kind}-${item.resource.resource_id}`, () => this.#open({ kind: "resource", resourceKind: item.resource.kind, id: item.resource.resource_id }))));
   }
   #renderResources() {
     const state = this.#store.state; const source = state.resources; const window = source.value;
     if (source.phase === "not_granted") return;
-    const workers = state.workers.value?.items ?? []; const workersGranted = !["not_granted", "unavailable"].includes(state.workers.phase);
+    const workers = state.workers.value?.items ?? [];
+    const workerNotice = workerCorrelationNotice(state.workers);
     const filtered = window ? filterResources(window.items, this.#preferences.resources) : [];
     syncRows(this.#resourceTable.body, filtered.map((item) => {
-      const related = item.resource.kind === "session" ? workersOfSession(workers, item.resource.resource_id).length : 0;
-      return { key: `${item.resource.kind}\n${item.resource.resource_id}`, signature: `${signatureOf(item)}\n${related}\n${workersGranted}`, build: () => this.#resourceRow(item, related, workersGranted) };
+      const session = item.resource.kind === "session";
+      const related = session ? workersOfSession(workers, item.resource.resource_id).length : 0;
+      const notice = session ? workerNotice : null;
+      return { key: `${item.resource.kind}\n${item.resource.resource_id}`, signature: `${signatureOf(item)}\n${related}\n${notice}`, build: () => this.#resourceRow(item, related, notice) };
     }));
     setText(this.#resourceTable.caption, "Ressources explicitement autorisées · registre des droits du contrôle");
     this.#counts.resources = window ? `${shownOfLoaded("resources", filtered.length, window.items.length)}.` : "";
@@ -669,6 +678,7 @@ export class SupervisionView {
   #resourceDetail(item: HumanResource): (HTMLElement | null)[] {
     const state = this.#store.state; const session = item.resource.kind === "session";
     const related = session ? workersOfSession(state.workers.value?.items ?? [], item.resource.resource_id) : [];
+    const workerNotice = workerCorrelationNotice(state.workers);
     return [
       definition([["Type", resourceKindLabel[item.resource.kind]], ["Propriétaire", item.owner.kind === "human_local" ? `Compte local ${item.owner.account_id}` : `${item.owner.subject} · ${item.owner.issuer}`],
         ["Révision", item.revision], ["Métadonnées", item.permissions.metadata ? "Autorisées" : "Non autorisées"], ["Contenu", item.permissions.content ? "Autorisé" : "Non autorisé"],
@@ -676,8 +686,8 @@ export class SupervisionView {
       session ? el("h3", "", "Workers déclarant cette session") : null,
       !session ? el("p", "muted", item.resource.kind === "agent" ? "Relation agent ↔ session et agent ↔ sous-agent : non fournie par le contrat nominatif, donc inconnue. Elle n’est jamais déduite d’un nom ou d’un modèle." :
         "Aucune relation vers un worker ou une session n’est fournie par le contrat nominatif pour ce type de ressource.") :
-        state.workers.phase === "unavailable" ? el("p", "muted", "Profil workers indisponible : aucune association ne peut être recherchée.") :
         state.workers.phase === "not_granted" ? el("p", "muted", "Registre des workers non accordé à ce contexte.") :
+        workerNotice ? el("p", "muted", workerNotice) :
         related.length ? el("ul", "sv-plain", ...related.map((worker) => el("li", "", action(`Ouvrir le worker ${worker.worker_id}`, `sv-detail-worker-${worker.worker_id}`, () => this.#open({ kind: "worker", id: worker.worker_id })),
           el("span", "muted", ` ${workerStateLabel[worker.state]} · référence de session déclarée`)))) :
           el("p", "muted", `Aucun worker de la fenêtre chargée ne déclare cette session${state.workers.value?.hasMore ? " ; d’autres pages existent au contrôle" : ""}.`),

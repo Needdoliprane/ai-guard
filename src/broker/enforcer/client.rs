@@ -1407,6 +1407,32 @@ struct LocalSlot {
 }
 
 impl EnforcerClient {
+    /// Executor fixtures whose path must complete without a guardian. No
+    /// process, transport, monitor or recovery authority is available.
+    #[cfg(test)]
+    pub(crate) fn unavailable_for_test(root: &Directory) -> anyhow::Result<Self> {
+        Ok(Self(Arc::new(Client {
+            authority: SlotAuthorityV1::Legacy,
+            legacy: None,
+            root: root.clone(),
+            executable: PathBuf::new(),
+            max_slots: 0,
+            endpoint_root: root.clone(),
+            endpoint: EndpointRecordV1::unavailable_for_test(),
+            capability: [0; 32],
+            liveness: root.try_clone_file()?.into(),
+            replacement: Mutex::new(None),
+            unknown_slots: AtomicU64::new(0),
+            lost_unknown: AtomicBool::new(false),
+            accounted: Mutex::new(BTreeSet::new()),
+            auto_recovery: AtomicBool::new(false),
+            recovery_gate: Mutex::new(()),
+            failed: AtomicBool::new(true),
+            health: Mutex::new(None),
+            slots: Mutex::new(BTreeMap::new()),
+        })))
+    }
+
     /// Reconnect/recover an existing Legacy namespace with W=0. Missing auth
     /// or lock is refused. Genuine fresh creation uses the parent/name factory
     /// selected by the broker, never adoption of an existing empty directory.

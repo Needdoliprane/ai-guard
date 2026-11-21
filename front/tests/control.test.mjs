@@ -34,26 +34,36 @@ test("le modèle de lecture worker ne conserve pas les commandes ou métadonnée
   assert.equal(parsed.launch.session_id, id);
 });
 
-test("les autorités de lancement et d’inspection sont projetées séparément sans normalisation", () => {
+test("les autorités et empreintes de lancement et d’inspection restent distinctes et exactes", () => {
   const utf8Boundary = "é".repeat(128);
-  const observed = { ...worker, launch: { ...worker.launch, authority_id: "  authority-a  " },
+  const imageId = `sha256:${"a".repeat(64)}`;
+  const inspection = { authority_id: "authority-b", runtime_kind: "podman", container_id: "b".repeat(64),
+    image_id: `sha256:${"c".repeat(64)}`, spec_hash: "d".repeat(64) };
+  const observed = { ...worker, spec_hash: "e".repeat(64),
+    launch: { ...worker.launch, authority_id: "  authority-a  ", image_id: imageId },
     last_observation: { observed_at: "2026-11-05T10:00:00Z", status: "running", running: true,
       started_at: "2026-11-05T09:59:00Z", finished_at: null, exit_code: null,
-      oom_killed: false, restart_count: 0,
-      inspection: { authority_id: "authority-b", runtime_kind: "podman", container_id: "ignored" } } };
+      oom_killed: false, restart_count: 0, inspection } };
   const parsed = parseWorkerPage({ items: [observed], next_cursor: null }).items[0];
   assert.equal(parsed.launch.authority_id, "  authority-a  ");
-  assert.deepEqual(parsed.last_observation.inspection, {
-    authority_id: "authority-b", runtime_kind: "podman",
-  });
-  assert.equal("container_id" in parsed.last_observation.inspection, false);
+  assert.equal(parsed.launch.image_id, imageId);
+  assert.equal(parsed.spec_hash, observed.spec_hash);
+  assert.deepEqual(parsed.last_observation.inspection, inspection);
+  for (const invalid of [{ ...observed, spec_hash: `${observed.spec_hash}\n` },
+    { ...observed, launch: { ...observed.launch, image_id: observed.spec_hash } },
+    { ...observed, last_observation: { ...observed.last_observation, inspection: { ...inspection, container_id: "ignored" } } }])
+    assert.throws(() => parseWorkerPage({ items: [invalid], next_cursor: null }), /contrat/i);
 
   const unknown = parseWorkerPage({ items: [{ ...worker,
     launch: { ...worker.launch, authority_id: null },
     last_observation: { ...observed.last_observation,
       inspection: { runtime_kind: "docker" } } }], next_cursor: null }).items[0];
   assert.equal(unknown.launch.authority_id, null);
-  assert.equal(unknown.last_observation.inspection.authority_id, null);
+  assert.equal(unknown.launch.image_id, null);
+  assert.equal(unknown.spec_hash, null);
+  assert.deepEqual(unknown.last_observation.inspection, {
+    authority_id: null, runtime_kind: "docker", container_id: null, image_id: null, spec_hash: null,
+  });
   const omitted = { ...worker, launch: { ...worker.launch },
     last_observation: { ...observed.last_observation, inspection: { runtime_kind: "docker" } } };
   delete omitted.launch.authority_id;

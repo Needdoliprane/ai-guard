@@ -112,7 +112,7 @@ Pour un registre multi-client, répéter avec le tenant et la base configurés, 
 
 La commande exige une source régulière existante, refuse une sauvegarde déjà présente et réalise une sauvegarde SQLite vérifiée avant modification. Elle compare l'intégrité et la tête de chaîne, ajoute un genesis de contrôle et conserve les anciens événements/hashes. Le rapport donne versions, chemin de sauvegarde, séquence et hash de genesis. Un échec peut laisser une sauvegarde de diagnostic : la conserver et choisir un nouveau chemin après investigation. Ne pas supprimer la base pour contourner un refus. La sauvegarde v1 et la migration ne fournissent pas un inventaire des anciennes exécutions hors registre.
 
-La cible est explicite avec `--target-version 2`, `3` ou `4` ; le défaut reste `2` pour conserver les commandes existantes. Chaque étape exige exactement la version précédente et sa propre destination de sauvegarde neuve :1→2 registre,2→3 supervision,3→4 projections d'identité humaine et permissions. Une migration ne saute pas de version et ne répare pas un schéma endommagé. Pour une source déjà en3, pendant le même arrêt vérifié du contrôle :
+La CLI `migrate-control` accepte les cibles explicites de `2` à `13`. La cible par défaut reste `2` pour conserver les commandes existantes. Chaque étape exige exactement la version précédente et sa propre destination de sauvegarde neuve. Les trois premières ajoutent le registre (1→2), la supervision (2→3), puis les projections d’identité et de permissions (3→4). Une migration ne saute pas de version et ne répare pas un schéma endommagé. Pour une source déjà en version 3, pendant le même arrêt vérifié du contrôle :
 
 ```sh
 agentsandbox migrate-control \
@@ -124,6 +124,21 @@ agentsandbox migrate-control \
 ```
 
 Mettre à jour ensemble les lecteurs gateway/broker avant d'ouvrir une base4 ; un ancien binaire refuse cette version. Le namespace, la liaison tenant, les événements et les claims consommés sont préservés. Ni migration ni réouverture ne réactivent une autorité inactive. Le stockage4 ne crée aucun compte, attribution rétroactive, credential humain ou connexion OIDC ; les clés techniques gardent leur classe et leur périmètre. Conserver tous les backups et reçus ; une restauration n'est jamais un raccourci pour rejouer un lancement.
+
+### Passer du schéma 12 au schéma 13
+
+Pendant l’arrêt vérifié décrit ci-dessus, relever la tête et le nombre d’événements connus pour le tenant. Fournir sa configuration et le même plafond d’audit qu’en exploitation. Réserver un chemin de sauvegarde neuf dans un répertoire privé.
+
+```sh
+agentsandbox migrate-control \
+  --data "$AIGUARD_CONTROL_DB" --tenant-id "$AIGUARD_TENANT" \
+  --backup "$AIGUARD_BACKUP_V12" --target-version 13 \
+  --max-events "$AIGUARD_MAX_EVENTS" --confirm-control-stopped
+```
+
+Conserver le rapport de migration. Après redémarrage du gateway compatible, vérifier l’intégrité et le protocole sous l’identité viewer du tenant. Le protocole indique le schéma 13, un namespace inchangé et une autorité inactive avant une réactivation explicite. La séquence et le hash du genesis 13 du rapport doivent correspondre à la nouvelle tête avant toute autre opération auditée.
+
+Pour un retour de consultation, démarrer un gateway compatible sur une **copie neuve** de la sauvegarde v12, dans un répertoire privé et sur une origine loopback réservée. Configurer le même identifiant tenant et utiliser l’identité viewer de ce contexte. Relever le schéma 12, le même namespace, l’autorité inactive et la tête et le nombre d’événements relevés avant la migration. Conserver la base v13, la sauvegarde et le rapport. Une réactivation de l’ancienne autorité et la reprise de workers exigent leur propre réconciliation. [Recette de migration et relecture](../tests/schema13_protocol_contract.rs)
 
 Après redémarrage, vérifier l'intégrité, l'identité, le quota et l'absence d'erreur de migration avant une nouvelle admission. La restauration d'une sauvegarde v2 avec des claims déjà consommés **n'est pas qualifiée** : elle peut ressusciter un droit de démarrage si elle est employée sans inventaire/fencing/réconciliation. Ne pas relancer des sessions à partir d'une ancienne sauvegarde comme si les moteurs étaient vierges. La procédure complète reste un gate ouvert.
 
