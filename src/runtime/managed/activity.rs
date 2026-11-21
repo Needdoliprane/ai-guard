@@ -96,8 +96,8 @@ impl ManagedRuntime {
     /// Open the activity channel of one running, owned and authorized worker.
     ///
     /// Checks without engine IO first (owned handle, running snapshot, spec
-    /// binding: same session/operation/fingerprint version, `Run` purpose,
-    /// network `None`, approved exec profile), then a fresh inspection must
+    /// binding: same session/operation/fingerprint version and `Run` purpose,
+    /// approved exec profile), then a fresh inspection must
     /// show the same running incarnation, authorized identity, complete
     /// configuration, closed inherited environment and private secret file.
     /// A successful spawn is not a handshake: call
@@ -110,14 +110,7 @@ impl ManagedRuntime {
         self.validate_handle(&snapshot.handle)
             .map_err(|_| ActivityExecError::Identity)?;
         validate_running_snapshot(&snapshot, &snapshot.observation).map_err(relay)?;
-        if snapshot.handle.session != authorized.session
-            || snapshot.handle.operation != authorized.operation_id()
-            || snapshot.handle.fingerprint_version() != authorized.fingerprint_version()
-            || !matches!(authorized.purpose, ContainerPurpose::Run)
-            || authorized.network != NetworkMode::None
-        {
-            return Err(ActivityExecError::Profile);
-        }
+        bind_spec(&snapshot, authorized)?;
         let profile = self.relay_profile().map_err(relay)?;
         // Raw facts are read transiently; no environment or inspection byte is
         // copied into errors or the transport owner.
@@ -153,6 +146,25 @@ impl ManagedRuntime {
             .map_err(|_| ActivityExecError::Authority)?;
         ActivityExecTransport::spawn(command, snapshot, retained)
     }
+}
+
+/// The owned snapshot must be the `Run` container of its authorized spec. The
+/// worker's network mode (none, bridge, or egress-filtered) is not checked
+/// here: the channel is an exec stdio transport that never uses that network,
+/// and `validate_configuration` still compares the inspected network with
+/// the spec.
+fn bind_spec(
+    snapshot: &OwnedContainerSnapshot,
+    authorized: &ContainerSpec,
+) -> std::result::Result<(), ActivityExecError> {
+    if snapshot.handle.session != authorized.session
+        || snapshot.handle.operation != authorized.operation_id()
+        || snapshot.handle.fingerprint_version() != authorized.fingerprint_version()
+        || !matches!(authorized.purpose, ContainerPurpose::Run)
+    {
+        return Err(ActivityExecError::Profile);
+    }
+    Ok(())
 }
 
 /// Docker's non-TTY exec installs no escape proxy; Podman explicitly disables
@@ -688,22 +700,13 @@ mod tests {
                 .unwrap_err(),
             ActivityExecError::Identity
         );
-        // Profile failures: another session, a bridged network, another purpose.
+        // Profile failures: another session, another purpose.
         let other_session = ContainerSpec::with_operation(
             Uuid::from_u128(9),
             ContainerPurpose::Run,
             "worker:fixture",
             vec!["/usr/bin/id".into()],
             NetworkMode::None,
-            snapshot.handle.operation,
-        )
-        .unwrap();
-        let bridged = ContainerSpec::with_operation(
-            snapshot.handle.session,
-            ContainerPurpose::Run,
-            "worker:fixture",
-            vec!["/usr/bin/id".into()],
-            NetworkMode::Bridge,
             snapshot.handle.operation,
         )
         .unwrap();
@@ -716,7 +719,7 @@ mod tests {
             snapshot.handle.operation,
         )
         .unwrap();
-        for spec in [other_session, bridged, import] {
+        for spec in [other_session, import] {
             assert_eq!(
                 managed
                     .open_activity_channel(snapshot.clone(), &spec)
@@ -725,6 +728,79 @@ mod tests {
                 ActivityExecError::Profile
             );
         }
+    }
+
+    #[test]
+    fn a_run_spec_binds_on_any_network_while_other_purposes_or_identities_do_not() {
+        let mut snapshot = owned(&"c".repeat(64), true);
+        let spec = |purpose, network, session, operation| {
+            ContainerSpec::with_operation(
+                session,
+                purpose,
+                "worker:fixture",
+                vec!["/usr/local/bin/ai-guard-provider".into()],
+                network,
+                operation,
+            )
+            .unwrap()
+        };
+        let (session, operation) = (snapshot.handle.session, snapshot.handle.operation);
+        // Provider sessions run on bridge (egress-filtered later): admitted.
+        for network in [NetworkMode::Bridge, NetworkMode::None] {
+            let authorized = spec(ContainerPurpose::Run, network, session, operation);
+            snapshot.handle.configuration_fingerprint_version =
+                Some(authorized.fingerprint_version());
+            assert_eq!(bind_spec(&snapshot, &authorized), Ok(()));
+        }
+        let bridged = spec(
+            ContainerPurpose::Run,
+            NetworkMode::Bridge,
+            session,
+            operation,
+        );
+        for refused in [
+            spec(
+                ContainerPurpose::Import,
+                NetworkMode::Bridge,
+                session,
+                operation,
+            ),
+            spec(
+                ContainerPurpose::Export,
+                NetworkMode::None,
+                session,
+                operation,
+            ),
+            spec(
+                ContainerPurpose::Run,
+                NetworkMode::Bridge,
+                Uuid::from_u128(9),
+                operation,
+            ),
+            spec(
+                ContainerPurpose::Run,
+                NetworkMode::Bridge,
+                session,
+                Uuid::from_u128(9),
+            ),
+        ] {
+            assert_eq!(
+                bind_spec(&snapshot, &refused),
+                Err(ActivityExecError::Profile)
+            );
+        }
+        snapshot.handle.configuration_fingerprint_version = Some(bridged.fingerprint_version() + 1);
+        assert_eq!(
+            bind_spec(&snapshot, &bridged),
+            Err(ActivityExecError::Profile)
+        );
+        // The network never reaches the exec argv (see the golden test above).
+        let argv = activity_exec_args(RuntimeKind::Podman, &"a".repeat(64)).unwrap();
+        assert!(
+            !argv
+                .iter()
+                .any(|arg| arg.contains("network") || arg == "bridge")
+        );
     }
 
     fn qa_command(case: &str) -> Command {
