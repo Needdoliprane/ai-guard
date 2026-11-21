@@ -68,6 +68,7 @@ fn one_build_plan_aligns_both_recipes_and_retains_provider_choices() {
         [
             "CODEX_VERSION=1.2.3",
             "CLAUDE_CODE_VERSION=4.5.6",
+            "CLAUDE_ACTIVITY_PROFILE=v1-onfailure",
             "AI_GUARD_VERSION=0.0.1",
             expected_id.as_str(),
             "AI_GUARD_BUILD_REVISION=0123456789abcdef0123456789abcdef01234567",
@@ -80,6 +81,52 @@ fn one_build_plan_aligns_both_recipes_and_retains_provider_choices() {
     assert_eq!(control.arguments.last(), worker.arguments.last());
     control.verify_before_spawn().unwrap();
     worker.verify_before_spawn().unwrap();
+}
+
+// Catches installing a hook profile the requested Claude Code cannot read.
+#[test]
+fn the_claude_activity_profile_follows_the_requested_release() {
+    for (version, profile) in [
+        ("2.1.294", "v1"),
+        ("2.1.295-rc.1", "v1"),
+        ("2.0.999", "v1"),
+        ("1.99.400", "v1"),
+        ("2.1.295", "v1-onfailure"),
+        ("2.1.295+build.7", "v1-onfailure"),
+        ("2.1.296", "v1-onfailure"),
+        ("2.2.0", "v1-onfailure"),
+        ("3.0.0-beta", "v1-onfailure"),
+    ] {
+        assert_eq!(
+            super::super::build_identity::claude_activity_profile(version).unwrap(),
+            profile,
+            "{version}"
+        );
+    }
+    for invalid in ["2.1", "latest", "2.1.295.1", "v2.1.295"] {
+        assert!(super::super::build_identity::claude_activity_profile(invalid).is_err());
+    }
+    for (claude, expected) in [
+        (Some("2.1.200"), Some("CLAUDE_ACTIVITY_PROFILE=v1")),
+        (None, None),
+    ] {
+        let fixture = aligned_fixture();
+        let source = prepared(&fixture);
+        let plan = source.build_plan(None, Some("1.2.3"), claude).unwrap();
+        drop(source);
+        let [control, worker] = plan.commands().unwrap();
+        assert!(
+            !assignments(&control)
+                .iter()
+                .any(|value| value.starts_with("CLAUDE_"))
+        );
+        let profiles: Vec<_> = assignments(&worker)
+            .into_iter()
+            .filter(|value| value.starts_with("CLAUDE_ACTIVITY_PROFILE="))
+            .collect();
+        assert_eq!(profiles, expected.into_iter().collect::<Vec<_>>());
+        worker.verify_before_spawn().unwrap();
+    }
 }
 
 // Catches rereading the mutable checkout or inventing a revision when absent.

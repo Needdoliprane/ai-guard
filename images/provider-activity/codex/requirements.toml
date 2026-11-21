@@ -1,0 +1,42 @@
+# ai-guard provider activity hooks for Codex CLI, protocol v1.
+# Installed read-only at /etc/codex/requirements.toml by images/worker.Dockerfile;
+# the provider bootstrap refuses a worker whose file differs from this one.
+allow_managed_hooks_only = true
+
+[[hooks.SessionStart]]
+matcher = "*"
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "/usr/local/bin/ai-guard-activity hook-v1 codex SessionStart"
+timeout = 30
+
+[[hooks.UserPromptSubmit]]
+
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "/usr/local/bin/ai-guard-activity hook-v1 codex UserPromptSubmit"
+timeout = 30
+
+[[hooks.PreToolUse]]
+matcher = "*"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/usr/local/bin/ai-guard-activity hook-v1 codex PreToolUse"
+timeout = 30
+
+[[hooks.PostToolUse]]
+matcher = "*"
+
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "/usr/local/bin/ai-guard-activity hook-v1 codex PostToolUse"
+timeout = 30
+
+[[hooks.Stop]]
+
+[[hooks.Stop.hooks]]
+type = "command"
+command = "/usr/local/bin/ai-guard-activity hook-v1 codex Stop"
+timeout = 30

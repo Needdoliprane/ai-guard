@@ -80,7 +80,7 @@ const BUILD_IGNORE_FILE: &str = ".dockerignore";
 /// engine would apply rules the copy was not selected with. Change the file,
 /// the allowlist and this digest together.
 pub(super) const BUILD_IGNORE_SHA256: &str =
-    "051dfe1d0fdd5b9f55fad979174f634670a998886650093ec7e047105720defc";
+    "2b55fbd77990389969cfda9ddad4888718da687a24c384cb6d78228605125af2";
 /// Suffix of a per-Dockerfile ignore file. The shipped distribution has none,
 /// and a builder may apply such a file instead of `.dockerignore`.
 const DOCKERFILE_IGNORE_SUFFIX: &str = ".Dockerfile.dockerignore";
@@ -268,6 +268,13 @@ impl Scope {
                         || length == 2
                             && named(0, "images")
                             && (ends(".Dockerfile") || ends(DOCKERFILE_IGNORE_SUFFIX))
+                        || length == 4
+                            && named(0, "images")
+                            && named(1, "provider-activity")
+                            && (named(2, "claude-code")
+                                && (named(3, "managed-settings.v1.json")
+                                    || named(3, "managed-settings.v1-onfailure.json"))
+                                || named(2, "codex") && named(3, "requirements.toml"))
                 }
             },
         }
@@ -291,6 +298,11 @@ impl Scope {
                     named(0, "src")
                         || named(0, "front") && named(1, "src")
                         || length == 2 && named(0, "front") && named(1, "public")
+                        || length == 2 && named(0, "images") && named(1, "provider-activity")
+                        || length == 3
+                            && named(0, "images")
+                            && named(1, "provider-activity")
+                            && (named(2, "claude-code") || named(2, "codex"))
                 }
             },
         }
