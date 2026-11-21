@@ -1,4 +1,7 @@
-FROM rust:1.99.1-bookworm AS rust-toolchain
+# Base images are pinned by multi-platform index digest, verified with
+# `docker buildx imagetools inspect` on 2026-11-21 (node 24-bookworm-slim, rust 1.99.1-bookworm,
+# debian bookworm-slim). Update tag and digest together, never the digest alone.
+FROM rust:1.99.1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c AS rust-toolchain
 
 FROM rust-toolchain AS provider-build
 WORKDIR /build
@@ -12,7 +15,7 @@ ENV AI_GUARD_VERSION=${AI_GUARD_VERSION} \
     AI_GUARD_BUILD_REVISION=${AI_GUARD_BUILD_REVISION}
 RUN cargo build --release --locked --bin ai-guard-provider --bin ai-guard-relay
 
-FROM node:24-bookworm-slim
+FROM node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
 ARG CODEX_VERSION=""
 ARG CLAUDE_CODE_VERSION=""
 LABEL ai-guard.image.recipe="images/worker.Dockerfile" \
