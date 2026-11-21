@@ -174,8 +174,8 @@ fn unknown_fields_versions_and_inconsistent_submissions_are_refused() {
     assert!(decode_body::<ClientFrameV1>(missing.to_string().as_bytes()).is_err());
     let duplicate = br#"{"type":"submit","version":1,"version":1,"client":"codex","event":"Stop","gate":false,"stdin_total_bytes":0,"stdin_truncated":false,"payload_invalid_utf8":false,"payload":""}"#;
     assert!(decode_body::<ClientFrameV1>(duplicate).is_err());
-    // Codex has no SubagentStop hook in this protocol version.
-    let codex = submit(ClientV1::Codex, EventV1::SubagentStop, "");
+    // Codex has no PostToolUseFailure hook.
+    let codex = submit(ClientV1::Codex, EventV1::PostToolUseFailure, "");
     assert_eq!(codex.validate(), Err(WireError::Protocol));
     // Nested submissions refuse unknown fields as well.
     let nested = br#"{"type":"hook","seq":1,"submit":{"version":1,"client":"codex","event":"Stop","gate":false,"stdin_total_bytes":0,"stdin_truncated":false,"payload_invalid_utf8":false,"payload":"","tenant":"a"}}"#;
@@ -374,7 +374,8 @@ fn invocations_are_closed_and_only_gate_names_block_when_unusable() {
         }
     );
     for (text, gate) in [
-        ("codex SubagentStop", false),
+        ("codex PostToolUseFailure", false),
+        ("codex Notification", false),
         ("bogus PreToolUse", true),
         ("claude-code UserPromptSubmit extra", true),
         ("claude-code", false),
@@ -394,7 +395,7 @@ fn invocations_are_closed_and_only_gate_names_block_when_unusable() {
     assert_eq!(
         hook::run(
             &settings,
-            &arguments("codex SubagentStop"),
+            &arguments("codex PostToolUseFailure"),
             std::io::empty(),
             &mut stderr
         ),

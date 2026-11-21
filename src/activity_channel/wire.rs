@@ -115,12 +115,17 @@ pub enum EventV1 {
     Notification,
     PreCompact,
 }
-/// Codex CLI hook events configured by the managed requirements file.
-pub const CODEX_EVENTS: [EventV1; 5] = [
+/// Codex CLI hook events configured by the managed requirements file. Codex
+/// has no `PostToolUseFailure` or `Notification` event; its `PreCompact` and
+/// other events are not collected by this protocol version.
+pub const CODEX_EVENTS: [EventV1; 8] = [
     EventV1::SessionStart,
+    EventV1::SessionEnd,
     EventV1::UserPromptSubmit,
     EventV1::PreToolUse,
     EventV1::PostToolUse,
+    EventV1::SubagentStart,
+    EventV1::SubagentStop,
     EventV1::Stop,
 ];
 impl EventV1 {
