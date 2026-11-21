@@ -1,5 +1,15 @@
 # Suivi de l'audit indépendant — 29 octobre 2026
 
+## Rapport run-2 reçu le 10 novembre 2026
+
+Le [registre run-2](AUDIT_RUN_2_20261110.md) conserve la référence `696efd1`,
+les empreintes des pièces et les huit constats démontrés, cinq pistes et trois
+rejets du rapport final. Le lire avant les prochains correctifs et rapprocher
+ses fingerprints des sources courantes. Les archives privées et diffs de
+reproduction sont conservés dans le `.claude/audit` du worktree d'intégration,
+avec sauvegarde extérieure ; aucun verdict n'est clôturé par cette copie.
+Les résultats historiques ci-dessous ne sont ni remplacés ni transférés.
+
 L'[audit importé](evidence/2026-10-29/independent-audit/REPORT.md) porte sur `/private/tmp/ai-guard-audit-20261029.n8ZxPB`,169 fichiers ; manifest annoncé `77876e6de40964096f90f458b07b872b7848f1a05257e2f763e5f57679641d34`. Ses originaux restent hors dépôt et inchangés. La copie de `findings.json` conserve **0 confirmé,19 needs_validation,0 rejeté**. Le workflow [Cloudflare security-audit](https://github.com/cloudflare/security-audit-skill) distingue confirmation, fait restant à vérifier et candidat réfuté ; aucune sévérité formelle n'est ajoutée ici.
 
 Le checkout a évolué indépendamment. Le candidat209 et ses essais Docker/navigateur ne sont pas une reproduction contrôlée des19 candidats. Ce suivi distingue le delta du code, les preuves de développement disponibles et la validation de sécurité manquante. Une correction n'authentifie pas rétroactivement l'instantané ni ses données. Le statut BLOCKED de l'audit concerne son environnement de validation, pas l'ensemble des travaux produit autorisés.

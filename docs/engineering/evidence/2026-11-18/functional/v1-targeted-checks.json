@@ -1,0 +1,38 @@
+{
+  "date": "2026-11-18",
+  "base_commit": "c4c4d2a7",
+  "candidate": "Checkout principal avec modifications locales",
+  "environment": { "platform": "macOS 27.2 ARM64", "rust": "1.99.1", "node": "24.22.2", "playwright": "1.66.0-alpha-2026-11-09", "chrome": "157.0.8103.79" },
+  "source_sha256": {
+    "src/ingress.rs": "81e1f2617cafb6f6df6bf699c5d29b112f6e0d0b5c2600fe1daf68071c4eabe8",
+    "tests/ingress.rs": "6220b4b0349fdca4534163611b0006fa756c33c2a5af8253a4a03118c7145350",
+    "src/control_fs.rs": "cb5395a463ecad6004264734340c60029c154c84963f5ffd35275fd83c46ba2e",
+    "src/provider/selection.rs": "fee31bf383f232a7c2e8a26155d03948eae0466ed0bb5bea6ef77b4e2c835c40",
+    "src/operations.rs": "7fe38fc1a121f7434127df30bce5d4715e3872aea347afd1bf5cb8640faff470",
+    "tests/provider_readiness_cli.rs": "24339beafd54b22da13efc93b02e5206ae2d45f765fde831591dfb6109ed54ff",
+    "front/src/control-view.ts": "0cf9a48e911454ffc5cb62047ebe3854d25d3626717c3ce5d4b2b4db25ad34dc",
+    "front/tests/browser.mjs": "72a736b55f1a449d1ed0349a1a0346879c3da0740d95ae703001e8b1c21a0d88"
+  },
+  "browser_bundle": { "file": "index-Bd4Bi-BU.js", "sha256": "dc4d07111ccb22016a2cdb88373dd40208e2ae26b46631738523183c525805fe" },
+  "checks": [
+    { "command": "cargo test --locked --offline --lib ingress::tests", "status": "PASS", "passed": 8 },
+    { "command": "cargo test --locked --offline --test ingress", "status": "PASS", "passed": 6 },
+    { "command": "cargo test --locked --offline --test provider_readiness_cli", "status": "PASS", "passed": 3 },
+    { "command": "cargo test --locked --offline --test provider_config", "status": "PASS", "passed": 9 },
+    { "command": "cargo test --locked --offline --lib control_fs::descriptor_tests", "status": "PASS", "passed": 4 },
+    { "command": "cargo test --locked --offline --test control_fs", "status": "PASS", "passed": 15 },
+    { "command": "npm run build", "workdir": "front", "status": "PASS" },
+    { "command": "npm test", "workdir": "front", "status": "PASS", "passed": 29 },
+    { "command": "npm run test:browser", "workdir": "front", "status": "PASS", "scope": "Harnais Playwright, Chrome headless, fixtures HTTP loopback, scénario principal et frontière d’identité." }
+  ],
+  "observations": [
+    "Le relais retient au plus 48 SSE sur 64 échanges. Le 49e stream reçoit 429, une lecture ordinaire répond 204 et la fermeture libère une place. Deux tests en mémoire couvrent les deux fins de vie du permis.",
+    "La vraie CLI résout le profil puis qualifie uniquement la présence et les métadonnées du fichier déclaré, sans l’ouvrir. Un abonnement absent reste sélectionné et les chemins et valeurs restent exclus du rapport.",
+    "Le test Chrome a observé le défaut Agent à froid avant correction. Après correction, il vérifie attente, 503, reprise, page partielle, correspondance exacte, ouverture du worker, réponse tardive ignorée, cache récent et refus d’autorisation courant. Le harnais vérifie aussi la génération privée de HTML et PNG masqués."
+  ],
+  "limits": [
+    "Les preuves SSE couvrent le budget après réception des en-têtes upstream. V4, la capacité et les conditions LAN/cloud restent distinctes.",
+    "La preuve CLI ne couvre aucune authentification native ni accès au fichier de credential. Les quatre sessions avec fournisseurs gardent leurs propres états.",
+    "Le nouveau scénario web s’appuie sur des fixtures locales. Les déploiements, l’identité OIDC nominative et la vue fédérée gardent leurs propres états."
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "audit_after": {
+    "event_count": 199,
+    "head_hash": "96f40479a1d79683d943e67b55f264a728dedaf2292db5063369bbaf17a7f4c3",
+    "valid": true
+  },
+  "audit_before": {
+    "event_count": 103,
+    "head_hash": "f08f3bc1fd7efb597bf4101b30b3756396e5dacffc6aca7e7a1559acac54c317",
+    "valid": true
+  },
+  "auth_mode": "api",
+  "cleanup": "removed",
+  "cli_exit_status": 0,
+  "cli_sha256": "ba083cdbf14f3ab62b524ea3c502ac148b9a8dbb3e0652e84396eced742ee779",
+  "client": "codex",
+  "ended_at": "2026-11-18T14:18:54.120976+00:00",
+  "host": "Darwin/arm64",
+  "image_requested": "agentsandbox-worker:functional-audit-providers-20261118",
+  "model_requested": "gpt-6-luna",
+  "original_unchanged": true,
+  "profile": "codex-api",
+  "quota_released": true,
+  "result_sha256": "8afb63f0fefffcada2816119a4a926f45155166d63a0f3762a5a46751165f51b",
+  "rootful_exception_requested": true,
+  "runtime": "docker",
+  "runtime_result": "terminal",
+  "session_id": "8a92fa0a-7e1f-437c-99c1-4b5725d653fa",
+  "stage": "complete",
+  "started_at": "2026-11-18T14:15:41.278236+00:00",
+  "status": "PASS"
+}

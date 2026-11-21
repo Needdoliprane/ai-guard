@@ -1,0 +1,27 @@
+{
+  "status": "PASS",
+  "mode": "session_trace",
+  "browser": "157.0.8103.79",
+  "session": "8a92fa0a-7e1f-437c-99c1-4b5725d653fa",
+  "count": 28,
+  "terminalEventId": "97ebebb2-d4d7-45aa-a57c-bb887268c58a",
+  "decisionEventId": "2d24168b-9796-47a2-8bd7-1d317134a403",
+  "fileEventId": "160086d7-0130-4e32-83e3-04517614c041",
+  "exportEventId": "0899751e-0fcf-412f-8230-31dcde9afbbd",
+  "fileSha256": "8afb63f0fefffcada2816119a4a926f45155166d63a0f3762a5a46751165f51b",
+  "auditExportSha256": "d92f529e858d5834e25eb0fa8fc3e695d113e3d7f6fab5ea89ac7aa0fca6424e",
+  "client": "codex",
+  "authMode": "api",
+  "requestedModel": "gpt-6-luna",
+  "runtime": "docker",
+  "checks": [
+    "services HTTP",
+    "Playwright et Chromium",
+    "identité viewer",
+    "journal de la session",
+    "décision et résultat dans le journal",
+    "fichier et export dans la vue Fichiers",
+    "téléchargement JSONL de la session"
+  ],
+  "node": "v24.22.2"
+}

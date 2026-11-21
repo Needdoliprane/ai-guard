@@ -1,0 +1,32 @@
+{
+  "status": "PASS",
+  "mode": "session_timeout_trace",
+  "transport": "tty",
+  "browser": "157.0.8103.79",
+  "session": "ed25c482-c48f-42ac-a9b2-4579d03ae857",
+  "count": 16,
+  "workerOutcome": "timeout",
+  "timeoutLabelsVerified": true,
+  "terminalKind": "command.failed",
+  "terminalExitCode": 137,
+  "transportStopReason": "authorized worker duration elapsed",
+  "terminalEventId": "64377119-bdab-459d-a871-67ffe6506fec",
+  "decisionEventId": "ef44c2b4-7267-4c3f-9157-a13e880aec2a",
+  "fileEventId": null,
+  "exportEventId": null,
+  "fileSha256": null,
+  "auditExportSha256": "6556762349d6cc81a0e227297d7646ca6461672d10b6c8bed3097ba1759752d2",
+  "client": "claude_code",
+  "authMode": "api",
+  "requestedModel": "claude-haiku-5-5",
+  "runtime": "docker",
+  "checks": [
+    "services HTTP",
+    "Playwright et Chromium",
+    "identité viewer",
+    "journal de la session",
+    "décision et résultat dans le journal",
+    "téléchargement JSONL de la session"
+  ],
+  "node": "v24.22.2"
+}

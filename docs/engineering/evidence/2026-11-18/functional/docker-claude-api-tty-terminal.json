@@ -1,0 +1,9 @@
+{
+  "session_id": "ed25c482-c48f-42ac-a9b2-4579d03ae857",
+  "terminal": "terminal",
+  "quota_held": false,
+  "exit_code": 137,
+  "timed_out": true,
+  "stop_reason": "authorized worker duration elapsed",
+  "cleanup": "removed"
+}

@@ -1,0 +1,37 @@
+{
+  "date": "2026-11-18",
+  "candidate": "Checkout principal c4c4d2a7 avec modifications locales",
+  "environment": { "platform": "macOS ARM64", "rust": "1.99.1", "compose": "5.6.1" },
+  "source_sha256": {
+    "src/api.rs": "bb648db41e279f88f64f550ff5c4ee9edf16f3900459f86d67f44b949e1c9636",
+    "src/audit.rs": "90d3ccd60b79720a43e3fe161503c93a0bf76a9ddd8efa941966910ecfc5f432",
+    "src/model.rs": "8967a18f69783bf554ef2cb37e72e66307c3ec7a7c0e5649712f1d808d759701",
+    "Cargo.toml": "45f31d9f0d58c4c72d7ee5a4c2dd031f84c3d853de9ec8473950145eee9577e2",
+    "tests/e2e/provider_matrix.rs": "ccdcdf37e9d9e9d831d2db57ff96d87ffd8fe874c5bfce78e3e3d43d58ba24c6",
+    "tests/e2e/run_provider_case.py": "1528b7282b3443fdaeb6820bacadc33e2b52913013e8ee37329e21f74e8fa5a3",
+    "tests/e2e/interactive_driver.py": "349b804251ee8592e7bb3e2e766f6222f0b5cb3c4f9a7926d50700e715e09042",
+    "deploy/docker/compose.keycloak.yaml": "ed302397857713b2aca342540542ecd440b50bb96de60925b8ce9f3e3b07d7b0",
+    "deploy/docker/keycloak-realm.json": "ba0834060236ce8693ea74f371ee86e4a32d653fc652f67a8854a8ff5e2820f9",
+    "deploy/docker/keycloak_data/realm-export.json": "ec503f02d7c0e0432c951b3769fa6127f2ae83371f2d5f2ac7c4cfc2987a79b9"
+  },
+  "checks": [
+    { "command": "cargo test --locked --offline --lib model::tests::event_namespace", "status": "PASS", "passed": 2 },
+    { "command": "cargo test --locked --offline --test control_migration explicit_migration_preserves_prior_events_and_verified_backup -- --exact", "status": "PASS", "passed": 1 },
+    { "command": "cargo test --locked --offline --example provider-matrix", "status": "PASS", "passed": 5 },
+    { "command": "cargo run --locked --offline --example provider-matrix -- …", "status": "PASS", "scope": "Les six rapports CLI historiques ne satisfont pas l’identité immuable; les quatre rapports Chrome sans rattachement admissible ne prêtent aucun statut au candidat.", "result": "provider-matrix-replay.json" },
+    { "command": "python3 -I -B tests/e2e/interactive_driver.py --self-test", "status": "PASS", "scope": "Vrai PTY sur processus synthétique. Deux reçus visibles distincts, sortie native et termios restauré. Le défaut du texte masqué a été observé avant correction." },
+    { "command": "Contrôle Python sur valeurs synthétiques du harnais fournisseur", "status": "PASS", "scope": "Un ID d’image canonique, refus de trois identifiants non canoniques, six cas de concordance positive et négative entre le lancement et l’inspection terminale, sans moteur." },
+    { "command": "docker compose --env-file /dev/null -f deploy/docker/compose.keycloak.yaml config avec et sans --profile keycloak-demo-http", "status": "PASS", "scope": "Activation explicite, bind canonique RO, image épinglée, loopback, quatre comptes de découverte configurés et deux clients publics PKCE S256. Ancien export inchangé." }
+  ],
+  "runtime_observation": {
+    "docker_server": "29.9.2",
+    "docker_desktop_state": "stopping",
+    "podman_info_exit": 125,
+    "podman_error": "ssh_handshake_eof"
+  },
+  "limits": [
+    "Le périmètre D4 du Store n’inclut pas le relais absent du checkout principal. Les lectures gardent les types historiques d’événements et leur hash. Revue indépendante du port ciblé terminée.",
+    "Les essais compilés et la relecture des rapports n’ont lancé ni fournisseur ni moteur. Le nouveau harnais requiert le contrôle d’une image terminale réelle lors de la prochaine exécution.",
+    "Le profil Keycloak est validé statiquement. Démarrage, attribution de l’identité, autorisation et refus applicatifs restent à éprouver."
+  ]
+}

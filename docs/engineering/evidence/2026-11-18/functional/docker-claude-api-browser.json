@@ -1,0 +1,27 @@
+{
+  "status": "PASS",
+  "mode": "session_trace",
+  "browser": "157.0.8103.79",
+  "session": "24e76951-143e-4be2-a65e-cfc2ba051ea4",
+  "count": 29,
+  "terminalEventId": "0e9ac315-fb43-4bcb-8768-8ca2eb46da71",
+  "decisionEventId": "c24e02b5-43e4-4ff3-9934-b035071622f7",
+  "fileEventId": "b36d4867-bae0-48ea-960a-e019b0893b4e",
+  "exportEventId": "96d8b767-0af2-4de8-8899-4533da9aebb6",
+  "fileSha256": "26d908f989e2b5c739ebce876656b1c8910b58a3cbba07821e9f037611274854",
+  "auditExportSha256": "cfa951e537bc49b2a1208b76c5c2ab460d644d85832560b7d285853f7368a974",
+  "client": "claude_code",
+  "authMode": "api",
+  "requestedModel": "claude-haiku-5-5",
+  "runtime": "docker",
+  "checks": [
+    "services HTTP",
+    "Playwright et Chromium",
+    "identité viewer",
+    "journal de la session",
+    "décision et résultat dans le journal",
+    "fichier et export dans la vue Fichiers",
+    "téléchargement JSONL de la session"
+  ],
+  "node": "v24.22.2"
+}

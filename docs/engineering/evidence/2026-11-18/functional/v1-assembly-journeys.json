@@ -1,0 +1,117 @@
+{
+  "date": "2026-11-18",
+  "checkout": "v1-assembly-20261118",
+  "base_commit": "5b3c2ed044d5fdf4bbfb7489762d1eb17684fcd6",
+  "macos_binary_sha256": "a28ed9665f5ef881b540431f229845d2bdcb60c79506155c809c6c24ea35fba4",
+  "macos_binary_preserved": "target/qa-cache-archive/previous-tested-agentsandbox",
+  "guarded_preservation_in_checkout": {
+    "target/debug/agentsandbox": "target/qa-cache-archive/guarded-tested-agentsandbox",
+    "target/debug/deps/agentsandbox-69e55698f80c28a5": "target/qa-cache-archive/guarded-tested-unit",
+    "src/broker/service/server.rs": "target/qa-cache-archive/guarded-tested-server.rs",
+    "src/broker/service/result_auth_tests.rs": "target/qa-cache-archive/guarded-tested-result_auth_tests.rs"
+  },
+  "source_sha256": {
+    "front/src/control-view.ts": "8dc73a54612eeeb047469f42a9dbccd8883c5befeaf79475e9d12881d40245ef",
+    "front/src/control.ts": "3cfec834aa1ba7bbb7fd5c8ac9c1ba3b75c36e3e78a43e4f20f3756d12b04ce7",
+    "front/tests/browser_unified.mjs": "bd3410b78a140d904617720645648ada4f6f42785d4e27f07925ff4c859c729d",
+    "front/tests/control.test.mjs": "d3a9505e9f7fc5438cf7864f43487524532324e7258154fea432a75692155d1d",
+    "front/tests/browser_provider_live.mjs": "3ff54e62d40b2226371f1abb6074bb6ef73b6949cc5c8deda5252b66b0d77567",
+    "front/tests/browser_failure.mjs": "f8fa04692934a933aa0931baaeb76521376bd45860344031688ab12d402d5ca0",
+    "tests/broker_runtime.rs": "610c51b1d2488ab75bddbed1a18bd3566bb150b43a3bed396a79463c0cea943f",
+    "tests/support/broker_runtime.rs": "119413ddd8af7cdae6feba0a17abc8bb09c21e770309b179d8f9efc8826ea5d2",
+    "tests/e2e/interactive_driver.py": "349b804251ee8592e7bb3e2e766f6222f0b5cb3c4f9a7926d50700e715e09042",
+    "tests/e2e/run_provider_case.py": "1cc7f6017d2d3a8eef2842c763332960b22b583da5cdaa3f412ffd94b9a49185",
+    "tests/jev_contract.rs": "dac5528b17866c9bd1e9b89c1f1cadeec8ab420d4e297e52ca8a31961d5a7009",
+    "tests/jev_backends.rs": "3d30b73e79bbb77da6cffc95c57ae95a4fde6ffa5bbef05a7ca2b34c5ec3d5ee",
+    "tests/jev_typesafe_ambiguity.rs": "4d40ef2112bb6bf765ee5099a4eca70142390fcd661f075ddf002b5c1ad23762",
+    "deploy/local-ai/compose.yaml": "1a09817954108c4b0d33bda4ac2ab7b3df4e137fd94135710161854f6b6a0d2f",
+    "deploy/local-ai/Dockerfile": "d9dc8e2c802c407621ffad1022a0ecb4aa215d5975332bc874c5b56902a17fa4",
+    "deploy/keycloak-demo/compose.yaml": "31eaf165c92fde05de01316c16677dffd5dcd916be86f52253fb1b267a2e3c9c"
+  },
+  "checks": [
+    { "command": "cargo test --locked --offline --test broker_runtime", "status": "PASS", "passed": 4, "ignored": 3, "scope": "Les scénarios de perte de CLI, de perte broker et d’inspection du gardien sont compilés et ignorés par défaut; seuls les tests de diagnostic sont exécutés." },
+    { "command": "cargo test --locked --offline --test jev_contract --test jev_backends --test jev_typesafe_ambiguity -- --test-threads=1", "status": "PASS", "passed": 4, "scope": "HTTP loopback; provenance du backend, veto, indisponibilité et refus des réponses invalides." },
+    { "command": "python3 -I -B tests/e2e/interactive_driver.py --self-test", "status": "PASS", "scope": "Pseudo-terminal réel et client synthétique; deux réponses visibles, sortie native et restauration termios." },
+    { "command": "docker compose config sur deploy/local-ai/compose.yaml et deploy/keycloak-demo/compose.yaml", "status": "PASS", "scope": "Configuration uniquement. Qwen 0,5B épinglé, réseau interne, limite mémoire et swap à 1 000 000 000 octets, UID de service et publication du relais sur loopback. Activation Keycloak explicite, réseau d’identité interne et volume de démonstration dédié." }
+  ],
+  "browser_prior_agent_reopen": {
+    "status": "PASS",
+    "node": "24.22.2",
+    "typescript": "5.9.3",
+    "vite": "7.3.7",
+    "chrome": "157.0.8103.79",
+    "playwright": "1.66.0-alpha-2026-11-09",
+    "bundle": "index-UuJi7MUY.js",
+    "bundle_sha256": "5a00c15909084ea42f513d7670d37ae033dc6530b5214265fb52de4055098bd1",
+    "source_sha256": {
+      "front/src/control-view.ts": "0d53aab8d3cbc1f7acf52ded918be1f1494d4c4dc68d8b8165f3b47511de5059",
+      "front/tests/browser_unified.mjs": "a61badd8bf12afbb5c7ab275c17e80dceeb282908f24a9d8b9fce956b285beef"
+    },
+    "commands": ["tsc --noEmit", "vite build --configLoader runner", "node tests/browser_unified.mjs", "AI_GUARD_UNIFIED_SCENARIO=agent-registry-reopen node tests/browser_unified.mjs", "AI_GUARD_UNIFIED_SCENARIO=usage-links node tests/browser_unified.mjs"],
+    "scope": "Copie de recette du front assemblé; HTTP loopback et rôle viewer; avant correction un 503 tardif remplaçait le détail rouvert, après correction le dialogue conserve l’accès courant et traite le refus 403. Le cycle A→B et les liens depuis Allocations continuent de passer."
+  },
+  "browser_worker_provenance": {
+    "status": "PASS",
+    "browser": "Chromium Headless Shell 148.0.7778.96 en processus unique, GPU désactivé",
+    "node": "24.22.2",
+    "bundle": "index-DHU65RNh.js",
+    "bundle_sha256": "8cafb44d83d74f387cac1e8dfa89f65e449bc8124acfa094fa321cabc39311dc",
+    "commands": ["tsc --noEmit", "vite build --configLoader runner", "node --test --test-isolation=none tests/control.test.mjs tests/federation-control.test.mjs tests/api.test.mjs", "AI_GUARD_UNIFIED_SCENARIO=worker-provenance node tests/browser_unified.mjs", "AI_GUARD_UNIFIED_SCENARIO=agent-registry-reopen node tests/browser_unified.mjs", "node tests/browser_unified.mjs"],
+    "node_tests_passed": 24,
+    "scope": "RED avant correction sur l’empreinte de lancement absente. GREEN sur image/plan de lancement, conteneur/image/plan inspectés, valeurs historiques partielles et exclusion du champ sentinelle credentials. Même fixture viewer et portée locale que les autres scénarios.",
+    "environment_note": "Chrome système signalait une signature invalide. Le Chromium multiprocessus a échoué avant chargement de la fixture. La preuve utilise le Chromium Headless Shell local en processus unique."
+  },
+  "engine_readiness": {
+    "status": "BLOCKED",
+    "docker": {
+      "initial": "API Docker 29.9.2 et Docker Desktop stopping",
+      "final": "socket Unix absent après arrêt de Docker Desktop",
+      "desktop_start": "échec de résolution de l’application par son bundle ID, code 1",
+      "open_application_path": "kLSNoExecutableErr, même si le fichier exécutable déclaré existe",
+      "codesign_verify_strict": "signature invalide pour arm64, code 1"
+    },
+    "podman": "VM libkrun déclarée Running. podman info échoue au handshake SSH, code 125.",
+    "physical_g09": "NOT_RUN"
+  },
+  "result_and_local_model_tests": {
+    "scope": "Correctif serveur postérieur au binaire CLI précédent. Une lecture Result utilise un journal existant et refuse avant ouverture du writer si le service est clôturé ou en arrêt.",
+    "cargo_environment": "CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=2",
+    "test_binary_sha256": "27bd950839ea79f9464458c35638a1c962c50712f21e89728671b74d846fb2a8",
+    "source_sha256": {
+      "src/broker/service/server.rs": "a56daff9fe260e19e754039bc566ea5b0ed60920223b5dced300e5992c3b6f15",
+      "src/broker/service/result_auth_tests.rs": "524ac452ecdaa21df64fff7470b83d9fc27b738b70e618b1da309de1563574ac",
+      "src/broker/service/result_tests.rs": "90aed8f76af941ec926dfb94b725c29fcf4e68652db857010d5ff84f7b1d1950"
+    },
+    "cases": [
+      { "filter": "broker::service::result::tests::result_requires_acknowledged_exit_scan_and_cleanup", "status": "PASS" },
+      { "filter": "broker::service::server::result_auth_tests::result_query_requires_the_profile_runner_and_allows_inactive_control", "status": "PASS", "scope": "Service réel et deux bases derrière la gateway locale. Refus d’un viewer et d’un runner d’un autre tenant. Une lecture dans un profil vide ne crée ni journal ni writer, même lorsqu’il est clôturé ou arrêté." },
+      { "filter": "broker::service::result::tests::result_waits_during_pending_preclaim_retirement_without_claiming_cancellation", "status": "BLOCKED", "observed_test_exit": 101, "scope": "La fixture s’arrête à invocation.selection.approve_pin: control OS account home is unavailable. La transition de retraite V5 n’a pas été exercée." },
+      { "filter": "jev::local::tests::", "status": "PASS", "passed": 2, "scope": "Décision consultative, refus des champs/mesures non attestés et veto de masquage avant connexion. Aucun service Qwen joint." }
+    ]
+  },
+  "guarded_cli_and_identity": {
+    "cli_sha256": "fd1aeeb21e738e4744dd0f20ccf1c13260612d3152c6559cdf6b263d7577a616",
+    "tests_sha256": {
+      "tests/human_cli.rs": "ea98a049fe0f12f02910eb91fb4db9240877865a5d3b8ed95e6adb89e6a98ec3",
+      "tests/oidc_gateway_flow.rs": "a5c63ae472b74f4358056a66eef2180980521f4a8fe25cc07eb622ab65c6b862"
+    },
+    "checks": [
+      { "command": "cargo test --locked --offline --test broker_run_cli -- --test-threads=1", "status": "PASS", "passed": 10 },
+      { "target": "human_cli", "filter": "provision_retains_private_files_and_replays_commit_with_missing_completion", "status": "PASS" },
+      { "target": "human_cli", "filter": "human_cli_reads_exact_context_and_resource_exports_privately_and_observes_revocation", "status": "PASS" },
+      { "target": "oidc_gateway_flow", "filter": "browser_pkce_callback_is_correlated_consumed_and_delivered_once", "status": "PASS", "scope": "Gateway et fournisseur synthétique local, sans démarrage de Keycloak ni navigateur dans ce contrôle Rust." }
+    ]
+  },
+  "provider_case_port": {
+    "status": "PASS",
+    "scope": "AST Python, syntaxe Node, recette batch synthétique CLI et navigateur doublés, refus de traces divergentes, canari de conservation privée du HTML et PNG.",
+    "real_provider_and_browser": "NOT_RUN",
+    "timeout_labels": "BLOCKED",
+    "mode": "legacy_direct"
+  },
+  "limits": [
+    "Les résultats Jev et TTY utilisent des services ou programmes synthétiques et n’ouvrent aucun nouveau modèle.",
+    "Le front n’a utilisé ni IdP ni fédération réelle. Les limites déclarées de Qwen attendent les mesures réelles.",
+    "La capacité de lecture Result via le journal partagé reste à mesurer. Le correctif d’ouverture du writer ne change pas cette file."
+  ]
+}

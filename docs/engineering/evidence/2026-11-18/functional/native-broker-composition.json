@@ -1,0 +1,68 @@
+{
+  "base": "0f7c4032",
+  "overlay_base": "c4c4d2a7",
+  "scope": "isolated native Docker broker composition",
+  "cli_sha256": "588499c7dbb5d8694024442d674c34210036ef586c4b0fbe83807c74cde4e50c",
+  "compile": "PASS",
+  "regression_tests": {
+    "control_cli": 2,
+    "local_judge_gateway": 2,
+    "supervision_api": 4
+  },
+  "docker_compose_port_precedence": "PASS",
+  "native_profile": "docker_minimal",
+  "arm_timeout_requested_seconds": 60,
+  "image_id": "sha256:7e76101dc6cbcaa5bb9ec5ca2dc14e024494844380e17ef6497caeefbefcfd39",
+  "runtime_test": "FAIL",
+  "failure": {
+    "audit_seq": 6,
+    "broker_step": "failure_observed",
+    "enforcer_stage": null,
+    "event_id": "79b4926d-ee68-403d-a258-a7f842cb69a0",
+    "kind": "broker.batch.failure",
+    "phase": "admission",
+    "runtime_effect": "unknown",
+    "runtime_stage": null
+  },
+  "journal_admission_ack_revision": 4,
+  "journal_prepare_ack_revision": 6,
+  "worker_state": "preparing",
+  "hold_quota": true,
+  "assigned_container": null,
+  "work_volume_found": false,
+  "matching_docker_volume_events": 0,
+  "fault_injected": false,
+  "deadline_observation": "NOT_RUN",
+  "retained_test_resources": true,
+  "diagnostics_candidate": {
+    "cli_sha256": "c975a58407a872e8e8e5ccb98dfc8e58726a5b210f7c04db44c2bea796c2836e",
+    "compile": "PASS",
+    "frontend_model_tests_passed": 12,
+    "harness_tests_passed": 4,
+    "runtime_test": "FAIL",
+    "failure": {
+      "audit_seq": 6,
+      "broker_step": "workspace_volume_create",
+      "enforcer_stage": null,
+      "event_id": "9d012397-6d4d-4191-ad08-35225a0e4467",
+      "kind": "broker.batch.failure",
+      "phase": "import",
+      "runtime_effect": "unknown",
+      "runtime_stage": null
+    },
+    "worker_state": "preparing",
+    "hold_quota": true,
+    "assigned_container": null,
+    "fault_injected": false,
+    "deadline_observation": "NOT_RUN",
+    "source_file_count": 185,
+    "source_manifest_sha256": "3f881ec14b45033b3bfd83e8860f8629e19a43794b4c4e9bdbed7ca26f7a3c85",
+    "diagnostic_unit_tests_passed": 1
+  },
+  "docker_storage_blocker": {
+    "create_exit": 1,
+    "engine_diagnostic": "Error response from daemon: create [qa-volume]: error while creating volume root path '/var/lib/docker/volumes/[qa-volume]': mkdir /var/lib/docker/volumes/[qa-volume]: read-only file system",
+    "created_volume_owned": false,
+    "volume_present_after_probe": false
+  }
+}

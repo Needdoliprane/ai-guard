@@ -1,0 +1,23 @@
+{
+  "session_id": "99c3b234-fa8c-4aa4-8d4e-97662b3ce720",
+  "decisions": [
+    {
+      "seq": 219,
+      "outcome": "review",
+      "rule": "human_review_required"
+    },
+    {
+      "seq": 221,
+      "outcome": "allow",
+      "rule": "human_approval"
+    }
+  ],
+  "completed": [
+    0
+  ],
+  "created": [
+    "review-receipt.txt"
+  ],
+  "original_unchanged": true,
+  "workers_before_approval": 0
+}

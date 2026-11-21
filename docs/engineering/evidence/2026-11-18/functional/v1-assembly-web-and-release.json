@@ -1,0 +1,373 @@
+{
+  "date": "2026-11-18",
+  "base_commit": "5b3c2ed044d5fdf4bbfb7489762d1eb17684fcd6",
+  "checkout": ".worktrees/v1-assembly-20261118",
+  "archived_binary": {
+    "path": "target/qa-cache-archive/decision-web-capacity-agentsandbox",
+    "sha256": "99bb3f3e0308a1981071a3121f923496c20c6267bae41f522d3d55c2a56992c4"
+  },
+  "source_sha256": {
+    "src/api.rs": "c653da7ad5725028cac9af9dcfd5f0dfd4537506d3260f456f4d01687c6c7cef",
+    "src/api/store_io.rs": "0505b361ca578b76b01a3c474932b5345bf5339df762ddfd85ba5e34f7085212",
+    "src/api/read_execution_tests.rs": "ee6348e76b518cf8569805b9d8fdde7e0fd714574618e7714dcb9491fba6fe6c",
+    "front/src/api.ts": "56b789108f13ee12bf5c35f118634f60fe2d7f15b2e064aee5a7bc838867b2a2",
+    "front/src/main.ts": "3a5804b4d6682e352ac6d8d5822d6377e611329c67bfd5f70e5ff6f088caadf2",
+    "front/tests/api.test.mjs": "ea82f62dbcd816535a86de0dbfa93258f5cc286617433582a924cd4d09cc4bf9",
+    "front/tests/browser_decision_live.mjs": "62682606e86c44fe29d2797fa487104725f9fb59bb026ed11d737d957f742754",
+    "tests/e2e/run_browser_decision.py": "845218eda1e428d870f5d567503b7df17bf5180aa022315fc94f438844dd3888",
+    "tests/e2e/run_provider_case.py": "7f0ce0355a6809b8f001837f19c5bbdc501bcf007abe9aa580793871a88b4659",
+    "tests/e2e/test_run_provider_broker.py": "78c722d53b87a2d3075ab570fddb849592cbb777c11fe682a228739a898d1c74",
+    "tests/audit_signed_checkpoint_cli.rs": "0027972ec0ea756963aa898bff71d2029f5da2cbca1efca7992c7dcd04a3f8d0",
+    "tests/control_migration.rs": "fd720c786d51edb64aaae5c38da2b4917d7d135409ce41287da4e081e75444cf",
+    "tests/audit_signed_checkpoint_verify_audit.rs": "8eee0d26d3941100c1770f805ab76363be355b9bb1d9936bdd5668b2ef3c0bf9",
+    "src/operations.rs": "482abcfde7163d27adb158a0769b0a58102500bb843f9f7feda0bd73caf63c21",
+    "src/operations/source_snapshot/release_metadata.rs": "637d412b16aca147d05f6a2dfc825c4750bd1682fbcc2de5b1c4a801d510e50b",
+    "tests/release_metadata_verify.rs": "807c0ea8bb57ff3bcfb20a2c26ffbe2d74367843d3c9722a9ca2e077b8c66345",
+    "images/worker.Dockerfile": "95ea16c67d45af057fab1615c2be3bee09d9edd4052d1c72ffb11086b37f6a53",
+    "images/control.Dockerfile": "fcd60741633e94af7264d2cfa9f7331b0dc38ac20f32fd92911689e5e2eb1e7c",
+    "LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+  },
+  "web": {
+    "before_results": [
+      {
+        "runner": {
+          "status": "FAIL",
+          "stage": "chromium",
+          "scope": "real Rust services, no model or worker",
+          "cli_sha256": "01d9dbd6bd3a9f59943fe2ec2ed3475a631223e76226adde4cadd1f16add2999",
+          "html_sha256": "c3d19ca5cc785b56600518204b05a852e9399d7e3f0f58b9f242943ea7cdeec1",
+          "cli_audit": {
+            "event_count": 3,
+            "head_hash": "98cef0629948dbd8451ede1f00576e758718e218bbf88f5990f110b9017ca152"
+          },
+          "workers": 0,
+          "browser_status": "FAIL",
+          "diagnostic": "browser decision journey failed"
+        },
+        "browser": {
+          "mode": "rust_decision_audit_web",
+          "status": "FAIL",
+          "stage": "connexion et détails Sécurité",
+          "reason": "L’étape n’a pas abouti.",
+          "artifacts": {
+            "directory": "browser-failure-cqKjfH",
+            "files": [
+              "page.html",
+              "page.png"
+            ]
+          }
+        }
+      },
+      {
+        "runner": {
+          "status": "PASS",
+          "stage": "complete",
+          "scope": "real Rust services, no model or worker",
+          "cli_sha256": "a3f0384f2e2bc0aa5fdd011f102941e27f438a7b6bbad6f1c4c226e05ebf6282",
+          "html_sha256": "c3d19ca5cc785b56600518204b05a852e9399d7e3f0f58b9f242943ea7cdeec1",
+          "cli_audit": {
+            "event_count": 3,
+            "head_hash": "b5610520236ad6d7cc3d7f46f2f9f93f1c0df462209b981f66573b1a687d9510"
+          },
+          "workers": 0,
+          "browser_status": "PASS"
+        },
+        "browser": {
+          "mode": "rust_decision_audit_web",
+          "status": "PASS",
+          "tenant_id": "tenant-a",
+          "audit_verified": true,
+          "export_verified": true,
+          "foreign_decision_absent": true,
+          "decisions": [
+            {
+              "seq": 2,
+              "id": "5f43ea9f-9d17-4d28-b05a-1b1db14aab14",
+              "hash": "4f1cfd0055a1533a0888d1f5a6046eab46f8dcf05cf06b0399cd5179fdc9aac0",
+              "outcome": "allow",
+              "rule": "exact_allowlist"
+            },
+            {
+              "seq": 3,
+              "id": "f6e716d3-1ec9-4d81-8afb-ac703ade6a49",
+              "hash": "b5610520236ad6d7cc3d7f46f2f9f93f1c0df462209b981f66573b1a687d9510",
+              "outcome": "deny",
+              "rule": "strict_default_deny"
+            }
+          ]
+        }
+      },
+      {
+        "runner": {
+          "status": "FAIL",
+          "stage": "chromium",
+          "scope": "real Rust services, no model or worker",
+          "cli_sha256": "a3f0384f2e2bc0aa5fdd011f102941e27f438a7b6bbad6f1c4c226e05ebf6282",
+          "html_sha256": "c3d19ca5cc785b56600518204b05a852e9399d7e3f0f58b9f242943ea7cdeec1",
+          "cli_audit": {
+            "event_count": 3,
+            "head_hash": "6724a186a51f96d62691bc679b45a8912d17ee17e3126305c425b3c34113022b"
+          },
+          "workers": 0,
+          "browser_status": "FAIL",
+          "diagnostic": "browser decision journey failed"
+        },
+        "browser": {
+          "mode": "rust_decision_audit_web",
+          "status": "FAIL",
+          "stage": "lecture du journal Sécurité",
+          "reason": "Le dashboard indique que le journal est indisponible.",
+          "browser_http_errors": [
+            {
+              "path": "/api/events",
+              "status": 502
+            }
+          ],
+          "artifacts": {
+            "directory": "browser-failure-ofCllY",
+            "files": [
+              "page.html",
+              "page.png"
+            ]
+          }
+        }
+      }
+    ],
+    "red_read_burst": {
+      "fixture": "12 séquences de 6 lectures normales simultanées sur le même tenant, vrais gateway/dashboard loopback",
+      "http_status_counts": {
+        "200": 48,
+        "502": 24
+      },
+      "upstream_identity_429_translation": "502 Vérification d’identité refusée."
+    },
+    "red_artifact_sha256": {
+      "page.html": "a1a815d95869f8124cc5ee5a60ab02f5cd73d0e3d5ee87dc1957352e95177800",
+      "page.png": "977ae5a0db28526deda0a294a20a5df624e5487bb63f283b523159fb6ee13663"
+    },
+    "capacity_test": "PASS api::read_execution_tests::dashboard_reports_read_capacity_and_can_reload_after_recovery: 429 capacity_exhausted puis 200 après libération des quatre places.",
+    "frontend_tests": "PASS TypeScript/Vite, 26 Node API/SSE/contrôle, 4 scénarios Chromium de timeout sur fixture.",
+    "after_results": [
+      {
+        "runner": {
+          "status": "PASS",
+          "stage": "complete",
+          "scope": "real Rust services, no model or worker",
+          "cli_sha256": "99bb3f3e0308a1981071a3121f923496c20c6267bae41f522d3d55c2a56992c4",
+          "html_sha256": "723a77e4a670046dd80796bf83950cbe7af39c3931fd96a0486903d976ac1a5d",
+          "cli_audit": {
+            "event_count": 3,
+            "head_hash": "2ba7be6d757103ec7fb4cc36e7f21702af0e29d82d52c75086c0ee0ab65586cd"
+          },
+          "workers": 0,
+          "browser_status": "PASS"
+        },
+        "browser": {
+          "mode": "rust_decision_audit_web",
+          "status": "PASS",
+          "tenant_id": "tenant-a",
+          "audit_verified": true,
+          "export_verified": true,
+          "foreign_decision_absent": true,
+          "decisions": [
+            {
+              "seq": 2,
+              "id": "aaf4c6c5-5cd1-4eef-83a5-318a09dd5040",
+              "hash": "0e5b605142b7f64e29977a71a03aec374d4b6de389a1b39a01337c047b041949",
+              "outcome": "allow",
+              "rule": "exact_allowlist"
+            },
+            {
+              "seq": 3,
+              "id": "9d72eefd-4474-419c-b9a8-6fff7a7e93ae",
+              "hash": "2ba7be6d757103ec7fb4cc36e7f21702af0e29d82d52c75086c0ee0ab65586cd",
+              "outcome": "deny",
+              "rule": "strict_default_deny"
+            }
+          ]
+        }
+      },
+      {
+        "runner": {
+          "status": "PASS",
+          "stage": "complete",
+          "scope": "real Rust services, no model or worker",
+          "cli_sha256": "99bb3f3e0308a1981071a3121f923496c20c6267bae41f522d3d55c2a56992c4",
+          "html_sha256": "723a77e4a670046dd80796bf83950cbe7af39c3931fd96a0486903d976ac1a5d",
+          "cli_audit": {
+            "event_count": 3,
+            "head_hash": "a9faf2de942fa3cdb0dd618c4a93cc206e7782e55847daba34c26f738c3d0309"
+          },
+          "workers": 0,
+          "browser_status": "PASS"
+        },
+        "browser": {
+          "mode": "rust_decision_audit_web",
+          "status": "PASS",
+          "tenant_id": "tenant-a",
+          "audit_verified": true,
+          "export_verified": true,
+          "foreign_decision_absent": true,
+          "decisions": [
+            {
+              "seq": 2,
+              "id": "1439f34b-7b72-4313-a155-498ef9408a21",
+              "hash": "bc814cd38d478d2c8e4058ef1550be533914dca28f4e6172c2adfc67c04bb187",
+              "outcome": "allow",
+              "rule": "exact_allowlist"
+            },
+            {
+              "seq": 3,
+              "id": "c420e684-9522-40fd-854e-21c5ddc9233a",
+              "hash": "a9faf2de942fa3cdb0dd618c4a93cc206e7782e55847daba34c26f738c3d0309",
+              "outcome": "deny",
+              "rule": "strict_default_deny"
+            }
+          ]
+        }
+      },
+      {
+        "runner": {
+          "status": "PASS",
+          "stage": "complete",
+          "scope": "real Rust services, no model or worker",
+          "cli_sha256": "99bb3f3e0308a1981071a3121f923496c20c6267bae41f522d3d55c2a56992c4",
+          "html_sha256": "723a77e4a670046dd80796bf83950cbe7af39c3931fd96a0486903d976ac1a5d",
+          "cli_audit": {
+            "event_count": 3,
+            "head_hash": "1817e594e73eb2517dc20ec27ad934c4e4f8f1bc9c6bef2b777b7ee2c1c75e2f"
+          },
+          "workers": 0,
+          "browser_status": "PASS"
+        },
+        "browser": {
+          "mode": "rust_decision_audit_web",
+          "status": "PASS",
+          "tenant_id": "tenant-a",
+          "audit_verified": true,
+          "export_verified": true,
+          "foreign_decision_absent": true,
+          "decisions": [
+            {
+              "seq": 2,
+              "id": "8088f34d-d7df-480b-8e28-5d1e5cd47f5f",
+              "hash": "075c9e8ae97769716bad02be5c481dd34847ae0ad271199452c0f1ad15db1b6b",
+              "outcome": "allow",
+              "rule": "exact_allowlist"
+            },
+            {
+              "seq": 3,
+              "id": "18607422-3d6a-419c-90b2-ae2998912406",
+              "hash": "1817e594e73eb2517dc20ec27ad934c4e4f8f1bc9c6bef2b777b7ee2c1c75e2f",
+              "outcome": "deny",
+              "rule": "strict_default_deny"
+            }
+          ]
+        }
+      }
+    ],
+    "scope": "Vrais binaires gateway/dashboard, SQLite privé séparé A/B, moteur Rust, vrai CLI verify-audit, Chromium Headless Shell ARM64, JSONL audité. Aucun fournisseur ni worker. La borne UI reste par session."
+  },
+  "release_checks": {
+    "tests": "PASS 8 tests release_metadata_verify, binaire réel et fixtures de source et artefacts.",
+    "local_artifact": "PASS release manifest + release verify --expect-manifest-sha256 avec le vrai binaire natif du lot G08, fourni aussi comme artefact.",
+    "verification": [
+      "release verify: MATCH",
+      "manifest   sha256=566fbeb51b760b57e6bffccf7ae34b3ddb88c4b8567f1832f1e0f198f802a69c format=ai-guard.release-manifest/1 producer=agentsandbox 0.0.1",
+      "source     sha256=7dc3e500b5356c8a607a1028f5c58b471bb09a10348be5cda3267a1b13ef6d99 layout=ai-guard:public-distribution:v1 files=739 bytes=14855354",
+      "locks      Cargo.lock sha256=fc791b8e509e77c8806009dc363eee5ab353df1f70cb32db7c7874615dfc9797 packages=340; front/package-lock.json sha256=67bf96ad6088e3eccaf853f41f24097db09ae8bc9a7ac58ffce2263489b42f80 packages=65",
+      "sbom       sbom.cdx.json sha256=9fc6bba0fcd5f203d1719b1d07b8714ae1f2113c44b430fd945912bf4f2d1be9 CycloneDX 1.6 pre-build",
+      "inputs identity 6052650a396da29fe7fc1343d80f1dee1b030a13d97bf98597c8aef181e2f155 (build inputs only; declared: CODEX_VERSION=none, CLAUDE_CODE_VERSION=none)",
+      "target     unknown (not observed)",
+      "artifacts  1/1 matched",
+      "expected manifest SHA-256 matched (declared by the operator)",
+      "limits     declared values are not authenticated; this is not a signature, a build attestation, SLSA provenance or anti-rollback"
+    ],
+    "manifest_artifacts_sha256": {
+      "SHA256SUMS": "52042c6aa81918b44efcd137c0f24d3e5426128b1919f25ef4d15095dc65addd",
+      "release-manifest.json": "566fbeb51b760b57e6bffccf7ae34b3ddb88c4b8567f1832f1e0f198f802a69c",
+      "sbom.cdx.json": "9fc6bba0fcd5f203d1719b1d07b8714ae1f2113c44b430fd945912bf4f2d1be9"
+    },
+    "license": "PASS contrôle statique du dernier stage des deux Dockerfiles. Images reconstruites et lecture sous UID1000 NOT_RUN.",
+    "scope": "Empreinte calculée localement pendant la recette. La provenance de distribution, la transmission de confiance et la qualification release restent à établir."
+  },
+  "audit_checks": {
+    "passed": [
+      "audit_signed_checkpoint_cli::operator_journey_create_export_verify_offline",
+      "audit_signed_checkpoint_cli::a_failed_write_is_an_io_failure_that_keeps_the_partial_file_and_resumes",
+      "audit_signed_checkpoint_cli::no_private_key_material_in_outputs_exports_or_logs",
+      "audit_signed_checkpoint_verify_audit::verify_audit_uses_setup_v2_viewer_token_and_preserves_legacy_default",
+      "control_migration::explicit_migration_preserves_prior_events_and_verified_backup",
+      "control_migration::migration_never_overwrites_backup_and_audit_full_rolls_back_ddl"
+    ],
+    "before": "Le canari de reprise comparait /private/var/ à /var/ malgré la canonisation réelle du produit. Échec de fixture conservé. La même cible passe après canonisation de la valeur attendue.",
+    "scope": "Procédures locales sur vrais fichiers. Restauration d’un tenant avec worker ou claims actifs toujours ouverte."
+  },
+  "broker_provider": "PASS 7 cas hors ligne de test_run_provider_broker.py. Le reçu d’export doit reprendre l’UUID exact de la commande. L’oracle Playwright du batch broker et les vrais parcours fournisseurs restent à exécuter.",
+  "limits": "Docker répond localement. Compte OS de contrôle non résolu, Podman code 125 et readyz Kubernetes local EOF. Image Qwen distante hors d’atteinte du DNS de la session. G01–G12 restent à qualifier.",
+  "integrated_native_recheck": {
+    "artifact": {
+      "path": "target/qa-cache-archive/web-export-release-agentsandbox",
+      "sha256": "a7b6c9500dc93a63432ecb8548b2445a698c9cf0c5723e547538a937be1025f0"
+    },
+    "runner": {
+      "status": "PASS",
+      "stage": "complete",
+      "scope": "real Rust services, no model or worker",
+      "cli_sha256": "a7b6c9500dc93a63432ecb8548b2445a698c9cf0c5723e547538a937be1025f0",
+      "html_sha256": "723a77e4a670046dd80796bf83950cbe7af39c3931fd96a0486903d976ac1a5d",
+      "cli_audit": {
+        "event_count": 3,
+        "head_hash": "9824ea2e4148d195660354e224cc61c0ea888233626d9508c96fe071c8e3f11f"
+      },
+      "workers": 0,
+      "browser_status": "PASS"
+    },
+    "browser": {
+      "mode": "rust_decision_audit_web",
+      "status": "PASS",
+      "tenant_id": "tenant-a",
+      "audit_verified": true,
+      "export_verified": true,
+      "foreign_decision_absent": true,
+      "decisions": [
+        {
+          "seq": 2,
+          "id": "4beb434e-898b-4321-87c1-fd84fa0130c7",
+          "hash": "b93d6ab279effba896c041e8579c2da4625510c909cec49790ce9f92c3645061",
+          "outcome": "allow",
+          "rule": "exact_allowlist"
+        },
+        {
+          "seq": 3,
+          "id": "a9bd55c5-0147-48e9-9423-94c8d60c1a58",
+          "hash": "9824ea2e4148d195660354e224cc61c0ea888233626d9508c96fe071c8e3f11f",
+          "outcome": "deny",
+          "rule": "strict_default_deny"
+        }
+      ]
+    },
+    "release_verify": [
+      "release verify: MATCH",
+      "manifest   sha256=1b48e5c2578b3c5d5e2c562cda17924d6feb130cfc2de9d5cc985befabd6647a format=ai-guard.release-manifest/1 producer=agentsandbox 0.0.1",
+      "source     sha256=5c443e36269c6a6c277e74ec6802e928bf482eb7b91ccf586037d905c145d063 layout=ai-guard:public-distribution:v1 files=739 bytes=14856013",
+      "locks      Cargo.lock sha256=fc791b8e509e77c8806009dc363eee5ab353df1f70cb32db7c7874615dfc9797 packages=340; front/package-lock.json sha256=67bf96ad6088e3eccaf853f41f24097db09ae8bc9a7ac58ffce2263489b42f80 packages=65",
+      "sbom       sbom.cdx.json sha256=ac36dde2c231925db483fa828b69736d16970e513d3e970fca5533ad4f3f49c0 CycloneDX 1.6 pre-build",
+      "inputs identity ce4d547bfc5a993eca1fb9a407af932839dd0acb554d625f00328b85fa6cced6 (build inputs only; declared: CODEX_VERSION=none, CLAUDE_CODE_VERSION=none)",
+      "target     unknown (not observed)",
+      "artifacts  1/1 matched",
+      "expected manifest SHA-256 matched (declared by the operator)",
+      "limits     declared values are not authenticated; this is not a signature, a build attestation, SLSA provenance or anti-rollback"
+    ],
+    "documents_sha256": {
+      "SHA256SUMS": "ae652c0d4ee603b2ced4be5aafa62d2f3f2a7faee612659c93bab4fa265df0b6",
+      "release-manifest.json": "1b48e5c2578b3c5d5e2c562cda17924d6feb130cfc2de9d5cc985befabd6647a",
+      "sbom.cdx.json": "ac36dde2c231925db483fa828b69736d16970e513d3e970fca5533ad4f3f49c0"
+    },
+    "export_ack_loss_regression": "v1-assembly-export-recovery.json",
+    "scope": "Binaire recompilé après le correctif d’export. La recette Chromium et la vérification locale du manifeste ont été rejouées sur ce binaire."
+  },
+  "preserved_source_paths": {
+    "front/src/main.ts": "target/qa-cache-archive/decision-web-capacity-main.ts"
+  }
+}

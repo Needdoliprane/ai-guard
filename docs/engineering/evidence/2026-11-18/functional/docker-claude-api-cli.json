@@ -1,0 +1,32 @@
+{
+  "audit_after": {
+    "event_count": 199,
+    "head_hash": "96f40479a1d79683d943e67b55f264a728dedaf2292db5063369bbaf17a7f4c3",
+    "valid": true
+  },
+  "audit_before": {
+    "event_count": 103,
+    "head_hash": "f08f3bc1fd7efb597bf4101b30b3756396e5dacffc6aca7e7a1559acac54c317",
+    "valid": true
+  },
+  "auth_mode": "api",
+  "cleanup": "removed",
+  "cli_exit_status": 0,
+  "cli_sha256": "ba083cdbf14f3ab62b524ea3c502ac148b9a8dbb3e0652e84396eced742ee779",
+  "client": "claude-code",
+  "ended_at": "2026-11-18T14:18:53.843103+00:00",
+  "host": "Darwin/arm64",
+  "image_requested": "agentsandbox-worker:functional-audit-providers-20261118",
+  "model_requested": "claude-haiku-5-5",
+  "original_unchanged": true,
+  "profile": "claude-api",
+  "quota_released": true,
+  "result_sha256": "26d908f989e2b5c739ebce876656b1c8910b58a3cbba07821e9f037611274854",
+  "rootful_exception_requested": true,
+  "runtime": "docker",
+  "runtime_result": "terminal",
+  "session_id": "24e76951-143e-4be2-a65e-cfc2ba051ea4",
+  "stage": "complete",
+  "started_at": "2026-11-18T14:15:41.276004+00:00",
+  "status": "PASS"
+}

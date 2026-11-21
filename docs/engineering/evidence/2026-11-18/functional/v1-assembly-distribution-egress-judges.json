@@ -1,0 +1,249 @@
+{
+  "date_utc": "2026-11-18",
+  "base_commit": "5b3c2ed044d5fdf4bbfb7489762d1eb17684fcd6",
+  "candidate_worktree": ".worktrees/v1-assembly-20261118",
+  "judges": {
+    "scope": "Services Rust natifs, Chromium et deux tenants SQLite à chaque cas. Protocoles TypeSafe et Qwen avec endpoints synthétiques loopback.",
+    "replay": "python3 -B tests/e2e/run_browser_decision.py --cli \"$QA_BIN\" --front-dir \"$QA_FRONT_DIR\" --judge-mode \"$QA_MODE\" --evidence-dir \"$QA_EVIDENCE\"",
+    "typesafe_expected": [
+      "jev-latest",
+      "jev-fixture-version",
+      "accord puis veto Jev",
+      "refus Rust sans troisième POST"
+    ],
+    "sources_sha256": {
+      "tests/e2e/run_browser_decision.py": "00193d531b807ce1e43f6103d01b7e268fa456f7b12192bb6de3e40b7f376ecc",
+      "front/tests/browser_decision_live.mjs": "72382b1185e7aa94e09ca925f3daca40415f96cfe399aab52790cc7a05150fe7"
+    },
+    "cases": {
+      "rust": {
+        "rust_services": {
+          "status": "PASS",
+          "stage": "complete",
+          "judge_mode": "rust",
+          "scope": "real Rust services, no model or worker",
+          "cli_sha256": "1808b9e1228a872b7e665bb18fe8a12574845962a26eba777ded78333df10c1f",
+          "html_sha256": "9d5a4418ed133f5a70f411411ef960cf30079480d909af3150b1c231a93b0318",
+          "bundle_js_sha256": {
+            "index-Cm5OapoU.js": "1be7c9e06f51fb2bf3cc984149605524beef89af292a1b88ded26e931ff02680"
+          },
+          "cli_audit": {
+            "event_count": 3,
+            "head_hash": "8b747f6e63084b01725a629246b34434ffca74cc05c451d6c7a804efaaacb0cc"
+          },
+          "workers": 0,
+          "browser_status": "PASS"
+        },
+        "chromium": {
+          "mode": "rust_decision_audit_web",
+          "status": "PASS",
+          "tenant_id": "tenant-a",
+          "audit_verified": true,
+          "export_verified": true,
+          "foreign_decision_absent": true,
+          "decisions": [
+            {
+              "seq": 2,
+              "id": "1c0d00d2-9dcf-42eb-ae31-50faf3a37d35",
+              "hash": "cb49512a03757f9130da5341ea0f6b13d77528829529071396d7ee5b949af9e3",
+              "outcome": "allow",
+              "rule": "exact_allowlist"
+            },
+            {
+              "seq": 3,
+              "id": "861a8bb9-9efb-4a88-9da0-d591b36aa040",
+              "hash": "8b747f6e63084b01725a629246b34434ffca74cc05c451d6c7a804efaaacb0cc",
+              "outcome": "deny",
+              "rule": "strict_default_deny"
+            }
+          ]
+        }
+      },
+      "typesafe-fixture": {
+        "rust_services": {
+          "status": "PASS",
+          "stage": "complete",
+          "judge_mode": "typesafe-fixture",
+          "scope": "real Rust services, no model or worker",
+          "cli_sha256": "1808b9e1228a872b7e665bb18fe8a12574845962a26eba777ded78333df10c1f",
+          "html_sha256": "9d5a4418ed133f5a70f411411ef960cf30079480d909af3150b1c231a93b0318",
+          "bundle_js_sha256": {
+            "index-Cm5OapoU.js": "1be7c9e06f51fb2bf3cc984149605524beef89af292a1b88ded26e931ff02680"
+          },
+          "fixture_calls": 2,
+          "cli_audit": {
+            "event_count": 4,
+            "head_hash": "eca3a6b776882f0148f3e1ed4692c8155b517ef306a1182b683ff8ddd3290968"
+          },
+          "workers": 0,
+          "browser_status": "PASS"
+        },
+        "chromium": {
+          "mode": "typesafe_fixture_decision_audit_web",
+          "status": "PASS",
+          "tenant_id": "tenant-a",
+          "audit_verified": true,
+          "export_verified": true,
+          "foreign_decision_absent": true,
+          "decisions": [
+            {
+              "seq": 2,
+              "id": "52c360c0-c3cf-477b-a65e-131828aff975",
+              "hash": "c703543793e9fbd30cb2746cdb0232ed772a459761af31ca8bfa7630f3e17abb",
+              "outcome": "allow",
+              "rule": "exact_allowlist"
+            },
+            {
+              "seq": 3,
+              "id": "bed378fb-0d91-43c8-86ae-0d74b523fcc8",
+              "hash": "eb0614cb62fb5c45649ff5afd2813068bf064df38cab6ac45fc1fbcbaaf4aa95",
+              "outcome": "deny",
+              "rule": "strict_default_deny"
+            },
+            {
+              "seq": 4,
+              "id": "f624d2aa-d724-4bdc-a838-826f8af97d16",
+              "hash": "eca3a6b776882f0148f3e1ed4692c8155b517ef306a1182b683ff8ddd3290968",
+              "outcome": "deny",
+              "rule": "jev_deny"
+            }
+          ]
+        }
+      },
+      "local-fixture": {
+        "rust_services": {
+          "status": "PASS",
+          "stage": "complete",
+          "judge_mode": "local-fixture",
+          "scope": "real Rust services, no model or worker",
+          "cli_sha256": "1808b9e1228a872b7e665bb18fe8a12574845962a26eba777ded78333df10c1f",
+          "html_sha256": "9d5a4418ed133f5a70f411411ef960cf30079480d909af3150b1c231a93b0318",
+          "bundle_js_sha256": {
+            "index-Cm5OapoU.js": "1be7c9e06f51fb2bf3cc984149605524beef89af292a1b88ded26e931ff02680"
+          },
+          "fixture_calls": 2,
+          "cli_audit": {
+            "event_count": 4,
+            "head_hash": "3fa272d7d1c90f3654ffb657264aaf6fc75da89fb9021c29282730a779d5ab69"
+          },
+          "workers": 0,
+          "browser_status": "PASS"
+        },
+        "chromium": {
+          "mode": "local_model_fixture_decision_audit_web",
+          "status": "PASS",
+          "tenant_id": "tenant-a",
+          "audit_verified": true,
+          "export_verified": true,
+          "foreign_decision_absent": true,
+          "decisions": [
+            {
+              "seq": 2,
+              "id": "eec0f65b-6bd8-498a-bce8-6fc1d2c0bed1",
+              "hash": "055a03acde9a18354aab44b0f5a812fdc9964e94a395cf2a44e11a9b111c6104",
+              "outcome": "deny",
+              "rule": "local_openai_review_fail_closed"
+            },
+            {
+              "seq": 3,
+              "id": "ac5add78-cc4c-4e5f-a8f8-c77cd1719e49",
+              "hash": "6ecb6b6de9e282aa3d170819e5c4ea96bd7e4b16aa030cbd89bc23a6afef6316",
+              "outcome": "deny",
+              "rule": "strict_default_deny"
+            },
+            {
+              "seq": 4,
+              "id": "f7fd8810-684c-4cd4-b572-d4f2b8020032",
+              "hash": "3fa272d7d1c90f3654ffb657264aaf6fc75da89fb9021c29282730a779d5ab69",
+              "outcome": "deny",
+              "rule": "decision_backend_unavailable_or_invalid"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "installation": {
+    "status": "PASS",
+    "scope": "Vrais binaires natifs de la candidate et licence transférés localement. Aucun moteur, aucune publication.",
+    "test": "verified_native_files_run_from_a_fresh_private_installation",
+    "source_sha256": "10c277949b3d93113bf96a7fde5aa882ba2f34c14eff5867ecf9198d413ac786",
+    "test_binary_sha256": "44c2ff2810acac064829e49c9a952c7225a6233010e69aaa05d8e8ca2832e758",
+    "receipt": {
+      "diagnose": "layout.target_absent",
+      "manifest_sha256": "234e5a43397fa8439fdff7258bcad25160a4c016c167979b6ec9eed0a50d392b",
+      "native_files_verified": 3,
+      "original_source_and_installation": "MATCH",
+      "replacement": "artifact-changed",
+      "source_sha256": "1e81ff0bd9e3810fd71730c9c410fc613fc58c02b2dc7dd88300346b002a9304"
+    },
+    "native_cli_sha256": "1808b9e1228a872b7e665bb18fe8a12574845962a26eba777ded78333df10c1f",
+    "native_diagnose_sha256": "921ccdcd3dcde0cb6efd10c7d565c8417f50ab47a96f920be4140dedc890f8d9"
+  },
+  "browser_oidc_refresh": {
+    "status": "PASS",
+    "scope": "Chromium réel, dashboard et gateway Rust en boucle locale, deux ressources d’un tenant SQLite et émetteur OIDC signé de test.",
+    "test": "chromium_oidc_refresh_withdraws_administration_and_keeps_personal_resources",
+    "code_flow": "Client public, PKCE S256, aucun secret client admis par la fixture, renouvellement par le timer réel du navigateur.",
+    "observed": {
+      "rust_public_status_http": 200,
+      "browser_public_status_http": 200,
+      "admin_purge": true,
+      "old_stream_closed": true,
+      "single_personal_resource_returned": true,
+      "provider_refresh": true,
+      "durable_authentication_records": 5,
+      "business_audit_valid": true
+    },
+    "prep_failure": {
+      "status": "FAIL",
+      "stage": "public_status",
+      "canary": "Règle Chromium générique bloquant aussi 127.0.0.1. Même canari HTTP 200 après exclusion du loopback littéral, gardes navigateur actives."
+    },
+    "related_http_test": "successful_web_refresh_withdraws_administration_and_preserves_personal_scope",
+    "related_http_test_status": "PASS",
+    "frontend_bundle_sha256": "1be7c9e06f51fb2bf3cc984149605524beef89af292a1b88ded26e931ff02680",
+    "test_binary_sha256": "57d738f3118680f701d95f6286cd91b8d672a5f57b78cbdb9d630bab8239c10c",
+    "sources_sha256": {
+      "front/tests/browser_oidc_refresh.mjs": "71e92ac8fcbfa1f4c2f55f9e879c89d34ae1c35f2f466867f4459b55d142a9eb",
+      "tests/oidc_gateway_flow.rs": "2ab9a33921281c7f3105c4b631bde5e9ad7ba7a9dada4b2c5f96f9e98216a574",
+      "tests/support/oidc_browser.rs": "33eee68a8716368e64d24af39034a633a1887a119653d5d9157e9e56538c6b08",
+      "tests/support/oidc_fixture.rs": "512814967a4e313542db278f78792403879a79bff1264c6648f0b6d7b82af617"
+    }
+  },
+  "offline_worker_journey": {
+    "status": "BLOCKED",
+    "test": "real_cli_copies_a_project_and_exports_after_one_audited_worker",
+    "stage": "doctor",
+    "reason": "account_home_unavailable",
+    "cause": "UID de la session de recette introuvable via la résolution de compte de contrôle. Blocage avant création de la fixture.",
+    "production_cli_exit_code": 1,
+    "cargo_test_exit_code": 101,
+    "runtime": "Docker Desktop 29.9.3",
+    "effect_observed": "Aucun worker lancé dans cette recette",
+    "source_sha256": "8085a6615610bc6be09fe7d6ed9b362d163b85bb7787a53e7855040be0dd3c01",
+    "test_binary_sha256": "d5ceddbfe56dd18780d5d9ad8581ea16fef705a2d0ad99d5e5ae5efd16d5ca9a"
+  },
+  "egress_registry": {
+    "status": "PASS",
+    "scope": "Noyau de politique, SDK HTTP et vrai CLI sur un gateway de recette et un Store15 préparé en fixture. Aucune connexion aux destinations de la politique.",
+    "tests": [
+      "egress::policy_tests::empty_policies_deny_and_both_policies_must_allow_the_exact_destination",
+      "runner::egress_policy::tests::real_reserved_sdk_preserves_e1_receipts_retries_and_revoke",
+      "api::human_sources::owned_policy_inspection_cli_tests::real_cli_inspect_prepare_apply_keeps_observed_scope_cas_and_operation"
+    ],
+    "test_binary_sha256": "6e0d64d65c71d47921ef1ca9bdff270a1f5e0d393da3f07f5fcef3d0558730a0",
+    "cli_sha256": "1808b9e1228a872b7e665bb18fe8a12574845962a26eba777ded78333df10c1f",
+    "observations": [
+      "refus par défaut et intersection exacte tenant/session",
+      "remplacement avec reçu durable et rejeu",
+      "révocation demandée",
+      "inspecter, préparer et appliquer au même périmètre"
+    ],
+    "open": [
+      "raccord opérateur format 15 depuis une installation neuve",
+      "raccord du canal et garde des effets runtime",
+      "connexion, observation réseau et fermeture appliquée"
+    ]
+  }
+}

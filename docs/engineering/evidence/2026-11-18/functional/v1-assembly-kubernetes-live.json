@@ -1,0 +1,59 @@
+{
+  "date": "2026-11-18",
+  "checkout": ".worktrees/v1-assembly-20261118",
+  "base_commit": "5b3c2ed044d5fdf4bbfb7489762d1eb17684fcd6",
+  "runtimes": {
+    "cluster": "Docker Desktop",
+    "context": "docker-desktop",
+    "endpoint_scope": "TLS loopback",
+    "api_ready": "PASS",
+    "nodes_ready": 1,
+    "node_architecture": "arm64",
+    "podman_machine": "Running",
+    "podman_rootless_client": "BLOCKED handshake SSH code 125",
+    "podman_direct_rootful_socket": "BLOCKED erreur d’E/S overlay-images/images.lock"
+  },
+  "doctor": {
+    "status": "PASS",
+    "version": "v1.36.1",
+    "authority_fingerprint": "065a9e66a9ff248d751e3fb3222bab174f87a629bbe6e792eeb9f41229cc8734",
+    "pod_security_enforce": "restricted",
+    "permission_coverage": "queried_actions_only",
+    "access_review_count": 12,
+    "admission_available": false,
+    "remaining_gaps": [
+      "network_enforcement_not_proven",
+      "container_confinement_not_qualified",
+      "per_pod_pid_limit_not_proven",
+      "temporary_filesystem_noexec_not_proven",
+      "worker_log_persistence_not_prevented",
+      "workspace_transfer_not_implemented",
+      "exec_attach_not_implemented",
+      "durable_deadline_not_implemented",
+      "control_audit_admission_not_connected",
+      "service_account_rbac_not_qualified"
+    ]
+  },
+  "real_preflight": {
+    "status": "PASS",
+    "command": "cargo test --locked --offline --test kubernetes_preflight_cli real_loopback_cluster_preflight -- --ignored --exact --test-threads=1 --nocapture",
+    "operation_id": "6c0d97e0-e3ed-42ff-b03c-8cdcd22e70bd",
+    "request_audit_seq": 3,
+    "result_audit_seq": 4,
+    "audit_head": "c904e640c0127e804827244f78bc1d57b8a909ff88adc49fa91a1d84901f38d7",
+    "worker_count": 0,
+    "pod_count_before": 0,
+    "pod_count_after": 0,
+    "namespace_cleanup": "PASS",
+    "rbac_cleanup": "PASS",
+    "temporary_token_files_removed": true,
+    "image_reference": "local/ai-guard-preflight-qa@sha256:2175c51348979e99eb6c7d8ebe3b4667c7871f22bb1accef75ad554c8f084d0a",
+    "scope": "Vrai serveur Kubernetes, TokenRequest de recette sous RBAC scoped, TLS validé, admission dry-run. Vrais gateway et SQLite privés. Référence d’image synthétique, aucun téléchargement ni worker lancé."
+  },
+  "source_and_artifacts_sha256": {
+    "tests/kubernetes_preflight_cli.rs": "cb34a30cec82bd8b9fa9f3714b1b842430105abc97946b56d722a80e2bb1becf",
+    "deploy/kubernetes/local-inspection.json": "ffcc78a9c966fb72b9a773693271377f1f2068c2ff775727c2f5916f4fe8ca99",
+    "deploy/kubernetes/local-preflight.json": "ae6b1f196065f32ef30c1361b1bf5a7cfa16805e33cde0b33b09b782c98285cb",
+    "target/qa-cache-archive/web-export-release-agentsandbox": "a7b6c9500dc93a63432ecb8548b2445a698c9cf0c5723e547538a937be1025f0"
+  }
+}

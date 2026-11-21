@@ -1,5 +1,7 @@
 # Interface de supervision
 
+Ce document est la référence pour l'identité visuelle et les vues du dashboard. Le [périmètre livré](#périmètre-livré) reste une consultation `viewer` ; les [vues utilisateur et administration](#vues-utilisateur-et-administration-unifiée--cible-à-livrer) sont une cible obligatoire à implémenter et qualifier. Le [contrat d'identité et de configuration](sso.md) fixe les permissions et profils attendus. Les preuves visuelles datées ne qualifient pas les fonctions futures.
+
 ## Direction de conception
 
 Le guide détaillé du mainteneur reçu le 30 octobre 2026 a guidé la refonte livrée en QA. Le front antérieur, avec barre latérale claire et accents turquoise, a été remplacé par le header clair et la navigation sombre fixes. La référence est transposée à **ai-guard**, à ses neuf vues et à ses données de supervision ; elle ne transforme pas le dashboard en page de vente ou en parcours fictif de dix chapitres. Les [preuves et captures réelles](engineering/evidence/2026-10-30/editorial-ui/README.md) identifient le rendu déployé.
@@ -27,15 +29,42 @@ Pour ai-guard, les titres structurent les vues, les actions essentielles se rep�
 
 La revue d'un changement visuel compare les vues principales à cette référence et vérifie desktop/mobile, thèmes clair/sombre, navigation clavier, focus, contrastes, mouvement réduit et activité dense. Elle inclut les états chargement, vide, partiel, périmé, déconnecté, interdit et erreur. Les captures complètent les parcours fonctionnels avec données réelles ; les preuves de l'interface livrée restent dans [VALIDATION.md](engineering/VALIDATION.md).
 
+## Vues utilisateur et administration unifiée — cible à livrer
+
+Complément du mainteneur, 31 octobre 2026 : l'IHM doit refléter les [axes de configuration](sso.md#configuration-par-axes-indépendants), l'identité, les permissions effectives et le périmètre autorisé. **À implémenter et qualifier.** Le front actuel ne prend en charge que l'identité `viewer` d'un tenant dans [ses types](../front/src/types.ts) et [son client API](../front/src/api.ts). Les preuves des neuf vues existantes ne qualifient pas les parcours administrateur ci-dessous.
+
+Conserver une seule application frontend et une identité visuelle commune, avec des vues utilisateur et administrateur adaptées. La navigation, les informations et les commandes découlent d'un contrat typé d'identité, de périmètres et de capacités établi par le contrôle Rust ; le navigateur ne déduit pas des droits d'un nom de compte ou d'un claim non vérifié. Le nom externe de rôle reste configurable. Un même utilisateur peut disposer de permissions différentes selon son périmètre ; distinguer le contexte personnel et l'administration lorsque les deux sont autorisés.
+
+| Vue | Informations et parcours attendus |
+|---|---|
+| Utilisateur | Ses sandboxes et les ressources explicitement partagées avec lui, agents/sous-agents, sessions, demandes, décisions, événements, résultats et exports autorisés ; limites applicables, état de connexion du client IA et paramètres qu'il peut réellement modifier |
+| Administrateur | Vue unifiée de l'organisation et des tenants explicitement administrés : utilisateurs et appartenances, agents/sous-agents, sessions, sandboxes, workers, brokers/hôtes/runtimes, quotas, usage observé, politiques, décisions, audit et incidents ; gestion selon les seules permissions déléguées |
+| Synthèse à 360° | Situation globale puis accès aux détails par utilisateur, tenant autorisé, projet, session, agent, worker ou broker ; filtres cohérents entre vues, liens de causalité et retour au contexte sans devoir consulter un dashboard par worker |
+| Configuration et diagnostic | Profils IA effectifs, modèle, mode abonnement/API/interne, provenance des réglages, paramètres réseau/TLS et identité locale/OIDC selon les droits ; prérequis manquants, restrictions administratives et actions de reprise explicites, sans afficher de credential |
+
+La vue à 360° couvre tout le périmètre autorisé, y compris plusieurs brokers ou plusieurs tenants rattachés à une organisation lorsque le contrôle l'autorise. Elle ne donne aucun accès implicite aux autres clients. Les droits sur métadonnées, contenus sensibles, export et mutations sont distincts ; voir une ressource ne donne pas automatiquement le droit d'en consulter tous les messages ou de l'administrer. La configuration personnelle simple sans SSO ne doit pas imposer les écrans de gestion d'entreprise.
+
+Le control plane autorise et agrège les sources ; le frontend ne fusionne pas des périmètres en faisant autorité et ne reçoit aucun credential global. Les bases clients restent distinctes. Chaque synthèse précise portée, filtres, période, provenance, fraîcheur et sources absentes ou déconnectées. Un total global ne se déduit pas d'une page chargée ; aucune collecte partielle ne devient zéro activité, aucune réservation ne devient consommation réelle ou montant facturé. Les états et configurations affichés sont fournis par les API, sans compteur ni capacité inventés.
+
+Le changement de rôle, de périmètre, la révocation, l'expiration ou la déconnexion doivent invalider les lectures et abonnements concernés et retirer les données devenues interdites, y compris détails ouverts et caches. Les URL directes, recherches, exports et flux temps réel respectent les mêmes autorisations côté serveur. Les refus, limitations et mises à jour manquantes restent visibles avec un moyen de reprise approprié. Le dashboard conserve les thèmes, la navigation clavier, les commandes stables et la lisibilité à 320/390 px et sous charge.
+
+Les opérations de gestion passent par des contrats API Rust explicites, validés et audités avant effet ; aucun accès moteur depuis le navigateur. Ne pas ajouter de commande sans effet, d'écran de démonstration ni de sélection locale « admin » pour simuler ce comportement. La livraison exige ensemble les contrats serveur, l'agrégation autorisée, les vues frontend, la documentation et les [preuves de rôles et de fraîcheur](engineering/TEST_STRATEGY.md#identité-individuelle-sso-et-découverte--à-qualifier).
+
 ## Périmètre livré
 
 Le dossier `front/` contient une interface TypeScript et Vite sans framework ni dépendance JavaScript d’exécution. Les neuf vues sont en français : vue d’ensemble, agents, actions, sécurité, fichiers, sandboxes, workers, quotas et allocations. La production utilise les fichiers statiques de `front/dist/`, servis par le service Rust dashboard. Aucun hébergement public ni service cloud n’est nécessaire.
+
+Dans le journal, l’arrivée d’un événement conserve le défilement horizontal et le focus sur la trace sélectionnée. Échap restitue le focus à cette trace après rafraîchissement. Si elle a quitté la page, le focus revient au titre de la vue.
+
+L’onglet **Commande** d’un résultat signale un délai dépassé et présente le motif de l’arrêt lorsqu’il est fourni par le collecteur. Le code de sortie, la durée et la trace brute restent accessibles.
 
 La vue d’ensemble présente les comptes fournis par `/api/overview`, les décisions, le journal récent, la santé des services, les ressources disponibles et l’intégrité du journal. Une valeur absente ou `null` est affichée « Inconnu » ; zéro reste affiché comme zéro. Aucun pourcentage de progression, consommation CPU, coût, débit, agent ou conteneur de démonstration n’est généré dans l’application.
 
 Le statut « Flux connecté » indique une connexion SSE ouverte. Il ne constitue pas une preuve que le moteur de conteneurs ou un agent est opérationnel. Les horodatages sont affichés dans le fuseau du navigateur, avec la date complète dans le titre de l’heure et dans le détail.
 
 ## Authentification et frontières de confiance
+
+Fonctionnement livré du parcours `viewer`, distinct de l'identité nominative locale ou OIDC à livrer :
 
 - Le formulaire demande le jeton **viewer**. Le champ est immédiatement vidé lorsqu’une tentative commence.
 - Le jeton vit seulement dans une instance JavaScript en mémoire. Aucun cookie, paramètre d’URL, `localStorage`, `sessionStorage` ou IndexedDB ne le conserve.
@@ -70,6 +99,8 @@ La recherche transmet `q`, `agent_id`, `sandbox_id`, `project_id`, `kind`, `deci
 
 Le sélecteur de période propose toutes les périodes, la dernière heure, 24 heures et 7 jours. Il fixe une date `from` RFC3339 au moment du choix et l’affiche sous les filtres. Cette date reste identique lors d’une actualisation, d’un filtrage, d’une navigation, de la pagination et de l’export ; elle est recalculée uniquement au choix d’une autre période. L’absence de borne `to` conserve l’arrivée des nouveaux événements en direct. Le filtre SSE utilise `received_at`, comme l’API, et se replie sur `timestamp` seulement si l’horodatage de réception n’est pas disponible ou exploitable. Les types et le client prennent également en charge une borne `to` facultative.
 
+Si le chargement des événements précédents échoue, le journal conserve les lignes affichées et propose de réessayer au curseur courant. Si le flux déplace ce curseur pendant la lecture, la page devenue obsolète est écartée pour éviter un trou dans l’historique affiché. Le focus clavier reste sur l’action de reprise, puis rejoint le résumé de pagination lorsque la dernière page est atteinte. Un refus d’identité ferme la session.
+
 Les vues Actions, Sécurité et Fichiers sont des projections des événements chargés ; leur pied de tableau indique le nombre affiché et le nombre chargé. La vue Fichiers se fonde sur les types `file.*`, `files.*`, `artifact.*`, `workspace.diff*`, `workspace.snapshot*`, `workspace.import*` et `workspace.export*`. Elle ne parcourt pas le système de fichiers. Un détail expose les données brutes reçues lorsque les chemins ou différences sont fournis dans l’événement.
 
 L’export utilise un `fetch` authentifié, puis un `Blob` et une URL objet temporaire. Il reprend tous les filtres appliqués : `q`, `agent_id`, `sandbox_id`, `project_id`, `kind`, `decision` et les bornes de période `from`/`to`. Il inclut tous les résultats correspondants, sans reprendre `before`, `after` ou `limit` de pagination. Sans filtre appliqué, il contient le journal complet retourné par l’API. Les filtres sont figés au clic pour toute la requête d’export. Le jeton n’est jamais ajouté au lien de téléchargement.
@@ -93,6 +124,8 @@ Les quotas exposent les ressources réservées et les limites de la politique du
 Le relevé d’allocation utilise exclusivement les observations terminales du ledger. Les durées et produits CPU/RAM sont des chaînes décimales conservées sans conversion en nombre flottant : durée en secondes, CPU alloué en milliCPU·s et mémoire allouée en octet·ns. La provenance observée, le runtime et l’autorité fournis par la source accompagnent la période. Il affiche la méthode 1 et `billable=false`, sans prix, coût, facture ou total extrapolé à partir d’une page. L’absence d’allocation terminale laisse la durée inconnue, y compris pour un worker actif ; le signal durable d’allocation incohérente reste visible sur le worker. Un contrat incomplet, une source sans provenance observée, une méthode inconnue ou une unité invalide produit une erreur de lecture explicite.
 
 Workers et allocations utilisent une page de 50 éléments et un curseur UUID opaque fourni par l’API, avec page suivante, page précédente et retour à la première page. Une seule page de données est conservée par vue ; la position de navigation est mémorisée pendant la session. Le résultat n’annonce aucun compte global à partir du nombre d’éléments chargés. Le focus clavier reste dans la vue lors d’une pagination et les tableaux peuvent défiler horizontalement sur petit écran.
+
+Le détail Workers affiche l’autorité du lancement et celle liée à la dernière inspection, ainsi que les identifiants du runtime et les empreintes de l’image et du plan. Les champs absents dans une réponse ancienne restent affichés comme inconnus.
 
 Les états chargement, vide, erreur, lecture périmée et flux déconnecté sont distincts. Chaque lecture réussie porte sa date ; une erreur ultérieure conserve les dernières données avec leur avertissement et propose « Réessayer ». Un 401/403 ferme la session et efface les collections. Les vues se chargent à leur ouverture, puis sont relues toutes les 30 secondes lorsqu’elles sont ouvertes. Les événements `control.worker.*`, `worker.*`, `quota.*` et `allocation.*` invalident les données ; leur rafraîchissement est regroupé sur une seconde avec une seule requête en vol par ressource. Aucun appel de registre n’est envoyé pour chaque événement d’une rafale. Une reconnexion invalide également les données.
 

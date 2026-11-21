@@ -1,0 +1,14 @@
+{
+  "originally_running": {
+    "state": "running",
+    "worker_id": "44fc67d9-3a43-4805-9d2d-e114e89b4348",
+    "session_id": "428ec247-5598-402a-a4d7-700a307a8b1e",
+    "container_id": "78f2ada563083af4448e35b7441f1d1626815ea6038c1dc95804d450bd27e45f"
+  },
+  "resumed_state": "running",
+  "original_worker_reused": true,
+  "original_container_reused": true,
+  "terminal_state": "terminal",
+  "quota_held": false,
+  "cleanup_removed": true
+}

@@ -1,0 +1,135 @@
+{
+  "positive": {
+    "status": "PASS",
+    "node": "v24.22.2",
+    "browser": "157.0.8103.79",
+    "dashboardMode": "fixed",
+    "checks": [
+      {
+        "name": "services HTTP réels",
+        "status": "PASS"
+      },
+      {
+        "name": "refus serveur anonyme, invalide, runner et écritures viewer",
+        "status": "PASS"
+      },
+      {
+        "name": "bundle compilé servi par le dashboard",
+        "status": "PASS"
+      },
+      {
+        "name": "connexion UI, mémoire seule et proxy authentifié",
+        "status": "PASS"
+      },
+      {
+        "name": "SSE réel et XSS rendu comme texte déclaré",
+        "status": "PASS"
+      },
+      {
+        "name": "reconnexion SSE avec Last-Event-ID et rattrapage réel",
+        "status": "PASS"
+      },
+      {
+        "name": "téléchargement export cohérent avec la gateway",
+        "status": "PASS"
+      },
+      {
+        "name": "workers, quotas et allocations réels dans le dashboard",
+        "status": "PASS"
+      },
+      {
+        "name": "déconnexion, actualisation et absence de persistance du jeton",
+        "status": "PASS"
+      },
+      {
+        "name": "fermeture contexte et navigateur",
+        "status": "PASS"
+      }
+    ],
+    "worker": {
+      "workerId": "d6d445bd-4a5c-4d94-bd1e-4c94dd261166",
+      "attemptId": "23c28aba-0f25-40f6-b334-ec19c49150e0",
+      "containerId": "0f8fef47c71b848e5c9722a47426f85390094bd2a711d49d2d7f5232029c3ef8",
+      "allocationObservationId": "0c11696c-9393-4c66-a85a-e14936b8baa6",
+      "provenance": "observed",
+      "billable": false
+    },
+    "qa": {
+      "project": "qa-browser-4dd44169-b0ef-4b95-9ad1-3d5ef4bd4057",
+      "eventIds": [
+        "8744dc39-cf22-4954-becf-31abb7bfcf18",
+        "2ee035ca-df3c-4787-bd5f-35202029e4b4"
+      ],
+      "sequences": [
+        26,
+        27
+      ],
+      "provenance": "declared",
+      "source": "qa.browser.live",
+      "exportSha256": "fddf161857bf6b00f2ecceba1fc82be1b96c9dffc52b19c7d9b7dbcd74b3f51a"
+    },
+    "scope": "Dashboard Rust et gateway réels ; injection QA déclarée ; aucun effet runtime/fournisseur attesté."
+  },
+  "negative": {
+    "status": "BLOCKED",
+    "stage": "workers, quotas et allocations réels dans le dashboard",
+    "message": "Le worker explicite doit être présent dans la première page du registre : exécuter runtime_smoke sur ce gateway avant le navigateur.",
+    "failureArtifacts": {
+      "files": [
+        "page.html",
+        "page.png"
+      ]
+    }
+  },
+  "worker_image": "sha256:7e76101dc6cbcaa5bb9ec5ca2dc14e024494844380e17ef6497caeefbefcfd39",
+  "cli_sha256": "dcb206c13b1a0bf0f25c6e99d5340c7a1ecffcd578253dbc1af0f6d928dcab18",
+  "positive_exit_code": 0,
+  "negative_exit_code": 2,
+  "artifacts_private": true,
+  "qa_tokens_absent_from_artifact_bytes": true,
+  "worker_cli_capture": {
+    "status": "HARNESS_TIMEOUT",
+    "deadline_seconds": 120,
+    "stage": "workspace.scan.started",
+    "worker_terminal": true,
+    "held_workers": 0
+  },
+  "initial_browser_case": {
+    "status": "FAIL",
+    "stage": "workers, quotas et allocations réels dans le dashboard",
+    "message": "Le sélecteur du conteneur correspondait à deux champs de provenance."
+  },
+  "bundle_sha256": "d75a184360bb5e779c1b7d019d7382150a4f7fa3cb84d91226ed04d07e3cbf1a",
+  "audit": {
+    "error": null,
+    "event_count": 27,
+    "head_hash": "569fc37477c96b02709690a858b32e197f5b4f1fba6c9b38844151e8383de13e",
+    "valid": true
+  },
+  "export_after_interruption": {
+    "other_gateway_origin": {
+      "exit_code": 1,
+      "target_created": false
+    },
+    "admitted_gateway_origin": {
+      "exit_code": 0,
+      "target_created": true,
+      "original_unchanged": true,
+      "exported_file_sha256": "678a277f7123770d501e3aa330e35b195e243ed3f1cc7b2a4b9ac466c9cc60a1",
+      "audit": {
+        "error": null,
+        "event_count": 33,
+        "head_hash": "c1544db4c664e1c23dbac0150d188b328f9d09b6c7ee226d862a2ff16194ca08",
+        "valid": true
+      }
+    },
+    "new_audit_event_kinds": [
+      "workspace.export.requested",
+      "workspace.scan.requested",
+      "workspace.scan.created",
+      "workspace.scan.started",
+      "workspace.scan.completed",
+      "workspace.export.completed"
+    ]
+  }
+}

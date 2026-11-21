@@ -1,0 +1,9 @@
+{
+  "status": "BLOCKED",
+  "stage": "provider_profile",
+  "diagnostic": "no matching prepared client profile for this authentication mode",
+  "client": "codex",
+  "auth_mode": "subscription",
+  "runtime": "docker",
+  "model_requested": "gpt-6-luna"
+}

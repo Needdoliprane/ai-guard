@@ -1,0 +1,34 @@
+{
+  "audit_after": {
+    "event_count": 19,
+    "head_hash": "138ee23147db7c0b3c81c3dbc80021d356de3e4c3a15ed1a5796e84a8e6ed81c",
+    "valid": true
+  },
+  "audit_before": {
+    "event_count": 1,
+    "head_hash": "4b4e0e59eae3154d491b0a40c58876c885a9b4b91134ac8346feb4e1fb445cd7",
+    "valid": true
+  },
+  "cleanup_removed": true,
+  "cli_sigkill_confirmed": true,
+  "ended_at": "2026-11-18T14:53:37.078933+00:00",
+  "original_container_reused": true,
+  "original_start_reused": true,
+  "original_worker_reused": true,
+  "originally_running": {
+    "attempt_id": "1787d06d-338e-48e3-86ee-9abc2c28ad3b",
+    "container_id": "cd83ca22ddeff51fd118f89d7ca51fb0ca772d3e438e7b69c084b4ec21c7b0b9",
+    "start_operation_id": "a376c3e7-aed0-4d8a-ab82-8443d6a1527a",
+    "state": "running",
+    "worker_id": "ee078406-0b58-4b06-ad92-fe65d56082e3"
+  },
+  "quota_held": false,
+  "rootful_exception_requested": true,
+  "runtime": "docker",
+  "session_id": "5834d63d-38f8-44ce-be49-43ff6c4d4fc2",
+  "stage": "complete",
+  "started_at": "2026-11-18T14:51:48.498750+00:00",
+  "status": "PASS",
+  "terminal_state": "terminal",
+  "gateway_restart_verified": true
+}

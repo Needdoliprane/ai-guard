@@ -1,0 +1,30 @@
+{
+  "allow_rootful_runtime": true,
+  "control_image": "agentsandbox-control:functional-audit-worker-ui-20261118",
+  "control_image_id": "sha256:193d2a403bae8387d45423c599408b04615a76dc6d554208f008d083483a125e",
+  "dashboard_port": 60884,
+  "gateway_port": 60883,
+  "initial": {
+    "audit": {
+      "event_count": 1,
+      "head_hash": "9899ae331f9e1ade99ff09e3d756ec24fd12270d7a1fb0867f683870327acfba",
+      "valid": true
+    },
+    "volumes": [
+      "aigqa-dccfd8303f504dfd93c8365160652b81_audit_data"
+    ]
+  },
+  "restarted": {
+    "audit": {
+      "event_count": 1,
+      "head_hash": "9899ae331f9e1ade99ff09e3d756ec24fd12270d7a1fb0867f683870327acfba",
+      "valid": true
+    },
+    "volumes": [
+      "aigqa-dccfd8303f504dfd93c8365160652b81_audit_data"
+    ]
+  },
+  "stack": "aigqa-dccfd8303f504dfd93c8365160652b81",
+  "stage": "complete",
+  "status": "PASS"
+}

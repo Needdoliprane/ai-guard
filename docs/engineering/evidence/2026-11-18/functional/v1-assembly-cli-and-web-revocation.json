@@ -1,0 +1,76 @@
+{
+  "date_utc": "2026-11-18",
+  "base_commit": "5b3c2ed044d5fdf4bbfb7489762d1eb17684fcd6",
+  "worktree": ".worktrees/v1-assembly-20261118",
+  "runtime": "macOS arm64, Rust 1.99.1, Node 24.22.2, Playwright 1.66.0-alpha-2026-11-18",
+  "scope": "Recettes fonctionnelles sur les routeurs et bases SQLite de test, écouteurs 127.0.0.1. Les résultats restent attachés aux empreintes relevées.",
+  "oidc_native_cli": {
+    "status": "PASS",
+    "test": "native_cli_reads_then_observes_durable_membership_revocation_and_expiry",
+    "source_sha256": "fa72bb2dc9336a2534fe9f17da68a55d7cf676fc7297a303367c53d81bfafa26",
+    "cli_sha256": "a34a7632770a0729655f8bf06bc1123efb394a1d08fe17a2c072c66116a747a9",
+    "test_binary_sha256": "a860469c3e1a767e244a45b4c4475ea742e7e8f6058fb41954203cc4473bbdbc",
+    "observed": [
+      "échange PKCE accepté par émetteur signé de recette",
+      "lecture nominative et reçu d’audit",
+      "lecture refusée après retrait de l’appartenance",
+      "session fermée durablement par l’expiration naturelle",
+      "aucun fichier de credential créé"
+    ],
+    "runtime_seconds": 13.11
+  },
+  "chromium": {
+    "status": "PASS",
+    "targeted_node_tests_passed": 35,
+    "scenarios": [
+      "correlation-recovery",
+      "resource-recovery"
+    ],
+    "workers_in_fixture": 24,
+    "events_in_fixture": 60,
+    "supervision_stack_binary_sha256": "6c11858ba5190d139d7beffec27aa7277967902646e2da1a78f51e873bbf6228",
+    "source_sha256": {
+      "front/src/supervision-view.ts": "991f9b31c6ce8eb6c14626cbbe928d743a837a493aabf40e65949cf45501fb69",
+      "front/tests/browser_supervision.mjs": "9d44d9549f2c091995d5cdcdaf56dd0cd0816fa6143b032bf58b85e103753533"
+    },
+    "front_bundle_js_sha256": "b3aa6ec916a0f193249b9bb0c6043633baf496bd6fd5ab6996ebb4b4408c8cea",
+    "observed": [
+      "première panne Workers et correspondance inconnue dans la ligne et le détail",
+      "Réessayer lit le registre et révèle le worker attendu",
+      "Réessayer rétablit une lecture Ressources",
+      "révocation pendant une seconde panne purge détail et fenêtre Ressources"
+    ],
+    "prior_failure": {
+      "status": "FAIL",
+      "stage": "worker_correlation_unavailable",
+      "scenario_source_sha256": "26dafb11b68330e0233661098513545e81b4067c757f8d629cff527f9101c44d",
+      "front_bundle_js_sha256": "1be7c9e06f51fb2bf3cc984149605524beef89af292a1b88ded26e931ff02680",
+      "observed": "L’ancien détail affichait une absence de correspondance alors que le registre Workers n’avait servi aucune page.",
+      "private_artifacts_directory": "target/qa-cache-archive/browser-worker-correlation-before",
+      "artifacts_sha256": {
+        "page.html": "9bdd5d84b96b2be93919c9471625363284ef15a3a538b652eed7efe516032344",
+        "page.png": "b9d6662217bd465a8460abdf6e445fb5bbd98192b82fbdc7602d23cfd7da4027"
+      }
+    }
+  },
+  "provider_matrix": {
+    "status": "PASS",
+    "tests_run": 13,
+    "networks_used": 0,
+    "source_sha256": "4789e9e40944df6f685fbdde1552fa09b5f00e4acb986bcf2c966ef735230c2a",
+    "test_binary_sha256": "fcec7dde8f6a2fb8981428c81b530260cff7830a03ba34bc8f79649c9bcdf9b0",
+    "original_process_status": 0,
+    "original_matrix_pass_count": 8,
+    "original_contradictory_reports": 1,
+    "observed": "Le même UUID et des empreintes de candidat divergentes bloquent la case. Deux sessions indépendantes restent évaluées.",
+    "evidence_scope": "Agrégateur et rapports synthétiques, aucun appel modèle"
+  },
+  "kubernetes_workspace": {
+    "source_review": "PASS",
+    "status": "NOT_RUN",
+    "test": "inspect_workspace_cli_refuses_a_protected_name_before_any_request",
+    "cli_source_sha256": "67dd96a9d78c7917a53d50250d363576318947dae06ba1734653a1b289a9ab42",
+    "test_source_sha256": "438ee8de184c7471c4268dc205d29dfc9f7e57c6ab0c2e5ca416d19824e17531",
+    "scope": "Refus des données d’authentification dans le nom du PVC avant transport. Revue source du placement et de la régression. Les pièces primaires run-1 et run-2 restent indépendantes, aucun fingerprint n’est reclassé."
+  }
+}

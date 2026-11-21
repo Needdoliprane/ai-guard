@@ -1,0 +1,23 @@
+{
+  "status": "PASS",
+  "stage": "complete",
+  "requested_model": "jev-latest",
+  "cli_sha256": "66386c09afb48d8bb63e4aa78a1a8f5b9b2c5a39d221026aa201b475c7ae11d9",
+  "audit_seq": 2,
+  "event_count": 2,
+  "audit_head": "4b6d2d1eee5783c07702d2dc1e81321f6c17e2d4ac17a406169e4a3c99e2eed3",
+  "audit_valid_after_restart": true,
+  "gateway_reopened": true,
+  "decision_replayed": true,
+  "workers": 0,
+  "returned_model": "jev-1.14.0",
+  "provider_choice": "allow",
+  "backend": "typesafe",
+  "selection_source": "cli",
+  "configuration_sha256": "94800b3766f7ac19ba6b9cb736d68510fdee903ed55776f41b8534ce5e4bf879",
+  "confidence": 1.0,
+  "confidence_provenance": "provider_declared_not_calibrated",
+  "decision_outcome": "allow",
+  "decision_engine": "deterministic",
+  "decision_rule": "exact_allowlist"
+}

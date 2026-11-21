@@ -1,0 +1,274 @@
+{
+  "date_utc": "2026-11-18",
+  "main_base": "c4c4d2a7560d31768da08d8ad9335f4f08667344",
+  "candidate_base": "5b3c2ed044d5fdf4bbfb7489762d1eb17684fcd6",
+  "candidate_source_sha256": {
+    "tests/gateway_tenancy.rs": "9823a58b72993553513c4d03f8b9320badb09280b3595e9cb9063bd2e3f98af9",
+    "tests/broker_runtime.rs": "39f0a8cb3499f86d61fcf087373ec78e42bb18eecd937428da42a9c9f165b660",
+    "tests/support/broker_runtime.rs": "119413ddd8af7cdae6feba0a17abc8bb09c21e770309b179d8f9efc8826ea5d2",
+    "front/src/human-view.ts": "d9268c7107b9b4f87bf33bef78ddc77a9d96b40c8489dbebaca080a36a5369b0",
+    "front/tests/browser_supervision.mjs": "7ec654655f8b07769c43e393126c1f560d3dda91c5e6c82bfec8cd345e431506"
+  },
+  "release_workflow": {
+    "status": "PASS_LOCAL_SYNTHETIC",
+    "before_sha256": "d22872d121437780d826f1b02397a52e3ef3fb2cee1ef47515f8fbfbe2d7fbb9",
+    "stale_commit_before": {
+      "case": "stale_commit",
+      "exit": 0,
+      "gh_stub_calls": [
+        "verify_tag",
+        "list_releases",
+        "create_draft"
+      ],
+      "stdout": "",
+      "stderr": ""
+    },
+    "after_sha256": "187f2034ca96b59f9c2d94ad837b9fc0682880744b31dd068ccf35b96c0c5a95",
+    "draft_shell_sha256": "7b1d02f1bd58b340ef33e1b9eb758a64488a3a4d7da59854418f1d4aeed0af7f",
+    "step_simulation": {
+      "tar_version": "bsdtar 3.5.3 - libarchive 3.7.4 zlib/1.2.12 liblzma/5.4.3 bz2lib/1.0.8",
+      "network_denied": true,
+      "gh_substituted": true,
+      "cases": [
+        {
+          "case": "good",
+          "exit": 0,
+          "gh_stub_calls": [
+            "verify_tag",
+            "list_releases",
+            "create_draft"
+          ]
+        },
+        {
+          "case": "stale_commit",
+          "exit": 1,
+          "gh_stub_calls": [
+            "verify_tag",
+            "list_releases"
+          ]
+        },
+        {
+          "case": "wrong_target",
+          "exit": 1,
+          "gh_stub_calls": [
+            "verify_tag",
+            "list_releases"
+          ]
+        },
+        {
+          "case": "missing_info",
+          "exit": 1,
+          "gh_stub_calls": [
+            "verify_tag",
+            "list_releases"
+          ]
+        },
+        {
+          "case": "empty_duplicate",
+          "exit": 1,
+          "gh_stub_calls": [
+            "verify_tag",
+            "list_releases"
+          ]
+        },
+        {
+          "case": "symlink_info",
+          "exit": 1,
+          "gh_stub_calls": [
+            "verify_tag",
+            "list_releases"
+          ]
+        },
+        {
+          "case": "bad_sidecar",
+          "exit": 1,
+          "gh_stub_calls": [
+            "verify_tag",
+            "list_releases"
+          ]
+        },
+        {
+          "case": "unexpected_frontend_target",
+          "exit": 1,
+          "gh_stub_calls": [
+            "verify_tag",
+            "list_releases"
+          ]
+        }
+      ]
+    },
+    "archive_validation_block": {
+      "tar_version": "GNU tar 1.34",
+      "environment": "local Docker Desktop linux/arm64, network none, nonroot, read-only rootfs, private tmpfs",
+      "local_image_id": "sha256:5b6c2c6cbc90b6085e3f9b3086110b1eccedb643374137bfdcd1d2f5c78f6cd1",
+      "checksum_command": "sha256sum compatible output shim for shasum",
+      "cases": {
+        "good": 0,
+        "stale_commit": 1,
+        "wrong_target": 1,
+        "missing_info": 1,
+        "empty_duplicate": 1,
+        "symlink_info": 1,
+        "bad_sidecar": 1,
+        "unexpected_frontend_target": 1
+      }
+    },
+    "github_hosted_run": "NOT_RUN",
+    "real_tag_created": false,
+    "real_release_created": false,
+    "scope": "internal archive declaration and checksum consistency",
+    "declared_versions": {
+      "primary": {
+        "cargo": "0.1.0",
+        "front_package": "0.1.0",
+        "front_lock_root": "0.1.0"
+      },
+      "candidate": {
+        "cargo": "0.0.1",
+        "front_package": "0.0.1",
+        "front_lock_root": "0.0.1"
+      }
+    }
+  },
+  "gateway_audit_capacity": {
+    "status": "PASS",
+    "platform": "macOS ARM64",
+    "command": "CARGO_INCREMENTAL=0 cargo test --locked --offline --test gateway_tenancy -- --test-threads=1",
+    "gateway_sha256": "4fa8dd8a8a9b417b6ccec9655984fe62b45f854631cf1357b6627218c836f405",
+    "test_binary_sha256": "d4ef4043da8474303746667d692a2b5609914cb79eeed24244cec46cb23281ea",
+    "log_sha256": "d29c5153016c6a56b1b120307bd6a3c2acf3834b099fa049726b5c19f81db70d",
+    "passed": 2,
+    "failed": 0,
+    "ignored": 0,
+    "test_elapsed_seconds": 3.09,
+    "scenario": "real gateway process and two private SQLite tenant stores on HTTP loopback, synthetic decision request",
+    "before_restart": {
+      "limits_per_tenant": 2,
+      "tenant_a_new_decision_http": 503,
+      "tenant_a_event_count": 2,
+      "tenant_b_decision_http": 200
+    },
+    "after_restart": {
+      "limits_per_tenant": 100,
+      "tenant_a_event_count": 3,
+      "tenant_b_event_count": 2,
+      "both_chains_valid": true,
+      "both_tenant_a_receipts_replayed": true
+    },
+    "runtime_or_models": "NOT_RUN",
+    "primary_recheck": {
+      "command": "CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked --offline --test gateway_tenancy -- --test-threads=1",
+      "gateway_sha256": "13ebdbf4b8239617e8532d5661de885d95a1d0e740651257e4147fb8db8511e0",
+      "test_binary_sha256": "f9afab651b97648cac2746bcb44ec368e277d0c468fd47379e5cba757e066fce",
+      "log_sha256": "e7210d1c673eb1b64e4cf04037359b0bd2bea83ab126f890a369b536c781a013",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "elapsed_seconds": 0.84
+    }
+  },
+  "broker_crash_recipes": {
+    "command": "CARGO_INCREMENTAL=0 cargo test --locked --offline --test broker_runtime",
+    "test_binary_sha256": "41184d0d6c4e9d54227fdfd2d14f5de88e8ae75324fe1525c8a26c740834968f",
+    "log_sha256": "32c5390ad877632e0ae6d2a494767eabcba648c65cbbaf93794460d760c9550c",
+    "diagnostic_passed": 4,
+    "failed": 0,
+    "ignored": 3,
+    "actual_docker_worker_cases": "BLOCKED",
+    "observed_control_account": {
+      "effective_uid": 501,
+      "getpwuid_r_return": 0,
+      "entry_resolved": false
+    },
+    "deadline_reference": "durable Arm before worker start",
+    "physical_duration": "Docker FinishedAt minus StartedAt for the same container",
+    "clock_projection_assumption": "Docker wall clock continuous from observed event to the single post-fault sample",
+    "doctor": {
+      "exit_code": 1,
+      "expected_message": "Error: control OS account home is unavailable",
+      "log_sha256": "908ceecce14b2d2ec0652eb8278406c4d7233674db722de9131182138676ec46"
+    }
+  },
+  "chromium_resource_stream": {
+    "scenario": "resource-stream-recovery",
+    "status": "PASS_SYNTHETIC_RECORDS",
+    "scope": "actual browser, Rust routes, temporary SQLite, driven document visibility, Chromium offline emulation",
+    "pre_fix": {
+      "status": "FAIL",
+      "stage": "resource_stream_return_offline",
+      "stale_table_label_present": true,
+      "connected_banner_present": true,
+      "private_capture_sha256": {
+        "page.html": "b2c8d57909e15196ae091812c4908a2582da2cc8b4572311a7119f7230d83c22",
+        "page.png": "452b4f71e71c446172f2e0beba71d5fb53999d2a9d96d113e3addf42bdeee086"
+      }
+    },
+    "post_fix": {
+      "stale_rows_retained": 2,
+      "no_stream_offline": true,
+      "identity_http_after_retry": 200,
+      "stream_reopen_count": 1,
+      "stream_http_after_retry": 200,
+      "resources_http_after_retry": 200,
+      "focus_retained": true,
+      "logout_closes_stream": true
+    },
+    "node_tests_passed": 29,
+    "rust_fixture_sha256": "6c11858ba5190d139d7beffec27aa7277967902646e2da1a78f51e873bbf6228",
+    "pre_fix_js_sha256": "e3814860a5bce8f233f9fb09ec74ae1aaa60da518c38fed7aec6c1d0ef3c361c",
+    "post_fix_js_sha256": "cc45e9e76f857d5726c357708687f4b044b3a833dd53b4584da9dedbfd0212d4",
+    "node_version": "24.22.2",
+    "playwright_version": "1.66.0-alpha-2026-11-18",
+    "chromium_version": "148.0.7778.96",
+    "first_fix_js_sha256": "d5d72ea492a30ac17de59d98ad3523c7d8c037846e659b1a1e688535e92b45de",
+    "browser_results_final_bundle": {
+      "resource-stream-recovery": {
+        "status": "PASS",
+        "synthetic_worker_records": 24,
+        "synthetic_events": 60,
+        "log_sha256": "b8ef3d538c2687609effa5c795f18c414e1cefb6813bebc4494220c8df9f8b91"
+      },
+      "resource-stream-late-denial": {
+        "status": "PASS",
+        "synthetic_worker_records": 24,
+        "synthetic_events": 60,
+        "log_sha256": "a6f5d07f3341336dd0367d7cfee402fa4fbcc9a20e8a97359e12770dec7c677c"
+      },
+      "resource-stream-visibility-race": {
+        "status": "PASS",
+        "synthetic_worker_records": 24,
+        "synthetic_events": 60,
+        "log_sha256": "dd998dc5f163118b59bdf44efa864280a2ef595f6850237c32da4acfe13a8f47",
+        "identity_http_responses_held_at_delivery": 2,
+        "no_resource_event_or_stream_read_before_current_identity": true,
+        "details_and_export_disabled_then_restored": true
+      }
+    },
+    "late_denial_pre_fix": {
+      "status": "FAIL",
+      "stage": "resource_read_before_access",
+      "log_sha256": "712bb5f06eb902d414a9d9f99bfcfde54e7f91f642e8e897d320849a7f0ec10d",
+      "private_capture_sha256": {
+        "page.html": "b898e1386ca8753558452cf4f1aebd18cd9631bbdfd6fdd018fcfa54ed6064cd",
+        "page.png": "5c85afc67cec2934580f49f95202cc415ba273d726343fbd097cfee82354114c"
+      }
+    },
+    "visibility_race_pre_fix": {
+      "status": "FAIL",
+      "stage": "resource_visibility_waiting_current_read",
+      "log_sha256": "ac9e2a13e7758534b355d439a4c1c5d63aa947d45deb50be7fa2d1e9a9d2a526",
+      "private_capture_sha256": {
+        "page.html": "8215e7a9ec7e85e4582e0275e9fe68f68d75ad25428f3282a0cc63eef847d42b",
+        "page.png": "0da38fc26a875807c8f0805b6042dc655c9aa3f0955ecdc286faaedbe95194f2"
+      }
+    },
+    "independent_source_review": "PASS on visibility epoch, late denial and guarded details and export"
+  },
+  "keycloak_discovery_local_preflight": {
+    "status": "BLOCKED",
+    "profile_image_in_local_docker": false,
+    "pinned_base_image_in_local_docker": false,
+    "pinned_base_digest": "sha256:3f3c5f8e03c614774b4bd9173b88391fefa4153bfc010d8012d59ad825377332",
+    "network_pull_and_four_account_scenario": "NOT_RUN"
+  }
+}

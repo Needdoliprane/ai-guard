@@ -4,6 +4,10 @@
 
 Objectif : satisfaire les exigences complètes local-first/cloud et produire des preuves reproductibles, sans assimiler un lot à une qualification du produit. Rust/SQLite et frontend TypeScript existants sont conservés. Les décisions structurelles restent soumises au mainteneur.
 
+Lecture du plan : le [cycle broker permanent](#cycle-actif--broker-permanent-et-premier-batch-réel) reste un chantier applicatif distinct des [exigences d'identité et de configuration](#fonctionnalités-demandées--identité-sso-et-découverte-31-octobre). Les autres lots conservent leurs dates, gels et propriétaires historiques. Leurs chemins temporaires, noms d'agents et commandes exécutées ne sont pas des exigences durables ni des preuves d'un autre checkout. Le contrat produit canonique est [sso.md](../sso.md), les vues sont définies dans [ui.md](../ui.md) et l'avancement constaté dans [CURRENT_STATE.md](CURRENT_STATE.md).
+
+Le [programme V1](V1_DELIVERY.md) coordonne les lots parallèles, leurs dépendances, leurs critères d’acceptation et le suivi des audits. Il relie les résultats au candidat et à l’environnement réellement testés.
+
 ## Cycle actif : établir puis sécuriser la référence
 
 ### Lot P1 livré — authentification avant traitement HTTP
@@ -250,10 +254,47 @@ Contrat : endpoint déjà existant api/v1/workers/supervised-reservations, crede
 - [x] Faire relire indépendamment les changements, traiter les défauts bloquants, puis format/Clippy/tests/build et preuves courantes : 109 PASS, 1 smoke ignoré, re-probes HTTP et deux processus PASS.
 - [x] Aligner la gouvernance persistante sur un vrai produit open source complet et soigné, sans réduction en MVP/V2 ; préserver les preuves historiques. Vingt documents relus, 93 liens/234 chemins vérifiés, copies synchronisées.
 
-## Ordre des lots suivants
+## Fonctionnalités demandées — identité, SSO et découverte, 31 octobre
+
+Le [contrat canonique](../sso.md) fixe intégralement les exigences ; ce tableau organise leur livraison et leurs critères de preuve. **Tous ces comportements restent à implémenter et qualifier.** Le lot documentaire ne livre aucun d'entre eux et ne remplace pas le chantier de supervision en cours. Le SSO est facultatif à l'installation, mais son support fait partie du produit ; les exemples de parcours ne limitent pas les axes de configuration.
+
+| Identifiant | Fonctionnalité à livrer | Critère d'acceptation |
+|---|---|---|
+| CFG-01 | Configuration par axes indépendants et profils de parcours non exhaustifs | Topologie, identité, périmètres, client/authentification IA et réseau combinables selon le [contrat](../sso.md#configuration-par-axes-indépendants) ; configuration typée, priorités/provenance visibles, contraintes administratives appliquées et incompatibilités refusées sans repli ; interactions critiques qualifiées sans assimiler une combinaison non testée à une garantie |
+| INF-01 | Images construites/distribuées par le client et inférence interne | Dockerfiles et procédures sans image publique obligatoire ; URL, modèle, format compatible OpenAI précis/adaptation Claude, référence de credential et chaîne publique d'AC préparés dans le worker et liés à l'autorisation ; TLS actif, destinations internes approuvées, aucun secret de contrôle ou clé privée d'AC, aucun repli cloud ; vrais parcours sans Internet avec clients épinglés |
+| IDN-01 | Utilisateurs individuels en local et via fournisseur OIDC configurable | Identité locale ou `(iss, sub)` vérifiée, appartenances tenant et rôles côté Rust ; compatibilité des anciennes clés sans réattribution fictive |
+| SSO-01 | Clients publics Web et CLI, Authorization Code + PKCE S256 | Aucun secret client distribué ; connexion réelle, expiration/renouvellement, déconnexion/révocation, refus d'issuer/audience/signature/nonce et replay |
+| SSO-02 | Administration applicative avec mapping de rôles/claims configurable | Rôle externe `admin-ai-guard` pour la découverte, noms et chemins configurables ailleurs ; claims du jeton d'accès validés côté Rust, mapping et périmètre explicites ; vue d'administration autorisée, refus utilisateurs normaux/autres tenants/claims falsifiés ou retirés, aucune promotion en administrateur du realm ou `runner` |
+| UI-01 | Vues utilisateur et administrateur pilotées par les permissions effectives | Contrat typé Rust/frontend, navigation et actions adaptées aux droits/configuration, contexte personnel distinct, contrôles serveur sur lecture/contenu/export/mutation ; invalidation après révocation/changement de périmètre, refus aussi par URL directe et SSE |
+| UI-02 | Synthèse administrateur unifiée à 360° | [Vue globale](../ui.md#vues-utilisateur-et-administration-unifiée--cible-à-livrer) des ressources, utilisateurs, incidents, décisions, quotas et configurations autorisés sur tous les brokers concernés ; filtres et causalité vers les détails, sources/fraîcheur/couverture partielle explicites, aucun accès inter-client implicite ni faux total de pagination ; parcours réel qualifié avec thèmes et mobile |
+| TRC-01 | Identités d'exécution et délégations authentifiées | Parent, initiateur, acteur, mission et droits liés durablement ; pas d'élévation, d'usurpation ou de jeton SSO humain dans un worker |
+| TRC-02 | Chaîne demandes/réponses visibles → outils/commandes → décisions → effets | Causalité conservée sous concurrence/reprise, messages masqués/bornés, couverture partielle explicite, audit obligatoire avant effet |
+| TRC-03 | Recherche et export de preuves par utilisateur/session/agent/commande | Navigation des parents et résultats selon les droits ; audit indépendant, chaîné et points de contrôle signés, vérification et limites documentées |
+| DEM-01 | Premier essai Compose avec une clé API du fournisseur choisi | Prérequis diagnostiqués, interface disponible et première exécution réelle auditée, sans autre clé fournisseur/SSO obligatoire ; temps et étapes manuelles mesurés |
+| DEM-02 | Profil Keycloak de découverte prêt à lancer | Version épinglée, realm/clients/PKCE préconfigurés ; quatre comptes : `admin/admin` pour le realm, `admin-ai-guard/admin-ai-guard` avec le rôle `admin-ai-guard`, `user-1/user-1` et `user-2/user-2` sans ce rôle ; loopback et activation explicite, aucune donnée existante remplacée |
+| DOC-01 | Documentation découverte et raccordement entreprise | Quick start, configuration, Compose/realm, commandes CLI, diagnostic, arrêt/reprise et migration cohérents avec les comportements réellement testés |
+
+- [ ] Définir les contrats typés, migrations et règles de rattachement/revocation sans changer les frontières de confiance existantes.
+- [ ] Implémenter les parcours individuels, le connecteur OIDC et les délégations/audits avec les refus et états incomplets.
+- [ ] Livrer le packaging et les configurations de découverte ; aucune commande future n'est présentée comme exécutable avant validation.
+- [ ] Exécuter la [matrice ciblée](TEST_STRATEGY.md#identité-individuelle-sso-et-découverte--à-qualifier) avec vrai Keycloak, vrais Web/CLI et trace d'exécution, puis mesurer la cible d'essai rapide. Aucune qualification globale par fixture ou par simple démarrage du fournisseur.
+- [ ] Mettre à jour documentation et preuves au même gel, faire relire les changements de sécurité et traiter les écarts des gates G04/G06/G07/G08/G09/G12.
+
+## Stockage SQL configurable
+
+Le [contrat de stockage](ARCHITECTURE_CONTRACT.md#stockage-sql-par-tenant) conserve SQLite local et ajoute MySQL distant avec mot de passe ou avec mot de passe et mTLS. Les deux profils distants restent à implémenter et à qualifier.
+
+- [ ] Résoudre le profil dans le gateway à partir de ses références privées. Préserver la configuration SQLite existante et vérifier la liaison au tenant avant de déclarer le gateway prêt.
+- [ ] Isoler l’implémentation SQLite derrière l’API publique `Store` en préservant ses transactions et ses schémas. Porter ensuite les opérations métier complètes vers MySQL, avec un schéma versionné et des transactions InnoDB liant les quotas, les transitions, les reçus et l’audit.
+- [ ] Vérifier l’ouverture, la sauvegarde et la restauration de la cible MySQL, y compris la reprise de la chaîne et des claims. Documenter les prérequis d’une cible préparée et laisser le transfert entre bases à l’opérateur.
+- [ ] Exécuter la [matrice SQL](TEST_STRATEGY.md#stockage-sql-configurable--à-qualifier) sur les trois profils, avec le gateway réel, la CLI et Chromium. Conserver des preuves distinctes pour le prévol MySQL, l’intégration, les pannes et la restauration sous G06.
+
+## Ordre de dépendance des lots
+
+Cette séquence décrit les dépendances du chantier global. Les sous-lots déjà vérifiés ci-dessus ne sont pas à refaire systématiquement ; compléter leurs exigences et preuves encore ouvertes, ainsi que les fonctionnalités CFG/INF/IDN/SSO/UI/TRC/DEM/DOC, avant la revue de release.
 
 1. Corriger les autres P0/P1 reproduits par les audits (audit, autorisations, import/export, lancement).
-2. Registre durable des workers, quotas/réservations et transitions atomiques avec audit ; intégration broker et réconciliation.
+2. Compléter le registre durable, les quotas/réservations et transitions atomiques avec audit ; intégration broker, supervision et réconciliation qualifiées.
 3. Relais Rust authentifié avec grants dirigés/révocation, limites/durée/rétention, ledger d'allocation `billable=false` idempotent.
 4. Recette réelle trois workers, reprises/pannes et visibilité dashboard ; qualification séparée Docker/Podman par plateforme.
 5. Versionnement API et schéma, migrations admises, sauvegarde/restauration, exploitation et chaîne de livraison.

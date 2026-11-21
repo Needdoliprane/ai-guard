@@ -1,0 +1,134 @@
+{
+  "date_utc": "2026-11-18",
+  "base_commit": "5b3c2ed044d5fdf4bbfb7489762d1eb17684fcd6",
+  "worktree": ".worktrees/v1-assembly-20261118",
+  "docker_qwen": {
+    "deployment_status": "PASS",
+    "route_status": "PASS",
+    "memory_status": "PASS",
+    "journey_status": "FAIL",
+    "chromium_status": "NOT_RUN",
+    "chromium_with_synthetic_response_status": "PASS",
+    "model": "Qwen2.5-0.5B-Instruct Q4_K_M",
+    "platform": "Docker Desktop 29.9.3 linux/arm64",
+    "model_image_id": "sha256:5b52e22438e6ac61957325cabc84c9aa7fceef44cc3a540fc400ef0becde9ea4",
+    "control_image_id": "sha256:e20206a85db2eaf42a1c562409de456a251ca1b10ca60abc472a5ec441a17c8a",
+    "llama_cpp_index": "sha256:4b7be0376002b4450a357a109bab804093ff9251193cc75ed4ce0cb39953ff5c",
+    "model_weights_sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+    "docker_memory_limit_bytes": 1000000000,
+    "observed_cgroup_limit_bytes": 999997440,
+    "cgroup_peak_before_bytes": 301142016,
+    "cgroup_peak_after_bytes": 337895424,
+    "swap_limit_bytes": 0,
+    "oom": 0,
+    "oom_kill": 0,
+    "oom_group_kill": 0,
+    "model_endpoint_posts": 1,
+    "response": "transport timeout before usable model output; durable effective deny under decision_backend_unavailable_or_invalid",
+    "route": "Same healthy Rust relay and model identities before and after the probe. Exact inference network contained only these two members; model was unpublished and the public binding of the relay was restricted to loopback.",
+    "timing": "Ordered samples successively succeeded before and after the POST journey. Extra shell timestamps failed due to the path of date; independent sample timestamps are 2026-11-18T21:13:58.203867Z and 2026-11-18T21:14:04.218796Z.",
+    "preparation_failure": [
+      "A cached control image did not implement http-relay; the image was rebuilt from the checkout.",
+      "The first control build could not validate the Docker Hub token endpoint in the host build client; the engine pulled all declared base images normally and the same Dockerfile built after cache warming.",
+      "The first cgroup reader could not project an empty CapAdd in Docker 29.9.3. The guarded collection projections fixed the actual inspection."
+    ],
+    "cli_sha256": "a34a7632770a0729655f8bf06bc1123efb394a1d08fe17a2c072c66116a747a9",
+    "memory_helper_sha256": "37b2293c61dbdba37da51e69e1a130cc833fb1807da622f85c6c3e427659401d",
+    "bundle_sha256": "235ac78a40987d1e2b0250cfa6dcad95918aea952d2eeb8ae1e8a5aea776e570",
+    "private_artifacts_directory": "target/qa-cache-archive/qwen-docker-physical-first",
+    "artifacts_sha256": {
+      "memory-before.json": "92459dd7037f66841d0bb19732fcf8392c8f86351e8004f96a5de30c2e30e8c9",
+      "memory-after.json": "010fb4a588f62beb08667ba232aa9c35e7f3dfe63f54dd5799e303d5a2f2a925",
+      "route-before.json": "f85b974e71f834332d59fba53f73fd0a1e986852526b58e28ced73e159a9b988",
+      "route-after.json": "f85b974e71f834332d59fba53f73fd0a1e986852526b58e28ced73e159a9b988",
+      "journey-result.json": "3aa4c07f100dcbe3fc56f3106c3f18843e06bffdf6736c3496db684598af1551"
+    },
+    "cleaned": {
+      "projects_remaining_containers": 0,
+      "projects_remaining_networks": 0,
+      "images_retained": true
+    }
+  },
+  "docker_qwen_retry": {
+    "status": "PASS",
+    "model_requests": 1,
+    "model_timeout_seconds": 12,
+    "old_default_seconds": 5,
+    "delayed_loopback_canary": {
+      "status": "PASS",
+      "synthetic_response_delay_seconds": 6.2,
+      "model_outcome": "unknown",
+      "chromium_advice": "Indéterminé",
+      "request_count": 1
+    },
+    "timeout_unit_tests": {
+      "backend_fingerprint": "PASS",
+      "cli_bounds_and_conflicts": "PASS"
+    },
+    "platform": "Docker Desktop 29.9.3 linux/arm64, native macOS arm64 gateway and dashboard, Chromium Headless Shell",
+    "cli_sha256": "60e93643b1aedd62f978277d67a6372e3a3a2809fc7760ec242d7ef230f46681",
+    "bundle_sha256": "235ac78a40987d1e2b0250cfa6dcad95918aea952d2eeb8ae1e8a5aea776e570",
+    "model_image_id": "sha256:5b52e22438e6ac61957325cabc84c9aa7fceef44cc3a540fc400ef0becde9ea4",
+    "relay_image_id": "sha256:e20206a85db2eaf42a1c562409de456a251ca1b10ca60abc472a5ec441a17c8a",
+    "effective_outcome": "deny",
+    "advisory_outcome": "deny",
+    "provider_declared_usage": {
+      "prompt_tokens": 117,
+      "completion_tokens": 47,
+      "total_tokens": 164
+    },
+    "verified_audit": true,
+    "verified_jsonl_export": true,
+    "foreign_decision_absent": true,
+    "workers": 0,
+    "same_model_relay_and_network_identities": true,
+    "restart_count": 0,
+    "peak_before_bytes": 304398336,
+    "peak_after_bytes": 337022976,
+    "observed_limit_bytes": 999997440,
+    "swap_limit_bytes": 0,
+    "oom": 0,
+    "oom_kill": 0,
+    "source_sha256": {
+      "src/main.rs": "2a397f6c9b1da346fad8728d2c44cd64293469ef4d0223c9219cb9ef43d974a7",
+      "src/jev.rs": "8b696b07e8ba0394c5d37b7102b7e5b52bcb623d0ab4e2a7881d5fa2028844f4",
+      "src/jev/backend.rs": "619743624fc9689e6acd25d79eba8ec439fff91c9e9762425eaf5e5dac01981a",
+      "src/jev/local.rs": "c36fffa769959256981574961785c1a83e9412f9a6733aadcdd82428d07b0da8",
+      "src/jev/transport.rs": "91c70c18ae5d73bd2b13bfa404320a45252f25c1e352095702e672655473e78c",
+      "tests/e2e/run_browser_decision.py": "be139ca8348085b5f5ac6e38b7564dc6c50bb83b427c2434fbc750e508b83fb7"
+    },
+    "private_artifacts_directory": "target/qa-cache-archive/qwen-docker-physical-retry",
+    "artifacts_sha256": {
+      "browser.json": "4667ba9977a6428f72942a2aacab2001be401c476e57dca21fbef212de92fb22",
+      "result.json": "03d078f874280220679dc0349e4c07040613414b0b5670d65d38be4071b8f09c",
+      "retry-memory-before.json": "4a2d0450cbffc1094c41a74646ed5e314a82c175210fd7cb40ef06bdf8b2a010",
+      "retry-memory-after.json": "d90f704378ff496f9396b6eb03f5e952c3645f0a0115426e6fa21e3810bcc0db",
+      "retry-route-before.json": "9a81772fae99a51a9097ef3f2776b711560024245b702910e6286169b6b24a8f",
+      "retry-route-after.json": "9a81772fae99a51a9097ef3f2776b711560024245b702910e6286169b6b24a8f"
+    },
+    "cleanup_verified": true,
+    "scope": "Docker restricted loopback HTTP model deployment. Remote TLS profile, Podman and model classification quality remain open. Control relay was built before the new timeout; the native gateway and dashboard used the current updated binary."
+  },
+  "reserved_stop": {
+    "status": "PASS",
+    "test": "runner::managed::stop_replay_tests::reserved_stop_replays_the_same_intent_across_gateway_restart",
+    "test_source_sha256": "2f84420f6211f3c11909381180eaef376abad925203cc565fdf9a00019c0c0bc",
+    "source_sha256": "a59566a4794f04e3fbcdf7e41ffbe2d62aecd0be39721fddc013b800cedb7a69",
+    "test_binary_sha256": "7197d2f11c0de7690e177cec3a61e52ea83fa1aa7160196a9350cadc4fc68d05",
+    "baseline": {
+      "status": "FAIL",
+      "exit_code": 101,
+      "stage": "replay AfterCommit",
+      "observed_posts": 1,
+      "expected_identical_posts": 2
+    },
+    "assertions": [
+      "same operation before and after real SQLite reopen",
+      "HTTP 503 before or after commit",
+      "single quota release and audit append",
+      "local acknowledgement matched to the authenticated durable control receipt",
+      "no runtime invocation"
+    ],
+    "limits": "Product stop_worker through real Rust HTTP gateway. Legacy flat stop intents remain readable as historical evidence and are not indexed by the new journal. No physical worker or late directory fsync fault injected."
+  }
+}

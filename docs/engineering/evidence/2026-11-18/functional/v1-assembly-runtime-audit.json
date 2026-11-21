@@ -1,0 +1,90 @@
+{
+  "date": "2026-11-18",
+  "checkout": ".worktrees/v1-assembly-20261118",
+  "base_commit": "5b3c2ed044d5fdf4bbfb7489762d1eb17684fcd6",
+  "candidate_binaries": {
+    "agentsandbox_sha256": "1808b9e1228a872b7e665bb18fe8a12574845962a26eba777ded78333df10c1f",
+    "ai_guard_diagnose_sha256": "921ccdcd3dcde0cb6efd10c7d565c8417f50ab47a96f920be4140dedc890f8d9"
+  },
+  "broker_command_observation": {
+    "status": "PASS",
+    "scope": "Bundle compilé et Chromium réel avec événements et registre broker synthétiques",
+    "red": {
+      "status": "FAIL",
+      "oracle": "Code de sortie observé absent de l’onglet Commande malgré l’observation dans l’audit",
+      "bundle": "index-Bh0Yrqti.js",
+      "sha256": "1d5a326cd60b9eefbe06a04ce63f1f70278098f87a9c910bf2fb0038ba909602",
+      "private_artifacts_sha256": {
+        "page.html": "543ead8d9afdb88537df44e4d9058b040d5dd35dc35ab9c2cf28031701f28bc5",
+        "page.png": "259dccf48c9790be06e0c073ef7b2c800e679afeddebfe8b8955e6e90e3580f3"
+      }
+    },
+    "green": {
+      "browser": "Chromium 148.0.7778.96",
+      "node": "24.22.2",
+      "mode": "synthetic_broker_dashboard",
+      "bundle": "index-Ny5rvfR-.js",
+      "sha256": "43d4b21651e7cf8de1e55b317822cffa4c2ad3f7304a8da0f2db3deecc32187c",
+      "node_tests_passed": 23,
+      "npm_test": {"passed": 233, "failed": 0, "skipped": 8},
+      "event_count": 5,
+      "assertions": ["code de sortie observé 0", "code transport 23", "durée du transport", "OOM Non", "texte non conservé", "JSONL exact"]
+    },
+    "sources_sha256": {
+      "front/src/main.ts": "2435edc0a1e0483ba93a3a4638e53b4cbc1d50501bb915bca56577292d18889a",
+      "front/src/model.ts": "21d2904201612dddb604f8f67e14cab7d0fc34659fa48c0aea7dab1d6cf7c0cb",
+      "front/tests/model.test.mjs": "cde330b2d9f695745a7a302ffcbbe1cb7a754282e3a06c028d4469f490356d71",
+      "front/tests/browser_provider_live.mjs": "6355b877814b99ce42bebd94bb1c8fbdaa14dd477d9477bdf15131694be48ee2",
+      "front/tests/browser_broker_provider_fixture.mjs": "422aeec81213acd8fa59943658c51b3419d74fdb0586dd742595bd356a378e3f",
+      "front/tests/browser_broker_provider_simulated.mjs": "4d39933a89f83d5c8bf524cb83f0723638e1d4bfbd8331f67f2e49ab500e8b30"
+    }
+  },
+  "tenant_relay_restart": {
+    "status": "PASS",
+    "scope": "Gateway HTTP loopback, deux bases SQLite réelles, observations runtime synthétiques pour A1, A2, B1",
+    "test": "reopened_gateway_keeps_three_worker_quotas_terminal_usage_and_directed_audit_separate",
+    "test_binary_sha256": "68dd6f9f91dae55d48bc18b9c7af33da36c65000dd4bfec5da0b557bf009e797",
+    "source_sha256": "48252312fd5c0c830f7ef7b232cd4cabe4bffeaecccf84fd11896980c835e31e",
+    "assertions": ["envoi et rejeu du canal A1→A2", "refus 403 sans autorité runtime active après réouverture", "trois workers dans leurs tenants", "quota A retenu et B libéré", "une allocation terminale non facturable pour B1", "reçus et exports d’audit propres à chaque tenant", "corps du message et credentials absents de l’audit"],
+    "review": "Relecture indépendante du test exact"
+  },
+  "workspace_claim": {
+    "status": "PASS",
+    "scope": "Vrai CLI sur fixture HTTP avec TLS loopback. Aucune mutation, création de volume ou admission live",
+    "tests_passed": 6,
+    "test_binary_sha256": "4f17435592e4a1970c02558aee5afaeb5050a9d30df49139fca323f4679f99d3",
+    "sources_sha256": {
+      "src/kubernetes_cli.rs": "8c74fcef5ef518c075aca33116f9cdef8b1122335af135c985e9d84796020065",
+      "tests/kubernetes_session_runtime.rs": "0f7b8322423c22b2c584b3c1e497884d33574dcada7a00c0c33a035280811ee2"
+    },
+    "assertions": ["GET exact entre deux vérifications d’autorité", "UID et admission_available=false", "nom invalide refusé avant le réseau", "aucune projection qui répète un credential"],
+    "review": "Relecture indépendante du chemin CLI",
+    "live_pvc": {
+      "status": "BLOCKED",
+      "cluster": "Docker Desktop v1.36.1, ARM64",
+      "csi_drivers": [],
+      "classes": ["hostpath", "standard"],
+      "provisioner": "rancher.io/local-path",
+      "binding_mode": "WaitForFirstConsumer",
+      "pvc_created": false
+    }
+  },
+  "provider_preflight": {
+    "status": "PASS",
+    "scope": "Compagnon Rust réel et harnais Python sur références privées entièrement synthétiques. Aucun Chromium, runtime ou appel fournisseur.",
+    "cases": 16,
+    "axes": {
+      "models": {"codex": "gpt-6-luna", "claude-code": "claude-haiku-5-5"},
+      "modes": ["api", "subscription"],
+      "transports": ["batch", "tty"],
+      "selected_reference": ["present", "missing"],
+      "other_reference": "present"
+    },
+    "assertions": ["sélection exacte", "provider.credential_missing ou provider.login_required au prévol fournisseur", "référence présente arrêtée à la frontière navigateur", "seul result.json est créé"],
+    "python_synthetic_tests_passed": 18,
+    "sources_sha256": {
+      "tests/e2e/run_provider_case.py": "3cf16c24bbe8d1cc0f6338fa27c65ec5e19950ac2ed1400f7760e4d67a5a368c",
+      "tests/e2e/test_run_provider_preflight.py": "8c0ee1695c7dda80ed647b6522880104b171c790ec32febc723dc4314a69ad7a"
+    }
+  }
+}
