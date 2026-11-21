@@ -22,6 +22,8 @@ pub mod kubernetes_cli;
 pub mod model;
 pub mod model_ingress;
 pub mod model_tls;
+#[cfg(feature = "mysql-storage")]
+pub mod mysql_storage;
 pub mod oidc;
 pub mod operations;
 pub mod policy;

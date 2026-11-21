@@ -7,6 +7,10 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 
+pub(crate) mod projection;
+pub(super) use projection::canonical_control_time;
+use projection::{Change, Genesis, Projection, ProjectionCell, Record, worker_matches};
+
 /// Proposed owned broker binding writers (IdentityAuthority) and status reads.
 pub(super) mod owned_broker_identity;
 #[cfg(test)]
@@ -94,167 +98,6 @@ const QUERIES: [(&str, &str); 6] = [
         "SELECT worker_id,attempt_id,generation,event_seq FROM workload_worker_endpoints ORDER BY worker_id",
     ),
 ];
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Genesis {
-    version: u32,
-    tenant_id: String,
-    control_namespace_uuid: String,
-    previous_seq: i64,
-    previous_hash: String,
-}
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
-enum Change {
-    Issue { input: WorkloadBindingIssueV1 },
-    Revoke { input: WorkloadBindingRevocationV1 },
-}
-impl Change {
-    fn operation_id(&self) -> &str {
-        match self {
-            Self::Issue { input } => &input.operation_id,
-            Self::Revoke { input } => &input.operation_id,
-        }
-    }
-    fn credential_id(&self) -> &str {
-        match self {
-            Self::Issue { input } => &input.credential_id,
-            Self::Revoke { input } => &input.credential_id,
-        }
-    }
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Issue { .. } => "control.workload.issue",
-            Self::Revoke { .. } => "control.workload.revoke",
-        }
-    }
-    fn validate(&self) -> anyhow::Result<()> {
-        match self {
-            Self::Issue { input } => input.validate(),
-            Self::Revoke { input } => input.validate(),
-        }
-    }
-    fn input_hash(&self) -> anyhow::Result<String> {
-        crate::control::content_hash("ai-guard:workload-binding-input:v1", self)
-    }
-}
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Record {
-    version: u32,
-    input_hash: String,
-    received_at: String,
-    change: Change,
-}
-#[derive(Default)]
-struct Projection {
-    bindings: BTreeMap<String, (WorkloadBinding, i64)>,
-    history: BTreeMap<(String, u64), (WorkloadBinding, i64)>,
-    digests: BTreeMap<String, String>,
-    operations: BTreeMap<String, (String, i64, String, u64)>,
-    endpoints: BTreeMap<String, (RelayEndpointV1, i64)>,
-    subject_counts: BTreeMap<String, u64>,
-}
-impl Projection {
-    fn apply(&mut self, record: &Record, seq: i64) -> anyhow::Result<WorkloadBinding> {
-        record.change.validate()?;
-        workload_valid(record.version == 1 && record.input_hash == record.change.input_hash()?)?;
-        workload_conflict(!self.operations.contains_key(record.change.operation_id()))?;
-        let now = parse_time(&record.received_at)?;
-        let previous = self
-            .bindings
-            .get(record.change.credential_id())
-            .map(|(binding, _)| binding);
-        if let Some(previous) = previous {
-            if now < parse_time(&previous.updated_at)? {
-                return Err(WorkloadFailureV1::ClockRegression.into());
-            }
-        }
-        let binding = match &record.change {
-            Change::Issue { input } => {
-                let expires_at = canonical_control_time(parse_time(&input.expires_at)?)?;
-                workload_valid(expires_at > now)?;
-                workload_conflict(
-                    input.expected_revision == previous.map_or(0, |binding| binding.revision),
-                )?;
-                if let Some(previous) = previous {
-                    workload_conflict(previous.subject == input.subject)?;
-                }
-                if previous.is_none() {
-                    let count = self.subject_counts.entry(input.subject.key()?).or_default();
-                    workload_conflict(*count < 64)?;
-                    *count += 1;
-                }
-                if let Some(owner) = self.digests.get(&input.sha256_digest) {
-                    workload_conflict(owner == &input.credential_id)?;
-                    // A historical digest is ownership evidence, not a fresh
-                    // credential. Only renewal of the still-current active key
-                    // may reuse it; rotation and revocation require a new key.
-                    let current = previous.ok_or(WorkloadFailureV1::Conflict)?;
-                    workload_conflict(
-                        !current.revoked
-                            && current.sha256_digest == input.sha256_digest
-                            && now < parse_time(&current.expires_at)?,
-                    )?;
-                }
-                if let WorkloadSubjectV1::Worker {
-                    worker_id,
-                    attempt_id,
-                    generation,
-                } = &input.subject
-                {
-                    let endpoint = RelayEndpointV1 {
-                        worker_id: worker_id.clone(),
-                        attempt_id: attempt_id.clone(),
-                        generation: *generation,
-                    };
-                    if let Some((previous, _)) = self.endpoints.get(worker_id) {
-                        workload_conflict(previous == &endpoint)?;
-                    } else {
-                        self.endpoints.insert(worker_id.clone(), (endpoint, seq));
-                    }
-                }
-                let binding = WorkloadBinding {
-                    version: 1,
-                    credential_id: input.credential_id.clone(),
-                    revision: crate::broker_registry::next_revision(input.expected_revision)?,
-                    subject: input.subject.clone(),
-                    sha256_digest: input.sha256_digest.clone(),
-                    expires_at: format_time(expires_at),
-                    revoked: false,
-                    updated_at: record.received_at.clone(),
-                };
-                self.digests
-                    .insert(input.sha256_digest.clone(), input.credential_id.clone());
-                binding
-            }
-            Change::Revoke { input } => {
-                let mut binding = previous.cloned().ok_or(WorkloadFailureV1::Conflict)?;
-                workload_conflict(input.expected_revision == binding.revision && !binding.revoked)?;
-                binding.revision = crate::broker_registry::next_revision(binding.revision)?;
-                binding.revoked = true;
-                binding.updated_at = record.received_at.clone();
-                binding
-            }
-        };
-        self.bindings
-            .insert(binding.credential_id.clone(), (binding.clone(), seq));
-        self.history.insert(
-            (binding.credential_id.clone(), binding.revision),
-            (binding.clone(), seq),
-        );
-        self.operations.insert(
-            record.change.operation_id().into(),
-            (
-                record.input_hash.clone(),
-                seq,
-                binding.credential_id.clone(),
-                binding.revision,
-            ),
-        );
-        Ok(binding)
-    }
-}
 fn require_schema(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if [6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
@@ -282,14 +125,6 @@ pub(super) fn validate_control_time(
     before_seq: Option<i64>,
 ) -> anyhow::Result<()> {
     validate_control_time_floor(db, parse_time(received_at)?, before_seq)
-}
-
-/// Authorization/expiry use millisecond UTC, matching their durable records.
-/// This does not claim detection of a cross-request rollback within one ms.
-pub(super) fn canonical_control_time(at: DateTime<Utc>) -> anyhow::Result<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(&format_time(at))
-        .map(|time| time.with_timezone(&Utc))
-        .map_err(|_| WorkloadFailureV1::ClockRegression.into())
 }
 
 /// Snapshot-bound preparation; never serialized or constructed by HTTP input.
@@ -449,15 +284,6 @@ fn worker(db: &Connection, id: &str) -> anyhow::Result<Option<crate::control::Wo
     .map(|json| serde_json::from_str(&json).map_err(Into::into))
     .transpose()
 }
-fn worker_matches(worker: &crate::control::WorkerV1, endpoint: &RelayEndpointV1) -> bool {
-    worker.worker_id == endpoint.worker_id
-        && worker.attempt.attempt_id == endpoint.attempt_id
-        && worker.quota_held
-        && !matches!(
-            worker.state,
-            crate::control::WorkerStateV1::Terminal | crate::control::WorkerStateV1::Cancelled
-        )
-}
 fn worker_relay_matches(worker: &crate::control::WorkerV1, endpoint: &RelayEndpointV1) -> bool {
     worker_matches(worker, endpoint)
         && endpoint.generation == 1
@@ -471,31 +297,19 @@ fn validate_issue_worker(
     change: &Change,
     before_seq: Option<i64>,
 ) -> anyhow::Result<()> {
-    if let Change::Issue { input } = change {
-        if let WorkloadSubjectV1::Worker {
-            worker_id,
-            attempt_id,
-            generation,
-        } = &input.subject
-        {
-            let endpoint = RelayEndpointV1 {
-                worker_id: worker_id.clone(),
-                attempt_id: attempt_id.clone(),
-                generation: *generation,
-            };
-            let worker = if let Some(before_seq) = before_seq {
-                super::control::worker_at(db, worker_id, before_seq)?
-            } else {
-                worker(db, worker_id)?
-            };
-            workload_authorized(
-                worker
-                    .as_ref()
-                    .is_some_and(|worker| worker_matches(worker, &endpoint)),
-            )?;
-        }
-    }
-    Ok(())
+    let Some(endpoint) = change.worker_issue_endpoint() else {
+        return Ok(());
+    };
+    let worker = if let Some(before_seq) = before_seq {
+        super::control::worker_at(db, &endpoint.worker_id, before_seq)?
+    } else {
+        worker(db, &endpoint.worker_id)?
+    };
+    workload_authorized(
+        worker
+            .as_ref()
+            .is_some_and(|worker| worker_matches(worker, &endpoint)),
+    )
 }
 fn preflight(db: &Connection, change: &Change) -> anyhow::Result<Projection> {
     let mut projection = Projection::default();
@@ -536,7 +350,7 @@ fn preflight(db: &Connection, change: &Change) -> anyhow::Result<Projection> {
     }
     Ok(projection)
 }
-fn receipt(
+pub(crate) fn receipt(
     stored: &StoredEvent,
     credential_id: String,
     revision: u64,
@@ -1122,12 +936,15 @@ pub(super) fn validate_worker_relay_identity_at(
 }
 
 type SqlRow = Vec<rusqlite::types::Value>;
-fn sql_text(value: impl Into<String>) -> rusqlite::types::Value {
-    rusqlite::types::Value::Text(value.into())
+impl From<ProjectionCell> for rusqlite::types::Value {
+    fn from(value: ProjectionCell) -> Self {
+        match value {
+            ProjectionCell::Integer(value) => Self::Integer(value),
+            ProjectionCell::Text(value) => Self::Text(value),
+        }
+    }
 }
-fn sql_int(value: u64) -> anyhow::Result<rusqlite::types::Value> {
-    Ok(rusqlite::types::Value::Integer(i64::try_from(value)?))
-}
+
 pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if ![6, 7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&version) {
@@ -1164,11 +981,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
                 !seen
                     && stored.seq == genesis_seq
                     && stored.hash == genesis_hash
-                    && genesis.version == 1
-                    && genesis.tenant_id == tenant
-                    && genesis.control_namespace_uuid == namespace
-                    && genesis.previous_seq == stored.seq - 1
-                    && genesis.previous_hash == stored.prev_hash,
+                    && genesis.matches_prefix(&tenant, &namespace, stored.seq, &stored.prev_hash),
             )?;
             seen = true;
             continue;
@@ -1184,86 +997,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         projection.apply(&record, stored.seq)?;
     }
     workload_valid(seen)?;
-    let mut expected: BTreeMap<&str, Vec<SqlRow>> = BTreeMap::new();
-    expected.insert(
-        "workload_meta",
-        vec![vec![
-            rusqlite::types::Value::Integer(1),
-            rusqlite::types::Value::Integer(genesis_seq),
-            sql_text(genesis_hash),
-        ]],
-    );
-    expected.insert(
-        "workload_bindings",
-        projection
-            .bindings
-            .values()
-            .map(|(binding, seq)| {
-                Ok(vec![
-                    sql_text(&binding.credential_id),
-                    sql_int(binding.revision)?,
-                    sql_text(&binding.sha256_digest),
-                    sql_text(binding.subject.key()?),
-                    sql_text(serde_json::to_string(binding)?),
-                    rusqlite::types::Value::Integer(*seq),
-                ])
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?,
-    );
-    expected.insert(
-        "workload_binding_history",
-        projection
-            .history
-            .values()
-            .map(|(binding, seq)| {
-                Ok(vec![
-                    sql_text(&binding.credential_id),
-                    sql_int(binding.revision)?,
-                    sql_text(serde_json::to_string(binding)?),
-                    rusqlite::types::Value::Integer(*seq),
-                ])
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?,
-    );
-    expected.insert(
-        "workload_digests",
-        projection
-            .digests
-            .iter()
-            .map(|(digest, id)| vec![sql_text(digest), sql_text(id)])
-            .collect(),
-    );
-    expected.insert(
-        "workload_operations",
-        projection
-            .operations
-            .iter()
-            .map(|(op, (hash, seq, id, revision))| {
-                Ok(vec![
-                    sql_text(op),
-                    sql_text(hash),
-                    rusqlite::types::Value::Integer(*seq),
-                    sql_text(id),
-                    sql_int(*revision)?,
-                ])
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?,
-    );
-    expected.insert(
-        "workload_worker_endpoints",
-        projection
-            .endpoints
-            .values()
-            .map(|(endpoint, seq)| {
-                Ok(vec![
-                    sql_text(&endpoint.worker_id),
-                    sql_text(&endpoint.attempt_id),
-                    sql_int(endpoint.generation)?,
-                    rusqlite::types::Value::Integer(*seq),
-                ])
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?,
-    );
+    let mut expected = projection.rows(genesis_seq, &genesis_hash)?;
     for (table, query) in QUERIES {
         let mut statement = db.prepare(query)?;
         let width = statement.column_count();
@@ -1274,8 +1008,13 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
                     .collect::<rusqlite::Result<SqlRow>>()
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let expected_rows = expected.remove(table).map(|rows| {
+            rows.into_iter()
+                .map(|row| row.into_iter().map(rusqlite::types::Value::from).collect())
+                .collect()
+        });
         anyhow::ensure!(
-            expected.remove(table) == Some(actual),
+            expected_rows == Some(actual),
             "workload projection differs from audit: {table}"
         );
     }

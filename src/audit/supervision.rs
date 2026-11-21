@@ -1,5 +1,9 @@
 //! Audited supervision on explicitly admitted Store transactions. No automatic migration.
 use super::*;
+use crate::audit::{
+    supervision_admission::{self as admission_codec, Binding, receipt_for},
+    supervision_genesis,
+};
 
 pub(in crate::audit) const SCHEMA: [(&str, &str, &str); 6] = [
     (
@@ -70,7 +74,7 @@ const QUERIES: [(&str, &str); 5] = [
     rename_all = "snake_case",
     deny_unknown_fields
 )]
-enum Input {
+pub(crate) enum Input {
     Admission(Box<SupervisedAdmissionV1>),
     Bind(Box<BindLegacyIntentV1>),
     Arm(Box<ArmV1>),
@@ -82,22 +86,15 @@ enum Input {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Record {
-    version: u32,
-    input: Input,
-    worker_record: Option<ControlRecord>,
+pub(crate) struct Record {
+    pub(in crate::audit) version: u32,
+    pub(in crate::audit) input: Input,
+    pub(in crate::audit) worker_record: Option<ControlRecord>,
 }
 pub(super) fn worker_snapshot(stored: &StoredEvent) -> anyhow::Result<Option<WorkerV1>> {
     let record: Record = serde_json::from_value(stored.event.data.clone())?;
     invalid(record.version == 2 && stored.event.kind == record.input.kind())?;
     Ok(record.worker_record.and_then(|record| record.worker))
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Binding {
-    worker_id: String,
-    intent_hash: String,
-    input: Input,
 }
 #[derive(Clone)]
 struct ArmEntry {
@@ -106,7 +103,7 @@ struct ArmEntry {
 }
 
 impl Input {
-    fn operation_id(&self) -> &str {
+    pub(crate) fn operation_id(&self) -> &str {
         match self {
             Self::Admission(r) => &r.admission.operation_id,
             Self::Bind(r) => &r.operation_id,
@@ -118,9 +115,9 @@ impl Input {
             Self::Export(r) => &r.operation_id,
         }
     }
-    fn action(&self) -> &'static str {
+    pub(crate) fn action(&self) -> &'static str {
         match self {
-            Self::Admission(_) => "supervised_admit",
+            Self::Admission(_) => admission_codec::ACTION,
             Self::Bind(_) => "bind_intent",
             Self::Arm(_) => "arm",
             Self::WorkerClaim(_) => "armed_start_claim",
@@ -130,13 +127,13 @@ impl Input {
             Self::Export(_) => "export_request",
         }
     }
-    fn kind(&self) -> &'static str {
+    pub(in crate::audit) fn kind(&self) -> &'static str {
         match self {
             Self::Arm(_) => "control.execution.arm",
-            _ => "control.supervision.transition",
+            _ => admission_codec::KIND,
         }
     }
-    fn hash(&self) -> anyhow::Result<String> {
+    pub(crate) fn hash(&self) -> anyhow::Result<String> {
         match self {
             Self::Admission(r) => r.input_hash(),
             Self::Bind(r) => r.input_hash(),
@@ -148,7 +145,7 @@ impl Input {
             Self::Export(r) => r.input_hash(),
         }
     }
-    fn worker_id<'a>(&'a self, record: &'a Record) -> Option<&'a str> {
+    pub(in crate::audit) fn worker_id<'a>(&'a self, record: &'a Record) -> Option<&'a str> {
         match self {
             Self::Admission(_) => record
                 .worker_record
@@ -164,20 +161,6 @@ impl Input {
             Self::Export(r) => Some(&r.worker_id),
         }
     }
-}
-fn receipt_for(stored: &StoredEvent, record: &Record) -> anyhow::Result<MutationReceiptV1> {
-    Ok(MutationReceiptV1 {
-        operation_id: record.input.operation_id().into(),
-        worker_id: record.input.worker_id(record).map(str::to_owned),
-        revision: record
-            .worker_record
-            .as_ref()
-            .and_then(|r| r.worker.as_ref())
-            .map(|w| w.revision),
-        input_hash: record.input.hash()?,
-        audit_seq: stored.seq,
-        audit_hash: stored.hash.clone(),
-    })
 }
 fn mutation_row_for(
     stored: &StoredEvent,
@@ -422,18 +405,11 @@ impl Replay {
         Ok(())
     }
     pub(super) fn genesis(&mut self, stored: &StoredEvent) -> anyhow::Result<()> {
-        let genesis: Genesis = serde_json::from_value(stored.event.data.clone())?;
+        supervision_genesis::validate(stored, &self.namespace)?;
         invalid(
             !self.seen_genesis
                 && Some(stored.seq) == self.genesis_seq
-                && Some(&stored.hash) == self.genesis_hash.as_ref()
-                && genesis.version == 3
-                && genesis.namespace_uuid == self.namespace
-                && genesis.previous_seq == stored.seq - 1
-                && genesis.previous_hash == stored.prev_hash
-                && stored.event.kind == "control.supervision.genesis"
-                && stored.event.source == "gateway"
-                && stored.event.provenance == "observed",
+                && Some(&stored.hash) == self.genesis_hash.as_ref(),
         )?;
         self.seen_genesis = true;
         self.expected
@@ -443,7 +419,7 @@ impl Replay {
                 "1".into(),
                 vec![
                     rusqlite::types::Value::Integer(1),
-                    sql_text("broker_supervision_v1"),
+                    sql_text(supervision_genesis::PROTOCOL),
                     rusqlite::types::Value::Integer(stored.seq),
                     sql_text(&stored.hash),
                 ],
@@ -612,34 +588,13 @@ impl Replay {
         stored: &StoredEvent,
         workers: &BTreeMap<String, WorkerV1>,
     ) -> anyhow::Result<(Option<ControlRecord>, Vec<rusqlite::types::Value>)> {
-        let record: Record = serde_json::from_value(stored.event.data.clone())?;
-        invalid(
-            self.seen_genesis
-                && self.genesis_seq.is_some_and(|seq| stored.seq > seq)
-                && record.version == 2
-                && stored.event.kind == record.input.kind()
-                && stored.event.source == "gateway"
-                && stored.event.provenance == "observed",
-        )?;
+        let record = admission_codec::decode(stored)?;
+        invalid(self.seen_genesis && self.genesis_seq.is_some_and(|seq| stored.seq > seq))?;
         record.input.hash()?;
         match &record.input {
-            Input::Admission(request) => {
-                let legacy = record
-                    .worker_record
-                    .as_ref()
-                    .ok_or(ControlFailure::InvalidRequest)?;
-                invalid(
-                    legacy.action == "admit"
-                        && legacy.input_hash == request.admission.input_hash()?
-                        && legacy.operation_id == request.admission.operation_id,
-                )?;
+            Input::Admission(_) => {
+                let (request, legacy) = record.admission()?;
                 if let Some(worker) = &legacy.worker {
-                    invalid(
-                        serde_json::to_value(&worker.launch)?
-                            == serde_json::to_value(&request.admission.launch)?
-                            && serde_json::to_value(&worker.receipt)?
-                                == serde_json::to_value(&request.admission.receipt)?,
-                    )?;
                     self.binding(
                         worker,
                         &request.intent_hash,
@@ -915,13 +870,7 @@ impl Store {
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        let mut event = Event::new("control.supervision.genesis");
-        event.data = serde_json::to_value(Genesis {
-            version: 3,
-            namespace_uuid: namespace(tx)?,
-            previous_seq: seq,
-            previous_hash: hash,
-        })?;
+        let event = supervision_genesis::event(&namespace(tx)?, seq, &hash)?;
         let (prepared, payload) = self.prepare_event(event.clone())?;
         invalid(prepared.data == event.data)?;
         let stored = self.append_in_transaction(tx, prepared, payload)?;
@@ -929,7 +878,7 @@ impl Store {
             tx,
             "INSERT INTO supervision_meta(singleton,protocol,genesis_seq,genesis_hash) VALUES(1,?1,?2,?3)",
             vec![
-                sql_text("broker_supervision_v1"),
+                sql_text(supervision_genesis::PROTOCOL),
                 rusqlite::types::Value::Integer(stored.seq),
                 sql_text(stored.hash),
             ],
@@ -1006,24 +955,20 @@ impl Store {
             workers.insert(worker.worker_id.clone(), worker);
         }
         drop(stmt);
-        let mut event = Event::new(record.input.kind());
-        event.data = serde_json::to_value(record)?;
-        if let Some(id) = record.input.worker_id(record)
-            && let Some(worker) = workers.get(id).or_else(|| {
-                record
-                    .worker_record
-                    .as_ref()
-                    .and_then(|r| r.worker.as_ref())
-            })
-        {
-            event.session_id = Some(worker.launch.session_id.clone());
-        }
+        let session_id = record.input.worker_id(record).and_then(|id| {
+            workers
+                .get(id)
+                .or_else(|| {
+                    record
+                        .worker_record
+                        .as_ref()
+                        .and_then(|r| r.worker.as_ref())
+                })
+                .map(|worker| worker.launch.session_id.as_str())
+        });
+        let event = admission_codec::event(record, session_id)?;
         let (prepared, payload) = self.prepare_event(event)?;
-        let mut expected = serde_json::to_value(record)?;
-        if let Some(policy) = expected.pointer_mut("/worker_record/admission_policy") {
-            *policy = self.redactor.value(policy);
-        }
-        invalid(prepared.data == expected)?;
+        admission_codec::require_prepared(&prepared, record, &self.redactor)?;
         let stored = self.append_in_transaction(tx, prepared, payload)?;
         let (_, mutation_row) = overlay.apply(tx, &stored, &workers)?;
         if let Some(legacy) = &record.worker_record {
@@ -1077,11 +1022,7 @@ impl Store {
         input: Input,
         build: impl FnOnce(&Transaction<'_>) -> anyhow::Result<Option<ControlRecord>>,
     ) -> anyhow::Result<Persisted> {
-        let input_hash = input.hash()?;
-        let value = serde_json::to_value(&input)?;
-        invalid(
-            self.redactor.value(&value) == value && serde_json::to_vec(&value)?.len() <= 65536,
-        )?;
+        let input_hash = admission_codec::validate_input(&input, &self.redactor)?;
         let mut db = self
             .db
             .lock()
@@ -1095,9 +1036,7 @@ impl Store {
         require_v3(&tx, access)?;
         let namespace = namespace(&tx)?;
         if let Some((stored, record)) = load_record(&tx, input.operation_id())? {
-            conflict(
-                record.input.hash()? == input_hash && record.input.action() == input.action(),
-            )?;
+            admission_codec::require_replay(&record, &input, &input_hash)?;
             self.commit_checked(tx)?;
             return Ok(Persisted {
                 stored,
@@ -1118,11 +1057,7 @@ impl Store {
             return Err(ControlFailure::SupervisionInactive.into());
         }
         let worker_record = build(&tx)?;
-        let record = Record {
-            version: 2,
-            input,
-            worker_record,
-        };
+        let record = Record::new(input, worker_record);
         let stored = self.persist_supervision_record(&tx, &record)?;
         self.commit_checked(tx)?;
         Ok(Persisted {
@@ -1162,31 +1097,18 @@ impl Store {
         jev: Value,
         quota: &QuotaPolicyV1,
     ) -> anyhow::Result<AdmissionResultV1> {
-        request.validate()?;
-        quota.validate()?;
-        let saved = self.persist_supervision_input(
-            access,
-            Input::Admission(Box::new(request.clone())),
-            |tx| {
-                Ok(Some(self.build_admission_record(
-                    tx,
-                    &request.admission,
-                    policy,
-                    fresh_decision,
-                    jev,
-                    quota,
-                )?))
-            },
-        )?;
-        let legacy = saved
-            .record
-            .worker_record
-            .as_ref()
-            .ok_or(ControlFailure::InvalidRequest)?;
-        let mut result = admission_result(&saved.stored, legacy);
-        result.receipt = receipt_for(&saved.stored, &saved.record)?;
-        result.replayed = saved.replayed;
-        Ok(result)
+        let input = admission_codec::admission_input(request, quota)?;
+        let saved = self.persist_supervision_input(access, input, |tx| {
+            Ok(Some(self.build_admission_record(
+                tx,
+                &request.admission,
+                policy,
+                fresh_decision,
+                jev,
+                quota,
+            )?))
+        })?;
+        admission_codec::result(&saved.stored, &saved.record, saved.replayed)
     }
     pub fn bind_legacy_intent(
         &self,

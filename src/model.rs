@@ -9,6 +9,16 @@ pub enum Outcome {
     Review,
 }
 
+impl Outcome {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Deny => "deny",
+            Self::Review => "review",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CommandSpec {

@@ -8,6 +8,9 @@ license = "Apache-2.0"
 publish = false
 default-run = "agentsandbox"
 
+[features]
+mysql-storage = ["dep:mysql_async"]
+
 [dependencies]
 anyhow = "1"
 arc-swap = { version = "=1.9.4", default-features = false }
@@ -23,6 +26,7 @@ httparse = "=1.10.1"
 hyper-util = { version = "=0.1.21", default-features = false, features = ["http1", "server", "service", "tokio"] }
 libc = "0.2"
 jsonwebtoken = { version = "=11.1.0", default-features = false, features = ["rust_crypto"] }
+mysql_async = { version = "=0.37.1", default-features = false, features = ["minimal-rust", "rustls-tls", "ring", "tls12"], optional = true }
 openidconnect = { version = "=4.1.0", default-features = false, features = ["reqwest", "rustls-tls"] }
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
@@ -45,6 +49,14 @@ walkdir = "2"
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+
+[[example]]
+name = "mysql_storage_probe"
+required-features = ["mysql-storage"]
+
+[[test]]
+name = "mysql_audit_store"
+required-features = ["mysql-storage"]
 
 [profile.release]
 lto = "thin"

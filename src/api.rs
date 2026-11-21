@@ -1361,13 +1361,14 @@ async fn list_events(
 ) -> ApiResult<Json<Value>> {
     tenant
         .blocking(true, move |tenant| {
-            let items = tenant.store.events(&q).map_err(|_| {
-                error(
-                    StatusCode::BAD_REQUEST,
-                    "Filtre invalide ou lecture indisponible.",
-                )
+            let items = tenant.store.events(&q).map_err(|failure| {
+                if failure.is::<crate::audit::InvalidEventFilter>() {
+                    error(StatusCode::BAD_REQUEST, "Filtre invalide.")
+                } else {
+                    unavailable(failure)
+                }
             })?;
-            let next = if items.len() == q.limit.unwrap_or(100).clamp(1, 1000) {
+            let next = if items.len() == q.page_limit() {
                 items.last().map(|e| e.seq)
             } else {
                 None

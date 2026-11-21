@@ -1,12 +1,9 @@
 //! The two operator files of the gateway, read as its loaders read them.
 //!
-//! The loaders (`src/gateway_config.rs`: `load`, `validate_policies`,
-//! `prepare_oidc_file`) are private to the gateway binary, and `load` reads
-//! every token. This module restates only their closed envelopes and their
-//! structural rules, each cited below. Every field-level rule is a call to the
-//! library validator the loader itself calls. Parity tests beside the loaders
-//! (`src/gateway_config_diagnostics_parity_tests.rs`) bind both halves: the
-//! field names of the envelopes, and acceptance on a corpus of files.
+//! The gateway and the storage probe share the closed tenant registry here.
+//! The gateway's other loaders (`src/gateway_config.rs`) and their parity
+//! tests (`src/gateway_config_diagnostics_parity_tests.rs`) bind the remaining
+//! envelopes and structural rules to the offline diagnostic.
 //!
 //! What is deliberately not restated: token content and token uniqueness
 //! (`load`), the stores, and the durable authentication state (`load_oidc`).
@@ -40,19 +37,25 @@ use crate::{
     redaction::Redactor,
     relay::RelayRetentionPolicyV1,
 };
-use serde::Deserialize;
+use anyhow::Context;
+use serde::{
+    Deserialize,
+    de::{MapAccess, Visitor},
+};
+use serde_json::value::RawValue;
 use std::{
     collections::BTreeSet,
     io::Read,
     path::{Path, PathBuf},
 };
 
-/// Field names of the loader's `Registry`.
+/// Field names of the loader's `TenantRegistryFiles`.
 pub const REGISTRY_FIELDS: &[&str] = &["version", "tenants"];
 /// Field names of the loader's `TenantFiles`.
 pub const TENANT_FIELDS: &[&str] = &[
     "tenant_id",
     "data",
+    "storage",
     "runner_token_file",
     "viewer_token_file",
     "worker_quota",
@@ -84,31 +87,201 @@ pub const MAX_CA_BUNDLE_FILE_BYTES: u64 = 262_144;
 /// `validate_policies`: the accepted range of the gateway event bound.
 pub const MAX_EVENTS_RANGE: std::ops::RangeInclusive<u64> = 1..=1_000_000;
 
-// Mirror of `Registry` (`src/gateway_config.rs`).
+/// Closed versioned envelope shared by the gateway and storage probe.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Registry {
-    version: u32,
-    tenants: Vec<TenantFiles>,
+pub struct TenantRegistryFiles {
+    pub version: u32,
+    pub tenants: Vec<TenantFiles>,
 }
 
-// Mirror of `TenantFiles` (`src/gateway_config.rs`), with the same types.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct TenantFiles {
-    tenant_id: String,
-    data: PathBuf,
-    runner_token_file: PathBuf,
-    viewer_token_file: PathBuf,
+pub struct TenantFiles {
+    pub tenant_id: String,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    pub data: Option<PathBuf>,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    pub storage: Option<TenantStorageFiles>,
+    pub runner_token_file: PathBuf,
+    pub viewer_token_file: PathBuf,
     #[serde(default)]
-    worker_quota: QuotaPolicyV1,
-    audit_capacity_policy: Option<AuditCapacityPolicyV1>,
-    workload_audit_policy: Option<WorkloadAuditPolicyV1>,
-    relay_retention_policy: Option<RelayRetentionPolicyV1>,
-    held_create_policy: Option<KubernetesHeldCreatePolicyV1>,
-    session_reservation_policy: Option<KubernetesSessionReservationPolicyV2>,
-    session_recovery_policy: Option<KubernetesSessionRecoveryPolicyV2>,
-    session_control_recovery_policy: Option<KubernetesSessionControlRecoveryPolicyV2>,
+    pub worker_quota: QuotaPolicyV1,
+    pub audit_capacity_policy: Option<AuditCapacityPolicyV1>,
+    pub workload_audit_policy: Option<WorkloadAuditPolicyV1>,
+    pub relay_retention_policy: Option<RelayRetentionPolicyV1>,
+    pub held_create_policy: Option<KubernetesHeldCreatePolicyV1>,
+    pub session_reservation_policy: Option<KubernetesSessionReservationPolicyV2>,
+    pub session_recovery_policy: Option<KubernetesSessionRecoveryPolicyV2>,
+    pub session_control_recovery_policy: Option<KubernetesSessionControlRecoveryPolicyV2>,
+}
+
+/// Read only the selected registry file, with the normal gateway's file bound.
+pub fn read_tenant_registry_file(path: &Path) -> anyhow::Result<Vec<u8>> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(path)
+        .context("Registre de tenants inaccessible")?;
+    anyhow::ensure!(
+        file.metadata()?.is_file(),
+        "Le registre doit être un fichier régulier"
+    );
+    let mut bytes = Vec::new();
+    file.take(MAX_REGISTRY_BYTES + 1).read_to_end(&mut bytes)?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= MAX_REGISTRY_BYTES,
+        "Registre de tenants trop volumineux"
+    );
+    Ok(bytes)
+}
+
+pub fn decode_tenant_registry(bytes: &[u8]) -> anyhow::Result<TenantRegistryFiles> {
+    let registry: TenantRegistryFiles = crate::human_authority::migration::operator::decode_closed(
+        bytes,
+        MAX_REGISTRY_BYTES as usize,
+        256,
+    )
+    .map_err(|_| anyhow::anyhow!("Registre de tenants invalide"))?;
+    anyhow::ensure!(
+        registry.version == 1,
+        "Version de registre de tenants inconnue"
+    );
+    anyhow::ensure!(
+        !registry.tenants.is_empty(),
+        "Le registre de tenants est vide"
+    );
+    Ok(registry)
+}
+
+/// An omitted field and a present null must not select the same backend.
+pub fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+/// Shared closed storage selection for the gateway and its offline diagnostic.
+#[derive(Deserialize)]
+#[serde(tag = "backend", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TenantStorageFiles {
+    Sqlite {
+        path: PathBuf,
+    },
+    #[serde(rename = "mysql")]
+    MySql(MySqlStorageFiles),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MySqlStorageFiles {
+    pub host: String,
+    pub port: std::num::NonZeroU16,
+    pub database: String,
+    pub username: String,
+    pub namespace: uuid::Uuid,
+    pub password_file: PathBuf,
+    pub ca_file: PathBuf,
+    pub authentication: MySqlAuthenticationFiles,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MySqlAuthenticationFiles {
+    Password {},
+    PasswordAndMtls {
+        client_cert_file: PathBuf,
+        client_key_file: PathBuf,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TenantStorageRefusal {
+    InvalidSelection,
+    EmptySqlitePath,
+    InvalidMySqlProfile,
+    MySqlUnavailable,
+}
+
+impl std::fmt::Display for TenantStorageRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidSelection => "Déclarer exactement une référence data ou un profil storage",
+            Self::EmptySqlitePath => "Référence de fichier vide",
+            Self::InvalidMySqlProfile => "Profil de stockage MySQL invalide",
+            Self::MySqlUnavailable => {
+                "Ce gateway refuse le profil MySQL tant que les transactions nécessaires sont indisponibles"
+            }
+        })
+    }
+}
+
+impl std::error::Error for TenantStorageRefusal {}
+
+pub enum SelectedTenantStorage<'a> {
+    Sqlite(&'a Path),
+    MySql(&'a MySqlStorageFiles),
+}
+
+/// Resolve the registry's backend without opening any material or store.
+pub fn select_tenant_storage<'a>(
+    data: Option<&'a Path>,
+    storage: Option<&'a TenantStorageFiles>,
+) -> Result<SelectedTenantStorage<'a>, TenantStorageRefusal> {
+    let sqlite_path = |path: &'a Path| {
+        if path.as_os_str().is_empty() {
+            Err(TenantStorageRefusal::EmptySqlitePath)
+        } else {
+            Ok(SelectedTenantStorage::Sqlite(path))
+        }
+    };
+    match (data, storage) {
+        (Some(path), None) => sqlite_path(path),
+        (None, Some(TenantStorageFiles::Sqlite { path })) => sqlite_path(path),
+        (None, Some(TenantStorageFiles::MySql(profile))) => {
+            let valid_name = |name: &str, max| {
+                !name.is_empty() && name.chars().count() <= max && !name.contains('\0')
+            };
+            let valid_reference = |path: &Path| !path.as_os_str().is_empty();
+            let valid_identity = match &profile.authentication {
+                MySqlAuthenticationFiles::Password {} => true,
+                MySqlAuthenticationFiles::PasswordAndMtls {
+                    client_cert_file,
+                    client_key_file,
+                } => valid_reference(client_cert_file) && valid_reference(client_key_file),
+            };
+            if tokio_rustls::rustls::pki_types::ServerName::try_from(profile.host.as_str()).is_err()
+                || !valid_name(&profile.database, 64)
+                || !valid_name(&profile.username, 32)
+                || profile.namespace.is_nil()
+                || !valid_reference(&profile.password_file)
+                || !valid_reference(&profile.ca_file)
+                || !valid_identity
+            {
+                return Err(TenantStorageRefusal::InvalidMySqlProfile);
+            }
+            Ok(SelectedTenantStorage::MySql(profile))
+        }
+        _ => Err(TenantStorageRefusal::InvalidSelection),
+    }
+}
+
+// MySQL can be inspected separately. The gateway still needs all transactions.
+pub fn sqlite_path_for_gateway<'a>(
+    data: Option<&'a Path>,
+    storage: Option<&'a TenantStorageFiles>,
+) -> Result<&'a Path, TenantStorageRefusal> {
+    match select_tenant_storage(data, storage)? {
+        SelectedTenantStorage::Sqlite(path) => Ok(path),
+        SelectedTenantStorage::MySql(_) => Err(TenantStorageRefusal::MySqlUnavailable),
+    }
 }
 
 // Mirror of `OidcFile` (`src/gateway_config.rs`).
@@ -208,12 +381,111 @@ pub struct RegistryInspection {
     /// resolved; `tenants` then holds every entry, in file order.
     pub decoded: bool,
     pub tenants: Vec<RegistryTenant>,
+    /// Paths to withhold from other diagnostic inputs, even on a refused registry.
+    pub(crate) protected_paths: ProtectedRegistryPaths,
     /// True when a tenant declares a policy whose verdict depends on the
     /// gateway event bound.
     pub uses_max_events: bool,
     /// What `load` followed by `validate_policies` refuses, token content and
     /// token uniqueness aside.
     pub refusals: Vec<Refusal>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ProtectedRegistryPaths {
+    pub(crate) files: Vec<PathBuf>,
+    pub(crate) stores: Vec<PathBuf>,
+}
+
+/// Keeps every occurrence of a member, including duplicates. The typed
+/// registry decoder still decides whether the input can be used.
+#[derive(Default)]
+struct ReferenceObject<'a>(Vec<(String, &'a RawValue)>);
+
+impl<'de> Deserialize<'de> for ReferenceObject<'de> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ObjectVisitor;
+
+        impl<'de> Visitor<'de> for ObjectVisitor {
+            type Value = ReferenceObject<'de>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JSON object")
+            }
+
+            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+                let mut fields = Vec::new();
+                while let Some(field) = map.next_entry::<String, &'de RawValue>()? {
+                    fields.push(field);
+                }
+                Ok(ReferenceObject(fields))
+            }
+        }
+
+        deserializer.deserialize_map(ObjectVisitor)
+    }
+}
+
+fn reference_object(json: &str) -> Vec<(String, &RawValue)> {
+    serde_json::from_str::<ReferenceObject<'_>>(json)
+        .unwrap_or_default()
+        .0
+}
+
+fn resolve_registry_path(parent: &Path, path: &Path) -> Option<PathBuf> {
+    (!path.as_os_str().is_empty()).then(|| parent.join(path))
+}
+
+/// Reads only the reference slots of the already size-bounded registry bytes.
+/// Unexpected shapes contribute no references and do not relax a refusal.
+fn protected_registry_paths(bytes: &[u8], parent: &Path) -> ProtectedRegistryPaths {
+    let mut paths = ProtectedRegistryPaths::default();
+    let Ok(json) = std::str::from_utf8(bytes) else {
+        return paths;
+    };
+    let reference = |raw: &RawValue| {
+        let path = serde_json::from_str::<PathBuf>(raw.get()).ok()?;
+        resolve_registry_path(parent, &path)
+    };
+    for (field, value) in reference_object(json) {
+        if field != "tenants" {
+            continue;
+        }
+        let Ok(tenants) = serde_json::from_str::<Vec<&RawValue>>(value.get()) else {
+            continue;
+        };
+        for tenant in tenants {
+            for (field, value) in reference_object(tenant.get()) {
+                match field.as_str() {
+                    "runner_token_file" | "viewer_token_file" => {
+                        paths.files.extend(reference(value))
+                    }
+                    "data" => paths.stores.extend(reference(value)),
+                    "storage" => {
+                        for (field, value) in reference_object(value.get()) {
+                            match field.as_str() {
+                                "path" => paths.stores.extend(reference(value)),
+                                "password_file" | "ca_file" => paths.files.extend(reference(value)),
+                                "authentication" => {
+                                    for (field, value) in reference_object(value.get()) {
+                                        if matches!(
+                                            field.as_str(),
+                                            "client_cert_file" | "client_key_file"
+                                        ) {
+                                            paths.files.extend(reference(value));
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    paths
 }
 
 /// The gateway's own read of the registry (`load`): a plain open that does not
@@ -277,7 +549,18 @@ pub fn inspect_registry(path: &Path, max_events: u64) -> RegistryInspection {
         }
     };
     inspection.read = true;
-    let registry: Registry = match serde_json::from_slice(&bytes) {
+    let parsed = serde_json::from_slice(&bytes);
+    // Even a rejected object can declare a private file that another input
+    // names. Register only known references without giving it authority.
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+        .canonicalize();
+    if let Ok(parent) = &parent {
+        inspection.protected_paths = protected_registry_paths(&bytes, parent);
+    }
+    let registry: TenantRegistryFiles = match parsed {
         Ok(registry) => registry,
         Err(error) => {
             inspection.refusals.push(Refusal::detailed(
@@ -296,12 +579,7 @@ pub fn inspect_registry(path: &Path, max_events: u64) -> RegistryInspection {
     }
     // `load`: a relative reference is resolved against the canonicalised
     // parent of the registry; an empty parent is the current directory.
-    let Ok(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(Path::new("."))
-        .canonicalize()
-    else {
+    let Ok(parent) = parent else {
         inspection
             .refusals
             .push(Refusal::file(FindingCode::RegistryFileUnreadable));
@@ -322,15 +600,7 @@ pub fn inspect_registry(path: &Path, max_events: u64) -> RegistryInspection {
             .push(Refusal::file(FindingCode::RegistryPolicyInvalid));
     }
     // `load`: a reference is not empty; an absolute one is used as written.
-    let resolve = |value: &Path| {
-        (!value.as_os_str().is_empty()).then(|| {
-            if value.is_absolute() {
-                value.to_owned()
-            } else {
-                parent.join(value)
-            }
-        })
-    };
+    let resolve = |value: &Path| resolve_registry_path(&parent, value);
     let mut seen = BTreeSet::new();
     for tenant in registry.tenants {
         let id = tenant.tenant_id.as_str();
@@ -413,11 +683,25 @@ pub fn inspect_registry(path: &Path, max_events: u64) -> RegistryInspection {
         if !seen.insert(tenant.tenant_id.clone()) {
             refuse(FindingCode::RegistryTenantIdDuplicate, None);
         }
-        let data = resolve(&tenant.data);
+        let data = match sqlite_path_for_gateway(tenant.data.as_deref(), tenant.storage.as_ref()) {
+            Ok(path) => resolve(path),
+            Err(refusal) => {
+                let code = match refusal {
+                    TenantStorageRefusal::InvalidSelection
+                    | TenantStorageRefusal::InvalidMySqlProfile => {
+                        FindingCode::RegistryStorageInvalid
+                    }
+                    TenantStorageRefusal::EmptySqlitePath => FindingCode::RegistryReferenceEmpty,
+                    TenantStorageRefusal::MySqlUnavailable => FindingCode::RegistryMySqlUnavailable,
+                };
+                refuse(code, None);
+                None
+            }
+        };
         let runner_token_file = resolve(&tenant.runner_token_file);
         let viewer_token_file = resolve(&tenant.viewer_token_file);
         // `load`: "Référence de fichier vide".
-        if data.is_none() || runner_token_file.is_none() || viewer_token_file.is_none() {
+        if runner_token_file.is_none() || viewer_token_file.is_none() {
             refuse(FindingCode::RegistryReferenceEmpty, None);
         }
         inspection.tenants.push(RegistryTenant {
@@ -797,6 +1081,106 @@ mod tests {
         assert_eq!(
             classified(Lookup::Unavailable),
             (FindingCode::ReferenceMetadataUnavailable, None)
+        );
+    }
+}
+
+#[cfg(test)]
+mod storage_reference_tests {
+    use super::*;
+
+    #[test]
+    fn typed_storage_selection_keeps_mysql_profiles_out_of_the_sqlite_gateway() {
+        let path = Path::new("tenant.sqlite");
+        assert!(matches!(
+            select_tenant_storage(Some(path), None),
+            Ok(SelectedTenantStorage::Sqlite(selected)) if selected == path
+        ));
+        let explicit: TenantStorageFiles =
+            serde_json::from_value(serde_json::json!({"backend": "sqlite", "path": path})).unwrap();
+        assert_eq!(
+            sqlite_path_for_gateway(None, Some(&explicit)).unwrap(),
+            path
+        );
+
+        for authentication in [
+            serde_json::json!({"mode": "password"}),
+            serde_json::json!({
+                "mode": "password_and_mtls", "client_cert_file": "client.crt", "client_key_file": "client.key",
+            }),
+        ] {
+            let mut json = serde_json::json!({
+                "backend": "mysql",
+                "host": "db.example.test",
+                "port": 3306,
+                "database": "tenant",
+                "username": "audit",
+                "namespace": "00000000-0000-4000-8000-000000000001",
+                "password_file": "password",
+                "ca_file": "ca.crt",
+                "authentication": authentication,
+            });
+            let storage: TenantStorageFiles = serde_json::from_value(json.clone()).unwrap();
+            let SelectedTenantStorage::MySql(profile) =
+                select_tenant_storage(None, Some(&storage)).unwrap()
+            else {
+                panic!("a MySQL profile resolved to SQLite");
+            };
+            assert_eq!(profile.port.get(), 3306);
+            assert_eq!(
+                matches!(
+                    profile.authentication,
+                    MySqlAuthenticationFiles::PasswordAndMtls { .. }
+                ),
+                json["authentication"]["mode"] == "password_and_mtls"
+            );
+            assert_eq!(
+                sqlite_path_for_gateway(None, Some(&storage)),
+                Err(TenantStorageRefusal::MySqlUnavailable)
+            );
+            assert!(matches!(
+                select_tenant_storage(Some(path), Some(&storage)),
+                Err(TenantStorageRefusal::InvalidSelection)
+            ));
+
+            json["password"] = serde_json::json!("inline credentials are invalid");
+            assert!(serde_json::from_value::<TenantStorageFiles>(json).is_err());
+        }
+    }
+
+    #[test]
+    fn private_reference_projection_keeps_duplicate_members_and_both_store_paths() {
+        let json = br#"{
+          "tenants":[{"data":"old.sqlite","runner_token_file":"runner",
+            "storage":{
+              "password_file":"first-password","password_file":"second-password",
+              "ca_file":"server-ca",
+              "authentication":{"client_key_file":"first-key","client_key_file":"second-key"},
+              "authentication":{"client_cert_file":"client-cert",
+                "unrelated":{"client_key_file":"ignore-this"}}
+            },
+            "storage":{"path":"new.sqlite"},"other":{"data":"ignore-that"}}],
+          "tenants":[false,{"viewer_token_file":"viewer","data":"/direct.sqlite"}]
+        }"#;
+        let parent = Path::new("/qa");
+        let paths = protected_registry_paths(json, parent);
+        assert_eq!(
+            paths.files,
+            [
+                "runner",
+                "first-password",
+                "second-password",
+                "server-ca",
+                "first-key",
+                "second-key",
+                "client-cert",
+                "viewer"
+            ]
+            .map(|path| parent.join(path))
+        );
+        assert_eq!(
+            paths.stores,
+            ["old.sqlite", "new.sqlite", "/direct.sqlite"].map(|path| parent.join(path))
         );
     }
 }

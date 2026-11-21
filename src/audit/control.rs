@@ -1,3 +1,7 @@
+use super::worker_admission::{self, ControlRecord, admission_result, receipt};
+use super::worker_transition::{
+    self, ObservationClass, allocation_source, apply_worker_transition, classify_observation,
+};
 use super::*;
 use crate::control::*;
 
@@ -57,21 +61,6 @@ struct Genesis {
     namespace_uuid: String,
     previous_seq: i64,
     previous_hash: String,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ControlRecord {
-    version: u32,
-    operation_id: String,
-    action: String,
-    input_hash: String,
-    previous_revision: Option<u64>,
-    worker: Option<WorkerV1>,
-    snapshot_hash: Option<String>,
-    observation: Option<RuntimeObservationV1>,
-    allocation: Option<AllocationV1>,
-    refusal: Option<AdmissionRefusalV1>,
-    admission_policy: Option<Value>,
 }
 type TableRows = BTreeMap<String, Vec<rusqlite::types::Value>>;
 const TABLE_QUERIES: [(&str, &str); 6] = [
@@ -483,7 +472,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
                 "invalid control revision or immutable identity"
             );
             if let Some(previous) = previous {
-                replay_worker_transition(previous, worker, &record)?;
+                worker_transition::replay_record(previous, &record)?;
             } else {
                 anyhow::ensure!(
                     worker.state == WorkerStateV1::Reserved
@@ -717,25 +706,6 @@ fn load_operation(
         })
         .transpose()
 }
-fn receipt(stored: &StoredEvent, record: &ControlRecord) -> MutationReceiptV1 {
-    MutationReceiptV1 {
-        operation_id: record.operation_id.clone(),
-        worker_id: record.worker.as_ref().map(|w| w.worker_id.clone()),
-        revision: record.worker.as_ref().map(|w| w.revision),
-        input_hash: record.input_hash.clone(),
-        audit_seq: stored.seq,
-        audit_hash: stored.hash.clone(),
-    }
-}
-fn admission_result(stored: &StoredEvent, record: &ControlRecord) -> AdmissionResultV1 {
-    AdmissionResultV1 {
-        replayed: false,
-        accepted: record.worker.is_some(),
-        refusal: record.refusal,
-        worker: record.worker.clone(),
-        receipt: receipt(stored, record),
-    }
-}
 pub(super) fn quota_usage(db: &Connection, policy: &QuotaPolicyV1) -> anyhow::Result<QuotaUsageV1> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     // This reader is a projection, not a business-access gate. Its callers
@@ -873,34 +843,7 @@ impl Store {
         jev: Value,
         quota: &QuotaPolicyV1,
     ) -> anyhow::Result<AdmissionResultV1> {
-        admission.validate()?;
-        invalid(admission.version == 1 && admission.receipt.version == 1)?;
-        uuid(&admission.operation_id)?;
-        uuid(&admission.decision_request.request_id)?;
-        admission.launch.validate()?;
-        quota.validate()?;
-        let request = &admission.decision_request;
-        invalid(
-            admission.receipt.request_id == request.request_id
-                && admission.receipt.request_hash == policy::request_hash(request)
-                && admission.launch.command == request.command
-                && admission.launch.profile == request.profile
-                && request.session_id.as_deref() == Some(admission.launch.session_id.as_str())
-                && admission.receipt.phase
-                    == if request.human_approved {
-                        DecisionPhaseV1::Approved
-                    } else {
-                        DecisionPhaseV1::Initial
-                    },
-        )?;
-        hash(&admission.receipt.request_hash)?;
-        hash(&admission.receipt.audit_hash)?;
-        invalid(admission.receipt.audit_seq > 0)?;
-        let value = serde_json::to_value(admission)?;
-        invalid(
-            self.redactor.value(&value) == value && serde_json::to_vec(&value)?.len() <= 65536,
-        )?;
-        let input_hash = admission.input_hash()?;
+        let input_hash = worker_admission::validate_input(admission, quota, &self.redactor)?;
         let mut db = self
             .db
             .lock()
@@ -931,18 +874,9 @@ impl Store {
         quota: &QuotaPolicyV1,
     ) -> anyhow::Result<ControlRecord> {
         let request = &admission.decision_request;
-        let input_hash = admission.input_hash()?;
         let stored = Self::lookup_decision(tx, request, &admission.receipt.request_hash)?
             .ok_or(ControlFailure::InvalidRequest)?;
-        invalid(
-            stored.seq == admission.receipt.audit_seq
-                && stored.hash == admission.receipt.audit_hash
-                && stored
-                    .event
-                    .decision
-                    .as_ref()
-                    .is_some_and(|decision| decision.outcome == Outcome::Allow),
-        )?;
+        worker_admission::require_receipt(&admission.receipt, &stored)?;
         let existing: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM workers WHERE request_id=?1 OR session_id=?2)",
             params![request.request_id, admission.launch.session_id],
@@ -966,23 +900,8 @@ impl Store {
             )?;
             conflict(!reserved)?;
         }
-        let current = policy::evaluate(policy, request);
         let usage = quota_usage(tx, quota)?;
-        let refusal =
-            if current.outcome != Outcome::Allow || fresh_decision.outcome != Outcome::Allow {
-                Some(AdmissionRefusalV1::Policy)
-            } else if usage.held_workers >= quota.max_active_workers
-                || usage.held_cpu_millis + u64::from(admission.launch.cpu_millis)
-                    > u64::from(quota.max_cpu_millis)
-                || usage.held_memory_bytes + admission.launch.memory_bytes > quota.max_memory_bytes
-                || admission.launch.timeout_seconds > quota.max_timeout_seconds
-            {
-                Some(AdmissionRefusalV1::Quota)
-            } else {
-                None
-            };
-        let policy_hash = content_hash("ai-guard:admission-policy:v1", &(policy, quota))?;
-        let worker = if refusal.is_none() {
+        worker_admission::build_record(admission, policy, fresh_decision, jev, &usage, || {
             let namespace: String = tx.query_row(
                 "SELECT namespace_uuid FROM control_meta WHERE singleton=1",
                 [],
@@ -996,61 +915,8 @@ impl Store {
                     params![worker_id, attempt_id], |row| row.get(0))?;
                 conflict(!duplicate)?;
             }
-            let physical = format!(
-                "aig-{}-{}",
-                namespace.replace('-', ""),
-                worker_id.replace('-', "")
-            );
-            Some(WorkerV1 {
-                worker_id,
-                admission_operation_id: admission.operation_id.clone(),
-                request_id: request.request_id.clone(),
-                receipt: admission.receipt.clone(),
-                launch: admission.launch.clone(),
-                spec_hash: admission.launch.spec_hash()?,
-                policy_hash: policy_hash.clone(),
-                state: WorkerStateV1::Reserved,
-                quota_held: true,
-                revision: 1,
-                attempt: WorkerAttemptV1 {
-                    attempt_id,
-                    stable_name: physical.clone(),
-                    volume_name: format!("{physical}-work"),
-                    container_id: None,
-                    created_inspection: None,
-                    create_operation_id: None,
-                    start_operation_id: None,
-                    start_emitter_id: None,
-                },
-                observed_started_at: None,
-                allocation_inconsistent: false,
-                last_observation: None,
-                unknown_reason: None,
-                cleanup_removed: None,
-                cleanup_error: None,
-            })
-        } else {
-            None
-        };
-        let record = ControlRecord {
-            version: 1,
-            operation_id: admission.operation_id.clone(),
-            action: "admit".into(),
-            input_hash,
-            previous_revision: None,
-            snapshot_hash: worker
-                .as_ref()
-                .map(|w| content_hash("ai-guard:worker-snapshot:v1", w))
-                .transpose()?,
-            worker,
-            observation: None,
-            allocation: None,
-            refusal,
-            admission_policy: Some(
-                json!({"policy_hash":policy_hash,"deterministic":current,"fresh":fresh_decision,"jev":jev,"quota":quota}),
-            ),
-        };
-        Ok(record)
+            Ok((namespace, worker_id, attempt_id))
+        })
     }
     fn persist_control_record(
         &self,
@@ -1474,26 +1340,7 @@ impl Store {
         })
     }
     pub fn mutate_worker(&self, mutation: &WorkerMutationV1) -> anyhow::Result<MutationResultV1> {
-        invalid(mutation.version == 1 && mutation.expected_revision > 0)?;
-        uuid(&mutation.operation_id)?;
-        uuid(&mutation.worker_id)?;
-        uuid(&mutation.attempt_id)?;
-        let value = serde_json::to_value(mutation)?;
-        invalid(
-            self.redactor.value(&value) == value && serde_json::to_vec(&value)?.len() <= 65536,
-        )?;
-        let input_hash = content_hash("ai-guard:worker-mutation:v1", mutation)?;
-        let action = match &mutation.transition {
-            WorkerTransitionV1::Prepare => "prepare",
-            WorkerTransitionV1::CreateIssued => "create_issued",
-            WorkerTransitionV1::Created { .. } => "created",
-            WorkerTransitionV1::StartClaim { .. } => "start_claim",
-            WorkerTransitionV1::Observe { .. } => "observe",
-            WorkerTransitionV1::Unknown { .. } => "unknown",
-            WorkerTransitionV1::Stop => "stop",
-            WorkerTransitionV1::CancelReserved => "cancel_reserved",
-            WorkerTransitionV1::CleanupResult { .. } => "cleanup_result",
-        };
+        let input_hash = worker_transition::validate_input(mutation, &self.redactor)?;
         let mut db = self
             .db
             .lock()
@@ -1501,21 +1348,11 @@ impl Store {
         let tx = self.begin_checked(&mut db)?;
         require_control(&tx)?;
         if let Some((stored, record)) = load_operation(&tx, &mutation.operation_id)? {
-            conflict(record.input_hash == input_hash && record.action == action)?;
-            let worker = record.worker.clone().ok_or(ControlFailure::Conflict)?;
-            let result = MutationResultV1 {
-                worker,
-                receipt: receipt(&stored, &record),
-                disposition: if action == "start_claim" {
-                    Some(ClaimDispositionV1::AlreadyConsumed)
-                } else {
-                    None
-                },
-            };
+            let result = worker_transition::replay(mutation, &input_hash, &record, &stored)?;
             self.commit_checked(tx)?;
             return Ok(result);
         }
-        let mut worker = load_worker(&tx, &mutation.worker_id)?.ok_or(ControlFailure::NotFound)?;
+        let worker = load_worker(&tx, &mutation.worker_id)?.ok_or(ControlFailure::NotFound)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
             if !tx.lease.active
@@ -1537,241 +1374,11 @@ impl Store {
                 supervision::can_create(&tx, &worker)?;
             }
         }
-        conflict(
-            worker.attempt.attempt_id == mutation.attempt_id
-                && worker.revision == mutation.expected_revision,
-        )?;
-        let (observation, allocation) = apply_worker_transition(&mut worker, mutation)?;
-        let record = ControlRecord {
-            version: 1,
-            operation_id: mutation.operation_id.clone(),
-            action: action.into(),
-            input_hash,
-            previous_revision: Some(mutation.expected_revision),
-            snapshot_hash: Some(content_hash("ai-guard:worker-snapshot:v1", &worker)?),
-            worker: Some(worker.clone()),
-            observation,
-            allocation,
-            refusal: None,
-            admission_policy: None,
-        };
+        let record = worker_transition::build_record(worker, mutation, input_hash)?;
         let stored = self.persist_control_record(&tx, &record, false)?;
-        let result = MutationResultV1 {
-            worker,
-            receipt: receipt(&stored, &record),
-            disposition: if action == "start_claim" {
-                Some(ClaimDispositionV1::EmitOnce)
-            } else {
-                None
-            },
-        };
         self.commit_checked(tx)?;
-        Ok(result)
+        worker_transition::committed_result(&stored, &record)
     }
-}
-
-/// Derive checkpoint facts from an acknowledged parent without storage or IO.
-/// The returned clone is data, never a start or mutation permission.
-pub(crate) fn expected_worker_transition(
-    parent: &WorkerV1,
-    mutation: &WorkerMutationV1,
-) -> anyhow::Result<WorkerV1> {
-    invalid(mutation.version == 1 && mutation.expected_revision > 0)?;
-    uuid(&mutation.operation_id)?;
-    uuid(&mutation.worker_id)?;
-    uuid(&mutation.attempt_id)?;
-    invalid(serde_json::to_vec(mutation)?.len() <= 65536)?;
-    conflict(
-        mutation.worker_id == parent.worker_id
-            && mutation.attempt_id == parent.attempt.attempt_id
-            && mutation.expected_revision == parent.revision,
-    )?;
-    let mut expected = parent.clone();
-    apply_worker_transition(&mut expected, mutation)?;
-    Ok(expected)
-}
-
-/// Deterministic state change shared by live mutations and journal replay.
-/// This function performs no database or runtime operation.
-fn apply_worker_transition(
-    worker: &mut WorkerV1,
-    mutation: &WorkerMutationV1,
-) -> anyhow::Result<(Option<RuntimeObservationV1>, Option<AllocationV1>)> {
-    let mut observation = None;
-    let mut allocation = None;
-    match &mutation.transition {
-        WorkerTransitionV1::Prepare => {
-            prepare_worker(worker)?;
-        }
-        WorkerTransitionV1::CreateIssued => {
-            conflict(
-                worker.state == WorkerStateV1::Preparing
-                    && worker.attempt.create_operation_id.is_none(),
-            )?;
-            worker.attempt.create_operation_id = Some(mutation.operation_id.clone());
-        }
-        WorkerTransitionV1::Created { inspection } => {
-            record_created_worker(worker, inspection)?;
-        }
-        WorkerTransitionV1::StartClaim { emitter_id } => {
-            uuid(emitter_id)?;
-            conflict(
-                worker.state == WorkerStateV1::Created
-                    && worker.quota_held
-                    && worker.attempt.container_id.is_some()
-                    && worker.attempt.start_operation_id.is_none(),
-            )?;
-            worker.attempt.start_operation_id = Some(mutation.operation_id.clone());
-            worker.attempt.start_emitter_id = Some(emitter_id.clone());
-            worker.state = WorkerStateV1::StartIssued;
-        }
-        WorkerTransitionV1::Observe {
-            observation: incoming,
-        } => {
-            conflict(
-                worker.quota_held
-                    && worker.attempt.container_id.is_some()
-                    && ![
-                        WorkerStateV1::Reserved,
-                        WorkerStateV1::Preparing,
-                        WorkerStateV1::Terminal,
-                        WorkerStateV1::Cancelled,
-                    ]
-                    .contains(&worker.state),
-            )?;
-            validate_inspection(&incoming.inspection)?;
-            chrono::DateTime::parse_from_rfc3339(&incoming.observed_at)
-                .map_err(|_| ControlFailure::InvalidRequest)?;
-            for date in [&incoming.started_at, &incoming.finished_at]
-                .into_iter()
-                .flatten()
-            {
-                bounded(date, 64)?;
-            }
-            // Later inspection cannot erase an observed restart or an
-            // identity/configuration divergence during this allocation.
-            if !inspection_matches(worker, &incoming.inspection, true)
-                || incoming.restart_count.is_some_and(|count| count > 0)
-                || worker
-                    .observed_started_at
-                    .as_ref()
-                    .and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok())
-                    .zip(
-                        incoming
-                            .started_at
-                            .as_ref()
-                            .and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok()),
-                    )
-                    .is_some_and(|(first, current)| first != current)
-            {
-                worker.allocation_inconsistent = true;
-            }
-            if worker.observed_started_at.is_none()
-                && !worker.allocation_inconsistent
-                && inspection_matches(worker, &incoming.inspection, true)
-                && incoming.restart_count == Some(0)
-                && worker.attempt.start_operation_id.is_some()
-                && ((incoming.status == RuntimeStatusV1::Running && incoming.running == Some(true))
-                    || ([RuntimeStatusV1::Exited, RuntimeStatusV1::Dead]
-                        .contains(&incoming.status)
-                        && incoming.running == Some(false)))
-                && let Some(started) = incoming
-                    .started_at
-                    .as_ref()
-                    .and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok())
-                    .filter(|date| date.timestamp() > 0)
-            {
-                // A credible historical start remains evidence even when
-                // finish time or exit code is not yet observable.
-                worker.observed_started_at = Some(
-                    started
-                        .with_timezone(&chrono::Utc)
-                        .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
-                );
-            }
-            let diagnosis = classify_observation(worker, incoming);
-            match diagnosis {
-                ObservationClass::Running => {
-                    worker.state = if worker.state == WorkerStateV1::Stopping {
-                        WorkerStateV1::Stopping
-                    } else {
-                        WorkerStateV1::Running
-                    };
-                    worker.unknown_reason = None;
-                    if worker.observed_started_at.is_none() {
-                        worker.observed_started_at = incoming.started_at.clone();
-                    }
-                }
-                ObservationClass::Terminal(ref started, ref finished, ns) => {
-                    let cpu = ns
-                        .checked_mul(u128::from(worker.launch.cpu_millis))
-                        .context("allocation CPU overflow")?;
-                    let ram = ns
-                        .checked_mul(u128::from(worker.launch.memory_bytes))
-                        .context("allocation memory overflow")?;
-                    allocation = Some(AllocationV1 {
-                        attempt_id: worker.attempt.attempt_id.clone(),
-                        worker_id: worker.worker_id.clone(),
-                        terminal_observation_id: mutation.operation_id.clone(),
-                        started_at: started.clone(),
-                        finished_at: finished.clone(),
-                        duration_ns: ns.to_string(),
-                        cpu_millicore_nanoseconds: cpu.to_string(),
-                        memory_byte_nanoseconds: ram.to_string(),
-                        method_version: 1,
-                        billable: false,
-                        source: allocation_source(incoming),
-                    });
-                    worker.state = WorkerStateV1::Terminal;
-                    worker.quota_held = false;
-                    worker.unknown_reason = None;
-                    if worker.observed_started_at.is_none() {
-                        worker.observed_started_at = Some(started.clone());
-                    }
-                }
-                ObservationClass::Unknown(reason) => {
-                    worker.state = WorkerStateV1::InDoubt;
-                    worker.unknown_reason = Some(reason.into());
-                }
-            }
-            worker.last_observation = Some(incoming.clone());
-            observation = Some(incoming.clone());
-        }
-        WorkerTransitionV1::Unknown { reason } => {
-            bounded(reason, 1024)?;
-            conflict(worker.quota_held)?;
-            worker.state = WorkerStateV1::InDoubt;
-            worker.unknown_reason = Some(reason.clone());
-        }
-        WorkerTransitionV1::Stop => {
-            conflict(worker.quota_held && worker.attempt.container_id.is_some())?;
-            worker.state = WorkerStateV1::Stopping;
-        }
-        WorkerTransitionV1::CancelReserved => {
-            conflict(
-                worker.state == WorkerStateV1::Reserved
-                    && worker.attempt.create_operation_id.is_none()
-                    && worker.attempt.start_operation_id.is_none()
-                    && worker.quota_held,
-            )?;
-            worker.state = WorkerStateV1::Cancelled;
-            worker.quota_held = false;
-        }
-        WorkerTransitionV1::CleanupResult { removed, error } => {
-            conflict(worker.state == WorkerStateV1::Terminal && !worker.quota_held)?;
-            invalid((*removed && error.is_none()) || (!*removed && error.is_some()))?;
-            if let Some(error) = error {
-                bounded(error, 1024)?;
-            }
-            worker.cleanup_removed = Some(*removed);
-            worker.cleanup_error = error.clone();
-        }
-    }
-    worker.revision = worker
-        .revision
-        .checked_add(1)
-        .context("worker revision exhausted")?;
-    Ok((observation, allocation))
 }
 
 fn validate_admission_input(
@@ -1788,61 +1395,15 @@ fn validate_admission_input(
         )
         .optional()?
         .context("admission receipt event is missing")?;
-    let event = &source.event;
-    let approved = event.data["human_approved"]
-        .as_bool()
-        .context("admission receipt phase is missing")?;
+    let admission = worker_admission::historical_admission(worker, record, &source, admission_seq)?;
+    let linked = Store::lookup_decision(
+        db,
+        &admission.decision_request,
+        &worker.receipt.request_hash,
+    )?
+    .context("admission receipt decision is missing")?;
     anyhow::ensure!(
-        source.seq < admission_seq
-            && source.hash == worker.receipt.audit_hash
-            && event.kind == "security.decision"
-            && event.source == "gateway"
-            && event.provenance == "observed"
-            && event
-                .decision
-                .as_ref()
-                .is_some_and(|decision| decision.outcome == Outcome::Allow)
-            && event.data["request_hash"].as_str() == Some(worker.receipt.request_hash.as_str()),
-        "admission receipt does not reference an earlier allow"
-    );
-    let request = DecisionRequest {
-        request_id: event.data["request_id"]
-            .as_str()
-            .context("admission receipt request is missing")?
-            .into(),
-        profile: event.data["profile"]
-            .as_str()
-            .context("admission receipt profile is missing")?
-            .into(),
-        command: event
-            .command
-            .clone()
-            .context("admission command is missing")?,
-        project_id: event.project_id.clone(),
-        sandbox_id: event.sandbox_id.clone(),
-        agent_id: event.agent_id.clone(),
-        session_id: event.session_id.clone(),
-        correlation_id: event.correlation_id.clone(),
-        trace_id: event.trace_id.clone(),
-        human_approved: approved,
-        approval_hash: approved.then(|| worker.receipt.request_hash.clone()),
-        execution_mode: Store::decision_execution_mode(&event.data)?,
-        provider_resolution: Store::decision_provider_resolution(&event.data)?,
-    };
-    let linked = Store::lookup_decision(db, &request, &worker.receipt.request_hash)?
-        .context("admission receipt decision is missing")?;
-    let admission = AdmissionV1 {
-        version: 1,
-        operation_id: record.operation_id.clone(),
-        decision_request: request,
-        receipt: worker.receipt.clone(),
-        launch: worker.launch.clone(),
-    };
-    admission.validate()?;
-    anyhow::ensure!(
-        linked.seq == source.seq
-            && linked.hash == source.hash
-            && admission.input_hash()? == record.input_hash,
+        linked.seq == source.seq && linked.hash == source.hash,
         "admission input differs from its linked decision or journal"
     );
     let policy = record
@@ -1855,242 +1416,8 @@ fn validate_admission_input(
     quota.validate()?;
     let usage = quota_usage_before(db, admission_seq, &quota)?;
     anyhow::ensure!(
-        usage
-            .held_workers
-            .checked_add(1)
-            .is_some_and(|count| count <= quota.max_active_workers)
-            && usage
-                .held_cpu_millis
-                .checked_add(u64::from(worker.launch.cpu_millis))
-                .is_some_and(|cpu| cpu <= u64::from(quota.max_cpu_millis))
-            && usage
-                .held_memory_bytes
-                .checked_add(worker.launch.memory_bytes)
-                .is_some_and(|memory| memory <= quota.max_memory_bytes)
-            && worker.launch.timeout_seconds <= quota.max_timeout_seconds,
+        worker_admission::fits_quota(&worker.launch, &usage),
         "worker admission exceeds historical shared tenant quota"
     );
     Ok(())
-}
-
-fn replay_worker_transition(
-    previous: &WorkerV1,
-    worker: &WorkerV1,
-    record: &ControlRecord,
-) -> anyhow::Result<()> {
-    // Version 1 stores each mutation's full input across its identity, action,
-    // snapshot and observation. Rebuild that input without trusting its result.
-    // Admission inputs have a different contract and are validated separately.
-    let transition = match record.action.as_str() {
-        "prepare" => WorkerTransitionV1::Prepare,
-        "create_issued" => WorkerTransitionV1::CreateIssued,
-        "created" => WorkerTransitionV1::Created {
-            inspection: worker
-                .attempt
-                .created_inspection
-                .clone()
-                .context("created transition has no inspection")?,
-        },
-        "start_claim" => WorkerTransitionV1::StartClaim {
-            emitter_id: worker
-                .attempt
-                .start_emitter_id
-                .clone()
-                .context("start claim has no emitter")?,
-        },
-        "observe" => WorkerTransitionV1::Observe {
-            observation: record
-                .observation
-                .clone()
-                .context("observe transition has no observation")?,
-        },
-        "unknown" => WorkerTransitionV1::Unknown {
-            reason: worker
-                .unknown_reason
-                .clone()
-                .context("unknown transition has no reason")?,
-        },
-        "stop" => WorkerTransitionV1::Stop,
-        "cancel_reserved" => WorkerTransitionV1::CancelReserved,
-        "cleanup_result" => WorkerTransitionV1::CleanupResult {
-            removed: worker
-                .cleanup_removed
-                .context("cleanup result is missing")?,
-            error: worker.cleanup_error.clone(),
-        },
-        _ => anyhow::bail!("unsupported worker mutation action"),
-    };
-    let mutation = WorkerMutationV1 {
-        version: 1,
-        operation_id: record.operation_id.clone(),
-        worker_id: previous.worker_id.clone(),
-        attempt_id: previous.attempt.attempt_id.clone(),
-        expected_revision: previous.revision,
-        transition,
-    };
-    anyhow::ensure!(
-        content_hash("ai-guard:worker-mutation:v1", &mutation)? == record.input_hash
-            && record.refusal.is_none()
-            && record.admission_policy.is_none(),
-        "worker mutation input or metadata differs from journal"
-    );
-    let mut expected = previous.clone();
-    let (observation, allocation) = apply_worker_transition(&mut expected, &mutation)?;
-    anyhow::ensure!(
-        serde_json::to_value(expected)? == serde_json::to_value(worker)?
-            && observation == record.observation
-            && allocation == record.allocation,
-        "worker mutation result differs from journal"
-    );
-    Ok(())
-}
-
-fn prepare_worker(worker: &mut WorkerV1) -> anyhow::Result<()> {
-    conflict(
-        [WorkerStateV1::Reserved, WorkerStateV1::InDoubt].contains(&worker.state)
-            && worker.quota_held
-            && worker.attempt.create_operation_id.is_none()
-            && worker.attempt.container_id.is_none()
-            && worker.attempt.created_inspection.is_none()
-            && worker.attempt.start_operation_id.is_none()
-            && !worker.allocation_inconsistent,
-    )?;
-    worker.state = WorkerStateV1::Preparing;
-    worker.unknown_reason = None;
-    Ok(())
-}
-
-fn record_created_worker(
-    worker: &mut WorkerV1,
-    inspection: &RuntimeInspectionV1,
-) -> anyhow::Result<()> {
-    conflict(
-        [WorkerStateV1::Preparing, WorkerStateV1::InDoubt].contains(&worker.state)
-            && worker.quota_held
-            && worker.attempt.create_operation_id.is_some()
-            && worker.attempt.container_id.is_none()
-            && worker.attempt.created_inspection.is_none()
-            && worker.attempt.start_operation_id.is_none()
-            && !worker.allocation_inconsistent,
-    )?;
-    validate_inspection(inspection)?;
-    invalid(inspection_matches(worker, inspection, false))?;
-    worker.attempt.container_id = Some(inspection.container_id.clone());
-    worker.attempt.created_inspection = Some(inspection.clone());
-    worker.state = WorkerStateV1::Created;
-    worker.unknown_reason = None;
-    Ok(())
-}
-
-fn validate_inspection(inspection: &RuntimeInspectionV1) -> anyhow::Result<()> {
-    bounded(&inspection.authority_id, 256)?;
-    bounded(&inspection.stable_name, 128)?;
-    bounded(&inspection.volume_name, 128)?;
-    hash(&inspection.container_id)?;
-    hash(&inspection.spec_hash)?;
-    hash(
-        inspection
-            .image_id
-            .strip_prefix("sha256:")
-            .ok_or(ControlFailure::InvalidRequest)?,
-    )?;
-    Ok(())
-}
-fn inspection_matches(worker: &WorkerV1, i: &RuntimeInspectionV1, known_cid: bool) -> bool {
-    i.authority_id == worker.launch.authority_id
-        && i.runtime_kind == worker.launch.runtime_kind
-        && i.stable_name == worker.attempt.stable_name
-        && i.volume_name == worker.attempt.volume_name
-        && i.image_id == worker.launch.image_id
-        && i.spec_hash == worker.spec_hash
-        && i.cpu_millis == worker.launch.cpu_millis
-        && i.memory_bytes == worker.launch.memory_bytes
-        && i.pids_limit == worker.launch.pids_limit
-        && i.network == worker.launch.network
-        && i.security_preset == worker.launch.security_preset
-        && i.restart_policy == worker.launch.restart_policy
-        && (!known_cid || worker.attempt.container_id.as_deref() == Some(i.container_id.as_str()))
-}
-enum ObservationClass {
-    Running,
-    Terminal(String, String, u128),
-    Unknown(&'static str),
-}
-fn allocation_source(observation: &RuntimeObservationV1) -> AllocationSourceV1 {
-    AllocationSourceV1 {
-        authority_id: observation.inspection.authority_id.clone(),
-        runtime_kind: observation.inspection.runtime_kind,
-        container_id: observation.inspection.container_id.clone(),
-        spec_hash: observation.inspection.spec_hash.clone(),
-        provenance: AllocationProvenanceV1::Observed,
-    }
-}
-fn classify_observation(worker: &WorkerV1, observation: &RuntimeObservationV1) -> ObservationClass {
-    if worker.allocation_inconsistent {
-        return ObservationClass::Unknown(
-            "allocation history is inconsistent; explicit reconciliation required",
-        );
-    }
-    if !inspection_matches(worker, &observation.inspection, true) {
-        return ObservationClass::Unknown("runtime identity or inspected configuration differs");
-    }
-    if worker.attempt.start_operation_id.is_none() {
-        return ObservationClass::Unknown("runtime start was not claimed by control");
-    }
-    if observation.restart_count != Some(0) {
-        return ObservationClass::Unknown("runtime restart count is missing or nonzero");
-    }
-    let Some(started) = observation
-        .started_at
-        .as_ref()
-        .and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok())
-    else {
-        return ObservationClass::Unknown("runtime start time is missing or invalid");
-    };
-    if started.timestamp() <= 0 {
-        return ObservationClass::Unknown("runtime start time is not an observed execution time");
-    }
-    if let Some(previous) = worker
-        .observed_started_at
-        .as_ref()
-        .and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok())
-        && previous.timestamp() > 0
-        && previous != started
-    {
-        return ObservationClass::Unknown("runtime start time changed");
-    }
-    if observation.status == RuntimeStatusV1::Running && observation.running == Some(true) {
-        return ObservationClass::Running;
-    }
-    if ![RuntimeStatusV1::Exited, RuntimeStatusV1::Dead].contains(&observation.status)
-        || observation.running != Some(false)
-        || observation.exit_code.is_none()
-    {
-        return ObservationClass::Unknown("runtime terminal state or exit code is incomplete");
-    }
-    let Some(finished) = observation
-        .finished_at
-        .as_ref()
-        .and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok())
-    else {
-        return ObservationClass::Unknown("runtime finish time is missing or invalid");
-    };
-    if finished < started {
-        return ObservationClass::Unknown("runtime finish precedes start");
-    }
-    let Some(duration) = (finished - started)
-        .num_nanoseconds()
-        .and_then(|ns| u128::try_from(ns).ok())
-    else {
-        return ObservationClass::Unknown("runtime interval cannot be represented exactly");
-    };
-    ObservationClass::Terminal(
-        started
-            .with_timezone(&chrono::Utc)
-            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
-        finished
-            .with_timezone(&chrono::Utc)
-            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
-        duration,
-    )
 }

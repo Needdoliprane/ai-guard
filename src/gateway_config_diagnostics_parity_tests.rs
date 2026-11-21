@@ -2,12 +2,12 @@
 //!
 //! `ai-guard-diagnose` cannot call `load`, `validate_policies` or
 //! `prepare_oidc_file`: they are private to the gateway binary, and `load`
-//! reads every token. `agentsandbox::diagnostics::gateway_files` restates
-//! their closed envelopes and their structural rules. These tests bind that
-//! restatement to the real loaders:
+//! reads every token. The diagnostic shares the registry envelope and restates
+//! the other private envelopes and structural rules. These tests bind the
+//! reported fields and rules to the real loaders:
 //!
-//! 1. the field names of the four private envelopes, read from the source of
-//!    this module's parent, equal the lists the inspection declares;
+//! 1. the field names of the four closed envelopes equal the lists the
+//!    inspection declares;
 //! 2. on registries whose tokens are valid, `load` then `validate_policies`
 //!    succeeds exactly when the inspection reports no refusal, with the same
 //!    tenants and the same resolved references;
@@ -40,6 +40,7 @@ use std::{
 };
 
 const SOURCE: &str = include_str!("gateway_config.rs");
+const REGISTRY_SOURCE: &str = include_str!("diagnostics/gateway_files.rs");
 const HTTPS_FILE: &str = include_str!("../docs/setup/sso/examples/gateway.https.json");
 const DEMO_MANIFEST: &str = include_str!("../docs/setup/sso/examples/local-demo.json");
 /// One public certificate; its key was never written.
@@ -69,23 +70,31 @@ fn write_json(path: &Path, value: &Value) {
 
 // ---- 1. field tripwire ----------------------------------------------------
 
-/// Field names of a closed envelope of `gateway_config.rs`, read from its
-/// source. A field starts at the first indentation level; attributes and the
-/// continuation lines of a type do not.
-fn declared_fields(name: &str) -> Vec<String> {
+/// Read the field names of a closed envelope from its declaration. A field
+/// starts at the first indentation level and can have an explicit visibility.
+fn declared_fields(source: &str, name: &str) -> Vec<String> {
     let header = format!("struct {name} {{\n");
-    let start = SOURCE
+    let start = source
         .find(&header)
-        .unwrap_or_else(|| panic!("gateway_config.rs declares no struct {name}"));
+        .unwrap_or_else(|| panic!("loader source declares no struct {name}"));
+    let prefix = &source[..start];
+    let attributes = prefix
+        .strip_suffix("pub ")
+        .or_else(|| prefix.strip_suffix("pub(crate) "))
+        .unwrap_or(prefix);
     assert!(
-        SOURCE[..start].ends_with("#[derive(Deserialize)]\n#[serde(deny_unknown_fields)]\n"),
+        attributes.ends_with("#[derive(Deserialize)]\n#[serde(deny_unknown_fields)]\n"),
         "{name} is no longer a closed envelope that is only deserialised"
     );
-    SOURCE[start + header.len()..]
+    source[start + header.len()..]
         .lines()
         .take_while(|line| *line != "}")
         .filter_map(|line| {
             let (field, _) = line.strip_prefix("    ")?.split_once(':')?;
+            let field = field
+                .strip_prefix("pub ")
+                .or_else(|| field.strip_prefix("pub(crate) "))
+                .unwrap_or(field);
             (!field.is_empty()
                 && field
                     .bytes()
@@ -97,14 +106,18 @@ fn declared_fields(name: &str) -> Vec<String> {
 
 #[test]
 fn diagnostics_parity_envelope_field_names_equal_the_loaders() {
-    for (name, restated) in [
-        ("Registry", REGISTRY_FIELDS),
-        ("TenantFiles", TENANT_FIELDS),
-        ("OidcFile", OIDC_FILE_FIELDS),
-        ("AuthenticationAuditFile", AUTHENTICATION_AUDIT_FIELDS),
+    for (source, name, restated) in [
+        (REGISTRY_SOURCE, "TenantRegistryFiles", REGISTRY_FIELDS),
+        (REGISTRY_SOURCE, "TenantFiles", TENANT_FIELDS),
+        (SOURCE, "OidcFile", OIDC_FILE_FIELDS),
+        (
+            SOURCE,
+            "AuthenticationAuditFile",
+            AUTHENTICATION_AUDIT_FIELDS,
+        ),
     ] {
         assert_eq!(
-            declared_fields(name),
+            declared_fields(source, name),
             restated,
             "the envelope {name} changed: update agentsandbox::diagnostics::gateway_files and this corpus"
         );

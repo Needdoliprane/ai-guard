@@ -161,7 +161,7 @@ pub(crate) enum AuthenticatedWorkload {
 /// Historical ownership for collision checks, never an authentication proof.
 /// No secret or digest is returned to the caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WorkloadDigestOwnerV1 {
+pub struct WorkloadDigestOwnerV1 {
     pub credential_id: String,
     pub subject: WorkloadSubjectV1,
 }
