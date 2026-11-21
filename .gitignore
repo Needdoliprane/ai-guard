@@ -5,6 +5,9 @@
 /.scratch/
 /.claude/*
 !/.claude/skills/
+!/.claude/rules/
+/.claude/rules/*
+!/.claude/rules/storage.md
 /.playwright-mcp/
 *.sqlite
 *.sqlite-shm
@@ -30,3 +33,4 @@
 
 # Local Qwen cgroup evidence helper
 /tests/e2e/qwen_runtime_evidence.rs
+/tests/e2e/run_qwen_probe.py

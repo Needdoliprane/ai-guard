@@ -1,0 +1,64 @@
+{
+  "date": "2026-11-18",
+  "candidate": {
+    "checkout": "g09-native-broker-integration-20261118",
+    "base_commit": "0f7c4032",
+    "composition": "Sources du broker et deltas locaux du checkout c4c4d2a7, avec raccordement run et requête Result v1 ajoutés dans le checkout isolé.",
+    "binary_sha256": "4e1afa3fe2b9c5b79a0aa9acd13c9dded1d13eaaa7f2c9b367ac004d83e7a918",
+    "source_sha256": {
+      "Cargo.lock": "6e5ac5a7f03f0dcf0f8ddb666b4461dca71129f0898880673d648ee16534fa82",
+      "src/main.rs": "5b55234aef5c3053efd0b54a4707444f66bfdc713ac75ef6825852c2233ba8de",
+      "src/operations.rs": "9528ae0508582abd96e24d884103b4ff5cb007dc50e11e4e7238e7358de086fd",
+      "src/operations/broker_run.rs": "81ff073220973f6bb2e607788780bddbb23d112d4c24fda99e253a2a4a19546e",
+      "src/broker_cli.rs": "6920044f90910185f1d81edb2b0b5731ac73b625c7848ed340579da3d6d102e4",
+      "src/broker/service/client.rs": "fe74f85c86064c9ff986912a1247c38a95d7fe8f0b4eb93ee7345e6b6b10e62f",
+      "src/broker/service/jobs.rs": "17946ab8fa34184670f95e918c9674531efa5d27b43cfe0fba9ab9bedc25baa3",
+      "src/broker/service/protocol.rs": "69918eae25b362c7cc2000bcdf4f7e3e88d06334655c28fc80e5e1574dda378f",
+      "src/broker/service/server.rs": "57335e7b01842cab22ae9851e4b8e3391ad87cbc2525278c88f968a97c8e1c70",
+      "src/broker/service/result_auth_tests.rs": "341c53ee4a7b9b58c90d7a16b4f7e3181bb9b6019cd8878e6183895e91d11cc2",
+      "tests/broker_run_cli.rs": "dd1ecba2a8aa20697dc57bd70d611078df0a432cdeea94188e5df29d881aff06",
+      "tests/broker_runtime.rs": "610c51b1d2488ab75bddbed1a18bd3566bb150b43a3bed396a79463c0cea943f",
+      "tests/support/broker_runtime.rs": "77a80be62a54b039d73dac973cd115e9e6d9d6963782070b236d32d443c9aa3c"
+    }
+  },
+  "environment": {
+    "platform": "macOS 27.2 ARM64",
+    "rust": "1.99.1",
+    "cargo_environment": "CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=2",
+    "cargo_options": [
+      "--config profile.dev.package.agentsandbox.opt-level=\"s\"",
+      "--config profile.dev.package.agentsandbox.codegen-units=4"
+    ]
+  },
+  "checks": [
+    {
+      "command": "cargo test --locked --offline --test broker_run_cli",
+      "status": "PASS",
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0,
+      "scope": "Binaire CLI Rust réel et fixture IPC Unix privée. Sélection explicite, service absent ou obsolète, refus des options héritées, identité d’opération stable, compatibilité de réponse, revue, code terminal et OOM, Ctrl-C avec accusé lié au même UUID."
+    },
+    {
+      "command": "cargo test --locked --offline --lib broker::service",
+      "status": "PASS",
+      "passed": 21,
+      "failed": 0,
+      "ignored": 0,
+      "scope": "Dont autorisation Result via gateway loopback et journal privé, et projection Terminal qui exige sortie observée, acquittement du résultat et du scan, puis nettoyage confirmé."
+    },
+    {
+      "command": "cargo test --locked --offline --test broker_runtime",
+      "status": "PASS",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 3,
+      "scope": "Compilation du harnais natif et quatre régressions du diagnostic. Le nouveau cas qui interrompt uniquement la CLI est parmi les cas ignorés par défaut et reste NOT_RUN sur moteur."
+    }
+  ],
+  "limits": [
+    "Le raccordement est dans le checkout isolé. Le point d’entrée sans profil broker suit encore le parcours historique.",
+    "Le dernier essai moteur de la composition de base est BLOCKED avant démarrage à la création de volume Docker. L’échéance physique après disparition du client ou du broker avec ce raccordement reste NOT_RUN.",
+    "Les builds de test signalent trois avertissements préexistants sur les types OIDC non raccordés. Aucun contrôle de livraison, fournisseur ou TTY avec cette composition."
+  ]
+}

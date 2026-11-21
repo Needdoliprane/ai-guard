@@ -49,6 +49,8 @@ La première ouverture lie transactionnellement la base à son tenant dans `tena
 
 Les fichiers SQLite/WAL doivent rester sur un stockage local fiable au contrôle. Cette évolution n'introduit ni partage concurrent d'une base entre clients, ni haute disponibilité. Une base neuve utilise le schéma de contrôle v2 et commence par un événement de genesis audité ; une base v1 existante exige la [migration explicite sauvegardée](../operations.md) avant les API workers. Cette migration conserve les anciens événements ; elle ne restaure pas un inventaire de workers exécutés par l'ancien broker. La restauration d'un état v2 contenant des claims de start exige encore une procédure de fencing/réconciliation qualifiée ; restaurer une sauvegarde ne donne aucun droit de rejouer un start.
 
+Le [stockage SQL configurable](ARCHITECTURE_CONTRACT.md#stockage-sql-par-tenant) ajoute à la cible deux profils MySQL distants, avec mot de passe ou avec mot de passe et mTLS. Les deux profils doivent prouver la liaison durable au tenant, les transactions avec audit et la restauration décrites dans la [matrice SQL](TEST_STRATEGY.md#stockage-sql-configurable--à-qualifier). Cette qualification reste ouverte.
+
 ## Déploiement et limites
 
 ### Dashboard unifié obligatoire

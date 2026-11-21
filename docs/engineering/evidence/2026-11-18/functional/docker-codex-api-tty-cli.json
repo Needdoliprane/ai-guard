@@ -1,0 +1,33 @@
+{
+  "audit_before": {
+    "event_count": 240,
+    "head_hash": "3dc9c24c4d3735cd8c524f0902e9202b244e5de1522e3d4154306b616e21752f",
+    "valid": true
+  },
+  "auth_mode": "api",
+  "cli_exit_status": 1,
+  "cli_sha256": "ba083cdbf14f3ab62b524ea3c502ac148b9a8dbb3e0652e84396eced742ee779",
+  "client": "codex",
+  "diagnostic": "TTY did not prove two replies, a native exit and restored modes at stage second_receipt; consult the durable session state before any retry",
+  "ended_at": "2026-11-18T14:36:28.808335+00:00",
+  "host": "Darwin/arm64",
+  "image_requested": "agentsandbox-worker:functional-audit-providers-20261118",
+  "model_requested": "gpt-6-luna",
+  "new_checkpoint_count": 1,
+  "profile": "codex-api",
+  "quota_released": true,
+  "rootful_exception_requested": true,
+  "runtime": "docker",
+  "runtime_result": "terminal",
+  "session_id": "ff9ce74a-dfb9-439f-9096-1fd855ba247e",
+  "stage": "interactive_conversation",
+  "started_at": "2026-11-18T14:31:36.784665+00:00",
+  "status": "FAIL",
+  "transport": "tty",
+  "tty": {
+    "cli_exit_status": 1,
+    "receipts": 1,
+    "stage": "second_receipt",
+    "termios_restored": true
+  }
+}

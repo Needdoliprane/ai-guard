@@ -1,0 +1,247 @@
+{
+  "date": "2026-11-18",
+  "checkout": ".worktrees/v1-assembly-20261118",
+  "base_commit": "5b3c2ed044d5fdf4bbfb7489762d1eb17684fcd6",
+  "status": "PASS",
+  "scope": "Trafic DNS sur TCP entre deux Pods de recette, dans deux namespaces distincts sur un même nœud. Lancement et politique réseau d’un worker ai-guard, DNS UDP, Internet et multi-nœud restent à qualifier.",
+  "cluster": {
+    "product": "Docker Desktop",
+    "context": "docker-desktop",
+    "endpoint": "HTTPS loopback",
+    "server_version": "v1.36.1",
+    "kubectl_version": "v1.36.1",
+    "nodes": 1,
+    "architecture": "arm64",
+    "cni_image": "docker.io/kindest/kindnetd:v20260528-9350166c"
+  },
+  "probe": {
+    "test_binary_sha256": "7b787be50f0b3537c6cef5c0a64e947d788f0bd4e3874ea9d7c44918a0ca1937",
+    "image": "registry.k8s.io/coredns/coredns:v1.14.2",
+    "image_id_sha256": "fe81a497e85f174f8d7d5739d14f5184141f4e80596977ff8f838d7062fecf02",
+    "image_pull_policy": "Never",
+    "pod_security": "restricted",
+    "drop_capabilities": [
+      "ALL"
+    ],
+    "add_capabilities": [
+      "NET_BIND_SERVICE"
+    ],
+    "duration_sec": 115.72,
+    "docs": [
+      "https://github.com/coredns/coredns/blob/v1.14.2/Dockerfile",
+      "https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted"
+    ]
+  },
+  "attempts": [
+    {
+      "fixture": "initial_core_dns",
+      "source_sha256": "2b11b351be353f1c8edae0feae8fac8a7a5be0e6417fcfe360ed0368fb89c858",
+      "receipt_sha256": "ac1e3117936ba756521c215a3823a1e7c761f00d1e8a7422381ea43f68a00903",
+      "status": "BLOCKED",
+      "stage": "policy_and_pod_setup",
+      "namespace_cleanup": {
+        "client": "removed",
+        "server": "removed"
+      },
+      "policies_accepted": 4,
+      "network_samples": 0,
+      "owner_selector_absent_after_cleanup": true,
+      "diagnostic": "pod_failed_or_image_not_loaded"
+    },
+    {
+      "fixture": "typed_startup_diagnostics",
+      "source_sha256": "820c52cc782d775f17b3e24322542a8930e48c61ed9819c508ffecfd85520e7c",
+      "receipt_sha256": "18795e66a5a882dde24c996b3c40efd8d25bc45679dbc2b5baebfe92fca2c843",
+      "status": "BLOCKED",
+      "stage": "server_pod_readiness",
+      "namespace_cleanup": {
+        "client": "removed",
+        "server": "removed"
+      },
+      "policies_accepted": 4,
+      "network_samples": 0,
+      "owner_selector_absent_after_cleanup": true,
+      "diagnostic": "coredns_pod_ended_before_readiness",
+      "startup": {
+        "server": {
+          "coredns_log_diagnostic": "other",
+          "exit_code": 255,
+          "phase": "running",
+          "pod_reason": "missing",
+          "pod_uid": "b71a36a3-1075-4967-ae88-d5cd28629f99",
+          "ready": "false",
+          "restart_count": 0,
+          "scheduled": "true",
+          "signal": null,
+          "terminated_reason": "error",
+          "waiting_reason": "missing"
+        }
+      }
+    },
+    {
+      "fixture": "core_dns_fixture_capability",
+      "source_sha256": "ff31873341bbfbc255b39a36bfdccbd5dc5d08a7130af02e9eae9e10d2e3fb2f",
+      "receipt_sha256": "770cb462bfd4bd1596fb5ded01477c969fdfd4c48fe81761b2680bf55e936a2e",
+      "status": "PASS",
+      "stage": "complete",
+      "namespace_cleanup": {
+        "client": "removed",
+        "server": "removed"
+      },
+      "policies_accepted": 4,
+      "network_samples": 15,
+      "owner_selector_absent_after_cleanup": true,
+      "startup": {
+        "client": {
+          "exit_code": null,
+          "phase": "running",
+          "pod_reason": "missing",
+          "pod_uid": "08c100fb-f26c-432f-a1c2-ced6cb738429",
+          "ready": "true",
+          "restart_count": 0,
+          "scheduled": "true",
+          "signal": null,
+          "terminated_reason": "missing",
+          "waiting_reason": "missing"
+        },
+        "server": {
+          "exit_code": null,
+          "phase": "running",
+          "pod_reason": "missing",
+          "pod_uid": "c2e02f50-e0f2-47fa-99d6-eab7d590826a",
+          "ready": "true",
+          "restart_count": 0,
+          "scheduled": "true",
+          "signal": null,
+          "terminated_reason": "missing",
+          "waiting_reason": "missing"
+        }
+      }
+    }
+  ],
+  "observations_by_phase": {
+    "baseline": {
+      "answer": 3
+    },
+    "egress_denied": {
+      "servfail": 3
+    },
+    "egress_restored": {
+      "answer": 3
+    },
+    "ingress_denied": {
+      "servfail": 3
+    },
+    "ingress_restored": {
+      "answer": 3
+    }
+  },
+  "measurements": [
+    {
+      "at": "2026-11-18T19:44:39.863098Z",
+      "client_control": "answer",
+      "peer_tcp_dns": "answer",
+      "phase": "baseline",
+      "server_control": "answer"
+    },
+    {
+      "at": "2026-11-18T19:44:40.884488Z",
+      "client_control": "answer",
+      "peer_tcp_dns": "answer",
+      "phase": "baseline",
+      "server_control": "answer"
+    },
+    {
+      "at": "2026-11-18T19:44:41.908384Z",
+      "client_control": "answer",
+      "peer_tcp_dns": "answer",
+      "phase": "baseline",
+      "server_control": "answer"
+    },
+    {
+      "at": "2026-11-18T19:44:54.714249Z",
+      "client_control": "answer",
+      "peer_tcp_dns": "servfail",
+      "phase": "egress_denied",
+      "server_control": "answer"
+    },
+    {
+      "at": "2026-11-18T19:45:11.549535Z",
+      "client_control": "answer",
+      "peer_tcp_dns": "servfail",
+      "phase": "egress_denied",
+      "server_control": "answer"
+    },
+    {
+      "at": "2026-11-18T19:45:32.357072Z",
+      "client_control": "answer",
+      "peer_tcp_dns": "servfail",
+      "phase": "egress_denied",
+      "server_control": "answer"
+    },
+    {
+      "at": "2026-11-18T19:45:32.430322Z",
+      "client_control": "answer",
+      "peer_tcp_dns": "answer",
+      "phase": "egress_restored",
+      "server_control": "answer"
+    },
+    {
+      "at": "2026-11-18T19:45:33.452653Z",
+      "client_control": "answer",
+      "peer_tcp_dns": "answer",
+      "phase": "egress_restored",
+      "server_control": "answer"
+    },
+    {
+      "at": "2026-11-18T19:45:34.474901Z",
+      "client_control": "answer",
+      "peer_tcp_dns": "answer",
+      "phase": "egress_restored",
+      "server_control": "answer"
+    },
+    {
+      "at": "2026-11-18T19:45:45.061572Z",
+      "client_control": "answer",
+      "peer_tcp_dns": "servfail",
+      "phase": "ingress_denied",
+      "server_control": "answer"
+    },
+    {
+      "at": "2026-11-18T19:45:59.121759Z",
+      "client_control": "answer",
+      "peer_tcp_dns": "servfail",
+      "phase": "ingress_denied",
+      "server_control": "answer"
+    },
+    {
+      "at": "2026-11-18T19:46:16.444067Z",
+      "client_control": "answer",
+      "peer_tcp_dns": "servfail",
+      "phase": "ingress_denied",
+      "server_control": "answer"
+    },
+    {
+      "at": "2026-11-18T19:46:16.526184Z",
+      "client_control": "answer",
+      "peer_tcp_dns": "answer",
+      "phase": "ingress_restored",
+      "server_control": "answer"
+    },
+    {
+      "at": "2026-11-18T19:46:17.540777Z",
+      "client_control": "answer",
+      "peer_tcp_dns": "answer",
+      "phase": "ingress_restored",
+      "server_control": "answer"
+    },
+    {
+      "at": "2026-11-18T19:46:18.562884Z",
+      "client_control": "answer",
+      "peer_tcp_dns": "answer",
+      "phase": "ingress_restored",
+      "server_control": "answer"
+    }
+  ],
+  "replay": "AI_GUARD_QA_KUBE_CNI=1 AI_GUARD_QA_KUBECTL=/usr/local/bin/kubectl cargo test --locked --offline --test kubernetes_cni_live docker_desktop_tcp_network_policy -- --ignored --exact --test-threads=1 --nocapture"
+}

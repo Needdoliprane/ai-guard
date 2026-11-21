@@ -1,0 +1,363 @@
+{
+  "date_utc": "2026-11-18",
+  "base": "5b3c2ed044d5fdf4bbfb7489762d1eb17684fcd6",
+  "source_scope": "isolated candidate with local uncommitted deltas",
+  "source_sha256": {
+    "deploy/keycloak-demo/Dockerfile": "3d6dc12c38f0c67cebab1d3a259a70f28ec0141f87cfb0e2be60e3ac6a757d25",
+    "deploy/keycloak-demo/compose.yaml": "31eaf165c92fde05de01316c16677dffd5dcd916be86f52253fb1b267a2e3c9c",
+    "deploy/keycloak-demo/ai-guard-demo-realm.json": "1c50de30f73d1fd3ba8ddd431b5126252b40e21381c7d3acaaa1b7033126c9e2",
+    "docs/setup/sso/examples/local-demo.json": "3c3fb2ddd990d84609e2fd110030a74e1f1ba487fe46873aedc7003d6a3abc47",
+    "front/tests/browser_oidc_live.mjs": "c2e713928439ac34109c87d62bac15c7b8d1857c511131f4069d4d7be93b1810",
+    "tests/gateway_tenancy.rs": "83006d5c285eb869db9d1e92f6ba11db08e8bb22f14b55c376c04779834ad2db",
+    "tests/e2e/provider_matrix.rs": "3f6e6145d87508c13d94dbde6d526f3e00dc7e61f59d5404853e947071114afe",
+    "front/src/journal-store.ts": "5575a5cd2ff798974611522a85ff343cf1923bd623b6a5bffa515b4fd5432e98",
+    "front/tests/browser_supervision.mjs": "4466749d36d18ed68cf9d13f16cc1b41c487e3240878bb72b87b7012316c3b2d",
+    "front/tests/journal-store.test.mjs": "59a0f28cbed1418d2bf6ac3efeb1fa1baea1b64db43bbd07dfb0a8d8e9d06293",
+    "front/tests/browser_oidc_native_live.mjs": "c27d226cf801c421d4a083bed5055d03c90e6e65b408a6d0556a30f0ea5606ea"
+  },
+  "keycloak_discovery": {
+    "engine": "Docker Desktop Linux ARM64, Compose 5.7.0",
+    "keycloak_version": "26.8.1",
+    "upstream_index": "sha256:3f3c5f8e03c614774b4bd9173b88391fefa4153bfc010d8012d59ad825377332",
+    "upstream_linux_arm64_image_id": "sha256:24959b9b2ff0ec6bd9445588d3b488b84dffbe06e6a6ccb50e3d074f7ec581dd",
+    "idp_image_id": "sha256:8af96140aa750b622e7efd1dc236575b540e6a6e1aeb5436de12a14cd09d27f7",
+    "already_built_ingress_image_id": "sha256:e20206a85db2eaf42a1c562409de456a251ca1b10ca60abc472a5ec441a17c8a",
+    "control_profile": "native gateway and dashboard from candidate, legacy human source mode, separate from containerized IdP",
+    "fixed_default_native_prepare": "PASS",
+    "generic_loopback_manifest_prepare": "PASS",
+    "operational_adaptation": "standard host control ports were in use; dashboard and its two exact registered origin/redirect fields moved to 127.0.0.1:14080; gateway used an ephemeral loopback port",
+    "idp_network": {
+      "internal": true,
+      "loopback_published_by_relay_only": true,
+      "public_host_port": 18080,
+      "idp_service_memory_limit_bytes": 1073741824,
+      "idp_oom_observed": false,
+      "keycloak_uid": "1000:0",
+      "relay_uid": "1000:1000",
+      "both_read_only": true,
+      "both_all_capabilities_dropped": true,
+      "no_host_or_engine_socket_mount": true
+    },
+    "discovery": {
+      "http": 200,
+      "issuer_exact": true,
+      "code_advertised": true,
+      "s256_advertised": true
+    },
+    "native_cli_sha256": "4fa8dd8a8a9b417b6ccec9655984fe62b45f854631cf1357b6627218c836f405",
+    "web_harness_initial": {
+      "fixed_default_setup": "prepared",
+      "custom_loopback_setup": "prepared",
+      "gateway_health_http": 200,
+      "dashboard_health_http": 200,
+      "browser_exit": 1,
+      "front_js_sha256": [
+        "cc45e9e76f857d5726c357708687f4b044b3a833dd53b4584da9dedbfd0212d4"
+      ],
+      "native_cli_sha256": "4fa8dd8a8a9b417b6ccec9655984fe62b45f854631cf1357b6627218c836f405",
+      "manifest_sha256": "3c3fb2ddd990d84609e2fd110030a74e1f1ba487fe46873aedc7003d6a3abc47",
+      "browser_harness_sha256": "f8bc01fd9f3b7409c3979b659732b5df802cb652941f6fe163c9699ccc29394d"
+    },
+    "web_harness_initial_accounts": [
+      {
+        "account": "admin-ai-guard",
+        "status": "PASS",
+        "evidence": "oidc_identity_and_authorized_read",
+        "context": "administration",
+        "local_logout": "closed",
+        "logout_audit": "recorded",
+        "provider_logout": "accepted"
+      },
+      {
+        "account": "user-1",
+        "status": "PASS",
+        "evidence": "oidc_identity_and_authorized_read",
+        "context": "personnel",
+        "local_logout": "closed",
+        "logout_audit": "recorded",
+        "provider_logout": "accepted"
+      },
+      {
+        "account": "user-2",
+        "status": "PASS",
+        "evidence": "oidc_identity_and_authorized_read",
+        "context": "personnel",
+        "local_logout": "closed",
+        "logout_audit": "recorded",
+        "provider_logout": "accepted"
+      },
+      {
+        "account": "admin",
+        "status": "FAIL",
+        "stage": "refus Keycloak du compte master",
+        "reason": "L’étape n’a pas abouti."
+      }
+    ],
+    "web_final": {
+      "browser_exit": 0,
+      "report": {
+        "mode": "keycloak_discovery_oidc_web",
+        "status": "PASS",
+        "checks": [
+          {
+            "account": "admin-ai-guard",
+            "status": "PASS",
+            "evidence": "oidc_identity_and_authorized_read",
+            "context": "administration",
+            "local_logout": "closed",
+            "logout_audit": "recorded",
+            "provider_logout": "accepted"
+          },
+          {
+            "account": "user-1",
+            "status": "PASS",
+            "evidence": "oidc_identity_and_authorized_read",
+            "context": "personnel",
+            "local_logout": "closed",
+            "logout_audit": "recorded",
+            "provider_logout": "accepted"
+          },
+          {
+            "account": "user-2",
+            "status": "PASS",
+            "evidence": "oidc_identity_and_authorized_read",
+            "context": "personnel",
+            "local_logout": "closed",
+            "logout_audit": "recorded",
+            "provider_logout": "accepted"
+          },
+          {
+            "account": "admin",
+            "status": "PASS",
+            "evidence": "realm_demo_login_refused"
+          }
+        ]
+      },
+      "browser_harness_sha256": "c2e713928439ac34109c87d62bac15c7b8d1857c511131f4069d4d7be93b1810",
+      "reopened_same_installation": true,
+      "front_js_sha256": [
+        "4f3a26ddcdda45dea943e3dd29e752b9616dc0fb090f2bb371d8eeaca6ad03c7"
+      ]
+    },
+    "master_admin_cli_distinct_scope": {
+      "master_admin_read_status": "PASS",
+      "realm": "ai-guard-demo",
+      "enabled": true,
+      "application_admin_realm_read_status": "DENIED_403",
+      "no_config": true,
+      "method": "read only official Keycloak Admin CLI inside the owned DEMO"
+    },
+    "application_cli": {
+      "native_cli_exit": 0,
+      "report": {
+        "status": "PASS",
+        "stage": "complete",
+        "mode": "native_cli_keycloak_demo",
+        "account": "user-1",
+        "callback_http": 200,
+        "resource_count": 0,
+        "generations": [
+          1,
+          2
+        ],
+        "local_session": "closed",
+        "logout_audit": "recorded",
+        "provider_logout": "accepted",
+        "control_provider_logout": "not_attempted",
+        "credential_files_created": false
+      },
+      "browser_harness_sha256": "c27d226cf801c421d4a083bed5055d03c90e6e65b408a6d0556a30f0ea5606ea",
+      "native_binary_sha256": "4fa8dd8a8a9b417b6ccec9655984fe62b45f854631cf1357b6627218c836f405",
+      "post_restart_corroboration": {
+        "receipt_found_in_business_sqlite": true,
+        "receipt_audit_sequence": 44,
+        "scope": "personal",
+        "read_action": "resources",
+        "business_event_count": 46,
+        "business_chain_verified_by_real_cli_after_reopen": true,
+        "authentication_sqlite_quick_check": true,
+        "matching_native_authentication_records": [
+          {
+            "action": "session_admission",
+            "phase": "intention",
+            "outcome": null,
+            "transition": null
+          },
+          {
+            "action": "session_admission",
+            "phase": "result",
+            "outcome": "succeeded",
+            "transition": "admit"
+          },
+          {
+            "action": "refresh",
+            "phase": "intention",
+            "outcome": null,
+            "transition": "refresh_pending"
+          },
+          {
+            "action": "refresh",
+            "phase": "result",
+            "outcome": "succeeded",
+            "transition": "rotate"
+          },
+          {
+            "action": "logout",
+            "phase": "intention",
+            "outcome": null,
+            "transition": null
+          },
+          {
+            "action": "logout",
+            "phase": "result",
+            "outcome": "succeeded",
+            "transition": "close"
+          }
+        ]
+      }
+    },
+    "human_initiated_worker_execution": "NOT_RUN",
+    "cross_tenant_workload_or_enterprise_idp": "NOT_RUN",
+    "cleanup": {
+      "owned_containers_stopped": 2,
+      "running_owned_containers": 0,
+      "owned_demo_volume_retained": true,
+      "proof_loopback_ports_released": true
+    }
+  },
+  "capacity_http_wal": {
+    "status": "PASS",
+    "command": "CARGO_INCREMENTAL=0 cargo test --locked --offline -j1 --test gateway_tenancy configured_worker_quota_at_hundred_survives_gateway_restart -- --exact --test-threads=1 --nocapture",
+    "elapsed_seconds": 7.38,
+    "test_sha256": "442aca0828e89a78cd32e46727faa54be68e732e4dda7685321856bee8ae1bbb",
+    "gateway_sha256": "4fa8dd8a8a9b417b6ccec9655984fe62b45f854631cf1357b6627218c836f405",
+    "reservations": 100,
+    "reservation_state": "reserved",
+    "next_status_http": 429,
+    "next_typed_reason": "Quota",
+    "after_gateway_kill_and_reopen": {
+      "first_page_unchanged": 60,
+      "second_page": 40,
+      "quota_unchanged": true,
+      "same_denial_receipt": true,
+      "audit_verified": true,
+      "tenant_b_reserved": 1,
+      "runtime_allocations": 0
+    },
+    "physical_100_worker_load": "NOT_RUN"
+  },
+  "provider_matrix": {
+    "status": "PASS_SYNTHETIC_TESTS",
+    "unit_count": 14,
+    "before": {
+      "binary_sha256": "d0c88b67fa164953a87f3e50acb26a3d04aa95899ba3666b451a7ba17ce34da3",
+      "results": [
+        {
+          "input_status": "FAIL",
+          "replay": false,
+          "exit": 1,
+          "status": "FAIL",
+          "cli_status": "PASS",
+          "browser_status": "FAIL",
+          "matrix_counts": {
+            "FAIL": 1,
+            "PASS": 7
+          }
+        },
+        {
+          "input_status": "FAIL",
+          "replay": true,
+          "exit": 0,
+          "status": "PASS",
+          "cli_status": "PASS",
+          "browser_status": "PASS",
+          "matrix_counts": {
+            "PASS": 8
+          }
+        },
+        {
+          "input_status": "BLOCKED",
+          "replay": true,
+          "exit": 0,
+          "status": "PASS",
+          "cli_status": "PASS",
+          "browser_status": "PASS",
+          "matrix_counts": {
+            "PASS": 8
+          }
+        }
+      ]
+    },
+    "after": {
+      "binary_sha256": "1e87cdcb4f519a106795443f508c9a6b6e1df28cf897a74b935cf2726001b70e",
+      "results": [
+        {
+          "input_status": "FAIL",
+          "replay": false,
+          "exit": 1,
+          "status": "FAIL",
+          "cli_status": "PASS",
+          "browser_status": "FAIL",
+          "matrix_counts": {
+            "PASS": 7,
+            "FAIL": 1
+          }
+        },
+        {
+          "input_status": "FAIL",
+          "replay": true,
+          "exit": 1,
+          "status": "FAIL",
+          "cli_status": "PASS",
+          "browser_status": "FAIL",
+          "matrix_counts": {
+            "PASS": 7,
+            "FAIL": 1
+          }
+        },
+        {
+          "input_status": "BLOCKED",
+          "replay": true,
+          "exit": 0,
+          "status": "PASS",
+          "cli_status": "PASS",
+          "browser_status": "PASS",
+          "matrix_counts": {
+            "PASS": 8
+          }
+        }
+      ]
+    },
+    "provider_api_calls": 0
+  },
+  "journal_browser": {
+    "status": "PASS_SCOPED",
+    "fixture": "actual Rust services and Chromium with SQLite synthetic records",
+    "cases": {
+      "target-red": {
+        "scenario": "journal-catch-up",
+        "status": "FAIL",
+        "log_sha256": "b4a22ed6536247f4832d51ff16d73f8ebaf275fd9d1845d1b3e95595e106f62d"
+      },
+      "green": {
+        "scenario": "journal-catch-up",
+        "status": "PASS",
+        "log_sha256": "cf1b9235c6d285299fe29da2c1ac72843deddf57fdf34e34f52872717fcbb45c"
+      },
+      "states": {
+        "scenario": "states",
+        "status": "PASS",
+        "log_sha256": "9c834de72f88d339f813d468e1ca9d61436cde555f1f8d161e223f8bdd28e722"
+      }
+    },
+    "red_capture_sha256": {
+      "page.html": "ae7505a34117387e308949b113a041d909e2073b5d69ce30894c6376d5e7053b",
+      "page.png": "b9f508e7ec0748e7ee46cedb9bb4ed6247ae464bf3dae38b16dbf284da4817a3"
+    },
+    "front_js_sha256": "4f3a26ddcdda45dea943e3dd29e752b9616dc0fb090f2bb371d8eeaca6ad03c7",
+    "node_tests_passed": 41,
+    "freshness_after_200_only": "STALE",
+    "new_events_rendered_without_duplicates": 3,
+    "explicit_reread_when_silent": true
+  }
+}

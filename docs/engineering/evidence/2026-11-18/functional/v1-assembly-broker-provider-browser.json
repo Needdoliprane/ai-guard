@@ -1,0 +1,68 @@
+{
+  "date": "2026-11-18",
+  "checkout": ".worktrees/v1-assembly-20261118",
+  "base_commit": "5b3c2ed044d5fdf4bbfb7489762d1eb17684fcd6",
+  "status": "PASS outillage et projection sur données synthétiques",
+  "browser": {
+    "command": "node tests/browser_broker_provider_simulated.mjs",
+    "working_directory": "front",
+    "mode": "synthetic_broker_dashboard",
+    "status": "PASS",
+    "chromium": "148.0.7778.96",
+    "audit_export_session_events": 5,
+    "scope": "Deux serveurs HTTP synthétiques loopback et vrais assets Vite. Décision, résultat, scan, politique d’export et publication dans le JSONL; nettoyage lu par son seq hors sandbox; détail Workers et rendu Fichiers vérifiés."
+  },
+  "checks": [
+    {
+      "command": "python3 -I -B tests/e2e/test_run_provider_broker.py -v",
+      "passed": 9
+    },
+    {
+      "command": "node --test --test-isolation=none tests/browser_broker_provider.test.mjs tests/model.test.mjs",
+      "passed": 20
+    },
+    {
+      "command": "cargo test --locked --offline --example provider-matrix -- --test-threads=1",
+      "passed": 12
+    }
+  ],
+  "matrix": {
+    "empty_legacy_count": 8,
+    "empty_broker_batch_count": 4,
+    "strict_empty_exit": 1,
+    "status_all_empty": "NOT_RUN",
+    "broker_batch_kubernetes_rejected": true
+  },
+  "proof_binding": "Le worker et le reçu sont reliés à l’UUID d’admission, aux seq, au CID, aux deux manifestes, à l’export et à la résolution vérifiée du modèle demandé. Un rapport de simulation ne possède pas le schéma de preuve live.",
+  "native_workers_and_providers": "NOT_RUN avec cette recette. Aucun modèle réellement servi ne peut être déduit de la résolution.",
+  "source_and_artifacts_sha256": {
+    "front/src/main.ts": "7752a5550788edfb48a89f162cdc3274920ba7e6e7125a6c8e9c35e9f0fd4ebd",
+    "front/src/model.ts": "ca3c1a6ba88697e4573cba06b0c6831f5371a53b27fbbd6ec3d0d8318ec73237",
+    "front/src/style.css": "0a9e180696b03822cce41053bee49c6e0ff62f3639d5c07abec4e59fdc752417",
+    "front/tests/browser_provider_live.mjs": "a82dd022574ea1962fb78c1b80248eec7dcc780efb68dcb823062a5e3cd3644e",
+    "front/tests/browser_broker_provider_fixture.mjs": "38c32b6f3ed51bb6749aa0a548d7cd5ee22198d6efe37a29ed224f3c207d552d",
+    "front/tests/browser_broker_provider.test.mjs": "61cfe49055d03a1669577317f16169e15f53306c3cd45f3dc227a91dcf2e873b",
+    "front/tests/browser_broker_provider_simulated.mjs": "4d39933a89f83d5c8bf524cb83f0723638e1d4bfbd8331f67f2e49ab500e8b30",
+    "front/tests/model.test.mjs": "8252068255c12790a859d55e22274d368ca68501bb9822148ae753c6f35c80a1",
+    "tests/e2e/run_provider_case.py": "ab87569c12411bc680762816d1d06e86aa3efc5d37e9ef3fa71f731adbf46d6c",
+    "tests/e2e/test_run_provider_broker.py": "7bb361e6e55f67c42325787292a761be30156d5349300dbc65d10bb723a62ac8",
+    "tests/e2e/provider_matrix.rs": "e6683536759b4417e9b2d78f1c1bb97a9ffa1beaeeca8cf10eb9a250dba25cd6",
+    "target/qa-cache-archive/broker-provider-matrix": "d0c88b67fa164953a87f3e50acb26a3d04aa95899ba3666b451a7ba17ce34da3"
+  },
+  "neighbor_native_decision_web": {
+    "scope": "Vrais gateway et dashboard, moteur Rust seul, nouveaux assets, SQLite A/B. Aucun worker.",
+    "result": {
+      "status": "PASS",
+      "stage": "complete",
+      "scope": "real Rust services, no model or worker",
+      "cli_sha256": "a7b6c9500dc93a63432ecb8548b2445a698c9cf0c5723e547538a937be1025f0",
+      "html_sha256": "42e75f81b60539d647f9d593ca980650d520455cba3b87db0974c45f5c4a6752",
+      "cli_audit": {
+        "event_count": 3,
+        "head_hash": "98d7f1b06943ca33c410c2375edf1e4e24075affa6f88e4ab2b155596ad1442e"
+      },
+      "workers": 0,
+      "browser_status": "PASS"
+    }
+  }
+}

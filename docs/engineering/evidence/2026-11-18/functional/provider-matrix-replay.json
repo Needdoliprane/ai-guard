@@ -1,0 +1,200 @@
+{
+  "inputs": {
+    "cli": [
+      "docker-codex-api-cli.json",
+      "docker-claude-api-cli.json",
+      "docker-codex-api-tty-cli.json",
+      "docker-claude-api-tty-cli.json",
+      "docker-codex-subscription-preflight.json",
+      "docker-claude-code-subscription-preflight.json"
+    ],
+    "browser": [
+      "docker-codex-api-browser-final-bundle.json",
+      "docker-claude-api-browser-final-bundle.json",
+      "docker-codex-api-tty-timeout-browser.json",
+      "docker-claude-api-tty-timeout-browser.json"
+    ]
+  },
+  "result": {
+    "version": 1,
+    "candidate": {
+      "host": "Darwin/arm64",
+      "runtime": "docker",
+      "cli_sha256": "ba083cdbf14f3ab62b524ea3c502ac148b9a8dbb3e0652e84396eced742ee779",
+      "worker_image_sha256": "sha256:1bf2e06bc934d4e9eb3d87f207029e2b1c30986f59137b4c8e6810612fd1e632",
+      "rootful_exception_requested": true
+    },
+    "image_identity_source": "image_requested_for_attempt_worker_image_id_required_for_pass",
+    "model_served": null,
+    "client_version": null,
+    "release_qualification": false,
+    "cases": [
+      {
+        "client": "codex",
+        "auth_mode": "api",
+        "transport": "batch",
+        "status": "NOT_RUN",
+        "model_requested": "gpt-6-luna",
+        "cli_status": "NOT_RUN",
+        "cli_input": null,
+        "cli_session_id": null,
+        "cli_reason": null,
+        "browser_status": "NOT_RUN",
+        "browser": null
+      },
+      {
+        "client": "codex",
+        "auth_mode": "api",
+        "transport": "tty",
+        "status": "NOT_RUN",
+        "model_requested": "gpt-6-luna",
+        "cli_status": "NOT_RUN",
+        "cli_input": null,
+        "cli_session_id": null,
+        "cli_reason": null,
+        "browser_status": "NOT_RUN",
+        "browser": null
+      },
+      {
+        "client": "codex",
+        "auth_mode": "subscription",
+        "transport": "batch",
+        "status": "NOT_RUN",
+        "model_requested": "gpt-6-luna",
+        "cli_status": "NOT_RUN",
+        "cli_input": null,
+        "cli_session_id": null,
+        "cli_reason": null,
+        "browser_status": "NOT_RUN",
+        "browser": null
+      },
+      {
+        "client": "codex",
+        "auth_mode": "subscription",
+        "transport": "tty",
+        "status": "NOT_RUN",
+        "model_requested": "gpt-6-luna",
+        "cli_status": "NOT_RUN",
+        "cli_input": null,
+        "cli_session_id": null,
+        "cli_reason": null,
+        "browser_status": "NOT_RUN",
+        "browser": null
+      },
+      {
+        "client": "claude-code",
+        "auth_mode": "api",
+        "transport": "batch",
+        "status": "NOT_RUN",
+        "model_requested": "claude-haiku-5-5",
+        "cli_status": "NOT_RUN",
+        "cli_input": null,
+        "cli_session_id": null,
+        "cli_reason": null,
+        "browser_status": "NOT_RUN",
+        "browser": null
+      },
+      {
+        "client": "claude-code",
+        "auth_mode": "api",
+        "transport": "tty",
+        "status": "NOT_RUN",
+        "model_requested": "claude-haiku-5-5",
+        "cli_status": "NOT_RUN",
+        "cli_input": null,
+        "cli_session_id": null,
+        "cli_reason": null,
+        "browser_status": "NOT_RUN",
+        "browser": null
+      },
+      {
+        "client": "claude-code",
+        "auth_mode": "subscription",
+        "transport": "batch",
+        "status": "NOT_RUN",
+        "model_requested": "claude-haiku-5-5",
+        "cli_status": "NOT_RUN",
+        "cli_input": null,
+        "cli_session_id": null,
+        "cli_reason": null,
+        "browser_status": "NOT_RUN",
+        "browser": null
+      },
+      {
+        "client": "claude-code",
+        "auth_mode": "subscription",
+        "transport": "tty",
+        "status": "NOT_RUN",
+        "model_requested": "claude-haiku-5-5",
+        "cli_status": "NOT_RUN",
+        "cli_input": null,
+        "cli_session_id": null,
+        "cli_reason": null,
+        "browser_status": "NOT_RUN",
+        "browser": null
+      }
+    ],
+    "excluded": [
+      {
+        "source": "cli",
+        "input": 1,
+        "reason": "missing_candidate_identity",
+        "reported_status": "PASS"
+      },
+      {
+        "source": "cli",
+        "input": 2,
+        "reason": "missing_candidate_identity",
+        "reported_status": "PASS"
+      },
+      {
+        "source": "cli",
+        "input": 3,
+        "reason": "missing_candidate_identity",
+        "reported_status": "FAIL"
+      },
+      {
+        "source": "cli",
+        "input": 4,
+        "reason": "missing_candidate_identity",
+        "reported_status": "FAIL"
+      },
+      {
+        "source": "cli",
+        "input": 5,
+        "reason": "missing_candidate_identity",
+        "reported_status": "BLOCKED"
+      },
+      {
+        "source": "cli",
+        "input": 6,
+        "reason": "missing_candidate_identity",
+        "reported_status": "BLOCKED"
+      },
+      {
+        "source": "browser",
+        "input": 1,
+        "reason": "unmatched_browser_session_or_axes",
+        "reported_status": "PASS"
+      },
+      {
+        "source": "browser",
+        "input": 2,
+        "reason": "unmatched_browser_session_or_axes",
+        "reported_status": "PASS"
+      },
+      {
+        "source": "browser",
+        "input": 3,
+        "reason": "unmatched_browser_session_or_axes",
+        "reported_status": "PASS"
+      },
+      {
+        "source": "browser",
+        "input": 4,
+        "reason": "unmatched_browser_session_or_axes",
+        "reported_status": "PASS"
+      }
+    ]
+  }
+}

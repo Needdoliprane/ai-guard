@@ -1,0 +1,32 @@
+{
+  "status": "PASS",
+  "test": "cargo test --locked --offline --test control_cli -- --nocapture",
+  "tests_passed": 2,
+  "platform": "macOS 27.2 ARM64",
+  "rustc_version": "1.99.1 (58cf8f9c3 2026-10-13)",
+  "cli_sha256": "dcb206c13b1a0bf0f25c6e99d5340c7a1ecffcd578253dbc1af0f6d928dcab18",
+  "backup_unchanged": true,
+  "before_migration": {
+    "error": null,
+    "event_count": 1,
+    "head_hash": "d4bf7ad3d803a66554fb483965e74a8323adc0f4ce8b4a754ad29a19b0c336a4",
+    "valid": true
+  },
+  "migrated_source": {
+    "error": null,
+    "event_count": 2,
+    "head_hash": "6f7b4177814abc81af7dcd301d3bc1e11b6e0984eed3fbeb101ef781284d2575",
+    "valid": true
+  },
+  "migration_requires_attestation": true,
+  "restored_copy": {
+    "error": null,
+    "event_count": 1,
+    "head_hash": "d4bf7ad3d803a66554fb483965e74a8323adc0f4ce8b4a754ad29a19b0c336a4",
+    "valid": true
+  },
+  "restored_worker_registry": {
+    "code": "migration_required",
+    "status": 503
+  }
+}

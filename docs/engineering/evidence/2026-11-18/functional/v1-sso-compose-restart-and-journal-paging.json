@@ -1,0 +1,512 @@
+{
+  "date_utc": "2026-11-18",
+  "date_local": "2026-11-19",
+  "candidate_base": "5b3c2ed044d5fdf4bbfb7489762d1eb17684fcd6",
+  "build": {
+    "image_id": "sha256:f1a82618653911f2c334cacc6e12209e99689981382feacbf9d98a27c856f08b",
+    "platform": "linux/arm64",
+    "docker": "29.9.3",
+    "compose_plugin": "5.7.0",
+    "public_allowlisted_inputs_count": 739,
+    "build_input_manifest_sha256": "37799a1063a921a4f0f8746311dd4bf19aac34dd00eb85651a3407f72c23cf4a",
+    "dockerfile_sha256": "fcd60741633e94af7264d2cfa9f7331b0dc38ac20f32fd92911689e5e2eb1e7c",
+    "cargo_release_elapsed_seconds": 352,
+    "served_front_js_sha256": "4f3a26ddcdda45dea943e3dd29e752b9616dc0fb090f2bb371d8eeaca6ad03c7",
+    "independent_journal_and_broker_changes_are_post_snapshot": true
+  },
+  "compose": {
+    "setup": "PASS",
+    "setup_profile": "generic reviewed public manifest, private new volume, network none",
+    "topology": "PASS",
+    "observed_publication": [
+      {
+        "host_ip": "127.0.0.1",
+        "published": "18780",
+        "target": 8787
+      },
+      {
+        "host_ip": "127.0.0.1",
+        "published": "14080",
+        "target": 4000
+      }
+    ],
+    "canonical_keycloak_issuer": true,
+    "keycloak_discovery_http": 200,
+    "runtime_idp_image": "sha256:8af96140aa750b622e7efd1dc236575b540e6a6e1aeb5436de12a14cd09d27f7",
+    "control_services": {
+      "gateway": {
+        "image": "sha256:f1a82618653911f2c334cacc6e12209e99689981382feacbf9d98a27c856f08b",
+        "uid": "1000:1000",
+        "read_only": true,
+        "privileged": false,
+        "cap_drop": [
+          "ALL"
+        ],
+        "ports": {},
+        "networks": [
+          "aig-v1-sso-container-ygwbo5z4-idp_identity_demo",
+          "aig-v1-sso-container-ygwbo5z4_control"
+        ],
+        "mounts": [
+          {
+            "type": "volume",
+            "destination": "/data",
+            "volume": "aig-v1-sso-container-ygwbo5z4_installation_data",
+            "writable": true
+          }
+        ],
+        "mode": "aig-v1-sso-container-ygwbo5z4_control",
+        "status": "running",
+        "oom": false,
+        "memory_limit": 402653184,
+        "exit_code": 0
+      },
+      "dashboard": {
+        "image": "sha256:f1a82618653911f2c334cacc6e12209e99689981382feacbf9d98a27c856f08b",
+        "uid": "1000:1000",
+        "read_only": true,
+        "privileged": false,
+        "cap_drop": [
+          "ALL"
+        ],
+        "ports": {},
+        "networks": [
+          "aig-v1-sso-container-ygwbo5z4_control"
+        ],
+        "mounts": [],
+        "mode": "aig-v1-sso-container-ygwbo5z4_control",
+        "status": "running",
+        "oom": false,
+        "memory_limit": 201326592,
+        "exit_code": 0
+      },
+      "ingress": {
+        "image": "sha256:f1a82618653911f2c334cacc6e12209e99689981382feacbf9d98a27c856f08b",
+        "uid": "1000:1000",
+        "read_only": true,
+        "privileged": false,
+        "cap_drop": [
+          "ALL"
+        ],
+        "ports": {
+          "4000/tcp": [
+            {
+              "HostIp": "127.0.0.1",
+              "HostPort": "14080"
+            }
+          ],
+          "8787/tcp": [
+            {
+              "HostIp": "127.0.0.1",
+              "HostPort": "18780"
+            }
+          ]
+        },
+        "networks": [
+          "aig-v1-sso-container-ygwbo5z4_control",
+          "aig-v1-sso-container-ygwbo5z4_publication"
+        ],
+        "mounts": [],
+        "mode": "aig-v1-sso-container-ygwbo5z4_control",
+        "status": "running",
+        "oom": false,
+        "memory_limit": 201326592,
+        "exit_code": 0
+      }
+    },
+    "idp_keycloak": {
+      "image": "sha256:8af96140aa750b622e7efd1dc236575b540e6a6e1aeb5436de12a14cd09d27f7",
+      "uid": "1000:0",
+      "read_only": true,
+      "privileged": false,
+      "cap_drop": [
+        "ALL"
+      ],
+      "ports": {},
+      "networks": [
+        "aig-v1-sso-container-ygwbo5z4-idp_identity_demo"
+      ],
+      "mounts": [
+        {
+          "type": "volume",
+          "destination": "/opt/keycloak/data",
+          "volume": "aig-v1-sso-container-ygwbo5z4-idp_demo_identity_data",
+          "writable": true
+        }
+      ],
+      "mode": "aig-v1-sso-container-ygwbo5z4-idp_identity_demo",
+      "status": "running",
+      "oom": false,
+      "memory_limit": 1073741824,
+      "exit_code": 0
+    },
+    "idp_relay": {
+      "image": "sha256:f1a82618653911f2c334cacc6e12209e99689981382feacbf9d98a27c856f08b",
+      "uid": "1000:1000",
+      "read_only": true,
+      "privileged": false,
+      "cap_drop": [
+        "ALL"
+      ],
+      "ports": {
+        "18080/tcp": [
+          {
+            "HostIp": "127.0.0.1",
+            "HostPort": "18080"
+          }
+        ]
+      },
+      "networks": [
+        "aig-v1-sso-container-ygwbo5z4-idp_identity_demo",
+        "aig-v1-sso-container-ygwbo5z4-idp_publication_demo"
+      ],
+      "mounts": [],
+      "mode": "aig-v1-sso-container-ygwbo5z4-idp_identity_demo",
+      "status": "running",
+      "oom": false,
+      "memory_limit": 201326592,
+      "exit_code": 0
+    },
+    "fixture_stopped_after_cli": {
+      "control": {
+        "containers": 4,
+        "networks": 2,
+        "volumes": 1
+      },
+      "idp": {
+        "containers": 2,
+        "networks": 2,
+        "volumes": 1
+      }
+    },
+    "cleanup": {
+      "control": {
+        "containers": 4,
+        "networks": 2,
+        "volumes": 1
+      },
+      "identity": {
+        "containers": 2,
+        "networks": 2,
+        "volumes": 1
+      },
+      "running_owned_containers": 0,
+      "loopback_ports_released": true
+    }
+  },
+  "web_containers": {
+    "first_run": {
+      "mode": "keycloak_discovery_oidc_web",
+      "status": "FAIL",
+      "checks": [
+        {
+          "account": "admin-ai-guard",
+          "status": "PASS",
+          "evidence": "oidc_identity_and_authorized_read",
+          "context": "administration",
+          "local_logout": "closed",
+          "logout_audit": "recorded",
+          "provider_logout": "accepted"
+        },
+        {
+          "account": "user-1",
+          "status": "FAIL",
+          "stage": "état du SSO",
+          "reason": "L’étape n’a pas abouti.",
+          "artifacts": {
+            "directory": "browser-failure-AFrFQF",
+            "files": [
+              "page.html",
+              "page.png"
+            ]
+          }
+        },
+        {
+          "account": "user-2",
+          "status": "FAIL",
+          "stage": "état du SSO",
+          "reason": "L’étape n’a pas abouti.",
+          "artifacts": {
+            "directory": "browser-failure-oylndo",
+            "files": [
+              "page.html",
+              "page.png"
+            ]
+          }
+        },
+        {
+          "account": "admin",
+          "status": "FAIL",
+          "stage": "état du SSO",
+          "reason": "L’étape n’a pas abouti.",
+          "artifacts": {
+            "directory": "browser-failure-FkjrQM",
+            "files": [
+              "page.html",
+              "page.png"
+            ]
+          }
+        }
+      ]
+    },
+    "targeted_diagnostics_run": {
+      "mode": "keycloak_discovery_oidc_web",
+      "status": "FAIL",
+      "checks": [
+        {
+          "account": "user-1",
+          "status": "FAIL",
+          "stage": "validation de l’état du SSO",
+          "reason": "La réponse d’état SSO doit contenir un JSON lisible.",
+          "dashboard_document_http": 200,
+          "sso_status_http": 200,
+          "artifacts": {
+            "directory": "browser-failure-XhvX9E",
+            "files": [
+              "page.html",
+              "page.png"
+            ]
+          }
+        },
+        {
+          "account": "user-2",
+          "status": "FAIL",
+          "stage": "validation de l’état du SSO",
+          "reason": "La réponse d’état SSO doit contenir un JSON lisible.",
+          "dashboard_document_http": 200,
+          "sso_status_http": 200,
+          "artifacts": {
+            "directory": "browser-failure-CxfJmi",
+            "files": [
+              "page.html",
+              "page.png"
+            ]
+          }
+        },
+        {
+          "account": "admin",
+          "status": "FAIL",
+          "stage": "validation de l’état du SSO",
+          "reason": "La réponse d’état SSO doit contenir un JSON lisible.",
+          "dashboard_document_http": 200,
+          "sso_status_http": 200,
+          "artifacts": {
+            "directory": "browser-failure-FCIcxu",
+            "files": [
+              "page.html",
+              "page.png"
+            ]
+          }
+        }
+      ]
+    },
+    "first_attempt_failure_capture_sha256": [
+      {
+        "page.html": "2ee478b9c817593218d120ef14689164d557aedbae57d331dadd7e58006c06a2",
+        "page.png": "50a92278c8d676cb43753efffe44eb4260789ed15368269fe7567b594fcbfe1b"
+      },
+      {
+        "page.html": "2ee478b9c817593218d120ef14689164d557aedbae57d331dadd7e58006c06a2",
+        "page.png": "50a92278c8d676cb43753efffe44eb4260789ed15368269fe7567b594fcbfe1b"
+      },
+      {
+        "page.html": "2ee478b9c817593218d120ef14689164d557aedbae57d331dadd7e58006c06a2",
+        "page.png": "f3bf64c9acf42457a6a19427fae0f59130be2760be73230bb71d25be975078fd"
+      }
+    ],
+    "status": "PASS_ACROSS_INITIAL_SUCCESS_AND_TARGETED_REPLAY",
+    "body_observation": "cloned the actual frontend status response in Chromium, checked public fields and network HTTP 200 without an additional request",
+    "replayed_three_accounts": {
+      "mode": "keycloak_discovery_oidc_web",
+      "status": "PASS",
+      "checks": [
+        {
+          "account": "user-1",
+          "status": "PASS",
+          "evidence": "oidc_identity_and_authorized_read",
+          "context": "personnel",
+          "local_logout": "closed",
+          "logout_audit": "recorded",
+          "provider_logout": "accepted"
+        },
+        {
+          "account": "user-2",
+          "status": "PASS",
+          "evidence": "oidc_identity_and_authorized_read",
+          "context": "personnel",
+          "local_logout": "closed",
+          "logout_audit": "recorded",
+          "provider_logout": "accepted"
+        },
+        {
+          "account": "admin",
+          "status": "PASS",
+          "evidence": "realm_demo_login_refused"
+        }
+      ]
+    },
+    "all_observed_account_outcomes": [
+      {
+        "account": "admin-ai-guard",
+        "status": "PASS",
+        "evidence": "oidc_identity_and_authorized_read",
+        "context": "administration",
+        "local_logout": "closed",
+        "logout_audit": "recorded",
+        "provider_logout": "accepted"
+      },
+      {
+        "account": "user-1",
+        "status": "PASS",
+        "evidence": "oidc_identity_and_authorized_read",
+        "context": "personnel",
+        "local_logout": "closed",
+        "logout_audit": "recorded",
+        "provider_logout": "accepted"
+      },
+      {
+        "account": "user-2",
+        "status": "PASS",
+        "evidence": "oidc_identity_and_authorized_read",
+        "context": "personnel",
+        "local_logout": "closed",
+        "logout_audit": "recorded",
+        "provider_logout": "accepted"
+      },
+      {
+        "account": "admin",
+        "status": "PASS",
+        "evidence": "realm_demo_login_refused"
+      }
+    ],
+    "same_served_asset_sha256": "4f3a26ddcdda45dea943e3dd29e752b9616dc0fb090f2bb371d8eeaca6ad03c7"
+  },
+  "live_cli_restart": {
+    "status": "PASS",
+    "native_binary_sha256": "4fa8dd8a8a9b417b6ccec9655984fe62b45f854631cf1357b6627218c836f405",
+    "http_during_gateway_only_stop": 502,
+    "original_container_and_volume_reused": true,
+    "business_head_valid_and_unchanged_across_restart": true,
+    "business_count_across_restart": 19,
+    "business_count_after_fresh_admission": 25,
+    "old_session": {
+      "status": "PASS",
+      "stage": "complete",
+      "mode": "native_cli_keycloak_demo_gateway_restart",
+      "account": "user-1",
+      "callback_http": 200,
+      "resource_count": 0,
+      "post_restart_identity_http": 401,
+      "post_restart_identity_code": "credential_invalid",
+      "post_restart_contexts_returned": false,
+      "admission_deadline_remaining": true,
+      "local_session": "unknown",
+      "logout_audit": "unavailable",
+      "provider_logout": "accepted",
+      "control_provider_logout": "not_attempted",
+      "cli_process_exited": true,
+      "credential_files_created": false
+    },
+    "new_session": {
+      "status": "PASS",
+      "stage": "complete",
+      "mode": "native_cli_keycloak_demo",
+      "account": "user-1",
+      "callback_http": 200,
+      "resource_count": 0,
+      "generations": [
+        1,
+        2
+      ],
+      "local_session": "closed",
+      "logout_audit": "recorded",
+      "provider_logout": "accepted",
+      "control_provider_logout": "not_attempted",
+      "credential_files_created": false
+    },
+    "after_stop_sqlite": {
+      "sqlite_quick_check_both": "ok",
+      "read_receipts_found_after_stop": 2,
+      "same_authenticated_principal": true,
+      "new_admission_distinct": true,
+      "old_business_read_sequence": 19,
+      "new_business_read_sequence": 23,
+      "old_auth_results": [
+        {
+          "action": "session_admission",
+          "transition": "admit",
+          "outcome": "succeeded"
+        }
+      ],
+      "fresh_auth_results": [
+        {
+          "action": "session_admission",
+          "transition": "admit",
+          "outcome": "succeeded"
+        },
+        {
+          "action": "refresh",
+          "transition": "rotate",
+          "outcome": "succeeded"
+        },
+        {
+          "action": "logout",
+          "transition": "close",
+          "outcome": "succeeded"
+        }
+      ]
+    }
+  },
+  "broker_cli_result_retry": {
+    "status": "PASS_SCOPED",
+    "surface": "real CLI, private IPC fixture, no runtime",
+    "before": "FAIL after confirmed Cancel then typed Result Unavailable",
+    "after": "same original Result read until deadline; one Submit and one Cancel",
+    "result_timeout_and_forbidden_canaries": "PASS",
+    "test_count": 11,
+    "test_seconds": 5.61,
+    "command": "cargo test --locked --offline --jobs 1 --test broker_run_cli",
+    "review": "independent source review favorable"
+  },
+  "journal_older_paging": {
+    "status": "PASS_SCOPED",
+    "cases": {
+      "journal_older_red": {
+        "status": "FAIL",
+        "log_sha256": "4eca212cdc57d83f26992d91416c4c0f63b30f72755c9bba66298cbbfeb76287"
+      },
+      "journal_older_green": {
+        "status": "PASS",
+        "log_sha256": "da09397e8612f94c3282ca8d11ea29884352b9da56066e2286513e37a052902c"
+      },
+      "journal_catch_up_green": {
+        "status": "PASS",
+        "log_sha256": "c8c70e77dc5083830577fc91ff12e48c5d1bd3d2b5e82994807d68556cbbe6ad"
+      }
+    },
+    "browser_scope": "actual Chromium and Rust/SQLite, one older-page HTTP 503 injected",
+    "retained_rows_before_retry": 201,
+    "rows_after_same_cursor_retry": 301,
+    "replacement_sse_connections": 0,
+    "keyboard_focus_retained": true,
+    "invalid_cursor_stayed_invalid_after_an_unsuccessful_head_reload": true,
+    "node_tests_passed": 31,
+    "bundle_sha256": "035b7df794cb09479e97cde93032bb9bb04b98c2b78a2b8c5ae1261d06144339",
+    "red_capture_sha256": {
+      "page.html": "8f7a14f6635e7e0734cfe6e321ea3e0641143e9c9cd354e00def9b0c8fd94531",
+      "page.png": "0fced6b84381a0476579541d54ac52afe8bd21895fa686a7371f817c82f5f4ec"
+    }
+  },
+  "source_sha256": {
+    "tests/e2e/compose.sso.override.yaml": "71e80d1598afc3674d0565bf103ac086e0e2d8bfe5296c3fbe39029ae7bbb398",
+    "deploy/docker/compose.sso.yaml": "c53063e84bb84b4eec849700cccbf40f6c8d756fdfd9340792c21b45847f3636",
+    "front/tests/browser_oidc_native_live.mjs": "0cdc7919026b9b4b4a616831aa2bbbf441d0726b101f59f3c0dc55810925a7a4",
+    "src/operations/broker_run.rs": "21a8e69585129dbae9589e804bb49c38cb64d4177d36e04338c93c578a4b2213",
+    "tests/broker_run_cli.rs": "aa7dbd4dcc1f8b0e12c238b69181ee28daec2c0d3798fe7dc4baf8e765a49ef2",
+    "front/src/journal-store.ts": "d63fc1afd10747f123448e9a792cf863a9954898ff0f67ed0dd321020a20dc87",
+    "front/src/journal-view.ts": "0571214d642fa3b0eb1a8ab17e05f4977c30126f74093e8938d9747e2f754833",
+    "front/tests/journal-store.test.mjs": "7e9c8d3b0a7b0e2ae87e8c58bbda9d1c81ae748ae6fc02bdc5d4b24c8a1f8c40",
+    "front/tests/browser_supervision.mjs": "d05649dcdcd69289e8b127ba3f418fa7a0387bc4685384fb46b3ba1feee3f661",
+    "front/tests/browser_oidc_live.mjs": "39acf8aecb78718bdc30f5c4789a1a2fce817ec6a171a8394946da768493d25c"
+  }
+}

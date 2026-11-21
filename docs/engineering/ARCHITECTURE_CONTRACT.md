@@ -7,7 +7,7 @@ Autorité : consignes du mainteneur dans [AGENTS.md](../../AGENTS.md) et mission
 - Un relais d'entrée Rust de confiance publie les deux accès locaux via des destinations fixes. Le choix a été autorisé par le mainteneur dans `DECISIONS.md` : gateway/dashboard restent sur le réseau interne sans passerelle ; seul le relais rejoint aussi le réseau de publication. Il ne monte ni credential, donnée ni socket et ne journalise ni corps ni Authorization. Il ne crée aucune identité et conserve l'authentification/autorisation des services. Les ports hôte restent liés au loopback ; les workers ne rejoignent aucun de ces réseaux.
 - Chaque session travaille sur un volume alimenté par copie filtrée. L'export publie une destination neuve. Le projet original n'est jamais réécrit automatiquement. Liens, traversées et substitutions concurrentes doivent être refusés.
 - Docker et Podman sont des adaptateurs distincts à qualifier sur moteurs réels. Kubernetes est une cible obligatoire à implémenter ; une métadonnée ou une configuration cloud ne constitue pas un adaptateur.
-- L'identité authentifiée détermine le tenant. Un identifiant JSON, header, querystring, projet ou label worker ne choisit jamais le périmètre. Le stockage cible conserve une base SQLite distincte liée durablement à chaque tenant. Aucun changement de moteur de stockage ni ajout de haute disponibilité sans migration et preuves.
+- L'identité authentifiée détermine le tenant. Un identifiant JSON, header, querystring, projet ou label worker ne choisit jamais le périmètre. Le stockage reste distinct et lié durablement à chaque tenant, avec SQLite local ou MySQL distant selon le profil configuré.
 - `runner` est réservé au contrôle de confiance ; `viewer` consulte son tenant ; `worker` ne peut accéder qu'au relais autorisé. Un worker appartient exclusivement à un tenant. La cible est de 0 à 100 workers actifs par tenant, avec recette locale standard A1/A2 chez A et B1 chez B.
 - Le relais exige une autorisation dirigée source → destination + canal, révocable et éventuellement bornée dans le temps. Même tenant ne donne aucune autorisation implicite ; les échanges inter-tenants sont refusés.
 - Quotas/réservations, transitions des workers, grants, messages et usage exigent transactions durables, audit obligatoire et reprises idempotentes. Même identité avec contenu divergent est un conflit. L'audit ne duplique pas les corps des messages.
@@ -16,6 +16,22 @@ Autorité : consignes du mainteneur dans [AGENTS.md](../../AGENTS.md) et mission
 - L'usage d'allocation CPU/RAM ne constitue ni du CPU consommé ni une facture. Toute unité reste `billable=false` avant qualification du compteur, de la réconciliation et des tarifs.
 
 Les secrets sont masqués avant persistance et diffusion. Les comptes, licences, canaux privés de signalement et infrastructures externes ne sont pas inventés. Une opération réelle sur cloud/PKI/NAS exige les prérequis et l'autorisation du mainteneur.
+
+## Stockage SQL par tenant
+
+SQLite local par tenant est le backend actuellement livré. Le contrat cible ajoute MySQL distant derrière les mêmes opérations transactionnelles du Store Rust. Le gateway choisit le backend au démarrage à partir de sa configuration de confiance et vérifie sa liaison au tenant avant de servir. Les champs historiques `data` et `--data` gardent leur sens SQLite.
+
+| Profil | Configuration à livrer |
+|---|---|
+| SQLite local | Chemin de base lié au tenant, sur le stockage local fiable du contrôle |
+| MySQL distant avec mot de passe | Hôte, port, base dédiée au tenant, compte SQL, référence privée du mot de passe et CA du serveur. Le gateway vérifie la chaîne et le nom TLS. Aucun certificat client requis |
+| MySQL distant avec mot de passe et mTLS | Mêmes paramètres, plus références du certificat et de la clé du client. Le serveur doit vérifier le certificat client et le compte doit encore authentifier le mot de passe |
+
+Le stockage distant utilise une base et des privilèges SQL distincts par tenant. Les credentials et clés restent dans le périmètre du gateway. La résolution de configuration refuse les paramètres manquants ou incompatibles et rend visibles le backend, le mode d’authentification et la destination masquée. Une indisponibilité laisse le backend sélectionné et bloque les actions exigeant l’audit.
+
+Les backends conservent les mêmes contrats d’identité, de quotas, de transitions, de relais et de reçus. Le Store garantit l’atomicité entre mutation, quota et audit obligatoire. Un rejeu après un résultat de commit incertain retrouve le même reçu ou se clôture en refus explicite. MySQL dispose de son propre schéma versionné.
+
+Lors d’un changement de stockage, l’opérateur prépare la cible et réalise lui-même tout transfert d’historique. Le gateway ouvre uniquement la cible sélectionnée. Il vérifie le schéma, le rattachement au tenant et l’intégrité de l’état durable avant d’ajouter les nouveaux événements. Chaque ajout prolonge la chaîne de cette base en préservant les octets hachés et les séquences de l’historique existant. La nouvelle tête et les projections métier associées sont écrites dans la même transaction. La [matrice SQL](TEST_STRATEGY.md#stockage-sql-configurable--à-qualifier) définit les preuves requises.
 
 ## Direction de supervision autorisée le 30 octobre
 

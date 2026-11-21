@@ -1,0 +1,231 @@
+{
+  "date": "2026-11-18",
+  "candidate_worktree": ".worktrees/v1-assembly-20261118",
+  "base_commit": "5b3c2ed044d5fdf4bbfb7489762d1eb17684fcd6",
+  "sources_sha256": {
+    "front/src/main.ts": "9d333f1c60dec36efd30d86888034c72ca5fb27e7b734da085ef9df2a074f38c",
+    "front/src/model.ts": "67960223ed84af7afe27ca9a4cbe9dea3de344861ea55896592fbccf0cce321a",
+    "front/tests/model.test.mjs": "46cdbf5f5d9a9bb5e4cd9217dcbd382aac2068f218a5cc4487e502bbe49b4da3",
+    "front/tests/browser_decision_live.mjs": "3a940af9f0661605bee8142ec5ae9448ab02b9918966009e6af441fb4f7c0c89",
+    "tests/e2e/run_browser_decision.py": "c36798147a8a478441b5796b54ccd15e42904cb7d2f237faf8356b07cf324d57",
+    "tests/e2e/qwen_runtime_evidence.rs": "0d8c35243e7f9b72c8a2908f4b4544536112e8cb0bce52a1ae7f1a9ffbb58c2d",
+    "tests/schema13_protocol_contract.rs": "c3eaf0b08c4879cd2cc2fc34611ee373e9d90e32c4797c3c0640165696784b4c",
+    "tests/oidc_gateway_flow.rs": "e7889c604d9664e7736bc0dc02e43b978f4e623c331b3c53cc67fd813db8c1b5",
+    "src/broker/service/result_auth_tests.rs": "cf9fc929cca64fc6a8860831655526919a149ca610a72e9cfcc91370511cde11"
+  },
+  "artifacts_sha256": {
+    "agentsandbox": "1808b9e1228a872b7e665bb18fe8a12574845962a26eba777ded78333df10c1f",
+    "gateway_oidc_test": "6cbdd0a79110a0347e225c4e6c3b223178245cbf23ad9466621b360286c51a2c",
+    "schema13_test": "08224d708891d75b7c559d21a34265a6b7d30300f2ad5dc0cd095b98ef26ef7d",
+    "broker_test": "6e0d64d65c71d47921ef1ca9bdff270a1f5e0d393da3f07f5fcef3d0558730a0",
+    "qwen_measurement_tool": "1ac582d1102ff363ea4d4caa602b3593d74821ee94cfee47a919a2c664ace890"
+  },
+  "evaluators_front": {
+    "scope": "Services Rust natifs, deux tenants SQLite, Chromium réel. Qwen sur un endpoint de test synthétique.",
+    "red": {
+      "bundle": "index-Ny5rvfR-.js",
+      "sha256": "43d4b21651e7cf8de1e55b317822cffa4c2ad3f7304a8da0f2db3deecc32187c",
+      "browser": {
+        "mode": "local_model_fixture_decision_audit_web",
+        "status": "FAIL",
+        "stage": "détail des décisions Sécurité",
+        "reason": "Les métadonnées de l’évaluation diffèrent de l’audit sur le champ Évaluateur.",
+        "artifacts": {
+          "directory": "browser-failure-aU01Ha",
+          "files": [
+            "page.html",
+            "page.png"
+          ]
+        }
+      },
+      "artifact_sha256": {
+        "page.html": "b8870469c0037ed49d3e44cf990c19f0ae7b12862d527bc6b382b71698bf24ca",
+        "page.png": "03d6559400ca5212c2779ed89ef3f1a67788b8e3232cb69a7efcfdb63f3afc00"
+      }
+    },
+    "green_rust": {
+      "gateway_and_cli": {
+        "status": "PASS",
+        "stage": "complete",
+        "judge_mode": "rust",
+        "scope": "real Rust services, no model or worker",
+        "cli_sha256": "1808b9e1228a872b7e665bb18fe8a12574845962a26eba777ded78333df10c1f",
+        "html_sha256": "9d5a4418ed133f5a70f411411ef960cf30079480d909af3150b1c231a93b0318",
+        "bundle_js_sha256": {
+          "index-Cm5OapoU.js": "1be7c9e06f51fb2bf3cc984149605524beef89af292a1b88ded26e931ff02680"
+        },
+        "cli_audit": {
+          "event_count": 3,
+          "head_hash": "491b1cb2663ed8a41ba3d54a13d3677ff66416feff226b0c4083d1179249d2a4"
+        },
+        "workers": 0,
+        "browser_status": "PASS"
+      },
+      "browser": {
+        "mode": "rust_decision_audit_web",
+        "status": "PASS",
+        "tenant_id": "tenant-a",
+        "audit_verified": true,
+        "export_verified": true,
+        "foreign_decision_absent": true,
+        "decisions": [
+          {
+            "seq": 2,
+            "id": "c56a2684-8776-4c66-8ed0-fba4d0bc5596",
+            "hash": "4d12ae49f4975a44a1e572d1c067aa437b754f54db883944d23109e7e7a50420",
+            "outcome": "allow",
+            "rule": "exact_allowlist"
+          },
+          {
+            "seq": 3,
+            "id": "f358e11e-40da-4ecc-b042-a17d07d59419",
+            "hash": "491b1cb2663ed8a41ba3d54a13d3677ff66416feff226b0c4083d1179249d2a4",
+            "outcome": "deny",
+            "rule": "strict_default_deny"
+          }
+        ]
+      }
+    },
+    "green_local_model_fixture": {
+      "gateway_and_cli": {
+        "status": "PASS",
+        "stage": "complete",
+        "judge_mode": "local-fixture",
+        "scope": "real Rust services, no model or worker",
+        "cli_sha256": "1808b9e1228a872b7e665bb18fe8a12574845962a26eba777ded78333df10c1f",
+        "html_sha256": "9d5a4418ed133f5a70f411411ef960cf30079480d909af3150b1c231a93b0318",
+        "bundle_js_sha256": {
+          "index-Cm5OapoU.js": "1be7c9e06f51fb2bf3cc984149605524beef89af292a1b88ded26e931ff02680"
+        },
+        "fixture_calls": 2,
+        "cli_audit": {
+          "event_count": 4,
+          "head_hash": "76613dec00d608239628eed32eac14929bbdc9a17105982f01a542c1b06a12ec"
+        },
+        "workers": 0,
+        "browser_status": "PASS"
+      },
+      "browser": {
+        "mode": "local_model_fixture_decision_audit_web",
+        "status": "PASS",
+        "tenant_id": "tenant-a",
+        "audit_verified": true,
+        "export_verified": true,
+        "foreign_decision_absent": true,
+        "decisions": [
+          {
+            "seq": 2,
+            "id": "3792b767-4b1f-4636-b04f-8fb687ce62be",
+            "hash": "78667b33a87ff5c8c32a3fd68bbb76ea7d2a1c78a2e2062c85c165b0a3f1369c",
+            "outcome": "deny",
+            "rule": "local_openai_review_fail_closed"
+          },
+          {
+            "seq": 3,
+            "id": "5d18366d-9403-4d77-ad5f-f045db15c5be",
+            "hash": "1ce5a5f5299119dc8a3dcdd27f23035f0967d21b17af05f24834a7e0a86ba231",
+            "outcome": "deny",
+            "rule": "strict_default_deny"
+          },
+          {
+            "seq": 4,
+            "id": "6bc38d82-c450-4644-98b0-02683dbb0b94",
+            "hash": "76613dec00d608239628eed32eac14929bbdc9a17105982f01a542c1b06a12ec",
+            "outcome": "deny",
+            "rule": "decision_backend_unavailable_or_invalid"
+          }
+        ]
+      }
+    },
+    "fixtures_asserted": [
+      "avis favorable consultatif suivi d’un refus",
+      "veto Rust sans POST",
+      "503 amont suivi du refus durable",
+      "JSONL complet du tenant A",
+      "absence du contexte B"
+    ],
+    "npm_test": {
+      "passed": 238,
+      "failed": 0,
+      "skipped": 8
+    },
+    "chromium_unavailable": {
+      "mode": "rust_decision_audit_web",
+      "status": "BLOCKED",
+      "stage": "lancement Chromium",
+      "reason": "Playwright ou Chromium est indisponible pour ce parcours."
+    }
+  },
+  "oidc_refresh": {
+    "status": "PASS",
+    "test": "successful_web_refresh_withdraws_administration_and_preserves_personal_scope",
+    "scope": "Echanges OIDC de renouvellement avec IdP signé loopback. Un même principal perd le rôle d’administration.",
+    "assertions": [
+      "contexte personnel maintenu sur le même tenant",
+      "ancien contexte rejeté",
+      "nouvelle génération auditée"
+    ],
+    "keycloak_live": {
+      "status": "BLOCKED",
+      "image": "quay.io/keycloak/keycloak:26.8.1",
+      "reason": "image locale absente"
+    }
+  },
+  "schema_migration": {
+    "status": "PASS",
+    "scope": "Vrai CLI de migration et lecture HTTP protégée. Deux vrais gateways successifs. Réactivation et reprise worker exclues de la preuve.",
+    "test": "cli_schema13_and_the_served_protocol_keep_the_same_inactive_namespace",
+    "observed": {
+      "backup_unchanged": true,
+      "control_namespace_uuid": "b21d4033-7e7c-4c9d-b652-aa97e197e69b",
+      "restored_copy": {
+        "active": false,
+        "event_count": 12,
+        "head_hash": "edb20cfc3404865d7dd3ca1850717fe1976e75d7a45081bbba5adbaf877897f0",
+        "schema_version": 12
+      },
+      "tenant": "schema13-contract-tenant",
+      "upgraded": {
+        "active": false,
+        "event_count": 13,
+        "head_hash": "d67348b637c26daa939cd9cef2fb2793b26da7f807945137690319f18976bdd6",
+        "schema_version": 13
+      }
+    }
+  },
+  "broker_cancellation": {
+    "status": "PASS",
+    "test": "broker::service::server::result_auth_tests::confirmed_cancel_replays_after_gateway_outage_and_broker_reopen",
+    "related_tests_passed": 2,
+    "scope": "Vrai IPC et gateway sur loopback et SQLite. Nouvelles instances dans le processus de test, sans démarrage runtime.",
+    "assertions": [
+      "Unavailable pendant la coupure",
+      "Cancelled après réouverture",
+      "annulation et reçu idempotents",
+      "aucune nouvelle entrée d’audit ni réservation"
+    ],
+    "review": "Seconde lecture sur le SHA exact."
+  },
+  "qwen_memory_evidence": {
+    "software_status": "PASS",
+    "test": "memory_evidence_requires_observed_peak_and_zero_oom",
+    "absent_containers_reader_check": {
+      "budget_bytes": 1000000000,
+      "diagnostic": "model_not_found",
+      "finished_at": "2026-11-18T19:59:52.336267Z",
+      "model_requests": 0,
+      "project": "aig-v1-qwen-21127d62397549fc9807fb3bc0903b59",
+      "scope": "model_cgroup_v2_lifetime_peak",
+      "stage": "identify_model",
+      "status": "BLOCKED",
+      "version": 1
+    },
+    "physical_status": "BLOCKED",
+    "model_image_status": "absente avant construction",
+    "build_step": "métadonnées de l’image llama.cpp épinglée, avant création du modèle",
+    "normal_registry_client": "échec du helper de credentials, OSStatus -50",
+    "public_anonymous_registry_client": "échec de vérification TLS, x509 OSStatus -26276",
+    "model_requests": 0,
+    "physical_memory_measurements": "NOT_RUN"
+  }
+}

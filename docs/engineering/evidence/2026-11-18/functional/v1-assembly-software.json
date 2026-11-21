@@ -1,0 +1,48 @@
+{
+  "date": "2026-11-18",
+  "candidate": {
+    "checkout": "v1-assembly-20261118",
+    "base_commit": "5b3c2ed044d5fdf4bbfb7489762d1eb17684fcd6",
+    "base_integration": "9629b9285dfa5a829ee4f6daecd94c772e31c5ec",
+    "scope": "Base d’intégration et durcissements Wave 0, plus port du run supervisé et du Result v1. Le checkout principal conserve ses propres deltas.",
+    "preservation_in_checkout": {
+      "target/debug/agentsandbox": "target/qa-cache-archive/previous-tested-agentsandbox",
+      "target/debug/ai-guard-demo-pki": "target/qa-cache-archive/previous-tested-ai-guard-demo-pki",
+      "src/broker/service/server.rs": "target/qa-cache-archive/previous-tested-server.rs"
+    },
+    "artifacts_sha256": {
+      "target/debug/agentsandbox": "a28ed9665f5ef881b540431f229845d2bdcb60c79506155c809c6c24ea35fba4",
+      "target/debug/ai-guard-demo-pki": "a402c42a5002b34b492ba82aa503976815af931a43918de00b5bd59693a5b644"
+    },
+    "source_sha256": {
+      "Cargo.lock": "fc791b8e509e77c8806009dc363eee5ab353df1f70cb32db7c7874615dfc9797",
+      "src/broker/service/client.rs": "cc00bc41797440d6dd8fd552143227cda3bd498f2b35186bb01ca3daaecb6b51",
+      "src/broker/service/jobs.rs": "6e11bfdda43fbbbaa923bb92507e997679561fd51026d8ca857625a4618031f9",
+      "src/broker/service/mod.rs": "8d1d3aefc1d20253940c46a60afcf963c0aad28c922a6a07577a5cba00fa2c6a",
+      "src/broker/service/protocol.rs": "90a9f3578449eb22d226e03c56198b63ed266cde95e4ce2f4326d6966a0a8ea0",
+      "src/broker/service/server.rs": "b92b46ba952760b4b46f3bb0eb3fdb817ddc4e621fb686710da925aaf708aec0",
+      "src/broker/service/result.rs": "8202eb8e18fcaa34b27f009f6173a7a37e6a6f84b97333e5dc25bb37d61d7fbc",
+      "src/main.rs": "6ca529449fbe3f4777082bb7bccb709de6f2cf2b8c4d9297668d1d86e452dba9",
+      "src/operations.rs": "167b45c6f4f5d68af430416ed14eddb457eb2ee67f807b0cec6d53957607cea2",
+      "src/broker_cli.rs": "709534464b104c15e335f54abdd48e0361f4aa7a1be7b6689ca08d90eb40c7d9",
+      "src/operations/broker_run.rs": "99c86b43de8126ed861b330f7d4a919eaa3f1d97714066d8ed7053d6efc9247e",
+      "tests/broker_run_cli.rs": "c5b7391a11e1e566cfb90d74fc1daaa72347da5c0c92b22922a580a3eb7d54de",
+      "tests/kubernetes_preflight_cli.rs": "3690615e8059377334315e5a375ac38f5d8c72c0f0b0ac865066e8dbfcbd49e9",
+      "tests/release_metadata_verify.rs": "13bc0b86432b219bb518e14cfab7724ceb29e26307f6f263a28bb8cc15872823"
+    }
+  },
+  "environment": { "platform": "macOS ARM64", "rust": "1.99.1", "cargo_environment": "CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=2" },
+  "command": "cargo test --locked --offline --test broker_run_cli --test kubernetes_preflight_cli --test release_metadata_verify -- --test-threads=1",
+  "compile_check": { "command": "cargo check --locked --offline --tests", "status": "PASS", "scope": "Vérification de compilation des cibles de test. Les trois nouveaux tests serveur Result ne sont pas exécutés par ce contrôle." },
+  "checks": [
+    { "target": "broker_run_cli", "status": "PASS", "passed": 10, "failed": 0, "ignored": 0, "scope": "Vraie CLI et fixture IPC locale; UUID corrélé, refus des replis, Ctrl-C et résultat attesté côté protocole." },
+    { "target": "kubernetes_preflight_cli", "status": "PASS", "passed": 9, "failed": 0, "ignored": 0, "scope": "Vraie CLI, gateway et fixture Kubernetes HTTPS loopback avec PKI de test isolée; accusés durables avant le dry-run et avant succès, refus et états inconnus." },
+    { "target": "release_metadata_verify", "status": "PASS", "passed": 6, "failed": 0, "ignored": 0, "scope": "Vraie CLI et artefacts synthétiques; manifeste valide, refus d’un artefact substitué de même taille et distinction divergence/non vérifié." }
+  ],
+  "initial_run": "Le premier essai CLI s’est arrêté sur les cinq secondes d’attente de connexion IPC; les huit autres cas ont réussi. Le cas isolé a réussi lors du rejeu. Le harnais borne désormais l’attente de connexion à 15 s en conservant cinq secondes pour le transfert de trame et 30 s pour le processus enfant.",
+  "limits": [
+    "Le build signale 128 avertissements sur la bibliothèque, notamment des surfaces Kubernetes non raccordées. Cette exécution ne qualifie aucun build de livraison.",
+    "La preuve du broker se limite au protocole et à la CLI. L’effet Docker, le crash, l’échéance et le maintien de la capacité avec la lecture stricte sont ouverts.",
+    "Le préflight n’a joint aucun cluster et n’a créé aucun pod. La vérification release sur fichiers synthétiques n’atteste aucun artefact de distribution ni sa provenance."
+  ]
+}

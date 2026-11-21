@@ -1,0 +1,54 @@
+{
+  "date_utc": "2026-11-18",
+  "base_commit": "5b3c2ed044d5fdf4bbfb7489762d1eb17684fcd6",
+  "candidate_worktree": ".worktrees/v1-assembly-20261118",
+  "podman_bootstrap": {
+    "source_review": "PASS",
+    "status": "NOT_RUN",
+    "test": "podman_authority_bootstrap_is_explicit_and_marker_loss_remains_unknown",
+    "expected": [
+      "un seul info avec réponse rootful sans exception",
+      "aucune création de marqueur",
+      "bootstrap rootless nominal et réouverture avec validation du marqueur"
+    ],
+    "scope": "Contrôle de la même réponse info bornée que le relevé de stockage avant la création. Les deux appels de production transmettent leur exception gelée. Aucune propriété atomique entre commandes moteur distinctes.",
+    "source_sha256": {
+      "src/runtime/managed.rs": "351f70aaf22e48a2ea1dd162398a507a453a55546d46abc8ba135e46dad4e98a",
+      "src/runner/managed.rs": "30d7318cb564f0fa334033ed1b0627e1b59de9a7aa068190fc3b68238dcea57f",
+      "tests/runtime_fixtures/managed.rs": "20f1a8adb572bab0a4ad0d2d9c6ffbaf7a9d440e6e611cf721ad48e2a4652526",
+      "tests/runtime_managed.rs": "4a5dd8e7014a708d1f4df874937920365f368686c78acccdfb71ad5286dfb1b6"
+    }
+  },
+  "native_cli_oidc": {
+    "status": "NOT_RUN",
+    "test": "native_cli_reads_then_observes_durable_membership_revocation_and_expiry",
+    "scope": "Vrai sous-processus CLI et gateway, émetteur signé de fixture et SQLite sur loopback. Vérifie échange PKCE public, reçu, refus après révocation puis expiration naturelle. Sans appel IdP externe.",
+    "source_sha256": "fa72bb2dc9336a2534fe9f17da68a55d7cf676fc7297a303367c53d81bfafa26"
+  },
+  "browser_resource_recovery": {
+    "status": "NOT_RUN",
+    "scenario": "resource-recovery",
+    "scope": "Vrai gateway et dashboard de la fixture SQLite. Panne de transport injectée dans Chromium sur une lecture Ressources, autre réponse saine, reprise, retrait des droits et purge. HTML et PNG assainis conservés sur échec exploitable.",
+    "source_sha256": "1b99ad2a03b8d5300574de6fde27ba3bf9b8cb0eb04595a7614fa0bae90d06ce"
+  },
+  "execution_environment": {
+    "status": "BLOCKED",
+    "scope": "Préparation du rejeu isolé requise par security-audit",
+    "verified": [
+      "Seatbelt refuse un bind TCP loopback de contrôle avec EPERM dans le profil sans réseau",
+      "watchdog système termine le programme témoin au délai"
+    ],
+    "missing": [
+      "namespace loopback isolé des services hôte",
+      "plafonds mémoire, processus et espace disque vérifiés dans le même environnement de test"
+    ],
+    "other_prerequisite": "Le contrôle d’un programme runtime de fixture reste soumis à l’identification du vrai compte OS.",
+    "target_run": false
+  },
+  "checks": {
+    "rustfmt": "PASS",
+    "node_syntax": "PASS",
+    "diff_whitespace": "PASS"
+  },
+  "audit_history": "Registres run-1 et run-2 et rapports primaires consultés pour la portée des preuves runtime. La preuve moteur du run-2 concerne Docker. Aucun fingerprint historique reclassé."
+}

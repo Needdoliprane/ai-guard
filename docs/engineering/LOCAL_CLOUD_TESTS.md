@@ -8,7 +8,11 @@ Observer les trois workers actifs pendant une même période, avec leur identifi
 
 Le test opt-in utilise trois projets synthétiques, deux bases tenant et le vrai CLI. Il vérifie le chevauchement des intervalles observés par Docker, les quotas actifs, la fin normale d’A1 pendant qu’A2 et B1 restent actifs, les volumes et exports distincts, les allocations non facturables et les deux chaînes d’audit. Chaque viewer ouvre le détail de ses workers et reçoit HTTP 404 pour les identifiants des workers de l’autre tenant. Les plafonds cumulés des workers sont de 6 vCPU et 3 Gio de RAM, hors contrôle. L’arrêt explicite, le relais et le dashboard font partie de la recette complète et restent à vérifier séparément.
 
+Le gel `434c1400` de la candidate a vérifié les trois workers A1/A2/B1 en parallèle sur Docker Desktop ARM64, avec deux tenants et 20,08 s de chevauchement. A1 s’achève pendant qu’A2 et B1 sont actifs. Les exports, quotas, allocations, chaînes d’audit et refus d’accès aux détails inter-tenant passent. L’arrêt explicite, le relais et le dashboard sous la même charge gardent leurs propres recettes. [Résultats et empreintes](evidence/2026-11-19/functional/native17-and-local-workers.md#trois-workers-a1-a2-et-b1-après-redémarrage)
+
 Fournir le chemin absolu du client Docker, son socket Unix local et l’identifiant SHA-256 complet d’une image QA déjà présente, avec `/bin/sleep`, `/bin/tar` et le profil de worker. Le compte courant doit être reconnu par le prévol de contrôle. Sur un moteur rootful approuvé, ajouter `AGENTSANDBOX_TEST_ALLOW_ROOTFUL=1` à l’environnement du test.
+
+Sélectionner une image QA locale par son SHA-256 complet. Elle fournit `/bin/sleep` et `/bin/tar`. Le répertoire `/workspace` existe dans l’image et appartient à `1000:1000`, comme dans le Dockerfile worker. Le volume neuf hérite de ce répertoire à l’import. Dans l’image de contrôle testée, `tar` a reçu un refus d’écriture en UID 1000. L’image QA préparée sans réseau à partir de Debian local a passé l’extraction sur un volume neuf.
 
 ```sh
 AGENTSANDBOX_TEST_RUNTIME=docker \
@@ -21,6 +25,8 @@ AGENTSANDBOX_TEST_IMAGE="$QA_WORKER_IMAGE_ID" \
 ```
 
 Le test affiche son verdict et conserve ses dossiers privés après le prévol. `BLOCKED` au stade `doctor` indique que la recette n’a démarré aucun worker. Un essai sans moteur est exclu des preuves de concurrence.
+
+Sur Docker Desktop rootful approuvé, fournir `AGENTSANDBOX_TEST_ALLOW_ROOTFUL=1` au processus de test. Les workers de la recette utilisent le profil strict et le réseau coupé.
 
 ### Vérifier l’arrêt explicite d’A1 par le CLI
 

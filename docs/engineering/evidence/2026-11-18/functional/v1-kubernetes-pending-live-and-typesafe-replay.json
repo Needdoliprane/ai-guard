@@ -1,0 +1,189 @@
+{
+  "date_utc": "2026-11-18",
+  "kubernetes": {
+    "context": "docker-desktop",
+    "api_version": "v1.36.1",
+    "api_platform": "linux/arm64",
+    "tls_verification": true,
+    "credential_plugin": false,
+    "endpoint_is_literal_loopback": true,
+    "csidrivers": 0,
+    "storage_classes": [
+      {
+        "name": "hostpath",
+        "provisioner": "rancher.io/local-path",
+        "volume_binding_mode": "WaitForFirstConsumer"
+      },
+      {
+        "name": "standard",
+        "provisioner": "rancher.io/local-path",
+        "volume_binding_mode": "WaitForFirstConsumer"
+      }
+    ],
+    "namespace_create_allowed": true,
+    "namespaced_token_requests_allowed": true,
+    "clusterrolebinding_create_allowed": true,
+    "native_cli_sha256": "f8a538dc603465e02ace1829e616f89a478d1c75848ea97115c25bfc5a749c1f",
+    "test_binary_sha256": "35526eb5ce7bcda0be0b88904c581231be93da1aa39a1379dc66a6462ceb930b",
+    "test": "docker_desktop_workspace_pending_diagnostic",
+    "status": "PASS",
+    "observed_claim": {
+      "access_mode": "ReadWriteOncePod",
+      "bound_volume": false,
+      "claim_uid": "8ef0b092-a105-4a41-93d1-60ab93c38215",
+      "phase": "Pending",
+      "pods": 0,
+      "request": "1Mi",
+      "resource_version_after": "16775",
+      "resource_version_before": "16775",
+      "volume_mode": "Filesystem"
+    },
+    "cli": {
+      "authority_id": "b2748e1b-4f57-4dff-9660-8511f226e24e",
+      "diagnostic": "Kubernetes workspace claim is Pending. Verify that its StorageClass supports ReadWriteOncePod through CSI and uses Immediate binding",
+      "exit_code": 1,
+      "stdout_bytes": 0
+    },
+    "cleanup": {
+      "clusterrole": "absent",
+      "clusterrolebinding": "absent",
+      "namespace": "removed",
+      "resources": [
+        {
+          "name": "aig-v1-cni-pending-f01649c8d3b240c9adb9cf737dcc785a",
+          "resource": "clusterrolebindings",
+          "result": "removed",
+          "uid": "6b2c2991-296f-493a-8972-29d86e253f44"
+        },
+        {
+          "name": "aig-v1-cni-pending-f01649c8d3b240c9adb9cf737dcc785a",
+          "resource": "clusterroles",
+          "result": "removed",
+          "uid": "70bee5f8-01b1-4218-88f5-bdc9cd20f4c6"
+        },
+        {
+          "name": "workspace-inspector",
+          "resource": "rolebindings",
+          "result": "removed",
+          "uid": "04609fa1-82e2-4878-a095-fc9f4cdb85ff"
+        },
+        {
+          "name": "workspace-inspector",
+          "resource": "roles",
+          "result": "removed",
+          "uid": "c4f2e137-b922-4417-bbae-ff32da7dae85"
+        },
+        {
+          "name": "workspace-inspector",
+          "resource": "serviceaccounts",
+          "result": "removed",
+          "uid": "7d06d3fa-0826-4bd7-bd36-4b755e405020"
+        },
+        {
+          "name": "ai-guard-ws-f01649c8d3b240c9adb9cf737dcc785a",
+          "resource": "persistentvolumeclaims",
+          "result": "removed",
+          "uid": "8ef0b092-a105-4a41-93d1-60ab93c38215"
+        }
+      ]
+    },
+    "namespace_uid": "09cbc2ce-f91c-487c-8144-ea4182f2a854",
+    "uid_cleanup_reread_count": 3,
+    "verification": "Same UID and resource version before and after. PVC GET and namespace anchors use scoped short-lived credentials and HTTPS on the existing loopback API.",
+    "scope": "Live workspace diagnosis for a dedicated unbound PVC. Real CSI-backed storage and S5 workload admission remain open.",
+    "network_policy_harness_regression": {
+      "test": "docker_desktop_tcp_network_policy",
+      "status": "PASS",
+      "scope": "same_node_pod_to_pod_tcp_only",
+      "duration_seconds": 117.75,
+      "image": "registry.k8s.io/coredns/coredns:v1.14.2",
+      "image_digest": "fe81a497e85f174f8d7d5739d14f5184141f4e80596977ff8f838d7062fecf02",
+      "peer_tcp_dns_outcomes_by_phase": {
+        "baseline": {
+          "answer": 3
+        },
+        "egress_denied": {
+          "servfail": 3
+        },
+        "egress_restored": {
+          "answer": 3
+        },
+        "ingress_denied": {
+          "answer": 1,
+          "servfail": 3
+        },
+        "ingress_restored": {
+          "answer": 3
+        }
+      },
+      "loopback_control_answer_on_every_sample": true,
+      "namespace_cleanup": {
+        "client": "removed",
+        "server": "removed"
+      }
+    }
+  },
+  "podman": {
+    "machine": "podman-machine-default",
+    "state": "running",
+    "selected_rootful": true,
+    "remote_api_ping_http": 200,
+    "client_version": "6.1.4",
+    "store_info_exit_code": 125,
+    "store_info_reason": "EIO on overlay-images/images.lock",
+    "engine_version_exit_code": 125,
+    "rootless_ssh_info_exit_code": 125,
+    "rootless_ssh_info_reason": "SSH handshake EOF",
+    "machine_ssh_exit_code": 255,
+    "machine_ssh_reason": "local OS account UID 501 unavailable",
+    "status": "BLOCKED"
+  },
+  "candidate_base": "5b3c2ed044d5fdf4bbfb7489762d1eb17684fcd6",
+  "typesafe_replay": {
+    "status": "PASS",
+    "real_typesafe_status": "BLOCKED",
+    "real_typesafe_preflight": "Direct strict HTTPS HEAD failed at DNS resolution. No key loaded, no request to the model.",
+    "front_bundle_sha256": "e3814860a5bce8f233f9fb09ec74ae1aaa60da518c38fed7aec6c1d0ef3c361c",
+    "fixture_outcomes": {
+      "allow": {
+        "status": "PASS",
+        "backend_status": "evaluated",
+        "fixture_calls": 1,
+        "audit_hash": "39015343338b2902fd6ee4e2faf9f017b461d2957685d40f09fd5f72e09b4456",
+        "report_sha256": "769314d188511117aac1512c68cbe97ed9e90b3d5f945bac2995d4c5186ec295"
+      },
+      "deny": {
+        "status": "PASS",
+        "backend_status": "evaluated",
+        "fixture_calls": 1,
+        "audit_hash": "b24f1c9ccf1daebe04b03f9e2200f042046e81dad13d6a5f211a2ecc997992d6",
+        "report_sha256": "cd0ff15466316385b292b05d8b4037efdb69dcc425f091790a8995be76139ff9"
+      },
+      "review": {
+        "status": "PASS",
+        "backend_status": "evaluated",
+        "fixture_calls": 1,
+        "audit_hash": "d60e2d910e21fdc5fc49d8d86e25e9329165107883bf93f69cb5c9125c9dbc95",
+        "report_sha256": "80d81ba456f1b0a52aeadf1da8c3ceacd4a80e7e6c530c1a809a07622b7301ca"
+      },
+      "unavailable": {
+        "status": "PASS",
+        "backend_status": "unavailable_or_invalid",
+        "fixture_calls": 1,
+        "audit_hash": "9028a6914a1552aa10e7d2fedc999995355701f0d89bf5fd7e9c5abe5a9a1393",
+        "report_sha256": "d50cdf5171381947c7845b9af10ed86353893c0607345805e4aaebceea682269"
+      }
+    },
+    "compatibility_modes": {
+      "rust": "PASS",
+      "typesafe-fixture": "PASS",
+      "local-fixture": "PASS"
+    }
+  },
+  "source_sha256": {
+    "tests/kubernetes_cni_live.rs": "e49dd3fc19bcce294c8534469c4fa2ef0917698aea044779228f0c3744cfd7c4",
+    "tests/kubernetes_cni_live/workspace_pending.rs": "5c32a9735e10a82ea3f5037213d5cc7acb09be848cad6b785575513cf6264f69",
+    "tests/e2e/run_browser_decision.py": "da87dea004cae437825ae528b20184377d2ab8fbfc2e5ebe3201f51d2ca66e4b",
+    "front/tests/browser_decision_live.mjs": "0068573ed41bab683423aecb4361a1d751b44712cd14ee40b5ff6a5aabd76b53"
+  }
+}

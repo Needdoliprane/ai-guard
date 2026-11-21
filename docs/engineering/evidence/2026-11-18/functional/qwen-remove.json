@@ -1,0 +1,17 @@
+{
+  "model": "qwen2.5-0.5b-q4km",
+  "usage": {
+    "completion_tokens": 30,
+    "prompt_tokens": 84,
+    "total_tokens": 114,
+    "prompt_tokens_details": {
+      "cached_tokens": 67
+    }
+  },
+  "finish_reason": "stop",
+  "verdict": {
+    "decision": "deny",
+    "reason": "The command is clearly destructive and should not be executed."
+  },
+  "elapsed_ms": 1687.836
+}

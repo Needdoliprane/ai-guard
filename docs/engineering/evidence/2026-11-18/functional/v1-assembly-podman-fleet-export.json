@@ -1,0 +1,123 @@
+{
+  "date_utc": "2026-11-18",
+  "base_commit": "5b3c2ed044d5fdf4bbfb7489762d1eb17684fcd6",
+  "candidate_worktree": ".worktrees/v1-assembly-20261118",
+  "fleet_browser": {
+    "status": "PASS",
+    "scope": "Rust gateway et dashboard réellement servis via TCP loopback, registres SQLite A/B et comptes locaux nominatifs de recette. Les lignes runtime sont des fixtures.",
+    "test": "chromium_reads_bounded_supervision_window_without_cross_tenant_data",
+    "sources_sha256": {
+      "tests/supervision_stack_api.rs": "82c1b5aaba2ec8b1378a559544aed78b5341d90f3a329f1abac7d2eb86a53815",
+      "front/tests/browser_supervision_scale_live.mjs": "c59f784b583be47b7e8b1f6e3b3f233fa44c986e2677fd264049a8e25e3a0e0b"
+    },
+    "test_binary_sha256": "bb09e86abfb3274edc83b16449a971327151177e7004e41ac5c4b2288bd32886",
+    "front_bundle_js_sha256": "1be7c9e06f51fb2bf3cc984149605524beef89af292a1b88ded26e931ff02680",
+    "observed": {
+      "tenant_a": {
+        "workers": 120,
+        "first_page": 100,
+        "pages_audited": 2,
+        "brokers": 3,
+        "filtered_rows": 1
+      },
+      "tenant_b": {
+        "workers": 1,
+        "pages_audited": 1,
+        "brokers": 1
+      },
+      "isolation": true,
+      "coverage": "partial",
+      "runtime_inventory": "unknown"
+    },
+    "red": {
+      "stage": "login_a",
+      "reason": "le premier oracle attendait un nom incomplet malgré la bonne identité affichée",
+      "artifacts_sha256": {
+        "page.html": "207be5b79fc83eb952d96eab29aeac2586353ceea562ea71d3e0b11cc1750214",
+        "page.png": "46344b024d0266cb226b5da6d4825c6837c33fdd61862ca693d7ff5b2146d19c"
+      }
+    }
+  },
+  "export_grant_recovery": {
+    "status": "PASS",
+    "scope": "HTTP contrôlé au vrai Router et vraie SQLite. La preuve porte sur le grant durable.",
+    "test": "supervised_api_arms_import_and_worker_claims_once_then_maintenance_blocks_new_effects",
+    "source_sha256": "1bec5da629052bf89428bd03cbc86fe45934503714dce3743620b772082f560f",
+    "test_binary_sha256": "eb6f404d598c0fe142a77be32e8e8456a6e2df8a741b8bec15f86e98bbe18fc7",
+    "assertions": [
+      "rejeu exact après réouverture rend le reçu complet",
+      "destination divergente avec même UUID refusée par 409",
+      "nouveau grant refusé par 503 supervision_inactive",
+      "copie SQLite avant le grant refuse la requête originale",
+      "aucune modification des têtes, quotas ou allocations pendant ces refus"
+    ],
+    "red": {
+      "reason": "l’oracle initial comptait la décision durable préparée pour le scénario voisin",
+      "original_expected_count": 20,
+      "original_observed_count": 21
+    }
+  },
+  "podman": {
+    "scope": "Ciblage par le vrai CLI et le validateur Rust. Les effets de lancement et l’engin applicatif restent à qualifier.",
+    "client_canary_before_guard": {
+      "client": "Podman v6.1.4 Darwin/arm64",
+      "isolated_fixture_configuration": true,
+      "container_host_environment_present": false,
+      "explicit_remote_false": true,
+      "synthetic_unix_socket_received_read": true,
+      "exit_code": 125
+    },
+    "candidate_policy": {
+      "linux_and_freebsd": "local ou socket Unix explicite",
+      "macos": "socket Unix explicite"
+    },
+    "target_selection_test": {
+      "status": "PASS",
+      "test": "runtime::managed::podman_diagnostics_and_managed_commands_share_local_targets",
+      "test_binary_sha256": "1f0b0aa94cf03fb106c425b993e478666c665fbe7da398e17ec9efcc34f1cc15"
+    },
+    "new_run_before_early_guard": {
+      "status": "FAIL",
+      "scope": "new run with private uninitialized config on macOS",
+      "expected": "native_mode_guard",
+      "observed": "native_mode_guard_missing",
+      "config_created": false,
+      "cli_sha256": "7c50e61c2d02100bf2e0b0e144661d0f70271432a4f62b1cf5b02d4f4f4212b4",
+      "exit_code": 1
+    },
+    "new_run_after_early_guard": {
+      "status": "PASS",
+      "test": "new_podman_run_requires_explicit_socket_on_client_only_platforms",
+      "observed": "Refus dédié du vrai CLI sur macOS avant l’ouverture de la configuration de recette inactive.",
+      "cli_sha256": "ae316b3be4fa599620b6a669943d1fed0af47a2e1d8fbb18aeaf8c767e38085f",
+      "test_binary_sha256": "e3af3622382025b5335f0bbeb5c172c27b248875129f1427c3a4423d7a61065e"
+    },
+    "positive_doctor_fixture": {
+      "status": "NOT_RUN",
+      "test": "podman_doctor_targets_one_endpoint_and_keeps_rootful_refusal_read_only",
+      "compiled": true,
+      "prerequisite": "Compte OS de contrôle approuvable."
+    },
+    "doctor_on_real_socket": {
+      "status": "BLOCKED",
+      "explicit_socket_checked": true,
+      "reason": "account_home_unavailable",
+      "exit_code": 1
+    },
+    "sources_sha256": {
+      "src/operations.rs": "c8fff26a0a4d32260b00c28ff1c17d252748f29e3d181e51e5f2e4f59d7688b6",
+      "src/runtime.rs": "c4efed0e978c0c39b227767589835aedd67c69d239e92fe44acf7d0f885be264",
+      "src/runtime/managed.rs": "3f39d6abf4dd7da8b04a0c880bc1774f675d3209943f7d1cea95c44311a2e4bb",
+      "src/runner.rs": "aac3cc8705c8e0cbd1c210494e8ceb7bf180d1fc730ade264d29ae988f94aaf5",
+      "src/runner/managed.rs": "9f4a666a12dc62c040f5ae16b3cc0c377ab0036cfb28bef3f8ffcb5ecfe48799",
+      "tests/runtime_program.rs": "656c18bf21c542843977668e9067e800c62b80758709f5ee4abe9431b3e19c22"
+    },
+    "managed_launch_open": "Vérifier le placement du contrôle rootful par rapport à l’amorçage du volume d’autorité.",
+    "machine_socket": {
+      "status": "BLOCKED",
+      "machine_state": "running",
+      "direct_client_exit_code": 125,
+      "diagnostic": "erreur E/S overlay-images/images.lock"
+    }
+  }
+}

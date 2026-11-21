@@ -1215,6 +1215,8 @@ Le composite publié cd3d0b5 passe ensuite une seule release native arm64, sans 
 
 Lecture du plan : le [cycle broker permanent](#cycle-actif--broker-permanent-et-premier-batch-réel) reste un chantier applicatif distinct des [exigences d'identité et de configuration](#fonctionnalités-demandées--identité-sso-et-découverte-31-octobre). Les autres lots conservent leurs dates, gels et propriétaires historiques. Leurs chemins temporaires, noms d'agents et commandes exécutées ne sont pas des exigences durables ni des preuves d'un autre checkout. Le contrat produit canonique est [sso.md](../sso.md), les vues sont définies dans [ui.md](../ui.md) et l'avancement constaté dans [CURRENT_STATE.md](CURRENT_STATE.md).
 
+Le [programme V1](V1_DELIVERY.md) coordonne les lots parallèles, leurs dépendances, leurs critères d’acceptation et le suivi des audits. Il relie les résultats au candidat et à l’environnement réellement testés.
+
 Préparation identité du1er novembre, lecture seule : le premier parcours doit joindre principal humain, memberships/ACL durables et lectures/export réellement filtrés ; brancher un JWT sur le viewer tenant actuel exposerait trop de données. Les propriétaires Web/PKCE et routes IdP ne sont pas encore décidés. Une migration naïve au schéma4 ferait refuser la supervision3 actuelle : contrat/version/migration compatibles à figer avant code, jamais un test `>=3`. Local nominatif, OIDC Web/CLI et lancement humain délégué restent tous obligatoires. Le [contrat OIDC](SSO_OIDC.md) distingue désormais le profil IdP distribué de l'intégration applicative toujours absente ; aucune nouvelle capacité n'est annoncée par ce cadrage.
 
 ## Point de reprise — raccord permanent du 31 octobre, en cours
@@ -1646,6 +1648,15 @@ Le [contrat canonique](../sso.md) fixe intégralement les exigences ; ce tableau
 - [ ] Livrer le packaging et les configurations de découverte ; aucune commande future n'est présentée comme exécutable avant validation.
 - [ ] Exécuter la [matrice ciblée](TEST_STRATEGY.md#identité-individuelle-sso-et-découverte--à-qualifier) avec vrai Keycloak, vrais Web/CLI et trace d'exécution, puis mesurer la cible d'essai rapide. Aucune qualification globale par fixture ou par simple démarrage du fournisseur.
 - [ ] Mettre à jour documentation et preuves au même gel, faire relire les changements de sécurité et traiter les écarts des gates G04/G06/G07/G08/G09/G12.
+
+## Stockage SQL configurable
+
+Le [contrat de stockage](ARCHITECTURE_CONTRACT.md#stockage-sql-par-tenant) conserve SQLite local et ajoute MySQL distant avec mot de passe ou avec mot de passe et mTLS. Les deux profils distants restent à implémenter et à qualifier.
+
+- [ ] Résoudre le profil dans le gateway à partir de ses références privées. Préserver la configuration SQLite existante et vérifier la liaison au tenant avant de déclarer le gateway prêt.
+- [ ] Isoler l’implémentation SQLite derrière l’API publique `Store` en préservant ses transactions et ses schémas. Porter ensuite les opérations métier complètes vers MySQL, avec un schéma versionné et des transactions InnoDB liant les quotas, les transitions, les reçus et l’audit.
+- [ ] Vérifier l’ouverture, la sauvegarde et la restauration de la cible MySQL, y compris la reprise de la chaîne et des claims. Documenter les prérequis d’une cible préparée et laisser le transfert entre bases à l’opérateur.
+- [ ] Exécuter la [matrice SQL](TEST_STRATEGY.md#stockage-sql-configurable--à-qualifier) sur les trois profils, avec le gateway réel, la CLI et Chromium. Conserver des preuves distinctes pour le prévol MySQL, l’intégration, les pannes et la restauration sous G06.
 
 ## Ordre de dépendance des lots
 

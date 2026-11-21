@@ -17,6 +17,7 @@ Les consignes récentes du mainteneur priment sur les anciens plans. Les documen
 | [Identité, SSO et configuration](docs/sso.md), [interface](docs/ui.md) et contrats métier concernés | Exigences détaillées à conserver lors des implémentations et revues |
 | [Plan](docs/engineering/IMPLEMENTATION_PLAN.md) et [décisions](docs/engineering/DECISIONS.md) | Lots, dépendances et décisions datées ; ils ne prouvent pas une livraison |
 | [État constaté](docs/engineering/CURRENT_STATE.md), [validation](docs/engineering/VALIDATION.md) et [gates](docs/engineering/PRODUCTION_READINESS.md) | Avancement et preuves, limités à leurs sources, dates et périmètres |
+| [Registre des travaux](docs/engineering/WORK_TRACKING.md) | Travaux en cours et à venir, décisions, handoffs et clôture des ressources |
 
 Un contrat cible ne décrit pas une fonction disponible. Une preuve historique n'est pas transférée au checkout courant ou à un autre worktree.
 
@@ -104,7 +105,7 @@ Ces consignes s'appliquent aux agents principaux, sous-agents et revues. Les exi
 - Aucun socket de moteur, mode privilégié ou montage du projet original dans les conteneurs applicatifs.
 - Chaque session utilise un volume de travail alimenté par copie filtrée ; l'export crée une nouvelle destination. Le projet original n'est jamais réécrit automatiquement.
 - Un client (`tenant`) possède de 0 à 100 workers actifs comme cible de dimensionnement. Chaque worker appartient exclusivement à un client ; un client peut posséder plusieurs conteneurs/pods. Les services de contrôle peuvent être partagés et ne sont pas des workers clients.
-- Une base SQLite distincte par client est le stockage actuellement livré. Local et cloud partagent contrats, règles, événements et relais ; changer de stockage ou ajouter la haute disponibilité exige une migration documentée et des preuves. La configuration `deployment_mode=cloud` ne déploie pas une infrastructure.
+- Une base SQLite distincte par client est le stockage actuellement livré. La cible approuvée couvre SQLite local, MySQL distant avec identifiant et mot de passe, et MySQL distant avec identifiant, mot de passe et mTLS. Le choix est configurable et les trois profils partagent les contrats, règles, événements et relais. Lors d’un changement de stockage, l’opérateur prépare la cible et réalise lui-même tout transfert d’historique. Le gateway ouvre uniquement la base configurée, vérifie le schéma et la liaison au tenant, puis ajoute les nouveaux événements à son historique. Lire le [contrat de stockage](docs/engineering/ARCHITECTURE_CONTRACT.md#stockage-sql-par-tenant) et le [cahier de tests SQL](docs/engineering/TEST_STRATEGY.md#stockage-sql-configurable--à-qualifier). La configuration `deployment_mode=cloud` ne déploie pas une infrastructure.
 - Kubernetes est la cible d'adaptateur cloud, non disponible dans le broker actuel. Ne pas confondre la valeur de métadonnée `runtime=kubernetes` et un lancement de pod réellement implémenté.
 
 ## Identité utilisateur, SSO facultatif et traçabilité complète
@@ -194,7 +195,21 @@ Lire `docs/engineering/CLOUD_TENANCY.md`, `docs/engineering/LOCAL_CLOUD_TESTS.md
 - Ne jamais afficher, committer ou transmettre des secrets pour produire une preuve. Masquer avant persistance/diffusion ; conserver les clés et données existantes.
 - Ne pas supprimer le dépôt, un worktree principal, des volumes, des preuves ou une configuration existante pour obtenir un test vert. Toute destruction doit être ciblée et autorisée.
 
+## Chantier P1 — contrôle et supervision des sorties réseau
+
+**À développer et qualifier avant la qualification production des parcours avec Internet.** Le mainteneur demande de contrôler les sites et services qu'un agent peut joindre, et de rendre ses tentatives visibles dans le dashboard. Cette exigence ne déclare aucun filtrage déjà livré.
+
+- Conserver le refus par défaut ; autoriser les destinations nécessaires par politique du tenant et de la session. Un domaine inconnu reste bloqué jusqu'à décision autorisée ; les autorisations temporaires sont bornées, expirables et révocables.
+- Appliquer le contrôle depuis le périmètre de confiance Rust, hors du worker, à tous ses processus : clients IA, `curl`, Python, Git et descendants. Définir aussi la couverture des outils Web et MCP exécutés à distance ; aucun chemin non couvert n'est présenté comme filtré.
+- Refuser par défaut les accès à l'hôte, aux services de contrôle, aux autres tenants et aux métadonnées cloud. Les services internes nécessaires suivent des autorisations explicites et limitées à leur fonction.
+- Enregistrer durablement la décision avant la connexion autorisée ; un échec de cet audit bloque la sortie. Corréler tenant, session, agent/worker, destination, motif et résultat réellement observé ; distinguer demande, autorisation et connexion effective.
+- Afficher refus, demandes d'autorisation, expiration/révocation et couverture dans le dashboard. Masquer les secrets avant persistance ; ne pas collecter par défaut les corps ni les URL complètes avec paramètres sensibles. Durées et volumes restent inconnus sans observation.
+- La réputation d'un site et Jev peuvent conseiller la décision ; ils ne remplacent pas le confinement et ne garantissent ni innocuité du contenu ni absence d'injection de prompt. Une destination autorisée conserve le même contrôle des permissions et des secrets.
+- Critères d'acceptation : sur Docker, Podman et Kubernetes réels, vérifier domaine autorisé, domaine inconnu bloqué, autorisation temporaire puis révocation, refus inter-tenant, panne d'audit et tentatives de contournement par DNS, redirection, IP directe, IPv6 ou tunnel. Documenter la portée HTTPS et des outils distants ; relier les preuves à G05/G07/G11, avec revue indépendante et guides EN/FR synchronisés.
+
 ## Méthode de travail
+
+**Tenir le [registre des travaux](docs/engineering/WORK_TRACKING.md) à jour pendant toute intervention.** Au démarrage ou à la reprise, vérifier le lot contre Git, ses preuves et ses exécutions. Inscrire les lots à venir dès qu'ils sont identifiés. Mettre le registre à jour après chaque affectation, changement d'état, validation, intégration et fermeture, puis avant tout relais et toute fin de session. Le coordinateur tient le registre canonique dans le checkout principal et y conserve les décisions et résultats datés transmis par les sous-agents.
 
 Pour chaque changement, identifier le besoin, les fichiers touchés, les risques, le test pertinent et le critère d'acceptation. Examiner l'état Git et préserver le travail existant. Découper en changements relisibles ; ne pas refondre des modules sans nécessité liée au besoin.
 
@@ -322,7 +337,11 @@ et [dépannage Daybreak](https://help.openai.com/en/articles/20001259).
 Le [cadre documenté et les contrôles effectifs](https://learn.chatgpt.com/docs/cyber-safety/recommended-configuration)
 restent distincts.
 
-### Cycle de vie complet des worktrees
+### Cycle de vie des branches, des worktrees et des caches
+
+Appliquer la [procédure de cycle de vie](docs/engineering/WORKSPACE_LIFECYCLE.md) à la création, à la reprise, à l'intégration et à la fermeture d'une branche de travail ou d'un worktree, et avant toute purge de cache. La clôture impose le retrait des branches de travail et des worktrees intégrés dès que les vérifications de conservation et d'usage sont satisfaites.
+
+**La clôture impose la suppression de la branche de travail et du worktree secondaire déjà intégrés.** Vérifier l'intégration, les usages actifs et la conservation du travail avant suppression. Conserver le dépôt principal et les références pérennes. Consigner toute dépendance, preuve ou autorisation manquante et garder la fermeture de la ressource ouverte.
 
 Le mainteneur demande de gérer les worktrees de leur création à leur suppression. Un checkout secondaire n'est pas une archive permanente.
 
@@ -396,6 +415,8 @@ La licence open source retenue est Apache-2.0, dans `LICENSE`. Le canal privé d
 ## Définition de terminé
 
 Une tâche est terminée lorsque son comportement est implémenté, ses erreurs et états incomplets gérés, son parcours utilisable avec des données réelles, ses tests pertinents exécutés, sa documentation à jour et sa revue traitée. Une release n'est qualifiée que si tous les gates applicables du périmètre déclaré ont une preuve acceptable et que les écarts bloquants sont fermés. Réduire le périmètre d'une preuve ne réduit pas le périmètre du produit demandé.
+
+Inscrire le résultat dans le registre. Un lot intégré dont la branche ou le worktree est encore à retirer reste en clôture avec une action et un propriétaire.
 
 Rendre un bilan : **changements ; commandes et résultats constatés ; critères acceptés ; limites ; blocages précis**. Séparer `PASS`, `FAIL`, `BLOCKED`, `NOT_RUN` et `NOT_APPLICABLE` justifié. Citer les sources officielles pour les faits externes et les fichiers pour les faits du dépôt.
 

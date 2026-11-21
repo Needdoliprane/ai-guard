@@ -1,0 +1,16 @@
+{
+  "status": "PASS",
+  "requested_model": "jev-latest",
+  "returned_model": "jev-1.14.0",
+  "provider_choice": "allow",
+  "confidence": 1.0,
+  "decision_outcome": "allow",
+  "decision_engine": "deterministic",
+  "decision_rule": "exact_allowlist",
+  "audit_seq": 2,
+  "event_count": 2,
+  "audit_head": "12ec27e78836ceaed8e98eb84fc955f45f6838d4037cc402fc39d3bf821a58de",
+  "audit_valid_after_restart": true,
+  "workers": 0,
+  "gateway_reopened": true
+}

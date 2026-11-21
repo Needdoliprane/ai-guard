@@ -1,0 +1,75 @@
+{
+  "test": {
+    "audit_after": {
+      "event_count": 19,
+      "head_hash": "b60f38037d00d36f19b4ec36047ba29ac87692c6ef498ded6a23d874c5d21310",
+      "valid": true
+    },
+    "audit_before": {
+      "event_count": 1,
+      "head_hash": "a61c776401ca368af4eefb354fc3b8a77f07773778c2109ddb41b17124f2e089",
+      "valid": true
+    },
+    "autonomous_deadline": {
+      "clock_sample_width_seconds": 0.121,
+      "diagnostic": "the same Docker worker was still running after the autonomous deadline and grace",
+      "docker_clock_anchor": "2026-11-18T16:13:32.895850+00:00",
+      "docker_started_at": "2026-11-18T16:13:25.038291+00:00",
+      "elapsed_at_least_seconds": 20.01,
+      "grace_seconds": 5,
+      "kill_elapsed_upper_seconds": 7.98,
+      "outcome": "running_after_grace",
+      "timeout_seconds": 15,
+      "worker_running": true
+    },
+    "cleanup_removed": true,
+    "cli_sha256": "2d20d5a4d0d434e37a70c00e75668587f5ad68319a025bf00093e710522a55c8",
+    "cli_sigkill_confirmed": true,
+    "diagnostic": "the same Docker worker was still running after the autonomous deadline and grace",
+    "ended_at": "2026-11-18T16:14:19.830243+00:00",
+    "original_container_reused": true,
+    "original_start_reused": true,
+    "original_worker_reused": true,
+    "originally_running": {
+      "attempt_id": "f1f1486f-7f91-4e1b-bb5d-fe310c089e0c",
+      "container_id": "fee67ebfacedb11906fa8229f405e29fd9ef4aa74ef6a9627a972a210e6c24dd",
+      "start_operation_id": "40d68ffe-2b56-4e01-846e-d7f26c4ba1f5",
+      "state": "running",
+      "worker_id": "f26b7f64-f432-46fd-af75-e5754da7fcf3"
+    },
+    "quota_held": false,
+    "rootful_exception_requested": true,
+    "runtime": "docker",
+    "session_id": "834aae97-fb90-4646-95c9-6e2a379f1edb",
+    "stage": "autonomous_deadline",
+    "started_at": "2026-11-18T16:12:16.491609+00:00",
+    "status": "FAIL",
+    "terminal_exit_code": 137,
+    "terminal_state": "terminal",
+    "worker_image_sha256": "sha256:7e76101dc6cbcaa5bb9ec5ca2dc14e024494844380e17ef6497caeefbefcfd39"
+  },
+  "harness_exit_code": 1,
+  "engine": "29.9.2 linux/arm64",
+  "engine_image": "sha256:7e76101dc6cbcaa5bb9ec5ca2dc14e024494844380e17ef6497caeefbefcfd39",
+  "allocation_count": 1,
+  "held_workers": 0,
+  "audit_integrity": {
+    "error": null,
+    "event_count": 19,
+    "head_hash": "b60f38037d00d36f19b4ec36047ba29ac87692c6ef498ded6a23d874c5d21310",
+    "valid": true
+  },
+  "terminal_portion": {
+    "billable": false,
+    "provenance": "observed"
+  },
+  "after_gateway_restart": {
+    "audit_unchanged": true,
+    "same_worker_container_and_start": true,
+    "allocation_count": 1,
+    "allocation_billable": false,
+    "allocation_provenance": "observed",
+    "held_workers": 0,
+    "worker_state": "terminal"
+  }
+}

@@ -1,0 +1,114 @@
+{
+  "date_utc": "2026-11-18",
+  "platform": "Docker Desktop 29.9.3, Linux ARM64",
+  "capsule_image_id": "sha256:b485d52f4db1151e58bc667e737d40120e56ab0873d7a12176dd07793a1f9f04",
+  "tooling_base": "rust:1.99.1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c",
+  "sandbox_observed": {
+    "account_uid": 16001,
+    "hostname_namespace": "private container",
+    "network": "none with private loopback tests",
+    "source_and_tools_readonly": true,
+    "source_host_dirs": [
+      "allowlisted source snapshot",
+      "verified public Cargo archives and filtered index",
+      "preflight script"
+    ],
+    "cpu_limit": 2,
+    "memory_limit_gib": 6,
+    "swap_limit": 0,
+    "pids_limit": 96,
+    "temporary_disk_limit_gib": 4,
+    "file_limit_mib": 512,
+    "wall_clock_seconds": 440,
+    "credentials_exposed": 0,
+    "engine_sockets_exposed": 0
+  },
+  "primary_ci": {
+    "status": "PASS",
+    "head": "c4c4d2a7560d31768da08d8ad9335f4f08667344",
+    "source_manifest_sha256": "62b2b4ede95c9b548ac4f22f23814e32271c6307734245c7e50d150fa79ca50b",
+    "tests_passed": 112,
+    "tests_failed": 0,
+    "tests_ignored": 3,
+    "rerun_command": "cargo test --frozen --offline --lib --bins --example provider-matrix --no-fail-fast",
+    "macos_baseline_failure": "failed_control_capture_never_formats_raw_stderr",
+    "linux_same_test": "PASS",
+    "scope": "Primary local worktree snapshot with a real Linux account. This is not a GitHub-hosted x86_64 CI result."
+  },
+  "candidate_first_attempt": {
+    "status": "BLOCKED",
+    "base": "5b3c2ed044d5fdf4bbfb7489762d1eb17684fcd6",
+    "source_manifest_sha256": "f71fc5137b8d5f0d72178355a8dd07bc184d0d8df43c9a68f173128b38fec05d",
+    "phase": "Rust library compilation",
+    "runtime_tests_started": 0,
+    "diagnostic": "SIGKILL during compilation, cgroup OOM kill and Docker OOM flag confirmed. All targeted tests remained NOT_RUN.",
+    "terminal_state": "exited; dedicated capsule removed"
+  },
+  "primary_frontend_linux": {
+    "status": "PASS",
+    "node": "24.22.3",
+    "tests": 29,
+    "platform": "Linux ARM64",
+    "node_image_id": "sha256:8400c2d5d72e1cb9efd5ac46761a9d4622d5f92e81b620db71d4042ebaf68665"
+  },
+  "candidate_successful_run": {
+    "status": "PASS",
+    "base": "5b3c2ed044d5fdf4bbfb7489762d1eb17684fcd6",
+    "source_manifest_sha256": "f4d529266c92319345364c27102ced5adc7f42fe8d34f17f3607a4eb4310b3a1",
+    "source_file_count": 920,
+    "exit_code": 0,
+    "oom_kill": 0,
+    "compile_jobs": 1,
+    "memory_limit_gib": 7,
+    "file_limit_mib": 1024,
+    "unchanged_controls": "same isolated namespace, input mounts, non-root UID, CPU, pids, tmpfs and wall clock",
+    "prior_limit_probe": {
+      "status": "BLOCKED",
+      "file_limit_mib": 512,
+      "diagnostic": "rustc terminated with Linux signal 25 (XFSZ); no OOM. Capsule stopped and removed."
+    },
+    "cleanup_verified": true,
+    "tests": [
+      "podman_authority_bootstrap_is_explicit_and_marker_loss_remains_unknown",
+      "inspect_workspace_cli_refuses_a_protected_name_before_any_request",
+      "inspect_workspace_cli_reports_the_exact_claim_with_no_admission",
+      "inspect_workspace_cli_distinguishes_storage_prerequisites",
+      "inspect_workspace_cli_revalidates_authority_before_reporting_storage_prerequisites"
+    ],
+    "source_sha256": {
+      "src/runtime/kubernetes/session_instance.rs": "34d231fc8852535a8bebd8bda72e7e0cf834b72e646b078b1de561499640cad0",
+      "src/kubernetes_cli.rs": "5999891ea1b2ed3790083a4e7dcdbf8962697bd1806db62ab686982c40574d5a",
+      "tests/kubernetes_session_runtime.rs": "efa29ed934f1e16c345f025e9c9926afec53b32e841cac291367ef890554a8e2"
+    },
+    "scope": "Podman executable fixture and native Rust Kubernetes CLI against a synthetic TLS loopback API. Real Podman storage, CSI binding and cluster workload admission remain open."
+  },
+  "evaluator_selection": {
+    "status": "PASS",
+    "runtime": "native Rust gateway and dashboard with a synthetic TypeSafe response on loopback and real Chromium",
+    "model_node_test_count": 26,
+    "chrome_fixture_calls": 2,
+    "real_model_calls": 0,
+    "source_sha256": {
+      "front/src/model.ts": "90e35cae1855dedeab00d720b2fc9c9ce75a0ff85a6f5a9590b858e69b0c8c20",
+      "front/src/main.ts": "781422370934091204ca0972ceda113e4e72de22ff359fb1d97ac58d06c0e768",
+      "front/tests/model.test.mjs": "0372db3c49ae89cd5d997c1de7535250efec31568f4e44294749f6869120c75d",
+      "front/tests/browser_decision_live.mjs": "30e4a784fffd944962d8e0b498e71ec03a14655cfb30edc2395756817202b1af"
+    },
+    "front_bundle_js_sha256": "e3814860a5bce8f233f9fb09ec74ae1aaa60da518c38fed7aec6c1d0ef3c361c",
+    "cli_sha256": "60e93643b1aedd62f978277d67a6372e3a3a2809fc7760ec242d7ef230f46681",
+    "audit_verified": true,
+    "jsonl_export_verified": true,
+    "foreign_decision_absent": true,
+    "prior_failure": {
+      "status": "FAIL",
+      "stage": "Security decision detail",
+      "front_bundle_js_sha256": "235ac78a40987d1e2b0250cfa6dcad95918aea952d2eeb8ae1e8a5aea776e570",
+      "private_artifacts_directory": "target/qa-cache-archive/decision-selection-provenance-before",
+      "artifacts_sha256": {
+        "page.png": "8977b340a40ca0a682078980700ce977f6a731e55d1cfb67adbc0a49fc69b30d",
+        "page.html": "61c95aa6ce4a53e276b9cc698eeb17ce54eaf7a4cdd62a47c27411d658d0b94a"
+      }
+    },
+    "historical_real_model_replay": "BLOCKED: previous authenticated audit SQLite is unavailable; historical redacted summary cannot be replayed as the original record"
+  }
+}

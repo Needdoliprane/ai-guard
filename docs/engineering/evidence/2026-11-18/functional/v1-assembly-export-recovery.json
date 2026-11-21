@@ -1,0 +1,58 @@
+{
+  "date": "2026-11-18",
+  "checkout": ".worktrees/v1-assembly-20261118",
+  "base_commit": "5b3c2ed044d5fdf4bbfb7489762d1eb17684fcd6",
+  "command": "cargo test --locked --offline --lib runner::broker::executor::journal::tests::published_export_replays_when_the_policy_audit_response_is_lost -- --exact --nocapture",
+  "environment": "CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=2 RUST_MIN_STACK=8388608",
+  "before": {
+    "status": "FAIL",
+    "exit": 101,
+    "scope": "Publication du dossier temporaire par le code de production, SQLite réel via HTTP loopback, réponse perdue après COMMIT.",
+    "expected_pending": [
+      "workspace.export.policy",
+      "broker.batch.export"
+    ],
+    "observed_pending": [
+      "workspace.export.policy"
+    ],
+    "source_and_binary_sha256": {
+      "target/qa-cache-archive/export-recovery-red-unit": "3d3bbf51297ca56cb99dad2dac0a54aeac42300ce0df0acb6529e8b7196f4fee",
+      "target/qa-cache-archive/export-recovery-red-results.rs": "cca4bd631b806e7fce709eff5d933fed5228d06b444e3ff6ec4aae483fa53edf",
+      "target/qa-cache-archive/export-recovery-latest-red-journal_tests.rs": "f030d7e8adb36265e57418f5aa12bb5390366bec98aa4064974a8930c4e32346",
+      "src/broker/enforcer/client.rs": "25af84aa026c0ed1c9fbfddf0fc8ce23b8a2572b5083bb9d4e0ca10bcbf98744",
+      "src/broker/local_ipc.rs": "c00fb7a25d5787d23c4f29a95a5efdc82478b63ec26f5ad48a50bf8ce432d931",
+      "src/runtime/invocation.rs": "e5416cc223fcb17970ecf75f8eae88376f812bdbf7a6fca5a36478e57f677f9f"
+    }
+  },
+  "fixture_prerequisites": "Les premiers essais s’arrêtaient avant l’oracle au démarrage de l’enforcer puis à la résolution du compte OS. Le nouveau test utilise un enforcer et une invocation volontairement inutilisables qui échouent avant tout effet runtime.",
+  "limits": "Cette régression ne couvre ni moteur réel ni interruption entre la publication sur disque et l’enregistrement local des deux faits.",
+  "after": {
+    "status": "PASS",
+    "elapsed_seconds": 0.7,
+    "source_and_binary_sha256": {
+      "target/qa-cache-archive/export-recovery-green-unit": "d80d97a05981e5fab738985266a534261f9babbf068629ca9a3fcdef2c6a33d4",
+      "src/runner/broker/executor/results.rs": "df0bc604ffb73154b55015d42d9e40784660fc534015be04e14b724587c29daf",
+      "src/runner/broker/executor/journal_tests.rs": "f030d7e8adb36265e57418f5aa12bb5390366bec98aa4064974a8930c4e32346"
+    },
+    "observed": [
+      "Deux faits dans une seule révision avant la première réponse HTTP.",
+      "Le même UUID et la même destination sont relus après réouverture du journal.",
+      "Le reçu, l’empreinte et les octets sont confirmés. Inode de destination et source inchangés.",
+      "Un unique événement de politique au même seq/hash et une seule fin d’export dans SQLite. Accusés locaux durables.",
+      "La destination divergente avec le même UUID est refusée."
+    ],
+    "independent_review": "Favorable. Les contrôles prépublication, les formats V1, les anciens résultats complets et la redaction sont préservés."
+  },
+  "preserved_source_paths": {
+    "src/runner/broker/executor/journal_tests.rs": "target/qa-cache-archive/export-recovery-latest-red-journal_tests.rs"
+  },
+  "journal_limit_after_publication": {
+    "status": "PASS",
+    "command": "cargo test --locked --offline --lib runner::broker::executor::journal::tests::published_export_ -- --test-threads=1 --nocapture",
+    "tests_passed": 2,
+    "observed": "LimitExceeded après publication, tête et outbox inchangées après réouverture, dossier et source préservés, aucun événement SQLite de succès, même destination refusée lors du rejeu.",
+    "scope": "Défaillance déterministe du vrai writer. La chute physique du broker ou du disque reste distincte.",
+    "source_sha256": "a7a1034a363c5a8a09bfc238065be48241a67729ba607c89e6898f8f13fb4e86",
+    "test_binary_sha256": "19183f658e008619d396d74c595b26cf9875adc04bea53fb9086c7d69eb24b92"
+  }
+}

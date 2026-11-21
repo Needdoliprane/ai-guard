@@ -1,0 +1,171 @@
+{
+  "date": "2026-11-18",
+  "checkout": ".worktrees/v1-assembly-20261118",
+  "base_commit": "5b3c2ed044d5fdf4bbfb7489762d1eb17684fcd6",
+  "host": "Darwin/arm64",
+  "preserved_source_paths": {
+    "front/src/main.ts": "target/qa-cache-archive/engine-return-front-main.ts",
+    "tests/e2e/README.md": "target/qa-cache-archive/engine-return-e2e-README.md",
+    "tests/e2e/run_jev_probe.py": "target/qa-cache-archive/engine-return-run_jev_probe.py"
+  },
+  "source_sha256": {
+    "src/broker/service/server.rs": "4b25692b55657f3211c92ecc60eef018a7a687903c96a68dfdc6364ee16637ed",
+    "src/broker/service/owned_ipc_peer.rs": "2d9d93f2540cd4b07e0047030bea8f591fa2128a769d36cd7a18f028268d81ee",
+    "src/broker/service/result_auth_tests.rs": "a395c0d59458fad93d7d4696e5fd0ede6edf2303b169de30b8139aa94d5a30cd",
+    "src/broker/writer.rs": "9a6d2a13585ba809ef32281def02e14b9ab0fcf3758fbc2337cefa19c303c4b8",
+    "src/broker/writer_status_projection_tests.rs": "fe17c750f002a4b35a03546f42d2a14dd430e51625f6314148e8021bd194659e",
+    "src/jev/local.rs": "b7a4f239d285549b35d63b781323c26710ecf554de878b6985c3e3e74e9a6489",
+    "front/src/main.ts": "73185e6b16d67a18a6e05d69e35c2244ba3e7ace2de5c330bb292011810476c8",
+    "front/src/types.ts": "b1fcf477e8b9c79f069ac4089c546ddaf6807d4ddc6c1ef51ff678444d96e3e8",
+    "front/tests/browser_command_timeout.mjs": "e4434f3e8ee172c807010a79e1b677d465199320db7e8c8b7c083d913a7137f3",
+    "front/tests/browser_failure.mjs": "f8fa04692934a933aa0931baaeb76521376bd45860344031688ab12d402d5ca0",
+    "front/tests/browser_oidc_live.mjs": "3f93562c8a6cbc4efb6d26c554ae4ddd1ca9561f2fa000ecfb1f11de59ea8fa4",
+    "front/tests/browser_provider_live.mjs": "c642ac561012ea96082a40a42c14cd07bf460bee090b50bb4429a9af3f1cfeab",
+    "front/src/oidc-session.ts": "e1a017dd22c06fb5aeb5da62cc415b294c23659ccb31031c1e9b5a363d236b51",
+    "tests/oidc_gateway_flow.rs": "b11271084ff2c8e53c0bbd66d5e1c4a210ec7b43b3d503ab2699b028a4a74f83",
+    "tests/oidc_gateway.rs": "cb93ea6ba947d733c489fa6a2a2d76504d376c60057546c326d0ab128a271b91",
+    "tests/e2e/run_qwen_probe.py": "cb1c81f3d997af762a01d9beacb6ec76af65887bab7a2cac7b2bb1dd319ad237",
+    "tests/e2e/run_jev_probe.py": "a7d240c8f592ad56f38b4a5fa8a037cab765a90cb3eaac6697cee756f20fdd2d",
+    "tests/e2e/provider_matrix.rs": "1a1763191b04a20c4e9bf3a39e2c0e9847cf69112d8123a53f4db44fd0327103",
+    "tests/e2e/README.md": "7ecff5390944143d2df3f147f3caca72abdfb42823bfeb05240f8850ba59a49b"
+  },
+  "artifacts_sha256": {
+    "target/qa-cache-archive/engine-return-jev-agentsandbox": "66386c09afb48d8bb63e4aa78a1a8f5b9b2c5a39d221026aa201b475c7ae11d9",
+    "target/qa-cache-archive/engine-return-writer-unit": "99d7651efd36b39c2dc269e5efdf834a1208a854e05a1b4a29756a6907f7b2a1",
+    "target/qa-cache-archive/engine-return-qwen-agentsandbox": "01d9dbd6bd3a9f59943fe2ec2ed3475a631223e76226adde4cadd1f16add2999",
+    "target/qa-cache-archive/engine-return-qwen-unit": "8f9ee0fb35c8a3265f29810d4e697956e4daa6cfd5813d515638e85b14097c4f",
+    "target/qa-cache-archive/engine-return-provider-matrix": "65fd7be24e2aa2c43188cd1738e968c7559acd5d3e81d7bc7c00b4a9f948973e"
+  },
+  "runtimes": {
+    "docker": {
+      "version": "29.9.3",
+      "platform": "linux/arm64",
+      "storage_probe": "PASS",
+      "storage_scope": "Volume vide unique de recette, label de propriété inspecté, seul ce volume a été supprimé.",
+      "container_probe": "PASS",
+      "existing_control_image": "sha256:8552a8bc96bbfb380c0c367d1d3b61d043977063ef8369201e7256f8dfeb384d",
+      "container_scope": "Conteneur éphémère non-root sans réseau, sans volume ni téléchargement, rootfs lecture seule, 128 Mio. Sortie agentsandbox 0.1.0.",
+      "candidate_doctor": "BLOCKED",
+      "candidate_doctor_error": "control OS account home is unavailable",
+      "physical_worker_g09": "NOT_RUN"
+    },
+    "podman": {
+      "client_version": "6.1.4",
+      "status": "BLOCKED",
+      "observed": "VM déclarée active. Handshake SSH et connexion au socket de la VM en échec, code 125."
+    },
+    "kubernetes": {
+      "client_version": "v1.36.1",
+      "status": "BLOCKED",
+      "context": "docker-desktop (adresse API loopback)",
+      "readyz": "EOF",
+      "physical_pod": "NOT_RUN"
+    }
+  },
+  "broker_result": {
+    "checks": [
+      {
+        "command": "cargo test --locked --offline --lib broker::writer::status_projection_tests::result_read_ -- --test-threads=1",
+        "status": "PASS",
+        "passed": 2
+      },
+      {
+        "command": "cargo test --locked --offline --lib broker::writer::status_projection_tests::abandoned_mutation_waiter_invalidates_projection_while_actor_keeps_its_work -- --exact",
+        "status": "PASS",
+        "passed": 1
+      },
+      {
+        "command": "cargo test --locked --offline --lib broker::service::server::result_auth_tests:: -- --test-threads=1",
+        "status": "PASS",
+        "passed": 1
+      }
+    ],
+    "scope": "Writer réel et socket IPC Unix sur fixtures de deux tenants, véritable gateway HTTP loopback. La latence avec 100 workers actifs reste NOT_RUN."
+  },
+  "judge": {
+    "typesafe": {
+      "status": "PASS",
+      "scope": "Un appel réel, reçu identique après redémarrage sans backend, aucun worker",
+      "report": "v1-assembly-jev-real.json"
+    },
+    "rust_and_local_protocol": [
+      {
+        "command": "cargo test --locked --offline --lib jev::local::tests:: -- --test-threads=1",
+        "status": "PASS",
+        "passed": 3
+      },
+      {
+        "command": "cargo test --locked --offline --test jev_protocol -- --test-threads=1",
+        "status": "PASS",
+        "passed": 6
+      }
+    ],
+    "qwen": {
+      "fixture_status": "PASS",
+      "before": "v1-assembly-qwen-usage-red.json",
+      "after": "v1-assembly-qwen-usage-green.json",
+      "model_status": "BLOCKED",
+      "blocked_by": "Image épinglée absente et échec DNS de ghcr.io après accès anonyme au registre.",
+      "oom_and_memory_peak": "NOT_RUN",
+      "independent_review": "Parseur borné, usage cohérent, verdict consultatif et compteurs d’audit préservés."
+    }
+  },
+  "browser": {
+    "build": "PASS TypeScript et Vite 7.3.7",
+    "browser": "Chromium Headless Shell 148.0.7778.96 en processus unique, Playwright 1.66.0-alpha-2026-11-09",
+    "checks": [
+      {
+        "command": "node tests/browser_command_timeout.mjs",
+        "status": "PASS",
+        "passed": 4
+      },
+      {
+        "command": "AI_GUARD_UNIFIED_SCENARIO=worker-provenance node tests/browser_unified.mjs",
+        "status": "PASS",
+        "passed": 1
+      }
+    ],
+    "failure_artifacts": "Une assertion volontairement fausse en composition isolée produit page.html et page.png en mode 0600. La sentinelle du token ne figure pas dans le HTML.",
+    "scope": "Fixtures d’API loopback. Le parcours navigateur réutilisant une vraie exécution fournisseur reste NOT_RUN."
+  },
+  "oidc": {
+    "port_commit": "610a4a81",
+    "scope": "OIDC Web legacy, gateway et dashboard correspondants. Tests Rust sur IdP synthétique.",
+    "checks": [
+      {
+        "command": "node --test --test-isolation=none tests/oidc-session.test.mjs tests/oidc-human.test.mjs",
+        "status": "PASS",
+        "passed": 10
+      },
+      {
+        "command": "cargo test --locked --offline --test oidc_gateway_flow browser_pkce_callback_is_correlated_consumed_and_delivered_once -- --exact",
+        "status": "PASS",
+        "passed": 1
+      },
+      {
+        "command": "cargo test --locked --offline --test oidc_gateway dashboard_oidc_completion_accepts_cross_site_redirect_navigation -- --exact",
+        "status": "PASS",
+        "passed": 1
+      }
+    ],
+    "keycloak_browser_preflight": "PASS configuration_only",
+    "keycloak_browser_with_four_accounts": "NOT_RUN",
+    "browser_offline_oracles": "PASS, adresses locales et TLS explicite, méthodes, S256, routes de callback, politique des redirections."
+  },
+  "release": "Qualification V1 ouverte. Les preuves d’infrastructure et logiciels ci-dessus ont une portée ciblée.",
+  "broker_and_compose_replay": {
+    "command": "cargo test --locked --offline --test broker_runtime --test broker_run_cli --test compose_ingress_args --example provider-matrix -- --test-threads=1",
+    "broker_runtime_diagnostics_pass": 4,
+    "broker_runtime_physical_ignored": 3,
+    "broker_cli_pass": 10,
+    "compose_ingress_pass": 2,
+    "scope": "CLI, diagnostics, configuration et relais loopback. Les scénarios moteur compilent et sont ignorés hors campagne opt-in."
+  },
+  "provider_matrix": {
+    "command": "cargo test --locked --offline --example provider-matrix -- --test-threads=1",
+    "status": "PASS",
+    "passed": 7,
+    "canary": "Sans preuve, le mode strict imprime le JSON inchangé, garde huit cas NOT_RUN et retourne 1.",
+    "scope": "Agrégation uniquement. Les sessions Haiku 5.5 et Luna et leur relecture navigateur restent NOT_RUN sur cette composition."
+  }
+}

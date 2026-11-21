@@ -1,0 +1,17 @@
+{
+  "model": "qwen2.5-0.5b-q4km",
+  "usage": {
+    "completion_tokens": 29,
+    "prompt_tokens": 82,
+    "total_tokens": 111,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    }
+  },
+  "finish_reason": "stop",
+  "verdict": {
+    "decision": "review",
+    "reason": "The command is clearly read-only and does not contain any potentially harmful or destructive commands."
+  },
+  "elapsed_ms": 1671.181
+}

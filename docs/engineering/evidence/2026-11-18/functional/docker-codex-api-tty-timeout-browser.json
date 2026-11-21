@@ -1,0 +1,32 @@
+{
+  "status": "PASS",
+  "mode": "session_timeout_trace",
+  "transport": "tty",
+  "browser": "157.0.8103.79",
+  "session": "ff9ce74a-dfb9-439f-9096-1fd855ba247e",
+  "count": 16,
+  "workerOutcome": "timeout",
+  "timeoutLabelsVerified": true,
+  "terminalKind": "command.failed",
+  "terminalExitCode": 137,
+  "transportStopReason": "authorized worker duration elapsed",
+  "terminalEventId": "3dbdc493-d3d6-4b92-bc5e-c3bbba8bab5d",
+  "decisionEventId": "b4e8805d-4b92-4a71-aa6f-356e590baea7",
+  "fileEventId": null,
+  "exportEventId": null,
+  "fileSha256": null,
+  "auditExportSha256": "63fd3cd2299f8453b29f431b52652247a9e18aeb24d884fe86958ee3740f7919",
+  "client": "codex",
+  "authMode": "api",
+  "requestedModel": "gpt-6-luna",
+  "runtime": "docker",
+  "checks": [
+    "services HTTP",
+    "Playwright et Chromium",
+    "identité viewer",
+    "journal de la session",
+    "décision et résultat dans le journal",
+    "téléchargement JSONL de la session"
+  ],
+  "node": "v24.22.2"
+}

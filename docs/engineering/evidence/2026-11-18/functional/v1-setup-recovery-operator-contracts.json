@@ -1,0 +1,186 @@
+{
+  "date_utc": "2026-11-18",
+  "date_local": "2026-11-19",
+  "candidate_base": "5b3c2ed044d5fdf4bbfb7489762d1eb17684fcd6",
+  "runtime_preflights": {
+    "docker": {
+      "product_doctor_exit": 1,
+      "engine_read_only_info_reachable": true,
+      "engine_version": "29.9.3",
+      "reason": "control OS account home is unavailable"
+    },
+    "podman": {
+      "version_client": "6.1.4",
+      "machine_state": "running",
+      "socket_type_verified": true,
+      "engine_info_exit": 125,
+      "chosen_machine_rootful": true,
+      "storage_lock_io_error": true
+    },
+    "kubernetes": {
+      "context": "docker-desktop",
+      "version": "v1.36.1",
+      "verified_tls_loopback": true,
+      "csi_driver_count": 0,
+      "storage_classes_count": 2,
+      "provisioner": "rancher.io/local-path",
+      "binding_mode": "WaitForFirstConsumer"
+    }
+  },
+  "release_identity": {
+    "status": "PASS_LOCAL_PACKAGING_SIMULATION",
+    "scope": "local bash packaging step, stubbed Git and toolchain, deny network, real jq/install/tar",
+    "workflow_sha256": "7c13f01cf28797020152e28c05e087eb2f7043e679e674cc346942b8597a1947",
+    "step_sha256": "429ec32d6393d5b46b0ec4e7052f8bc084287cf3db4aa68259410865a03e6aeb",
+    "report_sha256": "f831da51a8b5b6005e85daeda1ac8eef231cecb66de2636ef79eff87273f4e9e",
+    "real_unstamped_sha256": "9da3ae3ece436d53f0f93dc5f663591466250fba9a479bb9ffb65ce1e4d9c067",
+    "cases": [
+      {
+        "scenario": "good",
+        "exit": 0,
+        "archive_created": true
+      },
+      {
+        "scenario": "null_revision",
+        "exit": 1,
+        "archive_created": false
+      },
+      {
+        "scenario": "stale_revision",
+        "exit": 1,
+        "archive_created": false
+      },
+      {
+        "scenario": "wrong_version",
+        "exit": 1,
+        "archive_created": false
+      },
+      {
+        "scenario": "wrong_component",
+        "exit": 1,
+        "archive_created": false
+      },
+      {
+        "scenario": "multiple_documents",
+        "exit": 1,
+        "archive_created": false
+      },
+      {
+        "scenario": "version_command_failed",
+        "exit": 1,
+        "archive_created": false
+      },
+      {
+        "scenario": "real_unstamped",
+        "exit": 1,
+        "archive_created": false
+      }
+    ],
+    "github_hosted_run": "NOT_RUN",
+    "tag_or_release_created": false
+  },
+  "docker_setup_recovery": {
+    "status": "PASS",
+    "control_image_id": "sha256:f1a82618653911f2c334cacc6e12209e99689981382feacbf9d98a27c856f08b",
+    "docker_platform": "linux/arm64",
+    "named_proof_volume_retained": "aig-qa-setup-d5c0007fe27a531e73731c0100c73598",
+    "prepare_wire_version": 2,
+    "resume_count": 2,
+    "duplicate_prepare_refused": true,
+    "before_after_completion_bytes_equal": true,
+    "private_credentials_origins_and_links_unchanged": true,
+    "first_preflight_attempt": "blocked by null/absent image Volumes template before creating any volume; corrected with index",
+    "fault_injection": "moved only the original completion receipt aside in the new fixture volume; no actual power failure",
+    "container_guard": {
+      "network": "none",
+      "uid": "1000:1000",
+      "read_only_root": true,
+      "capabilities_dropped": "ALL",
+      "memory_limit_mib": 256,
+      "only_user_data_mount": "fresh named volume /data"
+    },
+    "harness_binary_sha256": "694a7a62ff2a79fa2b82101037c3f27907bb9772d57d9356dae8c43df3d94fd0",
+    "source_sha256": "011710cdd03ee593786a432273697f1dda7541f9a35ac9ec7e8ba5406b806edb",
+    "public_manifest_sha256": "3c3fb2ddd990d84609e2fd110030a74e1f1ba487fe46873aedc7003d6a3abc47",
+    "report_sha256": "17fd05385fed127f64bf218355605dfece822195ce9dcf643fea279b59d90f15",
+    "independent_reopen_audit": {
+      "status": "PASS",
+      "app_gateway_reopened_volume_with_network_none": true,
+      "integrity_cli_valid": true,
+      "business_audit_event_count": 10,
+      "head_hash": "63a903460c8ae0e9f9852d58e7254d32e9e742e60d1bb44a7486a089415fa29d",
+      "running_or_stopped_volume_consumers": 0,
+      "proof_volume_retained": true
+    }
+  },
+  "human_cli_audit_budget": {
+    "status": "PASS",
+    "test_count": 2,
+    "test_elapsed_seconds": 3.1,
+    "native_cli_sha256": "daed223aa89d64f725571e2dff07e2f9d026a305878ac8d96933c613c6a8479f",
+    "red": "native CLI did not preserve the typed HTTP 429 and operator guidance",
+    "scope": "native CLI subprocess, actual Rust gateway/SQLite on loopback, distinct typed wire canaries",
+    "tests": [
+      "exhausted_read_audit_budget_preserves_operator_diagnostic_in_cli",
+      "migration_error_preserves_public_code_and_local_guidance_without_hostile_body"
+    ],
+    "http_status": 429,
+    "code": "audit_read_budget_exhausted",
+    "action": "contact_operator",
+    "exit_code": 1,
+    "printed_data": false,
+    "automatic_retry": false,
+    "business_audit_head_unchanged": true
+  },
+  "kubernetes_operator_cli": {
+    "status": "PASS",
+    "native_cli_sha256": "daed223aa89d64f725571e2dff07e2f9d026a305878ac8d96933c613c6a8479f",
+    "test_binary_sha256": "431409af7554684cd53347fb1d44c5180b8e8eb4222bdf0967ff6e10d4446039",
+    "test_elapsed_seconds": 4.14,
+    "scope": "actual CLI and Rust API/SQLite schema11 in local isolated test",
+    "test": "operator_session_cli_reports_and_replays_the_before_effect_reservation",
+    "actions": [
+      "prepare",
+      "status",
+      "abandon",
+      "abandon",
+      "status"
+    ],
+    "central_closure_replay_stable": true,
+    "audit_new_event_counts": [
+      1,
+      1,
+      0
+    ],
+    "held_quota_before_after": [
+      1,
+      0
+    ],
+    "usage_entries": 0,
+    "authority_connection_count": 0,
+    "execution_available": false,
+    "runtime_state": "not_observed",
+    "real_pod_or_cluster": "NOT_RUN",
+    "independent_source_review": "favorable"
+  },
+  "human_execution_handoff": {
+    "approved_contract_date": "2026-11-15",
+    "older_h1a_durable_transport_proposal_still_distinct": true,
+    "donor_head": "e8ef52f9",
+    "integration_head": "e8886bd1",
+    "latest_historical_compile_result": "40 errors in the Config/E2 freeze",
+    "earlier_historical_r16": {
+      "pass": 9,
+      "fail": 3,
+      "blocking_diagnostic": "human_authority_epoch_expired"
+    },
+    "candidate_end_to_end": "NOT_RUN"
+  },
+  "source_sha256": {
+    "src/identity_cli/http.rs": "e2c9293389ff69d755c1f60302b864bc541f15a3adae3ff0545e335cebf9f111",
+    "tests/human_cli.rs": "9765ae8dd6eb69b3403d9819e854785d4908a3f5f53214d2adb18b568bca15b3",
+    "tests/kubernetes_cli.rs": "44c71f96b85f82042ee65a9fd0e5aa901e75cb0e910ffd564ab96e79020e32c3",
+    "tests/kubernetes_cli/session_r2.rs": "f2ae43e93ad6a20de6f3c2c07618c03cbcd2b54a703b2167a7e4b8fb83ec228f",
+    "tests/e2e/setup_recovery_docker.rs": "011710cdd03ee593786a432273697f1dda7541f9a35ac9ec7e8ba5406b806edb"
+  }
+}

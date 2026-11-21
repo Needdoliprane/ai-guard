@@ -1,0 +1,11 @@
+{
+  "status": "PASS",
+  "scenario": "healthy_compose_with_dashboard_viewer_denied",
+  "stack": "cli-stack-ry8wia",
+  "gateway_port": 60751,
+  "dashboard_port": 60752,
+  "cli_exit_code": 1,
+  "public_healthz_both": true,
+  "gateway_audit_authenticated": true,
+  "dashboard_viewer_denial_reported": true
+}

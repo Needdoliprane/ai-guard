@@ -1,0 +1,101 @@
+{
+  "status": "PASS",
+  "model": "qwen2.5-0.5b-q4km",
+  "image_id": "sha256:d08b6e1aa127dcdd58ddc913b935cca384534824932a841d9b524edd87135042",
+  "cases": {
+    "advisory": {
+      "provider_outcome": "review",
+      "outcome": "deny",
+      "rule": "local_model_review_fail_closed"
+    },
+    "imperative": {
+      "outcome": "deny",
+      "rule": "denied_executable",
+      "inference": false
+    }
+  },
+  "scope": "rust_gateway",
+  "ingress_image_id": "sha256:193d2a403bae8387d45423c599408b04615a76dc6d554208f008d083483a125e",
+  "stage": "complete",
+  "weight_sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+  "transport": {
+    "model_network": "internal",
+    "model_published_ports": 0,
+    "ingress": "ipv4_loopback"
+  },
+  "decision_engine": "local_openai",
+  "model_tokens": {
+    "prompt_tokens_total": 81,
+    "tokens_predicted_total": 24
+  },
+  "memory": {
+    "limit_bytes": 999997440,
+    "peak_bytes": 313745408,
+    "swap_limit_bytes": 0,
+    "oom": 0,
+    "oom_kill": 0
+  },
+  "audit_event_count": 3,
+  "audit_head": "2394757325f759deb6157bde4b8299398f98a61073f8d65afcbedf5f1d76caf1",
+  "replay_with_model_stopped": true,
+  "workers": 0,
+  "audit_copy_sha256": "fb4282a7811fa0ccf4452a6f7857a75268ca1d032fb4589a02257e0494f94133",
+  "cleanup_confirmed": true,
+  "inference_gateway_sha256": "d8157344c8cc54e766ace310195497535fb1dc3e99ae6ebe5e423d0938e0b114",
+  "browser_replay": {
+    "browser": {
+      "status": "PASS",
+      "scope": "durable_viewer_read",
+      "seq": 2,
+      "eventId": "22c31b45-0078-4dac-861f-9d1fc50be9cd",
+      "auditHash": "35f6d3c4ecebc4931fb8c5c8fd1c9c6dbe053726213d82df6a283061c6d11634",
+      "engine": "local_openai",
+      "returnedModel": "qwen2.5-0.5b-q4km",
+      "advisoryOutcome": "review",
+      "effectiveOutcome": "deny"
+    },
+    "audit": {
+      "error": null,
+      "event_count": 3,
+      "head_hash": "2394757325f759deb6157bde4b8299398f98a61073f8d65afcbedf5f1d76caf1",
+      "valid": true
+    },
+    "archive_unchanged": true,
+    "browser_gateway_sha256": "2d20d5a4d0d434e37a70c00e75668587f5ad68319a025bf00093e710522a55c8",
+    "bundle_sha256": "acb7d36118c67e6d70cb5c97b372e3aa4456cce9f740a88a0df8f9a953268bc4",
+    "model_running": false
+  },
+  "cli_model_unavailable": {
+    "status": "PASS",
+    "command_exit_code": 1,
+    "effective_rule": "local_model_unavailable_or_invalid",
+    "decision_seq": 5,
+    "decision_hash": "96b3db55343417aa1e67560bc04896f66fb06879b1e4deec8125baeb428ceb1a",
+    "workers": 0,
+    "held_workers": 0,
+    "docker_containers_and_volumes_unchanged": true,
+    "original_unchanged": true,
+    "audit": {
+      "error": null,
+      "event_count": 5,
+      "head_hash": "96b3db55343417aa1e67560bc04896f66fb06879b1e4deec8125baeb428ceb1a",
+      "valid": true
+    },
+    "gateway_sha256": "2d20d5a4d0d434e37a70c00e75668587f5ad68319a025bf00093e710522a55c8"
+  },
+  "software_regressions": {
+    "jev_contract": 2,
+    "jev_credentials": 15,
+    "local_judge_gateway": 2,
+    "local_judge_unit": 5,
+    "front_node": 29,
+    "decision_idempotence": 9,
+    "workers_api": 6,
+    "supervision_api": 4
+  },
+  "initial_supervision_tests": {
+    "failed": 2,
+    "http_status": 400,
+    "cause": "Synthetic role tokens matched the synthetic digest fixtures under strengthened masking."
+  }
+}
