@@ -24,3 +24,10 @@ We take the security of our supply chain seriously:
 *   We use containerized environments for builds and tests to ensure isolation and reproducibility.
 *   We avoid pre-built public binaries where possible, preferring to build from source within controlled environments.
 *   Any dependency update should be carefully reviewed for security implications.
+*   Base images in `images/*.Dockerfile` are pinned by index digest. Update a tag and its digest together.
+*   A `Cargo.lock` change that introduces a licence expression missing from `.github/third-party-license-expressions.txt` fails CI: review the licence and add it in the same change.
+*   Releases ship `SHA256SUMS`, a CycloneDX SBOM and `BUILD-INFO`, without cryptographic signatures; see [Install from a GitHub Release](docs/setup/release/install.md).
+
+## Reporting a vulnerability
+
+Do not open a public issue. Follow [SECURITY.md](SECURITY.md) ([FR](SECURITY.fr.md)).

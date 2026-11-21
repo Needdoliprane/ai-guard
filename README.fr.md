@@ -123,3 +123,4 @@ Apache-2.0. Le canal privé de signalement des vulnérabilités doit être étab
 
 - [Runtime Kubernetes V2 : mécanismes logiciels, effets produit fermés et plan de qualification cluster réel](docs/setup/kubernetes-runtime/README.fr.md).
 - [Métadonnées release : manifest/verify hors ligne, provenance déclarée et limites de qualification](docs/setup/release/README.fr.md).
+- [Installer depuis une release GitHub](docs/setup/release/install.fr.md).

@@ -98,3 +98,4 @@ For local certificate preparation, see [the Rust CA generator](../demo-pki.md). 
 
 - [Kubernetes V2 runtime: software mechanics, closed product effects and real-cluster qualification plan](kubernetes-runtime/README.md).
 - [Release metadata: offline manifest/verify, declared provenance and qualification limits](release/README.md).
+- [Install from a GitHub Release: checksums, BUILD-INFO, SBOM, platform notes, upgrade and rollback](release/install.md).

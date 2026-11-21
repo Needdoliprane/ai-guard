@@ -123,3 +123,4 @@ Apache-2.0. The private vulnerability-reporting channel must be established befo
 
 - [Kubernetes V2 runtime: software mechanics, closed product effects and real-cluster qualification plan](docs/setup/kubernetes-runtime/README.md).
 - [Release metadata: offline manifest/verify, declared provenance and qualification limits](docs/setup/release/README.md).
+- [Install from a GitHub Release](docs/setup/release/install.md).

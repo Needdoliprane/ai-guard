@@ -98,3 +98,4 @@ Pour préparer les certificats locaux, consulter le [générateur Rust d'AC](../
 
 - [Runtime Kubernetes V2 : mécanismes logiciels, effets produit fermés et plan de qualification cluster réel](kubernetes-runtime/README.fr.md).
 - [Métadonnées release : manifest/verify hors ligne, provenance déclarée et limites de qualification](release/README.fr.md).
+- [Installer depuis une release GitHub : sommes, BUILD-INFO, SBOM, notes par plateforme, mise à jour et retour arrière](release/install.fr.md).
