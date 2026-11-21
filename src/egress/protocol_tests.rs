@@ -25,6 +25,41 @@ fn accepted(state: &mut EgressChannelState, flow_id: u64, now: u64) {
 }
 
 #[test]
+fn egress_protocol_unavailable_round_trips_without_inventing_a_narrower_cause() {
+    for message in [
+        EgressMessageV1::Rejected { flow_id: 1, reason: EgressReasonV1::Unavailable },
+        EgressMessageV1::Reset { flow_id: 1, reason: EgressReasonV1::Unavailable },
+        EgressMessageV1::Closed { flow_id: 1, reason: EgressReasonV1::Unavailable },
+    ] {
+        let encoded = message.encode_payload().unwrap();
+        let decoded = EgressMessageV1::decode_payload(&encoded).unwrap();
+        assert_eq!(decoded.encode_payload().unwrap(), encoded);
+        assert!(matches!(decoded,
+            EgressMessageV1::Rejected { reason: EgressReasonV1::Unavailable, .. }
+            | EgressMessageV1::Reset { reason: EgressReasonV1::Unavailable, .. }
+            | EgressMessageV1::Closed { reason: EgressReasonV1::Unavailable, .. }));
+    }
+    assert!(EgressMessageV1::decode_payload(
+        br#"{"operation":"rejected","flow_id":1,"reason":"unknown_guess"}"#
+    ).is_err());
+}
+
+#[test]
+fn egress_protocol_end_of_stream_is_a_closed_observation_only() {
+    let message = EgressMessageV1::Closed { flow_id: 1, reason: EgressReasonV1::EndOfStream };
+    let encoded = message.encode_payload().unwrap();
+    assert!(matches!(EgressMessageV1::decode_payload(&encoded).unwrap(),
+        EgressMessageV1::Closed { flow_id: 1, reason: EgressReasonV1::EndOfStream }));
+    for message in [
+        EgressMessageV1::Rejected { flow_id: 1, reason: EgressReasonV1::EndOfStream },
+        EgressMessageV1::Reset { flow_id: 1, reason: EgressReasonV1::EndOfStream },
+    ] { assert_eq!(message.encode_payload(), Err(EgressProtocolError::Protocol)); }
+    assert_eq!(EgressMessageV1::decode_payload(
+        br#"{"operation":"reset","flow_id":1,"reason":"end_of_stream"}"#
+    ).err(), Some(EgressProtocolError::Protocol));
+}
+
+#[test]
 fn egress_protocol_requires_explicit_capability_and_current_handshake() {
     let mut absent = EgressChannelState::new(0);
     assert_eq!(

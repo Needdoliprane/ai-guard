@@ -131,6 +131,10 @@ pub enum EgressReasonV1 {
     Revoked,
     Expired,
     AuditUnavailable,
+    /// The path is unavailable and this wire cannot establish a narrower cause.
+    Unavailable,
+    /// The broker observed upstream read EOF; this is not business success.
+    EndOfStream,
     Transport,
 }
 
@@ -329,6 +333,8 @@ impl<'a> BorrowedMessage<'a> {
                     "revoked" => EgressReasonV1::Revoked,
                     "expired" => EgressReasonV1::Expired,
                     "audit_unavailable" => EgressReasonV1::AuditUnavailable,
+                    "unavailable" => EgressReasonV1::Unavailable,
+                    "end_of_stream" => EgressReasonV1::EndOfStream,
                     "transport" => EgressReasonV1::Transport,
                     _ => return Err(EgressProtocolError::Protocol),
                 };
@@ -390,6 +396,8 @@ impl EgressMessageV1 {
             Self::Credit { bytes, .. } if *bytes == 0 || *bytes as usize > MAX_CREDIT_BYTES => {
                 Err(EgressProtocolError::Credit)
             }
+            Self::Rejected { reason: EgressReasonV1::EndOfStream, .. }
+            | Self::Reset { reason: EgressReasonV1::EndOfStream, .. } => Err(EgressProtocolError::Protocol),
             _ => Ok(()),
         }
     }

@@ -1,9 +1,14 @@
-//! Local egress policy validation, without a resolver or socket-owning path.
+//! Egress policy validation and the untrusted worker side of the broker-owned
+//! egress channel. The worker helper never resolves names or opens an
+//! upstream socket; the trusted broker owns those effects.
 //!
 //! A policy allowance and a validated candidate list are descriptive values.
 //! Neither is an execution capability, durable audit receipt or DNS witness.
 
+pub mod channel_helper;
+pub mod channel_protocol;
 pub mod frontend;
+pub mod ids;
 mod policy;
 pub mod protocol;
 mod types;
