@@ -824,3 +824,194 @@ mode sources détenues (formats 14 et 15), les routes de session refusent avant
 tout effet. Un CREATE incertain garde le quota retenu jusqu'à ce qu'une reprise
 autorisée le résolve. Les tenants MySQL refusent la famille jusqu'à l'arrivée
 de son portage.
+
+## 14. Protocole de session v3
+
+Le protocole v3 (exigence R4, lot G11 K3) est le tramage fermé qui suit le
+Hello/Ready v2 inchangé sur l'unique flux `pods/attach` d'un Pod de session.
+Il existe dans les sources ([protocole](../../../src/runtime/kubernetes/session_protocol.rs),
+[superviseur dans le Pod](../../../src/runtime/kubernetes/session_supervisor.rs),
+variante en flux du [propriétaire d'attachement](../../../src/runtime/kubernetes/session_attach.rs)).
+**Aucun parcours du produit ne l'atteint :** le permis d'effet est composé
+séparément, et aucun cluster, image de worker réelle, CLI fournisseur ou
+modèle ne l'a exercé. L'état de ses tests figure au paragraphe 14.7.
+
+### 14.1 Canaux et trames
+
+Chaque trame est une longueur `L` sur 4 octets big-endian (octet de canal
+compris, donc `L >= 1`), un octet de canal, puis `L - 1` octets de charge. Le
+récepteur juge la longueur déclarée, puis la borne du canal, avant de réserver
+exactement la charge.
+
+| Canal | Octet | Sens | Borne de charge |
+|---|---|---|---|
+| CONTROL | 0 | les deux | JSON fermé, 1 à 16 Kio ; l'unique Handoff 1 à 256 Kio |
+| STDIN | 1 | broker vers worker | 1 à 64 Kio |
+| STDOUT | 2 | worker vers broker | 1 à 64 Kio |
+| STDERR | 3 | worker vers broker | 1 à 64 Kio |
+| EGRESS | 4 | les deux | 1 à 64 Kio, octets G05 opaques, jamais analysés par v3 |
+| ARCHIVE | 5 | broker vers worker (session), worker vers broker (export) | 1 à 64 Kio |
+
+Sont des refus de protocole :
+
+- une charge de données vide ;
+- un canal inconnu, ou utilisé dans le mauvais sens ou la mauvaise phase ;
+- un membre JSON inconnu ou dupliqué, une autre version ou un encodage de
+  contrôle non canonique ;
+- toute trame hors ordre.
+
+Le Handoff porte le profil canonique (64 Kio au plus), la charge de
+credential fournisseur (64 Kio au plus) et l'invocation métier (32 Kio
+d'arguments au plus). Il n'est admis que comme première trame d'une session :
+une seule trame de cette taille est donc détenue au plus. Ces bornes sont des
+valeurs logicielles configurées, pas des capacités mesurées.
+
+### 14.2 Ordre
+
+Pod de session (`kubernetes-session-v3`), après Ready :
+
+1. broker : `handoff`, puis exactement `archive_bytes` octets d'ARCHIVE ;
+2. worker : `imported` (engagement de workspace vérifié) ou `refused` ;
+3. broker : `start` ;
+4. worker : `started`, après le démarrage de l'assistant egress et du fournisseur, ou `refused` ;
+5. broker : STDIN, EGRESS, au plus un `stdin_close`, au plus un `stop` ;
+   worker : STDOUT, STDERR, EGRESS ;
+6. worker : `exited` (`code` ou `signal`), puis le flux se termine.
+
+Un `stop` avant `start` reçoit `refused` avec `stopped`. Pod d'export
+(`kubernetes-workspace-export-v3`) : `start` (ou `stop`) du broker, puis les
+trames ARCHIVE du worker et `archive_end`, qui porte le nombre d'octets et le
+SHA-256 du tar écrit, ou `refused`. Dans les deux modes, rien n'est envoyé
+après Ready avant que le broker parle. Le bracket du broker reste donc celui
+de la section 11 : un octet reçu après Ready et avant l'identité deux est
+refusé.
+
+### 14.3 Contrôles et effets côté worker
+
+Avant tout effet, le superviseur vérifie les points suivants :
+
+- les octets du profil sont canoniques, leur hash égale le `profile_hash` du
+  Hello et leur liaison égale les identifiants du Hello ;
+- l'invocation correspond à `invocation_sha256` ;
+- le transport n'est pas interactif : un transport interactif est refusé avec
+  `interactive_unsupported`, faute de PTY dans le Pod ; ce point reste ouvert ;
+- la charge de credential passe les contrôles existants de `prepare_execution`.
+
+L'archive est reçue dans un tampon réservé à la taille exacte déclarée ; la
+limite mémoire du Pod doit donc la dépasser. Elle est ensuite traitée dans
+cet ordre :
+
+1. son SHA-256 est comparé au Handoff ;
+2. elle est analysée avec les règles de workspace existantes : aucun lien,
+   fichier spécial, traversée, doublon ni conflit, et respect des `Limits` ;
+3. son manifeste est comparé à l'engagement du profil ;
+4. elle est écrite dans `/workspace` vide, par créations exclusives sans
+   suivi de lien et ancrées sur des descripteurs de répertoire. Un workspace
+   non vide est refusé avec `workspace_not_empty`.
+
+Sur `start`, le superviseur lance deux **enfants**, jamais `exec` : il reste PID 1.
+
+- L'assistant G05 inchangé `/usr/local/bin/ai-guard-relay serve-egress-v1 --port 3128`.
+  Ses flux standard sont portés à l'octet près sur EGRESS. Ses diagnostics
+  fixes vont au journal du conteneur.
+- Le fournisseur, par `BootstrapExecution::spawn_child`, avec la même sonde et
+  la même connexion privée que le parcours Docker, des flux standard en tubes
+  et l'environnement préparé. Les variables `HTTP(S)_PROXY`/`http(s)_proxy` et
+  `AI_GUARD_EGRESS_PROXY` pointent vers `http://127.0.0.1:3128` ; `NO_PROXY`
+  désigne les noms de boucle locale.
+
+À la sortie du fournisseur, ses tubes sont vidés pendant 1 s au plus, puis
+`exited` est envoyé et l'entrée de l'assistant est fermée. En PID 1, le
+superviseur envoie ensuite `kill(-1, SIGKILL)` et récolte les processus
+pendant 2 s au plus. Sinon, il tue les groupes de processus du fournisseur et
+de l'assistant. Les orphelins ne sont récoltés qu'à cette fin.
+
+| Fenêtre | Borne |
+|---|---|
+| Hello et Ready | 5 s à partir du premier octet (inchangé) |
+| Ready vers Handoff (session) ou `start` (export) | 30 s |
+| Handoff vers import écrit | 600 s |
+| `imported` vers `start` | 120 s |
+| Vidage après la sortie du fournisseur | 1 s |
+| Session en cours | aucune borne locale ; `activeDeadlineSeconds` du Pod |
+
+### 14.4 Codes de sortie
+
+| Sortie | Fin |
+|---|---|
+| 0 | `exited` ou `archive_end` a été écrit. Le protocole est terminé ; ce n'est **pas** un succès du fournisseur ni de la session. |
+| 64 | Refus de protocole : trame, borne, ordre ou argument supplémentaire. `refused`/`protocol` est envoyé si le flux le permet. |
+| 65 | Fenêtre Hello, Handoff, import ou start écoulée (`refused`/`deadline`). |
+| 66 | Entrée terminée avant le Hello ou avant le Handoff (export : avant `start`). |
+| 67 | Handoff, import, start ou export refusé avec un motif fermé. |
+| 68 | `stop` avant `start`, ou pendant l'export. |
+| 69 | Entrée terminée après le Handoff, avant le marqueur de fin. Le fournisseur a été tué et `exited` a été tenté. |
+| 70 | Échec local de flux ou de runtime. |
+
+### 14.5 Variante en flux côté broker
+
+`attach_exact_instance_streaming` reprend le bracket, le garde
+(`SessionEffectKindV2::Attach`), l'annulation et les refus de l'attachement de
+préambule. Quand les deux observations concordent, la tâche propriétaire ne
+ferme pas le flux : elle remet un bout d'un tube en mémoire (128 Kio) à
+`SessionChannelV3`. Elle relaie ensuite stdin et stdout jusqu'à l'échéance
+de session (25 h au plus), la fermeture du canal ou la fin du pair. Stderr
+reste compté dans 16 Kio, un statut termine le flux, et la fermeture de stdin
+puis la trame de fermeture suivent comme au paragraphe 11.2. Le slot
+d'attachement est détenu jusqu'à cette fin. Les deux slots d'un runtime
+bornent donc les sessions en flux simultanées à **deux**, point ouvert pour la
+cible de 100 workers.
+
+Le canal offre des envois bornés (contrôle, stdin, archive), des événements
+bornés (contrôle, stdout, stderr, archive) et un `DuplexStream` pour le
+propriétaire egress G05. L'egress du broker est retenu jusqu'à `start` et
+s'arrête à `stop`. Le broker refuse :
+
+- ses propres envois hors ordre ;
+- une archive qui diffère de son empreinte déclarée ;
+- un `imported` qui diffère de l'engagement du profil ;
+- un `archive_end` qui diffère des octets reçus.
+
+L'appelant doit mener envois et événements en parallèle, car chaque file
+applique une contre-pression.
+
+### 14.6 Limites
+
+- Chaque message du worker est **déclaré**. `exited` n'est pas l'état terminal
+  observé du conteneur, que le broker lit par UID de Pod (D5). `imported`
+  n'est pas un workspace observé.
+- La sortie standard ne porte que Ready et les trames v3. Le runtime du nœud
+  la conserve dans ses journaux, donc aucun secret ne doit y passer. Le
+  superviseur n'écrit jamais la charge du Handoff dans une trame ni sur
+  stderr. Le fournisseur reçoit le credential par conception, et sa sortie
+  n'est pas filtrée ici : le masquage avant persistance reste au broker.
+- Les tampons de charge possédés par v3 sont écrasés avant libération. Les
+  zones de travail du décodeur JSON, la préparation fournisseur et
+  l'environnement de l'enfant ne sont pas couverts. C'est une hygiène, pas une
+  protection mémoire.
+- Aucun réattachement : un flux perdu est définitif pour le Pod (D6). La
+  reprise passe par un état terminal, un export et une nouvelle tentative.
+- La contre-pression STDIN d'un fournisseur qui ne lit pas bloque la suite des
+  entrées du broker. L'échéance du Pod et la fermeture par le broker restent
+  les bornes.
+- Un `lost+found` ext4 à la racine du claim rendrait le workspace non vide.
+  Cette question reste ouverte pour la classe de stockage.
+
+### 14.7 Tests et périmètre
+
+Les tests de source couvrent :
+
+- le codec, les messages de contrôle et les deux automates d'ordre ;
+- le canal broker face à des trames scriptées et au vrai superviseur ;
+- le superviseur par de vrais tubes d'enfants, avec `/bin/cat`,
+  `/usr/bin/false`, `/bin/sleep` et une fixture du binaire de test qui laisse
+  un descendant ;
+- le vrai binaire `ai-guard-provider` pour les deux modes v3 et leurs sorties
+  de refus ;
+- l'attachement en flux par le pair TLS de boucle locale, avec un pont de
+  fixture vers le vrai superviseur.
+
+Ils ne qualifient ni kubelet, ni serveur API, ni conteneur, ni image de
+worker, ni gestion des signaux en PID 1, ni fournisseur réel, ni assistant G05
+réel, ni modèle. Leurs résultats sont consignés dans les preuves du lot K3,
+pas ici. La qualification sur cluster reste BLOCKED comme au paragraphe 11.6.

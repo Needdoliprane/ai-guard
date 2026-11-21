@@ -763,3 +763,187 @@ Limits: Kubernetes sessions stay on store formats 11–13; in owned-source mode
 (formats 14 and 15) the session routes refuse before any effect. An uncertain
 CREATE keeps the quota held until an authorized recovery resolves it. MySQL
 tenants refuse the family until its port lands.
+
+## 14. Session protocol v3
+
+Protocol v3 (requirement R4, lot G11 K3) is the closed framing that follows
+the unchanged v2 Hello/Ready on the single `pods/attach` stream of a session
+Pod. It exists in source ([protocol](../../../src/runtime/kubernetes/session_protocol.rs),
+[in-Pod supervisor](../../../src/runtime/kubernetes/session_supervisor.rs),
+streaming variant of the [attach owner](../../../src/runtime/kubernetes/session_attach.rs)).
+**No product path reaches it:** the effect permit is composed separately and
+no cluster, real worker image, provider CLI or model has exercised it.
+The status of its tests is in section 14.7.
+
+### 14.1 Channels and frames
+
+Every frame is a 4-byte big-endian length `L` (channel byte included, so
+`L >= 1`), one channel byte, then `L - 1` payload bytes. The receiver judges
+the declared length, then the channel bound, before reserving exactly the
+payload.
+
+| Channel | Byte | Direction | Payload bound |
+|---|---|---|---|
+| CONTROL | 0 | both | closed JSON, 1 to 16 KiB; the single Handoff 1 to 256 KiB |
+| STDIN | 1 | broker to worker | 1 to 64 KiB |
+| STDOUT | 2 | worker to broker | 1 to 64 KiB |
+| STDERR | 3 | worker to broker | 1 to 64 KiB |
+| EGRESS | 4 | both | 1 to 64 KiB, opaque G05 bytes, never parsed by v3 |
+| ARCHIVE | 5 | broker to worker (session), worker to broker (export) | 1 to 64 KiB |
+
+The following are protocol refusals:
+
+- an empty data payload;
+- an unknown channel, or a channel in the wrong direction or phase;
+- an unknown or duplicate JSON member, another version or a non-canonical
+  control encoding;
+- any frame out of order.
+
+The Handoff carries the canonical profile (64 KiB at most), the provider
+credential payload (64 KiB at most) and the business invocation (32 KiB of
+arguments at most). It is admitted only as the first frame of a session, so
+at most one frame of that size is held. These bounds are configured software
+values, not measured capacities.
+
+### 14.2 Order
+
+Session Pod (`kubernetes-session-v3`), after Ready:
+
+1. broker: `handoff`, then exactly `archive_bytes` of ARCHIVE;
+2. worker: `imported` (verified workspace commitment) or `refused`;
+3. broker: `start`;
+4. worker: `started`, after starting the egress helper and the provider, or `refused`;
+5. broker: STDIN, EGRESS, at most one `stdin_close`, at most one `stop`;
+   worker: STDOUT, STDERR, EGRESS;
+6. worker: `exited` (`code` or `signal`), then the stream ends.
+
+A `stop` before `start` is answered by `refused` with `stopped`. Export Pod
+(`kubernetes-workspace-export-v3`): broker `start` (or `stop`), then worker
+ARCHIVE frames and `archive_end` with the byte count and SHA-256 of the tar it
+wrote, or `refused`. In both modes nothing is sent after Ready until the broker
+speaks. The broker bracket therefore stays as in section 11: a byte after
+Ready and before identity two is refused.
+
+### 14.3 Worker checks and effects
+
+Before any effect the supervisor checks the following.
+
+- The profile bytes are canonical, they hash to the Hello `profile_hash`, and
+  their binding equals the Hello identifiers.
+- The invocation matches `invocation_sha256`.
+- The transport is not interactive. An interactive transport is refused with
+  `interactive_unsupported`: no in-Pod PTY exists, and this is an open item.
+- The credential payload passes the existing `prepare_execution` checks.
+
+The archive is received into a buffer reserved for exactly the declared size,
+so the Pod memory limit must exceed it. It is then processed in this order:
+
+1. the SHA-256 is compared with the Handoff;
+2. the archive is scanned with the existing workspace rules: no link, special
+   file, traversal, duplicate or conflict, and the workspace `Limits`;
+3. the manifest is compared with the profile commitment;
+4. the files are written into the empty `/workspace` with exclusive,
+   no-follow creations anchored to directory descriptors. A non-empty
+   workspace is refused with `workspace_not_empty`.
+
+On `start` the supervisor spawns two **children**, never `exec`: it stays PID 1.
+
+- The unchanged G05 helper `/usr/local/bin/ai-guard-relay serve-egress-v1 --port 3128`.
+  Its standard streams are carried byte-exact on EGRESS frames, and its fixed
+  diagnostics go to the container log.
+- The provider, through `BootstrapExecution::spawn_child`: the same probe and
+  private login as the Docker path, piped standard streams and the prepared
+  environment. The proxy variables `HTTP(S)_PROXY`/`http(s)_proxy` and
+  `AI_GUARD_EGRESS_PROXY` point to `http://127.0.0.1:3128`, and
+  `NO_PROXY` to the loopback names.
+
+When the provider exits, its pipes are drained for at most 1 s, `exited` is
+sent and the helper stdin is closed. As PID 1 the supervisor then sends
+`kill(-1, SIGKILL)` and reaps for at most 2 s. Otherwise it kills the
+provider and helper process groups. Orphans are reaped only at that end.
+
+| Window | Bound |
+|---|---|
+| Hello and Ready | 5 s from the first byte (unchanged) |
+| Ready to Handoff (session) or `start` (export) | 30 s |
+| Handoff to written import | 600 s |
+| `imported` to `start` | 120 s |
+| Drain after the provider exit | 1 s |
+| Running session | no local bound; the Pod `activeDeadlineSeconds` |
+
+### 14.4 Exit codes
+
+| Exit | End |
+|---|---|
+| 0 | `exited` or `archive_end` was written. The protocol ended; this is **not** a provider or session success. |
+| 64 | Protocol refusal: frame, bound, order or extra argument. `refused`/`protocol` is sent when the stream allows it. |
+| 65 | Hello, Handoff, import or start window elapsed (`refused`/`deadline`). |
+| 66 | Input ended before the Hello or before the Handoff (export: before `start`). |
+| 67 | Handoff, import, start or export refused with a closed reason. |
+| 68 | `stop` before `start`, or during the export. |
+| 69 | Input ended after the Handoff before the end marker. The provider was killed and `exited` was attempted. |
+| 70 | Local stream or runtime failure. |
+
+### 14.5 Broker streaming variant
+
+`attach_exact_instance_streaming` runs the same bracket, guard
+(`SessionEffectKindV2::Attach`), cancellation and refusals as the preamble
+attach. When both observations match, the owner task hands one end of an
+in-memory pipe (128 KiB) to `SessionChannelV3` instead of closing. It then
+relays stdin and stdout until the session deadline (25 h at most), the
+channel's close or the peer's end. Stderr stays counted within 16 KiB, a
+status ends the stream, and the stdin close and close frame follow as in
+section 11.2. The attach slot is held until that end. The two slots of a
+runtime therefore bound concurrent streaming sessions to **two**, an open
+item for the 100-worker target.
+
+The channel offers bounded sends (control, stdin, archive), bounded events
+(control, stdout, stderr, archive) and a `DuplexStream` for the G05 egress
+owner. Broker egress is held until `start` and stops at `stop`. The broker
+refuses:
+
+- its own out-of-order sends;
+- an archive that differs from its declared digest;
+- an `imported` that differs from the profile commitment;
+- an `archive_end` that differs from the received bytes.
+
+A caller must drive sends and events concurrently, because every queue
+applies backpressure.
+
+### 14.6 Limits
+
+- Every worker message is **declared**. `exited` is not the observed
+  container terminal state, which the broker reads by Pod UID (D5).
+  `imported` is not an observed workspace.
+- Standard output carries only Ready and v3 frames. The node runtime keeps it
+  in its logs, so no secret may travel on it. The supervisor never writes the
+  Handoff payload to a frame or to stderr. The provider receives the
+  credential by design and its output is not filtered here: masking before
+  persistence remains with the broker.
+- The payload buffers owned by v3 are overwritten before they are dropped.
+  JSON decoder scratch space, the provider preparation and the child
+  environment are not covered. This is hygiene, not memory protection.
+- No re-attach: a lost stream is final for the Pod (D6). Resuming requires
+  a terminal state, an export and a new attempt.
+- STDIN backpressure from a provider that does not read stalls further
+  broker input. The Pod deadline and the broker's close remain the bounds.
+- An ext4 `lost+found` at the claim root would make the workspace non-empty.
+  This is an open question for the storage class.
+
+### 14.7 Tests and their scope
+
+Source tests cover the following:
+
+- the codec, the control messages and both order machines;
+- the broker channel against scripted frames and against the real supervisor;
+- the supervisor through real child pipes, with `/bin/cat`, `/usr/bin/false`,
+  `/bin/sleep` and a test-binary fixture that leaves a descendant;
+- the real `ai-guard-provider` binary for both v3 modes and their refusal
+  exits;
+- the streaming attach over the TLS loopback attach peer, with a fixture
+  bridge to the real supervisor.
+
+They qualify no kubelet, API server, container, worker image, PID-1 signal
+handling, real provider, real G05 helper or model. Their results are recorded
+in the K3 lot evidence, not here. Cluster qualification remains BLOCKED as in
+section 11.6.
