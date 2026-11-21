@@ -13,6 +13,7 @@ Please read the [architecture contract](docs/engineering/ARCHITECTURE_CONTRACT.m
 3.  Ensure your changes comply with the project's [production readiness gates](docs/engineering/PRODUCTION_READINESS.md).
 4.  Run the tests locally:
     *   Rust: `cargo test --locked`
+        *   On macOS, run the Rust tests with a private temporary directory outside the `/var` symlink, for example `export TMPDIR=$(/usr/bin/mktemp -d /private/tmp/aig.XXXX)`. With the default `TMPDIR`, fixtures that require a private, symlink-free directory fail (about 120 Kubernetes fixtures at the time of writing).
     *   Frontend: `cd front && npm test`
 5.  Submit a pull request.
 

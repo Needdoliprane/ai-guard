@@ -34,7 +34,7 @@ Certains tests HTTP ouvrent un port loopback éphémère. Le navigateur exige Ch
 
 | # | Scénario | Prérequis et procédure | Acceptation et limites de preuve |
 |---|---|---|---|
-| 1 | Sandbox Codex | Image avec version exacte, compte et credentials privés ; parcours `run --provider codex` du [README](../README.md#agents-cloud-et-identifiants-explicites) | Session et lancement observés ; déclarations normalisées. Une fixture ne remplace pas le compte/API réel. |
+| 1 | Sandbox Codex | Image avec version exacte, compte et credentials privés ; parcours `run --provider codex` du [README](../README.md#choose-identity-ai-and-deployment) | Session et lancement observés ; déclarations normalisées. Une fixture ne remplace pas le compte/API réel. |
 | 2 | Sandbox Claude | Version exacte et parcours `run --provider claude`, sortie structurée configurée | Même séparation des provenances ; format et permissions vérifiés sur la version utilisée. |
 | 3 | Tâche simple avec chacun | Modification limitée d'un fichier dans une copie jetable, puis examen et export | Original inchangé ; changement visible dans la session et destination d'export neuve ; preuve distincte par fournisseur. |
 | 4 | Création de sous-agents | Fonction réellement exposée par le fournisseur ou contrat générique explicite | IDs et parents explicites ; provenance par champ et couverture réelles. Aucune parenté inventée à partir d'un texte ou ID d'outil. |
