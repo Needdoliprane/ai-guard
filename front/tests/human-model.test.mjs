@@ -22,6 +22,17 @@ test("l’identité conserve une version d’autorisation opaque et la révision
   assert.throws(() => parseHumanIdentity({ ...identity, authentication: { ...identity.authentication, method: "viewer" } }), /Contrat/);
 });
 
+test("un contexte garde chaque capacité que le contrôle peut accorder et refuse un nom inconnu", () => {
+  const all = ["read_metadata", "read_content", "export", "read_tenant_metadata", "manage_memberships", "manage_grants",
+    "read_broker_registry", "read_worker_registry", "approve_launch", "read_memberships", "read_configuration",
+    "launch_session", "send_session_message"];
+  const identity = { version: 1, principal, display_name: "Alice", authentication: { method: "local_credential", credential_id: uuid, expires_at: null },
+    contexts: [{ ...context, mode: "administration", capabilities: all }], contexts_complete: true };
+  assert.deepEqual(parseHumanIdentity(identity).contexts[0].capabilities, all);
+  for (const bad of [[...all, "read_everything"], ["admin"], ["read_metadata", "read_metadata"]])
+    assert.throws(() => parseHumanIdentity({ ...identity, contexts: [{ ...context, capabilities: bad }] }), /Contrat/);
+});
+
 test("les droits sur une ressource restent distincts et une page incorrecte ne devient pas vide", () => {
   const item = { resource: { kind: "sandbox", resource_id: "sandbox/a" }, owner: principal, revision: "2",
     permissions: { metadata: true, content: false, export: false } };

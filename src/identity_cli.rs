@@ -71,6 +71,10 @@ pub enum Capability {
     ManageGrants,
     ReadBrokerRegistry,
     ReadWorkerRegistry,
+    ReadMemberships,
+    ReadConfiguration,
+    LaunchSession,
+    SendSessionMessage,
 }
 impl From<Capability> for crate::identity::HumanCapabilityV1 {
     fn from(value: Capability) -> Self {
@@ -84,6 +88,10 @@ impl From<Capability> for crate::identity::HumanCapabilityV1 {
             Capability::ManageGrants => C::ManageGrants,
             Capability::ReadBrokerRegistry => C::ReadBrokerRegistry,
             Capability::ReadWorkerRegistry => C::ReadWorkerRegistry,
+            Capability::ReadMemberships => C::ReadMemberships,
+            Capability::ReadConfiguration => C::ReadConfiguration,
+            Capability::LaunchSession => C::LaunchSession,
+            Capability::SendSessionMessage => C::SendSessionMessage,
         }
     }
 }

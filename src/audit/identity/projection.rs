@@ -138,31 +138,19 @@ impl Projection {
                         && m.0.organization_scope == membership.organization_scope
                 }))?;
                 // Organization administrators may retain or remove an existing
-                // tenant-wide grant, but only trusted control may introduce or
+                // control-only grant, but only trusted control may introduce or
                 // reactivate it. Identity and organization are immutable above.
                 if mutation.actor.is_human()
                     && membership
                         .capabilities
-                        .contains(&HumanCapabilityV1::ReadBrokerRegistry)
-                    && old.is_none_or(|(previous, _)| {
-                        !previous
-                            .capabilities
-                            .contains(&HumanCapabilityV1::ReadBrokerRegistry)
-                            || (!previous.active && membership.active)
-                    })
-                {
-                    return Err(IdentityFailureV1::PermissionDenied.into());
-                }
-                if mutation.actor.is_human()
-                    && membership
-                        .capabilities
-                        .contains(&HumanCapabilityV1::ReadWorkerRegistry)
-                    && old.is_none_or(|(previous, _)| {
-                        !previous
-                            .capabilities
-                            .contains(&HumanCapabilityV1::ReadWorkerRegistry)
-                            || (!previous.active && membership.active)
-                    })
+                        .iter()
+                        .filter(|capability| capability.is_control_only())
+                        .any(|capability| {
+                            old.is_none_or(|(previous, _)| {
+                                !previous.capabilities.contains(capability)
+                                    || (!previous.active && membership.active)
+                            })
+                        })
                 {
                     return Err(IdentityFailureV1::PermissionDenied.into());
                 }

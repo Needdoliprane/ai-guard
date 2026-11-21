@@ -362,6 +362,21 @@ observé ; un client qui ne poll pas peut immobiliser sa part. Chaque poll
 revérifie expiration et révocation. Ces bornes ne prouvent ni un plafond de tous
 les sockets HTTP ni une éviction autonome.
 
+## Activer les capacités des droits humains
+
+Quatre capacités sont protégées par un marqueur d’identité explicite : `read_memberships` et `read_configuration` (contextes d’administration), `launch_session` et `send_session_message` (contextes personnels). Tant que la base du tenant ne porte pas ce marqueur, un membership ou une préparation locale qui en contient une est refusé avec `migration_required` et rien n’est ajouté. Le marqueur ne change pas le format de la base ; c’est un événement de la chaîne d’identité que les binaires antérieurs refusent de rejouer. Conservez donc la sauvegarde qu’il crée si un retour à une version précédente peut être nécessaire.
+
+Le marqueur exige une base qui porte déjà le marqueur du registre workers (formats 10 à 13, après la migration explicite 9→10). Arrêtez d’abord le gateway et tous les brokers, puis exécutez :
+
+```sh
+"$AIGUARD_BIN" migrate-human-rights --data <tenant.sqlite> --tenant-id <tenant> \
+  --backup <nouvelle-sauvegarde-privee.sqlite> --confirm-control-stopped --max-events <capacite>
+```
+
+La commande écrit une nouvelle sauvegarde vérifiée, ajoute le marqueur une seule fois et affiche un rapport JSON dont `from_version` et `to_version` valent tous deux le format inchangé. Une seconde exécution est refusée. Pour revenir à l’état antérieur, restaurez la sauvegarde dans une nouvelle destination privée ; la base restaurée refuse de nouveau les quatre capacités. Les bases des sources possédées (formats 14 et 15) ne peuvent pas encore recevoir le marqueur par cette commande et refusent toujours ces capacités avec `migration_required`.
+
+Seul le contrôle de confiance peut introduire ou réactiver ces capacités : `human apply` sans `actor` appelant, ou `human provision --capability read-memberships` (de même `read-configuration`, `launch-session`, `send-session-message`) après le marqueur. Un administrateur d’organisation qui détient `manage_memberships` peut les conserver ou les retirer, jamais les ajouter, comme les lectures des registres brokers et workers. Une capacité seule n’ouvre aucune vue ni commande : le gateway revalide à chaque requête le membership, le plafond OIDC et chaque permission de ressource.
+
 ## Autoriser la lecture nominative du registre workers
 
 La capacité administrative distincte `read_worker_registry` exige la migration explicite9→10 et l’accord du contrôle sur le membership. Suivre la [lecture nominative des workers](WORKERS.fr.md) pour la procédure locale/OIDC, les budgets d’audit partagés, la restauration, les limites des données et l’écart obligatoire d’attribution personnelle. Aucun droit brokers/ressources existant n’accorde ce droit.

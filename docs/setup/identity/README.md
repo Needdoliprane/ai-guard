@@ -355,6 +355,21 @@ that does not poll can occupy its share. Every poll still rechecks expiry and
 revocation. These bounds do not establish a limit on all HTTP sockets or an
 autonomous eviction guarantee.
 
+## Enable the human rights capabilities
+
+Four capabilities are fenced by an explicit identity marker: `read_memberships` and `read_configuration` (administration contexts) and `launch_session` and `send_session_message` (personal contexts). Until a tenant store carries the marker, a membership or local preparation that contains any of them is refused with `migration_required` and nothing is appended. The marker does not change the store format; it is an identity-chain event that older binaries refuse to replay, so keep the backup it creates if you may need to return to an earlier release.
+
+The marker requires a store that already carries the worker registry marker (formats 10 to 13, after the explicit 9→10 migration). Stop the gateway and every broker first, then run:
+
+```sh
+"$AIGUARD_BIN" migrate-human-rights --data <tenant.sqlite> --tenant-id <tenant> \
+  --backup <new-private-backup.sqlite> --confirm-control-stopped --max-events <capacity>
+```
+
+The command writes a verified new backup, appends the marker once and prints a JSON report whose `from_version` and `to_version` are both the unchanged format. A second run is refused. To return to the earlier state, restore the backup into a new private destination; the restored store refuses the four capabilities again. Owned source stores (formats 14 and 15) cannot receive the marker through this command yet and keep refusing the four capabilities with `migration_required`.
+
+Only trusted control may introduce or reactivate these capabilities: `human apply` with no caller `actor`, or `human provision --capability read-memberships` (likewise `read-configuration`, `launch-session`, `send-session-message`) after the marker. An organization administrator holding `manage_memberships` may keep or remove them but never add them, like the broker and worker registry reads. A capability alone opens no view or command: the gateway still revalidates the membership, the OIDC ceiling and each resource permission on every request.
+
 ## Authorize named worker registry readers
 
 The separate administration capability `read_worker_registry` requires explicit9→10 migration and trusted membership approval. Follow [named worker registry reads](WORKERS.md) for the local/OIDC procedure, shared audit budgets, restore behavior, data limits and the obligatory personal-attribution gap. No existing broker/resource permission grants this right.
