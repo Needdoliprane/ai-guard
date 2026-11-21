@@ -31,7 +31,7 @@ const EOF_GRACE: Duration = Duration::from_secs(2);
 // The handoff currently carries only AI_GUARD_PROVIDER_BOOTSTRAP in Config.Env;
 // the other names are the supported clients' recognized credential/config
 // selectors. Each override is a literal empty value, never a secret in argv.
-const EMPTY_EXEC_ENV: &[&str] = &[
+pub(super) const EMPTY_EXEC_ENV: &[&str] = &[
     "AI_GUARD_PROVIDER_BOOTSTRAP",
     "OPENAI_API_KEY",
     "CODEX_API_KEY",
@@ -85,7 +85,7 @@ mod sealed {
     }
 }
 #[derive(Clone, PartialEq, Eq)]
-enum RelayExecProfile {
+pub(super) enum RelayExecProfile {
     Docker(DockerLaunchProfileBindingV1),
     Podman(PodmanBinding),
 }
@@ -241,7 +241,7 @@ impl ManagedRuntime {
         Ok(transport)
     }
 
-    fn relay_profile(&self) -> std::result::Result<RelayExecProfile, RelayExecError> {
+    pub(super) fn relay_profile(&self) -> std::result::Result<RelayExecProfile, RelayExecError> {
         if self.binding.invocation.as_ref() != Some(self.runtime.invocation())
             || self.runtime.invocation().policy_version != 2
         {
@@ -286,7 +286,7 @@ impl ManagedRuntime {
         }
     }
 
-    fn relay_command(
+    pub(super) fn relay_command(
         &self,
     ) -> std::result::Result<(Command, Option<RetainedDockerLaunchProfile>), RelayExecError> {
         self.relay_profile()?;
@@ -330,7 +330,7 @@ fn relay_exec_args(
     Ok(args)
 }
 
-fn validate_running_snapshot(
+pub(super) fn validate_running_snapshot(
     owned: &OwnedContainerSnapshot,
     observed: &ContainerObservation,
 ) -> std::result::Result<(), RelayExecError> {
@@ -375,7 +375,7 @@ fn validate_running_snapshot(
 /// clean. Recognized credential/config names are overridden with literal empty
 /// values. Other entries must be fixed public image values or short version
 /// strings; unknown keys, duplicates and opaque values remain closed.
-fn validate_helper_environment(bytes: &[u8]) -> std::result::Result<(), RelayExecError> {
+pub(super) fn validate_helper_environment(bytes: &[u8]) -> std::result::Result<(), RelayExecError> {
     #[derive(Deserialize)]
     #[serde(rename_all = "PascalCase")]
     struct Environment {
