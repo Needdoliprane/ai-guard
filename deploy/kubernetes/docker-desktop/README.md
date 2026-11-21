@@ -29,7 +29,7 @@ change below is an operator action.
 |---|---|
 | [`csi-hostpath/`](csi-hostpath/) | Namespace `ai-guard-csi-hostpath` (Pod Security `privileged`), CSIDriver `hostpath.csi.k8s.io`, the `csi-hostpathplugin` StatefulSet (containers `hostpath`, `node-driver-registrar`, `liveness-probe`, `csi-attacher`, `csi-provisioner`), its ServiceAccount, sidecar ClusterRoles, leader-election Roles and bindings. Vendored from upstream with the changes listed in [PROVENANCE.md](csi-hostpath/PROVENANCE.md). |
 | [`storage/`](storage/) | StorageClass `ai-guard-rwop`: provisioner `hostpath.csi.k8s.io`, `Immediate`, `Delete`, no expansion, never the default class. |
-| [`control/`](control/) | Namespace `ai-guard-control` (Pod Security `restricted` `v1.36`; no Pod ever runs there) and the broker ServiceAccounts `broker-tenant-a` and `broker-tenant-b`, without token automount. |
+| [`control/`](control/) | Namespace `ai-guard-control` (Pod Security `restricted` `v1.36`), a ResourceQuota `pods: 0` that refuses any Pod there, and the broker ServiceAccounts `broker-tenant-a` and `broker-tenant-b`, without token automount. |
 | [`tenant/base/`](tenant/base/) | Shared tenant objects: Namespace with Pod Security `restricted` `v1.36` (enforce, audit, warn), ServiceAccount `default` without token automount, NetworkPolicy `ai-guard-default-deny` (all Pods, Ingress and Egress, no rule) and Role `ai-guard-session-broker`. Never applied alone. |
 | [`tenant/tenant-a/`](tenant/tenant-a/), [`tenant/tenant-b/`](tenant/tenant-b/) | Namespace `ai-guard-tenant-a` or `ai-guard-tenant-b`, the RoleBinding to that tenant's broker, and the ClusterRole and ClusterRoleBinding `ai-guard-session-broker-tenant-<x>`. |
 
@@ -180,6 +180,7 @@ class recorded in step 1 is unchanged.
 ```sh
 kubectl --context docker-desktop get namespaces ai-guard-csi-hostpath ai-guard-control ai-guard-tenant-a ai-guard-tenant-b -o custom-columns='NAME:.metadata.name,UID:.metadata.uid,ENFORCE:.metadata.labels.pod-security\.kubernetes\.io/enforce,VERSION:.metadata.labels.pod-security\.kubernetes\.io/enforce-version,AUDIT:.metadata.labels.pod-security\.kubernetes\.io/audit,WARN:.metadata.labels.pod-security\.kubernetes\.io/warn'
 kubectl --context docker-desktop -n ai-guard-control get serviceaccounts broker-tenant-a broker-tenant-b -o custom-columns='NAME:.metadata.name,AUTOMOUNT:.automountServiceAccountToken'
+kubectl --context docker-desktop -n ai-guard-control get resourcequota ai-guard-control-no-pods -o jsonpath='{.spec.hard.pods}{"\n"}'
 kubectl --context docker-desktop -n ai-guard-tenant-a get serviceaccount default -o jsonpath='{.automountServiceAccountToken}{"\n"}'
 kubectl --context docker-desktop -n ai-guard-tenant-b get serviceaccount default -o jsonpath='{.automountServiceAccountToken}{"\n"}'
 kubectl --context docker-desktop -n ai-guard-tenant-a get networkpolicies -o name
@@ -188,7 +189,7 @@ kubectl --context docker-desktop -n ai-guard-tenant-b get networkpolicies -o nam
 
 Expected: `ai-guard-csi-hostpath` is `privileged`; the three other Namespaces
 are `restricted` `v1.36` for enforce, audit and warn. Both broker accounts and
-both tenant `default` accounts print `false`. Each tenant Namespace has exactly
+both tenant `default` accounts print `false`. The control quota prints `0`. Each tenant Namespace has exactly
 one policy, `networkpolicy.networking.k8s.io/ai-guard-default-deny`. Record the
 Namespace UIDs; the authority file needs them. A created policy proves no
 enforcement (see the limits below).

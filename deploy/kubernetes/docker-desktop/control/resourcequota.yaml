@@ -1,0 +1,14 @@
+# ai-guard LOCAL TEST recipe (Docker Desktop only, not production).
+# Enforces "no Pod ever runs in ai-guard-control": the namespace only holds
+# the broker ServiceAccounts, so a Pod here (which could mount their tokens)
+# is refused by the API server at admission.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: ai-guard-control-no-pods
+  namespace: ai-guard-control
+  labels:
+    app.kubernetes.io/part-of: ai-guard
+spec:
+  hard:
+    pods: "0"
