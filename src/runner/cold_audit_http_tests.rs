@@ -192,6 +192,7 @@ fn seed_worker(store: &Store) -> crate::control::WorkerV1 {
             credential_binding_id: None,
             credential_names: vec![],
             provider_resolution: None,
+            egress: None,
         },
     };
     store

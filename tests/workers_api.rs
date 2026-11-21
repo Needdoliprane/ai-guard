@@ -169,6 +169,7 @@ async fn admission_for(server: &Server, tenant: &str) -> AdmissionV1 {
             credential_binding_id: None,
             credential_names: vec![],
             provider_resolution: None,
+            egress: None,
         },
     }
 }

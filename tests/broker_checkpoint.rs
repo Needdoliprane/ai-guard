@@ -220,6 +220,7 @@ fn supervised_admission(
                 credential_binding_id: None,
                 credential_names: vec![],
                 provider_resolution: None,
+                egress: None,
             },
         },
     }
@@ -1495,6 +1496,7 @@ fn sqlite_decision_and_admission_ack_follow_pending_journal_revisions() {
             credential_binding_id: None,
             credential_names: vec![],
             provider_resolution: None,
+            egress: None,
         },
     };
     let supervised = SupervisedAdmissionV1 {

@@ -374,6 +374,7 @@ pub(in crate::api::human_sources) fn reserve_workload_fixture_worker(store: &Sto
                 credential_binding_id: None,
                 credential_names: vec![],
                 provider_resolution: None,
+                egress: None,
             },
             decision_request: request,
         },

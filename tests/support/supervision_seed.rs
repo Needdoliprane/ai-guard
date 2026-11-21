@@ -205,6 +205,7 @@ fn admit(store: &Store, authority: &str, session: &str, legacy: bool) -> anyhow:
             credential_binding_id: None,
             credential_names: vec![],
             provider_resolution: None,
+            egress: None,
         },
         decision_request: request,
     };

@@ -337,6 +337,7 @@ fn supervised_admission(
                 credential_binding_id: None,
                 credential_names: Vec::new(),
                 provider_resolution: None,
+                egress: None,
             },
         },
     }

@@ -88,6 +88,7 @@ fn parent_worker() -> WorkerV1 {
         credential_binding_id: None,
         credential_names: Vec::new(),
         provider_resolution: None,
+        egress: None,
     };
     let spec_hash = launch.spec_hash().unwrap();
     WorkerV1 {

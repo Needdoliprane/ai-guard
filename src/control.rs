@@ -4,6 +4,9 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
+#[path = "control/egress_launch_tests.rs"]
+mod egress_launch_tests;
 pub mod egress_policy;
 pub mod kubernetes_admission;
 #[cfg(test)]
@@ -30,6 +33,37 @@ macro_rules! closed_enum {
 closed_enum!(DecisionPhaseV1 { Initial, Approved });
 closed_enum!(RuntimeKindV1 { Docker, Podman });
 closed_enum!(NetworkV1 { None, Bridge });
+closed_enum!(EgressProfileV1 { BrokerProxyV1 });
+
+/// Broker-owned egress axis of a launch. The physical network stays `none`;
+/// the only route out is the trusted broker's mediated CONNECT channel to a
+/// loopback helper on `proxy_port`. Absent on every historical launch, so
+/// their serialization and hashes are unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EgressLaunchV1 {
+    pub version: u32,
+    pub profile: EgressProfileV1,
+    pub proxy_port: u16,
+}
+impl EgressLaunchV1 {
+    /// Lowest loopback port the unprivileged worker helper may bind.
+    pub const MIN_PROXY_PORT: u16 = 1024;
+    /// Default loopback port of the worker helper.
+    pub const DEFAULT_PROXY_PORT: u16 = 3128;
+    pub fn broker_proxy(proxy_port: u16) -> anyhow::Result<Self> {
+        let egress = Self {
+            version: 1,
+            profile: EgressProfileV1::BrokerProxyV1,
+            proxy_port,
+        };
+        egress.validate()?;
+        Ok(egress)
+    }
+    pub fn validate(&self) -> anyhow::Result<()> {
+        invalid(self.version == 1 && self.proxy_port >= Self::MIN_PROXY_PORT)
+    }
+}
 closed_enum!(SecurityPresetV1 {
     FixedSandboxV1,
     FixedSandboxV2,
@@ -120,6 +154,8 @@ pub struct LaunchSpecV1 {
         deserialize_with = "crate::model::deserialize_provider_resolution"
     )]
     pub provider_resolution: Option<crate::provider::ProviderResolutionV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress: Option<EgressLaunchV1>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -442,6 +478,10 @@ impl LaunchSpecV1 {
             ["strict", "review", "observe"].contains(&self.profile.as_str())
                 && (self.network == NetworkV1::None || self.profile == "observe"),
         )?;
+        if let Some(egress) = &self.egress {
+            egress.validate()?;
+            invalid(self.network == NetworkV1::None && self.profile == "observe")?;
+        }
         bounded(&self.provider, 80)?;
         if let Some(resolution) = &self.provider_resolution {
             resolution.validate()?;
@@ -455,7 +495,8 @@ impl LaunchSpecV1 {
                     && self.security_preset.is_interactive()
                         == resolution.transport.is_interactive()
                     && self.profile == "observe"
-                    && self.network == NetworkV1::Bridge,
+                    && (self.network == NetworkV1::Bridge
+                        || (self.network == NetworkV1::None && self.egress.is_some())),
             )?;
         }
         invalid(self.credential_names.len() <= 64)?;

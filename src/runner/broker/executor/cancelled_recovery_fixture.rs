@@ -183,6 +183,7 @@ impl RecoveryFixture {
                 credential_binding_id: None,
                 credential_names: vec![],
                 provider_resolution: None,
+                egress: None,
             },
         };
         let prepared: managed::ManagedCheckpoint = serde_json::from_value(json!({

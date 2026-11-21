@@ -91,6 +91,7 @@ fn decision_admission(store: &Store) -> AdmissionV1 {
             credential_binding_id: None,
             credential_names: vec![],
             provider_resolution: None,
+            egress: None,
         },
         decision_request: request,
     }

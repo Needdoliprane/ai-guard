@@ -191,6 +191,7 @@ fn reserve_with_protocol(store: &Store, authority: &str, legacy: bool) -> Worker
             credential_binding_id: None,
             credential_names: vec![],
             provider_resolution: None,
+            egress: None,
         },
         decision_request: request,
     };
