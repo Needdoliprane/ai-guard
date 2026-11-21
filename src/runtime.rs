@@ -212,6 +212,24 @@ pub struct ContainerSpec {
     managed_names: Option<(String, String)>,
     security_preset: crate::control::SecurityPresetV1,
     terminal_secrets: TerminalSecrets,
+    egress_proxy_port: Option<u16>,
+}
+/// Fixed proxy environment of a broker-egress worker. These values only help
+/// clients find the loopback helper; removing them never yields a route.
+pub const EGRESS_PROXY_MARKER: &str = "AI_GUARD_EGRESS_PROXY";
+fn egress_environment(port: u16) -> Vec<String> {
+    let proxy = format!("http://127.0.0.1:{port}");
+    let mut environment: Vec<String> = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"]
+        .iter()
+        .map(|name| format!("{name}={proxy}"))
+        .collect();
+    environment.extend(
+        ["NO_PROXY", "no_proxy"]
+            .iter()
+            .map(|name| format!("{name}=localhost,127.0.0.1,::1")),
+    );
+    environment.push(format!("{EGRESS_PROXY_MARKER}={proxy}"));
+    environment
 }
 #[derive(Clone, Default)]
 struct TerminalSecrets(Vec<String>);
@@ -256,6 +274,7 @@ impl ContainerSpec {
             managed_names: None,
             security_preset: crate::control::SecurityPresetV1::FixedSandboxV2,
             terminal_secrets: TerminalSecrets::default(),
+            egress_proxy_port: None,
         })
     }
     pub fn operation_id(&self) -> Uuid {
@@ -303,14 +322,32 @@ impl ContainerSpec {
         let path = crate::control_fs::absolute_path(path)?;
         self.with_secret_env_handle(crate::control_fs::PrivateFile::open(&path, 64 * 1024)?)
     }
+    /// Select the broker-owned egress profile for a `none` worker. The worker
+    /// keeps no route; its clients reach the loopback helper the broker
+    /// attaches after start. Must precede credential injection.
+    pub fn with_broker_egress(mut self, egress: &crate::control::EgressLaunchV1) -> Result<Self> {
+        egress.validate()?;
+        ensure!(
+            matches!(self.purpose, ContainerPurpose::Run) && self.network == NetworkMode::None,
+            "broker egress requires a worker execution on network none"
+        );
+        self.egress_proxy_port = Some(egress.proxy_port);
+        Ok(self)
+    }
+    pub fn egress_proxy_port(&self) -> Option<u16> {
+        self.egress_proxy_port
+    }
     pub fn with_secret_env_handle(mut self, file: crate::control_fs::PrivateFile) -> Result<Self> {
         ensure!(
             file.bytes().len() <= 64 * 1024,
             "credential env file must be no larger than 64 KiB"
         );
-        if !matches!(self.purpose, ContainerPurpose::Run) || self.network != NetworkMode::Bridge {
+        let mediated = self.network == NetworkMode::None && self.egress_proxy_port.is_some();
+        if !matches!(self.purpose, ContainerPurpose::Run)
+            || !(self.network == NetworkMode::Bridge || mediated)
+        {
             bail!(
-                "credential injection is valid only for a network-enabled worker and a regular absolute env file"
+                "credential injection is valid only for a broker-egress or explicitly bridged worker and a regular absolute env file"
             );
         }
         file.revalidate()?;
@@ -430,6 +467,11 @@ impl ContainerSpec {
         }
         if runtime == RuntimeKind::Podman {
             args.extend(["--userns".into(), "keep-id:uid=1000,gid=1000".into()]);
+        }
+        if let Some(port) = self.egress_proxy_port {
+            for value in egress_environment(port) {
+                args.extend(["--env".into(), value]);
+            }
         }
         if let Some(file) = &self.secret_env_file {
             args.extend([
