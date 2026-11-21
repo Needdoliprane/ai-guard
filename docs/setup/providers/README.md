@@ -217,3 +217,38 @@ The adapter uses the authenticated [System One API](https://docs.typesafe.ai/api
 After a task, use `worker-status`, audit inspection and the [fresh-destination export procedure](../local/README.md#inspect-and-export-changes). A client exit code or generated text does not prove all requested changes. [Provider events](../../../src/adapters.rs) have `provenance=declared`; their `coverage=observed` describes capture of a report, not independent observation of its effect. Launch authorization does not establish mediation before nested commands or remote Web/MCP actions; see [audit and coverage](../../operations.md#audit-sorties-et-couverture). Runtime observations keep their own provenance, and a durable audit record does not turn a declaration into an observed effect. Retain omission/truncation indicators rather than treating a bounded capture as a complete transcript.
 
 Stop active sessions with `worker-stop` and confirm observed terminal state before shutting down control services. Revoke or rotate credentials through their provider when required. Preserve retained session bindings with the same confidentiality as credentials; do not erase them to manufacture a clean recovery.
+
+## Replay the CLI and Chromium checks
+
+From the repository root, use Python 3.11 or later on Unix with a working pseudo-terminal. The first command checks preflight and browser failure reporting using fixtures. The second drives two turns with a synthetic terminal program and checks that terminal settings are restored. Allow at least one minute for both commands.
+
+```sh
+python3 -B tests/e2e/test_run_provider_preflight.py ProviderPreflightTests ProviderBrowserStageTests
+python3 -IB tests/e2e/interactive_driver.py --self-test
+```
+
+Build `agentsandbox` and `ai-guard-diagnose` from the same checkout. Place both executables side by side and set `QA_BIN` to the absolute path to `agentsandbox`. This preflight exercises the eight client, authentication and transport combinations with present and missing fixture references.
+
+```sh
+cargo build --locked --bin agentsandbox --bin ai-guard-diagnose
+QA_BIN="$PWD/target/debug/agentsandbox"
+AI_GUARD_QA_PROVIDER_CLI="$QA_BIN" \
+  python3 -IB tests/e2e/test_run_provider_preflight.py InstalledDiagnosticTests -v
+```
+
+For a live provider run, prepare a dedicated stack with loopback gateway and dashboard origins, the bundle from the same checkout, Node, Playwright and a usable Chromium. The reference runs used Codex `0.170.0` and Claude Code `2.1.329`. Build the worker with those exact versions and supply its immutable local image ID. Use a private profiles file and its configured authentication mode. Choose a new evidence directory under an existing parent.
+
+```sh
+umask 077
+python3 -B tests/e2e/run_provider_case.py \
+  --bin "$QA_BIN" --config-dir "$QA_CONFIG" \
+  --gateway "$QA_GATEWAY" --dashboard "$QA_DASHBOARD" \
+  --runtime docker --runtime-endpoint "$QA_RUNTIME_ENDPOINT" --image "$QA_WORKER_IMAGE_ID" \
+  --client claude-code --auth-mode api --client-profile "$QA_CLAUDE_API_PROFILE" \
+  --providers-file "$QA_PROVIDERS_FILE" --transport batch \
+  --evidence-dir "$QA_EVIDENCE" --worker-provenance
+```
+
+The harness selects `claude-haiku-5-5` for Claude Code and `gpt-6-luna` for Codex. Use `--client codex` with its own profile. `--auth-mode subscription` requires a subscription profile and its provider login. Use `--transport tty` with a QA configuration dedicated to that run. For Podman, use `--runtime podman --runtime-endpoint local`. Add `--allow-rootful-runtime` according to the exception selected in the local guide. If Playwright is installed separately, set `CODEX_PRIMARY_RUNTIME_NODE_MODULES` to its absolute `node_modules` path. Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` to select a local Chromium.
+
+Retain `result.json`, worker provenance and dashboard evidence for each combination. For a browser failure, retain the sanitized HTML and PNG when the harness can capture the page. [Local stack setup](../local/README.md) · [Validation coverage](../../engineering/TEST_STRATEGY.md)

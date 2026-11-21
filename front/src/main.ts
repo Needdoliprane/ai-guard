@@ -5,7 +5,7 @@ import { el, button, icon } from "./dom.ts";
 import { ControlDashboard } from "./control-view.ts";
 import { HumanDashboard } from "./human-view.ts";
 import { HumanApiError } from "./human-api.ts";
-import { HumanContractError } from "./human-model.ts";
+import { HumanContractError, uuid } from "./human-model.ts";
 import { OidcSession, OidcSessionError } from "./oidc-session.ts";
 import { FRONTEND_IDENTITY } from "./frontend-version.ts";
 import { buildIdentityFooter } from "./build-identity-view.ts";
@@ -143,7 +143,8 @@ let nextView: HTMLButtonElement;
 let journalExport: HTMLButtonElement;
 let streamPill: HTMLElement;
 let notice: HTMLElement;
-let summaryNoticeClient: ApiClient | null = null;
+type NoticeOwner = { client: ApiClient; source: "summary" | "journal" };
+let noticeOwner: NoticeOwner | null = null;
 let eventSlot: HTMLElement | null = null;
 let statSlot: HTMLElement | null = null;
 let sideSlot: HTMLElement | null = null;
@@ -241,6 +242,17 @@ function footerBrand(): HTMLElement {
   return mark;
 }
 
+const controlDeadlineLabels = new Map<unknown, string>([
+  ["original_execution_deadline", "Durée d’exécution autorisée atteinte"],
+  ["observation_window", "Fenêtre d’observation écoulée"],
+]);
+const controlStopLabels = new Map<unknown, string>([
+  ["no_owned_worker", "Aucun worker sous ce contrôle"],
+  ["already_stopped", "Worker déjà hors exécution"],
+  ["engine_acknowledged", "Demande acceptée par le moteur"],
+  ["unconfirmed", "Résultat de la demande inconnu"],
+]);
+
 function labelValue(
   label: string,
   value: unknown,
@@ -266,9 +278,9 @@ function empty(
     el("p", "", description),
   );
 }
-function setNotice(message = "", kind: "error" | "info" = "error", summaryClient: ApiClient | null = null) {
+function setNotice(message = "", kind: "error" | "info" = "error", owner: NoticeOwner | null = null) {
   if (!notice) return;
-  summaryNoticeClient = message ? summaryClient : null;
+  noticeOwner = message ? owner : null;
   notice.hidden = !message;
   notice.className = `notice notice-${kind}`;
   notice.replaceChildren(
@@ -282,7 +294,7 @@ function errorMessage(error: unknown): string {
     ? error.message
     : "Connexion au collecteur impossible. Vérifiez le service local puis réessayez.";
 }
-function onError(error: unknown, summaryClient: ApiClient | null = null) {
+function onError(error: unknown, owner: NoticeOwner | null = null) {
   if (
     error instanceof ApiError &&
     (error.status === 401 || error.status === 403)
@@ -290,7 +302,7 @@ function onError(error: unknown, summaryClient: ApiClient | null = null) {
     disconnect("Votre session a expiré ou le jeton a été refusé.");
     return;
   }
-  setNotice(errorMessage(error), "error", summaryClient);
+  setNotice(errorMessage(error), "error", owner);
 }
 function login(message = "", preferredAccess: "viewer" | "human" = "viewer") {
   const currentAuthenticationView = ++authenticationView;
@@ -581,7 +593,7 @@ function disconnect(message = "") {
   sandboxesError = "";
   summaryLoading = false;
   summaryRequest++;
-  summaryNoticeClient = null;
+  noticeOwner = null;
   dialog?.close();
   dialog?.remove();
   dialog = null;
@@ -696,8 +708,8 @@ async function refreshSummary() {
   }
   integrity = i.status === "fulfilled" ? i.value : null;
   const failed = result.find((entry) => entry.status === "rejected");
-  if (failed?.status === "rejected") onError(failed.reason, current);
-  else if (summaryNoticeClient === current) setNotice();
+  if (failed?.status === "rejected") onError(failed.reason, { client: current, source: "summary" });
+  else if (noticeOwner?.client === current && noticeOwner.source === "summary") setNotice();
   if (current !== client) return;
   control?.relationshipsChanged();
   updateDetailEntityLinks();
@@ -730,10 +742,11 @@ async function loadEvents(append = false) {
     );
     nextCursor =
       typeof result.next_cursor === "number" ? result.next_cursor : null;
+    if (noticeOwner?.client === current && noticeOwner.source === "journal") setNotice();
   } catch (error) {
     if (current === client && request === eventRequest) {
       eventsError = errorMessage(error);
-      onError(error);
+      onError(error, { client: current, source: "journal" });
     }
   } finally {
     if (current === client && request === eventRequest) {
@@ -2038,6 +2051,17 @@ function showEvent(event: AuditEvent) {
         );
         return;
       }
+      const stopReason = event.result?.transport_stop_reason;
+      const observedTerminal =
+        (event.kind === "command.completed" || event.kind === "command.failed") &&
+        event.source === "runner" &&
+        event.provenance === "observed" &&
+        [event.session_id, event.data?.worker_id].every(
+          (id) => uuid(id) && id !== "00000000-0000-0000-0000-000000000000",
+        );
+      const controlDeadline = observedTerminal ? event.result?.control_deadline : null;
+      const deadlineLabel = controlDeadlineLabels.get(controlDeadline?.deadline);
+      const controlStopLabel = controlStopLabels.get(controlDeadline?.stop);
       content.replaceChildren(
         el("h3", "", "Arguments reçus"),
         rawBlock(event.command?.argv ?? null),
@@ -2046,6 +2070,14 @@ function showEvent(event: AuditEvent) {
           "detail-grid",
           labelValue("Répertoire", event.command?.cwd),
           labelValue("Code de sortie", event.result?.exit_code),
+          event.result?.timed_out === true ? labelValue("État de la commande", "Délai dépassé") : null,
+          typeof stopReason === "string" && stopReason.trim()
+            ? labelValue("Motif de l’arrêt", stopReason)
+            : null,
+          deadlineLabel ? labelValue("Échéance du contrôle", deadlineLabel, event.provenance) : null,
+          deadlineLabel && controlStopLabel
+            ? labelValue("Observation de la demande d’arrêt", controlStopLabel, event.provenance)
+            : null,
           labelValue(
             "Durée",
             event.result?.duration_ms == null

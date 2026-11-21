@@ -460,8 +460,8 @@ fn schema12_existing_backup_repeat_and_schema14_refuse_without_replacement() {
     assert!(!store.supervision_state().unwrap().active);
     drop(store);
 
-    // Change only the declared version on this closed synthetic database.
-    // A failed Store open must neither downgrade nor initialize/replace it.
+    // Declare format 14 on the closed fixture. A legacy open must require
+    // retained authority without downgrading or replacing the file.
     let db = Connection::open_with_flags(
         &source,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
@@ -476,11 +476,10 @@ fn schema12_existing_backup_repeat_and_schema14_refuse_without_replacement() {
     let identity14 = std::fs::metadata(&source).unwrap();
     let error = Store::open_existing_for_tenant(&source, "tenant-a", Redactor::new(vec![]), 10_000)
         .err()
-        .expect("unknown schema14 must be refused");
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported audit schema version"),
+        .expect("format 14 requires retained source authority");
+    assert_eq!(
+        error.downcast_ref::<review_authority::ReviewAuthorityFailure>(),
+        Some(&review_authority::ReviewAuthorityFailure::Required),
         "{error:#}"
     );
     assert_eq!(std::fs::read(&source).unwrap(), bytes14);

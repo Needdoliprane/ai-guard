@@ -1,7 +1,7 @@
 // Fixtures de frontière d’identité exclusivement : aucun code de test dans le bundle.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { readFile, mkdir } from "node:fs/promises";
+import { readFile, mkdir, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,7 +35,7 @@ const allocation = (tenant) => {
     source: { authority_id: `ONLY_${tenant.toUpperCase()}_AUTHORITY`, runtime_kind: "docker", container_id: "container", spec_hash: "a".repeat(64), provenance: "observed" } };
 };
 let bOutage = true;
-let aDenied = false;
+const aDeniedPaths = new Set();
 let summaryDeniedStatus = null;
 let detailDeniedStatus = null;
 let identityMode = "normal";
@@ -71,7 +71,7 @@ const server = createServer(async (request, response) => {
     if (tenant === "a" && detailDeniedStatus && url.pathname === `/api/v1/workers/${aId}`) {
       response.writeHead(detailDeniedStatus); response.end(); return;
     }
-    if ((tenant === "b" && bOutage) || (tenant === "a" && aDenied)) {
+    if ((tenant === "b" && bOutage) || (tenant === "a" && aDeniedPaths.has(url.pathname))) {
       response.writeHead(tenant === "a" ? 403 : 500); response.end(); return;
     }
     const mark = `ONLY_${tenant.toUpperCase()}_`;
@@ -124,32 +124,54 @@ page.on("download", () => downloads++);
 await page.addInitScript(() => {
   const nativeFetch = window.fetch;
   window.__identityHeld = [];
-  window.__identityHold = false;
+  window.__identityHold = [];
+  window.__identityDelivered = [];
   window.__identityRelease = () => {
     const held = window.__identityHeld.splice(0);
-    window.__identityHold = false;
+    window.__identityHold = [];
     held.forEach((item) => item.release());
   };
-  const hold = (path) => new Promise((release) => window.__identityHeld.push({ path, release }));
+  const hold = (path, status) => new Promise((release) => window.__identityHeld.push({ path, status, release }));
+  const select = (path) => {
+    const index = window.__identityHold.findIndex((fragment) => path.includes(fragment));
+    if (index < 0) return false;
+    window.__identityHold.splice(index, 1);
+    return true;
+  };
   window.fetch = async (...args) => {
     const response = await nativeFetch(...args);
     const a = args[1]?.headers?.Authorization === "Bearer fixture-viewer-a";
     const path = String(args[0]);
     if (a && path === "/api/stream" && response.body) {
       const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let frame = "";
       return new Response(new ReadableStream({ async pull(controller) {
         try {
           const chunk = await reader.read();
           if (chunk.done) { controller.close(); return; }
-          if (window.__identityHold) await hold(path);
+          frame += decoder.decode(chunk.value, { stream: true });
+          const complete = frame.lastIndexOf("\n\n") + 2;
+          const retained = complete >= 2 && frame.slice(0, complete).includes("ONLY_A_LATE_EVENT") && select(path);
+          if (complete >= 2) frame = frame.slice(complete);
+          if (retained) await hold(path, response.status);
           controller.enqueue(chunk.value);
+          if (retained) window.__identityDelivered.push({ path, status: response.status });
         } catch (error) { controller.error(error); }
       } }), { status: response.status, headers: response.headers });
     }
-    if (a && window.__identityHold && path !== "/api/v1/identity") {
-      const body = await response.text();
-      await hold(path);
-      return new Response(body, { status: response.status, headers: response.headers });
+    if (a && path !== "/api/v1/identity" && select(path)) {
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      await hold(path, response.status);
+      const delivered = () => window.__identityDelivered.push({ path, status: response.status });
+      return new Response(new ReadableStream({
+        pull(controller) {
+          controller.enqueue(bytes);
+          controller.close();
+          delivered();
+        },
+        cancel: delivered,
+      }, { highWaterMark: 0 }), { status: response.status, headers: response.headers });
     }
     return response;
   };
@@ -168,6 +190,34 @@ const assertNoA = async () => {
   await page.getByText("Client : tenant-b", { exact: true }).first().waitFor();
 };
 const waitHeld = async (fragment) => page.waitForFunction((path) => window.__identityHeld.some((item) => item.path.includes(path)), fragment);
+const retain = async (...paths) => page.evaluate((selected) => { window.__identityHold = selected; }, paths);
+const logout = async () => page.getByRole("button", { name: "Se déconnecter", exact: true }).click();
+const refresh = async () => page.getByRole("button", { name: "Actualiser", exact: true }).click();
+const openA = async () => {
+  await login("a");
+  await page.getByText("Flux connecté", { exact: true }).waitFor();
+  await page.getByText("741", { exact: true }).waitFor();
+};
+const releaseUnderB = async (...expected) => {
+  for (const path of expected) await waitHeld(path);
+  const held = await page.evaluate(() => window.__identityHeld.map(({ path, status }) => ({ path, status })));
+  assert.equal(held.length, expected.length, "Chaque lecture attendue d’A est retenue une fois");
+  assert.ok(held.every(({ status }) => status === (bOutage ? 200 : 403)), "Les réponses A ont le statut attendu");
+  const delivered = await page.evaluate(() => window.__identityDelivered.length);
+  await logout();
+  await login("b");
+  await page.getByText("Flux connecté", { exact: true }).waitFor();
+  if (bOutage) await page.getByText("Journal indisponible", { exact: true }).waitFor();
+  await assertNoA();
+  await page.evaluate(() => window.__identityRelease());
+  await page.waitForFunction((count) => window.__identityDelivered.length === count, delivered + held.length);
+  const order = (left, right) => left.path.localeCompare(right.path);
+  assert.deepEqual((await page.evaluate((start) => window.__identityDelivered.slice(start), delivered)).sort(order), held.sort(order),
+    "Chaque transport d’A retenu livre sa réponse sous B");
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await assertNoA();
+  return held.length;
+};
 try {
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   for (const failure of ["outage", "invalid", "runner"]) {
@@ -206,7 +256,7 @@ try {
   // La fermeture du dialogue abandonne son affichage, pas le refus du serveur.
   detailDeniedStatus = 403;
   await navigate("Workers"); await page.getByText(aId, { exact: true }).first().waitFor();
-  await page.evaluate(() => { window.__identityHold = true; });
+  await retain(`/workers/${aId}`);
   await page.getByRole("button", { name: "Détails", exact: true }).click();
   await waitHeld(`/workers/${aId}`);
   await page.keyboard.press("Escape");
@@ -214,41 +264,81 @@ try {
   await page.getByLabel("Jeton de lecture").waitFor();
   assert.equal(await page.locator(".app-shell, dialog").count(), 0, "Le refus tardif du détail fermé invalide encore sa session");
   detailDeniedStatus = null;
-  await login("a"); await page.getByText("Flux connecté", { exact: true }).waitFor();
-  for (const name of ["Workers", "Quotas", "Allocations"]) {
-    await navigate(name); await page.getByText("Lecture réussie", { exact: true }).waitFor();
-  }
-  await page.evaluate(() => { window.__identityHold = true; });
-  await navigate("Actions");
-  await page.getByRole("button", { name: "Charger les précédents", exact: true }).click();
-  await waitHeld("before=14");
-  await navigate("Vue d’ensemble");
-  await page.getByRole("button", { name: "Actualiser", exact: true }).click();
-  await waitHeld("/api/overview"); await waitHeld("/api/agents"); await waitHeld("/api/sandboxes"); await waitHeld("/api/integrity");
-  await page.getByRole("button", { name: "Exporter JSONL", exact: true }).click(); await waitHeld("/api/export");
-  await navigate("Workers");
-  await page.getByRole("button", { name: "Page suivante", exact: true }).click(); await waitHeld("workers?limit=50&cursor=");
-  await page.getByRole("button", { name: "Détails", exact: true }).click(); await waitHeld(`/workers/${aId}`);
-  await page.keyboard.press("Escape");
-  await navigate("Quotas"); await page.getByRole("button", { name: "Actualiser", exact: true }).click(); await waitHeld("/api/v1/quota");
-  await navigate("Allocations"); await page.getByRole("button", { name: "Page suivante", exact: true }).click(); await waitHeld("usage?limit=50&cursor=");
-  streams.get("a").write(`id: 15\nevent: audit\ndata: ${JSON.stringify({ seq: 15, id: "ONLY_A_LATE_EVENT", timestamp: "2026-10-29T12:00:00Z", kind: "command.completed", command: { argv: ["ONLY_A_LATE_COMMAND"] } })}\n\n`);
-  await waitHeld("/api/stream");
-  const heldPaths = await page.evaluate(() => window.__identityHeld.map((item) => item.path));
-  await page.getByRole("button", { name: "Se déconnecter", exact: true }).click();
-  await login("b");
-  await page.getByText("Client : tenant-b", { exact: true }).first().waitFor();
-  await page.getByText("Journal indisponible", { exact: true }).waitFor();
-  await assertNoA();
-  await page.evaluate(() => window.__identityRelease());
-  for (const name of ["Vue d’ensemble", "Agents", "Sandboxes", "Workers", "Quotas", "Allocations", "Actions"]) {
+  // Les trois lectures ordinaires peuvent être simultanément en vol.
+  // Réauthentifier B pour chaque groupe afin de livrer chaque réponse sous B.
+  await openA();
+  const summary = ["/api/overview", "/api/agents", "/api/sandboxes"];
+  await retain(...summary);
+  await refresh();
+  let released = await releaseUnderB(...summary);
+  for (const name of ["Agents", "Sandboxes"]) {
     await navigate(name);
-    if (["Workers", "Quotas", "Allocations"].includes(name)) await page.getByText("Données indisponibles", { exact: true }).waitFor();
-    if (name === "Actions") await page.getByText("Journal indisponible", { exact: true }).waitFor();
     await assertNoA();
   }
+  await logout();
+
+  await openA();
+  const exportGroup = ["/api/integrity", "/api/events?limit=", "/api/export?"];
+  await retain(...exportGroup);
+  await refresh();
+  await waitHeld("/api/integrity");
+  await page.getByRole("button", { name: "Exporter JSONL", exact: true }).click();
+  released += await releaseUnderB(...exportGroup);
+  await page.getByText("Non vérifiée", { exact: true }).waitFor();
   assert.equal(downloads, 0, "L’export A tardif ne télécharge rien sous B");
+  await logout();
+
+  await openA();
+  await navigate("Actions");
+  const journal = ["before=14", "/api/stream"];
+  await retain(...journal);
+  await page.getByRole("button", { name: "Charger les précédents", exact: true }).click();
+  await waitHeld("before=14");
+  streams.get("a").write(`id: 15\nevent: audit\ndata: ${JSON.stringify({ seq: 15, id: "ONLY_A_LATE_EVENT", timestamp: "2026-10-29T12:00:00Z", kind: "command.completed", command: { argv: ["ONLY_A_LATE_COMMAND"] } })}\n\n`);
+  released += await releaseUnderB(...journal);
+  await navigate("Actions");
+  await page.getByText("Journal indisponible", { exact: true }).waitFor();
+  await assertNoA();
   assert.equal(await page.getByText("Aucun événement correspondant", { exact: true }).count(), 0, "B500 ne devient pas une absence d’activité");
+  await logout();
+
+  await openA();
+  await navigate("Workers");
+  await page.getByText("Lecture réussie", { exact: true }).waitFor();
+  const workers = ["workers?limit=50&cursor=", `/workers/${aId}`];
+  await retain(...workers);
+  await page.getByRole("button", { name: "Page suivante", exact: true }).click();
+  await waitHeld(workers[0]);
+  await page.getByRole("button", { name: "Détails", exact: true }).click();
+  await waitHeld(workers[1]);
+  await page.keyboard.press("Escape");
+  released += await releaseUnderB(...workers);
+  await navigate("Workers");
+  await page.getByText("Données indisponibles", { exact: true }).waitFor();
+  await assertNoA();
+  await logout();
+
+  await openA();
+  for (const name of ["Quotas", "Allocations"]) {
+    await navigate(name);
+    await page.getByText("Lecture réussie", { exact: true }).waitFor();
+  }
+  const usage = ["/api/v1/quota", "usage?limit=50&cursor="];
+  await retain(...usage);
+  await page.getByRole("button", { name: "Page suivante", exact: true }).click();
+  await waitHeld(usage[1]);
+  await navigate("Quotas");
+  await refresh();
+  released += await releaseUnderB(...usage);
+  for (const name of ["Quotas", "Allocations"]) {
+    await navigate(name);
+    await page.getByText("Données indisponibles", { exact: true }).waitFor();
+    if (name === "Quotas") {
+      await page.getByText("Quotas inconnus", { exact: true }).waitFor();
+      assert.equal(await page.locator(".quota-list").count(), 0, "Aucun quota A ne se substitue aux quotas inconnus de B");
+    }
+    await assertNoA();
+  }
   bOutage = false;
   await navigate("Workers");
   await page.getByText(bId, { exact: true }).first().waitFor();
@@ -258,17 +348,18 @@ try {
   assert.ok((await page.locator(".control-view").textContent()).includes(bId), "Seule la dernière lecture du même client est conservée");
   await assertNoA();
   // Un ancien refus A ne doit pas déconnecter une nouvelle session B valide.
-  await page.getByRole("button", { name: "Se déconnecter", exact: true }).click();
-  await login("a"); await page.getByText("Flux connecté", { exact: true }).waitFor();
-  aDenied = true;
-  await page.evaluate(() => { window.__identityHold = true; });
-  await page.getByRole("button", { name: "Actualiser", exact: true }).click(); await waitHeld("/api/overview");
+  await logout();
+  await openA();
+  const denied = ["/api/overview", "/api/v1/federation/workers?limit=50"];
+  aDeniedPaths.add("/api/overview");
+  aDeniedPaths.add("/api/v1/federation/workers");
+  await retain(...denied);
+  await refresh();
+  await waitHeld(denied[0]);
   // La vue Workers lit le registre fédéré : c’est cette lecture de liste, refusée à A, qui est retenue.
-  await navigate("Workers"); await waitHeld("/api/v1/federation/workers?limit=50");
-  await page.getByRole("button", { name: "Se déconnecter", exact: true }).click();
+  await navigate("Workers");
   bOutage = false;
-  await login("b"); await page.getByText("Flux connecté", { exact: true }).waitFor();
-  await page.evaluate(() => window.__identityRelease());
+  const lateDenials = await releaseUnderB(...denied);
   await navigate("Workers"); await page.getByText(bId, { exact: true }).first().waitFor(); await assertNoA();
   await page.getByRole("button", { name: "Se déconnecter", exact: true }).click();
   identityMode = "long";
@@ -291,9 +382,30 @@ try {
   }
   assert.deepEqual(errors, [], "Aucune exception navigateur");
   assert.ok(requests.every((request) => request.method === "GET" && !request.path.includes("tenant_id=")), "Les credentials seuls déterminent le client");
-  process.stdout.write(`Contrôle identité réussi : identité viewer validée avant données, indisponibilité/invalide/runner refusés, refus401/403 malgré overview500, refus403 d’un détail fermé, A→B avec B500, ${heldPaths.length} réponses/flux A tardifs ignorés, pagination/détail/export, refus A403 tardif, péremption limitée au même client.\n`);
+  process.stdout.write(`Contrôle identité réussi : identité viewer validée avant données, indisponibilité/invalide/runner refusés, refus401/403 malgré overview500, refus403 d’un détail fermé, A→B avec B500, ${released} réponses/flux A tardifs ignorés, pagination/détail/export, ${lateDenials} refus A403 tardifs, péremption limitée au même client.\n`);
 } catch (error) {
-  process.stderr.write(JSON.stringify({ errors, requests, page: await page.locator("body").innerText() }, null, 2) + "\n");
+  const artifacts = join(root, "tests", "artifacts");
+  const [details] = await Promise.allSettled([
+    page.evaluate(() => ({
+      barriers: {
+        pending: window.__identityHold,
+        held: window.__identityHeld.map(({ path, status }) => ({ path, status })),
+        delivered: window.__identityDelivered,
+      },
+      page: document.body.innerText,
+    })),
+    (async () => {
+      await mkdir(artifacts, { recursive: true });
+      const html = (await page.content()).replaceAll(/fixture-viewer-[ab]/g, "[fixture]");
+      await writeFile(join(artifacts, "identity-failure.html"), html, { mode: 0o600 });
+    })(),
+    (async () => {
+      await mkdir(artifacts, { recursive: true });
+      await page.screenshot({ path: join(artifacts, "identity-failure.png"), timeout: 3000 });
+    })(),
+  ]);
+  const summary = details.status === "fulfilled" ? details.value : { page: "indisponible" };
+  process.stderr.write(JSON.stringify({ errors, requests, ...summary }, null, 2) + "\n");
   throw error;
 } finally {
   await browser.close(); server.closeAllConnections(); await new Promise((resolve) => server.close(resolve));

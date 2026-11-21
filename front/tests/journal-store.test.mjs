@@ -65,6 +65,104 @@ test("un lot en direct s’insère en tête sans doublon", async () => {
   store.close();
 });
 
+test("une panne de pagination conserve son curseur et n’interrompt pas le direct", async () => {
+  const { store, source } = open((selection) => {
+    if (!selection.cursor) return recentPage(newestFirst(10, 5), { has_more: true, next_cursor: "older-1" });
+    if (source.calls.filter((call) => call.selection.cursor === "older-1").length === 1)
+      throw new HumanApiError(503, "identity_unavailable", "The cursor control is unavailable.", "retry");
+    return recentPage(newestFirst(5, 5), { live_cursor: null });
+  });
+  await store.open();
+  const stream = source.streams[0]; stream.onStatus("live");
+  await store.loadOlder();
+  assert.equal(store.state.error, null);
+  assert.equal(store.state.olderError?.retry, "same_page");
+  assert.equal(store.state.hasOlder, true);
+  assert.deepEqual(numbers(store), [10, 9, 8, 7, 6]);
+  stream.onPage(eventsPage([eventOf(11, session)]), "position-11");
+  assert.equal(store.state.olderError?.kind, "unreachable");
+  assert.equal(module.journalAnnouncement(store.state), "Journal : page plus ancienne indisponible, dernières lignes conservées. Direct connecté.");
+  await store.loadOlder();
+  assert.equal(store.state.olderError, null);
+  assert.deepEqual(numbers(store), [11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]);
+  assert.deepEqual(source.calls.filter((call) => call.name === "recentEvents").map((call) => call.selection.cursor),
+    [undefined, "older-1", "older-1"]);
+  assert.equal(source.streams.length, 1);
+  assert.equal(stream.signal.aborted, false);
+  store.close();
+});
+
+test("un curseur invalide, un refus et un snapshot injoignable ne rejouent pas la page", async () => {
+  const cursorError = new HumanApiError(400, "invalid_cursor", "Cursor invalid.", "select_context");
+  const denied = new HumanApiError(403, "permission_denied", "Page refused.", "review_permissions");
+  const unavailable = new HumanApiError(503, "identity_unavailable", "The cursor control is unavailable.", "retry");
+  for (const [issue, profile, phase] of [[cursorError, {}, "ready"], [denied, {}, "forbidden"],
+    [unavailable, { stream_mode: "snapshot_only", live_cursor: null }, "error"]]) {
+    let newestUnavailable = false;
+    const { store, source } = open((selection) => {
+      if (selection.cursor) throw issue;
+      if (newestUnavailable) throw unavailable;
+      return recentPage(newestFirst(10, 5), { has_more: true, next_cursor: "older-1", ...profile });
+    });
+    await store.open(); await store.loadOlder();
+    assert.equal(store.state.phase, phase);
+    assert.equal(store.state.items.length, phase === "ready" ? 5 : 0);
+    if (issue === cursorError) {
+      assert.equal(store.state.olderError?.retry, "from_newest");
+      assert.equal(store.state.hasOlder, true, "le curseur refusé n’invalide pas le constat sur la page lue");
+      const before = source.calls.length;
+      await store.loadOlder();
+      assert.equal(source.calls.length, before, "le curseur refusé n’est jamais demandé de nouveau");
+      newestUnavailable = true;
+      await store.reload();
+      assert.equal(store.state.olderError?.retry, "from_newest", "une relecture en échec ne rétablit pas la position");
+      await store.loadOlder();
+      assert.equal(source.calls.length, before + 1);
+      newestUnavailable = false;
+      await store.reload();
+      assert.equal(store.state.olderError, null);
+      assert.equal(source.calls.at(-2).selection.cursor, undefined);
+    } else assert.equal(store.state.olderError, null);
+    if (phase === "forbidden") assert.equal(source.streams[0].signal.aborted, true);
+    if (profile.stream_mode) assert.equal(source.streams.length, 0);
+    store.close();
+  }
+});
+
+test("le direct peut atteindre exactement la borne pendant la reprise d’une page plus ancienne", async () => {
+  let read = 0;
+  const delayed = deferred();
+  const { store, source } = open((selection) => {
+    if (selection.cursor === "older-9") {
+      if (read === 10) { read++; throw new HumanApiError(503, "identity_unavailable", "Cursor control unavailable.", "retry"); }
+      return delayed.promise;
+    }
+    const index = read++;
+    return recentPage(newestFirst(2000 - index * 100, index === 9 ? 99 : 100), {
+      has_more: true, next_cursor: index === 9 ? "older-9" : `older-${index}`, ...(selection.cursor ? { live_cursor: null } : {}),
+    });
+  });
+  await store.open();
+  for (let page = 0; page < 9; page++) await store.loadOlder();
+  assert.equal(store.state.items.length, 999);
+  await store.loadOlder();
+  assert.equal(store.state.olderError?.retry, "same_page");
+  const pending = store.loadOlder();
+  source.streams[0].onStatus("live");
+  source.streams[0].onPage(eventsPage([eventOf(2001, session)]), "position-2001");
+  assert.equal(store.state.items.length, 1000);
+  assert.equal(store.state.trimmed, true);
+  assert.equal(store.state.hasOlder, false);
+  delayed.resolve(recentPage(newestFirst(1001, 100), { live_cursor: null }));
+  await pending;
+  assert.equal(store.state.olderError, null);
+  assert.equal(numbers(store).at(-1), 1002);
+  const before = source.calls.length;
+  await store.loadOlder();
+  assert.equal(source.calls.length, before);
+  store.close();
+});
+
 test("au-delà de 1 000 événements les plus anciens sortent et la lecture plus ancienne est annulée", async () => {
   present();
   let page = 0;

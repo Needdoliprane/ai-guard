@@ -4,6 +4,7 @@
 import { button, el, icon } from "./dom.ts";
 import { announce, place, replaceIfChanged, setText, signatureOf, syncRows } from "./dom-sync.ts";
 import { formatDate } from "./model.ts";
+import { journalPolicyEventLabel } from "./journal-policy-event.ts";
 import { JOURNAL_MAX_EVENTS, JournalStore, journalAnnouncement } from "./journal-store.ts";
 import { FILTER_ANNOUNCE_MS, SEARCH_MAX_LENGTH, defaultEventFilter, filterEvents, resourceKindLabel, shownOfLoaded } from "./supervision-model.ts";
 import "./supervision.css";
@@ -136,14 +137,13 @@ export class JournalView {
     head.setAttribute("role", "rowgroup"); this.#rows.setAttribute("role", "rowgroup"); head.firstElementChild?.setAttribute("role", "row");
     this.#table.append(this.#caption, head, this.#rows);
   }
-  /**
-   * Reads from the newest again, for the person. While a read is in flight this starts nothing: neither a
-   * second read nor the replacement of the one in flight.
-   */
+  /** Retries an older page if it failed temporarily, or reads the newest events. One read at a time. */
   #readAgain(retry = false): Promise<void> {
     if (this.#store.state.busy) return Promise.resolve();
     this.#retrying = retry;
-    const read = this.#store.reload(); this.#sayAfter(read); return read;
+    const state = this.#store.state;
+    const read = retry && !state.error && state.olderError?.retry === "same_page" ? this.#store.loadOlder() : this.#store.reload();
+    this.#sayAfter(read); return read;
   }
   #limitTo(resource: ResourceRef | null) {
     this.#preferences.resource = resource; this.#preferences.rendered = JOURNAL_RENDER_STEP;
@@ -168,6 +168,9 @@ export class JournalView {
     }
   }
   #say(text: string) { announce(this.#announce, text); }
+  #readError(state: JournalState) {
+    return state.error?.message ?? (state.olderError ? `Page plus ancienne indisponible. ${state.olderError.message}` : null);
+  }
   #result(state: JournalState) { return `${shownOfLoaded("events", filterEvents(state.items, this.#preferences.filter).length, state.items.length)}.`; }
   /** Says how many loaded events match, once the person stopped typing or choosing. Never called by a read or a live batch. */
   #announceResult() {
@@ -205,9 +208,10 @@ export class JournalView {
     if (sentence !== this.#stateSaid) { this.#stateSaid = sentence; this.#stateSpoken = true; parts.push(sentence); }
     if (this.#resultDue) {
       this.#resultDue = false; clearTimeout(this.#resultTimer);
-      if (state.phase === "ready" && !state.error) parts.push(this.#result(state));
+      const error = this.#readError(state);
+      if (state.phase === "ready" && !error) parts.push(this.#result(state));
       // The read failed and neither a new state nor a new alert told it: the error still displayed is said again.
-      else if (!this.#stateSpoken && !this.#alerted) parts.push(state.error?.message ?? sentence);
+      else if (!this.#stateSpoken && !this.#alerted) parts.push(error ?? sentence);
     }
     if (parts.length) this.#say(parts.join(" "));
   }
@@ -227,13 +231,15 @@ export class JournalView {
       "Les plus récents en tête · les nouveaux événements s’ajoutent en haut de la liste");
     const read = state.phase === "loading" ? "Lecture en cours…" : state.phase === "forbidden" ? "Lecture refusée" : state.phase === "unavailable" ? "Lecture récente indisponible" :
       state.phase === "refused" ? "Ressource non accordée" : state.phase === "error" ? state.error?.kind === "unreachable" ? "Contrôle injoignable" : "Données indisponibles" :
-      state.phase === "idle" ? "Lecture requise" : state.stale ? "Données périmées · dernière lecture conservée" : state.busy ? "Lecture en cours…" : "Lecture réussie";
+      state.phase === "idle" ? "Lecture requise" : state.stale ? "Données périmées · dernière lecture conservée" : state.busy ? "Lecture en cours…" :
+      state.olderError ? "Page plus ancienne indisponible" : "Lecture réussie";
     const detail = state.live === "live" ? `${state.received} événement(s) reçu(s) depuis la dernière lecture` :
       state.live === "refused" || state.live === "off" || state.live === "unavailable" ? state.liveMessage :
       state.live === "retrying" ? `${state.liveMessage ? `${state.liveMessage} ` : ""}Les événements manquants seront repris à la reconnexion, sans doublon.` :
       state.live === "suspended" ? "Le retour sur l’onglet relit depuis les plus récents." : "";
+    const readError = this.#readError(state);
     replaceIfChanged(this.#sourcesBox,
-      el("span", "sv-source", el("strong", "", "Journal"), badge(read, state.error || state.stale || state.phase === "forbidden" ? "amber" : "neutral"),
+      el("span", "sv-source", el("strong", "", "Journal"), badge(read, readError || state.stale || state.phase === "forbidden" ? "amber" : "neutral"),
         el("span", "muted", state.loadedAt === null ? snapshot ? "Aucune lecture réussie conservée" : "Aucune lecture réussie" :
           `${snapshot ? "Dernière page lue le" : "Lu le"} ${formatDate(new Date(state.loadedAt).toISOString(), true)}`),
         snapshot && state.receipt ? el("span", "muted", `Lecture auditée le ${formatDate(state.receipt.received_at, true)} · reçu ${state.receipt.audit_event_id}`) : null),
@@ -242,8 +248,9 @@ export class JournalView {
     const error = state.phase === "forbidden" ?
       el("div", "control-error sv-error", el("p", "", "Consultation refusée par le contrôle. Les événements affichés ont été retirés. Relisez vos accès puis sélectionnez un contexte actuellement autorisé."),
         action("Relire mes accès", "jr-access", () => this.#host.onReviewAccess())) :
-      state.error ? el("div", "control-error sv-error", icon("alert"), el("p", "", state.error.message),
-        state.phase === "unavailable" || this.#host.reads.readBudgetStopped ? null : action("Réessayer", "jr-retry", () => { void this.#readAgain(true); })) : null;
+      readError ? el("div", "control-error sv-error", icon("alert"), el("p", "", readError),
+        state.phase === "unavailable" || this.#host.reads.readBudgetStopped ? null :
+          action(state.olderError?.retry === "from_newest" ? "Reprendre depuis les plus récents" : "Réessayer", "jr-retry", () => { void this.#readAgain(true); })) : null;
     error?.setAttribute("role", "alert");
     if (!state.busy) this.#retrying = false;
     // The store forgets an error when a read starts. The line « Réessayer » was activated from stays until
@@ -276,13 +283,20 @@ export class JournalView {
   #row(item: HumanEvent, limited: boolean) {
     const meta = item.metadata; const cell = (label: string, ...children: (Node | string | null)[]) => { const node = el("td", "", ...children); node.dataset.label = label; node.setAttribute("role", "cell"); return node; };
     const received = formatDate(meta.received_at, true); const stamped = formatDate(meta.timestamp, true);
+    const policyLabel = journalPolicyEventLabel(meta);
+    const typeSource = policyLabel
+      ? el("p", "muted", `Registre des politiques · Source ${meta.source} · `, el("code", "mono", meta.kind))
+      : el("p", "muted", `Source ${meta.source}`);
+    const decision = meta.decision
+      ? badge(decisionLabel[meta.decision], meta.decision === "allow" ? "teal" : meta.decision === "deny" ? "red" : "amber")
+      : el("p", "muted", policyLabel ? "Aucune décision de connexion" : "Non fournie");
     // Compact controls with their full purpose as accessible name: a dense journal stays two lines per event.
     const compact = (label: string, purpose: string, key: string, call: () => void) => { const node = action(label, key, call); node.setAttribute("aria-label", purpose); node.title = purpose; return node; };
     const tr = el("tr", "", cell("Reçu le", el("p", "mono", received), stamped === received ? null : el("p", "muted", `Source : ${stamped}`)),
-      cell("Type", el("p", "", el("strong", "", meta.kind)), el("p", "muted", `Source ${meta.source}`)),
+      cell("Type", el("p", "", el("strong", "", policyLabel ?? meta.kind)), typeSource),
       cell("Ressource", el("p", "", resourceKindLabel[meta.resource.kind]), el("p", "mono sv-id", meta.resource.resource_id)),
-      cell("Provenance", el("p", "muted", `${meta.provenance} · couverture ${meta.coverage}`)),
-      cell("Décision", meta.decision ? badge(decisionLabel[meta.decision], meta.decision === "allow" ? "teal" : meta.decision === "deny" ? "red" : "amber") : el("p", "muted", "Non fournie")),
+      cell("Provenance", el("p", "muted", `${meta.provenance} · couverture ${meta.coverage}${policyLabel ? " du registre" : ""}`)),
+      cell("Décision", decision),
       cell("Action", el("div", "sv-row-actions",
         limited ? null : compact("Limiter", "Limiter à cette ressource", `jr-limit-${meta.id}`, () => this.#limitTo({ kind: meta.resource.kind, resource_id: meta.resource.resource_id })),
         meta.resource.kind === "session" && this.#host.openWorkers ? compact("Workers", "Voir les workers de cette session", `jr-workers-${meta.id}`, () => this.#host.openWorkers?.(meta.resource.resource_id)) : null)));
@@ -291,13 +305,16 @@ export class JournalView {
   #renderList() {
     const state = this.#store.state; const resource = state.resource; const limited = !!resource;
     const snapshot = state.streamMode === "snapshot_only";
+    const olderNeedsReload = state.olderError?.retry === "from_newest";
+    const canLoadOlder = state.hasOlder && !olderNeedsReload;
     replaceIfChanged(this.#limit, resource ? el("p", "", "Limité côté serveur à ", el("strong", "", `${resourceKindLabel[resource.kind]} `), el("span", "mono sv-id", resource.resource_id), ".") :
       el("p", "muted", "Toutes les ressources autorisées. « Limiter » relit le journal d’une seule ressource côté serveur."),
       resource ? action("Retirer la limite", "jr-unlimit", () => this.#limitTo(null)) : null);
     const filtered = filterEvents(state.items, this.#preferences.filter); const shown = filtered.slice(0, this.#preferences.rendered);
     setText(this.#summary, state.phase === "ready" ? `${shownOfLoaded("events", filtered.length, state.items.length)} · ${
       state.trimmed ? `fenêtre de ${JOURNAL_MAX_EVENTS} événements atteinte : relisez depuis les plus récents ou limitez à une ressource pour remonter plus loin` :
-        state.hasOlder ? "des événements plus anciens existent au contrôle" : "début de la sélection autorisée atteint"}${shown.length < filtered.length ? ` · ${shown.length} lignes rendues` : ""}` :
+        olderNeedsReload ? "relisez depuis les plus récents pour poursuivre la lecture de l’historique" :
+          state.hasOlder ? "des événements plus anciens existent au contrôle" : "début de la sélection autorisée atteint"}${shown.length < filtered.length ? ` · ${shown.length} lignes rendues` : ""}` :
       "Aucun événement chargé : contenu de la sélection inconnu.");
     // An event never changes: a row keeps its node, and a live batch only inserts the rows it brings.
     syncRows(this.#rows, state.phase === "ready" ? shown.map((item) => ({ key: item.metadata.id, signature: `${signatureOf(item)}\n${limited}`, build: () => this.#row(item, limited) })) : []);
@@ -310,14 +327,14 @@ export class JournalView {
       !state.items.length ? empty("Aucun événement autorisé à cette lecture", snapshot ?
         "Aucune trace reçue pour cette sélection à cette lecture. Actualisez explicitement pour relire l’historique." :
         "Aucune trace reçue pour cette sélection autorisée. Les événements à venir apparaîtront ici tant que le direct est connecté.") :
-      !filtered.length ? empty("Aucun événement chargé ne correspond", state.hasOlder ? "Des événements plus anciens existent au contrôle : élargissez les filtres ou chargez-en davantage." : "Modifiez la recherche ou les filtres.") : null;
+      !filtered.length ? empty("Aucun événement chargé ne correspond", canLoadOlder ? "Des événements plus anciens existent au contrôle : élargissez les filtres ou chargez-en davantage." : "Modifiez la recherche ou les filtres.") : null;
     replaceIfChanged(this.#empty, notice);
     let reveal = false;
     if (state.phase === "ready") {
       setText(this.#renderMore, `Afficher ${Math.min(JOURNAL_RENDER_STEP, filtered.length - shown.length)} lignes de plus`);
       reveal = this.#older.getAttribute("aria-disabled") === "true" && !state.busy && document.activeElement === this.#older;
       this.#older.setAttribute("aria-disabled", String(state.busy)); this.#older.disabled = this.#host.reads.readBudgetStopped;
-      place(this.#footer, shown.length < filtered.length ? this.#renderMore : null, state.hasOlder ? this.#older : null, !state.hasOlder && !state.trimmed ? this.#end : null);
+      place(this.#footer, shown.length < filtered.length ? this.#renderMore : null, canLoadOlder ? this.#older : null, !state.hasOlder && !state.trimmed ? this.#end : null);
     }
     place(this.#body, notice ? this.#empty : this.#table, state.phase === "ready" ? this.#footer : null);
     // The events it loaded pushed the control down: it kept the focus, so it stays in sight for the next page.

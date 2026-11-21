@@ -27,6 +27,8 @@ export interface JournalState {
   /** Newest first, without duplicate, at most JOURNAL_MAX_EVENTS. */
   items: HumanEvent[];
   loadedAt: number | null; stale: boolean; busy: boolean; error: SourceError | null;
+  /** A failed older page. A refused cursor has to be replaced by a new read from the newest. */
+  olderError: (SourceError & { retry: "same_page" | "from_newest" }) | null;
   /** Older authorized events exist and can be read below this window. */
   hasOlder: boolean;
   /** The window reached its bound: its oldest events left it and the older position was dropped. */
@@ -50,10 +52,12 @@ export function journalAnnouncement(state: JournalState): string | null {
     state.phase === "unavailable" ? "Journal : lecture récente indisponible sur ce contrôle." :
     state.phase === "refused" ? "Journal : ressource non accordée." : "Journal : lecture en échec, contenu inconnu.";
   const live = { off: "Direct arrêté.", live: "Direct connecté.", retrying: "Direct déconnecté, reconnexion en cours.", suspended: "Direct suspendu, onglet masqué.", refused: "Direct refusé.", unavailable: SNAPSHOT_DIRECT }[state.live];
-  return `Journal : ${state.stale ? "données périmées, dernière lecture conservée" : "lecture réussie"}. ${live}`;
+  const read = state.stale ? "données périmées, dernière lecture conservée" :
+    state.olderError ? "page plus ancienne indisponible, dernières lignes conservées" : "lecture réussie";
+  return `Journal : ${read}. ${live}`;
 }
 const initial = (resource: ResourceRef | null): JournalState => ({ phase: "idle", resource, items: [], loadedAt: null, stale: false, busy: false, error: null,
-  hasOlder: false, trimmed: false, live: "off", liveMessage: "", streamMode: null, received: 0, receipt: null, closed: false });
+  olderError: null, hasOlder: false, trimmed: false, live: "off", liveMessage: "", streamMode: null, received: 0, receipt: null, closed: false });
 
 export class JournalStore {
   #reads: JournalReads; #clock: SupervisionClock; #onChange: () => void;
@@ -96,7 +100,7 @@ export class JournalStore {
     const state = this.#state;
     const profile = clearProfile ? null : state.streamMode;
     state.items = []; state.loadedAt = null; state.receipt = null; state.hasOlder = false;
-    state.streamMode = profile; state.received = 0; state.trimmed = false; state.stale = false; this.#older = null;
+    state.streamMode = profile; state.received = 0; state.trimmed = false; state.stale = false; state.olderError = null; this.#older = null;
     this.#stopStream(profile === "snapshot_only" ? "unavailable" : "off", profile === "snapshot_only" ? SNAPSHOT_DIRECT : "");
   }
 
@@ -111,6 +115,8 @@ export class JournalStore {
     this.#stopStream(state.streamMode === "snapshot_only" ? "unavailable" : "off", state.streamMode === "snapshot_only" ? SNAPSHOT_DIRECT : "");
     this.#retries = 0; this.#position = null;
     state.busy = true; state.error = null;
+    // A failed re-read still cannot replace a rejected cursor.
+    if (state.olderError?.retry === "same_page") state.olderError = null;
     if (!state.items.length) state.phase = "loading";
     this.#publish();
     try {
@@ -118,6 +124,7 @@ export class JournalStore {
       if (generation !== this.#generation || state.closed) return;
       state.phase = "ready"; state.items = page.items; state.loadedAt = this.#clock.now(); state.stale = false; state.trimmed = false;
       state.received = 0; state.receipt = page.read_receipt; state.hasOlder = page.has_more; this.#older = page.next_cursor;
+      state.olderError = null;
       state.streamMode = page.stream_mode ?? null;
       state.busy = false;
       if (state.streamMode === "snapshot_only") this.#stopStream("unavailable", SNAPSHOT_DIRECT);
@@ -143,12 +150,12 @@ export class JournalStore {
       if (state.streamMode === "snapshot_only") this.#withdraw(false);
       if (error instanceof HumanRecentUnavailable) {
         // Never open the stream without a start position: it would replay the whole authorized history.
-        state.phase = "unavailable"; state.items = []; state.hasOlder = false; this.#older = null;
+        state.phase = "unavailable"; state.items = []; state.hasOlder = false; state.olderError = null; this.#older = null;
         state.error = { kind: "server", message: error.message };
       } else if (error instanceof HumanApiError && error.status === 403) {
         this.#withdraw(); state.phase = "forbidden";
       } else if (error instanceof HumanApiError && error.code === "not_found") {
-        state.phase = "refused"; state.items = []; state.hasOlder = false; this.#older = null;
+        state.phase = "refused"; state.items = []; state.hasOlder = false; state.olderError = null; this.#older = null;
         state.error = { kind: "server", message: "Aucune ressource autorisée de ce contexte ne correspond à cette limite. Le contrôle ne distingue pas une ressource absente d’une ressource non accordée." };
       } else {
         state.error = sourceError(error); state.stale = state.items.length > 0; state.phase = state.items.length ? "ready" : "error";
@@ -217,35 +224,43 @@ export class JournalStore {
     const fresh = batch.filter((item) => !known.has(item.metadata.id) && known.add(item.metadata.id)).reverse();
     if (!fresh.length) return;
     state.items = [...fresh, ...state.items]; state.received += fresh.length;
-    if (state.items.length > JOURNAL_MAX_EVENTS) {
+    if (state.items.length > JOURNAL_MAX_EVENTS || state.items.length === JOURNAL_MAX_EVENTS && state.hasOlder) {
       state.items = state.items.slice(0, JOURNAL_MAX_EVENTS);
-      // The position of older pages no longer follows the window: restart from the newest to read further back.
-      state.trimmed = true; state.hasOlder = false; this.#older = null;
+      // The window can no longer accept an older page. Forget its position and any pending attempt to retry it.
+      state.trimmed = true; state.hasOlder = false; state.olderError = null; this.#older = null;
     }
   }
 
   async loadOlder(): Promise<void> {
     const state = this.#state;
     if (state.closed || state.busy || !this.#older || state.items.length >= JOURNAL_MAX_EVENTS) return;
-    const generation = this.#generation; state.busy = true; this.#publish();
+    const cursor = this.#older;
+    const generation = this.#generation; state.busy = true; state.olderError = null; this.#publish();
     try {
-      const page = await this.#reads.recentEvents(this.#selection(this.#older), this.#abort.signal);
-      if (generation !== this.#generation || state.closed) return;
+      const page = await this.#reads.recentEvents(this.#selection(cursor), this.#abort.signal);
+      if (generation !== this.#generation || state.closed || cursor !== this.#older) return;
       if ((page.stream_mode ?? null) !== state.streamMode) throw new HumanContractError();
       const known = new Set(state.items.map((item) => item.metadata.id));
       const merged = [...state.items, ...page.items.filter((item) => !known.has(item.metadata.id))];
       // Events cut off by the bound are a partial coverage even when this page was the last one of the control.
       const cut = merged.length > JOURNAL_MAX_EVENTS;
       state.items = merged.slice(0, JOURNAL_MAX_EVENTS);
-      this.#older = cut ? null : page.next_cursor; state.hasOlder = page.has_more && state.items.length < JOURNAL_MAX_EVENTS;
+      state.hasOlder = page.has_more && state.items.length < JOURNAL_MAX_EVENTS;
+      this.#older = state.hasOlder ? page.next_cursor : null;
       state.trimmed = cut || page.has_more && state.items.length >= JOURNAL_MAX_EVENTS; state.error = null;
       if (state.streamMode === "snapshot_only") { state.receipt = page.read_receipt; state.loadedAt = this.#clock.now(); }
     } catch (error) {
       if (this.#settled(error, generation)) return;
       if (error instanceof HumanApiError && error.status === 403) { this.#withdraw(); state.phase = "forbidden"; }
-      else {
-        if (state.streamMode === "snapshot_only") { this.#withdraw(false); state.phase = "error"; }
-        state.error = sourceError(error);
+      else if (cursor === this.#older) {
+        const issue = sourceError(error);
+        const retryable = error instanceof HumanApiError ? error.retryAction === "retry" :
+          error instanceof TypeError || error instanceof DOMException && error.name === "TimeoutError";
+        if (state.streamMode === "snapshot_only") { this.#withdraw(false); state.phase = "error"; state.error = issue; }
+        else if (error instanceof HumanApiError && error.code === "invalid_cursor") {
+          this.#older = null; state.olderError = { ...issue, retry: "from_newest" };
+        } else if (retryable) state.olderError = { ...issue, retry: "same_page" };
+        else state.error = issue;
       }
     } finally {
       if (generation === this.#generation) { state.busy = false; this.#publish(); }
@@ -254,7 +269,8 @@ export class JournalStore {
   /** Restricts the journal to one resource on the server, or removes the restriction. */
   setResource(resource: ResourceRef | null): Promise<void> {
     if (this.#state.closed) return Promise.resolve();
-    this.#state.resource = resource; this.#state.items = []; this.#state.hasOlder = false; this.#state.loadedAt = null; this.#older = null;
+    this.#state.resource = resource; this.#state.items = []; this.#state.hasOlder = false; this.#state.loadedAt = null;
+    this.#state.olderError = null; this.#older = null;
     if (this.#state.streamMode === "snapshot_only") { this.#state.receipt = null; this.#state.received = 0; }
     return this.reload();
   }

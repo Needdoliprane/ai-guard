@@ -277,6 +277,77 @@ async fn saturated_neighbor_keeps_local_identity_partial_and_preserves_its_conte
     assert_eq!(recovered["contexts"].as_array().unwrap().len(), 2);
 }
 
+#[tokio::test]
+async fn ordinary_journal_distinguishes_invalid_filters_from_read_failure() {
+    let directory = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let path = directory.path().join("audit.sqlite");
+    let store =
+        Arc::new(Store::open_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 100).unwrap());
+    store.append(Event::new("test.journal_read")).unwrap();
+    let last = store.append(Event::new("test.journal_read")).unwrap();
+    let viewer = "b".repeat(48);
+    let state = GatewayState::for_tenants(
+        vec![TenantGateway {
+            tenant_id: "tenant-a".into(),
+            store,
+            runner_token: "a".repeat(48),
+            viewer_token: viewer.clone(),
+        }],
+        Policy::default(),
+        None,
+        Redactor::new(vec![]),
+    )
+    .unwrap();
+    let tenant = state.tenants[0].clone();
+    let router = gateway_router(state);
+    for route in ["/api/events", "/api/v1/events"] {
+        let (status, page) = human_get(&router, &viewer, &format!("{route}?limit=1"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(page["items"].as_array().unwrap().len(), 1);
+        assert_eq!(page["items"][0]["seq"], last.seq);
+        assert_eq!(page["next_cursor"], last.seq);
+        let (status, next_page) = human_get(
+            &router,
+            &viewer,
+            &format!("{route}?before={}", last.seq),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(next_page["items"][0]["seq"].as_i64().unwrap() < last.seq);
+        for filter in [
+            "from=invalid".into(),
+            "to=invalid".into(),
+            format!("q={}", "x".repeat(257)),
+        ] {
+            let (status, body) =
+                human_get(&router, &viewer, &format!("{route}?{filter}"), None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body, json!({"error": "Filtre invalide."}));
+        }
+        let (status, _) =
+            human_get(&router, "unknown", &format!("{route}?from=invalid"), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    let db = rusqlite::Connection::open(path).unwrap();
+    db.execute(
+        "UPDATE events SET hash='fixture-invalid' WHERE seq=?1",
+        [last.seq],
+    )
+    .unwrap();
+    assert!(!tenant.store.integrity().unwrap().valid);
+    // Isolate the error mapping in the read handler from the authentication
+    // step, which can also reject an unavailable Store.
+    let (status, _) = list_events(ReadIdentity(tenant, "viewer"), Query(EventQuery::default()))
+        .await
+        .unwrap_err();
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn viewer_integrity_store_work_stays_off_runtime_worker() {
     let directory = tempfile::Builder::new()

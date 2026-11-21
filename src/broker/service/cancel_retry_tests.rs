@@ -1879,13 +1879,12 @@ async fn recovery_diagnostic_does_not_create_a_missing_profile_namespace() {
         .registry
         .profile(scope.profile_id())
         .unwrap();
-    assert!(matches!(
-        fixture
-            .service
-            .recovery_status_for_profile(profile, &scope, fixture.operation)
-            .await,
-        Err(BrokerErrorCodeV1::InvalidInput)
-    ));
+    let refusal = fixture
+        .service
+        .recovery_status_for_profile(profile, &scope, fixture.operation)
+        .await
+        .err();
+    assert_eq!(refusal, Some(BrokerErrorCodeV1::NeedsReconciliation));
     assert_eq!(fs::read_dir(&empty_root).unwrap().count(), 0);
 }
 

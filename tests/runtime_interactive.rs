@@ -1,17 +1,44 @@
 //! Real Docker qualification of the interactive CLI through an isolated PTY.
 //! Ignored by default: it starts retained worker instances on an explicitly
 //! selected local daemon. It never invokes a provider or uses real credentials.
+//!
+//! To replay the controller deadline, use the local image containing the
+//! `wait` probe built with `tests/runtime_fixtures/interactive.Dockerfile`.
+//! Verify the cached base and build the image offline as documented in
+//! `docs/engineering/evidence/2026-10-30/interactive-cli/README.md`.
+//! To use a different local worker base built from the repository, verify the
+//! image ID and set its local tag as `FROM` in a private copy of the fixture
+//! Dockerfile before the offline build. Record the resulting probe image ID.
+//! Use the image's full `sha256:…` ID, a local Unix socket and the absolute
+//! Docker executable. Set `AGENTSANDBOX_TEST_ALLOW_ROOTFUL=1` only for an
+//! approved rootful daemon. From the candidate's root:
+//!
+//! ```sh
+//! AGENTSANDBOX_TEST_RUNTIME_PROGRAM="$QA_DOCKER_BIN" \
+//! AGENTSANDBOX_TEST_RUNTIME_ENDPOINT="$QA_DOCKER_ENDPOINT" \
+//! AGENTSANDBOX_TEST_INTERACTIVE_IMAGE="$QA_PROBE_IMAGE_ID" \
+//! cargo test --locked --offline -j1 --release --test runtime_interactive \
+//!   docker_interactive_records_controller_deadline_and_owned_stop_outcome \
+//!   -- --ignored --exact --nocapture --test-threads=1
+//! ```
+//!
+//! The verdict reports `engine_acknowledged` for a controller stop acknowledged
+//! by Docker. It reports `already_stopped` only when the TTY timer's own
+//! deadline was also recorded and the same worker was observed terminal.
 use agentsandbox::{
     api::{GatewayState, TenantGateway, gateway_router},
     audit::{EventQuery, Store},
     control::{
-        AllocationProvenanceV1, QuotaPolicyV1, RuntimeStatusV1, WorkerMutationV1, WorkerStateV1,
-        WorkerTransitionV1,
+        AllocationProvenanceV1, NetworkV1, QuotaPolicyV1, RuntimeStatusV1, WorkerMutationV1,
+        WorkerStateV1, WorkerTransitionV1,
     },
     operations::initialize_config,
     policy::Policy,
     redaction::Redactor,
-    runner::{AuditClient, read_token},
+    runner::{
+        AuditClient, CleanupState, ControlDeadlineKind, ControlStopObservation, RunSummary,
+        read_token,
+    },
 };
 use anyhow::{Context, Result, ensure};
 use axum::{
@@ -27,7 +54,10 @@ use std::{
     io::{Read, Write},
     os::{
         fd::{AsRawFd, FromRawFd, OwnedFd},
-        unix::{fs::PermissionsExt, process::CommandExt},
+        unix::{
+            fs::{FileTypeExt, PermissionsExt},
+            process::CommandExt,
+        },
     },
     process::{Command, ExitStatus, Stdio},
     sync::{
@@ -41,7 +71,8 @@ use std::{
 
 const DOCKER: &str = "/opt/homebrew/bin/docker";
 const ENDPOINT: &str = "unix:///Users/louis/.docker/run/docker.sock";
-const DEADLINE: Duration = Duration::from_secs(150);
+const HOST_DRIVER_WATCHDOG: Duration = Duration::from_secs(140);
+const HOST_DRIVER_REPORT_GRACE: Duration = Duration::from_secs(10);
 const PTY_CAPTURE_LIMIT: usize = 2 * 1024 * 1024;
 const PTY_PUMP_READ_BUDGET: usize = 4 * 1024;
 const PTY_FLOOD_BYTES: usize = 64 * 1024 * 1024;
@@ -50,6 +81,7 @@ const PTY_FLOOD_TEST_READ_BUDGET: usize = 64;
 
 #[derive(Clone, Debug)]
 struct TerminalFacts {
+    container_id: String,
     logs_none: bool,
     log_options_empty: bool,
     tty: bool,
@@ -57,18 +89,24 @@ struct TerminalFacts {
     stdin_once: bool,
     running: bool,
     exit_code: i64,
+    oom_killed: bool,
 }
 
-async fn inspect_terminal_before_ack(endpoint: &str, container_id: &str) -> Result<TerminalFacts> {
+async fn inspect_terminal_before_ack(
+    docker_program: &str,
+    endpoint: &str,
+    container_id: &str,
+) -> Result<TerminalFacts> {
     let output = tokio::time::timeout(
         Duration::from_secs(10),
-        tokio::process::Command::new(DOCKER)
+        tokio::process::Command::new(docker_program)
+            .kill_on_drop(true)
             .args([
                 "--host",
                 endpoint,
                 "inspect",
                 "--format",
-                "{{.HostConfig.LogConfig.Type}}\n{{json .HostConfig.LogConfig.Config}}\n{{.Config.Tty}} {{.Config.OpenStdin}} {{.Config.StdinOnce}}\n{{.State.Running}} {{.State.ExitCode}}",
+                "{{.Id}}\n{{.HostConfig.LogConfig.Type}}\n{{json .HostConfig.LogConfig.Config}}\n{{.Config.Tty}} {{.Config.OpenStdin}} {{.Config.StdinOnce}}\n{{.State.Running}} {{.State.ExitCode}} {{.State.OOMKilled}}",
                 container_id,
             ])
             .stdin(Stdio::null())
@@ -81,23 +119,25 @@ async fn inspect_terminal_before_ack(endpoint: &str, container_id: &str) -> Resu
     ensure!(output.status.success(), "pre-ACK Docker inspect failed");
     let lines: Vec<_> = std::str::from_utf8(&output.stdout)?.lines().collect();
     ensure!(
-        lines.len() == 4,
-        "pre-ACK inspect returned an unexpected scalar shape"
+        lines.len() == 5 && lines[0] == container_id,
+        "pre-ACK inspect did not return the exact container and scalar shape"
     );
-    let streams: Vec<_> = lines[2].split_whitespace().collect();
-    let state: Vec<_> = lines[3].split_whitespace().collect();
+    let streams: Vec<_> = lines[3].split_whitespace().collect();
+    let state: Vec<_> = lines[4].split_whitespace().collect();
     ensure!(
-        streams.len() == 3 && state.len() == 2,
+        streams.len() == 3 && state.len() == 3,
         "pre-ACK inspect returned malformed scalar facts"
     );
     Ok(TerminalFacts {
-        logs_none: lines[0] == "none",
-        log_options_empty: matches!(lines[1], "{}" | "null"),
+        container_id: lines[0].to_owned(),
+        logs_none: lines[1] == "none",
+        log_options_empty: matches!(lines[2], "{}" | "null"),
         tty: streams[0] == "true",
         open_stdin: streams[1] == "true",
         stdin_once: streams[2] == "true",
         running: state[0] == "true",
         exit_code: state[1].parse()?,
+        oom_killed: state[2].parse()?,
     })
 }
 
@@ -575,6 +615,12 @@ fn host_driver_main() -> Result<()> {
     control.set_nonblocking(true)?;
     let broker = std::env::var("AI_GUARD_INTERACTIVE_BROKER")?;
     let args: Vec<String> = serde_json::from_str(&std::env::var("AI_GUARD_INTERACTIVE_ARGS")?)?;
+    let watchdog_secs: u64 =
+        std::env::var("AI_GUARD_INTERACTIVE_HOST_WATCHDOG_SECONDS")?.parse()?;
+    ensure!(
+        (1..=300).contains(&watchdog_secs),
+        "host driver watchdog outside its bounds"
+    );
     let mut command = Command::new(broker);
     command
         .args(args)
@@ -617,7 +663,7 @@ fn host_driver_main() -> Result<()> {
         }
     };
     let child_group = child.id() as libc::pid_t;
-    let deadline = Instant::now() + Duration::from_secs(140);
+    let deadline = Instant::now() + Duration::from_secs(watchdog_secs);
     let status: ExitStatus = 'status: loop {
         if let Some(status) = child.try_wait()? {
             break status;
@@ -709,6 +755,14 @@ fn run_on_pty(
     args: &[String],
     actions: impl FnOnce(&mut PtySession) -> Result<()>,
 ) -> Result<CliRun> {
+    run_on_pty_with_watchdog(args, HOST_DRIVER_WATCHDOG, actions)
+}
+
+fn run_on_pty_with_watchdog(
+    args: &[String],
+    watchdog: Duration,
+    actions: impl FnOnce(&mut PtySession) -> Result<()>,
+) -> Result<CliRun> {
     let pty = HostPty::new()?;
     for fd in [pty.master.as_raw_fd(), pty.slave.as_raw_fd()] {
         // SAFETY: descriptors are live and only close-on-exec is changed.
@@ -750,6 +804,10 @@ fn run_on_pty(
             env!("CARGO_BIN_EXE_agentsandbox"),
         )
         .env("AI_GUARD_INTERACTIVE_ARGS", serde_json::to_string(args)?)
+        .env(
+            "AI_GUARD_INTERACTIVE_HOST_WATCHDOG_SECONDS",
+            watchdog.as_secs().to_string(),
+        )
         .stdin(Stdio::from(pty.slave.try_clone()?))
         .stdout(Stdio::from(pty.slave.try_clone()?))
         .stderr(Stdio::from(pty.slave.try_clone()?));
@@ -778,7 +836,7 @@ fn run_on_pty(
         parent_control.set_nonblocking(true)?;
         let _ = parent_control.write_all(b"ABORT\n");
     }
-    let status_deadline = Instant::now() + DEADLINE;
+    let status_deadline = Instant::now() + watchdog + HOST_DRIVER_REPORT_GRACE;
     while session.broker_status.is_none() && session.driver_error.is_none() {
         if let Some(exit) = driver_child.try_wait()? {
             anyhow::bail!(
@@ -1028,7 +1086,10 @@ fn local_pty_host_driver_help_smoke() -> Result<()> {
     Ok(())
 }
 
-async fn private_gateway() -> Result<(
+async fn private_gateway(
+    docker_program: &str,
+    endpoint: &str,
+) -> Result<(
     std::path::PathBuf,
     String,
     Arc<Store>,
@@ -1069,15 +1130,19 @@ async fn private_gateway() -> Result<(
     let url = format!("http://{}", listener.local_addr()?);
     let inspections = Arc::new(Mutex::new(Vec::<Option<TerminalFacts>>::new()));
     let captured_inspections = inspections.clone();
-    let endpoint = ENDPOINT.to_owned();
+    let docker_program = docker_program.to_owned();
+    let endpoint = endpoint.to_owned();
     let app =
         gateway_router(state).layer(middleware::from_fn(move |request: Request, next: Next| {
             let captured = captured_inspections.clone();
+            let docker_program = docker_program.clone();
             let endpoint = endpoint.clone();
             async move {
+                let path = request.uri().path();
+                let path = path.strip_prefix("/control").unwrap_or(path);
                 if request.method() != Method::POST
-                    || !request.uri().path().starts_with("/api/v1/workers/")
-                    || !request.uri().path().ends_with("/transitions")
+                    || !path.starts_with("/api/v1/workers/")
+                    || !path.ends_with("/transitions")
                 {
                     return next.run(request).await;
                 }
@@ -1091,14 +1156,23 @@ async fn private_gateway() -> Result<(
                     && observation.running == Some(false)
                 {
                     // Read only the exact terminal configuration before the
-                    // real gateway commits/ACKs it. Forward original bytes and
-                    // response unchanged; this middleware never delays cleanup.
-                    let facts = inspect_terminal_before_ack(
+                    // real gateway commits/ACKs it, then forward the request
+                    // bytes to the gateway.
+                    let facts = match inspect_terminal_before_ack(
+                        &docker_program,
                         &endpoint,
                         &observation.inspection.container_id,
                     )
                     .await
-                    .ok();
+                    {
+                        Ok(observed) => Some(observed),
+                        Err(error) => {
+                            eprintln!(
+                                "interactive_qa phase=pre_ack_inspection_failed error={error:#}"
+                            );
+                            None
+                        }
+                    };
                     if let Ok(mut results) = captured.lock() {
                         results.push(facts);
                     }
@@ -1138,7 +1212,7 @@ async fn docker_interactive_cli_forwards_tty_input_resize_and_worker_exit() -> R
     );
     let image = std::env::var("AGENTSANDBOX_TEST_INTERACTIVE_IMAGE")
         .context("select the separately built interactive probe image after approval")?;
-    let (root, gateway, store, server, inspections) = private_gateway().await?;
+    let (root, gateway, store, server, inspections) = private_gateway(DOCKER, &endpoint).await?;
     let config = root.join("config");
     let project = root.join("project");
     fs::create_dir(&project)?;
@@ -1309,7 +1383,7 @@ async fn docker_interactive_raw_keys_preserve_control_and_utf8_bytes() -> Result
     );
     let image = std::env::var("AGENTSANDBOX_TEST_INTERACTIVE_IMAGE")
         .context("select the separately built raw-key probe image after approval")?;
-    let (root, gateway, store, server, inspections) = private_gateway().await?;
+    let (root, gateway, store, server, inspections) = private_gateway(DOCKER, &endpoint).await?;
     let config = root.join("config");
     let project = root.join("project");
     fs::create_dir(&project)?;
@@ -1459,7 +1533,7 @@ async fn docker_interactive_double_ctrl_x_stops_only_the_owned_worker() -> Resul
     );
     let image = std::env::var("AGENTSANDBOX_TEST_INTERACTIVE_IMAGE")
         .context("select the separately built interactive probe image after approval")?;
-    let (root, gateway, store, server, inspections) = private_gateway().await?;
+    let (root, gateway, store, server, inspections) = private_gateway(DOCKER, &endpoint).await?;
     let config = root.join("config");
     let project = root.join("project");
     fs::create_dir(&project)?;
@@ -1621,6 +1695,279 @@ async fn docker_interactive_double_ctrl_x_stops_only_the_owned_worker() -> Resul
     );
     eprintln!(
         "PASS double Ctrl-X: one claimed worker stopped promptly; durable Ctrl-X reason and timed_out=false; Docker confirms terminal state; one observed allocation; quota released; no second start authorization; audit reopened valid; source unchanged"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires the explicitly selected local Docker daemon and pinned interactive probe image"]
+async fn docker_interactive_records_controller_deadline_and_owned_stop_outcome() -> Result<()> {
+    const TIMEOUT_SECONDS: u32 = 120;
+    const TTY_DEADLINE: &str = "authorized worker duration elapsed";
+    let docker = std::env::var("AGENTSANDBOX_TEST_RUNTIME_PROGRAM")
+        .context("select the absolute Docker executable")?;
+    let program = std::path::Path::new(&docker);
+    ensure!(
+        program.is_absolute() && program.is_file(),
+        "the Docker executable must be an existing absolute path"
+    );
+    let endpoint = std::env::var("AGENTSANDBOX_TEST_RUNTIME_ENDPOINT")
+        .context("select a local Docker Unix socket")?;
+    let socket = std::path::Path::new(
+        endpoint
+            .strip_prefix("unix://")
+            .context("the Docker endpoint must use unix://")?,
+    );
+    ensure!(
+        socket.is_absolute() && fs::metadata(socket)?.file_type().is_socket(),
+        "the Docker endpoint must be an existing absolute Unix socket"
+    );
+    let image = std::env::var("AGENTSANDBOX_TEST_INTERACTIVE_IMAGE")
+        .context("select the immutable ID of the local interactive probe image")?;
+    ensure!(
+        image.strip_prefix("sha256:").is_some_and(|id| {
+            id.len() == 64 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        }),
+        "the interactive probe image must be pinned by its full Docker image ID"
+    );
+
+    let (root, gateway, store, server, inspections) = private_gateway(&docker, &endpoint).await?;
+    let config = root.join("config");
+    let project = root.join("project");
+    let original = project.join("original.txt");
+    fs::create_dir(&project)?;
+    fs::write(&original, b"unchanged\n")?;
+    let mut args: Vec<_> = [
+        "run",
+        "--project",
+        project.to_str().context("non-UTF-8 project path")?,
+        "--config-dir",
+        config.to_str().context("non-UTF-8 config path")?,
+        "--gateway",
+        &gateway,
+        "--runtime",
+        "docker",
+        "--runtime-program",
+        &docker,
+        "--runtime-endpoint",
+        &endpoint,
+        "--image",
+        &image,
+        "--profile",
+        "observe",
+        "--network",
+        "none",
+        "--timeout",
+        &TIMEOUT_SECONDS.to_string(),
+        "--provider",
+        "generic",
+        "--interactive",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if std::env::var("AGENTSANDBOX_TEST_ALLOW_ROOTFUL").as_deref() == Ok("1") {
+        args.push("--allow-rootful-runtime".into());
+    }
+    args.extend(["--", "/usr/local/bin/ai-guard-interactive-probe", "wait"].map(str::to_owned));
+    let launched_at = Instant::now();
+    // The watchdog also covers admission, import and terminal audit. It must
+    // outlast the worker deadline without supplying the stop for this test.
+    let result = run_on_pty_with_watchdog(&args, Duration::from_secs(240), |session| {
+        // The worker verifies all three TTY streams before printing its marker.
+        // Leave the PTY open and send no keys, signals or stop requests.
+        session.wait_for(
+            b"STOP_READY",
+            Instant::now() + Duration::from_secs(100),
+            "controller deadline probe",
+        )
+    })?;
+    ensure!(
+        result.broker_status.code == Some(1)
+            && result.broker_status.signal.is_none()
+            && result.broker_status_reported_at.duration_since(launched_at)
+                >= Duration::from_secs(TIMEOUT_SECONDS.into()),
+        "the CLI did not report a failed session after the authorized duration"
+    );
+    assert_filtered(&result.bytes)?;
+    ensure!(
+        fs::read(&original)? == b"unchanged\n",
+        "source project was modified"
+    );
+
+    let workers = store.workers()?;
+    let [worker] = workers.as_slice() else {
+        anyhow::bail!("expected exactly one worker for the TTY deadline");
+    };
+    let session = worker.launch.session_id.as_str();
+    let container_id = worker
+        .attempt
+        .container_id
+        .as_deref()
+        .context("no owned container")?;
+    ensure!(
+        worker.state == WorkerStateV1::Terminal
+            && worker.attempt.start_operation_id.is_some()
+            && worker.launch.image_id == image
+            && worker.launch.timeout_seconds == TIMEOUT_SECONDS
+            && worker.launch.network == NetworkV1::None
+            && worker.launch.provider == "generic"
+            && worker.launch.credential_binding_id.is_none()
+            && !worker.quota_held
+            && worker.cleanup_removed == Some(true),
+        "the claimed worker did not reach a cleaned-up terminal state with quota released"
+    );
+    let terminal = {
+        let inspections = inspections
+            .lock()
+            .map_err(|_| anyhow::anyhow!("pre-ACK inspection capture poisoned"))?;
+        let [Some(terminal)] = inspections.as_slice() else {
+            let confirmed = inspections.iter().flatten().count();
+            anyhow::bail!(
+                "expected one independent pre-ACK Docker inspection; attempts={}, confirmed={confirmed}",
+                inspections.len()
+            );
+        };
+        terminal.clone()
+    };
+    let observed = worker
+        .last_observation
+        .as_ref()
+        .context("no durable runtime observation")?;
+    ensure!(
+        terminal.container_id == container_id
+            && terminal.tty
+            && terminal.open_stdin
+            && terminal.stdin_once
+            && terminal.logs_none
+            && terminal.log_options_empty
+            && !terminal.running
+            && !terminal.oom_killed
+            && terminal.exit_code > 0
+            && observed.inspection.container_id == container_id
+            && observed.status == RuntimeStatusV1::Exited
+            && observed.running == Some(false)
+            && observed.oom_killed == Some(false)
+            && observed.exit_code == Some(terminal.exit_code),
+        "the durable worker terminal disagrees with the independent Docker inspection"
+    );
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_agentsandbox"))
+            .kill_on_drop(true)
+            .args(["worker-status", "--session", session, "--gateway", &gateway])
+            .arg("--config-dir")
+            .arg(&config)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output(),
+    )
+    .await
+    .context("worker-status exceeded its deadline")??;
+    ensure!(output.status.success(), "worker-status failed");
+    let status: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let summary: RunSummary = serde_json::from_value(status["result"].clone())?;
+    let observation = summary
+        .control_deadline
+        .context("worker-status omitted the controller deadline")?;
+    ensure!(
+        observation.deadline == ControlDeadlineKind::OriginalExecutionDeadline,
+        "the controller did not report the authorized execution deadline"
+    );
+    // The attach timer is armed later but can stop the worker while the
+    // controller is inspecting it. Require the attach's own deadline
+    // observation if the controller found that the worker was already stopped.
+    let stop = match (
+        observation.stop,
+        summary.timed_out,
+        summary.transport_stop_reason.as_deref(),
+    ) {
+        (ControlStopObservation::EngineAcknowledged, false, None)
+        | (ControlStopObservation::EngineAcknowledged, true, Some(TTY_DEADLINE)) => {
+            "engine_acknowledged"
+        }
+        (ControlStopObservation::AlreadyStopped, true, Some(TTY_DEADLINE)) => "already_stopped",
+        _ => anyhow::bail!(
+            "neither an acknowledged controller stop nor a TTY deadline race was established"
+        ),
+    };
+    let expected = serde_json::json!({
+        "deadline": "original_execution_deadline",
+        "stop": stop
+    });
+    ensure!(
+        status["session_id"] == session
+            && status["worker"] == serde_json::to_value(worker)?
+            && summary.session_id.to_string() == session
+            && summary.volume == worker.attempt.volume_name
+            && summary.exit_code == terminal.exit_code
+            && status["result"]["control_deadline"] == expected
+            && summary.cleanup.state == CleanupState::Removed,
+        "worker-status did not link the deadline and stop to the observed terminal"
+    );
+
+    server.abort();
+    let _ = server.await;
+    drop(store);
+    let reopened = Store::open_for_tenant(
+        &root.join("audit.sqlite"),
+        "local",
+        Redactor::new(vec![]),
+        1_000,
+    )?;
+    let integrity = reopened.integrity()?;
+    ensure!(integrity.valid, "audit chain invalid after reopening");
+    let events: Vec<_> = reopened
+        .events(&EventQuery {
+            order: Some("asc".into()),
+            limit: Some(1_000),
+            ..Default::default()
+        })?
+        .into_iter()
+        .filter(|stored| {
+            matches!(
+                stored.event.kind.as_str(),
+                "runtime.terminal.attach.authorized"
+                    | "command.started"
+                    | "command.failed"
+                    | "command.completed"
+            )
+        })
+        .collect();
+    let [attach, start, failed] = events.as_slice() else {
+        anyhow::bail!("expected one attach authorization, one start and one terminal audit event");
+    };
+    let audited = failed
+        .event
+        .result
+        .as_ref()
+        .context("no durable command.failed result")?;
+    ensure!(
+        attach.event.kind == "runtime.terminal.attach.authorized"
+            && start.event.kind == "command.started"
+            && failed.event.kind == "command.failed"
+            && attach.seq < start.seq
+            && start.seq < failed.seq
+            && events
+                .iter()
+                .all(|stored| stored.event.session_id.as_deref() == Some(session))
+            && attach.event.data["worker_id"] == worker.worker_id
+            && attach.event.data["attempt_id"] == worker.attempt.attempt_id
+            && failed.event.data["worker_id"] == worker.worker_id
+            && failed.event.source == "runner"
+            && failed.event.provenance == "observed"
+            && audited["exit_code"] == terminal.exit_code
+            && audited["oom_killed"] == false
+            && audited["timed_out"] == summary.timed_out
+            && audited.get("transport_stop_reason")
+                == Some(&serde_json::to_value(&summary.transport_stop_reason)?)
+            && audited["control_deadline"] == expected,
+        "the durable audit did not link the start and typed stop result to the same session and worker"
+    );
+    eprintln!(
+        "PASS controller deadline: stop={stop}, tty_deadline={}, independently observed terminal, durable audit and restored PTY",
+        summary.timed_out
     );
     Ok(())
 }

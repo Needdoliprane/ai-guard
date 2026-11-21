@@ -1,6 +1,7 @@
 use super::*;
 use std::io;
 
+const CARGO_VERSION: &str = env!("CARGO_PKG_VERSION");
 const GATEWAY_STATUS: &str = r#"{"schema_version":1,"product":"ai-guard","version":"0.0.1","component":"gateway","build":{"id":null,"revision":null}}"#;
 
 fn args(values: &[&str]) -> Vec<OsString> {
@@ -23,7 +24,6 @@ fn optional_version_assertion_accepts_only_exact_cargo_version() {
 
 #[test]
 fn current_identity_uses_product_version_and_exact_component_names() {
-    assert_eq!(env!("CARGO_PKG_VERSION"), "0.0.1");
     for (component, name) in [
         (Component::Gateway, "gateway"),
         (Component::Dashboard, "dashboard"),
@@ -40,7 +40,7 @@ fn current_identity_uses_product_version_and_exact_component_names() {
         assert_eq!(component.as_str(), name);
         assert_eq!(value["schema_version"], 1);
         assert_eq!(value["product"], "ai-guard");
-        assert_eq!(value["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(value["version"], CARGO_VERSION);
         assert_eq!(value["component"], name);
         assert_eq!(BuildStatusV1::from_json(&bytes, component).unwrap(), status);
     }
@@ -272,7 +272,9 @@ fn version_flags_are_early_only_when_unambiguous_and_other_commands_are_untouche
     ] {
         for flag in ["--version", "-V"] {
             let output = early_output(component, &args(&[flag])).unwrap().unwrap();
-            assert!(output.starts_with(&format!("{} 0.0.1\nbuild: ", component.as_str())));
+            assert!(
+                output.starts_with(&format!("{} {CARGO_VERSION}\nbuild: ", component.as_str()))
+            );
             assert_eq!(output.lines().count(), 3);
             for input in [
                 vec![flag, "--json"],
@@ -311,7 +313,7 @@ fn agentsandbox_version_json_is_static_identity_and_rejects_extra_arguments() {
     let text = early_output(Component::Agentsandbox, &args(&["version"]))
         .unwrap()
         .unwrap();
-    assert!(text.starts_with("agentsandbox 0.0.1\nbuild: "));
+    assert!(text.starts_with(&format!("agentsandbox {CARGO_VERSION}\nbuild: ")));
     let json = early_output(Component::Agentsandbox, &args(&["version", "--json"]))
         .unwrap()
         .unwrap();
@@ -339,7 +341,7 @@ fn text_identity_reports_the_validated_common_build_or_explicit_unknown() {
     let text = text_identity(Component::Relay);
     let lines: Vec<_> = text.lines().collect();
     assert_eq!(lines.len(), 3);
-    assert_eq!(lines[0], "ai-guard-relay 0.0.1");
+    assert_eq!(lines[0], format!("ai-guard-relay {CARGO_VERSION}"));
     assert_eq!(
         lines[1],
         format!("build: {}", status.build.id.as_deref().unwrap_or("unknown"))

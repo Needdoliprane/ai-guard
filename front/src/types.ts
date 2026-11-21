@@ -40,6 +40,12 @@ export interface AuditEvent {
   result?: {
     exit_code?: number | null;
     duration_ms?: number | null;
+    timed_out?: boolean | null;
+    transport_stop_reason?: string | null;
+    control_deadline?: {
+      deadline: "original_execution_deadline" | "observation_window";
+      stop: "no_owned_worker" | "already_stopped" | "engine_acknowledged" | "unconfirmed";
+    } | null;
     stdout?: string | null;
     stderr?: string | null;
     truncated?: boolean | null;

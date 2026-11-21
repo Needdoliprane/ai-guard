@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  rust-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      AI_GUARD_BUILD_REVISION: ${{ github.sha }}
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      RUST_MIN_STACK: '8388608'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fetch dependencies with the pinned Rust toolchain
+        run: |
+          rustc --version
+          cargo fetch --locked --target host-tuple
+      - name: Provider harness regressions
+        run: |
+          python3 -B tests/e2e/interactive_driver.py --self-test
+          python3 -B tests/e2e/test_run_provider_preflight.py ProviderPreflightTests ProviderBrowserStageTests
+          python3 -B tests/e2e/test_run_provider_broker.py BrokerRecipeTests
+      - name: Rust unit tests and provider matrix regressions
+        run: cargo test --locked --offline --lib --bins --example provider-matrix --no-fail-fast
+      - name: Check provider selection with the diagnostic CLI
+        run: >-
+          cargo test --locked --offline --test diagnose_cli --
+          --exact provider_references_from_metadata selection_refusals_are_classified
+          the_model_of_a_profile_is_resolved_as_the_product_resolves_it
+          --test-threads=1
+      - name: Verify the CLI version and build revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --locked --offline --no-deps --format-version 1 |
+            jq -er '.packages[] | select(.name == "agentsandbox") | .version | strings')
+          cargo run --quiet --locked --offline --bin agentsandbox -- version --json |
+            jq -es --arg revision "$GITHUB_SHA" --arg version "$version" '
+              length == 1 and (.[0] |
+                .schema_version == 1 and .product == "ai-guard" and .component == "agentsandbox" and
+                .version == $version and .build.revision == $revision)
+            '
+
+  frontend-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: front
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.22.2'
+          package-manager-cache: false
+      - name: Install
+        run: npm ci --no-audit --no-fund
+      - name: Build
+        run: npm run build
+      - name: Test
+        run: npm test

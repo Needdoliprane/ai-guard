@@ -98,6 +98,7 @@ const agents = [
   },
 ];
 let mode = "data";
+let limitNextJournalRead = false;
 let controlMode = "data";
 let controlReadBarrier = null;
 const workerId = "00000000-0000-4000-8000-000000000001";
@@ -236,6 +237,12 @@ const server = createServer(async (request, response) => {
         head_hash: "abc123",
       });
     if (url.pathname === "/api/events") {
+      if (limitNextJournalRead) {
+        limitNextJournalRead = false;
+        response.writeHead(429);
+        response.end();
+        return;
+      }
       const q = url.searchParams.get("q")?.toLowerCase();
       return json(response, {
         items:
@@ -409,10 +416,14 @@ try {
   await capture("login-320-light");
   await captureContent("login-form-320-light", ".login-card");
   await page.setViewportSize({ width: 1440, height: 1050 });
+  const publicStatusPaths = ["/api/v1/status", "/api/v1/gateway/status"];
   assert.equal(
-    requests.some((request) => request.path.startsWith("/api/")),
+    requests.some(({ path, method, auth }) =>
+      path.startsWith("/api/") &&
+      !(method === "GET" && auth === undefined && publicStatusPaths.includes(path)),
+    ),
     false,
-    "Aucune API authentifiée avant connexion",
+    "Avant connexion, seules les lectures de version publiques sans Authorization sont autorisées",
   );
   await page.getByLabel("Jeton de lecture").fill("mauvais-jeton");
   await page.getByRole("button", { name: "Ouvrir la supervision" }).click();
@@ -726,6 +737,22 @@ try {
     fullPage: true,
   });
   await capture("overview-1440-dark");
+  limitNextJournalRead = true;
+  const refreshOverview = page.getByRole("button", { name: "Actualiser", exact: true });
+  await refreshOverview.click();
+  const journalLimit = page.getByRole("alert").getByText(
+    "Le collecteur a répondu avec une erreur HTTP 429.", { exact: true },
+  );
+  const unavailableJournal = page.getByText("Journal indisponible", { exact: true });
+  await journalLimit.waitFor();
+  await unavailableJournal.waitFor();
+  assert.equal(await page.getByText("Aucun événement reçu", { exact: true }).count(), 0);
+  await page.getByRole("banner").getByText("Client : local", { exact: true }).waitFor();
+  await refreshOverview.click();
+  await page.getByRole("button", { name: "Voir l’événement 14", exact: true }).waitFor();
+  await unavailableJournal.waitFor({ state: "hidden" });
+  await journalLimit.waitFor({ state: "hidden" });
+
   const download = page.waitForEvent("download");
   await page.getByRole("button", { name: "Exporter JSONL" }).click();
   assert.ok((await download).suggestedFilename().endsWith(".jsonl"));

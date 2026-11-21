@@ -98,6 +98,71 @@ async fn last_confirmed_status_does_not_queue_behind_an_owned_writer_pause() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retirement_audit_on_a_v3_job_keeps_its_last_confirmed_status() {
+    let (_root, journal) = private_journal();
+    let job = accepted(&journal);
+    let operation = job.operation_id();
+    let next = lifecycle(&journal, &job);
+    let writer = WriterClient::start(journal, 8, Duration::from_secs(10)).unwrap();
+    let receipt = writer
+        .advance_lifecycle(operation, job.head().clone(), next)
+        .await
+        .unwrap();
+    let before = writer
+        .last_confirmed_status(operation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(before.entry().head(), Some(receipt.head()));
+
+    let pending = writer
+        .stops()
+        .pending_retirement_events(operation)
+        .await
+        .unwrap();
+    assert!(pending.is_empty());
+    let after = writer
+        .last_confirmed_status(operation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.entry().head(), Some(receipt.head()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retirement_audit_conflict_for_a_missing_observed_job_closes_the_status_projection() {
+    let (root, journal) = private_journal();
+    let job = accepted(&journal);
+    let operation = job.operation_id();
+    let writer = WriterClient::start(journal, 8, Duration::from_secs(10)).unwrap();
+    writer
+        .last_confirmed_status(operation)
+        .await
+        .unwrap()
+        .unwrap();
+    let scope = std::fs::read_dir(root.path().join("broker-journal-v1"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::rename(
+        scope.join("jobs").join(operation.to_string()),
+        root.path().join("retained-job-fixture"),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        writer.stops().pending_retirement_events(operation).await,
+        Err(JournalError::Conflict)
+    ));
+    assert!(matches!(
+        writer.last_confirmed_status(operation).await,
+        Err(JournalError::Corrupt)
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn last_confirmed_status_publishes_after_ack_and_polls_do_no_full_or_sync() {
     use crate::{
         broker::journal::cost_measurement::{Measurement as JournalMeasurement, WriterKind},

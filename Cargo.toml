@@ -46,6 +46,10 @@ walkdir = "2"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 
+[[example]]
+name = "provider-matrix"
+path = "tests/e2e/provider_matrix.rs"
+
 [profile.release]
 lto = "thin"
 strip = true

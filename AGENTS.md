@@ -375,6 +375,16 @@ Le parcours `npm run test:browser` requiert Playwright et Chromium disponibles. 
 
 Les emplacements attendus sont `.agents/skills/` pour Codex et `.claude/skills/` pour Claude ; ces noms ne prouvent pas leur présence dans le checkout. Les copies, lorsqu'elles existent, doivent rester identiques. Claude les appelle avec `/nom-du-skill` ; Codex avec `$nom-du-skill` lorsque la version installée les découvre. Si la découverte échoue, lire explicitement le `SKILL.md` concerné lorsqu'il est présent et signaler que le chargement automatique n'a pas été confirmé. Si le fichier manque aussi, signaler son absence et poursuivre les travaux indépendants avec les contrats ; ne pas prétendre avoir appliqué un skill absent.
 
+Les [skills Matt Pocock installés dans le projet](docs/agents/README.md) complètent cette méthode. Utiliser `diagnosing-bugs` pour un défaut difficile à isoler, `tdd` pour une régression ou une tranche fonctionnelle qui exige un test utile, et `code-review` pour les revues sur les deux axes contrat et règles de code. Les contrats d'ai-guard et le périmètre confié à l'agent s'appliquent aussi aux actions proposées par un skill.
+
+### Suivi des tickets
+
+Les skills utilisent des [fichiers Markdown locaux](docs/agents/issue-tracker.md) dans `.scratch/` et les [cinq états de triage](docs/agents/triage-labels.md). Toute opération sur un suivi distant suit les autorisations de la tâche.
+
+### Documentation du domaine
+
+Les [sources du vocabulaire et des décisions](docs/agents/domain.md) sont les contrats, le plan et le journal de décisions existants.
+
 ## Production, infrastructure et comptes
 
 La première qualification proposée est locale, à hôte unique, y compris les contrats multi-client avec 3 workers. Docker et Podman doivent être testés séparément ; une preuve Linux ne qualifie pas macOS/ARM64, ni un cluster Kubernetes. Le cloud exige en plus identité de workload, chiffrement des transports, politiques réseau réellement appliquées, reprise et autorité de comptage. Les versions réellement testées doivent être consignées.

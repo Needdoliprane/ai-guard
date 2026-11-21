@@ -667,11 +667,11 @@ impl StopJournal {
         let (_, recovered, _) = self
             .read_locked(operation, &mut writer)?
             .ok_or(JournalError::InvalidInput)?;
-        let checkpoint = recovered
-            .metadata
-            .as_ref()
-            .and_then(|value| value.checkpoint.retirement())
-            .ok_or(JournalError::Conflict)?;
+        let metadata = recovered.metadata.as_ref().ok_or(JournalError::Conflict)?;
+        let Some(checkpoint) = metadata.checkpoint.retirement() else {
+            // A confirmed V1–V4 checkpoint cannot own retirement events.
+            return Ok(Vec::new());
+        };
         Ok(checkpoint
             .outbox()
             .events()

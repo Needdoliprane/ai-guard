@@ -3,12 +3,13 @@
 // private test SQLite stores, no runtime and no worker execution. Nothing here is imported by the app.
 //
 //   AI_GUARD_SUPERVISION_SCENARIO  fleet (default) | partial | correlation | rights | revoked | isolation | expiry |
-//                                  resume | ttl | journal | keyboard | focus | regions | details | states | load
+//                                  resume | ttl | journal | keyboard | focus | regions | details | states | load | journal-older-recovery
 //                                  (ttl waits for a real 300-second context expiry)
 //
 // Prerequisite: the playwright package (1.64.x) and its Chromium. It is not a dependency of the frontend
 // package; without it the script exits with code 2 and BLOCKED, and the scenario is NOT_RUN.
 //   AI_GUARD_SUPERVISION_STACK     path of the built supervision_stack example
+//   AI_GUARD_SUPERVISION_FRONT_DIR built frontend directory (default: front/dist)
 //   AI_GUARD_SUPERVISION_ARTIFACTS directory for screenshots (default: a new temporary directory)
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -18,9 +19,14 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
+import { saveBrowserFailure } from "./browser_failure.mjs";
+import { installBrowserGuard } from "./browser_live.mjs";
 
 const scenario = process.env.AI_GUARD_SUPERVISION_SCENARIO || "fleet";
+const journalRecovery = scenario === "journal-older-recovery";
 const blocked = (reason) => { console.error(`BLOCKED: ${reason}. Scenario ${scenario} is NOT_RUN.`); process.exit(2); };
+if (journalRecovery && (process.env.DEBUG || process.env.PWDEBUG || process.env.NODE_DEBUG))
+  blocked("disable debug logs for the authenticated browser recipe");
 const require = createRequire(import.meta.url);
 let chromium;
 try { ({ chromium } = require("playwright")); }
@@ -31,18 +37,19 @@ catch {
 }
 const root = fileURLToPath(new URL("..", import.meta.url));
 const binary = process.env.AI_GUARD_SUPERVISION_STACK || "/workspace/target/debug/examples/supervision_stack";
-for (const path of [binary, join(root, "dist", "index.html")])
+const front = process.env.AI_GUARD_SUPERVISION_FRONT_DIR || join(root, "dist");
+for (const path of [binary, join(front, "index.html")])
   await access(path).catch(() => blocked(`${path} is missing: build the supervision_stack example and the frontend first`));
 
 const sizes = { fleet: [120, 300], partial: [24, 60], correlation: [120, 300], rights: [24, 60], revoked: [24, 60], isolation: [24, 60], expiry: [24, 60],
-  resume: [24, 60], ttl: [24, 60], journal: [24, 1500], keyboard: [24, 60], focus: [120, 300], regions: [24, 300], details: [24, 60], states: [24, 60], load: [300, 60] };
+  resume: [24, 60], ttl: [24, 60], journal: [24, 1500], keyboard: [24, 60], focus: [120, 300], regions: [24, 300], details: [24, 60], states: [24, 60], load: [300, 60], "journal-older-recovery": [24, 300] };
 const [workers, events] = sizes[scenario] ?? blocked(`unknown scenario ${scenario}`);
 const stateDir = await mkdtemp(join(tmpdir(), "ai-guard-supervision-state-")); await chmod(stateDir, 0o700);
 const artifacts = process.env.AI_GUARD_SUPERVISION_ARTIFACTS || await mkdtemp(join(tmpdir(), "ai-guard-supervision-browser-"));
-await mkdir(artifacts, { recursive: true });
+await mkdir(artifacts, { recursive: true, ...(journalRecovery ? { mode: 0o700 } : {}) });
 
 // The stack prints its credentials once on stdout; this parent keeps them in memory only.
-const stack = spawn(binary, ["--front-dir", join(root, "dist"), "--state-dir", stateDir, "--workers", String(workers), "--events", String(events)],
+const stack = spawn(binary, ["--front-dir", front, "--state-dir", stateDir, "--workers", String(workers), "--events", String(events)],
   { stdio: ["pipe", "pipe", "inherit"] });
 const lines = createInterface({ input: stack.stdout })[Symbol.asyncIterator]();
 const nextLine = async (milliseconds) => {
@@ -61,9 +68,12 @@ const { accounts, ids } = ready; const secrets = Object.values(accounts);
 const a = ids.tenant_a; const b = ids.tenant_b;
 const sortedWorkersA = [...a.workers].sort();
 
-const browser = await chromium.launch({ headless: true, chromiumSandbox: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined });
+const browser = await chromium.launch({ headless: true, chromiumSandbox: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined,
+  ...(journalRecovery ? { args: ["--no-proxy-server", "--host-resolver-rules=EXCLUDE 127.0.0.1, MAP * ~NOTFOUND"] } : {}) })
+  .catch(() => { stack.kill("SIGKILL"); blocked("Chromium failed to launch with its sandbox"); });
 // A browser that cannot open its page is closed at once, with the stack: no process outlives this script.
-const opened = await (async () => { const context = await browser.newContext({ viewport: { width: 1440, height: 1050 } }); return { context, page: await context.newPage() }; })()
+const opened = await (async () => { const context = await browser.newContext({ viewport: { width: 1440, height: 1050 },
+  ...(journalRecovery ? { serviceWorkers: "block" } : {}) }); return { context, page: await context.newPage() }; })()
   .catch(async (error) => { await browser.close().catch(() => {}); stack.kill("SIGKILL"); blocked(`Chromium could not open a page (${String(error?.message ?? error).split("\n")[0]})`); });
 const { context, page } = opened; page.setDefaultTimeout(15000);
 const errors = []; page.on("pageerror", (error) => errors.push(error.message));
@@ -388,6 +398,104 @@ const runPartial = async () => {
   await geometry("personal", [390, 320]);
   await logout();
   await noSecret("partiel");
+};
+
+let recoveryStage = "browser_guard";
+let recoveryOrigin;
+async function prepareRecoveryGuard() {
+  const dashboard = new URL(ready.dashboard);
+  assert.ok(dashboard.protocol === "http:" && dashboard.hostname === "127.0.0.1" && dashboard.port && dashboard.origin === ready.dashboard);
+  recoveryOrigin = dashboard.origin;
+  const guard = await installBrowserGuard(context, [recoveryOrigin], secrets);
+  await guard.preparePage(page);
+  return guard;
+}
+
+
+const runJournalOlderRecovery = async () => {
+  const guard = await prepareRecoveryGuard();
+  const recentPath = "/api/v1/human/events/recent";
+  const sameRead = (url) => url.origin === recoveryOrigin && url.pathname === recentPath;
+  const olderRead = (url) => sameRead(url) && url.searchParams.has("cursor");
+  const source = page.locator(".sv-journal .sv-source", { hasText: "Journal" });
+  const rows = page.locator(".sv-journal [data-event-id]");
+  const rowIds = () => rows.evaluateAll((nodes) => nodes.map((row) => row.dataset.eventId));
+  const retry = page.locator(".sv-journal .sv-errors").getByRole("button", { name: /^Réessayer/ });
+  const alert = page.locator(".sv-journal .sv-errors [role=alert]");
+
+  // Hold the next real read at the client boundary to inspect focus while its answer is pending.
+  await page.addInitScript((path) => {
+    const fetch = window.fetch;
+    let hold = false;
+    window.__holdOlderReply = () => { hold = true; };
+    window.fetch = async (input, options) => {
+      const url = new URL(input instanceof Request ? input.url : input, location.origin);
+      if (!hold || url.origin !== location.origin || url.pathname !== path) return fetch(input, options);
+      hold = false;
+      const gate = new Promise((resolve) => { window.__releaseOlderReply = resolve; });
+      const reply = await fetch(input, options);
+      await gate;
+      return reply;
+    };
+  }, recentPath);
+
+  recoveryStage = "journal_older_two_pages";
+  await login("admin_a"); await supervise("administration", "tenant-a"); await ready100();
+  await button("Journal").click(); await direct("Direct connecté").waitFor();
+  await journalResult(/^100 événements affichés sur 100 chargés/).waitFor();
+  await button("Charger 100 événements plus anciens").click();
+  await journalResult(/^200 événements affichés sur 200 chargés/).waitFor();
+  const cached = await rowIds();
+  assert.equal(new Set(cached).size, 200);
+  const streams = streamStarts();
+
+  recoveryStage = "journal_older_page_unavailable";
+  await page.route(olderRead, (route) => route.fulfill({ status: 503, json: { error: {
+    code: "identity_unavailable", message: "The cursor control is unavailable.", retry_action: "retry",
+  } } }));
+  const [failed] = await Promise.all([page.waitForResponse((answer) => olderRead(new URL(answer.url()))),
+    button("Charger 100 événements plus anciens").click()]);
+  assert.equal(failed.status(), 503);
+  await page.unroute(olderRead);
+  await alert.waitFor();
+  assert.deepEqual(await rowIds(), cached);
+  await direct("Direct connecté").waitFor();
+  const appended = (await command({ command: "append_event", resource_kind: "session", resource_id: a.session_owned_by_user_a1, count: 1 })).event_ids;
+  await journalResult(/^201 événements affichés sur 201 chargés/).waitFor();
+  assert.deepEqual(await rowIds(), [...appended, ...cached].slice(0, 200));
+  await alert.waitFor();
+  const failureNamesOlderPage = (await alert.innerText()).includes("Page plus ancienne indisponible");
+  const statusNamesOlderPage = await source.getByText("Page plus ancienne indisponible", { exact: true }).count() === 1;
+
+  recoveryStage = "journal_older_retry_position";
+  await page.evaluate(() => window.__holdOlderReply());
+  const before = requests.length;
+  try {
+    const attempted = page.waitForRequest((request) => sameRead(new URL(request.url())));
+    await retry.focus(); await page.keyboard.press("Enter");
+    const request = await attempted;
+    if (!olderRead(new URL(request.url()))) recoveryStage = "journal_older_retry_without_cursor";
+    assert.ok(request.url() === failed.url(), "la reprise utilise la position opaque de la page refusée");
+    recoveryStage = "journal_older_retry_focus_and_status";
+    assert.equal(await retry.getAttribute("aria-disabled"), "true");
+    assert.equal(await retry.evaluate((node) => node === document.activeElement), true);
+    assert.equal(failureNamesOlderPage, true);
+    assert.equal(statusNamesOlderPage, true);
+    assert.equal((await request.response())?.status(), 200);
+  } finally { await page.evaluate(() => window.__releaseOlderReply?.()); }
+  recoveryStage = "journal_older_recovered";
+  await journalResult(/^301 événements affichés sur 301 chargés/).waitFor();
+  assert.deepEqual(await rowIds(), [...appended, ...cached].slice(0, 200));
+  assert.equal(await alert.count(), 0);
+  await direct("Direct connecté").waitFor();
+  assert.equal(streamStarts(), streams);
+  assert.deepEqual(humanReads(before).map((path) => path.split("?")[0]), [recentPath]);
+  assert.equal(await page.evaluate(() => document.activeElement === document.body), false);
+  await logout();
+  assert.equal(await openStreams(), 0);
+  await noSecret("reprise de la page plus ancienne");
+  assert.equal(guard.violations.length, 0);
+  recoveryStage = "complete";
 };
 
 /** Worker -> declared session -> authorized resource -> real events, and back; refusals stay local. */
@@ -1900,18 +2008,26 @@ const runLoad = async () => {
 let failure = null;
 try {
   await ({ journal: runJournal, keyboard: runKeyboard, load: runLoad, fleet: runFleet, partial: runPartial, correlation: runCorrelation, rights: runRights, revoked: runRevoked,
-    isolation: runIsolation, expiry: runExpiry, resume: runResume, ttl: runTtl, focus: runFocus, regions: runRegions, details: runDetails, states: runStates })[scenario]();
+    isolation: runIsolation, expiry: runExpiry, resume: runResume, ttl: runTtl, focus: runFocus, regions: runRegions, details: runDetails, states: runStates,
+    "journal-older-recovery": runJournalOlderRecovery })[scenario]();
   assert.deepEqual(softFailures, [], "observations indépendantes du scénario");
   assert.deepEqual(errors, [], "aucune erreur JavaScript de page");
   console.log(`browser_supervision scenario=${scenario} PASS workers=${workers} events=${events} artifacts=${artifacts}`);
 } catch (error) {
   failure = error;
-  if (softFailures.length) console.error(`observations indépendantes en échec avant l’arrêt :\n- ${softFailures.join("\n- ")}`);
-  await page.screenshot({ path: join(artifacts, `supervision-${scenario}-failure.png`), fullPage: true }).catch(() => {});
-  console.error(`browser_supervision scenario=${scenario} FAIL artifacts=${artifacts}`);
+  if (journalRecovery) {
+    const mayCapture = recoveryOrigin && page.url() === recoveryOrigin + "/";
+    const snapshot = mayCapture ? await saveBrowserFailure(page, { directory: artifacts, secrets }) : null;
+    console.error(`browser_supervision scenario=${scenario} FAIL stage=${recoveryStage}`);
+    if (snapshot) for (const file of snapshot.files) console.error(`artifact=${join(artifacts, snapshot.directory, file)}`);
+  } else {
+    if (softFailures.length) console.error(`observations indépendantes en échec avant l’arrêt :\n- ${softFailures.join("\n- ")}`);
+    await page.screenshot({ path: join(artifacts, `supervision-${scenario}-failure.png`), fullPage: true }).catch(() => {});
+    console.error(`browser_supervision scenario=${scenario} FAIL artifacts=${artifacts}`);
+  }
 } finally {
   await browser.close();
   if (stack.exitCode === null) { stack.stdin.write(`${JSON.stringify({ command: "stop" })}\n`); stack.stdin.end(); }
   await new Promise((resolve) => { const timer = setTimeout(() => { stack.kill("SIGKILL"); resolve(); }, 5000); stack.once("exit", () => { clearTimeout(timer); resolve(); }); if (stack.exitCode !== null) { clearTimeout(timer); resolve(); } });
 }
-if (failure) { console.error(failure); process.exit(1); }
+if (failure) { if (!journalRecovery) console.error(failure); process.exit(1); }

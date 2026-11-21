@@ -335,6 +335,42 @@ Les tests Node control/api/federation et tsc sont ciblés ; navigateur, build
 complet et moteurs ont leurs statuts séparés dans les
 [preuves](VALIDATION.md#6-novembre--projection-fédérée-du-registre).
 
+## Réponses HTTP Rust relues par le frontend
+
+Depuis la racine du dépôt, utiliser Node 24 et le cache Cargo préparé pour
+`Cargo.lock`. Le lanceur compile hors ligne avec un seul job, exécute les
+tests Rust sélectionnés en série, puis transmet leurs réponses HTTP à Node.
+
+```sh
+node front/tests/run_rust_wire.mjs
+node front/tests/run_rust_wire.mjs supervision
+```
+
+La première commande couvre la fédération A/B et legacy, les trois réponses
+workers legacy, les pages du dashboard et le journal récent. La seconde cible
+les trois oracles de supervision. Les routeurs Rust utilisent des bases
+synthétiques et des ports loopback éphémères. Les captures privées sont
+conservées au chemin annoncé par le lanceur. Le contrôle de pagination exerce
+120 entrées de registre, sans démarrer de worker.
+
+Le scénario Chromium suivant utilise le bundle compilé et l’exemple Rust
+`supervision_stack` du même checkout. Il injecte un HTTP 503 pour la seule
+page ancienne. Le gateway sert les autres pages et le direct. Vérifier la
+conservation des lignes, la reprise au clavier sur le même curseur et la
+fermeture du flux à la déconnexion.
+
+```sh
+cargo build --locked --offline --example supervision_stack
+npm --prefix front run build
+AI_GUARD_SUPERVISION_STACK="$PWD/target/debug/examples/supervision_stack" \
+  AI_GUARD_SUPERVISION_SCENARIO=journal-older-recovery \
+  node front/tests/browser_supervision.mjs
+```
+
+Préparer Playwright et Chromium selon le conducteur. Un échec après ouverture
+de la vue peut produire un HTML et une capture assainis dans le dossier de
+recette privé.
+
 ## Prérequis Kubernetes explicites
 
 Sélections ciblées : `--lib runtime::kubernetes::prerequisites_tests::`,

@@ -217,3 +217,38 @@ L'adaptateur utilise l'[API System One](https://docs.typesafe.ai/api/system-one)
 Après une tâche, utiliser `worker-status`, l'audit et la [procédure d'export vers une destination neuve](../local/README.fr.md#examiner-et-exporter-les-changements). Un code de sortie client ou un texte généré ne prouve pas tous les changements demandés. Les [événements fournisseur](../../../src/adapters.rs) ont `provenance=declared` ; leur `coverage=observed` décrit la capture d'une déclaration, pas une observation indépendante de son effet. L'autorisation du lancement ne prouve pas une médiation avant les commandes imbriquées ou les actions Web/MCP distantes ; voir [audit et couverture](../../operations.md#audit-sorties-et-couverture). Les observations runtime gardent leur propre provenance, et une trace d'audit durable ne transforme pas une déclaration en effet observé. Conserver les indicateurs d'omission/troncature au lieu de présenter une capture bornée comme une transcription complète.
 
 Arrêter les sessions actives par `worker-stop` et confirmer l'état terminal observé avant d'arrêter les services de contrôle. Révoquer ou renouveler les credentials auprès de leur fournisseur si nécessaire. Conserver les bindings de session avec la même confidentialité que les credentials ; ne pas les effacer pour fabriquer une reprise propre.
+
+## Rejouer la recette CLI et Chromium
+
+Depuis la racine du dépôt, utiliser Python 3.11 ou plus sur un système Unix avec un pseudo-terminal. Le premier test vérifie les refus de prévol et leur restitution côté navigateur avec des fixtures. Le second conduit deux tours dans un pseudo-terminal avec un programme synthétique et contrôle la restauration du terminal. Prévoir au moins une minute pour les deux.
+
+```sh
+python3 -B tests/e2e/test_run_provider_preflight.py ProviderPreflightTests ProviderBrowserStageTests
+python3 -IB tests/e2e/interactive_driver.py --self-test
+```
+
+Construire `agentsandbox` et `ai-guard-diagnose` depuis le même checkout. Pour le prévol suivant, placer les deux binaires côte à côte et renseigner `QA_BIN` avec le chemin absolu d’`agentsandbox`. Le test exerce les huit combinaisons client, authentification et transport avec des références de recette présentes puis absentes.
+
+```sh
+cargo build --locked --bin agentsandbox --bin ai-guard-diagnose
+QA_BIN="$PWD/target/debug/agentsandbox"
+AI_GUARD_QA_PROVIDER_CLI="$QA_BIN" \
+  python3 -IB tests/e2e/test_run_provider_preflight.py InstalledDiagnosticTests -v
+```
+
+Pour un essai fournisseur réel, préparer une pile de recette avec gateway et dashboard sur boucle locale, le bundle du même checkout, Node, Playwright et un Chromium utilisable. Les versions des clients des essais de référence sont Codex `0.170.0` et Claude Code `2.1.329`. Construire l’image avec ces versions exactes et renseigner son ID local immuable. Utiliser un fichier privé de profils et le mode d’authentification réellement configuré. Le dossier de preuves indiqué doit être neuf et son parent doit exister.
+
+```sh
+umask 077
+python3 -B tests/e2e/run_provider_case.py \
+  --bin "$QA_BIN" --config-dir "$QA_CONFIG" \
+  --gateway "$QA_GATEWAY" --dashboard "$QA_DASHBOARD" \
+  --runtime docker --runtime-endpoint "$QA_RUNTIME_ENDPOINT" --image "$QA_WORKER_IMAGE_ID" \
+  --client claude-code --auth-mode api --client-profile "$QA_CLAUDE_API_PROFILE" \
+  --providers-file "$QA_PROVIDERS_FILE" --transport batch \
+  --evidence-dir "$QA_EVIDENCE" --worker-provenance
+```
+
+Le harnais sélectionne `claude-haiku-5-5` pour Claude Code et `gpt-6-luna` pour Codex. Utiliser `--client codex` avec son profil dédié. `--auth-mode subscription` exige le profil d’abonnement et sa connexion fournisseur. Utiliser `--transport tty` sur une configuration de recette réservée à cet essai. Pour Podman, utiliser `--runtime podman --runtime-endpoint local`. Ajouter `--allow-rootful-runtime` selon l’exception choisie dans le guide local. Si Playwright est installé à part, `CODEX_PRIMARY_RUNTIME_NODE_MODULES` indique son répertoire `node_modules` absolu. `PLAYWRIGHT_CHROMIUM_EXECUTABLE` permet de désigner un Chromium local.
+
+Conserver `result.json`, la provenance du worker et la preuve du dashboard pour chaque combinaison. En cas d’échec navigateur, conserver le HTML et le PNG assainis quand la capture est disponible. [Installation locale de recette](../local/README.fr.md) · [Suivi des validations](../../engineering/TEST_STRATEGY.md)

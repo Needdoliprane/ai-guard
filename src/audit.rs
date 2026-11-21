@@ -20,8 +20,11 @@ use std::{
 
 pub mod authentication;
 mod capacity;
+mod event_query;
 pub use capacity::WorkloadAuditPolicyV1;
 pub use capacity::{AuditCapacityFailureV1, AuditCapacityPolicyV1, AuditCapacityV1};
+pub use event_query::EventQuery;
+pub(crate) use event_query::InvalidEventFilter;
 
 pub(crate) const D5_CONTROL_EVENT_KINDS: &[&str] = &[
     "broker.abandon-before-claim.requested",
@@ -697,23 +700,6 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
         egress::validate(db)?;
     }
     Ok(false)
-}
-
-#[derive(Default, Debug, Clone, Deserialize)]
-pub struct EventQuery {
-    pub before: Option<i64>,
-    pub after: Option<i64>,
-    pub limit: Option<usize>,
-    pub q: Option<String>,
-    pub agent_id: Option<String>,
-    pub sandbox_id: Option<String>,
-    pub project_id: Option<String>,
-    pub kind: Option<String>,
-    pub decision: Option<String>,
-    pub from: Option<String>,
-    pub to: Option<String>,
-    pub order: Option<String>,
-    pub format: Option<String>,
 }
 
 fn digest(seq: i64, received: &str, prev: &str, payload: &str) -> String {
@@ -2146,6 +2132,7 @@ impl Store {
         Ok(db.query_row("SELECT COALESCE(MAX(seq),0) FROM events", [], |r| r.get(0))?)
     }
     pub fn events(&self, q: &EventQuery) -> anyhow::Result<Vec<StoredEvent>> {
+        q.validated_dates()?;
         let mut sql =
             String::from("SELECT seq,received_at,prev_hash,hash,payload FROM events WHERE 1=1");
         let mut args: Vec<rusqlite::types::Value> = vec![];
@@ -2170,17 +2157,14 @@ impl Store {
             args.push(seq.into());
         }
         if let Some(s) = &q.from {
-            chrono::DateTime::parse_from_rfc3339(s).context("invalid from date")?;
             sql.push_str(" AND julianday(received_at)>=julianday(?)");
             args.push(s.clone().into());
         }
         if let Some(s) = &q.to {
-            chrono::DateTime::parse_from_rfc3339(s).context("invalid to date")?;
             sql.push_str(" AND julianday(received_at)<=julianday(?)");
             args.push(s.clone().into());
         }
         if let Some(s) = &q.q {
-            anyhow::ensure!(s.len() <= 256, "search too long");
             sql.push_str(" AND instr(lower(payload), lower(?))>0");
             args.push(s.clone().into());
         }
@@ -2189,7 +2173,7 @@ impl Store {
         } else {
             " ORDER BY seq DESC LIMIT ?"
         });
-        args.push((q.limit.unwrap_or(100).clamp(1, 1000) as i64).into());
+        args.push((q.page_limit() as i64).into());
         let db = self
             .db
             .lock()
