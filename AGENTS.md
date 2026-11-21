@@ -410,7 +410,7 @@ La première qualification proposée est locale, à hôte unique, y compris les 
 
 La PKI du NAS est une intégration possible, pas une dépendance supposée. Aucun endpoint, compte, rôle, moteur, certificat ou accès NAS n'est confirmé par ce dépôt. Avant une opération réelle, demander au mainteneur les informations et l'autorisation nécessaires selon le guide PKI. Continuer les travaux locaux sans inventer ces valeurs. Ne jamais désactiver la vérification TLS pour contourner un problème.
 
-La licence open source retenue est Apache-2.0, dans `LICENSE`. Le canal privé de signalement des vulnérabilités reste à décider avant publication. Ne pas inventer un propriétaire, une adresse de contact, un dépôt distant, un certificat ou une autorisation.
+La licence open source retenue est Apache-2.0, dans `LICENSE`. Le canal privé de signalement des vulnérabilités est GitHub Security Advisories du dépôt, décidé par le mainteneur le 21 novembre 2026. La procédure est dans [SECURITY.md](SECURITY.md). Le signalement privé ouvert aux tiers sera activé au passage public du dépôt. Ne pas inventer un propriétaire, une adresse de contact, un dépôt distant, un certificat ou une autorisation.
 
 ## Définition de terminé
 
