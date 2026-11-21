@@ -1771,9 +1771,12 @@ impl ManagedRuntime {
                 "runtime inspected a different immutable instance"
             );
             validate_created(spec, &observation)?;
-            if let Some(baseline)=baseline {
-                ensure!(baseline.configuration_fingerprint.is_some(),"recovered instance lacks its created configuration proof");
-                validate_created(spec,baseline)?;
+            if let Some(baseline) = baseline {
+                ensure!(
+                    baseline.configuration_fingerprint.is_some(),
+                    "recovered instance lacks its created configuration proof"
+                );
+                validate_created(spec, baseline)?;
                 observation.validate_identity_allocation(baseline)?;
             }
             validate_configuration(spec, &facts.bytes, self.binding.kind)?;
@@ -1790,16 +1793,28 @@ impl ManagedRuntime {
                     ));
                 }
                 OwnedStartDirective::Legacy(veto) => {
-                    ensure!(duration.is_some(), "legacy start cannot authorize prearmed transport");
+                    ensure!(
+                        duration.is_some(),
+                        "legacy start cannot authorize prearmed transport"
+                    );
                     (None, veto)
                 }
                 OwnedStartDirective::Prearmed(control) => {
-                    ensure!(duration.is_none(), "prearmed start cannot authorize legacy transport");
+                    ensure!(
+                        duration.is_none(),
+                        "prearmed start cannot authorize legacy transport"
+                    );
                     (Some(control), None)
                 }
                 OwnedStartDirective::AbandonedBeforeClaim(retirement) => {
-                    ensure!(duration.is_none(), "unused-slot retirement requires the prearmed transport");
-                    return Ok(OwnedExecutionOutcome::Abandoned { owned: created, retirement });
+                    ensure!(
+                        duration.is_none(),
+                        "unused-slot retirement requires the prearmed transport"
+                    );
+                    return Ok(OwnedExecutionOutcome::Abandoned {
+                        owned: created,
+                        retirement,
+                    });
                 }
             };
             let instance = CreatedInstance {
@@ -1811,56 +1826,79 @@ impl ManagedRuntime {
                 Some(super::deadline_supervision::WorkObservation::new(Some(
                     self.batch_observation_scope(&id, &created.observation)?,
                 )))
-            } else { None };
+            } else {
+                None
+            };
             let on_started = tokio::sync::Mutex::new(on_started);
             let callback = |_| async {
-                    // RuntimeState cannot represent every unknown fact. Inspect
-                    // again instead of promoting its compatibility bool defaults.
-                    let observation = match batch_work.as_ref() {
-                        Some(work) => {
-                            // Preserve observe(handle)'s original pure checks as
-                            // well as the actual observation/created validation.
-                            self.validate_handle(&handle)?;
-                            work.require_binding(self, &handle.id, &created.observation)?;
-                            let observed = work.observe().await?;
-                            ensure!(observed.name == handle.name, "runtime owned instance name changed");
-                            observed
-                        }
-                        None => self.observe(&handle).await?,
-                    };
-                    observation.validate_identity_allocation(&created.observation)?;
-                    let mut callback = on_started.lock().await;
-                    callback(observation).await
+                // RuntimeState cannot represent every unknown fact. Inspect
+                // again instead of promoting its compatibility bool defaults.
+                let observation = match batch_work.as_ref() {
+                    Some(work) => {
+                        // Preserve observe(handle)'s original pure checks as
+                        // well as the actual observation/created validation.
+                        self.validate_handle(&handle)?;
+                        work.require_binding(self, &handle.id, &created.observation)?;
+                        let observed = work.observe().await?;
+                        ensure!(
+                            observed.name == handle.name,
+                            "runtime owned instance name changed"
+                        );
+                        observed
+                    }
+                    None => self.observe(&handle).await?,
                 };
+                observation.validate_identity_allocation(&created.observation)?;
+                let mut callback = on_started.lock().await;
+                callback(observation).await
+            };
             let result = if let Some(control) = control {
-                self.runtime.execute_created_prearmed(
-                    &instance, input, stdout_limit, (self, &created.observation), control, callback,
-                ).await?
+                self.runtime
+                    .execute_created_prearmed(
+                        &instance,
+                        input,
+                        stdout_limit,
+                        (self, &created.observation),
+                        control,
+                        callback,
+                    )
+                    .await?
             } else {
-                self.runtime.execute_created(
-                    &instance, input, duration.context("missing legacy runtime duration")?, stdout_limit,
-                    Some((self, &created.observation)),
-                    spec.security_preset.is_interactive().then_some(spec.terminal_secrets.0.as_slice()),
-                    batch_work.clone(),
-                    legacy_veto,
-                    callback,
-                ).await.map_err(|failure| {
-                    moved_batch_fallback = failure.moved_fallback;
-                    anyhow::Error::new(*failure)
-                })?
+                self.runtime
+                    .execute_created(
+                        &instance,
+                        input,
+                        duration.context("missing legacy runtime duration")?,
+                        stdout_limit,
+                        Some((self, &created.observation)),
+                        spec.security_preset
+                            .is_interactive()
+                            .then_some(spec.terminal_secrets.0.as_slice()),
+                        batch_work.clone(),
+                        legacy_veto,
+                        callback,
+                    )
+                    .await
+                    .map_err(|failure| {
+                        moved_batch_fallback = failure.moved_fallback;
+                        anyhow::Error::new(*failure)
+                    })?
             };
             completed_transport = Some(result);
             #[cfg(all(test, unix))]
             legacy_completion_tests::after_transport(&handle.id);
             let terminal = self.observe(&handle).await?;
             terminal.validate_terminal(self.binding.kind, &created.observation)?;
-            let result = completed_transport.take().context("completed transport result is absent")?;
+            let result = completed_transport
+                .take()
+                .context("completed transport result is absent")?;
             Ok(OwnedExecutionOutcome::Executed(ManagedRetainedExecution {
                 execution: RetainedExecution { result, instance },
                 created,
                 terminal,
             }))
-        }.await;
+        }
+        .await;
         match result {
             Ok(result) => Ok(result),
             Err(error) => {

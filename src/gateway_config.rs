@@ -443,9 +443,10 @@ mod tests {
             .tempdir()
             .unwrap();
         let path = dir.path().join("oidc.json");
-        let mut document: serde_json::Value =
-            serde_json::from_str(include_str!("../docs/setup/sso/examples/gateway.https.json"))
-                .unwrap();
+        let mut document: serde_json::Value = serde_json::from_str(include_str!(
+            "../docs/setup/sso/examples/gateway.https.json"
+        ))
+        .unwrap();
         document["version"] = json!(1);
         document["authentication_audit"]
             .as_object_mut()
