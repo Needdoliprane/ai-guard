@@ -53,8 +53,19 @@ fn never_accepted(path: &Path, store: Store, kind: &str, data: Value) -> String 
         return format!("{error:#}");
     }
     drop(store);
+    // Opening records the failed validation instead of refusing the handle:
+    // the reopened store is unhealthy and refuses its first checked write.
     match Store::open_existing_for_tenant(path, "tenant-a", Redactor::new(vec![]), 1000) {
-        Ok(_) => panic!("a store carrying {kind} reopened"),
+        Ok(reopened) => {
+            assert!(
+                !reopened.healthy(),
+                "a store carrying {kind} reopened healthy"
+            );
+            let refusal = reopened
+                .append(Event::new("fixture.after_unknown_identity"))
+                .expect_err("an unhealthy store refuses writes");
+            format!("{error:#}", error = refusal)
+        }
         Err(error) => format!("{error:#}"),
     }
 }
