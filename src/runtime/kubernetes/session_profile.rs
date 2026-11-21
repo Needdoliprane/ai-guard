@@ -412,6 +412,41 @@ impl KubernetesSessionProfileV2 {
     pub(crate) fn retained_provider(&self) -> SessionProfileResult<ProviderResolutionV1> {
         self.0.provider.resolution()
     }
+    /// Authority fingerprint of the retained binding. Validated data only.
+    pub(crate) fn retained_authority_fingerprint(&self) -> &str {
+        &self.0.binding.authority_fingerprint
+    }
+    /// Workspace commitment: manifest digest, file count, total bytes.
+    pub(crate) fn retained_workspace_commitment(&self) -> (&str, u64, u64) {
+        (
+            &self.0.workspace.manifest_sha256,
+            self.0.workspace.file_count,
+            self.0.workspace.total_bytes,
+        )
+    }
+
+    /// Worker-side reading of the canonical bytes carried by the protocol v3
+    /// Handoff (G11 K3). The Pod holds no Kubernetes authority, so none is
+    /// checked here: the caller compares `profile_hash` with the accepted
+    /// Hello and the retained binding with the Hello identifiers. Bytes that
+    /// are not exactly the canonical form of a valid profile are refused, so
+    /// the hash the worker computes is over the bytes it received. Validation
+    /// grants no authority and establishes no artifact.
+    pub(crate) fn from_canonical_bytes(bytes: &[u8]) -> SessionProfileResult<Self> {
+        if bytes.len() > MAX_PROFILE_BYTES {
+            return Err(KubernetesSessionProfileError::InputTooLarge);
+        }
+        let value = crate::json::decode_unique(bytes, MAX_DEPTH)
+            .map_err(|_| KubernetesSessionProfileError::InvalidProfile)?;
+        let wire: ProfileWire = serde_json::from_value(value)
+            .map_err(|_| KubernetesSessionProfileError::InvalidProfile)?;
+        wire.validate()?;
+        let profile = Self(wire);
+        if profile.canonical_bytes()? != bytes {
+            return Err(KubernetesSessionProfileError::InvalidProfile);
+        }
+        Ok(profile)
+    }
 
     /// Persistence parser only. The retained binding is validated data and is
     /// rechecked against authenticated/historical authority by the Store.

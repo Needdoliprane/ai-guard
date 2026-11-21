@@ -35,7 +35,9 @@ pub(crate) mod session_lifecycle;
 pub(crate) mod session_permit;
 pub(crate) mod session_pod;
 pub mod session_profile;
+pub(crate) mod session_protocol;
 pub(crate) mod session_requests;
+pub(crate) mod session_supervisor;
 #[cfg(test)]
 #[path = "kubernetes/session_test_peer.rs"]
 pub(crate) mod session_test_peer;

@@ -118,6 +118,15 @@ pub fn dispatch_waiting_mode<A: AsRef<OsStr>>(args: &[A]) -> Option<i32> {
     }
 }
 
+/// Entry for the provider binary covering every Kubernetes worker mode: the
+/// v2 waiting mode (`dispatch_waiting_mode`, unchanged) and the two protocol
+/// v3 modes (`session_supervisor::dispatch_v3_mode`). Same contract: the raw
+/// first argument selects a mode exactly, `Some(code)` once a mode is
+/// recognized, `None` for every other argv, which keeps the provider path.
+pub fn dispatch_worker_mode<A: AsRef<OsStr>>(args: &[A]) -> Option<i32> {
+    dispatch_waiting_mode(args).or_else(|| super::session_supervisor::dispatch_v3_mode(args))
+}
+
 /// Standard output carries only the Ready frame, flushed by the bootstrap
 /// writer; the one diagnostic line goes to standard error.
 fn run_on_process_stdio() -> i32 {

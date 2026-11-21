@@ -344,9 +344,69 @@ pub(crate) enum WaitingForAttachV2 {
 pub(crate) async fn bootstrap_waiting_for_attach<R, W>(
     input: &mut R,
     output: &mut W,
-    _capacity: &BootstrapCapacity,
+    capacity: &BootstrapCapacity,
     handshake: Duration,
 ) -> Result<WaitingForAttachV2>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    Ok(
+        match bootstrap_waiting_for_attach_hello(input, output, capacity, handshake).await? {
+            WaitingForAttachHelloV2::EofBeforeHello => WaitingForAttachV2::EofBeforeHello,
+            WaitingForAttachHelloV2::ReadyWritten(_) => WaitingForAttachV2::ReadyWritten,
+        },
+    )
+}
+
+/// Non-secret metadata of one accepted Hello, as the peer declared it. The
+/// protocol v3 supervisor compares the Handoff profile with `profile_hash`
+/// and the profile binding with the identifiers. Nothing here authenticates
+/// the peer, the broker or the Pod.
+#[derive(Clone)]
+pub(crate) struct AcceptedHelloV2 {
+    binding: WireBinding,
+}
+impl AcceptedHelloV2 {
+    pub(crate) fn profile_hash(&self) -> &str {
+        &self.binding.profile_hash
+    }
+    pub(crate) fn authority_fingerprint(&self) -> &str {
+        &self.binding.authority_fingerprint
+    }
+    /// installation, control namespace, broker, incarnation, session, attempt.
+    pub(crate) fn ids(&self) -> [Uuid; 6] {
+        [
+            self.binding.installation_id,
+            self.binding.control_namespace_uuid,
+            self.binding.broker_id,
+            self.binding.incarnation_id,
+            self.binding.session_id,
+            self.binding.attempt_id,
+        ]
+    }
+}
+impl std::fmt::Debug for AcceptedHelloV2 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AcceptedHelloV2(declared metadata; no identity proof)")
+    }
+}
+
+/// `WaitingForAttachV2` with the accepted Hello kept for the caller.
+#[derive(Clone, Debug)]
+pub(crate) enum WaitingForAttachHelloV2 {
+    EofBeforeHello,
+    ReadyWritten(AcceptedHelloV2),
+}
+
+/// `bootstrap_waiting_for_attach`, returning the accepted Hello metadata.
+/// Same reads, writes, window and fence; nothing is read after the Hello.
+pub(crate) async fn bootstrap_waiting_for_attach_hello<R, W>(
+    input: &mut R,
+    output: &mut W,
+    _capacity: &BootstrapCapacity,
+    handshake: Duration,
+) -> Result<WaitingForAttachHelloV2>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -356,12 +416,12 @@ where
     }
     let mut prefix = [0u8; 4];
     match input.read(&mut prefix[..1]).await {
-        Ok(0) => return Ok(WaitingForAttachV2::EofBeforeHello),
+        Ok(0) => return Ok(WaitingForAttachHelloV2::EofBeforeHello),
         Ok(_) => {}
         Err(_) => return Err(BootstrapError::Io),
     }
     let until = Instant::now() + handshake;
-    timeout_at(until, async {
+    let accepted = timeout_at(until, async {
         input
             .read_exact(&mut prefix[1..])
             .await
@@ -372,6 +432,9 @@ where
                 exchange_id,
                 binding,
             } => {
+                let accepted = AcceptedHelloV2 {
+                    binding: binding.clone(),
+                };
                 write_frame(
                     output,
                     &Frame::Ready {
@@ -380,7 +443,8 @@ where
                         binding,
                     },
                 )
-                .await
+                .await?;
+                Ok(accepted)
             }
             Frame::Ready { .. } => Err(BootstrapError::Protocol),
         }
@@ -390,7 +454,7 @@ where
     // Same fence as `bootstrap_waiting`: the Ready IO may finish in one poll
     // after `until`.
     check_deadline(until)?;
-    Ok(WaitingForAttachV2::ReadyWritten)
+    Ok(WaitingForAttachHelloV2::ReadyWritten(accepted))
 }
 
 struct State {
