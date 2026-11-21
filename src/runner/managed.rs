@@ -1516,6 +1516,20 @@ async fn bound_runtime(
     Ok(runtime)
 }
 
+/// The refusal the operator reads: the audited rule and reason of the durable decision, and the
+/// fact that nothing was reserved or launched.
+fn policy_denial(answer: &Value) -> anyhow::Error {
+    let rule = answer["decision"]["rule"]
+        .as_str()
+        .unwrap_or("rule unavailable");
+    let reason = answer["decision"]["reason"]
+        .as_str()
+        .unwrap_or("The gateway did not provide a reason.");
+    anyhow::anyhow!(
+        "policy denied the command ({rule}). {reason} No worker was reserved or launched."
+    )
+}
+
 async fn authorize_plan(
     plan: &mut RunPlan,
     client: &AuditClient,
@@ -1528,7 +1542,7 @@ async fn authorize_plan(
     let mut chosen = initial;
     match answer.pointer("/decision/outcome").and_then(Value::as_str) {
         Some("allow") => {}
-        Some("deny") => bail!("policy denied the command; no worker was reserved or launched"),
+        Some("deny") => return Err(policy_denial(&answer)),
         Some("review") => {
             let hash = crate::policy::request_hash(&chosen);
             let pending = approval_path(&plan.options.config_dir, &hash)?;
@@ -1566,6 +1580,9 @@ async fn authorize_plan(
             chosen.human_approved = true;
             chosen.approval_hash = Some(hash);
             answer = client.decide(&chosen).await?;
+            if answer.pointer("/decision/outcome").and_then(Value::as_str) == Some("deny") {
+                return Err(policy_denial(&answer));
+            }
             anyhow::ensure!(
                 answer.pointer("/decision/outcome").and_then(Value::as_str) == Some("allow"),
                 "approved request did not receive a durable allow"

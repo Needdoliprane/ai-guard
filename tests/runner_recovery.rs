@@ -328,6 +328,49 @@ impl Scenario {
 }
 
 #[tokio::test]
+async fn strict_refusal_explains_the_audited_rule_without_invoking_the_engine() {
+    let temporary = support::private_tempdir();
+    let bin = fixture_binary(temporary.path());
+    let scenario = Scenario::new(temporary.path(), &bin, "strict-refusal").await;
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_agentsandbox"));
+    command
+        .args(["run", "--gateway", &scenario.url, "--config-dir"])
+        .arg(&scenario.config)
+        .arg("--runtime-program")
+        .arg(scenario.bin.join("docker"))
+        .arg("--project")
+        .arg(&scenario.project)
+        .args(["--profile", "strict", "--", "/bin/echo", "not-allowlisted"])
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(20), command.output())
+        .await
+        .expect("CLI refusal deadline")
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(scenario.store.workers().unwrap().is_empty());
+    assert!(!scenario.root.join("calls").try_exists().unwrap());
+    scenario.invariant();
+
+    let events = scenario.store.events(&EventQuery::default()).unwrap();
+    let request = events
+        .iter()
+        .find(|entry| entry.event.kind == "command.requested")
+        .expect("durable command request");
+    let refusal = events
+        .iter()
+        .find(|entry| entry.event.kind == "security.decision")
+        .expect("durable policy refusal");
+    assert_eq!(request.event.session_id, refusal.event.session_id);
+    let decision = refusal.event.decision.as_ref().unwrap();
+    assert_eq!(decision.outcome, agentsandbox::model::Outcome::Deny);
+    assert_eq!(decision.rule, "strict_default_deny");
+    let diagnostic = String::from_utf8(output.stderr).unwrap();
+    assert!(diagnostic.contains(&decision.rule), "{diagnostic}");
+    assert!(diagnostic.contains(&decision.reason), "{diagnostic}");
+}
+
+#[tokio::test]
 async fn legacy_prestart_workspace_without_exclusion_proof_refuses_without_runtime_or_new_claim() {
     let temporary = support::private_tempdir();
     let bin = fixture_binary(temporary.path());
