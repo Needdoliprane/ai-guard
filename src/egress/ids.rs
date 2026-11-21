@@ -59,7 +59,11 @@ impl From<IdV1> for String {
 pub struct DigestV1(String);
 impl DigestV1 {
     pub fn parse(raw: &str) -> Result<Self, IdError> {
-        if raw.len() != 64 || !raw.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        if raw.len() != 64
+            || !raw
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
             return Err(IdError);
         }
         Ok(Self(raw.into()))

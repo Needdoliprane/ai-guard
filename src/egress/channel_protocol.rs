@@ -2,8 +2,8 @@
 //! echoing the challenge proves neither workload identity nor network authority.
 //! This framing is never selected from a historical relay token or frame.
 
-use super::protocol::{EgressCapabilityV1, EgressMessageV1, MAX_EGRESS_FRAME_BYTES};
 use super::ids::{CHANNEL_CONTRACT, DigestV1, IdV1};
+use super::protocol::{EgressCapabilityV1, EgressMessageV1, MAX_EGRESS_FRAME_BYTES};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::{
@@ -88,10 +88,12 @@ pub async fn read_handshake<R: AsyncRead + Unpin>(
     // A fixed scratch buffer also bounds malformed/unknown JSON before Serde.
     let mut bytes = [0_u8; MAX_HANDSHAKE_BYTES];
     read_exact_before(input, &mut bytes[..length], deadline).await?;
-    let hello: CommonEgressHandshakeV1 = serde_json::from_slice(&bytes[..length])
-        .map_err(|_| CommonEgressChannelError::Protocol)?;
+    let hello: CommonEgressHandshakeV1 =
+        serde_json::from_slice(&bytes[..length]).map_err(|_| CommonEgressChannelError::Protocol)?;
     hello.validate()?;
-    if Instant::now() >= deadline { return Err(CommonEgressChannelError::Timeout); }
+    if Instant::now() >= deadline {
+        return Err(CommonEgressChannelError::Timeout);
+    }
     Ok(hello)
 }
 
@@ -128,8 +130,12 @@ impl Default for EgressFrameReader {
 impl EgressFrameReader {
     pub fn new() -> Self {
         Self {
-            prefix: [0; 4], prefix_used: 0, body: Vec::new(), body_used: 0,
-            deadline: None, closed: false,
+            prefix: [0; 4],
+            prefix_used: 0,
+            body: Vec::new(),
+            body_used: 0,
+            deadline: None,
+            closed: false,
         }
     }
 
@@ -152,10 +158,14 @@ impl EgressFrameReader {
         input: &mut R,
     ) -> Result<Option<EgressMessageV1>, CommonEgressChannelError> {
         while self.prefix_used < self.prefix.len() {
-            let count = read_piece(input, &mut self.prefix[self.prefix_used..], self.deadline).await?;
+            let count =
+                read_piece(input, &mut self.prefix[self.prefix_used..], self.deadline).await?;
             if count == 0 {
-                return if self.prefix_used == 0 { Ok(None) }
-                else { Err(CommonEgressChannelError::PartialFrame) };
+                return if self.prefix_used == 0 {
+                    Ok(None)
+                } else {
+                    Err(CommonEgressChannelError::PartialFrame)
+                };
             }
             self.deadline.get_or_insert(Instant::now() + FRAME_TIME);
             self.prefix_used += count;
@@ -165,17 +175,24 @@ impl EgressFrameReader {
             if length == 0 || length > MAX_EGRESS_FRAME_BYTES {
                 return Err(CommonEgressChannelError::Size);
             }
-            self.body.try_reserve_exact(length).map_err(|_| CommonEgressChannelError::Capacity)?;
+            self.body
+                .try_reserve_exact(length)
+                .map_err(|_| CommonEgressChannelError::Capacity)?;
             self.body.resize(length, 0);
         }
         while self.body_used < self.body.len() {
             let count = read_piece(input, &mut self.body[self.body_used..], self.deadline).await?;
-            if count == 0 { return Err(CommonEgressChannelError::PartialFrame); }
+            if count == 0 {
+                return Err(CommonEgressChannelError::PartialFrame);
+            }
             self.body_used += count;
         }
         let message = EgressMessageV1::decode_payload(&self.body)
             .map_err(|_| CommonEgressChannelError::Protocol)?;
-        if self.deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
             return Err(CommonEgressChannelError::Timeout);
         }
         *self = Self::new();
@@ -190,7 +207,9 @@ pub async fn write_message<W: AsyncWrite + Unpin>(
     message: &EgressMessageV1,
     deadline: Instant,
 ) -> Result<(), CommonEgressChannelError> {
-    let bytes = message.encode_payload().map_err(|_| CommonEgressChannelError::Protocol)?;
+    let bytes = message
+        .encode_payload()
+        .map_err(|_| CommonEgressChannelError::Protocol)?;
     write_payload(output, &bytes, deadline).await
 }
 
@@ -199,41 +218,59 @@ async fn write_payload<W: AsyncWrite + Unpin>(
     bytes: &[u8],
     deadline: Instant,
 ) -> Result<(), CommonEgressChannelError> {
-    if Instant::now() >= deadline { return Err(CommonEgressChannelError::Timeout); }
+    if Instant::now() >= deadline {
+        return Err(CommonEgressChannelError::Timeout);
+    }
     let length = u32::try_from(bytes.len()).map_err(|_| CommonEgressChannelError::Size)?;
     timeout_at(deadline, async {
         output.write_all(&length.to_be_bytes()).await?;
         output.write_all(bytes).await?;
         output.flush().await
-    }).await.map_err(|_| CommonEgressChannelError::Timeout)?
-        .map_err(|_| CommonEgressChannelError::Io)?;
-    if Instant::now() >= deadline { return Err(CommonEgressChannelError::Timeout); }
+    })
+    .await
+    .map_err(|_| CommonEgressChannelError::Timeout)?
+    .map_err(|_| CommonEgressChannelError::Io)?;
+    if Instant::now() >= deadline {
+        return Err(CommonEgressChannelError::Timeout);
+    }
     Ok(())
 }
 
 async fn read_exact_before<R: AsyncRead + Unpin>(
-    input: &mut R, bytes: &mut [u8], deadline: Instant,
+    input: &mut R,
+    bytes: &mut [u8],
+    deadline: Instant,
 ) -> Result<(), CommonEgressChannelError> {
     let mut used = 0;
     while used < bytes.len() {
         let count = read_piece(input, &mut bytes[used..], Some(deadline)).await?;
-        if count == 0 { return Err(CommonEgressChannelError::PartialFrame); }
+        if count == 0 {
+            return Err(CommonEgressChannelError::PartialFrame);
+        }
         used += count;
     }
     Ok(())
 }
 
 async fn read_piece<R: AsyncRead + Unpin>(
-    input: &mut R, bytes: &mut [u8], deadline: Option<Instant>,
+    input: &mut R,
+    bytes: &mut [u8],
+    deadline: Option<Instant>,
 ) -> Result<usize, CommonEgressChannelError> {
     match deadline {
         Some(deadline) => {
-            if Instant::now() >= deadline { return Err(CommonEgressChannelError::Timeout); }
-            timeout_at(deadline, input.read(bytes)).await
+            if Instant::now() >= deadline {
+                return Err(CommonEgressChannelError::Timeout);
+            }
+            timeout_at(deadline, input.read(bytes))
+                .await
                 .map_err(|_| CommonEgressChannelError::Timeout)?
                 .map_err(|_| CommonEgressChannelError::Io)
         }
-        None => input.read(bytes).await.map_err(|_| CommonEgressChannelError::Io),
+        None => input
+            .read(bytes)
+            .await
+            .map_err(|_| CommonEgressChannelError::Io),
     }
 }
 

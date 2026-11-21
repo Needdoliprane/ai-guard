@@ -14,6 +14,7 @@ pub mod protocol;
 mod types;
 
 pub use policy::{EgressPolicyV1, ValidatedResolution};
+pub use protocol::Admission;
 pub use types::{
     Authority, AuthorityError, DenyReason, EgressTransport, PolicyAllowed, PolicyDecision,
     PolicyError, PolicyLimits, ResolutionError,
