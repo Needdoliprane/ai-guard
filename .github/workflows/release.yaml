@@ -87,8 +87,71 @@ jobs:
           printf 'tag=%s\nsha=%s\nci_url=%s\nnative_binaries=%s\nlicense_sha256=%s\n' \
             "$RELEASE_TAG" "$GITHUB_SHA" "$ci_url" "$native_binaries" "${license_sum%% *}" >> "$GITHUB_OUTPUT"
 
-  tag:
+  # Describe the exact source before any tag exists: if this job fails, nothing is tagged.
+  # The manifest is source-only; the archives are bound later by SHA256SUMS in the draft job.
+  metadata:
     needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+      RELEASE_SHA: ${{ needs.verify.outputs.sha }}
+      AI_GUARD_BUILD_REVISION: ${{ needs.verify.outputs.sha }}
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify.outputs.sha }}
+          persist-credentials: false
+      - name: Produce and re-verify the release manifest and the CycloneDX SBOM
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          export AI_GUARD_VERSION="${RELEASE_TAG#v}"
+          cargo fetch --locked
+          cargo build --release --locked --offline --bin agentsandbox
+          cli="$PWD/target/release/agentsandbox"
+
+          mkdir -m 700 "$RUNNER_TEMP/private" "$RUNNER_TEMP/private/tmp" "$RUNNER_TEMP/private/parent"
+          export TMPDIR="$RUNNER_TEMP/private/tmp"
+          name="ai-guard-$RELEASE_TAG-release-metadata"
+          package="$RUNNER_TEMP/package/$name"
+          assets="$RUNNER_TEMP/release-assets"
+          install -d "$package" "$assets"
+          "$cli" release manifest --source . --output "$RUNNER_TEMP/private/parent/manifest"
+          "$cli" release verify --source . --manifest "$RUNNER_TEMP/private/parent/manifest" --source-only
+          install -d "$package/manifest"
+          for file in release-manifest.json sbom.cdx.json SHA256SUMS; do
+            install -m 0644 "$RUNNER_TEMP/private/parent/manifest/$file" "$package/manifest/$file"
+          done
+          jq -e '.bomFormat == "CycloneDX" and .specVersion == "1.6"' "$package/manifest/sbom.cdx.json" >/dev/null
+          install -m 0644 LICENSE "$package/"
+          printf 'tag=%s\ncommit=%s\nrun=%s\nrepository=%s\n' \
+            "$RELEASE_TAG" "$RELEASE_SHA" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY" > "$package/BUILD-INFO"
+          tar -C "$RUNNER_TEMP/package" -czf "$assets/$name.tar.gz" "$name"
+          tar -tzf "$assets/$name.tar.gz" >/dev/null
+          install -m 0644 "$package/manifest/sbom.cdx.json" "$assets/ai-guard-$RELEASE_TAG-sbom.cdx.json"
+          cd "$assets"
+          for file in "$name.tar.gz" "ai-guard-$RELEASE_TAG-sbom.cdx.json"; do
+            test -s "$file"
+            shasum -a 256 "$file" > "$file.sha256"
+          done
+      - name: Check third-party licence expressions against the reviewed list
+        run: cargo run --quiet --locked --offline --example third_party_notices -- check --allowed .github/third-party-license-expressions.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-metadata
+          path: ${{ runner.temp }}/release-assets/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  tag:
+    needs: [verify, metadata]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -193,7 +256,13 @@ jobs:
           assets="$RUNNER_TEMP/release-assets"
           install -d "$package/bin" "$assets"
           install -m 0644 LICENSE "$package/"
-          printf 'tag=%s\ncommit=%s\ntarget=%s\n' "$RELEASE_TAG" "$RELEASE_SHA" "$RUST_TARGET" > "$package/BUILD-INFO"
+          printf 'tag=%s\ncommit=%s\ntarget=%s\nrun=%s\nrepository=%s\n' \
+            "$RELEASE_TAG" "$RELEASE_SHA" "$RUST_TARGET" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY" > "$package/BUILD-INFO"
+          # Every crate source is needed to read the licence texts, whatever the target.
+          cargo fetch --locked
+          cargo run --quiet --release --locked --offline --target "$RUST_TARGET" \
+            --example third_party_notices -- notices --output "$package/THIRD-PARTY-NOTICES"
+          test -s "$package/THIRD-PARTY-NOTICES"
           read -r -a programs <<< "$NATIVE_BINARIES"
           test "${#programs[@]}" -gt 0
           for program in "${programs[@]}"; do
@@ -234,7 +303,8 @@ jobs:
           cp -R dist/. "$package/"
           install -m 0644 ../LICENSE "$package/"
           install -m 0644 node_modules/vite/LICENSE.md "$package/licenses/vite-LICENSE.md"
-          printf 'tag=%s\ncommit=%s\n' "$RELEASE_TAG" "$RELEASE_SHA" > "$package/BUILD-INFO"
+          printf 'tag=%s\ncommit=%s\nrun=%s\nrepository=%s\n' \
+            "$RELEASE_TAG" "$RELEASE_SHA" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY" > "$package/BUILD-INFO"
           tar -C "$RUNNER_TEMP/package" -czf "$RUNNER_TEMP/release-assets/$name.tar.gz" "$name"
 
       - name: Record archive checksums
@@ -255,7 +325,7 @@ jobs:
           compression-level: 0
 
   draft:
-    needs: [verify, tag, build]
+    needs: [verify, tag, metadata, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -297,7 +367,7 @@ jobs:
                   }
                 }
                 BEGIN {
-                  if (target != "frontend") {
+                  if (target != "frontend" && target != "release-metadata") {
                     n = split(native_bins, programs, " ")
                     for (i = 1; i <= n; i++) {
                       path = "bin/" programs[i]
@@ -331,6 +401,9 @@ jobs:
                   }
                   path = substr(path, length(root) + 2)
                   if (path == "BUILD-INFO" || path == "LICENSE" || (path in required_binaries) || path == "index.html" ||
+                      path == "THIRD-PARTY-NOTICES" ||
+                      (target == "release-metadata" && (path == "manifest/release-manifest.json" ||
+                        path == "manifest/sbom.cdx.json" || path == "manifest/SHA256SUMS")) ||
                       (target == "frontend" && (path == "licenses/vite-LICENSE.md" || path ~ /^assets\/.+\.js$/))) {
                     count[path]++
                     nonempty_regular[path] = (type == "-" && size ~ /^[0-9]+$/ && size + 0 > 0)
@@ -340,7 +413,15 @@ jobs:
                 END {
                   check_required("BUILD-INFO", 0)
                   check_required("LICENSE", 0)
-                  if (target == "frontend") {
+                  if (target == "release-metadata") {
+                    check_required("manifest/release-manifest.json", 0)
+                    check_required("manifest/sbom.cdx.json", 0)
+                    check_required("manifest/SHA256SUMS", 0)
+                    if (count["index.html"] || count["THIRD-PARTY-NOTICES"]) {
+                      print "Unexpected frontend or notices member in the metadata archive"
+                      failed = 1
+                    }
+                  } else if (target == "frontend") {
                     check_required("index.html", 0)
                     check_required("licenses/vite-LICENSE.md", 0)
                     for (path in count) {
@@ -351,6 +432,7 @@ jobs:
                       failed = 1
                     }
                   } else {
+                    check_required("THIRD-PARTY-NOTICES", 0)
                     for (path in required_binaries) check_required(path, 1)
                   }
                   exit failed
@@ -363,7 +445,9 @@ jobs:
             "ai-guard-$RELEASE_TAG-x86_64-unknown-linux-gnu.tar.gz"
             "ai-guard-$RELEASE_TAG-aarch64-apple-darwin.tar.gz"
             "ai-guard-$RELEASE_TAG-frontend.tar.gz"
+            "ai-guard-$RELEASE_TAG-release-metadata.tar.gz"
           )
+          sbom="ai-guard-$RELEASE_TAG-sbom.cdx.json"
           if [[ ! "$LICENSE_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
             echo "::error::Missing or invalid LICENSE digest from the selected commit"
             exit 1
@@ -385,16 +469,28 @@ jobs:
             fi
             if ! tar -xOzf "$archive" -- "$name/BUILD-INFO" | cmp -s - <(
               printf 'tag=%s\ncommit=%s\n' "$RELEASE_TAG" "$RELEASE_SHA"
-              if [[ "$target" != frontend ]]; then
+              if [[ "$target" != frontend && "$target" != release-metadata ]]; then
                 printf 'target=%s\n' "$target"
               fi
+              printf 'run=%s\nrepository=%s\n' "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY"
             ); then
               echo "::error::$archive BUILD-INFO does not match the selected tag, commit and target"
               exit 1
             fi
           done
-          shasum -a 256 "${archives[@]}" > SHA256SUMS
-          files=("${archives[@]}" SHA256SUMS)
+          test -s "$sbom"
+          test "$(shasum -a 256 "$sbom")" = "$(cat "$sbom.sha256")"
+          metadata_archive="ai-guard-$RELEASE_TAG-release-metadata.tar.gz"
+          if ! tar -xOzf "$metadata_archive" -- "ai-guard-$RELEASE_TAG-release-metadata/manifest/sbom.cdx.json" | cmp -s - "$sbom"; then
+            echo "::error::The standalone SBOM differs from the SBOM inside the metadata archive"
+            exit 1
+          fi
+          if ! jq -e '.bomFormat == "CycloneDX" and .specVersion == "1.6" and (.components | type == "array" and length > 0)' "$sbom" >/dev/null; then
+            echo "::error::The SBOM is not a nonempty CycloneDX 1.6 document"
+            exit 1
+          fi
+          shasum -a 256 "${archives[@]}" "$sbom" > SHA256SUMS
+          files=("${archives[@]}" "$sbom" SHA256SUMS)
           expected=$(
             for file in "${files[@]}"; do
               checksum=$(shasum -a 256 "$file") || exit 1

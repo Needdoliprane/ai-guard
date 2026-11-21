@@ -41,6 +41,12 @@ jobs:
           --exact provider_references_from_metadata selection_refusals_are_classified
           the_model_of_a_profile_is_resolved_as_the_product_resolves_it
           --test-threads=1
+      - name: Third-party licence guard
+        # Fails when Cargo.lock brings a licence expression that was not reviewed, or a crate
+        # without any licence expression or text. Needs every crate source: see cargo fetch above.
+        run: |
+          cargo fetch --locked
+          cargo run --quiet --locked --offline --example third_party_notices -- check --allowed .github/third-party-license-expressions.txt
       - name: Verify the CLI version and build revision
         shell: bash
         run: |
