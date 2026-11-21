@@ -53,6 +53,7 @@ async fn reserve(
             let input = parse(body)?;
             let result = tenant
                 .store
+                .sqlite_api()?
                 .reserve_relay_channel(&input)
                 .map_err(failure)?;
             let status = if result.replayed {
@@ -76,6 +77,7 @@ async fn claim(
             path(&id, &input.channel_id)?;
             let result = tenant
                 .store
+                .sqlite_api()?
                 .claim_relay_channel_exec(&input)
                 .map_err(failure)?;
             let status = if result.replayed {
@@ -100,6 +102,7 @@ async fn transition(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .transition_relay_channel(&input)
                     .map_err(failure)?,
             ))
@@ -126,6 +129,7 @@ async fn reconcile(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .reconcile_relay_channel(&input)
                     .map_err(failure)?,
             ))

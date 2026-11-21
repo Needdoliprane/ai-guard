@@ -430,6 +430,33 @@ impl MysqlAuditStore {
         })
     }
 
+    pub fn tenant_id(&self) -> &str {
+        &self.tenant
+    }
+
+    pub fn redactor_union(&self, additional: &Redactor) -> Redactor {
+        self.redactor.union(additional)
+    }
+
+    pub fn redactor_covers(&self, additional: &Redactor) -> bool {
+        self.redactor.covers(additional)
+    }
+
+    /// Attach a masking union before the first connection. Only an unverified
+    /// instance can change its codec; a verified head is never rebound.
+    pub fn with_additional_redaction(mut self, additional: &Redactor) -> Result<Self> {
+        ensure!(
+            self.confirmed.get_mut().head.seq == 0,
+            "redaction cannot change after the audit prefix was verified"
+        );
+        self.redactor = self.redactor.union(additional);
+        Ok(self)
+    }
+
+    pub fn capacity_policy(&self) -> &AuditCapacityPolicyV1 {
+        &self.capacity_policy
+    }
+
     pub fn with_capacity_policy(mut self, policy: AuditCapacityPolicyV1) -> Result<Self> {
         policy.validate(self.max_events as u64)?;
         self.capacity_policy = policy;

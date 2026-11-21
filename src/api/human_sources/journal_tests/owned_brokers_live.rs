@@ -250,10 +250,15 @@ async fn owned_brokers_returns_nonempty_whitelisted_pages_with_real_scoped_audit
             .iter()
             .any(|cap| cap == "read_broker_registry")
     );
-    let neighbor = crate::audit::read_test_observer::observe(&state.tenants[0].store);
+    let neighbor =
+        crate::audit::read_test_observer::observe(state.tenants[0].store.sqlite().unwrap());
     let database = connection(&state);
     let before = snapshot(&database);
-    let usage = state.tenants[1].store.modern_test_human_usage();
+    let usage = state.tenants[1]
+        .store
+        .sqlite()
+        .unwrap()
+        .modern_test_human_usage();
     let (status, page) = get(
         &router,
         "/api/v1/human/owned/brokers?limit=1",
@@ -410,7 +415,11 @@ async fn owned_brokers_returns_nonempty_whitelisted_pages_with_real_scoped_audit
     );
     committed_receipt(&database, &before, &page, &identity, &member);
     assert_eq!(
-        state.tenants[1].store.modern_test_human_usage()["tenant"]["events"]
+        state.tenants[1]
+            .store
+            .sqlite()
+            .unwrap()
+            .modern_test_human_usage()["tenant"]["events"]
             .as_u64()
             .unwrap(),
         usage["tenant"]["events"].as_u64().unwrap() + 1
@@ -469,7 +478,11 @@ async fn refused_read(capability: HumanCapabilityV1, mode: &str) {
     let (_, context) = select(&router, mode).await;
     let database = connection(&state);
     let before = snapshot(&database);
-    let usage = state.tenants[1].store.modern_test_human_usage();
+    let usage = state.tenants[1]
+        .store
+        .sqlite()
+        .unwrap()
+        .modern_test_human_usage();
     let (status, body) = get(
         &router,
         "/api/v1/human/owned/brokers",
@@ -486,7 +499,14 @@ async fn refused_read(capability: HumanCapabilityV1, mode: &str) {
         before,
         "a refused read must not append a successful read receipt"
     );
-    assert_eq!(state.tenants[1].store.modern_test_human_usage(), usage);
+    assert_eq!(
+        state.tenants[1]
+            .store
+            .sqlite()
+            .unwrap()
+            .modern_test_human_usage(),
+        usage
+    );
 }
 
 #[tokio::test]

@@ -189,7 +189,7 @@ async fn dashboard_reports_read_capacity_and_can_reload_after_recovery() {
 #[tokio::test]
 async fn source_read_admission_rejects_before_opening_local_authentication_transactions() {
     let (_directory, state, token) = local_identity_state();
-    let observations = observe(&state.tenants[1].store);
+    let observations = observe(state.tenants[1].store.sqlite().unwrap());
     let router = gateway_router(state.clone());
     let (status, _) = human_get(&router, &token, "/api/v1/human/identity", None).await;
     assert_eq!(status, StatusCode::OK);
@@ -231,7 +231,7 @@ async fn source_read_admission_rejects_before_opening_local_authentication_trans
 #[tokio::test]
 async fn runner_control_survives_saturated_source_discovery() {
     let (_directory, state, _human_token) = local_identity_state();
-    let observations = observe(&state.tenants[1].store);
+    let observations = observe(state.tenants[1].store.sqlite().unwrap());
     let mut source_metadata_slots = Vec::new();
     while let Ok(permit) = state.tenants[1].io.admit(store_io::Lane::Discovery, false) {
         source_metadata_slots.push(permit);
@@ -431,7 +431,7 @@ async fn viewer_integrity_store_work_stays_off_runtime_worker() {
     .unwrap();
     // Gateway redaction attachment can replace the input Arc with a sibling.
     // Observe the exact Store reached by authentication and the HTTP handler.
-    let actual_store = Arc::clone(&state.tenants[0].store);
+    let actual_store = Arc::clone(state.tenants[0].store.sqlite().unwrap());
     let fixture = actual_store
         .events(&EventQuery {
             kind: Some("test.read_execution".into()),

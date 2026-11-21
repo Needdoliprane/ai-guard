@@ -103,6 +103,8 @@ async fn committed_read_race(revoke_credential: bool) {
         let digest: [u8; 32] = Sha256::digest(Fixture::bearer("B").as_bytes()).into();
         let mut binding = state.tenants[1]
             .store
+            .sqlite()
+            .unwrap()
             .local_credential_binding_scoped(&access, &digest)
             .unwrap()
             .unwrap();
@@ -110,6 +112,8 @@ async fn committed_read_race(revoke_credential: bool) {
         binding.active = false;
         state.tenants[1]
             .store
+            .sqlite()
+            .unwrap()
             .mutate_identity_scoped(
                 &epoch,
                 &owned.sources[1],
@@ -197,12 +201,16 @@ async fn owned_events_metadata_real_audit_full_rolls_back_without_publication() 
             })
             .unwrap()
     };
-    let page_limit = store.modern_test_limit_audit_pages().unwrap();
+    let page_limit = store
+        .sqlite()
+        .unwrap()
+        .modern_test_limit_audit_pages()
+        .unwrap();
     let mut failed_state = None;
     for _ in 0..128 {
         let before = snapshot(&database);
         let before_quota = quota();
-        let usage = store.modern_test_human_usage();
+        let usage = store.sqlite().unwrap().modern_test_human_usage();
         let (status, body) = get(&router, "/api/v1/human/events", Some(&context)).await;
         if status == StatusCode::OK {
             let items = body["items"].as_array().unwrap();
@@ -225,7 +233,7 @@ async fn owned_events_metadata_real_audit_full_rolls_back_without_publication() 
             );
             let after_quota = quota();
             assert!(after_quota > before_quota);
-            let after_usage = store.modern_test_human_usage();
+            let after_usage = store.sqlite().unwrap().modern_test_human_usage();
             assert_eq!(
                 after_usage["tenant"]["events"].as_u64().unwrap(),
                 usage["tenant"]["events"].as_u64().unwrap() + 1
@@ -250,7 +258,7 @@ async fn owned_events_metadata_real_audit_full_rolls_back_without_publication() 
         assert!(!serialized.contains("synthetic-private-journal-content"));
         assert_eq!(snapshot(&database), before);
         assert_eq!(quota(), before_quota);
-        assert_eq!(store.modern_test_human_usage(), usage);
+        assert_eq!(store.sqlite().unwrap().modern_test_human_usage(), usage);
         assert!(!store.healthy());
         failed_state = Some((before, before_quota, usage));
         break;
@@ -274,6 +282,6 @@ async fn owned_events_metadata_real_audit_full_rolls_back_without_publication() 
     );
     assert_eq!(snapshot(&database), before);
     assert_eq!(quota(), before_quota);
-    assert_eq!(store.modern_test_human_usage(), usage);
+    assert_eq!(store.sqlite().unwrap().modern_test_human_usage(), usage);
     assert!(!store.healthy());
 }

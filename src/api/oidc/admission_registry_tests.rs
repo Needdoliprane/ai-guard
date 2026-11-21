@@ -195,11 +195,21 @@ fn member(fixture: &Fixture, tenant_id: &str, subject: &str) {
     };
     for tenant in fixture.state.tenants.iter() {
         if tenant.tenant_id != tenant_id {
-            assert!(tenant.store.human_account(&principal).unwrap().is_none());
+            assert!(
+                tenant
+                    .store
+                    .sqlite()
+                    .unwrap()
+                    .human_account(&principal)
+                    .unwrap()
+                    .is_none()
+            );
             continue;
         }
         tenant
             .store
+            .sqlite()
+            .unwrap()
             .mutate_identity(&identity_change(IdentityChangeV1::Account {
                 expected_revision: 0,
                 account: HumanAccountV1 {
@@ -213,6 +223,8 @@ fn member(fixture: &Fixture, tenant_id: &str, subject: &str) {
             .unwrap();
         tenant
             .store
+            .sqlite()
+            .unwrap()
             .mutate_identity(&identity_change(IdentityChangeV1::Membership {
                 expected_revision: 0,
                 membership: MembershipV1 {

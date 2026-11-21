@@ -90,7 +90,7 @@ async fn page(
             .map_err(store_failure)?;
         let page = owned.human_brokers(
             source,
-            &tenant.store,
+            tenant.store.sqlite_api()?,
             &scope,
             &frame,
             cursor.after_broker_id.as_deref(),
@@ -116,6 +116,7 @@ async fn page(
         }
         let bytes = tenant
             .store
+            .sqlite_api()?
             .check_owned_human_broker_output(&proof.redactor, &body)
             .map_err(store_failure)?;
         cursor = context.advance_brokers(cursor, bytes).map_err(|error| {
@@ -136,6 +137,7 @@ async fn page(
         }
         tenant
             .store
+            .sqlite_api()?
             .check_owned_human_broker_output(&proof.redactor, &body)
             .map_err(store_failure)?;
         Ok(Json(body))

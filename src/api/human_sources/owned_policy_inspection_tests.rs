@@ -169,7 +169,12 @@ impl Fixture {
             state
                 .tenants
                 .iter()
-                .map(|entry| (entry.tenant_id.clone(), Arc::clone(&entry.store)))
+                .map(|entry| {
+                    (
+                        entry.tenant_id.clone(),
+                        Arc::clone(entry.store.sqlite().unwrap()),
+                    )
+                })
                 .collect(),
             RUNNER,
         )
@@ -178,6 +183,8 @@ impl Fixture {
             let epoch = owned.owner.try_read_epoch().unwrap();
             state.tenants[a]
                 .store
+                .sqlite()
+                .unwrap()
                 .assert_owned_control_fixture_binding_for_test(
                     &epoch,
                     &owned.sources[a],
@@ -570,7 +577,10 @@ async fn reserved_inspection_observes_actual_heads_ceiling_and_resource_metadata
     let outcome: Result<()> = async {
         server.sdk_witness(&fixture, RUNNER, "A", 15).await?;
         let neighbor = crate::audit::read_test_observer::observe(
-            &fixture.state.tenants[tenant(&fixture.state, "B")].store,
+            fixture.state.tenants[tenant(&fixture.state, "B")]
+                .store
+                .sqlite()
+                .unwrap(),
         );
         let before = snapshot(&fixture)?;
         println!("OPI_METADATA_SETUP_REAL_OWNED15_REGISTRY_BINDING_SDK200");
@@ -707,7 +717,10 @@ async fn inspection_refuses_role_collisions_and_unreserved_methods_before_body()
         inspect(&server, selector(None)).await?;
         let before = snapshot(&fixture)?;
         let neighbor = crate::audit::read_test_observer::observe(
-            &fixture.state.tenants[tenant(&fixture.state, "B")].store,
+            fixture.state.tenants[tenant(&fixture.state, "B")]
+                .store
+                .sqlite()
+                .unwrap(),
         );
         pending_refusal(&fixture.state, None, 401).await?;
         pending_refusal(&fixture.state, Some("synthetic-A-viewer"), 403).await?;
@@ -919,7 +932,7 @@ async fn collision_refusals() -> Result<()> {
                 .state
                 .tenants
                 .iter()
-                .map(|t| crate::audit::read_test_observer::observe(&t.store))
+                .map(|t| crate::audit::read_test_observer::observe(t.store.sqlite().unwrap()))
                 .collect::<Vec<_>>();
             pending_refusal(&fixture.state, Some(RUNNER), 503).await?;
             ensure!(
@@ -980,9 +993,9 @@ async fn inspection_never_publishes_unhealthy_busy_or_stale_observations() -> Re
         server.sdk_witness(&fixture,RUNNER,"A",15).await?;
         println!("OPI_HEALTH_SETUP_REAL_OWNED15_REGISTRY_BINDING_SDK200");
         inspect(&server,selector(None)).await?;
-        let store=Arc::clone(&fixture.state.tenants[tenant(&fixture.state,"A")].store);
+        let store=Arc::clone(fixture.state.tenants[tenant(&fixture.state,"A")].store.sqlite().unwrap());
         store.owned_control_set_busy_timeout_for_test(713)?;
-        let neighbor=crate::audit::read_test_observer::observe(&fixture.state.tenants[tenant(&fixture.state,"B")].store);
+        let neighbor=crate::audit::read_test_observer::observe(fixture.state.tenants[tenant(&fixture.state,"B")].store.sqlite().unwrap());
         let held=HeldMutex::new(Arc::clone(&store));
         let refusal=raw(&server.origin,"POST",INSPECT,Some(RUNNER),json!({"version":1,"selector":selector(None)})).await;
         held.close();
@@ -1090,7 +1103,7 @@ async fn postcommit_authority_change(revoke: bool) -> Result<()> {
         let change_result:Result<()>= (||{
             let epoch=owned.owner.try_write_epoch()?;
             if revoke {
-                fixture.state.tenants[a].store.revoke_review_binding(&epoch,&owned.sources[a],
+                fixture.state.tenants[a].store.sqlite().unwrap().revoke_review_binding(&epoch,&owned.sources[a],
                     &crate::control::review_binding::RevokeRunnerReviewBindingV1 {
                         version:1,operation_id:uuid::Uuid::new_v4().to_string(),
                         operator_delegation_id:command.operator_delegation_id.clone(),binding_id:command.binding.binding_id.clone(),
@@ -1098,7 +1111,7 @@ async fn postcommit_authority_change(revoke: bool) -> Result<()> {
                         reason:crate::control::review_binding::ReviewBindingRevocationReasonV1::OperatorRevoked,
                     })?;
             }else{
-                fixture.state.tenants[a].store.mutate_identity_scoped(&epoch,&owned.sources[a],&IdentityMutationV1 {
+                fixture.state.tenants[a].store.sqlite().unwrap().mutate_identity_scoped(&epoch,&owned.sources[a],&IdentityMutationV1 {
                     version:1,operation_id:uuid::Uuid::new_v4().to_string(),
                     actor:PrincipalRefV1::LegacyControl{credential_id:"synthetic-generation-control".into(),role:LegacyControlRoleV1::Runner},
                     change:IdentityChangeV1::Credential{expected_revision:0,binding:LocalCredentialV1 {

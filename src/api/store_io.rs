@@ -63,7 +63,7 @@ impl Gate {
 /// proof, session or slow HTTP body. Unknown neighboring Stores use temporary
 /// leases; known source/context Stores retain and reuse their leases.
 struct StoreLease {
-    store: Arc<Store>,
+    store: TenantStore,
     gate: Arc<Gate>,
     lane: Lane,
     _permit: OwnedSemaphorePermit,
@@ -89,14 +89,14 @@ impl Scope {
             .iter()
             .find(|lease| {
                 lease.lane == lane
-                    && Arc::ptr_eq(&lease.store, &tenant.store)
+                    && lease.store.ptr_eq(&tenant.store)
                     && Arc::ptr_eq(&lease.gate, &tenant.io)
             })
             .cloned()
     }
     fn acquire(tenant: &TenantState, lane: Lane, expensive: bool) -> ApiResult<Arc<StoreLease>> {
         Ok(Arc::new(StoreLease {
-            store: Arc::clone(&tenant.store),
+            store: tenant.store.clone(),
             gate: Arc::clone(&tenant.io),
             lane,
             _permit: tenant.io.admit(lane, expensive)?,
@@ -113,7 +113,7 @@ impl Scope {
             Some(lease) => lease,
             None => Self::acquire(tenant, lane, expensive)?,
         };
-        Ok(operation(&lease.store))
+        Ok(operation(lease.store.sqlite_api()?))
     }
 }
 pub(super) fn capacity() -> (StatusCode, Json<Value>) {

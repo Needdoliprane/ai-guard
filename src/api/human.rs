@@ -262,7 +262,7 @@ fn authenticate(state: &GatewayState, headers: &HeaderMap) -> ApiResult<Verified
         })?;
         let usage = owned.admit()?;
         let credential = owned
-            .authenticate(source, &state.tenants[source].store, &digest)?
+            .authenticate(source, state.tenants[source].store.sqlite_api()?, &digest)?
             .ok_or_else(super::human_sources::unavailable)?;
         return Ok(VerifiedHuman {
             credential: HumanAuthenticationProof {
@@ -408,6 +408,8 @@ fn credential_binding(
     let Some(lane) = own_lane else {
         return tenant
             .store
+            .sqlite()
+            .map_err(|refusal| MetadataUnavailable::Storage(refusal.into()))?
             .try_local_credential_binding(digest)
             .into_result()
             .map_err(MetadataUnavailable::Storage);
@@ -464,7 +466,11 @@ fn reauthenticate(state: &GatewayState, proof: &VerifiedHuman) -> ApiResult<()> 
             return Err(super::human_sources::unavailable());
         };
         let verified = owned
-            .authenticate(source, &state.tenants[source].store, &proof.digest)?
+            .authenticate(
+                source,
+                state.tenants[source].store.sqlite_api()?,
+                &proof.digest,
+            )?
             .ok_or_else(super::human_sources::unavailable)?;
         if verified.principal != proof.credential.principal
             || verified.credential_id != proof.credential.credential_id
@@ -604,7 +610,7 @@ fn selected_context(
         }
         owned.authorize(
             source,
-            &tenant.store,
+            tenant.store.sqlite_api()?,
             &proof.credential.principal,
             &binding.membership_id,
             binding.membership_revision,
@@ -613,6 +619,7 @@ fn selected_context(
     } else {
         tenant
             .store
+            .sqlite_api()?
             .authorize_human_context(
                 &proof.credential.principal,
                 &binding.membership_id,
@@ -1091,7 +1098,7 @@ fn resources_sync(
         };
         owned.resources(
             source,
-            &tenant.store,
+            tenant.store.sqlite_api()?,
             &scope,
             &cursor.after_resource,
             key.limit,
@@ -1100,6 +1107,7 @@ fn resources_sync(
     } else {
         tenant
             .store
+            .sqlite_api()?
             .human_resources(&scope, &cursor.after_resource, key.limit, &proof.redactor)
             .map_err(store_failure)?
     };
@@ -1201,7 +1209,7 @@ fn event_page_sync(
         };
         owned.events(
             source,
-            &tenant.store,
+            tenant.store.sqlite_api()?,
             &scope,
             &filter,
             cursor.after_event,
@@ -1212,6 +1220,7 @@ fn event_page_sync(
     } else {
         tenant
             .store
+            .sqlite_api()?
             .human_events(
                 &scope,
                 &filter,
@@ -1330,6 +1339,7 @@ fn stream_poll(
     };
     let poll = tenant
         .store
+        .sqlite_api()?
         .human_events(
             scope,
             &filter,
@@ -1435,7 +1445,7 @@ mod admission_tests {
         let proof = VerifiedHuman::from_request_parts(&mut parts, &state)
             .await
             .unwrap();
-        let observations = observe(&state.tenants[1].store);
+        let observations = observe(state.tenants[1].store.sqlite_api().unwrap());
         let _three_source_slots: Vec<_> = (0..3)
             .map(|_| {
                 state.tenants[1]

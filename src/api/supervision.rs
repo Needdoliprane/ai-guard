@@ -37,6 +37,7 @@ fn owned_arm(tenant: &TenantState, id: &str, arm_id: &str) -> ApiResult<ArmResul
     crate::control::uuid(id).map_err(control_error)?;
     tenant
         .store
+        .sqlite_api()?
         .execution_arm(arm_id)
         .map_err(control_error)?
         .filter(|result| result.arm.worker_id == id)
@@ -83,7 +84,11 @@ async fn protocol(identity: ProtocolIdentity) -> ApiResult<Json<ControlProtocolV
     };
     tenant
         .blocking(true, move |tenant| {
-            let state = tenant.store.supervision_state().map_err(control_error)?;
+            let state = tenant
+                .store
+                .sqlite_api()?
+                .supervision_state()
+                .map_err(control_error)?;
             Ok(Json(ControlProtocolV1 {
                 version: state.version,
                 schema_version: state.schema_version,
@@ -123,6 +128,7 @@ async fn reserve(
         .blocking(false, move |tenant| {
             Ok(tenant
                 .store
+                .sqlite_api()?
                 .worker_operation(&operation_id)
                 .map_err(control_error)?
                 .is_some())
@@ -136,7 +142,11 @@ async fn reserve(
     } else {
         let state = tenant
             .blocking(false, |tenant| {
-                tenant.store.supervision_state().map_err(control_error)
+                tenant
+                    .store
+                    .sqlite_api()?
+                    .supervision_state()
+                    .map_err(control_error)
             })
             .await?;
         if ![3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&state.schema_version) {
@@ -151,6 +161,7 @@ async fn reserve(
         .blocking(false, move |tenant| {
             tenant
                 .store
+                .sqlite_api()?
                 .admit_supervised(&request, &s.policy, decision, jev, &tenant.worker_quota)
                 .map_err(control_error)
         })
@@ -177,6 +188,7 @@ async fn arm(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .arm_execution(&request)
                     .map_err(control_error)?,
             ))
@@ -209,6 +221,7 @@ async fn claim_worker(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .claim_armed_start(&request)
                     .map_err(control_error)?,
             ))
@@ -229,6 +242,7 @@ async fn claim_helper(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .claim_helper_start(&request)
                     .map_err(control_error)?,
             ))
@@ -249,6 +263,7 @@ async fn observe_helper(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .observe_helper(&request)
                     .map_err(control_error)?,
             ))
@@ -269,6 +284,7 @@ async fn cleanup_helper(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .record_helper_cleanup(&request)
                     .map_err(control_error)?,
             ))
@@ -289,6 +305,7 @@ async fn request_export(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .request_export(&request)
                     .map_err(control_error)?,
             ))

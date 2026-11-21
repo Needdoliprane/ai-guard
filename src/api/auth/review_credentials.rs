@@ -259,7 +259,7 @@ pub(crate) fn authenticate_review_runner_fixture(
                 runner_token: token(CredentialRole::Runner)?,
                 viewer_token: token(CredentialRole::Viewer)?,
                 tenant_id,
-                store,
+                store: crate::tenant_store::TenantStore::from(store),
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;

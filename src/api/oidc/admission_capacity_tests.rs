@@ -43,7 +43,7 @@ async fn fixture_with_plan(
         GatewayState::for_tenants(
             vec![crate::api::TenantGateway {
                 tenant_id: "tenant-a".into(),
-                store,
+                store: store.sqlite().unwrap().clone(),
                 runner_token: "synthetic-legacy-runner".repeat(3),
                 viewer_token: "synthetic-legacy-viewer".repeat(3),
             }],
@@ -61,6 +61,8 @@ async fn fixture_with_plan(
     for tenant in state.tenants.iter() {
         tenant
             .store
+            .sqlite()
+            .unwrap()
             .mutate_identity(&identity_change(IdentityChangeV1::Account {
                 expected_revision: 0,
                 account: HumanAccountV1 {
@@ -74,6 +76,8 @@ async fn fixture_with_plan(
             .unwrap();
         tenant
             .store
+            .sqlite()
+            .unwrap()
             .mutate_identity(&identity_change(IdentityChangeV1::Membership {
                 expected_revision: 0,
                 membership: MembershipV1 {

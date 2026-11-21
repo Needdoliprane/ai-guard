@@ -126,8 +126,11 @@ fn authentication_failure(error: anyhow::Error) -> (StatusCode, Json<Value>) {
         unavailable(error)
     }
 }
-pub(super) fn store_failure(store: &Store, error: anyhow::Error) -> (StatusCode, Json<Value>) {
-    if store.healthy() {
+pub(super) fn store_failure(
+    store: &impl crate::tenant_store::StoreHealth,
+    error: anyhow::Error,
+) -> (StatusCode, Json<Value>) {
+    if store.store_healthy() {
         failure(error)
     } else {
         unavailable(error)
@@ -173,6 +176,7 @@ fn resolve_sync(state: &GatewayState, token: &str) -> ApiResult<(usize, Authenti
     for (index, tenant) in state.tenants.iter().enumerate() {
         match tenant
             .store
+            .sqlite_api()?
             .try_workload_digest_binding(&digest)
             .into_result()
         {
@@ -186,6 +190,7 @@ fn resolve_sync(state: &GatewayState, token: &str) -> ApiResult<(usize, Authenti
         }
         match tenant
             .store
+            .sqlite_api()?
             .try_local_credential_binding(&digest)
             .into_result()
         {
@@ -413,6 +418,7 @@ pub(super) fn reject_control_collision(
         } else {
             tenant
                 .store
+                .sqlite_api()?
                 .try_workload_digest_binding(&digest)
                 .into_result()
         };
@@ -464,6 +470,7 @@ pub(super) fn reject_human_collision(
         } else {
             tenant
                 .store
+                .sqlite_api()?
                 .try_workload_digest_binding(digest)
                 .into_result()
         };
@@ -489,7 +496,7 @@ async fn issue(
     let source = state
         .tenants
         .iter()
-        .position(|candidate| Arc::ptr_eq(&candidate.store, &tenant.store))
+        .position(|candidate| candidate.store.ptr_eq(&tenant.store))
         .ok_or_else(ambiguous)?;
     let digest_vec = hex::decode(&input.sha256_digest).map_err(|_| invalid())?;
     let digest: [u8; 32] = digest_vec.try_into().map_err(|_| invalid())?;
@@ -516,7 +523,7 @@ async fn issue(
                 .state
                 .scoped(Arc::clone(&_scope))
                 .authorize_sync(&proof.headers, true)?;
-            if role != "runner" || !Arc::ptr_eq(&current.store, &tenant.store) {
+            if role != "runner" || !current.store.ptr_eq(&tenant.store) {
                 return Err(forbidden());
             }
             tenant.write_quota()?;
@@ -541,10 +548,12 @@ async fn issue(
                         Ok((
                             candidate
                                 .store
+                                .sqlite()?
                                 .try_workload_digest_binding(&digest)
                                 .into_result()?,
                             candidate
                                 .store
+                                .sqlite()?
                                 .try_local_credential_binding(&digest)
                                 .into_result()?
                                 .is_some(),
@@ -564,6 +573,7 @@ async fn issue(
             }
             let receipt = tenant
                 .store
+                .sqlite_api()?
                 .issue_workload_binding(&input)
                 .map_err(|error| store_failure(&tenant.store, error))?;
             Ok((
@@ -591,6 +601,7 @@ async fn revoke(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .revoke_workload_binding(&input)
                     .map_err(|error| store_failure(&tenant.store, error))?,
             ))

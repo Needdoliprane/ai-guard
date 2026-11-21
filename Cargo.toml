@@ -9,6 +9,7 @@ publish = false
 default-run = "agentsandbox"
 
 [features]
+default = ["mysql-storage"]
 mysql-storage = ["dep:mysql_async"]
 
 [dependencies]

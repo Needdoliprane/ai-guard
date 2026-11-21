@@ -57,8 +57,11 @@ fn invalid() -> (StatusCode, Json<Value>) {
     )
 }
 
-fn failure(store: &Store, error: anyhow::Error) -> (StatusCode, Json<Value>) {
-    if !store.healthy() {
+fn failure(
+    store: &impl crate::tenant_store::StoreHealth,
+    error: anyhow::Error,
+) -> (StatusCode, Json<Value>) {
+    if !store.store_healthy() {
         return unavailable_reply();
     }
     use KubernetesCreateFailureV1 as F;
@@ -201,6 +204,7 @@ async fn protocol(broker: VerifiedBroker, request: Request) -> ApiResult<Respons
         .blocking(|tenant, identity, redactor| {
             let view = tenant
                 .store
+                .sqlite_api()?
                 .broker_authenticated_identity(&identity)
                 .map_err(|e| failure(&tenant.store, e))?;
             if ![9, 10, 11, 12, 13].contains(&view.schema_version) {
@@ -250,6 +254,7 @@ async fn reserve(broker: VerifiedBroker, request: Request) -> ApiResult<Response
                 .with_additional_redaction(&redactor)
                 .map_err(|e| failure(&tenant.store, e))?;
             let authorization = store
+                .sqlite_api()?
                 .authorize_kubernetes_create_admission(
                     &identity,
                     &input,
@@ -258,6 +263,7 @@ async fn reserve(broker: VerifiedBroker, request: Request) -> ApiResult<Response
                 )
                 .map_err(|e| failure(&store, e))?;
             let (receipt, snapshot, replayed) = store
+                .sqlite_api()?
                 .reserve_kubernetes_create(&identity, &authorization, &input)
                 .map_err(|e| failure(&store, e))?;
             let body = KubernetesCreateMutationResponseV1 {
@@ -309,10 +315,12 @@ async fn claim(
                 .with_additional_redaction(&redactor)
                 .map_err(|e| failure(&tenant.store, e))?;
             let intent = store
+                .sqlite_api()?
                 .kubernetes_create_intent_for_admission(&identity, &create_id)
                 .map_err(|e| failure(&store, e))?;
             let current = TenantAdmission::current(&tenant)?;
             let authorization = store
+                .sqlite_api()?
                 .authorize_kubernetes_create_admission(
                     &identity,
                     &intent,
@@ -321,6 +329,7 @@ async fn claim(
                 )
                 .map_err(|e| failure(&store, e))?;
             let (mut body, fresh) = store
+                .sqlite_api()?
                 .claim_kubernetes_create(&identity, &authorization, &input)
                 .map_err(|e| failure(&store, e))?;
             if let Some(proof) = fresh.as_ref() {
@@ -372,6 +381,7 @@ async fn observe(
                 .with_additional_redaction(&redactor)
                 .map_err(|e| failure(&tenant.store, e))?;
             let authorization = store
+                .sqlite_api()?
                 .authorize_kubernetes_create_reconciliation(
                     &identity,
                     &create_id,
@@ -379,6 +389,7 @@ async fn observe(
                 )
                 .map_err(|e| failure(&store, e))?;
             let body = store
+                .sqlite_api()?
                 .observe_kubernetes_create_claim_operation(
                     &identity,
                     &authorization,
@@ -408,6 +419,7 @@ async fn result(
                 .with_additional_redaction(&redactor)
                 .map_err(|e| failure(&tenant.store, e))?;
             let authorization = store
+                .sqlite_api()?
                 .authorize_kubernetes_create_reconciliation(
                     &identity,
                     &create_id,
@@ -415,6 +427,7 @@ async fn result(
                 )
                 .map_err(|e| failure(&store, e))?;
             let committed = store
+                .sqlite_api()?
                 .record_kubernetes_create_result(&identity, &authorization, &input)
                 .map_err(|e| failure(&store, e))?;
             let body = KubernetesCreateResultResponseV1 {
@@ -444,6 +457,7 @@ async fn cancel(
                 .with_additional_redaction(&redactor)
                 .map_err(|e| failure(&tenant.store, e))?;
             let authorization = store
+                .sqlite_api()?
                 .authorize_kubernetes_create_reconciliation(
                     &identity,
                     &create_id,
@@ -451,6 +465,7 @@ async fn cancel(
                 )
                 .map_err(|e| failure(&store, e))?;
             let (receipt, snapshot, replayed) = store
+                .sqlite_api()?
                 .cancel_kubernetes_create(&identity, &authorization, &input)
                 .map_err(|e| failure(&store, e))?;
             let body = KubernetesCreateMutationResponseV1 {
@@ -488,15 +503,16 @@ async fn recover(
             // Preparation checks the exact recorded operation before the
             // initial-state fence. An ACK lost after commit remains replayable.
             let prepared = store
+                .sqlite_api()?
                 .prepare_kubernetes_create_recovery(&identity, &input, &tenant.worker_quota)
                 .map_err(|e| failure(&store, e))?;
             let body = match prepared {
-                crate::audit::PreparedRecovery::Historical(proof) => {
-                    store.lookup_kubernetes_create_recovery(&identity, &proof)
-                }
-                crate::audit::PreparedRecovery::New(proof) => {
-                    store.recover_kubernetes_create(&identity, &proof)
-                }
+                crate::audit::PreparedRecovery::Historical(proof) => store
+                    .sqlite_api()?
+                    .lookup_kubernetes_create_recovery(&identity, &proof),
+                crate::audit::PreparedRecovery::New(proof) => store
+                    .sqlite_api()?
+                    .recover_kubernetes_create(&identity, &proof),
             }
             .map_err(|e| failure(&store, e))?;
             encode_response(
@@ -547,9 +563,11 @@ async fn observe_recovery(
                 .with_additional_redaction(&redactor)
                 .map_err(|e| failure(&tenant.store, e))?;
             let proof = store
+                .sqlite_api()?
                 .authorize_kubernetes_create_recovery_lookup(&identity, &create_id, &operation_id)
                 .map_err(|e| failure(&store, e))?;
             let body = store
+                .sqlite_api()?
                 .lookup_kubernetes_create_recovery(&identity, &proof)
                 .map_err(|e| failure(&store, e))?;
             encode_response(StatusCode::OK, &body, &redactor)
