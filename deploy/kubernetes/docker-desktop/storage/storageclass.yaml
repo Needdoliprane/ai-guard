@@ -1,0 +1,19 @@
+# ai-guard LOCAL TEST recipe (Docker Desktop only, not production).
+# Local test storage without byte enforcement; the client chooses its
+# production storage. Requires the csi-hostpath recipe (driver
+# hostpath.csi.k8s.io). ai-guard checks that its class is Immediate and backed
+# by a CSIDriver; ReadWriteOncePod is enforced by Kubernetes for CSI volumes.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ai-guard-rwop
+  labels:
+    app.kubernetes.io/part-of: ai-guard
+    app.kubernetes.io/component: local-test-storage
+  annotations:
+    # Never the default class: only claims that name ai-guard-rwop use it.
+    storageclass.kubernetes.io/is-default-class: "false"
+provisioner: hostpath.csi.k8s.io
+volumeBindingMode: Immediate
+reclaimPolicy: Delete
+allowVolumeExpansion: false

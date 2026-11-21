@@ -1,0 +1,116 @@
+# Derived from kubernetes-csi/external-provisioner v6.4.0, file
+# deploy/kubernetes/rbac.yaml (the RBAC that csi-driver-host-path v1.19.0
+# deploys for its csi-provisioner v6.4.0 sidecar).
+# Copyright The Kubernetes Authors. Licensed under the Apache License,
+# Version 2.0 (see LICENSE at the root of this repository).
+#
+# MODIFIED by the ai-guard project for a LOCAL TEST recipe on Docker Desktop
+# (not production). Changes, listed with the original SHA-256 in
+# PROVENANCE.md: the unused ServiceAccount "csi-provisioner", its
+# ClusterRoleBinding "csi-provisioner-role" and RoleBinding
+# "csi-provisioner-role-cfg" are removed (csi-hostpath-plugin.yaml binds these
+# roles to csi-hostpathplugin-sa); namespace "default" replaced by
+# "ai-guard-csi-hostpath"; the two labels that the upstream deploy script adds
+# are written explicitly. The rules are unchanged.
+#
+# This YAML file contains all RBAC objects that are necessary to run external
+# CSI provisioner.
+#
+# In production, each CSI driver deployment has to be customized:
+# - to avoid conflicts, use non-default namespace and different names
+#   for non-namespaced entities like the ClusterRole
+# - decide whether the deployment replicates the external CSI
+#   provisioner, in which case leadership election must be enabled;
+#   this influences the RBAC setup, see below
+
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: external-provisioner-runner
+  labels:
+    app.kubernetes.io/instance: hostpath.csi.k8s.io
+    app.kubernetes.io/part-of: csi-driver-host-path
+rules:
+  # The following rule should be uncommented for plugins that require secrets
+  # for provisioning.
+  # - apiGroups: [""]
+  #   resources: ["secrets"]
+  #   verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list", "watch", "create", "update", "patch"]
+  # The "watch", "update", and "list" verbs for volumesnapshots are optional but
+  # recommended. They enable finalizer-based protection to prevent snapshots from
+  # being deleted during provisioning, and allow periodic sweeps to clean up
+  # orphaned finalizers. Without these permissions, the provisioner will still
+  # function but snapshot protection will be unavailable. This makes the
+  # provisioner backwards compatible with older RBAC configurations.
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshotcontents"]
+    verbs: ["get", "list"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["csinodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  # Access to volumeattachments is only needed when the CSI driver
+  # has the PUBLISH_UNPUBLISH_VOLUME controller capability.
+  # In that case, external-provisioner will watch volumeattachments
+  # to determine when it is safe to delete a volume.
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "list", "watch"]
+  # (Alpha) Access to referencegrants is only needed when the CSI driver
+  # has the CrossNamespaceVolumeDataSource controller capability.
+  # In that case, external-provisioner requires "get", "list", "watch"
+  # permissions  for "referencegrants" on "gateway.networking.k8s.io".
+  #- apiGroups: ["gateway.networking.k8s.io"]
+  #  resources: ["referencegrants"]
+  #  verbs: ["get", "list", "watch"]
+
+---
+# Provisioner must be able to work with endpoints in current namespace
+# if (and only if) leadership election is enabled
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  # replace with non-default namespace name
+  namespace: ai-guard-csi-hostpath
+  name: external-provisioner-cfg
+  labels:
+    app.kubernetes.io/instance: hostpath.csi.k8s.io
+    app.kubernetes.io/part-of: csi-driver-host-path
+rules:
+# Only one of the following rules for endpoints or leases is required based on
+# what is set for `--leader-election-type`. Endpoints are deprecated in favor of Leases.
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "watch", "list", "delete", "update", "create"]
+# Permissions for CSIStorageCapacity are only needed enabling the publishing
+# of storage capacity information.
+- apiGroups: ["storage.k8s.io"]
+  resources: ["csistoragecapacities"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# The GET permissions below are needed for walking up the ownership chain
+# for CSIStorageCapacity. They are sufficient for deployment via
+# StatefulSet (only needs to get Pod) and Deployment (needs to get
+# Pod and then ReplicaSet to find the Deployment).
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get"]
+- apiGroups: ["apps"]
+  resources: ["replicasets"]
+  verbs: ["get"]
