@@ -124,6 +124,7 @@ let selectedPeriod: EventPeriod = "all";
 let treeMode = false;
 let loadingEvents = false;
 let eventsError = "";
+let historyError = "";
 let agentsAvailable: boolean | null = null;
 let sandboxesAvailable: boolean | null = null;
 let agentsLoadedAt: string | null = null;
@@ -150,6 +151,7 @@ let notice: HTMLElement;
 type NoticeOwner = { client: ApiClient; source: "summary" | "journal" };
 let noticeOwner: NoticeOwner | null = null;
 let eventSlot: HTMLElement | null = null;
+let historyNotice: HTMLElement | null = null;
 let statSlot: HTMLElement | null = null;
 let sideSlot: HTMLElement | null = null;
 let collectionSlot: HTMLElement | null = null;
@@ -297,6 +299,9 @@ function errorMessage(error: unknown): string {
     error instanceof Error && error.message === "Contrat de liste d’identités incomplet ou incompatible."
     ? error.message
     : "Connexion au collecteur impossible. Vérifiez le service local puis réessayez.";
+}
+function accessRefused(error: unknown): boolean {
+  return error instanceof ApiError && (error.status === 401 || error.status === 403);
 }
 function onError(error: unknown, owner: NoticeOwner | null = null) {
   if (
@@ -589,6 +594,7 @@ function disconnect(message = "") {
   health = "unknown";
   loadingEvents = false;
   eventsError = "";
+  historyError = "";
   agentsAvailable = null;
   sandboxesAvailable = null;
   agentsLoadedAt = null;
@@ -727,15 +733,20 @@ async function loadEvents(append = false) {
   const current = client;
   if (!current) return;
   const request = ++eventRequest;
+  const cursor = append ? nextCursor : null;
   const startedSeq = Math.max(0, ...events.map((event) => event.seq));
   loadingEvents = true;
   eventsError = "";
+  historyError = "";
   renderEvents();
   try {
-    const result = await current.get<EventPage>(
-      eventUrl(filters, append ? nextCursor : null),
-    );
+    const result = await current.get<EventPage>(eventUrl(filters, cursor));
     if (current !== client || request !== eventRequest) return;
+    if (append && cursor !== nextCursor) {
+      // Live events moved the loaded boundary while this older page was in flight.
+      historyError = "De nouveaux événements ont décalé la limite de la partie chargée. Réessayez.";
+      return;
+    }
     const received = Array.isArray(result.items)
       ? result.items.filter(isAuditEvent)
       : [];
@@ -749,8 +760,11 @@ async function loadEvents(append = false) {
     if (noticeOwner?.client === current && noticeOwner.source === "journal") setNotice();
   } catch (error) {
     if (current === client && request === eventRequest) {
-      eventsError = errorMessage(error);
-      onError(error, { client: current, source: "journal" });
+      // A failed "load older" keeps the history already read visible: only a failed first read
+      // replaces the list, so an error is never shown as an empty journal.
+      if (append) historyError = errorMessage(error);
+      else eventsError = errorMessage(error);
+      if (!append || accessRefused(error)) onError(error, { client: current, source: "journal" });
     }
   } finally {
     if (current === client && request === eventRequest) {
@@ -790,6 +804,7 @@ function renderView() {
   statSlot = null;
   sideSlot = null;
   eventSlot = null;
+  historyNotice = null;
   collectionSlot = null;
   if (view === "overview" || view === "security") {
     statSlot = el("section", "stats-section");
@@ -901,7 +916,10 @@ function renderView() {
       filterForm(),
     );
     eventSlot = el("div", "event-slot");
-    panel.append(eventSlot);
+    historyNotice = el("p", "notice notice-error");
+    historyNotice.setAttribute("role", "alert");
+    historyNotice.hidden = true;
+    panel.append(historyNotice, eventSlot);
     if (view === "overview") {
       sideSlot = el("aside", "support-column");
       page.append(el("div", "overview-grid", panel, sideSlot));
@@ -1230,7 +1248,10 @@ function updateFilterChoices() {
   );
 }
 function renderEvents() {
-  if (!eventSlot) return;
+  if (!eventSlot || !historyNotice) return;
+  const partialError = historyError ? `Historique incomplet. ${historyError}` : "";
+  historyNotice.hidden = !partialError;
+  if (historyNotice.textContent !== partialError) historyNotice.textContent = partialError;
   updateFilterChoices();
   if (eventsError) {
     eventSlot.replaceChildren(
@@ -1255,7 +1276,12 @@ function renderEvents() {
             "Chargement du journal…",
             "Lecture des événements du collecteur.",
           )
-        : empty(
+        : nextCursor !== null
+          ? empty(
+              "Aucun résultat dans la partie chargée",
+              "Chargez les événements précédents pour poursuivre la recherche.",
+            )
+          : empty(
             hasFilter
               ? "Aucun événement correspondant"
               : events.length
@@ -1353,13 +1379,13 @@ function renderEvents() {
   );
   if (nextCursor !== null) {
     const more = button(
-      loadingEvents ? "Chargement…" : "Charger les précédents",
+      loadingEvents ? "Chargement…" : historyError ? "Réessayer de charger les précédents" : "Charger les précédents",
       "button button-quiet",
       () => {
-        void loadEvents(true);
+        if (!loadingEvents) void loadEvents(true);
       },
     );
-    more.disabled = loadingEvents;
+    if (loadingEvents) more.setAttribute("aria-disabled", "true");
     footer.append(more);
   } else footer.append(el("span", "muted", "Fin de l’historique chargé"));
   eventSlot.append(footer);

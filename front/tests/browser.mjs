@@ -99,6 +99,9 @@ const agents = [
 ];
 let mode = "data";
 let limitNextJournalRead = false;
+let pagedJournal = false;
+let olderPageFailures = 0;
+const olderEvent = { seq: 11, id: "evt-11", timestamp: "2026-10-29T12:07:00Z", kind: "workspace.diff", provenance: "observed", data: { path: "older.txt" } };
 let controlMode = "data";
 let controlReadBarrier = null;
 const workerId = "00000000-0000-4000-8000-000000000001";
@@ -243,6 +246,16 @@ const server = createServer(async (request, response) => {
         response.end();
         return;
       }
+      if (pagedJournal && url.searchParams.has("before")) {
+        if (olderPageFailures > 0) {
+          olderPageFailures--;
+          response.writeHead(503);
+          response.end();
+          return;
+        }
+        return json(response, { items: [olderEvent], next_cursor: null });
+      }
+      if (pagedJournal) return json(response, { items: events, next_cursor: 12 });
       const q = url.searchParams.get("q")?.toLowerCase();
       return json(response, {
         items:
@@ -752,6 +765,24 @@ try {
   await page.getByRole("button", { name: "Voir l’événement 14", exact: true }).waitFor();
   await unavailableJournal.waitFor({ state: "hidden" });
   await journalLimit.waitFor({ state: "hidden" });
+
+  // A failed "load older" must keep the history already read and offer a retry: never an empty journal.
+  pagedJournal = true;
+  olderPageFailures = 1;
+  await refreshOverview.click();
+  await page.getByRole("button", { name: "Voir l’événement 14", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Charger les précédents", exact: true }).click();
+  const historyAlert = page.getByRole("alert").filter({ hasText: "Historique incomplet" });
+  await historyAlert.waitFor();
+  assert.equal(await page.getByText("Journal indisponible", { exact: true }).count(), 0);
+  await page.getByRole("button", { name: "Voir l’événement 14", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Réessayer de charger les précédents", exact: true }).click();
+  await page.getByRole("button", { name: "Voir l’événement 11", exact: true }).waitFor();
+  await historyAlert.waitFor({ state: "hidden" });
+  await page.getByText("Fin de l’historique chargé", { exact: true }).waitFor();
+  pagedJournal = false;
+  await refreshOverview.click();
+  await page.getByRole("button", { name: "Voir l’événement 14", exact: true }).waitFor();
 
   const download = page.waitForEvent("download");
   await page.getByRole("button", { name: "Exporter JSONL" }).click();
