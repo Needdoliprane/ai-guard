@@ -20,7 +20,7 @@ use std::{collections::BTreeMap, io, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
-    sync::{Mutex, watch},
+    sync::{Mutex, oneshot, watch},
     time::{sleep, timeout},
 };
 use uuid::Uuid;
@@ -221,6 +221,26 @@ pub(super) mod diagnostics {
                 });
             }
         }
+        pub(crate) fn emit_phase_counts(&self) {
+            let Ok(state) = self.state.lock() else {
+                println!("phase=fixture_metrics category=unavailable");
+                return;
+            };
+            for ((phase, purpose), m) in &state.metrics {
+                // Relative fixture-clock times only; no runtime or private value.
+                println!(
+                    "phase=fixture_metric name={phase:?} purpose={purpose:?} enter={} end={} ok={} non_success={} error={} unfinished={} max_us={} last_at_us={}",
+                    m.entered,
+                    m.completed,
+                    m.ok,
+                    m.non_success,
+                    m.errors,
+                    m.unfinished,
+                    m.max_us,
+                    m.last_at_us,
+                );
+            }
+        }
         pub(crate) fn emit_failure_once(&self) {
             if self.emitted.swap(true, Ordering::Relaxed) {
                 return;
@@ -300,16 +320,46 @@ pub(super) struct Container {
     pub(super) done: watch::Sender<bool>,
     pub(super) helper_root: Directory,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ImportCounts {
+    pub imports_created: usize,
+    pub imports_removed: usize,
+    pub verification_created: usize,
+    pub workers_created: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum EngineFailure {
+    OwnerJoin,
+    ListenerAccept,
+    ArgumentFrame,
+    CommandDispatch,
+    CreateGrammar,
+    RuntimeCommand,
+}
+impl std::fmt::Display for EngineFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
 pub(super) struct Engine {
     pub(super) next_id: u64,
     pub(super) containers: BTreeMap<String, Container>,
     pub(super) volumes: BTreeMap<String, Value>,
     pub(super) calls: Vec<Vec<String>>,
     pub(super) execs: BTreeMap<String, usize>,
-    pub(super) errors: Vec<String>,
+    pub(super) errors: BTreeMap<EngineFailure, usize>,
     pub(super) root: PathBuf,
+    pub(super) import_gate: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
+    pub(super) import_counts: ImportCounts,
 }
 impl Engine {
+    pub(super) fn note_failure(&mut self, reason: EngineFailure) {
+        let count = self.errors.entry(reason).or_default();
+        *count = count.saturating_add(1);
+    }
+
     fn find(&self, value: &str) -> Option<String> {
         self.containers.iter().find_map(|(id, c)| {
             (id == value
@@ -370,7 +420,9 @@ pub fn contradictory_create_flags_are_refused_before_fixture_mutation() -> Resul
         volumes: BTreeMap::new(),
         calls: vec![],
         execs: BTreeMap::new(),
-        errors: vec![],
+        errors: BTreeMap::new(),
+        import_gate: None,
+        import_counts: Default::default(),
         root: control.path().into(),
     };
     let id = create(&mut engine, &baseline)?;
@@ -415,6 +467,54 @@ pub fn contradictory_create_flags_are_refused_before_fixture_mutation() -> Resul
             engine.containers[&id].facts["Config"]["OpenStdin"] == stdin
                 && engine.containers[&id].facts["Config"]["StdinOnce"] == stdin,
             "valid production helper create preserves parsed stream flags"
+        );
+    }
+
+    let pull = baseline
+        .iter()
+        .position(|value| value == "--pull=never")
+        .context("production create omitted no-pull option")?;
+    let mut without_pull = baseline.clone();
+    without_pull.remove(pull);
+    let pull_cases = [
+        vec![],
+        vec!["--pull=always"],
+        vec!["--pull=missing"],
+        vec!["--pull", "never"],
+        vec!["--pull=never", "--pull=never"],
+    ];
+    for replacement in pull_cases {
+        let mut args = without_pull.clone();
+        args.splice(pull..pull, replacement.into_iter().map(String::from));
+        let root = tempfile::tempdir_in(&base)?;
+        let mut rejected = Engine {
+            next_id: 1,
+            containers: BTreeMap::new(),
+            volumes: BTreeMap::new(),
+            calls: vec![],
+            execs: BTreeMap::new(),
+            errors: BTreeMap::new(),
+            import_gate: None,
+            import_counts: Default::default(),
+            root: root.path().into(),
+        };
+        let error = create(&mut rejected, &args)
+            .err()
+            .context("invalid pull mode admitted")?;
+        ensure!(
+            matches!(
+                error.downcast_ref::<EngineFailure>(),
+                Some(EngineFailure::CreateGrammar)
+            ),
+            "invalid pull mode did not reach the create grammar"
+        );
+        ensure!(
+            rejected.next_id == 1
+                && rejected.containers.is_empty()
+                && rejected.volumes.is_empty()
+                && rejected.import_counts == ImportCounts::default()
+                && std::fs::read_dir(root.path())?.next().is_none(),
+            "invalid pull mode mutated the fixture"
         );
     }
 
@@ -465,7 +565,9 @@ pub fn contradictory_create_flags_are_refused_before_fixture_mutation() -> Resul
             volumes: BTreeMap::new(),
             calls: vec![],
             execs: BTreeMap::new(),
-            errors: vec![],
+            errors: BTreeMap::new(),
+            import_gate: None,
+            import_counts: Default::default(),
             root: root.path().into(),
         };
         let mut args = baseline.clone();
@@ -513,7 +615,7 @@ fn validate_create(args: &[String]) -> Result<ValidatedCreate> {
             .get(at)
             .context("missing create image separator")?
             .as_str();
-        if matches!(key, "--read-only" | "--interactive") {
+        if matches!(key, "--read-only" | "--interactive" | "--pull=never") {
             ensure!(flags.insert(key), "duplicate create flag");
             at += 1;
             continue;
@@ -594,6 +696,10 @@ fn validate_create(args: &[String]) -> Result<ValidatedCreate> {
     ] {
         ensure!(required(key)? == expected, "fixture create option {key}");
     }
+    ensure!(
+        flags.contains("--pull=never"),
+        "fixture requires an explicit no-pull create"
+    );
     ensure!(
         singles.len() == 12 && flags.contains("--read-only"),
         "create option inventory"
@@ -710,7 +816,7 @@ fn validate_create(args: &[String]) -> Result<ValidatedCreate> {
 }
 
 fn create(engine: &mut Engine, args: &[String]) -> Result<String> {
-    let parsed = validate_create(args)?;
+    let parsed = validate_create(args).context(EngineFailure::CreateGrammar)?;
     ensure!(
         engine.find(&parsed.name).is_none(),
         "duplicate synthetic create"
@@ -721,6 +827,12 @@ fn create(engine: &mut Engine, args: &[String]) -> Result<String> {
     let helper_path = private_dir(&engine.root, &format!("h{sequence}"))?;
     let helper_root = Directory::open_existing(&helper_path)?;
     let (done, _) = watch::channel(false);
+    match parsed.config["Labels"]["agentsandbox.purpose"].as_str() {
+        Some("import") => engine.import_counts.imports_created += 1,
+        Some("export") => engine.import_counts.verification_created += 1,
+        Some("run") => engine.import_counts.workers_created += 1,
+        _ => {}
+    }
     let facts = json!({"Id":id,"Name":format!("/{}", parsed.name),"Image":IMAGE,"RestartCount":0,
       "State":{"Status":"created","Running":false,"StartedAt":"0001-01-01T00:00:00Z","FinishedAt":"0001-01-01T00:00:00Z","ExitCode":0,"OOMKilled":false},
       "Config":parsed.config,"HostConfig":parsed.host,"Mounts":parsed.mounts});
@@ -770,7 +882,10 @@ pub(super) async fn engine_connection_observed(
     let frame = trace
         .as_ref()
         .map(|t| t.begin(Phase::RuntimeFrame, Purpose::Unknown));
-    let args = timeout(Duration::from_secs(5), argument_frame(&mut stream)).await??;
+    let args = timeout(Duration::from_secs(5), argument_frame(&mut stream))
+        .await
+        .context(EngineFailure::ArgumentFrame)?
+        .context(EngineFailure::ArgumentFrame)?;
     if let Some(frame) = frame {
         frame.finish(Outcome::Ok);
     }
@@ -792,7 +907,7 @@ pub(super) async fn engine_connection_observed(
                     | "exec"
             )
         })
-        .context("unexpected synthetic runtime command")?;
+        .context(EngineFailure::CommandDispatch)?;
     let call = &args[at..];
     let (phase, purpose) = {
         let mut engine = state.lock().await;
@@ -914,6 +1029,9 @@ async fn engine_command(
             let mut state = state.lock().await;
             let id = state.find(call.last().context("remove CID")?).context("unknown remove CID")?;
             ensure!(state.containers[&id].facts["State"]["Running"] == false, "remove before terminal");
+            if state.containers[&id].facts["Config"]["Labels"]["agentsandbox.purpose"] == "import" {
+                state.import_counts.imports_removed += 1;
+            }
             state.containers.remove(&id);
             drop(state);
             response(&mut stream, 0, b"").await
@@ -975,6 +1093,18 @@ async fn start_witness(
             ensure!(input.len() < 1024 * 1024, "fixture input bound");
             if let Some(input_read) = input_read {
                 input_read.finish(Outcome::Ok);
+            }
+            let gate = state.lock().await.import_gate.take();
+            if let Some((entered, resume)) = gate {
+                ensure!(
+                    !input.is_empty(),
+                    "import gate requires a transferred archive"
+                );
+                if entered.send(()).is_ok() {
+                    // Dropping the test side releases the gate on every error.
+                    // A test that loses its waiter cannot leave the witness paused.
+                    let _ = timeout(Duration::from_secs(45), resume).await;
+                }
             }
         } else {
             // Empty authorized source: valid empty tar, not a fabricated file change.
