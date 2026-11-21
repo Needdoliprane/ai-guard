@@ -45,7 +45,7 @@ The [diagnostic](docs/setup/diagnostics/README.md) is read-only and offline by d
 
 Open `http://127.0.0.1:4000`. For this technical viewer flow, obtain the viewer value from `$AIGUARD_CONFIG/secrets/viewer` in a private editor and enter it only in the trusted connection form. Keep the runner credential in trusted control. Named personal access has its own [local identity](docs/setup/identity/README.md) or [SSO](docs/setup/sso/README.md) procedure.
 
-This CLI stack uses the fixed project name `agentsandbox` and the default loopback ports above. Keep the same engine account/context, configuration directory and source for its lifecycle. For custom ports, project names, Compose env files and logs, use the [local guide](docs/setup/local/README.md#cli-up-stack); do not mix commands for a different stack. A health response establishes service reachability only.
+This CLI stack uses the project name `agentsandbox` and the default loopback ports above unless you pass `--stack-name`, `--gateway-port` and `--dashboard-port` (see [run a second stack](docs/setup/local/README.md#named-stack)); `up` ends once the gateway and the dashboard both accept the viewer key. Keep the same engine account/context, configuration directory, stack name and source for its lifecycle. For Compose env files and logs, use the [local guide](docs/setup/local/README.md#cli-up-stack); do not mix commands for a different stack. A health response establishes service reachability only.
 
 ## Run, follow and inspect a session
 

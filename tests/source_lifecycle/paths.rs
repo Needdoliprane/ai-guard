@@ -69,21 +69,27 @@ fn prepared_path(scenario: &Operator, path: &str) -> bool {
         && !Path::new(path).starts_with(&scenario.source)
 }
 
-/// The fixed loopback ports `agentsandbox up` asks for readiness: the gateway
+/// The default loopback ports `agentsandbox up` asks for readiness: the gateway
 /// and the dashboard.
 const READINESS_PORTS: [u16; 2] = [8787, 4000];
+
+/// The viewer identity request `up` waits for on both origins.
+const READINESS_REQUEST: &str = "GET /api/v1/identity HTTP/1.1";
 
 /// One readiness request: where it arrived, its request line, and what the
 /// test's private temporary directory held at that moment.
 struct Asked {
     port: u16,
     request: String,
+    /// Whether the request carried the viewer key of the control configuration.
+    authorized: bool,
     temporary: Vec<String>,
 }
 
-/// Answers `200` on the two readiness ports for the time of one test. It
-/// stands for the health endpoints of the services a real Compose provider
-/// would have started; it is not the gateway or the dashboard.
+/// Answers the viewer identity request on the readiness ports for the time of one test: `200`
+/// with a viewer identity when the request carries the key stored in the control configuration
+/// (read when the request arrives, because `up` may create it), `401` otherwise. It stands for
+/// the gateway and the dashboard a real Compose provider would have started; it is neither.
 struct Readiness {
     stop: Arc<AtomicBool>,
     asked: Arc<Mutex<Vec<Asked>>>,
@@ -91,11 +97,15 @@ struct Readiness {
 }
 
 impl Readiness {
-    fn listen(temporary: &Path) -> Self {
+    fn listen(temporary: &Path, viewer_file: &Path) -> Self {
+        Self::listen_on(&READINESS_PORTS, temporary, viewer_file)
+    }
+
+    fn listen_on(ports: &[u16], temporary: &Path, viewer_file: &Path) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let asked = Arc::new(Mutex::new(Vec::new()));
         let mut servers = Vec::new();
-        for port in READINESS_PORTS {
+        for &port in ports {
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap_or_else(|error| {
                 panic!(
                     "SETUP: 127.0.0.1:{port} cannot be bound ({error}). agentsandbox up asks this \
@@ -106,12 +116,16 @@ impl Readiness {
             listener
                 .set_nonblocking(true)
                 .expect("SETUP: readiness listener mode");
-            let (stop, asked, temporary) =
-                (Arc::clone(&stop), Arc::clone(&asked), temporary.to_owned());
+            let (stop, asked, temporary, viewer_file) = (
+                Arc::clone(&stop),
+                Arc::clone(&asked),
+                temporary.to_owned(),
+                viewer_file.to_owned(),
+            );
             servers.push(std::thread::spawn(move || {
                 while !stop.load(Ordering::Acquire) {
                     match listener.accept() {
-                        Ok((stream, _)) => answer(stream, port, &temporary, &asked),
+                        Ok((stream, _)) => answer(stream, port, &temporary, &viewer_file, &asked),
                         Err(_) => std::thread::sleep(TICK),
                     }
                 }
@@ -144,7 +158,13 @@ impl Drop for Readiness {
     }
 }
 
-fn answer(mut stream: TcpStream, port: u16, temporary: &Path, asked: &Mutex<Vec<Asked>>) {
+fn answer(
+    mut stream: TcpStream,
+    port: u16,
+    temporary: &Path,
+    viewer_file: &Path,
+    asked: &Mutex<Vec<Asked>>,
+) {
     // An accepted socket may inherit the listener's non-blocking mode.
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
@@ -163,19 +183,33 @@ fn answer(mut stream: TcpStream, port: u16, temporary: &Path, asked: &Mutex<Vec<
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
+    let text = String::from_utf8_lossy(&request).into_owned();
+    let viewer = fs::read_to_string(viewer_file).unwrap_or_default();
+    let authorized = !viewer.trim().is_empty()
+        && text.lines().any(|line| {
+            let prefix = "authorization: bearer ";
+            line.to_ascii_lowercase().starts_with(prefix)
+                && line[prefix.len()..].trim() == viewer.trim()
+        });
     asked
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .push(Asked {
             port,
-            request: String::from_utf8_lossy(&request)
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .to_owned(),
+            request: text.lines().next().unwrap_or_default().to_owned(),
+            authorized,
             temporary: names,
         });
-    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+    let body = "{\"tenant_id\":\"local\",\"role\":\"viewer\"}";
+    let reply = if authorized {
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    } else {
+        "HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_owned()
+    };
+    let _ = stream.write_all(reply.as_bytes());
 }
 
 #[test]
@@ -183,13 +217,14 @@ fn r9_up_hands_the_prepared_compose_file_to_the_engine_and_ends_when_the_stack_a
     let scenario = Operator::prepare();
     let original = tree_manifest(&scenario.source);
     let compose_bytes = scenario.source_file(COMPOSE_FILE);
-    let readiness = Readiness::listen(&scenario.tmp);
+    let readiness = Readiness::listen(&scenario.tmp, &scenario.config.join("secrets/viewer"));
 
     let config = scenario.config.to_string_lossy().into_owned();
     let started = scenario.run("up", &["--config-dir", &config], &Spawn::default());
     let asked = readiness.finish();
     succeed("up", &started);
     for line in [
+        "Stack: agentsandbox",
         "Gateway: http://127.0.0.1:8787",
         "Dashboard: http://127.0.0.1:4000",
     ] {
@@ -265,14 +300,22 @@ fn r9_up_hands_the_prepared_compose_file_to_the_engine_and_ends_when_the_stack_a
         scenario.state.calls()
     );
 
-    // Readiness was really asked of both endpoints, and only once the Compose
-    // command was collected: its prepared copy was already gone.
+    // The usual command carries exactly the environment it always had: the control
+    // directory alone, and no publication port.
+    assert_eq!(
+        compose.environment(),
+        vec![format!("AGENTSANDBOX_CONFIG_DIR={config}")],
+        "FAIL: unexpected Compose environment"
+    );
+
+    // Readiness was really asked of both endpoints with the viewer key, and only once the
+    // Compose command was collected: its prepared copy was already gone.
     for port in READINESS_PORTS {
         assert!(
-            asked
-                .iter()
-                .any(|asked| asked.port == port && asked.request == "GET /healthz HTTP/1.1"),
-            "FAIL: up succeeded without asking 127.0.0.1:{port} for readiness"
+            asked.iter().any(|asked| asked.port == port
+                && asked.request == READINESS_REQUEST
+                && asked.authorized),
+            "FAIL: up succeeded without asking 127.0.0.1:{port} for viewer access"
         );
     }
     for asked in &asked {
@@ -1268,5 +1311,163 @@ fn r18_a_build_log_beyond_its_bound_is_printed_up_to_256_kib_and_the_cut_is_anno
     assert!(
         tree_manifest(&scenario.source) == original,
         "FAIL: the original source tree changed"
+    );
+}
+
+/// Two distinct loopback ports that were free a moment ago.
+fn free_ports() -> [u16; 2] {
+    let first = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("SETUP: free port");
+    let second = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("SETUP: free port");
+    [
+        first.local_addr().expect("SETUP: port").port(),
+        second.local_addr().expect("SETUP: port").port(),
+    ]
+}
+
+#[test]
+fn r19_up_names_its_stack_and_publishes_the_chosen_ports_to_compose_and_to_readiness() {
+    let scenario = Operator::prepare();
+    let [gateway_port, dashboard_port] = free_ports();
+    let readiness = Readiness::listen_on(
+        &[gateway_port, dashboard_port],
+        &scenario.tmp,
+        &scenario.config.join("secrets/viewer"),
+    );
+    let config = scenario.config.to_string_lossy().into_owned();
+    let (gateway_port_text, dashboard_port_text) =
+        (gateway_port.to_string(), dashboard_port.to_string());
+    let started = scenario.run(
+        "up",
+        &[
+            "--config-dir",
+            &config,
+            "--stack-name",
+            "qa-second",
+            "--gateway-port",
+            &gateway_port_text,
+            "--dashboard-port",
+            &dashboard_port_text,
+        ],
+        &Spawn::default(),
+    );
+    let asked = readiness.finish();
+    succeed("up", &started);
+    for line in [
+        "Stack: qa-second".to_owned(),
+        format!("Gateway: http://127.0.0.1:{gateway_port}"),
+        format!("Dashboard: http://127.0.0.1:{dashboard_port}"),
+    ] {
+        assert!(
+            started.stdout.contains(&line),
+            "FAIL: up did not report {line:?}; stdout: {}",
+            started.stdout
+        );
+    }
+    let commands = scenario.state.consumers("compose");
+    assert_eq!(commands.len(), 1, "calls: {}", scenario.state.calls());
+    let compose = &commands[0];
+    assert_eq!(
+        compose.engine_arguments().get(..3),
+        Some(
+            &[
+                "compose".to_owned(),
+                "--project-name".to_owned(),
+                "qa-second".to_owned()
+            ][..]
+        ),
+        "FAIL: the stack name was not the Compose project name"
+    );
+    assert_eq!(
+        compose.environment(),
+        vec![
+            format!("AGENTSANDBOX_CONFIG_DIR={config}"),
+            format!("AI_GUARD_DASHBOARD_PORT={dashboard_port}"),
+            format!("AI_GUARD_GATEWAY_PORT={gateway_port}"),
+        ],
+        "FAIL: unexpected Compose environment"
+    );
+    for port in [gateway_port, dashboard_port] {
+        assert!(
+            asked.iter().any(|asked| asked.port == port
+                && asked.request == READINESS_REQUEST
+                && asked.authorized),
+            "FAIL: up did not ask 127.0.0.1:{port} for viewer access"
+        );
+    }
+}
+
+#[test]
+fn r20_up_refuses_equal_ports_and_down_addresses_the_named_stack() {
+    let scenario = Operator::prepare();
+    let config = scenario.config.to_string_lossy().into_owned();
+    let refused = scenario.run(
+        "up",
+        &[
+            "--config-dir",
+            &config,
+            "--gateway-port",
+            "9100",
+            "--dashboard-port",
+            "9100",
+        ],
+        &Spawn::default(),
+    );
+    assert!(!refused.status.success(), "FAIL: equal ports were accepted");
+    assert!(
+        refused.stderr.contains("must be distinct"),
+        "FAIL: refusal text: {}",
+        refused.stderr
+    );
+    no_engine_call(&scenario);
+
+    for (flag, value) in [
+        ("--stack-name", "Upper"),
+        ("--gateway-port", "0"),
+        ("--dashboard-port", "65536"),
+    ] {
+        let exit = scenario.run(
+            "up",
+            &["--config-dir", &config, flag, value],
+            &Spawn::default(),
+        );
+        assert_eq!(
+            exit.status.code(),
+            Some(2),
+            "FAIL: {flag} {value}: {}",
+            exit.describe()
+        );
+        no_engine_call(&scenario);
+    }
+
+    scenario.initialize_config();
+    let stopped = scenario.run(
+        "down",
+        &["--config-dir", &config, "--stack-name", "qa-second"],
+        &Spawn::default(),
+    );
+    succeed("down", &stopped);
+    assert!(
+        stopped
+            .stdout
+            .contains("Control-plane stack qa-second stopped"),
+        "FAIL: down said: {}",
+        stopped.stdout
+    );
+    let commands = scenario.state.consumers("compose");
+    assert_eq!(commands.len(), 1, "calls: {}", scenario.state.calls());
+    assert_eq!(
+        commands[0].engine_arguments().get(..3),
+        Some(
+            &[
+                "compose".to_owned(),
+                "--project-name".to_owned(),
+                "qa-second".to_owned()
+            ][..]
+        )
+    );
+    assert_eq!(
+        commands[0].environment(),
+        vec![format!("AGENTSANDBOX_CONFIG_DIR={config}")],
+        "FAIL: down must carry the control directory alone"
     );
 }

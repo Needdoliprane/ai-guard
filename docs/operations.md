@@ -17,7 +17,7 @@ Choisir le mode d'identité séparément du fournisseur IA : [accès local nomin
 - Rust **1.99.1**, fixé dans `rust-toolchain.toml`, pour compiler la CLI hôte. La compilation de l'image de contrôle utilise la même version.
 - Docker Engine avec Compose, ou Podman rootless avec un fournisseur `podman compose` installé. `doctor` interroge réellement `info` et `version` ; une installation de binaire sans moteur fonctionnel ne suffit pas.
 - Node **24** est utilisé dans les étapes de build des images. Il n'est pas nécessaire sur l'hôte pour construire celles-ci. Le build de l'interface utilise son lockfile npm.
-- Les ports locaux `8787` et `4000` doivent être libres. Ils sont publiés sur `127.0.0.1` uniquement.
+- Les ports locaux `8787` et `4000` doivent être libres, ou remplacés par `--gateway-port` et `--dashboard-port` de `up` avec un `--stack-name` propre à la pile ([seconde pile](setup/local/README.fr.md#named-stack)). Ils sont publiés sur `127.0.0.1` uniquement.
 - Le code de copie et de secrets nécessite Unix. Les quatre couples Linux x86_64/macOS ARM64 × Docker/Podman exigent leurs propres preuves ; le résultat partiel Desktop ne qualifie pas les autres. WSL et les autres plateformes ne sont pas implicitement qualifiés.
 
 Les tags des images de base suivent une version Rust précise, une version majeure Node et une suite Debian. Ils ne constituent pas un verrouillage par digest. Pour une livraison reproductible jusqu'aux paquets système, fixer et vérifier les digests et les dépôts APT dans la chaîne de build de l'équipe ; ce durcissement de supply chain reste distinct du lockfile Rust/npm livré.

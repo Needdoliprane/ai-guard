@@ -13,7 +13,7 @@
 //! | `plan` | test | `key=value` directives, one per line (see `Plan`) |
 //! | `started-<n>` | fixture | first action of invocation `n`: verb and PID |
 //! | `calls` | fixture | one JSON array of arguments per invocation, and `effect <target> <verb>` lines |
-//! | `observed/<n>/…` | fixture | exact bytes read at invocation `n` |
+//! | `observed/<n>/…` | fixture | exact bytes read at invocation `n`, and its `environment` (`NAME=value` lines) |
 //! | `alive-<role>` | fixture | exclusive lock held for the whole life of the process |
 //! | `ready-<role>` | fixture | published after the lock and after the first real read |
 //! | `probe-<k>` / `ack-<role>-<k>` | test / fixture | liveness question and answer |
@@ -139,6 +139,11 @@ fn leader(executable: &Path, state: &Path, arguments: &[String]) {
     let observed = state.join("observed").join(invocation.to_string());
     fs::create_dir_all(&observed).expect("fixture observation directory");
     fs::write(observed.join("arguments"), json_array(arguments)).expect("fixture arguments");
+    let mut environment: Vec<String> = std::env::vars_os()
+        .map(|(name, value)| format!("{}={}", name.to_string_lossy(), value.to_string_lossy()))
+        .collect();
+    environment.sort();
+    fs::write(observed.join("environment"), environment.join("\n")).expect("fixture environment");
     let target = arguments
         .windows(2)
         .find(|pair| pair[0] == "--host")

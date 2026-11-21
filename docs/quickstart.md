@@ -60,7 +60,18 @@ Avant leurs commandes de build ou Compose, `build`, `up` et `down` remettent au 
 
 `init` crée les clés `runner` et `viewer` si elles manquent et **préserve les valeurs existantes**. Les répertoires privés sont `0700`, les clés originales `0600`. Des projections de montage séparées sont `0444` dans un parent `0700` : ne pas les déplacer dans un dossier public. Un emplacement existant non conforme est refusé sans réparation générale. Détails dans [Exploitation](operations.md).
 
-`up` attend la disponibilité des deux accès et recrée les services de contrôle, même s'ils tournent déjà. Cette opération coupe les connexions d'audit en cours : attendre la fin des sessions avant de la répéter.
+`up` recrée les services de contrôle, même s’ils tournent déjà. Après le démarrage Compose, il vérifie pendant au plus 45 secondes que les deux accès acceptent la clé de lecture et annoncent le même client. En cas d’échec, le diagnostic indique l’accès concerné. Une sonde publique `healthcheck` reste disponible pour vérifier la santé HTTP, qui ne prouve pas l’accès. Attendre la fin des sessions avant de répéter `up`, qui coupe les connexions d’audit en cours.
+
+<a id="pile-supplementaire"></a>
+
+Pour faire cohabiter deux piles, attribuer à chacune un nom, un répertoire de configuration et deux ports loopback distincts. Avec une image de contrôle déjà construite, une pile supplémentaire peut être démarrée ainsi.
+
+```sh
+"$AIGUARD_BIN" up --runtime docker --stack-name ai-guard-qa \
+  --config-dir "$AIGUARD_QA_CONFIG" --gateway-port 28787 --dashboard-port 24000
+```
+
+Utiliser `--gateway http://127.0.0.1:28787` pour les commandes de session et ouvrir le dashboard sur le port `24000`. Pour arrêter cette pile, repasser `--stack-name ai-guard-qa`, le même répertoire de configuration et le même moteur à `down`. Les noms choisis et les ports affichés par `up` identifient la pile démarrée. Un fichier Compose personnalisé via `--source` doit publier les variables `AI_GUARD_GATEWAY_PORT` et `AI_GUARD_DASHBOARD_PORT`. Voir aussi [lancer une seconde pile](setup/local/README.fr.md#named-stack).
 
 ## 3. Ouvrir le dashboard
 
@@ -278,7 +289,7 @@ Un essai ultérieur du **parcours géré Claude/API batch** a créé/exporté un
 | Symptôme | Reprise utile |
 |---|---|
 | Moteur absent, programme refusé ou rootless non détecté | Lire `doctor`, démarrer le moteur choisi, vérifier son chemin approuvé et ses permissions. Pour un emplacement personnalisé, répéter `--runtime-program` sur chaque commande qui le prend ; aucun choix global ni repli hôte n'est prévu. |
-| `up` échoue ou ports occupés | Vérifier les ports 4000/8787 et les logs Compose de cette stack. `up` la crée sous le projet `agentsandbox` à partir d'une copie temporaire déjà supprimée : s'y adresser par ce nom, sur le même moteur et avec `AGENTSANDBOX_CONFIG_DIR`, comme dans [suivre une pile démarrée par `up` du CLI](setup/local/README.fr.md#cli-up-stack). Conserver volumes et données. |
+| `up` échoue ou ports occupés | Vérifier les ports 4000/8787 et les logs Compose de cette stack. `up` la crée sous le projet `agentsandbox` (ou le `--stack-name` donné ; ports par `--gateway-port` et `--dashboard-port`) à partir d'une copie temporaire déjà supprimée : s'y adresser par ce nom, sur le même moteur et avec `AGENTSANDBOX_CONFIG_DIR`, comme dans [suivre une pile démarrée par `up` du CLI](setup/local/README.fr.md#cli-up-stack). Conserver volumes et données. |
 | Jeton refusé / écran déconnecté | Utiliser `secrets/viewer` de la même installation. Vérifier le collecteur et reconnecter après une rotation ; ne pas substituer `runner`. |
 | `migration_required`, permissions ou ACL refusées | Suivre la maintenance hors ligne documentée ; ne pas supprimer la base, les verrous ou les checkpoints pour contourner le refus. |
 | Audit plein ou indisponible | Les nouvelles écritures bloquent les lancements. Conserver l'audit, diagnostiquer la capacité et appliquer une maintenance autorisée. |
