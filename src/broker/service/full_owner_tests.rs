@@ -67,12 +67,17 @@ async fn empty_full_enforcer(seed: &ColdRecoverySeed) -> (EnforcerClient, Native
             let code = status.code();
             panic!("native Full fixture exited before IPC, code={code:?}");
         }
-        if let Some(root) = parent.persistent_child("enforcer", false).unwrap()
-            && load_endpoint(&root).unwrap().is_some()
-        {
-            break EnforcerClient::connect_or_spawn(&root, &executable, 8)
-                .await
-                .unwrap();
+        if let Some(root) = parent.persistent_child("enforcer", false).unwrap() {
+            match load_endpoint(&root) {
+                Ok(Some(_)) => {
+                    break EnforcerClient::connect_or_spawn(&root, &executable, 8)
+                        .await
+                        .unwrap();
+                }
+                // The owned fixture can still be writing its first announcement.
+                Ok(None) | Err(IpcError::UnsafeFilesystem) => {}
+                Err(error) => panic!("native Full fixture discovery failed: {error:?}"),
+            }
         }
         assert!(
             Instant::now() < deadline,

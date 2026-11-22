@@ -18,6 +18,7 @@ use crate::{
             BindingInputs, ControlSecrets, FsExclusions, Journal, JournalLimitsV1, ReserveResult,
             RevisionRefV1,
         },
+        local_ipc::IpcError,
         outbox::{BrokerCheckpointV4, OutboxEventV1},
         service::protocol::BrokerErrorCodeV1,
     },
@@ -452,12 +453,17 @@ impl NativePeer {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         let mut owned = Self {
             client: loop {
-                if let Some(root) = parent.persistent_child("enforcer", false).unwrap()
-                    && load_endpoint(&root).unwrap().is_some()
-                {
-                    break EnforcerClient::connect_or_spawn(&root, &executable, 8)
-                        .await
-                        .unwrap();
+                if let Some(root) = parent.persistent_child("enforcer", false).unwrap() {
+                    match load_endpoint(&root) {
+                        Ok(Some(_)) => {
+                            break EnforcerClient::connect_or_spawn(&root, &executable, 8)
+                                .await
+                                .unwrap();
+                        }
+                        // The owned fixture can still be writing its first announcement.
+                        Ok(None) | Err(IpcError::UnsafeFilesystem) => {}
+                        Err(error) => panic!("native recovery fixture discovery failed: {error:?}"),
+                    }
                 }
                 assert!(
                     child.0.try_wait().unwrap().is_none(),
