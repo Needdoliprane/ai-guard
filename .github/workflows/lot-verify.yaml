@@ -1,4 +1,4 @@
-name: Lot verification
+name: G07 worker terminal verification
 
 # Verifies V1 development branches on a hosted Linux x86_64 runner so that the
 # development Mac keeps its memory for engine, browser and macOS recipes.
@@ -24,6 +24,7 @@ jobs:
     timeout-minutes: 180
     env:
       AI_GUARD_BUILD_REVISION: ${{ github.sha }}
+      CARGO_BUILD_JOBS: '1'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
@@ -44,21 +45,38 @@ jobs:
           cargo fetch --locked
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
-      - name: Check all targets with default features (SQLite and MySQL)
-        run: cargo check --locked --offline --all-targets
+      - name: Check all targets with MySQL enabled
+        run: cargo check --locked --offline --all-targets --features mysql-storage --keep-going
       - name: Check all targets without default features (SQLite only)
-        run: cargo check --locked --offline --all-targets --no-default-features
+        run: cargo check --locked --offline --all-targets --no-default-features --keep-going
       - name: Provider harness regressions
         run: |
           python3 -B tests/e2e/interactive_driver.py --self-test
           python3 -B tests/e2e/test_run_provider_preflight.py ProviderPreflightTests ProviderBrowserStageTests
           python3 -B tests/e2e/test_run_provider_broker.py BrokerRecipeTests
-      - name: Rust test suite (ignored engine and provider tests excluded)
+      - name: Full3 synthetic worker terminal
+        id: g07_full3
+        # The fixture starts its broker with env_clear, including RUST_MIN_STACK.
         shell: bash
         run: |
           set -o pipefail
           export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
-          cargo test --locked --offline --no-fail-fast 2>&1 | tee cargo-test.log
+          cargo test --locked --offline --no-default-features --test broker_import_result_gate \
+            broker_import_result_pending_then_acknowledged -- --exact --test-threads=1 --nocapture \
+            2>&1 | tee cargo-test.log
+          grep -Fq 'test result: ok. 1 passed; 0 failed;' cargo-test.log
+      - name: Broker journal publication and ACK regressions
+        if: ${{ !cancelled() && (steps.g07_full3.outcome == 'success' || steps.g07_full3.outcome == 'failure') }}
+        shell: bash
+        run: |
+          set -o pipefail
+          export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
+          cargo test --locked --offline --no-default-features --lib -- --exact --test-threads=1 \
+            runner::broker::executor::helpers::prospective_live_tests::fresh_claim_ack_with_a_lost_writer_reply_continues_once_from_the_exact_durable_head \
+            runner::broker::executor::helpers::prospective_live_tests::unpublished_claim_ack_with_a_writer_error_fails_closed_after_the_reread \
+            runner::broker::executor::journal::tests::committed_rpc_replay_is_not_fresh_and_binding_loss_blocks_http \
+            2>&1 | tee -a cargo-test.log journal-test.log
+          grep -Fq 'test result: ok. 3 passed; 0 failed;' journal-test.log
       - name: Summarize test results
         if: always()
         shell: bash
@@ -67,7 +85,7 @@ jobs:
             grep -E '^test result:|^     Running ' cargo-test.log > cargo-test-summary.txt || true
             grep -E '\.\.\. FAILED$' cargo-test.log | sed 's/^test //; s/ \.\.\. FAILED$//' > cargo-test-failed.txt || true
             {
-              echo "### Rust test suite"
+              echo "### G07 targeted test results"
               echo
               echo "Failed tests: $(wc -l < cargo-test-failed.txt)"
               echo
@@ -83,6 +101,7 @@ jobs:
           name: lot-verify-rust-${{ github.sha }}
           path: |
             cargo-test.log
+            journal-test.log
             cargo-test-summary.txt
             cargo-test-failed.txt
           if-no-files-found: ignore
