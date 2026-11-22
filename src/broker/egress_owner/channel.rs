@@ -26,7 +26,7 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf},
     net::TcpStream,
-    sync::{Semaphore, mpsc, watch},
+    sync::{Semaphore, mpsc, oneshot, watch},
     task::JoinSet,
     time::{Instant, MissedTickBehavior, sleep_until, timeout_at},
 };
@@ -109,6 +109,58 @@ struct Opened {
     valid_until: Instant,
     resolver: &'static str,
 }
+
+struct PendingOpen {
+    commands: mpsc::Sender<Command>,
+    closed_at: oneshot::Receiver<Instant>,
+    peer: SocketAddr,
+    connected_at: Instant,
+    valid_until: Instant,
+    resolver: &'static str,
+}
+
+impl Opened {
+    fn start_pump(self, flow_id: u64, events: mpsc::Sender<Event>) -> PendingOpen {
+        let Self {
+            stream,
+            peer,
+            connected_at,
+            valid_until,
+            resolver,
+        } = self;
+        let (commands, receiver) = mpsc::channel(COMMAND_SLOTS);
+        let (closed, closed_at) = oneshot::channel();
+        // The socket owner runs independently of the frame writer and event
+        // queue. No data can move until the channel owner sends commands.
+        tokio::spawn(async move {
+            if Instant::now() < valid_until {
+                tokio::select! {
+                    biased;
+                    _ = sleep_until(valid_until) => {},
+                    () = pump(flow_id, stream, receiver, events) => {},
+                }
+            } else {
+                drop(stream);
+            }
+            let _ = closed.send(Instant::now());
+        });
+        PendingOpen {
+            commands,
+            closed_at,
+            peer,
+            connected_at,
+            valid_until,
+            resolver,
+        }
+    }
+}
+
+impl PendingOpen {
+    fn available(&self) -> bool {
+        Instant::now() < self.valid_until && !self.commands.is_closed()
+    }
+}
+
 struct Refusal {
     reason: EgressReasonV1,
     /// Present when a durable allow preceded a resolution/connect failure.
@@ -119,7 +171,7 @@ enum Event {
     Opened {
         flow_id: u64,
         decision_id: IdV1,
-        result: Result<Opened, Refusal>,
+        result: Result<PendingOpen, Refusal>,
     },
     Upstream {
         flow_id: u64,
@@ -155,7 +207,7 @@ struct Flow {
 }
 
 struct Owner<W> {
-    output: W,
+    output: Option<W>,
     binding: EgressBindingV1,
     control: Arc<dyn EgressControl>,
     resolver: Arc<Resolver>,
@@ -227,7 +279,7 @@ where
     }
     let (events, mut incoming) = mpsc::channel(64);
     let mut owner = Owner {
-        output,
+        output: Some(output),
         binding,
         control,
         resolver,
@@ -266,6 +318,11 @@ where
             _ = renew.tick() => owner.renew(),
         }
     };
+    // A timed-out write may have emitted only a frame prefix. Close both
+    // halves before waiting for the audit work, without sending another frame.
+    drop(input);
+    drop(owner.output.take());
+    drop(incoming);
     owner.shutdown(exit).await;
     exit
 }
@@ -290,16 +347,29 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
     /// Send one frame after the ledger admitted it. Stale means the worker
     /// already retired that flow; nothing is written.
     async fn send(&mut self, message: EgressMessageV1) -> Result<Admission, ()> {
+        self.send_before(message, Instant::now() + FRAME_TIME).await
+    }
+
+    async fn send_before(
+        &mut self,
+        message: EgressMessageV1,
+        deadline: Instant,
+    ) -> Result<Admission, ()> {
+        let deadline = deadline.min(Instant::now() + FRAME_TIME);
+        if Instant::now() >= deadline {
+            return Err(());
+        }
         let now = self.now_ms();
         let admission = self.ledger.on_broker(&message, now).map_err(|_| ())?;
         if admission == Admission::Applied {
-            channel_protocol::write_message(
-                &mut self.output,
-                &message,
-                Instant::now() + FRAME_TIME,
-            )
-            .await
-            .map_err(|_| ())?;
+            let output = self.output.as_mut().ok_or(())?;
+            tokio::select! {
+                biased;
+                _ = sleep_until(deadline) => return Err(()),
+                written = channel_protocol::write_message(output, &message, deadline) => {
+                    written.map_err(|_| ())?;
+                }
+            }
         }
         Ok(admission)
     }
@@ -447,7 +517,9 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
         let events = self.events.clone();
         let times = self.times;
         tokio::spawn(async move {
-            let result = open_upstream(control, resolver, times, request, authority).await;
+            let result = open_upstream(control, resolver, times, request, authority)
+                .await
+                .map(|opened| opened.start_pump(flow_id, events.clone()));
             let _ = events
                 .send(Event::Opened {
                     flow_id,
@@ -575,7 +647,7 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
         &mut self,
         flow_id: u64,
         decision_id: IdV1,
-        result: Result<Opened, Refusal>,
+        result: Result<PendingOpen, Refusal>,
     ) -> Result<(), ()> {
         let live = self
             .flows
@@ -592,42 +664,57 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
                     peer: Some(opened.peer.to_string()),
                     resolver: opened.resolver.into(),
                 });
-                if !live || Instant::now() >= opened.valid_until {
-                    // A connected socket can outlive its permit while its result is queued.
-                    drop(opened.stream);
-                    let mut flow = self.pending_flow(decision_id);
-                    flow.started = opened.connected_at;
-                    let reason = if live {
-                        EgressCloseReasonV1::Expired
+                if !live {
+                    return self
+                        .close_opening(
+                            flow_id,
+                            decision_id,
+                            opened,
+                            EgressCloseReasonV1::WorkerReset,
+                        )
+                        .await;
+                }
+                if !opened.available() {
+                    let reason = if Instant::now() >= opened.valid_until {
+                        EgressReasonV1::Expired
                     } else {
-                        EgressCloseReasonV1::WorkerReset
+                        EgressReasonV1::Transport
                     };
-                    self.record_closed(flow_id, flow, reason);
-                    return if live {
-                        self.reset_pending(flow_id, EgressReasonV1::Expired).await
-                    } else {
+                    self.close_opening(flow_id, decision_id, opened, EgressCloseReasonV1::Protocol)
+                        .await?;
+                    return self.reset_pending(flow_id, reason).await;
+                }
+                match self.publish_opening(flow_id, &opened).await {
+                    Ok(Admission::Applied) if opened.available() => {
+                        let flow = self.flows.get_mut(&flow_id).ok_or(())?;
+                        flow.commands = Some(opened.commands);
+                        flow.valid_until = Some(opened.valid_until);
+                        flow.leased_until = Instant::now() + self.times.lease;
+                        flow.started = opened.connected_at;
                         Ok(())
-                    };
+                    }
+                    Ok(Admission::Stale) => {
+                        self.flows.remove(&flow_id);
+                        self.close_opening(
+                            flow_id,
+                            decision_id,
+                            opened,
+                            EgressCloseReasonV1::WorkerReset,
+                        )
+                        .await
+                    }
+                    _ => {
+                        self.flows.remove(&flow_id);
+                        self.close_opening(
+                            flow_id,
+                            decision_id,
+                            opened,
+                            EgressCloseReasonV1::Protocol,
+                        )
+                        .await?;
+                        Err(())
+                    }
                 }
-                if self.send(EgressMessageV1::Accepted { flow_id }).await? == Admission::Stale {
-                    self.flows.remove(&flow_id);
-                    return Ok(());
-                }
-                let (commands, receiver) = mpsc::channel(COMMAND_SLOTS);
-                tokio::spawn(pump(flow_id, opened.stream, receiver, self.events.clone()));
-                let lease = self.times.lease;
-                if let Some(flow) = self.flows.get_mut(&flow_id) {
-                    flow.commands = Some(commands);
-                    flow.valid_until = Some(opened.valid_until);
-                    flow.leased_until = Instant::now() + lease;
-                    flow.started = opened.connected_at;
-                }
-                self.send(EgressMessageV1::Credit {
-                    flow_id,
-                    bytes: MAX_DATA_BYTES as u32,
-                })
-                .await
-                .map(|_| ())
             }
             Err(refusal) => {
                 if let Some((failure, resolver)) = refusal.failure {
@@ -647,6 +734,62 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
                 Ok(())
             }
         }
+    }
+
+    async fn publish_opening(
+        &mut self,
+        flow_id: u64,
+        opened: &PendingOpen,
+    ) -> Result<Admission, ()> {
+        if !opened.available() {
+            return Err(());
+        }
+        if self
+            .send_before(EgressMessageV1::Accepted { flow_id }, opened.valid_until)
+            .await?
+            == Admission::Stale
+        {
+            return Ok(Admission::Stale);
+        }
+        if !opened.available() {
+            return Err(());
+        }
+        let credit = EgressMessageV1::Credit {
+            flow_id,
+            bytes: MAX_DATA_BYTES as u32,
+        };
+        match self.send_before(credit, opened.valid_until).await? {
+            Admission::Applied => Ok(Admission::Applied),
+            // Accepted has already been published. Abandon the channel if
+            // it cannot deliver the rest of a usable opening.
+            Admission::Stale => Err(()),
+        }
+    }
+
+    async fn close_opening(
+        &mut self,
+        flow_id: u64,
+        decision_id: IdV1,
+        opened: PendingOpen,
+        reason: EgressCloseReasonV1,
+    ) -> Result<(), ()> {
+        drop(opened.commands);
+        let closed_at = opened.closed_at.await.map_err(|_| ())?;
+        let reason = if closed_at >= opened.valid_until {
+            EgressCloseReasonV1::Expired
+        } else {
+            reason
+        };
+        self.record(EgressObservationV1::Closed {
+            binding: self.binding.clone(),
+            decision_id,
+            flow_id,
+            reason,
+            bytes_up: 0,
+            bytes_down: 0,
+            duration_ms: millis(closed_at.saturating_duration_since(opened.connected_at)),
+        });
+        Ok(())
     }
 
     async fn finish_if_done(&mut self, flow_id: u64) -> Result<(), ()> {

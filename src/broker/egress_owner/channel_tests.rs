@@ -13,7 +13,8 @@ use std::sync::{
     Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use tokio::net::TcpListener;
+use std::task::{Context, Poll};
+use tokio::{io::ReadBuf, net::TcpListener};
 
 const FIXTURE: &str = "fixture.egress.test";
 
@@ -165,6 +166,22 @@ fn fixture_binding() -> EgressBindingV1 {
     }
 }
 
+fn fixture_resolver(upstream_port: u16, lookup: Arc<NoLookup>) -> Arc<Resolver> {
+    let authority =
+        Authority::new(FIXTURE, upstream_port, EgressTransport::ConnectTcpOpaque).unwrap();
+    Arc::new(
+        Resolver::new(
+            lookup,
+            vec![InternalService {
+                authority,
+                addresses: vec!["127.0.0.1".parse().unwrap()],
+            }],
+            vec![],
+        )
+        .unwrap(),
+    )
+}
+
 async fn harness(gateway: Arc<Gateway>, upstream_port: u16) -> Harness {
     let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let helper_port = probe.local_addr().unwrap().port();
@@ -177,19 +194,7 @@ async fn harness(gateway: Arc<Gateway>, upstream_port: u16) -> Harness {
         helper_output,
     ));
     let lookups = Arc::new(NoLookup(AtomicUsize::new(0)));
-    let fixture =
-        Authority::new(FIXTURE, upstream_port, EgressTransport::ConnectTcpOpaque).unwrap();
-    let resolver = Arc::new(
-        Resolver::new(
-            lookups.clone(),
-            vec![InternalService {
-                authority: fixture,
-                addresses: vec!["127.0.0.1".parse().unwrap()],
-            }],
-            vec![],
-        )
-        .unwrap(),
-    );
+    let resolver = fixture_resolver(upstream_port, lookups.clone());
     let binding = fixture_binding();
     let times = ChannelTimes {
         lease: Duration::from_millis(1_500),
@@ -319,6 +324,196 @@ async fn egress_broker_receipt_expiry_stops_pending_resolution() {
             failure: Some(("resolution_timeout", "host_resolver"))
         })
     ));
+}
+
+/// Stops writes after the selected number of complete frames while preserving
+/// full-duplex reads. A notification proves the write was actually attempted.
+struct BlockedPublication {
+    inner: tokio::io::DuplexStream,
+    remaining_frames: usize,
+    blocked: Arc<tokio::sync::Notify>,
+}
+
+impl AsyncRead for BlockedPublication {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for BlockedPublication {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        if self.remaining_frames == 0 {
+            self.blocked.notify_one();
+            return Poll::Pending;
+        }
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let result = Pin::new(&mut self.inner).poll_flush(cx);
+        if matches!(result, Poll::Ready(Ok(()))) {
+            self.remaining_frames -= 1;
+        }
+        result
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+async fn expiry_during_publication(complete_frames: usize) {
+    let upstream = upstream().await;
+    let resolver = fixture_resolver(upstream.port, Arc::new(NoLookup(AtomicUsize::new(0))));
+    let gateway = Arc::new(Gateway {
+        allow: AtomicBool::new(true),
+        remaining_ms: Some(300),
+        ..Gateway::default()
+    });
+    let (broker, mut helper) = tokio::io::duplex(4096);
+    let blocked = Arc::new(tokio::sync::Notify::new());
+    let broker = BlockedPublication {
+        inner: broker,
+        remaining_frames: complete_frames,
+        blocked: blocked.clone(),
+    };
+    let (_stop, stopped) = watch::channel(false);
+    let owner = tokio::spawn(run(
+        broker,
+        fixture_binding(),
+        gateway.clone(),
+        resolver,
+        ChannelTimes::default(),
+        stopped,
+    ));
+    let handshake_deadline = Instant::now() + HANDSHAKE_TIME;
+    let hello = channel_protocol::read_handshake(&mut helper, handshake_deadline)
+        .await
+        .unwrap();
+    channel_protocol::write_handshake(&mut helper, &hello, handshake_deadline)
+        .await
+        .unwrap();
+    channel_protocol::write_message(
+        &mut helper,
+        &EgressMessageV1::Open {
+            flow_id: 1,
+            authority: format!("{FIXTURE}:{}", upstream.port),
+        },
+        Instant::now() + FRAME_TIME,
+    )
+    .await
+    .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    timeout_at(deadline, blocked.notified()).await.unwrap();
+    timeout_at(deadline, upstream.closed.notified())
+        .await
+        .expect("the upstream socket closes at receipt expiry, before the frame timeout");
+    assert_eq!(
+        timeout_at(deadline, owner).await.unwrap().unwrap(),
+        ChannelExit::Protocol
+    );
+    let mut frames = EgressFrameReader::new();
+    if complete_frames == 2 {
+        assert!(matches!(
+            frames.read(&mut helper).await.unwrap(),
+            Some(EgressMessageV1::Accepted { flow_id: 1 })
+        ));
+    }
+    assert!(frames.read(&mut helper).await.unwrap().is_none());
+    assert_eq!(upstream.accepts.load(Ordering::SeqCst), 1);
+    assert_expired_connection(&gateway);
+}
+
+fn assert_expired_connection(gateway: &Gateway) {
+    let observations = gateway.observations.lock().unwrap();
+    assert!(observations.iter().any(|event| matches!(
+        event,
+        EgressObservationV1::Connection {
+            flow_id: 1,
+            connected: true,
+            ..
+        }
+    )));
+    assert!(observations.iter().any(|event| matches!(
+        event,
+        EgressObservationV1::Closed {
+            flow_id: 1,
+            reason: EgressCloseReasonV1::Expired,
+            bytes_up: 0,
+            bytes_down: 0,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn egress_broker_receipt_expiry_closes_socket_during_accept_publication() {
+    expiry_during_publication(1).await;
+}
+
+#[tokio::test]
+async fn egress_broker_receipt_expiry_closes_socket_during_credit_publication() {
+    expiry_during_publication(2).await;
+}
+
+#[tokio::test]
+async fn egress_broker_receipt_expiry_closes_socket_before_event_consumption() {
+    let upstream = upstream().await;
+    let gateway = Arc::new(Gateway {
+        allow: AtomicBool::new(true),
+        remaining_ms: Some(300),
+        ..Gateway::default()
+    });
+    let mut ledger = EgressChannelState::new(0);
+    ledger
+        .accept_capability(Some(&EgressCapabilityV1::default()), 0)
+        .unwrap();
+    let (events, mut incoming) = mpsc::channel(1);
+    let mut owner = Owner {
+        output: Some(tokio::io::sink()),
+        binding: fixture_binding(),
+        control: gateway.clone(),
+        resolver: fixture_resolver(upstream.port, Arc::new(NoLookup(AtomicUsize::new(0)))),
+        times: ChannelTimes::default(),
+        ledger,
+        started: Instant::now(),
+        flows: HashMap::new(),
+        events,
+        observations: JoinSet::new(),
+        observation_slots: Arc::new(Semaphore::new(OBSERVATION_SLOTS)),
+        observations_lost: 0,
+        renewing: false,
+    };
+    owner
+        .worker_frame(EgressMessageV1::Open {
+            flow_id: 1,
+            authority: format!("{FIXTURE}:{}", upstream.port),
+        })
+        .await
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    timeout_at(deadline, upstream.closed.notified())
+        .await
+        .expect("the socket closes even while its event is queued");
+    let event = timeout_at(deadline, incoming.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    owner.event(event).await.unwrap();
+    assert!(owner.flows.is_empty());
+    owner.shutdown(ChannelExit::Stopped).await;
+    assert_eq!(upstream.accepts.load(Ordering::SeqCst), 1);
+    assert_expired_connection(&gateway);
 }
 
 #[tokio::test]
