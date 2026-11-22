@@ -5,11 +5,14 @@ use agentsandbox::{
     api::{GatewayState, TenantGateway, gateway_router},
     audit::Store,
     broker::{
+        checkpoint::SupervisionOperationV1,
+        lifecycle::BrokerCheckpointV3,
         local_ipc::{EndpointRecordV1, read_frame, write_frame},
+        outbox::{BrokerCheckpointV4, OutboxEventV1},
         service::{self, RequestedExecutionV1, SubmitV1, encode_submit, protocol::*},
     },
-    control::{WorkerMutationV1, WorkerStateV1, WorkerTransitionV1},
-    control_fs::Directory,
+    control::{RuntimeStatusV1, WorkerMutationV1, WorkerStateV1, WorkerTransitionV1, WorkerV1},
+    control_fs::{Directory, MAX_PRIVATE_FILE_BYTES},
     operations::initialize_config,
     policy::Policy,
     redaction::Redactor,
@@ -198,6 +201,27 @@ pub(super) struct TerminalWorkerSample {
     same_attempt: Option<bool>,
     witness: &'static str,
     store_receipt: &'static str,
+    journal_head: TerminalJournalHead,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TerminalJournalHead {
+    NotSampled,
+    Unavailable,
+    NoResult,
+    ResultWithoutObserve,
+    ObservePending,
+    ObserveAcknowledged,
+}
+
+#[derive(serde::Deserialize)]
+struct FixtureJournalFrame {
+    version: u32,
+    operation_id: Uuid,
+    intent_hash: String,
+    revision: u64,
+    payload: Value,
 }
 
 impl Default for TerminalWorkerSample {
@@ -210,6 +234,7 @@ impl Default for TerminalWorkerSample {
             same_attempt: None,
             witness: "unknown",
             store_receipt: "not_checked",
+            journal_head: TerminalJournalHead::NotSampled,
         }
     }
 }
@@ -777,6 +802,7 @@ impl Fixture {
         store: &Store,
         endpoint: &RelayEndpointV1,
         sample: &mut TerminalWorkerSample,
+        journal_job_a: Option<Uuid>,
     ) -> Result<()> {
         // Reuse the last worker-state reading from the existing wait.
         let mut last = TerminalWorkerRead::Unknown;
@@ -806,6 +832,10 @@ impl Fixture {
             Err(error) if error.is::<tokio::time::error::Elapsed>() => "timeout",
             Err(_) => "read_failed",
         };
+        let probe_job = journal_job_a.filter(|_| sample.wait == "timeout");
+        if probe_job.is_some() {
+            sample.journal_head = TerminalJournalHead::Unavailable;
+        }
         match last {
             TerminalWorkerRead::Present {
                 state,
@@ -821,6 +851,12 @@ impl Fixture {
                 if let Some(container_id) = container_id.as_deref() {
                     // The receipt is an independent, later sample from the same fixture Store.
                     sample.store_receipt = terminal_store_receipt(store, endpoint, container_id);
+                    if let Some(job) = probe_job {
+                        sample.journal_head = self
+                            .terminal_journal_head(job, endpoint, container_id)
+                            .await
+                            .unwrap_or(TerminalJournalHead::Unavailable);
+                    }
                 }
             }
             TerminalWorkerRead::Absent => sample.store = "absent",
@@ -828,6 +864,67 @@ impl Fixture {
             TerminalWorkerRead::Unknown => {}
         }
         result.map(|_| ())
+    }
+
+    async fn terminal_journal_head(
+        &self,
+        job: Uuid,
+        endpoint: &RelayEndpointV1,
+        container_id: &str,
+    ) -> Result<TerminalJournalHead> {
+        let reply = timeout(
+            Duration::from_secs(1),
+            service::request(
+                &self.broker_root,
+                "a",
+                A_RUNNER,
+                BrokerCommandV1::Status { operation_id: job },
+            ),
+        )
+        .await??;
+        let BrokerReplyV1::Status { status } = reply else {
+            bail!("fixture journal status unavailable");
+        };
+        ensure!(status.operation_id == job && status.cancel_requested);
+        let revision = status.head_revision.context("confirmed fixture head")?;
+        let namespace =
+            Directory::open_existing(&self.broker_root.join("journals/a/broker-journal-v1"))?;
+        let mut scopes = std::fs::read_dir(namespace.path())?;
+        let scope = scopes.next().context("fixture journal scope")??;
+        ensure!(scopes.next().is_none(), "ambiguous fixture journal scope");
+        namespace.revalidate()?;
+        let job_root = Directory::open_existing(&scope.path().join("jobs").join(job.to_string()))?;
+        // As in the Full3 fixture, read only the immutable frame named by Status.
+        let bytes = job_root
+            .read_private_file(format!("rev-{revision:020}.json"), MAX_PRIVATE_FILE_BYTES)?;
+        let frame: FixtureJournalFrame = serde_json::from_slice(bytes.bytes())?;
+        let domain = match frame.version {
+            3 => b"ai-guard:broker-checkpoint:v3\0",
+            4 => b"ai-guard:broker-checkpoint:v4\0",
+            _ => bail!("unsupported fixture journal head"),
+        };
+        let mut hash = Sha256::new();
+        hash.update(domain);
+        hash.update(bytes.bytes());
+        let hash = hex::encode(hash.finalize());
+        ensure!(
+            frame.operation_id == job
+                && frame.revision == revision
+                && status.head_hash.as_deref() == Some(hash.as_str())
+                && status.intent_hash.as_deref() == Some(frame.intent_hash.as_str())
+        );
+        if frame.version == 3 {
+            let lifecycle = serde_json::from_value(frame.payload)?;
+            terminal_journal_category(&lifecycle, &[], endpoint, container_id)
+        } else {
+            let checkpoint: BrokerCheckpointV4 = serde_json::from_value(frame.payload)?;
+            terminal_journal_category(
+                checkpoint.lifecycle(),
+                checkpoint.events(),
+                endpoint,
+                container_id,
+            )
+        }
     }
 
     fn terminal_witness_state(&self, container_id: Option<&str>) -> &'static str {
@@ -1017,6 +1114,66 @@ impl Fixture {
         );
         Ok(())
     }
+}
+
+fn terminal_journal_category(
+    lifecycle: &BrokerCheckpointV3,
+    events: &[OutboxEventV1],
+    endpoint: &RelayEndpointV1,
+    container_id: &str,
+) -> Result<TerminalJournalHead> {
+    let same_worker = |worker: &WorkerV1| {
+        worker.worker_id == endpoint.worker_id
+            && worker.attempt.attempt_id == endpoint.attempt_id
+            && worker.attempt.container_id.as_deref() == Some(container_id)
+    };
+    let operations = lifecycle.broker().supervision().operations();
+    ensure!(operations.iter().any(|operation| matches!(
+        operation,
+        SupervisionOperationV1::WorkerClaim { response: Some(response), .. }
+            if same_worker(&response.worker)
+    )));
+    for operation in operations.iter().rev() {
+        let SupervisionOperationV1::WorkerMutation { request, response } = operation else {
+            continue;
+        };
+        let WorkerTransitionV1::Observe { observation } = &request.transition else {
+            continue;
+        };
+        if request.worker_id == endpoint.worker_id
+            && request.attempt_id == endpoint.attempt_id
+            && matches!(
+                observation.status,
+                RuntimeStatusV1::Exited | RuntimeStatusV1::Dead
+            )
+            && observation.running == Some(false)
+        {
+            ensure!(observation.inspection.container_id == container_id);
+            return match response {
+                Some(response) => {
+                    ensure!(
+                        same_worker(&response.worker)
+                            && response.receipt.operation_id == request.operation_id
+                    );
+                    Ok(TerminalJournalHead::ObserveAcknowledged)
+                }
+                None => Ok(TerminalJournalHead::ObservePending),
+            };
+        }
+    }
+    let result = events
+        .iter()
+        .find(|entry| entry.event().kind == "broker.batch.result");
+    let Some(result) = result else {
+        return Ok(TerminalJournalHead::NoResult);
+    };
+    let data = &result.event().data;
+    ensure!(
+        data["worker_id"].as_str() == Some(endpoint.worker_id.as_str())
+            && data["attempt_id"].as_str() == Some(endpoint.attempt_id.as_str())
+            && data["observation"]["id"].as_str() == Some(container_id)
+    );
+    Ok(TerminalJournalHead::ResultWithoutObserve)
 }
 
 fn terminal_store_receipt(

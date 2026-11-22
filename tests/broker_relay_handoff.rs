@@ -604,11 +604,11 @@ async fn verify_scoped_relay_ipc(
     fixture.cancel("b", b_job).await?;
     *phase = "terminal_a";
     fixture
-        .sample_worker_terminal(&fixture.a, &a_endpoint, a)
+        .sample_worker_terminal(&fixture.a, &a_endpoint, a, Some(a_job))
         .await?;
     *phase = "terminal_b";
     fixture
-        .sample_worker_terminal(&fixture.b, &b_endpoint, b)
+        .sample_worker_terminal(&fixture.b, &b_endpoint, b, None)
         .await?;
     *phase = "verified";
     Ok(())
