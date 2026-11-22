@@ -948,11 +948,13 @@ impl Fixture {
             },
         )
         .await?;
-        ensure!(
-            matches!(reply, BrokerReplyV1::CommandAcknowledged { .. }),
-            "cancel not durably acknowledged"
-        );
-        Ok(())
+        match reply {
+            BrokerReplyV1::CommandAcknowledged { .. } => Ok(()),
+            BrokerReplyV1::Error { code } => {
+                Err(anyhow::Error::new(code).context("cancel not durably acknowledged"))
+            }
+            _ => bail!("cancel not durably acknowledged"),
+        }
     }
     pub async fn close(self) -> Result<()> {
         self.close_owned(true).await

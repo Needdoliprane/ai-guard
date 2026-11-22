@@ -502,24 +502,36 @@ enum ScopedRelayPhase {
     SubmitB,
     RunningB,
     ScopedReads,
-    Terminal,
+    CancelA,
+    CancelB,
+    TerminalA,
+    TerminalB,
     GuardianShutdown,
     FixtureClose,
 }
 
-impl std::fmt::Debug for ScopedRelayPhase {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let phase = match self {
+impl ScopedRelayPhase {
+    fn label(self) -> &'static str {
+        match self {
             Self::FixtureOpen => "fixture_open",
             Self::SubmitA => "submit_a",
             Self::AwaitingA => "awaiting_a",
             Self::SubmitB => "submit_b",
             Self::RunningB => "running_b",
             Self::ScopedReads => "scoped_reads",
-            Self::Terminal => "terminal",
+            Self::CancelA => "cancel_a",
+            Self::CancelB => "cancel_b",
+            Self::TerminalA => "terminal_a",
+            Self::TerminalB => "terminal_b",
             Self::GuardianShutdown => "guardian_shutdown",
             Self::FixtureClose => "fixture_close",
-        };
+        }
+    }
+}
+
+impl std::fmt::Debug for ScopedRelayPhase {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let phase = self.label();
         write!(formatter, "g11_relay_fixture_failure phase={phase}")
     }
 }
@@ -534,7 +546,15 @@ async fn software_broker_scoped_relay_ipc_refuses_before_private_detail()
     let mut phase = ScopedRelayPhase::SubmitA;
     let result = verify_scoped_relay_ipc(&mut fixture, &mut phase)
         .await
-        .map_err(|_| phase);
+        .map_err(|error| {
+            if matches!(phase, ScopedRelayPhase::CancelA | ScopedRelayPhase::CancelB)
+                && let Some(code) = error.downcast_ref::<BrokerErrorCodeV1>()
+            {
+                let label = phase.label();
+                eprintln!("g11_relay_cancel_code phase={label} code={code:?}");
+            }
+            phase
+        });
     let cleanup = fixture.close().await.map_err(|error| {
         if error.is::<GuardianCleanupUnconfirmed>() {
             ScopedRelayPhase::GuardianShutdown
@@ -542,6 +562,14 @@ async fn software_broker_scoped_relay_ipc_refuses_before_private_detail()
             ScopedRelayPhase::FixtureClose
         }
     });
+    if result.is_err() {
+        let status = match &cleanup {
+            Ok(()) => "confirmed",
+            Err(ScopedRelayPhase::GuardianShutdown) => "guardian_shutdown_unconfirmed",
+            Err(_) => "fixture_close_unconfirmed",
+        };
+        eprintln!("g11_relay_fixture_cleanup status={status}");
+    }
     result.and(cleanup)
 }
 
@@ -630,10 +658,13 @@ async fn verify_scoped_relay_ipc(
         fixture.exec_count().await == 0 && fixture.committed_claims()? == 0,
         "diagnostics confer no execution authority"
     );
-    *phase = ScopedRelayPhase::Terminal;
+    *phase = ScopedRelayPhase::CancelA;
     fixture.cancel("a", a_job).await?;
+    *phase = ScopedRelayPhase::CancelB;
     fixture.cancel("b", b_job).await?;
+    *phase = ScopedRelayPhase::TerminalA;
     worker_terminal(&fixture.a, &a_endpoint).await?;
+    *phase = ScopedRelayPhase::TerminalB;
     worker_terminal(&fixture.b, &b_endpoint).await?;
     Ok(())
 }
