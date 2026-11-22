@@ -51,11 +51,12 @@ pub(in crate::api) async fn authenticate_policy(
     let identity = authenticate(state, headers).await?;
     let shared = identity.state.io.clone();
     let tenant = identity.tenant.io.clone();
-    store_io::run(
+    store_io::run_retaining(
         shared,
         Some(tenant),
         store_io::Lane::Control,
         false,
+        identity._usage.clone(),
         move || {
             let source = identity
                 .owned
@@ -318,11 +319,12 @@ pub(in crate::api) async fn authenticate(
     let usage = owned.admit()?;
     let token = token.to_owned();
     let state = state.scoped(Arc::default());
-    store_io::run(
+    store_io::run_retaining(
         state.io.clone(),
         Some(tenant.io.clone()),
         store_io::Lane::Control,
         false,
+        usage.clone(),
         move || {
             if !owned.technical_candidate(&digest)? {
                 return Err(human_sources::unavailable());
