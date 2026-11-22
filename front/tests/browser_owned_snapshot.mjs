@@ -512,7 +512,8 @@ async function runOwnedSnapshot() {
 
 try {
   must(fixtureMode === "run-v1" || egressMode, "EXPLICIT_FIXTURE_GUARD_REQUIRED");
-  const admittedLinux = process.platform === "linux" && process.arch === "arm64" && process.getuid?.() === 1000 && process.getgid?.() === 1000;
+  const admittedLinuxArch = process.arch === "arm64" || (fixtureMode === "run-v1" && process.arch === "x64");
+  const admittedLinux = process.platform === "linux" && admittedLinuxArch && process.getuid?.() === 1000 && process.getgid?.() === 1000;
   const admittedMac = egressMode && process.platform === "darwin" && process.arch === "arm64" && process.geteuid?.() > 0;
   must(admittedLinux || admittedMac, "ADMITTED_OWNED_BROWSER_PLATFORM_REQUIRED");
   libtest = process.env.AI_GUARD_OWNED_BROWSER_LIBTEST; dist = process.env.AI_GUARD_OWNED_BROWSER_DIST;
