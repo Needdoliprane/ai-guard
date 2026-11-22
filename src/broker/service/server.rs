@@ -600,7 +600,7 @@ impl RetainedServiceShutdown {
     pub async fn supervise(self) -> Result<()> {
         let mut owner = self;
         eprintln!(
-            "broker shutdown is not drained: broker ownership and the private endpoint remain retained; inspect the operation or request Cancel with the existing broker CLI; a further termination explicitly ends this process without proving retirement"
+            "broker shutdown is not drained: broker ownership and the private endpoint remain retained; inspect recovery status and request Cancel if the STOP connection is available; a further termination ends this broker without proving retirement"
         );
         let mut requests = JoinSet::new();
         let capacity = Arc::new(Semaphore::new(64));
@@ -935,18 +935,28 @@ pub async fn serve_selected_owned(
         && !retain_service
         && let Some(guardian) = fresh_guardian.as_mut()
     {
-        match guardian.shutdown_if_idle().await {
-            Ok(true) => fresh_guardian = None,
-            Ok(false) => {
-                eprintln!("broker guardian acknowledged idle shutdown; waiting for child exit");
-            }
-            Err(EnforcerError::NotIdle) => {
-                eprintln!(
-                    "broker guardian is not idle; keep it running and inspect or cancel retained jobs"
-                );
-            }
-            Err(_) => {
-                eprintln!("broker guardian shutdown is unconfirmed; reconciliation is required");
+        // Full3's idle join covers the Full owners. A separately installed
+        // native recovery owner can retain a STOP outside the admission map.
+        if service.registry.data.max_recovery_stop_owners > 0 {
+            eprintln!(
+                "broker guardian retains native STOP recovery; keep it running and inspect recovery status"
+            );
+        } else {
+            match guardian.shutdown_if_idle().await {
+                Ok(true) => fresh_guardian = None,
+                Ok(false) => {
+                    eprintln!("broker guardian acknowledged idle shutdown; waiting for child exit");
+                }
+                Err(EnforcerError::NotIdle) => {
+                    eprintln!(
+                        "broker guardian is not idle; keep it running and inspect or cancel retained jobs"
+                    );
+                }
+                Err(_) => {
+                    eprintln!(
+                        "broker guardian shutdown is unconfirmed; reconciliation is required"
+                    );
+                }
             }
         }
     }
