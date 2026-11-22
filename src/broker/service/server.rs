@@ -3027,6 +3027,11 @@ impl Service {
                 else {
                     continue;
                 };
+                // The writer is one FIFO actor shared with this profile's
+                // executions. Yield this tick to their commits (bounded).
+                if !jobs.admit_reconcile(writer.outstanding()) {
+                    continue;
+                }
                 let credential = match self.material.reconciler(profile) {
                     Ok(value) => value,
                     Err(_) => continue,
@@ -3042,6 +3047,11 @@ impl Service {
                     };
                     for entry in page.entries() {
                         let operation = entry.operation_id();
+                        // A Job whose gate is held cannot be entered by this
+                        // pass below; do not queue its strict load either.
+                        if jobs.known(operation).is_some_and(|job| job.is_running()) {
+                            continue;
+                        }
                         let durable = match writer.load(operation).await {
                             Ok(Some(job)) => job,
                             _ => continue,
@@ -3155,6 +3165,12 @@ impl Service {
             return Ok(());
         };
         let writer = capabilities.stops();
+        // Same FIFO actor as this profile's executions: yield (bounded) while
+        // a caller awaits its reply. Pending events stay durable in the
+        // journal and a later tick delivers them, even under a live owner.
+        if !jobs.admit_retirement_audit(writer.outstanding()) {
+            return Ok(());
+        }
         let material = Arc::clone(&self.material);
         let credential_profile = profile.clone();
         let credential = self

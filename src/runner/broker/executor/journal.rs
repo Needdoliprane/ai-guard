@@ -16,11 +16,38 @@ async fn load_draft(
     Ok((job, draft))
 }
 
+/// What a lost writer reply means for one commit. The actor is FIFO: a later
+/// load of the same job is served after the advance whose reply was lost.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UncertainPublication {
+    /// Report the unknown outcome; reconciliation re-reads it later.
+    FailClosed,
+    /// Accept the outcome only if the durable head is exactly this checkpoint.
+    ConfirmExactHead,
+}
+
 async fn commit_patch(
     writer: &WriterClient,
     operation: Uuid,
     scope: &JournalScopeV1,
     change: impl Fn(&mut Draft) -> Result<()>,
+) -> Result<Box<CommittedDraftAtHead>> {
+    commit_patch_with(
+        writer,
+        operation,
+        scope,
+        change,
+        UncertainPublication::FailClosed,
+    )
+    .await
+}
+
+async fn commit_patch_with(
+    writer: &WriterClient,
+    operation: Uuid,
+    scope: &JournalScopeV1,
+    change: impl Fn(&mut Draft) -> Result<()>,
+    uncertain: UncertainPublication,
 ) -> Result<Box<CommittedDraftAtHead>> {
     for _ in 0..16 {
         let (job, mut draft) = load_draft(writer, operation, scope).await?;
@@ -28,6 +55,7 @@ async fn commit_patch(
         let next = draft.checkpoint(scope.control_namespace_uuid())?;
         #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
         tests::before_commit()?;
+        let proposed = (uncertain == UncertainPublication::ConfirmExactHead).then(|| next.clone());
         match writer
             .advance_lifecycle(operation, job.head().clone(), next)
             .await
@@ -47,10 +75,47 @@ async fn commit_patch(
                 }));
             }
             Err(JournalError::Conflict) => continue,
+            Err(JournalError::Io) if proposed.is_some() => {
+                let proposed = proposed.context("proposed checkpoint is retained")?;
+                return confirm_exact_head(writer, operation, scope, job.head(), &proposed, draft)
+                    .await;
+            }
             Err(error) => return Err(error.into()),
         }
     }
     Err(anyhow!("journal contention requires reconciliation"))
+}
+
+/// A reply timeout after the actor accepted this advance is an unknown
+/// publication, not a lost one. Re-read the durable journal: only the exact
+/// proposed checkpoint at the very next revision confirms it. Anything else,
+/// including a failed re-read, keeps the original fail-closed outcome.
+async fn confirm_exact_head(
+    writer: &WriterClient,
+    operation: Uuid,
+    scope: &JournalScopeV1,
+    expected: &crate::broker::journal::RevisionRefV1,
+    proposed: &BrokerCheckpointV3,
+    draft: Draft,
+) -> Result<Box<CommittedDraftAtHead>> {
+    let unknown = || anyhow::Error::new(JournalError::Io);
+    let (job, durable) = load_draft(writer, operation, scope)
+        .await
+        .map_err(|_| unknown())?;
+    let exact = expected.revision().checked_add(1) == Some(job.head().revision())
+        && same(
+            &durable.checkpoint(scope.control_namespace_uuid())?,
+            proposed,
+        )?;
+    if !exact {
+        return Err(unknown());
+    }
+    Ok(Box::new(CommittedDraftAtHead {
+        operation,
+        scope: writer.scope().clone(),
+        head: job.head().clone(),
+        draft,
+    }))
 }
 
 impl<'a> Execution<'a> {
@@ -164,11 +229,21 @@ impl<'a> Execution<'a> {
         &self,
         change: impl Fn(&mut Draft) -> Result<()>,
     ) -> Result<Box<CommittedDraftAtHead>> {
-        commit_patch(
+        self.patch_committed_with(change, UncertainPublication::FailClosed)
+            .await
+    }
+
+    async fn patch_committed_with(
+        &self,
+        change: impl Fn(&mut Draft) -> Result<()>,
+        uncertain: UncertainPublication,
+    ) -> Result<Box<CommittedDraftAtHead>> {
+        commit_patch_with(
             &self.executor.writer,
             self.operation,
             self.context.scope(),
             change,
+            uncertain,
         )
         .await
     }
@@ -275,38 +350,49 @@ impl<'a> Execution<'a> {
                 .context(diagnostics::BrokerStep::ReadinessBeforeClaim)?;
         }
         let completed = self.call(input.clone()).await?;
+        // Only this execution's own fresh EmitOnce claim may survive a lost
+        // writer reply: it still holds the in-memory start permission. Every
+        // other unknown publication, and any replayed claim, fails closed.
+        let uncertain = if fresh && emits_once(&completed) {
+            UncertainPublication::ConfirmExactHead
+        } else {
+            UncertainPublication::FailClosed
+        };
         let committed = self
-            .patch_committed(|draft| {
-                let existing = draft
-                    .operations
-                    .iter_mut()
-                    .find(|op| operation_key(op) == key)
-                    .context("pending request disappeared")?;
-                ensure!(
-                    same(&without_response(existing), &input)?,
-                    "pending request changed"
-                );
-                if acknowledged(existing) {
-                    ensure!(same(existing, &completed)?, "acknowledgement changed");
-                }
-                *existing = completed.clone();
-                if let Some(worker) = response_worker(&completed) {
-                    let managed = draft
-                        .run
-                        .plan
-                        .managed
-                        .as_mut()
-                        .context("worker without managed state")?;
-                    if managed
-                        .worker
-                        .as_ref()
-                        .is_none_or(|old| old.revision <= worker.revision)
-                    {
-                        managed.worker = Some(worker.clone());
+            .patch_committed_with(
+                |draft| {
+                    let existing = draft
+                        .operations
+                        .iter_mut()
+                        .find(|op| operation_key(op) == key)
+                        .context("pending request disappeared")?;
+                    ensure!(
+                        same(&without_response(existing), &input)?,
+                        "pending request changed"
+                    );
+                    if acknowledged(existing) {
+                        ensure!(same(existing, &completed)?, "acknowledgement changed");
                     }
-                }
-                Ok(())
-            })
+                    *existing = completed.clone();
+                    if let Some(worker) = response_worker(&completed) {
+                        let managed = draft
+                            .run
+                            .plan
+                            .managed
+                            .as_mut()
+                            .context("worker without managed state")?;
+                        if managed
+                            .worker
+                            .as_ref()
+                            .is_none_or(|old| old.revision <= worker.revision)
+                        {
+                            managed.worker = Some(worker.clone());
+                        }
+                    }
+                    Ok(())
+                },
+                uncertain,
+            )
             .await?;
         Ok((completed, fresh, committed))
     }
@@ -520,6 +606,21 @@ pub(super) fn operation_key(operation: &Operation) -> String {
         Operation::Export { request, .. } => request.operation_id.clone(),
     }
 }
+/// A claim acknowledgement that grants its caller the single start emission.
+pub(super) fn emits_once(operation: &Operation) -> bool {
+    match operation {
+        Operation::HelperClaim {
+            response: Some(response),
+            ..
+        } => response.disposition == ClaimDispositionV1::EmitOnce,
+        Operation::WorkerClaim {
+            response: Some(response),
+            ..
+        } => response.disposition == Some(ClaimDispositionV1::EmitOnce),
+        _ => false,
+    }
+}
+
 pub(super) fn acknowledged(operation: &Operation) -> bool {
     match operation {
         Operation::Decision { response, .. } => response.is_some(),

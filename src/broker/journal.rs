@@ -863,6 +863,12 @@ fn stop_before_ack() -> JournalResult<()> {
 pub(in crate::broker) fn fail_next_cold_ack_for_test() {
     tests::fail_once_at(FaultStage::BeforeAck);
 }
+/// The next revision of this thread's journal fails before its new head is
+/// published: the revision is not current and the writer reports an error.
+#[cfg(test)]
+pub(in crate::broker) fn fail_next_publication_for_test() {
+    tests::fail_once_at(FaultStage::CurrentWritten);
+}
 #[cfg(test)]
 fn full_namespace_durable() -> JournalResult<()> {
     tests::checkpoint(FaultStage::NamespaceDurable)

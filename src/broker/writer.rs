@@ -25,7 +25,7 @@ use std::{
     fmt,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
     time::Duration,
@@ -297,6 +297,23 @@ struct ClientState {
     inventory_pending: Arc<AtomicBool>,
     retirements: Arc<retirement_owners::RetirementOwners>,
     status_cache: Arc<status_cache::StatusCache>,
+    // Callers currently awaiting an actor reply. A scheduling signal only: it
+    // is never evidence of a durable outcome, an empty queue or an idle actor.
+    outstanding: Arc<AtomicUsize>,
+}
+
+/// Counts one caller awaiting its reply, including a cancelled waiter.
+struct AwaitingReply<'a>(&'a AtomicUsize);
+impl<'a> AwaitingReply<'a> {
+    fn enter(counter: &'a AtomicUsize) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self(counter)
+    }
+}
+impl Drop for AwaitingReply<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 #[derive(Clone)]
@@ -363,6 +380,7 @@ impl ClientState {
             inventory_pending: Arc::new(AtomicBool::new(false)),
             retirements,
             status_cache,
+            outstanding: Arc::new(AtomicUsize::new(0)),
         }))
     }
     async fn call<T: Send + 'static>(
@@ -447,6 +465,7 @@ impl ClientState {
         &self,
         receive: oneshot::Receiver<JournalResult<T>>,
     ) -> JournalResult<JournalResult<T>> {
+        let _awaiting = AwaitingReply::enter(&self.outstanding);
         tokio::time::timeout(self.timeout, receive)
             .await
             .map_err(|_| JournalError::Io)?
@@ -535,6 +554,10 @@ impl ProfileWriterCapabilities {
 impl StopWriterClient {
     pub fn scope(&self) -> &JournalScopeV1 {
         &self.0.scope
+    }
+    /// Callers of this shared actor currently awaiting a reply (see WriterClient).
+    pub(crate) fn outstanding(&self) -> usize {
+        self.0.outstanding.load(Ordering::SeqCst)
     }
     pub async fn append_cancel(
         &self,
@@ -649,6 +672,34 @@ struct ArmedAdvanceReplyBarrier {
     release: mpsc::Receiver<()>,
     fail_before_ack: bool,
     cleanup_trace: Option<Arc<CleanupAdvanceTrace>>,
+    // Apply only to the first advance that publishes a claim acknowledgement.
+    claim_ack_only: bool,
+    // Fail that advance before `current.json` is published (not durable).
+    fail_before_publication: bool,
+}
+#[cfg(test)]
+impl ArmedAdvanceReplyBarrier {
+    fn applies(&self, next: &BrokerCheckpointV3) -> bool {
+        use super::checkpoint::SupervisionOperationV1;
+        !self.claim_ack_only
+            || next
+                .broker()
+                .supervision()
+                .operations()
+                .iter()
+                .any(|operation| {
+                    matches!(
+                        operation,
+                        SupervisionOperationV1::HelperClaim {
+                            response: Some(_),
+                            ..
+                        } | SupervisionOperationV1::WorkerClaim {
+                            response: Some(_),
+                            ..
+                        }
+                    )
+                })
+    }
 }
 
 #[cfg(test)]
@@ -802,11 +853,43 @@ impl WriterClient {
             .await
     }
 
+    /// The first advance that publishes a claim ACK becomes durable, then its
+    /// reply is lost (`fail_before_ack`) or delayed until the guard is dropped.
+    #[cfg(test)]
+    pub(crate) async fn claim_ack_reply_barrier_for_test(
+        &self,
+        fail_before_ack: bool,
+    ) -> JournalResult<AdvanceReplyBarrier> {
+        self.install_barrier_for_test(fail_before_ack, None, true, false)
+            .await
+    }
+
+    /// The first advance that publishes a claim ACK fails before its head is
+    /// published: the writer reports an error and no ACK is durable.
+    #[cfg(test)]
+    pub(crate) async fn claim_ack_publication_failure_for_test(
+        &self,
+    ) -> JournalResult<AdvanceReplyBarrier> {
+        self.install_barrier_for_test(false, None, true, true).await
+    }
+
     #[cfg(test)]
     async fn install_advance_reply_barrier_for_test(
         &self,
         fail_before_ack: bool,
         cleanup_trace: Option<Arc<CleanupAdvanceTrace>>,
+    ) -> JournalResult<AdvanceReplyBarrier> {
+        self.install_barrier_for_test(fail_before_ack, cleanup_trace, false, false)
+            .await
+    }
+
+    #[cfg(test)]
+    async fn install_barrier_for_test(
+        &self,
+        fail_before_ack: bool,
+        cleanup_trace: Option<Arc<CleanupAdvanceTrace>>,
+        claim_ack_only: bool,
+        fail_before_publication: bool,
     ) -> JournalResult<AdvanceReplyBarrier> {
         let (entered, observed) = oneshot::channel();
         let (release, wait) = mpsc::channel();
@@ -820,6 +903,8 @@ impl WriterClient {
             release: wait,
             fail_before_ack,
             cleanup_trace,
+            claim_ack_only,
+            fail_before_publication,
         };
         self.call(move |reply| Command::TestAdvanceReplyBarrier { barrier, reply })
             .await?;
@@ -886,6 +971,12 @@ impl WriterClient {
 
     pub fn scope(&self) -> &JournalScopeV1 {
         &self.0.scope
+    }
+    /// Callers currently awaiting a reply from this actor, business and
+    /// background alike. Background reconciliation uses it to yield; it never
+    /// establishes that a command was executed, durable or absent.
+    pub(crate) fn outstanding(&self) -> usize {
+        self.0.outstanding.load(Ordering::SeqCst)
     }
     #[cfg(test)]
     pub(in crate::broker) fn cost_context_for_test(&self) -> usize {
@@ -1575,6 +1666,10 @@ fn serve_backend(
                 reply,
             } => {
                 #[cfg(test)]
+                let barrier_applies = advance_reply_barrier
+                    .as_ref()
+                    .is_some_and(|barrier| barrier.applies(&next));
+                #[cfg(test)]
                 let cleanup_trace = advance_reply_barrier
                     .as_ref()
                     .and_then(|barrier| barrier.cleanup_trace.as_ref())
@@ -1586,11 +1681,20 @@ fn serve_backend(
                     super::journal::CurrentDurableObserver::install(Arc::clone(&trace.durable))
                 });
                 #[cfg(test)]
-                if advance_reply_barrier
-                    .as_ref()
-                    .is_some_and(|barrier| barrier.fail_before_ack)
+                if barrier_applies
+                    && advance_reply_barrier
+                        .as_ref()
+                        .is_some_and(|barrier| barrier.fail_before_ack)
                 {
                     super::journal::fail_next_cold_ack_for_test();
+                }
+                #[cfg(test)]
+                if barrier_applies
+                    && advance_reply_barrier
+                        .as_ref()
+                        .is_some_and(|barrier| barrier.fail_before_publication)
+                {
+                    super::journal::fail_next_publication_for_test();
                 }
                 let result = backend
                     .full()
@@ -1603,7 +1707,7 @@ fn serve_backend(
                             .returned
                             .set((Instant::now(), result.as_ref().err().copied()));
                     }
-                    if let Some(barrier) = advance_reply_barrier.take() {
+                    if let Some(barrier) = advance_reply_barrier.take_if(|_| barrier_applies) {
                         let _ = barrier.entered.send(());
                         // After the actual Journal call, without any filesystem
                         // mutex held. Drop of the owned test guard releases it.
@@ -2036,6 +2140,7 @@ mod tests {
                     journal.status_projection_limits().0,
                     journal.status_projection_limits().1,
                 )),
+                outstanding: Arc::new(AtomicUsize::new(0)),
             })),
             receiver,
         )
@@ -2156,6 +2261,7 @@ mod tests {
             inventory_pending: Arc::clone(&writer.0.inventory_pending),
             retirements: Arc::clone(&writer.0.retirements),
             status_cache: Arc::clone(&writer.0.status_cache),
+            outstanding: Arc::clone(&writer.0.outstanding),
         }));
         let worker = std::thread::spawn(move || serve(journal, receiver));
 
@@ -2303,6 +2409,7 @@ mod tests {
             inventory_pending: Arc::clone(&writer.0.inventory_pending),
             retirements: Arc::clone(&writer.0.retirements),
             status_cache: Arc::clone(&writer.0.status_cache),
+            outstanding: Arc::clone(&writer.0.outstanding),
         }));
         let worker_journal = journal.clone();
         let worker = std::thread::spawn(move || serve(worker_journal, receiver));

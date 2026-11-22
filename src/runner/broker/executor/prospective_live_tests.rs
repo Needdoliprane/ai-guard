@@ -581,3 +581,138 @@ async fn import_cleanup_checkpoint(execution: &Execution<'_>) -> Result<(u64, Op
     );
     Ok((job.head().revision(), cleanup))
 }
+
+/// How the commit of a fresh EmitOnce claim acknowledgement reaches the writer.
+#[derive(Clone, Copy)]
+enum ClaimAckFault {
+    /// The ACK becomes durable, then its writer reply is an error.
+    DurableReplyLost,
+    /// The ACK fails before its head is published, then the reply is an error.
+    NotPublished,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_claim_ack_with_a_lost_writer_reply_continues_once_from_the_exact_durable_head()
+-> Result<()> {
+    claim_ack_case(ClaimAckFault::DurableReplyLost).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unpublished_claim_ack_with_a_writer_error_fails_closed_after_the_reread() -> Result<()> {
+    claim_ack_case(ClaimAckFault::NotPublished).await
+}
+
+async fn claim_ack_case(fault: ClaimAckFault) -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let origin = format!("http://{}", listener.local_addr()?);
+    let fixture = BoundaryFixture::from(live_fixture_with_gateway(&origin, true));
+    let posts = Arc::new(Posts::default());
+    let gateway = Gateway::start(listener, &fixture, Arc::clone(&posts)).await?;
+    let exercise =
+        boxed_execution_phase(|| exercise_claim_ack(&fixture, &origin, &posts, fault)).await;
+    let stopped = gateway.finish().await;
+    exercise.and(stopped)
+}
+
+async fn exercise_claim_ack(
+    fixture: &BoundaryFixture,
+    origin: &str,
+    posts: &Posts,
+    fault: ClaimAckFault,
+) -> Result<()> {
+    use super::super::journal::{acknowledged, emits_once};
+    let context = context(fixture, origin).await?;
+    let writer = WriterClient::start(fixture.journal.clone(), 16, Duration::from_secs(10))?;
+    let executor = BatchExecutor::new(
+        writer.clone(),
+        EnforcerClient::unavailable_for_test(context.config())?,
+        Arc::new(NativeHostClock::new()?),
+    );
+    let operation = fixture.intent.operation_id();
+    let execution = Execution::open(&executor, operation, &context).await?;
+    let arm = fixture.registration.arm();
+    let ArmSubjectV1::Helper {
+        helper_id,
+        purpose: HelperPurposeV1::Import,
+        ..
+    } = &arm.subject
+    else {
+        return Err(anyhow!("fixture must contain an acknowledged Import Arm"));
+    };
+    let claim = Operation::HelperClaim {
+        request: HelperStartClaimV1 {
+            version: 1,
+            operation_id: Uuid::new_v4().to_string(),
+            helper_id: helper_id.clone(),
+            emitter_id: Uuid::new_v4().to_string(),
+            arm_receipt: fixture.registration.receipt().clone(),
+            clock_check: arm.clock.clone(),
+        },
+        response: None,
+    };
+    let claim_key = operation_key(&claim);
+    let saved_claim = |draft: &Draft| {
+        draft
+            .operations
+            .iter()
+            .find(|op| operation_key(op) == claim_key)
+            .cloned()
+            .context("claim missing in the durable journal")
+    };
+    // The guard only releases the actor after the real journal call; the
+    // injected outcome applies to the claim ACK commit, not the pending one.
+    let barrier = match fault {
+        ClaimAckFault::DurableReplyLost => writer.claim_ack_reply_barrier_for_test(true).await?,
+        ClaimAckFault::NotPublished => writer.claim_ack_publication_failure_for_test().await?,
+    };
+    drop(barrier);
+    let result = boxed_execution_phase(|| execution.rpc_checked(claim.clone(), None)).await;
+    ensure!(
+        posts.claim.load(Ordering::SeqCst) == 1,
+        "exactly one claim reaches the gateway"
+    );
+    match fault {
+        ClaimAckFault::DurableReplyLost => {
+            let (completed, fresh) =
+                result.context("an exact durable claim ACK was treated as lost")?;
+            ensure!(
+                fresh && emits_once(&completed),
+                "this execution keeps its single fresh EmitOnce permission"
+            );
+            let (_, durable) = execution.load().await?;
+            ensure!(
+                same(&saved_claim(&durable)?, &completed)?,
+                "the continued ACK must be the durable head's ACK"
+            );
+            drop(execution);
+            // A restarted execution has no in-memory permission: the durable
+            // ACK replays without a fresh start and without another claim.
+            let resumed = Execution::open(&executor, operation, &context).await?;
+            let (replayed, fresh) =
+                boxed_execution_phase(|| resumed.rpc_checked(claim.clone(), None)).await?;
+            ensure!(
+                !fresh && same(&replayed, &completed)?,
+                "a replayed claim must stay ObserveOnly"
+            );
+            ensure!(
+                posts.claim.load(Ordering::SeqCst) == 1,
+                "a replayed claim must not reach the gateway again"
+            );
+        }
+        ClaimAckFault::NotPublished => {
+            let error = result
+                .err()
+                .context("an unpublished claim ACK must fail closed")?;
+            ensure!(
+                matches!(error.downcast_ref::<JournalError>(), Some(JournalError::Io)),
+                "the unknown publication keeps its writer error"
+            );
+            let (_, durable) = execution.load().await?;
+            ensure!(
+                !acknowledged(&saved_claim(&durable)?),
+                "no claim ACK may be durable after an unpublished commit"
+            );
+        }
+    }
+    Ok(())
+}

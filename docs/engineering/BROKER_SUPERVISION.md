@@ -140,6 +140,12 @@ L'IPC ne reçoit pas les paramètres de contrôle libres de RunOptions : origine
 
 Le premier batch permanent doit raccorder les vrais helpers Import/ImportVerification puis worker, FinalScan et export explicite aux armements/claims. Le `Ctrl-C` global du runtime, son timer local et le monitor qui réécrit le plan à chaque poll ne peuvent être repris tels quels dans un daemon partagé. L'échéance préarmée utilise sa cible immuable et un chemin d'arrêt séparé de l'IPC, du writer/fsync, de HTTP et de la clé fournisseur. Une réponse EmitOnce restaurée reste ObserveOnly ; une nouvelle tentative ou un restart ne recrée ni claim ni durée. La qualification d'un batch après mort CLI ne couvre pas le gardien TTY, le fencing D5 ou les autres plateformes.
 
+### Réponse perdue du writer et réconciliations de fond — 21 novembre
+
+Le writer du journal est un acteur FIFO unique par profil ; un appel dont la réponse dépasse `WRITER_TIMEOUT` (10 s, inchangé) rend `Io` alors que la commande peut encore être exécutée. Une réponse perdue n'est donc pas une publication perdue. Pour le seul ACK d'un claim `EmitOnce` créé par l'exécution courante, qui détient encore la permission de démarrage en mémoire, l'exécuteur relit l'état durable : il ne poursuit que si la tête est exactement le checkpoint proposé à la révision suivante. Toute autre publication incertaine, une relecture en échec et tout claim rejoué restent fermés comme avant ; un claim rejoué reste `ObserveOnly` et rien n'est réémis.
+
+Les ticks périodiques de réconciliation autonome cèdent au chemin métier du profil tant qu'une exécution détient son Job ou qu'un appelant attend une réponse du writer ; la livraison d'audit de retrait, promise indépendamment d'un propriétaire Full actif, ne cède qu'à cette contention. Le report est borné à six ticks consécutifs, puis un tick s'exécute. Ces règles réduisent la famine du chemin critique sous contention ; elles ne qualifient ni la reprise ni un délai sous charge.
+
 ### Raccord en cours — interfaces d'implémentation du 31 octobre
 
 Base `c4c4d2a7560d31768da08d8ad9335f4f08667344`. Cette section fixe les coutures du service en cours, **pas des commandes livrées ni une qualification**. Le vrai CLI ne reconnaît pas encore `broker` au RED conservé. Le transport Unix a son propre RED puis trois tests ciblés sur sockets réels ; une révision de ses oracles suit la revue indépendante. Autre UID et Linux ne sont pas qualifiés par ces essais macOS.

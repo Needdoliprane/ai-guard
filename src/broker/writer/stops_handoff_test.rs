@@ -63,6 +63,7 @@ impl WriterClient {
             inventory_pending: _,
             retirements: _,
             status_cache: _,
+            outstanding: _,
         } = state;
         drop(sender);
         Ok(StopsHandoffForTest(retained))
