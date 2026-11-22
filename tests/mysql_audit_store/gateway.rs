@@ -317,6 +317,33 @@ async fn post(
         .await?)
 }
 
+async fn post_batch(
+    http: &Client,
+    gateway: &Gateway,
+    token: &str,
+    events: &[&ModelEvent],
+) -> Result<(StatusCode, Value)> {
+    let response = http
+        .post(gateway.url("/api/v1/events/batch"))
+        .bearer_auth(token)
+        .json(&json!({"events": events}))
+        .send()
+        .await
+        .map_err(|_| anyhow::anyhow!("gateway batch request failed"))?;
+    let status = response.status();
+    let body = response
+        .json()
+        .await
+        .map_err(|_| anyhow::anyhow!("invalid gateway batch response"))?;
+    Ok((status, body))
+}
+
+async fn batch_snapshot(conn: &mut Conn) -> Result<AuditSnapshot> {
+    audit_snapshot(conn)
+        .await
+        .map_err(|_| anyhow::anyhow!("batch QA audit snapshot unavailable"))
+}
+
 #[tokio::test]
 #[ignore = "requires a fresh prepared private MySQL 8.4 QA schema and a built gateway"]
 async fn gateway_refuses_wrong_mysql_material_and_writes_no_business_row() -> Result<()> {
@@ -499,6 +526,112 @@ async fn gateway_appends_to_the_prepared_target_and_replays_after_restart() -> R
         "A's stored prefix changed"
     );
     ensure!(audit_snapshot(&mut conn_b).await? == witness_b, "B changed");
+    restarted.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires two fresh prepared private MySQL 8.4 QA schemas and a built gateway"]
+async fn gateway_commits_ordinary_batch_and_replays_after_restart() -> Result<()> {
+    let a = FixtureFiles::open_gateway("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_A")?;
+    let b = FixtureFiles::open_gateway("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_B")?;
+    let (mut conn_a, mut conn_b) = fresh_gateway_pair(&a, &b)
+        .await
+        .map_err(|_| anyhow::anyhow!("batch QA pair is not verified"))?;
+    prepare_gateway_target(&mut conn_a, &a, "tenant-a", &DIGEST_A)
+        .await
+        .map_err(|_| anyhow::anyhow!("batch QA writer preparation failed"))?;
+    prepare_gateway_target(&mut conn_b, &b, "tenant-b", &DIGEST_B)
+        .await
+        .map_err(|_| anyhow::anyhow!("batch QA witness preparation failed"))?;
+    let prefix_a = batch_snapshot(&mut conn_a).await?;
+    let witness_b = batch_snapshot(&mut conn_b).await?;
+
+    let registry = Registry::new()?;
+    registry.write(&[
+        registry.entry(&a, "tenant-a", "a")?,
+        registry.entry(&b, "tenant-b", "b")?,
+    ])?;
+    let http = Client::builder().no_proxy().timeout(DEADLINE).build()?;
+    let first = ModelEvent::new("activity.channel");
+    let second = ModelEvent::new("activity.coverage");
+    let events = [&first, &second, &first];
+    let seq = prefix_a.0.3;
+    let expected = json!({"stored": [
+        {"id": first.id, "seq": seq + 1},
+        {"id": second.id, "seq": seq + 2},
+        {"id": first.id, "seq": seq + 1}
+    ]});
+
+    let gateway = Gateway::start(&registry)
+        .await
+        .map_err(|_| anyhow::anyhow!("batch QA initial gateway start was not confirmed"))?;
+    let viewer = post_batch(&http, &gateway, VIEWER_A, &events).await?;
+    ensure!(
+        viewer.0 == StatusCode::FORBIDDEN,
+        "batch viewer was not refused"
+    );
+    ensure!(
+        batch_snapshot(&mut conn_a).await? == prefix_a
+            && batch_snapshot(&mut conn_b).await? == witness_b,
+        "batch viewer changed an audit"
+    );
+
+    let committed = post_batch(&http, &gateway, RUNNER_A, &events).await?;
+    ensure!(
+        committed.0 == StatusCode::OK && committed.1 == expected,
+        "batch acknowledgement did not match request order and original duplicate receipt"
+    );
+    let committed_a = batch_snapshot(&mut conn_a).await?;
+    ensure!(
+        committed_a.1.starts_with(&prefix_a.1),
+        "batch changed the prepared audit prefix"
+    );
+    let [one, two] = &committed_a.1[prefix_a.1.len()..] else {
+        anyhow::bail!("batch did not persist exactly two events")
+    };
+    ensure!(
+        one.0 == seq + 1
+            && one.1.as_slice() == first.id.as_bytes()
+            && one.3.as_slice() == prefix_a.0.4.as_bytes()
+            && two.0 == seq + 2
+            && two.1.as_slice() == second.id.as_bytes()
+            && two.3 == one.4
+            && committed_a.0.3 == two.0
+            && committed_a.0.4.as_bytes() == two.4.as_slice()
+            && batch_snapshot(&mut conn_b).await? == witness_b,
+        "batch did not durably extend only the intended audit in receipt order"
+    );
+
+    let next = ModelEvent::new("activity.channel");
+    let mut divergent = first.clone();
+    divergent.data = json!({"marker": "divergent synthetic event content"});
+    let conflict = post_batch(&http, &gateway, RUNNER_A, &[&next, &divergent]).await?;
+    ensure!(
+        conflict.0 == StatusCode::CONFLICT
+            && conflict.1
+                == json!({"error": "Un identifiant du lot existe déjà avec un contenu différent."}),
+        "divergent batch did not return the exact event-conflict refusal"
+    );
+    ensure!(
+        batch_snapshot(&mut conn_a).await? == committed_a
+            && batch_snapshot(&mut conn_b).await? == witness_b,
+        "batch conflict changed an audit or retained the preceding event"
+    );
+    gateway.stop().await?;
+
+    let restarted = Gateway::start(&registry)
+        .await
+        .map_err(|_| anyhow::anyhow!("batch QA gateway restart was not confirmed"))?;
+    let replay = post_batch(&http, &restarted, RUNNER_A, &events).await?;
+    ensure!(
+        replay == committed,
+        "batch replay returned a different acknowledgement"
+    );
+    ensure!(
+        batch_snapshot(&mut conn_a).await? == committed_a
+            && batch_snapshot(&mut conn_b).await? == witness_b,
+        "batch replay changed an audit"
+    );
     restarted.stop().await
 }
 
