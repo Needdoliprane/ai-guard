@@ -110,6 +110,21 @@ enum Command {
         #[arg(long, default_value_t = 100_000)]
         max_events: u64,
     },
+    /// Enable the Kubernetes session effect ledger on one offline store of
+    /// format 11 to 13, without a format change, after a verified new backup.
+    EnableKubernetesSessionEffects {
+        #[arg(long)]
+        data: PathBuf,
+        #[arg(long)]
+        tenant_id: String,
+        #[arg(long)]
+        backup: PathBuf,
+        /// Operator attestation: gateway and brokers are stopped; not runtime fencing.
+        #[arg(long, required = true)]
+        confirm_control_stopped: bool,
+        #[arg(long, default_value_t = 100_000)]
+        max_events: u64,
+    },
     /// Migrate the existing offline SSO audit one explicit version with a new backup.
     MigrateAuthentication {
         /// Existing private gateway OIDC configuration; no provider contact.
@@ -1137,6 +1152,36 @@ async fn run() -> Result<()> {
                 13 => store.migrate_kubernetes_recovery_v13(&backup)?,
                 _ => anyhow::bail!("unsupported migration target"),
             };
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::EnableKubernetesSessionEffects {
+            data,
+            tenant_id,
+            backup,
+            confirm_control_stopped,
+            max_events,
+        } => {
+            anyhow::ensure!(
+                confirm_control_stopped,
+                "Stop the control plane and all brokers before this maintenance"
+            );
+            anyhow::ensure!(
+                (1..=1_000_000).contains(&max_events),
+                "invalid audit capacity"
+            );
+            let metadata = std::fs::symlink_metadata(&data)
+                .context("The maintenance requires an existing audit database")?;
+            anyhow::ensure!(
+                metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() > 0,
+                "The maintenance requires an existing regular audit database"
+            );
+            let store = Store::open_existing_for_tenant(
+                &data,
+                &tenant_id,
+                Redactor::new(vec![]),
+                max_events,
+            )?;
+            let report = store.enable_kubernetes_session_effects_v1(&backup)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::MigrateAuthentication {

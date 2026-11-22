@@ -875,11 +875,23 @@ routes de session :
 - `POST .../terminals` enregistre une fin de Pod observée.
 - `POST .../settlements` libère le quota.
 
-`SessionProtocolV2.effects_available` indique si le tenant a une politique. La
-capacité s'active par Store avec la maintenance sauvegardée
-`enable_kubernetes_session_effects_v1`. Sa commande opérateur arrive avec la CLI
-de session ; d'ici là, les routes d'effet répondent HTTP 503
-`session_lifecycle_unavailable` sur un Store sans la capacité.
+`SessionProtocolV2.effects_available` indique si le tenant a une politique. Le
+registre lui-même s'active une fois par Store de tenant, hors ligne, sur un
+Store de format 11 à 13, avec un nouveau chemin de sauvegarde privé :
+
+```sh
+agentsandbox enable-kubernetes-session-effects \
+  --tenant-id tenant-a \
+  --data /private/path/tenant-a.sqlite \
+  --backup /private/path/tenant-a.before-effects.sqlite \
+  --confirm-control-stopped
+```
+
+`--confirm-control-stopped` est une attestation de l'opérateur que le gateway
+et tous les brokers sont arrêtés, pas une barrière d'exécution. La commande
+vérifie la sauvegarde, ajoute un marqueur de genèse, conserve le format, affiche
+un rapport JSON et refuse une seconde exécution. Sans elle, les routes d'effet
+répondent HTTP 503 `session_lifecycle_unavailable`.
 
 Limites : les sessions Kubernetes restent sur les formats de Store 11 à 13 ; en
 mode sources détenues (formats 14 et 15), les routes de session refusent avant

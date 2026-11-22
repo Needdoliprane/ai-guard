@@ -817,10 +817,22 @@ session routes:
 - `POST .../settlements` releases the quota.
 
 `SessionProtocolV2.effects_available` reports whether the tenant has a policy.
-The capability is enabled per store by the backed-up maintenance
-`enable_kubernetes_session_effects_v1`. Its operator command lands with the
-session CLI; until then the effect routes answer HTTP 503
-`session_lifecycle_unavailable` on a store without the capability.
+The ledger itself is enabled once per tenant store, offline, on a store of
+format 11 to 13, with a new private backup path:
+
+```sh
+agentsandbox enable-kubernetes-session-effects \
+  --tenant-id tenant-a \
+  --data /private/path/tenant-a.sqlite \
+  --backup /private/path/tenant-a.before-effects.sqlite \
+  --confirm-control-stopped
+```
+
+`--confirm-control-stopped` is an operator attestation that the gateway and
+every broker are stopped, not a runtime fence. The command verifies the backup,
+appends one genesis marker, keeps the format, prints a JSON report and refuses
+a second run. Without it, the effect routes answer HTTP 503
+`session_lifecycle_unavailable`.
 
 Limits: Kubernetes sessions stay on store formats 11–13; in owned-source mode
 (formats 14 and 15) the session routes refuse before any effect. An uncertain
