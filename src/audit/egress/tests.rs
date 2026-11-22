@@ -576,6 +576,11 @@ fn maintenance_reads_anchored_store14_neighbor_during_store15_upgrade() {
 }
 
 #[test]
+fn store15_operator_recovers_after_confirmed_genesis_before_closure_publish() {
+    fixtures::assert_operator_recovers_after_confirmed_genesis_before_closure_publish();
+}
+
+#[test]
 fn format15_genesis_predecessor_must_include_the_original_format14_anchor() {
     let fixture = Fixture::new(EgressStoreLimitsV1::default());
     fixture.assert_genesis_anchor_order_and_impossible_history();

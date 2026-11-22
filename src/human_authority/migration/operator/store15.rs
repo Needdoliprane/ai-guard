@@ -31,6 +31,12 @@ const MAX_PLAN_BYTES: u64 = 512 * 1024;
 const MAX_OUTPUT_ENTRIES: u32 = 32;
 const CLOSURE_STAGE: &str = "closure-stage-";
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static STOP_AFTER_STORE15_CONFIRMATION: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
 pub struct Store15UpgradeRequest<'a> {
     pub prior: HumanOwnedStartupRequest,
     pub configured_credentials: &'a [(&'a str, &'a str, &'a str)],
@@ -335,6 +341,10 @@ pub fn upgrade_store15(request: Store15UpgradeRequest<'_>) -> Result<Store15Upgr
             published.is_some(),
         )?;
         guard.check()?;
+        #[cfg(test)]
+        if STOP_AFTER_STORE15_CONFIRMATION.with(|stop| stop.replace(false)) {
+            anyhow::bail!("fixture interrupted after E1 confirmation");
+        }
         if published.is_none() {
             let stage = output.exclusive_child(&format!("{CLOSURE_STAGE}{}", Uuid::new_v4()))?;
             stage

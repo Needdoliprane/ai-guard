@@ -1262,6 +1262,101 @@ fn complete_migration15(
     }
 }
 
+pub(super) fn assert_operator_recovers_after_confirmed_genesis_before_closure_publish() {
+    use crate::human_authority::{
+        migration::operator::{
+            STOP_AFTER_STORE15_CONFIRMATION, Store15UpgradeRefusal, Store15UpgradeRequest,
+            upgrade_store15,
+        },
+        startup::{HumanOwnedSourceOptions, HumanOwnedStartupRequest},
+    };
+
+    let base = BaseFixture::new(&["A", "B"]);
+    let anchors = base.migrate_all();
+    let prior_name = "store15-operator-prior.json";
+    let owner = base.owner(&anchors, prior_name, 14);
+    let prior = owner.closure().clone();
+    drop(owner);
+    let manifest = PrivateFile::open(
+        &base.plan_file.path().parent().unwrap().join(prior_name),
+        crate::human_authority::MAX_HUMAN_MANIFEST_BYTES as u64,
+    )
+    .unwrap();
+    let operation_id = Uuid::new_v4();
+    let output = base.root.path().join("store15-operator-output");
+    let configured = [
+        ("A", "synthetic-A-runner", "synthetic-A-viewer"),
+        ("B", "synthetic-B-runner", "synthetic-B-viewer"),
+    ];
+    let run = |resume| {
+        let sources = prior
+            .sources
+            .iter()
+            .map(|source| {
+                let max_events = 10_000;
+                let capacity = AuditCapacityPolicyV1::resolved(max_events);
+                let workload = WorkloadAuditPolicyV1::resolved(max_events, &capacity);
+                (
+                    source.source_id,
+                    HumanOwnedSourceOptions::TenantStore {
+                        redactor: Redactor::new(vec![]),
+                        max_events,
+                        capacity,
+                        workload,
+                        retention: Default::default(),
+                    },
+                )
+            })
+            .collect();
+        let configuration = HumanSourcesConfigurationV1::new(
+            prior.sources.clone(),
+            prior.configuration.clone(),
+            base.configuration_files.clone(),
+        )
+        .unwrap();
+        upgrade_store15(Store15UpgradeRequest {
+            prior: HumanOwnedStartupRequest {
+                manifest: manifest.clone(),
+                configuration,
+                sources,
+            },
+            configured_credentials: &configured,
+            tenant: "A",
+            operation_id,
+            output_directory: &output,
+            resume,
+        })
+    };
+    let before = maintenance_source_state(&base);
+    let neighbor = store_source_state(&base.stores[1]);
+    STOP_AFTER_STORE15_CONFIRMATION.with(|stop| stop.set(true));
+    let error = run(false)
+        .err()
+        .expect("confirmation interruption expected");
+    assert_eq!(
+        error.downcast_ref::<Store15UpgradeRefusal>(),
+        Some(&Store15UpgradeRefusal::TransitionUnconfirmed)
+    );
+    let committed = maintenance_source_state(&base);
+    assert_eq!(before.format, 14);
+    assert_eq!(committed.format, 15);
+    assert_eq!(committed.head.0, before.head.0 + 1);
+    assert!(
+        output
+            .join("journal/egress15-confirmed-v2/record-v1.json")
+            .is_file()
+    );
+    assert!(!output.join("closure").exists());
+    assert_eq!(store_source_state(&base.stores[1]), neighbor);
+
+    let result = run(true).unwrap();
+    assert_eq!(result.genesis_sequence, committed.head.0);
+    assert_eq!(result.closure_revision, prior.closure_revision + 1);
+    assert!(output.join("closure/manifest.json").is_file());
+    assert_eq!(maintenance_source_state(&base), committed);
+    assert_eq!(store_source_state(&base.stores[1]), neighbor);
+}
+
 pub(super) fn assert_neighbor_store14_head_is_anchored_during_egress_upgrade() {
     use crate::control_fs::publication::FAIL_AFTER_RENAME;
     use crate::human_authority::migration::egress_journal::RetainedEgressIntent;

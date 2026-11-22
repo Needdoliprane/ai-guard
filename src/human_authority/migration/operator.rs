@@ -30,6 +30,8 @@ use std::{
 use uuid::Uuid;
 
 mod store15;
+#[cfg(test)]
+pub(crate) use store15::STOP_AFTER_STORE15_CONFIRMATION;
 pub use store15::{
     Store15UpgradeRefusal, Store15UpgradeRequest, Store15UpgradeResult, upgrade_store15,
 };
