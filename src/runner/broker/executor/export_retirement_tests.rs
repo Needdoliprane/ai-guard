@@ -7,7 +7,7 @@ use crate::{
     audit::EventQuery,
     broker::{
         enforcer::{EnforcerFullClientV3, run_internal_full3_fresh},
-        journal::canonical,
+        journal::{canonical, retirement_live_fixture::INVOCATION_DATA_PROGRAM},
         service::{AbandonBeforeClaimV1, preclaim::PreclaimStateV1},
     },
     runtime::{ContainerHandle, RuntimeAuthority},
@@ -205,7 +205,14 @@ fn run_export_oracle(handle: &tokio::runtime::Handle) -> Result<()> {
     let operation = Uuid::new_v4();
     let accepted = fixture.accept(operation, false);
     let execution = handle.block_on(Execution::open(&executor, operation, &context))?;
-    let worker = seed_terminal_parent(handle, &execution, &fixture, &accepted, &authority)?;
+    let worker = seed_terminal_parent(
+        handle,
+        &execution,
+        &fixture,
+        &accepted,
+        &authority,
+        TerminalParentAdmission::Executor,
+    )?;
     ensure!(
         worker.state == WorkerStateV1::Terminal && !worker.quota_held,
         "positive parent terminal precondition missing"
@@ -689,12 +696,234 @@ async fn abandon_during_registration(
     Ok((arm, bytes, seq))
 }
 
+enum WorkerCleanupAckCut {
+    StoreResponse,
+    WriterReply,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_cleanup_replays_the_exact_store_receipt_after_lost_http_response() -> Result<()> {
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        worker_cleanup_ack_cut(&handle, WorkerCleanupAckCut::StoreResponse)
+    })
+    .await?
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_cleanup_retains_the_published_ack_after_lost_writer_reply() -> Result<()> {
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        worker_cleanup_ack_cut(&handle, WorkerCleanupAckCut::WriterReply)
+    })
+    .await?
+}
+
+fn worker_cleanup_ack_cut(handle: &tokio::runtime::Handle, cut: WorkerCleanupAckCut) -> Result<()> {
+    use super::super::without_response;
+
+    let fixture = handle.block_on(Fixture::new());
+    // Pin an executable as data for the authority's identity. No test path
+    // launches it, asks for a live guardian or performs a runtime removal.
+    let runtime = Runtime::with_program(RuntimeKind::Docker, Path::new(INVOCATION_DATA_PROGRAM))?;
+    let authority: RuntimeAuthority = serde_json::from_value(json!({
+        "authority_id": Uuid::new_v4(), "kind": "docker", "endpoint": "unix:///cleanup-oracle.sock",
+        "engine_id": ENGINE, "invocation": runtime.invocation(), "podman": null
+    }))?;
+    let context = handle.block_on(AuthenticatedBatchContext::for_executor_test(
+        fixture.client.clone(),
+        fixture.scope.clone(),
+        fixture.config.clone(),
+        runtime,
+    ))?;
+    let writer = fixture.writer();
+    let executor = BatchExecutor::new(
+        writer.clone(),
+        EnforcerClient::unavailable_for_test(&fixture.config)?,
+        Arc::new(NativeHostClock::new()?),
+    );
+    let operation = Uuid::new_v4();
+    let accepted = fixture.accept(operation, false);
+    let execution = handle.block_on(Execution::open(&executor, operation, &context))?;
+    let worker = seed_terminal_parent(
+        handle,
+        &execution,
+        &fixture,
+        &accepted,
+        &authority,
+        TerminalParentAdmission::StoreFixture,
+    )?;
+    ensure!(
+        worker.state == WorkerStateV1::Terminal
+            && !worker.quota_held
+            && worker.cleanup_removed.is_none(),
+        "the worker must have a durable terminal and no cleanup result yet"
+    );
+    let allocation = fixture.store.worker_usage()?;
+    ensure!(
+        allocation.len() == 1,
+        "the seed must have one original terminal allocation"
+    );
+    let store_head = fixture.store.head()?;
+    let (before, initial) = handle.block_on(execution.load())?;
+    let generation = context.cancel_generation().current();
+    let request = WorkerMutationV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        worker_id: worker.worker_id.clone(),
+        attempt_id: worker.attempt.attempt_id.clone(),
+        expected_revision: worker.revision,
+        transition: WorkerTransitionV1::CleanupResult {
+            removed: true,
+            error: None,
+        },
+    };
+    let pending = Operation::WorkerMutation {
+        request: request.clone(),
+        response: None,
+    };
+    let published = match cut {
+        WorkerCleanupAckCut::StoreResponse => {
+            fixture
+                .drop_next_worker_transition_response
+                .store(true, Ordering::SeqCst);
+            let error = handle
+                .block_on(boxed_execution_phase(|| execution.rpc(pending.clone())))
+                .err()
+                .context("the committed HTTP body was unexpectedly received")?;
+            ensure!(
+                !fixture
+                    .drop_next_worker_transition_response
+                    .load(Ordering::SeqCst)
+                    && error.downcast_ref::<reqwest::Error>().is_some(),
+                "the post-commit response cut did not reach the HTTP client"
+            );
+            false
+        }
+        WorkerCleanupAckCut::WriterReply => {
+            // Save Pending before arming the generic barrier so that it
+            // targets the next advance, which appends this exact response.
+            handle.block_on(execution.patch(|draft| {
+                draft.operations.push(pending.clone());
+                Ok(())
+            }))?;
+            let mut barrier = handle.block_on(writer.advance_reply_barrier_for_test(true))?;
+            let error = handle.block_on(async {
+                let mut attempt = boxed_execution_phase(|| execution.rpc(pending.clone()));
+                tokio::select! {
+                    _ = &mut attempt => return Err(anyhow!("Cleanup did not reach its Writer ACK barrier")),
+                    () = barrier.entered() => {}
+                }
+                drop(barrier);
+                attempt.await.err().context("the lost Writer reply was treated as acknowledged")
+            })?;
+            ensure!(
+                error.downcast_ref::<JournalError>() == Some(&JournalError::Io),
+                "the exact Writer ACK cut did not report an uncertain reply"
+            );
+            true
+        }
+    };
+    let store_receipt = fixture
+        .store
+        .worker_operation(&request.operation_id)?
+        .context("the exact CleanupResult did not commit in the Store")?;
+    ensure!(
+        store_receipt.audit_seq == store_head + 1
+            && store_receipt.worker_id.as_deref() == Some(worker.worker_id.as_str())
+            && store_receipt.revision == worker.revision.checked_add(1)
+            && store_receipt.input_hash == content_hash("ai-guard:worker-mutation:v1", &request)?,
+        "Store cleanup receipt differs from the original request"
+    );
+    let (cut_head, cut_draft) = handle.block_on(execution.load())?;
+    let saved = cut_draft
+        .operations
+        .last()
+        .context("cleanup missing at the cut")?;
+    ensure!(
+        same(&without_response(saved), &pending)?
+            && cut_head.head().revision()
+                == before.head().revision() + if published { 2 } else { 1 },
+        "the cut did not preserve the original durable cleanup request"
+    );
+    match saved {
+        Operation::WorkerMutation {
+            response: Some(ack),
+            ..
+        } if published => {
+            ensure!(
+                ack.receipt == store_receipt,
+                "the durable Writer ACK must contain the Store receipt"
+            );
+        }
+        Operation::WorkerMutation { response: None, .. } if !published => {}
+        _ => bail!("the checkpoint does not distinguish the HTTP cut from a published Writer ACK"),
+    }
+    if published {
+        ensure!(
+            matches!(
+                handle.block_on(writer.result_status(operation)),
+                Err(JournalError::Corrupt)
+            ),
+            "the Writer result guard must stay closed after its lost acknowledgement"
+        );
+    }
+    drop(execution);
+
+    let resumed = handle.block_on(Execution::open(&executor, operation, &context))?;
+    handle.block_on(boxed_execution_phase(|| resumed.reconcile_pending()))?;
+    let (closed, after) = handle.block_on(resumed.load())?;
+    let Some(Operation::WorkerMutation {
+        request: replayed,
+        response: Some(ack),
+    }) = after.operations.last()
+    else {
+        bail!("reconciliation did not acknowledge the original cleanup");
+    };
+    ensure!(
+        same(replayed, &request)?
+            && ack.receipt == store_receipt
+            && ack.worker.attempt == worker.attempt
+            && ack.worker.state == WorkerStateV1::Terminal
+            && ack.worker.cleanup_removed == Some(true)
+            && !ack.worker.quota_held
+            && closed.head().revision() == before.head().revision() + 2
+            && (!published || closed.head() == cut_head.head())
+            && context.cancel_generation().current() == generation
+            && after
+                .run
+                .plan
+                .managed
+                .as_ref()
+                .and_then(|managed| managed.binding.as_ref())
+                == Some(&authority)
+            && after.operations.len() == initial.operations.len() + 1
+            && same(
+                &after.operations[..initial.operations.len()].to_vec(),
+                &initial.operations
+            )?
+            && same(&after.commands, &initial.commands)?
+            && fixture.store.worker_operation(&request.operation_id)?
+                == Some(store_receipt.clone())
+            && fixture.store.head()? == store_receipt.audit_seq
+            && fixture.store.worker_usage()? == allocation,
+        "reconciliation changed authority, allocation or the exact cleanup result"
+    );
+    Ok(())
+}
+
+enum TerminalParentAdmission {
+    Executor,
+    StoreFixture,
+}
+
 fn seed_terminal_parent(
     handle: &tokio::runtime::Handle,
     execution: &Execution<'_>,
     fixture: &Fixture,
     accepted: &AcceptedJobV1,
     authority: &RuntimeAuthority,
+    mode: TerminalParentAdmission,
 ) -> Result<WorkerV1> {
     let request = accepted.checkpoint().0.current_request.clone();
     let (answer, _) = handle.block_on(execution.rpc(Operation::Decision {
@@ -769,7 +998,48 @@ fn seed_terminal_parent(
         Ok(())
     }))?;
     trace_phase("parent_admission_prepared");
-    let (admitted, _) = handle.block_on(execution.rpc(pending))?;
+    let admitted = match mode {
+        TerminalParentAdmission::Executor => handle.block_on(execution.rpc(pending))?.0,
+        TerminalParentAdmission::StoreFixture => {
+            // This test seeds the real Store and journal with a typed
+            // admission. It does not exercise executor admission or claim a
+            // guardian was ready, and cannot emit a runtime start.
+            let Operation::Admission { request, .. } = pending else {
+                bail!("pending fixture admission missing");
+            };
+            let receipt = fixture.store.admit_supervised(
+                &request,
+                &Policy::default(),
+                answer.decision().clone(),
+                Value::Null,
+                &QuotaPolicyV1::default(),
+            )?;
+            let worker = receipt
+                .worker
+                .clone()
+                .context("fixture admission did not reserve a worker")?;
+            let complete = Operation::Admission {
+                request,
+                response: Some(receipt),
+            };
+            handle.block_on(execution.patch(|draft| {
+                let entry = draft
+                    .operations
+                    .last_mut()
+                    .context("fixture pending admission missing")?;
+                *entry = complete.clone();
+                draft
+                    .run
+                    .plan
+                    .managed
+                    .as_mut()
+                    .context("managed preparation missing")?
+                    .worker = Some(worker.clone());
+                Ok(())
+            }))?;
+            complete
+        }
+    };
     trace_phase("parent_admission_returned");
     let Operation::Admission {
         response: Some(admitted),
