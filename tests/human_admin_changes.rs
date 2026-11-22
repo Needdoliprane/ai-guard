@@ -496,7 +496,7 @@ async fn a_delegated_share_change_never_raises_a_right() {
     assert_eq!(read.body["owner"], json!(user_a1));
     assert_eq!(
         read.body["shares"],
-        json!([{"principal": user_a2, "display_name": "user A2", "permissions": ["metadata"]}])
+        json!([{"principal": user_a2, "display_name": "Supervision test user A2", "permissions": ["metadata"]}])
     );
     assert!(read.body["read_receipt"]["audit_event_id"].is_string());
     let revision = read.body["revision"].as_str().unwrap().to_owned();
