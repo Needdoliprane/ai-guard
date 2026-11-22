@@ -130,6 +130,43 @@ async fn retirement_audit_on_a_v3_job_keeps_its_last_confirmed_status() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abandoned_retirement_audit_read_keeps_acknowledged_result_readable() {
+    let (_root, journal) = private_journal();
+    let job = accepted(&journal);
+    let operation = job.operation_id();
+    let next = lifecycle(&journal, &job);
+    let writer = WriterClient::start(journal, 8, Duration::from_secs(10)).unwrap();
+    let receipt = writer
+        .advance_lifecycle(operation, job.head().clone(), next)
+        .await
+        .unwrap();
+    let confirmed = writer
+        .last_confirmed_status(operation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(confirmed.entry().head(), Some(receipt.head()));
+
+    let pause = writer.pause_for_test().await.unwrap();
+    assert!(pause.is_paused());
+    {
+        let stops = writer.stops();
+        let read = stops.pending_retirement_events(operation);
+        tokio::pin!(read);
+        assert!(read.as_mut().now_or_never().is_none());
+        assert_eq!(writer.outstanding(), 1);
+        // Drop the queued read's waiter while the actor still owns the command.
+    }
+    drop(pause);
+
+    let Some(JournalStatusV1::Accepted(read)) = writer.result_status(operation).await.unwrap()
+    else {
+        panic!("the intact journal must still supply the operation");
+    };
+    assert_eq!(read.head(), receipt.head());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retirement_audit_conflict_for_a_missing_observed_job_closes_the_status_projection() {
     let (root, journal) = private_journal();
     let job = accepted(&journal);
