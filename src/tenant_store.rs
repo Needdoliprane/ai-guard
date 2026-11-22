@@ -154,6 +154,20 @@ impl TenantStore {
         })
     }
 
+    /// Seed each MySQL tenant's startup verification with the gateway's entire
+    /// technical credential index, including credentials of neighboring tenants.
+    #[cfg(feature = "mysql-storage")]
+    pub(crate) fn bind_control_collision_candidates(&mut self, digests: &[[u8; 32]]) -> Result<()> {
+        if let Self::Mysql(store) = self {
+            Arc::get_mut(store)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("MySQL collision candidates require an unshared Store")
+                })?
+                .set_control_collision_candidates(digests)?;
+        }
+        Ok(())
+    }
+
     /// A per-request sibling with a wider masking union. A MySQL tenant keeps
     /// its codec and refuses a union it does not already cover.
     pub fn with_additional_redaction(&self, additional: &Redactor) -> Result<Self> {
@@ -249,6 +263,13 @@ mod mysql {
         /// The Store handle for typed async ports.
         pub fn store(&self) -> &MysqlAuditStore {
             &self.store
+        }
+
+        pub(super) fn set_control_collision_candidates(
+            &mut self,
+            digests: &[[u8; 32]],
+        ) -> Result<()> {
+            self.store.set_control_collision_candidates(digests)
         }
 
         pub fn block<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {

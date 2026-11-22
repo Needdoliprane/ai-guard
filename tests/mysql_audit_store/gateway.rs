@@ -347,6 +347,74 @@ async fn gateway_appends_to_the_prepared_target_and_replays_after_restart() -> R
 }
 
 #[tokio::test]
+#[ignore = "requires two fresh prepared private MySQL 8.4 QA schemas and a built gateway"]
+async fn gateway_retains_verified_neighbor_collisions_during_projection_failure() -> Result<()> {
+    let a = FixtureFiles::open("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_A")?;
+    let b = FixtureFiles::open("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_B")?;
+    ensure!(
+        a.target.namespace != b.target.namespace,
+        "targets must differ"
+    );
+    let runner_a_digest: [u8; 32] = Sha256::digest(RUNNER_A.as_bytes()).into();
+    prepare_gateway_target(&a, "tenant-a", &DIGEST_A).await?;
+    let head_b = prepare_gateway_target(&b, "tenant-b", &runner_a_digest).await?;
+
+    let mut conn_a = a.maintenance().await?;
+    let mut conn_b = b.maintenance().await?;
+    let before_a = audit_snapshot(&mut conn_a).await?;
+    let before_b = audit_snapshot(&mut conn_b).await?;
+    let b_reader = b.reader("tenant-b", b.target.namespace)?;
+    ensure!(b_reader.verify().await? == head_b);
+    let registry = Registry::new()?;
+    registry.write(&[
+        registry.entry(&a, "tenant-a", "a")?,
+        registry.entry(&b, "tenant-b", "b")?,
+    ])?;
+    let http = Client::builder().no_proxy().timeout(DEADLINE).build()?;
+    let gateway = Gateway::start(&registry).await?;
+
+    // After the startup verification, make only B's disposable projection
+    // temporarily unverifiable. No authenticated request has primed its cache.
+    let anchor = conn_b
+        .query_first::<Vec<u8>, _>(
+            "SELECT genesis_hash FROM ai_guard_identity_meta WHERE singleton=1",
+        )
+        .await?
+        .context("B's prepared identity anchor is missing")?;
+    let mut divergent = anchor.clone();
+    let first = divergent
+        .first_mut()
+        .context("B's identity anchor is empty")?;
+    *first = if *first == b'0' { b'1' } else { b'0' };
+    let update = "UPDATE ai_guard_identity_meta SET genesis_hash=? WHERE singleton=1";
+    conn_b.exec_drop(update, (divergent.as_slice(),)).await?;
+    let during_failure = async {
+        ensure!(b_reader.verify().await.is_err(), "B remained verifiable");
+        let url = gateway.url("/api/v1/integrity");
+        let unrelated = http.get(url.as_str()).bearer_auth(VIEWER_A).send().await?;
+        ensure!(
+            unrelated.status() == StatusCode::OK,
+            "A lost healthy access"
+        );
+        let colliding = http.get(url).bearer_auth(RUNNER_A).send().await?;
+        ensure!(
+            colliding.status() == StatusCode::SERVICE_UNAVAILABLE,
+            "B's verified collision must still block the ambiguous credential"
+        );
+        ensure!(colliding.json::<Value>().await?["error"]["code"] == "identity_unavailable");
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    conn_b.exec_drop(update, (anchor.as_slice(),)).await?;
+    gateway.stop().await?;
+    during_failure?;
+    ensure!(b_reader.verify().await? == head_b);
+    ensure!(audit_snapshot(&mut conn_a).await? == before_a, "A changed");
+    ensure!(audit_snapshot(&mut conn_b).await? == before_b, "B changed");
+    Ok(())
+}
+
+#[tokio::test]
 #[ignore = "requires a fresh prepared private MySQL 8.4 QA schema"]
 async fn the_control_guard_refuses_inside_the_append_transaction() -> Result<()> {
     let fixture = FixtureFiles::open("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_A")?;

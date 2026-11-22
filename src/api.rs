@@ -630,6 +630,9 @@ impl GatewayState {
             )?;
             client.validate_redaction(&redactor)?;
         }
+        let credential_index = CredentialIndex::for_tenants(&tenants)?;
+        #[cfg(feature = "mysql-storage")]
+        let control_collision_candidates: Vec<_> = credential_index.digests().copied().collect();
         let mut identities = HashSet::new();
         let mut bound = Vec::with_capacity(tenants.len());
         for mut tenant in tenants {
@@ -646,11 +649,14 @@ impl GatewayState {
                 .store
                 .bind_redaction(&redactor)
                 .map_err(|_| anyhow::anyhow!("gateway audit redaction attachment failed"))?;
+            #[cfg(feature = "mysql-storage")]
+            tenant
+                .store
+                .bind_control_collision_candidates(&control_collision_candidates)?;
             anyhow::ensure!(tenant.store.integrity()?.valid, "audit integrity failure");
             bound.push(tenant);
         }
         let tenants = bound;
-        let credential_index = CredentialIndex::for_tenants(&tenants)?;
         let human = human::HumanAccessState::for_tenants(
             tenants.iter().map(|tenant| tenant.tenant_id.as_str()),
         )?;

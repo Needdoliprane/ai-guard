@@ -494,6 +494,11 @@ impl MysqlAuditStore {
     /// Track only the configured runner and viewer digests, before verifying this Store.
     /// After verification, a candidate change requires a new Store.
     pub fn with_control_collision_candidates(mut self, digests: &[[u8; 32]]) -> Result<Self> {
+        self.set_control_collision_candidates(digests)?;
+        Ok(self)
+    }
+
+    pub(crate) fn set_control_collision_candidates(&mut self, digests: &[[u8; 32]]) -> Result<()> {
         ensure!(
             digests.len() <= MAX_CONTROL_COLLISION_CANDIDATES
                 && self.confirmed.get_mut().head.seq == 0,
@@ -503,7 +508,7 @@ impl MysqlAuditStore {
             .iter()
             .map(|digest| (hex::encode(digest), *digest))
             .collect();
-        Ok(self)
+        Ok(())
     }
 
     fn genesis_data(&self) -> Value {

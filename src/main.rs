@@ -551,7 +551,6 @@ fn open_mysql_tenant(
     redactor: &Redactor,
     max_events: u64,
     capacity_policy: Option<agentsandbox::audit::AuditCapacityPolicyV1>,
-    technical_tokens: &[&str],
 ) -> Result<TenantStore> {
     use agentsandbox::{
         mysql_storage::{
@@ -576,10 +575,6 @@ fn open_mysql_tenant(
         database: &target.database,
         username: &target.username,
     };
-    let digests: Vec<[u8; 32]> = technical_tokens
-        .iter()
-        .map(|token| Sha256::digest(token.as_bytes()).into())
-        .collect();
     let mut store = MysqlAuditStore::new(
         endpoint,
         credentials,
@@ -593,7 +588,6 @@ fn open_mysql_tenant(
     if let Some(policy) = capacity_policy {
         store = store.with_capacity_policy(policy)?;
     }
-    let store = store.with_control_collision_candidates(&digests)?;
     Ok(TenantStore::Mysql(std::sync::Arc::new(MysqlTenant::new(
         store,
         tokio::runtime::Handle::current(),
@@ -1039,7 +1033,6 @@ async fn run() -> Result<()> {
                         &redactor,
                         args.max_events,
                         tenant.audit_capacity_policy,
-                        &[&tenant.runner_token, &tenant.viewer_token],
                     )?;
                     capacity_diagnostics.push(redactor.text(&format!(
                         "Storage tenant={} backend=mysql host={} port={} database={} server_tls=verified client_certificate={}",
