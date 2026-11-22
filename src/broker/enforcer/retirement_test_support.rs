@@ -46,6 +46,15 @@ impl ProspectiveFixture {
             fixture.finish().await;
         }
     }
+
+    /// Join the native fixture after a normal exit of its SyntheticReady hooks.
+    pub(crate) async fn finish_synthetic(mut self) -> EnforcerResult<()> {
+        self.fixture
+            .take()
+            .ok_or(EnforcerError::Unavailable)?
+            .finish_synthetic()
+            .await
+    }
 }
 
 impl OriginalUnusedFixture {

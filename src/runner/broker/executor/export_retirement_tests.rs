@@ -6,8 +6,11 @@ use super::*;
 use crate::{
     audit::EventQuery,
     broker::{
-        enforcer::{EnforcerFullClientV3, run_internal_full3_fresh},
-        journal::{canonical, retirement_live_fixture::INVOCATION_DATA_PROGRAM},
+        enforcer::{
+            EnforcedSlot, EnforcerFullClientV3, ProspectiveRegistrationV1,
+            retirement::test_support::ProspectiveFixture, run_internal_full3_fresh,
+        },
+        journal::{JournalStatusV1, canonical, retirement_live_fixture::INVOCATION_DATA_PROGRAM},
         service::{AbandonBeforeClaimV1, preclaim::PreclaimStateV1},
     },
     runtime::{ContainerHandle, RuntimeAuthority},
@@ -720,6 +723,291 @@ async fn worker_cleanup_retains_the_published_ack_after_lost_writer_reply() -> R
     .await?
 }
 
+/// Exercise the real CleanupResult exchange on an assigned V5 job. The native
+/// test role authenticates the binding, while Created and terminal runtime
+/// observations remain synthetic. Only the worker Arm has a native binding;
+/// Import and verification are seeded Store facts. No runtime starts or scans.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full3_v5_commits_worker_cleanup_ack_after_acknowledged_result() -> Result<()> {
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        let fixture = handle.block_on(Fixture::new());
+        let mut native = handle.block_on(ProspectiveFixture::start(
+            fixture.scope.installation_id(),
+            8,
+        ));
+        match full3_cleanup_ack(&handle, &fixture, &mut native) {
+            Ok(()) => {
+                handle.block_on(native.finish_synthetic())?;
+                trace_phase("cleanup_v5_native_fixture_joined");
+                Ok(())
+            }
+            Err(error) => {
+                handle.block_on(native.finish());
+                Err(error)
+            }
+        }
+    })
+    .await?
+}
+
+fn full3_cleanup_ack(
+    handle: &tokio::runtime::Handle,
+    fixture: &Fixture,
+    native: &mut ProspectiveFixture,
+) -> Result<()> {
+    let runtime = Runtime::with_program(RuntimeKind::Docker, Path::new(INVOCATION_DATA_PROGRAM))?;
+    let authority: RuntimeAuthority = serde_json::from_value(json!({
+        "authority_id": Uuid::new_v4(), "kind": "docker", "endpoint": "unix:///cleanup-oracle.sock",
+        "engine_id": ENGINE, "invocation": runtime.invocation(), "podman": null
+    }))?;
+    let context = handle.block_on(AuthenticatedBatchContext::for_executor_test(
+        fixture.client.clone(),
+        fixture.scope.clone(),
+        fixture.config.clone(),
+        runtime,
+    ))?;
+    let full = handle.block_on(native.client());
+    full.verify_installation(fixture.scope.installation_id())?;
+    let writer = fixture.writer();
+    let executor = BatchExecutor::new(
+        writer.clone(),
+        ExecutionEnforcerV1::Full3(full.clone()),
+        Arc::new(NativeHostClock::new()?),
+    );
+    let operation = Uuid::new_v4();
+    let accepted = fixture.accept(operation, false);
+    let execution = handle.block_on(Execution::open(&executor, operation, &context))?;
+    let worker = seed_terminal_parent(
+        handle,
+        &execution,
+        fixture,
+        &accepted,
+        &authority,
+        TerminalParentAdmission::StoreFixtureWithFull3(native),
+    )?;
+    ensure!(
+        worker.state == WorkerStateV1::Terminal
+            && !worker.quota_held
+            && worker.cleanup_removed.is_none(),
+        "fixture terminal cleanup precondition is missing"
+    );
+    let owned = handle
+        .block_on(execution.load())?
+        .1
+        .run
+        .plan
+        .managed
+        .and_then(|state| state.owned)
+        .context("fixture ownership is missing")?;
+    let terminal = fixture_worker_terminal(&owned)?;
+    handle.block_on(boxed_execution_phase(|| {
+        execution.save_observed_result(&terminal)
+    }))?;
+    handle.block_on(boxed_execution_phase(|| execution.post_worker_result()))?;
+    drop(execution);
+    let execution = handle.block_on(Execution::open(&executor, operation, &context))?;
+    let (before, _) = handle.block_on(execution.load())?;
+    let prefix = before
+        .broker_checkpoint_v5()
+        .context("Full3 fixture does not retain V5")?;
+    let [binding] = prefix.bindings() else {
+        bail!("fixture must retain one native worker binding");
+    };
+    ensure!(
+        binding.original_epoch() == full.epoch()
+            && binding.ledger().matches(full.ledger_identity()?)?,
+        "fixture binding differs from the live Full3 role"
+    );
+    let result_ack = prefix
+        .outbox()
+        .events()
+        .iter()
+        .find(|entry| entry.event().kind == "broker.batch.result")
+        .context("fixture result is missing from the outbox")?;
+    let rows = fixture.store.events(&EventQuery {
+        kind: Some("broker.batch.result".into()),
+        ..Default::default()
+    })?;
+    let [stored_result] = rows.as_slice() else {
+        bail!("fixture result was not committed exactly once");
+    };
+    ensure!(
+        result_ack.audit_seq() == Some(stored_result.seq)
+            && same(result_ack.event(), &stored_result.event)?,
+        "fixture result ACK differs from the Store"
+    );
+    trace_phase("cleanup_v5_prefix_confirmed");
+
+    let store_head = fixture.store.head()?;
+    let usage = fixture.store.worker_usage()?;
+    let request = WorkerMutationV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        worker_id: worker.worker_id.clone(),
+        attempt_id: worker.attempt.attempt_id.clone(),
+        expected_revision: worker.revision,
+        transition: WorkerTransitionV1::CleanupResult {
+            removed: true,
+            error: None,
+        },
+    };
+    let pending = Operation::WorkerMutation {
+        request: request.clone(),
+        response: None,
+    };
+    handle.block_on(execution.patch(|draft| {
+        draft.operations.push(pending.clone());
+        Ok(())
+    }))?;
+    trace_phase("cleanup_v5_pending_durable");
+    // A normal writer advance, with its test barrier after the real journal
+    // call. Release immediately. No lost reply or timeout is injected.
+    let mut barrier = handle.block_on(writer.advance_reply_barrier_for_test(false))?;
+    let (reached_writer, result) = handle.block_on(async {
+        let mut attempt = boxed_execution_phase(|| execution.rpc(pending.clone()));
+        tokio::select! {
+            biased;
+            () = barrier.entered() => {
+                drop(barrier);
+                (true, attempt.await)
+            }
+            result = &mut attempt => (false, result),
+        }
+    });
+    if reached_writer {
+        trace_phase("cleanup_v5_writer_advance_returned");
+    }
+    if let Err(error) = &result {
+        eprintln!(
+            "cleanup-v5 attempt={} current={}",
+            cleanup_v5_failure(error),
+            cleanup_v5_current(handle.block_on(writer.load(operation)), &request),
+        );
+    }
+    let store_receipt = fixture
+        .store
+        .worker_operation(&request.operation_id)?
+        .context("exact cleanup receipt is unavailable at the Store sample")?;
+    ensure!(
+        store_receipt.audit_seq == store_head + 1
+            && store_receipt.worker_id.as_deref() == Some(worker.worker_id.as_str())
+            && store_receipt.revision == worker.revision.checked_add(1)
+            && store_receipt.input_hash == content_hash("ai-guard:worker-mutation:v1", &request)?,
+        "Store receipt differs from the exact cleanup"
+    );
+    trace_phase("cleanup_v5_store_receipt_confirmed");
+    let (completed, fresh) =
+        result.map_err(|error| anyhow!("cleanup V5 failed in {}", cleanup_v5_failure(&error)))?;
+    let Operation::WorkerMutation {
+        request: completed_request,
+        response: Some(answer),
+    } = &completed
+    else {
+        bail!("cleanup response is missing");
+    };
+    ensure!(
+        reached_writer
+            && !fresh
+            && same(completed_request, &request)?
+            && answer.receipt == store_receipt
+            && answer.worker.state == WorkerStateV1::Terminal
+            && answer.worker.cleanup_removed == Some(true)
+            && answer.worker.attempt == worker.attempt
+            && !answer.worker.quota_held,
+        "caller cleanup ACK differs from the exact receipt"
+    );
+    trace_phase("cleanup_v5_caller_ack_confirmed");
+
+    let Some(JournalStatusV1::Accepted(after)) =
+        handle.block_on(writer.result_status(operation))?
+    else {
+        bail!("strict Result has no accepted checkpoint");
+    };
+    let checkpoint = after
+        .broker_checkpoint_v5()
+        .context("strict Result lost V5 checkpoint")?;
+    let last = checkpoint
+        .outbox()
+        .lifecycle()
+        .broker()
+        .supervision()
+        .operations()
+        .last()
+        .context("strict Result lost the cleanup operation")?;
+    ensure!(
+        same(last, &completed)?
+            && after.head().revision() == before.head().revision() + 2
+            && same(&checkpoint.bindings(), &prefix.bindings())?
+            && same(&checkpoint.outbox().events(), &prefix.outbox().events())?,
+        "strict Result changed the bound prefix or cleanup ACK"
+    );
+    trace_phase("cleanup_v5_strict_result_confirmed");
+    let (replayed, fresh) = handle.block_on(boxed_execution_phase(|| execution.rpc(pending)))?;
+    let (end, _) = handle.block_on(execution.load())?;
+    ensure!(
+        !fresh
+            && same(&replayed, &completed)?
+            && end.head() == after.head()
+            && fixture.store.head()? == store_receipt.audit_seq
+            && fixture.store.worker_usage()? == usage,
+        "cleanup replay changed the receipt, head or original allocation"
+    );
+    trace_phase("cleanup_v5_replay_unchanged");
+    Ok(())
+}
+
+fn cleanup_v5_failure(error: &anyhow::Error) -> &'static str {
+    if let Some(error) = error.downcast_ref::<reqwest::Error>() {
+        if error.is_timeout() {
+            "http_timeout"
+        } else if error.is_body() {
+            "http_body"
+        } else {
+            "http_transport"
+        }
+    } else if let Some(error) = error.downcast_ref::<JournalError>() {
+        match error {
+            JournalError::Io => "writer_io",
+            JournalError::Corrupt | JournalError::UnsafeFilesystem => "journal_integrity",
+            JournalError::Conflict => "journal_conflict",
+            _ => "journal_refused",
+        }
+    } else {
+        "unclassified"
+    }
+}
+
+fn cleanup_v5_current(
+    loaded: Result<Option<AcceptedJobV1>, JournalError>,
+    request: &WorkerMutationV1,
+) -> &'static str {
+    let Ok(Some(job)) = loaded else {
+        return "unconfirmed";
+    };
+    let Some(v5) = job.broker_checkpoint_v5() else {
+        return "unconfirmed";
+    };
+    v5.outbox()
+        .lifecycle()
+        .broker()
+        .supervision()
+        .operations()
+        .iter()
+        .find_map(|operation| match operation {
+            Operation::WorkerMutation {
+                request: pending,
+                response,
+            } if same(pending, request).is_ok_and(|same| same) => Some(if response.is_some() {
+                "ack_recorded"
+            } else {
+                "pending"
+            }),
+            _ => None,
+        })
+        .unwrap_or("cleanup_not_found")
+}
+
 fn worker_cleanup_ack_cut(handle: &tokio::runtime::Handle, cut: WorkerCleanupAckCut) -> Result<()> {
     use super::super::without_response;
 
@@ -913,9 +1201,10 @@ fn worker_cleanup_ack_cut(handle: &tokio::runtime::Handle, cut: WorkerCleanupAck
     Ok(())
 }
 
-enum TerminalParentAdmission {
+enum TerminalParentAdmission<'a> {
     Executor,
     StoreFixture,
+    StoreFixtureWithFull3(&'a mut ProspectiveFixture),
 }
 
 fn seed_terminal_parent(
@@ -924,7 +1213,7 @@ fn seed_terminal_parent(
     fixture: &Fixture,
     accepted: &AcceptedJobV1,
     authority: &RuntimeAuthority,
-    mode: TerminalParentAdmission,
+    mode: TerminalParentAdmission<'_>,
 ) -> Result<WorkerV1> {
     let request = accepted.checkpoint().0.current_request.clone();
     let (answer, _) = handle.block_on(execution.rpc(Operation::Decision {
@@ -999,9 +1288,10 @@ fn seed_terminal_parent(
         Ok(())
     }))?;
     trace_phase("parent_admission_prepared");
-    let admitted = match mode {
+    let admitted = match &mode {
         TerminalParentAdmission::Executor => handle.block_on(execution.rpc(pending))?.0,
-        TerminalParentAdmission::StoreFixture => {
+        TerminalParentAdmission::StoreFixture
+        | TerminalParentAdmission::StoreFixtureWithFull3(_) => {
             // This test seeds the real Store and journal with a typed
             // admission. It does not exercise executor admission or claim a
             // guardian was ready, and cannot emit a runtime start.
@@ -1108,12 +1398,20 @@ fn seed_terminal_parent(
         inspection.clone(),
         ArmSubjectV1::Worker,
     )?;
-    let (armed, _) = handle.block_on(execution.rpc(Operation::Arm {
+    let pending = Operation::Arm {
         parent: worker.clone(),
-        owned,
+        owned: owned.clone(),
         request: arm.clone(),
         response: None,
-    }))?;
+    };
+    let (armed, slot) = if let TerminalParentAdmission::StoreFixtureWithFull3(native) = mode {
+        let (armed, slot) = handle.block_on(boxed_execution_phase(|| {
+            bind_fixture_worker(execution, native, pending, authority)
+        }))?;
+        (armed, Some(slot))
+    } else {
+        (handle.block_on(execution.rpc(pending))?.0, None)
+    };
     trace_phase("parent_arm_returned");
     let Operation::Arm {
         response: Some(armed),
@@ -1122,7 +1420,7 @@ fn seed_terminal_parent(
     else {
         return Err(anyhow!("worker arm missing"));
     };
-    handle.block_on(execution.rpc(Operation::WorkerClaim {
+    let claim = Operation::WorkerClaim {
         request: ArmedStartClaimV1 {
             version: 1,
             operation_id: Uuid::new_v4().to_string(),
@@ -1131,16 +1429,123 @@ fn seed_terminal_parent(
             expected_revision: worker.revision,
             emitter_id: Uuid::new_v4().to_string(),
             arm_receipt: armed.receipt,
-            clock_check: arm.clock,
+            clock_check: if slot.is_some() {
+                NativeHostClock::new()?.sample()?
+            } else {
+                arm.clock.clone()
+            },
         },
         response: None,
-    }))?;
+    };
+    handle.block_on(execution.rpc_checked(claim, slot.as_ref()))?;
     trace_phase("parent_claim_returned");
-    let terminal = handle.block_on(execution.mutate(WorkerTransitionV1::Observe {
-        observation: terminal_observation(inspection),
-    }))?;
+    let observation = if slot.is_some() {
+        managed::observation_dto(&worker, &fixture_worker_terminal(&owned)?)?
+    } else {
+        terminal_observation(inspection)
+    };
+    let terminal =
+        handle.block_on(execution.mutate(WorkerTransitionV1::Observe { observation }))?;
     trace_phase("parent_terminal_returned");
     Ok(terminal)
+}
+
+async fn bind_fixture_worker(
+    execution: &Execution<'_>,
+    native: &mut ProspectiveFixture,
+    pending: Operation,
+    authority: &RuntimeAuthority,
+) -> Result<(Operation, EnforcedSlot)> {
+    let Operation::Arm {
+        request: arm,
+        owned,
+        ..
+    } = &pending
+    else {
+        bail!("fixture worker Arm is missing");
+    };
+    let full = execution
+        .executor
+        .enforcer
+        .full3()
+        .context("fixture Full3 client is missing")?;
+    let scope = execution.context.scope();
+    let generation = execution.context.cancel_generation();
+    let origin_hash = hex::encode(Sha256::digest(scope.gateway_origin().as_bytes()));
+    let prospective = ProspectiveRegistrationV1::new(
+        origin_hash.clone(),
+        scope.tenant_id().into(),
+        arm.clone(),
+        authority.clone(),
+        owned.clone(),
+    )?;
+    native.install(&prospective);
+    execution
+        .patch(|draft| {
+            draft.operations.push(pending.clone());
+            Ok(())
+        })
+        .await?;
+    full.reserve_prospective(prospective.clone(), generation.clone(), false)
+        .await?;
+    let exchange = full
+        .begin_prospective_arm_exchange(&prospective, generation)
+        .await?;
+    ensure!(
+        exchange.permits_original(),
+        "fixture original exchange is unavailable"
+    );
+    let (armed, _) = boxed_execution_phase(|| execution.rpc(pending.clone())).await?;
+    let Operation::Arm {
+        response: Some(answer),
+        ..
+    } = &armed
+    else {
+        bail!("fixture worker Arm receipt is missing");
+    };
+    let arm_id = Uuid::parse_str(&arm.operation_id)?;
+    let epoch = full.epoch();
+    let current = generation.current();
+    let preclaim = execution.context.preclaim();
+    preclaim.announce_registration(execution.operation, arm_id, epoch, current)?;
+    let registration = RegistrationV1::new(
+        origin_hash,
+        scope.tenant_id().into(),
+        arm.clone(),
+        answer.receipt.clone(),
+        authority.clone(),
+        owned.clone(),
+    )?;
+    let slot = full
+        .bind_prospective(registration, generation.clone(), exchange)
+        .await?;
+    let binding = slot.full3_registration_binding()?;
+    let (head, _) = execution.load().await?;
+    execution
+        .executor
+        .writer
+        .bind_full3_registration(execution.operation, head.head().clone(), binding)
+        .await?;
+    slot.check_ready_for_claim(current)?;
+    preclaim.mark_original_unclaimed(arm_id, epoch, current)?;
+    preclaim.choose_claim(arm_id, epoch, current)?.consume()?;
+    let reservation = slot.reserve_claim(current)?;
+    slot.consume_claim_reservation(reservation, arm, current)?;
+    // Preserve the genuine slot and enforce readiness for the central claim.
+    // The test never prepares or consumes a runtime start guard.
+    Ok((armed, slot))
+}
+
+fn fixture_worker_terminal(owned: &OwnedContainerSnapshot) -> Result<ContainerObservation> {
+    let mut observed = owned.observation.clone();
+    observed.process.status = Some("exited".into());
+    observed.process.running = Some(false);
+    observed.process.started_at = Some(STARTED.parse()?);
+    observed.process.finished_at = Some(FINISHED.parse()?);
+    observed.process.exit_code = Some(0);
+    observed.process.oom_killed = Some(false);
+    observed.observed_at = FINISHED.parse()?;
+    Ok(observed)
 }
 
 #[allow(clippy::too_many_arguments)]

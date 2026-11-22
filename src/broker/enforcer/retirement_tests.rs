@@ -52,6 +52,7 @@ pub(super) struct SyntheticReadyControl {
     actor: Mutex<Weak<FullActor>>,
     return_allowed: AtomicBool,
     force_exit: AtomicBool,
+    fixture_exit: AtomicBool,
     stop_observed: AtomicBool,
     ready_allowed: AtomicBool,
 }
@@ -71,6 +72,9 @@ pub(super) fn synthetic_ready_original(actor: &Arc<FullActor>) -> Option<Enforce
     loop {
         if control.force_exit.load(Ordering::SeqCst) {
             return Some(Err(EnforcerError::Unhealthy));
+        }
+        if control.fixture_exit.load(Ordering::SeqCst) {
+            return Some(Ok(()));
         }
         let mut state = actor.state.lock().unwrap();
         if actor.exit.load(Ordering::SeqCst) && control.return_allowed.load(Ordering::SeqCst) {
@@ -104,6 +108,13 @@ impl SyntheticReadyControl {
     fn force(&self) {
         self.force_exit.store(true, Ordering::SeqCst);
         self.release();
+    }
+
+    fn finish_fixture(&self) {
+        self.fixture_exit.store(true, Ordering::SeqCst);
+        if let Some(actor) = self.actor.lock().unwrap().upgrade() {
+            actor.wake.notify_all();
+        }
     }
 }
 
@@ -184,6 +195,7 @@ impl OriginalIpcFixture {
             actor: Mutex::new(Weak::new()),
             return_allowed: AtomicBool::new(allow_return),
             force_exit: AtomicBool::new(false),
+            fixture_exit: AtomicBool::new(false),
             stop_observed: AtomicBool::new(false),
             ready_allowed: AtomicBool::new(true),
         });
@@ -379,9 +391,23 @@ impl OriginalIpcFixture {
             },
         )
     }
-    pub(super) async fn finish(mut self) {
+    pub(super) async fn finish(self) {
+        let _ = self.join_fixture(false).await;
+    }
+
+    /// End the selected SyntheticReady hooks through their fixture-only
+    /// signal. The join produces no STOP, retirement, quota or runtime evidence.
+    pub(super) async fn finish_synthetic(self) -> EnforcerResult<()> {
+        self.join_fixture(true).await
+    }
+
+    async fn join_fixture(mut self, synthetic_exit: bool) -> EnforcerResult<()> {
         for (_, control) in &self.controls {
-            control.force();
+            if synthetic_exit {
+                control.finish_fixture();
+            } else {
+                control.force();
+            }
         }
         self.full
             .finish_unbound_prospective_fixture()
@@ -413,29 +439,34 @@ impl OriginalIpcFixture {
         }
         self.full.actors.lock().unwrap().clear();
         let joiner = self.full.joiner.lock().unwrap().take();
-        if let Some(joiner) = joiner {
+        let joined = if let Some(joiner) = joiner {
             // Teardown joins support work; an unhealthy role remains fenced.
             // This is deliberately no Joined wrapper, Q, or retirement.
-            let _ = self.full.owners.finish_sealed_idle(joiner).await;
-        }
+            self.full.owners.finish_sealed_idle(joiner).await
+        } else {
+            Ok(())
+        };
         self.state.shutdown_requested.store(true, Ordering::SeqCst);
-        if let Some(server) = self.server.take() {
+        if let Some(server) = self.server.as_mut() {
             tokio::time::timeout(Duration::from_secs(3), server)
                 .await
                 .unwrap()
                 .unwrap()
                 .unwrap();
+            self.server.take();
         }
         for (id, _) in &self.controls {
             synthetic_registry().lock().unwrap().remove(id);
         }
-        if self.full.owners.failed() {
+        if self.full.owners.failed() || joined.is_err() {
             let preserved = self.files.take().unwrap().keep();
             eprintln!(
                 "private synthetic-Ready IPC role retained without a retirement claim: {}",
                 preserved.display()
             );
+            return Err(EnforcerError::Unhealthy);
         }
+        joined
     }
 }
 impl Drop for OriginalIpcFixture {
