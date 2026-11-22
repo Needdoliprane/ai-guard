@@ -18,8 +18,9 @@
 //!   must still be present, and a person has reviewed it);
 //! - `no-text: NAME VERSION` accepts one crate that has an expression but ships no licence text;
 //! - `supplement: NAME VERSION FILE SHA256` supplies upstream text for a crate whose published
-//!   package ships none: `FILE` is read from `third-party-notices/` next to the list and must have
-//!   exactly that SHA-256. The provenance (URL, revision) of each file is recorded in the list.
+//!   package ships none: `FILE` is read from `third-party-notices/` next to the list. It must have
+//!   exactly that SHA-256 and contain non-blank UTF-8 text of at most 256 KiB. The provenance
+//!   (URL, revision) of each file is recorded in the list.
 //!
 //! The release workflow passes `--for-release` to both modes, which forbids all `no-text:` exceptions.
 //!
@@ -30,6 +31,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -161,7 +163,11 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
         .unwrap_or_else(|| Path::new("."))
         .join("third-party-notices");
     apply_supplements(&mut krates, &policy, &|file| {
-        std::fs::read(directory.join(file)).map_err(|e| format!("{file}: {e}"))
+        let mut bytes = Vec::new();
+        std::fs::File::open(directory.join(file))
+            .and_then(|source| source.take(MAX_TEXT_BYTES + 1).read_to_end(&mut bytes))
+            .map_err(|e| format!("{file}: {e}"))?;
+        Ok(bytes)
     })?;
     let problems = problems(&krates, &policy);
     if !problems.is_empty() {
@@ -209,13 +215,21 @@ fn apply_supplements(
         }
         for (file, sha) in files {
             let bytes = read(file)?;
+            if bytes.len() as u64 > MAX_TEXT_BYTES {
+                return Err(format!("{id}: {file} exceeds {MAX_TEXT_BYTES} bytes"));
+            }
             let actual = hex::encode(Sha256::digest(&bytes));
             if actual != *sha {
                 return Err(format!(
                     "{id}: {file} has SHA-256 {actual}, the list records {sha}"
                 ));
             }
-            let text = String::from_utf8_lossy(&bytes).replace("\r\n", "\n");
+            let text = std::str::from_utf8(&bytes)
+                .map_err(|_| format!("{id}: {file} is not valid UTF-8"))?;
+            if text.trim().is_empty() {
+                return Err(format!("{id}: {file} contains no licence text"));
+            }
+            let text = text.replace("\r\n", "\n");
             krate.texts.push((file.clone(), text.trim_end().to_owned()));
         }
     }
@@ -629,6 +643,25 @@ mod tests {
         apply_supplements(&mut krates, &policy, &|_| Ok(b"upstream\n".to_vec())).unwrap_err();
         apply_supplements(&mut krates, &policy, &|_| Ok(b"upstream".to_vec())).unwrap();
         assert!(problems(&krates, &policy).is_empty());
+    }
+
+    #[test]
+    fn a_valid_supplement_digest_does_not_replace_text_validation() {
+        let oversized = vec![b'a'; MAX_TEXT_BYTES as usize + 1];
+        let cases: &[(&[u8], &str)] = &[
+            (b"", "contains no licence text"),
+            (b" \t\r\n", "contains no licence text"),
+            (b"license\xff\n", "is not valid UTF-8"),
+            (&oversized, "exceeds 262144 bytes"),
+        ];
+        for (bytes, reason) in cases {
+            let mut krates = with_texts(&[("a", "text a")]);
+            let digest = hex::encode(Sha256::digest(bytes));
+            let list = format!("MIT\nMIT OR Apache-2.0\nsupplement: d 1.0.0 d.txt {digest}\n");
+            let error = apply_supplements(&mut krates, &policy(&list), &|_| Ok(bytes.to_vec()))
+                .unwrap_err();
+            assert_eq!(error, format!("d 1.0.0: d.txt {reason}"));
+        }
     }
 
     #[test]
