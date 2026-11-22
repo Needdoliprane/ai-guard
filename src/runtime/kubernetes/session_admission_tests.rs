@@ -371,7 +371,8 @@ fn tenants_never_share_an_authority_namespace_or_namespace_uid() {
         authority.namespace_uid = "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd".into();
     });
     let first = activation_for(&a);
-    refuse_shared_authorities([("tenant-a", &first), ("tenant-b", &own)]).unwrap();
+    refuse_shared_authorities([("tenant-a", &first.authority), ("tenant-b", &own.authority)])
+        .unwrap();
     for shared in [
         // The same authority id.
         with(&|authority| {
@@ -389,9 +390,12 @@ fn tenants_never_share_an_authority_namespace_or_namespace_uid() {
             authority.namespace = "tenant-b".into();
         }),
     ] {
-        let error = refuse_shared_authorities([("tenant-a", &first), ("tenant-b", &shared)])
-            .unwrap_err()
-            .to_string();
+        let error = refuse_shared_authorities([
+            ("tenant-a", &first.authority),
+            ("tenant-b", &shared.authority),
+        ])
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("R10"), "{error}");
     }
 }

@@ -247,20 +247,19 @@ impl KubernetesRuntime {
     }
 }
 
-/// R10: refuses, at configuration load, two tenants whose activations share
-/// an authority id, an endpoint and namespace, or a namespace UID. The
-/// cluster itself would let them; ai-guard never does.
+/// R10: refuses, at configuration load, two tenants whose Kubernetes
+/// authorities share an authority id, an endpoint and namespace, or a
+/// namespace UID. The cluster itself would let them; ai-guard never does.
 pub fn refuse_shared_authorities<'a>(
-    activations: impl IntoIterator<Item = (&'a str, &'a KubernetesSessionActivationV2)>,
+    authorities: impl IntoIterator<Item = (&'a str, &'a KubernetesAuthorityV1)>,
 ) -> anyhow::Result<()> {
     let mut ids = std::collections::BTreeMap::new();
     let mut namespaces = std::collections::BTreeMap::new();
     let mut uids = std::collections::BTreeMap::new();
-    for (tenant, activation) in activations {
-        activation.validate().map_err(|_| {
-            anyhow::anyhow!("invalid Kubernetes session activation for tenant {tenant}")
+    for (tenant, authority) in authorities {
+        authority.validate().map_err(|_| {
+            anyhow::anyhow!("invalid Kubernetes session authority for tenant {tenant}")
         })?;
-        let authority = &activation.authority;
         for (index, key) in [
             (&mut ids, authority.authority_id().to_string()),
             (
@@ -269,6 +268,7 @@ pub fn refuse_shared_authorities<'a>(
             ),
             (&mut uids, authority.namespace_uid().to_owned()),
         ] {
+            // A tenant may also list one authority only once.
             if let Some(other) = index.insert(key, tenant.to_owned()) {
                 anyhow::bail!(
                     "tenants {other} and {tenant} share a Kubernetes authority or namespace; each tenant needs its own (R10)"

@@ -33,6 +33,17 @@ fn storage_policy() -> KubernetesSessionStoragePolicyV2 {
         max_capacity_mib: 4096,
     }
 }
+fn effect_policy(
+    intent: &KubernetesSessionReservationIntentV2,
+    storage: KubernetesSessionStoragePolicyV2,
+) -> KubernetesSessionEffectPolicyV2 {
+    KubernetesSessionEffectPolicyV2 {
+        version: 1,
+        claim_window_seconds: 30,
+        storage,
+        authorities: vec![intent.authority().clone()],
+    }
+}
 fn reserve(f: &Fixture, quota: &QuotaPolicyV1) -> KubernetesSessionReservationIntentV2 {
     let intent = session_intent(f, Uuid::new_v4());
     let policy = policy(&intent);
@@ -153,8 +164,7 @@ impl<'a> Chain<'a> {
         let ack = self.f.store.claim_kubernetes_session_effect(
             &self.f.identity,
             request,
-            Some(&storage_policy()),
-            30,
+            Some(&effect_policy(&self.intent, storage_policy())),
         )?;
         self.step = ack.request.step.max(self.step);
         Ok(ack)
@@ -295,7 +305,11 @@ fn the_store_rederives_digests_and_applies_the_tenant_storage_policy() {
     assert_eq!(
         failure(
             f.store
-                .claim_kubernetes_session_effect(&f.identity, &forged, Some(&storage_policy()), 30)
+                .claim_kubernetes_session_effect(
+                    &f.identity,
+                    &forged,
+                    Some(&effect_policy(&chain.intent, storage_policy())),
+                )
                 .unwrap_err()
         ),
         Failure::Conflict
@@ -304,7 +318,7 @@ fn the_store_rederives_digests_and_applies_the_tenant_storage_policy() {
     assert_eq!(
         failure(
             f.store
-                .claim_kubernetes_session_effect(&f.identity, &request, None, 30)
+                .claim_kubernetes_session_effect(&f.identity, &request, None)
                 .unwrap_err()
         ),
         Failure::PermissionDenied
@@ -316,7 +330,32 @@ fn the_store_rederives_digests_and_applies_the_tenant_storage_policy() {
     assert_eq!(
         failure(
             f.store
-                .claim_kubernetes_session_effect(&f.identity, &request, Some(&narrow), 30)
+                .claim_kubernetes_session_effect(
+                    &f.identity,
+                    &request,
+                    Some(&effect_policy(&chain.intent, narrow)),
+                )
+                .unwrap_err()
+        ),
+        Failure::PermissionDenied
+    );
+    // R7: a policy that activates another authority grants nothing here.
+    let mut other = effect_policy(&chain.intent, storage_policy());
+    other.authorities = vec![
+        crate::runtime::kubernetes::KubernetesAuthorityV1::new(
+            Uuid::new_v4(),
+            "https://127.0.0.1:6443/",
+            "d9a9b494-69f4-4060-a083-f20679e9547c",
+            "tenant-z",
+            "cc9d69e9-5277-4247-aca5-1c8cf2dbe7f5",
+            &"a".repeat(64),
+        )
+        .unwrap(),
+    ];
+    assert_eq!(
+        failure(
+            f.store
+                .claim_kubernetes_session_effect(&f.identity, &request, Some(&other))
                 .unwrap_err()
         ),
         Failure::PermissionDenied

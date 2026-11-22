@@ -294,7 +294,7 @@ fn admit_order(
 fn rederive(
     intent: &KubernetesSessionReservationIntentV2,
     request: &KubernetesSessionEffectRequestV2,
-    storage_policy: Option<&KubernetesSessionStoragePolicyV2>,
+    policy: Option<&KubernetesSessionEffectPolicyV2>,
 ) -> anyhow::Result<()> {
     let authority = intent.authority();
     let ids = intent.ids()?;
@@ -308,8 +308,9 @@ fn rederive(
         (Subject::WorkspaceClaim, Action::Create) => {
             let storage = request.storage.as_ref().ok_or(Failure::InvalidRequest)?;
             permission(
-                storage_policy
+                policy
                     .ok_or(Failure::PermissionDenied)?
+                    .storage
                     .approves(storage)?,
             )?;
             KubernetesSessionClaimRequestV2::render(intent, storage)
@@ -618,12 +619,19 @@ impl Store {
         &self,
         identity: &BrokerIdentityV1,
         request: &KubernetesSessionEffectRequestV2,
-        storage_policy: Option<&KubernetesSessionStoragePolicyV2>,
-        window_seconds: u32,
+        policy: Option<&KubernetesSessionEffectPolicyV2>,
     ) -> anyhow::Result<KubernetesSessionEffectClaimAckV2> {
         request.validate()?;
-        require((1..=60).contains(&window_seconds))?;
         let cleanup = matches!(request.action, Action::Delete | Action::ReleaseFinalizer);
+        // Cleanup of effects already issued stays possible without a policy.
+        let window_seconds = match policy {
+            Some(policy) => {
+                policy.validate()?;
+                policy.claim_window_seconds
+            }
+            None if cleanup => 30,
+            None => return Err(Failure::PermissionDenied.into()),
+        };
         let input_hash = request.input_hash()?;
         self.mutate(
             identity,
@@ -633,8 +641,12 @@ impl Store {
             cleanup,
             |tx, intent, state, steps, at| {
                 require(request.reservation_input_hash == intent.input_hash(&self.tenant_id)?)?;
+                // R7: a new effect needs an activation of this exact authority.
+                if !cleanup {
+                    permission(policy.is_some_and(|policy| policy.activates(intent.authority())))?;
+                }
                 admit_order(state, steps, request)?;
-                rederive(intent, request, storage_policy)?;
+                rederive(intent, request, policy)?;
                 let not_after = at
                     .checked_add_signed(chrono::Duration::seconds(i64::from(window_seconds)))
                     .ok_or(Failure::Unavailable)?;

@@ -403,6 +403,42 @@ impl KubernetesSessionStoragePolicyV2 {
     }
 }
 
+/// Tenant activation of effectful Kubernetes sessions (R7, R5, R10).
+/// Server configuration only; without it no session effect is granted
+/// beyond the cleanup of effects already issued.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KubernetesSessionEffectPolicyV2 {
+    pub version: u32,
+    /// Validity of one `EmitOnce` claim, in seconds (1 to 60).
+    pub claim_window_seconds: u32,
+    pub storage: KubernetesSessionStoragePolicyV2,
+    /// The authorities whose sessions may issue effects. Two tenants never
+    /// share one (R10, checked across tenants at configuration load).
+    pub authorities: Vec<crate::runtime::kubernetes::KubernetesAuthorityV1>,
+}
+impl KubernetesSessionEffectPolicyV2 {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        require(
+            self.version == 1
+                && (1..=60).contains(&self.claim_window_seconds)
+                && (1..=8).contains(&self.authorities.len()),
+        )?;
+        self.storage.validate()?;
+        crate::runtime::kubernetes::session_admission::refuse_shared_authorities(
+            self.authorities
+                .iter()
+                .map(|authority| ("this tenant", authority)),
+        )
+        .map_err(|_| super::KubernetesSessionReservationFailureV2::InvalidRequest)?;
+        Ok(())
+    }
+    /// True only for one of the activated authorities, compared exactly.
+    pub fn activates(&self, authority: &crate::runtime::kubernetes::KubernetesAuthorityV1) -> bool {
+        self.validate().is_ok() && self.authorities.iter().any(|known| known == authority)
+    }
+}
+
 /// Central position of one reservation's effects. `settled` releases the
 /// quota held by the reservation row.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
