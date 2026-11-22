@@ -727,11 +727,14 @@ async fn worker_cleanup_retains_the_published_ack_after_lost_writer_reply() -> R
 /// test role authenticates the binding, while Created and terminal runtime
 /// observations remain synthetic. Only the worker Arm has a native binding;
 /// Import and verification are seeded Store facts. No runtime starts or scans.
+/// The native actor and joiner wait in process with no local deadline. The
+/// coordinator and listener deadlines do not bound the whole canary.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full3_v5_commits_worker_cleanup_ack_after_acknowledged_result() -> Result<()> {
     let handle = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
-        let fixture = handle.block_on(Fixture::new());
+        let mut fixture = handle.block_on(Fixture::new());
+        fixture.root.disable_cleanup(true);
         let mut native = handle.block_on(ProspectiveFixture::start(
             fixture.scope.installation_id(),
             8,
@@ -740,6 +743,7 @@ async fn full3_v5_commits_worker_cleanup_ack_after_acknowledged_result() -> Resu
             Ok(()) => {
                 handle.block_on(native.finish_synthetic())?;
                 trace_phase("cleanup_v5_native_fixture_joined");
+                fixture.root.disable_cleanup(false);
                 Ok(())
             }
             Err(error) => {
