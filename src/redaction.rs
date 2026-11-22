@@ -207,9 +207,12 @@ impl Redactor {
             Value::Object(map) => Value::Object(
                 map.iter()
                     .map(|(k, v)| {
+                        // Kubernetes records this public disablement flag in the exact admitted spec.
+                        let public_no_automount =
+                            k == "automountServiceAccountToken" && v == &Value::Bool(false);
                         (
                             self.text(k),
-                            if sensitive_key(k) {
+                            if sensitive_key(k) && !public_no_automount {
                                 Value::String("[REDACTED]".into())
                             } else {
                                 self.value_with_string_limit(v, max_string_bytes)
@@ -295,6 +298,32 @@ mod tests {
         let v=r.value(&json!({"nested":{"api_key":"never-log-this"},"argv":["tool","--token","very-private-value"]}));
         assert!(!v.to_string().contains("never-log-this"));
         assert!(!v.to_string().contains("very-private-value"));
+    }
+    #[test]
+    fn preserves_only_the_public_kubernetes_no_automount_flag() {
+        let r = Redactor::new(vec![]);
+        let input = json!({
+            "spec": {"automountServiceAccountToken": false},
+            "other": [
+                {"automountServiceAccountToken": true},
+                {"automountServiceAccountToken": "false"},
+                {"automountServiceAccountToken": {"value": "fixture-value"}},
+                {"automount_service_account_token": false},
+                {"accessToken": false}
+            ]
+        });
+        let expected = json!({
+            "spec": {"automountServiceAccountToken": false},
+            "other": [
+                {"automountServiceAccountToken": "[REDACTED]"},
+                {"automountServiceAccountToken": "[REDACTED]"},
+                {"automountServiceAccountToken": "[REDACTED]"},
+                {"automount_service_account_token": "[REDACTED]"},
+                {"accessToken": "[REDACTED]"}
+            ]
+        });
+        assert_eq!(r.value(&input), expected);
+        assert_eq!(r.value_unclipped(&input), expected);
     }
     #[test]
     fn unclipped_values_preserve_long_strings_and_share_structured_masking() {
