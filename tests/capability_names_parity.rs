@@ -24,6 +24,16 @@ fn position(capability: HumanCapabilityV1) -> usize {
     }
 }
 fn rust_names() -> Vec<String> {
+    let mut positions: Vec<usize> = HumanCapabilityV1::ALL
+        .iter()
+        .map(|c| position(*c))
+        .collect();
+    positions.sort_unstable();
+    assert_eq!(
+        positions,
+        (0..HumanCapabilityV1::ALL.len()).collect::<Vec<_>>(),
+        "positions cover 0..ALL.len() exactly once, with no gap"
+    );
     HumanCapabilityV1::ALL
         .iter()
         .enumerate()

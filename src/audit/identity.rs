@@ -918,6 +918,7 @@ impl Store {
         let mut projection = load_projection(tx, mutation)?;
         projection.additive_resource_grants = rights_access;
         let previous_revision = projection.revision;
+        projection.check_holder_delegation(mutation)?;
         projection.apply(mutation, &self.tenant_id, next_seq)?;
         ensure_resource_known(tx, mutation, next_seq)?;
         let record = Record {

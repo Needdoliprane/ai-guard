@@ -89,13 +89,33 @@ fn an_unknown_identity_kind_fails_closed_like_an_older_binary_meets_the_marker()
     let files = private();
     let path = files.path().join("tenant.sqlite");
     let store = migrated(&path, true);
-    let refusal = never_accepted(
-        &path,
-        store,
+    append_identity(
+        &store,
         "control.identity.future_capability.genesis",
         json!({"version": 1}),
+    )
+    .expect("the chained writer does not interpret identity kinds");
+    // The identity replay itself refuses the unknown kind.
+    {
+        let db = store.db.lock().unwrap();
+        let refusal = super::super::identity::validate(&db)
+            .expect_err("the closed identity replay refuses an unknown kind");
+        assert_eq!(
+            refusal.downcast_ref::<IdentityFailureV1>(),
+            Some(&IdentityFailureV1::InvalidRequest),
+            "{refusal:#}"
+        );
+    }
+    drop(store);
+    // So the reopened store is unhealthy and refuses its first write.
+    let reopened =
+        Store::open_existing_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 1000).unwrap();
+    assert!(!reopened.healthy());
+    assert!(
+        reopened
+            .append(Event::new("fixture.after_unknown_identity"))
+            .is_err()
     );
-    assert!(!refusal.is_empty());
 }
 
 #[test]
@@ -157,7 +177,7 @@ fn new_read_actions_wait_for_the_marker_with_the_head_unchanged() {
         account_id: uuid::Uuid::new_v4().to_string(),
     };
     let head = store.head().unwrap();
-    for action in ["summary", "memberships", "quota", "usage", "configuration"] {
+    for action in MARKER_READ_ACTIONS {
         let mut db = store.db.lock().unwrap();
         let tx = db.transaction().unwrap();
         let refusal = store

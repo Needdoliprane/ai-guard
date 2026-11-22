@@ -51,6 +51,51 @@ impl Projection {
             &m.principal == principal && m.active && m.organization_scope == organization
         })
     }
+    /// The delegable approval rights (`approve_launch`, `approve_egress`)
+    /// pass only from a holder: a human actor adds or reactivates one, for
+    /// another member or for itself, only while its own active membership in
+    /// the same organization holds it. Removal and retention stay free.
+    ///
+    /// Checked on the live mutation path before effect. Historical records
+    /// keep replaying under the rules they were accepted with, so an existing
+    /// format 14/15 history is never refused at reopen.
+    pub(crate) fn check_holder_delegation(
+        &self,
+        mutation: &IdentityMutationV1,
+    ) -> anyhow::Result<()> {
+        if !mutation.actor.is_human() {
+            return Ok(());
+        }
+        let IdentityChangeV1::Membership { membership, .. } = &mutation.change else {
+            return Ok(());
+        };
+        let previous = self
+            .memberships
+            .get(&membership.membership_id)
+            .map(|(previous, _)| previous);
+        for capability in [
+            HumanCapabilityV1::ApproveLaunch,
+            HumanCapabilityV1::ApproveEgress,
+        ] {
+            if !membership.capabilities.contains(&capability) {
+                continue;
+            }
+            let retained = previous.is_some_and(|previous| {
+                previous.capabilities.contains(&capability)
+                    && (previous.active || !membership.active)
+            });
+            let held = self.memberships.values().any(|(m, _)| {
+                m.active
+                    && m.principal == mutation.actor
+                    && m.organization_scope == membership.organization_scope
+                    && m.capabilities.contains(&capability)
+            });
+            if !retained && !held {
+                return Err(IdentityFailureV1::PermissionDenied.into());
+            }
+        }
+        Ok(())
+    }
     pub(crate) fn apply(
         &mut self,
         mutation: &IdentityMutationV1,

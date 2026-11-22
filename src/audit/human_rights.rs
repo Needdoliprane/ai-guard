@@ -42,20 +42,26 @@ struct Genesis {
 /// Human read actions recorded under `control.identity.access` that may exist
 /// only after the marker. The existing actions keep their historical meaning.
 pub(crate) fn read_action_requires_marker(action: &str) -> bool {
-    matches!(
-        action,
-        "summary"
-            | "memberships"
-            | "quota"
-            | "usage"
-            | "configuration"
-            | "session_launch_options"
-            | "session_preparation"
-            | "session_launch_receipt"
-            | "session_messages"
-            | "session_attribution"
-    )
+    MARKER_READ_ACTIONS.contains(&action)
 }
+
+/// Every marker-fenced read action: the administration views and the
+/// session-control reads, with the exact strings their lots record.
+pub(crate) const MARKER_READ_ACTIONS: [&str; 13] = [
+    "summary",
+    "memberships",
+    "quota",
+    "usage",
+    "configuration",
+    "session_launch_options",
+    "session_preparation",
+    "session_launch_receipt",
+    "session_reviews",
+    "session_review",
+    "session_messages",
+    "session_message_receipt",
+    "session_attribution",
+];
 
 /// The validated marker, or `None` when the chain does not carry it. More than
 /// one marker, or one that differs from its durable prefix, is invalid.

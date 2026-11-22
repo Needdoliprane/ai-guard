@@ -669,3 +669,146 @@ fn the_operator_maintenance_requires_its_attestation_and_explains_each_refusal()
         cli_error(&old)
     );
 }
+
+#[test]
+fn approval_rights_pass_only_from_a_holder() {
+    use HumanCapabilityV1 as C;
+    let files = support::private_tempdir();
+    let path = files.path().join("tenant.sqlite");
+    let store = migrated(&path, true);
+    store
+        .migrate_human_rights_v2(&path.with_extension("exact13"))
+        .unwrap();
+    let (plain, plain_membership) = preparation(&[C::ManageMemberships, C::ReadMetadata]);
+    store.provision_local_human(&plain).unwrap();
+    let (holder, holder_membership) = preparation(&[
+        C::ManageMemberships,
+        C::ReadMetadata,
+        C::ApproveLaunch,
+        C::ApproveEgress,
+    ]);
+    store.provision_local_human(&holder).unwrap();
+    let (member, mut member_membership) = preparation(&[C::ReadMetadata]);
+    store.provision_local_human(&member).unwrap();
+    let plain_actor = Some(&plain_membership.principal);
+    let holder_actor = Some(&holder_membership.principal);
+    for capability in [C::ApproveLaunch, C::ApproveEgress] {
+        let head = store.head().unwrap();
+        assert_eq!(
+            refusal(store.mutate_identity(&membership_change(
+                plain_actor,
+                &member_membership,
+                &[C::ReadMetadata, capability],
+                true
+            ))),
+            Some(IdentityFailureV1::PermissionDenied),
+            "a non-holder never passes {capability:?} to another member"
+        );
+        assert_eq!(
+            refusal(store.mutate_identity(&membership_change(
+                plain_actor,
+                &plain_membership,
+                &[C::ManageMemberships, C::ReadMetadata, capability],
+                true
+            ))),
+            Some(IdentityFailureV1::PermissionDenied),
+            "a non-holder never grants {capability:?} to itself"
+        );
+        assert_eq!(store.head().unwrap(), head);
+        let mut granted = member_membership.capabilities.clone();
+        granted.insert(capability);
+        let granted: Vec<C> = granted.into_iter().collect();
+        store
+            .mutate_identity(&membership_change(
+                holder_actor,
+                &member_membership,
+                &granted,
+                true,
+            ))
+            .unwrap_or_else(|error| panic!("a holder passes {capability:?}: {error:#}"));
+        member_membership = next(&member_membership, &granted, true);
+    }
+    // A holder that removes a right from itself cannot reactivate it.
+    store
+        .mutate_identity(&membership_change(
+            holder_actor,
+            &holder_membership,
+            &[C::ManageMemberships, C::ReadMetadata, C::ApproveLaunch],
+            true,
+        ))
+        .unwrap();
+    let removed = next(
+        &holder_membership,
+        &[C::ManageMemberships, C::ReadMetadata, C::ApproveLaunch],
+        true,
+    );
+    assert_eq!(
+        refusal(store.mutate_identity(&membership_change(
+            holder_actor,
+            &removed,
+            &[
+                C::ManageMemberships,
+                C::ReadMetadata,
+                C::ApproveLaunch,
+                C::ApproveEgress
+            ],
+            true
+        ))),
+        Some(IdentityFailureV1::PermissionDenied),
+        "approve_egress is not self-reactivated after removal"
+    );
+    drop(store);
+    // Every accepted change replays at reopen.
+    let reopened =
+        Store::open_existing_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 1000).unwrap();
+    assert!(reopened.healthy());
+}
+
+#[test]
+fn rebinding_a_tombstoned_resource_advances_the_revision() {
+    let files = support::private_tempdir();
+    let path = files.path().join("tenant.sqlite");
+    let store = migrated(&path, true);
+    store
+        .migrate_human_rights_v2(&path.with_extension("exact13"))
+        .unwrap();
+    let (a, a_membership) = preparation(&[HumanCapabilityV1::ReadMetadata]);
+    store.provision_local_human(&a).unwrap();
+    known_session(&store, "session-bound-twice");
+    let bound = session_grant(&a_membership.principal, "session-bound-twice", vec![], 1);
+    store
+        .mutate_identity(&control(IdentityChangeV1::ResourceGrant {
+            expected_revision: 0,
+            grant: bound.clone(),
+        }))
+        .unwrap();
+    let first = store.identity_authorization_revision().unwrap();
+    store
+        .mutate_identity(&control(IdentityChangeV1::ResourceGrant {
+            expected_revision: 1,
+            grant: ResourceGrantV1 {
+                revision: 2,
+                active: false,
+                ..bound.clone()
+            },
+        }))
+        .unwrap();
+    let tombstoned = store.identity_authorization_revision().unwrap();
+    assert_eq!(tombstoned, first + 1, "a tombstone withdraws rights");
+    store
+        .mutate_identity(&control(IdentityChangeV1::ResourceGrant {
+            expected_revision: 2,
+            grant: ResourceGrantV1 {
+                revision: 3,
+                ..bound
+            },
+        }))
+        .unwrap();
+    assert_eq!(
+        store.identity_authorization_revision().unwrap(),
+        tombstoned + 1,
+        "only a first binding keeps the revision; a re-binding is a new authorization"
+    );
+    drop(store);
+    Store::open_existing_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 1000).unwrap();
+}
