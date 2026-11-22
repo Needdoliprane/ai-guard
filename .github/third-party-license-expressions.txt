@@ -33,10 +33,15 @@ Zlib
 Zlib OR Apache-2.0 OR MIT
 
 # Crates whose published package ships no licence text. The upstream text is committed under
-# third-party-notices/ and its SHA-256 is checked on every run. Provenance, fetched 2026-11-22:
-#  - keyed_priority_queue 0.4.2: https://raw.githubusercontent.com/AngelicosPhosphoros/keyed_priority_queue/v0.4.2/LICENSE.md (MIT, copyright holder named in the text)
-#  - rsqlite-vfs 0.2.0: https://raw.githubusercontent.com/Spxg/sqlite-wasm-rs/master/LICENSE at commit 27faf7c5c7b12d03c6e8f3b1ba916cc02d977f4e (MIT; the repository root licence of the workspace that publishes the crate, not a per-version tag)
-#  - r-efi 5.3.0 / 6.0.0: https://raw.githubusercontent.com/r-efi/r-efi/v5.3.0/AUTHORS and .../v6.0.0/AUTHORS (the upstream AUTHORS file holds the MIT, Apache-2.0 and LGPL-2.1+ statement and the copyright holders; the repository has no separate LICENSE file)
+# third-party-notices/ and its SHA-256 is checked on every run. Sources at the revisions
+# recorded in the packages' .cargo_vcs_info.json, verified 2026-11-22:
+# keyed_priority_queue 0.4.2 (MIT)
+# https://raw.githubusercontent.com/AngelicosPhosphoros/keyed_priority_queue/2656a970a1ff174010bb8ebfb676f922d2d59599/LICENSE.md
+# rsqlite-vfs 0.2.0 (MIT, workspace root licence)
+# https://raw.githubusercontent.com/Spxg/sqlite-wasm-rs/3d8318430bacd7d6a1aafdf5b5e54fb0fee8d451/LICENSE
+# r-efi 5.3.0 and 6.0.0 (upstream AUTHORS files including the MIT text and copyright holders)
+# https://raw.githubusercontent.com/r-efi/r-efi/97b55bed1c2c91dcbf787674849f05337ff80b33/AUTHORS
+# https://raw.githubusercontent.com/r-efi/r-efi/7e1b0322d31d625f81a5656096330934f9cd835d/AUTHORS
 supplement: keyed_priority_queue 0.4.2 keyed_priority_queue-0.4.2.LICENSE.md 824f627ec8266fa82057490c3d0982c9b327dca9de1c3c77ebb0128a13621a13
 supplement: rsqlite-vfs 0.2.0 rsqlite-vfs-0.2.0.LICENSE e1c1975c3474cce31722836f101a40ffaf1cc784e4d2f38ce3e77b9712934e78
 supplement: r-efi 5.3.0 r-efi-5.3.0.AUTHORS ff92bed461f50338dd703a9ba9aee496a425957873df1d91192776e4bdf5dda7
