@@ -60,9 +60,6 @@ impl RetainedEffectClaimV2 {
             authority_fingerprint: authority.fingerprint(),
         })
     }
-    pub(in crate::runtime::kubernetes) fn ack(&self) -> &KubernetesSessionEffectClaimAckV2 {
-        &self.ack
-    }
 }
 
 /// The single production implementor of the sealed effect guard.

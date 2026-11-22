@@ -2,8 +2,8 @@
 //! broker bindings and real reservations with synthetic metadata. The
 //! request digests come from the runtime builders that send the same
 //! requests (their exact bodies are pinned by the runtime tests). No cluster.
-use crate::audit::kubernetes_session::tests::{intent as session_intent, policy, prepare};
 use super::*;
+use crate::audit::kubernetes_session::tests::{intent as session_intent, policy, prepare};
 use crate::{
     audit::kubernetes_admission_state_tests::Fixture,
     control::QuotaPolicyV1,
@@ -406,6 +406,12 @@ fn quota_is_released_only_by_a_settlement_after_every_observed_end() {
     let state = chain.settle().unwrap();
     assert!(state.settled);
     assert_eq!(held(), 0);
+    assert_eq!(
+        f.store
+            .kubernetes_session_effect_state(&f.identity, chain.intent.reservation_id())
+            .unwrap(),
+        state
+    );
     // After settlement only cleanup is admitted.
     assert!(chain.claim(&chain.pod_create()).is_err());
     // The freed quota admits another reservation.

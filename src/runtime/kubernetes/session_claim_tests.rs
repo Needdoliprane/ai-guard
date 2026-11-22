@@ -205,6 +205,18 @@ async fn create_posts_the_exact_claim_once_and_a_validated_201_yields_its_uid() 
     assert_eq!(created.uid(), CLAIM_UID);
     assert_eq!(created.resource_version(), "7");
     assert_eq!(created.claim_name(), case.request.target().claim_name());
+    // The later bound observation must be this very object.
+    let bound = |uid: &str| {
+        KubernetesSessionWorkspaceClaimV2::retained_from_value(json!({
+            "version":1,"authority_fingerprint":case.intent.authority().fingerprint(),
+            "namespace":"tenant-a","name":case.request.target().claim_name(),"uid":uid,
+            "resource_version":"9","storage_class_name":"ai-guard-rwop",
+            "volume_name":"pvc-55555555-5555-4555-8555-555555555555","capacity":"1Gi",
+            "access_mode":"ReadWriteOncePod","observed_at":"2026-11-21T19:00:01.000Z"}))
+        .unwrap()
+    };
+    assert!(created.is_observed_as(&bound(CLAIM_UID)));
+    assert!(!created.is_observed_as(&bound("66666666-6666-4666-8666-666666666666")));
     let effects = case.effects();
     assert_eq!(effects.len(), 1);
     assert_eq!(effects[0].line(), format!("POST {CREATE}"));
@@ -268,12 +280,15 @@ async fn every_unproven_answer_keeps_ownership_unknown_without_a_second_post() {
         let case = Case::new().await;
         case.respond(move |request: &PeerRequest| reply(request));
         let outcome = case.create(case.create_guard(), false).await.unwrap();
-        assert!(
-            matches!(
-                outcome,
-                SessionClaimCreateOutcomeV2::OwnershipUnknown { .. }
-            ),
-            "{label}: {outcome:?}"
+        let SessionClaimCreateOutcomeV2::OwnershipUnknown { http_status, cause } = outcome else {
+            panic!("{label}: {outcome:?}");
+        };
+        // A lost answer has no status; every received answer keeps its own.
+        assert_eq!(http_status.is_none(), label == "lost answer", "{label}");
+        assert_ne!(
+            cause,
+            KubernetesSessionRuntimeError::EffectRefusedBeforeSend,
+            "{label}"
         );
         assert_eq!(case.effects().len(), 1, "{label}: exactly one POST");
     }
