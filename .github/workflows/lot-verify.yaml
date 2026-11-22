@@ -89,7 +89,7 @@ jobs:
             identity::operations::tests::owned_event_availability_preserves_granted_permissions
             broker::writer::inventory_tests::completed_inventory_releases_its_permit_before_reply
             broker::writer::inventory_tests::timed_out_inventory_keeps_one_permit_and_cannot_queue_a_series_before_cancel
-            broker::writer::status_projection_tests::missing_shared_scope_inventory_interrupted_still_closes_the_cached_view
+            broker::writer::status_projection_tests::coverage_only_pending_arm_does_not_taint_a_valid_last_confirmed_status
             "$settlement"
           )
           expected=9
