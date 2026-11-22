@@ -66,13 +66,14 @@ jobs:
         run: |
           set -o pipefail
           export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
-          cargo test --locked --offline --no-default-features --features mysql-storage --lib -- --exact --test-threads=1 \
+          cargo test --locked --offline --no-default-features --features mysql-storage --no-fail-fast --lib --bin agentsandbox -- --exact --test-threads=1 \
             gateway_config::tests::mysql_private_material_is_read_once_and_never_printed \
             gateway_config::tests::mysql_private_material_refuses_shared_oversized_or_malformed_files \
             gateway_config::tests::owned_sources_are_refused_explicitly_on_a_mysql_tenant \
             diagnostics::tenants::tests::a_mysql_private_reference_does_not_open_as_a_gateway_ca \
             2>&1 | tee cargo-test.log
-          grep -Fq 'test result: ok. 4 passed; 0 failed;' cargo-test.log
+          grep -Fq 'test result: ok. 1 passed; 0 failed;' cargo-test.log
+          grep -Fq 'test result: ok. 3 passed; 0 failed;' cargo-test.log
       - name: SQLite-only MySQL reference protection regression
         if: ${{ !cancelled() && (steps.g06_mysql.outcome == 'success' || steps.g06_mysql.outcome == 'failure') }}
         shell: bash
