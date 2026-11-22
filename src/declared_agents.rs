@@ -10,11 +10,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_ID_BYTES: usize = 256;
 
-#[derive(Default)]
+/// Serializable so that audit retention can persist and resume the fold.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeclaredAgentProjection {
     agents: BTreeMap<String, DeclaredAgent>,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Namespace {
     session_id: String,
     sandbox_id: String,
@@ -22,17 +26,19 @@ struct Namespace {
     source: String,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DeclaredAgent {
     namespace: Namespace,
     project_id: Option<String>,
     provider_agent_id: String,
     provider_parent_agent_id: Option<String>,
-    parent_warning: Option<&'static str>,
+    parent_warning: Option<String>,
     provider: Option<String>,
     name: String,
     model: Option<String>,
     task: Option<String>,
-    status: &'static str,
+    status: String,
     reported_state: Option<String>,
     started_at: Option<String>,
     last_activity: String,
@@ -86,7 +92,7 @@ impl DeclaredAgentProjection {
             provider: None,
             model: None,
             task: None,
-            status: "unknown",
+            status: "unknown".into(),
             reported_state: None,
             started_at: None,
             last_activity: event.timestamp.clone(),
@@ -104,7 +110,8 @@ impl DeclaredAgentProjection {
             }
             ParentUpdate::Invalid => {
                 agent.provider_parent_agent_id = None;
-                agent.parent_warning = Some("Identifiant parent invalide ou contradictoire.");
+                agent.parent_warning =
+                    Some("Identifiant parent invalide ou contradictoire.".into());
             }
         }
 
@@ -144,7 +151,8 @@ impl DeclaredAgentProjection {
                 Some("failed") => "error",
                 Some("stopped") => "stopped",
                 _ => "unknown",
-            };
+            }
+            .into();
             if state == Some("started") && agent.started_at.is_none() {
                 agent.started_at = Some(event.timestamp.clone());
             }
@@ -180,7 +188,7 @@ impl DeclaredAgentProjection {
                 } else if unresolved.is_some() {
                     Some("Parent déclaré absent de ce contexte d'exécution.")
                 } else {
-                    agent.parent_warning
+                    agent.parent_warning.as_deref()
                 };
                 json!({
                     "id": id,

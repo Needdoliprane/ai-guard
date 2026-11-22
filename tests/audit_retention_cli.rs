@@ -22,8 +22,11 @@ fn store13(dir: &Path) -> PathBuf {
     let data = dir.join("tenant-a.sqlite");
     let history = dir.join("history");
     std::fs::create_dir(&history).unwrap();
-    std::fs::set_permissions(&history, std::os::unix::fs::PermissionsExt::from_mode(0o700))
-        .unwrap();
+    std::fs::set_permissions(
+        &history,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
     let store = Store::open_for_tenant(&data, TENANT, Redactor::new(vec![]), MAX_EVENTS).unwrap();
     for (index, migrate) in [
         Store::migrate_control_v3,
@@ -41,7 +44,11 @@ fn store13(dir: &Path) -> PathBuf {
     .into_iter()
     .enumerate()
     {
-        migrate(&store, &history.join(format!("before-{}.sqlite", index + 3))).unwrap();
+        migrate(
+            &store,
+            &history.join(format!("before-{}.sqlite", index + 3)),
+        )
+        .unwrap();
     }
     for index in 0..5 {
         let mut event = Event::new("command.requested");
@@ -262,6 +269,7 @@ async fn plan_and_apply_refuse_history_younger_than_the_policy_floor() {
         os(TENANT),
         os("--policy"),
         below_floor.as_os_str(),
+        os("--without-signed-checkpoints"),
     ])
     .await;
     assert_eq!(invalid.status.code(), Some(2));
@@ -275,6 +283,7 @@ async fn plan_and_apply_refuse_history_younger_than_the_policy_floor() {
         os(TENANT),
         os("--policy"),
         policy.as_os_str(),
+        os("--without-signed-checkpoints"),
     ])
     .await;
     assert_eq!(planned.status.code(), Some(2), "{:?}", planned);
@@ -295,6 +304,7 @@ async fn plan_and_apply_refuse_history_younger_than_the_policy_floor() {
         os(&"0".repeat(64)),
         os("--archive-dir"),
         archive.as_os_str(),
+        os("--without-signed-checkpoints"),
         os("--confirm-control-stopped"),
     ])
     .await;

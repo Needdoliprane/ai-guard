@@ -26,6 +26,7 @@ mod files;
 mod format;
 mod keys;
 mod log;
+mod positions;
 mod report;
 #[cfg(test)]
 mod tests;
@@ -51,6 +52,7 @@ pub use format::{
 };
 pub use keys::{KeyOutcome, PublicKeyDocument, init_key, show_key};
 pub use log::IncompleteRecord;
+pub(crate) use positions::signed_positions;
 pub use report::{
     AnchorIdentity, DatabaseComparison, ErrorEntry, Failure, FailureClass, HeadSummary,
     ReferenceSummary, RollbackDetection, Scope, Verdict, VerificationReport, Warning,

@@ -357,11 +357,31 @@ fn load_registry_bytes(
 /// Pure validation of every configured tenant before opening/creating a Store
 /// or preparing any backup directory. Defaults come from the Store contract.
 pub fn validate_policies(tenants: &[ConfiguredTenant], max_events: u64) -> Result<()> {
+    validate_policies_for(
+        tenants,
+        max_events,
+        agentsandbox::audit::DEFAULT_PHYSICAL_BYTES,
+    )
+}
+
+/// `validate_policies` for an explicitly selected SQLite payload cap.
+pub fn validate_policies_for(
+    tenants: &[ConfiguredTenant],
+    max_events: u64,
+    physical_bytes: u64,
+) -> Result<()> {
     anyhow::ensure!(
         (1..=1_000_000).contains(&max_events),
         "max-events doit être compris entre 1 et 1000000"
     );
-    let defaults = agentsandbox::audit::AuditCapacityPolicyV1::resolved(max_events);
+    anyhow::ensure!(
+        (agentsandbox::audit::DEFAULT_PHYSICAL_BYTES
+            ..=agentsandbox::audit::MAX_SQLITE_PHYSICAL_BYTES)
+            .contains(&physical_bytes),
+        "audit-max-bytes doit être compris entre 256 Mio et 2 Gio"
+    );
+    let defaults =
+        agentsandbox::audit::AuditCapacityPolicyV1::resolved_for(max_events, physical_bytes);
     let mut credentials = BTreeSet::new();
     for tenant in tenants {
         tenant
@@ -397,11 +417,12 @@ pub fn validate_policies(tenants: &[ConfiguredTenant], max_events: u64) -> Resul
             );
         }
         if let Some(policy) = &tenant.audit_capacity_policy {
-            policy.validate(max_events)?;
+            policy.validate_for(max_events, physical_bytes)?;
         }
         if let Some(policy) = &tenant.workload_audit_policy {
-            policy.validate(
+            policy.validate_for(
                 max_events,
+                physical_bytes,
                 tenant.audit_capacity_policy.as_ref().unwrap_or(&defaults),
             )?;
         }

@@ -162,6 +162,10 @@ pub enum OperatorCommand {
         /// Audit SQLite database to compare with every trusted signed position.
         #[arg(long, requires = "checkpoint_dir")]
         data: Option<PathBuf>,
+        /// Retention archive of this tenant; repeat for every segment. Each is
+        /// verified against the retention ledger that the gateway reports.
+        #[arg(long)]
+        archive_dir: Vec<PathBuf>,
     },
     /// Write or verify the release manifest of a build source prepared as `build` prepares it.
     /// Starts no engine and opens no network connection; nothing is signed or uploaded.
@@ -655,6 +659,7 @@ pub async fn execute(command: OperatorCommand) -> Result<()> {
             checkpoint_dir,
             anchor,
             data,
+            archive_dir,
         } => {
             let viewer_token_file =
                 viewer_token_file.unwrap_or_else(|| config_dir.join("secrets/viewer"));
@@ -665,6 +670,28 @@ pub async fn execute(command: OperatorCommand) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&answer)?);
             if answer.get("valid").and_then(serde_json::Value::as_bool) != Some(true) {
                 bail!("audit chain verification failed");
+            }
+            let segments = answer
+                .pointer("/retention/segments")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0);
+            if segments > 0 || !archive_dir.is_empty() {
+                // A retained store verifies end to end only with its archives.
+                let ledger: crate::audit::retention::RetentionLedgerV1 =
+                    serde_json::from_value(answer["retention"].clone())
+                        .context("the gateway did not report its retention ledger")?;
+                let identity = AuditClient::new(&gateway, &token)?
+                    .get_json("api/identity")
+                    .await?;
+                let tenant_id = identity["tenant_id"]
+                    .as_str()
+                    .context("the gateway did not report the tenant")?;
+                let report =
+                    crate::audit::retention::verify_archive_chain(tenant_id, &ledger, &archive_dir);
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                if report.verdict != "verified" {
+                    bail!("audit retention archive verification failed");
+                }
             }
             if let (Some(checkpoint_dir), Some(anchor)) = (checkpoint_dir, anchor) {
                 use crate::audit::signed_checkpoint::{RecordSource, VerifyRequest, cli};

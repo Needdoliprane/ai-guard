@@ -243,6 +243,8 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     if matches!(version, 13 | 14 | 15) {
         super::kubernetes_admission::validate_recovery_marker(db)?;
     }
+    // The retention marker and every applied segment against the ledger.
+    super::retention::ledger::validate(db, version)?;
     let review_tenant: Option<String> = if matches!(version, 14 | 15) {
         Some(db.query_row(
             "SELECT tenant_id FROM tenant_binding WHERE singleton=1",
@@ -298,6 +300,14 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         .query_map([genesis_seq], row_event)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for stored in events {
+        if stored.event.kind.starts_with("control.audit_retention.") {
+            // Replayed in full by retention::ledger::validate above.
+            anyhow::ensure!(
+                super::retention::ledger::format_admits(version),
+                "audit retention requires schema13, 14 or 15"
+            );
+            continue;
+        }
         if stored.event.kind.starts_with("control.egress_policy.") {
             anyhow::ensure!(version == 15, "egress policy requires exact schema15");
             super::egress::marker(&stored.event)?;
@@ -1202,6 +1212,75 @@ impl Store {
     pub fn migrate_human_rights_v2(&self, backup_path: &Path) -> anyhow::Result<MigrationReportV1> {
         self.backed_up_maintenance(backup_path, Maintenance::HumanRights)
     }
+    /// Copy the store into a new private backup, under the caller's DB guard,
+    /// and prove that the copy has the same verified schema, quota and chain
+    /// head. `admits` checks the preflight snapshot before anything is
+    /// created. Returns the backup path, the verified head and the store
+    /// format; the caller must recheck that head in its own transaction.
+    pub(super) fn backup_verified(
+        &self,
+        db: &mut Connection,
+        backup_path: &Path,
+        admits: impl FnOnce(&Connection, i64) -> anyhow::Result<()>,
+    ) -> anyhow::Result<(std::path::PathBuf, super::Integrity, i64)> {
+        let preflight = self.begin_checked(db)?;
+        let version: i64 = preflight.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        admits(&preflight, version)?;
+        validate_schema(&preflight, false)?;
+        Self::validate_metadata(&preflight, &self.tenant_id)?;
+        let expected = Self::check_integrity(&preflight)?;
+        anyhow::ensure!(expected.valid, "cannot migrate corrupt audit");
+        self.commit_checked(preflight)?;
+        let (backup_backing, initialization_guard) = storage::StoreStorage::create_new(backup_path)
+            .context("create new migration backup destination")?;
+        let target = backup_backing.path().to_path_buf();
+        self.backing.verify(db)?;
+        let mut destination = Connection::open_with_flags(
+            &target,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        backup_backing.verify(&destination)?;
+        destination.busy_timeout(std::time::Duration::from_secs(1))?;
+        destination.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA synchronous=FULL;")?;
+        {
+            let backup = rusqlite::backup::Backup::new(db, &mut destination)?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                // Backup borrows destination mutably. Filesystem checks here
+                // never open/close main or SHM descriptors held by SQLite;
+                // HAS_MOVED runs on destination before and after this borrow.
+                backup_backing.verify_names()?;
+                self.backing.verify(db)?;
+                if backup.step(256)? == rusqlite::backup::StepResult::Done {
+                    break;
+                }
+                anyhow::ensure!(
+                    std::time::Instant::now() < deadline,
+                    "migration backup deadline exceeded"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        backup_backing.verify(&destination)?;
+        self.backing.verify(db)?;
+        validate_schema(&destination, false)?;
+        Self::validate_metadata(&destination, &self.tenant_id)?;
+        let backed = Self::check_integrity(&destination)?;
+        anyhow::ensure!(
+            backed.valid
+                && backed.event_count == expected.event_count
+                && backed.head_hash == expected.head_hash,
+            "migration backup does not match preflight audit"
+        );
+        let quick: String = destination.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+        anyhow::ensure!(quick == "ok", "migration backup SQLite integrity failure");
+        backup_backing.verify(&destination)?;
+        destination.close().map_err(|(_, error)| error)?;
+        // The destination is fresh and its SQLite connection is now closed.
+        // The initialization guard remains held through synchronization.
+        backup_backing.sync_closed(&initialization_guard)?;
+        Ok((target, expected, version))
+    }
     pub(super) fn migrate_control_version(
         &self,
         backup_path: &Path,
@@ -1228,84 +1307,35 @@ impl Store {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let preflight = self.begin_checked(&mut db)?;
-        let version: i64 = preflight.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        let (target, expected, version) =
+            self.backup_verified(&mut db, backup_path, |preflight, version| match step {
+                Maintenance::Version { from_version, .. } => {
+                    invalid(version == i64::from(from_version))
+                }
+                Maintenance::HumanRights => {
+                    // Legacy stores only; an owned 14/15 store receives the
+                    // marker through its journaled source maintenance.
+                    anyhow::ensure!(
+                        (10..=13).contains(&version),
+                        "migrate-human-rights requires the worker registry marker: store formats 10 to 13 (this store is format {version}; run migrate-control up to --target-version 10 first)"
+                    );
+                    anyhow::ensure!(
+                        super::human_rights::maintenance_pending(preflight)?,
+                        "the human rights marker is already installed on this store; nothing was changed"
+                    );
+                    Ok(())
+                }
+            })?;
         let (from_version, to_version) = match step {
             Maintenance::Version {
                 from_version,
                 to_version,
-            } => {
-                invalid(version == i64::from(from_version))?;
-                (from_version, to_version)
-            }
+            } => (from_version, to_version),
             Maintenance::HumanRights => {
-                // Legacy stores only; an owned 14/15 store receives the marker
-                // through its journaled source maintenance.
-                anyhow::ensure!(
-                    (10..=13).contains(&version),
-                    "migrate-human-rights requires the worker registry marker: store formats 10 to 13 (this store is format {version}; run migrate-control up to --target-version 10 first)"
-                );
-                anyhow::ensure!(
-                    super::human_rights::maintenance_pending(&preflight)?,
-                    "the human rights marker is already installed on this store; nothing was changed"
-                );
                 let version = u32::try_from(version)?;
                 (version, version)
             }
         };
-        validate_schema(&preflight, false)?;
-        Self::validate_metadata(&preflight, &self.tenant_id)?;
-        let expected = Self::check_integrity(&preflight)?;
-        anyhow::ensure!(expected.valid, "cannot migrate corrupt audit");
-        self.commit_checked(preflight)?;
-        let (backup_backing, initialization_guard) = storage::StoreStorage::create_new(backup_path)
-            .context("create new migration backup destination")?;
-        let target = backup_backing.path().to_path_buf();
-        self.backing.verify(&db)?;
-        let mut destination = Connection::open_with_flags(
-            &target,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )?;
-        backup_backing.verify(&destination)?;
-        destination.busy_timeout(std::time::Duration::from_secs(1))?;
-        destination.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA synchronous=FULL;")?;
-        {
-            let backup = rusqlite::backup::Backup::new(&db, &mut destination)?;
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            loop {
-                // Backup borrows destination mutably. Filesystem checks here
-                // never open/close main or SHM descriptors held by SQLite;
-                // HAS_MOVED runs on destination before and after this borrow.
-                backup_backing.verify_names()?;
-                self.backing.verify(&db)?;
-                if backup.step(256)? == rusqlite::backup::StepResult::Done {
-                    break;
-                }
-                anyhow::ensure!(
-                    std::time::Instant::now() < deadline,
-                    "migration backup deadline exceeded"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-        }
-        backup_backing.verify(&destination)?;
-        self.backing.verify(&db)?;
-        validate_schema(&destination, false)?;
-        Self::validate_metadata(&destination, &self.tenant_id)?;
-        let backed = Self::check_integrity(&destination)?;
-        anyhow::ensure!(
-            backed.valid
-                && backed.event_count == expected.event_count
-                && backed.head_hash == expected.head_hash,
-            "migration backup does not match preflight audit"
-        );
-        let quick: String = destination.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
-        anyhow::ensure!(quick == "ok", "migration backup SQLite integrity failure");
-        backup_backing.verify(&destination)?;
-        destination.close().map_err(|(_, error)| error)?;
-        // The destination is fresh and its SQLite connection is now closed.
-        // The initialization guard remains held through synchronization.
-        backup_backing.sync_closed(&initialization_guard)?;
         // A separate connection may have appended while the backup was copied.
         // Recheck the exact backed head before any DDL; never migrate past it.
         let mut tx = self.begin_checked(&mut db)?;

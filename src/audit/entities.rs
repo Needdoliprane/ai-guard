@@ -12,12 +12,36 @@ pub(crate) struct Projection {
     declared: DeclaredAgentProjection,
 }
 
+/// Resumable state of a projection, persisted by audit retention snapshots.
+/// Its field layout is part of `RetentionSnapshotV1` version 1.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProjectionStateV1 {
+    pub(crate) items: BTreeMap<String, Value>,
+    pub(crate) declared: DeclaredAgentProjection,
+}
+
 impl Projection {
     pub(crate) fn new(sandboxes: bool) -> Self {
         Self {
             sandboxes,
             items: BTreeMap::new(),
             declared: DeclaredAgentProjection::default(),
+        }
+    }
+
+    pub(crate) fn from_state(sandboxes: bool, state: ProjectionStateV1) -> Self {
+        Self {
+            sandboxes,
+            items: state.items,
+            declared: state.declared,
+        }
+    }
+
+    pub(crate) fn state(&self) -> ProjectionStateV1 {
+        ProjectionStateV1 {
+            items: self.items.clone(),
+            declared: self.declared.clone(),
         }
     }
 

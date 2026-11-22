@@ -4,6 +4,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub(crate) const PHYSICAL_BYTES: u64 = 256 * 1024 * 1024;
+/// Largest payload cap that an operator may select for a SQLite tenant store.
+/// A larger store lengthens every full validation at open and after an
+/// external change; MySQL keeps `PHYSICAL_BYTES` until its verification is
+/// incremental.
+pub const MAX_SQLITE_PHYSICAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Default and smallest selectable payload cap of a tenant store.
+pub const DEFAULT_PHYSICAL_BYTES: u64 = PHYSICAL_BYTES;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -63,9 +70,13 @@ impl AuditCapacityPolicyV1 {
     /// Automatic defaults, including disabled reads for very small capacities.
     /// An explicit operator policy must separately pass `validate`.
     pub fn resolved(max_events: u64) -> Self {
+        Self::resolved_for(max_events, PHYSICAL_BYTES)
+    }
+    /// Defaults for an explicitly selected payload cap.
+    pub fn resolved_for(max_events: u64, physical_bytes: u64) -> Self {
         let physical = AuditCapacityV1 {
             events: max_events,
-            bytes: PHYSICAL_BYTES,
+            bytes: physical_bytes,
         };
         Self {
             version: 1,
@@ -79,6 +90,10 @@ impl AuditCapacityPolicyV1 {
     /// Small-capacity automatic defaults are resolved internally, not accepted
     /// as an explicit policy that silently disables human access.
     pub fn validate(&self, max_events: u64) -> anyhow::Result<()> {
+        self.validate_for(max_events, PHYSICAL_BYTES)
+    }
+    /// `validate` against an explicitly selected payload cap.
+    pub fn validate_for(&self, max_events: u64, physical_bytes: u64) -> anyhow::Result<()> {
         anyhow::ensure!(max_events <= i64::MAX as u64, "invalid audit capacity");
         anyhow::ensure!(
             self.version == 1,
@@ -86,7 +101,7 @@ impl AuditCapacityPolicyV1 {
         );
         let physical = AuditCapacityV1 {
             events: max_events,
-            bytes: PHYSICAL_BYTES,
+            bytes: physical_bytes,
         };
         anyhow::ensure!(
             self.control_reserve.positive()

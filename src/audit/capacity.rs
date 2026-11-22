@@ -16,9 +16,16 @@ impl WorkloadAuditPolicyV1 {
     /// Automatic defaults fit the operator's existing C+I reserves. A very
     /// small remainder disables workload admission without invalidating F1.
     pub fn resolved(max_events: u64, control: &AuditCapacityPolicyV1) -> Self {
+        Self::resolved_for(max_events, PHYSICAL_BYTES, control)
+    }
+    pub fn resolved_for(
+        max_events: u64,
+        physical_bytes: u64,
+        control: &AuditCapacityPolicyV1,
+    ) -> Self {
         let physical = AuditCapacityV1 {
             events: max_events,
-            bytes: PHYSICAL_BYTES,
+            bytes: physical_bytes,
         };
         let available = AuditCapacityV1 {
             events: physical.events.saturating_sub(
@@ -67,13 +74,21 @@ impl WorkloadAuditPolicyV1 {
             && self.principal.bytes < self.tenant.bytes
     }
     pub fn validate(&self, max_events: u64, control: &AuditCapacityPolicyV1) -> anyhow::Result<()> {
+        self.validate_for(max_events, PHYSICAL_BYTES, control)
+    }
+    pub fn validate_for(
+        &self,
+        max_events: u64,
+        physical_bytes: u64,
+        control: &AuditCapacityPolicyV1,
+    ) -> anyhow::Result<()> {
         anyhow::ensure!(
             max_events <= i64::MAX as u64 && self.version == 1 && self.enabled(),
             "invalid workload audit policy version or budgets"
         );
         let physical = AuditCapacityV1 {
             events: max_events,
-            bytes: PHYSICAL_BYTES,
+            bytes: physical_bytes,
         };
         let available =
             physical.subtract(control.control_reserve.add(control.identity_reserve)?)?;
@@ -127,6 +142,8 @@ pub(super) enum Class<'a> {
     OrdinaryWrite,
     ControlWrite,
     IdentityMaintenance,
+    /// Offline retention records, admitted after their own reclaim.
+    RetentionMaintenance,
     EgressTerminal(&'a super::egress::TerminalReservation<'a>),
     Workload(WorkloadAuditPrincipalV1),
 }
@@ -155,7 +172,12 @@ impl Cache {
     /// transaction snapshot. The suffix may include uncommitted appends, so
     /// its counters stay separate until commit/backing checks have succeeded.
     pub(super) fn prepare(&mut self, db: &Connection) -> anyhow::Result<Prepared> {
-        let (after, expected) = self.head.clone().unwrap_or((0, "0".repeat(64)));
+        // A retained store starts its budgets at the last retention boundary:
+        // the closed prefix below it is sparse and no longer counted.
+        let (after, expected) = match self.head.clone() {
+            Some(head) => head,
+            None => super::retention::ledger::base(db)?,
+        };
         let actual = if after == 0 {
             "0".repeat(64)
         } else {
@@ -280,7 +302,9 @@ impl Cache {
             Class::Workload(_) => {
                 anyhow::bail!("workload audit requires its private admission policy")
             }
-            Class::IdentityMaintenance | Class::EgressTerminal(_) => Ok(()),
+            Class::IdentityMaintenance | Class::RetentionMaintenance | Class::EgressTerminal(_) => {
+                Ok(())
+            }
             Class::OrdinaryWrite => policy.admit_write(physical, next, ReservedWrite::Ordinary),
             Class::ControlWrite => policy.admit_write(physical, next, ReservedWrite::Control),
             Class::HumanRead(principal) => {
@@ -342,19 +366,54 @@ impl Cache {
 
 impl Store {
     /// Select an immutable operator policy before creating any sibling or Arc.
+    /// Select the payload cap of this SQLite store, between 256 MiB and 2 GiB,
+    /// before any capacity policy and before sharing the Store. Defaults are
+    /// resolved again for that cap.
+    pub fn with_physical_bytes(mut self, physical_bytes: u64) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            (super::capacity_policy::DEFAULT_PHYSICAL_BYTES
+                ..=super::capacity_policy::MAX_SQLITE_PHYSICAL_BYTES)
+                .contains(&physical_bytes),
+            "the audit payload cap must be between 256 MiB and 2 GiB"
+        );
+        anyhow::ensure!(
+            Arc::strong_count(&self.supervision_lease) == 1
+                && self.capacity_policy
+                    == AuditCapacityPolicyV1::resolved_for(self.max_events, self.physical_bytes)
+                && !self.workload_audit_policy_explicit,
+            "select the audit payload cap before any capacity policy and before sharing the Store"
+        );
+        self.physical_bytes = physical_bytes;
+        self.capacity_policy = AuditCapacityPolicyV1::resolved_for(self.max_events, physical_bytes);
+        self.workload_audit_policy = WorkloadAuditPolicyV1::resolved_for(
+            self.max_events,
+            physical_bytes,
+            &self.capacity_policy,
+        );
+        Ok(self)
+    }
+    pub fn physical_bytes(&self) -> u64 {
+        self.physical_bytes
+    }
     pub fn with_capacity_policy(mut self, policy: AuditCapacityPolicyV1) -> anyhow::Result<Self> {
-        policy.validate(self.max_events)?;
+        policy.validate_for(self.max_events, self.physical_bytes)?;
         anyhow::ensure!(
             Arc::strong_count(&self.supervision_lease) == 1,
             "audit capacity policy must be selected before sharing the Store"
         );
         self.capacity_policy = policy;
         if self.workload_audit_policy_explicit {
-            self.workload_audit_policy
-                .validate(self.max_events, &self.capacity_policy)?;
+            self.workload_audit_policy.validate_for(
+                self.max_events,
+                self.physical_bytes,
+                &self.capacity_policy,
+            )?;
         } else {
-            self.workload_audit_policy =
-                WorkloadAuditPolicyV1::resolved(self.max_events, &self.capacity_policy);
+            self.workload_audit_policy = WorkloadAuditPolicyV1::resolved_for(
+                self.max_events,
+                self.physical_bytes,
+                &self.capacity_policy,
+            );
         }
         Ok(self)
     }
@@ -376,7 +435,7 @@ impl Store {
         mut self,
         policy: WorkloadAuditPolicyV1,
     ) -> anyhow::Result<Self> {
-        policy.validate(self.max_events, &self.capacity_policy)?;
+        policy.validate_for(self.max_events, self.physical_bytes, &self.capacity_policy)?;
         anyhow::ensure!(
             Arc::strong_count(&self.supervision_lease) == 1,
             "workload audit policy must be selected before sharing the Store"
