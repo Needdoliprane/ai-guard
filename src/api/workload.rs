@@ -476,6 +476,17 @@ pub(super) fn reject_control_collision(
             _ => (),
         }
     }
+    // A concurrent verified read may have published a positive while this
+    // scan was waiting for another store.
+    #[cfg(feature = "mysql-storage")]
+    if state
+        .tenants
+        .iter()
+        .filter_map(|tenant| tenant.store.mysql())
+        .any(|mysql| known_mysql_collision(mysql, &digest))
+    {
+        return Err(ambiguous());
+    }
     Ok(())
 }
 
