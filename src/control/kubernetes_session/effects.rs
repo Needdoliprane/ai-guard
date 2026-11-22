@@ -208,7 +208,10 @@ impl KubernetesSessionEffectClaimAckV2 {
 pub enum KubernetesSessionEffectOutcomeV2 {
     Applied {
         object_uid: String,
-        resource_version: String,
+        /// The resourceVersion carried by the answer: required for a CREATE
+        /// (201) and a gate release (200). `None` when the runtime does not
+        /// read it (attach, DELETE, finalizer PATCH): never an invented value.
+        resource_version: Option<String>,
     },
     /// The request was answered without effect (failed `test`, failed
     /// precondition, or 404 of a DELETE/PATCH at the exact name).
@@ -250,7 +253,11 @@ impl KubernetesSessionEffectResultV2 {
                 resource_version,
             } => {
                 uuid(object_uid)?;
-                require(valid_resource_version(resource_version))
+                require(
+                    resource_version
+                        .as_deref()
+                        .is_none_or(valid_resource_version),
+                )
             }
             KubernetesSessionEffectOutcomeV2::NotApplied { http_status } => {
                 require(matches!(http_status, 404 | 409 | 422))

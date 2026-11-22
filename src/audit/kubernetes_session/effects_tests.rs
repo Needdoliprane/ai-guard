@@ -194,7 +194,7 @@ impl<'a> Chain<'a> {
             &ack,
             KubernetesSessionEffectOutcomeV2::Applied {
                 object_uid: uid.into(),
-                resource_version: "45".into(),
+                resource_version: Some("45".into()),
             },
         )
         .unwrap();
@@ -378,12 +378,27 @@ fn the_chain_is_ordered_and_a_claim_uid_is_never_reused() {
         failure(chain.claim(&chain.pod_create()).unwrap_err()),
         Failure::Conflict
     );
+    // A CREATE answer always carries a resourceVersion: none is refused.
+    assert_eq!(
+        failure(
+            chain
+                .result(
+                    &claim,
+                    KubernetesSessionEffectOutcomeV2::Applied {
+                        object_uid: CLAIM_UID.into(),
+                        resource_version: None,
+                    },
+                )
+                .unwrap_err()
+        ),
+        Failure::InvalidRequest
+    );
     let state = chain
         .result(
             &claim,
             KubernetesSessionEffectOutcomeV2::Applied {
                 object_uid: CLAIM_UID.into(),
-                resource_version: "7".into(),
+                resource_version: Some("7".into()),
             },
         )
         .unwrap();
@@ -407,7 +422,7 @@ fn the_chain_is_ordered_and_a_claim_uid_is_never_reused() {
                     &other_claim,
                     KubernetesSessionEffectOutcomeV2::Applied {
                         object_uid: CLAIM_UID.into(),
-                        resource_version: "8".into(),
+                        resource_version: Some("8".into()),
                     },
                 )
                 .unwrap_err()

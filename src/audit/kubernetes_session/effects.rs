@@ -723,6 +723,13 @@ impl Store {
             )?;
             let mut post = state.clone();
             match (&result.outcome, step.action) {
+                (
+                    KubernetesSessionEffectOutcomeV2::Applied {
+                        resource_version: None,
+                        ..
+                    },
+                    Action::Create | Action::ReleaseGate,
+                ) => return Err(Failure::InvalidRequest.into()),
                 (KubernetesSessionEffectOutcomeV2::Applied { object_uid, .. }, Action::Create) => {
                     let slot = match step.subject {
                         Subject::WorkspaceClaim => &mut post.workspace_claim_uid,

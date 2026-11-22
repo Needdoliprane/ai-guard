@@ -217,7 +217,7 @@ fn results_terminals_and_settlements_are_closed_values() {
     };
     result(KubernetesSessionEffectOutcomeV2::Applied {
         object_uid: POD_UID.into(),
-        resource_version: "42".into(),
+        resource_version: Some("42".into()),
     })
     .validate()
     .unwrap();
