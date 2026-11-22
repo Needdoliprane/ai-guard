@@ -584,8 +584,14 @@ impl Store {
         if filter.export {
             predicates.push(allowed(&current, ResourcePermissionV1::Export));
         }
+        // Keep the exact ID lookup eligible for the unique event ID index.
+        let event_id_predicate = if filter.event_id.is_some() {
+            "e.id=:event_id"
+        } else {
+            ":event_id IS NULL"
+        };
         let sql = format!(
-            "SELECT e.seq,e.payload,e.received_at,r.resource_kind,r.resource_id FROM events e JOIN identity_resources r ON r.resource_kind=CASE WHEN json_extract(e.payload,'$.session_id') IS NOT NULL THEN 'session' WHEN e.sandbox_id IS NOT NULL THEN 'sandbox' WHEN e.agent_id IS NOT NULL THEN 'agent' ELSE 'project' END AND r.resource_id=COALESCE(json_extract(e.payload,'$.session_id'),e.sandbox_id,e.agent_id,e.project_id) WHERE e.seq>:after AND e.seq<=:upper AND e.kind NOT GLOB 'control.identity.*' AND r.active=1 AND json_extract(r.payload_json,'$.organization_scope')=:organization AND (:resource_kind IS NULL OR r.resource_kind=:resource_kind) AND (:resource_id IS NULL OR r.resource_id=:resource_id) AND (:event_id IS NULL OR e.id=:event_id) AND {} ORDER BY e.seq LIMIT :limit",
+            "SELECT e.seq,e.payload,e.received_at,r.resource_kind,r.resource_id FROM events e JOIN identity_resources r ON r.resource_kind=CASE WHEN json_extract(e.payload,'$.session_id') IS NOT NULL THEN 'session' WHEN e.sandbox_id IS NOT NULL THEN 'sandbox' WHEN e.agent_id IS NOT NULL THEN 'agent' ELSE 'project' END AND r.resource_id=COALESCE(json_extract(e.payload,'$.session_id'),e.sandbox_id,e.agent_id,e.project_id) WHERE e.seq>:after AND e.seq<=:upper AND e.kind NOT GLOB 'control.identity.*' AND r.active=1 AND json_extract(r.payload_json,'$.organization_scope')=:organization AND (:resource_kind IS NULL OR r.resource_kind=:resource_kind) AND (:resource_id IS NULL OR r.resource_id=:resource_id) AND {event_id_predicate} AND {} ORDER BY e.seq LIMIT :limit",
             predicates.join(" AND ")
         );
         let key = current.principal().key()?;

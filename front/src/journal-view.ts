@@ -224,7 +224,7 @@ export class JournalView {
       "Historique de métadonnées à l’heure de lecture. Actualiser relit les plus récents ; le retour dans l’onglet conserve une revalidation ponctuelle, sans flux ni actualisation périodique." :
       positive ? "Le direct part exactement après la page lue : il ne rejoue pas l’historique. Chaque page et chaque lot en direct laissent un reçu durable de lecture." :
         "Le mode de suivi est indiqué après une lecture réussie. Une lecture en échec ne signifie pas une absence d’activité.");
-    setText(this.#coverageHelp, snapshot ? "Métadonnées uniquement pour ce profil : contenu, détail d’événement et export indisponibles, même si les droits correspondants sont accordés." :
+    setText(this.#coverageHelp, snapshot ? "Métadonnées uniquement pour ce profil. Le contenu et l’export sont indisponibles, même si les droits correspondants sont accordés." :
       positive ? "Pour le contenu ou l’export d’une ressource précise, utilisez l’onglet Événements depuis Ressources." :
         "La lecture précisera le profil disponible pour ce contexte. Les permissions restent vérifiées par le contrôle.");
     setText(this.#caption, snapshot || !positive ? "Les plus récents en tête · historique à l’heure de lecture" :

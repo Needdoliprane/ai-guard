@@ -252,7 +252,7 @@ mod extended {
     fn events_receipts(database: &rusqlite::Connection) -> i64 {
         database
             .query_row(
-                "SELECT COUNT(*) FROM events WHERE kind='control.identity.access' AND json_extract(payload,'$.data.action')='events'",
+                "SELECT COUNT(*) FROM events WHERE kind='control.identity.access' AND json_extract(payload,'$.data.action') IN ('events','event')",
                 [],
                 |row| row.get(0),
             )
@@ -390,7 +390,7 @@ mod extended {
         let before = events_receipts(&database);
         for path in [
             format!("{RECENT}?view=content"),
-            format!("/api/v1/human/events/{}?view=metadata", expected[0]),
+            format!("/api/v1/human/events/{}?view=content", expected[0]),
             "/api/v1/human/export?view=metadata".into(),
             "/api/v1/human/stream?view=metadata".into(),
         ] {

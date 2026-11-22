@@ -41,7 +41,14 @@ async fn owned_dashboard_events_metadata_forwards_exact_get_without_identity_pro
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (stop, stopped) = tokio::sync::oneshot::channel();
-    let router = gateway_router(state.clone());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let router = gateway_router(state.clone()).layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            async move { next.run(request).await }
+        },
+    ));
     let task = tokio::spawn(async move {
         axum::serve(listener, router)
             .with_graceful_shutdown(async {
@@ -88,9 +95,61 @@ async fn owned_dashboard_events_metadata_forwards_exact_get_without_identity_pro
         )
         .unwrap();
     assert_eq!(action, "events");
+
+    let detail_path = format!("/api/v1/human/events/{event}");
+    let before = snapshot(&database);
+    let calls_before = calls.load(Ordering::SeqCst);
+    let (status, detail) = get(
+        &dashboard,
+        &format!("{detail_path}?view=metadata"),
+        Some(&context),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["items"], page["items"]);
+    assert_eq!(detail["context_id"], page["context_id"]);
+    assert_eq!(
+        detail["authorization_version"],
+        page["authorization_version"]
+    );
+    assert_eq!(detail["view"], "metadata");
+    assert_eq!(snapshot(&database).0, before.0 + 1);
+    let action: String = database
+        .query_row(
+            "SELECT json_extract(payload,'$.data.action') FROM events WHERE id=?1",
+            [detail["read_receipt"]["audit_event_id"].as_str().unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(action, "event");
+    assert_eq!(calls.load(Ordering::SeqCst), calls_before + 1);
+
+    let noncanonical = format!("/api/v1/human/events/{}", event.replace('-', ""));
+    let before = snapshot(&database);
+    let (status, refused) = get(
+        &gateway_router(state.clone()),
+        &noncanonical,
+        Some(&context),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{refused}");
+    assert_eq!(refused["error"]["code"], "not_found");
+    assert!(refused.get("items").is_none());
+    assert_eq!(snapshot(&database), before);
+
+    let calls_before = calls.load(Ordering::SeqCst);
     for (method, path) in [
-        ("HEAD", "/api/v1/human/events"),
-        ("GET", "/api/v1/human/export"),
+        ("HEAD", "/api/v1/human/events".to_owned()),
+        ("HEAD", detail_path.clone()),
+        ("GET", format!("{detail_path}?view=content")),
+        (
+            "GET",
+            format!("{detail_path}?view=metadata&cursor=synthetic"),
+        ),
+        ("GET", noncanonical),
+        ("GET", format!("/api/human/events/{event}")),
+        ("GET", "/api/v1/human/export".to_owned()),
+        ("GET", "/api/v1/human/stream".to_owned()),
     ] {
         let before = snapshot(&database);
         let response = dashboard
@@ -98,7 +157,7 @@ async fn owned_dashboard_events_metadata_forwards_exact_get_without_identity_pro
             .oneshot(
                 axum::http::Request::builder()
                     .method(method)
-                    .uri(path)
+                    .uri(&path)
                     .header("authorization", format!("Bearer {}", Fixture::bearer("B")))
                     .header("x-aiguard-context", &context)
                     .body(Body::empty())
@@ -106,9 +165,14 @@ async fn owned_dashboard_events_metadata_forwards_exact_get_without_identity_pro
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{method} {path}"
+        );
         assert_eq!(snapshot(&database), before);
     }
+    assert_eq!(calls.load(Ordering::SeqCst), calls_before);
     server.close().await;
 }
 

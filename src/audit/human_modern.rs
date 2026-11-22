@@ -183,8 +183,7 @@ impl Store {
         })
     }
 
-    /// Adopted metadata list only. Other event traversals remain unadopted
-    /// even when the existing legacy selector supports their filters.
+    /// Metadata list or a single event, using the same authorized selection.
     pub(crate) fn modern_human_events(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -197,7 +196,14 @@ impl Store {
     ) -> anyhow::Result<HumanEventPollV1> {
         anyhow::ensure!(
             filter.view == HumanReadViewV1::Metadata
-                && filter.event_id.is_none()
+                && filter.event_id.as_deref().is_none_or(|event_id| {
+                    limit == 1
+                        && filter.resource.is_none()
+                        && after == 0
+                        && upper.is_none()
+                        && uuid::Uuid::parse_str(event_id)
+                            .is_ok_and(|uuid| uuid.to_string() == event_id)
+                })
                 && !filter.export
                 && !filter.stream
                 && (1..=HUMAN_MAX_PAGE_ITEMS).contains(&limit)

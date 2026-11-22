@@ -2176,32 +2176,36 @@ async fn dashboard_oidc_proxy(
     Ok(response)
 }
 async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> ApiResult<Response> {
-    if s.owned_sources
-        && (request.method() != "GET"
-            || ![
-                "/api/v1/human/identity",
-                "/api/v1/human/resources",
-                "/api/v1/human/events",
-                "/api/v1/human/events/recent",
-                "/api/v1/human/owned/brokers",
-                "/api/v1/human/summary",
-                "/api/v1/human/admin/memberships",
-                "/api/v1/human/admin/grants",
-                "/api/v1/human/admin/configuration",
-            ]
-            .contains(&request.uri().path()))
-    {
-        return Err(human_sources::unavailable());
-    }
-    let canonical_path = request
-        .uri()
-        .path()
+    let path = request.uri().path();
+    let canonical_path = path
         .strip_prefix("/api/v1/")
         .map(|suffix| format!("/api/{suffix}"))
-        .unwrap_or_else(|| request.uri().path().to_owned());
-    let human_path =
-        request.uri().path().starts_with("/api/v1/human/") && human_dashboard_path(&canonical_path);
-    let federation_path = request.uri().path() == "/api/v1/federation/workers";
+        .unwrap_or_else(|| path.to_owned());
+    let versioned_human = path.starts_with("/api/v1/human/");
+    if s.owned_sources {
+        let owned_static_path = [
+            "/api/v1/human/identity",
+            "/api/v1/human/resources",
+            "/api/v1/human/events",
+            "/api/v1/human/events/recent",
+            "/api/v1/human/owned/brokers",
+            "/api/v1/human/summary",
+            "/api/v1/human/admin/memberships",
+            "/api/v1/human/admin/grants",
+            "/api/v1/human/admin/configuration",
+        ]
+        .contains(&path);
+        let allowed = request.method() == "GET"
+            && (owned_static_path
+                || versioned_human
+                    && human_dashboard_event_detail(&canonical_path)
+                    && human::owned_event_detail_query(request.uri()));
+        if !allowed {
+            return Err(human_sources::unavailable());
+        }
+    }
+    let human_path = versioned_human && human_dashboard_path(&canonical_path);
+    let federation_path = path == "/api/v1/federation/workers";
     // This proxy forwards no body: a human mutation is never relayed here.
     if human_path && request.method() != "GET" {
         return Err(human::failure(
@@ -2353,9 +2357,12 @@ fn human_dashboard_path(path: &str) -> bool {
         "/api/human/stream",
     ]
     .contains(&path)
-        || path.strip_prefix("/api/human/events/").is_some_and(|id| {
-            uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == id)
-        })
+        || human_dashboard_event_detail(path)
+}
+
+fn human_dashboard_event_detail(path: &str) -> bool {
+    path.strip_prefix("/api/human/events/")
+        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == id))
 }
 
 async fn verify_dashboard_human(state: &DashboardState, token: &str) -> ApiResult<()> {

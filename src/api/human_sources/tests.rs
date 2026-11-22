@@ -500,7 +500,8 @@ async fn modern_route_matrix_closes_before_body_extractors_and_store() {
     let router = gateway_router(state.clone());
     for (path, methods) in REGISTERED_ROUTES {
         for method in *methods {
-            if *method == "GET" && OWNED_HUMAN_GET_PATHS.contains(path)
+            if *method == "GET"
+                && (OWNED_HUMAN_GET_PATHS.contains(path) || *path == HUMAN_EVENT_DETAIL_PATH)
                 || *path == "/healthz"
                 || *path == "/api/v1/status" && ["GET", "HEAD"].contains(method)
             {
