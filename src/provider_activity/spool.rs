@@ -245,7 +245,23 @@ impl ActivitySpool {
     /// Append events durably and return their sequence numbers. After any
     /// write or sync error the spool refuses every later append.
     pub fn append(&mut self, events: Vec<Event>) -> Result<Vec<u64>> {
+        self.append_bounded(events, u64::MAX, u64::MAX)?
+            .context("provider activity spool capacity is exhausted")
+    }
+
+    /// Check the exact encoded lines before writing. A batch that would exceed
+    /// either limit leaves the file, chain head and sequence numbers intact.
+    pub(super) fn append_bounded(
+        &mut self,
+        events: Vec<Event>,
+        max_events: u64,
+        max_bytes: u64,
+    ) -> Result<Option<Vec<u64>>> {
         ensure!(!self.failed, "provider activity spool is unavailable");
+        if events.len() as u64 > max_events.saturating_sub(self.len()) {
+            return Ok(None);
+        }
+        let available_bytes = max_bytes.saturating_sub(self.bytes);
         let mut lines = Vec::new();
         let mut pending = Vec::with_capacity(events.len());
         let mut head = self.head.clone();
@@ -266,6 +282,9 @@ impl ActivitySpool {
                 line.len() < MAX_SPOOL_LINE,
                 "provider activity event exceeds the spool line bound"
             );
+            if (lines.len() + line.len() + 1) as u64 > available_bytes {
+                return Ok(None);
+            }
             head = hash;
             pending.push(SpooledEvent {
                 seq,
@@ -276,7 +295,7 @@ impl ActivitySpool {
             lines.push(b'\n');
         }
         if lines.is_empty() {
-            return Ok(Vec::new());
+            return Ok(Some(Vec::new()));
         }
         if let Err(error) = self
             .file
@@ -290,7 +309,7 @@ impl ActivitySpool {
         self.bytes += lines.len() as u64;
         let seqs = pending.iter().map(|e| e.seq).collect();
         self.events.extend(pending);
-        Ok(seqs)
+        Ok(Some(seqs))
     }
 
     /// Record delivery progress. Durability is not required: a lost marker
@@ -366,6 +385,39 @@ impl ActivitySpool {
 mod tests {
     use super::*;
     use std::{fs, io::ErrorKind, os::unix::fs::PermissionsExt};
+
+    #[test]
+    fn budget_counts_encoded_lines_and_refuses_the_whole_batch_before_writing() {
+        let temporary = tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let root = crate::control_fs::absolute_path(temporary.path()).unwrap();
+        let directory = Directory::open_existing(&root).unwrap();
+        let event = Event::new("activity.channel");
+        let pair = vec![event.clone(), event];
+        let mut reference = ActivitySpool::create(&directory, Uuid::new_v4()).unwrap();
+        reference.append(pair.clone()).unwrap();
+        let encoded_bytes = reference.bytes();
+
+        let session = Uuid::new_v4();
+        let path = root.join(spool_name(session));
+        let mut spool = ActivitySpool::create(&directory, session).unwrap();
+        assert_eq!(
+            spool
+                .append_bounded(pair.clone(), 2, encoded_bytes - 1)
+                .unwrap(),
+            None
+        );
+        assert!(spool.is_empty());
+        assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+
+        assert_eq!(
+            spool.append_bounded(pair, 2, encoded_bytes).unwrap(),
+            Some(vec![1, 2])
+        );
+        assert_eq!(fs::metadata(&path).unwrap().len(), encoded_bytes);
+    }
 
     #[test]
     fn retained_writer_blocks_reopen_before_torn_tail_recovery() {

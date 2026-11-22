@@ -30,6 +30,10 @@ pub const MAX_SESSION_BYTES: u64 = 8 * 1024 * 1024;
 /// Undelivered backlog above which the gateway path counts as unavailable.
 pub const DEFAULT_MAX_BACKLOG_EVENTS: u64 = 200;
 pub const DEFAULT_MAX_BACKLOG_BYTES: u64 = 512 * 1024;
+/// Up to one exhaustion marker and one terminal coverage record may exceed
+/// the ordinary session budget. Each has its own fixed encoded size bound.
+const MAX_RESERVED_RECORD_BYTES: u64 = 16 * 1024;
+const BUDGET_EXHAUSTION_REASON: &str = "session_budget_exhausted";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct ActivityLimits {
@@ -180,6 +184,13 @@ struct State {
     budget_exhausted: bool,
     stalled: bool,
     record_seq: [u64; 2],
+    coverage: CoverageFinalization,
+}
+
+enum CoverageFinalization {
+    Open,
+    Live(ActivitySummary),
+    Retained,
 }
 
 /// Shared by the stdout pump, the hook channel and the forwarder.
@@ -216,12 +227,33 @@ impl ActivityCollector {
             correlation_id: context.correlation_id.clone().unwrap_or_default(),
             trace_id: context.trace_id.clone().unwrap_or_default(),
         };
-        let budget_exhausted =
-            spool.len() >= limits.max_events || spool.bytes() >= limits.max_bytes;
+        let mut budget_exhausted =
+            spool.len() > limits.max_events || spool.bytes() > limits.max_bytes;
+        let mut coverage = CoverageFinalization::Open;
+        let mut stdout = ChannelCounts::default();
+        for entry in spool.events() {
+            let event = &entry.event;
+            if event.kind == "activity.loss"
+                && event.source == "runner"
+                && event.provenance == "observed"
+                && event.data["reason"] == BUDGET_EXHAUSTION_REASON
+            {
+                budget_exhausted = true;
+            }
+            if event.kind == "activity.coverage" {
+                coverage = CoverageFinalization::Retained;
+            }
+            if event.source == "codex-adapter"
+                && event.provenance == "declared"
+                && event.data["provider_reported_loss"] == true
+            {
+                stdout.declared_losses += 1;
+            }
+        }
         Ok(Self {
             state: Arc::new(Mutex::new(State {
                 spool,
-                stdout: ChannelCounts::default(),
+                stdout,
                 hook: ChannelCounts::default(),
                 hook_channel: "not_attached",
                 hook_coverage: HookCoverage::Unattached,
@@ -230,6 +262,7 @@ impl ActivityCollector {
                 budget_exhausted,
                 stalled: false,
                 record_seq: [0, 0],
+                coverage,
             })),
             context: Arc::new(context),
             adapter: Arc::new(adapter),
@@ -302,7 +335,7 @@ impl ActivityCollector {
             "declared",
             json!({"channel":"hook","count":count,"reason":crate::redaction::clip(reason, 64),"reporter":"worker_activity_helper"}),
         );
-        self.append_locked(&mut state, vec![event])
+        self.append_locked(&mut state, ActivityChannel::Hook, vec![event])
     }
 
     /// An observed change of channel state, spooled like provider events.
@@ -331,7 +364,7 @@ impl ActivityCollector {
             "observed",
             json!({"channel":channel,"state":state_name,"reason":reason.map(|r| crate::redaction::clip(r, 200))}),
         );
-        let admission = self.append_locked(&mut state, vec![event]);
+        let admission = self.append_locked(&mut state, channel, vec![event]);
         if channel == ActivityChannel::Hook {
             state.hook_coverage = state.hook_coverage.observe(state_name, reason, admission);
         }
@@ -405,7 +438,7 @@ impl ActivityCollector {
             "observed",
             json!({"channel":"stdout","count":1,"reason":reason}),
         );
-        self.append_locked(&mut state, vec![marker])
+        self.append_locked(&mut state, ActivityChannel::Stdout, vec![marker])
     }
 
     /// Bytes the stdout tap stopped forwarding after its stall bound: one
@@ -420,7 +453,7 @@ impl ActivityCollector {
             "observed",
             json!({"channel":"stdout","bytes":bytes,"reason":"stdout_stall_limit_exceeded"}),
         );
-        self.append_locked(&mut state, vec![marker])
+        self.append_locked(&mut state, ActivityChannel::Stdout, vec![marker])
     }
 
     /// An outage refuses before counting a stdout record so the pump can retry.
@@ -452,7 +485,14 @@ impl ActivityCollector {
             RecordDisposition::Oversized => counts.oversized += 1,
             RecordDisposition::Invalid => counts.invalid += 1,
         }
-        if state.budget_exhausted {
+        if channel == ActivityChannel::Stdout
+            && events
+                .iter()
+                .any(|event| event["data"]["provider_reported_loss"] == true)
+        {
+            counts.declared_losses = counts.declared_losses.saturating_add(1);
+        }
+        if state.budget_exhausted || !matches!(state.coverage, CoverageFinalization::Open) {
             Self::counts(&mut state, channel).dropped += 1;
             return Admission::Dropped;
         }
@@ -467,31 +507,17 @@ impl ActivityCollector {
                 }
             }
         }
-        let size: u64 = stamped
-            .iter()
-            .map(|e| serde_json::to_string(e).map_or(0, |s| s.len() as u64))
-            .sum();
-        if state.spool.len() + projected > self.limits.max_events
-            || state.spool.bytes() + size > self.limits.max_bytes
-        {
-            state.budget_exhausted = true;
-            Self::counts(&mut state, channel).dropped += 1;
-            // One explicit, observed marker; it may exceed the budget by one.
-            let marker = self.control_event(
-                "activity.loss",
-                "observed",
-                json!({"channel":channel,"count":1,"reason":"session_budget_exhausted","max_events":self.limits.max_events,"max_bytes":self.limits.max_bytes}),
-            );
-            let _ = self.append_locked(&mut state, vec![marker]);
-            return Admission::Dropped;
-        }
         if stamped.is_empty() {
             return Admission::Recorded;
         }
-        match self.append_locked(&mut state, stamped) {
+        match self.append_locked(&mut state, channel, stamped) {
             Admission::Recorded => {
                 Self::counts(&mut state, channel).events += projected;
                 Admission::Recorded
+            }
+            Admission::Dropped => {
+                Self::counts(&mut state, channel).dropped += 1;
+                Admission::Dropped
             }
             other => {
                 Self::counts(&mut state, channel).refused += 1;
@@ -500,11 +526,48 @@ impl ActivityCollector {
         }
     }
 
-    fn append_locked(&self, state: &mut State, events: Vec<Event>) -> Admission {
-        match state.spool.append(events) {
-            Ok(_) => Admission::Recorded,
+    fn append_locked(
+        &self,
+        state: &mut State,
+        channel: ActivityChannel,
+        events: Vec<Event>,
+    ) -> Admission {
+        if state.budget_exhausted || !matches!(state.coverage, CoverageFinalization::Open) {
+            return Admission::Dropped;
+        }
+        match state
+            .spool
+            .append_bounded(events, self.limits.max_events, self.limits.max_bytes)
+        {
+            Ok(Some(_)) => return Admission::Recorded,
+            Err(_) => return Admission::Unavailable,
+            Ok(None) => {}
+        }
+        state.budget_exhausted = true;
+        let mut marker = self.control_event(
+            "activity.loss",
+            "observed",
+            json!({"channel":channel,"count":1,"reason":BUDGET_EXHAUSTION_REASON,"max_events":self.limits.max_events,"max_bytes":self.limits.max_bytes}),
+        );
+        // This fixed code also identifies the reserved marker after reopening.
+        marker.data["reason"] = json!(BUDGET_EXHAUSTION_REASON);
+        match Self::append_reserved(state, marker) {
+            Ok(()) => Admission::Dropped,
             Err(_) => Admission::Unavailable,
         }
+    }
+
+    fn append_reserved(state: &mut State, event: Event) -> Result<()> {
+        let max_events = state.spool.len().saturating_add(1);
+        let max_bytes = state
+            .spool
+            .bytes()
+            .saturating_add(MAX_RESERVED_RECORD_BYTES);
+        state
+            .spool
+            .append_bounded(vec![event], max_events, max_bytes)?
+            .context("reserved provider activity record exceeds its bound")?;
+        Ok(())
     }
 
     fn activity_meta(&self, channel: Option<ActivityChannel>, record_seq: Option<u64>) -> Value {
@@ -569,7 +632,11 @@ impl ActivityCollector {
 
     pub fn summary(&self) -> Result<ActivitySummary> {
         let state = self.lock()?;
-        let audit_unavailable = self.unavailable_locked(&state);
+        Ok(self.summary_locked(&state))
+    }
+
+    fn summary_locked(&self, state: &State) -> ActivitySummary {
+        let audit_unavailable = self.unavailable_locked(state);
         let delivered = state.spool.delivered_through();
         let complete = state.hook_coverage == HookCoverage::Drained
             && !state.stdout_failed
@@ -583,14 +650,18 @@ impl ActivityCollector {
             && state.hook.invalid == 0
             && state.stdout.dropped == 0
             && state.stdout.refused == 0
+            && state.stdout.declared_losses == 0
             && state.stdout.oversized == 0
             && state.stdout.invalid == 0;
-        Ok(ActivitySummary {
+        ActivitySummary {
             version: 1,
             client: self.context.client,
             interactive: self.context.interactive,
             client_version_label: self.context.client_version_label.clone(),
-            stdout: (state.stdout_live || state.stdout.records > 0).then(|| state.stdout.clone()),
+            stdout: (state.stdout_live
+                || state.stdout.records > 0
+                || state.stdout.declared_losses > 0)
+                .then(|| state.stdout.clone()),
             hook: state.hook.clone(),
             hook_channel: state.hook_channel,
             spooled_events: state.spool.len(),
@@ -601,19 +672,14 @@ impl ActivityCollector {
             audit_unavailable,
             stalled: state.stalled,
             complete,
-        })
+        }
     }
 
     /// Give a retained terminal spool a coverage event when collection ended
     /// without a final summary. An existing event keeps its bytes and identity.
     pub(crate) fn ensure_replay_coverage(&self) -> Result<()> {
         let mut state = self.lock()?;
-        if state
-            .spool
-            .events()
-            .iter()
-            .any(|entry| entry.event.kind == "activity.coverage")
-        {
+        if !matches!(state.coverage, CoverageFinalization::Open) {
             return Ok(());
         }
         let mut event = self.control_event(
@@ -626,28 +692,31 @@ impl ActivityCollector {
             }),
         );
         event.coverage = "partial".into();
-        state
-            .spool
-            .append(vec![event])
+        Self::append_reserved(&mut state, event)
             .context("unconfirmed provider activity coverage cannot be spooled")?;
+        state.coverage = CoverageFinalization::Retained;
         Ok(())
     }
 
     /// Spool the observed coverage summary; it is the last collector event.
     pub fn finish(&self) -> Result<ActivitySummary> {
-        let summary = self.summary()?;
         let mut state = self.lock()?;
+        match &state.coverage {
+            CoverageFinalization::Open => {}
+            CoverageFinalization::Live(summary) => return Ok(summary.clone()),
+            CoverageFinalization::Retained => {
+                anyhow::bail!("retained provider activity already has a coverage record")
+            }
+        }
+        let summary = self.summary_locked(&state);
         let event = self.control_event(
             "activity.coverage",
             "observed",
             serde_json::to_value(&summary)?,
         );
-        // The summary is always spooled, even past the budget: a coverage
-        // statement must not be dropped for lack of room.
-        state
-            .spool
-            .append(vec![event])
+        Self::append_reserved(&mut state, event)
             .context("provider activity coverage cannot be spooled")?;
+        state.coverage = CoverageFinalization::Live(summary.clone());
         Ok(summary)
     }
 }
@@ -663,6 +732,14 @@ mod tests {
     }
 
     fn fixture_with_limits(
+        interactive: bool,
+        limits: ActivityLimits,
+    ) -> (tempfile::TempDir, ActivityCollector) {
+        client_fixture(ActivityClient::ClaudeCode, interactive, limits)
+    }
+
+    fn client_fixture(
+        client: ActivityClient,
         interactive: bool,
         limits: ActivityLimits,
     ) -> (tempfile::TempDir, ActivityCollector) {
@@ -684,7 +761,7 @@ mod tests {
                 trace_id: None,
                 worker_id: None,
                 attempt_id: None,
-                client: ActivityClient::ClaudeCode,
+                client,
                 interactive,
                 client_version_label: None,
             },
@@ -866,5 +943,40 @@ mod tests {
         assert!(!summary.complete);
         let stdout = summary.stdout.unwrap();
         assert_eq!((stdout.mapped, stdout.ignored, stdout.invalid), (1, 1, 1));
+    }
+
+    #[test]
+    fn a_provider_reported_stdout_loss_keeps_an_otherwise_complete_session_partial() {
+        let (_temp, collector) =
+            client_fixture(ActivityClient::Codex, false, ActivityLimits::default());
+        collector.channel_state(ActivityChannel::Stdout, "opened", None);
+        collector.channel_state(ActivityChannel::Hook, "attached", None);
+        collector.channel_state(ActivityChannel::Hook, "closed", None);
+        collector
+            .confirm_hook_drain(&HookPumpOutcome::default())
+            .unwrap();
+        deliver_pending(&collector);
+        assert!(collector.summary().unwrap().complete);
+
+        assert_eq!(
+            collector.stdout_line(br#"{"type":"item.completed","item":{"id":"item","type":"error","message":"in-process app-server event stream lagged; dropped 3 events"}}"#),
+            Admission::Recorded,
+        );
+        let pending = collector.pending(1, usize::MAX);
+        assert_eq!(pending[0].event.provenance, "declared");
+        assert_eq!(pending[0].event.data["provider_reported_loss"], true);
+        deliver_pending(&collector);
+
+        let summary = collector.finish().unwrap();
+        assert!(!summary.complete);
+        let stdout = summary.stdout.unwrap();
+        assert_eq!(
+            (stdout.declared_losses, stdout.dropped, stdout.invalid),
+            (1, 0, 0)
+        );
+        assert_eq!(
+            collector.pending(1, usize::MAX)[0].event.data["complete"],
+            false
+        );
     }
 }

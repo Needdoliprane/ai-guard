@@ -189,7 +189,8 @@ fn an_exhausted_session_budget_drops_records_with_one_explicit_loss() {
         max_backlog_events: 4,
         max_backlog_bytes: 64 * 1024,
     };
-    let collector = collector(&directory, Uuid::new_v4(), limits);
+    let session = Uuid::new_v4();
+    let collector = collector(&directory, session, limits);
     let lines: Vec<&str> = CLAUDE_STREAM.lines().collect();
     assert_eq!(
         collector.stdout_line(lines[0].as_bytes()),
@@ -211,11 +212,80 @@ fn an_exhausted_session_budget_drops_records_with_one_explicit_loss() {
     assert_eq!(losses.len(), 1);
     assert_eq!(losses[0].provenance, "observed");
     assert_eq!(losses[0].data["reason"], "session_budget_exhausted");
+    let marker_id = losses[0].id.clone();
+    let retained = collector.summary().unwrap();
+    for _ in 0..16 {
+        assert_eq!(
+            collector.stdout_unframed("oversized_record"),
+            Admission::Dropped
+        );
+        assert_eq!(collector.stdout_overflow(123), Admission::Dropped);
+        assert_eq!(
+            collector.declared_hook_loss(2, "client_unrecorded"),
+            Admission::Dropped
+        );
+        assert_eq!(
+            collector.channel_state(ActivityChannel::Hook, "closed", None),
+            Admission::Dropped
+        );
+    }
+    let after_losses = collector.summary().unwrap();
+    assert_eq!(after_losses.spooled_events, retained.spooled_events);
+    assert_eq!(after_losses.spooled_bytes, retained.spooled_bytes);
+    assert_eq!(after_losses.hook.declared_losses, 32);
+    drop(collector);
+
+    let (spool, _) = ActivitySpool::reopen(&directory, session).unwrap();
+    assert!(spool.len() < limits.max_events);
+    assert!(
+        spool
+            .events()
+            .iter()
+            .any(|entry| entry.event.id == marker_id)
+    );
+    let collector = ActivityCollector::new(
+        spool,
+        context(session, false),
+        Redactor::new(vec![]),
+        limits,
+    )
+    .unwrap();
+    assert_eq!(collector.stdout_overflow(123), Admission::Dropped);
+    assert_eq!(
+        collector.summary().unwrap().spooled_bytes,
+        retained.spooled_bytes
+    );
+
     let summary = collector.finish().unwrap();
     assert!(summary.budget_exhausted && !summary.complete);
     let coverage = spooled(&collector).pop().unwrap();
     assert_eq!(coverage.kind, "activity.coverage");
     assert_eq!(coverage.data["budget_exhausted"], true);
+    assert_eq!(
+        collector.finish().unwrap().spooled_events,
+        summary.spooled_events
+    );
+    drop(collector);
+
+    let (spool, _) = ActivitySpool::reopen(&directory, session).unwrap();
+    assert_eq!(spool.len(), retained.spooled_events + 1);
+    assert!(
+        spool
+            .events()
+            .iter()
+            .any(|entry| entry.event.id == marker_id)
+    );
+    let retained_bytes = spool.bytes();
+    let recovered = ActivityCollector::new(
+        spool,
+        context(session, false),
+        Redactor::new(vec![]),
+        limits,
+    )
+    .unwrap();
+    assert!(recovered.summary().unwrap().budget_exhausted);
+    assert_eq!(recovered.stdout_overflow(123), Admission::Dropped);
+    assert_eq!(recovered.summary().unwrap().spooled_bytes, retained_bytes);
 }
 
 #[test]
