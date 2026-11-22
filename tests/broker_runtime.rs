@@ -94,6 +94,7 @@ fn batch_failure_marker_empty_page_is_not_a_failure() {
 fn batch_failure_marker_accepts_observed_failures_without_claiming_effect() {
     let private = "synthetic-private-unclassified-failure-do-not-persist";
     for stage in [
+        "activity_spool",
         "failure_observed",
         "ownership_commit",
         "ownership_reload",

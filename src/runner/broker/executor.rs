@@ -72,7 +72,7 @@ pub(crate) struct BatchExecutor {
     enforcer: ExecutionEnforcerV1,
     clock: Arc<dyn HostClock>,
     relays: Option<Arc<crate::broker::relay_owner::RelayRegistry>>,
-    activity: Option<crate::control_fs::Directory>,
+    activity_root: Option<crate::control_fs::Directory>,
     activity_limits: crate::provider_activity::ActivityLimits,
 }
 impl fmt::Debug for BatchExecutor {
@@ -222,6 +222,7 @@ struct Execution<'a> {
     context: &'a AuthenticatedBatchContext,
     operation: Uuid,
     client: AuditClient,
+    activity_directory: tokio::sync::OnceCell<crate::control_fs::Directory>,
     generation: u64,
     phase: AtomicU8,
     launch_profile: Option<crate::runtime::launch_profile::RetainedDockerLaunchProfile>,
@@ -268,7 +269,7 @@ impl BatchExecutor {
             enforcer: enforcer.into(),
             clock,
             relays: None,
-            activity: None,
+            activity_root: None,
             activity_limits: crate::provider_activity::ActivityLimits::default(),
         }
     }
@@ -279,15 +280,13 @@ impl BatchExecutor {
         self.relays = relays;
         self
     }
-    /// Private broker directory holding one live provider activity spool per
-    /// session, and the per-session budget. Without it, a provider session
-    /// refuses to start.
+    /// Retained broker root and budget for the live provider activity spool.
     pub(crate) fn with_activity_root(
         mut self,
         root: crate::control_fs::Directory,
         limits: crate::provider_activity::ActivityLimits,
     ) -> Self {
-        self.activity = Some(root);
+        self.activity_root = Some(root);
         self.activity_limits = limits;
         self
     }
@@ -594,6 +593,9 @@ impl<'a> Execution<'a> {
             !current.cancelled(),
             "cancelled before workspace preparation"
         );
+        if activity::client(&current.run.options().provider).is_some() {
+            self.prepare_activity_directory().await?;
+        }
         let config = current.run.options().config_dir.clone();
         let operation = self.operation;
         tokio::task::spawn_blocking(move || {
@@ -979,7 +981,7 @@ impl<'a> Execution<'a> {
             return Ok(ControlFlow::Continue(None));
         }
         // Live activity is durable before the start control is emitted.
-        let mut activity = self.open_activity(&draft)?;
+        let mut activity = self.open_activity(&draft).await?;
         let tap = activity.as_mut().and_then(|(live, _)| live.take_tap());
         let hooks = activity
             .as_ref()

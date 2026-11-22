@@ -171,6 +171,7 @@ impl<'a> Execution<'a> {
             context,
             operation,
             client,
+            activity_directory: tokio::sync::OnceCell::new(),
             generation: context.expected_generation(),
             phase: AtomicU8::new(0),
             launch_profile: job.launch_profile().cloned(),

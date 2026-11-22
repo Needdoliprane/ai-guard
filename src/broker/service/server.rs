@@ -1539,12 +1539,6 @@ impl Service {
     }
     fn executor(&self, writer: WriterClient) -> Result<BatchExecutor, BrokerErrorCodeV1> {
         let clock = NativeHostClock::new().map_err(|_| BrokerErrorCodeV1::Unavailable)?;
-        // Live provider activity is part of the mandatory audit: without its
-        // private spool directory no provider session can be executed.
-        let activity = self
-            .root
-            .child("provider-activity")
-            .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
         // Validated when the registry was loaded; defaults when absent.
         let limits = match self.registry.data.provider_activity {
             Some(budget) => budget
@@ -1555,7 +1549,7 @@ impl Service {
         Ok(
             BatchExecutor::new(writer, self.full_enforcer()?.clone(), Arc::new(clock))
                 .with_relays(self.registry.relay_service.get().cloned())
-                .with_activity_root(activity, limits),
+                .with_activity_root(self.root.clone(), limits),
         )
     }
     async fn connection(self: Arc<Self>, mut stream: UnixStream) {

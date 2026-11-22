@@ -12,6 +12,7 @@ use std::fmt;
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum BrokerStep {
+    ActivitySpool,
     ArmExchange,
     Registration,
     ReadinessBeforeClaim,
@@ -175,6 +176,7 @@ mod tests {
     fn broker_context_reports_only_the_fixed_boundary() {
         let private = "synthetic-private-journal-error-keep-out-of-audit";
         for (step, label) in [
+            (BrokerStep::ActivitySpool, "activity_spool"),
             (BrokerStep::ArmExchange, "arm_exchange"),
             (BrokerStep::Registration, "registration"),
             (BrokerStep::ReadinessBeforeClaim, "readiness_before_claim"),

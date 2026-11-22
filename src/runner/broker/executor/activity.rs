@@ -1,8 +1,13 @@
 //! Live provider activity for one supervised batch execution: the trusted
 //! context of the plan, opened before the start control is emitted.
-use super::Execution;
-use crate::provider_activity::{ActivityClient, ActivityContext, session::LiveSession};
+use super::{Execution, diagnostics::BrokerStep};
+use crate::{
+    control_fs::Directory,
+    provider_activity::{ActivityClient, ActivityContext, session::LiveSession},
+};
 use anyhow::{Context, Result};
+
+const ACTIVITY_DIRECTORY: &str = "provider-activity";
 
 /// Map the plan's provider option; other providers have no live channel.
 pub(super) fn client(provider: &str) -> Option<ActivityClient> {
@@ -35,8 +40,22 @@ fn activity_context(draft: &super::Draft) -> Option<ActivityContext> {
 }
 
 impl Execution<'_> {
+    /// Retain the exact private directory across fresh preparation and start.
+    pub(super) async fn prepare_activity_directory(&self) -> Result<&Directory> {
+        self.activity_directory
+            .get_or_try_init(|| async {
+                self.executor
+                    .activity_root
+                    .as_ref()
+                    .context(BrokerStep::ActivitySpool)?
+                    .child(ACTIVITY_DIRECTORY)
+                    .context(BrokerStep::ActivitySpool)
+            })
+            .await
+    }
+
     /// Open live activity before starting a supported provider client.
-    pub(super) fn open_activity(
+    pub(super) async fn open_activity(
         &self,
         draft: &super::Draft,
     ) -> Result<Option<(LiveSession, ActivityClient)>> {
@@ -44,11 +63,7 @@ impl Execution<'_> {
             return Ok(None);
         };
         let client = context.client;
-        let root = self
-            .executor
-            .activity
-            .as_ref()
-            .context("provider activity directory is not configured")?;
+        let root = self.prepare_activity_directory().await?;
         let session = LiveSession::open(
             root,
             context,
@@ -56,7 +71,8 @@ impl Execution<'_> {
             self.client.clone(),
             self.executor.activity_limits,
             true,
-        )?;
+        )
+        .context(BrokerStep::ActivitySpool)?;
         Ok(Some((session, client)))
     }
 
@@ -69,10 +85,11 @@ impl Execution<'_> {
         if let Some(session) = activity {
             session.finish().await?;
         } else if let (Some(root), Some(context)) =
-            (&self.executor.activity, activity_context(draft))
+            (&self.executor.activity_root, activity_context(draft))
         {
+            let directory = root.open_existing_child(ACTIVITY_DIRECTORY)?;
             LiveSession::replay_retained(
-                root,
+                &directory,
                 context,
                 self.client.redactor.clone(),
                 &self.client,

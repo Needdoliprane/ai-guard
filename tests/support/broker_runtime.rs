@@ -858,6 +858,7 @@ pub fn batch_failure_marker(page: &Value) -> Result<Option<Value>> {
     let broker_step = optional_failure_label(
         data.get("broker_step"),
         &[
+            "activity_spool",
             "failure_observed",
             "ownership_commit",
             "ownership_reload",
