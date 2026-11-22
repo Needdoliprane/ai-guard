@@ -1,0 +1,132 @@
+name: G11 broker fixture and SQL checks
+
+on:
+  push:
+    branches: ['claude/v1-g11-broker-fixtures-check-20261122']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: g11-broker-fixtures-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sqlite-and-mysql-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      AI_GUARD_BUILD_REVISION: ${{ github.sha }}
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      LC_ALL: C
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify source and prepare locked dependencies
+        id: preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          scratch="$(mktemp -d "$RUNNER_TEMP/g11-fixtures.XXXXXX")"
+          printf 'source_commit=1c7506faa9d872f155d6fa9110546c1352834a5c\nworkflow_commit=%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/g11-broker-fixtures-summary.txt"
+          if [[ "$(git rev-parse HEAD)" != "$GITHUB_SHA" \
+              || "$(git rev-parse HEAD^)" != 1c7506faa9d872f155d6fa9110546c1352834a5c ]] \
+              || ! git diff --quiet 1c7506faa9d872f155d6fa9110546c1352834a5c HEAD -- . ':(exclude).github/workflows/g11-broker-fixtures-check.yaml'; then
+            printf 'source_check=FAIL\nchecks=NOT_RUN\ncanary=NOT_RUN\n' >> "$RUNNER_TEMP/g11-broker-fixtures-summary.txt"
+            cat "$RUNNER_TEMP/g11-broker-fixtures-summary.txt" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          printf 'source_check=PASS\n' >> "$RUNNER_TEMP/g11-broker-fixtures-summary.txt"
+          printf 'canary_scope=software_fixture_synthetic_runtime_no_engine_or_provider\n' >> "$RUNNER_TEMP/g11-broker-fixtures-summary.txt"
+          rustc --version | sed -nE 's/^rustc ([0-9]+\.[0-9]+\.[0-9]+).*/toolchain=\1/p' >> "$RUNNER_TEMP/g11-broker-fixtures-summary.txt"
+          if ! cargo fmt --all -- --check > "$scratch/fmt.log" 2>&1; then
+            printf 'format=FAIL\nchecks=NOT_RUN\ncanary=NOT_RUN\n' >> "$RUNNER_TEMP/g11-broker-fixtures-summary.txt"
+            cat "$RUNNER_TEMP/g11-broker-fixtures-summary.txt" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          printf 'format=PASS\n' >> "$RUNNER_TEMP/g11-broker-fixtures-summary.txt"
+          if ! cargo fetch --locked > "$scratch/fetch.log" 2>&1; then
+            printf 'locked_fetch=FAIL\nchecks=NOT_RUN\ncanary=NOT_RUN\n' >> "$RUNNER_TEMP/g11-broker-fixtures-summary.txt"
+            cat "$RUNNER_TEMP/g11-broker-fixtures-summary.txt" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          printf 'locked_fetch=PASS\n' >> "$RUNNER_TEMP/g11-broker-fixtures-summary.txt"
+      - name: Check both SQL profiles and run the synthetic broker canary
+        id: qualification
+        shell: bash
+        run: |
+          set -uo pipefail
+          umask 077
+          scratch="$(mktemp -d "$RUNNER_TEMP/g11-qualification.XXXXXX")"
+          receipt="$RUNNER_TEMP/g11-broker-fixtures-summary.txt"
+          errors=0
+          profile_check() {
+            local profile="$1"
+            shift
+            local json="$scratch/$profile.jsonl"
+            local stderr="$scratch/$profile.stderr"
+            local diagnostics="$scratch/$profile.diagnostics"
+            local rc=0
+            "$@" --message-format=json > "$json" 2> "$stderr" || rc=$?
+            printf '%s_check=%s cargo_exit=%s\n' "$profile" "$([[ "$rc" == 0 ]] && echo PASS || echo FAIL)" "$rc" >> "$receipt"
+            jq -r --arg profile "$profile" '
+              select(.reason == "compiler-message" and .message.level == "error")
+              | .target.name as $target | .message.code.code as $code
+              | .message.spans[]? | select(.is_primary == true)
+              | select(($target | type) == "string" and ($target | test("^[A-Za-z0-9_-]+$")))
+              | select(($code | type) == "string" and ($code | test("^E[0-9]{4}$")))
+              | select((.file_name | type) == "string" and (.file_name | test("^(src|tests)/([A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+\\.rs$")))
+              | select((.line_start | type) == "number" and (.line_start | floor) == .line_start and .line_start > 0)
+              | select((.column_start | type) == "number" and (.column_start | floor) == .column_start and .column_start > 0)
+              | "error profile=\($profile) target=\($target) code=\($code) location=\(.file_name):\(.line_start):\(.column_start)"
+            ' "$json" > "$diagnostics" || {
+              printf '%s_diagnostics=unavailable\n' "$profile" >> "$receipt"
+              errors=1
+              return 0
+            }
+            local count=0
+            if [[ -s "$diagnostics" ]]; then
+              sort -u "$diagnostics" >> "$receipt"
+              count="$(wc -l < "$diagnostics" | tr -d ' ')"
+            fi
+            printf '%s_sanitized_error_spans=%s\n' "$profile" "$count" >> "$receipt"
+            if (( rc != 0 )); then errors=1; fi
+          }
+          profile_check sqlite cargo check --locked --offline --no-default-features --all-targets --keep-going
+          profile_check mysql cargo check --locked --offline --no-default-features --features mysql-storage --all-targets --keep-going
+
+          test_log="$scratch/canary.log"
+          status=0
+          cargo test --locked --offline --no-default-features --test broker_relay_handoff \
+            software_broker_scoped_relay_ipc_refuses_before_private_detail -- \
+            --exact --test-threads=1 --color=never > "$test_log" 2>&1 || status=$?
+          test_count="$(grep -Fxc 'running 1 test' "$test_log" || true)"
+          ignored_count="$(grep -Eo '[0-9]+ ignored' "$test_log" | tail -n 1 | cut -d ' ' -f1 || true)"
+          ignored_count="${ignored_count:-unknown}"
+          selected='software_broker_scoped_relay_ipc_refuses_before_private_detail'
+          if [[ "$status" -eq 0 && "$test_count" == 1 && "$ignored_count" == 0 ]] \
+              && grep -Fqx "test $selected ... ok" "$test_log" \
+              && grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;$' "$test_log"; then
+            printf 'canary=PASS selected=1 ignored=0\n' >> "$receipt"
+          else
+            printf 'canary=FAIL selected_count=%s ignored_count=%s exit=%s\n' "$test_count" "$ignored_count" "$status" >> "$receipt"
+            errors=1
+          fi
+          cat "$receipt" >> "$GITHUB_STEP_SUMMARY"
+          echo "qualification_result=$([[ "$errors" == 0 ]] && echo PASS || echo FAIL)" >> "$GITHUB_OUTPUT"
+          exit "$errors"
+      - name: Upload sanitized receipt
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: g11-broker-fixtures-${{ github.sha }}
+          path: ${{ runner.temp }}/g11-broker-fixtures-summary.txt
+          if-no-files-found: ignore
+          retention-days: 14
