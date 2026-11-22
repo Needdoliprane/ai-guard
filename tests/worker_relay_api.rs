@@ -2650,8 +2650,18 @@ async fn reopened_gateway_keeps_three_worker_quotas_terminal_usage_and_directed_
         refused.json::<Value>().await?["error"]["code"],
         "workload_forbidden"
     );
-    for (viewer, integrity) in [("v", audit_a), ("w", audit_b)] {
+    for (viewer, mut integrity) in [("v", audit_a), ("w", audit_b)] {
         let token = viewer.repeat(48);
+        integrity["stored_events"] = integrity["event_count"].clone();
+        integrity["retention"] = json!({
+            "capability": false,
+            "segments": 0,
+            "archived_through_seq": 0,
+            "reclaimed_events": 0,
+            "reclaimed_bytes": 0,
+            "last": null,
+            "segment_list": [],
+        });
         assert_eq!(
             read_reopened_gateway(&http, &origin, "integrity", &token).await?,
             integrity
