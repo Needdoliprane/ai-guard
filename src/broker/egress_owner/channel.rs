@@ -105,25 +105,43 @@ pub(crate) enum LocalQuiescence {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChannelAuditClosure {
+    NotOpened,
+    /// The gateway acknowledged the terminal after the prior submissions.
+    Acknowledged {
+        observations_lost: u64,
+    },
+    Unknown {
+        observations_lost: u64,
+        /// Submissions without proof of a durable acknowledgment.
+        observations_unconfirmed: u64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ChannelTermination {
     pub(crate) cause: ChannelExit,
     /// Covers the broker's local egress owners and socket handles only.
     /// Unknown blocks epoch handover pending reconciliation.
     pub(crate) local_quiescence: LocalQuiescence,
+    pub(crate) audit: ChannelAuditClosure,
 }
 
 impl ChannelTermination {
-    fn without_flows(cause: ChannelExit) -> Self {
+    fn without_flows(cause: ChannelExit, audit: ChannelAuditClosure) -> Self {
         Self {
             cause,
             local_quiescence: LocalQuiescence::Confirmed,
+            audit,
         }
     }
 }
 
 const COMMAND_SLOTS: usize = 32;
 const OBSERVATION_SLOTS: usize = 8;
-const OBSERVATION_DRAIN: Duration = Duration::from_secs(5);
+const LOCAL_RETIREMENT_TIME: Duration = Duration::from_secs(5);
+const AUDIT_OBSERVATION_DRAIN: Duration = Duration::from_secs(4);
+const AUDIT_TERMINAL_RESERVE: Duration = Duration::from_secs(1);
 
 enum Command {
     Write(Vec<u8>),
@@ -574,6 +592,7 @@ struct Owner<W> {
     observations: JoinSet<bool>,
     observation_slots: Arc<Semaphore>,
     observations_lost: u64,
+    observations_unconfirmed: u64,
     retirement_unconfirmed: bool,
     renewing: bool,
 }
@@ -593,7 +612,10 @@ where
 {
     let (mut input, mut output) = tokio::io::split(io);
     let Ok(binding_id) = IdV1::parse(&binding.attempt_id) else {
-        return ChannelTermination::without_flows(ChannelExit::Protocol);
+        return ChannelTermination::without_flows(
+            ChannelExit::Protocol,
+            ChannelAuditClosure::NotOpened,
+        );
     };
     let hello = CommonEgressHandshakeV1 {
         version: 1,
@@ -616,14 +638,23 @@ where
             .as_ref()
             != Some(&hello)
     {
-        return ChannelTermination::without_flows(ChannelExit::Protocol);
+        return ChannelTermination::without_flows(
+            ChannelExit::Protocol,
+            ChannelAuditClosure::NotOpened,
+        );
     }
     // The channel is durably known before any flow can be admitted.
     let opened = EgressObservationV1::ChannelOpened {
         binding: binding.clone(),
     };
     if control.observe(observation(opened)).await.is_err() {
-        return ChannelTermination::without_flows(ChannelExit::AuditUnavailable);
+        return ChannelTermination::without_flows(
+            ChannelExit::AuditUnavailable,
+            ChannelAuditClosure::Unknown {
+                observations_lost: 0,
+                observations_unconfirmed: 1,
+            },
+        );
     }
     let started = Instant::now();
     let mut ledger = EgressChannelState::new(0);
@@ -631,7 +662,13 @@ where
         .accept_capability(Some(&hello.capability), 0)
         .is_err()
     {
-        return ChannelTermination::without_flows(ChannelExit::Protocol);
+        return ChannelTermination::without_flows(
+            ChannelExit::Protocol,
+            ChannelAuditClosure::Unknown {
+                observations_lost: 0,
+                observations_unconfirmed: 0,
+            },
+        );
     }
     let (events, mut incoming) = mpsc::channel(64);
     let mut owner = Owner {
@@ -649,6 +686,7 @@ where
         observations: JoinSet::new(),
         observation_slots: Arc::new(Semaphore::new(OBSERVATION_SLOTS)),
         observations_lost: 0,
+        observations_unconfirmed: 0,
         retirement_unconfirmed: false,
         renewing: false,
     };
@@ -688,7 +726,7 @@ where
     drop(owner.output.take());
     drop(incoming);
     owner
-        .shutdown(exit, Instant::now() + OBSERVATION_DRAIN)
+        .shutdown(exit, Instant::now() + LOCAL_RETIREMENT_TIME)
         .await
 }
 
@@ -791,7 +829,7 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
         });
         while let Some(done) = self.observations.try_join_next() {
             if !matches!(done, Ok(true)) {
-                self.observations_lost += 1;
+                self.observations_unconfirmed += 1;
             }
         }
     }
@@ -893,7 +931,7 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
         targets: impl IntoIterator<Item = (u64, TerminalFrame, EgressCloseReasonV1)>,
     ) -> Result<(), ()> {
         // Signal every affected owner before any confirmation or helper I/O.
-        let deadline = Instant::now() + OBSERVATION_DRAIN;
+        let deadline = Instant::now() + LOCAL_RETIREMENT_TIME;
         let stopped: Vec<_> = targets
             .into_iter()
             .filter_map(|(flow_id, wire, reason)| {
@@ -987,7 +1025,7 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
                     .remove(&flow_id)
                     .and_then(|flow| flow.stop(flow_id, EgressCloseReasonV1::WorkerReset))
                 {
-                    self.collect_retired(retired, Instant::now() + OBSERVATION_DRAIN)
+                    self.collect_retired(retired, Instant::now() + LOCAL_RETIREMENT_TIME)
                         .await?;
                 }
                 Ok(())
@@ -1281,7 +1319,7 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
         let closing = opened
             .socket
             .stop(flow_id, decision_id, opened.connected_at, reason);
-        self.record_closed(closing, Instant::now() + OBSERVATION_DRAIN)
+        self.record_closed(closing, Instant::now() + LOCAL_RETIREMENT_TIME)
             .await
     }
 
@@ -1303,7 +1341,7 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
                 .and_then(|flow| flow.stop(flow_id, EgressCloseReasonV1::EndOfStream))
         {
             let reason = self
-                .collect_retired(closing, Instant::now() + OBSERVATION_DRAIN)
+                .collect_retired(closing, Instant::now() + LOCAL_RETIREMENT_TIME)
                 .await?
                 .ok_or(())?;
             let message = if reason == EgressCloseReasonV1::EndOfStream {
@@ -1413,20 +1451,14 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
             let _ = self.collect_retired(flow, deadline).await;
         }
         self.ledger.close();
-        if exit != ChannelExit::AuditUnavailable {
-            let closed = EgressObservationV1::ChannelClosed {
-                binding: self.binding.clone(),
-                reason: exit.code().into(),
-                observations_lost: self.observations_lost,
-            };
-            self.record(closed);
-        }
-        while let Ok(Some(done)) = timeout_at(deadline, self.observations.join_next()).await {
-            if !matches!(done, Ok(true)) {
-                self.observations_lost += 1;
-            }
-        }
-        self.observations.abort_all();
+        let observations_until = Instant::now() + AUDIT_OBSERVATION_DRAIN;
+        let audit = self
+            .finish_audit(
+                exit,
+                observations_until,
+                observations_until + AUDIT_TERMINAL_RESERVE,
+            )
+            .await;
         ChannelTermination {
             cause: exit,
             local_quiescence: if self.retirement_unconfirmed {
@@ -1434,6 +1466,55 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
             } else {
                 LocalQuiescence::Confirmed
             },
+            audit,
+        }
+    }
+
+    async fn finish_audit(
+        &mut self,
+        exit: ChannelExit,
+        observations_until: Instant,
+        terminal_until: Instant,
+    ) -> ChannelAuditClosure {
+        while !self.observations.is_empty() && Instant::now() < observations_until {
+            let Ok(Some(done)) =
+                timeout_at(observations_until, self.observations.join_next()).await
+            else {
+                break;
+            };
+            if Instant::now() >= observations_until || !matches!(done, Ok(true)) {
+                self.observations_unconfirmed += 1;
+            }
+        }
+        // An in-flight request can still have committed at the gateway.
+        self.observations_unconfirmed += self.observations.len() as u64;
+        self.observations.abort_all();
+
+        if self.observations_unconfirmed == 0
+            && !self.retirement_unconfirmed
+            && exit != ChannelExit::AuditUnavailable
+            && Instant::now() < terminal_until
+        {
+            let closed = EgressObservationV1::ChannelClosed {
+                binding: self.binding.clone(),
+                reason: exit.code().into(),
+                observations_lost: self.observations_lost,
+            };
+            // Send the terminal after previous receipts, outside the observation slots.
+            if matches!(
+                timeout_at(terminal_until, self.control.observe(observation(closed))).await,
+                Ok(Ok(()))
+            ) && Instant::now() < terminal_until
+            {
+                return ChannelAuditClosure::Acknowledged {
+                    observations_lost: self.observations_lost,
+                };
+            }
+            self.observations_unconfirmed += 1;
+        }
+        ChannelAuditClosure::Unknown {
+            observations_lost: self.observations_lost,
+            observations_unconfirmed: self.observations_unconfirmed,
         }
     }
 }

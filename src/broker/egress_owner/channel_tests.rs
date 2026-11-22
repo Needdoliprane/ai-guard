@@ -25,11 +25,23 @@ struct Gateway {
     observe_unavailable: AtomicBool,
     decision_delay: Duration,
     decision_hold: Option<Arc<PendingOperation>>,
+    prior_observation_reply: Option<ObservationReply>,
+    terminal_observation_reply: Option<ObservationReply>,
     remaining_ms: Option<u64>,
     renewal: Option<Arc<ScriptedRenewal>>,
     decisions: Mutex<Vec<EgressDecideRequestV1>>,
     observations: Mutex<Vec<EgressObservationV1>>,
     revoke: Mutex<Vec<IdV1>>,
+}
+
+enum ObservationReply {
+    Wait(Arc<ObservationGate>),
+    LostAfterCommit,
+}
+
+struct ObservationGate {
+    started: Semaphore,
+    release: Semaphore,
 }
 
 #[derive(Default)]
@@ -106,8 +118,24 @@ impl EgressControl for Gateway {
             if self.observe_unavailable.load(Ordering::SeqCst) {
                 return Err(ControlError::Unavailable);
             }
+            let reply = if matches!(
+                request.observation,
+                EgressObservationV1::ChannelClosed { .. }
+            ) {
+                &self.terminal_observation_reply
+            } else {
+                &self.prior_observation_reply
+            };
+            if let Some(ObservationReply::Wait(gate)) = reply {
+                gate.started.add_permits(1);
+                gate.release.acquire().await.unwrap().forget();
+            }
             self.observations.lock().unwrap().push(request.observation);
-            Ok(())
+            if matches!(reply, Some(ObservationReply::LostAfterCommit)) {
+                Err(ControlError::Unavailable)
+            } else {
+                Ok(())
+            }
         })
     }
     fn renew(&self, request: EgressRenewRequestV1) -> ControlFuture<'_, EgressRenewResponseV1> {
@@ -832,10 +860,219 @@ fn fixture_owner<W>(
         observations: JoinSet::new(),
         observation_slots: Arc::new(Semaphore::new(OBSERVATION_SLOTS)),
         observations_lost: 0,
+        observations_unconfirmed: 0,
         retirement_unconfirmed: false,
         renewing: false,
     };
     (owner, incoming, stop)
+}
+
+#[tokio::test]
+async fn egress_broker_unconfirmed_prior_observation_leaves_no_audit_terminal() {
+    let control = Arc::new(Gateway {
+        prior_observation_reply: Some(ObservationReply::LostAfterCommit),
+        ..Gateway::default()
+    });
+    let (mut owner, _incoming, _stop) = fixture_owner(
+        tokio::io::sink(),
+        control.clone(),
+        443,
+        ChannelTimes::default(),
+    );
+    owner.record(EgressObservationV1::ChannelOpened {
+        binding: owner.binding.clone(),
+    });
+
+    let terminal = owner
+        .shutdown(ChannelExit::Stopped, Instant::now() + LOCAL_RETIREMENT_TIME)
+        .await;
+
+    assert_eq!(terminal.cause, ChannelExit::Stopped);
+    assert_eq!(
+        terminal.audit,
+        ChannelAuditClosure::Unknown {
+            observations_lost: 0,
+            observations_unconfirmed: 1,
+        }
+    );
+    assert!(
+        matches!(
+            control.observations.lock().unwrap().as_slice(),
+            [EgressObservationV1::ChannelOpened { .. }]
+        ),
+        "a prior unconfirmed receipt must leave no terminal observation"
+    );
+}
+
+#[tokio::test]
+async fn egress_broker_audit_terminal_follows_the_saturated_observations() {
+    let gate = Arc::new(ObservationGate {
+        started: Semaphore::new(0),
+        release: Semaphore::new(0),
+    });
+    let control = Arc::new(Gateway {
+        prior_observation_reply: Some(ObservationReply::Wait(gate.clone())),
+        ..Gateway::default()
+    });
+    let (mut owner, _incoming, _stop) = fixture_owner(
+        tokio::io::sink(),
+        control.clone(),
+        443,
+        ChannelTimes::default(),
+    );
+    for flow_id in 1..=OBSERVATION_SLOTS as u64 + 1 {
+        owner.record(EgressObservationV1::Connection {
+            binding: owner.binding.clone(),
+            decision_id: IdV1::random(),
+            flow_id,
+            connected: true,
+            failure: None,
+            peer: Some("127.0.0.1:443".into()),
+            resolver: "fixture".into(),
+        });
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut closing = std::pin::pin!(owner.shutdown(ChannelExit::Stopped, deadline));
+    tokio::select! {
+        biased;
+        _ = &mut closing => panic!("shutdown awaits the prior submissions"),
+        permits = timeout_at(deadline, gate.started.acquire_many(OBSERVATION_SLOTS as u32)) => {
+            permits.unwrap().unwrap().forget();
+        }
+    }
+    assert!(control.observations.lock().unwrap().is_empty());
+    gate.release.add_permits(OBSERVATION_SLOTS);
+    let terminal = timeout_at(deadline, closing).await.unwrap();
+
+    assert_eq!(
+        terminal.audit,
+        ChannelAuditClosure::Acknowledged {
+            observations_lost: 1
+        }
+    );
+    let observations = control.observations.lock().unwrap();
+    let (closing, prior) = observations.split_last().unwrap();
+    assert_eq!(prior.len(), OBSERVATION_SLOTS);
+    assert!(
+        prior
+            .iter()
+            .all(|event| matches!(event, EgressObservationV1::Connection { .. }))
+    );
+    assert!(matches!(
+        closing,
+        EgressObservationV1::ChannelClosed {
+            observations_lost: 1,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn egress_broker_missing_terminal_receipt_keeps_audit_unknown() {
+    let control = Arc::new(Gateway {
+        terminal_observation_reply: Some(ObservationReply::LostAfterCommit),
+        ..Gateway::default()
+    });
+    let (mut owner, _incoming, _stop) = fixture_owner(
+        tokio::io::sink(),
+        control.clone(),
+        443,
+        ChannelTimes::default(),
+    );
+
+    let terminal = owner
+        .shutdown(
+            ChannelExit::HelperClosed,
+            Instant::now() + LOCAL_RETIREMENT_TIME,
+        )
+        .await;
+
+    assert_eq!(terminal.local_quiescence, LocalQuiescence::Confirmed);
+    assert_eq!(terminal.cause, ChannelExit::HelperClosed);
+    assert_eq!(
+        terminal.audit,
+        ChannelAuditClosure::Unknown {
+            observations_lost: 0,
+            observations_unconfirmed: 1,
+        }
+    );
+    assert!(matches!(
+        control.observations.lock().unwrap().as_slice(),
+        [EgressObservationV1::ChannelClosed { reason, .. }] if reason == "helper_exit"
+    ));
+}
+
+#[tokio::test]
+async fn egress_broker_audit_cut_bounds_prior_and_terminal_acknowledgments() {
+    for prior in [true, false] {
+        let gate = Arc::new(ObservationGate {
+            started: Semaphore::new(0),
+            release: Semaphore::new(0),
+        });
+        let control = Arc::new(Gateway {
+            prior_observation_reply: prior.then(|| ObservationReply::Wait(gate.clone())),
+            terminal_observation_reply: (!prior).then(|| ObservationReply::Wait(gate.clone())),
+            ..Gateway::default()
+        });
+        let (mut owner, _incoming, _stop) = fixture_owner(
+            tokio::io::sink(),
+            control.clone(),
+            443,
+            ChannelTimes::default(),
+        );
+        if prior {
+            owner.record(EgressObservationV1::ChannelOpened {
+                binding: owner.binding.clone(),
+            });
+        }
+        let observations_until = Instant::now() + Duration::from_millis(30);
+        let terminal_until = observations_until + Duration::from_millis(30);
+        let mut audit = std::pin::pin!(owner.finish_audit(
+            ChannelExit::HelperClosed,
+            observations_until,
+            terminal_until,
+        ));
+        if !prior {
+            assert!(
+                poll_fn(|cx| Poll::Ready(audit.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+            sleep_until(terminal_until).await;
+            gate.release.add_permits(1);
+        }
+        let result = audit.await;
+
+        assert_eq!(gate.started.available_permits(), 1);
+        assert!(
+            Instant::now()
+                >= if prior {
+                    observations_until
+                } else {
+                    terminal_until
+                }
+        );
+        assert_eq!(
+            result,
+            ChannelAuditClosure::Unknown {
+                observations_lost: 0,
+                observations_unconfirmed: 1,
+            }
+        );
+        let observations = control.observations.lock().unwrap();
+        if prior {
+            assert!(observations.is_empty());
+        } else {
+            assert!(
+                matches!(
+                    observations.as_slice(),
+                    [EgressObservationV1::ChannelClosed { .. }]
+                ),
+                "the fixture committed the terminal before returning its late receipt"
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -879,7 +1116,10 @@ async fn egress_broker_missing_detached_opening_report_keeps_quiescence_unknown(
     assert!(owner.flows.is_empty());
 
     let terminal = owner
-        .shutdown(ChannelExit::Protocol, Instant::now() + OBSERVATION_DRAIN)
+        .shutdown(
+            ChannelExit::Protocol,
+            Instant::now() + LOCAL_RETIREMENT_TIME,
+        )
         .await;
     assert_eq!(terminal.cause, ChannelExit::Protocol);
     assert_eq!(terminal.local_quiescence, LocalQuiescence::Unknown);
@@ -945,7 +1185,7 @@ async fn egress_broker_ready_retirement_receipts_after_deadline_cannot_confirm_q
     let terminal = owner
         .shutdown(
             ChannelExit::HelperClosed,
-            Instant::now() + OBSERVATION_DRAIN,
+            Instant::now() + LOCAL_RETIREMENT_TIME,
         )
         .await;
     assert_eq!(terminal.cause, ChannelExit::HelperClosed);
@@ -984,14 +1224,14 @@ async fn egress_broker_eof_without_socket_confirmation_keeps_quiescence_unknown(
     assert!(reported.is_closed());
     assert_eq!(terminal.cause, ChannelExit::HelperClosed);
     assert_eq!(terminal.local_quiescence, LocalQuiescence::Unknown);
-    assert!(
-        !control
-            .observations
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|event| matches!(event, EgressObservationV1::Closed { .. }))
+    assert_eq!(
+        terminal.audit,
+        ChannelAuditClosure::Unknown {
+            observations_lost: 1,
+            observations_unconfirmed: 0,
+        }
     );
+    assert!(control.observations.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1018,6 +1258,12 @@ async fn egress_broker_clean_eof_reports_local_quiescence_and_its_cause() {
     let terminal = timeout_at(deadline, owner).await.unwrap().unwrap();
     assert_eq!(terminal.cause, ChannelExit::HelperClosed);
     assert_eq!(terminal.local_quiescence, LocalQuiescence::Confirmed);
+    assert_eq!(
+        terminal.audit,
+        ChannelAuditClosure::Acknowledged {
+            observations_lost: 0
+        }
+    );
 }
 
 #[tokio::test]
@@ -1095,7 +1341,7 @@ async fn egress_broker_flow_retirement_cancels_pending_resolution() {
         .expect("retirement drops the in-flight resolver wait");
     assert_eq!(upstream.accepts.load(Ordering::SeqCst), 0);
     owner
-        .shutdown(ChannelExit::Stopped, Instant::now() + OBSERVATION_DRAIN)
+        .shutdown(ChannelExit::Stopped, Instant::now() + LOCAL_RETIREMENT_TIME)
         .await;
     assert!(
         !control
@@ -1170,7 +1416,7 @@ async fn egress_broker_retirement_closes_observed_socket_before_handoff() {
             .is_none()
     );
     owner
-        .shutdown(ChannelExit::Stopped, Instant::now() + OBSERVATION_DRAIN)
+        .shutdown(ChannelExit::Stopped, Instant::now() + LOCAL_RETIREMENT_TIME)
         .await;
     let observations = control.observations.lock().unwrap();
     assert_eq!(
@@ -1355,7 +1601,7 @@ async fn egress_broker_receipt_expiry_closes_socket_before_event_consumption() {
     ));
     assert!(owner.flows.is_empty());
     owner
-        .shutdown(ChannelExit::Stopped, Instant::now() + OBSERVATION_DRAIN)
+        .shutdown(ChannelExit::Stopped, Instant::now() + LOCAL_RETIREMENT_TIME)
         .await;
     assert_eq!(upstream.accepts.load(Ordering::SeqCst), 1);
     assert_expired_connection(&gateway);
@@ -1431,7 +1677,7 @@ async fn egress_broker_discards_buffered_data_after_receipt_or_lease_expiry() {
             "expired data must not be published"
         );
         owner
-            .shutdown(ChannelExit::Stopped, Instant::now() + OBSERVATION_DRAIN)
+            .shutdown(ChannelExit::Stopped, Instant::now() + LOCAL_RETIREMENT_TIME)
             .await;
         assert!(control.observations.lock().unwrap().iter().any(|event| matches!(event,
             EgressObservationV1::Closed { flow_id: 1, reason: observed, bytes_down: 3, .. } if *observed == reason)));
@@ -1719,9 +1965,14 @@ async fn egress_broker_refuses_every_flow_when_the_channel_cannot_be_recorded() 
     let unrecorded = gateway(true);
     unrecorded.observe_unavailable.store(true, Ordering::SeqCst);
     let harness = harness(unrecorded, upstream.port).await;
+    let terminal = harness.owner.await.unwrap();
+    assert_eq!(terminal.cause, ChannelExit::AuditUnavailable);
     assert_eq!(
-        harness.owner.await.unwrap().cause,
-        ChannelExit::AuditUnavailable
+        terminal.audit,
+        ChannelAuditClosure::Unknown {
+            observations_lost: 0,
+            observations_unconfirmed: 1,
+        }
     );
     assert!(harness.gateway.decisions.lock().unwrap().is_empty());
     assert_eq!(upstream.accepts.load(Ordering::SeqCst), 0);
