@@ -411,6 +411,7 @@ test("le résultat broker invalide laisse inconnus les champs et borne le texte 
 
 test("un échec broker v1 présente sa phase et son étape sans confirmer un effet d’exécution", () => {
   for (const [step, label] of [
+    ["activity_spool", "Collecte d’activité fournisseur indisponible"],
     ["failure_observed", "Observation d’un échec"],
     ["ownership_reload", "Vérification du conteneur enregistré"],
     ["created_exchange", "Confirmation de la création"],

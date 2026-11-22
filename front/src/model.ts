@@ -135,6 +135,7 @@ const failurePhaseLabels: ReadonlyMap<string, string> = new Map([
   ["cleanup", "Nettoyage"],
 ]);
 const failureStepLabels: ReadonlyMap<string, string> = new Map([
+  ["activity_spool", "Collecte d’activité fournisseur indisponible"],
   ["arm_exchange", "Armement de l’arrêt automatique"],
   ["registration", "Connexion au gardien d’arrêt"],
   ["readiness_before_claim", "Vérification avant démarrage"],
