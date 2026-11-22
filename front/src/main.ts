@@ -304,10 +304,7 @@ function accessRefused(error: unknown): boolean {
   return error instanceof ApiError && (error.status === 401 || error.status === 403);
 }
 function onError(error: unknown, owner: NoticeOwner | null = null) {
-  if (
-    error instanceof ApiError &&
-    (error.status === 401 || error.status === 403)
-  ) {
+  if (accessRefused(error)) {
     disconnect("Votre session a expiré ou le jeton a été refusé.");
     return;
   }

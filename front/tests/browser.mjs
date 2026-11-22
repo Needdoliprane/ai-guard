@@ -771,6 +771,7 @@ try {
   olderPageFailures = 1;
   await refreshOverview.click();
   await page.getByRole("button", { name: "Voir l’événement 14", exact: true }).waitFor();
+  const pageRequestStart = requests.length;
   await page.getByRole("button", { name: "Charger les précédents", exact: true }).focus();
   await page.keyboard.press("Enter");
   const historyAlert = page.getByRole("alert").filter({ hasText: "Historique incomplet" });
@@ -787,6 +788,11 @@ try {
   assert.equal(await page.locator(".event-slot .table-footer").evaluate((footer) =>
     footer.contains(document.activeElement) && document.activeElement.textContent.includes("chargés")), true,
     "En fin d’historique, le focus doit rejoindre le résumé");
+  const cursors = requests.slice(pageRequestStart)
+    .map(({ path }) => new URL(path, "http://localhost"))
+    .filter((url) => url.pathname === "/api/events" && url.searchParams.has("before"))
+    .map((url) => url.searchParams.get("before"));
+  assert.deepEqual(cursors, ["12", "12"], "La reprise relit la même limite du journal");
   pagedJournal = false;
   await refreshOverview.click();
   await page.getByRole("button", { name: "Voir l’événement 14", exact: true }).waitFor();
