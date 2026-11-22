@@ -61,11 +61,84 @@ jobs:
           python3 -B tests/e2e/test_run_provider_preflight.py ProviderPreflightTests ProviderBrowserStageTests
           python3 -B tests/e2e/test_run_provider_broker.py BrokerRecipeTests
       - name: Rust test suite (ignored engine and provider tests excluded)
+        if: github.ref_name != 'claude/v1-integration-regressions-20261122'
         shell: bash
         run: |
           set -o pipefail
           export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
           cargo test --locked --offline --no-fail-fast 2>&1 | tee cargo-test.log
+      - name: Targeted SQLite library regressions
+        if: github.ref_name == 'claude/v1-integration-regressions-20261122'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
+          build_json="$TMPDIR/libtest.jsonl"
+          test_log="$TMPDIR/selector.log"
+          summary=cargo-test-summary.txt
+          failures=cargo-test-failed.txt
+          : > "$summary"
+          : > "$failures"
+
+          settlement=broker::service::server::retirement_settlement_tests::same_original_not_queued_final_retries_its_retained_input_before_another_q
+          selectors=(
+            audit::resource_tests::retention_confirms_the_committed_segment_after_a_filesystem_ack_failure
+            api::human_sources::journal_tests::owned_event_page_reports_the_archived_prefix_after_adoption
+            api::human_sources::tests::owned_admin_reads_refuse_head_before_authentication
+            api::human_sources::journal_tests::owned_admin_reads::owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
+            identity::operations::tests::owned_event_availability_preserves_granted_permissions
+            broker::writer::inventory_tests::completed_inventory_releases_its_permit_before_reply
+            broker::writer::inventory_tests::timed_out_inventory_keeps_one_permit_and_cannot_queue_a_series_before_cancel
+            broker::writer::status_projection_tests::missing_shared_scope_inventory_interrupted_still_closes_the_cached_view
+            "$settlement"
+          )
+          expected=9
+          if (( ${#selectors[@]} != expected )); then
+            echo 'Invalid regression selector count' | tee -a "$summary"
+            exit 1
+          fi
+          printf 'Revision %s; %s exact SQLite library tests expected\n' "$GITHUB_SHA" "$expected" | tee -a "$summary"
+
+          # Keep raw Cargo and test output in the runner's private scratch directory.
+          if ! cargo test --locked --offline --no-default-features --lib --no-run \
+              --message-format=json > "$build_json" 2> "$TMPDIR/build.stderr"; then
+            echo 'SQLite library build failed; tests not run' | tee -a "$summary"
+            jq -r 'select(.reason == "compiler-message" and .message.level == "error")
+              | .message.code.code // empty | select(test("^E[0-9]{4}$"))' "$build_json" \
+              2>/dev/null | sort -u | tee -a "$summary" || true
+            exit 1
+          fi
+          if ! libtest="$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "agentsandbox" and .target.kind == ["lib"]
+              and .profile.test == true and .executable != null) | .executable]
+              | unique | if length == 1 then .[0] else empty end' "$build_json")" \
+              || [[ ! -x "$libtest" ]]; then
+            echo 'Expected one SQLite library test executable; tests not run' | tee -a "$summary"
+            exit 1
+          fi
+          printf 'SQLite libtest SHA-256 %s\n' "$(sha256sum "$libtest" | awk '{print $1}')" | tee -a "$summary"
+
+          passed=0
+          for selector in "${selectors[@]}"; do
+            if "$libtest" "$selector" --exact --test-threads=1 > "$test_log" 2>&1 \
+                && grep -Fxq 'running 1 test' "$test_log" \
+                && grep -Fxq "test $selector ... ok" "$test_log" \
+                && grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$test_log"; then
+              printf 'PASS %s\n' "$selector" | tee -a "$summary"
+              ((passed += 1))
+            else
+              printf 'FAIL %s\n' "$selector" | tee -a "$summary"
+              printf '%s\n' "$selector" >> "$failures"
+              if [[ "$selector" == "$settlement" ]]; then
+                phases='bind_full3|enqueue_signal|ack_signal|load_before_retirement|begin_retirement|ack_pending|authorize_retirement|read_pending|load_before_final|pause_writer'
+                categories='InvalidInput|UnsupportedVersion|TooLarge|LimitExceeded|Busy|Conflict|Interrupted|Corrupt|UnsafeFilesystem|ControlSecret|Io'
+                grep -Eo "settlement phase=($phases) category=($categories)\b" "$test_log" \
+                  | sort -u | tee -a "$summary" || true
+              fi
+            fi
+          done
+          printf 'Passed %s of %s exact selectors\n' "$passed" "$expected" | tee -a "$summary"
+          (( passed == expected ))
       - name: Summarize test results
         if: always()
         shell: bash
@@ -80,6 +153,13 @@ jobs:
               echo
               echo '```'
               head -n 100 cargo-test-failed.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif [ -f cargo-test-summary.txt ]; then
+            {
+              echo "### Targeted SQLite library tests"
+              echo '```'
+              cat cargo-test-summary.txt
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
           fi
