@@ -35,6 +35,23 @@ pub struct ConfiguredTenant {
     pub session_control_recovery_policy: Option<KubernetesSessionControlRecoveryPolicyV2>,
 }
 
+/// Interim, explicit refusal: the owned-sources profile (formats 14/15, a
+/// retained local source owner and storage binding) is not yet defined for a
+/// MySQL target. It never degrades to legacy human sources or to SQLite.
+pub fn refuse_owned_sources_on_mysql(tenants: &[ConfiguredTenant], owned: bool) -> Result<()> {
+    #[cfg(feature = "mysql-storage")]
+    anyhow::ensure!(
+        !owned
+            || !tenants
+                .iter()
+                .any(|tenant| matches!(tenant.storage, ConfiguredStorage::Mysql(_))),
+        "owned human sources are not available on a MySQL tenant yet; use the SQLite profile for owned_sources or the legacy human source mode"
+    );
+    #[cfg(not(feature = "mysql-storage"))]
+    let _ = (tenants, owned);
+    Ok(())
+}
+
 /// The tenant's selected audit backend with its private material, already read.
 /// Secrets stay in memory only and never reach Debug, logs or diagnostics.
 #[derive(Clone)]
@@ -1033,5 +1050,26 @@ mod tests {
         let registry_link = path.with_file_name("registry-link");
         std::os::unix::fs::symlink(&path, &registry_link).unwrap();
         assert!(load(&registry_link).is_err());
+    }
+
+    #[cfg(feature = "mysql-storage")]
+    #[test]
+    fn owned_sources_are_refused_explicitly_on_a_mysql_tenant() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolve = |path: PathBuf| -> Result<PathBuf> { Ok(path) };
+        let target = MysqlTarget::load(&mysql_files(dir.path(), false), &resolve).unwrap();
+        let (_dir, path, value) = fixture();
+        std::fs::write(&path, value.to_string()).unwrap();
+        std::fs::write(path.with_file_name("runner"), "r".repeat(48)).unwrap();
+        let mut tenants = load(&path).unwrap();
+        refuse_owned_sources_on_mysql(&tenants, true).unwrap();
+        tenants[0].storage = ConfiguredStorage::Mysql(Box::new(target));
+        refuse_owned_sources_on_mysql(&tenants, false).unwrap();
+        let refusal = refuse_owned_sources_on_mysql(&tenants, true).unwrap_err();
+        assert!(
+            refusal
+                .to_string()
+                .contains("not available on a MySQL tenant")
+        );
     }
 }

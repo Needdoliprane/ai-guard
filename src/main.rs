@@ -860,6 +860,11 @@ async fn run() -> Result<()> {
                         None,
                     )
                 };
+            gateway_config::refuse_owned_sources_on_mysql(
+                &tenants,
+                args.human_source_mode.as_deref() == Some("owned_sources")
+                    || activation_request.is_some(),
+            )?;
             let mut secrets: Vec<String> = tenants
                 .iter()
                 .flat_map(|tenant| [tenant.runner_token.clone(), tenant.viewer_token.clone()])
