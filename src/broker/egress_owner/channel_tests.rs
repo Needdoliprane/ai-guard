@@ -204,7 +204,7 @@ struct Harness {
     gateway: Arc<Gateway>,
     lookups: Arc<NoLookup>,
     helper_port: u16,
-    owner: tokio::task::JoinHandle<ChannelExit>,
+    owner: tokio::task::JoinHandle<ChannelTermination>,
     stop: ChannelStop,
 }
 
@@ -561,7 +561,7 @@ impl AsyncWrite for BlockedPublication {
 
 struct BlockedHarness {
     helper: tokio::io::DuplexStream,
-    owner: tokio::task::JoinHandle<ChannelExit>,
+    owner: tokio::task::JoinHandle<ChannelTermination>,
     blocked: Arc<tokio::sync::Notify>,
     stop: ChannelStop,
 }
@@ -635,7 +635,7 @@ async fn expiry_during_publication(complete_frames: usize) {
         .await
         .expect("the upstream socket closes at receipt expiry, before the frame timeout");
     assert_eq!(
-        timeout_at(deadline, owner).await.unwrap().unwrap(),
+        timeout_at(deadline, owner).await.unwrap().unwrap().cause,
         ChannelExit::Protocol
     );
     let mut frames = EgressFrameReader::new();
@@ -832,9 +832,125 @@ fn fixture_owner<W>(
         observations: JoinSet::new(),
         observation_slots: Arc::new(Semaphore::new(OBSERVATION_SLOTS)),
         observations_lost: 0,
+        retirement_unconfirmed: false,
         renewing: false,
     };
     (owner, incoming, stop)
+}
+
+#[tokio::test]
+async fn egress_broker_missing_detached_opening_report_keeps_quiescence_unknown() {
+    let (mut owner, _incoming, _stop) = fixture_owner(
+        tokio::io::sink(),
+        gateway(true),
+        443,
+        ChannelTimes::default(),
+    );
+    let now = owner.now_ms();
+    owner
+        .ledger
+        .on_worker(
+            &EgressMessageV1::Open {
+                flow_id: 1,
+                authority: format!("{FIXTURE}:443"),
+            },
+            now,
+        )
+        .unwrap();
+    let (opening, _lifetime) = OpeningOwner::new();
+    let (reported, outcome) = oneshot::channel();
+    let mut flow = owner.pending_flow(IdV1::random());
+    flow.opening = Some(OpeningHandle {
+        owner: opening,
+        outcome,
+    });
+    owner.flows.insert(1, flow);
+    drop(reported);
+
+    assert!(
+        owner
+            .worker_frame(EgressMessageV1::Reset {
+                flow_id: 1,
+                reason: EgressReasonV1::Cancelled,
+            })
+            .await
+            .is_err()
+    );
+    assert!(owner.flows.is_empty());
+
+    let terminal = owner
+        .shutdown(ChannelExit::Protocol, Instant::now() + OBSERVATION_DRAIN)
+        .await;
+    assert_eq!(terminal.cause, ChannelExit::Protocol);
+    assert_eq!(terminal.local_quiescence, LocalQuiescence::Unknown);
+}
+
+#[tokio::test]
+async fn egress_broker_eof_without_socket_confirmation_keeps_quiescence_unknown() {
+    let control = gateway(true);
+    let (mut owner, _incoming, _stop) = fixture_owner(
+        tokio::io::sink(),
+        control.clone(),
+        443,
+        ChannelTimes::default(),
+    );
+    let deadline = Instant::now() + Duration::from_millis(30);
+    let (authority, signalled) = watch::channel(SocketAuthority::default());
+    let (commands, _incoming_commands) = mpsc::channel(1);
+    let (reported, closed) = oneshot::channel();
+    let mut flow = owner.pending_flow(IdV1::random());
+    flow.socket = Some(SocketControl {
+        authority: Arc::new(authority),
+        commands,
+        closed,
+        valid_until: deadline,
+    });
+    owner.flows.insert(1, flow);
+
+    let terminal = owner.shutdown(ChannelExit::HelperClosed, deadline).await;
+
+    assert!(Instant::now() >= deadline);
+    assert_eq!(
+        signalled.borrow().stop.map(|(_, reason)| reason),
+        Some(EgressCloseReasonV1::OwnerExit)
+    );
+    assert!(reported.is_closed());
+    assert_eq!(terminal.cause, ChannelExit::HelperClosed);
+    assert_eq!(terminal.local_quiescence, LocalQuiescence::Unknown);
+    assert!(
+        !control
+            .observations
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event, EgressObservationV1::Closed { .. }))
+    );
+}
+
+#[tokio::test]
+async fn egress_broker_clean_eof_reports_local_quiescence_and_its_cause() {
+    let (broker, mut helper) = tokio::io::duplex(4096);
+    let (_stop, stopped) = ChannelStop::new();
+    let owner = tokio::spawn(run(
+        broker,
+        fixture_binding(),
+        gateway(true),
+        fixture_resolver(443, Arc::new(NoLookup(AtomicUsize::new(0)))),
+        ChannelTimes::default(),
+        stopped,
+    ));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let hello = channel_protocol::read_handshake(&mut helper, deadline)
+        .await
+        .unwrap();
+    channel_protocol::write_handshake(&mut helper, &hello, deadline)
+        .await
+        .unwrap();
+    drop(helper);
+
+    let terminal = timeout_at(deadline, owner).await.unwrap().unwrap();
+    assert_eq!(terminal.cause, ChannelExit::HelperClosed);
+    assert_eq!(terminal.local_quiescence, LocalQuiescence::Confirmed);
 }
 
 #[tokio::test]
@@ -857,7 +973,11 @@ async fn egress_broker_stop_cancels_an_opening_waiting_for_a_decision() {
         .await
         .expect("Stop drops the in-flight decision wait");
     assert_eq!(
-        timeout_at(deadline, channel.owner).await.unwrap().unwrap(),
+        timeout_at(deadline, channel.owner)
+            .await
+            .unwrap()
+            .unwrap()
+            .cause,
         ChannelExit::Stopped
     );
     assert_eq!(upstream.accepts.load(Ordering::SeqCst), 0);
@@ -907,7 +1027,9 @@ async fn egress_broker_flow_retirement_cancels_pending_resolution() {
         .await
         .expect("retirement drops the in-flight resolver wait");
     assert_eq!(upstream.accepts.load(Ordering::SeqCst), 0);
-    owner.shutdown(ChannelExit::Stopped).await;
+    owner
+        .shutdown(ChannelExit::Stopped, Instant::now() + OBSERVATION_DRAIN)
+        .await;
     assert!(
         !control
             .observations
@@ -980,7 +1102,9 @@ async fn egress_broker_retirement_closes_observed_socket_before_handoff() {
             .unwrap()
             .is_none()
     );
-    owner.shutdown(ChannelExit::Stopped).await;
+    owner
+        .shutdown(ChannelExit::Stopped, Instant::now() + OBSERVATION_DRAIN)
+        .await;
     let observations = control.observations.lock().unwrap();
     assert_eq!(
         observations
@@ -1047,7 +1171,10 @@ async fn egress_broker_unknown_connect_result_counts_as_lost_observation() {
         .await
         .unwrap();
     assert!(cause.is_none());
-    owner.shutdown(ChannelExit::Stopped).await;
+    let terminal = owner
+        .shutdown(ChannelExit::Stopped, Instant::now() + OBSERVATION_DRAIN)
+        .await;
+    assert_eq!(terminal.local_quiescence, LocalQuiescence::Confirmed);
     let observations = control.observations.lock().unwrap();
     assert!(matches!(
         observations.as_slice(),
@@ -1101,7 +1228,9 @@ async fn egress_broker_receipt_expiry_closes_socket_before_event_consumption() {
         })
     ));
     assert!(owner.flows.is_empty());
-    owner.shutdown(ChannelExit::Stopped).await;
+    owner
+        .shutdown(ChannelExit::Stopped, Instant::now() + OBSERVATION_DRAIN)
+        .await;
     assert_eq!(upstream.accepts.load(Ordering::SeqCst), 1);
     assert_expired_connection(&gateway);
 }
@@ -1175,7 +1304,9 @@ async fn egress_broker_discards_buffered_data_after_receipt_or_lease_expiry() {
             frames.read(&mut helper).await.unwrap().is_none(),
             "expired data must not be published"
         );
-        owner.shutdown(ChannelExit::Stopped).await;
+        owner
+            .shutdown(ChannelExit::Stopped, Instant::now() + OBSERVATION_DRAIN)
+            .await;
         assert!(control.observations.lock().unwrap().iter().any(|event| matches!(event,
             EgressObservationV1::Closed { flow_id: 1, reason: observed, bytes_down: 3, .. } if *observed == reason)));
     }
@@ -1236,7 +1367,8 @@ async fn egress_broker_expiry_during_partial_data_frame_closes_the_helper_channe
         timeout_at(deadline, channel.owner)
             .await
             .expect("the data deadline closes the helper channel")
-            .unwrap(),
+            .unwrap()
+            .cause,
         ChannelExit::Protocol,
     );
     assert!(matches!(
@@ -1274,7 +1406,11 @@ async fn egress_broker_stop_interrupts_partial_helper_publication() {
         .unwrap();
     assert_eq!(count, 0);
     assert_eq!(
-        timeout_at(deadline, channel.owner).await.unwrap().unwrap(),
+        timeout_at(deadline, channel.owner)
+            .await
+            .unwrap()
+            .unwrap()
+            .cause,
         ChannelExit::Stopped
     );
     assert!(matches!(
@@ -1327,7 +1463,11 @@ async fn egress_broker_received_revocation_interrupts_partial_helper_publication
         .unwrap();
     assert_eq!(count, 0);
     assert_eq!(
-        timeout_at(deadline, channel.owner).await.unwrap().unwrap(),
+        timeout_at(deadline, channel.owner)
+            .await
+            .unwrap()
+            .unwrap()
+            .cause,
         ChannelExit::Protocol
     );
     assert!(matches!(
@@ -1404,7 +1544,7 @@ async fn egress_broker_allowed_destination_is_decided_durably_before_one_pinned_
         EgressObservationV1::Connection { connected: true, peer: Some(peer), resolver, .. }
             if *peer == format!("127.0.0.1:{}", upstream.port) && resolver == "internal_service")));
     harness.stop.stop();
-    assert_eq!(harness.owner.await.unwrap(), ChannelExit::Stopped);
+    assert_eq!(harness.owner.await.unwrap().cause, ChannelExit::Stopped);
 }
 
 #[tokio::test]
@@ -1453,7 +1593,10 @@ async fn egress_broker_refuses_every_flow_when_the_channel_cannot_be_recorded() 
     let unrecorded = gateway(true);
     unrecorded.observe_unavailable.store(true, Ordering::SeqCst);
     let harness = harness(unrecorded, upstream.port).await;
-    assert_eq!(harness.owner.await.unwrap(), ChannelExit::AuditUnavailable);
+    assert_eq!(
+        harness.owner.await.unwrap().cause,
+        ChannelExit::AuditUnavailable
+    );
     assert!(harness.gateway.decisions.lock().unwrap().is_empty());
     assert_eq!(upstream.accepts.load(Ordering::SeqCst), 0);
 }

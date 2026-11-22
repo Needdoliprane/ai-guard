@@ -98,6 +98,29 @@ impl ChannelExit {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LocalQuiescence {
+    Confirmed,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ChannelTermination {
+    pub(crate) cause: ChannelExit,
+    /// Covers the broker's local egress owners and socket handles only.
+    /// Unknown blocks epoch handover pending reconciliation.
+    pub(crate) local_quiescence: LocalQuiescence,
+}
+
+impl ChannelTermination {
+    fn without_flows(cause: ChannelExit) -> Self {
+        Self {
+            cause,
+            local_quiescence: LocalQuiescence::Confirmed,
+        }
+    }
+}
+
 const COMMAND_SLOTS: usize = 32;
 const OBSERVATION_SLOTS: usize = 8;
 const OBSERVATION_DRAIN: Duration = Duration::from_secs(5);
@@ -536,6 +559,7 @@ struct Owner<W> {
     observations: JoinSet<bool>,
     observation_slots: Arc<Semaphore>,
     observations_lost: u64,
+    retirement_unconfirmed: bool,
     renewing: bool,
 }
 
@@ -548,13 +572,13 @@ pub(crate) async fn run<IO>(
     resolver: Arc<Resolver>,
     times: ChannelTimes,
     mut stop: watch::Receiver<ChannelStopState>,
-) -> ChannelExit
+) -> ChannelTermination
 where
     IO: AsyncRead + AsyncWrite + Send + 'static,
 {
     let (mut input, mut output) = tokio::io::split(io);
     let Ok(binding_id) = IdV1::parse(&binding.attempt_id) else {
-        return ChannelExit::Protocol;
+        return ChannelTermination::without_flows(ChannelExit::Protocol);
     };
     let hello = CommonEgressHandshakeV1 {
         version: 1,
@@ -577,14 +601,14 @@ where
             .as_ref()
             != Some(&hello)
     {
-        return ChannelExit::Protocol;
+        return ChannelTermination::without_flows(ChannelExit::Protocol);
     }
     // The channel is durably known before any flow can be admitted.
     let opened = EgressObservationV1::ChannelOpened {
         binding: binding.clone(),
     };
     if control.observe(observation(opened)).await.is_err() {
-        return ChannelExit::AuditUnavailable;
+        return ChannelTermination::without_flows(ChannelExit::AuditUnavailable);
     }
     let started = Instant::now();
     let mut ledger = EgressChannelState::new(0);
@@ -592,7 +616,7 @@ where
         .accept_capability(Some(&hello.capability), 0)
         .is_err()
     {
-        return ChannelExit::Protocol;
+        return ChannelTermination::without_flows(ChannelExit::Protocol);
     }
     let (events, mut incoming) = mpsc::channel(64);
     let mut owner = Owner {
@@ -610,6 +634,7 @@ where
         observations: JoinSet::new(),
         observation_slots: Arc::new(Semaphore::new(OBSERVATION_SLOTS)),
         observations_lost: 0,
+        retirement_unconfirmed: false,
         renewing: false,
     };
     let mut reader = EgressFrameReader::new();
@@ -647,8 +672,9 @@ where
     drop(input);
     drop(owner.output.take());
     drop(incoming);
-    owner.shutdown(exit).await;
-    exit
+    owner
+        .shutdown(exit, Instant::now() + OBSERVATION_DRAIN)
+        .await
 }
 
 fn observation(observation: EgressObservationV1) -> EgressObserveRequestV1 {
@@ -743,13 +769,18 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
         }
     }
 
+    fn mark_retirement_unconfirmed(&mut self) {
+        self.retirement_unconfirmed = true;
+        self.observations_lost += 1;
+    }
+
     async fn record_closed(
         &mut self,
         closing: ClosingFlow,
         deadline: Instant,
     ) -> Result<EgressCloseReasonV1, ()> {
         let Ok(Ok(closed)) = timeout_at(deadline, closing.closed).await else {
-            self.observations_lost += 1;
+            self.mark_retirement_unconfirmed();
             return Err(());
         };
         self.record(EgressObservationV1::Closed {
@@ -778,7 +809,7 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
                 outcome,
             } => {
                 let Ok(Ok(outcome)) = timeout_at(deadline, outcome).await else {
-                    self.observations_lost += 1;
+                    self.mark_retirement_unconfirmed();
                     return Err(());
                 };
                 self.observe_opening(flow_id, &decision_id, &outcome);
@@ -1110,7 +1141,7 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
         };
         // The wakeup is sent only after the result is available.
         let Ok(outcome) = outcome.try_recv() else {
-            self.observations_lost += 1;
+            self.mark_retirement_unconfirmed();
             return Err(());
         };
         self.observe_opening(flow_id, &decision_id, &outcome);
@@ -1341,8 +1372,7 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
         });
     }
 
-    async fn shutdown(&mut self, exit: ChannelExit) {
-        let deadline = Instant::now() + OBSERVATION_DRAIN;
+    async fn shutdown(&mut self, exit: ChannelExit, deadline: Instant) -> ChannelTermination {
         let reason = match exit {
             ChannelExit::Protocol => EgressCloseReasonV1::Protocol,
             _ => EgressCloseReasonV1::OwnerExit,
@@ -1370,6 +1400,14 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
             }
         }
         self.observations.abort_all();
+        ChannelTermination {
+            cause: exit,
+            local_quiescence: if self.retirement_unconfirmed {
+                LocalQuiescence::Unknown
+            } else {
+                LocalQuiescence::Confirmed
+            },
+        }
     }
 }
 
