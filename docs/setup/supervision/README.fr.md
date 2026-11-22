@@ -57,6 +57,26 @@ Lorsque le catalogue du contexte sélectionné accorde et sert `summary_read`, l
 
 **Période** ne change que les lignes des décisions et de l’usage. **Relecture automatique** a lieu toutes les 2 minutes par défaut (30 s ou manuel au choix) tant que l’onglet est visible ; chaque lecture laisse un reçu d’audit durable et compte dans les budgets de lecture humaine. Après une lecture en échec, la dernière synthèse reste affichée comme **Données périmées · dernière synthèse conservée** ; une lecture refusée retire toutes les valeurs et vos accès sont relus. Changer, laisser expirer ou révoquer le contexte, ou se déconnecter, retire la page.
 
+## Changer les droits d’un membre
+
+**Pas encore accessible dans ce build.** Le dashboard contient deux éditeurs : l’un pour une appartenance, l’autre pour les partages d’une ressource. Chacun n’apparaît que si le catalogue du contexte d’administration sélectionné accorde **et** sert son opération : `memberships_manage` pour les appartenances, `grants_manage` pour les partages. Ce build les annonce toutes deux en `not_in_this_build` : aucun éditeur n’est affiché et aucune demande de changement n’est envoyée tant que le dashboard n’admet pas ces deux changements. Rust autorise chaque changement et applique les règles de délégation avant tout effet. Les éditeurs évitent seulement de proposer ce que le contrôle refuserait.
+
+- **Utilisateurs → Modifier** (éditeur d’appartenance ; l’opération exige `manage_memberships` et `read_memberships` dans le contexte d’administration). Votre propre appartenance ne se modifie jamais ici : sa ligne indique **Votre appartenance : changement réservé au contrôle**. Chaque capacité est une case à cocher. Une capacité que l’appartenance détient se conserve ou se retire. Toute autre capacité ne s’ajoute que si votre contexte la détient. Six capacités sont réservées au contrôle ; elles se conservent ou se retirent, mais ne s’ajoutent jamais : `read_broker_registry`, `read_worker_registry`, `read_memberships`, `read_configuration`, `launch_session` et `send_session_message`. **Appartenance active** désactive ou réactive l’appartenance. Réactiver revient à ajouter chaque capacité conservée, selon les mêmes règles. La création des comptes et des appartenances reste une tâche de l’opérateur.
+- **Ressources → Gérer les partages** (éditeur de partages, sur chaque ressource d’un contexte d’administration ; l’opération exige `manage_grants` et `read_memberships`). L’éditeur lit le grant de la ressource. Il présente le propriétaire, qui ne reçoit jamais de partage et ne change pas ici, puis chaque partage avec ses permissions **Métadonnées**, **Contenu** et **Export**. Une permission peut toujours être retirée. Elle ne s’ajoute que si votre contexte détient la capacité correspondante : `read_metadata` ou `read_tenant_metadata` pour les métadonnées, `read_content` pour le contenu, `export` pour l’export. **Ajouter un partage** propose les membres actifs de l’organisation, jamais vous-même, le propriétaire ni un membre déjà présent dans la liste. Une ressource porte au plus 64 partages ; un partage sans permission se retire avec **Retirer ce partage**.
+
+**Vérifier le changement** affiche le changement exact avant tout envoi : capacités ajoutées et retirées, ou partages ajoutés, modifiés et retirés. Pour une appartenance, il indique aussi quand le changement retire tout accès : **La désactivation retire tous les accès de ce compte dans cette organisation.** lors d’une désactivation, ou un avis lorsqu’aucune capacité n’est conservée. **Confirmer le changement** envoie une seule demande. **Revenir à la modification** revient au brouillon.
+
+Chaque changement voulu porte un identifiant d’opération, affiché en **Opération …**. Il reste le même d’une reprise à l’autre jusqu’à une réponse définitive du contrôle :
+
+| Réponse | Affichage | Suite |
+|---|---|---|
+| `503`, `429`, panne réseau, délai dépassé ou réponse illisible | **Résultat inconnu : réessayer reprend la même opération.** | **Réessayer la même opération** envoie le même identifiant. Le contrôle applique le changement au plus une fois, ou rend le reçu du changement déjà appliqué. |
+| `409 conflict` | Le contenu a changé depuis votre lecture ; il est relu | L’éditeur de partages relit la ressource et repart de la nouvelle révision. Pour une appartenance, la liste est relue ; rouvrez **Modifier** depuis la nouvelle révision. La tentative suivante est une nouvelle opération. |
+| `403` | L’éditeur est retiré | Vos accès sont relus. |
+| `400` ou `404` | Le changement est refusé | Définitif : rien n’a été modifié. |
+
+Un changement enregistré crée une nouvelle révision d’autorisation : le contexte dans lequel vous l’avez fait est ensuite refusé. Le dashboard relit alors vos accès et sélectionne l’unique contexte de même attribution que le contrôle propose désormais. Il relit **Utilisateurs** ou **Ressources** et affiche le reçu : nouvelle révision, révision d’autorisation et position d’audit. Si le contrôle ne propose pas exactement un tel contexte, vous en choisissez un, et le reçu reste affiché. L’identité suivante du membre ne propose plus un droit retiré ; un partage retiré quitte ses vues à sa prochaine lecture.
+
 ## Ouvrir la vue
 
 1. Connectez-vous avec votre compte nominatif et attendez **Choisir un contexte.**

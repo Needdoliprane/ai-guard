@@ -1,6 +1,7 @@
-// Strict models of the administration reads of the 360° views: memberships, quota, usage and configuration.
+// Strict models of the administration reads of the 360° views: memberships, quota, usage and configuration, and of
+// the delegated membership and share changes with their receipts.
 // Pure: no DOM, no network, no clock. The control decides every value; the front never derives a right from them.
-import { CAPABILITIES, HumanContractError, object, uuid, type Capability, type Principal, type ReadReceipt } from "./human-model.ts";
+import { CAPABILITIES, HumanContractError, object, uuid, type Capability, type Principal, type ReadReceipt, type ResourceKind, type ResourceRef } from "./human-model.ts";
 import type { SummaryQuota } from "./summary-model.ts";
 
 function require(condition: unknown): asserts condition { if (!condition) throw new HumanContractError(); }
@@ -137,9 +138,109 @@ export function parseHumanConfiguration(value: unknown, expected: { contextId: s
 
 /** Bound of one administration response, envelope included. */
 export const ADMIN_PAGE_BYTES = 256 * 1024;
+const RESOURCE_KINDS: readonly ResourceKind[] = ["session", "sandbox", "agent", "project"];
+function resourceRef(value: unknown): ResourceRef {
+  closed(value, ["kind", "resource_id"]);
+  require(RESOURCE_KINDS.includes(value.kind as ResourceKind) && text(value.resource_id, 256));
+  return { kind: value.kind as ResourceKind, resource_id: value.resource_id };
+}
+const sameResource = (left: ResourceRef, right: ResourceRef) => left.kind === right.kind && left.resource_id === right.resource_id;
+const principalKey = (value: Principal) => value.kind === "human_local" ? `local\u0000${value.installation_id}\u0000${value.account_id}` : `oidc\u0000${value.issuer}\u0000${value.subject}`;
+const positiveDecimal = (value: unknown): value is string => decimal(value) && value !== "0";
+
+/** Closed share permissions, in the order of the wire. */
+export const SHARE_PERMISSIONS = ["metadata", "content", "export"] as const;
+export type SharePermission = typeof SHARE_PERMISSIONS[number];
+export const GRANT_SHARES_MAX = 64;
+export const MEMBERSHIP_CHANGE_BODY_BYTES = 4096;
+export const GRANT_CHANGE_BODY_BYTES = 32768;
+
+/** Durable outcome of a delegated membership change, decimal strings throughout. */
+export interface MembershipChangeReceipt {
+  version: 1; operation_id: string; membership_id: string; membership_revision: string; authorization_revision: string; audit_seq: string;
+}
+/** The receipt answers exactly the operation and the membership the request named. */
+export function parseMembershipChangeReceipt(value: unknown, expected: { operationId: string; membershipId: string }): MembershipChangeReceipt {
+  closed(value, ["version", "operation_id", "membership_id", "membership_revision", "authorization_revision", "audit_seq"]);
+  require(value.version === 1 && uuid(value.operation_id) && value.operation_id === expected.operationId && uuid(value.membership_id) &&
+    value.membership_id === expected.membershipId && positiveDecimal(value.membership_revision) && positiveDecimal(value.authorization_revision) &&
+    positiveDecimal(value.audit_seq));
+  return { version: 1, operation_id: value.operation_id, membership_id: value.membership_id, membership_revision: value.membership_revision,
+    authorization_revision: value.authorization_revision as string, audit_seq: value.audit_seq as string };
+}
+
+export interface GrantShare { principal: Principal; display_name: string; permissions: SharePermission[] }
+export interface HumanGrant {
+  evaluated_at: string; source: "tenant_identity_resources"; resource: ResourceRef; owner: Principal; owner_display_name: string;
+  revision: string; active: boolean; shares: GrantShare[]; read_receipt: ReadReceipt;
+}
+function permissions(value: unknown): SharePermission[] {
+  require(Array.isArray(value) && value.length >= 1 && value.length <= SHARE_PERMISSIONS.length && new Set(value).size === value.length &&
+    value.every((permission) => (SHARE_PERMISSIONS as readonly unknown[]).includes(permission)));
+  return SHARE_PERMISSIONS.filter((permission) => (value as unknown[]).includes(permission));
+}
+/** One resource of the context's organization with its shares. No share names the owner, twice the same principal, or no permission. */
+export function parseHumanGrant(value: unknown, expected: { contextId: string; authorizationVersion: string; resource: ResourceRef }): HumanGrant {
+  closed(value, ["version", "context_id", "authorization_version", "source", "evaluated_at", "resource", "owner", "owner_display_name", "revision", "active", "shares", "read_receipt"]);
+  frame(value, expected);
+  const resource = resourceRef(value.resource); const owner = principal(value.owner);
+  require(value.source === "tenant_identity_resources" && sameResource(resource, expected.resource) && text(value.owner_display_name, 160) &&
+    positiveDecimal(value.revision) && typeof value.active === "boolean" && Array.isArray(value.shares) && value.shares.length <= GRANT_SHARES_MAX);
+  const seen = new Set([principalKey(owner)]);
+  const shares = value.shares.map((share): GrantShare => {
+    closed(share, ["principal", "display_name", "permissions"]);
+    const sharer = principal(share.principal); const key = principalKey(sharer);
+    require(!seen.has(key) && text(share.display_name, 160)); seen.add(key);
+    return { principal: sharer, display_name: share.display_name, permissions: permissions(share.permissions) };
+  });
+  return { evaluated_at: value.evaluated_at as string, source: "tenant_identity_resources", resource, owner, owner_display_name: value.owner_display_name,
+    revision: value.revision, active: value.active, shares, read_receipt: receipt(value.read_receipt) };
+}
+
+export interface GrantChangeReceipt {
+  version: 1; operation_id: string; resource: ResourceRef; grant_revision: string; authorization_revision: string; audit_seq: string;
+}
+export function parseGrantChangeReceipt(value: unknown, expected: { operationId: string; resource: ResourceRef }): GrantChangeReceipt {
+  closed(value, ["version", "operation_id", "resource", "grant_revision", "authorization_revision", "audit_seq"]);
+  const resource = resourceRef(value.resource);
+  require(value.version === 1 && uuid(value.operation_id) && value.operation_id === expected.operationId && sameResource(resource, expected.resource) &&
+    positiveDecimal(value.grant_revision) && positiveDecimal(value.authorization_revision) && positiveDecimal(value.audit_seq));
+  return { version: 1, operation_id: value.operation_id, resource, grant_revision: value.grant_revision as string,
+    authorization_revision: value.authorization_revision as string, audit_seq: value.audit_seq as string };
+}
+
+/** The closed bodies of the two delegated changes, checked against their bounds before any request. */
+export interface MembershipChange { operation_id: string; expected_revision: string; capabilities: Capability[]; active: boolean }
+export function membershipChangeBody(change: MembershipChange): string {
+  require(uuid(change.operation_id) && positiveDecimal(change.expected_revision) && typeof change.active === "boolean" &&
+    Array.isArray(change.capabilities) && new Set(change.capabilities).size === change.capabilities.length &&
+    change.capabilities.every((capability) => (CAPABILITIES as readonly unknown[]).includes(capability)));
+  const body = JSON.stringify({ operation_id: change.operation_id, expected_revision: change.expected_revision,
+    capabilities: CAPABILITIES.filter((capability) => change.capabilities.includes(capability)), active: change.active });
+  require(new TextEncoder().encode(body).length <= MEMBERSHIP_CHANGE_BODY_BYTES);
+  return body;
+}
+export interface GrantChange { operation_id: string; resource: ResourceRef; expected_revision: string; shares: { principal: Principal; permissions: SharePermission[] }[] }
+export function grantChangeBody(change: GrantChange, owner?: Principal): string {
+  require(uuid(change.operation_id) && positiveDecimal(change.expected_revision) && Array.isArray(change.shares) && change.shares.length <= GRANT_SHARES_MAX);
+  const resource = resourceRef(change.resource);
+  const seen = new Set(owner ? [principalKey(owner)] : []);
+  const shares = change.shares.map((share) => {
+    const sharer = principal(share.principal); const key = principalKey(sharer);
+    require(!seen.has(key)); seen.add(key);
+    return { principal: sharer, permissions: permissions(share.permissions) };
+  });
+  const body = JSON.stringify({ operation_id: change.operation_id, resource, expected_revision: change.expected_revision, shares });
+  require(new TextEncoder().encode(body).length <= GRANT_CHANGE_BODY_BYTES);
+  return body;
+}
+
 export const adminUrls = {
   memberships: (cursor: string | null) => `/api/v1/human/admin/memberships?${new URLSearchParams({ limit: "50", ...(cursor ? { cursor } : {}) })}`,
   quota: () => "/api/v1/human/admin/quota",
   usage: (cursor: string | null) => `/api/v1/human/admin/usage?${new URLSearchParams({ limit: "50", ...(cursor ? { cursor } : {}) })}`,
   configuration: () => "/api/v1/human/admin/configuration",
+  membershipChange: (membershipId: string) => { require(uuid(membershipId)); return `/api/v1/human/admin/memberships/${membershipId}`; },
+  grant: (resource: ResourceRef) => { const ref = resourceRef(resource); return `/api/v1/human/admin/grants?${new URLSearchParams({ resource_kind: ref.kind, resource_id: ref.resource_id })}`; },
+  grantChange: () => "/api/v1/human/admin/grants",
 };

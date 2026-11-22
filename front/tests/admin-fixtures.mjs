@@ -15,3 +15,13 @@ export const usagePage = (contextId, extra = {}) => ({ ...anchors(contextId), so
   items: [], has_more: false, next_cursor: null, read_receipt: receipt, ...extra });
 export const configurationBody = (contextId, extra = {}) => ({ ...anchors(contextId), read_receipt: receipt,
   entries: [{ axis: "storage", key: "backend", value: "sqlite", provenance: "configured" }], ...extra });
+
+// Delegated changes: the grant of one resource and the two receipts.
+export const memberPrincipal = (number) => ({ kind: "human_local", installation_id: uuid, account_id: `00000000-0000-4000-8000-0000000001${String(number).padStart(2, "0")}` });
+export const grantBody = (contextId, extra = {}) => ({ ...anchors(contextId), source: "tenant_identity_resources",
+  resource: { kind: "session", resource_id: "session-a" }, owner: memberPrincipal(1), owner_display_name: "Owner One", revision: "4", active: true,
+  shares: [{ principal: memberPrincipal(2), display_name: "Member Two", permissions: ["metadata"] }], read_receipt: receipt, ...extra });
+export const membershipReceipt = (operationId, membershipId, extra = {}) => ({ version: 1, operation_id: operationId, membership_id: membershipId,
+  membership_revision: "4", authorization_revision: "17", audit_seq: "250", ...extra });
+export const grantReceipt = (operationId, resource = { kind: "session", resource_id: "session-a" }, extra = {}) => ({ version: 1, operation_id: operationId,
+  resource, grant_revision: "5", authorization_revision: "18", audit_seq: "251", ...extra });

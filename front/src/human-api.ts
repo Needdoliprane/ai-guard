@@ -1,10 +1,11 @@
 import { createSseParser } from "./sse.ts";
 import { HUMAN_FEDERATION_PAGE_BYTES, HumanContractError, boundedText, humanBrokersUrl, humanWorkersUrl, humanFederationWorkersUrl, humanRecentEventsUrl, humanUrl, object, opaque, parseHumanBrokerPage, parseHumanWorkerPage, parseHumanFederationWorkerPage, parseHumanEventPage, parseHumanIdentity, parseHumanRecentEventPage, parseResourcePage, uuid } from "./human-model.ts";
-import type { HumanContext, HumanEventPage, HumanIdentity, HumanOperation, HumanRecentEventPage, HumanSelection, HumanFederationSelection, ResourceRef } from "./human-model.ts";
+import type { HumanContext, HumanEventPage, HumanIdentity, HumanOperation, HumanRecentEventPage, HumanSelection, HumanFederationSelection, Principal, ResourceRef } from "./human-model.ts";
 import { humanOwnedBrokersUrl, parseHumanOwnedBrokerPage } from "./human-owned-brokers.ts";
 import { SUMMARY_PAGE_BYTES, humanSummaryUrl, parseHumanSummary, type HumanSummary, type SummaryWindow } from "./summary-model.ts";
-import { ADMIN_PAGE_BYTES, adminUrls, parseHumanConfiguration, parseHumanQuota, parseMembershipPage, parseUsagePage,
-  type HumanConfiguration, type HumanQuota, type MembershipPage, type UsagePage } from "./admin-model.ts";
+import { ADMIN_PAGE_BYTES, adminUrls, grantChangeBody, membershipChangeBody, parseGrantChangeReceipt, parseHumanConfiguration, parseHumanGrant, parseHumanQuota,
+  parseMembershipChangeReceipt, parseMembershipPage, parseUsagePage, type GrantChange, type GrantChangeReceipt, type HumanConfiguration, type HumanGrant,
+  type HumanQuota, type MembershipChange, type MembershipChangeReceipt, type MembershipPage, type UsagePage } from "./admin-model.ts";
 import { OPERATION_FACTS, access, availabilityText } from "./access-model.ts";
 
 export class HumanSuperseded extends Error { constructor() { super("Lecture abandonnée après changement de contexte."); } }
@@ -33,8 +34,8 @@ interface Handlers {
 }
 const codes = new Set(["authentication_required", "credential_invalid", "credential_expired", "identity_revoked", "context_required",
   "context_invalid", "context_expired", "context_revoked", "permission_denied", "not_found", "invalid_request", "invalid_cursor",
-  "capacity_exhausted", "stream_admission_unavailable", "audit_read_budget_exhausted", "identity_unavailable", "audit_unavailable", "migration_required"]);
-const actions = new Set(["authenticate", "select_context", "review_permissions", "reduce_page", "retry", "contact_operator", "close_unused_streams"]);
+  "capacity_exhausted", "stream_admission_unavailable", "audit_read_budget_exhausted", "identity_unavailable", "audit_unavailable", "migration_required", "conflict"]);
+const actions = new Set(["authenticate", "select_context", "review_permissions", "reduce_page", "retry", "contact_operator", "close_unused_streams", "reread"]);
 
 /** Separate trust boundary: a local human credential can never fall back to the viewer API. */
 export class HumanApiClient {
@@ -124,23 +125,28 @@ export class HumanApiClient {
       return { value: this.#parseText(text), bytes };
     } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
   }
-  async #request(path: string, snapshot: Snapshot, signal?: AbortSignal, stream = false): Promise<Response> {
+  /** `body` makes the request a POST of that JSON text: a delegated change, never a read. */
+  async #request(path: string, snapshot: Snapshot, signal?: AbortSignal, stream = false, body?: string): Promise<Response> {
     this.#assert(snapshot);
     if (!/^\/api\/v1\/human\/(identity|resources|events|export|stream|brokers|workers|summary)(?:\/[0-9a-f-]{36})?(?:\?[^#]*)?$/.test(path) &&
       !/^\/api\/v1\/human\/federation\/workers(?:\?[^#]*)?$/.test(path) && !/^\/api\/v1\/human\/events\/recent(?:\?[^#]*)?$/.test(path) &&
       !/^\/api\/v1\/human\/owned\/brokers(?:\?[^#]*)?$/.test(path) &&
-      !/^\/api\/v1\/human\/admin\/(memberships|quota|usage|configuration)(?:\?[^#]*)?$/.test(path)) throw new HumanContractError();
-    if (this.#readBudgetStopped) {
+      !/^\/api\/v1\/human\/admin\/(memberships|quota|usage|configuration|grants)(?:\?[^#]*)?$/.test(path) &&
+      !(body !== undefined && /^\/api\/v1\/human\/admin\/memberships\/[0-9a-fA-F-]{36}$/.test(path))) throw new HumanContractError();
+    // The durable read budget bounds reads; a change is not a read and keeps its own refusals.
+    if (this.#readBudgetStopped && body === undefined) {
       if (!this.#operatorReadAllowed || stream) throw new HumanApiError(429, "audit_read_budget_exhausted", "Lecture automatique suspendue : budget durable de lecture atteint. Contactez l’opérateur.", "contact_operator");
       this.#operatorReadAllowed = false; snapshot.operatorRetry = true;
     }
-    const headers: Record<string, string> = { Authorization: `Bearer ${this.#token}`, Accept: stream ? "text/event-stream" : "application/json" };
+    const headers: Record<string, string> = { Authorization: `Bearer ${this.#token}`, Accept: stream ? "text/event-stream" : "application/json",
+      ...(body !== undefined ? { "Content-Type": "application/json" } : {}) };
     if (snapshot.context) headers["X-AiGuard-Context"] = snapshot.context.id;
     const signals = [this.#lifetime.signal, this.#scope.signal];
     if (signal) signals.push(signal);
     if (!stream) signals.push(AbortSignal.timeout(15000));
     const fetcher = this.#fetcher;
-    const response = await fetcher(path, { method: "GET", headers, credentials: "omit", cache: "no-store", redirect: "error", signal: AbortSignal.any(signals) });
+    const response = await fetcher(path, { method: body === undefined ? "GET" : "POST", headers, ...(body !== undefined ? { body } : {}),
+      credentials: "omit", cache: "no-store", redirect: "error", signal: AbortSignal.any(signals) });
     if (!this.#token || this.#lifetime.signal.aborted) {
       void response.body?.cancel().catch(() => {}); throw new HumanSuperseded();
     }
@@ -294,6 +300,32 @@ export class HumanApiClient {
     this.#served(snapshot, "usage_read");
     const body = await this.#json(await this.#request(adminUrls.usage(cursor), snapshot, signal), snapshot, ADMIN_PAGE_BYTES);
     return this.#finishRead(parseUsagePage(body.value, this.#anchors(snapshot)), snapshot, signal);
+  }
+  /** One resource of the organization with its shares, for the administrator who may change them. */
+  async grant(resource: ResourceRef, signal?: AbortSignal): Promise<HumanGrant> {
+    const snapshot = this.#snapshot(true);
+    this.#served(snapshot, "grants_manage");
+    const body = await this.#json(await this.#request(adminUrls.grant(resource), snapshot, signal), snapshot, ADMIN_PAGE_BYTES);
+    return this.#finishRead(parseHumanGrant(body.value, { ...this.#anchors(snapshot), resource }), snapshot, signal);
+  }
+  /**
+   * A delegated change of one membership. The caller keeps `operation_id` across retries until a definitive answer;
+   * a 200 means a new authorization revision, so the selected context is refused afterwards and must be chosen again.
+   */
+  async changeMembership(membershipId: string, change: MembershipChange, signal?: AbortSignal): Promise<MembershipChangeReceipt> {
+    const snapshot = this.#snapshot(true);
+    this.#served(snapshot, "memberships_manage");
+    const text = membershipChangeBody(change);
+    const body = await this.#json(await this.#request(adminUrls.membershipChange(membershipId), snapshot, signal, false, text), snapshot, ADMIN_PAGE_BYTES);
+    return this.#finishRead(parseMembershipChangeReceipt(body.value, { operationId: change.operation_id, membershipId }), snapshot, signal);
+  }
+  /** A delegated replacement of the shares of one bound resource. `owner` lets the body refuse a share to the owner. */
+  async changeGrant(change: GrantChange, owner?: Principal, signal?: AbortSignal): Promise<GrantChangeReceipt> {
+    const snapshot = this.#snapshot(true);
+    this.#served(snapshot, "grants_manage");
+    const text = grantChangeBody(change, owner);
+    const body = await this.#json(await this.#request(adminUrls.grantChange(), snapshot, signal, false, text), snapshot, ADMIN_PAGE_BYTES);
+    return this.#finishRead(parseGrantChangeReceipt(body.value, { operationId: change.operation_id, resource: change.resource }), snapshot, signal);
   }
   /** Effective configuration, types and modes only. */
   async configuration(signal?: AbortSignal): Promise<HumanConfiguration> {

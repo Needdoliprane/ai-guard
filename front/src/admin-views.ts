@@ -91,6 +91,7 @@ const capabilityLabel: Record<string, string> = {
   manage_memberships: "Gestion des appartenances", manage_grants: "Gestion des partages", read_broker_registry: "Registre des brokers",
   read_worker_registry: "Registre des workers", approve_launch: "Approbation de lancement", read_memberships: "Lecture des appartenances",
   read_configuration: "Configuration", launch_session: "Lancement de session", send_session_message: "Consigne à une session",
+  approve_egress: "Approbation des sorties réseau",
 };
 
 export interface MembershipsHost extends AdminHost {

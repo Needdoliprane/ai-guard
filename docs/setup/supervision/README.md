@@ -57,6 +57,26 @@ When the selected context's catalogue grants and serves `summary_read`, the dash
 
 **Période** changes only the decision and usage rows. **Relecture automatique** is every 2 minutes by default (30 s or manual are available) while the tab is visible; each read leaves a durable audit receipt and counts against the human read budgets. After a failed read the last summary stays visible as **Données périmées · dernière synthèse conservée**; a refused read withdraws every value and your accesses are read again. Changing, expiring or revoking the context, or logging out, withdraws the page.
 
+## Changing a member's rights
+
+**Not reachable in this build.** The dashboard contains two editors: one for a membership and one for the shares of a resource. Each appears only when the catalogue of the selected administration context grants **and** serves its operation: `memberships_manage` for memberships, `grants_manage` for shares. This build announces both as `not_in_this_build`, so no editor is shown and no change request is sent until the dashboard admits the two changes. Rust authorizes every change and applies the delegation rules before any effect. The editors only avoid offering what the control would refuse.
+
+- **Utilisateurs → Modifier** (membership editor; the operation requires `manage_memberships` and `read_memberships` in the administration context). Your own membership is never editable here: its row says **Votre appartenance : changement réservé au contrôle** (your membership: change reserved to the control). Each capability is a checkbox. A capability the membership holds can be kept or removed. Any other capability can be added only if your context holds it. Six capabilities are reserved to the control and can be kept or removed, never added: `read_broker_registry`, `read_worker_registry`, `read_memberships`, `read_configuration`, `launch_session` and `send_session_message`. **Appartenance active** deactivates or reactivates the membership. Reactivating counts as adding every kept capability, under the same rules. Creating accounts and memberships stays an operator task.
+- **Ressources → Gérer les partages** (share editor, on each resource of an administration context; the operation requires `manage_grants` and `read_memberships`). The editor reads the resource's grant. It shows the owner, who never receives a share and does not change here, and each share with its **Métadonnées**, **Contenu** and **Export** permissions. A permission can always be removed. It can be added only if your context holds the matching capability: `read_metadata` or `read_tenant_metadata` for metadata, `read_content` for content, `export` for export. **Ajouter un partage** (add a share) lists active members of the organization, never yourself, the owner or a member already in the list. A resource has at most 64 shares; a share without any permission is removed with **Retirer ce partage** instead.
+
+**Vérifier le changement** (review the change) shows the exact change before anything is sent: the capabilities added and removed, or the shares added, changed and removed. For a membership it also says when the change removes every access: **La désactivation retire tous les accès de ce compte dans cette organisation.** on deactivation, or a notice when no capability is kept. **Confirmer le changement** sends one request. **Revenir à la modification** goes back to the draft.
+
+Each intended change carries one operation identifier, shown as **Opération …**. It stays the same across retries until the control gives a final answer:
+
+| Answer | Shown | What happens |
+|---|---|---|
+| `503`, `429`, network failure, timeout or unreadable answer | **Résultat inconnu : réessayer reprend la même opération.** (unknown outcome: retrying resumes the same operation) | **Réessayer la même opération** sends the same identifier. The control applies the change at most once, or returns the receipt of the change it already applied. |
+| `409 conflict` | The content changed since you read it; it is read again | The share editor reads the resource again and starts from the new revision. For a membership, the list is read again; open **Modifier** again from the new revision. The next attempt is a new operation. |
+| `403` | The editor is withdrawn | Your accesses are read again. |
+| `400` or `404` | The change was refused | Final: nothing was changed. |
+
+A recorded change creates a new authorization revision, so the context you made it in is refused afterwards. The dashboard then reads your accesses again and selects the one context with the same attribution that the control now offers. It reads **Utilisateurs** or **Ressources** again and shows the receipt: new revision, authorization revision and audit position. If the control does not offer exactly one such context, you choose one, and the receipt stays displayed. The member's next identity no longer offers a removed right; a removed share leaves the member's views at their next read.
+
 ## Open the view
 
 1. Sign in with your named account and wait for **Choisir un contexte.**

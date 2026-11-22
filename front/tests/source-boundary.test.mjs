@@ -22,7 +22,7 @@ test("aucun fichier de front/src n’importe hors de front/src", () => {
 });
 
 test("le modèle et l’état de la supervision restent sans DOM ni feuille de style", () => {
-  for (const name of ["supervision-model.ts", "supervision-store.ts", "human-model.ts", "human-api.ts", "access-model.ts", "summary-model.ts"]) {
+  for (const name of ["supervision-model.ts", "supervision-store.ts", "human-model.ts", "human-api.ts", "access-model.ts", "summary-model.ts", "admin-model.ts", "delegation-model.ts"]) {
     const text = readFileSync(join(source, name), "utf8");
     assert.ok(specifiers(text).every((specifier) => specifier.endsWith(".ts")), `${name} n’importe que des modules TypeScript`);
     const code = text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|\s)\/\/.*$/gm, "");
@@ -43,8 +43,20 @@ test("aucun fichier de front/src ne décide d’un droit à partir de la liste d
   // Rights come from the operation catalogue of the context. The capability list may be validated by the parser,
   // compared as a whole to detect a changed context, or displayed; it is never searched for one capability.
   const lookup = /\bcapabilities\s*\??\.\s*(?:includes|some|find|findIndex|findLast|indexOf|lastIndexOf|has)\s*\(/;
-  for (const file of files.filter((name) => name.endsWith(".ts"))) {
+  // Capability lists are the data of these two modules, never a gate: the wire of a membership change, and the
+  // published delegation rules, which say what an actor may hand over. Neither opens a view nor sends a read.
+  const data = { "admin-model.ts": "wire of the membership change", "delegation-model.ts": "delegation rules of the editors" };
+  for (const name of Object.keys(data)) assert.ok(files.some((file) => relative(source, file) === name), `${name} exists`);
+  for (const file of files.filter((name) => name.endsWith(".ts") && !Object.hasOwn(data, relative(source, name)))) {
     const code = readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|\s)\/\/.*$/gm, "");
     assert.doesNotMatch(code, lookup, `${relative(source, file)} cherche une capacité pour décider d’un accès`);
+  }
+});
+
+
+test("les vues et les éditeurs ne lisent aucune capacité : ils reçoivent leurs choix du modèle de délégation", () => {
+  for (const name of ["human-view.ts", "supervision-view.ts", "admin-views.ts", "delegation-views.ts", "overview-view.ts", "journal-view.ts"]) {
+    const code = readFileSync(join(source, name), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|\s)\/\/.*$/gm, "");
+    assert.doesNotMatch(code, /\bcapabilities\s*\??\.\s*(?:includes|some|every|find|filter|indexOf|has)\s*\(/, `${name} ne cherche aucune capacité`);
   }
 });

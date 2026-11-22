@@ -9,13 +9,16 @@ import { RENDER_STEP, SupervisionView, defaultSupervisionPreferences } from "./s
 import { JournalView, defaultJournalPreferences } from "./journal-view.ts";
 import { OverviewView, defaultOverviewPreferences } from "./overview-view.ts";
 import type { OverviewPreferences } from "./overview-view.ts";
-import { brokerAuthorityLabel, defaultFleetFilter, landingDestination, supervisionAccess } from "./supervision-model.ts";
+import { brokerAuthorityLabel, defaultFleetFilter, grantKey, landingDestination, supervisionAccess } from "./supervision-model.ts";
+import { GrantEditor, MembershipEditor } from "./delegation-views.ts";
+import { delegationOffers } from "./delegation-model.ts";
+import type { Membership } from "./admin-model.ts";
 import { captureIntent, deferredReadAllowed, resumeCandidate, resumeRetryDelay } from "./human-continuity.ts";
 import type { ResumeIntent } from "./human-continuity.ts";
 import "./human.css";
 import type { SupervisionPreferences } from "./supervision-view.ts";
 import type { JournalPreferences } from "./journal-view.ts";
-import type { HumanOperation } from "./human-model.ts";
+import type { HumanOperation, ResourceRef } from "./human-model.ts";
 import type { HumanBroker, HumanBrokerPage, HumanWorker, HumanWorkerPage, HumanWorkerAssociation, HumanWorkerTimeStatus, HumanFederationWorkerPage, HumanContext, HumanEvent, HumanEventPage, HumanIdentity, HumanPage, HumanResource, HumanView } from "./human-model.ts";
 import { checkpointFacts, checkpointLabel, formatBrokerDate } from "./human-owned-brokers.ts";
 
@@ -102,6 +105,10 @@ export class HumanDashboard {
   #pendingBroker: string | null = null;
   /** The one administration view mounted, with the destination it belongs to. */
   #admin: { mode: AdminDestination; view: MembershipsView | UsageView | ConfigurationView } | null = null;
+  /** The one delegated-change editor open, withdrawn with its context. */
+  #editor: MembershipEditor | GrantEditor | null = null;
+  /** After a receipt: the attribution of the context the change was made in, the view to read again and the receipt to show. */
+  #changeFollowUp: { key: string; destination: DashboardMode; notice: string } | null = null;
   /** Restrictive coverage observed on a real page, scoped to this exact context. */
   #journalProfile: { contextId: string; authorizationVersion: string; streamMode: "snapshot_only" | null } | null = null;
   /** Set only after a context expiry or a session rotation; dropped by any other context change. */
@@ -346,6 +353,7 @@ export class HumanDashboard {
     this.close(); this.#onLogout(detail);
   }
   #purgeContext() {
+    this.#closeEditor();
     this.#generation++; this.#selectionGeneration++; this.#invalidation++;
     this.#scope.abort(); this.#scope = new AbortController();
     this.#selectionAbort.abort(); this.#selectionAbort = new AbortController();
@@ -483,10 +491,68 @@ export class HumanDashboard {
       onReadStateChange: () => this.#updateRefreshState() };
     // The delegated membership change is a later slice: no change command is offered here.
     const view: MembershipsView | UsageView | ConfigurationView = mode === "memberships" ?
-      new MembershipsView({ ...host, read: (cursor, signal) => this.#api.memberships(cursor, signal), change: null }) :
+      // The delegated change is offered only when the catalogue grants and serves memberships_manage.
+      new MembershipsView({ ...host, read: (cursor, signal) => this.#api.memberships(cursor, signal),
+        change: delegationOffers(context).memberships ? (membership) => this.#editMembership(membership) : null }) :
       mode === "usage" ? new UsageView({ ...host, quota: (signal) => this.#api.quota(signal), usage: (cursor, signal) => this.#api.usage(cursor, signal) }) :
         new ConfigurationView({ ...host, read: (signal) => this.#api.configuration(signal) });
     this.#admin = { mode, view }; view.start();
+  }
+  #closeEditor() { const editor = this.#editor; this.#editor = null; editor?.close(); }
+  #editMembership(membership: Membership) {
+    const context = this.#context;
+    if (!context || membership.own || !delegationOffers(context).memberships || this.#closed) return;
+    this.#closeEditor();
+    const generation = this.#generation;
+    const editor: MembershipEditor = new MembershipEditor({ context, membership,
+      send: (change, signal) => this.#api.changeMembership(membership.membership_id, change, signal),
+      onApplied: (receipt) => {
+        if (this.#editor !== editor) return;
+        void this.#followChange("memberships", `Changement enregistré : appartenance de ${membership.display_name} en révision ${receipt.membership_revision} · révision d’autorisation ${receipt.authorization_revision} · position d’audit ${receipt.audit_seq}.`);
+      },
+      onStale: () => { if (this.#editor === editor && this.#mode === "memberships") void this.#admin?.view.refresh(); },
+      onRefused: () => { if (this.#editor !== editor) return; this.#closeEditor(); if (generation === this.#generation) void this.#loadIdentity(); },
+      onClosed: () => { if (this.#editor === editor) this.#editor = null; } });
+    this.#editor = editor; editor.open();
+  }
+  #editGrant(resource: ResourceRef) {
+    const context = this.#context; const self = this.#identity?.principal;
+    if (!context || !self || context.mode !== "administration" || !delegationOffers(context).grants || this.#closed) return;
+    this.#closeEditor();
+    const generation = this.#generation;
+    const editor: GrantEditor = new GrantEditor({ context, self, resource,
+      read: (signal) => this.#api.grant(resource, signal),
+      members: (cursor, signal) => this.#api.memberships(cursor, signal),
+      send: (change, owner, signal) => this.#api.changeGrant(change, owner, signal),
+      onApplied: (receipt) => {
+        if (this.#editor !== editor) return;
+        void this.#followChange("resources", `Partages enregistrés : ${resource.kind} ${resource.resource_id} en révision ${receipt.grant_revision} · révision d’autorisation ${receipt.authorization_revision} · position d’audit ${receipt.audit_seq}.`);
+      },
+      onRefused: () => { if (this.#editor !== editor) return; this.#closeEditor(); if (generation === this.#generation) void this.#loadIdentity(); },
+      onClosed: () => { if (this.#editor === editor) this.#editor = null; } });
+    this.#editor = editor; editor.open();
+  }
+  /**
+   * A change was recorded under a new authorization revision: the selected context is now refused. The accesses are
+   * read again, the one context of the same attribution the control proposes is selected, and the view is read again
+   * with the receipt displayed. Without exactly one such context the person chooses, with the receipt kept on screen.
+   */
+  async #followChange(destination: DashboardMode, notice: string) {
+    const previous = this.#context; if (!previous || this.#closed) return;
+    this.#closeEditor();
+    this.#changeFollowUp = { key: grantKey(previous), destination, notice };
+    const read = await this.#loadIdentity();
+    const followUp = this.#changeFollowUp; this.#changeFollowUp = null;
+    if (!followUp || this.#closed) return;
+    if (read !== true) { this.#message = `${notice} Vos accès n’ont pas pu être relus : actualisez la liste des contextes.`; this.#render(); return; }
+    if (this.#context?.id === previous.id) { this.#message = notice; this.#openView(destination); return; }
+    const candidates = (this.#identity?.contexts ?? []).filter((context) => grantKey(context) === followUp.key && Date.parse(context.expires_at) > Date.now());
+    if (candidates.length !== 1) {
+      this.#message = `${notice} Choisissez de nouveau un contexte : le contrôle n’en propose pas un seul de mêmes droits.`; this.#mode = "contexts"; this.#render(); return;
+    }
+    try { this.#purgeContext(); this.#context = this.#api.selectContext(candidates[0]!.id); }
+    catch (error) { this.#identityError = failure(error); this.#message = notice; this.#mode = "contexts"; this.#render(); return; }
+    this.#message = notice; this.#openView(followUp.destination);
   }
   #openJournal() {
     const context = this.#context; if (!context) return;
@@ -530,6 +596,7 @@ export class HumanDashboard {
     // One view owns server data at a time: leaving the unified view aborts its reads and drops its rows.
     if (mode !== "supervision" && this.#mode === "supervision") this.#closeSupervision();
     if (mode !== "journal" && this.#mode === "journal") this.#closeJournal();
+    if (mode !== this.#mode) this.#closeEditor();
     if (mode !== "overview" && this.#mode === "overview") this.#closeOverview();
     if (this.#admin && mode !== this.#admin.mode) this.#closeAdmin();
     if (mode !== "brokers") this.#pendingBroker = null;
@@ -1124,7 +1191,10 @@ export class HumanDashboard {
             el("div", "human-resource-actions",
               action("Métadonnées", `resource-metadata-${index}`, () => this.#select(item, "metadata"), !this.#canEvents() || !item.permissions.metadata),
               action("Contenu", `resource-content-${index}`, () => this.#select(item, "content"), this.#snapshotOnly() || !this.#canContent() || !item.permissions.metadata || !item.permissions.content),
-              badge(item.permissions.export ? this.#snapshotOnly() ? "Droit d’export accordé · indisponible pour ce profil" : "Export autorisé selon la projection" : "Export non autorisé"))))),
+              badge(item.permissions.export ? this.#snapshotOnly() ? "Droit d’export accordé · indisponible pour ce profil" : "Export autorisé selon la projection" : "Export non autorisé"),
+              // Delegated sharing: offered in the administration context when the catalogue grants and serves grants_manage.
+              this.#context?.mode === "administration" && delegationOffers(this.#context).grants ?
+                action("Gérer les partages", `resource-grants-${index}`, () => this.#editGrant(item.resource)) : null)))),
       this.#pagination(state, (next, previous) => { void this.#loadResources(next, previous); }));
   }
   #select(item: HumanResource, view: HumanView) {
