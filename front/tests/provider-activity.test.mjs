@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   activityChannel,
+  activityDetails,
   eventSummary,
+  formatActivityCoverageFlag,
   projectEvents,
   providerActivitySummary,
 } from "../src/model.ts";
@@ -118,8 +120,7 @@ test("the actions view includes declared tool calls and delegations", () => {
   assert.deepEqual(projectEvents(events, "actions").map((event) => event.seq), [1, 2]);
 });
 
-test("activity details separate the client's declaration from ai-guard's coverage facts", async () => {
-  const { activityDetails } = await import("../src/model.ts");
+test("activity details separate the client's declaration from ai-guard's coverage facts", () => {
   const declared = activityDetails({
     ...base,
     seq: 1,
@@ -144,6 +145,8 @@ test("activity details separate the client's declaration from ai-guard's coverag
     data: {
       complete: false,
       budget_exhausted: true,
+      audit_unavailable: false,
+      stalled: false,
       spooled_events: 12,
       delivered_events: 12,
       hook_channel: "closed",
@@ -154,11 +157,36 @@ test("activity details separate the client's declaration from ai-guard's coverag
   });
   assert.equal(summary.declaredByClient, false);
   assert.equal(summary.coverage.complete, false);
-  assert.equal(summary.coverage.budgetExhausted, true);
+  const { budgetExhausted, auditUnavailable, stalled } = summary.coverage;
+  const flags = [budgetExhausted, auditUnavailable, stalled];
+  assert.deepEqual(flags, [true, false, false]);
+  assert.deepEqual(flags.map(formatActivityCoverageFlag), ["Oui", "Non", "Non"]);
   assert.equal(summary.coverage.stdout.dropped, 2);
   assert.equal(summary.coverage.hook.declaredLosses, 2);
   // A coverage claim from a provider source is never read as a control fact.
   const forged = activityDetails({ ...base, seq: 3, kind: "activity.coverage", data: { complete: true, activity: {} } });
   assert.equal(forged.coverage, null);
   assert.equal(activityDetails({ ...base, seq: 4, kind: "message.declared", data: {} }), null);
+});
+
+test("activity coverage displays unconfirmed outcomes as unknown", () => {
+  const replay = {
+    ...base,
+    seq: 1,
+    kind: "activity.coverage",
+    source: "runner",
+    provenance: "observed",
+    coverage: "partial",
+    data: {
+      version: 1,
+      complete: false,
+      reason: "activity_finalization_unconfirmed",
+      activity: { channel: null, client: "claude-code" },
+    },
+  };
+  const coverage = activityDetails(replay).coverage;
+  assert.equal(coverage.complete, false);
+  const flags = [coverage.budgetExhausted, coverage.auditUnavailable, coverage.stalled];
+  assert.deepEqual(flags, [null, null, null]);
+  assert.deepEqual(flags.map(formatActivityCoverageFlag), ["Inconnu", "Inconnu", "Inconnu"]);
 });

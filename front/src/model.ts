@@ -441,15 +441,24 @@ export interface ActivityDetails {
   truncated: boolean;
   coverage: {
     complete: boolean;
-    budgetExhausted: boolean;
-    auditUnavailable: boolean;
-    stalled: boolean;
+    budgetExhausted: boolean | null;
+    auditUnavailable: boolean | null;
+    stalled: boolean | null;
     spooledEvents: number | null;
     deliveredEvents: number | null;
     hookChannel: string | null;
     stdout: ActivityChannelCounts | null;
     hook: ActivityChannelCounts | null;
   } | null;
+}
+
+function optionalBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+export function formatActivityCoverageFlag(value: boolean | null): string {
+  if (value === null) return "Inconnu";
+  return value ? "Oui" : "Non";
 }
 
 function count(value: unknown): number {
@@ -483,9 +492,9 @@ export function activityDetails(event: AuditEvent): ActivityDetails | null {
     event.kind === "activity.coverage" && event.source === "runner" && event.provenance === "observed"
       ? {
           complete: data.complete === true,
-          budgetExhausted: data.budget_exhausted === true,
-          auditUnavailable: data.audit_unavailable === true,
-          stalled: data.stalled === true,
+          budgetExhausted: optionalBoolean(data.budget_exhausted),
+          auditUnavailable: optionalBoolean(data.audit_unavailable),
+          stalled: optionalBoolean(data.stalled),
           spooledEvents: typeof data.spooled_events === "number" ? data.spooled_events : null,
           deliveredEvents: typeof data.delivered_events === "number" ? data.delivered_events : null,
           hookChannel: text(data.hook_channel),
