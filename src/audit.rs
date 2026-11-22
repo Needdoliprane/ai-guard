@@ -176,7 +176,7 @@ pub(crate) mod egress;
 mod human;
 mod human_brokers;
 mod human_modern;
-pub(crate) use human_modern::HumanDiscoveryGeneration;
+pub(crate) use human_modern::{HumanDiscoveryGeneration, HumanDiscoveryStale};
 mod human_configuration;
 mod human_grants;
 mod human_memberships;

@@ -812,6 +812,36 @@ impl Store {
         self.commit_checked(tx)?;
         Ok(result)
     }
+
+    /// Only an owned membership mutation may advance the expected discovery
+    /// snapshot here. It changes the authorization revision and leaves all
+    /// credential and workload candidates untouched.
+    pub(super) fn mutate_membership_with_discovery(
+        &self,
+        tx: CheckedTransaction<'_>,
+        expected: HumanDiscoveryGeneration,
+        prepare: impl FnOnce(&CheckedTransaction<'_>) -> anyhow::Result<IdentityMutationV1>,
+    ) -> anyhow::Result<(IdentityReceiptV1, Option<HumanDiscoveryGeneration>)> {
+        tx.require_identity_authority()?;
+        require_identity_projection(&tx)?;
+        if human_modern::discovery_generation(&tx)? != expected {
+            return Err(HumanDiscoveryStale.into());
+        }
+        let mutation = prepare(&tx)?;
+        invalid(matches!(
+            &mutation.change,
+            IdentityChangeV1::Membership { .. }
+        ))?;
+        let receipt = self.persist_identity_mutation(&tx, &mutation)?;
+        let next = expected.after_membership_change(
+            human_modern::discovery_generation(&tx)?,
+            receipt.authorization_revision,
+        )?;
+        // A rejected or uncertain commit yields neither receipt nor transition.
+        self.commit_checked(tx)?;
+        Ok((receipt, next))
+    }
+
     /// Atomically activate a prepared local account, credential and membership.
     /// Exact replay requires all three retained operation identities; partial
     /// overlap is a conflict and never an adoption of an existing account.

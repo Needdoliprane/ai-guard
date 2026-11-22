@@ -13,6 +13,37 @@ pub(crate) struct HumanDiscoveryGeneration {
     authorization_revision: u64,
     workload_history_event: Option<i64>,
 }
+
+#[derive(Debug)]
+pub(crate) struct HumanDiscoveryStale;
+
+impl std::fmt::Display for HumanDiscoveryStale {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("human source discovery generation differs")
+    }
+}
+
+impl std::error::Error for HumanDiscoveryStale {}
+
+impl HumanDiscoveryGeneration {
+    pub(super) fn after_membership_change(
+        self,
+        observed: Self,
+        receipt_revision: u64,
+    ) -> Result<Option<Self>, HumanDiscoveryStale> {
+        if observed == self {
+            return Ok(None);
+        }
+        if self.workload_history_event == observed.workload_history_event
+            && self.authorization_revision.checked_add(1) == Some(observed.authorization_revision)
+            && observed.authorization_revision == receipt_revision
+        {
+            return Ok(Some(observed));
+        }
+        Err(HumanDiscoveryStale)
+    }
+}
+
 pub(super) fn discovery_generation(
     tx: &CheckedTransaction<'_>,
 ) -> anyhow::Result<HumanDiscoveryGeneration> {

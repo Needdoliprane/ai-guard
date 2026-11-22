@@ -1,7 +1,7 @@
 //! Adopted local human source bundle. Discovery proposes; Store proves.
 use super::*;
 use crate::{
-    audit::HumanSourceAccess,
+    audit::{HumanDiscoveryGeneration, HumanDiscoveryStale, HumanSourceAccess},
     control_fs::PrivateFile,
     human_authority::{OwnedHumanSources, OwnedSourceToken, startup::HumanOwnedStartupBundle},
     identity::*,
@@ -72,7 +72,7 @@ impl CandidateIndex {
 pub(super) struct OwnedHumanGateway {
     pub(super) owner: OwnedHumanSources,
     pub(super) sources: Vec<OwnedSourceToken>,
-    pub(super) discovery_generations: Vec<crate::audit::HumanDiscoveryGeneration>,
+    discovery_generations: Vec<arc_swap::ArcSwap<HumanDiscoveryGeneration>>,
     candidates: CandidateIndex,
     pub(super) registry: Arc<auth::ReviewCredentialRegistry>,
     _authentication: Option<crate::audit::authentication::AuthenticationAudit>,
@@ -185,6 +185,15 @@ impl OwnedHumanGateway {
             Some([Candidate::Technical])
         ))
     }
+
+    /// Read the expected generation while holding the owner's read or write
+    /// epoch. The checked Store still compares it to the durable projection.
+    pub(super) fn discovery_generation(&self, index: usize) -> Option<HumanDiscoveryGeneration> {
+        self.discovery_generations
+            .get(index)
+            .map(|generation| **generation.load())
+    }
+
     fn read<T>(
         &self,
         index: usize,
@@ -205,14 +214,11 @@ impl OwnedHumanGateway {
             unavailable()
         })?;
         let access = HumanSourceAccess::read(&epoch, source).map_err(|_| unavailable())?;
-        let expected = self
-            .discovery_generations
-            .get(index)
-            .ok_or_else(unavailable)?;
+        let expected = self.discovery_generation(index).ok_or_else(unavailable)?;
         if store
             .modern_discovery_generation(&access)
             .map_err(human::store_failure)?
-            != *expected
+            != expected
         {
             self.require_rebuild();
             return Err(unavailable());
@@ -221,7 +227,7 @@ impl OwnedHumanGateway {
         if store
             .modern_discovery_generation(&access)
             .map_err(human::store_failure)?
-            != *expected
+            != expected
         {
             self.require_rebuild();
             return Err(unavailable());
@@ -290,10 +296,8 @@ impl OwnedHumanGateway {
     }
 
     /// A delegated human identity mutation on the proof's own retained source.
-    /// The owner's write epoch is taken without waiting and released before
-    /// returning; the source binding is checked before and after the commit.
-    /// A failure after the commit is reported like any refusal: the caller
-    /// replays the same operation identifier to read its durable receipt.
+    /// A checked commit may advance coverage before releasing the write epoch.
+    /// The same operation identifier supports replay after recovery.
     pub(super) fn change_membership(
         &self,
         index: usize,
@@ -304,13 +308,37 @@ impl OwnedHumanGateway {
     ) -> ApiResult<IdentityReceiptV1> {
         self.check()?;
         let source = self.sources.get(index).ok_or_else(unavailable)?;
+        let generation = self
+            .discovery_generations
+            .get(index)
+            .ok_or_else(unavailable)?;
         let receipt = {
             let epoch = self.owner.try_write_epoch().map_err(|_| unavailable())?;
+            self.check()?;
             epoch.validate_source(source).map_err(|_| unavailable())?;
-            let result =
-                store.modern_human_change_membership(&epoch, source, scope, membership_id, change);
+            let expected = **generation.load();
+            let result = store.modern_human_change_membership(
+                &epoch,
+                source,
+                scope,
+                membership_id,
+                change,
+                expected,
+            );
+            if result
+                .as_ref()
+                .is_err_and(|error| error.is::<HumanDiscoveryStale>())
+            {
+                self.require_rebuild();
+                return Err(unavailable());
+            }
             epoch.validate_source(source).map_err(|_| unavailable())?;
-            result.map_err(human::identity_change_failure)?
+            let (receipt, next) = result.map_err(human::identity_change_failure)?;
+            self.check()?;
+            if let Some(next) = next {
+                generation.store(Arc::new(next));
+            }
+            receipt
         };
         self.check()?;
         Ok(receipt)
@@ -514,7 +542,7 @@ impl GatewayState {
                         },
                     )
                 })?;
-            discovery_generations.push(revision);
+            discovery_generations.push(arc_swap::ArcSwap::from_pointee(revision));
             epoch.check()?;
         }
         for digest in index.digests() {

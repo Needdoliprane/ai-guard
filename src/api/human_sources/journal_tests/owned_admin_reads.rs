@@ -212,6 +212,29 @@ async fn owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
         Redactor::new(vec![]),
     )
     .unwrap();
+    let owned = state.owned_human.as_ref().unwrap().clone();
+    let tenant = state
+        .tenants
+        .iter()
+        .position(|tenant| tenant.tenant_id == membership.tenant_id)
+        .unwrap();
+    let store = state.tenants[tenant].store.clone();
+    let database = super::races::connection(&state);
+    let expected_generation = || {
+        let _epoch = owned.owner.try_read_epoch().unwrap();
+        owned.discovery_generation(tenant).unwrap()
+    };
+    let count_mutations = || {
+        database
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind='control.identity.mutation'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+    let before = expected_generation();
+    let mutations_before = count_mutations();
     let router = gateway_router(state);
     let (status, identity) = get(&router, "/api/v1/human/identity", None).await;
     assert_eq!(status, StatusCode::OK, "{identity}");
@@ -237,7 +260,13 @@ async fn owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
     let (status, receipt) = post(&router, &path, &context, &body).await;
     assert_eq!(status, StatusCode::OK, "{receipt}");
     assert_eq!(receipt["membership_revision"], "2");
-    // A right the administrator does not hold is refused on this profile too.
+    let after = expected_generation();
+    assert!(after != before);
+    assert_eq!(count_mutations(), mutations_before + 1);
+    let (status, stale) = get(&router, "/api/v1/human/admin/memberships", Some(&context)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{stale}");
+    assert_eq!(stale["error"]["code"], "context_revoked");
+
     let (status, identity) = get(&router, "/api/v1/human/identity", None).await;
     assert_eq!(status, StatusCode::OK, "{identity}");
     let context = identity["contexts"]
@@ -249,6 +278,13 @@ async fn owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
         .as_str()
         .unwrap()
         .to_owned();
+    let (status, replayed) = post(&router, &path, &context, &body).await;
+    assert_eq!(status, StatusCode::OK, "{replayed}");
+    assert_eq!(replayed, receipt);
+    assert!(expected_generation() == after);
+    assert_eq!(count_mutations(), mutations_before + 1);
+
+    // A right the administrator does not hold is refused on this profile too.
     let escalation = serde_json::json!({
         "operation_id": uuid::Uuid::new_v4().to_string(),
         "expected_revision": "2",
@@ -269,4 +305,25 @@ async fn owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
         .clone();
     assert_eq!(item["active"], false);
     assert_eq!(item["revision"], "2");
+
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let fault = store.test_fail_after_membership_commit(operation_id.clone());
+    let reactivate = serde_json::json!({
+        "operation_id": operation_id,
+        "expected_revision": "2",
+        "capabilities": ["read_metadata"],
+        "active": true,
+    });
+    let (status, failure) = post(&router, &path, &context, &reactivate).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{failure}");
+    assert!(failure.get("audit_seq").is_none());
+    assert!(
+        fault.load(Ordering::Acquire),
+        "the real SQLite commit was reached"
+    );
+    assert_eq!(count_mutations(), mutations_before + 2);
+    assert!(expected_generation() == after);
+    let (status, failure) = get(&router, "/api/v1/human/identity", None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{failure}");
+    assert_eq!(owned.coverage.load(Ordering::Acquire), REBUILD_REQUIRED);
 }

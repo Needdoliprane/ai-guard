@@ -237,6 +237,36 @@ fn local_credentials(
 }
 
 impl Store {
+    #[cfg(test)]
+    pub(crate) fn test_fail_after_membership_commit(
+        &self,
+        operation_id: String,
+    ) -> Arc<AtomicBool> {
+        // The existing storage fault seam fires only once a separate SQLite
+        // reader sees the actual committed operation.
+        let observer = Connection::open_with_flags(
+            self.backing.path(),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        let injected = Arc::new(AtomicBool::new(false));
+        let reached = injected.clone();
+        self.backing.test_hook.set(move || {
+            if !reached.load(Ordering::Acquire)
+                && observer.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM identity_operations WHERE operation_id=?1)",
+                    [&operation_id],
+                    |row| row.get::<_, bool>(0),
+                )?
+            {
+                reached.store(true, Ordering::Release);
+                return Err(std::io::Error::from_raw_os_error(libc::EMFILE).into());
+            }
+            Ok(())
+        });
+        injected
+    }
+
     /// Delegated change of one existing membership of the reader's
     /// organization (`memberships_manage`), on a legacy store.
     pub(crate) fn human_change_membership(
@@ -250,7 +280,8 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         let tx = self.begin_checked(&mut db)?;
-        self.human_change_membership_checked(tx, scope, membership_id, change)
+        let mutation = self.prepare_human_membership_change(&tx, scope, membership_id, change)?;
+        self.mutate_identity_checked(tx, &mutation)
     }
     /// The same change on an owned 14/15 source, under its write epoch. The
     /// epoch is never held across a second wait for the store connection.
@@ -261,7 +292,8 @@ impl Store {
         scope: &AuthorizedScopeV1,
         membership_id: &str,
         change: &HumanMembershipChangeV1,
-    ) -> anyhow::Result<IdentityReceiptV1> {
+        expected: HumanDiscoveryGeneration,
+    ) -> anyhow::Result<(IdentityReceiptV1, Option<HumanDiscoveryGeneration>)> {
         let access = HumanSourceAccess::write(epoch, source)?;
         let mut db = self
             .db
@@ -269,29 +301,30 @@ impl Store {
             .map_err(|_| crate::human_authority::HumanAuthorityFailure::StorageUnavailable)?;
         let tx =
             self.begin_checked_scoped(&mut db, &access, StoreOperationClass::IdentityAuthority)?;
-        self.human_change_membership_checked(tx, scope, membership_id, change)
+        self.mutate_membership_with_discovery(tx, expected, |tx| {
+            self.prepare_human_membership_change(tx, scope, membership_id, change)
+        })
     }
     /// Principal, tenant and organization come from the stored membership.
     /// Besides the projection's delegation rules, a capability the change adds
     /// must be held by the reader's effective context, so an OIDC ceiling
-    /// bounds what it can delegate. The mutation and its audit are durable
-    /// before the receipt returns; an exact replay returns the same receipt.
-    fn human_change_membership_checked(
+    /// bounds what it can delegate.
+    fn prepare_human_membership_change(
         &self,
-        tx: CheckedTransaction<'_>,
+        tx: &CheckedTransaction<'_>,
         scope: &AuthorizedScopeV1,
         membership_id: &str,
         change: &HumanMembershipChangeV1,
-    ) -> anyhow::Result<IdentityReceiptV1> {
+    ) -> anyhow::Result<IdentityMutationV1> {
         crate::control::uuid(membership_id).map_err(|_| IdentityFailureV1::InvalidRequest)?;
         let expected_revision: u64 = change
             .expected_revision
             .parse()
             .map_err(|_| IdentityFailureV1::InvalidRequest)?;
-        if !super::human_rights::installed(&tx)? {
+        if !super::human_rights::installed(tx)? {
             return Err(IdentityFailureV1::MigrationRequired.into());
         }
-        let current = identity::revalidate_scope_checked(&tx, scope, &self.tenant_id)?;
+        let current = identity::revalidate_scope_checked(tx, scope, &self.tenant_id)?;
         if current.mode() != ContextModeV1::Administration
             || !current.has_capability(HumanCapabilityV1::ManageMemberships)
             || !current.has_capability(HumanCapabilityV1::ReadMemberships)
@@ -339,6 +372,6 @@ impl Store {
         mutation
             .validate()
             .map_err(|_| IdentityFailureV1::InvalidRequest)?;
-        self.mutate_identity_checked(tx, &mutation)
+        Ok(mutation)
     }
 }

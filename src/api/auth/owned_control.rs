@@ -160,18 +160,17 @@ impl OwnedPolicyWriter {
                     .sources
                     .get(identity.index)
                     .ok_or_else(human_sources::unavailable)?;
-                let expected = *owned
-                    .discovery_generations
-                    .get(identity.index)
-                    .ok_or_else(human_sources::unavailable)?;
                 let scope = mutation.scope().clone();
-                let receipt = {
+                let (receipt, expected) = {
                     // Accepted work owns the usage/registry/source/operation and
                     // IO permits. An abandoned HTTP future cannot release them.
                     let epoch = owned
                         .owner
                         .try_write_epoch()
                         .map_err(policy_authority_failure)?;
+                    let expected = owned
+                        .discovery_generation(identity.index)
+                        .ok_or_else(human_sources::unavailable)?;
                     let result = match &mutation {
                         PolicyMutation::Replace(value) => {
                             let request = value.store_request().map_err(policy_store_failure)?;
@@ -206,7 +205,7 @@ impl OwnedPolicyWriter {
                     epoch
                         .validate_source(source)
                         .map_err(policy_authority_failure)?;
-                    receipt
+                    (receipt, expected)
                 }; // True E1 commit, SQLite restoration and WriteEpoch end first.
                 #[cfg(test)]
                 test_hook::pause(&identity.state)?;
@@ -222,16 +221,20 @@ impl OwnedPolicyWriter {
                     .map_err(policy_authority_failure)?;
                 let access =
                     HumanSourceAccess::read(&epoch, source).map_err(policy_store_failure)?;
+                let current_generation = owned
+                    .discovery_generation(identity.index)
+                    .ok_or_else(human_sources::unavailable)?;
                 let current = identity
                     .tenant
                     .store
-                    .modern_control_protocol(&access, &identity.credential, expected)
+                    .modern_control_protocol(&access, &identity.credential, current_generation)
                     .map_err(policy_store_failure)?;
                 let Some(current) = current else {
                     owned.require_rebuild();
                     return Err(human_sources::unavailable());
                 };
-                if current.schema_version != 15
+                if current_generation != expected
+                    || current.schema_version != 15
                     || current.control_namespace_uuid.as_deref()
                         != Some(scope.control_namespace_uuid())
                     || identity.tenant.tenant_id != scope.tenant_id()
@@ -391,10 +394,9 @@ impl OwnedProtocol {
                     .ok_or_else(human_sources::unavailable)?;
                 let access = HumanSourceAccess::read(&epoch, source)
                     .map_err(|_| human_sources::unavailable())?;
-                let expected = *identity
+                let expected = identity
                     .owned
-                    .discovery_generations
-                    .get(identity.index)
+                    .discovery_generation(identity.index)
                     .ok_or_else(human_sources::unavailable)?;
                 let snapshot = tenant
                     .store
