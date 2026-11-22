@@ -11,6 +11,7 @@ use agentsandbox::{
     policy::Policy,
     redaction::Redactor,
     runner::read_token,
+    runtime::RuntimeAuthority,
 };
 use axum::{
     body::{Body, to_bytes},
@@ -1071,6 +1072,15 @@ async fn broker_crash_recovery_observes_then_stops_the_same_running_instance() {
     assert_unreconciled();
     assert_eq!(scenario.store.head().unwrap(), before_resume);
 
+    // This legacy adoption restores the same invocation used by the first CLI.
+    let checkpoint_path = scenario.checkpoint_path();
+    let original_plan: Value =
+        serde_json::from_slice(&fs::read(&checkpoint_path).unwrap()).unwrap();
+    let original_binding: RuntimeAuthority =
+        serde_json::from_value(original_plan["managed"]["binding"].clone()).unwrap();
+    let expected_fingerprint = original_binding
+        .invocation_fingerprint()
+        .expect("original CLI did not persist its invocation");
     scenario.legacy_invocation();
     let before = scenario.calls();
     let rejected = scenario.invoke("worker-stop").await;
@@ -1101,11 +1111,14 @@ async fn broker_crash_recovery_observes_then_stops_the_same_running_instance() {
         !rejected.status.success(),
         "adoption succeeded without a confirmed gateway audit"
     );
-    let pending: Value =
-        serde_json::from_slice(&fs::read(scenario.checkpoint_path()).unwrap()).unwrap();
-    let pending_id = pending["managed"]["invocation_event"]["id"]
-        .as_str()
-        .unwrap();
+    let pending: Value = serde_json::from_slice(&fs::read(&checkpoint_path).unwrap()).unwrap();
+    let pending_adoption = &pending["managed"]["invocation_event"];
+    let pending_id = pending_adoption["id"].as_str().unwrap();
+    assert!(
+        pending_adoption["data"]["invocation_fingerprint"].as_str()
+            == Some(expected_fingerprint.as_str()),
+        "pending adoption did not bind the original CLI invocation"
+    );
     assert_unreconciled();
     assert_eq!(scenario.store.head().unwrap(), before_rejected_audit);
 
@@ -1218,9 +1231,18 @@ async fn broker_crash_recovery_observes_then_stops_the_same_running_instance() {
         event
     };
     let adoption = single_event("runtime.invocation.bound");
+    let adoption_data = &adoption.event.data;
     assert!(
-        adoption.event.id == pending_id,
-        "adoption changed its durable event identity"
+        adoption.event.id == pending_id
+            && adoption_data["invocation_fingerprint"].as_str()
+                == Some(expected_fingerprint.as_str())
+            && adoption_data["new_invocation_fingerprint"].as_str()
+                == Some(expected_fingerprint.as_str())
+            && adoption_data
+                .get("previous_invocation_fingerprint")
+                .is_some_and(Value::is_null)
+            && adoption_data["legacy_adoption"].as_bool() == Some(true),
+        "durable adoption does not match the original invocation and pending event"
     );
     let scan_requested = single_event("workspace.scan.requested");
     let scan_created = single_event("workspace.scan.created");
@@ -1249,6 +1271,13 @@ async fn broker_crash_recovery_observes_then_stops_the_same_running_instance() {
         .filter(|id| id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .expect("scan did not audit a valid export helper");
     assert!(
+        scan_created.event.data["operation_id"]
+            .as_str()
+            .and_then(|operation| uuid::Uuid::parse_str(operation).ok())
+            .is_some_and(|operation| !operation.is_nil()),
+        "scan did not audit a non-nil operation UUID"
+    );
+    assert!(
         export_id != container_id.as_str(),
         "scan reused the original worker"
     );
@@ -1265,10 +1294,17 @@ async fn broker_crash_recovery_observes_then_stops_the_same_running_instance() {
         );
     }
 
-    let checkpoint_path = scenario.checkpoint_path();
     let read_checkpoint = || {
         let plan: Value = serde_json::from_slice(&fs::read(&checkpoint_path).unwrap())
             .expect("invalid private recovery checkpoint");
+        let adopted_binding: RuntimeAuthority =
+            serde_json::from_value(plan["managed"]["binding"].clone())
+                .expect("invalid adopted runtime binding");
+        assert!(
+            adopted_binding == original_binding
+                && plan["managed"].get("invocation_event").is_none(),
+            "committed checkpoint must restore the audited invocation and clear the pending adoption"
+        );
         assert!(
             plan["managed"].get("result").is_some_and(Value::is_null)
                 && plan["managed"]
