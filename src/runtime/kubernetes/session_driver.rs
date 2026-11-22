@@ -36,7 +36,7 @@ use super::{
         SessionInstanceV2, SessionObservationStateV2, SessionObservedV2,
     },
     session_permit::{CentralEffectPermitV2, RetainedEffectClaimV2},
-    session_pod::KubernetesSessionPodRequestV2,
+    session_pod::{KubernetesSessionPodRequestV2, session_workspace_claim_name},
     session_protocol::{SessionChannelV3, SessionModeV3},
     session_requests::{
         attach_request, delete_claim_request, delete_pod_request, release_finalizer_request,
@@ -44,7 +44,8 @@ use super::{
     },
 };
 use crate::control::kubernetes_session::{
-    KubernetesSessionReservationIntentV2,
+    KubernetesSessionReservationCurrentV2, KubernetesSessionReservationIntentV2,
+    KubernetesSessionReservationStateV2,
     effects::{
         KubernetesSessionDeadlineArmV2, KubernetesSessionEffectActionV2 as Action,
         KubernetesSessionEffectClaimAckV2, KubernetesSessionEffectDispositionV2,
@@ -80,8 +81,10 @@ pub(crate) enum SessionDriverErrorV2 {
     Runtime(KubernetesSessionRuntimeError),
     /// The claim did not become `Bound` within the configured wait.
     ClaimNotBound,
-    /// The bound claim is not the object of the 201 that created it.
+    /// The observed claim is not the object of the 201 that created it.
     ClaimReplaced,
+    /// This reservation does not confirm a resumable first claim.
+    WorkspaceResumeUnavailable,
 }
 impl fmt::Display for SessionDriverErrorV2 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -109,7 +112,10 @@ impl fmt::Display for SessionDriverErrorV2 {
                 f.write_str("the workspace claim was not bound within the configured wait")
             }
             Self::ClaimReplaced => {
-                f.write_str("the bound workspace claim is not the object created by this attempt")
+                f.write_str("the workspace claim is not the object created by this attempt")
+            }
+            Self::WorkspaceResumeUnavailable => {
+                f.write_str("the current reservation does not confirm this workspace claim")
             }
         }
     }
@@ -141,6 +147,10 @@ pub(crate) trait SessionLedgerV2 {
         settlement: &KubernetesSessionSettlementV2,
     ) -> Driven<KubernetesSessionEffectStateV2>;
     async fn state(&self, reservation_id: &str) -> Driven<KubernetesSessionEffectStateV2>;
+    async fn reservation(
+        &self,
+        intent: &KubernetesSessionReservationIntentV2,
+    ) -> Driven<KubernetesSessionReservationCurrentV2>;
 }
 
 fn ledger_error(
@@ -189,6 +199,12 @@ impl SessionLedgerV2 for crate::broker::held_create_client::sessions::SessionCon
         self.effect_state(reservation_id)
             .await
             .map_err(ledger_error)
+    }
+    async fn reservation(
+        &self,
+        intent: &KubernetesSessionReservationIntentV2,
+    ) -> Driven<KubernetesSessionReservationCurrentV2> {
+        self.observe(intent).await.map_err(ledger_error)
     }
 }
 
@@ -388,15 +404,67 @@ impl<'a, L: SessionLedgerV2> SessionDriverV2<'a, L> {
             },
         )
         .await?;
+        self.wait_for_bound_workspace(created.claim_name(), created.uid())
+            .await
+    }
+
+    /// Observe a confirmed first PVC CREATE after reopening the driver.
+    /// The central position binds the original UID, but contains no proof of
+    /// the requested storage bytes. A successful observation grants no permit.
+    pub(crate) async fn observe_provisioned_workspace(&self) -> Driven<()> {
+        let unavailable = SessionDriverErrorV2::WorkspaceResumeUnavailable;
+        let current = self.ledger.reservation(&self.intent).await?;
+        if current.snapshot.input_hash != self.reservation_input_hash
+            || current.snapshot.state.state != KubernetesSessionReservationStateV2::Reserved
+        {
+            return Err(unavailable);
+        }
+        let reservation_id = self.intent.reservation_id();
+        let state = self.ledger.state(reservation_id).await?;
+        if state.version != 1
+            || state.reservation_id != reservation_id
+            || state.last_step != 1
+            || state.unresolved_uncertain_steps != 0
+            || state.session_pod_uid.is_some()
+            || state.export_pod_uid.is_some()
+            || state.session_terminal
+            || state.export_terminal
+            || state.settled
+        {
+            return Err(unavailable);
+        }
+        let uid = state
+            .workspace_claim_uid
+            .as_deref()
+            .ok_or(SessionDriverErrorV2::WorkspaceResumeUnavailable)?;
+        let ids = self
+            .intent
+            .ids()
+            .map_err(|_| SessionDriverErrorV2::WorkspaceResumeUnavailable)?;
+        self.wait_for_bound_workspace(&session_workspace_claim_name(ids.attempt_id), uid)
+            .await?;
+        if self.ledger.state(reservation_id).await? != state {
+            return Err(unavailable);
+        }
+        Ok(())
+    }
+
+    async fn wait_for_bound_workspace(
+        &self,
+        name: &str,
+        uid: &str,
+    ) -> Driven<KubernetesSessionWorkspaceClaimV2> {
         let deadline = tokio::time::Instant::now() + self.waits.bind;
         loop {
             match self
                 .runtime
-                .inspect_session_workspace_claim_detailed(created.claim_name())
+                .inspect_session_workspace_claim_exact(name, uid)
                 .await
             {
-                Ok(claim) if created.is_observed_as(&claim) => return Ok(claim),
-                Ok(_) => return Err(SessionDriverErrorV2::ClaimReplaced),
+                Ok(claim) => return Ok(claim),
+                Err(KubernetesSessionRuntimeError::WorkspaceClaimReplaced) => {
+                    return Err(SessionDriverErrorV2::ClaimReplaced);
+                }
                 Err(KubernetesSessionRuntimeError::WorkspaceClaimPending) => {}
                 Err(error) => return Err(error.into()),
             }

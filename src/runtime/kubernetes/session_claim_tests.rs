@@ -206,18 +206,6 @@ async fn create_posts_the_exact_claim_once_and_a_validated_201_yields_its_uid() 
     assert_eq!(created.uid(), CLAIM_UID);
     assert_eq!(created.resource_version(), "7");
     assert_eq!(created.claim_name(), case.request.target().claim_name());
-    // The later bound observation must be this very object.
-    let bound = |uid: &str| {
-        KubernetesSessionWorkspaceClaimV2::retained_from_value(json!({
-            "version":1,"authority_fingerprint":case.intent.authority().fingerprint(),
-            "namespace":"tenant-a","name":case.request.target().claim_name(),"uid":uid,
-            "resource_version":"9","storage_class_name":"ai-guard-rwop",
-            "volume_name":"pvc-55555555-5555-4555-8555-555555555555","capacity":"1Gi",
-            "access_mode":"ReadWriteOncePod","observed_at":"2026-11-21T19:00:01.000Z"}))
-        .unwrap()
-    };
-    assert!(created.is_observed_as(&bound(CLAIM_UID)));
-    assert!(!created.is_observed_as(&bound("66666666-6666-4666-8666-666666666666")));
     let effects = case.effects();
     assert_eq!(effects.len(), 1);
     assert_eq!(effects[0].line(), format!("POST {CREATE}"));

@@ -5,6 +5,7 @@
 use super::*;
 use crate::{
     audit::kubernetes_admission_state_tests::Fixture,
+    control::QuotaPolicyV1,
     control::kubernetes_session::effects::{
         KubernetesSessionEffectPolicyV2, KubernetesSessionStoragePolicyV2,
     },
@@ -76,6 +77,21 @@ impl SessionLedgerV2 for StoreLedger {
         self.fixture
             .store
             .kubernetes_session_effect_state(&self.fixture.identity, reservation_id)
+            .map_err(refused)
+    }
+    async fn reservation(
+        &self,
+        intent: &KubernetesSessionReservationIntentV2,
+    ) -> Driven<KubernetesSessionReservationCurrentV2> {
+        let fixture = &self.fixture;
+        let id = intent.reservation_id();
+        let authorization = fixture
+            .store
+            .authorize_kubernetes_session_reconciliation(&fixture.identity, id, None)
+            .map_err(refused)?;
+        fixture
+            .store
+            .observe_kubernetes_session(&fixture.identity, &authorization, id)
             .map_err(refused)
     }
 }
@@ -227,6 +243,72 @@ async fn a_workspace_is_claimed_created_once_and_bound_by_its_exact_uid() {
 }
 
 #[tokio::test]
+async fn a_second_driver_observes_the_confirmed_workspace_after_pending_expires() {
+    let case = Case::new("ai-guard-rwop").await;
+    let path = case.claim_path();
+    let name = path.rsplit('/').next().unwrap().to_owned();
+    let pending = pending_pvc(&name);
+    case.respond(move |request| match (request.method(), request.target()) {
+        ("POST", CREATE) => PeerReply::json(201, &created(request.body())),
+        ("GET", _) => PeerReply::json(200, &pending),
+        _ => PeerReply::json(404, &json!({"kind":"Status","code":404})),
+    });
+    {
+        let mut driver = case.driver().await;
+        driver.waits.bind = Duration::ZERO;
+        assert_eq!(
+            driver.provision_workspace(&storage()).await.unwrap_err(),
+            SessionDriverErrorV2::ClaimNotBound
+        );
+    }
+    let before = case.state();
+    assert_eq!(before.workspace_claim_uid.as_deref(), Some(CLAIM_UID));
+    let head = case.ledger.fixture.store.head().unwrap();
+    let held_workers = || {
+        case.ledger
+            .fixture
+            .store
+            .worker_quota(&QuotaPolicyV1::default())
+            .unwrap()
+            .held_workers
+    };
+    assert_eq!(held_workers(), 1);
+
+    let initial_requests = case.peer.requests().len();
+    let bound = bound_pvc("tenant-a", &name, CLAIM_UID);
+    case.respond(move |_| PeerReply::json(200, &bound));
+    case.driver()
+        .await
+        .observe_provisioned_workspace()
+        .await
+        .unwrap();
+
+    let mut replacement = pending_pvc(&name);
+    replacement["metadata"]["uid"] = json!("66666666-6666-4666-8666-666666666666");
+    case.respond(move |_| PeerReply::json(200, &replacement));
+    let mut reopened = case.driver().await;
+    reopened.waits.bind = Duration::ZERO;
+    assert_eq!(
+        reopened.observe_provisioned_workspace().await.unwrap_err(),
+        SessionDriverErrorV2::ClaimReplaced
+    );
+    assert_eq!(case.effects().len(), 1, "exactly one POST");
+    let requests = case.peer.requests();
+    let resumed = &requests[initial_requests..];
+    assert!(resumed.iter().all(|request| request.method() == "GET"));
+    assert_eq!(
+        resumed
+            .iter()
+            .filter(|request| request.target() == path)
+            .count(),
+        2
+    );
+    assert_eq!(case.state(), before);
+    assert_eq!(case.ledger.fixture.store.head().unwrap(), head);
+    assert_eq!(held_workers(), 1);
+}
+
+#[tokio::test]
 async fn an_unproven_create_is_recorded_uncertain_and_never_resent() {
     let case = Case::new("ai-guard-rwop").await;
     case.respond(|_: &PeerRequest| PeerReply::CloseWithoutResponse);
@@ -238,6 +320,16 @@ async fn an_unproven_create_is_recorded_uncertain_and_never_resent() {
     assert_eq!(state.last_step, 1);
     assert_eq!(state.workspace_claim_uid, None);
     assert_eq!(state.unresolved_uncertain_steps, 1);
+    let requests = case.peer.requests().len();
+    assert_eq!(
+        case.driver()
+            .await
+            .observe_provisioned_workspace()
+            .await
+            .unwrap_err(),
+        SessionDriverErrorV2::WorkspaceResumeUnavailable
+    );
+    assert_eq!(case.peer.requests().len(), requests);
     // The quota stays held: settlement is refused while ownership is unknown.
     assert!(matches!(
         driver.settle().await,

@@ -179,10 +179,6 @@ impl SessionClaimCreatedV2 {
     pub(crate) fn resource_version(&self) -> &str {
         &self.resource_version
     }
-    /// The bound observation must be the very object of this 201.
-    pub(crate) fn is_observed_as(&self, claim: &KubernetesSessionWorkspaceClaimV2) -> bool {
-        claim.name() == self.claim_name && claim.uid() == self.uid
-    }
 }
 
 #[derive(Debug)]
