@@ -866,6 +866,49 @@ impl AuthenticationReviewStartup {
     }
 }
 impl AuthenticationAudit {
+    /// Replay an untouched Auth5 neighbor against the preceding closure.
+    /// Opens no write transaction and appends no owner incarnation.
+    pub(crate) fn verify_unchanged_review_format5(
+        token: &HumanMaintenanceSourceToken,
+        policy: &AuthenticationAuditPolicyV1,
+        capacity: &AuthenticationCapacityPlanV1,
+        redactor: &Redactor,
+    ) -> Result<()> {
+        token.check()?;
+        let descriptor = token.descriptor();
+        let installation = descriptor.installation_id;
+        let expected = token
+            .prior_active_anchor(5)?
+            .ok_or(AuthenticationSourceFailure::Required)?;
+        capacity.validate()?;
+        format::validate_policy(installation, policy, redactor)?;
+        let (backing, _initialization) =
+            StoreStorage::open_existing(&descriptor.storage_binding.path())?;
+        let db = modern_connection(&backing, true, Duration::ZERO)?;
+        let tx = Transaction::new_unchecked(&db, TransactionBehavior::Deferred)?;
+        physical(&backing, &tx, installation, token)?;
+        let replay = format::replay_review(&tx, installation, policy, redactor, None)?;
+        let snapshot = replay
+            .authority
+            .as_ref()
+            .ok_or(AuthenticationSourceFailure::Required)?;
+        authority::exact(
+            replay.verified.namespace_id == descriptor.durable_namespace_id
+                && replay.budget.plan.as_ref() == Some(capacity)
+                && snapshot.anchor.source_id == descriptor.source_id
+                && snapshot.anchor.installation_id == installation
+                && snapshot.anchor.durable_namespace_id == descriptor.durable_namespace_id
+                && snapshot.anchor.kind == descriptor.kind
+                && snapshot.anchor_receipt.sequence == u64::try_from(expected.seq)?
+                && snapshot.anchor_receipt.hash == expected.hash,
+        )?;
+        physical(&backing, &tx, installation, token)?;
+        tx.commit()?;
+        physical(&backing, &db, installation, token)?;
+        db.close().map_err(|(_, error)| error)?;
+        token.check().map_err(Into::into)
+    }
+
     pub(crate) fn open_review_maintenance(
         path: &Path,
         installation_id: Uuid,

@@ -48,6 +48,15 @@ impl Directory {
         Ok((identity.device, identity.inode))
     }
 
+    /// Test the retained ancestry, counting the same directory as contained.
+    pub(crate) fn is_within_directory(&self, ancestor: &Self) -> Result<bool> {
+        self.revalidate()?;
+        let (device, inode) = ancestor.physical_identity()?;
+        let contained = self.0.chain.contains(&Identity { device, inode });
+        self.revalidate()?;
+        Ok(contained)
+    }
+
     /// Check an already retained direct child in this directory's mount domain.
     pub(crate) fn require_same_mount_child(&self, child: &Self) -> Result<()> {
         ensure!(
@@ -293,6 +302,27 @@ mod tests {
             .open(directory.path().join(name))
             .unwrap();
         file.metadata().unwrap()
+    }
+
+    #[test]
+    fn retained_directory_ancestry_includes_same_directory_and_aliases() {
+        let (_temporary, root) = private_directory();
+        let protected = root.child("protected").unwrap();
+        let nested = protected.child("nested").unwrap();
+        let outside = root.child("outside").unwrap();
+        assert!(protected.is_within_directory(&protected).unwrap());
+        assert!(nested.is_within_directory(&protected).unwrap());
+        assert!(!protected.is_within_directory(&nested).unwrap());
+        assert!(!outside.is_within_directory(&protected).unwrap());
+        assert!(root.open_existing_child("absent").is_err());
+        assert!(!root.path().join("absent").exists());
+
+        let alternate = root.path().join("PROTECTED");
+        if alternate.try_exists().unwrap() {
+            let alias = root.open_existing_child("PROTECTED").unwrap();
+            assert_ne!(alias.path(), protected.path());
+            assert!(nested.is_within_directory(&alias).unwrap());
+        }
     }
 
     #[cfg(any(

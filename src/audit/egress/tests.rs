@@ -402,6 +402,7 @@ fn maintenance_resume_requires_a_distinct_backup_parent() {
             closure_digest: closure.closure_digest.clone(),
         }),
         supported_storage_profile: closure.supported_storage_profile,
+        selected_source_id: None,
     };
     let files: Vec<_> = closure
         .configuration
@@ -573,6 +574,11 @@ fn maintenance_active_owner_refusal_is_typed_at_acquisition_and_effect_free() {
 #[test]
 fn maintenance_reads_anchored_store14_neighbor_during_store15_upgrade() {
     fixtures::assert_neighbor_store14_head_is_anchored_during_egress_upgrade();
+}
+
+#[test]
+fn store15_operator_recovers_after_confirmed_genesis_before_closure_publish() {
+    fixtures::assert_operator_recovers_after_confirmed_genesis_before_closure_publish();
 }
 
 #[test]

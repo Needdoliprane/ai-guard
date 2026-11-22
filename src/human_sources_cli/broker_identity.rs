@@ -11,7 +11,10 @@
 //! output or a log: the generated bearer exists only in the new private plan
 //! directory. Standard output is one closed JSON report; a refusal is one
 //! closed, secret-free line on standard error.
-use super::load_human_sources_activation;
+use super::{
+    activation::{DEFAULT_MAX_EVENTS, ExplicitOwnedSourcesArgs, technical_tokens},
+    load_human_sources_activation,
+};
 use crate::gateway_config::{load_owned_sources, load_owned_tenants};
 use agentsandbox::{
     broker_registry::BrokerRuntimeKindV1,
@@ -32,8 +35,6 @@ use clap::{Args, Subcommand, ValueEnum};
 use sha2::{Digest, Sha256};
 use std::{fmt, io::Write, path::PathBuf};
 use uuid::Uuid;
-
-const DEFAULT_MAX_EVENTS: u64 = 100_000;
 
 #[derive(Args)]
 pub(crate) struct BrokerIdentityArgs {
@@ -73,34 +74,8 @@ struct UnionArgs {
         ]
     )]
     human_sources_activation: Option<PathBuf>,
-    /// Existing private closure manifest (explicit owned-source route).
-    #[arg(
-        long,
-        requires_all = [
-            "human_credentials_envelope",
-            "tenants_file",
-            "human_control_config_revision",
-        ]
-    )]
-    human_sources_manifest: Option<PathBuf>,
-    /// Existing private technical credential envelope of that manifest.
-    #[arg(long, requires = "human_sources_manifest")]
-    human_credentials_envelope: Option<PathBuf>,
-    /// Owned tenant registry of that manifest.
-    #[arg(long, requires = "human_sources_manifest")]
-    tenants_file: Option<PathBuf>,
-    /// Explicit positive revision of the retained public control configuration.
-    #[arg(long, requires = "human_sources_manifest")]
-    human_control_config_revision: Option<u64>,
-    /// Private OIDC configuration of that manifest, when OIDC is selected.
-    #[arg(long, requires_all = ["human_sources_manifest", "human_oidc_mapping_revision"])]
-    oidc_config: Option<PathBuf>,
-    /// Explicit positive OIDC mapping closure revision.
-    #[arg(long, requires = "oidc_config")]
-    human_oidc_mapping_revision: Option<u64>,
-    /// Audit event bound of the explicit route (default 100000).
-    #[arg(long, requires = "human_sources_manifest")]
-    max_events: Option<u64>,
+    #[command(flatten)]
+    explicit: ExplicitOwnedSourcesArgs,
     /// Operator attestation: gateway, dashboard, ingress and brokers are stopped.
     /// The owner locks are still taken; this is not fencing of an older process.
     #[arg(long, required = true)]
@@ -277,15 +252,6 @@ pub(crate) fn run(args: BrokerIdentityArgs) -> Result<()> {
     }
 }
 
-/// Configured runner and viewer tokens: they seed the gateway's redaction
-/// dictionary and their digests are refused as a new bearer digest.
-fn technical_tokens(tenants: &[crate::gateway_config::ConfiguredTenant]) -> Vec<String> {
-    tenants
-        .iter()
-        .flat_map(|tenant| [tenant.runner_token.clone(), tenant.viewer_token.clone()])
-        .collect()
-}
-
 /// A running gateway retains the owner locks; its contention is named.
 fn union_refusal(error: &anyhow::Error) -> Refused {
     let contended = Some(&HumanAuthorityFailure::OwnerContended);
@@ -303,44 +269,46 @@ fn open_union(args: UnionArgs) -> Result<BrokerIdentityMaintenance, Refused> {
     if !args.confirm_control_stopped {
         return Err(Refused::Union("control_stop_attestation_required"));
     }
-    let (bundle, tokens): (HumanOwnedStartupBundle, Vec<String>) =
-        match (&args.human_sources_activation, &args.human_sources_manifest) {
-            (Some(activation), None) => {
-                let loaded = load_human_sources_activation(activation)
-                    .map_err(|_| Refused::Union("owned_union_activation_refused"))?;
-                let tokens = technical_tokens(&loaded.tenants);
-                let bundle = HumanOwnedStartupBundle::open(loaded.request)
-                    .map_err(|error| union_refusal(&error))?;
-                (bundle, tokens)
-            }
-            (None, Some(manifest)) => {
-                let selection = Refused::Union("owned_union_options_incomplete");
-                let (Some(envelope), Some(tenants_file), Some(revision)) = (
-                    args.human_credentials_envelope.as_deref(),
-                    args.tenants_file.as_deref(),
-                    args.human_control_config_revision,
-                ) else {
-                    return Err(selection);
-                };
-                let tenants = load_owned_tenants(tenants_file)
-                    .map_err(|_| Refused::Union("owned_union_tenants_refused"))?;
-                let tokens = technical_tokens(&tenants);
-                let prepared = load_owned_sources(
-                    manifest,
-                    envelope,
-                    tenants_file,
-                    args.oidc_config.as_deref(),
-                    &tenants,
-                    args.max_events.unwrap_or(DEFAULT_MAX_EVENTS),
-                    revision,
-                    args.human_oidc_mapping_revision,
-                    Redactor::new(tokens.clone()),
-                )
+    let (bundle, tokens): (HumanOwnedStartupBundle, Vec<String>) = match (
+        &args.human_sources_activation,
+        &args.explicit.human_sources_manifest,
+    ) {
+        (Some(activation), None) => {
+            let loaded = load_human_sources_activation(activation)
+                .map_err(|_| Refused::Union("owned_union_activation_refused"))?;
+            let tokens = technical_tokens(&loaded.tenants);
+            let bundle = HumanOwnedStartupBundle::open(loaded.request)
                 .map_err(|error| union_refusal(&error))?;
-                (prepared.bundle, tokens)
-            }
-            _ => return Err(Refused::Union("owned_union_selection_required")),
-        };
+            (bundle, tokens)
+        }
+        (None, Some(manifest)) => {
+            let selection = Refused::Union("owned_union_options_incomplete");
+            let (Some(envelope), Some(tenants_file), Some(revision)) = (
+                args.explicit.human_credentials_envelope.as_deref(),
+                args.explicit.tenants_file.as_deref(),
+                args.explicit.human_control_config_revision,
+            ) else {
+                return Err(selection);
+            };
+            let tenants = load_owned_tenants(tenants_file)
+                .map_err(|_| Refused::Union("owned_union_tenants_refused"))?;
+            let tokens = technical_tokens(&tenants);
+            let prepared = load_owned_sources(
+                manifest,
+                envelope,
+                tenants_file,
+                args.explicit.oidc_config.as_deref(),
+                &tenants,
+                args.explicit.max_events.unwrap_or(DEFAULT_MAX_EVENTS),
+                revision,
+                args.explicit.human_oidc_mapping_revision,
+                Redactor::new(tokens.clone()),
+            )
+            .map_err(|error| union_refusal(&error))?;
+            (prepared.bundle, tokens)
+        }
+        _ => return Err(Refused::Union("owned_union_selection_required")),
+    };
     let digests: Vec<[u8; 32]> = tokens
         .iter()
         .map(|token| Sha256::digest(token.as_bytes()).into())

@@ -74,6 +74,309 @@ fn prepare_check_resume_and_readoption_preserve_real_legacy_and_stable_ids() {
 }
 
 #[test]
+fn cli_store15_reuses_exact_closure_and_leaves_the_neighbor_unchanged() {
+    use agentsandbox::human_authority::HumanAuthorityClosureV1;
+    use rusqlite::{Connection, OpenFlags};
+    use std::{
+        os::{
+            fd::AsRawFd,
+            unix::fs::{MetadataExt, PermissionsExt},
+        },
+        path::Path,
+    };
+    use uuid::Uuid;
+
+    let f = Fixture::new(false);
+    successful(f.prepare());
+    successful(f.step("apply", true));
+    let activation_path = f.preparation.join("activation.json");
+    let activation_bytes = fs::read(&activation_path).unwrap();
+    let activation: Value = serde_json::from_slice(&activation_bytes).unwrap();
+    let original_manifest_path = activation["manifest"].as_str().unwrap();
+    let original_manifest = fs::read(original_manifest_path).unwrap();
+    let original = HumanAuthorityClosureV1::from_bytes(&original_manifest).unwrap();
+    let original_envelope = f.preparation.join("technical-credentials.json");
+    let before_credentials = fs::read(&original_envelope).unwrap();
+    let snapshot = |source: usize| {
+        let db = Connection::open_with_flags(
+            &f.sources[source],
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        let format = db
+            .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+            .unwrap();
+        let events = db
+            .prepare("SELECT seq,kind,hash FROM events ORDER BY seq")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        (format, events)
+    };
+    let before_a = snapshot(0);
+    let before_b = snapshot(1);
+    let id = Uuid::new_v4();
+    let destination = f.root.join("store15-a");
+    let upgrade = |output: &Path, resume, operation_id: Uuid| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_agentsandbox"));
+        command
+            .env_clear()
+            .args([
+                "human-sources",
+                "upgrade-egress",
+                "--human-sources-activation",
+            ])
+            .arg(&activation_path)
+            .args(["--tenant", "tenant-a", "--operation-id"])
+            .arg(operation_id.to_string())
+            .arg("--output-dir")
+            .arg(output)
+            .arg("--confirm-control-stopped");
+        if resume {
+            command.arg("--resume");
+        }
+        command.output().unwrap()
+    };
+    let explicit_upgrade = |manifest: &Path, envelope: &Path, output: &Path, tenant: &str| {
+        Command::new(env!("CARGO_BIN_EXE_agentsandbox"))
+            .env_clear()
+            .args([
+                "human-sources",
+                "upgrade-egress",
+                "--human-sources-manifest",
+            ])
+            .arg(manifest)
+            .arg("--human-credentials-envelope")
+            .arg(envelope)
+            .arg("--tenants-file")
+            .arg(&f.registry)
+            .args([
+                "--human-control-config-revision",
+                "7",
+                "--tenant",
+                tenant,
+                "--operation-id",
+            ])
+            .arg(Uuid::new_v4().to_string())
+            .arg("--output-dir")
+            .arg(output)
+            .arg("--confirm-control-stopped")
+            .output()
+            .unwrap()
+    };
+    let entries = |directory: &Path| {
+        let mut names = fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    };
+    let refused = |output: std::process::Output, code: &str| {
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(code));
+    };
+    let preparation_entries = entries(&f.preparation);
+    let nested = f.preparation.join("store15-output");
+    refused(upgrade(&nested, false, id), "store15_output_protected");
+    refused(
+        explicit_upgrade(
+            Path::new(original_manifest_path),
+            &original_envelope,
+            &nested,
+            "tenant-a",
+        ),
+        "store15_output_protected",
+    );
+    let alias = f.root.join(
+        f.preparation
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_ascii_uppercase(),
+    );
+    if alias != f.preparation && alias.try_exists().unwrap() {
+        refused(
+            upgrade(&alias.join("store15-output"), false, id),
+            "store15_output_protected",
+        );
+    }
+    assert_eq!(entries(&f.preparation), preparation_entries);
+    assert!(fs::read(&activation_path).unwrap() == activation_bytes);
+    let checked = f.step("check", false);
+    assert!(checked.status.success());
+    assert!(String::from_utf8_lossy(&checked.stdout).starts_with("activation_files_valid"));
+    assert_eq!(snapshot(0), before_a);
+    assert_eq!(snapshot(1), before_b);
+
+    let occupied = f.root.join("store15-occupied");
+    support::private_dir(&occupied);
+    refused(upgrade(&occupied, false, id), "store15_output_not_fresh");
+    assert!(entries(&occupied).is_empty());
+
+    let root_before_contention = entries(&f.root);
+    let lock = fs::File::open(
+        f.sources[0]
+            .parent()
+            .unwrap()
+            .join(".ai-guard-human-authority-v1.lock"),
+    )
+    .unwrap();
+    // SAFETY: this descriptor belongs to the test's disposable source owner.
+    assert_eq!(
+        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    refused(upgrade(&destination, false, id), "store15_control_active");
+    assert_eq!(entries(&f.root), root_before_contention);
+    drop(lock);
+    assert_eq!(snapshot(0), before_a);
+    assert_eq!(snapshot(1), before_b);
+
+    successful(upgrade(&destination, false, id));
+    let after_a = snapshot(0);
+    assert_eq!(before_a.0, 14);
+    assert_eq!(after_a.0, 15);
+    assert_eq!(after_a.1.len(), before_a.1.len() + 1);
+    assert_eq!(&after_a.1[..before_a.1.len()], before_a.1.as_slice());
+    assert_eq!(after_a.1.last().unwrap().1, "control.egress_policy.genesis");
+    assert_eq!(snapshot(1), before_b);
+    let manifest = destination.join("closure/manifest.json");
+    let bytes = fs::read(&manifest).unwrap();
+    let upgraded = HumanAuthorityClosureV1::from_bytes(&bytes).unwrap();
+    assert_eq!(upgraded.closure_id, original.closure_id);
+    assert_eq!(upgraded.closure_revision, original.closure_revision + 1);
+    let mut expected_sources = original.sources.clone();
+    expected_sources
+        .iter_mut()
+        .find(|source| source.tenant_id.as_deref() == Some("tenant-a"))
+        .unwrap()
+        .required_format = 15;
+    assert!(upgraded.sources == expected_sources);
+    let mut expected_credentials: Value = serde_json::from_slice(&before_credentials).unwrap();
+    expected_credentials["closure_revision"] = upgraded.closure_revision.into();
+    let credentials: Value =
+        serde_json::from_slice(&fs::read(destination.join("technical-credentials.json")).unwrap())
+            .unwrap();
+    assert!(
+        credentials == expected_credentials,
+        "technical identities and roles are preserved"
+    );
+    let before_backup = fs::metadata(destination.join("backup/source.sqlite")).unwrap();
+
+    successful(upgrade(&destination, true, id));
+    // Exercise the same committed/confirmed state without a visible closure.
+    // The first publication stays intact in the disposable fixture.
+    let retained_closure = f.root.join("retained-store15-closure");
+    fs::rename(destination.join("closure"), &retained_closure).unwrap();
+    assert!(!manifest.exists());
+    successful(upgrade(&destination, true, id));
+    assert!(fs::read(retained_closure.join("manifest.json")).unwrap() == bytes);
+    assert!(!upgrade(&destination, true, Uuid::new_v4()).status.success());
+    let after_backup = fs::metadata(destination.join("backup/source.sqlite")).unwrap();
+    assert_eq!(
+        (after_backup.dev(), after_backup.ino()),
+        (before_backup.dev(), before_backup.ino())
+    );
+    assert!(fs::read(&manifest).unwrap() == bytes);
+    assert!(fs::read(&original_envelope).unwrap() == before_credentials);
+    assert!(fs::read(original_manifest_path).unwrap() == original_manifest);
+    assert_eq!(snapshot(0), after_a);
+    assert_eq!(snapshot(1), before_b);
+
+    let second_output = f.root.join("store15-b");
+    successful(explicit_upgrade(
+        &manifest,
+        &destination.join("technical-credentials.json"),
+        &second_output,
+        "tenant-b",
+    ));
+    let second_manifest = second_output.join("closure/manifest.json");
+    let second_bytes = fs::read(&second_manifest).unwrap();
+    let second = HumanAuthorityClosureV1::from_bytes(&second_bytes).unwrap();
+    assert_eq!(second.closure_revision, upgraded.closure_revision + 1);
+    let mut expected_sources = upgraded.sources.clone();
+    expected_sources
+        .iter_mut()
+        .find(|source| source.tenant_id.as_deref() == Some("tenant-b"))
+        .unwrap()
+        .required_format = 15;
+    assert!(second.sources == expected_sources);
+    assert_eq!(snapshot(0), after_a);
+    let after_b = snapshot(1);
+    assert_eq!(after_b.0, 15);
+    assert_eq!(after_b.1.len(), before_b.1.len() + 1);
+    assert_eq!(&after_b.1[..before_b.1.len()], before_b.1.as_slice());
+    assert_eq!(after_b.1.last().unwrap().1, "control.egress_policy.genesis");
+
+    let maintenance_root = tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let maintenance_dir = maintenance_root
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("rights");
+    let rights = |step| {
+        let output = Command::new(env!("CARGO_BIN_EXE_agentsandbox"))
+            .env_clear()
+            .args([
+                "human-sources",
+                "human-rights",
+                step,
+                "--human-sources-manifest",
+            ])
+            .arg(&second_manifest)
+            .arg("--human-credentials-envelope")
+            .arg(second_output.join("technical-credentials.json"))
+            .arg("--tenants-file")
+            .arg(&f.registry)
+            .args([
+                "--human-control-config-revision",
+                "7",
+                "--tenant-id",
+                "tenant-a",
+                "--maintenance-dir",
+            ])
+            .arg(&maintenance_dir)
+            .arg("--confirm-control-stopped")
+            .output()
+            .unwrap();
+        let report = serde_json::from_slice::<Value>(&output.stdout);
+        successful(output);
+        report.unwrap()
+    };
+    let installed = rights("install");
+    assert_eq!(installed["state"], "installed");
+    assert_eq!(installed["store_format"], 15);
+    assert_eq!(installed["tenant_id"], "tenant-a");
+    let after_rights = snapshot(0);
+    assert_eq!(after_rights.0, 15);
+    assert_eq!(after_rights.1.len(), after_a.1.len() + 1);
+    assert_eq!(&after_rights.1[..after_a.1.len()], after_a.1.as_slice());
+    let marker = after_rights.1.last().unwrap();
+    assert_eq!(marker.1, "control.identity.human_rights.genesis");
+    assert_eq!(installed["markers"][0]["seq"], marker.0);
+    assert_eq!(installed["markers"][0]["hash"], marker.2.as_str());
+    let resumed = rights("resume");
+    assert_eq!(resumed["state"], "confirmed");
+    assert_eq!(resumed["markers"], installed["markers"]);
+    assert_eq!(snapshot(0), after_rights);
+    assert_eq!(snapshot(1), after_b);
+    assert!(fs::read(&second_manifest).unwrap() == second_bytes);
+}
+
+#[test]
 fn changed_token_before_envelope_and_truncated_publications_are_preserved() {
     let f = Fixture::new(false);
     successful(f.prepare());

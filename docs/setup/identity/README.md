@@ -368,7 +368,36 @@ The marker requires a store that already carries the worker registry marker (for
 
 The command refuses to start without `--confirm-control-stopped`. It writes a verified new backup, appends the marker once and prints a JSON report whose `from_version` and `to_version` are both the unchanged format. A second run is refused with `the human rights marker is already installed`; a store below format 10 is refused with `requires the worker registry marker: store formats 10 to 13`.
 
-An earlier release cannot use a store that carries the marker: plan an upgrade, not a downgrade. Returning to an earlier release means restoring the backup into a new private destination, which **discards every audit event recorded after the marker**; the restored store refuses the fenced capabilities again. On owned source stores (formats 14 and 15), the fenced capabilities are admitted only when the verified marker is present: install it on the legacy store before adopting it into the owned profile; a journaled maintenance for stores already adopted is not yet available. MySQL tenant stores refuse the marker and the fenced capabilities until the MySQL identity replay supports them.
+An earlier release cannot use a store that carries the marker: plan an upgrade, not a downgrade. Returning to an earlier release means restoring the backup into a new private destination, which **discards every audit event recorded after the marker**; the restored store refuses the fenced capabilities again. On owned source stores (formats 14 and 15), the fenced capabilities are admitted only when the verified marker is present: either install it on the legacy store before adopting it into the owned profile, or use the owned journaled maintenance below on an already adopted store. MySQL tenant stores refuse the marker and the fenced capabilities until the MySQL identity replay supports them.
+
+### Already adopted owned stores (formats 14 and 15)
+
+`migrate-human-rights` refuses an owned store. For a tenant already adopted through the [human sources workflow](../human-sources-maintenance/README.md), stop the gateway, dashboard, ingress and every broker, then install every pending in-place identity marker (today only `human_rights_v2`) with the published activation:
+
+```sh
+agentsandbox human-sources human-rights install \
+  --human-sources-activation /absolute/control/human-preparation/activation.json \
+  --tenant-id tenant-a \
+  --maintenance-dir /absolute/control/human-rights-tenant-a \
+  --confirm-control-stopped
+```
+
+The maintenance directory must be new, private and outside the preparation directory and every source directory. The command writes its `plan.json` for the unchanged active closure, takes the owner locks of the whole union and publishes `identity-markers-intent-v1`. It copies the selected Store14/15 into `backups/source.sqlite`, verifies it through SQLite and publishes `identity-markers-backup-v1` before appending every pending marker in one transaction. After commit, it reopens and replays the source and publishes `identity-markers-confirmed-v1` with each marker receipt. The store format, anchor and gateway activation remain valid. The JSON report includes `state`, `backup_path`, the marker receipts and `readiness` set to `not_checked`.
+
+Refusals return one closed line `human_rights_step_refused; step=…; state=…`. A failure during confirmation can occur after the transaction commits.
+
+| `state` | Meaning and action |
+|---|---|
+| (missing flag) | Without `--confirm-control-stopped` the command does not start and creates nothing. |
+| `human_rights_owner_busy` | A gateway or another maintenance holds the owner locks. Stop it, then run `resume` on the same directory. |
+| `human_rights_already_installed` | Nothing is pending; no journal record or backup was written. The new directory holds only its plan; you may remove it. |
+| `human_rights_source_unknown` | The tenant is not a tenant store of this activation. |
+| `human_rights_format_unsupported` | The adopted source does not match the activation's format and anchor (for example a Store15 still published as Store14). |
+| `human_rights_backup_inventory_limit` | The backup inventory exceeds its bound. Preserve the directory for offline review. |
+| `human_rights_backup_directory_invalid` | The private backup directory or one of its entries could not be verified. Preserve the directory and verify the original owner, permissions and filesystem identity. |
+| `human_rights_journal_conflict` | The directory, its plan, journal or backup differ from this maintenance, or the directory overlaps the preparation. Preserve everything and reconcile; nothing is overwritten or repaired. |
+
+After an interruption or a lost acknowledgement, keep the directory and run `resume` with the same flags once its checks can pass. It reuses the recorded plan and migration ID. If a copy was interrupted before the backup receipt was published, it can preserve that copy and publish a receipt for a new verified copy. A published receipt fixes `backup_path` for every later retry. The result is `installed` when this invocation commits the markers and `confirmed` when it replays an earlier commit. The reported backup is the return path. Restoring it into a new private destination discards every event recorded after the marker, as described above. [Backup limits and offline review](../human-sources-maintenance/README.md#in-place-identity-markers-on-adopted-stores)
 
 Trusted control may introduce or reactivate any of these capabilities: `human apply` with no caller `actor`, or `human provision --capability read-memberships` (likewise `read-configuration`, `launch-session`, `send-session-message`, `approve-launch`, `approve-egress`) after the marker. An organization administrator holding `manage_memberships` may keep or remove the control-only ones (`read_memberships`, `read_configuration`, `launch_session`, `send_session_message` and the two registry reads) but never add or reactivate them; `approve_egress` and `approve_launch` are delegable within the organization only by an administrator whose own active membership holds them, to another member or to itself; a right removed from oneself is not reactivated by oneself. A capability alone opens no view or command: the gateway still revalidates the membership, the OIDC ceiling and each resource permission on every request.
 

@@ -78,9 +78,42 @@ pub(crate) struct HumanSourcesMaintenancePlanV1 {
     pub target: HumanMaintenanceViewV1,
     pub prior_active_manifest: Option<HumanMaintenanceActiveManifestV1>,
     pub supported_storage_profile: HumanStorageProfileV1,
+    /// Single-source in-place maintenance still holds the whole union's locks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_source_id: Option<Uuid>,
 }
 
 impl HumanSourcesMaintenancePlanV1 {
+    /// In-place maintenance of an adopted union: prior and target are both
+    /// the published active closure, which is also the retained prior active
+    /// manifest. No source format, binding or configuration changes.
+    pub(crate) fn in_place(
+        migration_id: Uuid,
+        closure: &HumanAuthorityClosureV1,
+        manifest_binding: SourceStorageBindingV1,
+        selected_source_id: Uuid,
+    ) -> Self {
+        let view = HumanMaintenanceViewV1 {
+            sources: closure.sources.iter().map(from_active_source).collect(),
+            configuration: closure.configuration.clone(),
+        };
+        Self {
+            version: 1,
+            migration_id,
+            installation_id: closure.installation_id,
+            prior: Some(view.clone()),
+            target: view,
+            prior_active_manifest: Some(HumanMaintenanceActiveManifestV1 {
+                storage_binding: manifest_binding,
+                closure_id: closure.closure_id,
+                closure_revision: closure.closure_revision,
+                closure_digest: closure.closure_digest.clone(),
+            }),
+            supported_storage_profile: closure.supported_storage_profile,
+            selected_source_id: Some(selected_source_id),
+        }
+    }
+
     fn from_bytes(bytes: &[u8]) -> Result<Self, HumanAuthorityFailure> {
         if bytes.is_empty() || bytes.len() > MAX_MAINTENANCE_PLAN_BYTES {
             return Err(HumanAuthorityFailure::InvalidManifest);
@@ -103,6 +136,17 @@ impl HumanSourcesMaintenancePlanV1 {
             {
                 return Err(HumanAuthorityFailure::InvalidManifest);
             }
+        }
+        if let Some(source_id) = plan.selected_source_id
+            && (plan.prior.as_ref() != Some(&plan.target)
+                || plan.prior_active_manifest.is_none()
+                || !plan.target.sources.iter().any(|source| {
+                    source.source_id == source_id
+                        && source.kind == HumanSourceKindV1::TenantStore
+                        && matches!(source.required_format, 14 | 15)
+                }))
+        {
+            return Err(HumanAuthorityFailure::InvalidManifest);
         }
         // A moved logical source can have different physical bindings and
         // formats. It cannot silently change tenant, namespace or source kind.
@@ -197,7 +241,7 @@ fn same_logical_source(left: &HumanMaintenanceSourceV1, right: &HumanMaintenance
         && left.tenant_id == right.tenant_id
 }
 
-fn from_active_source(source: &HumanSourceDescriptorV1) -> HumanMaintenanceSourceV1 {
+pub(super) fn from_active_source(source: &HumanSourceDescriptorV1) -> HumanMaintenanceSourceV1 {
     // Copy expectations from the real retained old manifest; fabricate no receipt.
     HumanMaintenanceSourceV1 {
         source_id: source.source_id,
@@ -524,6 +568,14 @@ impl HumanSourcesMaintenanceGuard {
         source_id: Uuid,
     ) -> Result<HumanMaintenanceSourceToken, HumanAuthorityFailure> {
         self.check()?;
+        if self
+            .owner
+            .plan
+            .selected_source_id
+            .is_some_and(|selected| selected != source_id)
+        {
+            return Err(HumanAuthorityFailure::SourceMismatch);
+        }
         let index = self
             .owner
             .targets
@@ -586,6 +638,21 @@ impl HumanMaintenanceSourceToken {
             return Err(HumanAuthorityFailure::SourceMismatch);
         }
         Ok(Some(&source.authority_marker_receipt))
+    }
+
+    /// Active anchor of a source that this plan leaves unchanged in place:
+    /// the complete prior view equals the target view and the retained prior
+    /// active manifest lists the source at the same format and binding. Every
+    /// format-changing or initial plan returns `None`. Descriptive only; the
+    /// opener still compares the receipt with durable replay.
+    pub(crate) fn in_place_anchor(
+        &self,
+    ) -> Result<Option<&HumanAuthorityMarkerReceiptV1>, HumanAuthorityFailure> {
+        let plan = &self.owner.plan;
+        if plan.prior.as_ref() != Some(&plan.target) || self.owner.prior_active.is_none() {
+            return Ok(None);
+        }
+        self.prior_active_anchor(self.descriptor().required_format)
     }
 
     pub(crate) fn migration_id(&self) -> Uuid {

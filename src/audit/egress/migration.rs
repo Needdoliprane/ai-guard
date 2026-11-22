@@ -1,23 +1,51 @@
 //! Explicit stopped-consumer14→15 operation. No normal opener auto-migrates.
+//! The same verified source backup also serves the in-place maintenance of an
+//! adopted source (identity markers), which never changes its format.
 use super::*;
 use crate::human_authority::{
     HumanSourceKindV1, SourceStorageBindingV1, maintenance::HumanMaintenanceSourceToken,
 };
 use std::path::PathBuf;
 
+/// Which stopped-consumer maintenance a verified source backup belongs to.
+/// A proof never crosses steps: egress keeps its exact Store14 source, and
+/// the in-place step keeps the adopted source's own format14 or15.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SourceBackupStepV1 {
+    Egress15,
+    InPlace,
+}
+
 fn physical(
     store: &Store,
     tx: &Transaction<'_>,
     token: &HumanMaintenanceSourceToken,
 ) -> anyhow::Result<()> {
+    physical_for(store, tx, token, SourceBackupStepV1::Egress15)
+}
+
+/// The held writer, the exact physical source and the token's step. An
+/// in-place token is admitted only by an in-place plan (`in_place_anchor`).
+pub(in crate::audit) fn physical_for(
+    store: &Store,
+    tx: &Transaction<'_>,
+    token: &HumanMaintenanceSourceToken,
+    step: SourceBackupStepV1,
+) -> anyhow::Result<()> {
     token.check()?;
     storage::verify_connection_main(&store.backing, tx)?;
     ensure(tx.transaction_state(Some("main"))? == rusqlite::TransactionState::Write)?;
     let d = token.descriptor();
+    let format = match step {
+        SourceBackupStepV1::Egress15 => d.required_format == 15,
+        SourceBackupStepV1::InPlace => {
+            matches!(d.required_format, 14 | 15) && token.in_place_anchor()?.is_some()
+        }
+    };
     let (path, identity) = store.backing.identity_key();
     ensure(
         d.kind == HumanSourceKindV1::TenantStore
-            && d.required_format == 15
+            && format
             && d.tenant_id.as_deref() == Some(store.tenant_id())
             && d.durable_namespace_id == review_authority::namespace(tx)?
             && d.storage_binding.path() == path
@@ -30,7 +58,15 @@ fn physical(
     token.check().map_err(Into::into)
 }
 fn verify14(store: &Store, db: &Connection, prefix: &(i64, String)) -> anyhow::Result<u64> {
-    ensure(db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))? == 14)?;
+    verify_format(store, db, prefix, 14)
+}
+fn verify_format(
+    store: &Store,
+    db: &Connection,
+    prefix: &(i64, String),
+    format: i64,
+) -> anyhow::Result<u64> {
+    ensure(db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))? == format)?;
     validate_schema(db, false)?;
     Store::validate_metadata(db, store.tenant_id())?;
     control::validate(db)?;
@@ -39,26 +75,51 @@ fn verify14(store: &Store, db: &Connection, prefix: &(i64, String)) -> anyhow::R
     Ok(integrity.event_count)
 }
 
-fn backup_path(token: &HumanMaintenanceSourceToken, path: &Path) -> anyhow::Result<PathBuf> {
+fn backup_path(
+    token: &HumanMaintenanceSourceToken,
+    path: &Path,
+    step: SourceBackupStepV1,
+) -> anyhow::Result<PathBuf> {
     let path = crate::control_fs::absolute_path(path)?;
     let parent = crate::control_fs::Directory::open_existing(
         path.parent().context("backup parent required")?,
     )?;
     ensure(parent.physical_identity()? != token.descriptor().storage_binding.parent_identity())
-        .context("egress backup parent must differ from source parent")?;
+        .context(match step {
+            SourceBackupStepV1::Egress15 => "egress backup parent must differ from source parent",
+            SourceBackupStepV1::InPlace => {
+                "identity marker backup parent must differ from source parent"
+            }
+        })?;
     Ok(path)
+}
+
+/// Store format proved by a backup of this step for this token.
+fn step_format(token: &HumanMaintenanceSourceToken, step: SourceBackupStepV1) -> i64 {
+    match step {
+        SourceBackupStepV1::Egress15 => 14,
+        SourceBackupStepV1::InPlace => i64::from(token.descriptor().required_format),
+    }
 }
 
 /// Proof borrows a real maintenance token and retains the verified backup's
 /// own filesystem identity. A path/receipt/serialized manifest cannot mint it.
 pub(crate) struct VerifiedEgressSourceBackup<'a> {
     token: &'a HumanMaintenanceSourceToken,
+    step: SourceBackupStepV1,
     source_binding: (std::path::PathBuf, crate::control_fs::PrivateEntryIdentity),
     source_head: (i64, String),
     event_count: u64,
     backing: StoreStorage,
 }
+/// The same proof for any source step; the name is kept for egress callers.
+pub(crate) type VerifiedSourceBackup<'a> = VerifiedEgressSourceBackup<'a>;
 impl VerifiedEgressSourceBackup<'_> {
+    /// Exact committed prefix the backup proves. Not an authority by itself.
+    pub(in crate::audit) fn source_head(&self) -> &(i64, String) {
+        &self.source_head
+    }
+
     /// Describe the existing proof for the journal without opening a raw file.
     pub(crate) fn journal_observation(
         &self,
@@ -91,7 +152,14 @@ impl VerifiedEgressSourceBackup<'_> {
         )?;
         db.busy_timeout(std::time::Duration::ZERO)?;
         storage::verify_connection_main(&self.backing, &db)?;
-        ensure(verify14(store, &db, &self.source_head)? == self.event_count)?;
+        ensure(
+            verify_format(
+                store,
+                &db,
+                &self.source_head,
+                step_format(self.token, self.step),
+            )? == self.event_count,
+        )?;
         let quick: String = db.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
         ensure(quick == "ok")?;
         storage::verify_connection_main(&self.backing, &db)?;
@@ -107,10 +175,22 @@ pub(in crate::audit) fn prepare_backup<'a>(
     token: &'a HumanMaintenanceSourceToken,
     path: &Path,
 ) -> anyhow::Result<VerifiedEgressSourceBackup<'a>> {
-    physical(store, tx, token)?;
+    prepare_backup_for(store, tx, token, path, SourceBackupStepV1::Egress15)
+}
+
+/// Exclusive new SQLite backup of the exact held source prefix for `step`.
+pub(in crate::audit) fn prepare_backup_for<'a>(
+    store: &Store,
+    tx: &Transaction<'_>,
+    token: &'a HumanMaintenanceSourceToken,
+    path: &Path,
+    step: SourceBackupStepV1,
+) -> anyhow::Result<VerifiedEgressSourceBackup<'a>> {
+    physical_for(store, tx, token, step)?;
+    let format = step_format(token, step);
     let prefix = audit_head(tx)?;
-    let count = verify14(store, tx, &prefix)?;
-    let path = backup_path(token, path)?;
+    let count = verify_format(store, tx, &prefix, format)?;
+    let path = backup_path(token, path, step)?;
     let (backing, initialization) = StoreStorage::create_new(&path)?;
     let mut destination = Connection::open_with_flags(
         backing.path(),
@@ -127,12 +207,12 @@ pub(in crate::audit) fn prepare_backup<'a>(
     )?;
     reader.busy_timeout(std::time::Duration::ZERO)?;
     storage::verify_connection_main(&store.backing, &reader)?;
-    ensure(verify14(store, &reader, &prefix)? == count)?;
+    ensure(verify_format(store, &reader, &prefix, format)? == count)?;
     {
         let backup = rusqlite::backup::Backup::new(&reader, &mut destination)?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            physical(store, tx, token)?;
+            physical_for(store, tx, token, step)?;
             backing.verify_names()?;
             match backup.step(256)? {
                 rusqlite::backup::StepResult::Done => break,
@@ -141,10 +221,10 @@ pub(in crate::audit) fn prepare_backup<'a>(
             }
         }
     }
-    ensure(verify14(store, &reader, &prefix)? == count)?;
+    ensure(verify_format(store, &reader, &prefix, format)? == count)?;
     storage::verify_connection_main(&store.backing, &reader)?;
     reader.close().map_err(|(_, e)| e)?;
-    ensure(verify14(store, &destination, &prefix)? == count)?;
+    ensure(verify_format(store, &destination, &prefix, format)? == count)?;
     storage::verify_connection_main(&backing, &destination)?;
     let quick: String = destination.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
     ensure(quick == "ok")?;
@@ -152,13 +232,14 @@ pub(in crate::audit) fn prepare_backup<'a>(
     backing.sync_closed(&initialization)?;
     let proof = VerifiedEgressSourceBackup {
         token,
+        step,
         source_binding: store.backing.identity_key(),
         source_head: prefix,
         event_count: count,
         backing,
     };
     proof.verify(store)?;
-    physical(store, tx, token)?;
+    physical_for(store, tx, token, step)?;
     Ok(proof)
 }
 
@@ -206,18 +287,48 @@ pub(in crate::audit) fn resume_backup<'a>(
     path: &Path,
 ) -> anyhow::Result<VerifiedEgressSourceBackup<'a>> {
     let prefix = maintenance_prefix(store, tx, token, false)?;
-    let path = backup_path(token, path)?;
+    resume_backup_for(store, tx, token, path, SourceBackupStepV1::Egress15, prefix)
+}
+
+/// Re-check an existing backup of `step` against the prefix the caller
+/// derived from durable replay. It never creates or repairs a backup.
+pub(in crate::audit) fn resume_backup_for<'a>(
+    store: &Store,
+    tx: &Transaction<'_>,
+    token: &'a HumanMaintenanceSourceToken,
+    path: &Path,
+    step: SourceBackupStepV1,
+    prefix: review_authority::AuthorityReceiptV1,
+) -> anyhow::Result<VerifiedEgressSourceBackup<'a>> {
+    physical_for(store, tx, token, step)?;
+    let path = backup_path(token, path, step)?;
     let (backing, _guard) = StoreStorage::open_existing(&path)?;
     let proof = VerifiedEgressSourceBackup {
         token,
+        step,
         source_binding: store.backing.identity_key(),
         source_head: (prefix.seq, prefix.hash),
         event_count: u64::try_from(prefix.seq)?,
         backing,
     };
     proof.verify(store)?;
-    physical(store, tx, token)?;
+    physical_for(store, tx, token, step)?;
     Ok(proof)
+}
+
+/// Inputs of an in-place install or confirmation: the held in-place writer,
+/// a proof of that step from the same guard, re-verified through SQLite.
+pub(in crate::audit) fn verify_in_place_backup(
+    store: &Store,
+    tx: &Transaction<'_>,
+    token: &HumanMaintenanceSourceToken,
+    backup: &VerifiedEgressSourceBackup<'_>,
+) -> anyhow::Result<()> {
+    physical_for(store, tx, token, SourceBackupStepV1::InPlace)?;
+    ensure(
+        backup.step == SourceBackupStepV1::InPlace && token.same_guard_and_source(backup.token),
+    )?;
+    backup.verify(store)
 }
 
 fn validate_install_inputs(
@@ -228,7 +339,9 @@ fn validate_install_inputs(
     limits: &EgressStoreLimitsV1,
 ) -> anyhow::Result<()> {
     physical(store, tx, token)?;
-    ensure(token.same_guard_and_source(backup.token))?;
+    ensure(
+        backup.step == SourceBackupStepV1::Egress15 && token.same_guard_and_source(backup.token),
+    )?;
     backup.verify(store)?;
     limits.validate()
 }

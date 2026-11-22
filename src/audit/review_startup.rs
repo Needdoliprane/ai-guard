@@ -96,7 +96,24 @@ impl OpeningAuthority<'_> {
             Self::Maintenance(token) => {
                 let d = token.descriptor();
                 require(namespace == d.durable_namespace_id)?;
-                if matches!(format, 14 | 15) {
+                if let Some(expected) = token.in_place_anchor()? {
+                    // In-place maintenance of an adopted source: the plan
+                    // keeps every source, format and the active closure, so
+                    // its own migration id is not the anchor's. Bind it to
+                    // the unchanged format and the retained active anchor.
+                    // Egress and 13→14 methods keep refusing this token.
+                    let snapshot = authority::replay(db)?;
+                    require(
+                        u32::try_from(format).ok() == Some(d.required_format)
+                            && snapshot.anchor.installation_id == d.installation_id
+                            && snapshot.anchor.source_id == d.source_id
+                            && snapshot.anchor.kind == d.kind
+                            && snapshot.anchor.tenant_id == tenant
+                            && snapshot.anchor.durable_namespace_id == d.durable_namespace_id
+                            && snapshot.anchor_receipt.seq == expected.seq
+                            && snapshot.anchor_receipt.hash == expected.hash,
+                    )?;
+                } else if matches!(format, 14 | 15) {
                     let snapshot = authority::replay(db)?;
                     require(
                         (d.required_format == 15
@@ -222,6 +239,16 @@ pub(crate) struct ReviewStoreMaintenanceWriter<'a, 'db> {
 }
 
 impl ReviewStoreMaintenance {
+    pub(crate) fn with_capacity_policy(
+        self,
+        capacity: AuditCapacityPolicyV1,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            store: self.store.with_capacity_policy(capacity)?,
+            token: self.token,
+        })
+    }
+
     pub(crate) fn with_review_maintenance_writer<T>(
         &self,
         token: &HumanMaintenanceSourceToken,
@@ -261,6 +288,18 @@ impl ReviewStoreMaintenance {
 }
 
 impl<'a, 'db> ReviewStoreMaintenanceWriter<'a, 'db> {
+    pub(crate) fn egress_format15_installed(
+        &self,
+        token: &HumanMaintenanceSourceToken,
+    ) -> anyhow::Result<bool> {
+        self.same_token(token)?;
+        require(token.descriptor().required_format == 15)?;
+        let format: i64 = self
+            .transaction()?
+            .pragma_query_value(None, "user_version", |row| row.get(0))?;
+        Ok(format == 15)
+    }
+
     pub(crate) fn egress_maintenance_prefix(
         &self,
         token: &HumanMaintenanceSourceToken,
@@ -304,6 +343,86 @@ impl<'a, 'db> ReviewStoreMaintenanceWriter<'a, 'db> {
         }
         result
     }
+    /// In-place identity markers: prefix and the marker list of `token`.
+    pub(crate) fn identity_markers_maintenance_prefix(
+        &self,
+        token: &HumanMaintenanceSourceToken,
+        before_install: bool,
+    ) -> anyhow::Result<(
+        AuthorityReceiptV1,
+        Vec<identity_markers::InPlaceIdentityMarkerV1>,
+    )> {
+        self.same_token(token)?;
+        identity_markers::maintenance_prefix(self.store, self.transaction()?, token, before_install)
+    }
+
+    /// Whether this in-place maintenance already committed its markers.
+    pub(crate) fn identity_markers_committed(
+        &self,
+        token: &HumanMaintenanceSourceToken,
+    ) -> anyhow::Result<bool> {
+        self.same_token(token)?;
+        identity_markers::is_committed(self.store, self.transaction()?, token)
+    }
+
+    /// Refuses before any backup when no identity marker is pending.
+    pub(crate) fn prepare_identity_markers_backup<'t>(
+        &self,
+        token: &'t HumanMaintenanceSourceToken,
+        path: &Path,
+    ) -> anyhow::Result<egress::VerifiedSourceBackup<'t>> {
+        self.same_token(token)?;
+        let tx = self.transaction()?;
+        identity_markers::maintenance_prefix(self.store, tx, token, true)?;
+        egress::prepare_backup_for(
+            self.store,
+            tx,
+            token,
+            path,
+            egress::SourceBackupStepV1::InPlace,
+        )
+    }
+
+    pub(crate) fn resume_identity_markers_backup<'t>(
+        &self,
+        token: &'t HumanMaintenanceSourceToken,
+        path: &Path,
+    ) -> anyhow::Result<egress::VerifiedSourceBackup<'t>> {
+        self.same_token(token)?;
+        let tx = self.transaction()?;
+        let (prefix, _) = identity_markers::maintenance_prefix(self.store, tx, token, false)?;
+        egress::resume_backup_for(
+            self.store,
+            tx,
+            token,
+            path,
+            egress::SourceBackupStepV1::InPlace,
+            prefix,
+        )
+    }
+
+    /// Pending until explicit commit and source reopen/replay. Every listed
+    /// marker is appended in this one transaction, after the verified backup.
+    pub(crate) fn install_identity_markers(
+        &mut self,
+        token: &HumanMaintenanceSourceToken,
+        backup: &egress::VerifiedSourceBackup<'_>,
+        markers: &[identity_markers::InPlaceIdentityMarkerV1],
+    ) -> anyhow::Result<Vec<identity_markers::IdentityMarkerReceiptV1>> {
+        self.same_token(token)?;
+        let result = identity_markers::install_in_place(
+            self.store,
+            self.transaction()?,
+            token,
+            backup,
+            markers,
+        );
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
+    }
+
     fn transaction(&self) -> anyhow::Result<&Transaction<'db>> {
         if self.failed {
             return Err(ReviewAuthorityFailure::Required.into());
@@ -730,6 +849,45 @@ impl Store {
         })
     }
 
+    /// Observe the proven backup and the replayed committed identity markers
+    /// while a new maintenance writer is held. Appends nothing.
+    pub(crate) fn confirm_identity_markers_with<T>(
+        token: &HumanMaintenanceSourceToken,
+        redactor: Redactor,
+        max_events: u64,
+        backup_path: &Path,
+        markers: &[identity_markers::InPlaceIdentityMarkerV1],
+        observe: impl FnOnce(
+            &egress::VerifiedSourceBackup<'_>,
+            Vec<identity_markers::IdentityMarkerReceiptV1>,
+        ) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        token.check()?;
+        let descriptor = token.descriptor();
+        let tenant = descriptor
+            .tenant_id
+            .as_deref()
+            .ok_or(ReviewAuthorityFailure::Required)?;
+        let reopened = Self::open_review_maintenance_for_tenant(
+            &descriptor.storage_binding.path(),
+            tenant,
+            redactor,
+            max_events,
+            token,
+        )?;
+        reopened.with_review_maintenance_writer(token, |writer| {
+            let backup = writer.resume_identity_markers_backup(token, backup_path)?;
+            let receipts = identity_markers::confirm_in_place(
+                writer.store,
+                writer.transaction()?,
+                token,
+                &backup,
+                markers,
+            )?;
+            observe(&backup, receipts)
+        })
+    }
+
     pub(crate) fn open_review_maintenance_for_tenant(
         path: &Path,
         tenant_id: &str,
@@ -772,15 +930,27 @@ impl Store {
         })
     }
 
-    /// Observe one unchanged Store14 in the maintenance union. The returned
+    #[cfg(test)]
+    pub(crate) fn observe_unchanged_review_format14(
+        token: &HumanMaintenanceSourceToken,
+    ) -> anyhow::Result<AuthorityReceiptV1> {
+        if token.descriptor().required_format != 14 {
+            return Err(ReviewAuthorityFailure::Required.into());
+        }
+        Self::observe_unchanged_review_store(token)
+    }
+
+    /// Observe one unchanged Store14 or Store15 in the maintenance union. The returned
     /// head comes from the same snapshot as the verified prior-manifest anchor.
     /// SQLite opens read-only. The storage lock and WAL sidecars still apply.
-    pub(crate) fn observe_unchanged_review_format14(
+    pub(crate) fn observe_unchanged_review_store(
         token: &HumanMaintenanceSourceToken,
     ) -> anyhow::Result<AuthorityReceiptV1> {
         token.check()?;
         let descriptor = token.descriptor();
-        if descriptor.kind != HumanSourceKindV1::TenantStore || descriptor.required_format != 14 {
+        if descriptor.kind != HumanSourceKindV1::TenantStore
+            || !matches!(descriptor.required_format, 14 | 15)
+        {
             return Err(ReviewAuthorityFailure::Required.into());
         }
         let tenant = descriptor
@@ -788,7 +958,7 @@ impl Store {
             .as_deref()
             .ok_or(ReviewAuthorityFailure::Required)?;
         let expected = token
-            .prior_active_anchor(14)?
+            .prior_active_anchor(descriptor.required_format)?
             .ok_or(ReviewAuthorityFailure::Required)?;
         let (backing, _initialization) =
             StoreStorage::open_existing(&descriptor.storage_binding.path())?;
@@ -801,7 +971,10 @@ impl Store {
         db.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")?;
         let tx = Transaction::new_unchecked(&db, rusqlite::TransactionBehavior::Deferred)?;
         observer.physical(&backing, &tx, tenant)?;
-        require(tx.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))? == 14)?;
+        require(
+            tx.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))?
+                == descriptor.required_format,
+        )?;
         verify_store_contents(&tx, tenant)?;
         let snapshot = authority::replay(&tx)?;
         require(

@@ -29,6 +29,18 @@ use std::{
 };
 use uuid::Uuid;
 
+mod identity_markers;
+mod store15;
+pub use identity_markers::{
+    OwnedIdentityMarkerReceiptV1, OwnedIdentityMarkersRefusalV1, OwnedIdentityMarkersReportV1,
+    OwnedIdentityMarkersRequest, install_owned_identity_markers,
+};
+#[cfg(test)]
+pub(crate) use store15::STOP_AFTER_STORE15_CONFIRMATION;
+pub use store15::{
+    Store15UpgradeRefusal, Store15UpgradeRequest, Store15UpgradeResult, upgrade_store15,
+};
+
 /// Non-authorizing source expectation, identical to the maintenance schema.
 /// Conversion into the private maintenance type is checked by its real guard.
 #[derive(Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -299,6 +311,7 @@ pub fn prepare_maintenance_plan(
         target: view(target),
         prior_active_manifest: None,
         supported_storage_profile: HumanStorageProfileV1::LocalPosixFlockV1,
+        selected_source_id: None,
     };
     let bytes = serde_json::to_vec(&plan)?;
     ensure!(bytes.len() <= 512 * 1024, "human_sources_plan_bound");

@@ -1,4 +1,11 @@
 use super::*;
+use clap::Parser;
+
+#[derive(Parser)]
+struct Cli {
+    #[command(flatten)]
+    sources: HumanSourcesArgs,
+}
 
 #[test]
 fn activation_is_closed_and_does_not_accept_unpublished_mode() {
@@ -54,6 +61,264 @@ fn cli_refuses_missing_stop_attestation_before_preparation() {
         .build()
         .unwrap();
     assert!(runtime.block_on(run(args)).is_err());
+}
+
+#[test]
+fn identity_marker_cli_requires_one_complete_source_route() {
+    let activation = ["--human-sources-activation", "/private/activation.json"];
+    let explicit = [
+        "--human-sources-manifest",
+        "/private/closure.json",
+        "--human-credentials-envelope",
+        "/private/envelope.json",
+        "--tenants-file",
+        "/private/tenants.json",
+        "--human-control-config-revision",
+        "7",
+    ];
+    for command in ["install", "resume"] {
+        let parse = |options: &[&str]| {
+            Cli::try_parse_from(
+                [
+                    "agentsandbox",
+                    "human-rights",
+                    command,
+                    "--tenant-id",
+                    "tenant-a",
+                    "--maintenance-dir",
+                    "/private/maintenance",
+                    "--confirm-control-stopped",
+                ]
+                .into_iter()
+                .chain(options.iter().copied()),
+            )
+        };
+        assert!(parse(&activation).is_ok());
+        assert!(parse(&explicit).is_ok());
+        assert!(parse(&[]).is_err());
+        assert!(parse(&explicit[..6]).is_err());
+        assert!(parse(&[activation.as_slice(), explicit.as_slice()].concat()).is_err());
+        assert!(
+            parse(
+                &[
+                    explicit.as_slice(),
+                    &["--oidc-config", "/private/oidc.json"]
+                ]
+                .concat()
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn identity_marker_inputs_validate_explicit_store15_without_opening_sqlite() {
+    use crate::gateway_config::{
+        human_sources::{public_control_digest_v1, resolved_control},
+        load_owned_tenants,
+    };
+    use activation::{ExplicitOwnedSourcesArgs, load_explicit_identity_marker_inputs};
+    use agentsandbox::human_authority::{
+        HumanAuthorityMarkerReceiptV1, HumanSourceDescriptorV1, HumanStorageProfileV1,
+        startup::observe_human_storage_binding,
+    };
+    use std::{
+        fs,
+        io::Write,
+        os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    };
+
+    let temporary = tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let write = |name: &str, bytes: &[u8]| {
+        let path = root.join(name);
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap()
+            .write_all(bytes)
+            .unwrap();
+        path
+    };
+
+    let sentinel = b"file binding fixture";
+    let source = write("events.sqlite", sentinel);
+    let runner = "synthetic-runner-credential-long-enough";
+    let viewer = "synthetic-viewer-credential-long-enough";
+    let [runner_directory, viewer_directory] = ["runner", "viewer"].map(|role| {
+        let directory = root.join(role);
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        directory
+    });
+    let runner_file = write("runner/role.token", runner.as_bytes());
+    let viewer_file = write("viewer/role.token", viewer.as_bytes());
+    let registry = write(
+        "tenants.json",
+        &serde_json::to_vec(&serde_json::json!({
+            "version": 1,
+            "tenants": [{
+                "tenant_id": "tenant-a",
+                "data": source,
+                "runner_token_file": runner_file,
+                "viewer_token_file": viewer_file,
+            }],
+        }))
+        .unwrap(),
+    );
+    let tenants = load_owned_tenants(&registry).unwrap();
+    let max_events = 100_000;
+    let revision = 7;
+    let public_digest =
+        public_control_digest_v1(&resolved_control(revision, max_events, &tenants, None).unwrap())
+            .unwrap();
+    let installation_id = Uuid::new_v4();
+    let closure_id = Uuid::new_v4();
+    let credential_inputs = [
+        TechnicalCredentialInput {
+            tenant_id: "tenant-a",
+            role: TechnicalCredentialRoleV1::Runner,
+            credential_id: Uuid::new_v4(),
+            generation: 1,
+            token: runner,
+        },
+        TechnicalCredentialInput {
+            tenant_id: "tenant-a",
+            role: TechnicalCredentialRoleV1::Viewer,
+            credential_id: Uuid::new_v4(),
+            generation: 1,
+            token: viewer,
+        },
+    ];
+    let envelope_for = |closure_revision| {
+        let expected = EnvelopeExpectationsV1::from_configured_inputs(
+            installation_id,
+            closure_id,
+            closure_revision,
+            public_digest.clone(),
+            &["tenant-a".to_owned()],
+            &credential_inputs,
+        )
+        .unwrap();
+        prepare_envelope_configuration(&expected, &credential_inputs).unwrap()
+    };
+    let envelope = write("envelope.json", &envelope_for(2));
+    let mut closure = HumanAuthorityClosureV1 {
+        version: 1,
+        installation_id,
+        closure_id,
+        closure_revision: 2,
+        closure_digest: String::new(),
+        sources: vec![HumanSourceDescriptorV1 {
+            source_id: Uuid::new_v4(),
+            kind: HumanSourceKindV1::TenantStore,
+            installation_id,
+            durable_namespace_id: Uuid::new_v4(),
+            tenant_id: Some("tenant-a".to_owned()),
+            storage_binding: observe_human_storage_binding(&source).unwrap(),
+            required_format: 15,
+            authority_marker_receipt: HumanAuthorityMarkerReceiptV1 {
+                seq: 1,
+                hash: "ab".repeat(32),
+            },
+        }],
+        configuration: HumanAuthorityConfigurationV1 {
+            control_config_revision: revision,
+            public_config_digest: public_digest.clone(),
+            oidc: None,
+            files: [
+                (
+                    HumanConfigurationFileKindV1::ControlConfiguration,
+                    &registry,
+                ),
+                (
+                    HumanConfigurationFileKindV1::TechnicalCredentials,
+                    &envelope,
+                ),
+            ]
+            .into_iter()
+            .map(|(kind, path)| HumanConfigurationFileV1 {
+                kind,
+                storage_binding: observe_human_storage_binding(path).unwrap(),
+            })
+            .collect(),
+        },
+        supported_storage_profile: HumanStorageProfileV1::LocalPosixFlockV1,
+    };
+    closure.closure_digest = closure.compute_digest().unwrap();
+    let manifest_bytes = serde_json::to_vec(&closure).unwrap();
+    let args = ExplicitOwnedSourcesArgs {
+        human_sources_manifest: Some(write("closure.json", &manifest_bytes)),
+        human_credentials_envelope: Some(envelope.clone()),
+        tenants_file: Some(registry),
+        human_control_config_revision: Some(revision),
+        oidc_config: None,
+        human_oidc_mapping_revision: None,
+        max_events: Some(max_events),
+    };
+    let loaded = load_explicit_identity_marker_inputs(&args).unwrap();
+    assert_eq!(loaded.manifest.bytes(), manifest_bytes.as_slice());
+    assert_eq!(loaded.max_events, max_events);
+    assert_eq!(
+        loaded.excluded_directories,
+        vec![
+            root.clone(),
+            runner_directory.clone(),
+            viewer_directory.clone()
+        ]
+    );
+    drop(loaded);
+
+    fs::write(&envelope, envelope_for(1)).unwrap();
+    let maintenance_path = root.join("unused-maintenance");
+    let command = Cli::try_parse_from([
+        "agentsandbox",
+        "human-rights",
+        "install",
+        "--human-sources-manifest",
+        args.human_sources_manifest
+            .as_deref()
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "--human-credentials-envelope",
+        envelope.to_str().unwrap(),
+        "--tenants-file",
+        args.tenants_file.as_deref().unwrap().to_str().unwrap(),
+        "--human-control-config-revision",
+        "7",
+        "--tenant-id",
+        "tenant-a",
+        "--maintenance-dir",
+        maintenance_path.to_str().unwrap(),
+        "--confirm-control-stopped",
+    ])
+    .unwrap();
+    let HumanSourcesCommand::HumanRights(maintenance) = command.sources.command else {
+        panic!("expected the human-rights command");
+    };
+    let refusal = human_rights::run(maintenance).unwrap_err().to_string();
+    assert_eq!(
+        refusal,
+        "human_rights_step_refused; step=install; state=human_rights_closure_refused; action=preserve_maintenance_directory_and_sources"
+    );
+    fs::write(&envelope, envelope_for(2)).unwrap();
+    fs::write(
+        &runner_file,
+        b"synthetic-renewed-runner-credential-long-enough",
+    )
+    .unwrap();
+    assert!(load_explicit_identity_marker_inputs(&args).is_err());
+
+    assert_eq!(fs::read(source).unwrap().as_slice(), sentinel);
+    assert_eq!(fs::read_dir(root).unwrap().count(), 6);
+    assert_eq!(fs::read_dir(runner_directory).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(viewer_directory).unwrap().count(), 1);
 }
 
 fn real_legacy_fixture() -> (tempfile::TempDir, PrepareArgs, PathBuf) {

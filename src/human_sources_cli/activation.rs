@@ -1,9 +1,87 @@
 use super::*;
+use crate::gateway_config::{
+    ConfiguredTenant,
+    human_sources::{ResolvedOwnedSources, resolve_owned_sources},
+    load_owned_tenants,
+};
 use agentsandbox::human_authority::{
     HumanSourcesConfigurationV1,
     startup::{HumanOwnedSourceOptions, HumanOwnedStartupRequest},
 };
 use preparation::LoadedPreparation;
+
+pub(super) const DEFAULT_MAX_EVENTS: u64 = 100_000;
+
+/// Explicit references of an already published owned-source closure.
+#[derive(Args)]
+pub(super) struct ExplicitOwnedSourcesArgs {
+    /// Existing private closure manifest.
+    #[arg(
+        long,
+        requires_all = [
+            "human_credentials_envelope",
+            "tenants_file",
+            "human_control_config_revision",
+        ]
+    )]
+    pub(super) human_sources_manifest: Option<PathBuf>,
+    /// Existing private technical credential envelope of that manifest.
+    #[arg(long, requires = "human_sources_manifest")]
+    pub(super) human_credentials_envelope: Option<PathBuf>,
+    /// Owned tenant registry of that manifest.
+    #[arg(long, requires = "human_sources_manifest")]
+    pub(super) tenants_file: Option<PathBuf>,
+    /// Explicit positive revision of the retained public control configuration.
+    #[arg(long, requires = "human_sources_manifest")]
+    pub(super) human_control_config_revision: Option<u64>,
+    /// Private OIDC configuration of that manifest, when OIDC is selected.
+    #[arg(long, requires_all = ["human_sources_manifest", "human_oidc_mapping_revision"])]
+    pub(super) oidc_config: Option<PathBuf>,
+    /// Explicit positive OIDC mapping closure revision.
+    #[arg(long, requires = "oidc_config")]
+    pub(super) human_oidc_mapping_revision: Option<u64>,
+    /// Audit event bound of the explicit route (default 100000).
+    #[arg(long, requires = "human_sources_manifest")]
+    pub(super) max_events: Option<u64>,
+}
+
+/// Configured technical tokens used by the redaction dictionary and bearer checks.
+pub(super) fn technical_tokens(tenants: &[ConfiguredTenant]) -> Vec<String> {
+    tenants
+        .iter()
+        .flat_map(|tenant| [tenant.runner_token.clone(), tenant.viewer_token.clone()])
+        .collect()
+}
+
+impl ExplicitOwnedSourcesArgs {
+    /// Resolve and check the explicit files without acquiring a startup owner.
+    pub(super) fn resolve_for_maintenance(&self) -> Result<(ResolvedOwnedSources, Redactor, u64)> {
+        let (Some(manifest), Some(envelope), Some(tenants_file), Some(revision)) = (
+            self.human_sources_manifest.as_deref(),
+            self.human_credentials_envelope.as_deref(),
+            self.tenants_file.as_deref(),
+            self.human_control_config_revision,
+        ) else {
+            bail!("owned_sources_options_incomplete");
+        };
+        let tenants = load_owned_tenants(tenants_file)?;
+        let redactor = Redactor::new(technical_tokens(&tenants));
+        let max_events = self.max_events.unwrap_or(DEFAULT_MAX_EVENTS);
+        let resolved = resolve_owned_sources(
+            manifest,
+            envelope,
+            tenants_file,
+            self.oidc_config.as_deref(),
+            &tenants,
+            max_events,
+            revision,
+            self.human_oidc_mapping_revision,
+            redactor.clone(),
+        )?;
+        resolved.validate_for_maintenance(&tenants)?;
+        Ok((resolved, redactor, max_events))
+    }
+}
 
 #[cfg(test)]
 type FinalAckResyncHook = Box<dyn FnOnce()>;
@@ -324,5 +402,93 @@ pub(crate) fn load_human_sources_activation(path: &Path) -> Result<LoadedHumanSo
         anyhow::anyhow!(
             "human_sources_activation_refused; preserve_all_files; check_or_resume_same_operation"
         )
+    })
+}
+
+/// Inputs of the in-place identity-marker maintenance. Files and metadata;
+/// opening these inputs never acquires an owner or opens SQLite.
+pub(super) struct LoadedIdentityMarkerInputs {
+    pub manifest: PrivateFile,
+    pub configuration: HumanAuthorityConfigurationV1,
+    pub files: Vec<(HumanConfigurationFileKindV1, PrivateFile)>,
+    pub excluded_directories: Vec<PathBuf>,
+    pub redactor: Redactor,
+    pub max_events: u64,
+}
+
+pub(super) fn load_identity_marker_inputs(
+    path: &Path,
+    tenant_id: &str,
+) -> Result<LoadedIdentityMarkerInputs> {
+    validate_absolute_path(path)?;
+    ensure!(
+        path.file_name().and_then(|n| n.to_str()) == Some("activation.json"),
+        "human_sources_activation_leaf_invalid"
+    );
+    let directory = path
+        .parent()
+        .context("human_sources_activation_parent_missing")?;
+    let mut loaded = preparation::load_preparation(directory, false)
+        .map_err(|_| anyhow::anyhow!("human_sources_preparation_invalid"))?;
+    let (_, _, manifest) =
+        validate_activation(&mut loaded)?.context("human_sources_activation_incomplete")?;
+    validate_manifest(&mut loaded, &manifest)?;
+    let (configuration, files) = loaded
+        .inputs
+        .configuration(&loaded.recovery, &loaded.envelope)?;
+    let source = loaded
+        .recovery
+        .target_sources
+        .iter()
+        .find(|source| {
+            source.kind == HumanSourceKindV1::TenantStore
+                && source.tenant_id.as_deref() == Some(tenant_id)
+        })
+        .context("human_rights_source_unknown")?;
+    let OperatorSourceOptions::TenantStore {
+        redactor,
+        max_events,
+        ..
+    } = loaded
+        .inputs
+        .options_for(source, loaded.recovery.max_events)?
+    else {
+        bail!("human_rights_source_unknown");
+    };
+    loaded.inputs.budget.revalidate()?;
+    Ok(LoadedIdentityMarkerInputs {
+        manifest,
+        configuration,
+        files,
+        excluded_directories: vec![loaded.directory.path().to_owned()],
+        redactor,
+        max_events,
+    })
+}
+
+pub(super) fn load_explicit_identity_marker_inputs(
+    args: &ExplicitOwnedSourcesArgs,
+) -> Result<LoadedIdentityMarkerInputs> {
+    let (resolved, redactor, max_events) = args.resolve_for_maintenance()?;
+    let mut excluded_directories = std::iter::once(&resolved.manifest)
+        .chain(resolved.files.iter().map(|(_, file)| file))
+        .chain(&resolved.token_files)
+        .map(|file| {
+            file.revalidate()?;
+            file.path()
+                .parent()
+                .map(Path::to_owned)
+                .context("owned source reference parent missing")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    excluded_directories.sort();
+    excluded_directories.dedup();
+    Ok(LoadedIdentityMarkerInputs {
+        manifest: resolved.manifest,
+        configuration: resolved.configuration,
+        files: resolved.files,
+        excluded_directories,
+        redactor,
+        max_events,
     })
 }

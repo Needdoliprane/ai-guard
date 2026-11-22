@@ -153,10 +153,18 @@ impl Directory {
 
     /// Open or create a single private child using the retained directory FD.
     pub fn child(&self, name: impl AsRef<OsStr>) -> Result<Self> {
+        self.open_child(name.as_ref(), true)
+    }
+
+    /// Open a single existing private child using the retained directory FD.
+    pub(crate) fn open_existing_child(&self, name: impl AsRef<OsStr>) -> Result<Self> {
+        self.open_child(name.as_ref(), false)
+    }
+
+    fn open_child(&self, name: &OsStr, create: bool) -> Result<Self> {
         self.revalidate()?;
-        let name = name.as_ref();
         let encoded = child_name(name)?;
-        let file = open_child_directory(&self.0.file, &encoded, true)?;
+        let file = open_child_directory(&self.0.file, &encoded, create)?;
         let facts = check_directory(&file, true)?;
         let mut chain = self.0.chain.clone();
         chain.push(Identity::of(&facts));

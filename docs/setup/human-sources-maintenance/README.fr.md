@@ -128,6 +128,150 @@ peut annoncer des contextes complets. Les lectures identity/resources et leurs
 reçus durables ne qualifient ni les autres handlers, ni brokers distants, cloud,
 reprise après coupure physique ou préparation à la production.
 
+## Préparer un tenant pour le registre des politiques egress
+
+La commande de maintenance SQLite fait passer un Store14 d'une installation
+owned adoptée au format 15. Arrêter le gateway et tous les consommateurs.
+Conserver l'activation précédente et choisir un répertoire de sortie absolu,
+neuf et extérieur aux répertoires sources et à ceux qui contiennent le
+manifeste et l'enveloppe technique précédents, dont le répertoire d'activation
+initiale. Le même contrôle s'applique aux alias de ces répertoires. Générer un
+UUID d'opération et le conserver avec la commande.
+
+```sh
+agentsandbox human-sources upgrade-egress \
+  --human-sources-activation /absolute/control/human-preparation/activation.json \
+  --tenant tenant-a --operation-id 22222222-2222-4222-8222-222222222222 \
+  --output-dir /absolute/control/egress-tenant-a --confirm-control-stopped
+```
+
+Remplacer le tenant, l'UUID et les chemins par ceux de l'installation. Si la
+configuration courante utilise des références explicites, fournir à la place
+de l'activation `--human-sources-manifest`, `--human-credentials-envelope`,
+`--tenants-file` et `--human-control-config-revision`. Reprendre aussi
+`--max-events` si personnalisé, ainsi que `--oidc-config` et
+`--human-oidc-mapping-revision` si sélectionnés.
+
+La commande sauvegarde une copie vérifiée dans `backup/source.sqlite` et
+confirme la genèse egress durable, qui refuse toute destination. Elle publie
+ensuite `closure/manifest.json`. Au résultat `store15_closure_published`,
+sélectionner ce manifeste et `technical-credentials.json` du même répertoire
+de sortie dans la configuration explicite `owned_sources` du gateway. Garder
+les autres entrées de configuration et leurs révisions. L'ancien manifeste
+est devenu périmé pour la source migrée. Pour préparer un autre tenant,
+utiliser la dernière clôture publiée. L'application au runtime relève de sa
+propre qualification.
+
+Après une interruption, conserver tous les fichiers. Relancer la même commande
+avec `--resume`, la même activation ou le même manifeste antérieur, le même UUID
+et le même répertoire, une fois l'arrêt des contrôles vérifié. Une clôture
+existante doit correspondre à la genèse confirmée. Si le répertoire de sortie
+final n'a jamais été publié, préserver son répertoire de préparation voisin et
+repartir dans une nouvelle destination après vérification hors ligne que la
+source est toujours au format 14. Une sauvegarde sans reçu enregistré demande
+une réconciliation avant reprise. Conserver la copie et le journal pour le
+diagnostic.
+
+- `store15_output_protected` refuse une sortie qui recoupe un répertoire
+  retenu. Choisir une destination extérieure.
+- `store15_output_not_fresh` exige une nouvelle destination disponible.
+  Préserver les fichiers existants et utiliser `--resume` pour reprendre la
+  même opération préparée.
+- `store15_control_active` signale une contention du propriétaire avant la
+  transition SQLite. Réessayer après l'arrêt des contrôles. Utiliser `--resume`
+  si la même préparation a déjà été publiée.
+- `store15_preparation_publication_unconfirmed` laisse des fichiers de
+  préparation à vérifier avant la reprise. `store15_transition_unconfirmed`
+  peut suivre un commit SQLite durable. Conserver tous les fichiers et
+  reprendre la même opération pour confirmer le résultat.
+
+L'état de disponibilité du gateway sera établi à son démarrage.
+
+## Marqueurs d'identité en place sur les bases adoptées
+
+Après l'adoption, les capacités protégées des droits humains exigent le marqueur
+d'identité `human_rights_v2` sur chaque Store14/15 de tenant. Tous les
+consommateurs arrêtés, lancez la maintenance hors ligne en place une fois par
+tenant, chacun avec un nouveau répertoire de maintenance privé situé hors du
+répertoire de préparation et des répertoires des sources. La commande vérifie
+l'identité réelle des répertoires, y compris les autres noms que le système de
+fichiers résout vers ces mêmes répertoires.
+
+```sh
+agentsandbox human-sources human-rights install \
+  --human-sources-activation /absolute/control/human-preparation/activation.json \
+  --tenant-id tenant-a \
+  --maintenance-dir /absolute/control/human-rights-tenant-a \
+  --confirm-control-stopped
+agentsandbox human-sources human-rights resume \
+  --human-sources-activation /absolute/control/human-preparation/activation.json \
+  --tenant-id tenant-a \
+  --maintenance-dir /absolute/control/human-rights-tenant-a \
+  --confirm-control-stopped
+```
+
+Pour une clôture explicite déjà publiée, fournissez ensemble son manifeste,
+son enveloppe de credentials techniques, son registre de tenants et sa révision
+de contrôle. Indiquez `--max-events` si la clôture utilise une valeur différente
+de `100000`. Pour OIDC, indiquez aussi `--oidc-config` et
+`--human-oidc-mapping-revision` avec les mêmes valeurs qu'à la publication.
+Utilisez des répertoires privés en mode `0700` pour la clôture, sa configuration
+et les fichiers des tokens runner et viewer. Placez le répertoire de maintenance
+hors de ces répertoires et de tous les répertoires sources.
+
+```sh
+agentsandbox human-sources human-rights install \
+  --human-sources-manifest /absolute/control/published/closure.json \
+  --human-credentials-envelope /absolute/control/published/technical-credentials.json \
+  --tenants-file /absolute/control/config/tenants.json \
+  --human-control-config-revision 7 \
+  --tenant-id tenant-a \
+  --maintenance-dir /absolute/control/human-rights-tenant-a \
+  --confirm-control-stopped
+```
+
+Pour `resume`, reprenez les mêmes arguments explicites et le même répertoire
+de maintenance. `human_rights_closure_refused` indique que la clôture explicite
+ou l'une de ses entrées n'a pas pu être vérifiée. Conservez les fichiers et
+vérifiez que le manifeste, l'enveloppe, les tokens configurés et les révisions
+correspondent à la même publication.
+
+`install` prend les verrous propriétaires de toute l'union, écrit une sauvegarde
+SQLite vérifiée, journalise son intention, sa sauvegarde et sa confirmation, et
+ajoute chaque marqueur en attente dans une seule transaction. Le plan de
+maintenance identifie la source sélectionnée. `resume` exige le même tenant et
+resynchronise le plan et ses répertoires avant d'ouvrir la base. Il peut terminer
+ou reconfirmer cette maintenance sans ajouter de second marqueur. Une version
+d'essai qui a créé le plan avant l'ajout de cette liaison laisse un plan refusé
+avec `human_rights_journal_conflict`. Conservez son plan, son journal et sa
+sauvegarde pour examen. L'activation et les formats des bases restent inchangés. Les
+codes de refus, le chemin de retour et les capacités admises par ces marqueurs
+sont décrits dans
+[l'accès local nominatif](../identity/README.fr.md#bases-possédées-déjà-adoptées-formats-14-et-15).
+
+Après une interruption, `resume` conserve les copies sans reçu de sauvegarde
+publié. Si le chemin de sauvegarde initial est occupé, la reprise écrit une
+nouvelle copie vérifiée et publie son reçu sous la même intention. Une fois ce
+reçu publié, chaque reprise utilise sa copie et rend le même `backup_path`.
+Une copie manquante ou divergente pour un reçu publié arrête la maintenance.
+
+`human_rights_backup_inventory_limit` indique que `backups/` contient plus de
+27 entrées avant la création d'une copie, ou plus de 32 lors de la vérification
+des enregistrements du journal. Le plafond de création réserve cinq entrées
+pour le fichier SQLite, ses fichiers auxiliaires et le verrou d'initialisation.
+Le décompte comprend chaque entrée directe de `backups/`, y compris les copies
+conservées et les fichiers auxiliaires SQLite.
+
+`human_rights_backup_directory_invalid` indique que le caractère privé de
+`backups/` ou d'une entrée de son inventaire n'a pas pu être vérifié. La ligne
+de refus indique l'état sans afficher les noms privés. Dans les deux cas,
+gardez le répertoire de maintenance et les sources intacts pour examen hors
+ligne. Vérifiez l'identité, le propriétaire et les permissions du répertoire
+d'origine, ainsi que le plafond ci-dessus. Reprenez avec le même tenant, la
+mêmes arguments de source et le même répertoire de maintenance lorsque ces
+contrôles peuvent réussir. Si le plafond empêche toujours la reprise, conservez
+le répertoire entier pour examen avec le mainteneur avant toute autre maintenance.
+
 ## Périmètre de validation
 
 Les [preuves datées du parcours opérateur et du startup owned](../../engineering/evidence/2026-11-13/human-sources-operator/README.fr.md)

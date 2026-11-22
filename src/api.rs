@@ -40,12 +40,14 @@ use std::{
 #[cfg(test)]
 mod audit_capacity_tests;
 mod auth;
+pub(crate) use auth::prepare_successor_technical_credentials_configuration;
 #[cfg(test)]
 #[path = "build_identity/http_tests.rs"]
 mod build_identity_http_tests;
 pub use auth::{
     EnvelopeExpectationsV1, TechnicalCredentialIdentityV1, TechnicalCredentialInput,
     TechnicalCredentialRoleV1, prepare_envelope_configuration,
+    validate_owned_technical_credentials_configuration,
     validate_technical_credentials_configuration,
 };
 mod brokers;

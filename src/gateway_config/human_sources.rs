@@ -2,6 +2,7 @@
 //! No DTO, digest, pathname or expected binding is a source authenticator.
 use super::*;
 use agentsandbox::{
+    api::validate_owned_technical_credentials_configuration,
     audit::{
         AuditCapacityPolicyV1, WorkloadAuditPolicyV1,
         authentication::{AuthenticationAuditPolicyV1, AuthenticationCapacityPlanV1},
@@ -9,8 +10,9 @@ use agentsandbox::{
     control_fs::{PrivateFile, absolute_path},
     human_authority::{
         HumanAuthorityClosureV1, HumanAuthorityConfigurationV1, HumanConfigurationFileKindV1,
-        HumanConfigurationFileV1, HumanOidcConfigurationV1, HumanSourceKindV1,
-        HumanSourcesConfigurationV1,
+        HumanConfigurationFileV1, HumanOidcConfigurationV1, HumanSourceDescriptorV1,
+        HumanSourceKindV1, HumanSourcesConfigurationV1,
+        migration::operator::parse_private_token_file,
         startup::{
             HumanOwnedSourceOptions, HumanOwnedStartupBundle, HumanOwnedStartupRequest,
             observe_human_storage_binding,
@@ -223,29 +225,92 @@ pub fn validate_human_mode(
 pub fn load_owned_tenants(path: &Path) -> Result<Vec<ConfiguredTenant>> {
     let result = (|| -> Result<_> {
         let file = PrivateFile::open(&absolute_path(path)?, 1_048_576)?;
-        let tenants = super::load(file.path())?;
-        for tenant in &tenants {
-            for (path, expected) in [
-                (&tenant.runner_token_file, &tenant.runner_token),
-                (&tenant.viewer_token_file, &tenant.viewer_token),
-            ] {
-                let credential = PrivateFile::open(&absolute_path(path)?, 4096)?;
-                anyhow::ensure!(
-                    std::str::from_utf8(credential.bytes())?.trim() == expected.as_str(),
-                    "technical credential file changed"
-                );
-                credential.revalidate()?;
-            }
-        }
-        file.revalidate()?;
+        let (tenants, _) = load_owned_tenants_from_registry(&file)?;
         Ok(tenants)
     })();
     result.map_err(|_:anyhow::Error|anyhow::anyhow!("Owned human tenant configuration invalid or unavailable; preserve existing sources and check private configuration files"))
 }
 
+fn load_owned_tenants_from_registry(
+    registry: &PrivateFile,
+) -> Result<(Vec<ConfiguredTenant>, Vec<PrivateFile>)> {
+    let mut token_files = Vec::new();
+    let tenants = super::load_from_retained_registry(registry, |path| {
+        let file = PrivateFile::open(&absolute_path(path)?, 1024)?;
+        let token = parse_private_token_file(file.bytes())?;
+        token_files.push(file);
+        Ok(token)
+    })?;
+    for file in &token_files {
+        file.revalidate()?;
+    }
+    registry.revalidate()?;
+    Ok((tenants, token_files))
+}
+
 pub struct PreparedOwnedSources {
     pub bundle: HumanOwnedStartupBundle,
     pub credentials: PrivateFile,
+}
+
+/// Retained private files and resolved metadata, without an owner or database.
+pub(crate) struct ResolvedOwnedSources {
+    pub(crate) manifest: PrivateFile,
+    pub(crate) configuration: HumanAuthorityConfigurationV1,
+    pub(crate) files: Vec<(HumanConfigurationFileKindV1, PrivateFile)>,
+    pub(crate) token_files: Vec<PrivateFile>,
+    sources: Vec<HumanSourceDescriptorV1>,
+    options: BTreeMap<uuid::Uuid, HumanOwnedSourceOptions>,
+    credentials: PrivateFile,
+}
+
+impl ResolvedOwnedSources {
+    pub(crate) fn into_startup_request(self) -> Result<(HumanOwnedStartupRequest, PrivateFile)> {
+        for file in &self.token_files {
+            file.revalidate()?;
+        }
+        let configuration =
+            HumanSourcesConfigurationV1::new(self.sources, self.configuration, self.files)?;
+        let request = HumanOwnedStartupRequest {
+            manifest: self.manifest,
+            configuration,
+            sources: self.options,
+        };
+        Ok((request, self.credentials))
+    }
+
+    /// Maintenance cannot rely on the later gateway credential registry.
+    /// Check the same private envelope and independently read token roles here.
+    pub(crate) fn validate_for_maintenance(&self, tenants: &[ConfiguredTenant]) -> Result<()> {
+        let closure = HumanAuthorityClosureV1::from_bytes(self.manifest.bytes())?;
+        HumanSourcesConfigurationV1::new(
+            self.sources.clone(),
+            self.configuration.clone(),
+            self.files.clone(),
+        )?;
+        let configured = tenants
+            .iter()
+            .map(|tenant| {
+                (
+                    tenant.tenant_id.as_str(),
+                    tenant.runner_token.as_str(),
+                    tenant.viewer_token.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        validate_owned_technical_credentials_configuration(
+            self.credentials.bytes(),
+            &closure,
+            &configured,
+        )?;
+        for file in &self.token_files {
+            file.revalidate()?;
+        }
+        for (_, file) in &self.files {
+            file.revalidate()?;
+        }
+        self.manifest.revalidate()
+    }
 }
 
 /// Pure shared resolution from the retained private OIDC configuration and its
@@ -301,6 +366,40 @@ pub fn load_owned_sources(
     redactor: Redactor,
 ) -> Result<PreparedOwnedSources> {
     let result = (|| -> Result<_> {
+        let (request, credentials) = resolve_owned_sources(
+            manifest_path,
+            envelope_path,
+            control_path,
+            oidc_path,
+            tenants,
+            max_events,
+            control_revision,
+            mapping_revision,
+            redactor,
+        )?
+        .into_startup_request()?;
+        let bundle = HumanOwnedStartupBundle::open(request)?;
+        Ok(PreparedOwnedSources {
+            bundle,
+            credentials,
+        })
+    })();
+    result.map_err(|_:anyhow::Error|anyhow::anyhow!("Owned human startup refused; preserve sources, manifests and credentials; verify exact configuration, explicit revisions, formats14/15/Auth5, private files, durable clocks and offline migration status"))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_owned_sources(
+    manifest_path: &Path,
+    envelope_path: &Path,
+    control_path: &Path,
+    oidc_path: Option<&Path>,
+    tenants: &[ConfiguredTenant],
+    max_events: u64,
+    control_revision: u64,
+    mapping_revision: Option<u64>,
+    redactor: Redactor,
+) -> Result<ResolvedOwnedSources> {
+    let result = (|| -> Result<_> {
         let manifest = PrivateFile::open(
             &absolute_path(manifest_path)?,
             agentsandbox::human_authority::MAX_HUMAN_MANIFEST_BYTES as u64,
@@ -308,7 +407,7 @@ pub fn load_owned_sources(
         let closure = HumanAuthorityClosureV1::from_bytes(manifest.bytes())?;
         let control = PrivateFile::open(&absolute_path(control_path)?, 1_048_576)?;
         let credentials = PrivateFile::open(&absolute_path(envelope_path)?, 1_048_576)?;
-        let reloaded = load_owned_tenants(control.path())?;
+        let (reloaded, token_files) = load_owned_tenants_from_registry(&control)?;
         anyhow::ensure!(
             tenants.len() == reloaded.len(),
             "tenant configuration changed"
@@ -490,15 +589,14 @@ pub fn load_owned_sources(
             file.revalidate()?;
         }
         manifest.revalidate()?;
-        let configuration = HumanSourcesConfigurationV1::new(sources, configuration, files)?;
-        let bundle = HumanOwnedStartupBundle::open(HumanOwnedStartupRequest {
+        Ok(ResolvedOwnedSources {
             manifest,
             configuration,
-            sources: options,
-        })?;
-        Ok(PreparedOwnedSources {
-            bundle,
+            files,
+            sources,
+            options,
             credentials,
+            token_files,
         })
     })();
     result.map_err(|_:anyhow::Error|anyhow::anyhow!("Owned human startup refused; preserve sources, manifests and credentials; verify exact configuration, explicit revisions, formats14/15/Auth5, private files, durable clocks and offline migration status"))
