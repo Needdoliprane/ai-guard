@@ -26,6 +26,7 @@ pub struct ConfiguredTenant {
     pub audit_capacity_policy: Option<agentsandbox::audit::AuditCapacityPolicyV1>,
     pub workload_audit_policy: Option<agentsandbox::audit::WorkloadAuditPolicyV1>,
     pub relay_retention_policy: Option<agentsandbox::relay::RelayRetentionPolicyV1>,
+    pub egress_policy: Option<agentsandbox::control::egress_decision::EgressTenantPolicyV1>,
     pub held_create_policy:
         Option<agentsandbox::control::kubernetes_admission::KubernetesHeldCreatePolicyV1>,
     pub session_reservation_policy: Option<KubernetesSessionReservationPolicyV2>,
@@ -345,6 +346,7 @@ fn load_registry_bytes(
             audit_capacity_policy: tenant.audit_capacity_policy,
             workload_audit_policy: tenant.workload_audit_policy,
             relay_retention_policy: tenant.relay_retention_policy,
+            egress_policy: tenant.egress_policy,
             held_create_policy,
             session_reservation_policy,
             session_recovery_policy,
@@ -404,6 +406,11 @@ pub fn validate_policies(tenants: &[ConfiguredTenant], max_events: u64) -> Resul
                 max_events,
                 tenant.audit_capacity_policy.as_ref().unwrap_or(&defaults),
             )?;
+        }
+        if let Some(policy) = &tenant.egress_policy {
+            policy
+                .snapshot()
+                .context("Politique egress du tenant invalide")?;
         }
         if let Some(policy) = &tenant.relay_retention_policy {
             policy

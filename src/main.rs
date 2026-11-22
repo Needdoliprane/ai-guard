@@ -192,6 +192,10 @@ struct GatewayArgs {
     /// Private relay retention budgets for the local tenant; never deletes retained content.
     #[arg(long, conflicts_with = "tenants_file")]
     relay_retention_file: Option<PathBuf>,
+    /// Private operator egress policy of the local tenant (exact name:port
+    /// destinations, grantable class, grant ceiling). Absent means deny all.
+    #[arg(long, conflicts_with = "tenants_file")]
+    egress_policy_file: Option<PathBuf>,
     /// Explicit private OIDC gateway configuration; absent means no SSO/IdP calls.
     #[arg(long)]
     oidc_config: Option<PathBuf>,
@@ -568,6 +572,11 @@ fn configured_local_tenant(args: &GatewayArgs) -> Result<gateway_config::Configu
             .relay_retention_file
             .as_deref()
             .map(Store::load_relay_retention_policy)
+            .transpose()?,
+        egress_policy: args
+            .egress_policy_file
+            .as_deref()
+            .map(Store::load_egress_policy)
             .transpose()?,
         held_create_policy: None,
         session_reservation_policy: None,
@@ -1011,6 +1020,19 @@ async fn run() -> Result<()> {
                 } else {
                     store
                 };
+                let store = if let Some(policy) = &tenant.egress_policy {
+                    store.with_egress_policy(policy)?
+                } else {
+                    store
+                };
+                let egress = store.egress_policy();
+                capacity_diagnostics.push(redactor.text(&format!(
+                    "Egress policy tenant={} source={:?} revision={} digest={}",
+                    store.tenant_id(),
+                    egress.source,
+                    egress.revision,
+                    egress.digest.as_str()
+                )));
                 capacity_diagnostics.push(redactor.text(&format!(
                     "Relay retention tenant={} source={} release_on_ack={} policy={} fingerprint={}",
                     store.tenant_id(),

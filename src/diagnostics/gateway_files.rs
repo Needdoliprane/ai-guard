@@ -110,6 +110,8 @@ pub struct TenantFiles {
     pub audit_capacity_policy: Option<AuditCapacityPolicyV1>,
     pub workload_audit_policy: Option<WorkloadAuditPolicyV1>,
     pub relay_retention_policy: Option<RelayRetentionPolicyV1>,
+    #[serde(default)]
+    pub egress_policy: Option<crate::control::egress_decision::EgressTenantPolicyV1>,
     pub held_create_policy: Option<KubernetesHeldCreatePolicyV1>,
     pub session_reservation_policy: Option<KubernetesSessionReservationPolicyV2>,
     pub session_recovery_policy: Option<KubernetesSessionRecoveryPolicyV2>,
