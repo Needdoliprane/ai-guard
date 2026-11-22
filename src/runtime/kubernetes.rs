@@ -56,6 +56,7 @@ pub use prerequisites::{
     KubernetesPermissionActionV1, KubernetesPermissionCoverageV1, KubernetesPermissionDecisionV1,
     KubernetesPermissionReviewStatusV1, KubernetesPrerequisitesV1,
 };
+pub use session_claim::KubernetesSessionStorageRequestV2;
 pub use session_instance::KubernetesSessionWorkspaceClaimV2;
 use transport::Transport;
 

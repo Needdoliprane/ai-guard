@@ -66,6 +66,7 @@ pub const TENANT_FIELDS: &[&str] = &[
     "session_reservation_policy",
     "session_recovery_policy",
     "session_control_recovery_policy",
+    "session_effect_policy",
 ];
 /// Field names of the loader's `OidcFile`.
 pub const OIDC_FILE_FIELDS: &[&str] = &[
@@ -114,6 +115,9 @@ pub struct TenantFiles {
     pub session_reservation_policy: Option<KubernetesSessionReservationPolicyV2>,
     pub session_recovery_policy: Option<KubernetesSessionRecoveryPolicyV2>,
     pub session_control_recovery_policy: Option<KubernetesSessionControlRecoveryPolicyV2>,
+    /// G11: activation of effectful Kubernetes sessions (R7, R5, R10).
+    pub session_effect_policy:
+        Option<crate::control::kubernetes_session::effects::KubernetesSessionEffectPolicyV2>,
 }
 
 /// Read only the selected registry file, with the normal gateway's file bound.
@@ -653,6 +657,13 @@ pub fn inspect_registry(path: &Path, max_events: u64) -> RegistryInspection {
             .is_some_and(|policy| policy.canonicalized().and_then(|c| c.validate()).is_err())
         {
             refuse_policy(PolicyKind::KubernetesSessionControlRecovery);
+        }
+        if tenant
+            .session_effect_policy
+            .as_ref()
+            .is_some_and(|policy| policy.validate().is_err())
+        {
+            refuse_policy(PolicyKind::KubernetesSessionEffect);
         }
         // `validate_policies`: the audit policies, for the gateway event
         // bound; the workload policy against the explicit capacity policy or

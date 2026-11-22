@@ -45,6 +45,7 @@ fn tenant(id: &str) -> ConfiguredTenant {
         session_reservation_policy: None,
         session_recovery_policy: None,
         session_control_recovery_policy: None,
+        session_effect_policy: None,
     }
 }
 

@@ -556,6 +556,7 @@ fn configured_local_tenant(args: &GatewayArgs) -> Result<gateway_config::Configu
         session_reservation_policy: None,
         session_recovery_policy: None,
         session_control_recovery_policy: None,
+        session_effect_policy: None,
     })
 }
 
@@ -572,6 +573,10 @@ struct GatewaySessionPolicies {
     control_recovery: Vec<(
         String,
         agentsandbox::control::kubernetes_session::KubernetesSessionControlRecoveryPolicyV2,
+    )>,
+    effect: Vec<(
+        String,
+        agentsandbox::control::kubernetes_session::effects::KubernetesSessionEffectPolicyV2,
     )>,
 }
 
@@ -684,6 +689,11 @@ impl GatewaySessionPolicies {
                     .control_recovery
                     .push((tenant.tenant_id.clone(), policy.clone()));
             }
+            if let Some(policy) = &tenant.session_effect_policy {
+                policies
+                    .effect
+                    .push((tenant.tenant_id.clone(), policy.clone()));
+            }
         }
         policies
     }
@@ -692,6 +702,7 @@ impl GatewaySessionPolicies {
         state
             .with_kubernetes_session_reservation_policies(self.reservation)?
             .with_kubernetes_session_recovery_policies(self.recovery)?
+            .with_kubernetes_session_effect_policies(self.effect)?
             .with_kubernetes_session_control_recovery_policies(self.control_recovery)
     }
 }

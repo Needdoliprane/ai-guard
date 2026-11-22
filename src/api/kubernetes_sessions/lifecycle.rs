@@ -94,6 +94,22 @@ pub(super) fn routes() -> Router<GatewayState> {
             "/brokers/kubernetes/session-reservations/{id}/abandonments",
             post(abandon),
         )
+        .route(
+            "/brokers/kubernetes/session-reservations/{id}/effects",
+            post(claim_effect).get(effect_state),
+        )
+        .route(
+            "/brokers/kubernetes/session-reservations/{id}/effect-results",
+            post(effect_result),
+        )
+        .route(
+            "/brokers/kubernetes/session-reservations/{id}/terminals",
+            post(effect_terminal),
+        )
+        .route(
+            "/brokers/kubernetes/session-reservations/{id}/settlements",
+            post(effect_settlement),
+        )
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .layer(middleware::from_fn(workload::request_guard))
 }
@@ -184,7 +200,7 @@ async fn protocol(SessionBroker(broker): SessionBroker, request: Request) -> Api
                     identity,
                     reservation_policy_configured: tenant.session_reservation_policy.is_some(),
                     recovery_policy_configured: tenant.session_recovery_policy.is_some(),
-                    effects_available: false,
+                    effects_available: tenant.session_effect_policy.is_some(),
                 },
                 &redactor,
             )
@@ -368,6 +384,137 @@ async fn abandon(
                 }
             };
             output(StatusCode::OK, &response, &redactor)
+        })
+        .await
+}
+
+/// Central claim of one exact effect (G11, R1). 201 with `EmitOnce` for a
+/// fresh claim, 200 with `ObserveOnly` for any replay. The tenant comes
+/// from the authenticated broker before the body; the effect policy only
+/// from the tenant configuration.
+async fn claim_effect(
+    SessionBroker(broker): SessionBroker,
+    path: Result<Path<String>, PathRejection>,
+    request: Request,
+) -> ApiResult<Response> {
+    use crate::control::kubernetes_session::effects::KubernetesSessionEffectRequestV2;
+    let id = path_id(path)?;
+    let effect: KubernetesSessionEffectRequestV2 = input(request).await?;
+    effect.validate().map_err(|_| invalid())?;
+    if effect.reservation_id != id {
+        return Err(invalid());
+    }
+    broker
+        .blocking(move |tenant, identity, redactor| {
+            screen(&effect, &redactor)?;
+            let store = tenant
+                .store
+                .with_additional_redaction(&redactor)
+                .map_err(|e| failure(&tenant.store, e))?;
+            let ack = store
+                .claim_kubernetes_session_effect(
+                    &identity,
+                    &effect,
+                    tenant.session_effect_policy.as_deref(),
+                )
+                .map_err(|e| failure(&store, e))?;
+            output(
+                if ack.replayed {
+                    StatusCode::OK
+                } else {
+                    StatusCode::CREATED
+                },
+                &ack,
+                &redactor,
+            )
+        })
+        .await
+}
+async fn effect_result(
+    SessionBroker(broker): SessionBroker,
+    path: Result<Path<String>, PathRejection>,
+    request: Request,
+) -> ApiResult<Response> {
+    use crate::control::kubernetes_session::effects::KubernetesSessionEffectResultV2;
+    let id = path_id(path)?;
+    let result: KubernetesSessionEffectResultV2 = input(request).await?;
+    result.validate().map_err(|_| invalid())?;
+    if result.reservation_id != id {
+        return Err(invalid());
+    }
+    broker
+        .blocking(move |tenant, identity, redactor| {
+            screen(&result, &redactor)?;
+            let state = tenant
+                .store
+                .record_kubernetes_session_effect_result(&identity, &result)
+                .map_err(|e| failure(&tenant.store, e))?;
+            output(StatusCode::OK, &state, &redactor)
+        })
+        .await
+}
+async fn effect_terminal(
+    SessionBroker(broker): SessionBroker,
+    path: Result<Path<String>, PathRejection>,
+    request: Request,
+) -> ApiResult<Response> {
+    use crate::control::kubernetes_session::effects::KubernetesSessionTerminalV2;
+    let id = path_id(path)?;
+    let terminal: KubernetesSessionTerminalV2 = input(request).await?;
+    terminal.validate().map_err(|_| invalid())?;
+    if terminal.reservation_id != id {
+        return Err(invalid());
+    }
+    broker
+        .blocking(move |tenant, identity, redactor| {
+            screen(&terminal, &redactor)?;
+            let state = tenant
+                .store
+                .record_kubernetes_session_terminal(&identity, &terminal)
+                .map_err(|e| failure(&tenant.store, e))?;
+            output(StatusCode::OK, &state, &redactor)
+        })
+        .await
+}
+async fn effect_settlement(
+    SessionBroker(broker): SessionBroker,
+    path: Result<Path<String>, PathRejection>,
+    request: Request,
+) -> ApiResult<Response> {
+    use crate::control::kubernetes_session::effects::KubernetesSessionSettlementV2;
+    let id = path_id(path)?;
+    let settlement: KubernetesSessionSettlementV2 = input(request).await?;
+    settlement.validate().map_err(|_| invalid())?;
+    if settlement.reservation_id != id {
+        return Err(invalid());
+    }
+    broker
+        .blocking(move |tenant, identity, redactor| {
+            screen(&settlement, &redactor)?;
+            let state = tenant
+                .store
+                .settle_kubernetes_session(&identity, &settlement)
+                .map_err(|e| failure(&tenant.store, e))?;
+            output(StatusCode::OK, &state, &redactor)
+        })
+        .await
+}
+async fn effect_state(
+    SessionBroker(broker): SessionBroker,
+    path: Result<Path<String>, PathRejection>,
+    request: Request,
+) -> ApiResult<Response> {
+    if request.uri().query().is_some() {
+        return Err(invalid());
+    }
+    let id = path_id(path)?;
+    broker
+        .blocking(move |tenant, identity, redactor| {
+            let state = tenant
+                .store
+                .kubernetes_session_effect_state(&identity, &id)
+                .map_err(|e| failure(&tenant.store, e))?;
+            output(StatusCode::OK, &state, &redactor)
         })
         .await
 }

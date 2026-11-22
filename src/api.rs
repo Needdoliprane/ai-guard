@@ -198,6 +198,8 @@ struct TenantState {
         Option<Arc<crate::control::kubernetes_session::KubernetesSessionRecoveryPolicyV2>>,
     session_control_recovery_policy:
         Option<Arc<crate::control::kubernetes_session::KubernetesSessionControlRecoveryPolicyV2>>,
+    session_effect_policy:
+        Option<Arc<crate::control::kubernetes_session::effects::KubernetesSessionEffectPolicyV2>>,
     io: Arc<store_io::Gate>,
     shared_io: Arc<store_io::Gate>,
     control_proof: Option<Arc<ControlProof>>,
@@ -225,6 +227,7 @@ impl TenantState {
             session_reservation_policy: None,
             session_recovery_policy: None,
             session_control_recovery_policy: None,
+            session_effect_policy: None,
             io: Arc::new(store_io::Gate::new(false)),
             shared_io,
             control_proof: None,
@@ -375,6 +378,44 @@ impl GatewayState {
                     anyhow::anyhow!("session reservation policy identity is not registered")
                 })?;
             tenant.session_reservation_policy = Some(Arc::new(policy));
+        }
+        Ok(self)
+    }
+
+    /// G11 effect activation per tenant. Refuses, across all tenants, two
+    /// tenants that share a Kubernetes authority or namespace (R10).
+    pub fn with_kubernetes_session_effect_policies(
+        mut self,
+        policies: Vec<(
+            String,
+            crate::control::kubernetes_session::effects::KubernetesSessionEffectPolicyV2,
+        )>,
+    ) -> anyhow::Result<Self> {
+        let mut configured = HashSet::new();
+        for (identity, policy) in &policies {
+            policy.validate()?;
+            anyhow::ensure!(
+                configured.insert(identity.clone()),
+                "duplicate session effect policy identity"
+            );
+        }
+        crate::runtime::kubernetes::session_admission::refuse_shared_authorities(
+            policies.iter().flat_map(|(identity, policy)| {
+                policy
+                    .authorities
+                    .iter()
+                    .map(move |authority| (identity.as_str(), authority))
+            }),
+        )?;
+        let tenants = Arc::make_mut(&mut self.tenants);
+        for (identity, policy) in policies {
+            let tenant = tenants
+                .iter_mut()
+                .find(|tenant| tenant.tenant_id == identity)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("session effect policy identity is not registered")
+                })?;
+            tenant.session_effect_policy = Some(Arc::new(policy));
         }
         Ok(self)
     }
