@@ -186,6 +186,26 @@ fn native_archive_needs_a_nonempty_third_party_notices_member() {
 }
 
 #[test]
+fn native_archive_refuses_bin_members_outside_the_verified_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = "x86_64-unknown-linux-gnu";
+    let root = format!("ai-guard-{TAG}-{target}");
+    let mut members = native(Some("notices\n"));
+    members.push(Member {
+        path: "bin/ai-guard-demo-pki",
+        content: "unlisted companion\n",
+        mode: 0o755,
+    });
+
+    let extra = archive(dir.path(), &root, &members);
+    let (ok, output) = check(&extra, &root, target);
+    assert!(
+        !ok && output.contains("Unexpected native bin member bin/ai-guard-demo-pki"),
+        "unexpected companion accepted: {output}"
+    );
+}
+
+#[test]
 fn metadata_archive_needs_manifest_sbom_and_sums() {
     let dir = tempfile::tempdir().unwrap();
     let root = format!("ai-guard-{TAG}-release-metadata");

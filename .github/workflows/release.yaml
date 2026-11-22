@@ -374,7 +374,8 @@ jobs:
                   }
                 }
                 BEGIN {
-                  if (target != "frontend" && target != "release-metadata") {
+                  native_archive = (target != "frontend" && target != "release-metadata")
+                  if (native_archive) {
                     n = split(native_bins, programs, " ")
                     for (i = 1; i <= n; i++) {
                       path = "bin/" programs[i]
@@ -407,6 +408,13 @@ jobs:
                     next
                   }
                   path = substr(path, length(root) + 2)
+                  if (native_archive &&
+                      ((path == "bin" && type != "d") ||
+                       (index(path, "bin/") == 1 && !(path in required_binaries)))) {
+                    print "Unexpected native bin member " path
+                    failed = 1
+                    next
+                  }
                   if (path == "BUILD-INFO" || path == "LICENSE" || (path in required_binaries) || path == "index.html" ||
                       path == "THIRD-PARTY-NOTICES" ||
                       (target == "release-metadata" && (path == "manifest/release-manifest.json" ||
