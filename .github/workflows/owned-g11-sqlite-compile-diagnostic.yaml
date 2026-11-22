@@ -25,6 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 4
           persist-credentials: false
       - name: Check the single SQLite profile
         id: check
@@ -33,13 +34,16 @@ jobs:
           set -euo pipefail
           umask 077
           scratch="$(mktemp -d "$RUNNER_TEMP/g11-sqlite.XXXXXX")"
-          receipt="$scratch/summary.txt"
+          receipt="$RUNNER_TEMP/owned-g11-sqlite-summary.txt"
           json="$scratch/cargo.jsonl"
           stderr="$scratch/cargo.stderr"
-          printf 'source_revision=601a2b4c1d02b2911bf07859d9867bd6916a7ea8\nworkflow_revision=%s\nprofile=sqlite-only\ncheck=all-targets\n' "$GITHUB_SHA" > "$receipt"
+          source_revision=735aee320c5512137f0ae8c9ddd7803638b570e7
+          original_check=601a2b4c1d02b2911bf07859d9867bd6916a7ea8
+          printf 'source_revision=%s\nworkflow_revision=%s\nprofile=sqlite-only\ncheck=all-targets\n' "$source_revision" "$GITHUB_SHA" > "$receipt"
           if [[ "$(git rev-parse HEAD)" != "$GITHUB_SHA" \
-              || "$(git rev-parse HEAD^)" != 735aee320c5512137f0ae8c9ddd7803638b570e7 ]] \
-              || ! git diff --quiet 601a2b4c1d02b2911bf07859d9867bd6916a7ea8 HEAD -- . ':(exclude).github/workflows/owned-g11-sqlite-compile-diagnostic.yaml'; then
+              || "$(git rev-parse "$original_check^")" != "$source_revision" ]] \
+              || ! git merge-base --is-ancestor "$original_check" HEAD \
+              || ! git diff --quiet "$original_check" HEAD -- . ':(exclude).github/workflows/owned-g11-sqlite-compile-diagnostic.yaml'; then
             printf 'source_check=FAIL\n' >> "$receipt"
             echo 'check_result=source_mismatch' >> "$GITHUB_OUTPUT"
             cat "$receipt" >> "$GITHUB_STEP_SUMMARY"
@@ -62,17 +66,18 @@ jobs:
           printf 'cargo_exit=%s\n' "$status" >> "$receipt"
           # Only primary Rust spans within repository source trees, numeric
           # coordinates, safe target names and closed rustc error codes escape.
-          if ! jq -r '
+          if ! jq -r --arg workspace "$GITHUB_WORKSPACE/" '
             select(.reason == "compiler-message" and .message.level == "error")
             | .target.name as $target
             | .message.code.code as $code
             | .message.spans[]? | select(.is_primary == true)
-            | select(($target | type) == "string" and ($target | test("^[A-Za-z0-9_-]+$")))
-            | select(($code | type) == "string" and ($code | test("^E[0-9]{4}$")))
-            | select((.file_name | type) == "string" and (.file_name | test("^(src|tests)/([A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+\\.rs$")))
+            | select($target | strings | test("^[A-Za-z0-9_-]+$"))
+            | select($code | strings | test("^E[0-9]{4}$"))
+            | (.file_name | strings | ltrimstr($workspace)) as $file
+            | select($file | test("^(src|tests)/([A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+\\.rs$"))
             | select((.line_start | type) == "number" and (.line_start | floor) == .line_start and .line_start > 0)
             | select((.column_start | type) == "number" and (.column_start | floor) == .column_start and .column_start > 0)
-            | "error target=\($target) code=\($code) location=\(.file_name):\(.line_start):\(.column_start)"
+            | "error target=\($target) code=\($code) location=\($file):\(.line_start):\(.column_start)"
           ' "$json" > "$scratch/diagnostics.txt"; then
             printf 'diagnostics=unavailable\n' >> "$receipt"
             echo 'check_result=diagnostic_parse_failed' >> "$GITHUB_OUTPUT"
@@ -93,7 +98,6 @@ jobs:
             printf 'check=FAIL\n' >> "$receipt"
             result=fail
           fi
-          cp "$receipt" "$RUNNER_TEMP/owned-g11-sqlite-summary.txt"
           echo "check_result=$result" >> "$GITHUB_OUTPUT"
           cat "$receipt" >> "$GITHUB_STEP_SUMMARY"
           test "$status" -eq 0
