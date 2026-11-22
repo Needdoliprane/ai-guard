@@ -51,7 +51,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    sync::Mutex,
+    sync::{Mutex, MutexGuard},
     time::{Instant, timeout_at},
 };
 use uuid::Uuid;
@@ -225,6 +225,59 @@ fn read_snapshot_options() -> TxOpts {
         .with_readonly(true)
         .with_isolation_level(IsolationLevel::RepeatableRead);
     options
+}
+
+async fn close_owned_connection(conn: Conn) -> Result<()> {
+    conn.disconnect()
+        .await
+        .map_err(driver_error)
+        .context("MySQL owned audit connection closure is uncertain")
+}
+
+/// The verified head and its physical lock travel with the exact connection.
+/// The handle has no lease recovery or authority to write.
+struct RetainedOwnedAudit<'a> {
+    store: &'a MysqlAuditStore,
+    conn: Conn,
+    ownership: OwnedAuditLock,
+    head: AuditHead,
+    // Keep ordinary operations on this Store serialized through disconnect.
+    _confirmed: MutexGuard<'a, Confirmed>,
+}
+
+impl RetainedOwnedAudit<'_> {
+    async fn close_verified(mut self) -> Result<AuditHead> {
+        let checked = match self.confirm_retained_head().await {
+            Ok(()) => self.ownership.release(&mut self.conn).await,
+            Err(error) => Err(error),
+        };
+        close_owned_connection(self.conn).await?;
+        checked?;
+        Ok(self.head)
+    }
+
+    /// Reconfirm the bound head in a new snapshot of the retained connection.
+    /// The chain itself was replayed when this handle was constructed.
+    async fn confirm_retained_head(&mut self) -> Result<()> {
+        let mut tx = self
+            .conn
+            .start_transaction(read_snapshot_options())
+            .await
+            .map_err(driver_error)?;
+        let checked = async {
+            self.ownership.verify(&mut tx).await?;
+            let bound = binding(&mut tx, STATE).await?;
+            self.store.verify_binding(&bound)?;
+            ensure!(
+                bound.head == self.head,
+                "MySQL owned audit head changed while the session was retained"
+            );
+            Ok(())
+        }
+        .await;
+        tx.rollback().await.map_err(driver_error)?;
+        checked
+    }
 }
 
 async fn require_transactional_schema(tx: &mut Transaction<'_>) -> Result<()> {
@@ -542,6 +595,15 @@ impl MysqlAuditStore {
         Ok(connection)
     }
 
+    fn verify_binding(&self, bound: &Binding) -> Result<()> {
+        ensure!(
+            bound.tenant.as_deref() == Some(self.tenant.as_str())
+                && bound.namespace.as_deref() == Some(self.namespace.as_str()),
+            "MySQL audit binding mismatch"
+        );
+        Ok(())
+    }
+
     async fn verify_bound(
         &self,
         tx: &mut Transaction<'_>,
@@ -549,11 +611,7 @@ impl MysqlAuditStore {
         confirmed: &AuditHead,
         mut observer: Option<&mut ReadObserver<'_>>,
     ) -> Result<VerifiedPrefix> {
-        ensure!(
-            bound.tenant.as_deref() == Some(self.tenant.as_str())
-                && bound.namespace.as_deref() == Some(self.namespace.as_str()),
-            "MySQL audit binding mismatch"
-        );
+        self.verify_binding(&bound)?;
         let mut head = AuditHead::empty();
         let mut indexed = 0;
         let mut legacy_worker_events = 0;
@@ -813,30 +871,54 @@ impl MysqlAuditStore {
         );
         crate::control::hash(head_hash)?;
         timeout_at(Instant::now() + DEADLINE, async {
-            let confirmed = self.confirmed.lock().await;
-            let mut conn = self.connect().await?;
-            let verified = self
-                .verify_owned_snapshot(&mut conn, server, head_seq, head_hash, &confirmed.head)
-                .await;
-            conn.disconnect()
+            self.retain_owned_origin(server, head_seq, head_hash)
+                .await?
+                .close_verified()
                 .await
-                .map_err(driver_error)
-                .context("MySQL owned audit connection closure is uncertain")?;
-            verified
         })
         .await
         .map_err(|_| MysqlProbeError::TimedOut)?
     }
 
+    async fn retain_owned_origin(
+        &self,
+        server: Uuid,
+        head_seq: i64,
+        head_hash: &str,
+    ) -> Result<RetainedOwnedAudit<'_>> {
+        let confirmed = self.confirmed.lock().await;
+        let mut conn = self.connect().await?;
+        let verified = async {
+            let ownership = OwnedAuditLock::acquire(&mut conn, server, &self.database).await?;
+            let head = self
+                .verify_owned_snapshot(&mut conn, &ownership, head_seq, head_hash, &confirmed.head)
+                .await?;
+            Ok((ownership, head))
+        }
+        .await;
+        match verified {
+            Ok((ownership, head)) => Ok(RetainedOwnedAudit {
+                store: self,
+                conn,
+                ownership,
+                head,
+                _confirmed: confirmed,
+            }),
+            Err(error) => {
+                close_owned_connection(conn).await?;
+                Err(error)
+            }
+        }
+    }
+
     async fn verify_owned_snapshot(
         &self,
         conn: &mut Conn,
-        server: Uuid,
+        ownership: &OwnedAuditLock,
         head_seq: i64,
         head_hash: &str,
         confirmed: &AuditHead,
     ) -> Result<AuditHead> {
-        let ownership = OwnedAuditLock::acquire(conn, server, &self.database).await?;
         let mut tx = conn
             .start_transaction(read_snapshot_options())
             .await
@@ -856,7 +938,6 @@ impl MysqlAuditStore {
         }
         .await;
         tx.rollback().await.map_err(driver_error)?;
-        ownership.release(conn).await?;
         verified
     }
 
