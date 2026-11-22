@@ -1503,10 +1503,17 @@ impl Service {
             .root
             .child("provider-activity")
             .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
+        // Validated when the registry was loaded; defaults when absent.
+        let limits = match self.registry.data.provider_activity {
+            Some(budget) => budget
+                .limits()
+                .map_err(|_| BrokerErrorCodeV1::Unavailable)?,
+            None => crate::provider_activity::ActivityLimits::default(),
+        };
         Ok(
             BatchExecutor::new(writer, self.full_enforcer()?.clone(), Arc::new(clock))
                 .with_relays(self.registry.relay_service.get().cloned())
-                .with_activity_root(activity),
+                .with_activity_root(activity, limits),
         )
     }
     async fn connection(self: Arc<Self>, mut stream: UnixStream) {

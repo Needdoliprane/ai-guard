@@ -575,30 +575,43 @@ async fn the_hook_pump_acknowledges_only_durable_records_and_reports_anomalies()
                 seq: 1,
                 payload: hooks[2].into(),
                 truncated: false,
+                gate: true,
+            },
+            // A gated payload the adapter cannot map leaves no audit record:
+            // the action must be refused even though nothing failed.
+            HookFrame::Hook {
+                seq: 2,
+                payload: r#"{"session_id":"s"}"#.into(),
+                truncated: false,
+                gate: true,
             },
             HookFrame::Loss {
-                seq: 2,
+                seq: 3,
                 count: 1,
                 reason: "client_unrecorded".into(),
             },
-            // Seq 3 is missing: the helper's numbering is not trusted.
+            // Seq 4 is missing: the helper's numbering is not trusted.
             HookFrame::Hook {
-                seq: 4,
+                seq: 5,
                 payload: hooks[3].into(),
                 truncated: true,
+                gate: false,
             },
             // The backlog is now full: a gated hook is refused, not dropped silently.
             HookFrame::Hook {
-                seq: 5,
+                seq: 6,
                 payload: hooks[2].into(),
                 truncated: false,
+                gate: true,
             },
         ]
         .into(),
         acks: acks.clone(),
     };
     let outcome = pump_hooks(collector.clone(), transport).await;
-    assert_eq!(outcome.hooks, 3);
+    assert_eq!(outcome.hooks, 4);
+    assert_eq!((outcome.recorded, outcome.refused), (2, 2));
+    assert_eq!(outcome.unrecorded_gates, 1);
     assert_eq!(outcome.declared_losses, 1);
     assert_eq!(outcome.sequence_gaps, 1);
     assert!(!outcome.transport_error);
@@ -606,8 +619,9 @@ async fn the_hook_pump_acknowledges_only_durable_records_and_reports_anomalies()
         *acks.lock().unwrap(),
         [
             (1, HookAck::Recorded),
-            (4, HookAck::Recorded),
-            (5, HookAck::Refused)
+            (2, HookAck::Refused),
+            (5, HookAck::Recorded),
+            (6, HookAck::Refused)
         ]
     );
     let events = spooled(&collector);
@@ -625,4 +639,6 @@ async fn the_hook_pump_acknowledges_only_durable_records_and_reports_anomalies()
     let summary = collector.summary().unwrap();
     assert_eq!(summary.hook_channel, "closed");
     assert_eq!(summary.hook.refused, 1);
+    assert_eq!(summary.hook.unrecognized, 1);
+    assert!(!summary.complete);
 }

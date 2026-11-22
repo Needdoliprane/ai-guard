@@ -72,6 +72,7 @@ pub(crate) struct BatchExecutor {
     clock: Arc<dyn HostClock>,
     relays: Option<Arc<crate::broker::relay_owner::RelayRegistry>>,
     activity: Option<crate::control_fs::Directory>,
+    activity_limits: crate::provider_activity::ActivityLimits,
 }
 impl fmt::Debug for BatchExecutor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -266,6 +267,7 @@ impl BatchExecutor {
             clock,
             relays: None,
             activity: None,
+            activity_limits: crate::provider_activity::ActivityLimits::default(),
         }
     }
     pub(crate) fn with_relays(
@@ -276,9 +278,15 @@ impl BatchExecutor {
         self
     }
     /// Private broker directory holding one live provider activity spool per
-    /// session. Without it, a provider session refuses to start.
-    pub(crate) fn with_activity_root(mut self, root: crate::control_fs::Directory) -> Self {
+    /// session, and the per-session budget. Without it, a provider session
+    /// refuses to start.
+    pub(crate) fn with_activity_root(
+        mut self,
+        root: crate::control_fs::Directory,
+        limits: crate::provider_activity::ActivityLimits,
+    ) -> Self {
         self.activity = Some(root);
+        self.activity_limits = limits;
         self
     }
     pub(crate) async fn run(
@@ -950,7 +958,7 @@ impl<'a> Execution<'a> {
             let terminal = runtime.resume_terminal(&owned.handle).await?;
             // A resumed worker is observed only: drain what an interrupted
             // run spooled and state its coverage; no stdout is replayed.
-            if let Some(activity) = self.open_activity(&draft)? {
+            if let Some((activity, _)) = self.open_activity(&draft)? {
                 activity.finish().await?;
             }
             self.save_observed_result(&terminal).await?;
@@ -969,7 +977,10 @@ impl<'a> Execution<'a> {
         }
         // Live activity is durable before the start control is emitted.
         let mut activity = self.open_activity(&draft)?;
-        let tap = activity.as_mut().and_then(activity::LiveActivity::take_tap);
+        let tap = activity.as_mut().and_then(|(live, _)| live.take_tap());
+        let hooks = activity
+            .as_ref()
+            .map(|(live, client)| live.hook_attacher(*client));
         let callback = |owned: OwnedContainerSnapshot| {
             boxed_execution_phase(|| async move {
                 self.patch(|draft| {
@@ -1029,8 +1040,26 @@ impl<'a> Execution<'a> {
         let relay_spec = spec.clone();
         let started = |observation: ContainerObservation| {
             let relay_spec = relay_spec.clone();
+            let hooks = hooks.clone();
             boxed_execution_phase(|| async move {
                 let (_, draft) = self.load().await?;
+                // The worker hook channel of this running incarnation. Its
+                // failure is a recorded coverage fact, never a start failure:
+                // gated hooks inside the worker then refuse their actions.
+                if let Some(hooks) = &hooks
+                    && let Some(owned) = draft
+                        .run
+                        .plan
+                        .managed
+                        .as_ref()
+                        .and_then(|m| m.owned.clone())
+                {
+                    let running = OwnedContainerSnapshot {
+                        handle: owned.handle,
+                        observation: observation.clone(),
+                    };
+                    hooks.attach(runtime, running, &relay_spec).await;
+                }
                 let observation = managed::observation_dto(draft.worker()?, &observation)?;
                 boxed_execution_phase(|| self.mutate(WorkerTransitionV1::Observe { observation }))
                     .await?;
@@ -1081,7 +1110,7 @@ impl<'a> Execution<'a> {
             }
         };
         let live = match activity {
-            Some(activity) => {
+            Some((activity, _)) => {
                 activity.finish().await?;
                 true
             }

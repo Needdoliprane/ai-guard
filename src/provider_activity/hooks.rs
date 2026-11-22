@@ -1,8 +1,9 @@
 //! Broker side of the worker hook channel: spool each hook payload, then
 //! acknowledge it to the worker helper. A gated hook (PreToolUse,
 //! UserPromptSubmit) lets the client act only on `recorded`, so the durable
-//! spool append always precedes the acknowledgement.
+//! spool append of at least one event always precedes that acknowledgement.
 use super::collector::{ActivityChannel, ActivityCollector, Admission};
+use crate::adapters::RecordDisposition;
 
 /// One frame received from the worker activity helper.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -11,6 +12,8 @@ pub enum HookFrame {
         seq: u64,
         payload: String,
         truncated: bool,
+        /// The configured hook is a gate: the client waits for `recorded`.
+        gate: bool,
     },
     /// Losses the helper counted inside the worker: worker declarations.
     Loss {
@@ -38,6 +41,8 @@ pub struct HookPumpOutcome {
     pub hooks: u64,
     pub recorded: u64,
     pub refused: u64,
+    /// Gated hooks refused because their payload left no event to record.
+    pub unrecorded_gates: u64,
     pub declared_losses: u64,
     /// The helper skipped or repeated a sequence number: observed loss.
     pub sequence_gaps: u64,
@@ -79,14 +84,21 @@ pub async fn pump_hooks<T: HookTransport>(
                 seq,
                 payload,
                 truncated,
+                gate,
             } => {
                 outcome.hooks += 1;
                 let collector_ref = collector.clone();
-                let admission =
-                    tokio::task::spawn_blocking(move || collector_ref.hook(&payload, truncated))
-                        .await
-                        .unwrap_or(Admission::Unavailable);
-                let ack = if admission == Admission::Recorded {
+                let (admission, disposition) = tokio::task::spawn_blocking(move || {
+                    collector_ref.hook_record(&payload, truncated)
+                })
+                .await
+                .unwrap_or((Admission::Unavailable, RecordDisposition::Invalid));
+                let recorded = admission == Admission::Recorded
+                    && (!gate || disposition == RecordDisposition::Mapped);
+                if admission == Admission::Recorded && !recorded {
+                    outcome.unrecorded_gates += 1;
+                }
+                let ack = if recorded {
                     outcome.recorded += 1;
                     HookAck::Recorded
                 } else {

@@ -11,6 +11,7 @@
 pub mod collector;
 pub mod forwarder;
 pub mod hooks;
+pub(crate) mod session;
 pub mod spool;
 pub mod stdout;
 

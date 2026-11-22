@@ -34,6 +34,7 @@ pub mod terminal;
 #[cfg(unix)]
 pub(crate) use invocation::control_service_account;
 pub use invocation::{ExecutableDirectoryIdentityV1, ExecutableIdentityV1, InvocationBindingV1};
+pub(crate) use managed::activity::ActivityExecTransport;
 pub use managed::{
     ContainerHandle, ManagedPrearmedExecution, ManagedPrearmedOutcome, ManagedRetainedExecution,
     ManagedRuntime, ManagedRuntimeError, OwnedContainerSnapshot, RuntimeAuthority, StartDirective,

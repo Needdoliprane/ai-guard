@@ -33,6 +33,30 @@ pub(super) struct RegistryWireV1 {
     pub(super) profiles: Vec<ControlProfileV1>,
     #[serde(default)]
     pub(super) additional_control_secret_files: Vec<PathBuf>,
+    /// Per-session live provider activity budget; defaults when absent.
+    #[serde(default)]
+    pub(super) provider_activity: Option<ProviderActivityBudgetV1>,
+}
+
+/// Operator budget of live provider activity per session. The undelivered
+/// backlog bound follows at one fifth of the events and a quarter of the bytes.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ProviderActivityBudgetV1 {
+    max_events: u64,
+    max_bytes: u64,
+}
+impl ProviderActivityBudgetV1 {
+    pub(super) fn limits(self) -> Result<crate::provider_activity::ActivityLimits> {
+        let limits = crate::provider_activity::ActivityLimits {
+            max_events: self.max_events,
+            max_bytes: self.max_bytes,
+            max_backlog_events: (self.max_events / 5).max(1),
+            max_backlog_bytes: (self.max_bytes / 4).max(64 * 1024),
+        };
+        limits.validate()?;
+        Ok(limits)
+    }
 }
 
 pub(super) struct Registry {
@@ -79,6 +103,8 @@ struct RegistryWireV2 {
     profiles: Vec<ControlProfileV2>,
     #[serde(default)]
     additional_control_secret_files: Vec<PathBuf>,
+    #[serde(default)]
+    provider_activity: Option<ProviderActivityBudgetV1>,
 }
 
 #[derive(Deserialize)]
@@ -253,6 +279,7 @@ impl Registry {
                     max_recovery_stop_owners: wire.max_recovery_stop_owners,
                     profiles,
                     additional_control_secret_files: wire.additional_control_secret_files,
+                    provider_activity: wire.provider_activity,
                 }
             }
             _ => return Err(anyhow!("unsupported broker configuration")),
@@ -277,6 +304,11 @@ impl Registry {
             data.additional_control_secret_files.len() <= 16,
             "broker control secret references exceed their bound"
         );
+        if let Some(budget) = data.provider_activity {
+            budget
+                .limits()
+                .map_err(|_| anyhow!("invalid broker provider activity budget"))?;
+        }
         data.root = normalized(&data.root)?;
         for path in &mut data.additional_control_secret_files {
             *path = normalized(path)?;

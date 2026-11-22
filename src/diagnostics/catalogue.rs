@@ -686,6 +686,13 @@ catalogue! {
         requires: "a registry whose tenants declare an audit-capacity or a workload-audit policy",
         commands: &[product(&["gateway"], &["--max-events"]), tool(&["--max-events"])],
     }
+    AuditLiveActivityBudgetCapacity = "audit.live_activity_budget_capacity" {
+        axis: Tenants, status: Warning, basis: Inferred,
+        consumer: "agentsandbox gateway",
+        message: "With the per-session live provider activity budget, a tenant audit holds fewer than 50 sessions: the gateway event bound divided by the event budget, or the 256 MiB physical audit cap divided by the byte budget, is below 50. The audit has no rotation yet and refuses every write once full, launches included.",
+        action: "Give this tool the budget of the broker registry with --activity-max-events and --activity-max-bytes, raise the event bound of agentsandbox gateway with --max-events, or lower the provider_activity budget of the broker registry.",
+        commands: &[product(&["gateway"], &["--max-events"]), tool(&["--max-events", "--activity-max-events", "--activity-max-bytes"])],
+    }
     RegistryOfflineRulesPassed = "registry.offline_rules_passed" {
         axis: Tenants, status: Ok, basis: Inferred,
         consumer: "agentsandbox gateway",

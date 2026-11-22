@@ -475,6 +475,8 @@ The first and the fourth of these refusals are produced by runs of the tool. The
 | `--client-profile ID` | none | Provider profile asked from a managed launch, as given to `run`. |
 | `--model ID` | none | Model asked from a managed launch, as given to `run`. It replaces the model of the profile. |
 | `--max-events N` | 100000, reported as assumed when a tenant policy depends on it | Gateway event bound, from 1 to 1000000, used to validate the audit-capacity and workload-audit policies of the tenants. A policy refused at the assumed bound is reported `unknown`, by `registry.policy_refused_at_assumed_event_bound`; refused at a bound you give, it is an `error`. |
+| `--activity-max-events N` | 1000 | Per-session live provider activity event budget of the broker registry, from 1 to 5000. With `--max-events`, it sizes the tenant audit: below 50 sessions the report warns by `audit.live_activity_budget_capacity`. |
+| `--activity-max-bytes BYTES` | 2097152 | Per-session live provider activity byte budget of the broker registry, from 65536 to 8388608. The 256 MiB physical audit cap divided by it below 50 sessions is reported by `audit.live_activity_budget_capacity`. |
 | `--jev-url URL` | none | Decision-engine URL to validate. Never contacted. Not together with `--jev-local-url`. |
 | `--jev-local-url URL` | none | Local decision-engine URL to validate. Never contacted. Not together with `--jev-url`. |
 | `--jev-allow-local-http` | off | States that the gateway is started with its explicit local HTTP permission. Judged only together with a decision-engine URL. |
@@ -952,6 +954,7 @@ One code has one status, one axis and one basis. Some codes have a second messag
 | `registry.policy_invalid` | `error` | `tenants` | `observed` | A tenant policy is refused by the product validator; the details name the policy. An audit-capacity or a workload-audit policy is judged for the event bound given with `--max-events`. |
 | `registry.policy_refused_at_assumed_event_bound` | `unknown` | `tenants` | `inferred` | An audit-capacity or a workload-audit policy is refused at 100000 events, the gateway default that this tool assumes when `--max-events` is not given. A gateway started with another bound may accept it. |
 | `registry.event_bound_not_used` | `not_checked` | `tenants` | `observed` | An event bound was given with `--max-events` and nothing was validated with it: no decoded registry declares an audit-capacity or a workload-audit policy. |
+| `audit.live_activity_budget_capacity` | `warning` | `tenants` | `inferred` | With the per-session live provider activity budget, a tenant audit holds fewer than 50 sessions by the gateway event bound or by the 256 MiB physical cap; the audit has no rotation yet and refuses every write once full. |
 | `registry.offline_rules_passed` | `ok` | `tenants` | `inferred` | The registry passes the offline rules of the gateway loader. Token content is not checked. |
 | `registry.loader_acceptance_not_checked` | `not_checked` | `tenants` | `observed` | Acceptance by the gateway at start is not checked. |
 | `tenants.plan_matches_registry` | `ok` | `tenants` | `inferred` | The plan and the registry name exactly the same tenants. |

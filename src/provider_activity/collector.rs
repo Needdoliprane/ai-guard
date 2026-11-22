@@ -151,6 +151,8 @@ struct State {
     stdout: ChannelCounts,
     hook: ChannelCounts,
     hook_channel: &'static str,
+    /// The stdout of this session is collected live (batch with a tap).
+    stdout_live: bool,
     budget_exhausted: bool,
     stalled: bool,
     record_seq: [u64; 2],
@@ -198,6 +200,7 @@ impl ActivityCollector {
                 stdout: ChannelCounts::default(),
                 hook: ChannelCounts::default(),
                 hook_channel: "not_attached",
+                stdout_live: false,
                 budget_exhausted,
                 stalled: false,
                 record_seq: [0, 0],
@@ -238,6 +241,13 @@ impl ActivityCollector {
 
     /// One hook payload forwarded by the worker helper.
     pub fn hook(&self, payload: &str, truncated: bool) -> Admission {
+        self.hook_record(payload, truncated).0
+    }
+
+    /// Same as `hook`, also returning how the payload was understood. A gated
+    /// hook is acknowledged `recorded` only when it was mapped to at least one
+    /// durable event: an unreadable gated payload leaves no audit record.
+    pub fn hook_record(&self, payload: &str, truncated: bool) -> (Admission, RecordDisposition) {
         let normalized = normalize_hook_record(
             self.context.client.adapter(),
             payload,
@@ -250,14 +260,15 @@ impl ActivityCollector {
                 event["data"]["hook_input_truncated"] = json!(true);
             }
         }
-        let admission = self.admit(ActivityChannel::Hook, normalized.disposition, events);
+        let disposition = normalized.disposition;
+        let admission = self.admit(ActivityChannel::Hook, disposition, events);
         // A hook is never retried: an outage refusal is counted here once.
         if admission == Admission::Unavailable
             && let Ok(mut state) = self.lock()
         {
             state.hook.refused += 1;
         }
-        admission
+        (admission, disposition)
     }
 
     /// Losses the worker helper reports. They are worker declarations.
@@ -284,8 +295,10 @@ impl ActivityCollector {
         let Ok(mut state) = self.lock() else {
             return Admission::Unavailable;
         };
-        if channel == ActivityChannel::Hook {
-            state.hook_channel = state_name;
+        match channel {
+            ActivityChannel::Hook => state.hook_channel = state_name,
+            ActivityChannel::Stdout if state_name == "opened" => state.stdout_live = true,
+            ActivityChannel::Stdout => {}
         }
         let event = self.control_event(
             "activity.channel",
@@ -518,7 +531,7 @@ impl ActivityCollector {
             client: self.context.client,
             interactive: self.context.interactive,
             client_version_label: self.context.client_version_label.clone(),
-            stdout: (!self.context.interactive).then(|| state.stdout.clone()),
+            stdout: (state.stdout_live || state.stdout.records > 0).then(|| state.stdout.clone()),
             hook: state.hook.clone(),
             hook_channel: state.hook_channel,
             spooled_events: state.spool.len(),
