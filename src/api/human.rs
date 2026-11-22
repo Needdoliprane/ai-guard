@@ -11,6 +11,7 @@ use crate::{
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use serde::{Deserialize, Serialize};
+mod admin;
 mod brokers;
 /// Proposed owned (formats 14/15) human broker registry projection, served on
 /// its own path because its page shape is not the legacy page's.
@@ -18,6 +19,7 @@ mod brokers_owned;
 #[cfg(test)]
 pub(super) mod event_read_test_hook;
 mod recent;
+mod summary;
 mod workers;
 
 const CONTEXT_HEADER: &str = "x-aiguard-context";
@@ -817,6 +819,11 @@ pub(super) fn routes() -> Router<GatewayState> {
             "/human/federation/workers",
             get(workers::federation_workers),
         )
+        .route("/human/summary", get(summary::summary))
+        .route("/human/admin/quota", get(admin::quota))
+        .route("/human/admin/usage", get(admin::usage))
+        .route("/human/admin/memberships", get(admin::memberships))
+        .route("/human/admin/configuration", get(admin::configuration))
         .route("/human/resources", get(resources))
         .route("/human/events", get(events))
         .route("/human/events/recent", get(recent::recent))
@@ -932,6 +939,10 @@ fn identity_sync(
         let revision = snapshot
             .authorization_revision
             .ok_or_else(|| context_failure("context_revoked"))?;
+        let facts = OperationFactsV1 {
+            owned_profile: state.owned_human.is_some(),
+            human_rights_marker: snapshot.human_rights_marker,
+        };
         for mut member in snapshot.memberships {
             if let Some(ceiling) = proof.ceiling() {
                 member.capabilities = member.capabilities.intersection(ceiling).copied().collect();
@@ -986,12 +997,18 @@ fn identity_sync(
                         }
                         Err(error) => return Err(state_failure(error)),
                     };
-                let capabilities = member
+                let capabilities: Vec<HumanCapabilityV1> = member
                     .capabilities
                     .iter()
                     .copied()
                     .filter(|cap| mode == ContextModeV1::Administration || !cap.is_administration())
                     .collect();
+                let operations = context_operations(
+                    mode,
+                    &capabilities.iter().copied().collect(),
+                    &member.capabilities,
+                    facts,
+                );
                 contexts.push(HumanContextV1 {
                     id: context.id.clone(),
                     tenant_id: tenant.tenant_id.clone(),
@@ -1001,6 +1018,7 @@ fn identity_sync(
                     membership_revision: member.revision.to_string(),
                     authorization_version: context.authorization_version.clone(),
                     expires_at: context.expires_at.clone(),
+                    operations,
                 });
             }
         }

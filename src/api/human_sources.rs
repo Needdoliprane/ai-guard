@@ -289,6 +289,49 @@ impl OwnedHumanGateway {
         })
     }
 
+    /// The 360° summary of an owned source's context, read in its scoped
+    /// transaction with the same receipt as the legacy profile.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn summary(
+        &self,
+        index: usize,
+        store: &Store,
+        scope: &AuthorizedScopeV1,
+        frame: &crate::audit::HumanSummaryFrameV1,
+        window: SummaryWindowV1,
+        quota: &crate::control::QuotaPolicyV1,
+        redactor: &Redactor,
+    ) -> ApiResult<HumanSummaryV1> {
+        self.read(index, store, |access| {
+            store.modern_human_summary(access, scope, frame, window, quota, redactor)
+        })
+    }
+    pub(super) fn memberships(
+        &self,
+        index: usize,
+        store: &Store,
+        scope: &AuthorizedScopeV1,
+        frame: &crate::audit::HumanMembershipFrameV1,
+        after: Option<&str>,
+        limit: usize,
+        redactor: &Redactor,
+    ) -> ApiResult<crate::audit::HumanMembershipStorePageV1> {
+        self.read(index, store, |access| {
+            store.modern_human_memberships(access, scope, frame, after, limit, redactor)
+        })
+    }
+    pub(super) fn configuration_facts(
+        &self,
+        index: usize,
+        store: &Store,
+        scope: &AuthorizedScopeV1,
+        redactor: &Redactor,
+    ) -> ApiResult<crate::audit::HumanConfigurationStoreFactsV1> {
+        self.read(index, store, |access| {
+            store.modern_human_configuration_facts(access, scope, redactor)
+        })
+    }
+
     pub(super) fn events(
         &self,
         index: usize,

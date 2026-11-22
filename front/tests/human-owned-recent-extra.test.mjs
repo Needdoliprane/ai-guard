@@ -131,7 +131,7 @@ test("a late snapshot from a closed Journal cannot publish into a newly selected
 });
 
 test("an initial explicit content503 has no silent metadata fallback or change of granted capabilities", async () => {
-  const capabilities = adminContext().capabilities.slice();
+  const capabilities = adminContext().capabilities.slice(); const operations = structuredClone(adminContext().operations);
   const { api, requests } = await client((path) => {
     assert.match(path, /view=content/);
     return refusal(503, "identity_unavailable", "retry");
@@ -141,6 +141,7 @@ test("an initial explicit content503 has no silent metadata fallback or change o
     assert.equal(requests.length, 1);
     assert.match(requests[0].path, /view=content/);
     assert.deepEqual(api.context.capabilities, capabilities);
+    assert.deepEqual(api.context.operations, operations, "a refused read changes no operation of the context offer");
   } finally { api.close(); }
 });
 

@@ -1910,6 +1910,9 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
                 "/api/v1/human/events",
                 "/api/v1/human/events/recent",
                 "/api/v1/human/owned/brokers",
+                "/api/v1/human/summary",
+                "/api/v1/human/admin/memberships",
+                "/api/v1/human/admin/configuration",
             ]
             .contains(&request.uri().path()))
     {
@@ -2053,6 +2056,11 @@ fn human_dashboard_path(path: &str) -> bool {
         "/api/human/owned/brokers",
         "/api/human/workers",
         "/api/human/federation/workers",
+        "/api/human/summary",
+        "/api/human/admin/quota",
+        "/api/human/admin/usage",
+        "/api/human/admin/memberships",
+        "/api/human/admin/configuration",
         "/api/human/resources",
         "/api/human/events",
         "/api/human/events/recent",

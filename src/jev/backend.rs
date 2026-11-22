@@ -35,6 +35,22 @@ pub(crate) struct BackendEvaluation {
     pub metadata: Value,
 }
 impl JevBackend {
+    /// Closed kind and selection provenance words, for the administration
+    /// configuration read. Never an endpoint, model path or key.
+    pub(crate) fn describe(&self) -> (&'static str, &'static str) {
+        let engine = match &self.engine {
+            Engine::TypeSafe(_) => "jev_typesafe",
+            Engine::RustRules(_) => "rust_rules",
+            Engine::LocalOpenAI(_) => "local_model",
+        };
+        let source = match self.source {
+            SelectionSource::Cli => "cli",
+            SelectionSource::Environment => "environment",
+            SelectionSource::Legacy => "legacy",
+            SelectionSource::Programmatic => "programmatic",
+        };
+        (engine, source)
+    }
     pub fn typesafe(client: JevClient, source: SelectionSource) -> Self {
         Self {
             engine: Engine::TypeSafe(client),

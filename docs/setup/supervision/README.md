@@ -8,7 +8,7 @@ The view needs a named account: [local](../identity/README.md) or [SSO](../sso/R
 
 ## Who sees what
 
-Navigation, sections and actions follow both the capabilities that the control returns for the selected context and the read profiles it actually serves. A profile announces a wire contract; it grants no permission. The browser never derives a right from an account name; every read is authorized again by the gateway. The following table describes controls that omit `read_profiles` (the legacy registry contracts). The owned profile is described below.
+Navigation, sections and actions follow only the operation catalogue (`operations`) that the control returns with the selected context: an operation is opened when it is `granted` and `available`, and its explanation names the other states (`not_granted`, held by the other context of the same membership, `migration_required`, `profile_unavailable`, `not_in_this_build`). The capability list is displayed, never used to derive a right; a read profile only selects a wire contract. The browser never derives a right from an account name; every read is authorized again by the gateway. The following table describes controls that omit `read_profiles` (the legacy registry contracts). The owned profile is described below.
 
 | Capability in the selected context | What Supervision shows | Read sent |
 |---|---|---|
@@ -19,7 +19,7 @@ Navigation, sections and actions follow both the capabilities that the control r
 | Same metadata capabilities | **Journal** tab: authorized events, newest first, then live | `GET /api/v1/human/events/recent?limit=100&view=metadata`, then `GET /api/v1/human/stream?…&cursor=<live_cursor>` |
 | None of the above | No Supervision entry for that context | none |
 
-A source that the context does not grant is never requested. The **Accès de ce contexte** panel (access of this context; closed by default, opened with its chevron) lists each capability, what it opens and what is missing. Two items are always listed as unavailable: the personal view of workers (no authenticated initiation chain links a worker to a person yet) and the agent / sub-agent hierarchy (the named contract does not return it, so it stays unknown and is never inferred from a name).
+A source that the context does not grant is never requested. The **Accès de ce contexte** panel (access of this context; closed by default, opened with its chevron) lists each operation of the control's catalogue with one of four states — **Accordé** (granted and served), **Non accordé**, **Autre contexte** (held by the other context of the same membership) and **Indisponible** (granted but not served, with the reason: migration, source profile or this build) — and what it opens. Two items are always listed as unavailable: the personal view of workers (no authenticated initiation chain links a worker to a person yet) and the agent / sub-agent hierarchy (the named contract does not return it, so it stays unknown and is never inferred from a name).
 
 ## Owned broker supervision profile
 
@@ -46,6 +46,16 @@ A received checkpoint shows its own reception/expiry, current-grant relation, re
 Loading, a successful empty page, a failed initial read and the dated last successful page after a failed refresh stay distinct. An open **Brokers** detail remains tied to its dated page through ordinary heartbeat refreshes; it closes when its broker leaves the page or its grant, incarnation or disclosed authorities change. A 403 removes rows, details and cursors as soon as headers arrive, without waiting for the response body. In Supervision it also fences concurrent reads before the control's access offer is checked again. A changed or removed `read_profiles` announcement removes the selected context and its data; no late response restores them. A 401 signs out. No broker SSE, runner credential or engine access is added.
 
 The worker-association, worker-pagination and federation procedures below apply to the legacy profiles above. Under the owned profile, these sources remain unavailable.
+
+## Vue 360° and Mon espace
+
+When the selected context's catalogue grants and serves `summary_read`, the dashboard opens **Vue 360°** (administration context) or **Mon espace** (personal context) first. The page reads `GET /api/v1/human/summary` once and shows what the control computed in one transaction, with its evaluation time and read receipt:
+
+- **Situation du tenant / de mon espace**: one row per domain. *Workers* (every registered worker by durable state and the quota it holds; the runtime inventory stays unknown), *Brokers* (lease states at evaluation), *Ressources* (authorized sessions, agents, sandboxes and projects), *Décisions* over the chosen period (allow, review, deny; when the journal read budget stops the count, the row says from when it counted), *Quota du tenant* (reservations, not measured consumption) and *Usage observé* (terminal allocations of the period, method 1, `billable=false`). A row your context may not read says **Non accordé à ce contexte.**; an unavailable row names its reason. Neither is ever shown as zero.
+- **Flotte par broker**: workers grouped by launch authority and joined to the broker registry by exact identifier. A broker whose lease is no longer current keeps its workers' last known state with a note; workers whose authority is not registered stay counted under **Autorité non enregistrée**.
+- **Points d'attention**: facts derived only from durable control states (worker in doubt, inconsistent allocation, out-of-memory stop, broker without heartbeat, stale lease, expired or revoked authorization, uncertain clock), with complete counts by kind and the 50 most recent items. **Ouvrir le worker** / **Ouvrir le broker** opens the exact view when your context offers it. This is not an incident tracker.
+
+**Période** changes only the decision and usage rows. **Relecture automatique** is every 2 minutes by default (30 s or manual are available) while the tab is visible; each read leaves a durable audit receipt and counts against the human read budgets. After a failed read the last summary stays visible as **Données périmées · dernière synthèse conservée**; a refused read withdraws every value and your accesses are read again. Changing, expiring or revoking the context, or logging out, withdraws the page.
 
 ## Open the view
 
@@ -170,7 +180,7 @@ The fleet refreshes every 30 s while the tab is visible; choose 2 min or **Manue
 
 ## Limits
 
-- No runtime inventory, no usage, quota, user or policy administration: the 360° target of [ui.md](../../ui.md#vues-utilisateur-et-administration-unifiée--cible-à-livrer) remains open.
+- No runtime inventory. **Vue 360°** summarizes the tenant's registries, quota reservations and observed allocations in one transaction; the administration views of memberships, usage and configuration and the delegated membership and share changes are described in [ui.md](../../ui.md#vues-utilisateur-et-administration-unifiée--cible-à-livrer) with their own state. The owned source profile does not serve the summary yet.
 - One tenant per context. No cross-tenant view.
 - No server-side filter or sort of the worker registry; at most 500 worker rows, 100 brokers and 300 resources in this view.
 - No agent hierarchy and no personal view of workers.

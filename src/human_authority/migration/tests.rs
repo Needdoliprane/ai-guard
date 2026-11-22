@@ -110,13 +110,18 @@ fn identity_projection(source: &HumanMaintenanceSourceV1) -> Vec<String> {
 
 impl Fixture {
     pub(crate) fn new() -> Self {
-        Self::new_configured(false, true)
+        Self::new_configured(false, true, false)
     }
     pub(crate) fn new_owned() -> Self {
-        Self::new_configured(true, true)
+        Self::new_configured(true, true, false)
     }
     pub(crate) fn new_owned_local() -> Self {
-        Self::new_configured(true, false)
+        Self::new_configured(true, false, false)
+    }
+    /// Legacy stores that receive the human rights marker before adoption,
+    /// as the identity guide asks of an operator.
+    pub(crate) fn new_owned_with_human_rights() -> Self {
+        Self::new_configured(true, true, true)
     }
     pub(crate) fn bearer(tenant: &str) -> String {
         format!(
@@ -124,7 +129,7 @@ impl Fixture {
             if tenant == "A" { "11" } else { "22" }.repeat(32)
         )
     }
-    fn new_configured(owned: bool, oidc: bool) -> Self {
+    fn new_configured(owned: bool, oidc: bool, human_rights: bool) -> Self {
         let temporary = tempfile::Builder::new()
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap())
@@ -170,6 +175,11 @@ impl Fixture {
                         .join(format!("before-{}.sqlite", offset + 3)),
                 )
                 .unwrap();
+            }
+            if human_rights {
+                store
+                    .migrate_human_rights_v2(&historical.path().join("before-rights.sqlite"))
+                    .unwrap();
             }
             let change = identity_change(IdentityChangeV1::Account {
                 expected_revision: 0,

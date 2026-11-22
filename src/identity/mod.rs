@@ -4,15 +4,23 @@
 //! principal is never proof of token validation, membership, or runner authority.
 mod access;
 mod authorization;
+mod configuration;
 mod entropy;
+mod memberships;
+mod operations;
+mod summary;
 mod types;
 
 pub use access::*;
 pub use authorization::AuthorizedScopeV1;
 pub(crate) use authorization::authorize_context;
+pub use configuration::*;
 pub use entropy::generate_local_credential;
 pub(crate) use entropy::local_credential_format;
 pub(crate) use entropy::random_bytes;
+pub use memberships::*;
+pub use operations::*;
+pub use summary::*;
 pub use types::*;
 
 #[cfg(test)]

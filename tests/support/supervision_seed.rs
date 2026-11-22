@@ -132,6 +132,7 @@ fn migrate(store: &Store, path: &Path) -> anyhow::Result<()> {
     store.migrate_kubernetes_create_v8(&path.with_extension("before8"))?;
     store.migrate_kubernetes_policy_v9(&path.with_extension("before9"))?;
     store.migrate_human_workers_v10(&path.with_extension("before10"))?;
+    store.migrate_human_rights_v2(&path.with_extension("before-rights"))?;
     Ok(())
 }
 

@@ -5,11 +5,34 @@ export const CAPABILITIES = ["read_metadata", "read_content", "export", "read_te
   "read_broker_registry", "read_worker_registry", "approve_launch", "read_memberships", "read_configuration", "launch_session",
   "send_session_message", "approve_egress"] as const;
 export type Capability = typeof CAPABILITIES[number];
+/** Closed operation catalogue of a context, in the exact order the Rust control serves it (src/identity/operations.rs). */
+export const OPERATIONS = ["resources_read", "events_read_metadata", "events_read_content", "events_export", "events_stream",
+  "summary_read", "brokers_read", "workers_read", "federation_read", "quota_read", "usage_read", "memberships_read",
+  "configuration_read", "memberships_manage", "grants_manage", "launch_approve", "session_launch_prepare", "session_launch",
+  "session_message_send", "session_messages_read", "session_attribution_read", "egress_policies_read", "egress_attempts_read",
+  "egress_grants_read", "egress_coverage_read", "egress_summary_read", "egress_grant_approve", "egress_grant_revoke"] as const;
+export type HumanOperation = typeof OPERATIONS[number];
+export const OPERATION_PERMISSIONS = ["granted", "not_granted", "requires_administration", "requires_personal"] as const;
+export type OperationPermission = typeof OPERATION_PERMISSIONS[number];
+export const OPERATION_SCOPES = ["own_and_shared", "organization", "tenant"] as const;
+export type OperationScope = typeof OPERATION_SCOPES[number];
+export const OPERATION_AVAILABILITIES = ["available", "migration_required", "profile_unavailable", "not_in_this_build"] as const;
+export type OperationAvailability = typeof OPERATION_AVAILABILITIES[number];
+/**
+ * What the control offers for one operation in one context. Permission (from the membership) and availability
+ * (from this build, the source profile and the tenant store) stay two facts; a scope exists only for a grant.
+ * The entry describes the offer and authorizes nothing: every route revalidates the request.
+ */
+export type HumanOperationAccess =
+  { operation: HumanOperation; permission: "granted"; scope: OperationScope; availability: OperationAvailability } |
+  { operation: HumanOperation; permission: Exclude<OperationPermission, "granted">; availability: OperationAvailability };
 export type Principal = { kind: "human_local"; installation_id: string; account_id: string } |
   { kind: "human_oidc"; issuer: string; subject: string };
 export interface HumanContext {
   id: string; tenant_id: string; organization_scope: string; mode: "personal" | "administration";
+  /** Server fact, displayed only. No right is derived from it: rights come from `operations`. */
   capabilities: Capability[]; membership_revision: string; authorization_version: string; expires_at: string;
+  operations: HumanOperationAccess[];
 }
 export interface HumanIdentity {
   version: 1; principal: Principal; display_name: string;
@@ -102,6 +125,28 @@ function principal(value: unknown): Principal {
 function utf8Text(value: unknown, max: number): value is string {
   return typeof value === "string" && value.trim().length > 0 && new TextEncoder().encode(value).length <= max && !/[\u0000-\u001f\u007f-\u009f]/.test(value);
 }
+/**
+ * One entry per operation, in the closed wire order: a missing, extra, duplicated or reordered entry is a contract
+ * break, never a partial catalogue. The scope exists exactly for a grant. A right held elsewhere names the other
+ * mode, so it can only appear in the opposite one.
+ */
+function operations(value: unknown, mode: HumanContext["mode"]): HumanOperationAccess[] {
+  requireContract(Array.isArray(value) && value.length === OPERATIONS.length);
+  return value.map((entry, index): HumanOperationAccess => {
+    requireContract(object(entry));
+    const granted = entry.permission === "granted";
+    closed(entry, granted ? ["operation", "permission", "scope", "availability"] : ["operation", "permission", "availability"]);
+    requireContract(entry.operation === OPERATIONS[index] &&
+      (OPERATION_PERMISSIONS as readonly unknown[]).includes(entry.permission) &&
+      (OPERATION_AVAILABILITIES as readonly unknown[]).includes(entry.availability) &&
+      (!granted || (OPERATION_SCOPES as readonly unknown[]).includes(entry.scope)) &&
+      (entry.permission !== "requires_administration" || mode === "personal") &&
+      (entry.permission !== "requires_personal" || mode === "administration"));
+    const operation = entry.operation as HumanOperation; const availability = entry.availability as OperationAvailability;
+    return granted ? { operation, permission: "granted", scope: entry.scope as OperationScope, availability } :
+      { operation, permission: entry.permission as Exclude<OperationPermission, "granted">, availability };
+  });
+}
 function resource(value: unknown): ResourceRef {
   requireContract(object(value) && ["session", "sandbox", "agent", "project"].includes(String(value.kind)) && boundedText(value.resource_id));
   return { kind: value.kind as ResourceKind, resource_id: value.resource_id };
@@ -125,10 +170,16 @@ export function parseHumanIdentity(value: unknown): HumanIdentity {
       Array.isArray(item.capabilities) && item.capabilities.length <= CAPABILITIES.length && new Set(item.capabilities).size === item.capabilities.length &&
       item.capabilities.every((capability) => (CAPABILITIES as readonly string[]).includes(String(capability))));
     seen.add(item.id);
+    const mode = item.mode as HumanContext["mode"];
     return { id: item.id, tenant_id: item.tenant_id, organization_scope: item.organization_scope,
-      mode: item.mode as HumanContext["mode"], membership_revision: item.membership_revision,
-      authorization_version: item.authorization_version, expires_at: item.expires_at, capabilities: item.capabilities as Capability[] };
+      mode, membership_revision: item.membership_revision,
+      authorization_version: item.authorization_version, expires_at: item.expires_at, capabilities: item.capabilities as Capability[],
+      operations: operations(item.operations, mode) };
   });
+  // The owned read profiles and the catalogue come from the same server fact: every context then announces the worker
+  // registry and the composition unavailable for this profile, granted or not. A disagreement is a contract break.
+  if (profiles) requireContract(contexts.every((context) => context.operations.every((entry) =>
+    !["workers_read", "federation_read"].includes(entry.operation) || entry.availability === "profile_unavailable")));
   const authenticatedPrincipal = principal(value.principal);
   requireContract((value.authentication.method === "local_credential" && authenticatedPrincipal.kind === "human_local") ||
     (value.authentication.method === "oidc_access_token" && authenticatedPrincipal.kind === "human_oidc" && timestamp(value.authentication.expires_at)));
@@ -425,10 +476,6 @@ export interface HumanFederationWorkerPage {
   coverage: "partial"; runtime_inventory: "unknown"; workers: HumanWorkerPage; brokers: HumanBrokerPage;
 }
 export interface HumanFederationSelection { workerCursor?: string | null; brokerCursor?: string | null; workerLimit?: number; brokerLimit?: number }
-/** Presentation gating only. Rust remains the authorization authority for every read. */
-export function canReadHumanFederation(context: HumanContext | null): boolean {
-  return context?.mode === "administration" && context.capabilities.includes("read_worker_registry") && context.capabilities.includes("read_broker_registry");
-}
 export function parseHumanFederationWorkerPage(value: unknown): HumanFederationWorkerPage {
   closed(value, ["version", "source", "consistency", "coverage", "runtime_inventory", "workers", "brokers"]);
   requireContract(value.version === 1 && value.source === "tenant_federation_registry" && value.consistency === "independent_snapshots" &&

@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseHumanIdentity, parseResourcePage, parseHumanEventPage, humanUrl } from "../src/human-model.ts";
 import * as humanModel from "../src/human-model.ts";
-import { broker, brokerPage, brokerIdentity } from "./human-fixtures.mjs";
+import { broker, brokerPage, brokerIdentity, catalogue, own, tenantScope, OPERATION_ORDER } from "./human-fixtures.mjs";
 
 const uuid = "00000000-0000-4000-8000-000000000001";
 const principal = { kind: "human_local", installation_id: uuid, account_id: uuid };
 const context = { id: "signed-context-a", tenant_id: "tenant-a", organization_scope: "organization-a", mode: "personal",
-  capabilities: ["read_metadata"], membership_revision: "1", authorization_version: "a".repeat(64), expires_at: "2099-01-01T00:00:00Z" };
+  capabilities: ["read_metadata"], membership_revision: "1", authorization_version: "a".repeat(64), expires_at: "2099-01-01T00:00:00Z",
+  operations: catalogue({ resources_read: own, events_read_metadata: own, events_stream: own, summary_read: own }) };
 const envelope = { version: 1, context_id: context.id, authorization_version: context.authorization_version,
   coverage: "authorized_selection", items: [], next_cursor: null, has_more: false,
   read_receipt: { request_id: uuid, audit_event_id: uuid, received_at: "2026-11-01T12:00:00Z" } };
@@ -31,6 +32,57 @@ test("un contexte garde chaque capacité que le contrôle peut accorder et refus
   assert.deepEqual(parseHumanIdentity(identity).contexts[0].capabilities, all);
   for (const bad of [[...all, "read_everything"], ["admin"], ["read_metadata", "read_metadata"]])
     assert.throws(() => parseHumanIdentity({ ...identity, contexts: [{ ...context, capabilities: bad }] }), /Contrat/);
+});
+
+test("le catalogue d’opérations d’un contexte est conservé entrée par entrée, sans portée hors accord", () => {
+  const identity = { version: 1, principal, display_name: "Alice", authentication: { method: "local_credential", credential_id: uuid, expires_at: null },
+    contexts: [context], contexts_complete: true };
+  const parsed = parseHumanIdentity(identity).contexts[0].operations;
+  assert.deepEqual(parsed, context.operations);
+  assert.deepEqual(parsed.map((entry) => entry.operation), OPERATION_ORDER);
+  assert.deepEqual(parsed[0], { operation: "resources_read", permission: "granted", scope: "own_and_shared", availability: "available" });
+  assert.equal(Object.hasOwn(parsed[6], "scope"), false, "une opération non accordée ne porte aucune portée");
+  // A right held elsewhere names the opposite mode: both directions are kept as served.
+  const personal = catalogue({ resources_read: own, brokers_read: ["requires_administration"], workers_read: ["requires_administration"] });
+  assert.equal(parseHumanIdentity({ ...identity, contexts: [{ ...context, operations: personal }] }).contexts[0].operations[6].permission, "requires_administration");
+  const administration = catalogue({ brokers_read: tenantScope, session_launch: ["requires_personal"] });
+  const admin = parseHumanIdentity({ ...identity, contexts: [{ ...context, mode: "administration", operations: administration }] }).contexts[0].operations;
+  assert.deepEqual(admin[17], { operation: "session_launch", permission: "requires_personal", availability: "not_in_this_build" });
+  for (const availability of ["migration_required", "profile_unavailable", "not_in_this_build"])
+    assert.equal(parseHumanIdentity({ ...identity, contexts: [{ ...context, operations: catalogue({ workers_read: ["not_granted", null, availability] }) }] })
+      .contexts[0].operations[7].availability, availability);
+});
+
+test("un catalogue d’opérations absent, incomplet, réordonné ou ouvert est une rupture de contrat", () => {
+  const { operations: _removed, ...withoutOperations } = context;
+  const identity = (operations, mode = "personal") => ({ version: 1, principal, display_name: "Alice",
+    authentication: { method: "local_credential", credential_id: uuid, expires_at: null },
+    contexts: [{ ...withoutOperations, mode, ...(operations === undefined ? {} : { operations }) }], contexts_complete: true });
+  const valid = () => structuredClone(context.operations);
+  const edited = (change) => { const list = valid(); change(list); return list; };
+  const bad = [
+    ["sans tableau", undefined], ["tableau nul", null], ["objet", {}], ["vide", []],
+    ["une entrée manquante", valid().slice(1)], ["une entrée en plus", [...valid(), valid()[0]]],
+    ["deux entrées échangées", edited((list) => { [list[0], list[1]] = [list[1], list[0]]; })],
+    ["une entrée dupliquée à la place d’une autre", edited((list) => { list[1] = { ...list[0] }; })],
+    ["opération inconnue", edited((list) => { list[18] = { ...list[18], operation: "session_delete" }; })],
+    ["permission inconnue", edited((list) => { list[6] = { ...list[6], permission: "admin" }; })],
+    ["disponibilité inconnue", edited((list) => { list[0] = { ...list[0], availability: "partial" }; })],
+    ["portée inconnue", edited((list) => { list[0] = { ...list[0], scope: "global" }; })],
+    ["accord sans portée", edited((list) => { delete list[0].scope; })],
+    ["portée sans accord", edited((list) => { list[6] = { ...list[6], scope: "tenant" }; })],
+    ["portée nulle sans accord", edited((list) => { list[6] = { ...list[6], scope: null }; })],
+    ["champ supplémentaire", edited((list) => { list[0] = { ...list[0], capability: "read_metadata" }; })],
+    ["disponibilité absente", edited((list) => { delete list[3].availability; })],
+    ["entrée nulle", edited((list) => { list[2] = null; })],
+    ["entrée texte", edited((list) => { list[2] = "events_read_content"; })],
+  ];
+  for (const [label, operations] of bad)
+    assert.throws(() => parseHumanIdentity(identity(operations)), /Contrat/, label);
+  assert.doesNotThrow(() => parseHumanIdentity(identity(valid())), "the same helper accepts the served catalogue");
+  // The redirection names the other mode, so it cannot appear in the mode it names.
+  assert.throws(() => parseHumanIdentity(identity(catalogue({ brokers_read: ["requires_administration"] }), "administration")), /Contrat/);
+  assert.throws(() => parseHumanIdentity(identity(catalogue({ session_launch: ["requires_personal"] }), "personal")), /Contrat/);
 });
 
 test("les droits sur une ressource restent distincts et une page incorrecte ne devient pas vide", () => {

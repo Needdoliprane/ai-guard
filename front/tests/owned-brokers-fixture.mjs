@@ -1,6 +1,10 @@
 // Exact whitelisted owned wire profile. Test data only; never imported by the application.
 import { broker, brokerPage } from "./human-fixtures.mjs";
 export const ownedReadProfiles = () => ({ broker_registry: "human_broker_registry_owned_v1", worker_registry: "unavailable", federation_registry: "unavailable" });
+/** The owned source profile has no protocol for these reads: the control announces them unavailable in every context, granted or not. */
+export const OWNED_UNAVAILABLE = ["workers_read", "federation_read", "quota_read", "usage_read"];
+/** The same offer on the owned profile: permissions and scopes kept, availability stated by the profile. */
+export const ownedCatalogue = (operations) => operations.map((entry) => OWNED_UNAVAILABLE.includes(entry.operation) ? { ...entry, availability: "profile_unavailable" } : entry);
 
 export const ownedBroker = (extra = {}) => ownedBrokerFromLegacy(broker(), extra);
 export function ownedBrokerFromLegacy(item, extra = {}) {

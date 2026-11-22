@@ -1,7 +1,11 @@
 import { createSseParser } from "./sse.ts";
 import { HUMAN_FEDERATION_PAGE_BYTES, HumanContractError, boundedText, humanBrokersUrl, humanWorkersUrl, humanFederationWorkersUrl, humanRecentEventsUrl, humanUrl, object, opaque, parseHumanBrokerPage, parseHumanWorkerPage, parseHumanFederationWorkerPage, parseHumanEventPage, parseHumanIdentity, parseHumanRecentEventPage, parseResourcePage, uuid } from "./human-model.ts";
-import type { HumanContext, HumanEventPage, HumanIdentity, HumanRecentEventPage, HumanSelection, HumanFederationSelection, ResourceRef } from "./human-model.ts";
+import type { HumanContext, HumanEventPage, HumanIdentity, HumanOperation, HumanRecentEventPage, HumanSelection, HumanFederationSelection, ResourceRef } from "./human-model.ts";
 import { humanOwnedBrokersUrl, parseHumanOwnedBrokerPage } from "./human-owned-brokers.ts";
+import { SUMMARY_PAGE_BYTES, humanSummaryUrl, parseHumanSummary, type HumanSummary, type SummaryWindow } from "./summary-model.ts";
+import { ADMIN_PAGE_BYTES, adminUrls, parseHumanConfiguration, parseHumanQuota, parseMembershipPage, parseUsagePage,
+  type HumanConfiguration, type HumanQuota, type MembershipPage, type UsagePage } from "./admin-model.ts";
+import { OPERATION_FACTS, access, availabilityText } from "./access-model.ts";
 
 export class HumanSuperseded extends Error { constructor() { super("Lecture abandonnée après changement de contexte."); } }
 export class HumanApiError extends Error {
@@ -122,9 +126,10 @@ export class HumanApiClient {
   }
   async #request(path: string, snapshot: Snapshot, signal?: AbortSignal, stream = false): Promise<Response> {
     this.#assert(snapshot);
-    if (!/^\/api\/v1\/human\/(identity|resources|events|export|stream|brokers|workers)(?:\/[0-9a-f-]{36})?(?:\?[^#]*)?$/.test(path) &&
+    if (!/^\/api\/v1\/human\/(identity|resources|events|export|stream|brokers|workers|summary)(?:\/[0-9a-f-]{36})?(?:\?[^#]*)?$/.test(path) &&
       !/^\/api\/v1\/human\/federation\/workers(?:\?[^#]*)?$/.test(path) && !/^\/api\/v1\/human\/events\/recent(?:\?[^#]*)?$/.test(path) &&
-      !/^\/api\/v1\/human\/owned\/brokers(?:\?[^#]*)?$/.test(path)) throw new HumanContractError();
+      !/^\/api\/v1\/human\/owned\/brokers(?:\?[^#]*)?$/.test(path) &&
+      !/^\/api\/v1\/human\/admin\/(memberships|quota|usage|configuration)(?:\?[^#]*)?$/.test(path)) throw new HumanContractError();
     if (this.#readBudgetStopped) {
       if (!this.#operatorReadAllowed || stream) throw new HumanApiError(429, "audit_read_budget_exhausted", "Lecture automatique suspendue : budget durable de lecture atteint. Contactez l’opérateur.", "contact_operator");
       this.#operatorReadAllowed = false; snapshot.operatorRetry = true;
@@ -202,7 +207,9 @@ export class HumanApiClient {
     if (selected && (profilesChanged || !current || current.authorization_version !== selected.authorization_version ||
       current.membership_revision !== selected.membership_revision || current.tenant_id !== selected.tenant_id ||
       current.organization_scope !== selected.organization_scope || current.mode !== selected.mode ||
-      [...current.capabilities].sort().join(",") !== [...selected.capabilities].sort().join(",") || Date.parse(current.expires_at) <= Date.now())) {
+      [...current.capabilities].sort().join(",") !== [...selected.capabilities].sort().join(",") ||
+      // The same context can carry a new catalogue (an operator migration changes an availability): its views were built on the old one.
+      JSON.stringify(current.operations) !== JSON.stringify(selected.operations) || Date.parse(current.expires_at) <= Date.now())) {
       const error = new HumanApiError(403, "context_revoked", "Les accès ont changé. Choisissez à nouveau un contexte autorisé.", "select_context");
       this.clearContext(); this.#handlers.onContextInvalidated(error);
     }
@@ -238,17 +245,66 @@ export class HumanApiClient {
     const body = await this.#json(await this.#request(owned ? humanOwnedBrokersUrl(cursor, limit) : humanBrokersUrl(cursor, limit), snapshot, signal), snapshot);
     return this.#finishRead(this.#validatePage(owned ? parseHumanOwnedBrokerPage(body.value) : parseHumanBrokerPage(body.value), snapshot), snapshot, signal);
   }
+  /**
+   * A read the selected context's catalogue announces as not served (source profile, store marker or build) is refused
+   * here, before any request, whatever its permission: no historical route is substituted. A permission is never
+   * decided here; a served read goes to the control, which authorizes it.
+   */
+  #served(snapshot: Snapshot, operation: HumanOperation) {
+    const entry = access(snapshot.context, operation);
+    if (!entry || entry.availability === "available") return;
+    const code = entry.availability === "profile_unavailable" ? "read_profile_unavailable" : entry.availability;
+    throw new HumanApiError(503, code, `${OPERATION_FACTS[operation].label} : ${availabilityText[entry.availability]}`, "contact_operator");
+  }
+  #anchors(snapshot: Snapshot) {
+    const context = snapshot.context;
+    if (!context) throw new HumanSuperseded();
+    return { contextId: context.id, authorizationVersion: context.authorization_version };
+  }
   async workers(cursor: string | null = null, signal?: AbortSignal, limit?: number) {
     const snapshot = this.#snapshot(true);
-    if (this.#identity?.read_profiles?.worker_registry === "unavailable")
-      throw new HumanApiError(503, "read_profile_unavailable", "Registre des workers indisponible pour le profil annoncé par le contrôle. La couverture reste partielle.", "contact_operator");
+    this.#served(snapshot, "workers_read");
     const body = await this.#json(await this.#request(humanWorkersUrl(cursor, limit), snapshot, signal), snapshot);
     return this.#finishRead(this.#validatePage(parseHumanWorkerPage(body.value), snapshot), snapshot, signal);
   }
+  /** One summary of the selected context; its sections follow the control's decision for this context. */
+  async summary(window: SummaryWindow, signal?: AbortSignal): Promise<HumanSummary> {
+    const snapshot = this.#snapshot(true);
+    this.#served(snapshot, "summary_read");
+    const body = await this.#json(await this.#request(humanSummaryUrl(window), snapshot, signal), snapshot, SUMMARY_PAGE_BYTES);
+    return this.#finishRead(parseHumanSummary(body.value, this.#anchors(snapshot)), snapshot, signal);
+  }
+  /** Memberships of the administered organization, one page; the control decides what each entry discloses. */
+  async memberships(cursor: string | null = null, signal?: AbortSignal): Promise<MembershipPage> {
+    const snapshot = this.#snapshot(true);
+    this.#served(snapshot, "memberships_read");
+    const body = await this.#json(await this.#request(adminUrls.memberships(cursor), snapshot, signal), snapshot, ADMIN_PAGE_BYTES);
+    return this.#finishRead(parseMembershipPage(body.value, this.#anchors(snapshot)), snapshot, signal);
+  }
+  /** The tenant quota policy and its durable reservations. */
+  async quota(signal?: AbortSignal): Promise<HumanQuota> {
+    const snapshot = this.#snapshot(true);
+    this.#served(snapshot, "quota_read");
+    const body = await this.#json(await this.#request(adminUrls.quota(), snapshot, signal), snapshot, ADMIN_PAGE_BYTES);
+    return this.#finishRead(parseHumanQuota(body.value, this.#anchors(snapshot)), snapshot, signal);
+  }
+  /** Terminal allocations observed, method 1, never billable. */
+  async usage(cursor: string | null = null, signal?: AbortSignal): Promise<UsagePage> {
+    const snapshot = this.#snapshot(true);
+    this.#served(snapshot, "usage_read");
+    const body = await this.#json(await this.#request(adminUrls.usage(cursor), snapshot, signal), snapshot, ADMIN_PAGE_BYTES);
+    return this.#finishRead(parseUsagePage(body.value, this.#anchors(snapshot)), snapshot, signal);
+  }
+  /** Effective configuration, types and modes only. */
+  async configuration(signal?: AbortSignal): Promise<HumanConfiguration> {
+    const snapshot = this.#snapshot(true);
+    this.#served(snapshot, "configuration_read");
+    const body = await this.#json(await this.#request(adminUrls.configuration(), snapshot, signal), snapshot, ADMIN_PAGE_BYTES);
+    return this.#finishRead(parseHumanConfiguration(body.value, this.#anchors(snapshot)), snapshot, signal);
+  }
   async federationWorkers(selection: HumanFederationSelection = {}, signal?: AbortSignal) {
     const snapshot = this.#snapshot(true);
-    if (this.#identity?.read_profiles?.federation_registry === "unavailable")
-      throw new HumanApiError(503, "read_profile_unavailable", "Composition workers/brokers indisponible pour le profil annoncé par le contrôle. Ouvrez le registre Brokers autorisé.", "contact_operator");
+    this.#served(snapshot, "federation_read");
     const body = await this.#json(await this.#request(humanFederationWorkersUrl(selection), snapshot, signal), snapshot, HUMAN_FEDERATION_PAGE_BYTES);
     const page = parseHumanFederationWorkerPage(body.value);
     this.#validatePage(page.workers, snapshot); this.#validatePage(page.brokers, snapshot);

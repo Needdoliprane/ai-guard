@@ -260,6 +260,13 @@ pub struct OidcGateway {
     cleanup_slots: Arc<tokio::sync::Semaphore>,
 }
 impl OidcGateway {
+    /// Closed transport word for the administration configuration read.
+    pub(crate) fn transport_kind(&self) -> &'static str {
+        match self.config.provider.transport {
+            crate::oidc::OidcTransportModeV1::HttpsOnly => "https_only",
+            crate::oidc::OidcTransportModeV1::IsolatedDemoHttp { .. } => "isolated_demo_http",
+        }
+    }
     pub fn new(
         config: OidcGatewayConfigV1,
         audit: Arc<AuthenticationAudit>,

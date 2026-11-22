@@ -2,7 +2,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { HumanContractError, humanBrokersUrl, humanFederationWorkersUrl, humanUrl, humanWorkersUrl } from "../src/human-model.ts";
-import { adminContext, broker, brokerId, fleetWorker, namedResource, observation, personalContext, registered, sessionId, sessionResource, unassociated, workerId } from "./supervision-fixtures.mjs";
+import { adminContext, adminOperations, broker, brokerId, fleetWorker, namedResource, observation, ownedAdminOperations, personalContext, registered, sessionId, sessionResource, unassociated, workerId } from "./supervision-fixtures.mjs";
+import { catalogue, organization, own, tenantScope } from "./human-fixtures.mjs";
 
 // A missing module is reported by the first assertion of each test, not by an import failure of the file.
 const model = await import("../src/supervision-model.ts").catch((error) => {
@@ -235,28 +236,78 @@ test("la session d’un worker n’est liée à une ressource que par identifian
   assert.deepEqual(model.workersOfSession(workers, "session-a"), []);
 });
 
-test("les accès affichés suivent exactement les capacités du contexte fourni par le contrôle", () => {
+test("les accès affichés suivent exactement le catalogue d’opérations fourni par le contrôle", () => {
   present("supervisionAccess"); present("accessLines");
   const access = (context) => {
-    const { workers, brokers, composed, resources, journal, content, export: exporting, any } = model.supervisionAccess(context);
-    return { workers, brokers, composed, resources, journal, content, export: exporting, any };
+    const { workers, workersUnavailable, brokers, composed, resources, journal, content, export: exporting, any } = model.supervisionAccess(context);
+    return { workers, brokers, composed, resources, journal, content, export: exporting, any, ...(workersUnavailable ? { workersUnavailable } : {}) };
   };
   const none = { workers: false, brokers: false, composed: false, resources: false, journal: false, content: false, export: false, any: false };
+  const metadata = { resources_read: organization, events_read_metadata: organization, events_stream: organization };
   assert.deepEqual(access(null), none);
   assert.deepEqual(access(adminContext()), { workers: true, brokers: true, composed: true, resources: true, journal: true, content: true, export: true, any: true });
-  assert.deepEqual(access(adminContext(["read_worker_registry"])), { ...none, workers: true, any: true });
-  assert.deepEqual(access(adminContext(["read_broker_registry"])), { ...none, brokers: true, any: true });
-  assert.deepEqual(access(adminContext(["read_tenant_metadata"])), { ...none, resources: true, journal: true, any: true });
+  assert.deepEqual(access(adminContext(["read_worker_registry"], { operations: catalogue({ workers_read: tenantScope, quota_read: tenantScope, usage_read: tenantScope }) })),
+    { ...none, workers: true, any: true });
+  assert.deepEqual(access(adminContext(["read_broker_registry"], { operations: catalogue({ brokers_read: tenantScope }) })), { ...none, brokers: true, any: true });
+  assert.deepEqual(access(adminContext(["read_tenant_metadata"], { operations: catalogue(metadata) })), { ...none, resources: true, journal: true, any: true });
   assert.deepEqual(access(personalContext()), { ...none, resources: true, journal: true, content: true, export: true, any: true });
-  assert.deepEqual(access(personalContext(["read_metadata"])), { ...none, resources: true, journal: true, any: true });
-  // A registry capability is honoured only in the administration mode issued by the control.
-  assert.deepEqual(access(personalContext(["read_worker_registry", "read_broker_registry", "read_tenant_metadata"])), none);
-  assert.deepEqual(access(personalContext([])), none);
-  const lines = model.accessLines(adminContext(["read_worker_registry"]));
-  assert.deepEqual(lines.filter((line) => line.granted).map((line) => line.key), ["workers"]);
-  assert.ok(lines.find((line) => line.key === "brokers" && !line.granted));
-  assert.ok(lines.find((line) => line.key === "agents" && !line.granted), "la relation agent/sous-agent est annoncée comme non fournie");
-  assert.ok(lines.every((line) => line.label && line.detail));
+  assert.deepEqual(access(personalContext(["read_metadata"], { operations: catalogue({ resources_read: own, events_read_metadata: own, events_stream: own }) })),
+    { ...none, resources: true, journal: true, any: true });
+  // A registry the membership holds is offered by its administration context only: the personal one opens nothing.
+  assert.deepEqual(access(personalContext(["read_worker_registry", "read_broker_registry", "read_tenant_metadata"], { operations: catalogue({
+    brokers_read: ["requires_administration"], workers_read: ["requires_administration"], federation_read: ["requires_administration"] }) })), none);
+  assert.deepEqual(access(personalContext([], { operations: catalogue() })), none);
+});
+
+test("la vue suit les opérations et non les capacités, y compris quand elles divergent", () => {
+  const access = (operations, capabilities = adminContext().capabilities) => model.supervisionAccess(adminContext(capabilities, { operations }));
+  // Every registry and metadata capability is present, but the control offers none of these operations.
+  const withdrawn = access(catalogue());
+  assert.deepEqual([withdrawn.workers, withdrawn.brokers, withdrawn.composed, withdrawn.resources, withdrawn.journal, withdrawn.any], [false, false, false, false, false, false]);
+  assert.equal(withdrawn.workersUnavailable, undefined);
+  // The worker registry is granted but the adopted source profile has no protocol for it: no read, and a named gap.
+  const owned = access(ownedAdminOperations());
+  assert.equal(owned.workers, false); assert.equal(owned.workersUnavailable, true); assert.equal(owned.composed, false);
+  assert.equal(owned.brokers, true); assert.equal(owned.any, true);
+  for (const availability of ["migration_required", "not_in_this_build"]) {
+    const fenced = access(adminOperations({ workers_read: ["granted", "tenant", availability] }));
+    assert.equal(fenced.workers, false, availability); assert.equal(fenced.workersUnavailable, undefined, availability);
+  }
+  // No capability at all, yet the control offers the broker registry: the offer is what the view follows.
+  const offered = access(catalogue({ brokers_read: tenantScope }), []);
+  assert.equal(offered.brokers, true); assert.equal(offered.workers, false); assert.equal(offered.any, true);
+  // Content and export follow their own operations, never the metadata one.
+  const metadataOnly = access(adminOperations({ events_read_content: ["not_granted"], events_export: ["granted", "own_and_shared", "migration_required"] }));
+  assert.equal(metadataOnly.resources, true); assert.equal(metadataOnly.content, false); assert.equal(metadataOnly.export, false);
+});
+
+test("chaque ligne d’accès distingue accordé, non accordé, autre contexte et indisponible, avec son motif", () => {
+  const lines = (context) => Object.fromEntries(model.accessLines(context).map((line) => [line.key, line]));
+  const workersOnly = lines(adminContext(["read_worker_registry"], { operations: catalogue({ workers_read: tenantScope }) }));
+  assert.deepEqual(Object.keys(workersOnly), ["workers", "brokers", "resources", "journal", "content", "export", "personal_workers", "agents"]);
+  assert.deepEqual(Object.values(workersOnly).filter((line) => line.granted).map((line) => line.key), ["workers"]);
+  assert.equal(workersOnly.workers.state, "granted");
+  assert.equal(workersOnly.workers.detail, "Accordé par l’opération workers_read (portée : les registres du tenant) : états du contrôle, dernière observation runtime et associations d’autorité.");
+  assert.equal(workersOnly.brokers.state, "not_granted");
+  assert.equal(workersOnly.brokers.detail, "Opération brokers_read non accordée à ce contexte : aucune requête n’est émise.");
+  assert.equal(workersOnly.agents.granted, false, "la relation agent/sous-agent est annoncée comme non fournie");
+  assert.match(workersOnly.agents.detail, /Relation non fournie par le contrat nominatif/);
+  const personal = lines(personalContext(["read_metadata"], { operations: catalogue({ resources_read: own, events_read_metadata: own, events_stream: own,
+    workers_read: ["requires_administration"] }) }));
+  assert.equal(personal.workers.state, "elsewhere"); assert.equal(personal.workers.granted, false);
+  assert.equal(personal.workers.detail, "Opération workers_read non offerte par ce contexte. Votre appartenance porte ce droit, mais seul son contexte d’administration l’offre : ouvrez le contexte d’administration de la même appartenance.");
+  assert.equal(personal.resources.detail, "Accordé par l’opération resources_read (portée : vos ressources et celles partagées avec vous) : ressources listées avec leurs propres permissions de métadonnées, de contenu et d’export.");
+  const organizationScope = lines(adminContext());
+  assert.match(organizationScope.resources.detail, /portée : les ressources de l’organisation/);
+  const owned = lines(adminContext(undefined, { operations: ownedAdminOperations() }));
+  assert.equal(owned.workers.state, "unavailable"); assert.equal(owned.workers.granted, false);
+  assert.equal(owned.workers.detail, "Opération workers_read accordée (portée : les registres du tenant), mais indisponible. Le profil de sources adopté par le contrôle ne fournit pas cette lecture : aucune route historique n’est appelée, rien n’est déduit et l’activité reste inconnue.");
+  const migration = lines(adminContext(undefined, { operations: adminOperations({ events_export: ["granted", "own_and_shared", "migration_required"] }) }));
+  assert.equal(migration.export.state, "unavailable");
+  assert.match(migration.export.detail, /attend la migration explicite des droits humains par l’opérateur/);
+  for (const line of [...Object.values(owned), ...Object.values(migration)].filter((item) => item.state === "unavailable"))
+    assert.doesNotMatch(line.detail, /\b(?:vide|aucune activité|zéro)\b/, `${line.key} : une lecture indisponible n’est jamais annoncée vide`);
+  assert.ok(model.accessLines(null).every((line) => !line.granted && line.label && line.detail));
 });
 
 test("les filtres de brokers, ressources et événements restent des projections des lignes chargées", () => {

@@ -7,7 +7,8 @@
 import { grantKey, principalKey } from "./supervision-model.ts";
 import type { HumanContext, HumanIdentity, Principal } from "./human-model.ts";
 
-export type ResumableView = "supervision" | "journal";
+/** The views that keep only typed choices of the person (filters, period, cadence), never a server row. */
+export type ResumableView = "supervision" | "journal" | "overview";
 /** What removed the context: its own expiry, or the replacement of the dashboard session by a token renewal. */
 export type ResumeCause = "context_expired" | "session_rotated";
 /** Kept in memory only. It carries identifiers of the account and its grant, what the person typed or selected, and no server row. */
@@ -18,7 +19,7 @@ export const RESUME_MAX_RETRIES = 3;
 export const resumeRetryDelay = (attempt: number) => 2000 * 2 ** Math.min(Math.max(attempt, 0), RESUME_MAX_RETRIES - 1);
 /** A deferred identity read never starts in a hidden tab: the return to the foreground reads the accesses and decides again. */
 export const deferredReadAllowed = (input: { visible: boolean }) => input.visible;
-const resumableViews: readonly string[] = ["supervision", "journal"];
+const resumableViews: readonly string[] = ["supervision", "journal", "overview"];
 /** A revoked or unknown context, a refusal, a sign-out and a deliberate navigation never resume. */
 const resumableCauses: readonly string[] = ["context_expired", "session_rotated"];
 

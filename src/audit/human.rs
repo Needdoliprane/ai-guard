@@ -34,6 +34,8 @@ pub(crate) struct HumanProfileSnapshotV1 {
     pub account: Option<HumanAccountV1>,
     pub memberships: Vec<MembershipV1>,
     pub authorization_revision: Option<u64>,
+    /// The tenant store carries the validated human rights marker.
+    pub human_rights_marker: bool,
 }
 
 #[derive(Clone)]
@@ -63,6 +65,12 @@ fn allowed(scope: &AuthorizedScopeV1, permission: ResourcePermissionV1) -> Strin
     format!(
         "(r.owner_key=:principal OR EXISTS(SELECT 1 FROM identity_shares s,json_each(s.permissions_json) p WHERE s.resource_key=r.resource_key AND s.principal_key=:principal AND p.value='{name}'))"
     )
+}
+
+/// The authorized-resource predicate of a human read, for sibling Store reads
+/// that count instead of listing. Bound parameter `:principal` is required.
+pub(super) fn allowed_sql(scope: &AuthorizedScopeV1, permission: ResourcePermissionV1) -> String {
+    allowed(scope, permission)
 }
 
 fn require_view(scope: &AuthorizedScopeV1, filter: &HumanEventFilterV1) -> anyhow::Result<()> {
@@ -310,9 +318,11 @@ impl Store {
                 account: None,
                 memberships: vec![],
                 authorization_revision: None,
+                human_rights_marker: false,
             });
         }
         let revision = identity::authorization_revision(&tx)?;
+        let human_rights_marker = super::human_rights::installed(tx)?;
         let key = principal.key()?;
         let account: Option<HumanAccountV1> = identity::json_row(
             &tx,
@@ -324,6 +334,7 @@ impl Store {
                 account: None,
                 memberships: vec![],
                 authorization_revision: Some(revision),
+                human_rights_marker,
             });
         };
         identity::require_human_read(&tx)?;
@@ -339,6 +350,7 @@ impl Store {
             account: Some(account),
             memberships: members,
             authorization_revision: Some(revision),
+            human_rights_marker,
         })
     }
     pub(crate) fn human_resources(
@@ -712,10 +724,14 @@ impl Store {
     ) -> anyhow::Result<HumanReadReceiptV1> {
         // Format fence before any receipt: a newer read action never enters a
         // history that an older binary could still replay.
-        if super::human_rights::read_action_requires_marker(action)
-            && !super::human_rights::installed(tx)?
-        {
-            return Err(IdentityFailureV1::MigrationRequired.into());
+        if super::human_rights::read_action_requires_marker(action) {
+            if !super::human_rights::installed(tx)? {
+                return Err(IdentityFailureV1::MigrationRequired.into());
+            }
+            if !scope.is_some_and(|scope| super::human_rights::read_action_permitted(action, scope))
+            {
+                return Err(IdentityFailureV1::PermissionDenied.into());
+            }
         }
         let request_id = uuid::Uuid::new_v4().to_string();
         let record = HumanReadAuditV1 {

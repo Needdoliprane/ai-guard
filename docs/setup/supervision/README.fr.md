@@ -8,7 +8,7 @@ La vue exige un compte nominatif : [local](../identity/README.fr.md) ou [SSO](..
 
 ## Qui voit quoi
 
-La navigation, les sections et les actions suivent les capacités que le contrôle renvoie pour le contexte sélectionné et les profils de lecture qu'il sert réellement. Un profil annonce un contrat de réponse ; il n'accorde aucune permission. Le navigateur ne déduit jamais un droit d'un nom de compte ; chaque lecture est autorisée de nouveau par le gateway. Le tableau suivant décrit les contrôles qui omettent `read_profiles` (contrats de registre historiques). Le profil owned est détaillé ci-dessous.
+La navigation, les sections et les actions suivent uniquement le catalogue d’opérations (`operations`) que le contrôle renvoie avec le contexte sélectionné : une opération s’ouvre lorsqu’elle est `granted` et `available`, et son explication nomme les autres états (`not_granted`, droit détenu par l’autre contexte de la même appartenance, `migration_required`, `profile_unavailable`, `not_in_this_build`). La liste des capacités est affichée, jamais utilisée pour déduire un droit ; un profil de lecture choisit seulement un contrat de réponse. Le navigateur ne déduit jamais un droit d'un nom de compte ; chaque lecture est autorisée de nouveau par le gateway. Le tableau suivant décrit les contrôles qui omettent `read_profiles` (contrats de registre historiques). Le profil owned est détaillé ci-dessous.
 
 | Capacité du contexte sélectionné | Ce que montre Supervision | Lecture émise |
 |---|---|---|
@@ -19,7 +19,7 @@ La navigation, les sections et les actions suivent les capacités que le contrô
 | Mêmes capacités de métadonnées | Onglet **Journal** : événements autorisés, les plus récents d'abord, puis en direct | `GET /api/v1/human/events/recent?limit=100&view=metadata`, puis `GET /api/v1/human/stream?…&cursor=<live_cursor>` |
 | Aucune de ces capacités | Pas d'entrée Supervision pour ce contexte | aucune |
 
-Une source que le contexte n'accorde pas n'est jamais demandée. Le panneau **Accès de ce contexte** (replié par défaut, ouvert par son chevron) liste chaque capacité, ce qu'elle ouvre et ce qui manque. Deux éléments y figurent toujours comme indisponibles : la vue personnelle des workers (aucune chaîne authentifiée d'initiation ne relie encore un worker à une personne) et la hiérarchie agent / sous-agent (le contrat nominatif ne la renvoie pas ; elle reste inconnue et n'est jamais déduite d'un nom).
+Une source que le contexte n'accorde pas n'est jamais demandée. Le panneau **Accès de ce contexte** (replié par défaut, ouvert par son chevron) liste chaque opération du catalogue du contrôle avec l’un de quatre états — **Accordé** (accordé et servi), **Non accordé**, **Autre contexte** (détenu par l’autre contexte de la même appartenance) et **Indisponible** (accordé mais non servi, avec sa raison : migration, profil de sources ou build) — et ce qu’elle ouvre. Deux éléments y figurent toujours comme indisponibles : la vue personnelle des workers (aucune chaîne authentifiée d'initiation ne relie encore un worker à une personne) et la hiérarchie agent / sous-agent (le contrat nominatif ne la renvoie pas ; elle reste inconnue et n'est jamais déduite d'un nom).
 
 ## Profil de supervision des brokers owned
 
@@ -46,6 +46,16 @@ Un checkpoint reçu affiche ses propres réception/expiration, relation à l'aut
 Chargement, page vide réussie, premier échec de lecture et dernière page réussie datée après un échec d'actualisation restent distincts. Un détail **Brokers** ouvert reste lié à sa page datée pendant les actualisations ordinaires du heartbeat ; il se ferme lorsque son broker quitte la page ou que son autorisation, son incarnation ou ses autorités divulguées changent. Un 403 retire lignes, détails et curseurs dès les en-têtes, sans attendre le corps. Dans Supervision, il invalide aussi les lectures concurrentes avant relecture de l'offre d'accès du contrôle. Une annonce `read_profiles` modifiée ou retirée supprime le contexte sélectionné et ses données ; aucune réponse tardive ne les rétablit. Un 401 déconnecte. Aucun SSE broker, credential runner ou accès moteur n'est ajouté.
 
 Les procédures ci-dessous d'association et de pagination des workers et de fédération concernent les profils historiques ci-dessus. Ces sources restent indisponibles dans le profil owned.
+
+## Vue 360° et Mon espace
+
+Lorsque le catalogue du contexte sélectionné accorde et sert `summary_read`, le dashboard ouvre d’abord **Vue 360°** (contexte d’administration) ou **Mon espace** (contexte personnel). La page lit une fois `GET /api/v1/human/summary` et présente ce que le contrôle a calculé en une transaction, avec l’heure d’évaluation et le reçu de lecture :
+
+- **Situation du tenant / de mon espace** : une ligne par domaine. *Workers* (chaque worker enregistré par état durable et le quota qu’il retient ; l’inventaire runtime reste inconnu), *Brokers* (états des baux à l’évaluation), *Ressources* (sessions, agents, sandboxes et projets autorisés), *Décisions* de la période choisie (autorisées, à revoir, refusées ; lorsque le budget de lecture du journal arrête le décompte, la ligne dit depuis quand elle compte), *Quota du tenant* (réservations, pas une consommation mesurée) et *Usage observé* (allocations terminales de la période, méthode 1, `billable=false`). Une ligne que votre contexte ne peut pas lire indique **Non accordé à ce contexte.** ; une ligne indisponible nomme sa raison. Aucune n’est jamais présentée comme zéro.
+- **Flotte par broker** : les workers groupés par autorité de lancement et joints au registre brokers par identifiant exact. Un broker dont le bail n’est plus courant conserve le dernier état connu de ses workers avec une note ; les workers d’une autorité non enregistrée restent comptés sous **Autorité non enregistrée**.
+- **Points d’attention** : faits dérivés des seuls états durables du contrôle (worker incertain, allocation incohérente, arrêt pour mémoire, broker sans heartbeat, bail périmé, autorisation expirée ou révoquée, horloge incertaine), avec les comptes complets par type et les 50 éléments les plus récents. **Ouvrir le worker** / **Ouvrir le broker** ouvre la vue exacte lorsque votre contexte l’offre. Ce n’est pas un suivi d’incidents.
+
+**Période** ne change que les lignes des décisions et de l’usage. **Relecture automatique** a lieu toutes les 2 minutes par défaut (30 s ou manuel au choix) tant que l’onglet est visible ; chaque lecture laisse un reçu d’audit durable et compte dans les budgets de lecture humaine. Après une lecture en échec, la dernière synthèse reste affichée comme **Données périmées · dernière synthèse conservée** ; une lecture refusée retire toutes les valeurs et vos accès sont relus. Changer, laisser expirer ou révoquer le contexte, ou se déconnecter, retire la page.
 
 ## Ouvrir la vue
 
@@ -170,7 +180,7 @@ La flotte est relue toutes les 30 s tant que l'onglet est visible ; choisissez 2
 
 ## Limites
 
-- Ni inventaire runtime, ni usage, ni administration des quotas, utilisateurs ou politiques : la cible à 360° de [ui.md](../../ui.md#vues-utilisateur-et-administration-unifiée--cible-à-livrer) reste ouverte.
+- Aucun inventaire runtime. **Vue 360°** résume en une transaction les registres du tenant, les réservations de quota et les allocations observées ; les vues d’administration des appartenances, de l’usage et de la configuration et les changements délégués d’appartenance et de partage sont décrits dans [ui.md](../../ui.md#vues-utilisateur-et-administration-unifiée--cible-à-livrer) avec leur propre état. Le profil de sources possédées ne sert pas encore la synthèse.
 - Un tenant par contexte. Aucune vue inter-tenants.
 - Ni filtre ni tri serveur du registre des workers ; au plus 500 lignes de workers, 100 brokers et 300 ressources dans cette vue.
 - Ni hiérarchie d'agents ni vue personnelle des workers.

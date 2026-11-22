@@ -391,7 +391,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
                     .memberships
                     .get(id)
                     .ok_or(IdentityFailureV1::ContextRevoked)?;
-                crate::identity::authorize_context(
+                let scope = crate::identity::authorize_context(
                     &record.principal,
                     &member.0,
                     record.mode.ok_or(IdentityFailureV1::InvalidRequest)?,
@@ -399,6 +399,10 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
                         .membership_revision
                         .ok_or(IdentityFailureV1::InvalidRequest)?,
                 )?;
+                invalid(super::human_rights::read_action_permitted(
+                    &record.action,
+                    &scope,
+                ))?;
             }
             continue;
         }

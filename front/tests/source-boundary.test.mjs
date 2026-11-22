@@ -22,7 +22,7 @@ test("aucun fichier de front/src n’importe hors de front/src", () => {
 });
 
 test("le modèle et l’état de la supervision restent sans DOM ni feuille de style", () => {
-  for (const name of ["supervision-model.ts", "supervision-store.ts", "human-model.ts", "human-api.ts"]) {
+  for (const name of ["supervision-model.ts", "supervision-store.ts", "human-model.ts", "human-api.ts", "access-model.ts", "summary-model.ts"]) {
     const text = readFileSync(join(source, name), "utf8");
     assert.ok(specifiers(text).every((specifier) => specifier.endsWith(".ts")), `${name} n’importe que des modules TypeScript`);
     const code = text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|\s)\/\/.*$/gm, "");
@@ -31,10 +31,20 @@ test("le modèle et l’état de la supervision restent sans DOM ni feuille de s
 });
 
 test("les sources de la supervision n’embarquent aucune donnée d’exemple ni ressource distante", () => {
-  for (const file of files.filter((name) => /supervision|journal|human-continuity/.test(relative(source, name)))) {
+  for (const file of files.filter((name) => /supervision|journal|human-continuity|overview|summary-model|access-model/.test(relative(source, name)))) {
     const text = readFileSync(file, "utf8");
     assert.ok(!/https?:\/\//.test(text), `${relative(source, file)} ne référence aucune URL`);
     // Identifier-shaped literals would be invented rows: every identifier must come from a control read.
     assert.ok(!/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(text), `${relative(source, file)} ne contient aucun identifiant en dur`);
+  }
+});
+
+test("aucun fichier de front/src ne décide d’un droit à partir de la liste de capacités", () => {
+  // Rights come from the operation catalogue of the context. The capability list may be validated by the parser,
+  // compared as a whole to detect a changed context, or displayed; it is never searched for one capability.
+  const lookup = /\bcapabilities\s*\??\.\s*(?:includes|some|find|findIndex|findLast|indexOf|lastIndexOf|has)\s*\(/;
+  for (const file of files.filter((name) => name.endsWith(".ts"))) {
+    const code = readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|\s)\/\/.*$/gm, "");
+    assert.doesNotMatch(code, lookup, `${relative(source, file)} cherche une capacité pour décider d’un accès`);
   }
 });
