@@ -12,6 +12,7 @@ mod broker_registry;
 mod decision;
 mod event_read;
 mod identity;
+mod owned_origin;
 mod supervision;
 mod worker;
 mod workload;

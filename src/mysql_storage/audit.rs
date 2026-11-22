@@ -1,7 +1,8 @@
 //! Transactional audit for a prepared MySQL target.
 use super::{
     MysqlCredentials, MysqlEndpoint, MysqlProbeError, broker_registry, connect_options, decision,
-    driver_error, event_read::Selection, identity, open_verified, supervision, worker, workload,
+    driver_error, event_read::Selection, identity, open_verified, owned_origin::OwnedAuditLock,
+    supervision, worker, workload,
 };
 use crate::{
     audit::{
@@ -216,6 +217,14 @@ async fn binding(tx: &mut Transaction<'_>, query: &str) -> Result<Binding> {
             payload_bytes,
         },
     })
+}
+
+fn read_snapshot_options() -> TxOpts {
+    let mut options = TxOpts::new();
+    options
+        .with_readonly(true)
+        .with_isolation_level(IsolationLevel::RepeatableRead);
+    options
 }
 
 async fn require_transactional_schema(tx: &mut Transaction<'_>) -> Result<()> {
@@ -789,6 +798,68 @@ impl MysqlAuditStore {
         Ok(prefix.head)
     }
 
+    /// Closed operator preflight. The negotiated connection owns the lock
+    /// during verification and closes before a successful receipt is returned.
+    /// This produces no runtime authority and never updates the Store's cache.
+    pub async fn verify_owned_origin(
+        &self,
+        server: Uuid,
+        head_seq: i64,
+        head_hash: &str,
+    ) -> Result<AuditHead> {
+        ensure!(
+            !server.is_nil() && head_seq > 0,
+            "invalid MySQL owned audit expectation"
+        );
+        crate::control::hash(head_hash)?;
+        timeout_at(Instant::now() + DEADLINE, async {
+            let confirmed = self.confirmed.lock().await;
+            let mut conn = self.connect().await?;
+            let verified = self
+                .verify_owned_snapshot(&mut conn, server, head_seq, head_hash, &confirmed.head)
+                .await;
+            conn.disconnect()
+                .await
+                .map_err(driver_error)
+                .context("MySQL owned audit connection closure is uncertain")?;
+            verified
+        })
+        .await
+        .map_err(|_| MysqlProbeError::TimedOut)?
+    }
+
+    async fn verify_owned_snapshot(
+        &self,
+        conn: &mut Conn,
+        server: Uuid,
+        head_seq: i64,
+        head_hash: &str,
+        confirmed: &AuditHead,
+    ) -> Result<AuditHead> {
+        let ownership = OwnedAuditLock::acquire(conn, server, &self.database).await?;
+        let mut tx = conn
+            .start_transaction(read_snapshot_options())
+            .await
+            .map_err(driver_error)?;
+        let verified = async {
+            ownership.verify(&mut tx).await?;
+            let bound = binding(&mut tx, STATE).await?;
+            require_transactional_schema(&mut tx).await?;
+            let prefix = self.verify_bound(&mut tx, bound, confirmed, None).await?;
+            prefix.control_projections()?;
+            ensure!(
+                prefix.head.seq == head_seq && prefix.head.hash == head_hash,
+                "MySQL owned audit head differs from the expected head"
+            );
+            ownership.verify(&mut tx).await?;
+            Ok(prefix.head)
+        }
+        .await;
+        tx.rollback().await.map_err(driver_error)?;
+        ownership.release(conn).await?;
+        verified
+    }
+
     /// Report a row-level chain mismatch with the preceding checked prefix.
     /// Transport, schema, projection and confirmed-prefix failures remain errors.
     pub async fn integrity(&self) -> Result<Integrity> {
@@ -1039,12 +1110,8 @@ impl MysqlAuditStore {
             let mut confirmed = self.confirmed.lock().await;
             let prior = confirmed.origin.take();
             let mut conn = self.connect().await?;
-            let mut options = TxOpts::new();
-            options
-                .with_readonly(true)
-                .with_isolation_level(IsolationLevel::RepeatableRead);
             let mut tx = conn
-                .start_transaction(options)
+                .start_transaction(read_snapshot_options())
                 .await
                 .map_err(driver_error)?;
             let bound = binding(&mut tx, STATE).await?;

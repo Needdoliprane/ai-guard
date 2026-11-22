@@ -785,3 +785,86 @@ async fn the_control_guard_refuses_inside_the_append_transaction() -> Result<()>
     ensure!(stored.seq == before.0.3 + 1);
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires two fresh prepared private MySQL 8.4 QA schemas"]
+async fn owned_origin_probe_refuses_a_held_schema_and_preserves_both_audits() -> Result<()> {
+    let a = FixtureFiles::open_gateway("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_A")?;
+    let b = FixtureFiles::open_gateway("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_B")?;
+    let (mut conn_a, mut conn_b) = fresh_gateway_pair(&a, &b).await?;
+    let head_a = prepare_gateway_target(&mut conn_a, &a, "tenant-a", &DIGEST_A).await?;
+    let head_b = prepare_gateway_target(&mut conn_b, &b, "tenant-b", &DIGEST_B).await?;
+    let before_a = audit_snapshot(&mut conn_a).await?;
+    let before_b = audit_snapshot(&mut conn_b).await?;
+    let server: String = conn_a
+        .query_first("SELECT @@GLOBAL.server_uuid")
+        .await?
+        .context("missing server UUID in the owned-origin fixture")?;
+    let server = Uuid::parse_str(&server)?;
+    let store_a = a.reader("tenant-a", a.target.namespace)?;
+    let store_b = b.reader("tenant-b", b.target.namespace)?;
+
+    // Hold exactly the lock of A's physical database through another verified
+    // session. B has its own lock and must remain independently readable.
+    let mut scope = b"ai-guard:owned-mysql-source:v1\0".to_vec();
+    scope.extend_from_slice(server.as_bytes());
+    scope.extend_from_slice(a.target.database.as_bytes());
+    let lock = hex::encode(Sha256::digest(scope));
+    let acquired: Option<i64> = conn_a.exec_first("SELECT GET_LOCK(?, 0)", (&lock,)).await?;
+    ensure!(acquired == Some(1), "fixture could not take the lock for A");
+    let contested = store_a
+        .verify_owned_origin(server, head_a.seq, &head_a.hash)
+        .await;
+    let independent = store_b
+        .verify_owned_origin(server, head_b.seq, &head_b.hash)
+        .await;
+    let released: Option<i64> = conn_a
+        .exec_first("SELECT RELEASE_LOCK(?)", (&lock,))
+        .await?;
+    ensure!(
+        released == Some(1),
+        "fixture could not confirm lock release"
+    );
+    ensure!(
+        contested
+            .expect_err("a second owner must refuse")
+            .to_string()
+            == "MySQL owned audit target is already held"
+    );
+    ensure!(independent? == head_b);
+    ensure!(
+        store_a
+            .verify_owned_origin(Uuid::new_v4(), head_a.seq, &head_a.hash)
+            .await
+            .is_err()
+    );
+    ensure!(
+        store_a
+            .verify_owned_origin(server, head_a.seq + 1, &head_a.hash)
+            .await
+            .is_err()
+    );
+    let wrong_namespace = a.reader("tenant-a", b.target.namespace)?;
+    ensure!(
+        wrong_namespace
+            .verify_owned_origin(server, head_a.seq, &head_a.hash)
+            .await
+            .is_err()
+    );
+    ensure!(
+        store_a
+            .verify_owned_origin(server, head_a.seq, &head_a.hash)
+            .await?
+            == head_a
+    );
+    let remaining_owner = conn_a
+        .exec_first::<Option<u64>, _, _>("SELECT IS_USED_LOCK(?)", (&lock,))
+        .await?;
+    ensure!(
+        remaining_owner == Some(None),
+        "preflight did not release A's lock"
+    );
+    ensure!(audit_snapshot(&mut conn_a).await? == before_a);
+    ensure!(audit_snapshot(&mut conn_b).await? == before_b);
+    Ok(())
+}

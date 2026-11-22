@@ -1,4 +1,6 @@
 //! Operator-side read-only probe for MySQL transport and a prepared audit target.
+//! The `owned_origin_preflight` receipt confirms the expected origin under the
+//! schema lock and successful release and disconnect before returning.
 use agentsandbox::{
     control_fs::{PrivateFile, absolute_path},
     diagnostics::{
@@ -29,7 +31,7 @@ use std::{
 };
 use uuid::Uuid;
 
-const USAGE: &str = "usage: mysql_storage_probe <private JSON file> | --registry <file> --tenant <id> [--verify-control-projections]";
+const USAGE: &str = "usage: mysql_storage_probe <private JSON file> | --registry <file> --tenant <id> [--verify-control-projections | --verify-owned-origin <server-uuid> <head-seq> <head-hash>]";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -58,14 +60,24 @@ enum Invocation {
     Registry {
         path: PathBuf,
         tenant: String,
-        verify_control_projections: bool,
+        verification: RegistryVerification,
+    },
+}
+
+enum RegistryVerification {
+    Binding,
+    ControlProjections,
+    OwnedOrigin {
+        server: Uuid,
+        head_seq: i64,
+        head_hash: String,
     },
 }
 
 struct Binding<'a> {
     tenant: &'a str,
     namespace: Uuid,
-    verify_control_projections: bool,
+    verification: RegistryVerification,
 }
 
 #[derive(Serialize)]
@@ -75,6 +87,8 @@ struct BoundTargetReceipt {
     audit_head: AuditHead,
     #[serde(skip_serializing_if = "Option::is_none")]
     control_projections_verified: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verification_mode: Option<&'static str>,
 }
 
 fn material(directory: &Path, file: &Path, max: usize) -> Result<PrivateFile> {
@@ -103,8 +117,8 @@ async fn run() -> Result<()> {
         Invocation::Registry {
             path,
             tenant,
-            verify_control_projections,
-        } => check_registry_target(&path, &tenant, verify_control_projections).await,
+            verification,
+        } => check_registry_target(&path, &tenant, verification).await,
     }
 }
 
@@ -117,9 +131,37 @@ fn parse_invocation(mut arguments: impl Iterator<Item = OsString>) -> Result<Inv
     let flag = arguments.next().context(USAGE)?;
     ensure!(flag.as_os_str() == "--tenant", "{USAGE}");
     let tenant = arguments.next().context(USAGE)?;
-    let verify_control_projections = match arguments.next() {
-        None => false,
-        Some(flag) if flag.as_os_str() == "--verify-control-projections" => true,
+    let verification = match arguments.next() {
+        None => RegistryVerification::Binding,
+        Some(flag) if flag.as_os_str() == "--verify-control-projections" => {
+            RegistryVerification::ControlProjections
+        }
+        Some(flag) if flag.as_os_str() == "--verify-owned-origin" => {
+            let mut next = || {
+                arguments
+                    .next()
+                    .context(USAGE)?
+                    .into_string()
+                    .map_err(|_| anyhow!("{USAGE}"))
+            };
+            let server = Uuid::parse_str(&next()?).map_err(|_| anyhow!("{USAGE}"))?;
+            let head_seq: i64 = next()?.parse().map_err(|_| anyhow!("{USAGE}"))?;
+            let head_hash = next()?;
+            ensure!(
+                !server.is_nil()
+                    && head_seq > 0
+                    && head_hash.len() == 64
+                    && head_hash
+                        .bytes()
+                        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')),
+                "{USAGE}"
+            );
+            RegistryVerification::OwnedOrigin {
+                server,
+                head_seq,
+                head_hash,
+            }
+        }
         Some(_) => bail!("{USAGE}"),
     };
     ensure!(arguments.next().is_none(), "{USAGE}");
@@ -128,7 +170,7 @@ fn parse_invocation(mut arguments: impl Iterator<Item = OsString>) -> Result<Inv
     Ok(Invocation::Registry {
         path: path.into(),
         tenant,
-        verify_control_projections,
+        verification,
     })
 }
 
@@ -189,7 +231,7 @@ fn select_mysql_target<'a>(
 async fn check_registry_target(
     path: &Path,
     tenant: &str,
-    verify_control_projections: bool,
+    verification: RegistryVerification,
 ) -> Result<()> {
     let registry = decode_tenant_registry(&read_tenant_registry_file(path)?)?;
     let profile = select_mysql_target(&registry, tenant)?;
@@ -220,7 +262,7 @@ async fn check_registry_target(
         Some(Binding {
             tenant,
             namespace: profile.namespace,
-            verify_control_projections,
+            verification,
         }),
     )
     .await
@@ -276,16 +318,30 @@ async fn check_target(
                 Redactor::new(Vec::new()),
                 DEFAULT_MAX_EVENTS as i64,
             )?;
-            let audit_head = if binding.verify_control_projections {
-                store.verify_control_projections().await?
-            } else {
-                store.verify().await?
-            };
+            let (audit_head, control_projections_verified, verification_mode) =
+                match binding.verification {
+                    RegistryVerification::Binding => (store.verify().await?, None, None),
+                    RegistryVerification::ControlProjections => {
+                        (store.verify_control_projections().await?, Some(true), None)
+                    }
+                    RegistryVerification::OwnedOrigin {
+                        server,
+                        head_seq,
+                        head_hash,
+                    } => (
+                        store
+                            .verify_owned_origin(server, head_seq, &head_hash)
+                            .await?,
+                        Some(true),
+                        Some("owned_origin_preflight"),
+                    ),
+                };
             serde_json::to_string(&BoundTargetReceipt {
                 configured_authentication,
                 binding_verified: true,
                 audit_head,
-                control_projections_verified: binding.verify_control_projections.then_some(true),
+                control_projections_verified,
+                verification_mode,
             })?
         }
         None => serde_json::to_string(&probe(endpoint, credentials).await?)?,
@@ -340,13 +396,21 @@ mod tests {
         }
         assert!(matches!(
             parse(&["--registry", "tenants.json", "--tenant", "b"])?,
-            Invocation::Registry { path, tenant, verify_control_projections: false }
+            Invocation::Registry { path, tenant, verification: RegistryVerification::Binding }
                 if path.as_path() == Path::new("tenants.json") && tenant == "b"
         ));
         assert!(matches!(
             parse(&["--registry", "tenants.json", "--tenant", "b", "--verify-control-projections"])?,
-            Invocation::Registry { path, tenant, verify_control_projections: true }
+            Invocation::Registry { path, tenant, verification: RegistryVerification::ControlProjections }
                 if path.as_path() == Path::new("tenants.json") && tenant == "b"
+        ));
+        let server_uuid = "01234567-89ab-4def-8012-3456789abcde";
+        let head = "ab".repeat(32);
+        assert!(matches!(
+            parse(&["--registry", "tenants.json", "--tenant", "b", "--verify-owned-origin", server_uuid, "3", &head])?,
+            Invocation::Registry {
+                path, tenant, verification: RegistryVerification::OwnedOrigin { server, head_seq: 3, head_hash }
+            } if path.as_path() == Path::new("tenants.json") && tenant == "b" && server.to_string() == server_uuid && head_hash == head
         ));
         for args in [
             &[][..],
@@ -369,9 +433,54 @@ mod tests {
                 "--verify-control-projections",
                 "--verify-control-projections",
             ],
+            &[
+                "--registry",
+                "tenants.json",
+                "--tenant",
+                "b",
+                "--verify-owned-origin",
+                server_uuid,
+                "3",
+            ],
+            &[
+                "--registry",
+                "tenants.json",
+                "--tenant",
+                "b",
+                "--verify-owned-origin",
+                server_uuid,
+                "0",
+                &head,
+            ],
         ] {
             assert!(parse(args).is_err());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn only_owned_origin_preflight_labels_the_receipt() -> Result<()> {
+        let mut receipt = BoundTargetReceipt {
+            configured_authentication: MysqlAuthentication::Password,
+            binding_verified: true,
+            audit_head: AuditHead {
+                seq: 1,
+                hash: "ab".repeat(32),
+                payload_bytes: 128,
+            },
+            control_projections_verified: Some(true),
+            verification_mode: None,
+        };
+        let mut expected = json!({
+            "configured_authentication": "password",
+            "binding_verified": true,
+            "audit_head": receipt.audit_head,
+            "control_projections_verified": true,
+        });
+        assert_eq!(serde_json::to_value(&receipt)?, expected);
+        receipt.verification_mode = Some("owned_origin_preflight");
+        expected["verification_mode"] = json!("owned_origin_preflight");
+        assert_eq!(serde_json::to_value(&receipt)?, expected);
         Ok(())
     }
 
