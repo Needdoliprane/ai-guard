@@ -212,7 +212,7 @@ struct GatewayArgs {
     relay_retention_file: Option<PathBuf>,
     /// Private operator egress policy of the local tenant (exact name:port
     /// destinations, grantable class, grant ceiling). Absent means deny all.
-    #[arg(long, conflicts_with = "tenants_file")]
+    #[arg(long, conflicts_with_all = ["tenants_file", "human_sources_activation"])]
     egress_policy_file: Option<PathBuf>,
     /// Explicit private OIDC gateway configuration; absent means no SSO/IdP calls.
     #[arg(long)]
@@ -1779,6 +1779,26 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn gateway_local_egress_policy_refuses_owned_activation_and_tenant_registry() {
+        let policy = ["--egress-policy-file", "egress.json"];
+        assert_eq!(
+            gateway_arguments(&policy).egress_policy_file.as_deref(),
+            Some(Path::new("egress.json"))
+        );
+        for source in [
+            ["--human-sources-activation", "activation.json"],
+            ["--tenants-file", "tenants.json"],
+        ] {
+            let options = ["agentsandbox", "gateway"].into_iter().chain(source);
+            assert!(Cli::try_parse_from(options.clone()).is_ok());
+            let error = Cli::try_parse_from(options.chain(policy))
+                .err()
+                .expect("local egress policy must conflict with the selected configuration source");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
     }
 
     fn gateway_arguments(arguments: &[&str]) -> GatewayArgs {
