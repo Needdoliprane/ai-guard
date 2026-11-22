@@ -405,13 +405,13 @@ pub(crate) fn load_human_sources_activation(path: &Path) -> Result<LoadedHumanSo
     })
 }
 
-/// Inputs of the in-place identity-marker maintenance, from the published
-/// activation only. Files and metadata; no SQLite, owner or write.
+/// Inputs of the in-place identity-marker maintenance. Files and metadata;
+/// opening these inputs never acquires an owner or opens SQLite.
 pub(super) struct LoadedIdentityMarkerInputs {
     pub manifest: PrivateFile,
     pub configuration: HumanAuthorityConfigurationV1,
     pub files: Vec<(HumanConfigurationFileKindV1, PrivateFile)>,
-    pub preparation_directory: PathBuf,
+    pub excluded_directories: Vec<PathBuf>,
     pub redactor: Redactor,
     pub max_events: u64,
 }
@@ -460,7 +460,31 @@ pub(super) fn load_identity_marker_inputs(
         manifest,
         configuration,
         files,
-        preparation_directory: loaded.directory.path().to_owned(),
+        excluded_directories: vec![loaded.directory.path().to_owned()],
+        redactor,
+        max_events,
+    })
+}
+
+pub(super) fn load_explicit_identity_marker_inputs(
+    args: &ExplicitOwnedSourcesArgs,
+) -> Result<LoadedIdentityMarkerInputs> {
+    let (resolved, redactor, max_events) = args.resolve_for_maintenance()?;
+    let mut excluded_directories = std::iter::once(resolved.manifest.path())
+        .chain(resolved.files.iter().map(|(_, file)| file.path()))
+        .map(|path| {
+            path.parent()
+                .map(Path::to_owned)
+                .context("owned source reference parent missing")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    excluded_directories.sort();
+    excluded_directories.dedup();
+    Ok(LoadedIdentityMarkerInputs {
+        manifest: resolved.manifest,
+        configuration: resolved.configuration,
+        files: resolved.files,
+        excluded_directories,
         redactor,
         max_events,
     })

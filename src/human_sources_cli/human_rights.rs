@@ -5,7 +5,9 @@
 //! The command opens the union through the maintenance guard, which takes the
 //! real owner locks: a running gateway makes it refuse. Standard output is one
 //! closed JSON report; a refusal is one closed, secret-free line.
-use super::activation::load_identity_marker_inputs;
+use super::activation::{
+    ExplicitOwnedSourcesArgs, load_explicit_identity_marker_inputs, load_identity_marker_inputs,
+};
 use agentsandbox::human_authority::migration::operator::{
     OwnedIdentityMarkersRefusalV1, OwnedIdentityMarkersReportV1, OwnedIdentityMarkersRequest,
     install_owned_identity_markers,
@@ -31,13 +33,19 @@ enum HumanRightsCommand {
 #[derive(Args)]
 struct HumanRightsRunArgs {
     /// Published private owned-source activation (`activation.json`).
-    #[arg(long)]
-    human_sources_activation: PathBuf,
+    #[arg(
+        long,
+        required_unless_present = "human_sources_manifest",
+        conflicts_with = "human_sources_manifest"
+    )]
+    human_sources_activation: Option<PathBuf>,
+    #[command(flatten)]
+    explicit: ExplicitOwnedSourcesArgs,
     /// Adopted tenant whose Store14/15 receives the markers.
     #[arg(long)]
     tenant_id: String,
     /// New private directory (install) or the same directory (resume), outside
-    /// the preparation directory and every source directory.
+    /// the preparation or explicit reference directories and every source directory.
     #[arg(long)]
     maintenance_dir: PathBuf,
     /// Operator attestation: gateway, dashboard, ingress and brokers are stopped.
@@ -50,17 +58,20 @@ fn execute(args: &HumanRightsRunArgs, resume: bool) -> Result<OwnedIdentityMarke
     if !args.confirm_control_stopped {
         bail!("human_rights_control_stop_attestation_required");
     }
-    let inputs = load_identity_marker_inputs(&args.human_sources_activation, &args.tenant_id)
-        .map_err(|error| {
-            if error
-                .chain()
-                .any(|cause| cause.to_string() == "human_rights_source_unknown")
-            {
-                anyhow::Error::from(OwnedIdentityMarkersRefusalV1::SourceUnknown)
-            } else {
-                anyhow::anyhow!("human_rights_activation_refused")
-            }
-        })?;
+    let inputs = match args.human_sources_activation.as_deref() {
+        Some(path) => load_identity_marker_inputs(path, &args.tenant_id),
+        None => load_explicit_identity_marker_inputs(&args.explicit),
+    }
+    .map_err(|error| {
+        if error
+            .chain()
+            .any(|cause| cause.to_string() == "human_rights_source_unknown")
+        {
+            anyhow::Error::from(OwnedIdentityMarkersRefusalV1::SourceUnknown)
+        } else {
+            anyhow::anyhow!("human_rights_activation_refused")
+        }
+    })?;
     install_owned_identity_markers(OwnedIdentityMarkersRequest {
         manifest: inputs.manifest,
         configuration: inputs.configuration,
@@ -69,7 +80,7 @@ fn execute(args: &HumanRightsRunArgs, resume: bool) -> Result<OwnedIdentityMarke
         redactor: inputs.redactor,
         max_events: inputs.max_events,
         maintenance_directory: args.maintenance_dir.clone(),
-        excluded_directories: vec![inputs.preparation_directory],
+        excluded_directories: inputs.excluded_directories,
         resume,
     })
 }

@@ -151,6 +151,28 @@ agentsandbox human-sources human-rights resume \
   --confirm-control-stopped
 ```
 
+Pour une clôture explicite déjà publiée, fournissez ensemble son manifeste,
+son enveloppe de credentials techniques, son registre de tenants et sa révision
+de contrôle. Indiquez `--max-events` si la clôture utilise une valeur différente
+de `100000`. Pour OIDC, indiquez aussi `--oidc-config` et
+`--human-oidc-mapping-revision` avec les mêmes valeurs qu'à la publication.
+Placez le répertoire de maintenance hors des répertoires qui contiennent la
+clôture, sa configuration et tous les fichiers sources.
+
+```sh
+agentsandbox human-sources human-rights install \
+  --human-sources-manifest /absolute/control/published/closure.json \
+  --human-credentials-envelope /absolute/control/published/technical-credentials.json \
+  --tenants-file /absolute/control/config/tenants.json \
+  --human-control-config-revision 7 \
+  --tenant-id tenant-a \
+  --maintenance-dir /absolute/control/human-rights-tenant-a \
+  --confirm-control-stopped
+```
+
+Pour `resume`, reprenez les mêmes arguments explicites et le même répertoire
+de maintenance.
+
 `install` prend les verrous propriétaires de toute l'union, écrit une sauvegarde
 SQLite vérifiée, journalise son intention, sa sauvegarde et sa confirmation, et
 ajoute chaque marqueur en attente dans une seule transaction. Le plan de
@@ -183,9 +205,9 @@ de refus indique l'état sans afficher les noms privés. Dans les deux cas,
 gardez le répertoire de maintenance et les sources intacts pour examen hors
 ligne. Vérifiez l'identité, le propriétaire et les permissions du répertoire
 d'origine, ainsi que le plafond ci-dessus. Reprenez avec le même tenant, la
-même activation et le même répertoire de maintenance lorsque ces contrôles
-peuvent réussir. Si le plafond empêche toujours la reprise, conservez le
-répertoire entier pour examen avec le mainteneur avant toute autre maintenance.
+mêmes arguments de source et le même répertoire de maintenance lorsque ces
+contrôles peuvent réussir. Si le plafond empêche toujours la reprise, conservez
+le répertoire entier pour examen avec le mainteneur avant toute autre maintenance.
 
 ## Périmètre de validation
 

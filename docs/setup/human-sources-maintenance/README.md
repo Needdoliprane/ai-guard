@@ -145,6 +145,26 @@ agentsandbox human-sources human-rights resume \
   --confirm-control-stopped
 ```
 
+For an already published explicit closure, use its manifest, technical
+credential envelope, tenant registry and control revision together. Supply
+`--max-events` if the closure uses a value other than `100000`. For OIDC, also
+supply `--oidc-config` and `--human-oidc-mapping-revision` with the same values
+used at publication. Keep the maintenance directory outside the directories
+holding the closure, its configuration and all source files.
+
+```sh
+agentsandbox human-sources human-rights install \
+  --human-sources-manifest /absolute/control/published/closure.json \
+  --human-credentials-envelope /absolute/control/published/technical-credentials.json \
+  --tenants-file /absolute/control/config/tenants.json \
+  --human-control-config-revision 7 \
+  --tenant-id tenant-a \
+  --maintenance-dir /absolute/control/human-rights-tenant-a \
+  --confirm-control-stopped
+```
+
+For `resume`, reuse the same explicit arguments and maintenance directory.
+
 `install` takes the owner locks of the whole union, writes a verified SQLite
 backup, journals its intent, backup and confirmation, and appends every pending
 marker in one transaction. The maintenance plan identifies the selected
@@ -174,9 +194,9 @@ could not be verified as private. The refusal line reports the state without
 printing private entry names. For either refusal, keep the maintenance directory
 and sources intact for offline operator review. Verify the identity, owner and
 permissions of the original directory and the bound above. Resume with the same
-tenant, activation and maintenance directory once those checks can pass. If the
-limit still prevents resume, retain the whole directory for review with the
-maintainer before starting another maintenance.
+tenant, source arguments and maintenance directory once those checks can pass.
+If the limit still prevents resume, retain the whole directory for review with
+the maintainer before starting another maintenance.
 
 ## Validation scope
 
