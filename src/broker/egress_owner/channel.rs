@@ -704,6 +704,18 @@ fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+async fn receive_retirement_before<T>(
+    deadline: Instant,
+    confirmation: oneshot::Receiver<T>,
+) -> Option<T> {
+    if Instant::now() >= deadline {
+        return None;
+    }
+    let confirmation = timeout_at(deadline, confirmation).await.ok()?.ok()?;
+    // timeout_at may deliver a ready confirmation when resumed past its timer.
+    (Instant::now() < deadline).then_some(confirmation)
+}
+
 impl<W: AsyncWrite + Unpin + Send> Owner<W> {
     fn now_ms(&self) -> u64 {
         millis(self.started.elapsed())
@@ -794,7 +806,7 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
         closing: ClosingFlow,
         deadline: Instant,
     ) -> Result<EgressCloseReasonV1, ()> {
-        let Ok(Ok(closed)) = timeout_at(deadline, closing.closed).await else {
+        let Some(closed) = receive_retirement_before(deadline, closing.closed).await else {
             self.mark_retirement_unconfirmed();
             return Err(());
         };
@@ -823,7 +835,7 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
                 reason,
                 outcome,
             } => {
-                let Ok(Ok(outcome)) = timeout_at(deadline, outcome).await else {
+                let Some(outcome) = receive_retirement_before(deadline, outcome).await else {
                     self.mark_retirement_unconfirmed();
                     return Err(());
                 };

@@ -886,6 +886,73 @@ async fn egress_broker_missing_detached_opening_report_keeps_quiescence_unknown(
 }
 
 #[tokio::test]
+async fn egress_broker_ready_retirement_receipts_after_deadline_cannot_confirm_quiescence() {
+    let (mut owner, _incoming, _stop) = fixture_owner(
+        tokio::io::sink(),
+        gateway(true),
+        443,
+        ChannelTimes::default(),
+    );
+    let expired = Instant::now();
+    let (reported_opening, outcome) = oneshot::channel();
+    assert!(
+        reported_opening
+            .send(OpeningOutcome {
+                result: Err(cancelled_opening()),
+                socket_unobserved: false
+            })
+            .is_ok()
+    );
+    let (reported_socket, closed) = oneshot::channel();
+    assert!(
+        reported_socket
+            .send(SocketClosure {
+                at: Instant::now(),
+                reason: EgressCloseReasonV1::Revoked,
+                traffic: SocketTraffic::default(),
+            })
+            .is_ok()
+    );
+
+    let opening = owner
+        .collect_retired(
+            RetiredFlow::Opening {
+                flow_id: 1,
+                decision_id: IdV1::random(),
+                reason: EgressCloseReasonV1::OwnerExit,
+                outcome,
+            },
+            expired,
+        )
+        .await;
+    let socket = owner
+        .record_closed(
+            ClosingFlow {
+                flow_id: 2,
+                decision_id: IdV1::random(),
+                connected_at: expired,
+                closed,
+            },
+            expired,
+        )
+        .await;
+
+    assert_eq!(
+        (opening, socket),
+        (Err(()), Err(())),
+        "ready receipts beyond the budget are late"
+    );
+    let terminal = owner
+        .shutdown(
+            ChannelExit::HelperClosed,
+            Instant::now() + OBSERVATION_DRAIN,
+        )
+        .await;
+    assert_eq!(terminal.cause, ChannelExit::HelperClosed);
+    assert_eq!(terminal.local_quiescence, LocalQuiescence::Unknown);
+}
+
+#[tokio::test]
 async fn egress_broker_eof_without_socket_confirmation_keeps_quiescence_unknown() {
     let control = gateway(true);
     let (mut owner, _incoming, _stop) = fixture_owner(
