@@ -124,9 +124,9 @@ Utiliser un `TMPDIR` absolu sans lien symbolique et la même révision pour le b
 
 ## Read-only origin preflight · Prévol d’origine en lecture seule
 
-Use fresh A and B from the same profile and a probe built at the test’s source revision. The test selects the read-only service account for B, checks the exact receipt and the released lock, then supplies a different head and checks for a refusal without a receipt. It compares both audits before and after the invocations. Both profiles use the existing audit schema. Owned formats 14 and 15 require separate acceptance tests.
+Prepare fresh A with `writer` and fresh B with `witness` for each profile. Use a probe built at the test’s source revision. The test selects the read-only service account for B, checks the exact receipt for the expected head, then supplies a different head and checks for a refusal without a receipt. After each invocation it verifies that no session holds the expected lock. It compares both audits before and after the invocations. Both profiles use the existing audit schema. Owned formats 14 and 15 require separate acceptance tests.
 
-Utiliser deux cibles A et B neuves du même profil et une sonde construite à la révision du test. Le test sélectionne le compte de service en lecture seule de B, vérifie le reçu exact et la libération du verrou, puis soumet une tête différente et vérifie le refus sans reçu. Il compare les deux audits avant et après les appels. Les deux profils utilisent le schéma d’audit existant. Les formats owned 14 et 15 exigent des tests d’acceptation distincts.
+Pour chaque profil, préparer A avec `writer` et B avec `witness`, tous deux neufs. Utiliser une sonde construite à la révision du test. Le test sélectionne le compte de service en lecture seule de B, vérifie le reçu exact de la tête attendue, puis soumet une tête différente et vérifie le refus sans reçu. Après chaque appel, il vérifie qu’aucune session ne détient le verrou attendu. Il compare les deux audits avant et après les appels. Les deux profils utilisent le schéma d’audit existant. Les formats owned 14 et 15 exigent des tests d’acceptation distincts.
 
 ```sh
 cargo build --locked --offline --features mysql-storage --example mysql_storage_probe

@@ -992,6 +992,22 @@ async fn prepared_registry_probe_verifies_owned_origin_and_preserves_audits() ->
                 && a.client_identity.is_some() == b.client_identity.is_some(),
             "origin QA requires distinct schemas and accounts on one loopback profile"
         );
+        let mut witness = maintenance_connection(
+            b.target.endpoint(&b.target.username),
+            b.credentials(&b.reader_password)?,
+        )
+        .await?;
+        let update_plan = witness
+            .query_drop("EXPLAIN UPDATE ai_guard_audit_state SET head_seq=head_seq WHERE singleton=1")
+            .await;
+        ensure!(
+            matches!(update_plan, Err(mysql_async::Error::Server(error)) if matches!(error.code, 1142 | 1143)),
+            "origin QA requires B's read-only service account"
+        );
+        witness
+            .disconnect()
+            .await
+            .map_err(|_| anyhow::anyhow!("cannot close the QA witness preflight"))?;
         let mut conn_a = a.maintenance().await?;
         let mut conn_b = b.maintenance().await?;
         require_fresh(&mut conn_a).await?;
@@ -1040,7 +1056,11 @@ async fn prepared_registry_probe_verifies_owned_origin_and_preserves_audits() ->
             &json!({
                 "configured_authentication": entries[1]["storage"]["authentication"]["mode"],
                 "binding_verified": true,
-                "audit_head": &head,
+                "audit_head": {
+                    "seq": head.seq,
+                    "hash": head.hash,
+                    "payload_bytes": head.payload_bytes,
+                },
                 "control_projections_verified": true,
                 "verification_mode": "owned_origin_preflight",
             }),
