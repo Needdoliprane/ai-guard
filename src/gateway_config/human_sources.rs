@@ -2,6 +2,7 @@
 //! No DTO, digest, pathname or expected binding is a source authenticator.
 use super::*;
 use agentsandbox::{
+    api::validate_owned_technical_credentials_configuration,
     audit::{
         AuditCapacityPolicyV1, WorkloadAuditPolicyV1,
         authentication::{AuthenticationAuditPolicyV1, AuthenticationCapacityPlanV1},
@@ -9,8 +10,8 @@ use agentsandbox::{
     control_fs::{PrivateFile, absolute_path},
     human_authority::{
         HumanAuthorityClosureV1, HumanAuthorityConfigurationV1, HumanConfigurationFileKindV1,
-        HumanConfigurationFileV1, HumanOidcConfigurationV1, HumanSourceKindV1,
-        HumanSourcesConfigurationV1,
+        HumanConfigurationFileV1, HumanOidcConfigurationV1, HumanSourceDescriptorV1,
+        HumanSourceKindV1, HumanSourcesConfigurationV1,
         startup::{
             HumanOwnedSourceOptions, HumanOwnedStartupBundle, HumanOwnedStartupRequest,
             observe_human_storage_binding,
@@ -248,6 +249,59 @@ pub struct PreparedOwnedSources {
     pub credentials: PrivateFile,
 }
 
+/// Retained private files and resolved metadata, without an owner or database.
+pub(crate) struct ResolvedOwnedSources {
+    pub(crate) manifest: PrivateFile,
+    pub(crate) configuration: HumanAuthorityConfigurationV1,
+    pub(crate) files: Vec<(HumanConfigurationFileKindV1, PrivateFile)>,
+    sources: Vec<HumanSourceDescriptorV1>,
+    options: BTreeMap<uuid::Uuid, HumanOwnedSourceOptions>,
+    credentials: PrivateFile,
+}
+
+impl ResolvedOwnedSources {
+    pub(crate) fn into_startup_request(self) -> Result<(HumanOwnedStartupRequest, PrivateFile)> {
+        let configuration =
+            HumanSourcesConfigurationV1::new(self.sources, self.configuration, self.files)?;
+        let request = HumanOwnedStartupRequest {
+            manifest: self.manifest,
+            configuration,
+            sources: self.options,
+        };
+        Ok((request, self.credentials))
+    }
+
+    /// Maintenance cannot rely on the later gateway credential registry.
+    /// Check the same private envelope and independently read token roles here.
+    pub(crate) fn validate_for_maintenance(&self, tenants: &[ConfiguredTenant]) -> Result<()> {
+        let closure = HumanAuthorityClosureV1::from_bytes(self.manifest.bytes())?;
+        HumanSourcesConfigurationV1::new(
+            self.sources.clone(),
+            self.configuration.clone(),
+            self.files.clone(),
+        )?;
+        let configured = tenants
+            .iter()
+            .map(|tenant| {
+                (
+                    tenant.tenant_id.as_str(),
+                    tenant.runner_token.as_str(),
+                    tenant.viewer_token.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        validate_owned_technical_credentials_configuration(
+            self.credentials.bytes(),
+            &closure,
+            &configured,
+        )?;
+        for (_, file) in &self.files {
+            file.revalidate()?;
+        }
+        self.manifest.revalidate()
+    }
+}
+
 /// Pure shared resolution from the retained private OIDC configuration and its
 /// actual trust bundle. No authentication ledger, HTTP discovery or owner.
 pub(crate) fn resolved_oidc(
@@ -300,6 +354,40 @@ pub fn load_owned_sources(
     mapping_revision: Option<u64>,
     redactor: Redactor,
 ) -> Result<PreparedOwnedSources> {
+    let result = (|| -> Result<_> {
+        let (request, credentials) = resolve_owned_sources(
+            manifest_path,
+            envelope_path,
+            control_path,
+            oidc_path,
+            tenants,
+            max_events,
+            control_revision,
+            mapping_revision,
+            redactor,
+        )?
+        .into_startup_request()?;
+        let bundle = HumanOwnedStartupBundle::open(request)?;
+        Ok(PreparedOwnedSources {
+            bundle,
+            credentials,
+        })
+    })();
+    result.map_err(|_:anyhow::Error|anyhow::anyhow!("Owned human startup refused; preserve sources, manifests and credentials; verify exact configuration, explicit revisions, formats14/15/Auth5, private files, durable clocks and offline migration status"))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_owned_sources(
+    manifest_path: &Path,
+    envelope_path: &Path,
+    control_path: &Path,
+    oidc_path: Option<&Path>,
+    tenants: &[ConfiguredTenant],
+    max_events: u64,
+    control_revision: u64,
+    mapping_revision: Option<u64>,
+    redactor: Redactor,
+) -> Result<ResolvedOwnedSources> {
     let result = (|| -> Result<_> {
         let manifest = PrivateFile::open(
             &absolute_path(manifest_path)?,
@@ -490,14 +578,12 @@ pub fn load_owned_sources(
             file.revalidate()?;
         }
         manifest.revalidate()?;
-        let configuration = HumanSourcesConfigurationV1::new(sources, configuration, files)?;
-        let bundle = HumanOwnedStartupBundle::open(HumanOwnedStartupRequest {
+        Ok(ResolvedOwnedSources {
             manifest,
             configuration,
-            sources: options,
-        })?;
-        Ok(PreparedOwnedSources {
-            bundle,
+            files,
+            sources,
+            options,
             credentials,
         })
     })();

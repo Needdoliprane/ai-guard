@@ -153,6 +153,37 @@ pub fn validate_technical_credentials_configuration(
     validate_envelope_configuration(bytes, expected).map(|_| ())
 }
 
+/// Check an existing closure's private envelope against independently loaded
+/// tenant, runner and viewer inputs before opening any maintenance source.
+pub fn validate_owned_technical_credentials_configuration(
+    bytes: &[u8],
+    closure: &crate::human_authority::HumanAuthorityClosureV1,
+    tenants: &[(&str, &str, &str)],
+) -> anyhow::Result<()> {
+    let tenant_order = tenants
+        .iter()
+        .map(|(tenant, _, _)| (*tenant).to_owned())
+        .collect::<Vec<_>>();
+    let index = CredentialIndex::from_configured_inputs(
+        &tenant_order,
+        tenants.iter().flat_map(|&(tenant_id, runner, viewer)| {
+            [
+                ControlCredentialInput {
+                    tenant_id,
+                    role: CredentialRole::Runner,
+                    token: runner,
+                },
+                ControlCredentialInput {
+                    tenant_id,
+                    role: CredentialRole::Viewer,
+                    token: viewer,
+                },
+            ]
+        }),
+    )?;
+    validate_runtime_configuration(bytes, &index, &tenant_order, closure).map(|_| ())
+}
+
 pub(super) fn validate_envelope_configuration(
     bytes: &[u8],
     expected: &EnvelopeExpectationsV1,

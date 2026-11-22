@@ -29,6 +29,7 @@ pub(crate) use review_credentials::authenticate_review_runner_fixture;
 pub use review_credentials::preparation::{
     EnvelopeExpectationsV1, TechnicalCredentialIdentityV1, TechnicalCredentialInput,
     TechnicalCredentialRoleV1, prepare_envelope_configuration,
+    validate_owned_technical_credentials_configuration,
     validate_technical_credentials_configuration,
 };
 

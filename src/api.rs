@@ -46,6 +46,7 @@ mod build_identity_http_tests;
 pub use auth::{
     EnvelopeExpectationsV1, TechnicalCredentialIdentityV1, TechnicalCredentialInput,
     TechnicalCredentialRoleV1, prepare_envelope_configuration,
+    validate_owned_technical_credentials_configuration,
     validate_technical_credentials_configuration,
 };
 mod brokers;

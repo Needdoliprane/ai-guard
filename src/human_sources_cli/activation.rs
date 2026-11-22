@@ -1,9 +1,87 @@
 use super::*;
+use crate::gateway_config::{
+    ConfiguredTenant,
+    human_sources::{ResolvedOwnedSources, resolve_owned_sources},
+    load_owned_tenants,
+};
 use agentsandbox::human_authority::{
     HumanSourcesConfigurationV1,
     startup::{HumanOwnedSourceOptions, HumanOwnedStartupRequest},
 };
 use preparation::LoadedPreparation;
+
+pub(super) const DEFAULT_MAX_EVENTS: u64 = 100_000;
+
+/// Explicit references of an already published owned-source closure.
+#[derive(Args)]
+pub(super) struct ExplicitOwnedSourcesArgs {
+    /// Existing private closure manifest.
+    #[arg(
+        long,
+        requires_all = [
+            "human_credentials_envelope",
+            "tenants_file",
+            "human_control_config_revision",
+        ]
+    )]
+    pub(super) human_sources_manifest: Option<PathBuf>,
+    /// Existing private technical credential envelope of that manifest.
+    #[arg(long, requires = "human_sources_manifest")]
+    pub(super) human_credentials_envelope: Option<PathBuf>,
+    /// Owned tenant registry of that manifest.
+    #[arg(long, requires = "human_sources_manifest")]
+    pub(super) tenants_file: Option<PathBuf>,
+    /// Explicit positive revision of the retained public control configuration.
+    #[arg(long, requires = "human_sources_manifest")]
+    pub(super) human_control_config_revision: Option<u64>,
+    /// Private OIDC configuration of that manifest, when OIDC is selected.
+    #[arg(long, requires_all = ["human_sources_manifest", "human_oidc_mapping_revision"])]
+    pub(super) oidc_config: Option<PathBuf>,
+    /// Explicit positive OIDC mapping closure revision.
+    #[arg(long, requires = "oidc_config")]
+    pub(super) human_oidc_mapping_revision: Option<u64>,
+    /// Audit event bound of the explicit route (default 100000).
+    #[arg(long, requires = "human_sources_manifest")]
+    pub(super) max_events: Option<u64>,
+}
+
+/// Configured technical tokens used by the redaction dictionary and bearer checks.
+pub(super) fn technical_tokens(tenants: &[ConfiguredTenant]) -> Vec<String> {
+    tenants
+        .iter()
+        .flat_map(|tenant| [tenant.runner_token.clone(), tenant.viewer_token.clone()])
+        .collect()
+}
+
+impl ExplicitOwnedSourcesArgs {
+    /// Resolve and check the explicit files without acquiring a startup owner.
+    pub(super) fn resolve_for_maintenance(&self) -> Result<(ResolvedOwnedSources, Redactor, u64)> {
+        let (Some(manifest), Some(envelope), Some(tenants_file), Some(revision)) = (
+            self.human_sources_manifest.as_deref(),
+            self.human_credentials_envelope.as_deref(),
+            self.tenants_file.as_deref(),
+            self.human_control_config_revision,
+        ) else {
+            bail!("owned_sources_options_incomplete");
+        };
+        let tenants = load_owned_tenants(tenants_file)?;
+        let redactor = Redactor::new(technical_tokens(&tenants));
+        let max_events = self.max_events.unwrap_or(DEFAULT_MAX_EVENTS);
+        let resolved = resolve_owned_sources(
+            manifest,
+            envelope,
+            tenants_file,
+            self.oidc_config.as_deref(),
+            &tenants,
+            max_events,
+            revision,
+            self.human_oidc_mapping_revision,
+            redactor.clone(),
+        )?;
+        resolved.validate_for_maintenance(&tenants)?;
+        Ok((resolved, redactor, max_events))
+    }
+}
 
 #[cfg(test)]
 type FinalAckResyncHook = Box<dyn FnOnce()>;
