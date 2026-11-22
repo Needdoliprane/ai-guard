@@ -158,11 +158,7 @@ impl Store {
                     credentials_complete,
                     own: principal_key == reader,
                 };
-                let value = serde_json::to_value(&item)?;
-                anyhow::ensure!(
-                    redactor.value(&value) == value,
-                    "membership metadata requires redaction"
-                );
+                item.require_unredacted_metadata(&redactor)?;
                 let size = serde_json::to_vec(&item)?
                     .len()
                     .checked_add(1)

@@ -190,7 +190,8 @@ pub(super) async fn memberships(
         )?;
         cursor.after_worker_id = page.after_membership_id;
         let mut body = page.page;
-        unredacted(&proof, &body)?;
+        body.require_unredacted_metadata(&proof.redactor)
+            .map_err(store_failure)?;
         let bytes = serde_json::to_vec(&body)
             .map_err(|_| invalid_request())?
             .len();
