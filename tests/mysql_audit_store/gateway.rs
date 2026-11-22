@@ -4,6 +4,10 @@
 use super::*;
 use agentsandbox::{
     audit::Store,
+    broker_registry::{
+        BrokerAuthorityV1, BrokerGrantMutationV1, BrokerIdentityViewV1, BrokerMutationResultV1,
+        BrokerRuntimeKindV1,
+    },
     model::Event as ModelEvent,
     mysql_storage::{
         MysqlEndpoint, MysqlProbeError,
@@ -590,16 +594,19 @@ async fn gateway_issues_sqlite_workload_credential_when_mysql_neighbor_verifies(
     ])?;
     let http = Client::builder().no_proxy().timeout(DEADLINE).build()?;
     let gateway = Gateway::start(&registry).await?;
+    let broker_id = Uuid::new_v4().to_string();
+    let incarnation_id = Uuid::new_v4().to_string();
+    let workload_proof = Uuid::new_v4().simple().to_string();
     let issue = WorkloadBindingIssueV1 {
         version: 1,
         operation_id: Uuid::new_v4().to_string(),
         credential_id: Uuid::new_v4().to_string(),
         expected_revision: 0,
         subject: WorkloadSubjectV1::Broker {
-            broker_id: Uuid::new_v4().to_string(),
-            incarnation_id: Uuid::new_v4().to_string(),
+            broker_id: broker_id.clone(),
+            incarnation_id: incarnation_id.clone(),
         },
-        sha256_digest: hex::encode(Sha256::digest(b"synthetic QA workload credential")),
+        sha256_digest: hex::encode(Sha256::digest(workload_proof.as_bytes())),
         expires_at: (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
     };
     let post = |input: &WorkloadBindingIssueV1| {
@@ -617,15 +624,54 @@ async fn gateway_issues_sqlite_workload_credential_when_mysql_neighbor_verifies(
         operation_id: Uuid::new_v4().to_string(),
         credential_id: Uuid::new_v4().to_string(),
         sha256_digest: hex::encode(DIGEST_B),
-        ..issue
+        ..issue.clone()
     };
     ensure!(post(&alias).await?.status() == StatusCode::CONFLICT);
+    let grant = http
+        .post(gateway.url("/api/v1/brokers/grants"))
+        .bearer_auth(RUNNER_A)
+        .json(&BrokerGrantMutationV1 {
+            version: 1,
+            operation_id: Uuid::new_v4().to_string(),
+            broker_id: broker_id.clone(),
+            expected_revision: None,
+            credential_id: issue.credential_id.clone(),
+            incarnation_id: incarnation_id.clone(),
+            authorities: vec![BrokerAuthorityV1 {
+                authority_id: "mixed-registry-fixture".into(),
+                runtime_kind: BrokerRuntimeKindV1::Docker,
+            }],
+            lease_seconds: 120,
+            not_after: issue.expires_at.clone(),
+        })
+        .send()
+        .await?;
+    ensure!(grant.status() == StatusCode::CREATED);
+    let grant = grant.json::<BrokerMutationResultV1>().await?;
+    ensure!(grant.receipt.audit_seq == receipt.audit_seq + 1);
+
+    let identity = http
+        .get(gateway.url("/api/v1/brokers/identity"))
+        .bearer_auth(&workload_proof)
+        .send()
+        .await?;
+    ensure!(identity.status() == StatusCode::OK);
+    let identity = identity.json::<BrokerIdentityViewV1>().await?;
+    ensure!(
+        identity.tenant_id == "tenant-a"
+            && identity.broker_id == broker_id
+            && identity.incarnation_id == incarnation_id
+            && identity.credential_id == issue.credential_id
+            && identity.binding_revision == receipt.revision
+            && identity.grant_revision == grant.receipt.grant_revision,
+        "the checked SQLite workload proof must select its own broker"
+    );
     gateway.stop().await?;
 
     let a = Store::open_existing_for_tenant(&data, "tenant-a", Redactor::new(Vec::new()), 128)?;
     let after_a = a.integrity()?;
-    ensure!(after_a.valid && after_a.event_count == before_a.event_count + 1);
-    ensure!(after_a.head_hash == receipt.audit_hash);
+    ensure!(after_a.valid && after_a.event_count == before_a.event_count + 2);
+    ensure!(after_a.head_hash == grant.receipt.audit_hash);
     ensure!(audit_snapshot(&mut conn_b).await? == before_b, "B changed");
     Ok(())
 }
