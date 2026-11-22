@@ -111,3 +111,58 @@ fn mode_selection_refuses_ambiguous_or_missing_inputs_without_opening_sources() 
     );
     assert!(validate_human_mode("legacy", None, None, None, false, false).is_ok());
 }
+
+#[test]
+fn owned_tenants_load_private_role_files_without_opening_the_store() {
+    use std::{
+        fs,
+        io::Write,
+        os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    };
+
+    let temporary = tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let write = |name: &str, bytes: &[u8]| {
+        let path = root.join(name);
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap()
+            .write_all(bytes)
+            .unwrap();
+        path
+    };
+    let runner = "synthetic-runner-credential-long-enough";
+    let viewer = "synthetic-viewer-credential-long-enough";
+    let runner_file = write("runner.token", runner.as_bytes());
+    let viewer_file = write("viewer.token", viewer.as_bytes());
+    let registry = write(
+        "tenants.json",
+        &serde_json::to_vec(&json!({
+            "version": 1,
+            "tenants": [{
+                "tenant_id": "tenant-a",
+                "data": "events.sqlite",
+                "runner_token_file": "runner.token",
+                "viewer_token_file": "viewer.token"
+            }]
+        }))
+        .unwrap(),
+    );
+    let tenants = load_owned_tenants(&registry).unwrap();
+    let [tenant] = tenants.as_slice() else {
+        panic!("expected one configured tenant");
+    };
+    assert_eq!(tenant.runner_token_file, runner_file);
+    assert_eq!(tenant.viewer_token_file, viewer_file);
+    assert!(tenant.runner_token == runner && tenant.viewer_token == viewer);
+
+    fs::set_permissions(&viewer_file, fs::Permissions::from_mode(0o640)).unwrap();
+    assert!(load_owned_tenants(&registry).is_err());
+    assert_eq!(fs::read_dir(root).unwrap().count(), 3);
+}
