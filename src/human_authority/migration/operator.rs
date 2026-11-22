@@ -29,6 +29,12 @@ use std::{
 };
 use uuid::Uuid;
 
+mod identity_markers;
+pub use identity_markers::{
+    OwnedIdentityMarkerReceiptV1, OwnedIdentityMarkersRefusalV1, OwnedIdentityMarkersReportV1,
+    OwnedIdentityMarkersRequest, install_owned_identity_markers,
+};
+
 /// Non-authorizing source expectation, identical to the maintenance schema.
 /// Conversion into the private maintenance type is checked by its real guard.
 #[derive(Clone, PartialEq, Eq, Serialize, serde::Deserialize)]

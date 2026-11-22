@@ -123,6 +123,34 @@ Available identity/resources reads and their durable receipts do not qualify
 the remaining handlers, remote brokers, cloud, restart after physical power
 loss or production readiness.
 
+## In-place identity markers on adopted stores
+
+After adoption, the fenced human rights capabilities need the identity marker
+`human_rights_v2` on each tenant Store14/15. With every consumer stopped, run
+the offline in-place maintenance once per tenant, each with a new private
+maintenance directory outside the preparation directory:
+
+```sh
+agentsandbox human-sources human-rights install \
+  --human-sources-activation /absolute/control/human-preparation/activation.json \
+  --tenant-id tenant-a \
+  --maintenance-dir /absolute/control/human-rights-tenant-a \
+  --confirm-control-stopped
+agentsandbox human-sources human-rights resume \
+  --human-sources-activation /absolute/control/human-preparation/activation.json \
+  --tenant-id tenant-a \
+  --maintenance-dir /absolute/control/human-rights-tenant-a \
+  --confirm-control-stopped
+```
+
+`install` takes the owner locks of the whole union, writes a verified SQLite
+backup, journals its intent, backup and confirmation, and appends every pending
+marker in one transaction. `resume` finishes or re-confirms the same
+maintenance after an interruption; it never appends a second marker. The
+activation and store formats are unchanged. The refusal codes, the return path
+and the capabilities these markers admit are described in
+[named local access](../identity/README.md#already-adopted-owned-stores-formats-14-and-15).
+
 ## Validation scope
 
 The [dated operator and owned-startup evidence](../../engineering/evidence/2026-11-13/human-sources-operator/README.md)

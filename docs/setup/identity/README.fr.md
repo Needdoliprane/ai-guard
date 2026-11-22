@@ -375,7 +375,34 @@ Le marqueur exige une base qui porte déjà le marqueur du registre workers (for
 
 La commande refuse de démarrer sans `--confirm-control-stopped`. Elle écrit une nouvelle sauvegarde vérifiée, ajoute le marqueur une seule fois et affiche un rapport JSON dont `from_version` et `to_version` valent tous deux le format inchangé. Une seconde exécution est refusée avec `the human rights marker is already installed` ; une base de format inférieur à 10 est refusée avec `requires the worker registry marker: store formats 10 to 13`.
 
-Une version antérieure ne peut pas utiliser une base qui porte le marqueur : prévoyez une mise à jour, pas un retour arrière. Revenir à une version antérieure impose de restaurer la sauvegarde dans une nouvelle destination privée, ce qui **abandonne tous les événements d’audit enregistrés après le marqueur** ; la base restaurée refuse de nouveau les capacités protégées. Sur les bases des sources possédées (formats 14 et 15), ces capacités ne sont admises qu’en présence du marqueur vérifié : installez-le sur la base legacy avant son adoption dans le profil possédé ; une maintenance journalisée des bases déjà adoptées n’est pas encore disponible. Les bases MySQL refusent le marqueur et les capacités protégées tant que le rejeu d’identité MySQL ne les prend pas en charge.
+Une version antérieure ne peut pas utiliser une base qui porte le marqueur : prévoyez une mise à jour, pas un retour arrière. Revenir à une version antérieure impose de restaurer la sauvegarde dans une nouvelle destination privée, ce qui **abandonne tous les événements d’audit enregistrés après le marqueur** ; la base restaurée refuse de nouveau les capacités protégées. Sur les bases des sources possédées (formats 14 et 15), ces capacités ne sont admises qu’en présence du marqueur vérifié : installez-le sur la base legacy avant son adoption dans le profil possédé, ou utilisez la maintenance journalisée possédée ci-dessous sur une base déjà adoptée. Les bases MySQL refusent le marqueur et les capacités protégées tant que le rejeu d’identité MySQL ne les prend pas en charge.
+
+### Bases possédées déjà adoptées (formats 14 et 15)
+
+`migrate-human-rights` refuse une base possédée. Pour un tenant déjà adopté par le [parcours des sources humaines](../human-sources-maintenance/README.fr.md), arrêtez le gateway, le dashboard, l’ingress et tous les brokers, puis installez chaque marqueur d’identité en attente (aujourd’hui uniquement `human_rights_v2`) à partir de l’activation publiée :
+
+```sh
+agentsandbox human-sources human-rights install \
+  --human-sources-activation /absolute/control/human-preparation/activation.json \
+  --tenant-id tenant-a \
+  --maintenance-dir /absolute/control/human-rights-tenant-a \
+  --confirm-control-stopped
+```
+
+Le répertoire de maintenance doit être nouveau, privé et situé hors du répertoire de préparation et de tout répertoire de source. La commande écrit son `plan.json` (la clôture active inchangée, prior égal à target), prend les verrous propriétaires réels de toute l’union, copie le Store14/15 choisi dans `backups/source.sqlite` et vérifie cette sauvegarde par SQLite, puis enregistre `identity-markers-intent-v1`, `identity-markers-backup-v1` et, après le commit et une réouverture/un rejeu de la source, `identity-markers-confirmed-v1` qui liste chaque reçu de marqueur. Tous les marqueurs en attente sont ajoutés dans une seule transaction, après la sauvegarde vérifiée ; le format de la base, son ancre et l’activation ne changent pas, et la même activation du gateway reste valide. La sortie standard est un rapport JSON (`state` vaut `installed`, `markers` liste chaque `marker`, `seq` et `hash`, `readiness` reste `not_checked`).
+
+Les refus sont une ligne fermée `human_rights_step_refused; step=…; state=…` et laissent la base inchangée :
+
+| `state` | Signification et action |
+|---|---|
+| (option absente) | Sans `--confirm-control-stopped`, la commande ne démarre pas et ne crée rien. |
+| `human_rights_owner_busy` | Un gateway ou une autre maintenance détient les verrous propriétaires. Arrêtez-le, puis lancez `resume` sur le même répertoire. |
+| `human_rights_already_installed` | Rien n’est en attente ; aucun enregistrement de journal ni sauvegarde n’a été écrit. Le nouveau répertoire ne contient que son plan ; vous pouvez le supprimer. |
+| `human_rights_source_unknown` | Le tenant n’est pas une base de tenant de cette activation. |
+| `human_rights_format_unsupported` | La source adoptée ne correspond pas au format et à l’ancre de l’activation (par exemple un Store15 encore publié comme Store14). |
+| `human_rights_journal_conflict` | Le répertoire, son plan, son journal ou sa sauvegarde diffèrent de cette maintenance, ou le répertoire chevauche la préparation. Conservez tout et réconciliez ; rien n’est écrasé ni réparé. |
+
+Après une interruption ou un acquittement perdu, conservez le répertoire et relancez la même commande avec `resume` (mêmes options). Elle réutilise le plan et l’identifiant de migration enregistrés, revérifie la sauvegarde enregistrée, puis termine l’installation ou se contente de la reconfirmer (`state` `confirmed`) ; elle n’ajoute jamais de second marqueur. Lancez la commande une fois par tenant, chacun avec son propre répertoire de maintenance. La sauvegarde constitue votre chemin de retour : la restaurer dans une nouvelle destination privée abandonne tous les événements enregistrés après le marqueur, comme indiqué ci-dessus.
 
 Le contrôle de confiance peut introduire ou réactiver chacune de ces capacités : `human apply` sans `actor` appelant, ou `human provision --capability read-memberships` (de même `read-configuration`, `launch-session`, `send-session-message`, `approve-launch`, `approve-egress`) après le marqueur. Un administrateur d’organisation qui détient `manage_memberships` peut conserver ou retirer celles réservées au contrôle (`read_memberships`, `read_configuration`, `launch_session`, `send_session_message` et les deux lectures de registre), jamais les ajouter ni les réactiver ; `approve_egress` et `approve_launch` ne sont délégables, dans l’organisation, que par un administrateur dont l’appartenance active les détient, à un autre membre ou à lui-même ; un droit qu’il s’est retiré n’est pas réactivé par lui-même. Une capacité seule n’ouvre aucune vue ni commande : le gateway revalide à chaque requête le membership, le plafond OIDC et chaque permission de ressource.
 

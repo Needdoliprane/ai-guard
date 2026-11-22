@@ -128,6 +128,36 @@ peut annoncer des contextes complets. Les lectures identity/resources et leurs
 reçus durables ne qualifient ni les autres handlers, ni brokers distants, cloud,
 reprise après coupure physique ou préparation à la production.
 
+## Marqueurs d'identité en place sur les bases adoptées
+
+Après l'adoption, les capacités protégées des droits humains exigent le marqueur
+d'identité `human_rights_v2` sur chaque Store14/15 de tenant. Tous les
+consommateurs arrêtés, lancez la maintenance hors ligne en place une fois par
+tenant, chacun avec un nouveau répertoire de maintenance privé situé hors du
+répertoire de préparation :
+
+```sh
+agentsandbox human-sources human-rights install \
+  --human-sources-activation /absolute/control/human-preparation/activation.json \
+  --tenant-id tenant-a \
+  --maintenance-dir /absolute/control/human-rights-tenant-a \
+  --confirm-control-stopped
+agentsandbox human-sources human-rights resume \
+  --human-sources-activation /absolute/control/human-preparation/activation.json \
+  --tenant-id tenant-a \
+  --maintenance-dir /absolute/control/human-rights-tenant-a \
+  --confirm-control-stopped
+```
+
+`install` prend les verrous propriétaires de toute l'union, écrit une sauvegarde
+SQLite vérifiée, journalise son intention, sa sauvegarde et sa confirmation, et
+ajoute chaque marqueur en attente dans une seule transaction. `resume` termine ou
+reconfirme la même maintenance après une interruption ; il n'ajoute jamais de
+second marqueur. L'activation et les formats des bases restent inchangés. Les
+codes de refus, le chemin de retour et les capacités admises par ces marqueurs
+sont décrits dans
+[l'accès local nominatif](../identity/README.fr.md#bases-possédées-déjà-adoptées-formats-14-et-15).
+
 ## Périmètre de validation
 
 Les [preuves datées du parcours opérateur et du startup owned](../../engineering/evidence/2026-11-13/human-sources-operator/README.fr.md)

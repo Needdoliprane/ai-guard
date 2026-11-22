@@ -368,7 +368,34 @@ The marker requires a store that already carries the worker registry marker (for
 
 The command refuses to start without `--confirm-control-stopped`. It writes a verified new backup, appends the marker once and prints a JSON report whose `from_version` and `to_version` are both the unchanged format. A second run is refused with `the human rights marker is already installed`; a store below format 10 is refused with `requires the worker registry marker: store formats 10 to 13`.
 
-An earlier release cannot use a store that carries the marker: plan an upgrade, not a downgrade. Returning to an earlier release means restoring the backup into a new private destination, which **discards every audit event recorded after the marker**; the restored store refuses the fenced capabilities again. On owned source stores (formats 14 and 15), the fenced capabilities are admitted only when the verified marker is present: install it on the legacy store before adopting it into the owned profile; a journaled maintenance for stores already adopted is not yet available. MySQL tenant stores refuse the marker and the fenced capabilities until the MySQL identity replay supports them.
+An earlier release cannot use a store that carries the marker: plan an upgrade, not a downgrade. Returning to an earlier release means restoring the backup into a new private destination, which **discards every audit event recorded after the marker**; the restored store refuses the fenced capabilities again. On owned source stores (formats 14 and 15), the fenced capabilities are admitted only when the verified marker is present: either install it on the legacy store before adopting it into the owned profile, or use the owned journaled maintenance below on an already adopted store. MySQL tenant stores refuse the marker and the fenced capabilities until the MySQL identity replay supports them.
+
+### Already adopted owned stores (formats 14 and 15)
+
+`migrate-human-rights` refuses an owned store. For a tenant already adopted through the [human sources workflow](../human-sources-maintenance/README.md), stop the gateway, dashboard, ingress and every broker, then install every pending in-place identity marker (today only `human_rights_v2`) with the published activation:
+
+```sh
+agentsandbox human-sources human-rights install \
+  --human-sources-activation /absolute/control/human-preparation/activation.json \
+  --tenant-id tenant-a \
+  --maintenance-dir /absolute/control/human-rights-tenant-a \
+  --confirm-control-stopped
+```
+
+The maintenance directory must be new, private and outside the preparation directory and every source directory. The command writes its `plan.json` (the unchanged active closure, prior equal to target), takes the real owner locks of the whole union, copies the selected Store14/15 into `backups/source.sqlite` and verifies that backup through SQLite, then records `identity-markers-intent-v1`, `identity-markers-backup-v1` and, after the commit and a reopen/replay of the source, `identity-markers-confirmed-v1` listing every marker receipt. All pending markers are appended in one transaction after the verified backup; the store format, its anchor and the activation do not change, and the same gateway activation keeps working. Standard output is one JSON report (`state` is `installed`, `markers` lists each `marker`, `seq` and `hash`, `readiness` stays `not_checked`).
+
+Refusals are one closed line `human_rights_step_refused; step=…; state=…` and leave the store unchanged:
+
+| `state` | Meaning and action |
+|---|---|
+| (missing flag) | Without `--confirm-control-stopped` the command does not start and creates nothing. |
+| `human_rights_owner_busy` | A gateway or another maintenance holds the owner locks. Stop it, then run `resume` on the same directory. |
+| `human_rights_already_installed` | Nothing is pending; no journal record or backup was written. The new directory holds only its plan; you may remove it. |
+| `human_rights_source_unknown` | The tenant is not a tenant store of this activation. |
+| `human_rights_format_unsupported` | The adopted source does not match the activation's format and anchor (for example a Store15 still published as Store14). |
+| `human_rights_journal_conflict` | The directory, its plan, journal or backup differ from this maintenance, or the directory overlaps the preparation. Preserve everything and reconcile; nothing is overwritten or repaired. |
+
+After an interruption or a lost acknowledgement, keep the directory and run the same command with `resume` (same flags). It reuses the recorded plan and migration id, verifies the recorded backup again and either completes the install or only re-confirms it (`state` `confirmed`); it never appends a second marker. Run the command once per tenant, each with its own maintenance directory. The backup is your return path: restoring it into a new private destination discards every event recorded after the marker, as described above.
 
 Trusted control may introduce or reactivate any of these capabilities: `human apply` with no caller `actor`, or `human provision --capability read-memberships` (likewise `read-configuration`, `launch-session`, `send-session-message`, `approve-launch`, `approve-egress`) after the marker. An organization administrator holding `manage_memberships` may keep or remove the control-only ones (`read_memberships`, `read_configuration`, `launch_session`, `send_session_message` and the two registry reads) but never add or reactivate them; `approve_egress` and `approve_launch` are delegable within the organization only by an administrator whose own active membership holds them, to another member or to itself; a right removed from oneself is not reactivated by oneself. A capability alone opens no view or command: the gateway still revalidates the membership, the OIDC ceiling and each resource permission on every request.
 

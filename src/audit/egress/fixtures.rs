@@ -2594,3 +2594,6 @@ impl Store {
         Ok(())
     }
 }
+
+/// In-place identity markers on adopted owned sources (journaled maintenance).
+mod identity_markers_tests;

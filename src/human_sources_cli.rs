@@ -28,6 +28,7 @@ use std::{
 use uuid::Uuid;
 mod activation;
 mod broker_identity;
+mod human_rights;
 mod inputs;
 mod preparation;
 mod schema;
@@ -54,6 +55,8 @@ pub(crate) enum HumanSourcesCommand {
     Check(PreparationArgs),
     /// Offline owned broker identity (proposal): enroll, rotate, revoke, resume, status.
     BrokerIdentity(broker_identity::BrokerIdentityArgs),
+    /// Offline in-place identity markers (human rights) on one adopted Store14/15.
+    HumanRights(human_rights::HumanRightsArgs),
 }
 #[derive(Args)]
 pub(crate) struct PrepareArgs {
@@ -124,6 +127,9 @@ pub(crate) async fn run(args: HumanSourcesArgs) -> Result<()> {
         HumanSourcesCommand::BrokerIdentity(_) => {
             ("broker-identity", "preserve_the_plan_directory")
         }
+        HumanSourcesCommand::HumanRights(_) => {
+            ("human-rights", "preserve_the_maintenance_directory")
+        }
     };
     let result = match args.command {
         HumanSourcesCommand::Prepare(args) => {
@@ -160,6 +166,7 @@ pub(crate) async fn run(args: HumanSourcesArgs) -> Result<()> {
         }
         // Its own closed report and refusal vocabulary; no shared state here.
         HumanSourcesCommand::BrokerIdentity(args) => return broker_identity::run(args),
+        HumanSourcesCommand::HumanRights(args) => return human_rights::run(args),
     };
     match result {
         Ok((state, count)) => {
