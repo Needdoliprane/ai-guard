@@ -31,7 +31,7 @@ jobs:
           printf 'workflow_sha=%s\nworkflow_parent_initial=NOT_VERIFIED\ncandidate=c0f323d4d41631ecb0448fd2ee00ac6a6f474477\ncandidate_parent=5e9f8994d4360ab7bd3a64be120cd04539397af4\nsource_delta=tests/broker_relay_handoff.rs,tests/support/broker_relay_handoff.rs\nsource_initial=NOT_RUN\nworkflow_lineage_initial=NOT_RUN\nfetch_initial=NOT_RUN\nbuild_initial=NOT_RUN\nlibtest_initial=NOT_RUN\ncanary_initial=NOT_RUN\nphase_initial=unknown\nterminal_marker_initial=unknown\n' "$WORKFLOW_SHA" > "$RUNNER_TEMP/g11-relay-terminal-receipt.txt"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: 5e9f8994d4360ab7bd3a64be120cd04539397af4
+          ref: c0f323d4d41631ecb0448fd2ee00ac6a6f474477
           fetch-depth: 0
           persist-credentials: false
       - name: Guard the exact candidate and workflow-only delta
@@ -56,11 +56,13 @@ jobs:
             source_status=PASS
           fi
           workflow_delta="$(git diff --name-only c0f323d4d41631ecb0448fd2ee00ac6a6f474477 "$WORKFLOW_SHA")"
-          if [[ "$(git rev-parse "$WORKFLOW_SHA^")" == c0f323d4d41631ecb0448fd2ee00ac6a6f474477 &&
+          if [[ "$(git rev-parse "$WORKFLOW_SHA^")" == 1199591dbf0f67f9600e420f1e7088fdf0836b1b &&
+                "$(git rev-parse "$WORKFLOW_SHA^^")" == c0f323d4d41631ecb0448fd2ee00ac6a6f474477 &&
+                "$(git diff --name-only "$WORKFLOW_SHA^" "$WORKFLOW_SHA")" == '.github/workflows/lot-verify.yaml' &&
                 "$workflow_delta" == '.github/workflows/lot-verify.yaml' ]]; then
             lineage_status=PASS
           fi
-          printf 'source=%s\nworkflow_lineage=%s\nworkflow_parent=c0f323d4d41631ecb0448fd2ee00ac6a6f474477\nsource_delta=%s\n' \
+          printf 'source=%s\nworkflow_lineage=%s\nworkflow_parent=1199591dbf0f67f9600e420f1e7088fdf0836b1b\nworkflow_base=c0f323d4d41631ecb0448fd2ee00ac6a6f474477\nsource_delta=%s\n' \
             "$source_status" "$lineage_status" "$(printf '%s' "$source_delta" | tr '\n' ',')" >> "$receipt"
           cat "$receipt" >> "$GITHUB_STEP_SUMMARY"
           [[ "$source_status" == PASS && "$lineage_status" == PASS ]]
