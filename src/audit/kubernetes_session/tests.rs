@@ -29,6 +29,17 @@ pub(crate) fn prepare(f: &Fixture) {
         .unwrap();
 }
 pub(crate) fn intent(f: &Fixture, session_id: Uuid) -> KubernetesSessionReservationIntentV2 {
+    intent_with_network(
+        f,
+        session_id,
+        crate::runtime::kubernetes::session_profile::KubernetesSessionNetworkV2::Denied,
+    )
+}
+pub(crate) fn intent_with_network(
+    f: &Fixture,
+    session_id: Uuid,
+    network: crate::runtime::kubernetes::session_profile::KubernetesSessionNetworkV2,
+) -> KubernetesSessionReservationIntentV2 {
     let binding = KubernetesSessionBindingV2::new(
         &f.intent.authority,
         KubernetesSessionIdsV2 {
@@ -73,7 +84,7 @@ pub(crate) fn intent(f: &Fixture, session_id: Uuid) -> KubernetesSessionReservat
         "public test prompt",
     ]
     .map(str::to_owned);
-    let profile = KubernetesSessionProfileV2::build(
+    let profile = KubernetesSessionProfileV2::build_with_network(
         &f.intent.authority,
         &binding,
         &f.intent.image,
@@ -87,6 +98,7 @@ pub(crate) fn intent(f: &Fixture, session_id: Uuid) -> KubernetesSessionReservat
         &provider,
         KubernetesSessionInvocationV2::new(crate::provider::BOOTSTRAP_PROGRAM, &args).unwrap(),
         &crate::workspace::Manifest::new(),
+        network,
     )
     .unwrap();
     KubernetesSessionReservationIntentV2::new(

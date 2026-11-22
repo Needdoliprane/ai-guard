@@ -515,6 +515,82 @@ fn a_claimed_step_refused_before_send_closes_without_effect() {
     assert_eq!(f.store.worker_quota(&quota).unwrap().held_workers, 0);
 }
 
+/// The read-only predicate G05 calls inside its egress decision
+/// transaction: only a released, attached, not yet ended session whose
+/// profile asked for broker egress is Active.
+#[test]
+fn egress_liveness_follows_the_ledger_and_the_profile_request() {
+    use crate::audit::kubernetes_session::tests::intent_with_network;
+    use crate::runtime::kubernetes::session_profile::KubernetesSessionNetworkV2;
+    let f = Fixture::new();
+    prepare(&f);
+    enable(&f);
+    let quota = QuotaPolicyV1::default();
+    let reserve_with = |network| {
+        let intent = intent_with_network(&f, Uuid::new_v4(), network);
+        let policy = policy(&intent);
+        let authorization = f
+            .store
+            .authorize_kubernetes_session_reservation(&f.identity, &intent, &policy, &quota)
+            .unwrap();
+        f.store
+            .reserve_kubernetes_session(&f.identity, &authorization, &intent, &policy, &quota)
+            .unwrap();
+        intent
+    };
+    let liveness = |intent: &KubernetesSessionReservationIntentV2| {
+        let ids = intent.ids().unwrap();
+        let db = f.store.db.lock().unwrap();
+        egress_binding_active(
+            &db,
+            intent.reservation_id(),
+            &ids.session_id.to_string(),
+            &ids.attempt_id.to_string(),
+        )
+        .unwrap()
+    };
+    let quiet = reserve_with(KubernetesSessionNetworkV2::Denied);
+    assert_eq!(liveness(&quiet), EgressBindingState::EgressNotRequested);
+    let intent = reserve_with(KubernetesSessionNetworkV2::BrokerEgress);
+    let ids = intent.ids().unwrap();
+    {
+        let db = f.store.db.lock().unwrap();
+        // Another attempt or an unknown reservation is never live.
+        assert_eq!(
+            egress_binding_active(
+                &db,
+                intent.reservation_id(),
+                &ids.session_id.to_string(),
+                &Uuid::new_v4().to_string()
+            )
+            .unwrap(),
+            EgressBindingState::Unknown
+        );
+        assert_eq!(
+            egress_binding_active(
+                &db,
+                &Uuid::new_v4().to_string(),
+                &ids.session_id.to_string(),
+                &ids.attempt_id.to_string()
+            )
+            .unwrap(),
+            EgressBindingState::Unknown
+        );
+    }
+    let mut chain = Chain::new(&f, intent.clone());
+    assert_eq!(liveness(&intent), EgressBindingState::NotActive);
+    chain.applied(chain.claim_request(), CLAIM_UID);
+    chain.applied(chain.pod_create(), POD_UID);
+    chain.applied(chain.release(POD_UID), POD_UID);
+    assert_eq!(
+        liveness(&intent),
+        EgressBindingState::NotActive,
+        "not attached yet"
+    );
+    chain.applied(chain.attach(POD_UID), POD_UID);
+    assert_eq!(liveness(&intent), EgressBindingState::Active);
+}
+
 #[test]
 fn a_reopened_store_revalidates_the_capability_family() {
     let f = Fixture::new();

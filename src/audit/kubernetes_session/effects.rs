@@ -42,7 +42,7 @@ pub(crate) const SCHEMA: [(&str, &str, &str); 4] = [
     (
         "table",
         "kubernetes_session_effects",
-        "CREATE TABLE kubernetes_session_effects(reservation_id TEXT NOT NULL REFERENCES kubernetes_session_reservations(reservation_id),step INTEGER NOT NULL CHECK(step>=1 AND step<=32),operation_id TEXT NOT NULL UNIQUE,input_hash TEXT NOT NULL,subject TEXT NOT NULL CHECK(subject IN ('workspace_claim','session_pod','export_pod')),action TEXT NOT NULL CHECK(action IN ('create','release_gate','attach','release_finalizer','delete')),request_sha256 TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('claimed','applied','not_applied','uncertain')),claim_seq INTEGER NOT NULL UNIQUE REFERENCES events(seq),result_seq INTEGER UNIQUE REFERENCES events(seq),PRIMARY KEY(reservation_id,step))",
+        "CREATE TABLE kubernetes_session_effects(reservation_id TEXT NOT NULL REFERENCES kubernetes_session_reservations(reservation_id),step INTEGER NOT NULL CHECK(step>=1 AND step<=32),operation_id TEXT NOT NULL UNIQUE,input_hash TEXT NOT NULL,subject TEXT NOT NULL CHECK(subject IN ('workspace_claim','session_pod','export_pod')),action TEXT NOT NULL CHECK(action IN ('create','release_gate','attach','release_finalizer','delete')),request_sha256 TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('claimed','applied','not_applied','uncertain','not_sent')),claim_seq INTEGER NOT NULL UNIQUE REFERENCES events(seq),result_seq INTEGER UNIQUE REFERENCES events(seq),PRIMARY KEY(reservation_id,step))",
     ),
     (
         "table",
@@ -64,6 +64,81 @@ pub(crate) const AUTO_INDEX_COUNTS: [(&str, u32); 4] = [
 
 /// True when the effect capability marker exists. Only then may the family's
 /// tables and events exist.
+/// Liveness of one Kubernetes session for the G05 egress decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EgressBindingState {
+    /// Released, attached, not ended, and its profile asked for broker egress.
+    Active,
+    /// Known, but not (or no longer) running with its single attach.
+    NotActive,
+    /// Running or not, its profile never asked for broker egress.
+    EgressNotRequested,
+    /// No reservation with this id and these identifiers in this store.
+    Unknown,
+}
+
+/// Read-only predicate for the egress decision transaction `tx` of this
+/// tenant store. It proves only that the subject is live and opted in;
+/// destinations stay decided by the tenant egress policy.
+pub(crate) fn egress_binding_active(
+    tx: &Connection,
+    reservation_id: &str,
+    session_id: &str,
+    attempt_id: &str,
+) -> anyhow::Result<EgressBindingState> {
+    if uuid(reservation_id).is_err() || uuid(session_id).is_err() || uuid(attempt_id).is_err() {
+        return Ok(EgressBindingState::Unknown);
+    }
+    let tenant: String = tx.query_row(
+        "SELECT tenant_id FROM tenant_binding WHERE singleton=1",
+        [],
+        |row| row.get(0),
+    )?;
+    let intent = match replay::reservation(tx, reservation_id, &tenant) {
+        Ok((_, record)) => record.intent,
+        Err(error)
+            if matches!(
+                error.downcast_ref::<Failure>(),
+                Some(Failure::NotFound | Failure::PermissionDenied)
+            ) =>
+        {
+            return Ok(EgressBindingState::Unknown);
+        }
+        Err(error) => return Err(error),
+    };
+    let ids = intent.ids()?;
+    if ids.session_id.to_string() != session_id || ids.attempt_id.to_string() != attempt_id {
+        return Ok(EgressBindingState::Unknown);
+    }
+    if intent.profile().network()
+        != crate::runtime::kubernetes::session_profile::KubernetesSessionNetworkV2::BrokerEgress
+    {
+        return Ok(EgressBindingState::EgressNotRequested);
+    }
+    if !enabled(tx)? {
+        return Ok(EgressBindingState::NotActive);
+    }
+    let Some((state, _)) = load_state(tx, reservation_id)? else {
+        return Ok(EgressBindingState::NotActive);
+    };
+    let steps = load_steps(tx, reservation_id)?;
+    let live = !state.settled
+        && !state.session_terminal
+        && state.session_pod_uid.is_some()
+        && applied(&steps, Subject::SessionPod, Action::ReleaseGate)
+        && applied(&steps, Subject::SessionPod, Action::Attach)
+        && !steps.iter().any(|step| {
+            step.subject == Subject::SessionPod
+                && step.action == Action::Delete
+                && step.outcome.is_some()
+        });
+    Ok(if live {
+        EgressBindingState::Active
+    } else {
+        EgressBindingState::NotActive
+    })
+}
+
 pub(crate) fn enabled(db: &Connection) -> anyhow::Result<bool> {
     Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM events WHERE kind=?1)",

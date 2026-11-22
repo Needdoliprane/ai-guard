@@ -341,11 +341,18 @@ impl WorkspaceCommitment {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+/// The network a session profile asks for. In both cases the Pod network
+/// stays denied by its NetworkPolicy. `BrokerEgress` asks the broker to
+/// carry the provider traffic inside the attach, where the G05 tenant policy
+/// decides each destination; `Denied` asks for no egress at all. Committed
+/// by the profile hash, so it is fixed at reservation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum NetworkRequest {
+pub enum KubernetesSessionNetworkV2 {
     Denied,
+    BrokerEgress,
 }
+type NetworkRequest = KubernetesSessionNetworkV2;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -466,6 +473,7 @@ impl KubernetesSessionProfileV2 {
         Self::from_json(bytes, authority, &binding)
     }
 
+    /// A profile without egress (`KubernetesSessionNetworkV2::Denied`).
     pub fn build(
         authority: &KubernetesAuthorityV1,
         binding: &KubernetesSessionBindingV2,
@@ -475,12 +483,39 @@ impl KubernetesSessionProfileV2 {
         invocation: KubernetesSessionInvocationV2<'_>,
         manifest: &Manifest,
     ) -> SessionProfileResult<Self> {
+        Self::build_with_network(
+            authority,
+            binding,
+            image,
+            resources,
+            provider,
+            invocation,
+            manifest,
+            KubernetesSessionNetworkV2::Denied,
+        )
+    }
+
+    /// Same profile with an explicit network request.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the closed profile fields, each validated by its own type"
+    )]
+    pub fn build_with_network(
+        authority: &KubernetesAuthorityV1,
+        binding: &KubernetesSessionBindingV2,
+        image: &str,
+        resources: KubernetesSessionResourcesV2,
+        provider: &ProviderResolutionV1,
+        invocation: KubernetesSessionInvocationV2<'_>,
+        manifest: &Manifest,
+        network: KubernetesSessionNetworkV2,
+    ) -> SessionProfileResult<Self> {
         let profile = Self(ProfileWire {
             version: 2,
             profile: PROFILE.into(),
             binding: binding.0.clone(),
             image: image.into(),
-            network: NetworkRequest::Denied,
+            network,
             resources,
             provider: ProviderWire::new(provider)?,
             invocation_sha256: invocation.commitment(provider)?,
@@ -527,6 +562,11 @@ impl KubernetesSessionProfileV2 {
             return Err(KubernetesSessionProfileError::BindingMismatch);
         }
         Ok(())
+    }
+
+    /// The committed network request.
+    pub fn network(&self) -> KubernetesSessionNetworkV2 {
+        self.0.network
     }
 
     pub fn canonical_bytes(&self) -> SessionProfileResult<Vec<u8>> {
