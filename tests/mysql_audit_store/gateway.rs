@@ -1,9 +1,10 @@
 //! The real gateway process on a prepared MySQL target: startup refusals, the
 //! application path of SQL-06 over HTTP, and the control guard of the append.
 //! The external fixture prepares disposable schemas, as for the Store tests.
+use super::super::SECRET;
 use super::*;
 use agentsandbox::{
-    audit::Store,
+    audit::{AuditCapacityFailureV1, Store},
     broker_registry::{
         BrokerAuthorityV1, BrokerGrantMutationV1, BrokerIdentityViewV1, BrokerMutationResultV1,
         BrokerRuntimeKindV1,
@@ -16,7 +17,7 @@ use agentsandbox::{
     model::Event as ModelEvent,
     mysql_storage::{
         MysqlEndpoint, MysqlProbeError,
-        audit::{ControlGuardRefused, with_control_guard},
+        audit::{BatchConflict, ControlGuardRefused, with_control_guard},
         probe,
     },
     policy::Policy,
@@ -753,6 +754,105 @@ async fn gateway_issues_sqlite_workload_credential_when_mysql_neighbor_verifies(
     ensure!(after_a.valid && after_a.event_count == before_a.event_count + 3);
     ensure!(after_a.head_hash == grant.receipt.audit_hash);
     ensure!(audit_snapshot(&mut conn_b).await? == before_b, "B changed");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh prepared private MySQL 8.4 QA schema and a writer account"]
+async fn ordinary_batch_is_atomic_and_replays_in_request_order() -> Result<()> {
+    let fixture = FixtureFiles::open_gateway("AI_GUARD_MYSQL_ACTIVITY_QA_CONFIG")?;
+    let mut conn = fresh_gateway_schema(&fixture).await?;
+    let genesis = fixture.initialize("tenant-a").await?;
+    let open = |max_events| {
+        fixture.target.open(
+            &fixture.target.username,
+            fixture.credentials(&fixture.reader_password)?,
+            "tenant-a",
+            fixture.target.namespace,
+            max_events,
+        )
+    };
+    let store = open(128)?;
+    let mut first = ModelEvent::new("activity.channel");
+    first.data = json!({"message": SECRET});
+    let second = ModelEvent::new("activity.coverage");
+    let input = vec![first.clone(), second.clone(), first.clone()];
+    let receipts = store.append_batch(input.clone()).await?;
+    let [one, two, repeated] = receipts.as_slice() else {
+        anyhow::bail!("the batch must acknowledge all three positions")
+    };
+    ensure!(
+        one.seq == genesis.seq + 1
+            && one.prev_hash == genesis.hash
+            && one.event.id == first.id
+            && one.event.data["message"] == "[REDACTED]"
+            && two.seq == one.seq + 1
+            && two.prev_hash == one.hash
+            && two.event.id == second.id
+            && serde_json::to_value(repeated)? == serde_json::to_value(one)?,
+        "the batch lost masking, ordering, chaining or duplicate replay"
+    );
+    let committed = store.verify().await?;
+    ensure!(committed.seq == two.seq && committed.hash == two.hash);
+    let snapshot = audit_snapshot(&mut conn).await?;
+    ensure!(
+        store.append_batch(Vec::new()).await.is_err()
+            && store.append_batch(vec![first.clone(); 65]).await.is_err()
+            && audit_snapshot(&mut conn).await? == snapshot,
+        "out-of-bound batches must be refused"
+    );
+
+    let next = ModelEvent::new("activity.channel");
+    let mut divergent = first.clone();
+    divergent.data = json!({"message": "different synthetic content"});
+    let conflict = store
+        .append_batch(vec![next.clone(), divergent])
+        .await
+        .err()
+        .context("a divergent existing id must refuse the batch")?;
+    ensure!(
+        conflict.is::<BatchConflict>(),
+        "expected a typed batch conflict"
+    );
+    ensure!(
+        store.verify().await? == committed && audit_snapshot(&mut conn).await? == snapshot,
+        "conflict changed the confirmed head or persisted a partial batch"
+    );
+
+    let limited = open(5)?;
+    ensure!(limited.verify().await? == committed);
+    let too_many = vec![next.clone(), ModelEvent::new("activity.channel")];
+    let capacity = limited
+        .append_batch(too_many)
+        .await
+        .err()
+        .context("a batch exceeding the ordinary reserve must be refused")?;
+    ensure!(
+        capacity.downcast_ref::<AuditCapacityFailureV1>()
+            == Some(&AuditCapacityFailureV1::OrdinaryWriteBudgetExhausted),
+        "expected the cumulative ordinary reserve refusal"
+    );
+    ensure!(
+        limited.verify().await? == committed && audit_snapshot(&mut conn).await? == snapshot,
+        "capacity refusal changed the confirmed head or persisted a partial batch"
+    );
+
+    let reopened = open(128)?;
+    let replayed = reopened.append_batch(input).await?;
+    ensure!(
+        serde_json::to_vec(&replayed)? == serde_json::to_vec(&receipts)?
+            && reopened.verify().await? == committed
+            && audit_snapshot(&mut conn).await? == snapshot,
+        "reopening changed the original receipts or audit state"
+    );
+    let following = limited.append_batch(vec![next.clone()]).await?;
+    ensure!(
+        following.len() == 1
+            && following[0].seq == committed.seq + 1
+            && following[0].prev_hash == committed.hash
+            && following[0].event.id == next.id,
+        "a refused batch spent capacity or retained a partial receipt"
+    );
     Ok(())
 }
 

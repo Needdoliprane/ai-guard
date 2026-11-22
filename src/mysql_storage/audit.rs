@@ -83,6 +83,18 @@ impl fmt::Display for CommitUncertain {
 }
 impl std::error::Error for CommitUncertain {}
 
+/// An audit id has different content and the batch rollback was confirmed.
+#[derive(Debug)]
+pub struct BatchConflict;
+
+impl fmt::Display for BatchConflict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("event batch conflicts with a stored event")
+    }
+}
+
+impl std::error::Error for BatchConflict {}
+
 #[derive(Debug)]
 struct AuditChainMismatch {
     prefix: AuditHead,
@@ -161,6 +173,14 @@ type ProjectedEventColumns = (
 
 pub(super) fn decode_event(row: Row) -> Result<EncodedEvent> {
     decode_event_columns(decode_row(row)?)
+}
+
+async fn event_by_id(tx: &mut Transaction<'_>, id: &str) -> Result<Option<StoredEvent>> {
+    tx.exec_first::<Row, _, _>(EVENT_BY_ID, (id,))
+        .await
+        .map_err(driver_error)?
+        .map(|row| decode_event(row).map(|event| event.stored))
+        .transpose()
 }
 
 pub(super) fn decode_event_columns(
@@ -454,6 +474,10 @@ enum Mutation<'a> {
     Initialize,
     InitializeSupervised,
     Append(Event),
+    AppendBatch {
+        events: Vec<(Event, String)>,
+        receipts: &'a mut Vec<StoredEvent>,
+    },
     AppendControl {
         event: Event,
         retirement_resume: bool,
@@ -1315,6 +1339,32 @@ impl MysqlAuditStore {
             .context("MySQL audit receipt missing")
     }
 
+    /// Append ordinary events in one verified transaction and acknowledge in
+    /// request order. Identical ids and payloads reuse their original receipt.
+    pub async fn append_batch(&self, events: Vec<Event>) -> Result<Vec<StoredEvent>> {
+        ensure!(
+            !events.is_empty() && events.len() <= 64,
+            "event batch size is outside its bound"
+        );
+        let mut prepared = Vec::with_capacity(events.len());
+        for event in events {
+            decision::require_ordinary(&event.kind)?;
+            let (event, payload) = prepare_event(&self.redactor, event)
+                .map_err(|_| anyhow!("invalid MySQL audit event"))?;
+            decision::require_ordinary(&event.kind)?;
+            prepared.push((event, payload));
+        }
+        // The transaction fills this private collection. It is returned only
+        // after the common write path confirms COMMIT.
+        let mut receipts = Vec::with_capacity(prepared.len());
+        self.write(Mutation::AppendBatch {
+            events: prepared,
+            receipts: &mut receipts,
+        })
+        .await?;
+        Ok(receipts)
+    }
+
     /// Trusted runner delivery. Callers must authenticate the runner before
     /// parsing the request and selecting this capacity class.
     pub async fn append_control_event(&self, event: Event) -> Result<StoredEvent> {
@@ -1515,6 +1565,7 @@ impl MysqlAuditStore {
     async fn write(&self, operation: Mutation<'_>) -> Result<(Option<StoredEvent>, bool)> {
         let deadline = Instant::now() + DEADLINE;
         let initialize_supervised = matches!(&operation, Mutation::InitializeSupervised);
+        let batch = matches!(&operation, Mutation::AppendBatch { .. });
         let mut confirmed = timeout_at(deadline, self.confirmed.lock())
             .await
             .map_err(|_| MysqlProbeError::TimedOut)?;
@@ -1553,8 +1604,11 @@ impl MysqlAuditStore {
             Ok(Err(error)) => {
                 // Only a verified prefix can retain the witness. Restore it
                 // after a confirmed rollback, including a failed projection.
-                if let Ok(Ok(())) = timeout_at(deadline, tx.rollback()).await {
-                    confirmed.origin = origin;
+                match timeout_at(deadline, tx.rollback()).await {
+                    Ok(Ok(())) => confirmed.origin = origin,
+                    Ok(Err(rollback)) if batch => return Err(driver_error(rollback).into()),
+                    Err(_) if batch => return Err(MysqlProbeError::TimedOut.into()),
+                    _ => {}
                 }
                 return Err(error);
             }
@@ -1627,6 +1681,39 @@ impl MysqlAuditStore {
             }
             Mutation::InitializeSupervised => return Err(ControlFailure::Conflict.into()),
             Mutation::Append(event) => (event, AppendKind::Ordinary),
+            Mutation::AppendBatch { events, receipts } => {
+                let initial_seq = head.seq;
+                for (event, payload) in events {
+                    let stored = if let Some(previous) = event_by_id(tx, &event.id).await? {
+                        ensure!(
+                            serde_json::to_string(&previous.event)? == payload,
+                            BatchConflict
+                        );
+                        previous
+                    } else {
+                        self.persist_event(
+                            tx,
+                            &mut head,
+                            event,
+                            payload,
+                            ReservedWrite::Ordinary,
+                            None,
+                        )
+                        .await?
+                    };
+                    receipts.push(stored);
+                }
+                let replayed = head.seq == initial_seq;
+                if !replayed {
+                    self.confirm_pending_head(tx, &head, confirmed, origin)
+                        .await?;
+                }
+                return Ok(PreparedWrite {
+                    stored: None,
+                    head,
+                    replayed,
+                });
+            }
             Mutation::AppendControl {
                 event,
                 retirement_resume,
@@ -1811,18 +1898,13 @@ impl MysqlAuditStore {
             AppendKind::IssueWorkload(_) => (None, ReservedWrite::Control),
             AppendKind::RevokeWorkload(_) => (None, ReservedWrite::IdentityMaintenance),
         };
-        if let Some(row) = tx
-            .exec_first::<Row, _, _>(EVENT_BY_ID, (&event.id,))
-            .await
-            .map_err(driver_error)?
-        {
-            let previous = decode_event(row)?;
+        if let Some(previous) = event_by_id(tx, &event.id).await? {
             ensure!(
-                serde_json::to_string(&previous.stored.event)? == payload,
+                serde_json::to_string(&previous.event)? == payload,
                 "event id conflict"
             );
             return Ok(PreparedWrite {
-                stored: Some(previous.stored),
+                stored: Some(previous),
                 head,
                 replayed: true,
             });
@@ -1850,6 +1932,22 @@ impl MysqlAuditStore {
             }
             _ => {}
         }
+        self.confirm_pending_head(tx, &head, confirmed, origin)
+            .await?;
+        Ok(PreparedWrite {
+            stored: Some(stored),
+            head,
+            replayed: false,
+        })
+    }
+
+    async fn confirm_pending_head(
+        &self,
+        tx: &mut Transaction<'_>,
+        head: &AuditHead,
+        confirmed: &AuditHead,
+        origin: &mut Option<supervision::Witness>,
+    ) -> Result<()> {
         tx.exec_drop(
             "UPDATE ai_guard_audit_state SET head_seq=?,head_hash=?,payload_bytes=? WHERE singleton=1",
             (head.seq, &head.hash, head.payload_bytes),
@@ -1862,15 +1960,11 @@ impl MysqlAuditStore {
             .verify_bound_origin(tx, persisted, prior, confirmed, None)
             .await?;
         ensure!(
-            durable.head == head,
+            &durable.head == head,
             "MySQL audit persistence differs from prepared event"
         );
         *origin = retained;
-        Ok(PreparedWrite {
-            stored: Some(stored),
-            head,
-            replayed: false,
-        })
+        Ok(())
     }
 
     async fn prepare_bootstrap(
