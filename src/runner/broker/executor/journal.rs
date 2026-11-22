@@ -1,5 +1,6 @@
 //! Private batch journal operations.
 use super::*;
+use std::future::Future;
 
 async fn load_draft(
     writer: &WriterClient,
@@ -26,12 +27,12 @@ enum UncertainPublication {
     ConfirmExactHead,
 }
 
-async fn commit_patch(
+fn commit_patch(
     writer: &WriterClient,
     operation: Uuid,
     scope: &JournalScopeV1,
     change: impl Fn(&mut Draft) -> Result<()>,
-) -> Result<Box<CommittedDraftAtHead>> {
+) -> impl Future<Output = Result<Box<CommittedDraftAtHead>>> {
     commit_patch_with(
         writer,
         operation,
@@ -39,7 +40,6 @@ async fn commit_patch(
         change,
         UncertainPublication::FailClosed,
     )
-    .await
 }
 
 async fn commit_patch_with(
@@ -226,17 +226,16 @@ impl<'a> Execution<'a> {
         self.patch_committed(change).await.map(drop)
     }
 
-    async fn patch_committed(
+    fn patch_committed(
         &self,
         change: impl Fn(&mut Draft) -> Result<()>,
-    ) -> Result<Box<CommittedDraftAtHead>> {
+    ) -> impl Future<Output = Result<Box<CommittedDraftAtHead>>> {
         commit_patch(
             &self.executor.writer,
             self.operation,
             self.context.scope(),
             change,
         )
-        .await
     }
 
     async fn patch_committed_with(
@@ -333,17 +332,23 @@ impl<'a> Execution<'a> {
             }
             existing
         } else {
-            self.patch(|draft| {
-                if let Some(existing) = draft.operations.iter().find(|op| operation_key(op) == key)
-                {
-                    ensure!(
-                        same(&without_response(existing), &pending)?,
-                        "pending operation conflicts"
-                    );
-                    return Ok(());
-                }
-                draft.operations.push(pending.clone());
-                Ok(())
+            // Build the fail-closed commit future outside this poll frame.
+            // The Created callback already holds the worker and Arm frames
+            // while polling a fresh claim.
+            boxed_execution_phase(|| {
+                self.patch_committed(|draft| {
+                    if let Some(existing) =
+                        draft.operations.iter().find(|op| operation_key(op) == key)
+                    {
+                        ensure!(
+                            same(&without_response(existing), &pending)?,
+                            "pending operation conflicts"
+                        );
+                        return Ok(());
+                    }
+                    draft.operations.push(pending.clone());
+                    Ok(())
+                })
             })
             .await?;
             pending
