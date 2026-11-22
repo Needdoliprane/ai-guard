@@ -110,6 +110,23 @@ enum Command {
         #[arg(long, default_value_t = 100_000)]
         max_events: u64,
     },
+    /// Append the human rights marker to an offline audit database that carries
+    /// the worker registry marker (formats 10–13), preserving a verified new
+    /// backup. The format is unchanged; it admits read_memberships,
+    /// read_configuration, launch_session and send_session_message.
+    MigrateHumanRights {
+        #[arg(long)]
+        data: PathBuf,
+        #[arg(long)]
+        tenant_id: String,
+        #[arg(long)]
+        backup: PathBuf,
+        /// Operator attestation: gateway and brokers are stopped; not runtime fencing.
+        #[arg(long, required = true)]
+        confirm_control_stopped: bool,
+        #[arg(long, default_value_t = 100_000)]
+        max_events: u64,
+    },
     /// Migrate the existing offline SSO audit one explicit version with a new backup.
     MigrateAuthentication {
         /// Existing private gateway OIDC configuration; no provider contact.
@@ -1126,6 +1143,36 @@ async fn run() -> Result<()> {
                 13 => store.migrate_kubernetes_recovery_v13(&backup)?,
                 _ => anyhow::bail!("unsupported migration target"),
             };
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::MigrateHumanRights {
+            data,
+            tenant_id,
+            backup,
+            confirm_control_stopped,
+            max_events,
+        } => {
+            anyhow::ensure!(
+                confirm_control_stopped,
+                "Stop the control plane and all brokers before migration"
+            );
+            anyhow::ensure!(
+                (1..=1_000_000).contains(&max_events),
+                "invalid audit capacity"
+            );
+            let metadata = std::fs::symlink_metadata(&data)
+                .context("Migration requires an existing audit database")?;
+            anyhow::ensure!(
+                metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() > 0,
+                "Migration requires an existing regular audit database"
+            );
+            let store = Store::open_existing_for_tenant(
+                &data,
+                &tenant_id,
+                Redactor::new(vec![]),
+                max_events,
+            )?;
+            let report = store.migrate_human_rights_v2(&backup)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::MigrateAuthentication {

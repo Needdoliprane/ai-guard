@@ -1196,6 +1196,12 @@ impl Store {
     ) -> anyhow::Result<MigrationReportV1> {
         self.migrate_control_version(backup_path, 9, 10)
     }
+    /// Explicit backed-up offline maintenance appending the human rights
+    /// marker on a store that already carries the worker-access marker. The
+    /// store format (`user_version`) is unchanged; never activates supervision.
+    pub fn migrate_human_rights_v2(&self, backup_path: &Path) -> anyhow::Result<MigrationReportV1> {
+        self.backed_up_maintenance(backup_path, Maintenance::HumanRights)
+    }
     pub(super) fn migrate_control_version(
         &self,
         backup_path: &Path,
@@ -1205,13 +1211,48 @@ impl Store {
         // The recovery format has one explicit semantic edge. An internal
         // caller cannot skip the checkpoint marker and history of schema12.
         invalid(to_version != 13 || from_version == 12)?;
+        self.backed_up_maintenance(
+            backup_path,
+            Maintenance::Version {
+                from_version,
+                to_version,
+            },
+        )
+    }
+    fn backed_up_maintenance(
+        &self,
+        backup_path: &Path,
+        step: Maintenance,
+    ) -> anyhow::Result<MigrationReportV1> {
         let mut db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         let preflight = self.begin_checked(&mut db)?;
         let version: i64 = preflight.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        invalid(version == i64::from(from_version))?;
+        let (from_version, to_version) = match step {
+            Maintenance::Version {
+                from_version,
+                to_version,
+            } => {
+                invalid(version == i64::from(from_version))?;
+                (from_version, to_version)
+            }
+            Maintenance::HumanRights => {
+                // Legacy stores only; an owned 14/15 store receives the marker
+                // through its journaled source maintenance.
+                anyhow::ensure!(
+                    (10..=13).contains(&version),
+                    "migrate-human-rights requires the worker registry marker: store formats 10 to 13 (this store is format {version}; run migrate-control up to --target-version 10 first)"
+                );
+                anyhow::ensure!(
+                    super::human_rights::maintenance_pending(&preflight)?,
+                    "the human rights marker is already installed on this store; nothing was changed"
+                );
+                let version = u32::try_from(version)?;
+                (version, version)
+            }
+        };
         validate_schema(&preflight, false)?;
         Self::validate_metadata(&preflight, &self.tenant_id)?;
         let expected = Self::check_integrity(&preflight)?;
@@ -1277,6 +1318,34 @@ impl Store {
                 && current.event_count == expected.event_count
                 && current.head_hash == expected.head_hash,
         )?;
+        if step == Maintenance::HumanRights {
+            conflict(super::human_rights::maintenance_pending(&tx)?)?;
+            // Each step installs only what this store still lacks, in order,
+            // in the one transaction that follows the verified backup.
+            if !super::human_rights::installed(&tx)? {
+                self.initialize_human_rights(&tx)?;
+            }
+            validate_schema(&tx, false)?;
+            validate(&tx)?;
+            Self::validate_metadata(&tx, &self.tenant_id)?;
+            anyhow::ensure!(
+                Self::check_integrity(&tx)?.valid,
+                "post-maintenance audit integrity failure"
+            );
+            let (seq, hash): (i64, String) = tx.query_row(
+                "SELECT seq,hash FROM events WHERE kind=?1",
+                [super::human_rights::GENESIS_KIND],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            self.commit_checked(tx)?;
+            return Ok(MigrationReportV1 {
+                from_version,
+                to_version,
+                backup_path: target.to_string_lossy().into(),
+                genesis_seq: seq,
+                genesis_hash: hash,
+            });
+        }
         let activate_supervision = to_version == 3 && tx.lease.untouched_fresh_origin(&tx)?;
         match to_version {
             2 => initialize(&tx, self.max_events, &self.redactor)?,
@@ -1420,4 +1489,12 @@ fn validate_admission_input(
         "worker admission exceeds historical shared tenant quota"
     );
     Ok(())
+}
+
+/// One backed-up offline maintenance step. A version step changes the store
+/// format; the human rights marker never does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Maintenance {
+    Version { from_version: u32, to_version: u32 },
+    HumanRights,
 }

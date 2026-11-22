@@ -362,6 +362,23 @@ observé ; un client qui ne poll pas peut immobiliser sa part. Chaque poll
 revérifie expiration et révocation. Ces bornes ne prouvent ni un plafond de tous
 les sockets HTTP ni une éviction autonome.
 
+## Activer les capacités des droits humains
+
+Cinq capacités sont protégées par un marqueur d’identité explicite : `read_memberships`, `read_configuration` et `approve_egress` (contextes d’administration), `launch_session` et `send_session_message` (contextes personnels). Sur une base legacy, le marqueur admet aussi `approve_launch`, déjà accepté par les formats possédés 14 et 15. Tant que la base du tenant ne porte pas ce marqueur, un membership ou une préparation locale qui en contient une est refusé avec `migration_required` et rien n’est ajouté ; les nouvelles actions de lecture humaine (synthèse, appartenances, quota, usage, configuration et lectures du contrôle de session) sont refusées de la même façon. Le marqueur ne change pas le format de la base ; c’est un événement de la chaîne d’identité que les versions antérieures refusent de rejouer : elles ouvrent alors la base comme défaillante et refusent toute opération. Conservez donc la sauvegarde qu’il crée si un retour à une version précédente peut être nécessaire.
+
+Le marqueur exige une base qui porte déjà le marqueur du registre workers (formats 10 à 13, après la migration explicite 9→10). Arrêtez d’abord le gateway et tous les brokers, puis exécutez :
+
+```sh
+"$AIGUARD_BIN" migrate-human-rights --data <tenant.sqlite> --tenant-id <tenant> \
+  --backup <nouvelle-sauvegarde-privee.sqlite> --confirm-control-stopped --max-events <capacite>
+```
+
+La commande refuse de démarrer sans `--confirm-control-stopped`. Elle écrit une nouvelle sauvegarde vérifiée, ajoute le marqueur une seule fois et affiche un rapport JSON dont `from_version` et `to_version` valent tous deux le format inchangé. Une seconde exécution est refusée avec `the human rights marker is already installed` ; une base de format inférieur à 10 est refusée avec `requires the worker registry marker: store formats 10 to 13`.
+
+Une version antérieure ne peut pas utiliser une base qui porte le marqueur : prévoyez une mise à jour, pas un retour arrière. Revenir à une version antérieure impose de restaurer la sauvegarde dans une nouvelle destination privée, ce qui **abandonne tous les événements d’audit enregistrés après le marqueur** ; la base restaurée refuse de nouveau les capacités protégées. Sur les bases des sources possédées (formats 14 et 15), ces capacités ne sont admises qu’en présence du marqueur vérifié : installez-le sur la base legacy avant son adoption dans le profil possédé ; une maintenance journalisée des bases déjà adoptées n’est pas encore disponible. Les bases MySQL refusent le marqueur et les capacités protégées tant que le rejeu d’identité MySQL ne les prend pas en charge.
+
+Le contrôle de confiance peut introduire ou réactiver chacune de ces capacités : `human apply` sans `actor` appelant, ou `human provision --capability read-memberships` (de même `read-configuration`, `launch-session`, `send-session-message`, `approve-launch`, `approve-egress`) après le marqueur. Un administrateur d’organisation qui détient `manage_memberships` peut conserver ou retirer celles réservées au contrôle (`read_memberships`, `read_configuration`, `launch_session`, `send_session_message` et les deux lectures de registre), jamais les ajouter ni les réactiver ; `approve_egress` et `approve_launch` ne sont délégables, dans l’organisation, que par un administrateur dont l’appartenance active les détient, à un autre membre ou à lui-même ; un droit qu’il s’est retiré n’est pas réactivé par lui-même. Une capacité seule n’ouvre aucune vue ni commande : le gateway revalide à chaque requête le membership, le plafond OIDC et chaque permission de ressource.
+
 ## Autoriser la lecture nominative du registre workers
 
 La capacité administrative distincte `read_worker_registry` exige la migration explicite9→10 et l’accord du contrôle sur le membership. Suivre la [lecture nominative des workers](WORKERS.fr.md) pour la procédure locale/OIDC, les budgets d’audit partagés, la restauration, les limites des données et l’écart obligatoire d’attribution personnelle. Aucun droit brokers/ressources existant n’accorde ce droit.

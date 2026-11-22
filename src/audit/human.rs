@@ -95,7 +95,7 @@ pub(super) fn validate_read(record: &HumanReadAuditV1) -> anyhow::Result<()> {
         record.version == 1
             && record.principal.is_human()
             && uuid::Uuid::parse_str(&record.request_id).is_ok()
-            && [
+            && ([
                 "identity",
                 "resources",
                 "events",
@@ -104,6 +104,7 @@ pub(super) fn validate_read(record: &HumanReadAuditV1) -> anyhow::Result<()> {
                 "stream"
             ]
             .contains(&record.action.as_str())
+                || super::human_rights::read_action_requires_marker(&record.action))
             && record.result_count <= HUMAN_MAX_PAGE_ITEMS,
         "invalid human read audit"
     );
@@ -709,6 +710,13 @@ impl Store {
         count: usize,
         transient: &Redactor,
     ) -> anyhow::Result<HumanReadReceiptV1> {
+        // Format fence before any receipt: a newer read action never enters a
+        // history that an older binary could still replay.
+        if super::human_rights::read_action_requires_marker(action)
+            && !super::human_rights::installed(tx)?
+        {
+            return Err(IdentityFailureV1::MigrationRequired.into());
+        }
         let request_id = uuid::Uuid::new_v4().to_string();
         let record = HumanReadAuditV1 {
             version: 1,

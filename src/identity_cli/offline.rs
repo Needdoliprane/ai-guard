@@ -255,6 +255,14 @@ pub(super) fn provision(args: ProvisionArgs) -> Result<()> {
             ),
         "read-broker-registry requires explicit migration6→7 before preparing a local identity"
     );
+    ensure!(
+        !args.capabilities.iter().any(|cap| {
+            let capability = crate::identity::HumanCapabilityV1::from(*cap);
+            capability.requires_human_rights_marker()
+                || capability == crate::identity::HumanCapabilityV1::ApproveLaunch
+        }) || control.store.human_rights_installed()?,
+        "approve-launch, read-memberships, read-configuration, launch-session, send-session-message and approve-egress require explicit migrate-human-rights before preparing a local identity"
+    );
     let secret = generate_local_credential()
         .map_err(|_| anyhow::anyhow!("credential generation failed; no identity was activated"))?;
     let (parent, leaf) = destination(&args.output_dir)?;

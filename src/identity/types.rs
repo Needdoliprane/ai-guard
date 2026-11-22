@@ -80,9 +80,43 @@ pub enum HumanCapabilityV1 {
     /// ACL and current Content access are also required; ownership/admin alone
     /// never confers approval. Persistence requires the modern source format.
     ApproveLaunch,
+    /// Administration read of the organization's accounts and memberships.
+    /// Persistence requires the human rights marker.
+    ReadMemberships,
+    /// Administration read of the effective configuration kinds and modes,
+    /// never hosts, paths, credentials or file contents. Requires the marker.
+    ReadConfiguration,
+    /// Personal right to create a session on an authorized target. Separate
+    /// from reads, administration and ApproveLaunch. Requires the marker.
+    LaunchSession,
+    /// Personal right to send an instruction to an authorized session.
+    /// Separate from LaunchSession and every read. Requires the marker.
+    SendSessionMessage,
+    /// Administration right to approve or revoke bounded egress grants of the
+    /// tenant. Delegable by an organization administrator who holds it, never
+    /// beyond it. Requires the marker.
+    ApproveEgress,
 }
 
 impl HumanCapabilityV1 {
+    /// Every capability, in wire order: the single list other lists are
+    /// checked against (CLI flags, dashboard parser, guides).
+    pub const ALL: [Self; 14] = [
+        Self::ReadMetadata,
+        Self::ReadContent,
+        Self::Export,
+        Self::ReadTenantMetadata,
+        Self::ManageMemberships,
+        Self::ManageGrants,
+        Self::ReadBrokerRegistry,
+        Self::ReadWorkerRegistry,
+        Self::ApproveLaunch,
+        Self::ReadMemberships,
+        Self::ReadConfiguration,
+        Self::LaunchSession,
+        Self::SendSessionMessage,
+        Self::ApproveEgress,
+    ];
     pub(crate) fn is_administration(self) -> bool {
         matches!(
             self,
@@ -91,6 +125,34 @@ impl HumanCapabilityV1 {
                 | Self::ManageGrants
                 | Self::ReadBrokerRegistry
                 | Self::ReadWorkerRegistry
+                | Self::ReadMemberships
+                | Self::ReadConfiguration
+                | Self::ApproveEgress
+        )
+    }
+    /// Capabilities that may enter a history only after the explicit, backed-up
+    /// human rights marker. This is a format fence, never an authorization.
+    pub(crate) fn requires_human_rights_marker(self) -> bool {
+        matches!(
+            self,
+            Self::ReadMemberships
+                | Self::ReadConfiguration
+                | Self::LaunchSession
+                | Self::SendSessionMessage
+                | Self::ApproveEgress
+        )
+    }
+    /// Only trusted authenticated/offline control may introduce or reactivate
+    /// these; an organization administrator can keep or remove them only.
+    pub(crate) fn is_control_only(self) -> bool {
+        matches!(
+            self,
+            Self::ReadBrokerRegistry
+                | Self::ReadWorkerRegistry
+                | Self::ReadMemberships
+                | Self::ReadConfiguration
+                | Self::LaunchSession
+                | Self::SendSessionMessage
         )
     }
 }

@@ -178,7 +178,7 @@ impl Replay {
                 );
                 let record = Record::decode_replay(&event.data)
                     .map_err(|_| anyhow::anyhow!("invalid MySQL identity mutation payload"))?;
-                require_replay_capabilities(&record.mutation, 4, false, false)?;
+                require_replay_capabilities(&record.mutation, 4, false, false, false)?;
                 self.projection
                     .apply(&record.mutation, tenant, stored.seq)?;
                 record.verify_revision(&self.projection)?;
