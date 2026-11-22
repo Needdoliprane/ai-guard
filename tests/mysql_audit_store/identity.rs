@@ -512,42 +512,30 @@ async fn assert_projection_refused(
 }
 
 async fn assert_genesis_refused(conn: &mut Conn, reader: &MysqlAuditStore) -> Result<()> {
-    let anchor = conn
-        .query_first::<Vec<u8>, _>(
-            "SELECT genesis_hash FROM ai_guard_identity_meta WHERE singleton=1",
-        )
-        .await?
-        .context("identity QA capability is missing")?;
-    let divergent = if anchor.starts_with(b"f") {
-        [b'0'; 64]
-    } else {
-        [b'f'; 64]
-    };
-    let statement = "UPDATE ai_guard_identity_meta SET genesis_hash=? WHERE singleton=1";
     for (hash, expected) in [
         (
-            divergent,
+            None,
             "MySQL identity genesis does not match the prepared capability",
         ),
-        ([0xff; 64], "unexpected MySQL audit row"),
+        (Some([0xff; 64]), "unexpected MySQL audit row"),
     ] {
-        conn.exec_drop(statement, (hash.as_slice(),)).await?;
-        let changed = conn.affected_rows();
-        let refused = AssertUnwindSafe(reader.has_local_credential_binding(&DIGEST_A))
-            .catch_unwind()
-            .await;
-        conn.exec_drop(statement, (anchor.as_slice(),)).await?;
-        ensure!(
-            changed == 1 && conn.affected_rows() == 1,
-            "identity QA capability fault was not applied and restored"
-        );
-        let error = refused
-            .map_err(|_| anyhow::anyhow!("identity lookup panicked while reading a capability"))?
-            .expect_err("lookup must refuse an invalid genesis hash");
-        ensure!(
-            error.to_string() == expected,
-            "unexpected identity QA capability error: {error}"
-        );
+        gateway::with_unverifiable_identity_projection(conn, hash, async {
+            let refused = AssertUnwindSafe(reader.has_local_credential_binding(&DIGEST_A))
+                .catch_unwind()
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!("identity lookup panicked while reading a capability")
+                })?;
+            let Err(error) = refused else {
+                anyhow::bail!("lookup must refuse an invalid genesis hash");
+            };
+            ensure!(
+                error.to_string() == expected,
+                "unexpected identity QA capability error"
+            );
+            Ok(())
+        })
+        .await?;
         ensure!(reader.has_local_credential_binding(&DIGEST_A).await?);
     }
     Ok(())

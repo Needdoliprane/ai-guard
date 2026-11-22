@@ -443,6 +443,28 @@ impl fmt::Display for ControlGuardRefused {
 }
 impl std::error::Error for ControlGuardRefused {}
 
+/// The required audit verification did not complete successfully.
+#[derive(Debug)]
+pub(crate) struct RequiredAuditVerificationFailed(String);
+
+impl fmt::Display for RequiredAuditVerificationFailed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl RequiredAuditVerificationFailed {
+    pub(crate) fn tag(error: anyhow::Error, required: bool) -> anyhow::Error {
+        if required {
+            // Preserve the existing Store message and downcasts to the cause.
+            let message = error.to_string();
+            error.context(Self(message))
+        } else {
+            error
+        }
+    }
+}
+
 tokio::task_local! {
     static CONTROL_GUARD: [u8; 32];
 }
@@ -879,7 +901,9 @@ impl MysqlAuditStore {
     /// same read-only snapshot. This checks storage prerequisites for control.
     pub async fn verify_control_projections(&self) -> Result<AuditHead> {
         let (prefix, _, _) = self.read_verified(None, None).await?;
-        prefix.control_projections()?;
+        prefix
+            .control_projections()
+            .map_err(|error| RequiredAuditVerificationFailed::tag(error, true))?;
         Ok(prefix.head)
     }
 
@@ -1229,11 +1253,17 @@ impl MysqlAuditStore {
                 .start_transaction(read_snapshot_options())
                 .await
                 .map_err(driver_error)?;
-            let bound = binding(&mut tx, STATE).await?;
-            require_transactional_schema(&mut tx).await?;
+            let verification_failure = |error| RequiredAuditVerificationFailed::tag(error, true);
+            let bound = binding(&mut tx, STATE)
+                .await
+                .map_err(verification_failure)?;
+            require_transactional_schema(&mut tx)
+                .await
+                .map_err(verification_failure)?;
             let (prefix, origin) = self
                 .verify_bound_origin(&mut tx, bound, prior, &confirmed.head, observer)
-                .await?;
+                .await
+                .map_err(verification_failure)?;
             let usage = match worker_read {
                 Some(WorkerRead::Quota(policy)) => Some(worker::usage(&mut tx, policy).await?),
                 Some(WorkerRead::Operation(id, receipt)) => {
@@ -1593,10 +1623,21 @@ impl MysqlAuditStore {
             Ok(Err(error)) => {
                 // Only a verified prefix can retain the witness. Restore it
                 // after a confirmed rollback, including a failed projection.
+                let proof_failed = error.is::<RequiredAuditVerificationFailed>();
                 match timeout_at(deadline, tx.rollback()).await {
                     Ok(Ok(())) => confirmed.origin = origin,
-                    Ok(Err(rollback)) if batch => return Err(driver_error(rollback).into()),
-                    Err(_) if batch => return Err(MysqlProbeError::TimedOut.into()),
+                    Ok(Err(rollback)) if batch => {
+                        return Err(RequiredAuditVerificationFailed::tag(
+                            driver_error(rollback).into(),
+                            proof_failed,
+                        ));
+                    }
+                    Err(_) if batch => {
+                        return Err(RequiredAuditVerificationFailed::tag(
+                            MysqlProbeError::TimedOut.into(),
+                            proof_failed,
+                        ));
+                    }
                     _ => {}
                 }
                 return Err(error);
@@ -1633,13 +1674,24 @@ impl MysqlAuditStore {
         workload_clock: &mut Option<workload::ControlClock>,
     ) -> Result<PreparedWrite> {
         let prior = origin.take();
-        let bound = binding(tx, LOCK_STATE).await?;
-        require_transactional_schema(tx).await?;
+        let control_guard = CONTROL_GUARD.try_with(|digest| *digest).ok();
+        let verification_failure =
+            |error| RequiredAuditVerificationFailed::tag(error, control_guard.is_some());
+        let bound = binding(tx, LOCK_STATE)
+            .await
+            .map_err(verification_failure)?;
+        require_transactional_schema(tx)
+            .await
+            .map_err(verification_failure)?;
         if bound.tenant.is_none() && bound.namespace.is_none() {
             let supervised = match operation {
                 Mutation::Initialize => false,
                 Mutation::InitializeSupervised => true,
-                _ => anyhow::bail!("MySQL audit binding mismatch"),
+                _ => {
+                    return Err(verification_failure(anyhow!(
+                        "MySQL audit binding mismatch"
+                    )));
+                }
             };
             return self
                 .prepare_bootstrap(tx, bound.head, confirmed, supervised)
@@ -1647,12 +1699,15 @@ impl MysqlAuditStore {
         }
         let (prefix, retained) = self
             .verify_bound_origin(tx, bound, prior, confirmed, None)
-            .await?;
+            .await
+            .map_err(verification_failure)?;
         *origin = retained;
-        if let Ok(digest) = CONTROL_GUARD.try_with(|digest| *digest) {
-            if let Some(collision) = prefix.control_credential_presence(&digest)? {
-                return Err(ControlGuardRefused(collision).into());
-            }
+        if let Some(digest) = control_guard
+            && let Some(collision) = prefix
+                .control_credential_presence(&digest)
+                .map_err(verification_failure)?
+        {
+            return Err(ControlGuardRefused(collision).into());
         }
         let mut head = prefix.head;
         let (event, kind) = match operation {

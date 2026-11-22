@@ -112,6 +112,8 @@ cargo test --locked --offline --features mysql-storage --test mysql_audit_store 
 | `gateway_requires_identity_and_workload_projections_before_listening` | A |
 | `gateway_refuses_wrong_mysql_material_and_writes_no_business_row` | A |
 | `gateway_appends_to_the_prepared_target_and_replays_after_restart` | A + B |
+| `gateway_commits_ordinary_batch_and_replays_after_restart` | A + B |
+| `gateway_reports_unverified_selected_mysql_audit_and_recovers` | A + B |
 | `gateway_retains_verified_neighbor_collisions_during_projection_failure` | A + B |
 | `gateway_issues_sqlite_workload_credential_when_mysql_neighbor_verifies` | B. SQLite A is created by the test. SQLite A est créé par le test. |
 | `the_control_guard_refuses_inside_the_append_transaction` | A |
