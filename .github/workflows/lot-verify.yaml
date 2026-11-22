@@ -36,7 +36,7 @@ jobs:
         shell: bash
         run: |
           umask 077
-          receipt=g12-candidate-release-assets-receipt.txt
+          receipt="$RUNNER_TEMP/g12-candidate-release-assets-receipt.txt"
           cat > "$receipt" <<EOF
           candidate=ce0297852a20f0c6f9f7b66fb2beede29d725475
           source_guard=NOT_RUN
@@ -58,9 +58,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          receipt=g12-candidate-release-assets-receipt.txt
+          receipt="$RUNNER_TEMP/g12-candidate-release-assets-receipt.txt"
           source_sha=ce0297852a20f0c6f9f7b66fb2beede29d725475
-          expected_parent=ce0297852a20f0c6f9f7b66fb2beede29d725475
+          expected_parent=bd38e213c1bf4855899ac34f437f4aa3da2b91de
           expected_base=65798ff1cf1ea1f753a8418d6c9e48a7b74c7c97
           set_receipt() {
             awk -F= -v key="$1" -v value="$2" '$1 == key { $0 = key "=" value } { print }' "$receipt" > "$receipt.tmp"
@@ -72,10 +72,11 @@ jobs:
             [[ "$workflow_sha" =~ ^[0-9a-f]{40}$ ]] || return 1
             actual_parent="$(git rev-parse "$workflow_sha^" 2>/dev/null)" || return 1
             [[ "$actual_parent" == "$expected_parent" ]] || return 1
-            changed="$(git diff-tree --no-commit-id --name-only -r "$workflow_sha" 2>/dev/null)" || return 1
+            changed="$(git diff --name-only "$source_sha" "$workflow_sha" 2>/dev/null)" || return 1
             [[ "$changed" == '.github/workflows/lot-verify.yaml' ]]
           }
 
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || fail_guard
           verify_workflow_sha "$GITHUB_SHA" || fail_guard
           # Exercise the negative guard on every run: the real source commit is not a workflow child.
           if verify_workflow_sha "$source_sha"; then
@@ -92,9 +93,9 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          receipt="$GITHUB_WORKSPACE/g12-candidate-release-assets-receipt.txt"
-          private="$RUNNER_TEMP/ai-guard-g12-private"
-          mkdir -m 700 -p "$private/tmp" "$private/manifest"
+          receipt="$RUNNER_TEMP/g12-candidate-release-assets-receipt.txt"
+          private="$(mktemp -d "$RUNNER_TEMP/ai-guard-g12.XXXXXX")"
+          mkdir -m 700 "$private/tmp"
           export TMPDIR="$private/tmp"
           source_sha=ce0297852a20f0c6f9f7b66fb2beede29d725475
           cli="$GITHUB_WORKSPACE/target/release/agentsandbox"
@@ -169,6 +170,6 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: g12-candidate-release-assets-${{ github.sha }}
-          path: g12-candidate-release-assets-receipt.txt
+          path: ${{ runner.temp }}/g12-candidate-release-assets-receipt.txt
           if-no-files-found: warn
           retention-days: 14
