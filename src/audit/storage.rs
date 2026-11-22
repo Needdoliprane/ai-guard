@@ -106,6 +106,27 @@ impl StoreStorage {
         Self::prepare(path, false, true)
     }
 
+    /// Prepare another VFS connection to this exact retained main.
+    pub(super) fn prepare_sibling(&self) -> Result<(Self, InitializationGuard)> {
+        self.verify_names()?;
+        let guard = InitializationGuard::acquire(&self.parent)?;
+        // The lock may have waited for another initializer. Check the same
+        // retained identity again before handing the name to SQLite.
+        self.verify_names()?;
+        Ok((
+            Self {
+                parent: self.parent.clone(),
+                name: self.name.clone(),
+                path: self.path.clone(),
+                identity: self.identity,
+                created: false,
+                #[cfg(test)]
+                test_hook: super::resource_tests::StorageHook::default(),
+            },
+            guard,
+        ))
+    }
+
     fn prepare(
         path: &Path,
         new_only: bool,
@@ -315,6 +336,38 @@ impl StoreStorage {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn sibling_preparation_requires_the_retained_main_identity() {
+        let directory = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap())
+            .unwrap();
+        let (mut storage, guard) =
+            StoreStorage::create_new(&directory.path().join("audit.sqlite")).unwrap();
+        drop(guard);
+        let (other, guard) =
+            StoreStorage::create_new(&directory.path().join("other.sqlite")).unwrap();
+        drop(guard);
+
+        let (sibling, guard) = storage.prepare_sibling().unwrap();
+        assert_eq!(sibling.identity_key(), storage.identity_key());
+        assert!(!sibling.created_here());
+        drop(guard);
+
+        // Give the validator a discordant witness while both files stay in place.
+        storage.identity = other.identity;
+        let error = storage
+            .prepare_sibling()
+            .err()
+            .expect("identity must match");
+        assert_eq!(
+            error.to_string(),
+            "audit database identity changed or disappeared; recovery required"
+        );
+        assert_eq!(std::fs::metadata(storage.path()).unwrap().len(), 0);
+        assert_eq!(std::fs::metadata(other.path()).unwrap().len(), 0);
+    }
 
     #[test]
     fn unavailable_vfs_identity_control_is_refused() {

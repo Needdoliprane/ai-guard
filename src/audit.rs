@@ -1092,12 +1092,14 @@ impl Store {
             self.healthy(),
             "cannot share an unhealthy supervision origin"
         );
-        self.backing.verify_names()?;
-        let mut sibling = Self::open_for_tenant(
-            self.backing.path(),
+        let (backing, guard) = self.backing.prepare_sibling()?;
+        let mut sibling = Self::open_prepared_for_tenant(
+            backing,
+            guard,
             &self.tenant_id,
             redactor,
             self.max_events,
+            false,
         )?;
         // The parent's resolved policy is immutable, including disabled defaults
         // for small stores. Do not resolve defaults again on this connection.
