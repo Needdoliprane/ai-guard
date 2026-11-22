@@ -225,11 +225,11 @@ const geometry = async (label, widths, { shots = true, also = [] } = {}) => {
 
 const runFleet = async () => {
   await login("admin_a");
-  assert.equal(await button("Ouvrir administration · tenant-a").count(), 1, "l’atterrissage existant reste proposé");
+  assert.equal(await button("Ouvrir administration · tenant-a").count(), 1, "l’ouverture du contexte reste proposée (elle atterrit sur la Vue 360° servie)");
   assert.equal(await button("Superviser administration · tenant-a").count(), 1, "l’entrée de la vue unifiée est proposée pour ce contexte");
   const before = requests.length;
   await supervise("administration", "tenant-a"); await heading("Supervision du tenant.").waitFor(); await ready100();
-  assert.deepEqual(await tabs(), ["Contextes", "Supervision", "Journal", "Ressources", "Événements", "Brokers", "Workers", "Fédération"]);
+  assert.deepEqual(await tabs(), ["Contextes", "Vue 360°", "Quotas et usage", "Supervision", "Journal", "Ressources", "Événements", "Brokers", "Workers", "Fédération"]);
   assert.deepEqual(humanReads(before).sort(), ["/api/v1/human/federation/workers?worker_limit=100&broker_limit=100", "/api/v1/human/resources?limit=100"],
     "une composition de 100 lignes et une lecture de ressources, rien d’autre");
   assert.ok(requests.every((path) => !/tenant/i.test(path)), "aucune requête ne choisit un tenant");
@@ -373,7 +373,7 @@ const runPartial = async () => {
   await login("workers_only_a");
   let before = requests.length;
   await supervise("administration", "tenant-a"); await heading("Supervision du tenant.").waitFor(); await ready100(["Workers"]);
-  assert.deepEqual(await tabs(), ["Contextes", "Supervision", "Ressources", "Événements", "Workers"]);
+  assert.deepEqual(await tabs(), ["Contextes", "Vue 360°", "Quotas et usage", "Supervision", "Ressources", "Événements", "Workers"]);
   assert.equal(await page.getByLabel("Rythme d’actualisation").count(), 1, "un registre accordé garde son rythme d’actualisation");
   assert.deepEqual(humanReads(before), ["/api/v1/human/workers?limit=100"], "ni composition, ni brokers, ni ressources pour un contexte workers seuls");
   await source("Brokers").getByText("Non accordé", { exact: true }).waitFor();
@@ -388,7 +388,7 @@ const runPartial = async () => {
   recoveryStage = "partial_brokers";
   await login("brokers_only_a"); before = requests.length;
   await supervise("administration", "tenant-a"); await ready100(["Brokers"]);
-  assert.deepEqual(await tabs(), ["Contextes", "Supervision", "Ressources", "Événements", "Brokers"]);
+  assert.deepEqual(await tabs(), ["Contextes", "Vue 360°", "Supervision", "Ressources", "Événements", "Brokers"]);
   assert.deepEqual(humanReads(before), ["/api/v1/human/brokers?limit=100"]);
   assert.equal(await brokerRows().count(), 3);
   assert.equal(await heading("Workers").count(), 0, "aucune table de workers sans capacité");
@@ -402,7 +402,7 @@ const runPartial = async () => {
   await login("user_a1"); before = requests.length;
   assert.equal(await button("Superviser administration · tenant-a").count(), 0, "aucun contexte d’administration n’est proposé à ce compte");
   await supervise("personnel", "tenant-a"); await heading("Supervision de mon espace.").waitFor(); await ready100(["Ressources"]);
-  assert.deepEqual(await tabs(), ["Contextes", "Supervision", "Journal", "Ressources", "Événements"]);
+  assert.deepEqual(await tabs(), ["Contextes", "Mon espace", "Supervision", "Journal", "Ressources", "Événements"]);
   assert.deepEqual(humanReads(before), ["/api/v1/human/resources?limit=100"]);
   assert.equal(await heading("Workers").count(), 0); assert.equal(await heading("Brokers et autorités").count(), 0);
   // No registry is granted: nothing was refused, nothing is refreshed automatically and there is no period to choose.
@@ -411,7 +411,7 @@ const runPartial = async () => {
   assert.equal(await page.getByLabel("Rythme d’actualisation").count(), 0, "aucun rythme à choisir quand rien n’est relu automatiquement");
   await page.getByText("Accès de ce contexte", { exact: true }).click();
   assert.equal(await page.locator(".sv-access[open] summary .icon").count(), 1, "le panneau d’accès porte un indicateur de dépliage");
-  await page.getByText("Le registre workers du tenant est réservé à un contexte d’administration portant read_worker_registry.", { exact: true }).waitFor();
+  await page.getByText("Opération workers_read non accordée à ce contexte : aucune requête n’est émise.", { exact: true }).waitFor();
   await page.getByText(/Relation non fournie par le contrat nominatif/).waitFor();
   assert.ok(await page.locator(".sv-table tbody tr").count() >= 10, "sessions, agents, sandboxes et projets accordés sont listés");
   await noSecret("ressources personnelles");
@@ -450,7 +450,9 @@ const runHumanExport = async () => {
     assert.equal(identity.display_name, displayName);
     assert.equal(identity.principal.kind, "human_local");
     assert.equal(personal.length, 1);
-    await button(`Ouvrir personnel · ${tenant}`).click();
+    // The marked seed serves the summary: the context lands on « Mon espace », and this recipe reads the resources.
+    await button(`Ouvrir personnel · ${tenant}`).click(); await heading("Mon espace.").waitFor();
+    await button("Ressources").click(); await heading("Ressources autorisées.").waitFor();
     return { principal: identity.principal, selected: personal[0] };
   };
 
@@ -729,7 +731,9 @@ const runResourceStreamRecovery = async (lateDenial = false) => {
 
   recoveryStage = "resource_stream_connected";
   await login("user_a2");
-  const [initial] = await Promise.all([response(streamPath), button("Ouvrir personnel · tenant-a").click()]);
+  // Landing is « Mon espace » on the marked seed: the resource stream starts with the Ressources destination.
+  await button("Ouvrir personnel · tenant-a").click(); await heading("Mon espace.").waitFor();
+  const [initial] = await Promise.all([response(streamPath), button("Ressources").click()]);
   assert.equal(initial.status(), 200);
   await page.getByText("Flux autorisé connecté", { exact: true }).waitFor();
   await panel.getByText(a.session_owned_by_user_a2, { exact: true }).waitFor();
@@ -861,7 +865,8 @@ const runResourceStreamVisibilityRace = async () => {
   }, identityPath);
   recoveryStage = "resource_visibility_event_ready";
   await login("user_a1");
-  await button("Ouvrir personnel · tenant-a").click();
+  await button("Ouvrir personnel · tenant-a").click(); await heading("Mon espace.").waitFor();
+  await button("Ressources").click(); await heading("Ressources autorisées.").waitFor();
   const row = page.locator(".human-resource-row").filter({ has: page.getByText(a.session_owned_by_user_a1, { exact: true }) });
   const [initial] = await Promise.all([page.waitForResponse((answer) => isReply(answer, eventsPath)),
     row.getByRole("button", { name: "Métadonnées", exact: true }).click()]);
@@ -1163,7 +1168,7 @@ const runCorrelation = async () => {
   let text = await bodyText();
   for (const hidden of ["sandbox-retired", "project-elsewhere"]) assert.ok(!text.includes(hidden), "une ressource inactive ou d’une autre organisation n’est pas listée");
   await page.getByText("Accès de ce contexte", { exact: true }).click();
-  await page.getByText("Accordé par read_worker_registry : états du contrôle, dernière observation runtime et associations d’autorité.", { exact: true }).waitFor();
+  await page.getByText("Accordé par l’opération workers_read (portée : les registres du tenant) : états du contrôle, dernière observation runtime et associations d’autorité.", { exact: true }).waitFor();
   await geometry("correlation", [1440, 390], { also: [["resources", ".sv-toolbar-short"]] });
   await logout();
 
@@ -1173,7 +1178,7 @@ const runCorrelation = async () => {
   await dialog.getByText("Les ressources ne sont pas lues dans ce contexte : aucune correspondance n’est recherchée.", { exact: true }).waitFor();
   before = requests.length;
   await dialog.getByRole("button", { name: "Lire les événements de cette session", exact: true }).click();
-  await dialog.locator(".detail-body").getByText("Ce contexte ne porte aucune capacité de métadonnées : les événements de session ne sont pas lus.", { exact: true }).waitFor();
+  await dialog.locator(".detail-body").getByText("Ce contexte n’offre pas l’opération events_read_metadata : les événements de session ne sont pas lus.", { exact: true }).waitFor();
   assert.deepEqual(humanReads(before), [], "aucune requête d’événements sans capacité de métadonnées");
   await page.keyboard.press("Escape"); await logout();
 
@@ -1224,15 +1229,15 @@ const runRights = async () => {
   assert.deepEqual(humanReads(before).sort(), ["/api/v1/human/brokers?limit=100", "/api/v1/human/resources?limit=100"], "la source retirée n’est plus demandée");
   await page.getByText("Workers : registre non accordé à ce contexte, aucune lecture émise.", { exact: true }).waitFor();
   assert.equal(await heading("Workers").count(), 0);
-  assert.deepEqual(await tabs(), ["Contextes", "Supervision", "Journal", "Ressources", "Événements", "Brokers"]);
+  assert.deepEqual(await tabs(), ["Contextes", "Vue 360°", "Supervision", "Journal", "Ressources", "Événements", "Brokers"]);
   await geometry("rights-6", [390, 320], { shots: false });
 
-  // Both registries without any metadata capability: seven destinations.
+  // Both registries without any metadata capability: nine destinations, the summary and the quotas included.
   await command({ command: "set_capabilities", account: "admin_a", capabilities: ["read_broker_registry", "read_worker_registry"] });
   await button("Contextes").click(); await heading("Choisir un contexte.").waitFor();
   await page.getByText(/Capacités serveur : .*read_worker_registry/).first().waitFor();
   await supervise("administration", "tenant-a"); await ready100(["Workers", "Brokers"]);
-  assert.deepEqual(await tabs(), ["Contextes", "Supervision", "Ressources", "Événements", "Brokers", "Workers", "Fédération"]);
+  assert.deepEqual(await tabs(), ["Contextes", "Vue 360°", "Quotas et usage", "Supervision", "Ressources", "Événements", "Brokers", "Workers", "Fédération"]);
   await geometry("rights-7", [390, 320], { shots: false });
 
   // The same reduction met by a read in flight: nothing of the refused registry stays on screen.
@@ -2446,7 +2451,7 @@ const runJournal = async () => {
 
   recoveryStage = "journal_initial_page";
   await login("admin_a"); await supervise("administration", "tenant-a"); await ready100();
-  assert.deepEqual(await tabs(), ["Contextes", "Supervision", "Journal", "Ressources", "Événements", "Brokers", "Workers", "Fédération"]);
+  assert.deepEqual(await tabs(), ["Contextes", "Vue 360°", "Quotas et usage", "Supervision", "Journal", "Ressources", "Événements", "Brokers", "Workers", "Fédération"]);
   await page.getByLabel("Rythme d’actualisation").selectOption("0");
   await page.getByText("Actualisation manuelle : aucune lecture sans action de votre part.", { exact: true }).waitFor();
   let before = requests.length;
@@ -2623,7 +2628,7 @@ const runKeyboard = async () => {
   for (const width of [768, 390, 320]) {
     await page.setViewportSize({ width, height: 900 }); await settle();
     const enabled = await page.locator(".human-nav .human-tab:not(:disabled)").allInnerTexts();
-    assert.deepEqual(enabled, ["Contextes", "Supervision", "Journal", "Ressources", "Brokers", "Workers", "Fédération"]);
+    assert.deepEqual(enabled, ["Contextes", "Vue 360°", "Quotas et usage", "Supervision", "Journal", "Ressources", "Brokers", "Workers", "Fédération"]);
     await page.locator(".human-nav .human-tab").first().focus();
     for (const [key, order] of [["Tab", enabled], ["Shift+Tab", [...enabled].reverse()]]) {
       for (let index = 0; index < order.length; index++) {
