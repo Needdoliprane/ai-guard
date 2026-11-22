@@ -35,30 +35,26 @@ fn write_private(path: &Path, bytes: &[u8]) {
     file.sync_all().unwrap();
 }
 
-/// Connect to the same existing native test peer used by the BatchExecutor
-/// canary. Its empty registry is checked before the Full run. This test never
-/// registers a stop slot or emits a runtime command through that peer.
+/// Start the same fresh native test peer used by the BatchExecutor fixture.
+/// The child creates its own role and lease before publishing the endpoint.
 async fn empty_full_enforcer(seed: &ColdRecoverySeed) -> (EnforcerClient, NativeChild) {
     let path = seed.root().join("fo");
     fs::create_dir(&path).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
-    let root = Directory::open_existing(&path).unwrap();
-    root.persistent_create("auth", &[61; 32])
-        .unwrap()
-        .persistent_sync()
-        .unwrap();
-    root.sync().unwrap();
+    let parent = Directory::open_existing(&path).unwrap();
+    let nonce = Uuid::new_v4();
     let executable = std::env::current_exe().unwrap();
     let mut child = NativeChild(
         Command::new(&executable)
             .args([
                 "--exact",
-                "broker::enforcer::client::retained_cancel_tests::native_cancel_server_child",
+                "runner::broker::executor::journal::tests::native_fresh_recovery_peer_child",
                 "--ignored",
             ])
             .env_clear()
             .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-            .env("AI_GUARD_TEST_RETAINED_CANCEL_ROOT", &path)
+            .env("AI_GUARD_TEST_RECOVERY_FRESH_PEER_PARENT", parent.path())
+            .env("AI_GUARD_TEST_RECOVERY_FRESH_PEER_NONCE", nonce.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -67,21 +63,29 @@ async fn empty_full_enforcer(seed: &ColdRecoverySeed) -> (EnforcerClient, Native
     );
     let deadline = Instant::now() + Duration::from_secs(5);
     let client = loop {
-        if load_endpoint(&root).unwrap().is_some() {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            let code = status.code();
+            panic!("native Full fixture exited before IPC, code={code:?}");
+        }
+        if let Some(root) = parent.persistent_child("enforcer", false).unwrap()
+            && load_endpoint(&root).unwrap().is_some()
+        {
             break EnforcerClient::connect_or_spawn(&root, &executable, 8)
                 .await
                 .unwrap();
         }
-        assert!(
-            child.0.try_wait().unwrap().is_none(),
-            "native test peer exited"
-        );
         assert!(
             Instant::now() < deadline,
             "native test peer did not publish IPC"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
+    let capabilities = serde_json::to_value(client.legacy_capabilities().await.unwrap()).unwrap();
+    assert!(
+        capabilities.get("fresh_launch_nonce") == Some(&json!(nonce)),
+        "native Full fixture nonce mismatch"
+    );
+    client.require_admission_ready().await.unwrap();
     assert_eq!(client.status().await.unwrap().slot_count(), 0);
     (client, child)
 }
