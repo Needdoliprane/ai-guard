@@ -52,6 +52,26 @@ fn finish(
     }
 }
 
+/// The single attach of a session Pod: `GET` on the transport's fixed
+/// attach route, the canonical identity-one bytes in the place of a body.
+pub(crate) fn attach_request(
+    authority: &KubernetesAuthorityV1,
+    pod_name: &str,
+    identity_one: &[u8],
+) -> Outcome<SessionEffectRequestBodyV2> {
+    if !valid_dns_label(pod_name) || !valid_dns_label(authority.namespace()) {
+        return Err(REFUSED);
+    }
+    let path = super::session_attach::attach_path(authority.namespace(), pod_name);
+    Ok(finish(
+        SessionEffectKindV2::Attach,
+        authority,
+        "GET",
+        &path,
+        identity_one.to_vec(),
+    ))
+}
+
 /// Gate removal tested on the UID, the observed resourceVersion and the gate.
 pub(crate) fn release_gate_request(
     authority: &KubernetesAuthorityV1,

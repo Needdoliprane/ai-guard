@@ -221,6 +221,10 @@ pub enum KubernetesSessionEffectOutcomeV2 {
     Uncertain {
         http_status: Option<u16>,
     },
+    /// Declared by the broker: its own permit refused the request before
+    /// anything was sent (cancellation, elapsed claim window, another digest
+    /// or authority). No Kubernetes effect, and the step stays consumed.
+    NotSent,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,6 +269,7 @@ impl KubernetesSessionEffectResultV2 {
             KubernetesSessionEffectOutcomeV2::Uncertain { http_status } => {
                 require(http_status.is_none_or(|status| (100..=599).contains(&status)))
             }
+            KubernetesSessionEffectOutcomeV2::NotSent => Ok(()),
         }
     }
     pub fn input_hash(&self) -> anyhow::Result<String> {

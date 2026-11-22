@@ -176,6 +176,7 @@ fn outcome_state(outcome: Option<&KubernetesSessionEffectOutcomeV2>) -> &'static
         Some(KubernetesSessionEffectOutcomeV2::Applied { .. }) => "applied",
         Some(KubernetesSessionEffectOutcomeV2::NotApplied { .. }) => "not_applied",
         Some(KubernetesSessionEffectOutcomeV2::Uncertain { .. }) => "uncertain",
+        Some(KubernetesSessionEffectOutcomeV2::NotSent) => "not_sent",
     }
 }
 
@@ -249,7 +250,10 @@ fn admit_order(
                     && step.action == Action::ReleaseGate
                     && !matches!(
                         step.outcome,
-                        Some(KubernetesSessionEffectOutcomeV2::NotApplied { .. })
+                        Some(
+                            KubernetesSessionEffectOutcomeV2::NotApplied { .. }
+                                | KubernetesSessionEffectOutcomeV2::NotSent
+                        )
                     )
             });
             conflict(
@@ -773,13 +777,17 @@ impl Store {
                 )?;
                 if observed.end == KubernetesSessionPodEndV2::NeverStarted {
                     // A Pod whose gate release was applied, or may have been, may
-                    // have run: only refused releases leave it never started.
+                    // have run: only refused or unsent releases leave it never
+                    // started.
                     conflict(!steps.iter().any(|step| {
                         step.subject == observed.subject
                             && step.action == Action::ReleaseGate
                             && !matches!(
                                 step.outcome,
-                                Some(KubernetesSessionEffectOutcomeV2::NotApplied { .. })
+                                Some(
+                                    KubernetesSessionEffectOutcomeV2::NotApplied { .. }
+                                        | KubernetesSessionEffectOutcomeV2::NotSent
+                                )
                             )
                     }))?;
                 }

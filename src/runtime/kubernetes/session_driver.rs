@@ -20,6 +20,9 @@
 )]
 use super::{
     KubernetesRuntime,
+    bootstrap::BootstrapCapacity,
+    session::SessionBootstrapBindingV2,
+    session_attach::{AttachAttemptV2, AttachIdentityV2},
     session_claim::{
         KubernetesSessionClaimRequestV2, KubernetesSessionStorageRequestV2,
         SessionClaimCreateOutcomeV2,
@@ -34,8 +37,10 @@ use super::{
     },
     session_permit::{CentralEffectPermitV2, RetainedEffectClaimV2},
     session_pod::KubernetesSessionPodRequestV2,
+    session_protocol::{SessionChannelV3, SessionModeV3},
     session_requests::{
-        delete_claim_request, delete_pod_request, release_finalizer_request, release_gate_request,
+        attach_request, delete_claim_request, delete_pod_request, release_finalizer_request,
+        release_gate_request,
     },
 };
 use crate::control::kubernetes_session::{
@@ -223,6 +228,13 @@ struct Claimed {
 }
 
 impl<'a, L: SessionLedgerV2> SessionDriverV2<'a, L> {
+    /// Stops every later send of this driver. Cleanup of already issued
+    /// effects goes through a new driver opened on the same reservation.
+    pub(crate) fn cancel(&self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
     /// The position is read from the ledger's current effect state of this
     /// reservation; the driver never guesses it.
     pub(crate) async fn open(
@@ -269,6 +281,13 @@ impl<'a, L: SessionLedgerV2> SessionDriverV2<'a, L> {
         storage: Option<&KubernetesSessionStorageRequestV2>,
         deadline: Option<&KubernetesSessionDeadlineArmV2>,
     ) -> Driven<Claimed> {
+        // A cancelled driver claims nothing more; a cancellation raised after
+        // a claim refuses its permit and the step is recorded `NotSent`.
+        if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(SessionDriverErrorV2::Runtime(
+                KubernetesSessionRuntimeError::EffectRefusedBeforeSend,
+            ));
+        }
         let request = KubernetesSessionEffectRequestV2 {
             version: 1,
             operation_id: Uuid::new_v4().to_string(),
@@ -347,11 +366,11 @@ impl<'a, L: SessionLedgerV2> SessionDriverV2<'a, L> {
                 None,
             )
             .await?;
-        let created = match self
+        let sent = self
             .runtime
             .create_session_workspace_claim(&request, permit, &self.cancelled)
-            .await?
-        {
+            .await;
+        let created = match self.sent(&ack, sent).await? {
             SessionClaimCreateOutcomeV2::Created(created) => created,
             SessionClaimCreateOutcomeV2::OwnershipUnknown { http_status, .. } => {
                 self.report(&ack, Outcome::Uncertain { http_status })
@@ -405,11 +424,11 @@ impl<'a, L: SessionLedgerV2> SessionDriverV2<'a, L> {
                 None,
             )
             .await?;
-        match self
+        let sent = self
             .runtime
             .create_session_held(request, permit, &self.cancelled)
-            .await?
-        {
+            .await;
+        match self.sent(&ack, sent).await? {
             SessionCreateOutcomeV2::CreatedHeld(instance) => {
                 self.report(
                     &ack,
@@ -456,12 +475,96 @@ impl<'a, L: SessionLedgerV2> SessionDriverV2<'a, L> {
                 Some(deadline),
             )
             .await?;
-        let outcome = self
+        let sent = self
             .runtime
-            .release_session_gate(instance, &observed, permit, &self.cancelled)
-            .await?;
+            .release_session_gate(instance, &observed, permit, &self.cancelled);
+        let outcome = self.sent(&ack, sent.await).await?;
         self.finish(&ack, instance.pod_uid(), release_outcome(outcome))
             .await
+    }
+
+    /// The single attach of a running session Pod (`stdinOnce`; no second
+    /// attach, decision D6). The claimed digest binds identity one, read
+    /// here from the same observation fields the bracket reads again before
+    /// sending: a changed container refuses the permit, nothing is sent.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the streaming attach inputs; each is owned by a different layer"
+    )]
+    pub(crate) async fn attach_session(
+        &mut self,
+        instance: &SessionInstanceV2,
+        binding: SessionBootstrapBindingV2,
+        attempt: &AttachAttemptV2,
+        bootstrap: BootstrapCapacity,
+        until: tokio::time::Instant,
+        session_until: tokio::time::Instant,
+        mode: SessionModeV3,
+    ) -> Driven<SessionChannelV3> {
+        let observed = self.runtime.observe_session_instance(instance).await?;
+        let identity = AttachIdentityV2::from_observation(&observed).ok_or(
+            SessionDriverErrorV2::Runtime(KubernetesSessionRuntimeError::EffectRefusedBeforeSend),
+        )?;
+        let body = attach_request(
+            self.runtime.binding(),
+            instance.target().pod_name(),
+            &identity.canonical_bytes()?,
+        )?;
+        let Claimed { ack, permit } = self
+            .claim(
+                Subject::SessionPod,
+                Action::Attach,
+                &body.request_sha256,
+                Some(instance.pod_uid()),
+                None,
+                None,
+                None,
+            )
+            .await?;
+        let attached = self
+            .runtime
+            .attach_exact_instance_streaming(
+                instance,
+                binding,
+                permit,
+                attempt,
+                bootstrap,
+                until,
+                session_until,
+                &self.cancelled,
+                mode,
+            )
+            .await;
+        match attached {
+            Ok(channel) => {
+                self.report(
+                    &ack,
+                    Outcome::Applied {
+                        object_uid: instance.pod_uid().into(),
+                        resource_version: None,
+                    },
+                )
+                .await?;
+                Ok(channel)
+            }
+            Err(error) => {
+                // The record tells whether the permit let the request out.
+                let _ = attempt.join().await;
+                let initiated = attempt
+                    .report()
+                    .is_none_or(|report| report.request_initiated());
+                if initiated {
+                    self.report(&ack, Outcome::Uncertain { http_status: None })
+                        .await?;
+                    Err(SessionDriverErrorV2::Uncertain {
+                        step: ack.request.step,
+                    })
+                } else {
+                    self.report(&ack, Outcome::NotSent).await?;
+                    Err(error.into())
+                }
+            }
+        }
     }
 
     /// DELETE of one Pod by its UID (stop, or cleanup after the terminal).
@@ -490,10 +593,10 @@ impl<'a, L: SessionLedgerV2> SessionDriverV2<'a, L> {
                 None,
             )
             .await?;
-        let outcome = self
+        let sent = self
             .runtime
-            .delete_session_exact(instance, &observed, permit, &self.cancelled)
-            .await?;
+            .delete_session_exact(instance, &observed, permit, &self.cancelled);
+        let outcome = self.sent(&ack, sent.await).await?;
         self.finish(&ack, instance.pod_uid(), delete_outcome(outcome))
             .await
     }
@@ -549,10 +652,10 @@ impl<'a, L: SessionLedgerV2> SessionDriverV2<'a, L> {
                 None,
             )
             .await?;
-        let outcome = self
-            .runtime
-            .release_session_finalizer(instance, observed, permit, &self.cancelled)
-            .await?;
+        let sent =
+            self.runtime
+                .release_session_finalizer(instance, observed, permit, &self.cancelled);
+        let outcome = self.sent(&ack, sent.await).await?;
         self.finish(&ack, instance.pod_uid(), finalizer_outcome(outcome))
             .await
     }
@@ -574,10 +677,10 @@ impl<'a, L: SessionLedgerV2> SessionDriverV2<'a, L> {
                 None,
             )
             .await?;
-        let outcome = self
-            .runtime
-            .delete_session_workspace_claim_exact(claim, permit, &self.cancelled)
-            .await?;
+        let sent =
+            self.runtime
+                .delete_session_workspace_claim_exact(claim, permit, &self.cancelled);
+        let outcome = self.sent(&ack, sent.await).await?;
         self.finish(&ack, claim.uid(), delete_outcome(outcome))
             .await
     }
@@ -593,6 +696,22 @@ impl<'a, L: SessionLedgerV2> SessionDriverV2<'a, L> {
                 expected_last_step: self.last_step,
             })
             .await
+    }
+
+    /// After a claim, a runtime refusal means nothing was sent: it is
+    /// recorded `NotSent` so that the step does not stay open.
+    async fn sent<T>(
+        &self,
+        ack: &KubernetesSessionEffectClaimAckV2,
+        sent: Result<T, KubernetesSessionRuntimeError>,
+    ) -> Driven<T> {
+        match sent {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                self.report(ack, Outcome::NotSent).await?;
+                Err(error.into())
+            }
+        }
     }
 
     /// Records the observed outcome and maps it to the driver's result.

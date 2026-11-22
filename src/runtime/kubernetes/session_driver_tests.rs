@@ -260,3 +260,18 @@ async fn a_ledger_refusal_sends_nothing() {
     assert!(case.effects().is_empty(), "no request without a claim");
     assert_eq!(case.state().last_step, 0);
 }
+
+#[tokio::test]
+async fn a_cancelled_driver_claims_and_sends_nothing() {
+    let case = Case::new("ai-guard-rwop").await;
+    case.respond(|request: &PeerRequest| PeerReply::json(201, &created(request.body())));
+    let mut driver = case.driver().await;
+    driver.cancel();
+    let error = driver.provision_workspace(&storage()).await.unwrap_err();
+    assert_eq!(
+        error,
+        SessionDriverErrorV2::Runtime(KubernetesSessionRuntimeError::EffectRefusedBeforeSend)
+    );
+    assert!(case.effects().is_empty());
+    assert_eq!(case.state().last_step, 0, "no step claimed");
+}

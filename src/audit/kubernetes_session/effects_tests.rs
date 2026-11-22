@@ -494,6 +494,28 @@ fn an_uncertain_create_keeps_the_quota_held() {
 }
 
 #[test]
+fn a_claimed_step_refused_before_send_closes_without_effect() {
+    let f = Fixture::new();
+    prepare(&f);
+    enable(&f);
+    let quota = QuotaPolicyV1::default();
+    let mut chain = Chain::new(&f, reserve(&f, &quota));
+    assert_eq!(f.store.worker_quota(&quota).unwrap().held_workers, 1);
+    // While its result is pending, the claimed step blocks every later one.
+    let claim = chain.claim(&chain.claim_request()).unwrap();
+    assert_eq!(failure(chain.settle().unwrap_err()), Failure::Conflict);
+    let state = chain
+        .result(&claim, KubernetesSessionEffectOutcomeV2::NotSent)
+        .unwrap();
+    assert_eq!(state.last_step, 1);
+    assert_eq!(state.workspace_claim_uid, None);
+    assert_eq!(state.unresolved_uncertain_steps, 0);
+    // Nothing exists, so the attempt settles and its quota is released.
+    assert!(chain.settle().unwrap().settled);
+    assert_eq!(f.store.worker_quota(&quota).unwrap().held_workers, 0);
+}
+
+#[test]
 fn a_reopened_store_revalidates_the_capability_family() {
     let f = Fixture::new();
     prepare(&f);
