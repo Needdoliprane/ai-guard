@@ -36,7 +36,7 @@ Before starting services, inspect the configuration:
 "$AIGUARD_DIAGNOSE" --config-dir "$AIGUARD_CONFIG"
 ```
 
-The [diagnostic](docs/setup/diagnostics/README.md) is read-only and offline by default: it launches nothing, reads credential references through metadata and reports what was not checked or is unavailable. It does not validate credential contents, account access, SQLite integrity or signed checkpoints. Resolve errors and unknowns and read the limits even when the report says `OK`. Add `--json` for the structured report.
+The [diagnostic](docs/setup/diagnostics/README.md) is read-only and offline by default. It launches nothing and reports what was not checked or is unavailable. It describes files that the inspected files name as a credential by their metadata and flags any that it opened before identifying their role. It does not validate credential contents, account access, SQLite integrity or signed checkpoints. Resolve errors and unknowns and read the limits even when the report says `OK`. Add `--json` for the structured report.
 
 ```sh
 "$AIGUARD_BIN" up --runtime docker --source . --config-dir "$AIGUARD_CONFIG"

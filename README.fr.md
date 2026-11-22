@@ -36,7 +36,7 @@ Avant de démarrer les services, inspecter la configuration :
 "$AIGUARD_DIAGNOSE" --config-dir "$AIGUARD_CONFIG"
 ```
 
-Le [diagnostic](docs/setup/diagnostics/README.fr.md) fonctionne en lecture seule et hors ligne par défaut : il ne lance rien, décrit les références de credentials par leurs métadonnées et signale ce qui n’est pas vérifié ou disponible. Il ne valide ni le contenu des credentials, ni l’accès au compte, ni l’intégrité SQLite, ni les checkpoints signés. Résoudre les erreurs et inconnues et lire les limites même lorsque le rapport affiche `OK`. Ajouter `--json` pour le rapport structuré.
+Le [diagnostic](docs/setup/diagnostics/README.fr.md) fonctionne en lecture seule et hors ligne par défaut. Il ne lance rien et signale ce qui n’est pas vérifié ou disponible. Il décrit par leurs métadonnées les fichiers que les fichiers inspectés désignent comme credential et signale ceux qu’il a ouverts avant d’identifier leur rôle. Il ne valide ni le contenu des credentials, ni l’accès au compte, ni l’intégrité SQLite, ni les checkpoints signés. Résoudre les erreurs et inconnues et lire les limites même lorsque le rapport affiche `OK`. Ajouter `--json` pour le rapport structuré.
 
 ```sh
 "$AIGUARD_BIN" up --runtime docker --source . --config-dir "$AIGUARD_CONFIG"

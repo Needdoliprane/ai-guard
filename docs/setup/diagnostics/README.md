@@ -949,6 +949,8 @@ One code has one status, one axis and one basis. Some codes have a second messag
 | `registry.tenant_id_invalid` | `error` | `tenants` | `observed` | A tenant identifier is refused by the product validator. |
 | `registry.tenant_id_duplicate` | `error` | `tenants` | `inferred` | A tenant identifier appears more than once. |
 | `registry.reference_empty` | `error` | `tenants` | `inferred` | A tenant has an empty store or key file reference. |
+| `registry.storage_invalid` | `error` | `tenants` | `observed` | A tenant must declare exactly one storage selector: `data` or a valid `storage` profile. Correct the registry supplied with `--tenants-file`. |
+| `registry.mysql_unavailable` | `error` | `tenants` | `observed` | This gateway cannot serve the declared MySQL profile. Keep the destination in the registry supplied with `--tenants-file` and use a gateway that supports the profile. |
 | `registry.policy_invalid` | `error` | `tenants` | `observed` | A tenant policy is refused by the product validator; the details name the policy. An audit-capacity or a workload-audit policy is judged for the event bound given with `--max-events`. |
 | `registry.policy_refused_at_assumed_event_bound` | `unknown` | `tenants` | `inferred` | An audit-capacity or a workload-audit policy is refused at 100000 events, the gateway default that this tool assumes when `--max-events` is not given. A gateway started with another bound may accept it. |
 | `registry.event_bound_not_used` | `not_checked` | `tenants` | `observed` | An event bound was given with `--max-events` and nothing was validated with it: no decoded registry declares an audit-capacity or a workload-audit policy. |
