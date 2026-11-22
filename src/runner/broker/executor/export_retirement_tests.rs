@@ -12,6 +12,7 @@ use crate::{
     },
     runtime::{ContainerHandle, RuntimeAuthority},
 };
+use anyhow::bail;
 use std::{
     collections::BTreeMap,
     io::Read,

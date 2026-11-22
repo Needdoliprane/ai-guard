@@ -28,10 +28,10 @@ jobs:
         env:
           WORKFLOW_SHA: ${{ github.sha }}
         run: |
-          printf 'workflow_sha=%s\nworkflow_parent=NOT_VERIFIED\ncandidate=75bdd7af33e40e60b9586e1a12cb2530225ee414\ncandidate_parent=8e34ce0449e5c6f0be394a3103f9cfdd594c3adf\nsource=NOT_RUN\nworkflow_lineage=NOT_RUN\nfetch=NOT_RUN\nlibtest_build=NOT_RUN\nlibtest_artifact=NOT_RUN\noracles=NOT_RUN\n' "$WORKFLOW_SHA" > "$RUNNER_TEMP/g07-cleanup-ack-receipt.txt"
+          printf 'workflow_sha=%s\nworkflow_parent=NOT_VERIFIED\ncandidate=c9d0611080d4cb7f9742e4075b7f49e8a4413acb\ncandidate_parent=75bdd7af33e40e60b9586e1a12cb2530225ee414\nsource=NOT_RUN\nworkflow_lineage=NOT_RUN\nfetch=NOT_RUN\nlibtest_build=NOT_RUN\nlibtest_artifact=NOT_RUN\noracles=NOT_RUN\n' "$WORKFLOW_SHA" > "$RUNNER_TEMP/g07-cleanup-ack-receipt.txt"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: 75bdd7af33e40e60b9586e1a12cb2530225ee414
+          ref: c9d0611080d4cb7f9742e4075b7f49e8a4413acb
           fetch-depth: 0
           persist-credentials: false
       - name: Verify candidate, module path, and workflow-only ancestry
@@ -44,22 +44,24 @@ jobs:
           source_status=FAIL
           lineage_status=FAIL
           test_source=src/runner/broker/executor/export_retirement_tests.rs
-          source_delta="$(git diff --name-only 8e34ce0449e5c6f0be394a3103f9cfdd594c3adf 75bdd7af33e40e60b9586e1a12cb2530225ee414)"
-          if [[ "$(git rev-parse HEAD)" == 75bdd7af33e40e60b9586e1a12cb2530225ee414 &&
-                "$(git rev-parse HEAD^)" == 8e34ce0449e5c6f0be394a3103f9cfdd594c3adf &&
+          source_delta="$(git diff --name-only 75bdd7af33e40e60b9586e1a12cb2530225ee414 c9d0611080d4cb7f9742e4075b7f49e8a4413acb)"
+          if [[ "$(git rev-parse HEAD)" == c9d0611080d4cb7f9742e4075b7f49e8a4413acb &&
+                "$(git rev-parse HEAD^)" == 75bdd7af33e40e60b9586e1a12cb2530225ee414 &&
                 "$source_delta" == "$test_source" ]] &&
               grep -Fq '#[path = "journal_tests.rs"]' src/runner/broker/executor/journal.rs &&
               grep -Fq '#[path = "export_retirement_tests.rs"]' src/runner/broker/executor/journal_tests.rs &&
+              grep -Fq 'use anyhow::bail;' "$test_source" &&
               grep -Fq 'async fn worker_cleanup_replays_the_exact_store_receipt_after_lost_http_response()' "$test_source" &&
               grep -Fq 'async fn worker_cleanup_retains_the_published_ack_after_lost_writer_reply()' "$test_source"; then
             source_status=PASS
           fi
-          workflow_delta="$(git diff --name-only 75bdd7af33e40e60b9586e1a12cb2530225ee414 "$WORKFLOW_SHA")"
-          if [[ "$(git rev-parse "$WORKFLOW_SHA^")" == 0443be0fe0fcaeaad6972484f89fe9b7bac6e92a &&
+          workflow_delta="$(git diff --name-only c9d0611080d4cb7f9742e4075b7f49e8a4413acb "$WORKFLOW_SHA")"
+          if [[ "$(git rev-parse "$WORKFLOW_SHA^")" == a5db665916972a0910c197d5470bc10870b441d0 &&
+                "$(git rev-parse "$WORKFLOW_SHA^2")" == c9d0611080d4cb7f9742e4075b7f49e8a4413acb &&
                 "$workflow_delta" == '.github/workflows/lot-verify.yaml' ]]; then
             lineage_status=PASS
           fi
-          printf 'source=%s\nworkflow_lineage=%s\nworkflow_parent=0443be0fe0fcaeaad6972484f89fe9b7bac6e92a\n' \
+          printf 'source=%s\nworkflow_lineage=%s\nworkflow_parent=a5db665916972a0910c197d5470bc10870b441d0\nworkflow_candidate_parent=c9d0611080d4cb7f9742e4075b7f49e8a4413acb\n' \
             "$source_status" "$lineage_status" >> "$receipt"
           cat "$receipt" >> "$GITHUB_STEP_SUMMARY"
           [[ "$source_status" == PASS && "$lineage_status" == PASS ]]
@@ -78,10 +80,34 @@ jobs:
           scratch="$RUNNER_TEMP/g07-cleanup-ack-private"
           mkdir -m 700 "$scratch"
           export CARGO_TARGET_DIR="$scratch/target"
-          cargo test --locked --offline --no-default-features --lib --no-run --message-format=json \
-            > "$scratch/build.jsonl" 2> "$scratch/build.stderr"
-          rc=$?
+          if cargo test --locked --offline --no-default-features --lib --no-run --message-format=json \
+            > "$scratch/build.jsonl" 2> "$scratch/build.stderr"; then
+            rc=0
+          else
+            rc=$?
+          fi
           printf 'libtest_build=%s build_exit=%s\n' "$([[ "$rc" == 0 ]] && echo PASS || echo FAIL)" "$rc" >> "$RUNNER_TEMP/g07-cleanup-ack-receipt.txt"
+          if jq -r '
+            select(.reason == "compiler-message" and .message.level == "error")
+            | .target.name as $target | .message.code.code as $code
+            | .message.spans[]? | select(.is_primary == true)
+            | .file_name as $file | .line_start as $line | .column_start as $column
+            | select(($target | type) == "string" and ($target | test("^[A-Za-z0-9_-]+$")))
+            | select(($code | type) == "string" and ($code | test("^E[0-9]{4}$")))
+            | select(($file | type) == "string" and ($file | test("^(src|tests)/([A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+\\.rs$")))
+            | select(($line | type) == "number" and ($line | floor) == $line and $line > 0 and $line <= 1000000)
+            | select(($column | type) == "number" and ($column | floor) == $column and $column > 0 and $column <= 1000000)
+            | "build_error target=\($target) code=\($code) location=\($file):\($line):\($column)"
+          ' "$scratch/build.jsonl" > "$scratch/build.diagnostics"; then
+            if [[ -s "$scratch/build.diagnostics" ]]; then
+              sort -u "$scratch/build.diagnostics" >> "$RUNNER_TEMP/g07-cleanup-ack-receipt.txt"
+              printf 'build_error_spans=%s\n' "$(wc -l < "$scratch/build.diagnostics" | tr -d ' ')" >> "$RUNNER_TEMP/g07-cleanup-ack-receipt.txt"
+            else
+              printf 'build_error_spans=0\n' >> "$RUNNER_TEMP/g07-cleanup-ack-receipt.txt"
+            fi
+          else
+            printf 'build_error_spans=UNAVAILABLE\n' >> "$RUNNER_TEMP/g07-cleanup-ack-receipt.txt"
+          fi
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
           if [[ "$rc" == 0 ]]; then
             binary="$(jq -ers '[.[] | select(.reason == "compiler-artifact" and .target.name == "agentsandbox" and .target.kind == ["lib"] and .profile.test == true and .features == [] and .executable != null) | .executable] | unique | if length == 1 then .[0] else empty end' "$scratch/build.jsonl")"
