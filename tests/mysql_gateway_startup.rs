@@ -59,6 +59,12 @@ async fn ambiguous_mysql_selection_refuses_before_credentials_or_storage_effects
 
 #[tokio::test]
 async fn valid_mysql_profiles_refuse_before_credentials_or_storage_effects() {
+    // MySQL builds resolve the SQL references before reading gateway credentials.
+    #[cfg(feature = "mysql-storage")]
+    let expected = "Error: MySQL password reference is not a private regular file";
+    #[cfg(not(feature = "mysql-storage"))]
+    let expected = "Error: Ce gateway refuse le profil MySQL tant que les transactions nécessaires sont indisponibles";
+
     for authentication in [
         json!({"mode":"password"}),
         json!({
@@ -67,12 +73,7 @@ async fn valid_mysql_profiles_refuse_before_credentials_or_storage_effects() {
             "client_key_file":"absent-sql-client-key"
         }),
     ] {
-        assert_storage_startup_refused(
-            mysql_storage(authentication),
-            None,
-            "Error: Ce gateway refuse le profil MySQL tant que les transactions nécessaires sont indisponibles",
-        )
-        .await;
+        assert_storage_startup_refused(mysql_storage(authentication), None, expected).await;
     }
 }
 
