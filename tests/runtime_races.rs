@@ -52,11 +52,12 @@ mod unix {
             original: original.clone(),
             swapped: false,
         };
-        let result =
-            extract_workspace(reader, &parent.join("result"), &original, Limits::default());
+        let error = extract_workspace(reader, &parent.join("result"), &original, Limits::default())
+            .expect_err("changed parent identity must fail the export");
         assert!(
-            result.is_err(),
-            "changed parent identity must fail the export"
+            error.chain().any(|cause| cause.to_string()
+                == "export parent path or ancestry changed; export refused"),
+            "the export refusal must identify the changed parent: {error:#}"
         );
         assert_eq!(
             fs::read_dir(&original).unwrap().count(),
@@ -67,10 +68,22 @@ mod unix {
             fs::read_to_string(original.join("keep.txt")).unwrap(),
             "unchanged"
         );
-        assert_eq!(
-            fs::read_dir(parked).unwrap().count(),
-            0,
-            "failed staging must be cleaned relative to the held parent descriptor"
+        let mut retained = fs::read_dir(&parked).unwrap();
+        let staging = retained
+            .next()
+            .expect("private staging must be retained")
+            .unwrap();
+        assert!(
+            staging.file_type().unwrap().is_dir()
+                && staging
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".agentsandbox-export-"),
+            "the moved parent must contain the private staging directory"
+        );
+        assert!(
+            retained.next().is_none(),
+            "only staging may remain when publication is refused"
         );
     }
 
