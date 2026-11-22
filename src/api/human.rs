@@ -1291,15 +1291,7 @@ fn event_page_sync(
     cursor.after_event = page.after_event;
     cursor.upper_event = Some(page.upper_event);
     let mut page = envelope(&context, page, Some(key.view), is_export);
-    // Owned sources are not served by audit retention yet; a legacy store
-    // names its archived prefix so that no page reads as complete history.
-    if state.owned_human.is_none() {
-        let ledger = tenant
-            .store
-            .audit_retention_ledger()
-            .map_err(store_failure)?;
-        page.archived_through_seq = (ledger.segments > 0).then_some(ledger.archived_through_seq);
-    }
+    page.archived_through_seq = poll.archived_through_seq;
     finish_page(&context, &key, cursor, page)
 }
 async fn stream(

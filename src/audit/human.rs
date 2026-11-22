@@ -29,6 +29,7 @@ pub(crate) struct HumanStorePageV1<T> {
 pub(crate) struct HumanEventPollV1 {
     pub page: Option<HumanStorePageV1<HumanEventItemV1>>,
     pub after_event: i64,
+    pub archived_through_seq: Option<i64>,
 }
 pub(crate) struct HumanProfileSnapshotV1 {
     pub account: Option<HumanAccountV1>,
@@ -657,8 +658,15 @@ impl Store {
             return Ok(HumanEventPollV1 {
                 page: None,
                 after_event: upper,
+                archived_through_seq: None,
             });
         }
+        let archived_through_seq = if filter.stream {
+            None
+        } else {
+            let (last_seq, _) = super::retention::ledger::base(tx)?;
+            (last_seq > 0).then_some(last_seq)
+        };
         let action = if filter.stream {
             "stream"
         } else if filter.export {
@@ -679,6 +687,7 @@ impl Store {
         let after_event = if has_more { position } else { upper };
         Ok(HumanEventPollV1 {
             after_event,
+            archived_through_seq,
             page: Some(HumanStorePageV1 {
                 items,
                 after_resource: String::new(),

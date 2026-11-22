@@ -67,6 +67,106 @@ async fn get(router: &Router, path: &str, context: Option<&str>) -> (StatusCode,
 }
 
 #[tokio::test]
+async fn owned_event_page_reports_the_archived_prefix_after_adoption() {
+    use crate::audit::retention::{AuditRetentionPolicyV1, ReclaimClassV1, RetentionApplyRequest};
+    use std::{collections::BTreeSet, os::unix::fs::PermissionsExt};
+
+    let fixture = Fixture::new_owned_local();
+    let archive_home = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let archive_home_path = archive_home.path().canonicalize().unwrap();
+    let store = fixture.legacy_store("B");
+    assert_eq!(store.supervision_state().unwrap().schema_version, 13);
+    store
+        .install_audit_retention(&archive_home_path.join("before.sqlite"))
+        .unwrap();
+
+    let resource = "owned-archived-prefix";
+    let first_id = seed_event(&fixture, "B", resource, fixture.principal());
+    let append = |kind: &str| {
+        let mut event = Event::new(kind);
+        event.session_id = Some(resource.into());
+        store.append(event).unwrap()
+    };
+    let reclaimed = append("fixture.journal.archived");
+    let boundary = append("fixture.journal.boundary");
+    let recent = append("fixture.journal.recent");
+    let policy = AuditRetentionPolicyV1 {
+        version: 1,
+        min_age_seconds: 86_400,
+        keep_recent_events: 1,
+        max_segment_events: 100_000,
+        classes: vec![ReclaimClassV1::Ordinary],
+    };
+    let now = chrono::Utc::now() + chrono::Duration::days(2);
+    let kept = BTreeSet::new();
+    let planned = store
+        .audit_retention_plan(&policy, now, None, &kept)
+        .unwrap();
+    let receipt = store
+        .apply_audit_retention(&RetentionApplyRequest {
+            policy: &policy,
+            now,
+            through_seq: planned.plan.last_seq,
+            expect_plan_sha256: &planned.plan_sha256,
+            archive_dir: &archive_home_path.join("archive"),
+            kept_positions: &kept,
+        })
+        .unwrap();
+    assert_eq!(receipt.archive.last_seq, boundary.seq);
+    assert!(receipt.reclaimed_events > 0);
+
+    let (bundle, credentials, tokens) = fixture.owned_startup();
+    assert!(bundle.owner.closure().sources.iter().any(|source| {
+        source.tenant_id.as_deref() == Some("B") && source.required_format == 14
+    }));
+    let router = gateway_router(
+        GatewayState::for_owned_human_sources(
+            bundle,
+            credentials,
+            tokens,
+            Policy::default(),
+            None,
+            Redactor::new(vec![]),
+        )
+        .unwrap(),
+    );
+    let (status, identity) = get(&router, "/api/v1/human/identity", None).await;
+    assert_eq!(status, StatusCode::OK, "{identity}");
+    let context = identity["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|context| context["tenant_id"] == "B" && context["mode"] == "personal")
+        .unwrap();
+    let (status, page) = get(
+        &router,
+        "/api/v1/human/events?view=metadata&limit=10&resource_kind=session&resource_id=owned-archived-prefix",
+        context["id"].as_str(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["archived_through_seq"], receipt.archive.last_seq);
+    let ids = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["metadata"]["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        [
+            first_id.as_str(),
+            boundary.event.id.as_str(),
+            recent.event.id.as_str()
+        ]
+    );
+    assert!(!ids.contains(&reclaimed.event.id.as_str()));
+}
+
+#[tokio::test]
 async fn owned_events_metadata_returns_authorized_items_and_committed_scope_receipt() {
     // All history/grants are prepared by existing real Store APIs before the
     // existing owned migration/startup protocol. No modern helper is needed.
@@ -152,6 +252,7 @@ async fn owned_events_metadata_returns_authorized_items_and_committed_scope_rece
     assert_eq!(page["coverage"], "authorized_selection");
     assert_eq!(page["has_more"], false);
     assert!(page["next_cursor"].is_null());
+    assert!(page.get("archived_through_seq").is_none());
     assert!(page.get("live_cursor").is_none());
     assert!(page.get("selection_complete").is_none());
     let items = page["items"].as_array().unwrap();
