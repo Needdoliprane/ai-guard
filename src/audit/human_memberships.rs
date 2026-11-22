@@ -249,6 +249,7 @@ impl Store {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .unwrap();
+        observer.busy_timeout(std::time::Duration::ZERO).unwrap();
         let injected = Arc::new(AtomicBool::new(false));
         let reached = injected.clone();
         self.backing.test_hook.set(move || {
