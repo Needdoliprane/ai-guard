@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     audit::{
-        AuditCapacityPolicyV1, AuditCapacityV1, EventQuery, Integrity,
+        AuditCapacityPolicyV1, AuditCapacityV1, EventQuery, Integrity, MAX_EVENT_BATCH,
         RETIREMENT_RESUME_EVENT_KIND,
         capacity_policy::{PHYSICAL_BYTES, ReservedWrite},
         control_delivery_kind,
@@ -57,6 +57,7 @@ use tokio::{
 use uuid::Uuid;
 
 pub use super::supervision::MysqlSupervisionOrigin;
+pub use crate::audit::BatchConflict;
 
 pub(crate) const DEADLINE: Duration = Duration::from_secs(8);
 // The gateway's CredentialIndex admits one runner and one viewer for at most 256 tenants.
@@ -82,18 +83,6 @@ impl fmt::Display for CommitUncertain {
     }
 }
 impl std::error::Error for CommitUncertain {}
-
-/// An audit id has different content and the batch rollback was confirmed.
-#[derive(Debug)]
-pub struct BatchConflict;
-
-impl fmt::Display for BatchConflict {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("event batch conflicts with a stored event")
-    }
-}
-
-impl std::error::Error for BatchConflict {}
 
 #[derive(Debug)]
 struct AuditChainMismatch {
@@ -1343,7 +1332,7 @@ impl MysqlAuditStore {
     /// request order. Identical ids and payloads reuse their original receipt.
     pub async fn append_batch(&self, events: Vec<Event>) -> Result<Vec<StoredEvent>> {
         ensure!(
-            !events.is_empty() && events.len() <= 64,
+            !events.is_empty() && events.len() <= MAX_EVENT_BATCH,
             "event batch size is outside its bound"
         );
         let mut prepared = Vec::with_capacity(events.len());

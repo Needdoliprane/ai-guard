@@ -1,5 +1,7 @@
 use crate::{
-    audit::{AuditCapacityFailureV1, DecisionFailure, EventQuery, Store},
+    audit::{
+        AuditCapacityFailureV1, BatchConflict, DecisionFailure, EventQuery, MAX_EVENT_BATCH, Store,
+    },
     control::{
         AdmissionRefusalV1, AdmissionV1, ControlFailure, DecisionPhaseV1, DecisionReceiptV1,
         QuotaPolicyV1, WorkerMutationV1,
@@ -808,19 +810,24 @@ impl TenantState {
         Some(Sha256::digest(token.as_bytes()).into())
     }
     fn write_quota(&self) -> ApiResult<()> {
-        Self::take_write_slot(&self.rate)
+        Self::take_write_slots(&self.rate, 1)
     }
     fn ingestion_quota(&self) -> ApiResult<()> {
-        Self::take_write_slot(&self.ingestion_rate)
+        self.ingestion_quota_for(1)
     }
-    fn take_write_slot(rate: &Mutex<(Instant, u32)>) -> ApiResult<()> {
+    /// Charge one ingestion slot per event, for the entire lot or none of it.
+    fn ingestion_quota_for(&self, count: usize) -> ApiResult<()> {
+        Self::take_write_slots(&self.ingestion_rate, count)
+    }
+    fn take_write_slots(rate: &Mutex<(Instant, u32)>, count: usize) -> ApiResult<()> {
+        let count = u32::try_from(count).unwrap_or(u32::MAX);
         let mut state = rate
             .lock()
             .map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "Limiteur indisponible."))?;
         if state.0.elapsed() >= Duration::from_secs(1) {
             *state = (Instant::now(), 0);
         }
-        if state.1 >= 200 {
+        if state.1.saturating_add(count) > 200 {
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(
@@ -828,7 +835,7 @@ impl TenantState {
                 ),
             ));
         }
-        state.1 += 1;
+        state.1 += count;
         Ok(())
     }
 }
@@ -984,6 +991,7 @@ fn gateway_base_router(state: GatewayState) -> Router {
             routes
                 .clone()
                 .route("/control/events", post(ingest_control_event))
+                .route("/events/batch", post(ingest_batch))
                 .merge(supervision::routes())
                 .merge(egress_policy::router())
                 .merge(workload::routes())
@@ -1048,12 +1056,7 @@ async fn ingest(
             event
                 .validate()
                 .map_err(|_| error(StatusCode::BAD_REQUEST, "Événement invalide."))?;
-            if crate::audit::D5_CONTROL_EVENT_KINDS.contains(&event.kind.as_str())
-                || crate::relay::admission::reserved_kind(&event.kind)
-                || ["security.decision", "control", "worker", "usage.allocation"]
-                    .iter()
-                    .any(|namespace| crate::model::event_kind_in_namespace(&event.kind, namespace))
-            {
+            if reserved_ingestion_kind(&event.kind) {
                 return Err(error(
                     StatusCode::FORBIDDEN,
                     "Ce namespace est réservé aux opérations du contrôle.",
@@ -1067,6 +1070,73 @@ async fn ingest(
             ))
         })
         .await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EventBatchRequest {
+    events: Vec<Event>,
+}
+
+/// Legacy runner delivery of ordinary activity events. The selected Store
+/// commits the entire batch before returning its ordered receipts.
+async fn ingest_batch(
+    RunnerIdentity(tenant): RunnerIdentity,
+    Json(request): Json<EventBatchRequest>,
+) -> ApiResult<Json<Value>> {
+    tenant
+        .blocking(false, move |tenant| {
+            let events = request.events;
+            if events.is_empty() || events.len() > MAX_EVENT_BATCH {
+                return Err(error(
+                    StatusCode::BAD_REQUEST,
+                    "Lot d'événements vide ou supérieur à 64 événements.",
+                ));
+            }
+            for event in &events {
+                event
+                    .validate()
+                    .map_err(|_| error(StatusCode::BAD_REQUEST, "Événement invalide."))?;
+                if reserved_ingestion_kind(&event.kind) {
+                    return Err(error(
+                        StatusCode::FORBIDDEN,
+                        "Ce namespace est réservé aux opérations du contrôle.",
+                    ));
+                }
+            }
+            let digest = tenant
+                .control_guard()
+                .ok_or_else(human_sources::unavailable)?;
+            tenant.ingestion_quota_for(events.len())?;
+            let stored = tenant
+                .store
+                .append_batch_guarded(events, digest)
+                .map_err(|failure| {
+                    if failure.is::<BatchConflict>() {
+                        error(
+                            StatusCode::CONFLICT,
+                            "Un identifiant du lot existe déjà avec un contenu différent.",
+                        )
+                    } else {
+                        unavailable(failure)
+                    }
+                })?;
+            Ok(Json(json!({
+                "stored": stored
+                    .iter()
+                    .map(|row| json!({"id": row.event.id, "seq": row.seq}))
+                    .collect::<Vec<_>>()
+            })))
+        })
+        .await
+}
+
+fn reserved_ingestion_kind(kind: &str) -> bool {
+    crate::audit::D5_CONTROL_EVENT_KINDS.contains(&kind)
+        || crate::relay::admission::reserved_kind(kind)
+        || ["security.decision", "control", "worker", "usage.allocation"]
+            .iter()
+            .any(|namespace| crate::model::event_kind_in_namespace(kind, namespace))
 }
 
 /// The route is the source of delivery authority. Worker-controlled Event
@@ -2482,6 +2552,126 @@ mod ingestion_window_tests {
                         && row.event.data["request_id"] == decision_id.to_string())
             );
         }
+    }
+
+    #[tokio::test]
+    async fn legacy_batch_preserves_receipts_and_rolls_back_before_conflict_reply() {
+        const PATH: &str = "/api/v1/events/batch";
+        const SECRET: &str = "synthetic-batch-private-value";
+        let directory = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let store = Arc::new(
+            Store::open(
+                &directory.path().join("audit.sqlite"),
+                Redactor::new(Vec::new()),
+                1000,
+            )
+            .unwrap(),
+        );
+        let state = GatewayState::for_tenants(
+            vec![TenantGateway {
+                tenant_id: "local".into(),
+                store: store.clone(),
+                runner_token: "synthetic-runner".into(),
+                viewer_token: "synthetic-viewer".into(),
+            }],
+            Policy::default(),
+            None,
+            Redactor::new(vec![SECRET.into()]),
+        )
+        .unwrap();
+        let router = gateway_router(state.clone());
+        let post = |path, value| router.clone().oneshot(request(path, value));
+        let mut original = Event::new("activity.coverage");
+        original.source = "runner".into();
+        original.provenance = "declared".into();
+        original.coverage = "partial".into();
+        original.data = json!({"text": SECRET});
+        let other = Event::new("activity.channel");
+        let batch = json!({"events": [&original, &other, &original]});
+        let base = store.head().unwrap();
+        let expected = json!({"stored": [
+            {"id": original.id, "seq": base + 1},
+            {"id": other.id, "seq": base + 2},
+            {"id": original.id, "seq": base + 1}
+        ]});
+        for _ in 0..2 {
+            let response = post(PATH, batch.clone()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), expected);
+        }
+        let rows = store
+            .events(&EventQuery {
+                after: Some(base),
+                ..EventQuery::default()
+            })
+            .unwrap();
+        let row = rows.iter().find(|row| row.event.id == original.id).unwrap();
+        assert_eq!(row.event.source, "runner");
+        assert_eq!(row.event.provenance, "declared");
+        assert_eq!(row.event.coverage, "partial");
+        assert_eq!(row.event.data["text"], "[REDACTED]");
+
+        let next = Event::new("activity.channel");
+        let mut divergent = original;
+        divergent.data = json!({"text": "different synthetic content"});
+        let conflict = post(PATH, json!({"events": [&next, &divergent]}))
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(conflict.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!({"error": "Un identifiant du lot existe déjà avec un contenu différent."})
+        );
+        assert_eq!(store.head().unwrap(), base + 2);
+        assert_eq!(
+            post("/api/events/batch", batch).await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
+        for invalid in [json!({"events": []}), json!({"events": vec![&other; 65]})] {
+            assert_eq!(
+                post(PATH, invalid).await.unwrap().status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let mut oversized = Event::new("activity.channel");
+        oversized.data = json!({"text": "x".repeat(262_144)});
+        assert_eq!(
+            post(PATH, json!({"events": [oversized]}))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+
+        *state.tenants[0].ingestion_rate.lock().unwrap() =
+            (Instant::now() + Duration::from_secs(60), 199);
+        let overflow = post(PATH, json!({"events": [&next, &other]}))
+            .await
+            .unwrap();
+        assert_eq!(overflow.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(overflow.headers()[header::RETRY_AFTER], "1");
+        let body = axum::body::to_bytes(overflow.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap()["error"]["code"],
+            "write_rate_limited"
+        );
+        assert_eq!(state.tenants[0].ingestion_rate.lock().unwrap().1, 199);
+        assert_eq!(store.head().unwrap(), base + 2);
+        let recovered = post(PATH, json!({"events": [&next]})).await.unwrap();
+        assert_eq!(recovered.status(), StatusCode::OK);
+        assert_eq!(store.head().unwrap(), base + 3);
+        assert_eq!(state.tenants[0].ingestion_rate.lock().unwrap().1, 200);
     }
 
     #[tokio::test]

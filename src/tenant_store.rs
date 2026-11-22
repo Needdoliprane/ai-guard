@@ -111,6 +111,25 @@ impl TenantStore {
         }
     }
 
+    /// Append a Legacy runner's batch to its selected store. MySQL rechecks
+    /// the verified runner digest inside the batch transaction.
+    pub(crate) fn append_batch_guarded(
+        &self,
+        events: Vec<Event>,
+        guard: [u8; 32],
+    ) -> Result<Vec<StoredEvent>> {
+        match self {
+            Self::Sqlite(store) => {
+                let _ = guard;
+                store.append_batch(events)
+            }
+            #[cfg(feature = "mysql-storage")]
+            Self::Mysql(store) => {
+                store.block_guarded(Some(guard), store.store().append_batch(events))
+            }
+        }
+    }
+
     /// Capabilities proven against the selected backend's own verified state.
     pub fn control_capabilities(&self) -> Result<crate::control::ControlCapabilitiesV1> {
         match self {
@@ -378,12 +397,18 @@ mod mysql {
         /// The technical digest is checked against the verified identity and
         /// workload projections of the append's own transaction.
         pub fn append_guarded(&self, event: Event, guard: Option<[u8; 32]>) -> Result<StoredEvent> {
+            self.block_guarded(guard, self.store.append(event))
+        }
+        pub(super) fn block_guarded<T>(
+            &self,
+            guard: Option<[u8; 32]>,
+            operation: impl Future<Output = Result<T>>,
+        ) -> Result<T> {
             match guard {
                 Some(digest) => self.block(crate::mysql_storage::audit::with_control_guard(
-                    digest,
-                    self.store.append(event),
+                    digest, operation,
                 )),
-                None => self.append(event),
+                None => self.block(operation),
             }
         }
         /// One verified snapshot answers human and workload presence.

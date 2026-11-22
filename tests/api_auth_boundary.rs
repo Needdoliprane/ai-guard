@@ -30,8 +30,9 @@ use tokio::{
 };
 use tower::ServiceExt;
 
-const WRITE_PATHS: [&str; 8] = [
+const WRITE_PATHS: [&str; 9] = [
     "/api/v1/events",
+    "/api/v1/events/batch",
     "/api/v1/decide",
     "/api/v1/workers/reservations",
     "/api/v1/workers/00000000-0000-4000-8000-000000000001/transitions",

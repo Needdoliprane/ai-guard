@@ -525,6 +525,15 @@ async fn modern_route_matrix_closes_before_body_extractors_and_store() {
                 "{method} {path}"
             );
             assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
+            if path == "/api/v1/events/batch" {
+                let body = axum::body::to_bytes(response.into_body(), 4096)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&body).unwrap()["error"]["code"],
+                    "identity_unavailable"
+                );
+            }
         }
     }
     assert!(observed.try_recv().is_err());

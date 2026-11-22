@@ -37,6 +37,8 @@ pub(crate) mod worker_admission;
 pub(crate) mod worker_transition;
 use event_codec::digest;
 
+pub(crate) const MAX_EVENT_BATCH: usize = 64;
+
 pub(crate) const D5_CONTROL_EVENT_KINDS: &[&str] = &[
     "broker.abandon-before-claim.requested",
     "broker.retirement.pending",
@@ -228,6 +230,29 @@ mod storage;
 use storage::{InitializationGuard, StoreStorage};
 #[cfg(test)]
 mod resource_tests;
+
+/// A stored event differs from an input event and the batch was rolled back.
+#[derive(Debug)]
+pub struct BatchConflict;
+
+impl std::fmt::Display for BatchConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("event batch conflicts with a stored event")
+    }
+}
+
+impl std::error::Error for BatchConflict {}
+
+#[derive(Debug)]
+struct EventIdConflict;
+
+impl std::fmt::Display for EventIdConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("event id conflict")
+    }
+}
+
+impl std::error::Error for EventIdConflict {}
 
 #[derive(Debug, Serialize)]
 pub struct Integrity {
@@ -1226,6 +1251,47 @@ impl Store {
         self.commit_checked(tx)?;
         Ok(stored)
     }
+
+    /// Append ordinary events in one transaction and return their original or
+    /// new receipts in request order, after the checked commit.
+    pub fn append_batch(&self, events: Vec<Event>) -> anyhow::Result<Vec<StoredEvent>> {
+        anyhow::ensure!(
+            !events.is_empty() && events.len() <= MAX_EVENT_BATCH,
+            "event batch size is outside its bound"
+        );
+        let mut prepared = Vec::with_capacity(events.len());
+        for event in events {
+            event_codec::require_ordinary_kind(&event.kind)?;
+            prepared.push(self.prepare_event(event)?);
+        }
+        let mut db = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
+        let tx = self.begin_checked(&mut db)?;
+        let mut stored = Vec::with_capacity(prepared.len());
+        for (event, payload) in prepared {
+            match self.append_with_capacity_class(
+                &tx,
+                event,
+                payload,
+                capacity::Class::OrdinaryWrite,
+            ) {
+                Ok(row) => stored.push(row),
+                Err(failure) => {
+                    tx.transaction.rollback()?;
+                    return Err(if failure.is::<EventIdConflict>() {
+                        BatchConflict.into()
+                    } else {
+                        failure
+                    });
+                }
+            }
+        }
+        self.commit_checked(tx)?;
+        Ok(stored)
+    }
+
     /// Trusted runner delivery only: the gateway authenticates before parsing
     /// the body. This entry point rechecks the closed kind set at commit; no
     /// Event field can promote ordinary ingestion to the control reserve.
@@ -1612,7 +1678,7 @@ impl Store {
         if let Some(old) = existing {
             anyhow::ensure!(
                 serde_json::to_string(&old.event)? == payload,
-                "event id conflict"
+                EventIdConflict
             );
             return Ok(old);
         }
