@@ -186,6 +186,18 @@ fn stored_decision(
 }
 
 impl Store {
+    fn prepare_egress_event(&self, event: Event) -> anyhow::Result<(Event, String)> {
+        // The event has a canonical timestamp and its typed payload is the
+        // input to exact replay. Refuse a collision before any record is written.
+        let original = serde_json::to_value(&event)?;
+        let (event, payload) = self.prepare_event(event)?;
+        anyhow::ensure!(
+            serde_json::to_value(&event)? == original,
+            EgressJournalError::Invalid
+        );
+        Ok((event, payload))
+    }
+
     /// Select the tenant's immutable operator egress policy before sharing the
     /// Store. Without one, every egress decision is a durable deny.
     pub fn with_egress_policy(
@@ -277,7 +289,7 @@ impl Store {
             &request.binding.worker_id,
             data,
         );
-        let (event, payload) = self.prepare_event(event)?;
+        let (event, payload) = self.prepare_egress_event(event)?;
         let stored = self.append_in_transaction(&tx, event, payload)?;
         self.commit_checked(tx)?;
         decision.receipt = receipt(&stored);
@@ -324,7 +336,7 @@ impl Store {
             &binding.worker_id,
             data,
         );
-        let (event, payload) = self.prepare_event(event)?;
+        let (event, payload) = self.prepare_egress_event(event)?;
         let stored = self.append_in_transaction(&tx, event, payload)?;
         self.commit_checked(tx)?;
         Ok(receipt(&stored))

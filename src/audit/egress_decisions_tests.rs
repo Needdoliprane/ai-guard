@@ -350,3 +350,47 @@ fn egress_store_observations_are_idempotent_and_the_namespace_is_reserved() {
     forged.session_id = Some(worker.launch.session_id.clone());
     assert!(store.append(forged).is_err());
 }
+
+#[test]
+fn egress_store_masks_text_and_refuses_canonical_redaction_collisions() {
+    let directory = private_directory();
+    let store = std::sync::Arc::new(store(directory.path(), "tenant-a"));
+    let worker = software_workers::running_from(&store, egress_admission(&store));
+    let binding = binding(&worker);
+    let private_marker = binding.channel_id.as_str().to_owned();
+    let masked = store
+        .with_additional_redaction(&Redactor::new(vec![private_marker.clone()]))
+        .unwrap();
+    let head = store.head().unwrap();
+
+    let observation = masked.egress_observe(&channel_open(&binding)).unwrap_err();
+    assert_eq!(
+        observation.downcast_ref::<EgressJournalError>(),
+        Some(&EgressJournalError::Invalid)
+    );
+    assert_eq!(store.head().unwrap(), head);
+
+    let decision = masked
+        .egress_decide(
+            &request(&binding, "fixture.egress.test:8443"),
+            &policy(),
+            NOW,
+        )
+        .unwrap_err();
+    assert_eq!(
+        decision.downcast_ref::<EgressJournalError>(),
+        Some(&EgressJournalError::Invalid)
+    );
+    assert_eq!(store.head().unwrap(), head);
+    assert!(
+        store
+            .egress_session_events(&worker.launch.session_id, 10)
+            .unwrap()
+            .is_empty()
+    );
+
+    let mut ordinary = Event::new("fixture.note");
+    ordinary.data = json!({"text": private_marker});
+    let note = masked.append(ordinary).unwrap();
+    assert_eq!(note.event.data["text"], "[REDACTED]");
+}
