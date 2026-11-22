@@ -992,37 +992,85 @@ async fn broker_crash_recovery_observes_then_stops_the_same_running_instance() {
         .spawn()
         .unwrap();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        if fs::read_to_string(scenario.root.join("run_id"))
-            .ok()
-            .is_some_and(|id| {
-                fs::read_to_string(scenario.root.join("containers").join(id).join("state"))
-                    .is_ok_and(|state| state == "running")
-            })
+    let (original, container_id) = loop {
+        let workers = scenario.store.workers().unwrap();
+        if let [worker] = workers.as_slice()
+            && worker.state == WorkerStateV1::Running
+            && let Some(id) = worker.attempt.container_id.as_deref()
+            && fs::read_to_string(scenario.root.join("containers").join(id).join("state"))
+                .is_ok_and(|state| state == "running")
         {
-            break;
+            break (worker.clone(), id.to_owned());
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "broker never reached running"
+            "the exact worker never reached observed and durable Running"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    };
+    assert_eq!(
+        fs::read_to_string(scenario.root.join("run_id")).unwrap(),
+        container_id
+    );
     broker.kill().await.unwrap();
     let _ = broker.wait().await.unwrap();
     scenario.legacy_workspace_exclusion();
     let relocated = scenario.root.join("relocated-original");
     fs::rename(&scenario.project, &relocated).unwrap();
+
+    let assert_unreconciled = || {
+        let workers = scenario.store.workers().unwrap();
+        let [worker] = workers.as_slice() else {
+            panic!("expected the single original worker");
+        };
+        assert_eq!(worker.worker_id, original.worker_id);
+        assert_eq!(worker.attempt, original.attempt);
+        assert_ne!(worker.state, WorkerStateV1::Terminal);
+        assert!(worker.quota_held);
+        assert!(scenario.store.worker_usage().unwrap().is_empty());
+        assert!(!scenario.root.join("terminal_ack").exists());
+    };
+    let assert_one_stop = || {
+        let expected = format!("kill {container_id}");
+        let calls = scenario.calls();
+        let stops: Vec<_> = calls
+            .lines()
+            .filter(|line| line.starts_with("kill "))
+            .collect();
+        assert_eq!(stops, [expected.as_str()]);
+    };
+    let before_resume = scenario.store.head().unwrap();
     let resumed = scenario.invoke("worker-resume").await;
-    assert!(
-        resumed.status.success(),
-        "{}",
-        String::from_utf8_lossy(&resumed.stderr)
-    );
+    assert!(resumed.status.success(), "local recovery failed");
     let value: Value = serde_json::from_slice(&resumed.stdout).unwrap();
     assert_eq!(value["outputs"], "unknown_after_broker_interruption");
-    assert_eq!(value["runtime_observation"]["process"]["running"], true);
-    assert!(scenario.store.worker_usage().unwrap().is_empty());
+    assert_eq!(value["worker"]["worker_id"], original.worker_id);
+    assert_eq!(
+        value["worker"]["attempt"]["attempt_id"],
+        original.attempt.attempt_id
+    );
+    assert_eq!(
+        value["worker"]["launch"]["authority_id"],
+        original.launch.authority_id
+    );
+    assert_eq!(value["runtime_observation"]["id"], container_id);
+    assert_eq!(value["runtime_observation"]["process"]["running"], false);
+    assert!(value["result"].is_null());
+    assert_eq!(
+        fs::read_to_string(
+            scenario
+                .root
+                .join("containers")
+                .join(&container_id)
+                .join("state")
+        )
+        .unwrap(),
+        "exited"
+    );
+    assert_one_stop();
+    assert_unreconciled();
+    assert_eq!(scenario.store.head().unwrap(), before_resume);
+
     scenario.legacy_invocation();
     let before = scenario.calls();
     let rejected = scenario.invoke("worker-stop").await;
@@ -1033,26 +1081,91 @@ async fn broker_crash_recovery_observes_then_stops_the_same_running_instance() {
         before,
         "unbound stop emitted an engine effect"
     );
-    let stopped = scenario
-        .command("worker-stop")
-        .arg("--adopt-runtime-program")
-        .output()
+    let resume_with_adoption = || async {
+        tokio::time::timeout(
+            CLI_OBSERVATION_TIMEOUT,
+            scenario
+                .command("worker-resume")
+                .arg("--adopt-runtime-program")
+                .output(),
+        )
         .await
-        .unwrap();
+        .unwrap()
+        .unwrap()
+    };
+    let audit_refusal = scenario.root.join("reject_invocation_audit");
+    fs::write(&audit_refusal, "reject").unwrap();
+    let before_rejected_audit = scenario.store.head().unwrap();
+    let rejected = resume_with_adoption().await;
     assert!(
-        stopped.status.success(),
-        "{}",
-        String::from_utf8_lossy(&stopped.stderr)
+        !rejected.status.success(),
+        "adoption succeeded without a confirmed gateway audit"
     );
-    let worker = &scenario.store.workers().unwrap()[0];
+    let pending: Value =
+        serde_json::from_slice(&fs::read(scenario.checkpoint_path()).unwrap()).unwrap();
+    let pending_id = pending["managed"]["invocation_event"]["id"]
+        .as_str()
+        .unwrap();
+    assert_unreconciled();
+    assert_eq!(scenario.store.head().unwrap(), before_rejected_audit);
+
+    fs::remove_file(audit_refusal).unwrap();
+    let reconciled = resume_with_adoption().await;
+    assert!(
+        reconciled.status.success(),
+        "authenticated terminal reconciliation failed"
+    );
+    let workers = scenario.store.workers().unwrap();
+    let [worker] = workers.as_slice() else {
+        panic!("expected the single reconciled worker");
+    };
+    assert_eq!(worker.worker_id, original.worker_id);
+    assert_eq!(worker.attempt, original.attempt);
+    assert_eq!(worker.launch.authority_id, original.launch.authority_id);
     assert_eq!(worker.state, WorkerStateV1::Terminal);
     assert!(!worker.quota_held);
+    assert_eq!(worker.cleanup_removed, Some(true));
+    assert!(scenario.root.join("terminal_ack").is_file());
+
+    let adopted = scenario
+        .store
+        .events(&EventQuery {
+            kind: Some("runtime.invocation.bound".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(adopted.len(), 1);
+    assert_eq!(adopted[0].event.id, pending_id);
+    let allocations = scenario.store.worker_usage().unwrap();
+    let [allocation] = allocations.as_slice() else {
+        panic!("expected exactly one terminal allocation");
+    };
+    assert_eq!(allocation.source.container_id, container_id);
+    assert_eq!(allocation.worker_id, original.worker_id);
+    assert_eq!(allocation.attempt_id, original.attempt.attempt_id);
+    assert!(!allocation.billable);
+    let terminal_receipt = scenario
+        .store
+        .worker_operation(&allocation.terminal_observation_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        terminal_receipt.worker_id.as_deref(),
+        Some(original.worker_id.as_str())
+    );
+    let again = scenario.invoke("worker-resume").await;
+    assert!(again.status.success(), "replaying terminal recovery failed");
+    assert_eq!(scenario.store.worker_usage().unwrap(), allocations);
+    assert_eq!(
+        scenario
+            .store
+            .worker_operation(&allocation.terminal_observation_id)
+            .unwrap(),
+        Some(terminal_receipt)
+    );
     assert_eq!(scenario.count("create", "run"), 1);
     assert_eq!(scenario.count("start", "run"), 1);
-    assert_eq!(scenario.store.worker_usage().unwrap().len(), 1);
-    let again = scenario.invoke("worker-resume").await;
-    assert!(again.status.success());
-    assert_eq!(scenario.count("start", "run"), 1);
+    assert_one_stop();
     fs::rename(relocated, &scenario.project).unwrap();
     scenario.invariant();
 }
