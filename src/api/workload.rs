@@ -425,17 +425,36 @@ pub(super) fn reject_control_collision(
         return Err(super::human_sources::unavailable());
     }
     let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+    #[cfg(feature = "mysql-storage")]
+    let peer_deadline = tokio::time::Instant::now() + crate::mysql_storage::audit::DEADLINE;
     for (index, tenant) in state.tenants.iter().enumerate() {
-        // A MySQL tenant answers human and workload presence from one verified
-        // snapshot, in this lane's already admitted blocking job.
+        let own_lane = own
+            .filter(|(source, _)| *source == index)
+            .map(|(_, lane)| lane);
         #[cfg(feature = "mysql-storage")]
         if let Some(mysql) = tenant.store.mysql() {
-            if let Some(response) = mysql_collision(mysql, &digest, own, index) {
-                return response;
+            if known_mysql_collision(mysql, &digest) {
+                return Err(ambiguous());
             }
-            continue;
+            // The selected store keeps its own check and its existing budget.
+            // Sibling reads share the discovery budget and admission limits.
+            let present = if own_lane.is_some() {
+                mysql
+                    .control_presence(&digest)
+                    .map(|presence| presence.is_some())
+                    .map_err(unavailable)
+            } else {
+                read_mysql_peer_presence(state, tenant, &digest, peer_deadline)
+            };
+            match present {
+                Ok(true) => return Err(ambiguous()),
+                Err(response) if own_lane.is_some() => return Err(response),
+                // Policy B permits an independently selected source when a
+                // sibling's metadata is unavailable. Known positives still refuse.
+                _ => continue,
+            }
         }
-        let lookup = if let Some((_, lane)) = own.filter(|(source, _)| *source == index) {
+        let lookup = if let Some(lane) = own_lane {
             state
                 .io_scope
                 .with_store(tenant, lane, lane == store_io::Lane::Read, |store| {
@@ -451,7 +470,7 @@ pub(super) fn reject_control_collision(
         match lookup {
             Ok(Some(_)) => return Err(ambiguous()),
             Ok(None) => (),
-            Err(error) if own.is_some_and(|(source, _)| source == index) => {
+            Err(error) if own_lane.is_some() => {
                 return Err(unavailable(error));
             }
             _ => (),
@@ -460,29 +479,26 @@ pub(super) fn reject_control_collision(
     Ok(())
 }
 
-/// `Some` ends the scan: an ambiguity refuses, an unavailable own tenant
-/// refuses, an unavailable sibling is tolerated like any other backend.
 #[cfg(feature = "mysql-storage")]
-fn mysql_collision(
-    mysql: &crate::tenant_store::MysqlTenant,
-    digest: &[u8; 32],
-    own: Option<(usize, store_io::Lane)>,
-    index: usize,
-) -> Option<ApiResult<()>> {
-    use crate::mysql_storage::audit::KnownControlCollision;
-    let own_tenant = own.is_some_and(|(source, _)| source == index);
-    if matches!(
+fn known_mysql_collision(mysql: &crate::tenant_store::MysqlTenant, digest: &[u8; 32]) -> bool {
+    matches!(
         mysql.known_control_collision(digest),
-        KnownControlCollision::Known(_)
-    ) {
-        return Some(Err(ambiguous()));
-    }
-    match mysql.control_presence(digest) {
-        Ok(Some(_)) => Some(Err(ambiguous())),
-        Ok(None) => None,
-        Err(error) if own_tenant => Some(Err(unavailable(error))),
-        Err(_) => None,
-    }
+        crate::mysql_storage::audit::KnownControlCollision::Known(_)
+    )
+}
+
+#[cfg(feature = "mysql-storage")]
+fn read_mysql_peer_presence(
+    state: &GatewayState,
+    tenant: &TenantState,
+    digest: &[u8; 32],
+    deadline: tokio::time::Instant,
+) -> ApiResult<bool> {
+    let _metadata_slots = state.io_scope.admit_peer_discovery(&state.io, tenant)?;
+    tenant
+        .store
+        .neighboring_credential_present(digest, deadline)
+        .map_err(unavailable)
 }
 
 /// A MySQL peer can deny a Legacy proof, but cannot authenticate it here.
@@ -495,17 +511,8 @@ fn require_mysql_neighbor_absence(state: &GatewayState, digest: &[u8; 32]) -> Ap
         let Some(mysql) = tenant.store.mysql() else {
             continue;
         };
-        if matches!(
-            mysql.known_control_collision(digest),
-            crate::mysql_storage::audit::KnownControlCollision::Known(_)
-        ) {
-            return Err(ambiguous());
-        }
-        let _metadata_slots = state.io_scope.admit_peer_discovery(&state.io, tenant)?;
-        if tenant
-            .store
-            .neighboring_credential_present(digest, deadline)
-            .map_err(unavailable)?
+        if known_mysql_collision(mysql, digest)
+            || read_mysql_peer_presence(state, tenant, digest, deadline)?
         {
             return Err(ambiguous());
         }
