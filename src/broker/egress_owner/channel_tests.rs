@@ -22,6 +22,8 @@ struct Gateway {
     allow: AtomicBool,
     decide_unavailable: AtomicBool,
     observe_unavailable: AtomicBool,
+    decision_delay: Duration,
+    remaining_ms: Option<u64>,
     decisions: Mutex<Vec<EgressDecideRequestV1>>,
     observations: Mutex<Vec<EgressObservationV1>>,
     revoke: Mutex<Vec<IdV1>>,
@@ -31,6 +33,9 @@ impl EgressControl for Gateway {
         Box::pin(async move {
             if self.decide_unavailable.load(Ordering::SeqCst) {
                 return Err(ControlError::Unavailable);
+            }
+            if !self.decision_delay.is_zero() {
+                tokio::time::sleep(self.decision_delay).await;
             }
             let allow = self.allow.load(Ordering::SeqCst);
             self.decisions.lock().unwrap().push(request.clone());
@@ -53,7 +58,7 @@ impl EgressControl for Gateway {
                     digest: DigestV1::of(b"fixture policy"),
                 }),
                 grant_id: None,
-                remaining_ms: allow.then_some(60_000),
+                remaining_ms: allow.then_some(self.remaining_ms.unwrap_or(60_000)),
                 receipt: EgressReceiptV1 {
                     audit_seq: 7,
                     audit_hash: "a".repeat(64),
@@ -91,6 +96,14 @@ impl HostLookup for NoLookup {
     fn lookup(&self, _: String, _: u16) -> LookupFuture {
         self.0.fetch_add(1, Ordering::SeqCst);
         Box::pin(async { Err(std::io::Error::other("no DNS in this test")) })
+    }
+}
+
+struct PendingLookup(AtomicUsize);
+impl HostLookup for PendingLookup {
+    fn lookup(&self, _: String, _: u16) -> LookupFuture {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Box::pin(std::future::pending())
     }
 }
 
@@ -141,6 +154,17 @@ struct Harness {
     stop: watch::Sender<bool>,
 }
 
+fn fixture_binding() -> EgressBindingV1 {
+    EgressBindingV1 {
+        session_id: "00000000-0000-4000-8000-0000000000a1".into(),
+        worker_id: "00000000-0000-4000-8000-0000000000a2".into(),
+        attempt_id: "00000000-0000-4000-8000-0000000000a3".into(),
+        channel_id: IdV1::random(),
+        epoch: 1,
+        context_digest: DigestV1::of(b"fixture worker A1"),
+    }
+}
+
 async fn harness(gateway: Arc<Gateway>, upstream_port: u16) -> Harness {
     let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let helper_port = probe.local_addr().unwrap().port();
@@ -166,14 +190,7 @@ async fn harness(gateway: Arc<Gateway>, upstream_port: u16) -> Harness {
         )
         .unwrap(),
     );
-    let binding = EgressBindingV1 {
-        session_id: "00000000-0000-4000-8000-0000000000a1".into(),
-        worker_id: "00000000-0000-4000-8000-0000000000a2".into(),
-        attempt_id: "00000000-0000-4000-8000-0000000000a3".into(),
-        channel_id: IdV1::random(),
-        epoch: 1,
-        context_digest: DigestV1::of(b"fixture worker A1"),
-    };
+    let binding = fixture_binding();
     let times = ChannelTimes {
         lease: Duration::from_millis(1_500),
         renew_every: Duration::from_millis(200),
@@ -224,6 +241,84 @@ fn gateway(allow: bool) -> Arc<Gateway> {
     let gateway = Gateway::default();
     gateway.allow.store(allow, Ordering::SeqCst);
     Arc::new(gateway)
+}
+
+fn fixture_open_request() -> (EgressDecideRequestV1, Authority) {
+    let authority = Authority::new(FIXTURE, 443, EgressTransport::ConnectTcpOpaque).unwrap();
+    let request = EgressDecideRequestV1 {
+        version: 1,
+        decision_id: IdV1::random(),
+        binding: fixture_binding(),
+        flow_id: 1,
+        authority: format!("{FIXTURE}:443"),
+    };
+    (request, authority)
+}
+
+#[tokio::test]
+async fn egress_broker_late_allow_receipt_expires_before_resolution() {
+    let control = Arc::new(Gateway {
+        allow: AtomicBool::new(true),
+        decision_delay: Duration::from_millis(30),
+        remaining_ms: Some(1),
+        ..Gateway::default()
+    });
+    let lookup = Arc::new(NoLookup(AtomicUsize::new(0)));
+    let resolver = Arc::new(Resolver::new(lookup.clone(), vec![], vec![]).unwrap());
+    let (request, authority) = fixture_open_request();
+
+    let result = open_upstream(
+        control.clone(),
+        resolver,
+        ChannelTimes::default(),
+        request,
+        authority,
+    )
+    .await;
+
+    assert_eq!(control.decisions.lock().unwrap().len(), 1);
+    assert!(matches!(
+        result,
+        Err(Refusal {
+            reason: EgressReasonV1::Expired,
+            failure: None
+        })
+    ));
+    assert_eq!(lookup.0.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn egress_broker_receipt_expiry_stops_pending_resolution() {
+    let control = Arc::new(Gateway {
+        allow: AtomicBool::new(true),
+        remaining_ms: Some(120),
+        ..Gateway::default()
+    });
+    let lookup = Arc::new(PendingLookup(AtomicUsize::new(0)));
+    let resolver = Arc::new(Resolver::new(lookup.clone(), vec![], vec![]).unwrap());
+    let (request, authority) = fixture_open_request();
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        open_upstream(
+            control,
+            resolver,
+            ChannelTimes::default(),
+            request,
+            authority,
+        ),
+    )
+    .await
+    .expect("resolution ends at receipt expiry, before the processing budget");
+
+    assert_eq!(lookup.0.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        result,
+        Err(Refusal {
+            reason: EgressReasonV1::Expired,
+            failure: Some(("resolution_timeout", "host_resolver"))
+        })
+    ));
 }
 
 #[tokio::test]

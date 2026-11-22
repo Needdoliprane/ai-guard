@@ -28,7 +28,7 @@ use tokio::{
     net::TcpStream,
     sync::{Semaphore, mpsc, watch},
     task::JoinSet,
-    time::{Instant, MissedTickBehavior, timeout_at},
+    time::{Instant, MissedTickBehavior, sleep_until, timeout_at},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,7 +105,7 @@ enum Command {
 struct Opened {
     stream: TcpStream,
     peer: SocketAddr,
-    decision: EgressDecisionV1,
+    connected_at: Instant,
     valid_until: Instant,
     resolver: &'static str,
 }
@@ -592,13 +592,22 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
                     peer: Some(opened.peer.to_string()),
                     resolver: opened.resolver.into(),
                 });
-                if !live {
-                    // The worker cancelled while we connected: close at once.
+                if !live || Instant::now() >= opened.valid_until {
+                    // A connected socket can outlive its permit while its result is queued.
                     drop(opened.stream);
                     let mut flow = self.pending_flow(decision_id);
-                    flow.commands = Some(mpsc::channel(1).0);
-                    self.record_closed(flow_id, flow, EgressCloseReasonV1::WorkerReset);
-                    return Ok(());
+                    flow.started = opened.connected_at;
+                    let reason = if live {
+                        EgressCloseReasonV1::Expired
+                    } else {
+                        EgressCloseReasonV1::WorkerReset
+                    };
+                    self.record_closed(flow_id, flow, reason);
+                    return if live {
+                        self.reset_pending(flow_id, EgressReasonV1::Expired).await
+                    } else {
+                        Ok(())
+                    };
                 }
                 if self.send(EgressMessageV1::Accepted { flow_id }).await? == Admission::Stale {
                     self.flows.remove(&flow_id);
@@ -611,9 +620,8 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
                     flow.commands = Some(commands);
                     flow.valid_until = Some(opened.valid_until);
                     flow.leased_until = Instant::now() + lease;
-                    flow.started = Instant::now();
+                    flow.started = opened.connected_at;
                 }
-                let _ = opened.decision;
                 self.send(EgressMessageV1::Credit {
                     flow_id,
                     bytes: MAX_DATA_BYTES as u32,
@@ -785,12 +793,28 @@ async fn open_upstream(
             failure: None,
         });
     }
-    let valid_until = sent + Duration::from_millis(decision.remaining_ms.unwrap_or(0));
+    let valid_until = sent
+        .checked_add(Duration::from_millis(decision.remaining_ms.unwrap_or(0)))
+        .ok_or(Refusal {
+            reason: EgressReasonV1::Denied,
+            failure: None,
+        })?;
+    let (deadline, elapsed_reason) = if valid_until <= deadline {
+        (valid_until, EgressReasonV1::Expired)
+    } else {
+        (deadline, EgressReasonV1::Timeout)
+    };
+    if Instant::now() >= deadline {
+        return Err(Refusal {
+            reason: elapsed_reason,
+            failure: None,
+        });
+    }
     let resolution = match resolver.resolve(&authority, deadline).await {
         Ok(resolution) => resolution,
         Err(error) => {
             let reason = match error {
-                ResolveError::Timeout => EgressReasonV1::Timeout,
+                ResolveError::Timeout => elapsed_reason,
                 ResolveError::RefusedAddress => EgressReasonV1::Denied,
                 _ => EgressReasonV1::Unavailable,
             };
@@ -801,33 +825,53 @@ async fn open_upstream(
         }
     };
     let source = resolution.source.code();
+    let mut attempted = false;
     for address in &resolution.addresses {
-        let target = SocketAddr::new(*address, authority.port());
-        let attempt = (Instant::now() + times.connect_attempt).min(deadline);
-        if let Ok(Ok(stream)) = timeout_at(attempt, TcpStream::connect(target)).await {
-            // The connected peer must be exactly the pinned address.
-            let Ok(peer) = stream.peer_addr() else {
-                continue;
-            };
-            if peer != target {
-                continue;
-            }
-            let _ = stream.set_nodelay(true);
-            return Ok(Opened {
-                stream,
-                peer,
-                decision,
-                valid_until,
-                resolver: source,
-            });
-        }
-        if Instant::now() >= deadline {
+        let now = Instant::now();
+        if now >= deadline {
             break;
         }
+        let target = SocketAddr::new(*address, authority.port());
+        let attempt = (now + times.connect_attempt).min(deadline);
+        let connect = async {
+            if Instant::now() >= attempt {
+                return None;
+            }
+            attempted = true;
+            TcpStream::connect(target).await.ok()
+        };
+        // An elapsed attempt takes precedence over a ready connect future.
+        let stream = tokio::select! {
+            biased;
+            _ = sleep_until(attempt) => None,
+            stream = connect => stream,
+        };
+        let Some(stream) = stream else {
+            continue;
+        };
+        // The connected peer must be exactly the pinned address.
+        let Ok(peer) = stream.peer_addr() else {
+            continue;
+        };
+        if peer != target {
+            continue;
+        }
+        let _ = stream.set_nodelay(true);
+        return Ok(Opened {
+            stream,
+            peer,
+            connected_at: Instant::now(),
+            valid_until,
+            resolver: source,
+        });
     }
     Err(Refusal {
-        reason: EgressReasonV1::Unavailable,
-        failure: Some(("connect_failed", source)),
+        reason: if Instant::now() >= deadline {
+            elapsed_reason
+        } else {
+            EgressReasonV1::Unavailable
+        },
+        failure: attempted.then_some(("connect_failed", source)),
     })
 }
 
