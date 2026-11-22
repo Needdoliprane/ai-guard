@@ -501,12 +501,7 @@ fn require_mysql_neighbor_absence(state: &GatewayState, digest: &[u8; 32]) -> Ap
         ) {
             return Err(ambiguous());
         }
-        let _metadata_slot = tenant
-            .io
-            .admit(store_io::Lane::Discovery, false)
-            .map_err(|_| {
-                unavailable(anyhow::anyhow!("MySQL peer metadata admission unavailable"))
-            })?;
+        let _metadata_slots = state.io_scope.admit_peer_discovery(&state.io, tenant)?;
         if tenant
             .store
             .neighboring_credential_present(digest, deadline)
@@ -540,6 +535,13 @@ pub(super) fn reject_human_collision(
             "contact_operator",
         )
     };
+    let guard_failure = |response: (StatusCode, Json<Value>)| {
+        if response.0 == StatusCode::TOO_MANY_REQUESTS {
+            response
+        } else {
+            unavailable_identity()
+        }
+    };
     if own_source.is_some_and(|source| source >= state.tenants.len()) {
         return Err(unavailable_identity());
     }
@@ -554,7 +556,7 @@ pub(super) fn reject_human_collision(
                 .with_store(tenant, store_io::Lane::Read, true, |store| {
                     store.workload_digest_binding(digest)
                 })
-                .map_err(|_| unavailable_identity())?
+                .map_err(guard_failure)?
         } else {
             tenant
                 .store
@@ -572,7 +574,7 @@ pub(super) fn reject_human_collision(
         }
     }
     #[cfg(feature = "mysql-storage")]
-    require_mysql_neighbor_absence(state, digest).map_err(|_| unavailable_identity())?;
+    require_mysql_neighbor_absence(state, digest).map_err(guard_failure)?;
     Ok(())
 }
 
@@ -626,10 +628,10 @@ async fn issue(
             for (index, candidate) in state.tenants.iter().enumerate() {
                 if index != source {
                     #[cfg(feature = "mysql-storage")]
-                    let _metadata_slot = candidate
+                    let _metadata_slots = candidate
                         .store
                         .mysql()
-                        .map(|_| candidate.io.admit(store_io::Lane::Discovery, false))
+                        .map(|_| state.io_scope.admit_peer_discovery(&state.io, candidate))
                         .transpose()?;
                     if candidate
                         .store

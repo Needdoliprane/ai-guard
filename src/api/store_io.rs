@@ -71,8 +71,23 @@ struct StoreLease {
 #[derive(Default)]
 pub(super) struct Scope {
     held: Vec<Arc<StoreLease>>,
+    _shared_discovery: Option<(Arc<Gate>, OwnedSemaphorePermit)>,
 }
 impl Scope {
+    #[cfg(feature = "mysql-storage")]
+    pub(super) fn admit_peer_discovery(
+        &self,
+        shared: &Arc<Gate>,
+        tenant: &TenantState,
+    ) -> ApiResult<(Option<OwnedSemaphorePermit>, OwnedSemaphorePermit)> {
+        let shared_permit = match &self._shared_discovery {
+            Some((gate, _)) if Arc::ptr_eq(gate, shared) => None,
+            _ => Some(shared.admit(Lane::Discovery, false)?),
+        };
+        let tenant_permit = tenant.io.admit(Lane::Discovery, false)?;
+        Ok((shared_permit, tenant_permit))
+    }
+
     pub(super) fn hold(
         &mut self,
         tenant: &TenantState,
@@ -167,12 +182,38 @@ where
     // blocking pool, and both bounds survive a dropped HTTP request future.
     let shared_permit = shared.admit(lane, false)?;
     let tenant_permit = tenant.map(|gate| gate.admit(lane, expensive)).transpose()?;
-    tokio::task::spawn_blocking(move || {
+    run_blocking(move || {
         let _permits = (shared_permit, tenant_permit);
         operation()
     })
     .await
-    .map_err(|_| unavailable(anyhow::anyhow!("blocking Store task failed")))?
+}
+
+pub(super) async fn run_discovery<T, F>(shared: Arc<Gate>, operation: F) -> ApiResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce(Arc<Scope>) -> ApiResult<T> + Send + 'static,
+{
+    let permit = shared.admit(Lane::Discovery, false)?;
+    run_blocking(move || {
+        // The blocking segment may reuse its shared slot for a MySQL peer
+        // lookup. Neither the slot nor its scope belongs in a returned proof.
+        operation(Arc::new(Scope {
+            _shared_discovery: Some((shared, permit)),
+            ..Scope::default()
+        }))
+    })
+    .await
+}
+
+async fn run_blocking<T, F>(operation: F) -> ApiResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> ApiResult<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(|_| unavailable(anyhow::anyhow!("blocking Store task failed")))?
 }
 
 #[cfg(test)]
