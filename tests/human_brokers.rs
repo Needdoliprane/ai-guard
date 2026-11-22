@@ -562,7 +562,7 @@ fn broker_capability_cannot_be_persisted_before7_or_delegated_by_org_admin() {
     let path = files.path().join("a.sqlite");
     let a = store(&path, "tenant-a");
     let token = generate_local_credential().unwrap();
-    let (admin, mut membership) = provision(&a, &token, &[HumanCapabilityV1::ManageMemberships]);
+    let (member, mut membership) = provision(&a, &token, &[HumanCapabilityV1::ManageMemberships]);
     let mut mutation = change(IdentityChangeV1::Membership {
         expected_revision: 1,
         membership: {
@@ -581,8 +581,36 @@ fn broker_capability_cannot_be_persisted_before7_or_delegated_by_org_admin() {
     migrate7(&path);
     let a =
         Store::open_existing_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 10000).unwrap();
+    let (admin, admin_membership) = provision(
+        &a,
+        &generate_local_credential().unwrap(),
+        &[
+            HumanCapabilityV1::ManageMemberships,
+            HumanCapabilityV1::ReadBrokerRegistry,
+        ],
+    );
+    assert_ne!(admin, member);
+    let scope = a
+        .authorize_human_context(
+            &admin,
+            &admin_membership.membership_id,
+            admin_membership.revision,
+            ContextModeV1::Administration,
+        )
+        .unwrap();
+    assert_eq!(scope.organization_scope(), membership.organization_scope);
+    assert!(scope.has_capability(HumanCapabilityV1::ManageMemberships));
+    assert!(scope.has_capability(HumanCapabilityV1::ReadBrokerRegistry));
+
     mutation.actor = admin.clone();
-    assert!(a.mutate_identity(&mutation).is_err());
+    let before = a.head().unwrap();
+    assert_eq!(
+        a.mutate_identity(&mutation)
+            .unwrap_err()
+            .downcast_ref::<IdentityFailureV1>(),
+        Some(&IdentityFailureV1::PermissionDenied)
+    );
+    assert_eq!(a.head().unwrap(), before);
     mutation.actor = operator();
     a.mutate_identity(&mutation).unwrap();
     membership.revision = 3;
@@ -591,9 +619,18 @@ fn broker_capability_cannot_be_persisted_before7_or_delegated_by_org_admin() {
         expected_revision: 2,
         membership: membership.clone(),
     });
+    retain.actor = member;
+    let before = a.head().unwrap();
+    assert_eq!(
+        a.mutate_identity(&retain)
+            .unwrap_err()
+            .downcast_ref::<IdentityFailureV1>(),
+        Some(&IdentityFailureV1::PermissionDenied)
+    );
+    assert_eq!(a.head().unwrap(), before);
+
     retain.actor = admin.clone();
     a.mutate_identity(&retain).unwrap();
-    // The disabled admin cannot mutate itself; trusted control re-enables its old org permission separately.
     membership.revision = 4;
     membership.active = true;
     let mut reactivate = change(IdentityChangeV1::Membership {
@@ -601,7 +638,12 @@ fn broker_capability_cannot_be_persisted_before7_or_delegated_by_org_admin() {
         membership,
     });
     reactivate.actor = admin;
-    assert!(a.mutate_identity(&reactivate).is_err());
+    assert_eq!(
+        a.mutate_identity(&reactivate)
+            .unwrap_err()
+            .downcast_ref::<IdentityFailureV1>(),
+        Some(&IdentityFailureV1::PermissionDenied)
+    );
     assert!(a.integrity().unwrap().valid);
 }
 
@@ -661,11 +703,16 @@ fn organization_admin_can_retain_or_remove_but_never_introduce_or_reactivate_bro
     assert!(apply(copied, admin.clone()).is_err());
     target.active = true;
     apply(target.clone(), operator()).unwrap();
+    let (replacement, _) = provision(
+        &a,
+        &generate_local_credential().unwrap(),
+        &[HumanCapabilityV1::ReadMetadata],
+    );
     for mutate_principal in [false, true] {
         let mut changed = target.clone();
         changed.revision = 7;
         if mutate_principal {
-            changed.principal = admin.clone();
+            changed.principal = replacement.clone();
         } else {
             changed.organization_scope = "other-organization".into();
         }
