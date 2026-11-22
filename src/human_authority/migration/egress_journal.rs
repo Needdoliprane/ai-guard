@@ -4,6 +4,7 @@
 //! maintenance of an adopted source (formats 14 and 15) under its own record
 //! names. The egress step keeps its exact record names, bytes and messages.
 
+use crate::control_fs::persistent::PersistentLimit;
 use crate::{
     audit::{
         AuthorityReceiptV1, ReviewStoreMaintenanceWriter, Store,
@@ -66,6 +67,32 @@ const CONFIRMATION_SLOTS: u32 = 2;
 const BACKUP_NAME: &str = "source.sqlite";
 const MAX_RECORD_BYTES: u64 = 128 * 1024;
 const SQLITE_SUFFIXES: [&str; 4] = ["", "-wal", "-shm", "-journal"];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BackupInventoryFailure {
+    Limit,
+    Invalid,
+}
+
+impl std::fmt::Display for BackupInventoryFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Limit => "maintenance backup inventory exceeds its bound",
+            Self::Invalid => "maintenance backup directory or entry could not be verified",
+        })
+    }
+}
+
+impl std::error::Error for BackupInventoryFailure {}
+
+fn backup_inventory_error(error: anyhow::Error) -> anyhow::Error {
+    let cause = if error.is::<PersistentLimit>() {
+        BackupInventoryFailure::Limit
+    } else {
+        BackupInventoryFailure::Invalid
+    };
+    error.context(cause)
+}
 
 #[derive(Serialize)]
 struct DirectoryBinding<'a> {
@@ -535,7 +562,8 @@ impl<'a> RetainedSourceIntent<'a> {
         );
         if names.retry_backup {
             self.backup_parent
-                .persistent_entries(MAX_BACKUP_ENTRIES - BACKUP_CREATION_SLOTS)?;
+                .persistent_entries(MAX_BACKUP_ENTRIES - BACKUP_CREATION_SLOTS)
+                .map_err(backup_inventory_error)?;
         }
         let backup_path = if sqlite_entries(&self.backup_parent, BACKUP_NAME)?.is_empty() {
             self.backup_parent.path().join(BACKUP_NAME)
@@ -984,11 +1012,13 @@ fn read_record<T>(
         // Exclude all direct private files by metadata before reading the
         // record. Its contents cannot choose which SQLite inodes are protected.
         backup_parent
-            .persistent_entries(MAX_BACKUP_ENTRIES)?
+            .persistent_entries(MAX_BACKUP_ENTRIES)
+            .map_err(backup_inventory_error)?
             .into_iter()
             .filter(|entry| !entry.directory)
             .map(|entry| backup_parent.private_entry_same_mount(OsStr::new(&entry.name)))
-            .collect::<Result<Vec<_>>>()?
+            .collect::<Result<Vec<_>>>()
+            .map_err(backup_inventory_error)?
     } else {
         sqlite_entries(backup_parent, BACKUP_NAME)?
     };

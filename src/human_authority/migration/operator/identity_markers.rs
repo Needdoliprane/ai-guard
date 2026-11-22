@@ -17,7 +17,7 @@ use crate::{
             HumanMaintenanceResolvedViewV1, HumanSourcesMaintenanceConfigurationV1,
             HumanSourcesMaintenanceGuard, HumanSourcesMaintenancePlanV1,
         },
-        migration::egress_journal::RetainedSourceIntent,
+        migration::egress_journal::{BackupInventoryFailure, RetainedSourceIntent},
         open_bound_parent,
     },
     redaction::Redactor,
@@ -57,6 +57,8 @@ pub enum OwnedIdentityMarkersRefusalV1 {
     FormatUnsupported,
     AlreadyInstalled,
     OwnerBusy,
+    BackupInventoryLimit,
+    BackupDirectoryInvalid,
     JournalConflict,
 }
 impl OwnedIdentityMarkersRefusalV1 {
@@ -66,6 +68,8 @@ impl OwnedIdentityMarkersRefusalV1 {
             Self::FormatUnsupported => "human_rights_format_unsupported",
             Self::AlreadyInstalled => "human_rights_already_installed",
             Self::OwnerBusy => "human_rights_owner_busy",
+            Self::BackupInventoryLimit => "human_rights_backup_inventory_limit",
+            Self::BackupDirectoryInvalid => "human_rights_backup_directory_invalid",
             Self::JournalConflict => "human_rights_journal_conflict",
         }
     }
@@ -111,6 +115,13 @@ fn refusal(error: anyhow::Error, default: OwnedIdentityMarkersRefusalV1) -> anyh
             == Some(&HumanAuthorityFailure::OwnerContended)
     }) {
         OwnedIdentityMarkersRefusalV1::OwnerBusy
+    } else if let Some(cause) = error.downcast_ref::<BackupInventoryFailure>() {
+        match cause {
+            BackupInventoryFailure::Limit => OwnedIdentityMarkersRefusalV1::BackupInventoryLimit,
+            BackupInventoryFailure::Invalid => {
+                OwnedIdentityMarkersRefusalV1::BackupDirectoryInvalid
+            }
+        }
     } else {
         default
     };
@@ -154,8 +165,9 @@ fn create_directory(
         .persistent_child(JOURNAL_NAME, true)?
         .context("maintenance journal missing")?;
     let backups = directory
-        .persistent_child(BACKUPS_NAME, true)?
-        .context("maintenance backups missing")?;
+        .persistent_child(BACKUPS_NAME, true)
+        .context(BackupInventoryFailure::Invalid)?
+        .context(BackupInventoryFailure::Invalid)?;
     let plan = HumanSourcesMaintenancePlanV1::in_place(
         Uuid::new_v4(),
         closure,
@@ -186,6 +198,10 @@ fn open_directory(
     manifest: &PrivateFile,
     selected_source_id: Uuid,
 ) -> Result<MaintenanceDirectory> {
+    let backups = directory
+        .persistent_child(BACKUPS_NAME, false)
+        .context(BackupInventoryFailure::Invalid)?
+        .context(BackupInventoryFailure::Invalid)?;
     let mut names: Vec<_> = directory
         .persistent_entries(8)?
         .into_iter()
@@ -218,9 +234,6 @@ fn open_directory(
     let journal = directory
         .persistent_child(JOURNAL_NAME, false)?
         .context("maintenance journal missing")?;
-    let backups = directory
-        .persistent_child(BACKUPS_NAME, false)?
-        .context("maintenance backups missing")?;
     // A previous attempt may have written readable bytes without completing
     // the file and directory barriers. Reestablish them before opening SQLite.
     synchronize_plan(&plan_file, directory, parent)?;

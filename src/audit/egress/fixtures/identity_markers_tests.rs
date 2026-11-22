@@ -617,6 +617,41 @@ fn operator_resume_preserves_an_unpublished_backup_and_confirms_one_marker() {
             resume: true,
         })
     };
+
+    // A non-private backup directory and a full inventory are distinguishable
+    // before resume creates a copy or commits a marker.
+    let private_permissions = std::fs::metadata(backups.path()).unwrap().permissions();
+    std::fs::set_permissions(backups.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let directory_error = resume().unwrap_err();
+    std::fs::set_permissions(backups.path(), private_permissions).unwrap();
+    assert_eq!(
+        directory_error.downcast_ref::<OwnedIdentityMarkersRefusalV1>(),
+        Some(&OwnedIdentityMarkersRefusalV1::BackupDirectoryInvalid)
+    );
+
+    let extra_names: Vec<_> = (journal_names(&backups).len()..28)
+        .map(|number| format!("inventory-fixture-{number}"))
+        .collect();
+    for name in &extra_names {
+        backups.persistent_create(name, b"test entry").unwrap();
+    }
+    let inventory_error = resume().unwrap_err();
+    assert_eq!(
+        inventory_error.downcast_ref::<OwnedIdentityMarkersRefusalV1>(),
+        Some(&OwnedIdentityMarkersRefusalV1::BackupInventoryLimit)
+    );
+    assert_eq!(backups.persistent_entries(28).unwrap().len(), 28);
+    assert_eq!(journal_names(&journal), ["identity-markers-intent-v1"]);
+    assert_eq!(maintenance_source_state(&adopted.base), initial);
+    let extras = adopted
+        .base
+        .root
+        .exclusive_child("retained-fixtures")
+        .unwrap();
+    for name in &extra_names {
+        std::fs::rename(backups.path().join(name), extras.path().join(name)).unwrap();
+    }
+
     let installed = resume().unwrap();
     assert_eq!(installed.state, "installed");
     assert_eq!(installed.backup_path.parent(), Some(backups.path()));

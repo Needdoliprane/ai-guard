@@ -163,6 +163,21 @@ copy and publishes its receipt under the same intention. Once that receipt is
 published, every retry uses its copy and reports the same `backup_path`. A
 missing or divergent copy for a published receipt stops the maintenance.
 
+`human_rights_backup_inventory_limit` means `backups/` contains more than 27
+entries before creating a copy or more than 32 entries when verifying journal
+records. The creation limit reserves five entries for the SQLite file, its
+sidecars and the initialization lock. The count includes every direct entry
+under `backups/`, including retained copies and SQLite support files.
+
+`human_rights_backup_directory_invalid` means `backups/` or an inventory entry
+could not be verified as private. The refusal line reports the state without
+printing private entry names. For either refusal, keep the maintenance directory
+and sources intact for offline operator review. Verify the identity, owner and
+permissions of the original directory and the bound above. Resume with the same
+tenant, activation and maintenance directory once those checks can pass. If the
+limit still prevents resume, retain the whole directory for review with the
+maintainer before starting another maintenance.
+
 ## Validation scope
 
 The [dated operator and owned-startup evidence](../../engineering/evidence/2026-11-13/human-sources-operator/README.md)

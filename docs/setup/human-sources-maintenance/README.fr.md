@@ -170,6 +170,23 @@ nouvelle copie vérifiée et publie son reçu sous la même intention. Une fois 
 reçu publié, chaque reprise utilise sa copie et rend le même `backup_path`.
 Une copie manquante ou divergente pour un reçu publié arrête la maintenance.
 
+`human_rights_backup_inventory_limit` indique que `backups/` contient plus de
+27 entrées avant la création d'une copie, ou plus de 32 lors de la vérification
+des enregistrements du journal. Le plafond de création réserve cinq entrées
+pour le fichier SQLite, ses fichiers auxiliaires et le verrou d'initialisation.
+Le décompte comprend chaque entrée directe de `backups/`, y compris les copies
+conservées et les fichiers auxiliaires SQLite.
+
+`human_rights_backup_directory_invalid` indique que le caractère privé de
+`backups/` ou d'une entrée de son inventaire n'a pas pu être vérifié. La ligne
+de refus indique l'état sans afficher les noms privés. Dans les deux cas,
+gardez le répertoire de maintenance et les sources intacts pour examen hors
+ligne. Vérifiez l'identité, le propriétaire et les permissions du répertoire
+d'origine, ainsi que le plafond ci-dessus. Reprenez avec le même tenant, la
+même activation et le même répertoire de maintenance lorsque ces contrôles
+peuvent réussir. Si le plafond empêche toujours la reprise, conservez le
+répertoire entier pour examen avec le mainteneur avant toute autre maintenance.
+
 ## Périmètre de validation
 
 Les [preuves datées du parcours opérateur et du startup owned](../../engineering/evidence/2026-11-13/human-sources-operator/README.fr.md)
