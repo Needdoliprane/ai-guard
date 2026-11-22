@@ -8,7 +8,7 @@ mod harness;
 use agentsandbox::{
     audit::EventQuery,
     broker::service::protocol::{
-        BrokerReplyV1, JobResultOutcomeV1, JobStateV1, TerminalJobResultV1,
+        BrokerErrorCodeV1, BrokerReplyV1, JobResultOutcomeV1, JobStateV1, TerminalJobResultV1,
     },
     control::{
         ArmReceiptV1, HelperCleanupV1, HelperObservationV1, HelperStartClaimV1, MutationReceiptV1,
@@ -21,7 +21,14 @@ use anyhow::{Context, Result, bail, ensure};
 use harness::{BIN, Fixture};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::{io, os::unix::process::ExitStatusExt, path::Path, process::Stdio, time::Duration};
+use std::{
+    io,
+    os::unix::process::ExitStatusExt,
+    path::Path,
+    process::Stdio,
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
+};
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::Command,
@@ -80,7 +87,43 @@ fn broker_reply_failure_category(error: &anyhow::Error) -> &'static str {
         ("category=cli_harness_timeout", "reply_harness_timeout"),
         ("category=cli_capture_failed", "reply_capture_failed"),
         ("category=cli_output_limit", "reply_output_limit"),
-        ("category=broker_error", "broker_error_reply"),
+        (
+            "category=broker_error_code_unauthorized",
+            "broker_error_code_unauthorized",
+        ),
+        (
+            "category=broker_error_code_forbidden",
+            "broker_error_code_forbidden",
+        ),
+        (
+            "category=broker_error_code_unavailable",
+            "broker_error_code_unavailable",
+        ),
+        (
+            "category=broker_error_code_incompatible_control",
+            "broker_error_code_incompatible_control",
+        ),
+        ("category=broker_error_code_busy", "broker_error_code_busy"),
+        (
+            "category=broker_error_code_invalid_input",
+            "broker_error_code_invalid_input",
+        ),
+        (
+            "category=broker_error_code_conflict",
+            "broker_error_code_conflict",
+        ),
+        (
+            "category=broker_error_code_interrupted",
+            "broker_error_code_interrupted",
+        ),
+        (
+            "category=broker_error_code_limit_exceeded",
+            "broker_error_code_limit_exceeded",
+        ),
+        (
+            "category=broker_error_code_needs_reconciliation",
+            "broker_error_code_needs_reconciliation",
+        ),
         ("category=broker_rejected", "broker_rejected_reply"),
         (
             "category=missing_or_invalid_cli_reply",
@@ -105,6 +148,105 @@ fn broker_reply_failure_category(error: &anyhow::Error) -> &'static str {
     .iter()
     .find_map(|(needle, category)| error.contains(needle).then_some(*category))
     .unwrap_or("reply_failed_unclassified")
+}
+
+fn broker_error_category(code: BrokerErrorCodeV1) -> &'static str {
+    match code {
+        BrokerErrorCodeV1::Unauthorized => "broker_error_code_unauthorized",
+        BrokerErrorCodeV1::Forbidden => "broker_error_code_forbidden",
+        BrokerErrorCodeV1::Unavailable => "broker_error_code_unavailable",
+        BrokerErrorCodeV1::IncompatibleControl => "broker_error_code_incompatible_control",
+        BrokerErrorCodeV1::Busy => "broker_error_code_busy",
+        BrokerErrorCodeV1::InvalidInput => "broker_error_code_invalid_input",
+        BrokerErrorCodeV1::Conflict => "broker_error_code_conflict",
+        BrokerErrorCodeV1::Interrupted => "broker_error_code_interrupted",
+        BrokerErrorCodeV1::LimitExceeded => "broker_error_code_limit_exceeded",
+        BrokerErrorCodeV1::NeedsReconciliation => "broker_error_code_needs_reconciliation",
+    }
+}
+
+fn result_failure_category(error: &anyhow::Error) -> &'static str {
+    let category = broker_reply_failure_category(error);
+    if category.starts_with("broker_error_code_") {
+        category
+    } else {
+        "other_result_failure"
+    }
+}
+
+fn read_closed_checkpoint(root: &Path, operation: Uuid) -> Result<Value> {
+    let namespace = root.join("b/journals/a/broker-journal-v1");
+    let scopes = std::fs::read_dir(namespace)?.collect::<io::Result<Vec<_>>>()?;
+    let [scope] = scopes.as_slice() else {
+        bail!("invalid scope count");
+    };
+    let job = Directory::open_existing(&scope.path().join("jobs").join(operation.to_string()))?;
+    let current = job.read_private_file("current.json", 8192)?;
+    let current: Value = serde_json::from_slice(current.bytes())?;
+    let revision = current["head"]["revision"]
+        .as_u64()
+        .context("missing revision")?;
+    let checkpoint = job.read_private_file(format!("rev-{revision:020}.json"), 32 * 1024 * 1024)?;
+    let record: Value = serde_json::from_slice(checkpoint.bytes())?;
+    let operation_id = operation.to_string();
+    let version = record["version"].as_u64().context("missing version")?;
+    ensure!(
+        current["operation_id"] == operation_id
+            && record["operation_id"] == operation_id
+            && record["revision"] == revision
+            && current["head"]["hash"]
+                == format!("{:x}", checkpoint_hash(version, checkpoint.bytes())),
+        "checkpoint correlation mismatch"
+    );
+    Ok(record)
+}
+
+fn checkpoint_hash(version: u64, bytes: &[u8]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(format!("ai-guard:broker-checkpoint:v{version}"));
+    digest.update([0]);
+    digest.update(bytes);
+    format!("{:x}", digest.finalize())
+}
+
+fn batch_event_presence(record: &Value, kind: &str, worker_id: &str) -> &'static str {
+    let read = || -> Result<bool> {
+        let events = match record["version"].as_u64().context("missing version")? {
+            3 => return Ok(false),
+            4 => &record["payload"]["events"],
+            5 => &record["payload"]["outbox"]["events"],
+            _ => bail!("unsupported checkpoint"),
+        };
+        let events = events.as_array().context("missing events")?;
+        for entry in events.iter().filter(|entry| {
+            entry["event"]["kind"] == kind && entry["event"]["data"]["worker_id"] == worker_id
+        }) {
+            let sequence = entry["audit_seq"]
+                .as_i64()
+                .context("missing audit sequence")?;
+            let hash = entry["input_hash"]
+                .as_str()
+                .context("missing outbox hash")?;
+            ensure!(
+                sequence > 0 && valid_sha256(hash),
+                "invalid outbox acknowledgement"
+            );
+            return Ok(true);
+        }
+        Ok(false)
+    };
+    match read() {
+        Ok(true) => "present",
+        Ok(false) => "absent",
+        Err(_) => "unknown",
+    }
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 async fn capture_cli(stream: impl AsyncRead + Unpin) -> io::Result<Vec<u8>> {
@@ -174,7 +316,10 @@ async fn read_reply(mut command: Command, action: &str) -> Result<BrokerReplyV1>
     let reply = serde_json::from_slice::<BrokerReplyV1>(&stdout).ok();
     match (status.success(), reply) {
         (_, Some(BrokerReplyV1::Error { code })) => {
-            bail!("broker {action} {exit} category=broker_error code={code:?}");
+            bail!(
+                "broker {action} {exit} category={}",
+                broker_error_category(code)
+            );
         }
         (_, Some(BrokerReplyV1::Rejected { phase, code, .. })) => {
             bail!("broker {action} {exit} category=broker_rejected phase={phase:?} code={code:?}");
@@ -436,6 +581,7 @@ async fn after_import_worker_terminal(
     fixture: &Fixture,
     operation: Uuid,
     import_arm: &ArmReceiptV1,
+    pending_replies: &AtomicUsize,
 ) -> Result<()> {
     // The extended gate waits for the same allocation that held quota during import.
     let running = timeout(WORKER_WAIT, async {
@@ -512,7 +658,9 @@ async fn after_import_worker_terminal(
                         diagnostic_phase("phase=result stage=terminal_reply status=received");
                         break Ok((worker, result));
                     }
-                    JobResultOutcomeV1::Pending => {}
+                    JobResultOutcomeV1::Pending => {
+                        pending_replies.fetch_add(1, Ordering::Relaxed);
+                    }
                     _ => bail!("phase=result category=unexpected_result_outcome"),
                 }
             }
@@ -642,38 +790,9 @@ fn verify_terminal_audit(
     Ok(())
 }
 
-fn assert_closed_ack(
-    root: &Path,
-    operation: Uuid,
-    receipts: &[MutationReceiptV1; 2],
-) -> Result<()> {
-    // Close the only fixture writer before reading the immutable checkpoint.
-    let namespace = root.join("b/journals/a/broker-journal-v1");
-    let scopes = std::fs::read_dir(namespace)?.collect::<io::Result<Vec<_>>>()?;
-    let [scope] = scopes.as_slice() else {
-        bail!("category=unexpected_scope_count");
-    };
-    let job = Directory::open_existing(&scope.path().join("jobs").join(operation.to_string()))?;
-    let current = job.read_private_file("current.json", 8192)?;
-    let current: Value = serde_json::from_slice(current.bytes())?;
-    let revision = current["head"]["revision"]
-        .as_u64()
-        .context("missing revision")?;
-    let checkpoint = job.read_private_file(format!("rev-{revision:020}.json"), 32 * 1024 * 1024)?;
-    let record: Value = serde_json::from_slice(checkpoint.bytes())?;
+fn assert_closed_ack(record: &Value, receipts: &[MutationReceiptV1; 2]) -> Result<()> {
+    // The immutable checkpoint was read and correlated after the only writer closed.
     let version = record["version"].as_u64().context("missing version")?;
-    let mut digest = Sha256::new();
-    digest.update(format!("ai-guard:broker-checkpoint:v{version}"));
-    digest.update([0]);
-    digest.update(checkpoint.bytes());
-    let operation_id = operation.to_string();
-    ensure!(
-        current["operation_id"] == operation_id
-            && record["operation_id"] == operation_id
-            && record["revision"] == revision
-            && current["head"]["hash"] == format!("{:x}", digest.finalize()),
-        "category=checkpoint_correlation"
-    );
     let broker = match version {
         3 => &record["payload"]["broker"],
         4 => &record["payload"]["lifecycle"]["broker"],
@@ -777,6 +896,7 @@ async fn broker_import_result_pending_then_acknowledged() -> Result<()> {
     diagnostic_phase("phase=preflight stage=fresh_fixture status=ready");
     let operation = Uuid::new_v4();
     let deadline = Instant::now() + PLAYBACK_WAIT;
+    let pending_replies = AtomicUsize::new(0);
     let result = timeout_at(deadline, exercise(&fixture, operation))
         .await
         .context("phase=playback category=fixture_deadline")
@@ -784,7 +904,12 @@ async fn broker_import_result_pending_then_acknowledged() -> Result<()> {
     let terminal = match &result {
         Ok(playback) if playback.cli.is_ok() => timeout_at(
             deadline,
-            after_import_worker_terminal(&fixture, operation, &playback.import_arm),
+            after_import_worker_terminal(
+                &fixture,
+                operation,
+                &playback.import_arm,
+                &pending_replies,
+            ),
         )
         .await
         .context("phase=worker category=fixture_deadline")
@@ -792,11 +917,35 @@ async fn broker_import_result_pending_then_acknowledged() -> Result<()> {
         _ => Ok(()),
     };
     let mut journal_ack = None;
+    let diagnostic_worker_id = result
+        .as_ref()
+        .ok()
+        .map(|playback| playback.import_arm.worker_id.clone());
     diagnostic_phase("phase=closure stage=broker_stop status=starting");
     let (closed, witness_failures) = fixture
         .close_with_broker_stopped(|root| {
+            let checkpoint = read_closed_checkpoint(root, operation);
+            if let Err(error) = &terminal {
+                let (batch_result, batch_scan) = match (checkpoint.as_ref(), diagnostic_worker_id.as_deref()) {
+                    (Ok(record), Some(worker_id)) => (
+                        batch_event_presence(record, "broker.batch.result", worker_id),
+                        batch_event_presence(record, "broker.batch.scan", worker_id),
+                    ),
+                    _ => ("unknown", "unknown"),
+                };
+                println!(
+                    "phase=result failure_snapshot category={} pending_replies={} batch_result_event={} batch_scan_event={}",
+                    result_failure_category(error),
+                    pending_replies.load(Ordering::Relaxed),
+                    batch_result,
+                    batch_scan,
+                );
+            }
             if let Ok(playback) = &result {
-                let checked = assert_closed_ack(root, operation, &playback.receipts)
+                let checked = checkpoint
+                    .as_ref()
+                    .map_err(|_| anyhow::anyhow!("phase=closed_journal category=ack_not_proven"))
+                    .and_then(|record| assert_closed_ack(record, &playback.receipts))
                     .map_err(|_| anyhow::anyhow!("phase=closed_journal category=ack_not_proven"));
                 if checked.is_ok() {
                     println!(
