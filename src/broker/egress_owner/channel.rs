@@ -309,6 +309,21 @@ struct ConnectProgress {
     unobserved: bool,
 }
 
+impl ConnectProgress {
+    /// None means the local socket could not be created before connect.
+    fn complete<T>(&mut self, result: Option<std::io::Result<T>>) -> Option<T> {
+        self.pending = false;
+        match result? {
+            Ok(socket) => Some(socket),
+            Err(_) => {
+                // The runtime can fail while observing a connect already issued.
+                self.unobserved = true;
+                None
+            }
+        }
+    }
+}
+
 enum RetiredFlow {
     Socket(ClosingFlow),
     Opening {
@@ -1537,12 +1552,13 @@ async fn open_upstream(
     let mut attempted = false;
     let mut connecting = std::pin::pin!(async {
         let socket = match target {
-            SocketAddr::V4(_) => TcpSocket::new_v4()?,
-            SocketAddr::V6(_) => TcpSocket::new_v6()?,
-        };
+            SocketAddr::V4(_) => TcpSocket::new_v4(),
+            SocketAddr::V6(_) => TcpSocket::new_v6(),
+        }
+        .ok()?;
         // Tokio's TcpSocket issues the nonblocking connect on its first poll.
         // Later polls only wait for the result of this same attempt.
-        socket.connect(target).await
+        Some(socket.connect(target).await)
     });
     let connect = poll_fn(|cx| {
         if let Some(polled) = lifetime.poll_connect(attempt, || {
@@ -1550,10 +1566,7 @@ async fn open_upstream(
             progress.pending = true;
             connecting.as_mut().poll(cx)
         }) {
-            return polled.map(|result| {
-                progress.pending = false;
-                result.ok()
-            });
+            return polled.map(|result| progress.complete(result));
         }
         progress.unobserved |= progress.pending;
         progress.pending = false;

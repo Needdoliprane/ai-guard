@@ -1137,52 +1137,111 @@ async fn egress_broker_retirement_closes_observed_socket_before_handoff() {
 }
 
 #[tokio::test]
-async fn egress_broker_unknown_connect_result_counts_as_lost_observation() {
-    let upstream = upstream().await;
-    let control = gateway(true);
-    let (mut owner, _incoming, _stop) = fixture_owner(
-        tokio::io::sink(),
-        control.clone(),
-        upstream.port,
-        ChannelTimes::default(),
-    );
-    let (reported, outcome) = oneshot::channel();
-    assert!(
-        reported
-            .send(OpeningOutcome {
-                result: Err(Refusal {
-                    reason: EgressReasonV1::Timeout,
-                    failure: Some(("connect_failed", "test_resolver")),
-                }),
-                socket_unobserved: true,
+async fn egress_broker_connect_audit_requires_known_outcome_through_eof() {
+    enum Completion {
+        SocketUnavailable,
+        OpaqueError,
+        Connected,
+    }
+    for completion in [
+        Completion::SocketUnavailable,
+        Completion::OpaqueError,
+        Completion::Connected,
+    ] {
+        let control = gateway(true);
+        let (mut owner, _incoming, _stop) = fixture_owner(
+            tokio::io::sink(),
+            control.clone(),
+            443,
+            ChannelTimes::default(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let (stream, mut peer) = tokio::io::duplex(64);
+        let (result, expected_connection, lost) = match completion {
+            Completion::SocketUnavailable => (None, Some(false), 0),
+            Completion::OpaqueError => (
+                Some(Err(std::io::Error::from(
+                    std::io::ErrorKind::ConnectionRefused,
+                ))),
+                None,
+                1,
+            ),
+            Completion::Connected => (
+                Some(Ok(PendingOpen {
+                    socket: SocketControl::spawn(1, stream, owner.events.clone(), deadline, None),
+                    peer: "127.0.0.1:443".parse().unwrap(),
+                    connected_at: Instant::now(),
+                    resolver: "fixture",
+                })),
+                Some(true),
+                0,
+            ),
+        };
+        let mut progress = ConnectProgress {
+            pending: true,
+            ..ConnectProgress::default()
+        };
+        let result = progress.complete(result).ok_or(Refusal {
+            reason: EgressReasonV1::Unavailable,
+            failure: Some(("connect_failed", "fixture")),
+        });
+        let (reported, outcome) = oneshot::channel();
+        assert!(
+            reported
+                .send(OpeningOutcome {
+                    result,
+                    socket_unobserved: progress.pending || progress.unobserved,
+                })
+                .is_ok()
+        );
+        let (opening, _lifetime) = OpeningOwner::new();
+        let mut flow = owner.pending_flow(IdV1::random());
+        flow.opening = Some(OpeningHandle {
+            owner: opening,
+            outcome,
+        });
+        owner.flows.insert(1, flow);
+
+        let terminal = owner.shutdown(ChannelExit::HelperClosed, deadline).await;
+
+        assert_eq!(terminal.cause, ChannelExit::HelperClosed);
+        assert_eq!(terminal.local_quiescence, LocalQuiescence::Confirmed);
+        if matches!(completion, Completion::Connected) {
+            assert_eq!(
+                timeout_at(deadline, peer.read(&mut [0; 1]))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                0
+            );
+        }
+        let observations = control.observations.lock().unwrap();
+        let connections: Vec<_> = observations
+            .iter()
+            .filter_map(|event| match event {
+                EgressObservationV1::Connection { connected, .. } => Some(*connected),
+                _ => None,
             })
-            .is_ok()
-    );
-    let cause = owner
-        .collect_retired(
-            RetiredFlow::Opening {
-                flow_id: 1,
-                decision_id: IdV1::random(),
-                reason: EgressCloseReasonV1::OwnerExit,
-                outcome,
-            },
-            Instant::now() + Duration::from_secs(2),
-        )
-        .await
-        .unwrap();
-    assert!(cause.is_none());
-    let terminal = owner
-        .shutdown(ChannelExit::Stopped, Instant::now() + OBSERVATION_DRAIN)
-        .await;
-    assert_eq!(terminal.local_quiescence, LocalQuiescence::Confirmed);
-    let observations = control.observations.lock().unwrap();
-    assert!(matches!(
-        observations.as_slice(),
-        [EgressObservationV1::ChannelClosed {
-            observations_lost: 1,
-            ..
-        }]
-    ));
+            .collect();
+        assert_eq!(
+            connections,
+            expected_connection.as_slice(),
+            "only an outcome with known provenance is observed"
+        );
+        assert!(observations.iter().any(|event| matches!(
+            event, EgressObservationV1::ChannelClosed { observations_lost, .. } if *observations_lost == lost
+        )));
+        assert_eq!(
+            observations.iter().any(|event| matches!(
+                event,
+                EgressObservationV1::Closed {
+                    reason: EgressCloseReasonV1::OwnerExit,
+                    ..
+                }
+            )),
+            matches!(completion, Completion::Connected)
+        );
+    }
 }
 
 #[tokio::test]
