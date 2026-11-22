@@ -1,15 +1,12 @@
-name: Lot verification
+name: G11 Kubernetes regressions
 
-# Verifies V1 development branches on a hosted Linux x86_64 runner so that the
-# development Mac keeps its memory for engine, browser and macOS recipes.
-# It complements ci.yaml (dev/main) and never creates tags, releases or
-# artifacts outside this run. Engine (Docker/Podman/Kubernetes) and provider
-# recipes stay out of this workflow: ignored tests are not run and are never
-# counted as passes.
+# One hosted check for the held-create, diagnostics, PVC and provider fixes.
+# The Rust selectors use SQLite and synthetic peers. Physical runtime and
+# provider recipes are outside this verification.
 
 on:
   push:
-    branches: ['claude/v1-**']
+    branches: ['claude/v1-g11-kubernetes-regressions-20261122']
 
 permissions:
   contents: read
@@ -24,7 +21,7 @@ jobs:
     timeout-minutes: 180
     env:
       AI_GUARD_BUILD_REVISION: ${{ github.sha }}
-      # Match CI's build limit when compiling and linking the full test suite.
+      # Match CI's build limit when compiling and linking the test binaries.
       CARGO_BUILD_JOBS: '1'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -60,40 +57,61 @@ jobs:
           python3 -B tests/e2e/interactive_driver.py --self-test
           python3 -B tests/e2e/test_run_provider_preflight.py ProviderPreflightTests ProviderBrowserStageTests
           python3 -B tests/e2e/test_run_provider_broker.py BrokerRecipeTests
-      - name: Rust test suite (ignored engine and provider tests excluded)
+      - name: Exact G11 Rust regressions on SQLite
         shell: bash
         run: |
-          set -o pipefail
+          set -euo pipefail
           export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
-          cargo test --locked --offline --no-fail-fast 2>&1 | tee cargo-test.log
-      - name: Summarize test results
-        if: always()
-        shell: bash
-        run: |
-          if [ -f cargo-test.log ]; then
-            grep -E '^test result:|^     Running ' cargo-test.log > cargo-test-summary.txt || true
-            grep -E '\.\.\. FAILED$' cargo-test.log | sed 's/^test //; s/ \.\.\. FAILED$//' > cargo-test-failed.txt || true
-            {
-              echo "### Rust test suite"
-              echo
-              echo "Failed tests: $(wc -l < cargo-test-failed.txt)"
-              echo
-              echo '```'
-              head -n 100 cargo-test-failed.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
-      - name: Upload test logs
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: lot-verify-rust-${{ github.sha }}
-          path: |
-            cargo-test.log
-            cargo-test-summary.txt
-            cargo-test-failed.txt
-          if-no-files-found: ignore
-          retention-days: 14
+
+          lib_tests=(
+            audit::kubernetes_admission::authorization::quota_recovery_tests::recovery_refuses_recorded_created_or_unknown_post_claim_states
+            audit::kubernetes_admission_state_tests::held_create_safe_result_survives_cancel_and_inactive_reopen_without_reactivation
+            runtime::kubernetes::admission::coordinator_tests::coordinator_publishes_created_handle_only_with_the_durable_store_ack
+            runtime::kubernetes::admission::flow_tests::held_journal_real_ack_and_historical_confirmation_publish_only_exact_retained_uid
+            runtime::kubernetes::admission::transport_tests::fresh_claim_posts_exact_retained_bytes_and_acknowledges_only_the_201_uid
+            runtime::kubernetes::admission::transport_tests::non_201_duplicate_oversized_and_changed_profiles_are_unknown_without_retry
+            runtime::kubernetes::session_driver::tests::a_workspace_is_claimed_created_once_and_bound_by_its_exact_uid
+            runtime::kubernetes::session_driver::tests::a_second_driver_observes_the_confirmed_workspace_after_pending_expires
+            runtime::kubernetes::session_driver::tests::an_unproven_create_is_recorded_uncertain_and_never_resent
+            runtime::kubernetes::session_supervisor::tests::a_missing_provider_status_closes_without_an_exit_frame
+          )
+          diagnose_tests=(
+            catalogue_is_safe_and_actionable
+            entry_points_state_what_is_opened_as_the_report_does
+            guides_follow_the_binary
+            refusals_and_usage
+          )
+
+          run_exact() {
+            local -n selectors=$1
+            shift
+            local output status=0 passed=0 expected=${#selectors[@]}
+            local selector
+            output=$(cargo test --locked --offline --no-default-features "$@" \
+              -- --exact --test-threads=1 "${selectors[@]}" 2>&1) || status=$?
+
+            for selector in "${selectors[@]}"; do
+              if grep -Fqx -- "test $selector ... ok" <<< "$output"; then
+                printf 'PASS %s\n' "$selector"
+                passed=$((passed + 1))
+              elif grep -Fqx -- "test $selector ... FAILED" <<< "$output"; then
+                printf 'FAIL %s\n' "$selector"
+              else
+                printf 'UNCONFIRMED %s\n' "$selector"
+              fi
+            done
+            printf 'Confirmed passes: %s/%s (cargo exit %s)\n' "$passed" "$expected" "$status"
+            if (( status != 0 || passed != expected )) ||
+              ! grep -Eq "^test result: ok\. $expected passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;" <<< "$output"; then
+              sed -nE 's/^(error\[E[0-9]{4}\]):.*/\1/p' <<< "$output" | sort -u
+              return 1
+            fi
+          }
+
+          failed=0
+          run_exact lib_tests --lib || failed=1
+          run_exact diagnose_tests --test diagnose_cli || failed=1
+          exit "$failed"
 
   frontend:
     runs-on: ubuntu-24.04
