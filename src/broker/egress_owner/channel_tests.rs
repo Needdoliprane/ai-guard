@@ -331,6 +331,7 @@ async fn egress_broker_receipt_expiry_stops_pending_resolution() {
 struct BlockedPublication {
     inner: tokio::io::DuplexStream,
     remaining_frames: usize,
+    prefix_after_frames: usize,
     blocked: Arc<tokio::sync::Notify>,
 }
 
@@ -350,11 +351,21 @@ impl AsyncWrite for BlockedPublication {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        if self.remaining_frames == 0 {
+        if self.remaining_frames == 0 && self.prefix_after_frames == 0 {
             self.blocked.notify_one();
             return Poll::Pending;
         }
-        let result = Pin::new(&mut self.inner).poll_write(cx, buf);
+        let bytes = if self.remaining_frames == 0 {
+            &buf[..buf.len().min(self.prefix_after_frames)]
+        } else {
+            buf
+        };
+        let result = Pin::new(&mut self.inner).poll_write(cx, bytes);
+        if self.remaining_frames == 0
+            && let Poll::Ready(Ok(written)) = result
+        {
+            self.prefix_after_frames -= written;
+        }
         if result.is_pending() {
             self.blocked.notify_one();
         }
@@ -385,6 +396,7 @@ async fn open_with_blocked_publication(
     gateway: Arc<Gateway>,
     upstream_port: u16,
     complete_frames: usize,
+    prefix_after_frames: usize,
 ) -> BlockedHarness {
     let resolver = fixture_resolver(upstream_port, Arc::new(NoLookup(AtomicUsize::new(0))));
     let (broker, mut helper) = tokio::io::duplex(4096);
@@ -392,6 +404,7 @@ async fn open_with_blocked_publication(
     let broker = BlockedPublication {
         inner: broker,
         remaining_frames: complete_frames,
+        prefix_after_frames,
         blocked: blocked.clone(),
     };
     let (_stop, stopped) = watch::channel(false);
@@ -440,7 +453,7 @@ async fn expiry_during_publication(complete_frames: usize) {
         owner,
         blocked,
         _stop,
-    } = open_with_blocked_publication(gateway.clone(), upstream.port, complete_frames).await;
+    } = open_with_blocked_publication(gateway.clone(), upstream.port, complete_frames, 0).await;
 
     let deadline = Instant::now() + Duration::from_secs(2);
     timeout_at(deadline, blocked.notified()).await.unwrap();
@@ -504,7 +517,7 @@ async fn egress_broker_revocation_closes_before_a_blocked_reset_frame() {
         owner,
         blocked,
         _stop,
-    } = open_with_blocked_publication(gateway.clone(), upstream.port, 3).await;
+    } = open_with_blocked_publication(gateway.clone(), upstream.port, 3, 0).await;
     let mut frames = EgressFrameReader::new();
     assert!(matches!(
         frames.read(&mut helper).await.unwrap(),
@@ -561,6 +574,7 @@ async fn egress_broker_loss_of_authority_interrupts_a_partially_written_command(
         let io = BlockedPublication {
             inner: io,
             remaining_frames: usize::MAX,
+            prefix_after_frames: 0,
             blocked: blocked.clone(),
         };
         let (events, _incoming) = mpsc::channel(1);
@@ -617,25 +631,23 @@ async fn egress_broker_loss_of_authority_interrupts_a_partially_written_command(
     }
 }
 
-#[tokio::test]
-async fn egress_broker_receipt_expiry_closes_socket_before_event_consumption() {
-    let upstream = upstream().await;
-    let gateway = Arc::new(Gateway {
-        allow: AtomicBool::new(true),
-        remaining_ms: Some(300),
-        ..Gateway::default()
-    });
+fn fixture_owner<W>(
+    output: W,
+    gateway: Arc<Gateway>,
+    upstream_port: u16,
+    times: ChannelTimes,
+) -> (Owner<W>, mpsc::Receiver<Event>) {
     let mut ledger = EgressChannelState::new(0);
     ledger
         .accept_capability(Some(&EgressCapabilityV1::default()), 0)
         .unwrap();
-    let (events, mut incoming) = mpsc::channel(1);
-    let mut owner = Owner {
-        output: Some(tokio::io::sink()),
+    let (events, incoming) = mpsc::channel(8);
+    let owner = Owner {
+        output: Some(output),
         binding: fixture_binding(),
-        control: gateway.clone(),
-        resolver: fixture_resolver(upstream.port, Arc::new(NoLookup(AtomicUsize::new(0)))),
-        times: ChannelTimes::default(),
+        control: gateway,
+        resolver: fixture_resolver(upstream_port, Arc::new(NoLookup(AtomicUsize::new(0)))),
+        times,
         ledger,
         started: Instant::now(),
         flows: HashMap::new(),
@@ -645,6 +657,23 @@ async fn egress_broker_receipt_expiry_closes_socket_before_event_consumption() {
         observations_lost: 0,
         renewing: false,
     };
+    (owner, incoming)
+}
+
+#[tokio::test]
+async fn egress_broker_receipt_expiry_closes_socket_before_event_consumption() {
+    let upstream = upstream().await;
+    let gateway = Arc::new(Gateway {
+        allow: AtomicBool::new(true),
+        remaining_ms: Some(300),
+        ..Gateway::default()
+    });
+    let (mut owner, mut incoming) = fixture_owner(
+        tokio::io::sink(),
+        gateway.clone(),
+        upstream.port,
+        ChannelTimes::default(),
+    );
     owner
         .worker_frame(EgressMessageV1::Open {
             flow_id: 1,
@@ -666,6 +695,153 @@ async fn egress_broker_receipt_expiry_closes_socket_before_event_consumption() {
     owner.shutdown(ChannelExit::Stopped).await;
     assert_eq!(upstream.accepts.load(Ordering::SeqCst), 1);
     assert_expired_connection(&gateway);
+}
+
+#[tokio::test]
+async fn egress_broker_discards_buffered_data_after_receipt_or_lease_expiry() {
+    for reason in [EgressCloseReasonV1::Expired, EgressCloseReasonV1::LeaseLost] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut times = ChannelTimes::default();
+        if reason == EgressCloseReasonV1::LeaseLost {
+            times.lease = Duration::from_millis(300);
+        }
+        let control = Arc::new(Gateway {
+            allow: AtomicBool::new(true),
+            remaining_ms: (reason == EgressCloseReasonV1::Expired).then_some(300),
+            ..Gateway::default()
+        });
+        let (output, mut helper) = tokio::io::duplex(4096);
+        let (mut owner, mut incoming) = fixture_owner(output, control.clone(), port, times);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        owner
+            .worker_frame(EgressMessageV1::Open {
+                flow_id: 1,
+                authority: format!("{FIXTURE}:{port}"),
+            })
+            .await
+            .unwrap();
+        let (mut upstream, _) = timeout_at(deadline, listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let connected = timeout_at(deadline, incoming.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        owner.event(connected).await.unwrap();
+        let mut frames = EgressFrameReader::new();
+        assert!(matches!(
+            frames.read(&mut helper).await.unwrap(),
+            Some(EgressMessageV1::Accepted { flow_id: 1 })
+        ));
+        assert!(matches!(
+            frames.read(&mut helper).await.unwrap(),
+            Some(EgressMessageV1::Credit { flow_id: 1, .. })
+        ));
+        owner
+            .worker_frame(EgressMessageV1::Credit {
+                flow_id: 1,
+                bytes: 32,
+            })
+            .await
+            .unwrap();
+        upstream.write_all(b"old").await.unwrap();
+        let data = timeout_at(deadline, incoming.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(&data, Event::Upstream { flow_id: 1, data } if data == b"old"));
+
+        assert_eq!(
+            timeout_at(deadline, upstream.read(&mut [0; 1]))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        owner.event(data).await.unwrap();
+        drop(owner.output.take());
+        assert!(
+            frames.read(&mut helper).await.unwrap().is_none(),
+            "expired data must not be published"
+        );
+        owner.shutdown(ChannelExit::Stopped).await;
+        assert!(control.observations.lock().unwrap().iter().any(|event| matches!(event,
+            EgressObservationV1::Closed { flow_id: 1, reason: observed, bytes_down: 3, .. } if *observed == reason)));
+    }
+}
+
+#[tokio::test]
+async fn egress_broker_expiry_during_partial_data_frame_closes_the_helper_channel() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let control = Arc::new(Gateway {
+        allow: AtomicBool::new(true),
+        remaining_ms: Some(300),
+        ..Gateway::default()
+    });
+    let BlockedHarness {
+        mut helper,
+        owner,
+        blocked,
+        _stop,
+    } = open_with_blocked_publication(control.clone(), port, 3, 2).await;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let (mut upstream, _) = timeout_at(deadline, listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut frames = EgressFrameReader::new();
+    assert!(matches!(
+        frames.read(&mut helper).await.unwrap(),
+        Some(EgressMessageV1::Accepted { flow_id: 1 })
+    ));
+    assert!(matches!(
+        frames.read(&mut helper).await.unwrap(),
+        Some(EgressMessageV1::Credit { flow_id: 1, .. })
+    ));
+    channel_protocol::write_message(
+        &mut helper,
+        &EgressMessageV1::Credit {
+            flow_id: 1,
+            bytes: 32,
+        },
+        deadline,
+    )
+    .await
+    .unwrap();
+    upstream.write_all(b"data").await.unwrap();
+    timeout_at(deadline, blocked.notified())
+        .await
+        .expect("the writer is pending after emitting a partial data frame");
+    assert_eq!(
+        timeout_at(deadline, owner)
+            .await
+            .expect("the data deadline closes the helper channel")
+            .unwrap(),
+        ChannelExit::Protocol,
+    );
+    assert!(matches!(
+        frames.read(&mut helper).await,
+        Err(channel_protocol::CommonEgressChannelError::PartialFrame)
+    ));
+    assert!(
+        control
+            .observations
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| matches!(
+                event,
+                EgressObservationV1::Closed {
+                    flow_id: 1,
+                    reason: EgressCloseReasonV1::Expired,
+                    bytes_down: 4,
+                    ..
+                }
+            ))
+    );
 }
 
 #[tokio::test]

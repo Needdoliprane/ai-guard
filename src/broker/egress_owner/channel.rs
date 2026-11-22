@@ -251,6 +251,15 @@ impl SocketControl {
         });
     }
 
+    fn data_deadline(&self) -> Option<Instant> {
+        let state = *self.authority.borrow();
+        state.lease_until?;
+        if self.commands.is_closed() || state.loss(self.valid_until, Instant::now()).is_some() {
+            return None;
+        }
+        Some(state.deadline(self.valid_until).0)
+    }
+
     fn stop(
         self,
         flow_id: u64,
@@ -698,12 +707,27 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
                 result,
             } => self.opened(flow_id, decision_id, result).await,
             Event::Upstream { flow_id, data } => {
-                if !self.flows.contains_key(&flow_id) {
+                let Some(socket) = self
+                    .flows
+                    .get(&flow_id)
+                    .and_then(|flow| flow.socket.as_ref())
+                else {
                     return Ok(());
-                }
+                };
+                let Some(deadline) = socket.data_deadline() else {
+                    return Ok(());
+                };
+                let commands = socket.commands.clone();
                 let length = data.len();
                 let message = EgressMessageV1::data(flow_id, &data).map_err(|_| ())?;
-                if self.send(message).await? == Admission::Applied {
+                // Cancelling the writer may leave a partial frame. An error
+                // closes the channel instead of reusing that transport.
+                let admission = tokio::select! {
+                    biased;
+                    _ = commands.closed() => return Err(()),
+                    result = self.send_before(message, deadline) => result?,
+                };
+                if admission == Admission::Applied {
                     self.ledger
                         .release_buffer(flow_id, DirectionV1::BrokerToWorker, length)
                         .map_err(|_| ())?;
