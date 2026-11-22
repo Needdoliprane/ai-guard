@@ -12,7 +12,7 @@ import { buildIdentityFooter } from "./build-identity-view.ts";
 import { relatedAgents, relatedSandboxes, workerRelation } from "./control.ts";
 import { integrityCoverage, parseRetentionLedger, retentionNotice } from "./retention.ts";
 import type { WorkerRecord } from "./control.ts";
-import type { ActivityChannelCounts, BrokerCapture } from "./model.ts";
+import type { ActivityCoverageChannel, ActivityDetails, BrokerCapture } from "./model.ts";
 import {
   activityChannel,
   activityDetails,
@@ -23,7 +23,9 @@ import {
   buildAgentForest,
   decisionEvaluationDetails,
   eventSummary,
+  formatActivityChannelLosses,
   formatActivityCoverageFlag,
+  formatActivityCoverageNotice,
   formatBytes,
   formatDate,
   formatMetric,
@@ -2160,20 +2162,20 @@ function brokerBatchCommandContent(event: AuditEvent) {
   ];
 }
 
-function activityCountsRows(label: string, counts: ActivityChannelCounts | null) {
-  if (!counts) return [labelValue(label, "Non applicable à cette session")];
-  const losses = counts.dropped + counts.refused + counts.oversized + counts.invalid;
+function activityCountsRows(
+  channel: ActivityCoverageChannel,
+  coverage: NonNullable<ActivityDetails["coverage"]>,
+) {
+  const label = channel === "stdout" ? "Sortie structurée" : "Hooks";
+  const counts = coverage[channel];
+  if (counts === undefined) return [labelValue(label, "Inconnu")];
+  if (counts === null) return [labelValue(label, "Non applicable à cette session")];
   return [
     labelValue(
       label,
       `${formatMetric(counts.records)} enregistrement${counts.records === 1 ? "" : "s"} · ${formatMetric(counts.events)} événement${counts.events === 1 ? "" : "s"}`,
     ),
-    labelValue(
-      `${label} · pertes`,
-      losses || counts.declaredLosses
-        ? `${formatMetric(losses)} observée${losses === 1 ? "" : "s"} · ${formatMetric(counts.declaredLosses)} déclarée${counts.declaredLosses === 1 ? "" : "s"} par le worker`
-        : "Aucune perte comptée",
-    ),
+    labelValue(`${label} · pertes`, formatActivityChannelLosses(channel, counts)),
     labelValue(
       `${label} · non projetés`,
       `${formatMetric(counts.ignored)} ignoré${counts.ignored === 1 ? "" : "s"} · ${formatMetric(counts.unrecognized)} non reconnu${counts.unrecognized === 1 ? "" : "s"}`,
@@ -2217,9 +2219,7 @@ function activityContent(event: AuditEvent) {
         "div",
         "info-strip",
         icon("info"),
-        c.complete
-          ? "Collecte complète pour les canaux attachés. Elle ne couvre pas les actions faites hors des points de hook du client."
-          : "Collecte partielle : des enregistrements manquent ou n’ont pas été livrés. Une absence d’événement ne prouve pas une absence d’activité.",
+        formatActivityCoverageNotice(c),
       ),
       el(
         "dl",
@@ -2230,8 +2230,8 @@ function activityContent(event: AuditEvent) {
         labelValue("Budget de session épuisé", formatActivityCoverageFlag(c.budgetExhausted)),
         labelValue("Audit indisponible à la fin", formatActivityCoverageFlag(c.auditUnavailable)),
         labelValue("Lecture suspendue pendant la session", formatActivityCoverageFlag(c.stalled)),
-        ...activityCountsRows("Sortie structurée", c.stdout),
-        ...activityCountsRows("Hooks", c.hook),
+        ...activityCountsRows("stdout", c),
+        ...activityCountsRows("hook", c),
       ),
     );
   }

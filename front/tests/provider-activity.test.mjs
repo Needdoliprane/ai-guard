@@ -4,7 +4,9 @@ import {
   activityChannel,
   activityDetails,
   eventSummary,
+  formatActivityChannelLosses,
   formatActivityCoverageFlag,
+  formatActivityCoverageNotice,
   projectEvents,
   providerActivitySummary,
 } from "../src/model.ts";
@@ -135,7 +137,7 @@ test("activity details separate the client's declaration from ai-guard's coverag
   assert.equal(declared.versionLabel, null);
   assert.equal(declared.interactive, true);
   assert.equal(declared.coverage, null);
-  const summary = activityDetails({
+  const coverageEvent = {
     ...base,
     seq: 2,
     kind: "activity.coverage",
@@ -150,11 +152,12 @@ test("activity details separate the client's declaration from ai-guard's coverag
       spooled_events: 12,
       delivered_events: 12,
       hook_channel: "closed",
-      stdout: { records: 5, mapped: 4, ignored: 1, dropped: 2 },
+      stdout: { records: 5, mapped: 4, ignored: 1, dropped: 2, declared_losses: 1 },
       hook: { records: 3, refused: 1, declared_losses: 2 },
-      activity: { channel: null, client: "claude-code" },
+      activity: { channel: null, client: "codex" },
     },
-  });
+  };
+  const summary = activityDetails(coverageEvent);
   assert.equal(summary.declaredByClient, false);
   assert.equal(summary.coverage.complete, false);
   const { budgetExhausted, auditUnavailable, stalled } = summary.coverage;
@@ -163,6 +166,23 @@ test("activity details separate the client's declaration from ai-guard's coverag
   assert.deepEqual(flags.map(formatActivityCoverageFlag), ["Oui", "Non", "Non"]);
   assert.equal(summary.coverage.stdout.dropped, 2);
   assert.equal(summary.coverage.hook.declaredLosses, 2);
+  assert.equal(
+    formatActivityChannelLosses("stdout", summary.coverage.stdout),
+    "2 observées · 1 signalement de perte émis par le client",
+  );
+  assert.equal(
+    formatActivityChannelLosses("hook", summary.coverage.hook),
+    "1 observée · 2 déclarées par le worker",
+  );
+  const tty = activityDetails({
+    ...coverageEvent,
+    data: {
+      ...coverageEvent.data,
+      stdout: null,
+      activity: { ...coverageEvent.data.activity, interactive: true },
+    },
+  });
+  assert.equal(tty.coverage.stdout, null);
   // A coverage claim from a provider source is never read as a control fact.
   const forged = activityDetails({ ...base, seq: 3, kind: "activity.coverage", data: { complete: true, activity: {} } });
   assert.equal(forged.coverage, null);
@@ -186,6 +206,12 @@ test("activity coverage displays unconfirmed outcomes as unknown", () => {
   };
   const coverage = activityDetails(replay).coverage;
   assert.equal(coverage.complete, false);
+  assert.equal(coverage.stdout, undefined);
+  assert.equal(coverage.hook, undefined);
+  assert.equal(
+    formatActivityCoverageNotice(coverage),
+    "Bilan de collecte incomplet. La clôture n’a pas été confirmée.",
+  );
   const flags = [coverage.budgetExhausted, coverage.auditUnavailable, coverage.stalled];
   assert.deepEqual(flags, [null, null, null]);
   assert.deepEqual(flags.map(formatActivityCoverageFlag), ["Inconnu", "Inconnu", "Inconnu"]);

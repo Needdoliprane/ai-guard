@@ -428,6 +428,8 @@ export interface ActivityChannelCounts {
   declaredLosses: number;
 }
 
+export type ActivityCoverageChannel = "stdout" | "hook";
+
 export interface ActivityDetails {
   channel: string | null;
   client: string | null;
@@ -441,14 +443,15 @@ export interface ActivityDetails {
   truncated: boolean;
   coverage: {
     complete: boolean;
+    reason: string | null;
     budgetExhausted: boolean | null;
     auditUnavailable: boolean | null;
     stalled: boolean | null;
     spooledEvents: number | null;
     deliveredEvents: number | null;
     hookChannel: string | null;
-    stdout: ActivityChannelCounts | null;
-    hook: ActivityChannelCounts | null;
+    stdout: ActivityChannelCounts | null | undefined;
+    hook: ActivityChannelCounts | null | undefined;
   } | null;
 }
 
@@ -461,12 +464,39 @@ export function formatActivityCoverageFlag(value: boolean | null): string {
   return value ? "Oui" : "Non";
 }
 
+export function formatActivityCoverageNotice(
+  coverage: NonNullable<ActivityDetails["coverage"]>,
+): string {
+  if (coverage.reason === "activity_finalization_unconfirmed") {
+    return "Bilan de collecte incomplet. La clôture n’a pas été confirmée.";
+  }
+  return coverage.complete
+    ? "Collecte complète pour les canaux attachés. Elle ne couvre pas les actions faites hors des points de hook du client."
+    : "Collecte partielle. Certaines activités peuvent manquer dans les traces.";
+}
+
+export function formatActivityChannelLosses(
+  channel: ActivityCoverageChannel,
+  counts: ActivityChannelCounts,
+): string {
+  const observed = counts.dropped + counts.refused + counts.oversized + counts.invalid;
+  const declared = counts.declaredLosses;
+  if (observed === 0 && declared === 0) return "Aucune perte comptée";
+  const declaredCount = formatMetric(declared);
+  const plural = declared === 1 ? "" : "s";
+  const declarations = channel === "stdout"
+    ? `${declaredCount} signalement${plural} de perte émis par le client`
+    : `${declaredCount} déclarée${plural} par le worker`;
+  return `${formatMetric(observed)} observée${observed === 1 ? "" : "s"} · ${declarations}`;
+}
+
 function count(value: unknown): number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
-function channelCounts(value: unknown): ActivityChannelCounts | null {
-  if (!value || typeof value !== "object") return null;
+function channelCounts(value: unknown): ActivityChannelCounts | null | undefined {
+  if (value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) return undefined;
   const v = value as Record<string, unknown>;
   return {
     records: count(v.records),
@@ -492,6 +522,7 @@ export function activityDetails(event: AuditEvent): ActivityDetails | null {
     event.kind === "activity.coverage" && event.source === "runner" && event.provenance === "observed"
       ? {
           complete: data.complete === true,
+          reason: text(data.reason),
           budgetExhausted: optionalBoolean(data.budget_exhausted),
           auditUnavailable: optionalBoolean(data.audit_unavailable),
           stalled: optionalBoolean(data.stalled),
