@@ -4,6 +4,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod egress_decision;
 #[cfg(test)]
 #[path = "control/egress_launch_tests.rs"]
 mod egress_launch_tests;
