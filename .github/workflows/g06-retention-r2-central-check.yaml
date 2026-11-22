@@ -74,6 +74,22 @@ jobs:
               | unique | .[:8] | join(",")
             ' "$build" 2>/dev/null) || fail BUILD_FAILED
             if [[ "$codes" =~ ^E[0-9]{4}(,E[0-9]{4}){0,7}$ ]]; then
+              positions=$(jq -Rrs --arg fixture_file "$GITHUB_WORKSPACE/tests/supervision_api.rs" '
+                [split("\n")[] | fromjson? | objects
+                  | select(.reason == "compiler-message" and .message.level == "error")
+                  | .message
+                  | (.code.code | strings | select(test("^E[0-9]{4}$"))) as $code
+                  | .spans[]?
+                  | select(.is_primary == true
+                      and (.file_name == "tests/supervision_api.rs" or .file_name == $fixture_file))
+                  | select((.line_start | numbers | tostring | test("^[1-9][0-9]{0,5}$"))
+                      and (.column_start | numbers | tostring | test("^[1-9][0-9]{0,3}$")))
+                  | "\($code)@\(.line_start):\(.column_start)"]
+                | unique | .[:8] | join(",")
+              ' "$build" 2>/dev/null) || positions=
+              if [[ "$positions" =~ ^E[0-9]{4}@[1-9][0-9]{0,5}:[1-9][0-9]{0,3}(,E[0-9]{4}@[1-9][0-9]{0,5}:[1-9][0-9]{0,3}){0,7}$ ]]; then
+                fail "RUSTC_ERROR $codes at $positions"
+              fi
               fail "RUSTC_ERROR $codes"
             fi
             fail BUILD_FAILED
