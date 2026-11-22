@@ -4079,6 +4079,16 @@ fn supervisor_config(
     }
 }
 
+/// The next event of a broker channel, which must exist.
+async fn next_v3_event(
+    events: &mut crate::runtime::kubernetes::session_protocol::SessionEventsV3,
+) -> crate::runtime::kubernetes::session_protocol::WorkerEventV3 {
+    watched(events.next())
+        .await
+        .unwrap()
+        .expect("an event before the end")
+}
+
 #[tokio::test]
 async fn streaming_attach_carries_protocol_v3_to_the_real_supervisor_after_the_bracket() {
     use crate::runtime::kubernetes::{
@@ -4180,17 +4190,13 @@ async fn streaming_attach_carries_protocol_v3_to_the_real_supervisor_after_the_b
         .await
         .unwrap();
     sender.send_archive(&archive).await.unwrap();
-    let next = |events: &mut crate::runtime::kubernetes::session_protocol::SessionEventsV3| {
-        let future = events.next();
-        async move { watched(future).await.unwrap().unwrap() }
-    };
     assert!(matches!(
-        next(&mut events).await,
+        next_v3_event(&mut events).await,
         WorkerEventV3::Control(WorkerControlV3::Imported(_))
     ));
     sender.send_control(BrokerControlV3::Start).await.unwrap();
     assert!(matches!(
-        next(&mut events).await,
+        next_v3_event(&mut events).await,
         WorkerEventV3::Control(WorkerControlV3::Started)
     ));
     sender.send_stdin(b"over the attach\n").await.unwrap();
@@ -4200,7 +4206,7 @@ async fn streaming_attach_carries_protocol_v3_to_the_real_supervisor_after_the_b
     assert_eq!(&echoed, b"egress over the attach");
     let mut stdout = Vec::new();
     while stdout.len() < 16 {
-        match next(&mut events).await {
+        match next_v3_event(&mut events).await {
             WorkerEventV3::Stdout(bytes) => stdout.extend_from_slice(&bytes),
             other => panic!("unexpected event {other:?}"),
         }
@@ -4211,7 +4217,7 @@ async fn streaming_attach_carries_protocol_v3_to_the_real_supervisor_after_the_b
         .await
         .unwrap();
     assert!(matches!(
-        next(&mut events).await,
+        next_v3_event(&mut events).await,
         WorkerEventV3::Control(WorkerControlV3::Exited(_))
     ));
     // The worker ended its output: the relay ends, then the channel.

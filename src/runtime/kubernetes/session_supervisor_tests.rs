@@ -842,6 +842,16 @@ async fn export_streams_a_tar_of_regular_files_and_directories_with_its_digest()
     assert_eq!(harness.end().await.0, SupervisorEndV3::Protocol);
 }
 
+/// The next event of a broker channel, which must exist.
+async fn next_v3_event(
+    events: &mut crate::runtime::kubernetes::session_protocol::SessionEventsV3,
+) -> crate::runtime::kubernetes::session_protocol::WorkerEventV3 {
+    watched(events.next())
+        .await
+        .unwrap()
+        .expect("an event before the end")
+}
+
 /// The real broker channel against the real supervisor, with `/bin/cat`
 /// as provider and helper. Only the Hello/Ready is hand-written here; the
 /// attach transport is covered by the loopback attach tests.
@@ -869,17 +879,13 @@ async fn broker_channel_and_supervisor_complete_a_session_together() {
         .await
         .unwrap();
     sender.send_archive(&fixture.archive).await.unwrap();
-    let next = |events: &mut crate::runtime::kubernetes::session_protocol::SessionEventsV3| {
-        let future = events.next();
-        async move { watched(future).await.unwrap().unwrap() }
-    };
     assert!(matches!(
-        next(&mut events).await,
+        next_v3_event(&mut events).await,
         WorkerEventV3::Control(WorkerControlV3::Imported(_))
     ));
     sender.send_control(BrokerControlV3::Start).await.unwrap();
     assert!(matches!(
-        next(&mut events).await,
+        next_v3_event(&mut events).await,
         WorkerEventV3::Control(WorkerControlV3::Started)
     ));
     sender.send_stdin(b"round trip\n").await.unwrap();
@@ -889,7 +895,7 @@ async fn broker_channel_and_supervisor_complete_a_session_together() {
     assert_eq!(&echoed, b"egress-bytes");
     let mut stdout = Vec::new();
     while stdout.len() < 11 {
-        match next(&mut events).await {
+        match next_v3_event(&mut events).await {
             WorkerEventV3::Stdout(bytes) => stdout.extend_from_slice(&bytes),
             other => panic!("unexpected event {other:?}"),
         }
@@ -900,7 +906,7 @@ async fn broker_channel_and_supervisor_complete_a_session_together() {
         .await
         .unwrap();
     assert!(matches!(
-        next(&mut events).await,
+        next_v3_event(&mut events).await,
         WorkerEventV3::Control(WorkerControlV3::Exited(ExitedV3 {
             code: Some(0),
             signal: None
