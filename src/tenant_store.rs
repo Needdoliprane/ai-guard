@@ -299,7 +299,7 @@ impl TenantStore {
 #[cfg(feature = "mysql-storage")]
 mod mysql {
     use super::*;
-    use crate::mysql_storage::audit::MysqlAuditStore;
+    use crate::mysql_storage::audit::{MysqlAuditStore, RequiredAuditVerificationFailed};
     use std::{
         future::Future,
         sync::{
@@ -316,11 +316,13 @@ mod mysql {
     }
 
     impl ControlVerification {
-        fn observe(&mut self, failures_at_start: u64, verified: bool) {
-            if !verified {
-                self.failures = self.failures.saturating_add(1);
-                self.unavailable = true;
-            } else if self.failures == failures_at_start && self.failures != u64::MAX {
+        fn record_failure(&mut self) {
+            self.failures = self.failures.saturating_add(1);
+            self.unavailable = true;
+        }
+
+        fn recover(&mut self, failures_at_start: u64) {
+            if self.failures == failures_at_start && self.failures != u64::MAX {
                 // A check already in flight cannot clear a newer failure.
                 self.unavailable = false;
             }
@@ -384,11 +386,9 @@ mod mysql {
             self.store.tenant_id()
         }
         pub fn healthy(&self) -> bool {
-            !self.transport_degraded.load(Ordering::Acquire)
-                && self
-                    .control_verification
-                    .lock()
-                    .is_ok_and(|state| !state.unavailable)
+            self.control_verification.lock().is_ok_and(|state| {
+                !state.unavailable && !self.transport_degraded.load(Ordering::Acquire)
+            })
         }
         pub fn redactor_union(&self, additional: &Redactor) -> Redactor {
             self.store.redactor_union(additional)
@@ -410,19 +410,23 @@ mod mysql {
             )))
         }
         pub fn control_capabilities(&self) -> Result<crate::control::ControlCapabilitiesV1> {
-            self.block(self.store.control_capabilities())
+            self.block_verifying_audit(self.store.control_capabilities())
         }
         pub fn covers_redaction(&self, additional: &Redactor) -> bool {
             self.store.redactor_covers(additional)
         }
         pub fn head(&self) -> Result<i64> {
-            self.block(self.store.head())
+            self.block_verifying_audit(self.store.head())
         }
         pub fn events(&self, query: &EventQuery) -> Result<Vec<StoredEvent>> {
-            self.block(self.store.events(query))
+            self.block_verifying_audit(self.store.events(query))
         }
         pub fn integrity(&self) -> Result<Integrity> {
-            self.block(self.store.integrity())
+            let result = self.block_verifying_audit(self.store.integrity())?;
+            if !result.valid {
+                self.lock_control_verification()?.record_failure();
+            }
+            Ok(result)
         }
         pub fn append(&self, event: Event) -> Result<StoredEvent> {
             self.block(self.store.append(event))
@@ -438,11 +442,31 @@ mod mysql {
             operation: impl Future<Output = Result<T>>,
         ) -> Result<T> {
             match guard {
-                Some(digest) => self.block(crate::mysql_storage::audit::with_control_guard(
-                    digest, operation,
-                )),
+                Some(digest) => self.block_verifying_audit(
+                    crate::mysql_storage::audit::with_control_guard(digest, operation),
+                ),
                 None => self.block(operation),
             }
+        }
+        fn block_verifying_audit<T>(
+            &self,
+            operation: impl Future<Output = Result<T>>,
+        ) -> Result<T> {
+            let result = self.block(operation);
+            if result
+                .as_ref()
+                .is_err_and(|error| error.is::<RequiredAuditVerificationFailed>())
+            {
+                self.lock_control_verification()?.record_failure();
+            }
+            result
+        }
+        fn lock_control_verification(
+            &self,
+        ) -> Result<std::sync::MutexGuard<'_, ControlVerification>> {
+            self.control_verification
+                .lock()
+                .map_err(|_| anyhow::anyhow!("MySQL control verification state unavailable"))
         }
         /// One verified snapshot answers human and workload presence for the
         /// selected tenant. A collision is a verified answer. An unavailable
@@ -452,16 +476,14 @@ mod mysql {
             &self,
             digest: &[u8; 32],
         ) -> Result<Option<crate::mysql_storage::audit::ControlCollision>> {
-            let failures_at_start = self
-                .control_verification
-                .lock()
-                .map_err(|_| anyhow::anyhow!("MySQL control verification state unavailable"))?
-                .failures;
+            let failures_at_start = self.lock_control_verification()?.failures;
             let result = self.block(self.store.verify_control_credential_presence(digest));
-            self.control_verification
-                .lock()
-                .map_err(|_| anyhow::anyhow!("MySQL control verification state unavailable"))?
-                .observe(failures_at_start, result.is_ok());
+            let mut state = self.lock_control_verification()?;
+            if result.is_ok() {
+                state.recover(failures_at_start);
+            } else {
+                state.record_failure();
+            }
             result
         }
 
@@ -495,10 +517,27 @@ mod mysql {
             self.store.known_control_collision(digest)
         }
         pub fn entities(&self, sandboxes: bool) -> Result<Vec<Value>> {
-            self.block(self.store.entities(sandboxes))
+            self.block_verifying_audit(self.store.entities(sandboxes))
         }
         pub fn overview(&self) -> Result<Value> {
-            self.block(self.store.overview())
+            self.block_verifying_audit(self.store.overview())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::ControlVerification;
+
+        #[test]
+        fn a_success_already_in_flight_cannot_clear_a_new_failure() {
+            let mut state = ControlVerification::default();
+            state.record_failure();
+            let stale = state.failures;
+            state.record_failure();
+            state.recover(stale);
+            assert!(state.unavailable);
+            state.recover(state.failures);
+            assert!(!state.unavailable);
         }
     }
 }
@@ -618,5 +657,48 @@ mod tests {
             "a refusal does not clear an outage"
         );
         assert!(tenant.block(async { Ok(()) }).is_ok() && store.healthy());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn guarded_write_verification_failure_stays_visible_after_other_results() {
+        use crate::mysql_storage::audit::{
+            BatchConflict, CommitUncertain, ControlCollision, ControlGuardRefused,
+            RequiredAuditVerificationFailed,
+        };
+
+        let store = mysql_store(Redactor::new(vec![]));
+        let tenant = store.mysql().unwrap();
+        let guard = Some([0; 32]);
+        for refusal in [
+            anyhow::Error::new(ControlGuardRefused(ControlCollision::Human)),
+            anyhow::Error::new(BatchConflict),
+            anyhow::Error::new(CommitUncertain),
+        ] {
+            assert!(
+                tenant
+                    .block_guarded(guard, async { Err::<(), _>(refusal) })
+                    .is_err()
+            );
+            assert!(store.healthy());
+        }
+
+        let cause = MysqlProbeError::ServerRefused(1146);
+        let tagged = RequiredAuditVerificationFailed::tag(cause.into(), true);
+        assert_eq!(tagged.to_string(), cause.to_string());
+        assert_eq!(tagged.downcast_ref::<MysqlProbeError>(), Some(&cause));
+        assert!(!is_transport_failure(&tagged));
+        assert!(
+            tenant
+                .block_guarded(guard, async { Err::<(), _>(tagged) })
+                .is_err()
+        );
+        assert!(!store.healthy());
+
+        let timed_out =
+            RequiredAuditVerificationFailed::tag(MysqlProbeError::TimedOut.into(), true);
+        assert!(is_transport_failure(&timed_out));
+        assert!(tenant.block(async { Ok(()) }).is_ok());
+        assert!(tenant.block_guarded(guard, async { Ok(()) }).is_ok());
+        assert!(!store.healthy());
     }
 }

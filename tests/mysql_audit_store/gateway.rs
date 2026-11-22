@@ -33,6 +33,7 @@ use tokio::{
 };
 
 const DEADLINE: Duration = Duration::from_secs(45);
+const PROJECTION_SQL_DEADLINE: Duration = Duration::from_secs(8);
 const RUNNER_A: &str = "a-runner-a-runner-a-runner-a-runner-a-runner-a-runner-a-runner-a-runner-";
 const VIEWER_A: &str = "a-viewer-a-viewer-a-viewer-a-viewer-a-viewer-a-viewer-a-viewer-a-viewer-";
 const RUNNER_B: &str = "b-runner-b-runner-b-runner-b-runner-b-runner-b-runner-b-runner-b-runner-";
@@ -635,30 +636,53 @@ async fn gateway_commits_ordinary_batch_and_replays_after_restart() -> Result<()
     restarted.stop().await
 }
 
-async fn with_unverifiable_identity_projection(
+async fn set_identity_projection_anchor(conn: &mut Conn, anchor: &[u8]) -> Result<u64> {
+    const UPDATE: &str = "UPDATE ai_guard_identity_meta SET genesis_hash=? WHERE singleton=1";
+    timeout(PROJECTION_SQL_DEADLINE, conn.exec_drop(UPDATE, (anchor,)))
+        .await
+        .map_err(|_| anyhow::anyhow!("QA identity projection update timed out"))?
+        .map_err(|_| anyhow::anyhow!("QA identity projection update failed"))?;
+    Ok(conn.affected_rows())
+}
+
+pub(super) async fn with_unverifiable_identity_projection(
     conn: &mut Conn,
+    invalid_anchor: Option<[u8; 64]>,
     observe: impl std::future::Future<Output = Result<()>>,
 ) -> Result<()> {
-    let anchor = conn
-        .query_first::<Vec<u8>, _>(
+    let anchor = timeout(
+        PROJECTION_SQL_DEADLINE,
+        conn.query_first::<Vec<u8>, _>(
             "SELECT genesis_hash FROM ai_guard_identity_meta WHERE singleton=1",
-        )
+        ),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("QA identity anchor read timed out"))?
+    .map_err(|_| anyhow::anyhow!("cannot read QA identity anchor"))?
+    .context("prepared QA identity anchor is missing")?;
+    let divergent = invalid_anchor.unwrap_or_else(|| {
+        if anchor.starts_with(b"f") {
+            [b'0'; 64]
+        } else {
+            [b'f'; 64]
+        }
+    });
+    let changed = set_identity_projection_anchor(conn, &divergent).await;
+    let one_row_changed = matches!(&changed, Ok(1));
+    let observation = match changed {
+        Ok(1) => observe.await,
+        Ok(_) => Err(anyhow::anyhow!(
+            "QA identity projection fault did not change one row"
+        )),
+        Err(error) => Err(error),
+    };
+    let restored = set_identity_projection_anchor(conn, &anchor)
         .await
-        .map_err(|_| anyhow::anyhow!("cannot read QA identity anchor"))?
-        .context("prepared QA identity anchor is missing")?;
-    let mut divergent = anchor.clone();
-    let first = divergent
-        .first_mut()
-        .context("QA identity anchor is empty")?;
-    *first = if *first == b'0' { b'1' } else { b'0' };
-    let update = "UPDATE ai_guard_identity_meta SET genesis_hash=? WHERE singleton=1";
-    conn.exec_drop(update, (divergent.as_slice(),))
-        .await
-        .map_err(|_| anyhow::anyhow!("cannot introduce QA identity projection fault"))?;
-    let observation = observe.await;
-    conn.exec_drop(update, (anchor.as_slice(),))
-        .await
-        .map_err(|_| anyhow::anyhow!("cannot restore QA identity projection"))?;
+        .context("cannot restore QA identity projection")?;
+    ensure!(
+        restored == 1 || (!one_row_changed && restored == 0),
+        "QA identity projection was not restored"
+    );
     observation
 }
 
@@ -695,7 +719,7 @@ async fn gateway_reports_unverified_selected_mysql_audit_and_recovers() -> Resul
         health().await? == StatusCode::OK,
         "prepared gateway is unhealthy"
     );
-    with_unverifiable_identity_projection(&mut conn_b, async {
+    with_unverifiable_identity_projection(&mut conn_b, None, async {
         ensure!(
             integrity(VIEWER_A).await? == StatusCode::OK,
             "A lost verified read access"
@@ -767,7 +791,7 @@ async fn gateway_retains_verified_neighbor_collisions_during_projection_failure(
 
     // After the startup verification, make only B's disposable projection
     // temporarily unverifiable. No authenticated request has primed its cache.
-    let during_failure = with_unverifiable_identity_projection(&mut conn_b, async {
+    let during_failure = with_unverifiable_identity_projection(&mut conn_b, None, async {
         ensure!(b_reader.verify().await.is_err(), "B remained verifiable");
         let url = gateway.url("/api/v1/integrity");
         let unrelated = http.get(url.as_str()).bearer_auth(VIEWER_A).send().await?;
