@@ -41,7 +41,7 @@ fn deadline() -> KubernetesSessionDeadlineArmV2 {
     KubernetesSessionDeadlineArmV2 {
         version: 1,
         arm_id: ARM.into(),
-        deadline_at: "2026-11-21T20:00:00Z".into(),
+        deadline_at: "2026-11-21T20:00:00.000Z".into(),
         enforcer_receipt_sha256: h('c'),
     }
 }
@@ -151,10 +151,10 @@ fn inputs_that_do_not_belong_to_the_action_are_refused() {
         assert!(request.validate().is_err(), "{request:?}");
     }
     let mut late = deadline();
-    late.deadline_at = "2026-11-21T20:00:00.5Z".into();
-    assert!(late.validate().is_err());
-    late.deadline_at = "2026-11-21T21:00:00+01:00".into();
-    assert!(late.validate().is_err());
+    late.deadline_at = "2026-11-21T20:00:00Z".into();
+    assert!(late.validate().is_err(), "milliseconds are required");
+    late.deadline_at = "2026-11-21T21:00:00.000+01:00".into();
+    assert!(late.validate().is_err(), "UTC is required");
 }
 
 fn ack(
@@ -174,8 +174,8 @@ fn ack(
         },
         request,
         disposition,
-        issued_at: "2026-11-21T19:00:00Z".into(),
-        not_after: "2026-11-21T19:00:30Z".into(),
+        issued_at: "2026-11-21T19:00:00.000Z".into(),
+        not_after: "2026-11-21T19:00:30.000Z".into(),
         replayed,
     }
 }
@@ -213,7 +213,7 @@ fn results_terminals_and_settlements_are_closed_values() {
         claim_operation_id: OPERATION.into(),
         request_sha256: h('b'),
         outcome,
-        observed_at: "2026-11-21T19:00:01Z".into(),
+        observed_at: "2026-11-21T19:00:01.000Z".into(),
     };
     result(KubernetesSessionEffectOutcomeV2::Applied {
         object_uid: POD_UID.into(),
@@ -240,10 +240,10 @@ fn results_terminals_and_settlements_are_closed_values() {
             container_id: "containerd://0123".into(),
             exit_code: Some(0),
             oom_killed: Some(false),
-            started_at: Some("2026-11-21T19:00:02Z".into()),
-            finished_at: Some("2026-11-21T19:05:00Z".into()),
+            started_at: Some("2026-11-21T19:00:02.000Z".into()),
+            finished_at: Some("2026-11-21T19:05:00.000Z".into()),
         },
-        observed_at: "2026-11-21T19:05:01Z".into(),
+        observed_at: "2026-11-21T19:05:01.000Z".into(),
         declared_exit_code: Some(0),
     };
     terminal.validate().unwrap();

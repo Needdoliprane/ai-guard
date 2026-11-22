@@ -61,14 +61,14 @@ impl KubernetesSessionEffectActionV2 {
 pub struct KubernetesSessionDeadlineArmV2 {
     pub version: u32,
     pub arm_id: String,
-    /// RFC 3339 UTC, whole seconds; an absolute bound for the enforcer.
+    /// RFC 3339 UTC with milliseconds; an absolute bound for the enforcer.
     pub deadline_at: String,
     /// Digest of the enforcer's durable acknowledgement of this arm.
     pub enforcer_receipt_sha256: String,
 }
 impl KubernetesSessionDeadlineArmV2 {
     pub fn validate(&self) -> anyhow::Result<()> {
-        require(self.version == 1 && exact_utc_seconds(&self.deadline_at))?;
+        require(self.version == 1 && exact_utc_millis(&self.deadline_at))?;
         uuid(&self.arm_id)?;
         hash(&self.enforcer_receipt_sha256)
     }
@@ -184,8 +184,8 @@ impl KubernetesSessionEffectClaimAckV2 {
         self.request.validate()?;
         require(
             self.version == 1
-                && exact_utc_seconds(&self.issued_at)
-                && exact_utc_seconds(&self.not_after)
+                && exact_utc_millis(&self.issued_at)
+                && exact_utc_millis(&self.not_after)
                 && self.issued_at < self.not_after
                 && self.receipt.version == 1
                 && self.receipt.operation_id == self.request.operation_id
@@ -238,7 +238,7 @@ impl KubernetesSessionEffectResultV2 {
             self.version == 1
                 && (1..=MAX_EFFECT_STEPS).contains(&self.step)
                 && self.operation_id != self.claim_operation_id
-                && exact_utc_seconds(&self.observed_at),
+                && exact_utc_millis(&self.observed_at),
         )?;
         uuid(&self.operation_id)?;
         uuid(&self.reservation_id)?;
@@ -303,7 +303,7 @@ impl KubernetesSessionTerminalV2 {
         require(
             self.version == 1
                 && self.subject != KubernetesSessionEffectSubjectV2::WorkspaceClaim
-                && exact_utc_seconds(&self.observed_at),
+                && exact_utc_millis(&self.observed_at),
         )?;
         uuid(&self.operation_id)?;
         uuid(&self.reservation_id)?;
@@ -321,8 +321,8 @@ impl KubernetesSessionTerminalV2 {
                     && container_id.len() <= 256
                     && container_id.is_ascii()
                     && exit_code.is_none_or(|code| code >= 0)
-                    && started_at.as_deref().is_none_or(exact_utc_seconds)
-                    && finished_at.as_deref().is_none_or(exact_utc_seconds),
+                    && started_at.as_deref().is_none_or(exact_utc_millis)
+                    && finished_at.as_deref().is_none_or(exact_utc_millis),
             )?;
         }
         Ok(())
@@ -456,10 +456,14 @@ pub struct KubernetesSessionEffectStateV2 {
     pub settled: bool,
 }
 
-fn exact_utc_seconds(value: &str) -> bool {
+/// RFC 3339 UTC with milliseconds, the form every control timestamp uses.
+fn exact_utc_millis(value: &str) -> bool {
     chrono::DateTime::parse_from_rfc3339(value).is_ok_and(|time| {
         time.offset().local_minus_utc() == 0
-            && time.format("%Y-%m-%dT%H:%M:%SZ").to_string() == value
+            && time
+                .with_timezone(&chrono::Utc)
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                == value
     })
 }
 fn valid_resource_version(value: &str) -> bool {

@@ -65,12 +65,12 @@ fn ack(
         },
         request,
         disposition,
-        issued_at: "2026-01-01T00:00:00Z".into(),
+        issued_at: "2026-01-01T00:00:00.000Z".into(),
         not_after: not_after.into(),
         replayed,
     }
 }
-const FUTURE: &str = "2099-01-01T00:00:00Z";
+const FUTURE: &str = "2099-01-01T00:00:00.000Z";
 
 #[test]
 fn only_a_fresh_emit_once_acknowledgement_can_be_retained() {
@@ -171,7 +171,7 @@ fn the_permit_refuses_every_other_effect_digest_authority_window_or_cancellation
             digest.as_str(),
             &authority,
             false,
-            "2026-01-01T00:00:01Z",
+            "2026-01-01T00:00:01.000Z",
         ),
     ] {
         assert_eq!(

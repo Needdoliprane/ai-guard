@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 const CLAIM_UID: &str = "55555555-5555-4555-8555-555555555555";
 const POD_UID: &str = "33333333-3333-4333-8333-333333333333";
-const STAMP: &str = "2026-11-21T19:00:00Z";
+const STAMP: &str = "2026-11-21T19:00:00.000Z";
 
 fn storage() -> KubernetesSessionStorageRequestV2 {
     KubernetesSessionStorageRequestV2 {
@@ -125,7 +125,7 @@ impl<'a> Chain<'a> {
             deadline: Some(KubernetesSessionDeadlineArmV2 {
                 version: 1,
                 arm_id: Uuid::new_v4().to_string(),
-                deadline_at: "2026-11-21T19:10:00Z".into(),
+                deadline_at: "2026-11-21T19:10:00.000Z".into(),
                 enforcer_receipt_sha256: "c".repeat(64),
             }),
             ..self.request(Subject::SessionPod, Action::ReleaseGate, digest)
@@ -213,9 +213,9 @@ impl<'a> Chain<'a> {
                     exit_code: Some(0),
                     oom_killed: Some(false),
                     started_at: Some(STAMP.into()),
-                    finished_at: Some("2026-11-21T19:05:00Z".into()),
+                    finished_at: Some("2026-11-21T19:05:00.000Z".into()),
                 },
-                observed_at: "2026-11-21T19:05:01Z".into(),
+                observed_at: "2026-11-21T19:05:01.000Z".into(),
                 declared_exit_code: Some(0),
             },
         )
