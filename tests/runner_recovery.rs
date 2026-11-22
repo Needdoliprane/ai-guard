@@ -1109,155 +1109,269 @@ async fn broker_crash_recovery_observes_then_stops_the_same_running_instance() {
     assert_unreconciled();
     assert_eq!(scenario.store.head().unwrap(), before_rejected_audit);
 
+    // This batch was interrupted before it could retain a command result.
+    // Core25 requires this exact partial-coverage refusal even after recovery.
+    const CAPTURE_UNAVAILABLE: &str =
+        "legacy declared capture is unavailable; delivery counts remain unknown";
+    let capture_refusal =
+        format!("Error: postprocessing recovery incomplete: {CAPTURE_UNAVAILABLE}\n");
+    let assert_capture_refusal = |output: &std::process::Output, phase: &str| {
+        let category = if output.stderr.as_slice() == capture_refusal.as_bytes() {
+            "declared_capture_unavailable"
+        } else if output.stderr.as_slice()
+            == b"Error: postprocessing recovery requires durable cleanup\n"
+        {
+            "cleanup_unconfirmed"
+        } else if output.status.success() {
+            "unexpected_success"
+        } else {
+            "unexpected_refusal"
+        };
+        eprintln!(
+            "g09_recovery_cli phase={phase} category={category} exit_code={:?} stdout_empty={}",
+            output.status.code(),
+            output.stdout.is_empty()
+        );
+        assert!(
+            output.status.code() == Some(1)
+                && output.stdout.is_empty()
+                && category == "declared_capture_unavailable",
+            "unexpected authenticated terminal reconciliation outcome at {phase}"
+        );
+    };
     fs::remove_file(audit_refusal).unwrap();
     let reconciled = resume_with_adoption().await;
-    let reconciliation_diagnostic = (!reconciled.status.success()).then(|| {
-        const SAFE_CLI_MESSAGE_MARKERS: [(&str, &str); 8] = [
-            ("no terminal proof", "no_terminal_proof"),
-            (
-                "invocation adoption is pending",
-                "invocation_adoption_pending",
-            ),
-            ("cleanup unconfirmed", "cleanup_unconfirmed"),
-            (
-                "worker terminal result recorded after transport stop",
-                "terminal_result_after_transport_stop",
-            ),
-            ("worker command failed", "worker_command_failed"),
-            ("postprocessing failed", "postprocessing_failed"),
-            ("audit", "audit_related"),
-            ("runtime", "runtime_related"),
-        ];
-        let classify_cli_message = |message: &str| {
-            let message = message.to_ascii_lowercase();
-            SAFE_CLI_MESSAGE_MARKERS
-                .iter()
-                .find_map(|(marker, category)| message.contains(marker).then_some(*category))
-        };
-        let cli_message_category = serde_json::from_slice::<Value>(&reconciled.stdout)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .and_then(classify_cli_message)
-            })
-            .or_else(|| {
-                let stderr_prefix = &reconciled.stderr[..reconciled.stderr.len().min(4096)];
-                let stderr_message = String::from_utf8_lossy(stderr_prefix);
-                classify_cli_message(&stderr_message)
-            })
-            .unwrap_or("no_safe_cli_message");
-        let worker_snapshot = scenario.store.workers().ok();
-        let worker = worker_snapshot
-            .as_ref()
-            .and_then(|workers| workers.first());
-        let worker_state = worker
-            .map(|worker| format!("{:?}", worker.state))
-            .unwrap_or_else(|| "unavailable".into());
-        let quota_held = worker.map(|worker| worker.quota_held);
-        let store_cleanup_removed = worker.and_then(|worker| worker.cleanup_removed);
-        let usage_count = scenario.store.worker_usage().ok().map(|usage| usage.len());
-        let audit_head_unchanged = scenario.store.head().ok().map(|head| head == before_rejected_audit);
-        let terminal_ack = scenario.root.join("terminal_ack").is_file();
-        let stdout_value = serde_json::from_slice::<Value>(&reconciled.stdout).ok();
-        let stdout_json_object = stdout_value.as_ref().is_some_and(Value::is_object);
-        let cli_result_kind = match stdout_value.as_ref().and_then(|value| value.get("result")) {
-            None => if stdout_json_object { "absent" } else { "unavailable" },
-            Some(Value::Null) => "null",
-            Some(Value::Object(_)) => "preserved",
-            Some(_) => "other",
-        };
-        let result = stdout_value
-            .as_ref()
-            .and_then(|value| value.get("result"))
-            .filter(|value| value.is_object());
-        let cli_result_exit_code = result
-            .and_then(|value| value.get("exit_code"))
-            .and_then(Value::as_i64);
-        let cli_result_timed_out = result
-            .and_then(|value| value.get("timed_out"))
-            .and_then(Value::as_bool);
-        let cli_transport_stop = result
-            .and_then(|value| value.get("transport_stop_reason"))
-            .is_some_and(|value| !value.is_null());
-        let cli_postprocessing_error = result
-            .and_then(|value| value.get("postprocessing_error"))
-            .is_some_and(|value| !value.is_null());
-        let cli_cleanup_removed = stdout_value
-            .as_ref()
-            .and_then(|value| value.get("worker"))
-            .and_then(|worker| worker.get("cleanup_removed"))
-            .and_then(Value::as_bool);
-        let cli_result_cleanup_state = result
-            .and_then(|value| value.get("cleanup"))
-            .and_then(|cleanup| cleanup.get("state"))
-            .and_then(Value::as_str)
-            .filter(|state| matches!(*state, "removed" | "unconfirmed"))
-            .unwrap_or("unavailable");
-        format!(
-            "exit_code={:?}, cli_message_category={}, stdout_json_object={}, cli_result_kind={}, cli_result_exit_code={:?}, cli_result_timed_out={:?}, cli_transport_stop={}, cli_postprocessing_error={}, cli_cleanup_removed={:?}, cli_result_cleanup_state={}, worker_state={}, quota_held={:?}, store_cleanup_removed={:?}, usage_count={:?}, terminal_ack={}, audit_head_unchanged={:?}",
-            reconciled.status.code(), cli_message_category,
-            stdout_json_object, cli_result_kind, cli_result_exit_code, cli_result_timed_out,
-            cli_transport_stop, cli_postprocessing_error, cli_cleanup_removed,
-            cli_result_cleanup_state, worker_state, quota_held, store_cleanup_removed,
-            usage_count, terminal_ack, audit_head_unchanged,
-        )
-    });
-    assert!(
-        reconciled.status.success(),
-        "authenticated terminal reconciliation failed: {}",
-        reconciliation_diagnostic
-            .as_deref()
-            .unwrap_or("diagnostic unavailable")
-    );
+    assert_capture_refusal(&reconciled, "initial");
+
     let workers = scenario.store.workers().unwrap();
     let [worker] = workers.as_slice() else {
         panic!("expected the single reconciled worker");
     };
-    assert_eq!(worker.worker_id, original.worker_id);
-    assert_eq!(worker.attempt, original.attempt);
-    assert_eq!(worker.launch.authority_id, original.launch.authority_id);
+    assert!(
+        worker.worker_id == original.worker_id
+            && worker.attempt == original.attempt
+            && worker.launch.authority_id == original.launch.authority_id,
+        "recovery changed the original worker, attempt or authority"
+    );
     assert_eq!(worker.state, WorkerStateV1::Terminal);
     assert!(!worker.quota_held);
     assert_eq!(worker.cleanup_removed, Some(true));
     assert!(scenario.root.join("terminal_ack").is_file());
+    assert!(
+        !scenario
+            .root
+            .join("containers")
+            .join(&container_id)
+            .exists()
+    );
+    assert_eq!(scenario.count("rm", "run"), 1);
+    let observation = worker
+        .last_observation
+        .as_ref()
+        .expect("missing terminal observation");
+    assert!(
+        observation.inspection.container_id == container_id
+            && observation.running == Some(false)
+            && observation.started_at.is_some()
+            && observation.finished_at.is_some(),
+        "durable observation does not attest termination of the original instance"
+    );
 
-    let adopted = scenario
-        .store
-        .events(&EventQuery {
-            kind: Some("runtime.invocation.bound".into()),
-            ..Default::default()
-        })
-        .unwrap();
-    assert_eq!(adopted.len(), 1);
-    assert_eq!(adopted[0].event.id, pending_id);
     let allocations = scenario.store.worker_usage().unwrap();
     let [allocation] = allocations.as_slice() else {
         panic!("expected exactly one terminal allocation");
     };
-    assert_eq!(allocation.source.container_id, container_id);
-    assert_eq!(allocation.worker_id, original.worker_id);
-    assert_eq!(allocation.attempt_id, original.attempt.attempt_id);
-    assert!(!allocation.billable);
+    assert!(
+        allocation.source.container_id == container_id
+            && allocation.worker_id == original.worker_id
+            && allocation.attempt_id == original.attempt.attempt_id
+            && !allocation.billable,
+        "terminal usage changed identity or billability"
+    );
     let terminal_receipt = scenario
         .store
         .worker_operation(&allocation.terminal_observation_id)
         .unwrap()
-        .unwrap();
-    assert_eq!(
-        terminal_receipt.worker_id.as_deref(),
-        Some(original.worker_id.as_str())
+        .expect("missing terminal usage receipt");
+    assert!(
+        terminal_receipt.worker_id.as_deref() == Some(original.worker_id.as_str())
+            && terminal_receipt.audit_seq > 0
+            && terminal_receipt.audit_hash.len() == 64,
+        "terminal usage does not have a durable receipt for the original worker"
     );
+
+    let single_event = |kind: &str| {
+        let events = scenario
+            .store
+            .events(&EventQuery {
+                kind: Some(kind.into()),
+                limit: Some(2),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(events.len(), 1, "{kind} must be audited exactly once");
+        let event = events.into_iter().next().unwrap();
+        assert!(
+            event.event.session_id.as_deref() == Some(original.launch.session_id.as_str()),
+            "{kind} must be attributed to the original session"
+        );
+        event
+    };
+    let adoption = single_event("runtime.invocation.bound");
+    assert!(
+        adoption.event.id == pending_id,
+        "adoption changed its durable event identity"
+    );
+    let scan_requested = single_event("workspace.scan.requested");
+    let scan_created = single_event("workspace.scan.created");
+    let scan_started = single_event("workspace.scan.started");
+    let scan_completed = single_event("workspace.scan.completed");
+    let diff_completed = single_event("workspace.diff.completed");
+    let coverage = single_event("observer.coverage");
+    assert!(
+        adoption.seq < terminal_receipt.audit_seq
+            && terminal_receipt.audit_seq < scan_requested.seq
+            && scan_requested.seq < scan_created.seq
+            && scan_created.seq < scan_started.seq
+            && scan_started.seq < scan_completed.seq
+            && scan_completed.seq < diff_completed.seq
+            && diff_completed.seq < coverage.seq,
+        "recovery audit observations are out of order"
+    );
+    assert!(
+        diff_completed.event.data["changed_files"].as_u64() == Some(0)
+            && diff_completed.event.data["observation_phase"].as_str()
+                == Some("post_completion_recovery"),
+        "trusted diff does not describe the unchanged recovered volume"
+    );
+    let export_id = scan_created.event.data["container_id"]
+        .as_str()
+        .filter(|id| id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .expect("scan did not audit a valid export helper");
+    assert!(
+        export_id != container_id.as_str(),
+        "scan reused the original worker"
+    );
+    assert!(!scenario.root.join("containers").join(export_id).exists());
+    let calls_after_recovery = scenario.calls();
+    for action in ["create", "start", "rm"] {
+        assert_eq!(scenario.count(action, "export"), 1);
+        let expected = format!("{action} {export_id} export");
+        assert!(
+            calls_after_recovery
+                .lines()
+                .any(|line| line == expected.as_str()),
+            "audited export helper did not perform its expected {action}"
+        );
+    }
+
+    let checkpoint_path = scenario.checkpoint_path();
+    let read_checkpoint = || {
+        let plan: Value = serde_json::from_slice(&fs::read(&checkpoint_path).unwrap())
+            .expect("invalid private recovery checkpoint");
+        assert!(
+            plan["managed"].get("result").is_some_and(Value::is_null)
+                && plan["managed"]
+                    .get("output_event")
+                    .is_some_and(Value::is_null)
+                && plan["managed"].get("pending").is_some_and(Value::is_null)
+                && plan["managed"]["worker"]["cleanup_removed"].as_bool() == Some(true),
+            "checkpoint must acknowledge cleanup and preserve the unknown command result"
+        );
+        plan
+    };
+    let checkpoint = read_checkpoint();
+    let head_after_recovery = scenario.store.head().unwrap();
+    let read_status = || async {
+        let output = scenario.invoke("worker-status").await;
+        assert!(
+            output.status.success(),
+            "worker-status could not read the reconciled session"
+        );
+        serde_json::from_slice::<Value>(&output.stdout).expect("worker-status did not return JSON")
+    };
+    let status = read_status().await;
+    assert!(
+        status["session_id"].as_str() == Some(original.launch.session_id.as_str())
+            && status["tenant_id"].as_str() == Some("local")
+            && status["gateway_origin"] == checkpoint["managed"]["gateway_origin"]
+            && status["worker"] == serde_json::to_value(worker).unwrap()
+            && status["registry_observation_scope"].as_str() == Some("last_durably_recorded")
+            && status
+                .get("runtime_observation")
+                .is_some_and(Value::is_null)
+            && status.get("result").is_some_and(Value::is_null)
+            && status["outputs"].as_str() == Some("unknown_after_broker_interruption"),
+        "worker-status must report authenticated terminal registry facts, no live inspection and unknown output"
+    );
+    let postprocessing = &status["postprocessing"];
+    let declared = &postprocessing["declared"];
+    assert!(
+        declared["state"].as_str() == Some("unavailable_after_interruption")
+            && declared["error"].as_str() == Some(CAPTURE_UNAVAILABLE),
+        "worker-status must retain the reason for partial declared coverage"
+    );
+    for field in [
+        "normalized_events",
+        "acknowledged_events",
+        "dropped_events",
+        "unknown_delivery_events",
+        "not_attempted_events",
+    ] {
+        assert!(
+            declared.get(field).is_some_and(Value::is_null),
+            "unavailable capture count must remain unknown for {field}"
+        );
+    }
+    let diff = &postprocessing["diff"];
+    assert!(
+        diff["completed_acknowledged"].as_bool() == Some(true)
+            && diff["changed_files"].as_u64() == Some(0)
+            && diff["completed"]["id"].as_str() == Some(diff_completed.event.id.as_str())
+            && postprocessing.get("diff_error").is_some_and(Value::is_null),
+        "trusted diff in worker-status must match the acknowledged audit event"
+    );
+    let retained_coverage = &postprocessing["coverage"];
+    assert!(
+        postprocessing["coverage_acknowledged"].as_bool() == Some(true)
+            && postprocessing
+                .get("coverage_error")
+                .is_some_and(Value::is_null)
+            && retained_coverage["id"].as_str() == Some(coverage.event.id.as_str())
+            && retained_coverage["coverage"].as_str() == Some("partial")
+            && coverage.event.data == retained_coverage["data"]
+            && retained_coverage["data"]["trusted_diff"].as_str() == Some("complete")
+            && retained_coverage["data"]["postprocessing_complete"].as_bool() == Some(false)
+            && retained_coverage["data"]["declared_collection"] == *declared,
+        "worker-status must show acknowledged partial coverage for the reconciled session"
+    );
+
     let again = scenario.invoke("worker-resume").await;
-    assert!(again.status.success(), "replaying terminal recovery failed");
-    assert_eq!(scenario.store.worker_usage().unwrap(), allocations);
-    assert_eq!(
+    assert_capture_refusal(&again, "replay");
+    read_checkpoint();
+    assert!(
+        read_status().await == status,
+        "replay changed the observed worker-status"
+    );
+    assert!(
+        scenario.store.worker_usage().unwrap() == allocations,
+        "replay changed terminal usage"
+    );
+    assert!(
         scenario
             .store
             .worker_operation(&allocation.terminal_observation_id)
-            .unwrap(),
-        Some(terminal_receipt)
+            .unwrap()
+            == Some(terminal_receipt),
+        "replay changed the terminal receipt"
+    );
+    assert!(
+        scenario.store.head().unwrap() == head_after_recovery,
+        "status or replay changed the durable audit head"
+    );
+    assert!(
+        scenario.calls() == calls_after_recovery,
+        "status or replay invoked the runtime after cleanup"
     );
     assert_eq!(scenario.count("create", "run"), 1);
     assert_eq!(scenario.count("start", "run"), 1);

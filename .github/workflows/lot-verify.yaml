@@ -1,11 +1,11 @@
-name: G09 recovery diagnostic
+name: G09 recovery contract check
 
 # One synthetic local recovery selector on hosted Linux x86_64. This workflow
 # does not qualify Docker/Podman/Kubernetes engines or real providers.
 
 on:
   push:
-    branches: ['claude/v1-g09-recovery-diagnostic-followup-20261122']
+    branches: ['claude/v1-g09-recovery-contract-check-20261122']
 
 permissions:
   contents: read
@@ -53,10 +53,12 @@ jobs:
           tmpdir_status=NOT_RUN
           selected_test_count=0
           selector_guard=NOT_RUN
+          contract_guard=NOT_RUN
           cargo_exit_code=NOT_RUN
           workflow_exit_code=2
           test_result=NOT_RUN
           reconciliation_diagnostic=NOT_REACHED
+          replay_diagnostic=NOT_REACHED
 
           write_summary() {
             {
@@ -64,8 +66,10 @@ jobs:
               printf 'tmpdir_status=%s\n' "$tmpdir_status"
               printf 'selected_test_count=%s\n' "$selected_test_count"
               printf 'selector_guard=%s\n' "$selector_guard"
+              printf 'contract_guard=%s\n' "$contract_guard"
               printf 'test_result=%s\n' "$test_result"
               printf 'reconciliation_diagnostic=%s\n' "$reconciliation_diagnostic"
+              printf 'replay_diagnostic=%s\n' "$replay_diagnostic"
               printf 'cargo_exit_code=%s\n' "$cargo_exit_code"
               printf 'workflow_exit_code=%s\n' "$workflow_exit_code"
             } > "$summary"
@@ -94,27 +98,30 @@ jobs:
           cargo_exit_code=$?
           set -e
 
-          diagnostic_pattern='^authenticated terminal reconciliation failed: exit_code=(None|Some\(-?[0-9]{1,19}\)), '
-          diagnostic_pattern+='cli_message_category=(no_terminal_proof|invocation_adoption_pending|cleanup_unconfirmed|terminal_result_after_transport_stop|worker_command_failed|postprocessing_failed|audit_related|runtime_related|no_safe_cli_message), '
-          diagnostic_pattern+='stdout_json_object=(true|false), cli_result_kind=(absent|null|preserved|other|unavailable), '
-          diagnostic_pattern+='cli_result_exit_code=(None|Some\(-?[0-9]{1,19}\)), cli_result_timed_out=(None|Some\((true|false)\)), '
-          diagnostic_pattern+='cli_transport_stop=(true|false), cli_postprocessing_error=(true|false), '
-          diagnostic_pattern+='cli_cleanup_removed=(None|Some\((true|false)\)), cli_result_cleanup_state=(removed|unconfirmed|unavailable), '
-          diagnostic_pattern+='worker_state=(Reserved|Preparing|Created|StartIssued|Running|Stopping|Terminal|InDoubt|Cancelled|unavailable), '
-          diagnostic_pattern+='quota_held=(None|Some\((true|false)\)), store_cleanup_removed=(None|Some\((true|false)\)), '
-          diagnostic_pattern+='usage_count=(None|Some\([0-9]{1,19}\)), terminal_ack=(true|false), audit_head_unchanged=(None|Some\((true|false)\))$'
-          valid_diagnostic='authenticated terminal reconciliation failed: exit_code=Some(1), cli_message_category=no_safe_cli_message, stdout_json_object=true, cli_result_kind=preserved, cli_result_exit_code=Some(0), cli_result_timed_out=Some(false), cli_transport_stop=false, cli_postprocessing_error=false, cli_cleanup_removed=Some(true), cli_result_cleanup_state=removed, worker_state=Terminal, quota_held=Some(false), store_cleanup_removed=Some(true), usage_count=Some(1), terminal_ack=true, audit_head_unchanged=Some(false)'
-          if ! [[ "$valid_diagnostic" =~ $diagnostic_pattern ]]; then
+          diagnostic_fields=' category=(declared_capture_unavailable|cleanup_unconfirmed|unexpected_success|unexpected_refusal) exit_code=(None|Some\(-?[0-9]{1,10}\)) stdout_empty=(true|false)$'
+          initial_pattern="^g09_recovery_cli phase=initial$diagnostic_fields"
+          replay_pattern="^g09_recovery_cli phase=replay$diagnostic_fields"
+          expected_fields='category=declared_capture_unavailable exit_code=Some(1) stdout_empty=true'
+          expected_initial="g09_recovery_cli phase=initial $expected_fields"
+          expected_replay="g09_recovery_cli phase=replay $expected_fields"
+          if ! [[ "$expected_initial" =~ $initial_pattern && "$expected_replay" =~ $replay_pattern ]]; then
             echo 'safe diagnostic regex rejected its valid fixture' >&2
             exit 2
           fi
-          if [[ "${valid_diagnostic} unexpected_suffix" =~ $diagnostic_pattern ]]; then
+          if [[ "${expected_initial} unexpected_suffix" =~ $initial_pattern ]]; then
             echo 'safe diagnostic regex accepted a suffix' >&2
             exit 2
           fi
-          safe_diagnostic="$(grep -E -m 1 "$diagnostic_pattern" "$run_log" || true)"
-          if [[ -n "$safe_diagnostic" ]]; then
-            reconciliation_diagnostic="$safe_diagnostic"
+          initial_lines="$(grep -E "$initial_pattern" "$run_log" || true)"
+          replay_lines="$(grep -E "$replay_pattern" "$run_log" || true)"
+          reconciliation_diagnostic="${initial_lines%%$'\n'*}"
+          replay_diagnostic="${replay_lines%%$'\n'*}"
+          reconciliation_diagnostic="${reconciliation_diagnostic:-NOT_REACHED}"
+          replay_diagnostic="${replay_diagnostic:-NOT_REACHED}"
+          if [[ "$initial_lines" == "$expected_initial" && "$replay_lines" == "$expected_replay" ]]; then
+            contract_guard=PASS
+          else
+            contract_guard=FAIL
           fi
 
           selected_test_count="$(grep -Fxc 'running 1 test' "$run_log" || true)"
@@ -123,14 +130,14 @@ jobs:
           else
             selector_guard=FAIL
           fi
-          if [[ "$cargo_exit_code" == 0 && "$selector_guard" == PASS ]]; then
+          if [[ "$cargo_exit_code" == 0 && "$selector_guard" == PASS && "$contract_guard" == PASS ]]; then
             test_result=PASS
           else
             test_result=FAIL
           fi
           if [[ "$cargo_exit_code" != 0 ]]; then
             workflow_exit_code=$cargo_exit_code
-          elif [[ "$selector_guard" != PASS ]]; then
+          elif [[ "$selector_guard" != PASS || "$contract_guard" != PASS ]]; then
             workflow_exit_code=1
           else
             workflow_exit_code=0
