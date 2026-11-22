@@ -6,7 +6,7 @@ mod support;
 
 use agentsandbox::{
     api::{GatewayState, TenantGateway, gateway_router},
-    audit::Store,
+    audit::{EventQuery, Store},
     control::{
         AdmissionResultV1, AdmissionV1, ArmResultV1, ArmSubjectV1, ArmV1, ArmedStartClaimV1,
         ClaimDispositionV1, DecisionPhaseV1, DecisionReceiptV1, ExportRequestV1,
@@ -18,7 +18,7 @@ use agentsandbox::{
         WorkerTransitionV1, WorkerV1, helper_execution_policy_v1,
     },
     jev::JevClient,
-    model::{CommandSpec, DecisionRequest},
+    model::{CommandSpec, DecisionRequest, Outcome},
     policy::{self, Policy},
     redaction::Redactor,
 };
@@ -474,7 +474,7 @@ async fn transition(
     token: &str,
     worker: &WorkerV1,
     transition: WorkerTransitionV1,
-) -> WorkerV1 {
+) -> MutationResultV1 {
     let mutation = WorkerMutationV1 {
         version: 1,
         operation_id: Uuid::new_v4().to_string(),
@@ -486,8 +486,7 @@ async fn transition(
     let path = format!("/api/v1/workers/{}/transitions", worker.worker_id);
     let response = json_request(router, Method::POST, &path, Some(token), &mutation).await;
     assert_eq!(response.status(), StatusCode::OK);
-    let result: MutationResultV1 = response_json(response).await;
-    result.worker
+    response_json(response).await
 }
 
 #[tokio::test]
@@ -878,7 +877,8 @@ async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_bloc
         &worker,
         WorkerTransitionV1::Prepare,
     )
-    .await;
+    .await
+    .worker;
     let import_id = Uuid::new_v4();
     let import_arm = helper_arm(
         &worker,
@@ -1046,7 +1046,7 @@ async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_bloc
     )
     .await;
     assert_eq!(cleanup_response.status(), StatusCode::OK);
-    let _: MutationReceiptV1 = response_json(cleanup_response).await;
+    let import_cleanup: MutationReceiptV1 = response_json(cleanup_response).await;
 
     let verify_id = Uuid::new_v4();
     let verify_arm = helper_arm(
@@ -1056,7 +1056,7 @@ async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_bloc
         HelperPermissionV1::ImportVerification {
             import_helper_id: import_id.to_string(),
             import_arm: import_arm_result.receipt.clone(),
-            import_terminal,
+            import_terminal: import_terminal.clone(),
             manifest_digest: worker.launch.workspace_manifest_digest.clone(),
         },
         "2".repeat(64).as_str(),
@@ -1107,7 +1107,24 @@ async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_bloc
     )
     .await;
     assert_eq!(verify_observation_response.status(), StatusCode::OK);
-    let _: MutationReceiptV1 = response_json(verify_observation_response).await;
+    let verify_terminal: MutationReceiptV1 = response_json(verify_observation_response).await;
+    let verify_cleanup_response = json_request(
+        &fixture.router,
+        Method::POST,
+        &format!("/api/v1/workers/{}/helper-cleanup", worker.worker_id),
+        Some(&fixture.runner_a),
+        &HelperCleanupV1 {
+            version: 1,
+            operation_id: Uuid::new_v4().to_string(),
+            helper_id: verify_id.to_string(),
+            arm_receipt: verify_result.receipt.clone(),
+            removed: true,
+            error: None,
+        },
+    )
+    .await;
+    assert_eq!(verify_cleanup_response.status(), StatusCode::OK);
+    let verify_cleanup: MutationReceiptV1 = response_json(verify_cleanup_response).await;
 
     worker = transition(
         &fixture.router,
@@ -1115,7 +1132,8 @@ async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_bloc
         &worker,
         WorkerTransitionV1::CreateIssued,
     )
-    .await;
+    .await
+    .worker;
     let created_inspection = worker_inspection(&worker);
     worker = transition(
         &fixture.router,
@@ -1125,7 +1143,8 @@ async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_bloc
             inspection: created_inspection.clone(),
         },
     )
-    .await;
+    .await
+    .worker;
 
     let worker_arm = ArmV1 {
         version: 1,
@@ -1191,6 +1210,7 @@ async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_bloc
         replayed.disposition,
         Some(ClaimDispositionV1::AlreadyConsumed)
     );
+    assert_eq!(replayed.receipt, claimed.receipt);
     worker = replayed.worker;
 
     worker = transition(
@@ -1207,30 +1227,142 @@ async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_bloc
             ),
         },
     )
-    .await;
+    .await
+    .worker;
     worker = transition(
         &fixture.router,
         &fixture.runner_a,
         &worker,
         WorkerTransitionV1::Stop,
     )
-    .await;
-    worker = transition(
+    .await
+    .worker;
+    let terminal_observation = worker_observation(
+        &created_inspection,
+        RuntimeStatusV1::Exited,
+        false,
+        Some("2026-10-30T12:00:01Z"),
+        Some(0),
+    );
+    let terminal = transition(
         &fixture.router,
         &fixture.runner_a,
         &worker,
         WorkerTransitionV1::Observe {
-            observation: worker_observation(
-                &created_inspection,
-                RuntimeStatusV1::Exited,
-                false,
-                Some("2026-10-30T12:00:01Z"),
-                Some(0),
-            ),
+            observation: terminal_observation.clone(),
         },
     )
     .await;
-    assert_eq!(worker.state, WorkerStateV1::Terminal);
+    assert_eq!(terminal.worker.state, WorkerStateV1::Terminal);
+    let cleaned = transition(
+        &fixture.router,
+        &fixture.runner_a,
+        &terminal.worker,
+        WorkerTransitionV1::CleanupResult {
+            removed: true,
+            error: None,
+        },
+    )
+    .await;
+    worker = cleaned.worker;
+    assert_eq!(worker.cleanup_removed, Some(true));
+    assert!(!worker.quota_held);
+
+    // This private fixture is quiescent while the central evidence is read.
+    // A verified Store head covers the replay of control and supervision.
+    let verified = fixture.a.verify_audit_archives(&[]).unwrap();
+    let ledger = fixture.a.audit_retention_ledger().unwrap();
+    let namespace = fixture
+        .a
+        .supervision_state()
+        .unwrap()
+        .control_namespace_uuid
+        .unwrap();
+    assert_eq!(verified.verdict, "verified", "{:?}", verified.failure);
+    assert_eq!(verified.tenant_id, "tenant-a");
+    assert_eq!(verified.live_head_seq, cleaned.receipt.audit_seq);
+    assert_eq!(verified.live_head_hash, cleaned.receipt.audit_hash);
+    let decision = &admission_a.admission.receipt;
+    let facts = fixture
+        .a
+        .events(&EventQuery {
+            after: Some(decision.audit_seq - 1),
+            order: Some("asc".into()),
+            limit: Some(64),
+            ..Default::default()
+        })
+        .unwrap();
+    let event_at = |seq: i64, hash: &str| {
+        let row = facts.iter().find(|row| row.seq == seq).unwrap();
+        assert_eq!(row.hash, hash);
+        row
+    };
+    let decision_event = event_at(decision.audit_seq, &decision.audit_hash);
+    assert_eq!(decision_event.event.kind, "security.decision");
+    assert_eq!(
+        decision_event.event.decision.as_ref().unwrap().outcome,
+        Outcome::Allow
+    );
+    let admission_event = event_at(reserved.receipt.audit_seq, &reserved.receipt.audit_hash);
+    assert_eq!(
+        admission_event.event.data["worker_record"]["worker"]["receipt"],
+        serde_json::to_value(decision).unwrap()
+    );
+    let positions = [
+        decision.audit_seq,
+        reserved.receipt.audit_seq,
+        import_arm_result.receipt.audit_seq,
+        event_at(
+            helper_claim_result.receipt.audit_seq,
+            &helper_claim_result.receipt.audit_hash,
+        )
+        .seq,
+        event_at(import_terminal.audit_seq, &import_terminal.audit_hash).seq,
+        event_at(import_cleanup.audit_seq, &import_cleanup.audit_hash).seq,
+        verify_result.receipt.audit_seq,
+        event_at(
+            verify_claim_result.receipt.audit_seq,
+            &verify_claim_result.receipt.audit_hash,
+        )
+        .seq,
+        event_at(verify_terminal.audit_seq, &verify_terminal.audit_hash).seq,
+        event_at(verify_cleanup.audit_seq, &verify_cleanup.audit_hash).seq,
+        worker_arm_result.receipt.audit_seq,
+        event_at(claimed.receipt.audit_seq, &claimed.receipt.audit_hash).seq,
+        event_at(terminal.receipt.audit_seq, &terminal.receipt.audit_hash).seq,
+        event_at(cleaned.receipt.audit_seq, &cleaned.receipt.audit_hash).seq,
+    ];
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    for arm in [
+        &import_arm_result.receipt,
+        &verify_result.receipt,
+        &worker_arm_result.receipt,
+    ] {
+        let arm_event = event_at(arm.audit_seq, &arm.audit_hash);
+        assert_eq!(arm_event.event.kind, "control.execution.arm");
+        assert_eq!(arm.control_namespace_uuid, namespace);
+        assert_eq!(arm.worker_id, worker.worker_id);
+        assert_eq!(arm.attempt_id, worker.attempt.attempt_id);
+    }
+    let claim_fact = event_at(claimed.receipt.audit_seq, &claimed.receipt.audit_hash);
+    assert_eq!(
+        claim_fact.event.data["input"]["request"],
+        serde_json::to_value(&claim).unwrap()
+    );
+    let terminal_fact = event_at(terminal.receipt.audit_seq, &terminal.receipt.audit_hash);
+    assert_eq!(terminal_fact.event.kind, "control.worker.transition");
+    assert_eq!(
+        terminal_fact.event.data["worker"]["worker_id"],
+        worker.worker_id
+    );
+    assert_eq!(
+        terminal_fact.event.data["worker"]["attempt"]["attempt_id"],
+        worker.attempt.attempt_id
+    );
+    assert_eq!(
+        terminal_fact.event.data["observation"],
+        serde_json::to_value(&terminal_observation).unwrap()
+    );
     let before_export = fixture.a.integrity().unwrap();
     assert!(before_export.valid);
     let quota_policy = agentsandbox::control::QuotaPolicyV1::default();
@@ -1242,11 +1374,23 @@ async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_bloc
     };
     let before_accounting = accounting(&fixture.a);
     assert_eq!(before_accounting.0["held_workers"], 0);
-    assert!(
-        before_accounting
-            .1
-            .iter()
-            .any(|allocation| { allocation.worker_id == worker.worker_id && !allocation.billable })
+    let [allocation] = before_accounting.1.as_slice() else {
+        panic!("the supervised fixture has one terminal allocation");
+    };
+    assert_eq!(allocation.worker_id, worker.worker_id);
+    assert_eq!(allocation.attempt_id, worker.attempt.attempt_id);
+    assert_eq!(
+        allocation.terminal_observation_id,
+        terminal.receipt.operation_id
+    );
+    assert_eq!(
+        allocation.source.container_id,
+        created_inspection.container_id
+    );
+    assert!(!allocation.billable);
+    assert_eq!(
+        terminal_fact.event.data["allocation"],
+        serde_json::to_value(allocation).unwrap()
     );
     let directory = fixture._directory.path().canonicalize().unwrap();
     let restored_path = directory.join("pre-export.sqlite");
@@ -1439,6 +1583,38 @@ async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_bloc
     assert!(after.valid);
     assert_eq!(after.event_count, granted.event_count);
     assert_eq!(after.head_hash, granted.head_hash);
+
+    // An export grant alone leaves the central subsequence incomplete. There
+    // is no later arm, observation or cleanup for this request at the verified
+    // head. Refused fresh operations preserve the grant and prior evidence.
+    let pending = reopened.verify_audit_archives(&[]).unwrap();
+    assert_eq!(pending.verdict, "verified", "{:?}", pending.failure);
+    assert_eq!(pending.live_head_seq, verified.live_head_seq + 1);
+    assert_eq!(pending.live_head_seq, export_receipt.audit_seq);
+    assert_eq!(pending.live_head_hash, export_receipt.audit_hash);
+    let since_cleanup = reopened
+        .events(&EventQuery {
+            after: Some(verified.live_head_seq),
+            ..Default::default()
+        })
+        .unwrap();
+    let [export_fact] = since_cleanup.as_slice() else {
+        panic!("maintenance preserves exactly the pending export grant");
+    };
+    assert_eq!(export_fact.seq, export_receipt.audit_seq);
+    assert_eq!(export_fact.hash, export_receipt.audit_hash);
+    assert_eq!(export_fact.event.kind, "control.supervision.transition");
+    assert_eq!(export_fact.event.data["input"]["action"], "export");
+    assert_eq!(
+        export_fact.event.data["input"]["request"],
+        serde_json::to_value(&export).unwrap()
+    );
+    let pending_worker = reopened.worker(&worker.worker_id).unwrap().unwrap();
+    assert_eq!(pending_worker.attempt, worker.attempt);
+    assert_eq!(pending_worker.revision, worker.revision);
+    assert_eq!(pending_worker.cleanup_removed, Some(true));
+    assert!(!pending_worker.quota_held);
+    assert_eq!(reopened.audit_retention_ledger().unwrap(), ledger);
 
     let restored = Arc::new(
         Store::open_existing_for_tenant(&restored_path, "tenant-a", Redactor::new(vec![]), 10_000)
