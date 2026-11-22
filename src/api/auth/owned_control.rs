@@ -22,9 +22,10 @@ pub(in crate::api) enum PolicyWriteAction {
 /// Header/source admission is not a writer and has no body-derived scope.
 pub(in crate::api) struct OwnedPolicyIdentity(OwnedProtocolIdentity);
 pub(in crate::api) struct OwnedPolicyWriter {
+    // Release the operation before the identity drops its usage.
+    _operation: OwnedSemaphorePermit,
     identity: OwnedProtocolIdentity,
     action: PolicyWriteAction,
-    _operation: OwnedSemaphorePermit,
 }
 impl OwnedPolicyIdentity {
     pub(in crate::api) fn tenant(&self) -> &TenantState {
@@ -141,11 +142,12 @@ impl OwnedPolicyWriter {
         let owned = self.identity.owned.clone();
         let shared = self.identity.state.io.clone();
         let tenant_io = self.identity.tenant.io.clone();
-        let result = store_io::run(
+        let result = store_io::run_retaining(
             shared,
             Some(tenant_io),
             store_io::Lane::Control,
             false,
+            self.identity._usage.clone(),
             move || {
                 let identity = &self.identity;
                 let owned = &identity.owned;
@@ -269,8 +271,8 @@ pub(in crate::api) struct OwnedProtocolIdentity {
 /// Private retained work, not a wire object. Its permit/usage outlive an HTTP
 /// observer whenever the actual Store job is still queued or running.
 pub(in crate::api) struct OwnedProtocol {
-    identity: OwnedProtocolIdentity,
     _operation: OwnedSemaphorePermit,
+    identity: OwnedProtocolIdentity,
 }
 
 impl OwnedProtocolIdentity {
@@ -363,11 +365,12 @@ impl OwnedProtocol {
         let owned = self.identity.owned.clone();
         let state = self.identity.state.clone();
         let tenant = self.identity.tenant.clone();
-        let result = store_io::run(
+        let result = store_io::run_retaining(
             state.io.clone(),
             Some(tenant.io.clone()),
             store_io::Lane::Control,
             false,
+            self.identity._usage.clone(),
             move || {
                 // The Arc retains the operation permit and accepted usage in
                 // this actual job even if the response future is abandoned.

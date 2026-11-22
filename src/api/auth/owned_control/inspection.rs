@@ -3,8 +3,8 @@ use super::*;
 use crate::control::egress_policy::{EgressPolicyInspectionRequestV1, EgressPolicyInspectionV1};
 
 pub(in crate::api) struct OwnedPolicyInspection {
-    identity: OwnedProtocolIdentity,
     _operation: OwnedSemaphorePermit,
+    identity: OwnedProtocolIdentity,
 }
 
 impl OwnedPolicyIdentity {
@@ -31,11 +31,12 @@ impl OwnedPolicyInspection {
         let digest = self.identity.digest;
         let shared = self.identity.state.io.clone();
         let tenant_io = self.identity.tenant.io.clone();
-        let observation = store_io::run(
+        let observation = store_io::run_retaining(
             shared,
             Some(tenant_io),
             store_io::Lane::Control,
             false,
+            self.identity._usage.clone(),
             move || {
                 // Capturing this Arc keeps the real operation, credential,
                 // registry, source and usage until the actual job completes.

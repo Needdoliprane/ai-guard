@@ -163,11 +163,30 @@ where
     T: Send + 'static,
     F: FnOnce() -> ApiResult<T> + Send + 'static,
 {
+    run_retaining(shared, tenant, lane, expensive, (), operation).await
+}
+
+/// Retain a guard until both the operation and its I/O permits are released.
+pub(super) async fn run_retaining<T, F, R>(
+    shared: Arc<Gate>,
+    tenant: Option<Arc<Gate>>,
+    lane: Lane,
+    expensive: bool,
+    retained: R,
+    operation: F,
+) -> ApiResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> ApiResult<T> + Send + 'static,
+    R: Send + 'static,
+{
     // Never enqueue a waiter for admission. Only admitted tasks reach Tokio's
     // blocking pool, and both bounds survive a dropped HTTP request future.
     let shared_permit = shared.admit(lane, false)?;
     let tenant_permit = tenant.map(|gate| gate.admit(lane, expensive)).transpose()?;
     tokio::task::spawn_blocking(move || {
+        // Release the I/O permits before a retained guard can announce drainage.
+        let _retained = retained;
         let _permits = (shared_permit, tenant_permit);
         operation()
     })
