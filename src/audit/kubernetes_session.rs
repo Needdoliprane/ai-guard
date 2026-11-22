@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 mod authorization;
 mod confirmation;
 mod control_recovery;
+pub(crate) mod effects;
 mod migration;
 mod model;
 mod mutations;
@@ -91,7 +92,8 @@ pub(super) fn initialize(store: &Store, tx: &Transaction<'_>) -> anyhow::Result<
     migration::initialize(store, tx)
 }
 pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
-    replay::validate(db)
+    replay::validate(db)?;
+    effects::validate(db)
 }
 pub(super) fn held_usage_before(db: &Connection, before: i64) -> anyhow::Result<(u64, u64, u64)> {
     replay::held_usage_before(db, before)
@@ -100,6 +102,9 @@ pub(super) fn held_usage_before(db: &Connection, before: i64) -> anyhow::Result<
 pub(super) fn workload_audit_identity(
     event: &Event,
 ) -> anyhow::Result<Option<capacity::WorkloadAuditPrincipalV1>> {
+    if let Some(identity) = effects::workload_audit_identity(event)? {
+        return Ok(Some(identity));
+    }
     if !event.kind.starts_with(PREFIX) {
         return Ok(None);
     }
