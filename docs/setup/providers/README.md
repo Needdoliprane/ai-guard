@@ -201,6 +201,25 @@ With Podman, replace `docker compose` and the base file with `podman compose` an
 
 The adapter uses the authenticated [System One API](https://docs.typesafe.ai/api/system-one) and a [Choice question](https://docs.typesafe.ai/primitives/choice) for `allow`, `deny` or `review`. `jev-latest` is an evolving alias: retain the actually returned model with the result. A decision score is not a calibrated probability of safety. Audit or decision-service failure blocks the protected action; removing a key is not a safe automatic fallback to another engine.
 
+## Follow provider activity live
+
+ai-guard collects what Codex CLI and Claude Code officially expose while the session runs. Live delivery to the dashboard journal requires a gateway in legacy mode and an authorized runner. An owned gateway returns `503 identity_unavailable` before reading the batch body, and the forwarder leaves the batch unacknowledged in the local spool. Everything a client reports stays **declared**. ai-guard separately records its observations of container lifecycle, exit code, workspace changes, decisions and the collection channels. [Batch delivery contract](../../api.md#provider-activity-event-batch).
+
+- **Batch sessions.** Under the broker, the client's structured output (`claude --output-format stream-json`, `codex exec --json`) is read record by record as it arrives: visible messages, reasoning summaries, tool calls and results, commands (as display text, never as executable argv), file changes, plans and sub-agent delegations. A managed launch without the broker (`run`) collects its hooks live but still normalizes its structured output after the run.
+- **Batch and interactive sessions.** The worker image installs managed hook configurations on its read-only root: `/etc/claude-code/managed-settings.json` (with `allowManagedHooksOnly`) and `/etc/codex/requirements.toml` (with `allow_managed_hooks_only`). The hooks call `/usr/local/bin/ai-guard-activity`, which hands each payload to the broker over a dedicated `exec` channel. The channel carries no credential and uses no network. A workspace `.claude/settings.json` or `.codex/config.toml` cannot add or remove these hooks. The bootstrap refuses to start a client whose managed configuration is missing or altered (`activity_unavailable`).
+- **Blocking on audit loss.** `PreToolUse` and `UserPromptSubmit` are acknowledged only after their record is durable in the broker spool. If the spool is unavailable, the undelivered backlog is over its bound, or the session budget is exhausted, these hooks refuse the action, and the stdout reading of a batch session pauses for a bounded time. This applies when the hook client runs. Claude Code 2.1.295 and later also block when the hook itself fails (`onFailure: "block"`); with Claude Code 2.1.140 and Codex, a hook that crashes or times out lets the tool run.
+- **Budgets and losses.** By default each session keeps at most 1,000 events and 2 MiB, with an undelivered backlog of 200 events or 512 KiB. The broker registry field `provider_activity` (`max_events`, `max_bytes`) raises them up to 5,000 events and 8 MiB; the backlog follows at one fifth of the events and one quarter of the bytes. Any loss is explicit: `activity.loss` events, and an `activity.coverage` summary at the end of the session with its counters per channel.
+- **Size the tenant audit.** Audit retention is an offline operator action for host SQLite stores at format 13. Automatic rotation is unavailable. Plan for at least 50 sessions before reaching either the audit event or byte limit. The default limits of 100,000 events and 256 MiB allow 100 sessions at 1,000 events each or 128 at 2 MiB each. `ai-guard-diagnose` warns below 50. [Audit retention and supported deployments](../audit-retention/README.md).
+- **Sub-agents.** A Codex `spawn_agent` names the parent thread. Claude hooks report sub-agents and keep the related tool-call ID when the client supplies it. The sub-agent remains declared, with the parent link unresolved when only the tool-call ID is available.
+
+| Capability | Claude Code 2.1.140 | Claude Code 2.1.329 | Codex CLI 0.165.0 / 0.170.0 |
+|---|---|---|---|
+| Messages, tools and commands in batch | Implemented, not qualified | Implemented, not qualified | Primary thread only; sub-agents through hooks |
+| Interactive (TTY) activity | Hooks: prompts, tools, sub-agents, last message of each turn | Same | Same; hosted web search not covered |
+| Blocking when the audit is unavailable | When the hook client runs | Also when the hook fails | When the hook client runs |
+
+"Not qualified" means fixture-tested parsers without an authenticated session for that version. Versions outside this table are unknown. No row is mediation: the client and its hooks run inside the untrusted worker, under the same user as the agent. Not covered: OpenTelemetry, client transcripts and rollout files, the Codex app-server, and actions an agent performs outside the client's hook points. See the [adapter contract](../../adapters.md#collecte-live) for the record mappings and limits.
+
 ## Diagnose provider problems
 
 | Result | Next action |

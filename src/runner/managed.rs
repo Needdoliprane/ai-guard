@@ -2344,6 +2344,53 @@ mod first_start_policy_tests {
             .unwrap();
     }
 }
+/// Live provider activity of a managed session, in the control-private
+/// `provider-activity` directory of its configuration. `None` only when the
+/// plan names no supported provider client.
+fn open_live_activity(
+    plan: &RunPlan,
+    state: &PlanState,
+    client: &AuditClient,
+) -> Result<
+    Option<(
+        crate::provider_activity::session::LiveSession,
+        crate::provider_activity::ActivityClient,
+    )>,
+> {
+    use crate::provider_activity::{ActivityClient, ActivityContext, ActivityLimits};
+    let provider = match plan.options.provider.as_str() {
+        "codex" => ActivityClient::Codex,
+        "claude" | "claude-code" => ActivityClient::ClaudeCode,
+        _ => return Ok(None),
+    };
+    let root = crate::control_fs::Directory::open_existing(&plan.options.config_dir)?
+        .child("provider-activity")?;
+    let worker = state.worker().ok();
+    let context = ActivityContext {
+        session: plan.session,
+        session_id: plan.request.session_id.clone(),
+        project_id: plan.request.project_id.clone(),
+        sandbox_id: plan.request.sandbox_id.clone(),
+        agent_id: plan.request.agent_id.clone(),
+        correlation_id: plan.request.correlation_id.clone(),
+        trace_id: plan.request.trace_id.clone(),
+        worker_id: worker.as_ref().map(|w| w.worker_id.clone()),
+        attempt_id: worker.as_ref().map(|w| w.attempt.attempt_id.clone()),
+        client: provider,
+        interactive: plan.options.interactive,
+        client_version_label: None,
+    };
+    let session = crate::provider_activity::session::LiveSession::open(
+        &root,
+        context,
+        client.redactor.clone(),
+        client.clone(),
+        ActivityLimits::default(),
+        false,
+    )?;
+    Ok(Some((session, provider)))
+}
+
 async fn launch_worker(
     runtime: &ManagedRuntime,
     client: &AuditClient,
@@ -2373,6 +2420,13 @@ async fn launch_worker(
         tokio::time::Instant::now() + Duration::from_secs(plan.options.timeout);
     let supervision =
         control_monitor::PrestartOwner::new(runtime, client, state, guard, execution_deadline)?;
+    // Live provider activity: durable before the start claim. The managed
+    // path has no live stdout tap; its batch stdout keeps the post-run
+    // normalization, while the worker hooks are collected live in batch and TTY.
+    let live = open_live_activity(&plan, state, client)?;
+    let hooks = live
+        .as_ref()
+        .map(|(session, provider)| session.hook_attacher(*provider));
     let on_created = |created: OwnedContainerSnapshot| {
         let state = state.clone();
         let client = client.clone();
@@ -2438,7 +2492,20 @@ async fn launch_worker(
         let state = state.clone();
         let client = client.clone();
         let start_acknowledged = start_acknowledged.clone();
+        let hooks = hooks.clone();
+        let spec = &spec;
         async move {
+            // A failed hook channel is a recorded coverage fact, not a start
+            // failure: the worker's gated hooks then refuse their actions.
+            if let Some(hooks) = &hooks
+                && let Some(owned) = state.snapshot()?.managed.and_then(|m| m.owned)
+            {
+                let running = OwnedContainerSnapshot {
+                    handle: owned.handle,
+                    observation: observed.clone(),
+                };
+                hooks.attach(runtime, running, spec).await;
+            }
             record_observation(&client, &state, &observed).await?;
             let plan = state.snapshot()?;
             let mut event = event(
@@ -2503,6 +2570,10 @@ async fn launch_worker(
         supervision.clone(),
     );
     let (execution, monitor) = tokio::join!(execute, monitor);
+    if let Some((session, _)) = live {
+        // Finalization only: a coverage error never changes the run outcome.
+        let _ = session.finish().await;
+    }
     // Recover only a native completion qualified by this same runtime. The
     // carrier's original cause/contexts remain owned beside that completion.
     let (execution, execution_error) = match execution {

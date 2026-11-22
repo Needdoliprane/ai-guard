@@ -51,6 +51,8 @@ pub enum Component {
     Relay,
     #[serde(rename = "ai-guard-audit-checkpoint")]
     AuditCheckpoint,
+    #[serde(rename = "ai-guard-activity")]
+    Activity,
 }
 
 impl Component {
@@ -64,6 +66,7 @@ impl Component {
             Self::DemoPki => "ai-guard-demo-pki",
             Self::Relay => "ai-guard-relay",
             Self::AuditCheckpoint => "ai-guard-audit-checkpoint",
+            Self::Activity => "ai-guard-activity",
         }
     }
 }

@@ -129,6 +129,12 @@ pub struct DiagnoseArgs {
     /// Gateway event bound used to validate tenant policies [default: 100000, reported as assumed]
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..=1_000_000))]
     pub max_events: Option<u64>,
+    /// Per-session live provider activity event budget of the broker [default: 1000]
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..=5_000))]
+    pub activity_max_events: Option<u64>,
+    /// Per-session live provider activity byte budget of the broker [default: 2097152]
+    #[arg(long, value_name = "BYTES", value_parser = clap::value_parser!(u64).range(65_536..=8_388_608))]
+    pub activity_max_bytes: Option<u64>,
     /// Decision-engine URL to validate; never contacted; not together with --jev-local-url
     #[arg(long, value_name = "URL", conflicts_with = "jev_local_url")]
     pub jev_url: Option<String>,
@@ -634,6 +640,8 @@ struct Inspection<'a> {
     gateway_ca_file: Option<GivenFile>,
     runtime_program: Option<GivenFile>,
     event_bound: EventBound,
+    /// Per-session live provider activity budget, given or default.
+    activity_budget: (u64, u64),
     inputs: Vec<Input>,
     /// Where the profile file of the config directory is listed, when it is
     /// the one inspected.
@@ -864,6 +872,12 @@ impl<'a> Inspection<'a> {
                 value: args.max_events.unwrap_or(DEFAULT_MAX_EVENTS),
                 assumed: args.max_events.is_none(),
             },
+            activity_budget: (
+                args.activity_max_events
+                    .unwrap_or(crate::provider_activity::collector::DEFAULT_MAX_EVENTS),
+                args.activity_max_bytes
+                    .unwrap_or(crate::provider_activity::collector::DEFAULT_MAX_BYTES),
+            ),
             inputs,
             providers_slot,
             event_bound_slot,
@@ -1195,6 +1209,20 @@ impl<'a> Inspection<'a> {
         {
             context.report(Draft::new(
                 FindingCode::RegistryEventBoundNotUsed,
+                Scope::Input {
+                    input: InputName::MaxEvents,
+                },
+            ));
+        }
+
+        // Live provider activity fills the tenant audit, which has no rotation
+        // yet: fewer than 50 sessions per audit is reported as a sizing risk.
+        let (activity_events, activity_bytes) = self.activity_budget;
+        if self.event_bound.value / activity_events < 50
+            || crate::audit::capacity_policy::PHYSICAL_BYTES / activity_bytes < 50
+        {
+            context.report(Draft::new(
+                FindingCode::AuditLiveActivityBudgetCapacity,
                 Scope::Input {
                     input: InputName::MaxEvents,
                 },

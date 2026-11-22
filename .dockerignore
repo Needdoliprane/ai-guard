@@ -27,3 +27,12 @@ front/public/**
 !images/
 images/**
 !images/*.Dockerfile
+!images/provider-activity/
+images/provider-activity/**
+!images/provider-activity/claude-code/
+images/provider-activity/claude-code/**
+!images/provider-activity/claude-code/managed-settings.v1.json
+!images/provider-activity/claude-code/managed-settings.v1-onfailure.json
+!images/provider-activity/codex/
+images/provider-activity/codex/**
+!images/provider-activity/codex/requirements.toml

@@ -1,0 +1,16 @@
+{"type":"thread.started","thread_id":"019a0000-0000-7000-8000-00000000a001"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"Inspecting the test suite before running it."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"bash -lc 'cargo test'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"bash -lc 'cargo test'","aggregated_output":"test result: ok","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_2","type":"mcp_tool_call","server":"docs","tool":"search","arguments":{"q":"hooks"},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"mcp_tool_call","server":"docs","tool":"search","arguments":{"q":"hooks"},"result":{"content":[{"type":"text","text":"found"}],"structured_content":null},"error":null,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_3","type":"todo_list","items":[{"text":"Run tests","completed":false},{"text":"Fix failure","completed":false}]}}
+{"type":"item.updated","item":{"id":"item_3","type":"todo_list","items":[{"text":"Run tests","completed":true},{"text":"Fix failure","completed":false}]}}
+{"type":"item.started","item":{"id":"item_4","type":"collab_tool_call","tool":"spawn_agent","sender_thread_id":"019a0000-0000-7000-8000-00000000a001","receiver_thread_ids":[],"prompt":"Review the failing test","agents_states":{},"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_4","type":"collab_tool_call","tool":"spawn_agent","sender_thread_id":"019a0000-0000-7000-8000-00000000a001","receiver_thread_ids":["019a0000-0000-7000-8000-00000000a002"],"prompt":"Review the failing test","agents_states":{"019a0000-0000-7000-8000-00000000a002":{"status":"running","message":null}},"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_5","type":"file_change","changes":[{"path":"src/main.rs","kind":"update"}],"status":"completed"}}
+{"type":"item.started","item":{"id":"item_6","type":"web_search","query":"rust tokio timeout"}}
+{"type":"item.completed","item":{"id":"item_7","type":"agent_message","text":"Tests pass after the fix."}}
+{"type":"item.completed","item":{"id":"item_8","type":"error","message":"in-process app-server event stream lagged; dropped 3 events"}}
+{"type":"turn.completed","usage":{"input_tokens":1200,"cached_input_tokens":300,"cache_write_input_tokens":0,"output_tokens":420,"reasoning_output_tokens":64}}

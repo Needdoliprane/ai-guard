@@ -613,9 +613,9 @@ async fn write_async<W: AsyncWrite + Unpin>(
 
 /// A nonblocking owned pipe/socket FD, registered directly with Tokio. Unlike
 /// TokioStdin, cancellation never leaves a blocking stdin task behind.
-struct NonblockingFile(AsyncFd<File>);
+pub(crate) struct NonblockingFile(AsyncFd<File>);
 impl NonblockingFile {
-    fn new(file: File) -> Result<Self, HelperError> {
+    pub(crate) fn new(file: File) -> Result<Self, HelperError> {
         let mut facts = std::mem::MaybeUninit::<libc::stat>::uninit();
         // SAFETY: a live owned FD and a writable stat buffer.
         if unsafe { libc::fstat(file.as_raw_fd(), facts.as_mut_ptr()) } != 0 {

@@ -12,8 +12,10 @@ import { buildIdentityFooter } from "./build-identity-view.ts";
 import { relatedAgents, relatedSandboxes, workerRelation } from "./control.ts";
 import { integrityCoverage, parseRetentionLedger, retentionNotice } from "./retention.ts";
 import type { WorkerRecord } from "./control.ts";
-import type { BrokerCapture } from "./model.ts";
+import type { ActivityChannelCounts, BrokerCapture } from "./model.ts";
 import {
+  activityChannel,
+  activityDetails,
   asText,
   brokerBatchResultDetails,
   brokerFailureDetails,
@@ -1368,7 +1370,14 @@ function renderEvents() {
               ? decision(event.decision.outcome)
               : el("span", "muted", "—"),
           ),
-          el("td", "", provenance(event.provenance)),
+          el(
+            "td",
+            "",
+            provenance(event.provenance),
+            activityChannel(event)
+              ? el("span", "muted event-channel", ` · ${activityChannel(event)}`)
+              : null,
+          ),
           el("td", "", detailButton),
         ),
       );
@@ -2150,6 +2159,83 @@ function brokerBatchCommandContent(event: AuditEvent) {
   ];
 }
 
+function activityCountsRows(label: string, counts: ActivityChannelCounts | null) {
+  if (!counts) return [labelValue(label, "Non applicable à cette session")];
+  const losses = counts.dropped + counts.refused + counts.oversized + counts.invalid;
+  return [
+    labelValue(
+      label,
+      `${formatMetric(counts.records)} enregistrement${counts.records === 1 ? "" : "s"} · ${formatMetric(counts.events)} événement${counts.events === 1 ? "" : "s"}`,
+    ),
+    labelValue(
+      `${label} · pertes`,
+      losses || counts.declaredLosses
+        ? `${formatMetric(losses)} observée${losses === 1 ? "" : "s"} · ${formatMetric(counts.declaredLosses)} déclarée${counts.declaredLosses === 1 ? "" : "s"} par le worker`
+        : "Aucune perte comptée",
+    ),
+    labelValue(
+      `${label} · non projetés`,
+      `${formatMetric(counts.ignored)} ignoré${counts.ignored === 1 ? "" : "s"} · ${formatMetric(counts.unrecognized)} non reconnu${counts.unrecognized === 1 ? "" : "s"}`,
+    ),
+  ];
+}
+function activityContent(event: AuditEvent) {
+  const details = activityDetails(event);
+  if (!details) return null;
+  const section = el(
+    "section",
+    "activity-detail",
+    el("h3", "", "Activité du client IA"),
+    details.declaredByClient
+      ? el(
+          "p",
+          "detail-task",
+          "Déclaration du client IA, reçue par ai-guard sans vérification indépendante. Les effets observés par ai-guard sont le cycle de vie du worker, son code de sortie, les changements de l’espace de travail et les décisions.",
+        )
+      : null,
+    el(
+      "dl",
+      "detail-grid",
+      labelValue("Canal", details.channel),
+      labelValue("Client", details.client),
+      labelValue("Version demandée pour l’image", details.versionLabel ?? "Inconnue"),
+      labelValue("Mode", details.interactive === null ? null : details.interactive ? "Interactif" : "Batch"),
+      labelValue("Réception par ai-guard", formatDate(details.receivedAt, true), "observed"),
+      labelValue("Worker", details.workerId),
+      labelValue("Tentative", details.attemptId),
+    ),
+    details.truncated
+      ? el("div", "info-strip", icon("info"), "Contenu tronqué par le collecteur avant stockage.")
+      : null,
+  );
+  if (details.coverage) {
+    const c = details.coverage;
+    section.append(
+      el("h3", "", "Couverture de la collecte"),
+      el(
+        "div",
+        "info-strip",
+        icon("info"),
+        c.complete
+          ? "Collecte complète pour les canaux attachés. Elle ne couvre pas les actions faites hors des points de hook du client."
+          : "Collecte partielle : des enregistrements manquent ou n’ont pas été livrés. Une absence d’événement ne prouve pas une absence d’activité.",
+      ),
+      el(
+        "dl",
+        "detail-grid",
+        labelValue("Événements conservés", c.spooledEvents),
+        labelValue("Événements livrés au contrôle", c.deliveredEvents),
+        labelValue("Canal des hooks", c.hookChannel),
+        labelValue("Budget de session épuisé", c.budgetExhausted ? "Oui" : "Non"),
+        labelValue("Audit indisponible à la fin", c.auditUnavailable ? "Oui" : "Non"),
+        labelValue("Lecture suspendue pendant la session", c.stalled ? "Oui" : "Non"),
+        ...activityCountsRows("Sortie structurée", c.stdout),
+        ...activityCountsRows("Hooks", c.hook),
+      ),
+    );
+  }
+  return section;
+}
 function decisionEvaluationContent(event: AuditEvent) {
   const evaluation = decisionEvaluationDetails(event);
   if (!evaluation) return null;
@@ -2319,6 +2405,7 @@ function showEvent(event: AuditEvent) {
       ),
       ...details,
       ...(evaluation ? [evaluation] : []),
+      ...[activityContent(event)].filter((part): part is HTMLElement => part !== null),
       el("h3", "", "Chaînage d’audit"),
       el(
         "dl",

@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "note": "Synthetic records written from official schemas; they are not recordings of an authenticated session and do not qualify any client version.",
+  "fixtures": {
+    "codex.exec.jsonl": {
+      "client": "codex",
+      "channel": "stdout",
+      "derived_from": [
+        "https://github.com/openai/codex/blob/rust-v0.170.0/codex-rs/exec/src/exec_events.rs (identical at rust-v0.165.0)",
+        "https://github.com/openai/codex/blob/rust-v0.170.0/codex-rs/exec/src/event_processor_with_jsonl_output.rs"
+      ],
+      "unconfirmed": [
+        "web_search item: the WebSearchAction JSON shape and the duplicate id key between ThreadItem and WebSearchItem; the fixture carries only the query",
+        "exact wording of the lag warning item"
+      ]
+    },
+    "codex.hooks.jsonl": {
+      "client": "codex",
+      "channel": "hook",
+      "derived_from": [
+        "https://github.com/openai/codex/tree/rust-v0.170.0/codex-rs/hooks/schema/generated (field names and required lists, identical at rust-v0.165.0)"
+      ],
+      "unconfirmed": [
+        "enum values of permission_mode, SessionStart source and SessionEnd reason",
+        "tool_name and tool_input shape for the shell tool",
+        "tool_response shape",
+        "whether the hook session_id equals thread.started thread_id"
+      ]
+    },
+    "claude-code.stream.jsonl": {
+      "client": "claude-code",
+      "channel": "stdout",
+      "derived_from": [
+        "https://code.claude.com/docs/en/agent-sdk/typescript (SDKMessage, SDKSystemMessage, SDKAssistantMessage, SDKResultMessage)",
+        "https://code.claude.com/docs/en/headless (parent_tool_use_id semantics)"
+      ],
+      "unconfirmed": [
+        "agent_id on assistant/user messages for the pinned versions 2.1.140 and 2.1.329",
+        "thinking block field names (Anthropic Messages API shape)",
+        "Agent tool input fields other than subagent_type"
+      ]
+    },
+    "claude-code.hooks.jsonl": {
+      "client": "claude-code",
+      "channel": "hook",
+      "derived_from": [
+        "https://code.claude.com/docs/en/hooks (common and per-event input fields)"
+      ],
+      "unconfirmed": [
+        "Bash tool_response shape",
+        "SessionStart source and SessionEnd reason values",
+        "Notification notification_type values"
+      ]
+    },
+    "recorded/claude-code-2.1.329.offline.stream.jsonl": {
+      "client": "claude-code",
+      "channel": "stdout",
+      "recorded": "2026-11-22, local worker image with Claude Code 2.1.329 (label ai-guard.provider.claude-code.requested-version), network none, placeholder API key, no model call: the session reached only its API retries",
+      "covers": ["system/hook_started", "system/hook_response", "system/init", "system/api_retry", "assistant API error message", "result with is_error"]
+    },
+    "recorded/claude-code-2.1.329.offline.hooks.jsonl": {
+      "client": "claude-code",
+      "channel": "hook",
+      "recorded": "same run: managed hooks in /etc/claude-code/managed-settings.json fired under --setting-sources user; a workspace .claude/settings.json with disableAllHooks did not stop them",
+      "covers": ["SessionStart", "UserPromptSubmit"]
+    },
+    "recorded/codex-0.170.0.offline.exec.jsonl": {
+      "client": "codex",
+      "channel": "stdout",
+      "recorded": "2026-11-22, same image with Codex CLI 0.170.0, network none, placeholder API key, no model call: thread start then reconnect errors",
+      "covers": ["thread.started", "turn.started", "error"]
+    },
+    "recorded/codex-0.170.0.offline.hooks.jsonl": {
+      "client": "codex",
+      "channel": "hook",
+      "recorded": "same run: managed hooks in /etc/codex/requirements.toml fired; hook session_id equals thread.started thread_id; an untrusted workspace .codex/config.toml hook did not run",
+      "covers": ["SessionStart", "UserPromptSubmit"]
+    }
+  }
+}

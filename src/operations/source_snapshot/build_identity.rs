@@ -104,6 +104,37 @@ impl PreparedSource {
     }
 }
 
+/// First Claude Code release whose command hooks accept `"onFailure":"block"`.
+const CLAUDE_ON_FAILURE_RELEASE: (u64, u64, u64) = (2, 1, 295);
+
+/// Managed activity hook profile installed for an exact Claude Code version:
+/// `v1-onfailure` from 2.1.295, `v1` before it. A pre-release of 2.1.295
+/// orders before that release (SemVer), so it keeps `v1`; build metadata is
+/// ignored. The worker recipe refuses any other value.
+pub(in crate::operations) fn claude_activity_profile(version: &str) -> Result<&'static str> {
+    crate::operations::validate_provider_version(version)?;
+    let (core, pre_release) = match version.split_once(['-', '+']) {
+        Some((core, _)) => (core, version.as_bytes()[core.len()] == b'-'),
+        None => (version, false),
+    };
+    let mut parts = core.split('.').map(str::parse::<u64>);
+    let (Some(Ok(major)), Some(Ok(minor)), Some(Ok(patch)), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        bail!("--claude-code-version must be an exact MAJOR.MINOR.PATCH version");
+    };
+    let release = (major, minor, patch);
+    Ok(
+        if release > CLAUDE_ON_FAILURE_RELEASE
+            || release == CLAUDE_ON_FAILURE_RELEASE && !pre_release
+        {
+            "v1-onfailure"
+        } else {
+            "v1"
+        },
+    )
+}
+
 fn stopped(interruption: Option<&Interruption>) -> Result<()> {
     if let Some(signal) = interruption.and_then(Interruption::requested) {
         return Err(InvocationFailure::Interrupted { signal }.into());
@@ -140,6 +171,13 @@ impl RustBuildPlan {
                 if let Some(version) = version {
                     options.extend(["--build-arg".to_owned(), format!("{name}={version}")]);
                 }
+            }
+            if let Some(version) = self.claude_code_version.as_deref() {
+                let profile = claude_activity_profile(version)?;
+                options.extend([
+                    "--build-arg".to_owned(),
+                    format!("CLAUDE_ACTIVITY_PROFILE={profile}"),
+                ]);
             }
         }
         let mut command = self.source.build_command(recipe, &options)?;

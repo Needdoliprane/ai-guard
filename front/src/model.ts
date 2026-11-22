@@ -398,7 +398,186 @@ export function brokerWorkspaceDetails(event: AuditEvent): BrokerWorkspaceDetail
   return { kind: "scan", changedFiles, manifestDigest, truncated, changes };
 }
 
+const ACTIVITY_CHANNEL: Record<string, string> = {
+  stdout: "sortie structurée",
+  hook: "hook officiel",
+};
+
+function text(value: unknown): string | null {
+  return typeof value === "string" && value ? value : null;
+}
+
+/** Channel of a live provider record, as recorded by the control. */
+export function activityChannel(event: AuditEvent): string | null {
+  const activity = event.data?.activity;
+  if (!activity || typeof activity !== "object") return null;
+  const channel = (activity as Record<string, unknown>).channel;
+  return typeof channel === "string" ? (ACTIVITY_CHANNEL[channel] ?? channel) : null;
+}
+
+export interface ActivityChannelCounts {
+  records: number;
+  mapped: number;
+  ignored: number;
+  unrecognized: number;
+  oversized: number;
+  invalid: number;
+  events: number;
+  dropped: number;
+  refused: number;
+  declaredLosses: number;
+}
+
+export interface ActivityDetails {
+  channel: string | null;
+  client: string | null;
+  interactive: boolean | null;
+  versionLabel: string | null;
+  workerId: string | null;
+  attemptId: string | null;
+  receivedAt: string | null;
+  /** The record is the client's own declaration, not an ai-guard observation. */
+  declaredByClient: boolean;
+  truncated: boolean;
+  coverage: {
+    complete: boolean;
+    budgetExhausted: boolean;
+    auditUnavailable: boolean;
+    stalled: boolean;
+    spooledEvents: number | null;
+    deliveredEvents: number | null;
+    hookChannel: string | null;
+    stdout: ActivityChannelCounts | null;
+    hook: ActivityChannelCounts | null;
+  } | null;
+}
+
+function count(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function channelCounts(value: unknown): ActivityChannelCounts | null {
+  if (!value || typeof value !== "object") return null;
+  const v = value as Record<string, unknown>;
+  return {
+    records: count(v.records),
+    mapped: count(v.mapped),
+    ignored: count(v.ignored),
+    unrecognized: count(v.unrecognized),
+    oversized: count(v.oversized),
+    invalid: count(v.invalid),
+    events: count(v.events),
+    dropped: count(v.dropped),
+    refused: count(v.refused),
+    declaredLosses: count(v.declared_losses),
+  };
+}
+
+/** Collection metadata recorded by the control for a live activity record. */
+export function activityDetails(event: AuditEvent): ActivityDetails | null {
+  const data = (event.data ?? {}) as Record<string, unknown>;
+  const activity = data.activity;
+  if (!activity || typeof activity !== "object") return null;
+  const a = activity as Record<string, unknown>;
+  const coverage =
+    event.kind === "activity.coverage" && event.source === "runner" && event.provenance === "observed"
+      ? {
+          complete: data.complete === true,
+          budgetExhausted: data.budget_exhausted === true,
+          auditUnavailable: data.audit_unavailable === true,
+          stalled: data.stalled === true,
+          spooledEvents: typeof data.spooled_events === "number" ? data.spooled_events : null,
+          deliveredEvents: typeof data.delivered_events === "number" ? data.delivered_events : null,
+          hookChannel: text(data.hook_channel),
+          stdout: channelCounts(data.stdout),
+          hook: channelCounts(data.hook),
+        }
+      : null;
+  return {
+    channel: activityChannel(event),
+    client: text(a.client),
+    interactive: typeof a.interactive === "boolean" ? a.interactive : null,
+    versionLabel: text(a.client_version_label),
+    workerId: text(a.worker_id),
+    attemptId: text(a.attempt_id),
+    receivedAt: text(a.received_at),
+    declaredByClient: event.provenance === "declared" && event.source !== "runner",
+    truncated:
+      data.text_truncated === true ||
+      data.prompt_truncated === true ||
+      data.hook_input_truncated === true ||
+      data.adapter_payload_truncated === true,
+    coverage,
+  };
+}
+
+/**
+ * One-line reading of live provider activity. Provider facts stay declared:
+ * the wording never turns a declaration into an observed effect.
+ */
+export function providerActivitySummary(event: AuditEvent): string | null {
+  const data = (event.data ?? {}) as Record<string, unknown>;
+  const truncated = data.text_truncated === true ? " (tronqué)" : "";
+  switch (event.kind) {
+    case "message.declared": {
+      const body = text(data.text);
+      if (!body) return null;
+      const who = data.role === "user" ? "Consigne déclarée" : "Réponse déclarée";
+      return `${who} : ${body}${truncated}`;
+    }
+    case "reasoning.declared":
+      return data.redacted === true
+        ? "Raisonnement masqué par le fournisseur"
+        : `Raisonnement déclaré : ${text(data.text) ?? "—"}${truncated}`;
+    case "tool.requested": {
+      const tool = text(data.tool_name) ?? "outil";
+      const command = text(data.command_text) ?? text(data.query);
+      return command ? `Outil demandé · ${tool} : ${command}` : `Outil demandé · ${tool}`;
+    }
+    case "tool.result": {
+      const result = (event.result ?? {}) as Record<string, unknown>;
+      const tool = text(data.tool_name) ?? text(data.provider_tool_use_id) ?? "outil";
+      if (result.is_error === true)
+        return `Résultat déclaré en échec · ${tool}${text(result.error) ? ` : ${result.error}` : ""}`;
+      if (typeof result.exit_code === "number")
+        return `Résultat déclaré · ${tool} · code ${result.exit_code}`;
+      return `Résultat déclaré · ${tool}`;
+    }
+    case "delegation.declared": {
+      const target = text(data.agent_type) ?? text(data.delegation_tool) ?? "sous-agent";
+      const description = text(data.description) ?? text(data.prompt);
+      return description ? `Délégation déclarée · ${target} : ${description}` : `Délégation déclarée · ${target}`;
+    }
+    case "agent.declared": {
+      const role = data.agent_role === "root" ? "Agent principal" : "Sous-agent";
+      const id = text(data.provider_agent_id) ?? "inconnu";
+      const state = text(data.state);
+      return `${role} déclaré ${id}${state ? ` · ${state}` : ""}`;
+    }
+    case "plan.declared": {
+      const items = Array.isArray(data.items) ? data.items : [];
+      const done = items.filter((item) => (item as Record<string, unknown>)?.completed === true).length;
+      return `Plan déclaré · ${done}/${items.length} étape${items.length === 1 ? "" : "s"} terminée${done === 1 ? "" : "s"}`;
+    }
+    case "activity.loss": {
+      const reason = text(data.reason) ?? "cause inconnue";
+      const who = event.provenance === "declared" ? "Perte déclarée par le worker" : "Perte de collecte observée";
+      return `${who} · ${reason}`;
+    }
+    case "activity.channel":
+      return `Canal ${ACTIVITY_CHANNEL[String(data.channel)] ?? String(data.channel ?? "inconnu")} · ${text(data.state) ?? "état inconnu"}${text(data.reason) ? ` (${data.reason})` : ""}`;
+    case "activity.coverage":
+      return data.complete === true
+        ? "Couverture de collecte live complète pour les canaux attachés"
+        : "Couverture de collecte live partielle : voir le détail";
+    default:
+      return null;
+  }
+}
+
 export function eventSummary(event: AuditEvent): string {
+  const activity = providerActivitySummary(event);
+  if (activity) return activity;
   const failure = brokerFailureDetails(event);
   if (failure)
     return `Échec signalé · Phase : ${failure.phase} · Étape : ${failure.step} · Effet sur l’exécution : ${failure.runtimeEffect}`;
@@ -451,7 +630,8 @@ export function projectEvents(events: AuditEvent[], view: View): AuditEvent[] {
         event.kind === "broker.batch.failure" || event.kind === "broker.batch.result" ||
         event.command ||
         event.decision ||
-        /^(command|action|exec)\./.test(event.kind),
+        /^(command|action|exec)\./.test(event.kind) ||
+        /^(tool|delegation)\./.test(event.kind),
     );
   if (view === "security")
     return events.filter(

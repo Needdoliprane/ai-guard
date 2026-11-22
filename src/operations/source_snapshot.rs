@@ -157,7 +157,8 @@ fn image_tag(tag: &str) -> bool {
 impl PreparedSource {
     /// `options` must be exactly `["build", "--tag", <tag>]` followed by
     /// `"--build-arg", "<NAME>=<VALUE>"` pairs for `CODEX_VERSION` and
-    /// `CLAUDE_CODE_VERSION`, each at most once with an exact version.
+    /// `CLAUDE_CODE_VERSION`, each at most once with an exact version, and
+    /// `CLAUDE_ACTIVITY_PROFILE` at most once with `v1` or `v1-onfailure`.
     /// `dockerfile` must be a prepared `images/<name>.Dockerfile`.
     ///
     /// Result: `build --file <copy>/<dockerfile> --tag <tag> [--build-arg …]… <copy>`.
@@ -195,10 +196,20 @@ impl PreparedSource {
                 bail!("unsupported engine build options");
             };
             ensure!(
-                matches!(name, "CODEX_VERSION" | "CLAUDE_CODE_VERSION") && !seen.contains(&name),
+                matches!(
+                    name,
+                    "CODEX_VERSION" | "CLAUDE_CODE_VERSION" | "CLAUDE_ACTIVITY_PROFILE"
+                ) && !seen.contains(&name),
                 "unsupported engine build argument"
             );
-            super::validate_provider_version(value)?;
+            if name == "CLAUDE_ACTIVITY_PROFILE" {
+                ensure!(
+                    matches!(value, "v1" | "v1-onfailure"),
+                    "unsupported engine build argument"
+                );
+            } else {
+                super::validate_provider_version(value)?;
+            }
             seen.push(name);
         }
         let context = utf8(self.snapshot.context())?;

@@ -13,6 +13,7 @@ mod deadline_semantic_tests;
 #[cfg(all(test, unix))]
 mod legacy_completion_tests;
 
+pub(crate) mod activity;
 pub(crate) mod relay;
 
 #[cfg(all(test, unix))]

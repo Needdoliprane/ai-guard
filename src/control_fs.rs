@@ -274,6 +274,77 @@ impl Directory {
         Ok(file)
     }
 
+    /// Reopen an existing private entry for reading and appending, never
+    /// following a link. Absence is `None` only for ENOENT; an entry that is
+    /// not a private regular single-link file is refused, never repaired.
+    pub(crate) fn open_private_entry_rw(&self, name: &OsStr) -> Result<Option<File>> {
+        if self.private_entry(name)?.is_none() {
+            return Ok(None);
+        }
+        let encoded = child_name(name)?;
+        // SAFETY: retained directory FD and one C component; no creation.
+        let fd = unsafe {
+            libc::openat(
+                self.0.file.as_raw_fd(),
+                encoded.as_ptr(),
+                libc::O_RDWR | FILE_FLAGS,
+            )
+        };
+        ensure!(
+            fd >= 0,
+            "private entry cannot be reopened without following a link: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: successful openat transfers a new owned descriptor.
+        let file = unsafe { File::from_raw_fd(fd) };
+        check_private_file(&file)?;
+        Ok(Some(file))
+    }
+
+    /// Lock the exact private entry through its retained writable descriptor.
+    /// The file description keeps the lock until its last descriptor closes.
+    pub(crate) fn try_lock_private_entry(&self, name: &OsStr, file: &File) -> Result<bool> {
+        let facts = check_private_file(file)?;
+        let identity = PrivateEntryIdentity {
+            device: facts.dev(),
+            inode: facts.ino(),
+        };
+        ensure!(
+            self.private_entry(name)? == Some(identity),
+            "private writer entry identity changed before lock"
+        );
+        let fd = file.as_raw_fd();
+        // SAFETY: inspect flags on the retained descriptor; neither call changes them.
+        let (status, flags) = unsafe {
+            (
+                libc::fcntl(fd, libc::F_GETFL),
+                libc::fcntl(fd, libc::F_GETFD),
+            )
+        };
+        ensure!(
+            status >= 0
+                && status & libc::O_ACCMODE == libc::O_RDWR
+                && flags >= 0
+                && flags & libc::FD_CLOEXEC != 0,
+            "private writer requires a retained O_RDWR CLOEXEC descriptor"
+        );
+        // SAFETY: retained private FD; nonblocking whole-file advisory lock.
+        if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                return Ok(false);
+            }
+            return Err(error).context("private writer lock acquisition failed");
+        }
+        let after = check_private_file(file)?;
+        ensure!(
+            Identity::of(&after) == Identity::of(&facts)
+                && self.private_entry(name)? == Some(identity),
+            "private writer entry identity changed after lock"
+        );
+        Ok(true)
+    }
+
     /// Open the separately reserved SQLite initialization lock, never a main
     /// or sidecar inode. Its lifetime does not interfere with VFS POSIX locks.
     pub(crate) fn sqlite_initialization_lock(&self) -> Result<File> {

@@ -9,6 +9,7 @@ macro_rules! continue_step {
     };
 }
 
+mod activity;
 mod cancelled;
 mod diagnostics;
 mod helpers;
@@ -36,6 +37,7 @@ use crate::{
     },
     control::*,
     model::Outcome,
+    provider_activity::session::LiveSession,
     runner::{AuditClient, CheckpointDataV1, CheckpointPayloadV1, managed},
     runtime::{
         ContainerObservation, ManagedPrearmedExecution, ManagedRuntime, OwnedContainerSnapshot,
@@ -70,6 +72,8 @@ pub(crate) struct BatchExecutor {
     enforcer: ExecutionEnforcerV1,
     clock: Arc<dyn HostClock>,
     relays: Option<Arc<crate::broker::relay_owner::RelayRegistry>>,
+    activity: Option<crate::control_fs::Directory>,
+    activity_limits: crate::provider_activity::ActivityLimits,
 }
 impl fmt::Debug for BatchExecutor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -239,6 +243,7 @@ struct ActiveWorkerPhase {
     runtime: Box<ActiveRuntimePhase>,
     _draft: Box<Draft>,
     worker: Box<WorkerV1>,
+    activity: Option<LiveSession>,
 }
 
 // Construct the concrete phase future inside a separate call boundary before
@@ -263,6 +268,8 @@ impl BatchExecutor {
             enforcer: enforcer.into(),
             clock,
             relays: None,
+            activity: None,
+            activity_limits: crate::provider_activity::ActivityLimits::default(),
         }
     }
     pub(crate) fn with_relays(
@@ -270,6 +277,18 @@ impl BatchExecutor {
         relays: Option<Arc<crate::broker::relay_owner::RelayRegistry>>,
     ) -> Self {
         self.relays = relays;
+        self
+    }
+    /// Private broker directory holding one live provider activity spool per
+    /// session, and the per-session budget. Without it, a provider session
+    /// refuses to start.
+    pub(crate) fn with_activity_root(
+        mut self,
+        root: crate::control_fs::Directory,
+        limits: crate::provider_activity::ActivityLimits,
+    ) -> Self {
+        self.activity = Some(root);
+        self.activity_limits = limits;
         self
     }
     pub(crate) async fn run(
@@ -737,17 +756,18 @@ impl<'a> Execution<'a> {
                 runtime,
                 _draft: Box::new(draft),
                 worker: Box::new(worker),
+                activity: None,
             })))
         })
     }
 
     fn active_worker_phase(
         &self,
-        prepared: Box<ActiveWorkerPhase>,
+        mut prepared: Box<ActiveWorkerPhase>,
     ) -> BoxFuture<'_, Result<BatchStep<Box<ActiveWorkerPhase>>>> {
         Box::pin(async move {
             let worker = &prepared.worker;
-            if ((worker.state == WorkerStateV1::Preparing
+            if (worker.state == WorkerStateV1::Preparing
                 && worker.attempt.create_operation_id.is_some())
                 || matches!(
                     worker.state,
@@ -756,11 +776,12 @@ impl<'a> Execution<'a> {
                         | WorkerStateV1::Running
                         | WorkerStateV1::InDoubt
                         | WorkerStateV1::Stopping
-                ))
-                && let ControlFlow::Break(abandoned) =
-                    boxed_execution_phase(|| self.execute_worker(&prepared.runtime.runtime)).await?
+                )
             {
-                return Ok(ControlFlow::Break(abandoned));
+                prepared.activity = continue_step!(
+                    boxed_execution_phase(|| self.execute_worker(&prepared.runtime.runtime))
+                        .await?
+                );
             }
             Ok(ControlFlow::Continue(prepared))
         })
@@ -768,7 +789,7 @@ impl<'a> Execution<'a> {
 
     fn active_terminal_phase(
         &self,
-        prepared: Box<ActiveWorkerPhase>,
+        mut prepared: Box<ActiveWorkerPhase>,
     ) -> BoxFuture<'_, Result<BatchOutcome>> {
         Box::pin(async move {
             let (_, draft) = self.load().await?;
@@ -789,6 +810,10 @@ impl<'a> Execution<'a> {
             {
                 return Ok(BatchOutcome::AbandonedBeforeClaim(abandoned));
             }
+            // Activity uses its own spool and delivery cursor. The result
+            // and final scan already have their own acknowledgements.
+            let activity = prepared.activity.take();
+            let _ = boxed_execution_phase(|| self.finish_terminal_activity(&draft, activity)).await;
             Ok(BatchOutcome::Terminal)
         })
     }
@@ -863,7 +888,7 @@ impl<'a> Execution<'a> {
     async fn execute_worker(
         &self,
         runtime: &ManagedRuntime,
-    ) -> Result<BatchStep<ContainerObservation>> {
+    ) -> Result<BatchStep<Option<LiveSession>>> {
         self.stage(LocalFailurePhaseV1::Worker);
         let (job, draft) = self.load().await?;
         let worker = draft.worker()?.clone();
@@ -951,8 +976,14 @@ impl<'a> Execution<'a> {
                     .retire(self.context, current, self.executor.clock.clone())
                     .await?;
             }
-            return Ok(ControlFlow::Continue(terminal));
+            return Ok(ControlFlow::Continue(None));
         }
+        // Live activity is durable before the start control is emitted.
+        let mut activity = self.open_activity(&draft)?;
+        let tap = activity.as_mut().and_then(|(live, _)| live.take_tap());
+        let hooks = activity
+            .as_ref()
+            .map(|(live, client)| live.hook_attacher(*client));
         let callback = |owned: OwnedContainerSnapshot| {
             boxed_execution_phase(|| async move {
                 self.patch(|draft| {
@@ -997,14 +1028,41 @@ impl<'a> Execution<'a> {
                     .as_ref()
                     .and_then(|m| m.owned.clone())
                     .context("worker ownership was not persisted")?;
-                boxed_execution_phase(|| self.arm_and_claim(runtime, durable, None)).await
+                let directive =
+                    boxed_execution_phase(|| self.arm_and_claim(runtime, durable, None)).await?;
+                Ok(match (directive, tap) {
+                    (crate::runtime::PrearmedStartDirective::EmitOnce(control), Some(tap)) => {
+                        crate::runtime::PrearmedStartDirective::EmitOnce(
+                            control.with_stdout_tap(tap),
+                        )
+                    }
+                    (directive, _) => directive,
+                })
             })
         };
         let relay_spec = spec.clone();
         let started = |observation: ContainerObservation| {
             let relay_spec = relay_spec.clone();
+            let hooks = hooks.clone();
             boxed_execution_phase(|| async move {
                 let (_, draft) = self.load().await?;
+                // The worker hook channel of this running incarnation. Its
+                // failure is a recorded coverage fact, never a start failure:
+                // gated hooks inside the worker then refuse their actions.
+                if let Some(hooks) = &hooks
+                    && let Some(owned) = draft
+                        .run
+                        .plan
+                        .managed
+                        .as_ref()
+                        .and_then(|m| m.owned.clone())
+                {
+                    let running = OwnedContainerSnapshot {
+                        handle: owned.handle,
+                        observation: observation.clone(),
+                    };
+                    hooks.attach(runtime, running, &relay_spec).await;
+                }
                 let observation = managed::observation_dto(draft.worker()?, &observation)?;
                 boxed_execution_phase(|| self.mutate(WorkerTransitionV1::Observe { observation }))
                     .await?;
@@ -1054,7 +1112,11 @@ impl<'a> Execution<'a> {
                 })));
             }
         };
-        self.save_worker_result(&retained).await?;
+        if let Some((session, _)) = activity.as_mut() {
+            session.begin_producer_drain();
+        }
+        self.save_worker_result(&retained, activity.is_some())
+            .await?;
         let (_, draft) = self.load().await?;
         self.mutate(WorkerTransitionV1::Observe {
             observation: managed::observation_dto(draft.worker()?, retained.terminal())?,
@@ -1085,6 +1147,6 @@ impl<'a> Execution<'a> {
         })
         .await?;
         ensure!(removed, "worker cleanup requires reconciliation");
-        Ok(ControlFlow::Continue(retained.terminal().clone()))
+        Ok(ControlFlow::Continue(activity.map(|(session, _)| session)))
     }
 }

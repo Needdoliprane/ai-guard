@@ -33,6 +33,7 @@ fn current_identity_uses_product_version_and_exact_component_names() {
         (Component::DemoPki, "ai-guard-demo-pki"),
         (Component::Relay, "ai-guard-relay"),
         (Component::AuditCheckpoint, "ai-guard-audit-checkpoint"),
+        (Component::Activity, "ai-guard-activity"),
     ] {
         let status = BuildStatusV1::current(component);
         let bytes = serde_json::to_vec(&status).unwrap();
