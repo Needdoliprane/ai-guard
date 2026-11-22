@@ -4,7 +4,7 @@ Date : **29 octobre 2026**. Périmètre : modèle multi-client, relais entre wor
 
 ## Conclusion et portée
 
-Les vérifications logicielles de cette révision passent : **132 tests Rust, 24 tests frontend, analyse statique, compilation optimisée et parcours Chromium**. La cible reste un produit open source utilisable en production. Ce rapport ne qualifie pas encore une release de production : les gates applicables de [PRODUCTION_READINESS.md](engineering/PRODUCTION_READINESS.md) doivent être fermés avec leurs preuves.
+Les vérifications logicielles de cette révision passent : **132 tests Rust, 24 tests frontend, analyse statique, compilation optimisée et parcours Chromium**. La cible reste un produit open source utilisable en production. Ce rapport ne qualifie pas encore une release de production : les gates applicables de [PRODUCTION_READINESS.md](docs/engineering/PRODUCTION_READINESS.md) doivent être fermés avec leurs preuves.
 
 **Docker et Podman ne sont pas disponibles dans l'environnement de réalisation. Les images et la recette à trois workers n'ont pas été exécutées sur un moteur réel.** Deux tests qui exigent ce moteur sont explicitement ignorés dans la suite ordinaire. Aucun cluster Kubernetes, compte fournisseur IA, service de paiement ou accès à la PKI du NAS n'a été utilisé.
 
@@ -38,7 +38,7 @@ Les preuves distinguent les contrats logiciels, les processus Rust réellement l
 | `npm run test:browser`, avec Chromium disponible | PASS | Parcours navigateur sur collecteur de fixtures contrôlé. |
 | `live_services` | PASS, inclus dans les 132 | Gateway et dashboard Rust réels, SQLite, auth déléguée et redémarrage. |
 | Revue indépendante ciblée | Correctifs vérifiés | Droits/tenant, credentials, audit des refus, deadline et conservation des preuves runtime. |
-| Kit d'instructions | PASS documentaire | Liens, chemins, noms et copies des quatre skills ; voir [DOCUMENTATION_VALIDATION.md](engineering/DOCUMENTATION_VALIDATION.md). |
+| Kit d'instructions | PASS documentaire | Liens, chemins, noms et copies des quatre skills ; voir DOCUMENTATION_VALIDATION.md (`engineering/DOCUMENTATION_VALIDATION.md`, absent de cette arborescence). |
 
 Le bundle comprend environ **49,15 ko de JavaScript, 17,56 ko gzip**, et **31,39 ko de CSS, 6,95 ko gzip**. Ces tailles ne mesurent pas la RAM ou le coût d'exploitation.
 
@@ -108,7 +108,7 @@ Les nouveaux scénarios montrent A1/A2 sans B1 dans le contexte A, quotas, grant
 
 ### Nom et instructions
 
-Le binaire, les images, la configuration, les variables, le frontend et les skills portent le nom `ai-guard`. Les tests de compatibilité valident le type de télémétrie courant et son alias historique, ainsi que l'exclusion des anciens et nouveaux répertoires privés. Les domaines de hash persistants sont conservés pour ne pas invalider les historiques ; voir [RENAMING.md](engineering/RENAMING.md).
+Le binaire, les images, la configuration, les variables, le frontend et les skills portent le nom `ai-guard`. Les tests de compatibilité valident le type de télémétrie courant et son alias historique, ainsi que l'exclusion des anciens et nouveaux répertoires privés. Les domaines de hash persistants sont conservés pour ne pas invalider les historiques ; voir RENAMING.md (`engineering/RENAMING.md`, absent de cette arborescence).
 
 Les règles et les quatre skills ont été relus avec des scénarios de fuite entre clients, moteur absent, qualification prématurée et PKI sans paramètres. Leur découverte automatique n'a pas été testée dans les sessions Claude Code/Codex du mainteneur. Ces instructions sont des consignes de développement, pas une frontière d'isolation.
 
@@ -128,7 +128,7 @@ Les règles et les quatre skills ont été relus avec des scénarios de fuite en
 | Fournisseurs Codex/Claude/Jev | Contrats/fixtures seulement ; aucune session fournisseur authentifiée ou décision Jev distante exécutée. |
 | Portabilité, accessibilité, publication | macOS/ARM64/WSL/SELinux, audit WCAG, licence et canal de signalement à décider/qualifier selon le périmètre annoncé. |
 
-Les commandes moteur sont dans [LOCAL_CLOUD_TESTS.md](engineering/LOCAL_CLOUD_TESTS.md), [TEST_STRATEGY.md](engineering/TEST_STRATEGY.md) et [acceptance.md](acceptance.md). Les paramètres à obtenir avant une intégration réelle de la PKI sont dans [INFRASTRUCTURE_PKI.md](engineering/INFRASTRUCTURE_PKI.md). Aucun test ignoré n'est compté comme réussite.
+Les commandes moteur sont dans [LOCAL_CLOUD_TESTS.md](docs/engineering/LOCAL_CLOUD_TESTS.md), [TEST_STRATEGY.md](docs/engineering/TEST_STRATEGY.md) et [acceptance.md](docs/acceptance.md). Les paramètres à obtenir avant une intégration réelle de la PKI sont dans [INFRASTRUCTURE_PKI.md](docs/engineering/INFRASTRUCTURE_PKI.md). Aucun test ignoré n'est compté comme réussite.
 
 ## Livraison
 
