@@ -160,6 +160,9 @@ fn install_appends_the_marker_once_refuses_again_and_resume_is_idempotent() {
     assert!(untouched.markers.is_empty());
     // Plan, journal records and the verified pre-marker backup are retained.
     assert_eq!(names(&first), ["backups", "journal", "plan.json"]);
+    let plan: Value = serde_json::from_slice(&std::fs::read(first.join("plan.json")).unwrap())
+        .expect("published maintenance plan");
+    assert_eq!(plan["selected_source_id"], installed["source_id"]);
     assert_eq!(
         names(&first.join("journal")),
         [

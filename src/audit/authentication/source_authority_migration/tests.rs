@@ -135,6 +135,7 @@ impl Fixture {
             target: view.clone(),
             prior_active_manifest: None,
             supported_storage_profile: HumanStorageProfileV1::LocalPosixFlockV1,
+            selected_source_id: None,
         };
         let file = root
             .persistent_create("maintenance.json", &serde_json::to_vec(&plan).unwrap())

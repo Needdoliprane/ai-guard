@@ -151,9 +151,13 @@ agentsandbox human-sources human-rights resume \
 
 `install` prend les verrous propriétaires de toute l'union, écrit une sauvegarde
 SQLite vérifiée, journalise son intention, sa sauvegarde et sa confirmation, et
-ajoute chaque marqueur en attente dans une seule transaction. `resume` termine ou
-reconfirme la même maintenance après une interruption ; il n'ajoute jamais de
-second marqueur. L'activation et les formats des bases restent inchangés. Les
+ajoute chaque marqueur en attente dans une seule transaction. Le plan de
+maintenance identifie la source sélectionnée. `resume` exige le même tenant et
+resynchronise le plan et ses répertoires avant d'ouvrir la base. Il peut terminer
+ou reconfirmer cette maintenance sans ajouter de second marqueur. Une version
+d'essai qui a créé le plan avant l'ajout de cette liaison laisse un plan refusé
+avec `human_rights_journal_conflict`. Conservez son plan, son journal et sa
+sauvegarde pour examen. L'activation et les formats des bases restent inchangés. Les
 codes de refus, le chemin de retour et les capacités admises par ces marqueurs
 sont décrits dans
 [l'accès local nominatif](../identity/README.fr.md#bases-possédées-déjà-adoptées-formats-14-et-15).

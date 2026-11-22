@@ -145,8 +145,12 @@ agentsandbox human-sources human-rights resume \
 
 `install` takes the owner locks of the whole union, writes a verified SQLite
 backup, journals its intent, backup and confirmation, and appends every pending
-marker in one transaction. `resume` finishes or re-confirms the same
-maintenance after an interruption; it never appends a second marker. The
+marker in one transaction. The maintenance plan identifies the selected
+source. `resume` needs the same tenant and resynchronizes the plan and its
+directories before opening the store. It can finish or re-confirm that
+maintenance without appending a second marker. A plan created by a test build
+before source binding is refused with `human_rights_journal_conflict`. Preserve
+its plan, journal and backup for review. The
 activation and store formats are unchanged. The refusal codes, the return path
 and the capabilities these markers admit are described in
 [named local access](../identity/README.md#already-adopted-owned-stores-formats-14-and-15).

@@ -48,12 +48,16 @@ impl Adopted {
     }
 
     /// A new in-place plan (prior = target = active closure) and its guard.
-    fn in_place(&self) -> (HumanSourcesMaintenancePlanV1, HumanSourcesMaintenanceGuard) {
+    fn in_place(
+        &self,
+        index: usize,
+    ) -> (HumanSourcesMaintenancePlanV1, HumanSourcesMaintenanceGuard) {
         let configuration = self.configuration_dir();
         let plan = HumanSourcesMaintenancePlanV1::in_place(
             Uuid::new_v4(),
             &self.closure,
             binding(&configuration, &self.manifest_name),
+            self.source_id(index),
         );
         let file = configuration
             .persistent_create(
@@ -296,7 +300,7 @@ fn assert_installs_once_and_admits(format: u32) {
     }
     let before = maintenance_source_state(&adopted.base);
     let neighbor = store_source_state(&adopted.base.stores[1]);
-    let (plan, guard) = adopted.in_place();
+    let (plan, guard) = adopted.in_place(0);
     let receipts = install_all(&adopted, &guard, "once");
     assert_eq!(receipts.len(), 1);
     assert_eq!(receipts[0].marker, InPlaceIdentityMarkerV1::HumanRightsV2);
@@ -372,7 +376,7 @@ fn owned_store15_receives_the_marker_once_and_keeps_its_egress_genesis() {
 fn lost_acknowledgements_resume_to_exactly_one_marker() {
     let adopted = adopted(14);
     let initial = maintenance_source_state(&adopted.base);
-    let (plan, guard) = adopted.in_place();
+    let (plan, guard) = adopted.in_place(0);
     let token = guard.target_source(adopted.source_id(0)).unwrap();
     let (journal, backups) = adopted.directories("lost");
     let opened = adopted.base.open_maintenance(0, &token);
@@ -547,13 +551,13 @@ fn lost_acknowledgements_resume_to_exactly_one_marker() {
 #[test]
 fn refusals_leave_the_store_and_journal_unchanged() {
     let adopted = adopted(14);
-    let (_, guard) = adopted.in_place();
+    let (_, guard) = adopted.in_place(0);
     install_all(&adopted, &guard, "first");
     drop(guard);
     let installed = maintenance_source_state(&adopted.base);
 
     // Already installed: a new maintenance is refused before any record.
-    let (_, guard) = adopted.in_place();
+    let (_, guard) = adopted.in_place(0);
     let token = guard.target_source(adopted.source_id(0)).unwrap();
     let (journal, backups) = adopted.directories("again");
     let opened = adopted.base.open_maintenance(0, &token);
@@ -588,7 +592,7 @@ fn refusals_leave_the_store_and_journal_unchanged() {
 
     // On source B (still pending): occupied journal, foreign backup frame,
     // changed backup directory and an unframed backup are all refused.
-    let (_, guard) = adopted.in_place();
+    let (_, guard) = adopted.in_place(1);
     let token = guard.target_source(adopted.source_id(1)).unwrap();
     let neighbor = store_source_state(&adopted.base.stores[1]);
     let opened = adopted.base.open_maintenance(1, &token);
@@ -635,7 +639,7 @@ fn refusals_leave_the_store_and_journal_unchanged() {
     drop(guard);
 
     // A substituted backup copy no longer matches its frame at confirmation.
-    let (_, guard) = adopted.in_place();
+    let (_, guard) = adopted.in_place(1);
     let token = guard.target_source(adopted.source_id(1)).unwrap();
     let (journal, backups) = adopted.directories("b-swap");
     let copy = adopted
@@ -674,7 +678,7 @@ fn refusals_leave_the_store_and_journal_unchanged() {
 fn in_place_tokens_and_egress_or_adoption_methods_never_cross() {
     // Store14: the in-place token cannot drive egress or 13→14 adoption.
     let adopted14 = adopted(14);
-    let (_, guard) = adopted14.in_place();
+    let (_, guard) = adopted14.in_place(0);
     let token = guard.target_source(adopted14.source_id(0)).unwrap();
     let before = maintenance_source_state(&adopted14.base);
     let (journal, backups) = adopted14.directories("cross");
@@ -789,7 +793,7 @@ fn in_place_tokens_and_egress_or_adoption_methods_never_cross() {
     // Store15: the in-place token cannot resume or confirm the egress step,
     // and an in-place plan at the wrong format cannot open the source.
     let adopted15 = adopted(15);
-    let (_, guard) = adopted15.in_place();
+    let (_, guard) = adopted15.in_place(0);
     let token = guard.target_source(adopted15.source_id(0)).unwrap();
     let before = maintenance_source_state(&adopted15.base);
     let opened = adopted15.base.open_maintenance(0, &token);
@@ -835,7 +839,7 @@ fn in_place_tokens_and_egress_or_adoption_methods_never_cross() {
         closure,
         manifest_name: "stale14.json".into(),
     };
-    let (_, guard) = stale.in_place();
+    let (_, guard) = stale.in_place(0);
     let token = guard.target_source(stale.source_id(0)).unwrap();
     let source = &stale.base.plan.target.sources[0];
     assert!(

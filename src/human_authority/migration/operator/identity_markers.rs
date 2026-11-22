@@ -132,12 +132,20 @@ fn leaf(path: &Path) -> Result<(Directory, &str)> {
     Ok((parent, name))
 }
 
+fn synchronize_plan(plan: &PrivateFile, directory: &Directory, parent: &Directory) -> Result<()> {
+    plan.persistent_sync()?;
+    directory.sync()?;
+    parent.sync()?;
+    plan.persistent_revalidate()
+}
+
 /// Create the new private directory: journal and backups first, then the
 /// plan, synchronized last. A directory without its plan is never adopted.
 fn create_directory(
     path: &Path,
     closure: &HumanAuthorityClosureV1,
     manifest: &PrivateFile,
+    selected_source_id: Uuid,
 ) -> Result<MaintenanceDirectory> {
     let (parent, name) = leaf(path)?;
     let directory = parent.exclusive_child(name)?;
@@ -151,6 +159,7 @@ fn create_directory(
         Uuid::new_v4(),
         closure,
         observe_private_file_binding(manifest)?,
+        selected_source_id,
     );
     let bytes = serde_json::to_vec(&plan)?;
     ensure!(
@@ -158,10 +167,7 @@ fn create_directory(
         "maintenance plan exceeds bound"
     );
     let plan_file = directory.persistent_create(PLAN_NAME, &bytes)?;
-    plan_file.persistent_sync()?;
-    directory.sync()?;
-    parent.sync()?;
-    plan_file.persistent_revalidate()?;
+    synchronize_plan(&plan_file, &directory, &parent)?;
     Ok(MaintenanceDirectory {
         plan,
         plan_file,
@@ -171,12 +177,14 @@ fn create_directory(
 }
 
 /// Reopen the same directory; its plan must be the exact in-place plan of
-/// the unchanged published closure, with its original migration id.
+/// the unchanged published closure and selected source, with its original id.
 fn open_directory(
     path: &Path,
     closure: &HumanAuthorityClosureV1,
     manifest: &PrivateFile,
+    selected_source_id: Uuid,
 ) -> Result<MaintenanceDirectory> {
+    let (parent, _) = leaf(path)?;
     let directory = Directory::open_existing(path)?;
     let mut names: Vec<_> = directory
         .persistent_entries(8)?
@@ -201,10 +209,11 @@ fn open_directory(
         recorded.migration_id,
         closure,
         observe_private_file_binding(manifest)?,
+        selected_source_id,
     );
     ensure!(
         serde_json::to_vec(&plan)? == plan_file.bytes(),
-        "maintenance plan differs from the published closure"
+        "maintenance plan differs from the published closure or selected source"
     );
     let journal = directory
         .persistent_child(JOURNAL_NAME, false)?
@@ -212,6 +221,9 @@ fn open_directory(
     let backups = directory
         .persistent_child(BACKUPS_NAME, false)?
         .context("maintenance backups missing")?;
+    // A previous attempt may have written readable bytes without completing
+    // the file and directory barriers. Reestablish them before opening SQLite.
+    synchronize_plan(&plan_file, &directory, &parent)?;
     Ok(MaintenanceDirectory {
         plan,
         plan_file,
@@ -278,9 +290,19 @@ pub fn install_owned_identity_markers(
         return Err(Refusal::FormatUnsupported.into());
     }
     let maintenance = if resume {
-        open_directory(&maintenance_directory, &closure, &manifest)
+        open_directory(
+            &maintenance_directory,
+            &closure,
+            &manifest,
+            selected.source_id,
+        )
     } else {
-        create_directory(&maintenance_directory, &closure, &manifest)
+        create_directory(
+            &maintenance_directory,
+            &closure,
+            &manifest,
+            selected.source_id,
+        )
     }
     .map_err(conflict)?;
     let resolve = || {

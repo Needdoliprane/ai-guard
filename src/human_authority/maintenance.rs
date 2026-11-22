@@ -78,6 +78,9 @@ pub(crate) struct HumanSourcesMaintenancePlanV1 {
     pub target: HumanMaintenanceViewV1,
     pub prior_active_manifest: Option<HumanMaintenanceActiveManifestV1>,
     pub supported_storage_profile: HumanStorageProfileV1,
+    /// Single-source in-place maintenance still holds the whole union's locks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_source_id: Option<Uuid>,
 }
 
 impl HumanSourcesMaintenancePlanV1 {
@@ -88,6 +91,7 @@ impl HumanSourcesMaintenancePlanV1 {
         migration_id: Uuid,
         closure: &HumanAuthorityClosureV1,
         manifest_binding: SourceStorageBindingV1,
+        selected_source_id: Uuid,
     ) -> Self {
         let view = HumanMaintenanceViewV1 {
             sources: closure.sources.iter().map(from_active_source).collect(),
@@ -106,6 +110,7 @@ impl HumanSourcesMaintenancePlanV1 {
                 closure_digest: closure.closure_digest.clone(),
             }),
             supported_storage_profile: closure.supported_storage_profile,
+            selected_source_id: Some(selected_source_id),
         }
     }
 
@@ -131,6 +136,17 @@ impl HumanSourcesMaintenancePlanV1 {
             {
                 return Err(HumanAuthorityFailure::InvalidManifest);
             }
+        }
+        if let Some(source_id) = plan.selected_source_id
+            && (plan.prior.as_ref() != Some(&plan.target)
+                || plan.prior_active_manifest.is_none()
+                || !plan.target.sources.iter().any(|source| {
+                    source.source_id == source_id
+                        && source.kind == HumanSourceKindV1::TenantStore
+                        && matches!(source.required_format, 14 | 15)
+                }))
+        {
+            return Err(HumanAuthorityFailure::InvalidManifest);
         }
         // A moved logical source can have different physical bindings and
         // formats. It cannot silently change tenant, namespace or source kind.
@@ -552,6 +568,14 @@ impl HumanSourcesMaintenanceGuard {
         source_id: Uuid,
     ) -> Result<HumanMaintenanceSourceToken, HumanAuthorityFailure> {
         self.check()?;
+        if self
+            .owner
+            .plan
+            .selected_source_id
+            .is_some_and(|selected| selected != source_id)
+        {
+            return Err(HumanAuthorityFailure::SourceMismatch);
+        }
         let index = self
             .owner
             .targets

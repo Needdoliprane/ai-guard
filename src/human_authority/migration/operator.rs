@@ -305,6 +305,7 @@ pub fn prepare_maintenance_plan(
         target: view(target),
         prior_active_manifest: None,
         supported_storage_profile: HumanStorageProfileV1::LocalPosixFlockV1,
+        selected_source_id: None,
     };
     let bytes = serde_json::to_vec(&plan)?;
     ensure!(bytes.len() <= 512 * 1024, "human_sources_plan_bound");
