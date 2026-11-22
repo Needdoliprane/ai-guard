@@ -302,16 +302,38 @@ mod mysql {
     use crate::mysql_storage::audit::MysqlAuditStore;
     use std::{
         future::Future,
-        sync::atomic::{AtomicBool, Ordering},
+        sync::{
+            Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
     };
     use tokio::runtime::Handle;
+
+    #[derive(Default)]
+    struct ControlVerification {
+        failures: u64,
+        unavailable: bool,
+    }
+
+    impl ControlVerification {
+        fn observe(&mut self, failures_at_start: u64, verified: bool) {
+            if !verified {
+                self.failures = self.failures.saturating_add(1);
+                self.unavailable = true;
+            } else if self.failures == failures_at_start && self.failures != u64::MAX {
+                // A check already in flight cannot clear a newer failure.
+                self.unavailable = false;
+            }
+        }
+    }
 
     /// Synchronous facade over the async MySQL Store. Every call is made from
     /// a blocking Store lane (or from startup), never from an async worker.
     pub struct MysqlTenant {
         store: MysqlAuditStore,
         handle: Handle,
-        degraded: AtomicBool,
+        transport_degraded: AtomicBool,
+        control_verification: Mutex<ControlVerification>,
     }
 
     impl MysqlTenant {
@@ -319,7 +341,8 @@ mod mysql {
             Self {
                 store,
                 handle,
-                degraded: AtomicBool::new(false),
+                transport_degraded: AtomicBool::new(false),
+                control_verification: Mutex::default(),
             }
         }
 
@@ -345,12 +368,12 @@ mod mysql {
 
         pub fn block<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {
             let result = self.wait(future);
-            // Only a confirmed transport failure latches a degraded state. A
-            // refusal from the Store is an answer, not an outage.
+            // This records transport availability. Selected audit proof has
+            // its own health state.
             match &result {
-                Ok(_) => self.degraded.store(false, Ordering::Release),
+                Ok(_) => self.transport_degraded.store(false, Ordering::Release),
                 Err(error) if crate::mysql_storage::is_transport_failure(error) => {
-                    self.degraded.store(true, Ordering::Release)
+                    self.transport_degraded.store(true, Ordering::Release)
                 }
                 Err(_) => {}
             }
@@ -361,7 +384,11 @@ mod mysql {
             self.store.tenant_id()
         }
         pub fn healthy(&self) -> bool {
-            !self.degraded.load(Ordering::Acquire)
+            !self.transport_degraded.load(Ordering::Acquire)
+                && self
+                    .control_verification
+                    .lock()
+                    .is_ok_and(|state| !state.unavailable)
         }
         pub fn redactor_union(&self, additional: &Redactor) -> Redactor {
             self.store.redactor_union(additional)
@@ -375,11 +402,7 @@ mod mysql {
             if this.store.redactor_covers(additional) {
                 return Ok(this);
             }
-            let Self {
-                store,
-                handle,
-                degraded: _,
-            } = Arc::try_unwrap(this)
+            let Self { store, handle, .. } = Arc::try_unwrap(this)
                 .map_err(|_| anyhow::anyhow!("MySQL masking is fixed once the Store is shared"))?;
             Ok(Arc::new(Self::new(
                 store.with_additional_redaction(additional)?,
@@ -421,12 +444,25 @@ mod mysql {
                 None => self.block(operation),
             }
         }
-        /// One verified snapshot answers human and workload presence.
+        /// One verified snapshot answers human and workload presence for the
+        /// selected tenant. A collision is a verified answer. An unavailable
+        /// proof remains visible until a fresh selected check verifies both
+        /// projections, independently of transport and peer observations.
         pub fn control_presence(
             &self,
             digest: &[u8; 32],
         ) -> Result<Option<crate::mysql_storage::audit::ControlCollision>> {
-            self.block(self.store.verify_control_credential_presence(digest))
+            let failures_at_start = self
+                .control_verification
+                .lock()
+                .map_err(|_| anyhow::anyhow!("MySQL control verification state unavailable"))?
+                .failures;
+            let result = self.block(self.store.verify_control_credential_presence(digest));
+            self.control_verification
+                .lock()
+                .map_err(|_| anyhow::anyhow!("MySQL control verification state unavailable"))?
+                .observe(failures_at_start, result.is_ok());
+            result
         }
 
         /// This peer metadata lookup has its own budget and never changes the
