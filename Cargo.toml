@@ -57,10 +57,12 @@ path = "tests/e2e/provider_matrix.rs"
 
 [[example]]
 name = "mysql_storage_probe"
+path = "examples/mysql_storage_probe.rs"
 required-features = ["mysql-storage"]
 
 [[test]]
 name = "mysql_audit_store"
+path = "tests/mysql_audit_store.rs"
 required-features = ["mysql-storage"]
 
 [profile.release]
