@@ -567,6 +567,94 @@ impl Fixture {
         })
         .await?
     }
+
+    /// Called only after the scoped relay canary's wait failed, before cleanup.
+    pub(super) async fn awaiting_diagnostic(&mut self, job: Uuid) -> Value {
+        use std::os::unix::process::ExitStatusExt;
+
+        let broker = match self.broker.as_mut().map(Child::try_wait) {
+            Some(Ok(None)) => json!({"state": "live"}),
+            Some(Ok(Some(status))) => {
+                if let Some(code) = status.code().and_then(|code| u8::try_from(code).ok()) {
+                    json!({"state": "exit", "code": code})
+                } else if let Some(signal) =
+                    status.signal().and_then(|signal| u8::try_from(signal).ok())
+                {
+                    json!({"state": "signal", "code": signal})
+                } else {
+                    json!({"state": "unknown"})
+                }
+            }
+            _ => json!({"state": "unknown"}),
+        };
+        let witness = self.engine.try_lock().map_or_else(
+            |_| json!({"phase": "unknown", "has_errors": null}),
+            |engine| {
+                let counts = engine.import_counts;
+                let phase = if counts.workers_created > 0 {
+                    "worker_created"
+                } else if counts.verification_created > 0 {
+                    "verification_created"
+                } else if counts.imports_removed > 0 {
+                    "import_removed"
+                } else if counts.imports_created > 0 {
+                    "import_created"
+                } else {
+                    "not_observed"
+                };
+                json!({"phase": phase, "has_errors": !engine.errors.is_empty()})
+            },
+        );
+        // Sample each projection once. A failed or late read cannot change the
+        // outcome of the original 25-second observation.
+        let query = |command| {
+            timeout(
+                Duration::from_secs(1),
+                service::request(&self.broker_root, "a", A_RUNNER, command),
+            )
+        };
+        let (relay, job_status) = tokio::join!(
+            query(BrokerCommandV1::RelayStatus { operation_id: job }),
+            query(BrokerCommandV1::Status { operation_id: job }),
+        );
+        let unavailable = |reply| match reply {
+            Err(_) => json!({"reply": "timeout"}),
+            Ok(Err(_)) => json!({"reply": "transport_error"}),
+            Ok(Ok(BrokerReplyV1::Error { code })) => json!({"reply": "refused", "code": code}),
+            Ok(Ok(_)) => json!({"reply": "unexpected_reply"}),
+        };
+        let relay = match relay {
+            Ok(Ok(BrokerReplyV1::RelayStatus { status }))
+                if status.version == 1
+                    && status.operation_id == job
+                    && status.tenant_id == "tenant-a" =>
+            {
+                json!({
+                    "reply": "projection",
+                    "configured": status.configured,
+                    "phase": status.phase,
+                    "error": status.last_error,
+                    "endpoint_present": status.endpoint.is_some(),
+                })
+            }
+            other => unavailable(other),
+        };
+        let job_status = match job_status {
+            Ok(Ok(BrokerReplyV1::Status { status })) if status.operation_id == job => {
+                json!({
+                    "reply": "projection",
+                    "state": status.state,
+                    "worker_state": status.worker_state,
+                    "pending_rpc": status.pending_rpc_count.map(|count| count > 0),
+                    "executor_running": status.executor_task_running,
+                    "executor_error": status.executor_error,
+                })
+            }
+            other => unavailable(other),
+        };
+        json!({"broker": broker, "witness": witness, "relay": relay, "job": job_status})
+    }
+
     pub async fn issue(&self, index: usize, endpoint: &RelayEndpointV1) -> Result<String> {
         let manifest = self.root.as_path().join(format!("issue-{index}.json"));
         private_file(

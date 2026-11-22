@@ -527,12 +527,12 @@ impl std::fmt::Debug for ScopedRelayPhase {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn software_broker_scoped_relay_ipc_refuses_before_private_detail()
 -> std::result::Result<(), ScopedRelayPhase> {
-    // Libtest prints the failing Result with Debug. Only the phase leaves this test.
-    let fixture = Fixture::new(90)
+    // Libtest displays the phase instead of the underlying error.
+    let mut fixture = Fixture::new(90)
         .await
         .map_err(|_| ScopedRelayPhase::FixtureOpen)?;
     let mut phase = ScopedRelayPhase::SubmitA;
-    let result = verify_scoped_relay_ipc(&fixture, &mut phase)
+    let result = verify_scoped_relay_ipc(&mut fixture, &mut phase)
         .await
         .map_err(|_| phase);
     let cleanup = fixture.close().await.map_err(|error| {
@@ -545,10 +545,20 @@ async fn software_broker_scoped_relay_ipc_refuses_before_private_detail()
     result.and(cleanup)
 }
 
-async fn verify_scoped_relay_ipc(fixture: &Fixture, phase: &mut ScopedRelayPhase) -> Result<()> {
+async fn verify_scoped_relay_ipc(
+    fixture: &mut Fixture,
+    phase: &mut ScopedRelayPhase,
+) -> Result<()> {
     let a_job = fixture.submit("a", 90).await?;
     *phase = ScopedRelayPhase::AwaitingA;
-    let a_endpoint = fixture.wait_endpoint(a_job).await?;
+    let a_endpoint = match fixture.wait_endpoint(a_job).await {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            let diagnostic = fixture.awaiting_diagnostic(a_job).await;
+            eprintln!("g11_relay_awaiting_a {diagnostic}");
+            return Err(error);
+        }
+    };
     *phase = ScopedRelayPhase::SubmitB;
     let b_job = fixture.submit("b", 90).await?;
     *phase = ScopedRelayPhase::RunningB;
