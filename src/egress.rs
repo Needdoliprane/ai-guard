@@ -11,6 +11,7 @@ pub mod frontend;
 pub mod ids;
 mod policy;
 pub mod protocol;
+pub mod proxy_env;
 mod types;
 
 pub use policy::{EgressPolicyV1, ValidatedResolution};

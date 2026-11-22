@@ -214,22 +214,12 @@ pub struct ContainerSpec {
     terminal_secrets: TerminalSecrets,
     egress_proxy_port: Option<u16>,
 }
-/// Fixed proxy environment of a broker-egress worker. These values only help
-/// clients find the loopback helper; removing them never yields a route.
-pub const EGRESS_PROXY_MARKER: &str = "AI_GUARD_EGRESS_PROXY";
+pub use crate::egress::proxy_env::EGRESS_PROXY_MARKER;
 fn egress_environment(port: u16) -> Vec<String> {
-    let proxy = format!("http://127.0.0.1:{port}");
-    let mut environment: Vec<String> = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"]
-        .iter()
-        .map(|name| format!("{name}={proxy}"))
-        .collect();
-    environment.extend(
-        ["NO_PROXY", "no_proxy"]
-            .iter()
-            .map(|name| format!("{name}=localhost,127.0.0.1,::1")),
-    );
-    environment.push(format!("{EGRESS_PROXY_MARKER}={proxy}"));
-    environment
+    crate::egress::proxy_env::proxy_environment(port)
+        .into_iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect()
 }
 #[derive(Clone, Default)]
 struct TerminalSecrets(Vec<String>);
