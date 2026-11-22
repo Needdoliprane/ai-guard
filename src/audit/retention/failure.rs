@@ -45,6 +45,7 @@ pub mod code {
     pub const AUDIT_CHAIN_INVALID: &str = "audit_chain_invalid";
     pub const DESTINATION_NOT_NEW: &str = "archive_destination_not_new";
     pub const DESTINATION_UNAVAILABLE: &str = "archive_destination_unavailable";
+    pub const DESTINATION_RESERVED: &str = "archive_destination_reserved";
     pub const ARCHIVE_WRITE_FAILED: &str = "archive_write_failed";
     pub const ARCHIVE_UNVERIFIED: &str = "archive_unverified";
     pub const COMMIT_UNCONFIRMED: &str = "retention_commit_unconfirmed";

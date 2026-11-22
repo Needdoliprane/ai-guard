@@ -114,6 +114,55 @@ fn apply(
 }
 
 #[test]
+fn archive_destination_cannot_overlap_the_active_sqlite_namespace() {
+    let directory = support::private_tempdir();
+    let (data, store) = store13(directory.path());
+    store
+        .install_audit_retention(&directory.path().join("pre-retention.sqlite"))
+        .unwrap();
+    for index in 0..18 {
+        activity(&store, index).unwrap();
+    }
+    let planned = store
+        .audit_retention_plan(&policy(), later(), None, &BTreeSet::new())
+        .unwrap();
+    let head = store.head().unwrap();
+    let reserved_leaf = "tenant-a.sqlite-JOURNAL";
+    let reserved = directory.path().join(reserved_leaf);
+    assert!(!reserved.exists());
+    assert_eq!(
+        code_of(&apply(&store, &planned, &reserved).unwrap_err()),
+        Some("archive_destination_reserved")
+    );
+    assert!(!reserved.exists());
+    assert_eq!(
+        code_of(
+            &store
+                .export_audit_archive(&reserved, None, None)
+                .unwrap_err()
+        ),
+        Some("archive_destination_reserved")
+    );
+    assert!(!reserved.exists());
+    assert_eq!(store.head().unwrap(), head);
+    let after = store
+        .audit_retention_plan(&policy(), later(), None, &BTreeSet::new())
+        .unwrap();
+    assert_eq!(after.usage_before, planned.usage_before);
+    assert_eq!(store.audit_retention_ledger().unwrap().segments, 0);
+    drop(store);
+
+    let reopened = reopen(&data).unwrap();
+    assert_eq!(reopened.head().unwrap(), head);
+    assert!(reopened.integrity().unwrap().valid);
+    let outside = directory.path().join("archives");
+    private_dir(&outside);
+    let archive = outside.join(reserved_leaf);
+    reopened.export_audit_archive(&archive, None, None).unwrap();
+    assert!(archive.join("events.jsonl").is_file());
+}
+
+#[test]
 fn apply_reissues_the_durable_receipt_when_its_acknowledgement_was_lost() {
     let directory = support::private_tempdir();
     let (data, store) = store13(directory.path());

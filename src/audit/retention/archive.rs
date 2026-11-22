@@ -12,7 +12,7 @@ use super::{
     failure::{RetentionFailure, code},
 };
 use crate::{
-    audit::event_codec::digest,
+    audit::{event_codec::digest, storage::StoreStorage},
     control_fs::{Directory, absolute_path},
     model::Event,
 };
@@ -173,7 +173,7 @@ pub(crate) struct ArchiveWriter {
 impl ArchiveWriter {
     /// Create the archive directory exclusively under an existing private
     /// parent. An existing path, even an empty directory, is a refusal.
-    pub(crate) fn create(path: &Path) -> Result<Self, RetentionFailure> {
+    pub(super) fn create(path: &Path, storage: &StoreStorage) -> Result<Self, RetentionFailure> {
         let unavailable = |message: &str, error: &dyn std::fmt::Display| {
             RetentionFailure::new(code::DESTINATION_UNAVAILABLE, message)
                 .with("path", path.display().to_string())
@@ -213,6 +213,20 @@ impl ArchiveWriter {
                 &error,
             )
         })?;
+        if storage
+            .reserves_directory_name(&parent, &name)
+            .map_err(|error| {
+                unavailable(
+                    "the archive parent could not be compared with SQLite storage",
+                    &error,
+                )
+            })?
+        {
+            return Err(RetentionFailure::new(
+                code::DESTINATION_RESERVED,
+                "choose an ASCII name outside the SQLite namespace or another private parent",
+            ));
+        }
         let directory = parent.exclusive_child(&name).map_err(|error| {
             if std::fs::symlink_metadata(&path).is_ok() {
                 RetentionFailure::new(

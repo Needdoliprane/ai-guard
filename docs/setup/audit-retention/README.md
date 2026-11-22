@@ -143,6 +143,7 @@ Each command prints one JSON document. Exit status `0` is success, `2` a refusal
 | `plan_mismatch` | The store changed since the plan was reviewed | Plan again |
 | `archive_destination_not_new` | The archive path exists | Choose a new path |
 | `archive_destination_unavailable` | The parent is missing or not a private directory | Create a private parent (`0700`) |
+| `archive_destination_reserved` | The archive shares the physical SQLite parent and its name is reserved by SQLite or uses non-ASCII characters | Choose an ASCII name outside the SQLite namespace or another private parent |
 | `archive_write_failed`, `archive_unverified` | The archive could not be written or verified | Keep the directory for diagnosis and run `verify` before applying again |
 | `retention_commit_unconfirmed` | The archive is complete and the database did not confirm the commit | Keep the archive and retry the same command to check the receipt |
 | `reclaim_referenced_event` | A projection references an event selected for reclaim | Nothing was reclaimed; report it as a defect |

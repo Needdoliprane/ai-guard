@@ -667,7 +667,7 @@ impl Store {
             None => SnapshotFold::empty(),
         };
         let (_, genesis_seq, genesis_hash) = control_genesis(&tx)?;
-        let mut writer = ArchiveWriter::create(request.archive_dir)?;
+        let mut writer = ArchiveWriter::create(request.archive_dir, &self.backing)?;
         let archive_path = writer.path().to_path_buf();
         let written = (|| -> anyhow::Result<(WrittenArchive, String, String)> {
             {
@@ -971,7 +971,7 @@ impl Store {
         } else {
             None
         };
-        let mut writer = ArchiveWriter::create(archive_dir)?;
+        let mut writer = ArchiveWriter::create(archive_dir, &self.backing)?;
         {
             let mut statement = tx.prepare(RANGE_SQL)?;
             let mut range = statement.query(params![first, last])?;

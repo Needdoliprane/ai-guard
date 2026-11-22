@@ -143,6 +143,7 @@ Chaque commande affiche un document JSON. Le code de sortie `0` est un succès, 
 | `plan_mismatch` | La base a changé depuis la relecture du plan | Planifier à nouveau |
 | `archive_destination_not_new` | Le chemin d’archive existe | Choisir un nouveau chemin |
 | `archive_destination_unavailable` | Le parent manque ou n’est pas un répertoire privé | Créer un parent privé (`0700`) |
+| `archive_destination_reserved` | L’archive partage le parent physique de SQLite et son nom est réservé par SQLite ou contient des caractères hors ASCII | Choisir un nom ASCII en dehors de l’espace de noms SQLite ou un autre parent privé |
 | `archive_write_failed`, `archive_unverified` | L’archive n’a pas pu être écrite ou vérifiée | Conserver le répertoire pour le diagnostic et exécuter `verify` avant un nouvel `apply` |
 | `retention_commit_unconfirmed` | L’archive est complète et le commit de la base reste indéterminé | Conserver l’archive et relancer la même commande pour vérifier le reçu |
 | `reclaim_referenced_event` | Une projection référence un événement choisi pour la récupération | Rien n’a été récupéré ; le signaler comme défaut |
