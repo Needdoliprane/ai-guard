@@ -2,13 +2,13 @@ name: G06 R2 central SQLite fixture
 
 on:
   push:
-    branches: ['claude/v1-g06-retention-r2-central-diagnostic-20261122']
+    branches: ['claude/v1-g06-retention-r2-central-receipt-20261122']
 
 permissions:
   contents: read
 
 concurrency:
-  group: g06-retention-r2-central-diagnostic-${{ github.ref }}
+  group: g06-retention-r2-central-receipt-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -32,16 +32,21 @@ jobs:
         run: |
           set -o pipefail
           selector=supervised_api_arms_import_and_worker_claims_once_then_maintenance_blocks_new_effects
-          printf '### G06 R2 central SQLite fixture on Linux\n\n' >> "$GITHUB_STEP_SUMMARY"
+          receipt="$RUNNER_TEMP/g06-r2-central-receipt.txt"
+          : > "$receipt"
+          emit_receipt() {
+            tee -a "$receipt" "$GITHUB_STEP_SUMMARY"
+          }
+          printf '### G06 R2 central SQLite fixture on Linux\n\n' | emit_receipt
           fail() {
-            printf 'FAIL %s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+            printf 'FAIL %s\n' "$1" | emit_receipt
             exit 1
           }
           revision=$(git rev-parse HEAD 2>/dev/null) || fail CHECKOUT_REVISION_MISMATCH
           if [[ ! "$revision" =~ ^[0-9a-f]{40}$ || "$revision" != "$GITHUB_SHA" ]]; then
             fail CHECKOUT_REVISION_MISMATCH
           fi
-          printf 'Commit `%s`\n\n' "$revision" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Commit `%s`\n\n' "$revision" | emit_receipt
 
           capture_dir=$(mktemp -d "$RUNNER_TEMP/r2-central.XXXXXX" 2>/dev/null) || fail CAPTURE_FAILED
           trap 'rm -rf -- "$capture_dir" 2>/dev/null || true' EXIT
@@ -89,7 +94,7 @@ jobs:
           checksum=$(sha256sum -- "$binary" 2>/dev/null) || fail BUILD_RECEIPT_REJECTED
           checksum=${checksum%% *}
           [[ "$checksum" =~ ^[0-9a-f]{64}$ ]] || fail BUILD_RECEIPT_REJECTED
-          printf 'Test binary SHA-256 `%s`\n\n' "$checksum" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Test binary SHA-256 `%s`\n\n' "$checksum" | emit_receipt
 
           output="$capture_dir/fixture"
           if ! capture "$output" 1048576 FIXTURE "$binary" "$selector" --exact; then
@@ -111,4 +116,12 @@ jobs:
               || ! grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;' "$output"; then
             fail RECEIPT_REJECTED
           fi
-          printf 'PASS `%s` (1/1, 0 ignored)\n' "$selector" >> "$GITHUB_STEP_SUMMARY"
+          printf 'PASS `%s` (1/1, 0 ignored)\n' "$selector" | emit_receipt
+      - name: Upload the filtered fixture receipt
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: g06-r2-central-receipt-${{ github.sha }}
+          path: ${{ runner.temp }}/g06-r2-central-receipt.txt
+          if-no-files-found: error
+          retention-days: 14
