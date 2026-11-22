@@ -217,11 +217,18 @@ inspected; otherwise it is absent from the serialized report (not `null`).
   until the observed CNI enforcement probe of plan step 4a passes.
 - **Credentials:** the broker keeps the Kubernetes credentials; the Pod has no
   token automount, environment, Secret or argv secret.
-- **Future broker permissions** (plan step 1 below, not provisioned by this
-  work): get on the two Namespaces, get on PersistentVolumeClaims, get/create/patch/delete on
-  Pods in the tenant Namespace, and the attach permission whose verb must be
-  confirmed (EXT-8). No exec, logs or Secrets. RBAC cannot restrict create by
-  object name or spec.
+- **Broker permissions** (plan step 1 below; reviewed template in the
+  [Docker Desktop recipe](../../../deploy/kubernetes/docker-desktop/README.md)):
+  get on the two Namespaces; get/create/delete on PersistentVolumeClaims (the
+  broker creates each per-attempt claim, decision D4); get/create/patch/delete
+  on Pods in the tenant Namespace; create on `pods/attach` (whether the
+  WebSocket upgrade also needs `get` is EXT-8, verified live before any attach);
+  get/list on NetworkPolicies; get on the `default` ServiceAccount; and get on
+  the configured StorageClass and its CSIDriver. `delete` is granted from the
+  start: ai-guard only sends deletes that carry a UID precondition, after a
+  central claim. No exec, logs, Secrets, ephemeral containers, port-forward,
+  update, binding or token request. RBAC cannot restrict create by object name
+  or spec.
 - **Tenancy:** the tenant comes only from the authenticated identity. Refusing
   two tenants that share an authority or a namespace at configuration load
   (R10) is a prerequisite of any attach.
@@ -284,8 +291,8 @@ authorization.
 | Step | Action | Oracle and evidence | Stop |
 |---|---|---|---|
 | 0 | Record the environment of 8.1. | Versions and context retained. | Context other than `docker-desktop`. |
-| 1 | (Requires an explicit maintainer authorization, not granted by this work.) Provision the tenant Namespace with Pod Security `restricted` `v1.36`, a default-deny ingress and egress NetworkPolicy, a ServiceAccount without token automount and a Role with the permissions of section 7, from a template reviewed at that time. `delete` is granted only for the later stop step. | Created objects and their UIDs retained. A created NetworkPolicy is not proof of enforcement (step 4a). | Any partial creation: inspect, never delete and recreate. |
-| 2 | `agentsandbox kubernetes doctor --check-permissions` with the broker identity. | Report retained. Its twelve fixed access reviews include `patch pods`, `update pods`, `delete pods` and `create pods/attach`; whether `create` is the verb checked for a WebSocket attach upgrade is still to confirm (EXT-8). `delete pods` must stay denied until the stop step; `update pods`, exec, logs, Secrets, bindings and token requests must be denied. | Any refusal of the reviews, or any of those denied permissions allowed. |
+| 1 | (Requires an explicit maintainer authorization, not granted by this work.) Provision the tenant Namespace with Pod Security `restricted` `v1.36`, a default-deny ingress and egress NetworkPolicy, a ServiceAccount without token automount and a Role with the permissions of section 7, from a template reviewed at that time. `delete` on Pods and claims is granted from the start and used only by UID-precondition deletes. | Created objects and their UIDs retained. A created NetworkPolicy is not proof of enforcement (step 4a). | Any partial creation: inspect, never delete and recreate. |
+| 2 | `agentsandbox kubernetes doctor --check-permissions` with the broker identity. | Report retained. Its twelve fixed access reviews include `patch pods`, `update pods`, `delete pods` and `create pods/attach`; whether `create` is the verb checked for a WebSocket attach upgrade is still to confirm (EXT-8). `delete pods` is allowed (UID-precondition deletes only); `update pods`, exec, logs, Secrets, bindings and token requests must be denied. | Any refusal of the reviews, or any of those denied permissions allowed. |
 | 3 | (Requires an explicit maintainer authorization, not granted by this work.) The operator creates one `ReadWriteOncePod` PVC named for an attempt. The read-only `kubernetes inspect-workspace` CLI verifies that it is `Bound` and returns its UID. | Claim projection retained. | Class not RWOP-capable or `WaitForFirstConsumer`: `BLOCKED`. |
 
 ### 8.4 Effect suite (all BLOCKED)
@@ -733,3 +740,26 @@ and ACKs are limited to64/128KiB, closed JSON without duplicate members. Each
 control request has a12s timeout, without redirects, ambient proxies or
 automatic retries; incoming body reading is limited to5s. Secrets are refused
 before persistence/distribution and transport errors stay opaque.
+
+## 13. G11 effect path: source state (not qualified)
+
+The G11 lot adds, in source, the pieces of the effect path below. **No session
+runs yet**: the broker driver, the worker protocol v3, the HTTP routes of the
+effect ledger and the MySQL port are still being delivered, and nothing here
+has run against a cluster. The [Docker Desktop recipe](../../../deploy/kubernetes/docker-desktop/README.md)
+holds the reviewed cluster objects.
+
+| Piece | Source | What it does and does not do |
+|---|---|---|
+| Workspace claim created by the broker (R5, decision D4) | `src/runtime/kubernetes/session_claim.rs` | Renders the exact `ReadWriteOncePod` Filesystem claim `ai-guard-ws-<attempt>` from the confirmed intent and the tenant storage request (class, MiB). One POST at most; only a validated 201 yields the claim UID; any other answer leaves ownership unknown. DELETE carries the UID precondition. The claim size is not a byte quota. |
+| Effectful Pod renderer r2 | `src/runtime/kubernetes/session_pod.rs` | The session Pod carries the finalizer `ai-guard.io/session-terminal` and the protocol v3 mode `kubernetes-session-v3`; the export helper `ai-guard-export-<attempt>` mounts the same claim read-only, runs `kubernetes-workspace-export-v3` and has its own 1800 s runtime bound. The r1 waiting request is unchanged. |
+| Terminal finalizer (decision D5) | `src/runtime/kubernetes/session_effect.rs` | The finalizer is removed only by a JSON Patch that tests the UID and the exact finalizer list, after an observed terminated container or a deletion of a Pod that was never released. A Pod stuck with the finalizer after a lost broker follows the operator procedure of the recipe guide. |
+| Shared request builders | `src/runtime/kubernetes/session_requests.rs` | One source for the exact PATCH and DELETE bodies and their digests, used by the runtime to send and by the central ledger to re-derive. |
+| Production effect permit (S5) | `src/runtime/kubernetes/session_permit.rs` | The only production implementor of the sealed guard. Built from one central `EmitOnce` acknowledgement; refuses another effect kind, request digest or authority, an elapsed central window and a raised cancellation, before any byte is sent; consumed by its single request. |
+| Session admission (R7) and R10 | `src/runtime/kubernetes/session_admission.rs` | Explicit per-tenant activation bound to one authority. Reads the tenant namespace and refuses, each with its own reason: Pod Security other than `restricted` at the pinned version, a NetworkPolicy set other than the single default-deny policy, a default ServiceAccount that may automount a token, a StorageClass that is not `Immediate` or not served by a registered CSIDriver, a missing session permission, or a forbidden permission (exec, logs, Secrets, update, binding, token, ephemeral containers, port-forward) not denied. `refuse_shared_authorities` refuses at configuration load two tenants that share an authority id, an endpoint and namespace, or a namespace UID. The admission is an observation of objects, never a proof that the CNI enforces the policy or that no other subject can attach. |
+| Central effect ledger (R1, Q7, settlement) | `src/control/kubernetes_session/effects.rs`, `src/audit/kubernetes_session/effects.rs` | A capability family enabled by the backed-up maintenance `enable_kubernetes_session_effects_v1` on a schema 11–13 store, without any format change. Each claim, result, terminal and settlement is one audited event with its projection rows. The Store re-derives every request digest it can, enforces the order claim → session Pod → release with an armed deadline → one attach → terminal → finalizer → export → claim delete, binds each claim UID to one reservation only, and releases the quota only after every created Pod has an observed end and no CREATE stays uncertain. A replay never returns a second `EmitOnce`. |
+
+Limits: Kubernetes sessions stay on store formats 11–13; in owned-source mode
+(formats 14 and 15) the session routes refuse before any effect. An uncertain
+CREATE keeps the quota held until an authorized recovery resolves it. MySQL
+tenants refuse the family until its port lands.
