@@ -836,7 +836,7 @@ mod tests {
             json!({"mode":"password"})
         };
         serde_json::from_value(json!({
-            "backend":"mysql","host":"db.example.invalid","port":3306,"database":"audit_a",
+            "host":"db.example.invalid","port":3306,"database":"audit_a",
             "username":"writer_a","namespace":"5657019d-5302-4ced-922f-406aa3d8ec5c",
             "password_file":dir.join("sql-password"),"ca_file":dir.join("sql-ca.pem"),
             "authentication":authentication
