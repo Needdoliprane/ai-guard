@@ -398,7 +398,7 @@ async function main() {
       requireEvidence(modules, "Playwright est requis pour ce parcours.");
       playwright = require(join(modules, "playwright"));
     }
-    const launchBrowser = () => playwright.chromium.launch({ headless: true,
+    const launchBrowser = () => playwright.chromium.launch({ headless: true, chromiumSandbox: true,
       executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined,
       args: ["--no-proxy-server", "--disable-background-networking", `--host-resolver-rules=${hostResolverRules}`] });
     if (transportOnly) {
