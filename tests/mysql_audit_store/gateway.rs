@@ -171,7 +171,8 @@ async fn assert_startup_refused(registry: &Registry, secrets: &[&str], label: &s
     let mut text = Vec::new();
     let status = timeout(DEADLINE, async {
         use tokio::io::AsyncReadExt;
-        let read = stderr.take(16_384).read_to_end(&mut text);
+        let mut bounded = stderr.take(16_384);
+        let read = bounded.read_to_end(&mut text);
         let (status, _) = tokio::join!(child.wait(), read);
         status
     })
