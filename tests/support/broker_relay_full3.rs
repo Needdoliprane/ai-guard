@@ -1578,6 +1578,32 @@ impl Fixture {
         self.engine.lock().await.import_counts
     }
 
+    pub async fn complete_running_worker(
+        &self,
+        operation: Uuid,
+        session_id: &str,
+        container_id: &str,
+    ) -> Result<()> {
+        let mut engine = self.engine.lock().await;
+        let facts = &engine
+            .containers
+            .get(container_id)
+            .context("synthetic worker missing")?
+            .facts;
+        let labels = &facts["Config"]["Labels"];
+        ensure!(
+            engine.import_counts.workers_created == 1
+                && labels["agentsandbox.purpose"] == "run"
+                && labels["agentsandbox.operation"] == operation.to_string()
+                && labels["agentsandbox.session"] == session_id
+                && facts["State"]["Status"] == "running"
+                && facts["State"]["Running"] == true,
+            "synthetic worker is not the running allocation"
+        );
+        // End the existing attach and make the terminal available to runtime inspection.
+        engine.terminal(container_id)
+    }
+
     pub async fn submit(&self, profile: &str, seconds: u32) -> Result<Uuid> {
         use diagnostics::{Outcome, Phase, Purpose};
         let operation_id = Uuid::new_v4();

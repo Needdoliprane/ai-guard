@@ -369,7 +369,7 @@ impl Engine {
             .then(|| id.clone())
         })
     }
-    fn terminal(&mut self, id: &str) -> Result<()> {
+    pub(super) fn terminal(&mut self, id: &str) -> Result<()> {
         let container = self
             .containers
             .get_mut(id)

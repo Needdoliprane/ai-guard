@@ -1,4 +1,4 @@
-//! Real CLI, broker IPC and SQLite with a local synthetic import held before exit.
+//! Real CLI, broker IPC and SQLite through a held synthetic import and worker completion.
 #![cfg(all(target_os = "macos", target_arch = "aarch64"))]
 
 #[allow(dead_code, unused_imports)]
@@ -7,10 +7,12 @@ mod harness;
 
 use agentsandbox::{
     audit::EventQuery,
-    broker::service::protocol::{BrokerReplyV1, JobResultOutcomeV1, JobStateV1},
+    broker::service::protocol::{
+        BrokerReplyV1, JobResultOutcomeV1, JobStateV1, TerminalJobResultV1,
+    },
     control::{
-        HelperCleanupV1, HelperObservationV1, HelperStartClaimV1, MutationReceiptV1,
-        RuntimeStatusV1, WorkerStateV1,
+        ArmReceiptV1, HelperCleanupV1, HelperObservationV1, HelperStartClaimV1, MutationReceiptV1,
+        RuntimeStatusV1, WorkerStateV1, WorkerV1,
     },
     control_fs::Directory,
     model::StoredEvent,
@@ -23,7 +25,7 @@ use std::{io, os::unix::process::ExitStatusExt, path::Path, process::Stdio, time
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::Command,
-    time::{sleep, timeout},
+    time::{Instant, sleep, timeout, timeout_at},
 };
 use uuid::Uuid;
 
@@ -33,6 +35,7 @@ const CLI_STREAM_LIMIT: u64 = 64 * 1024;
 const CLI_WAIT: Duration = Duration::from_secs(60);
 const RELEASED_IMPORT_WAIT: Duration = Duration::from_secs(180);
 const PLAYBACK_WAIT: Duration = Duration::from_secs(600);
+const WORKER_WAIT: Duration = Duration::from_secs(300);
 
 fn broker_cli(fixture: &Fixture, action: &str, operation: Uuid) -> Command {
     let mut command = Command::new(BIN);
@@ -375,6 +378,196 @@ async fn after_import_release(
     Ok([observation_receipt, cleanup_receipt])
 }
 
+async fn after_import_worker_terminal(
+    fixture: &Fixture,
+    operation: Uuid,
+    import_arm: &ArmReceiptV1,
+) -> Result<()> {
+    // The extended gate waits for the same allocation that held quota during import.
+    let running = timeout(WORKER_WAIT, async {
+        loop {
+            let worker = fixture
+                .a
+                .worker(&import_arm.worker_id)
+                .map_err(|_| anyhow::anyhow!("phase=worker category=sqlite_worker_read"))?
+                .context("phase=worker category=sqlite_worker_missing")?;
+            if worker.state == WorkerStateV1::Running {
+                break Ok::<_, anyhow::Error>(worker);
+            }
+            if let Some(diagnostic) = batch_failure(fixture)? {
+                bail!("phase=worker category=batch_failure_observed diagnostic={diagnostic}");
+            }
+            sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .context("phase=worker category=running_not_reached")??;
+    let container_id = running
+        .attempt
+        .container_id
+        .as_deref()
+        .context("phase=worker category=runtime_identity_missing")?;
+    ensure!(
+        running.admission_operation_id == operation.to_string()
+            && running.attempt.attempt_id == import_arm.attempt_id
+            && running.observed_started_at.is_some()
+            && running.quota_held,
+        "phase=worker category=unexpected_running_worker"
+    );
+    println!("phase=worker state=Running quota_held=true");
+    fixture
+        .complete_running_worker(operation, &running.launch.session_id, container_id)
+        .await
+        .map_err(|_| anyhow::anyhow!("phase=worker category=synthetic_completion_refused"))?;
+
+    let (worker, terminal) = timeout(WORKER_WAIT, async {
+        loop {
+            let worker = fixture
+                .a
+                .worker(&running.worker_id)
+                .map_err(|_| anyhow::anyhow!("phase=result category=sqlite_worker_read"))?
+                .context("phase=result category=sqlite_worker_missing")?;
+            if worker.state == WorkerStateV1::Terminal && worker.cleanup_removed == Some(true) {
+                let BrokerReplyV1::Result { result } =
+                    read_reply(broker_cli(fixture, "result", operation), "result").await?
+                else {
+                    bail!("phase=result category=unexpected_result_reply");
+                };
+                ensure!(
+                    result.version == 1
+                        && result.operation_id == operation
+                        && !result.cancel_requested,
+                    "phase=result category=unexpected_result_identity"
+                );
+                match result.outcome {
+                    JobResultOutcomeV1::Terminal { result } => break Ok((worker, result)),
+                    JobResultOutcomeV1::Pending => {}
+                    _ => bail!("phase=result category=unexpected_result_outcome"),
+                }
+            }
+            if let Some(diagnostic) = batch_failure(fixture)? {
+                bail!("phase=result category=batch_failure_observed diagnostic={diagnostic}");
+            }
+            sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .context("phase=result category=terminal_not_reached")??;
+    let observed = worker
+        .last_observation
+        .as_ref()
+        .context("phase=result category=terminal_observation_missing")?;
+    ensure!(
+        worker.worker_id == running.worker_id
+            && worker.attempt == running.attempt
+            && worker.observed_started_at == running.observed_started_at
+            && worker.launch.authority_id == running.launch.authority_id
+            && !worker.quota_held
+            && observed.inspection.container_id == container_id
+            && observed.inspection.authority_id == worker.launch.authority_id
+            && observed.status == RuntimeStatusV1::Exited
+            && observed.running == Some(false)
+            && observed.finished_at.is_some()
+            && observed.exit_code == Some(0)
+            && observed.oom_killed == Some(false)
+            && terminal.session_id.to_string() == running.launch.session_id
+            && terminal.container_id == container_id
+            && terminal.volume == worker.attempt.volume_name
+            && terminal.exit_code == 0
+            && terminal.oom_killed == Some(false)
+            && terminal.changed_files == 0
+            && !terminal.output_captured,
+        "phase=result category=unexpected_terminal_worker"
+    );
+    verify_terminal_audit(fixture, &worker, &terminal)?;
+    println!("phase=worker state=Terminal quota_held=false releases=1");
+    println!("phase=result outcome=Terminal audit=Confirmed");
+    Ok(())
+}
+
+fn verify_terminal_audit(
+    fixture: &Fixture,
+    worker: &WorkerV1,
+    terminal: &TerminalJobResultV1,
+) -> Result<()> {
+    let events = fixture
+        .a
+        .events(&EventQuery {
+            order: Some("asc".into()),
+            limit: Some(1000),
+            ..EventQuery::default()
+        })
+        .map_err(|_| anyhow::anyhow!("phase=result category=sqlite_event_read"))?;
+    ensure!(
+        events.len() < 1000,
+        "phase=result category=audit_incomplete"
+    );
+    let session = worker.launch.session_id.as_str();
+    let at = |seq, kind: &str| {
+        events
+            .iter()
+            .find(|entry| {
+                entry.seq == seq
+                    && entry.event.kind == kind
+                    && entry.event.session_id.as_deref() == Some(session)
+            })
+            .map(|entry| &entry.event.data)
+            .with_context(|| format!("phase=result category=missing_audit_event kind={kind}"))
+    };
+    let worker_id = worker.worker_id.as_str();
+    let attempt_id = worker.attempt.attempt_id.as_str();
+    let result = at(terminal.result_audit_seq, "broker.batch.result")?;
+    let scan = at(terminal.scan_audit_seq, "broker.batch.scan")?;
+    let cleanup = at(terminal.cleanup_audit_seq, "control.worker.transition")?;
+    // This fixture uses the SQLite V6 worker record with a durable snapshot.
+    let cleaned = &cleanup["worker"];
+    ensure!(
+        result["worker_id"] == worker_id
+            && result["attempt_id"] == attempt_id
+            && result["observation"]["id"] == terminal.container_id
+            && result["observation"]["process"]["exit_code"] == terminal.exit_code
+            && scan["worker_id"] == worker_id
+            && scan["manifest_digest"] == terminal.manifest_digest
+            && scan["changed_files"].as_u64() == u64::try_from(terminal.changed_files).ok()
+            && cleanup["action"] == "cleanup_result"
+            && cleaned["worker_id"] == worker_id
+            && cleaned["attempt"]["attempt_id"] == attempt_id
+            && cleaned["attempt"]["container_id"] == terminal.container_id
+            && cleaned["cleanup_removed"] == true,
+        "phase=result category=audit_tuple_mismatch"
+    );
+    let mut held = None;
+    let mut release = None;
+    for entry in events.iter().filter(|entry| {
+        entry.event.kind == "control.worker.transition"
+            && entry.event.session_id.as_deref() == Some(session)
+            && entry.event.data["worker"]["worker_id"] == worker_id
+            && entry.event.data["worker"]["attempt"]["attempt_id"] == attempt_id
+    }) {
+        let quota_held = entry.event.data["worker"]["quota_held"]
+            .as_bool()
+            .context("phase=quota category=invalid_audit_snapshot")?;
+        if held == Some(true) && !quota_held {
+            ensure!(
+                release.replace(entry).is_none(),
+                "phase=quota category=multiple_releases"
+            );
+        }
+        held = Some(quota_held);
+    }
+    let release = release.context("phase=quota category=release_missing")?;
+    let observation = &release.event.data["observation"];
+    ensure!(
+        held == Some(false)
+            && release.seq < terminal.cleanup_audit_seq
+            && release.event.data["action"] == "observe"
+            && observation["inspection"]["container_id"] == terminal.container_id
+            && observation["status"] == "exited",
+        "phase=quota category=release_observation_mismatch"
+    );
+    Ok(())
+}
+
 fn assert_closed_ack(
     root: &Path,
     operation: Uuid,
@@ -436,6 +629,7 @@ fn assert_closed_ack(
 struct Playback {
     cli: Result<()>,
     receipts: [MutationReceiptV1; 2],
+    import_arm: ArmReceiptV1,
 }
 
 async fn exercise(fixture: &Fixture, operation: Uuid) -> Result<Playback> {
@@ -470,8 +664,13 @@ async fn exercise(fixture: &Fixture, operation: Uuid) -> Result<Playback> {
     let release = gate.release();
     let (claim, cli) = held?;
     release?;
-    let receipts = after_import_release(fixture, &claim?).await?;
-    Ok(Playback { cli, receipts })
+    let claim = claim?;
+    let receipts = after_import_release(fixture, &claim).await?;
+    Ok(Playback {
+        cli,
+        receipts,
+        import_arm: claim.arm_receipt,
+    })
 }
 
 #[test]
@@ -485,10 +684,21 @@ fn broker_import_witness_requires_exact_pull_policy() -> Result<()> {
 async fn broker_import_result_pending_then_acknowledged() -> Result<()> {
     let fixture = Fixture::new_fresh().await?;
     let operation = Uuid::new_v4();
-    let result = timeout(PLAYBACK_WAIT, exercise(&fixture, operation))
+    let deadline = Instant::now() + PLAYBACK_WAIT;
+    let result = timeout_at(deadline, exercise(&fixture, operation))
         .await
         .context("phase=playback category=fixture_deadline")
         .and_then(|result| result);
+    let terminal = match &result {
+        Ok(playback) if playback.cli.is_ok() => timeout_at(
+            deadline,
+            after_import_worker_terminal(&fixture, operation, &playback.import_arm),
+        )
+        .await
+        .context("phase=worker category=fixture_deadline")
+        .and_then(|result| result),
+        _ => Ok(()),
+    };
     let mut journal_ack = None;
     let (closed, witness_failures) = fixture
         .close_with_broker_stopped(|root| {
@@ -516,6 +726,7 @@ async fn broker_import_result_pending_then_acknowledged() -> Result<()> {
     );
     let playback = result?;
     playback.cli?;
+    terminal?;
     journal_ack.context("phase=closed_journal category=ack_not_checked")??;
     ensure!(
         witness_failures == 0,
