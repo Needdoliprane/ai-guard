@@ -46,8 +46,8 @@ jobs:
           cargo fetch --locked
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
-      - name: Check all targets with default features (SQLite and MySQL)
-        run: cargo check --locked --offline --all-targets
+      - name: Check all targets with MySQL enabled
+        run: cargo check --locked --offline --all-targets --features mysql-storage
       - name: Check all targets without default features (SQLite only)
         run: cargo check --locked --offline --all-targets --no-default-features
       - name: Provider harness regressions
