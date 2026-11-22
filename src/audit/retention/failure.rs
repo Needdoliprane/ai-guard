@@ -66,9 +66,11 @@ pub mod code {
     pub const CHECKPOINT_LOG_UNAVAILABLE: &str = "checkpoint_log_unavailable";
 }
 
-/// The refusal carried by an error chain, if any.
+/// The refusal carried by typed context or the underlying error chain.
 pub fn refusal(error: &anyhow::Error) -> Option<&RetentionFailure> {
-    error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<RetentionFailure>())
+    error.downcast_ref::<RetentionFailure>().or_else(|| {
+        error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<RetentionFailure>())
+    })
 }
