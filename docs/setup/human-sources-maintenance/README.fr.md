@@ -134,7 +134,9 @@ Après l'adoption, les capacités protégées des droits humains exigent le marq
 d'identité `human_rights_v2` sur chaque Store14/15 de tenant. Tous les
 consommateurs arrêtés, lancez la maintenance hors ligne en place une fois par
 tenant, chacun avec un nouveau répertoire de maintenance privé situé hors du
-répertoire de préparation :
+répertoire de préparation et des répertoires des sources. La commande vérifie
+l'identité réelle des répertoires, y compris les autres noms que le système de
+fichiers résout vers ces mêmes répertoires.
 
 ```sh
 agentsandbox human-sources human-rights install \

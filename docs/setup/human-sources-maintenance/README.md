@@ -128,7 +128,9 @@ loss or production readiness.
 After adoption, the fenced human rights capabilities need the identity marker
 `human_rights_v2` on each tenant Store14/15. With every consumer stopped, run
 the offline in-place maintenance once per tenant, each with a new private
-maintenance directory outside the preparation directory:
+maintenance directory outside the preparation and source directories. The
+command checks the actual directory identities, including alternate names
+resolved by the filesystem.
 
 ```sh
 agentsandbox human-sources human-rights install \

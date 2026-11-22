@@ -18,6 +18,7 @@ use crate::{
             HumanSourcesMaintenanceGuard, HumanSourcesMaintenancePlanV1,
         },
         migration::egress_journal::RetainedSourceIntent,
+        open_bound_parent,
     },
     redaction::Redactor,
 };
@@ -142,12 +143,12 @@ fn synchronize_plan(plan: &PrivateFile, directory: &Directory, parent: &Director
 /// Create the new private directory: journal and backups first, then the
 /// plan, synchronized last. A directory without its plan is never adopted.
 fn create_directory(
-    path: &Path,
+    parent: &Directory,
+    name: &str,
     closure: &HumanAuthorityClosureV1,
     manifest: &PrivateFile,
     selected_source_id: Uuid,
 ) -> Result<MaintenanceDirectory> {
-    let (parent, name) = leaf(path)?;
     let directory = parent.exclusive_child(name)?;
     let journal = directory
         .persistent_child(JOURNAL_NAME, true)?
@@ -167,7 +168,7 @@ fn create_directory(
         "maintenance plan exceeds bound"
     );
     let plan_file = directory.persistent_create(PLAN_NAME, &bytes)?;
-    synchronize_plan(&plan_file, &directory, &parent)?;
+    synchronize_plan(&plan_file, &directory, parent)?;
     Ok(MaintenanceDirectory {
         plan,
         plan_file,
@@ -179,13 +180,12 @@ fn create_directory(
 /// Reopen the same directory; its plan must be the exact in-place plan of
 /// the unchanged published closure and selected source, with its original id.
 fn open_directory(
-    path: &Path,
+    parent: &Directory,
+    directory: &Directory,
     closure: &HumanAuthorityClosureV1,
     manifest: &PrivateFile,
     selected_source_id: Uuid,
 ) -> Result<MaintenanceDirectory> {
-    let (parent, _) = leaf(path)?;
-    let directory = Directory::open_existing(path)?;
     let mut names: Vec<_> = directory
         .persistent_entries(8)?
         .into_iter()
@@ -223,7 +223,7 @@ fn open_directory(
         .context("maintenance backups missing")?;
     // A previous attempt may have written readable bytes without completing
     // the file and directory barriers. Reestablish them before opening SQLite.
-    synchronize_plan(&plan_file, &directory, &parent)?;
+    synchronize_plan(&plan_file, directory, parent)?;
     Ok(MaintenanceDirectory {
         plan,
         plan_file,
@@ -232,10 +232,10 @@ fn open_directory(
     })
 }
 
-fn check_location(path: &Path, excluded: &[PathBuf]) -> Result<()> {
-    validate_absolute_path(path)?;
+fn check_location(candidate: &Directory, protected: &Directory, resume: bool) -> Result<()> {
     ensure!(
-        excluded.iter().all(|excluded| !path.starts_with(excluded)),
+        !candidate.is_within_directory(protected)?
+            && (!resume || !protected.is_within_directory(candidate)?),
         "maintenance directory overlaps a protected directory"
     );
     Ok(())
@@ -259,7 +259,20 @@ pub fn install_owned_identity_markers(
         resume,
     } = request;
     let conflict = |error| refusal(error, Refusal::JournalConflict);
-    check_location(&maintenance_directory, &excluded_directories).map_err(conflict)?;
+    validate_absolute_path(&maintenance_directory).map_err(conflict)?;
+    let (parent, name) = leaf(&maintenance_directory).map_err(conflict)?;
+    let existing = resume
+        .then(|| parent.open_existing_child(name))
+        .transpose()
+        .map_err(conflict)?;
+    let candidate = existing.as_ref().unwrap_or(&parent);
+    // For a fresh leaf the held parent must be outside every protected root.
+    // A resume also refuses an existing leaf that contains a protected root.
+    let require_outside =
+        |protected: &Directory| check_location(candidate, protected, resume).map_err(conflict);
+    for path in &excluded_directories {
+        require_outside(&Directory::open_existing(path).map_err(conflict)?)?;
+    }
     let closure = HumanAuthorityClosureV1::from_bytes(manifest.bytes())
         .map_err(anyhow::Error::from)
         .and_then(|closure| {
@@ -270,13 +283,12 @@ pub fn install_owned_identity_markers(
             Ok(closure)
         })
         .map_err(conflict)?;
-    // Nor inside any source directory of the union.
-    let sources: Vec<PathBuf> = closure
-        .sources
-        .iter()
-        .map(|source| source.storage_binding.parent_path.clone())
-        .collect();
-    check_location(&maintenance_directory, &sources).map_err(conflict)?;
+    for source in &closure.sources {
+        let protected = open_bound_parent(&source.storage_binding)
+            .map_err(anyhow::Error::from)
+            .map_err(conflict)?;
+        require_outside(&protected)?;
+    }
     let selected = closure
         .sources
         .iter()
@@ -289,20 +301,10 @@ pub fn install_owned_identity_markers(
     if !matches!(selected.required_format, 14 | 15) {
         return Err(Refusal::FormatUnsupported.into());
     }
-    let maintenance = if resume {
-        open_directory(
-            &maintenance_directory,
-            &closure,
-            &manifest,
-            selected.source_id,
-        )
+    let maintenance = if let Some(directory) = existing {
+        open_directory(&parent, &directory, &closure, &manifest, selected.source_id)
     } else {
-        create_directory(
-            &maintenance_directory,
-            &closure,
-            &manifest,
-            selected.source_id,
-        )
+        create_directory(&parent, name, &closure, &manifest, selected.source_id)
     }
     .map_err(conflict)?;
     let resolve = || {

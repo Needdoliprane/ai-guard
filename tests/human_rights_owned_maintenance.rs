@@ -127,12 +127,18 @@ fn install_appends_the_marker_once_refuses_again_and_resume_is_idempotent() {
         "human_rights_source_unknown"
     );
     assert!(!first.exists());
-    let inside = f.preparation.join("human-rights");
-    assert_eq!(
-        refusal_state(&human_rights(&f, "install", "tenant-a", &inside, true)),
-        "human_rights_journal_conflict"
-    );
-    assert!(!inside.exists());
+    for protected in [f.preparation.as_path(), b.parent().unwrap()] {
+        let inside = protected.join("human-rights");
+        assert_eq!(
+            refusal_state(&human_rights(&f, "install", "tenant-a", &inside, true)),
+            "human_rights_journal_conflict"
+        );
+        assert!(!inside.exists());
+        assert_eq!(
+            refusal_state(&human_rights(&f, "resume", "tenant-a", protected, true)),
+            "human_rights_journal_conflict"
+        );
+    }
     assert_eq!(
         refusal_state(&human_rights(&f, "resume", "tenant-a", &first, true)),
         "human_rights_journal_conflict"
