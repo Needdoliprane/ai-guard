@@ -201,7 +201,7 @@ async fn start_fixture_enforcer(root: &Path, broker_root: &Path) -> Result<Child
 }
 #[path = "broker_relay_runtime.rs"]
 mod runtime;
-use runtime::{Engine, engine_connection};
+use runtime::{Engine, EngineFailure, engine_connection};
 pub use runtime::{
     RelayAttempt, contradictory_create_flags_are_refused_before_fixture_mutation, exchange,
     relay_attempt, worker_terminal,
@@ -286,8 +286,10 @@ impl Fixture {
             volumes: BTreeMap::new(),
             calls: vec![],
             execs: BTreeMap::new(),
-            errors: vec![],
+            errors: BTreeMap::new(),
             root: root.as_path().to_owned(),
+            import_gate: None,
+            import_counts: Default::default(),
         }));
         let socket = root.as_path().join("r");
         let listener = UnixListener::bind(&socket)?;
@@ -300,8 +302,8 @@ impl Fixture {
                     biased;
                     _ = &mut stopped => break,
                     result = owners.join_next(), if !owners.is_empty() => {
-                        if let Some(Err(error)) = result {
-                            shared.lock().await.errors.push(format!("fixture owner join: {error}"));
+                        if let Some(Err(_)) = result {
+                            shared.lock().await.note_failure(EngineFailure::OwnerJoin);
                         }
                     }
                     accepted = listener.accept(), if owners.len() < 64 => {
@@ -310,12 +312,15 @@ impl Fixture {
                                 let state = shared.clone();
                                 owners.spawn(async move {
                                     if let Err(error) = engine_connection(stream, state.clone()).await {
-                                        state.lock().await.errors.push(format!("{error}"));
+                                        let category = error.downcast_ref::<EngineFailure>()
+                                            .copied()
+                                            .unwrap_or(EngineFailure::RuntimeCommand);
+                                        state.lock().await.note_failure(category);
                                     }
                                 });
                             }
-                            Err(error) => {
-                                shared.lock().await.errors.push(format!("fixture accept: {error}"));
+                            Err(_) => {
+                                shared.lock().await.note_failure(EngineFailure::ListenerAccept);
                                 break;
                             }
                         }
@@ -928,9 +933,11 @@ impl Fixture {
         };
         untouched?;
         guardian?;
+        let engine = self.engine.lock().await;
         ensure!(
-            self.engine.lock().await.errors.is_empty(),
-            "synthetic runtime fixture errors"
+            engine.errors.is_empty(),
+            "synthetic runtime fixture errors counts={:?}",
+            engine.errors
         );
         Ok(())
     }
