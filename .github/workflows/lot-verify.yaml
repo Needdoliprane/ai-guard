@@ -45,9 +45,9 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
       - name: Check all targets with default features (SQLite and MySQL)
-        run: cargo check --locked --offline --all-targets
+        run: cargo check --locked --offline --all-targets --keep-going
       - name: Check all targets without default features (SQLite only)
-        run: cargo check --locked --offline --all-targets --no-default-features
+        run: cargo check --locked --offline --all-targets --no-default-features --keep-going
       - name: Provider harness regressions
         run: |
           python3 -B tests/e2e/interactive_driver.py --self-test
