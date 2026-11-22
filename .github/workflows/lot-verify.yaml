@@ -1,198 +1,405 @@
-name: Lot verification
+name: G08 owned event detail canary
 
-# Verifies V1 development branches on a hosted Linux x86_64 runner so that the
-# development Mac keeps its memory for engine, browser and macOS recipes.
-# It complements ci.yaml (dev/main) and never creates tags, releases or
-# artifacts outside this run. Engine (Docker/Podman/Kubernetes) and provider
-# recipes stay out of this workflow: ignored tests are not run and are never
-# counted as passes.
-
+# One SQLite libtest and its real owned browser fixture. This is not an engine,
+# provider, SSO, cloud, or production qualification.
 on:
   push:
-    branches: ['claude/v1-**']
+    branches:
+      - claude/v1-g08-owned-event-detail-check-20261122
 
 permissions:
   contents: read
 
 concurrency:
-  group: lot-verify-${{ github.ref }}
+  group: g08-owned-event-detail-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  rust:
+  owned-event-detail:
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 60
+    permissions:
+      contents: read
     env:
-      AI_GUARD_BUILD_REVISION: ${{ github.sha }}
-      # Match CI's build limit when compiling and linking the full test suite.
+      SOURCE_SHA: 076d69add0efcae7f9870630a47c110bc89373c2
+      FORMAT14_SELECTOR: api::human_sources::journal_tests::dashboard::owned_dashboard_events_metadata_forwards_exact_get_without_identity_probe
+      FORMAT14_JOURNAL_SELECTOR: api::human_sources::journal_tests::owned_events_metadata_returns_authorized_items_and_committed_scope_receipt
+      E1_FORMAT15_SELECTOR: api::human_sources::tests::owned_browser_fixture::egress::owned_event_detail_format15_returns_metadata_and_commits_receipt
+      BROWSER_FIXTURE_FQN: api::human_sources::tests::owned_browser_fixture::serve_owned_browser_fixture
+      PLAYWRIGHT_VERSION: '1.65.1'
+      PLAYWRIGHT_CHROMIUM_EXECUTABLE: /opt/google/chrome/chrome
       CARGO_BUILD_JOBS: '1'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
-      RUST_MIN_STACK: '8388608'
       CARGO_TERM_COLOR: never
     steps:
+      - name: Initialize closed G08 receipt
+        shell: bash
+        run: |
+          umask 077
+          receipt="$RUNNER_TEMP/g08-owned-event-detail-receipt.txt"
+          cat > "$receipt" <<'EOF'
+          source_sha=076d69add0efcae7f9870630a47c110bc89373c2
+          workflow_sha=NOT_RUN
+          source_guard=NOT_RUN
+          rustc_version=NOT_RUN
+          node_version=NOT_RUN
+          playwright_version=NOT_RUN
+          chrome_version=NOT_RUN
+          dependency_fetch=NOT_RUN
+          frontend_build=NOT_RUN
+          libtest_compile=NOT_RUN
+          format14_selector=api::human_sources::journal_tests::dashboard::owned_dashboard_events_metadata_forwards_exact_get_without_identity_probe
+          format14_selected=NOT_RUN
+          format14_passed=NOT_RUN
+          format14_failed=NOT_RUN
+          format14_ignored=NOT_RUN
+          format14_exit=NOT_RUN
+          format14_journal_selector=api::human_sources::journal_tests::owned_events_metadata_returns_authorized_items_and_committed_scope_receipt
+          format14_journal_selected=NOT_RUN
+          format14_journal_passed=NOT_RUN
+          format14_journal_failed=NOT_RUN
+          format14_journal_ignored=NOT_RUN
+          format14_journal_exit=NOT_RUN
+          e1_format15_selector=api::human_sources::tests::owned_browser_fixture::egress::owned_event_detail_format15_returns_metadata_and_commits_receipt
+          e1_format15_selected=NOT_RUN
+          e1_format15_passed=NOT_RUN
+          e1_format15_failed=NOT_RUN
+          e1_format15_ignored=NOT_RUN
+          e1_format15_exit=NOT_RUN
+          browser_fixture=NOT_RUN
+          browser_fixture_selected=NOT_RUN
+          browser_user_access=NOT_RUN
+          browser_scenarios=NOT_RUN
+          browser_exit=NOT_RUN
+          private_scratch_cleanup=NOT_RUN
+          last_phase=NOT_RUN
+          result=NOT_RUN
+          scope=owned local SQLite metadata detail; format14 BFF+rights, format15 Rust oracle, format14 browser fixture
+          EOF
+          chmod 600 "$receipt"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
         with:
           persist-credentials: false
-      - name: Free runner disk for the test targets
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
-      - name: Fetch dependencies with the pinned Rust toolchain
-        run: |
-          rustc --version
-          cargo fetch --locked
-      - name: Check Rust formatting
-        run: cargo fmt --all -- --check
-      - name: Check all targets with MySQL enabled
-        run: cargo check --locked --offline --all-targets --features mysql-storage --keep-going
-      - name: Check all targets without default features (SQLite only)
-        run: cargo check --locked --offline --all-targets --no-default-features --keep-going
-      - name: Third-party licence guard and its unit tests
-        # `cargo test` builds examples but does not run their unit tests.
-        run: |
-          cargo test --locked --offline --example third_party_notices
-          cargo run --quiet --locked --offline --example third_party_notices -- check --allowed .github/third-party-license-expressions.txt
-      - name: Provider harness regressions
-        run: |
-          python3 -B tests/e2e/interactive_driver.py --self-test
-          python3 -B tests/e2e/test_run_provider_preflight.py ProviderPreflightTests ProviderBrowserStageTests
-          python3 -B tests/e2e/test_run_provider_broker.py BrokerRecipeTests
-      - name: Rust test suite (ignored engine and provider tests excluded)
-        if: github.ref_name != 'claude/v1-integration-regressions-20261122'
-        shell: bash
-        run: |
-          set -o pipefail
-          export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
-          cargo test --locked --offline --no-fail-fast 2>&1 | tee cargo-test.log
-      - name: Targeted SQLite library regressions
-        if: github.ref_name == 'claude/v1-integration-regressions-20261122'
-        shell: bash
-        run: |
-          set -euo pipefail
-          export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
-          build_json="$TMPDIR/libtest.jsonl"
-          test_log="$TMPDIR/selector.log"
-          summary=cargo-test-summary.txt
-          failures=cargo-test-failed.txt
-          : > "$summary"
-          : > "$failures"
+          fetch-depth: 2
 
-          settlement=broker::service::server::retirement_settlement_tests::same_original_not_queued_final_retries_its_retained_input_before_another_q
-          selectors=(
-            audit::resource_tests::retention_confirms_the_committed_segment_after_a_filesystem_ack_failure
-            api::human_sources::journal_tests::owned_event_page_reports_the_archived_prefix_after_adoption
-            api::human_sources::tests::owned_admin_reads_refuse_head_before_authentication
-            api::human_sources::journal_tests::owned_admin_reads::owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
-            identity::operations::tests::owned_event_availability_preserves_granted_permissions
-            broker::writer::inventory_tests::completed_inventory_releases_its_permit_before_reply
-            broker::writer::inventory_tests::timed_out_inventory_keeps_one_permit_and_cannot_queue_a_series_before_cancel
-            broker::writer::status_projection_tests::coverage_only_pending_arm_does_not_taint_a_valid_last_confirmed_status
-            "$settlement"
-          )
-          expected=9
-          if (( ${#selectors[@]} != expected )); then
-            echo 'Invalid regression selector count' | tee -a "$summary"
-            exit 1
-          fi
-          printf 'Revision %s; %s exact SQLite library tests expected\n' "$GITHUB_SHA" "$expected" | tee -a "$summary"
-
-          # Keep raw Cargo and test output in the runner's private scratch directory.
-          if ! cargo test --locked --offline --no-default-features --lib --no-run \
-              --message-format=json > "$build_json" 2> "$TMPDIR/build.stderr"; then
-            echo 'SQLite library build failed; tests not run' | tee -a "$summary"
-            jq -r 'select(.reason == "compiler-message" and .message.level == "error")
-              | .message.code.code // empty | select(test("^E[0-9]{4}$"))' "$build_json" \
-              2>/dev/null | sort -u | tee -a "$summary" || true
-            exit 1
-          fi
-          if ! libtest="$(jq -ers '[.[] | select(.reason == "compiler-artifact"
-              and .target.name == "agentsandbox" and .target.kind == ["lib"]
-              and .profile.test == true and .executable != null) | .executable]
-              | unique | if length == 1 then .[0] else empty end' "$build_json")" \
-              || [[ ! -x "$libtest" ]]; then
-            echo 'Expected one SQLite library test executable; tests not run' | tee -a "$summary"
-            exit 1
-          fi
-          printf 'SQLite libtest SHA-256 %s\n' "$(sha256sum "$libtest" | awk '{print $1}')" | tee -a "$summary"
-
-          passed=0
-          for selector in "${selectors[@]}"; do
-            if "$libtest" "$selector" --exact --test-threads=1 > "$test_log" 2>&1 \
-                && grep -Fxq 'running 1 test' "$test_log" \
-                && grep -Fxq "test $selector ... ok" "$test_log" \
-                && grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$test_log"; then
-              printf 'PASS %s\n' "$selector" | tee -a "$summary"
-              ((passed += 1))
-            else
-              printf 'FAIL %s\n' "$selector" | tee -a "$summary"
-              printf '%s\n' "$selector" >> "$failures"
-              if [[ "$selector" == "$settlement" ]]; then
-                phases='bind_full3|enqueue_signal|ack_signal|load_before_retirement|begin_retirement|ack_pending|authorize_retirement|read_pending|load_before_final|pause_writer'
-                categories='InvalidInput|UnsupportedVersion|TooLarge|LimitExceeded|Busy|Conflict|Interrupted|Corrupt|UnsafeFilesystem|ControlSecret|Io'
-                grep -Eo "settlement phase=($phases) category=($categories)\b" "$test_log" \
-                  | sort -u | tee -a "$summary" || true
-              fi
-            fi
-          done
-          printf 'Passed %s of %s exact selectors\n' "$passed" "$expected" | tee -a "$summary"
-          (( passed == expected ))
-      - name: Summarize test results
-        if: always()
-        shell: bash
-        run: |
-          if [ -f cargo-test.log ]; then
-            grep -E '^test result:|^     Running ' cargo-test.log > cargo-test-summary.txt || true
-            grep -E '\.\.\. FAILED$' cargo-test.log | sed 's/^test //; s/ \.\.\. FAILED$//' > cargo-test-failed.txt || true
-            {
-              echo "### Rust test suite"
-              echo
-              echo "Failed tests: $(wc -l < cargo-test-failed.txt)"
-              echo
-              echo '```'
-              head -n 100 cargo-test-failed.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-          elif [ -f cargo-test-summary.txt ]; then
-            {
-              echo "### Targeted SQLite library tests"
-              echo '```'
-              cat cargo-test-summary.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
-      - name: Upload test logs
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: lot-verify-rust-${{ github.sha }}
-          path: |
-            cargo-test.log
-            cargo-test-summary.txt
-            cargo-test-failed.txt
-          if-no-files-found: ignore
-          retention-days: 14
-
-  frontend:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: front
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Setup Node
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24.22.2'
           package-manager-cache: false
-      - name: Install
-        run: npm ci --no-audit --no-fund
-      - name: Build
-        run: npm run build
-      - name: Test
-        run: npm test
+
+      - name: Verify owned metadata detail on real SQLite and browser fixture
+        id: verify
+        shell: bash
+        run: |
+          set +x
+          set -euo pipefail
+          umask 022
+          receipt="$RUNNER_TEMP/g08-owned-event-detail-receipt.txt"
+          private_root=
+          cargo_target=
+          playwright_modules=
+          browser_root=
+          frontend_touched=0
+          overall=FAIL
+          stage=source_guard
+          set_receipt() {
+            awk -F= -v key="$1" -v value="$2" '$1 == key { $0 = key "=" value } { print }' "$receipt" > "$receipt.tmp"
+            chmod 600 "$receipt.tmp"
+            mv -- "$receipt.tmp" "$receipt"
+          }
+          finish() {
+            local code=$?
+            local scratch_rc=0 final_phase
+            trap - EXIT
+            set +e
+            if [[ -n "$private_root" && "$private_root" == "$RUNNER_TEMP"/g08-private.* ]]; then
+              rm -rf -- "$private_root" || scratch_rc=1
+              [[ ! -e "$private_root" ]] || scratch_rc=1
+            fi
+            if [[ -n "$cargo_target" && "$cargo_target" == "$GITHUB_WORKSPACE/target" ]]; then
+              rm -rf -- "$cargo_target" || scratch_rc=1
+              [[ ! -e "$cargo_target" ]] || scratch_rc=1
+            fi
+            if [[ -n "$playwright_modules" && "$playwright_modules" == /tmp/g08-playwright-* ]]; then
+              rm -rf -- "$playwright_modules" || scratch_rc=1
+              [[ ! -e "$playwright_modules" ]] || scratch_rc=1
+            fi
+            if (( frontend_touched )); then
+              rm -rf -- "$GITHUB_WORKSPACE/front/node_modules" "$GITHUB_WORKSPACE/front/dist" || scratch_rc=1
+              [[ ! -e "$GITHUB_WORKSPACE/front/node_modules" && ! -e "$GITHUB_WORKSPACE/front/dist" ]] || scratch_rc=1
+            fi
+            if [[ -n "$browser_root" && "$browser_root" == /tmp/g08-browser.* ]]; then
+              sudo -n rm -rf -- "$browser_root" || scratch_rc=1
+              [[ ! -e "$browser_root" ]] || scratch_rc=1
+            fi
+            case "$stage" in
+              source_guard|toolchain|private_setup|playwright_install|frontend_build|cargo_fetch|libtest_compile|sqlite_oracles|browser_fixture|browser_user_access|complete)
+                final_phase="$stage" ;;
+              *) final_phase=unknown ;;
+            esac
+            if (( scratch_rc != 0 )); then final_phase=private_scratch_cleanup; fi
+            set_receipt last_phase "$final_phase"
+            if (( scratch_rc == 0 )); then set_receipt private_scratch_cleanup PASS; else set_receipt private_scratch_cleanup FAIL; fi
+            if (( code == 0 && scratch_rc != 0 )); then code=1; fi
+            if (( code == 0 && scratch_rc == 0 )); then overall=PASS; else overall=FAIL; fi
+            set_receipt result "$overall"
+            {
+              printf 'G08 owned event detail: %s\n' "$overall"
+              printf 'format14=%s/%s/%s/%s exit=%s\n' \
+                "$(awk -F= '$1=="format14_selected"{print $2}' "$receipt")" \
+                "$(awk -F= '$1=="format14_passed"{print $2}' "$receipt")" \
+                "$(awk -F= '$1=="format14_failed"{print $2}' "$receipt")" \
+                "$(awk -F= '$1=="format14_ignored"{print $2}' "$receipt")" \
+                "$(awk -F= '$1=="format14_exit"{print $2}' "$receipt")"
+              printf 'format14_journal=%s/%s/%s/%s exit=%s\n' \
+                "$(awk -F= '$1=="format14_journal_selected"{print $2}' "$receipt")" \
+                "$(awk -F= '$1=="format14_journal_passed"{print $2}' "$receipt")" \
+                "$(awk -F= '$1=="format14_journal_failed"{print $2}' "$receipt")" \
+                "$(awk -F= '$1=="format14_journal_ignored"{print $2}' "$receipt")" \
+                "$(awk -F= '$1=="format14_journal_exit"{print $2}' "$receipt")"
+              printf 'e1_format15=%s/%s/%s/%s exit=%s\n' \
+                "$(awk -F= '$1=="e1_format15_selected"{print $2}' "$receipt")" \
+                "$(awk -F= '$1=="e1_format15_passed"{print $2}' "$receipt")" \
+                "$(awk -F= '$1=="e1_format15_failed"{print $2}' "$receipt")" \
+                "$(awk -F= '$1=="e1_format15_ignored"{print $2}' "$receipt")" \
+                "$(awk -F= '$1=="e1_format15_exit"{print $2}' "$receipt")"
+              printf 'browser_fixture=%s selected=%s scenarios=%s exit=%s user_access=%s last_phase=%s cleanup=%s\n' \
+                "$(awk -F= '$1=="browser_fixture"{print $2}' "$receipt")" \
+                "$(awk -F= '$1=="browser_fixture_selected"{print $2}' "$receipt")" \
+                "$(awk -F= '$1=="browser_scenarios"{print $2}' "$receipt")" \
+                "$(awk -F= '$1=="browser_exit"{print $2}' "$receipt")" \
+                "$(awk -F= '$1=="browser_user_access"{print $2}' "$receipt")" \
+                "$(awk -F= '$1=="last_phase"{print $2}' "$receipt")" \
+                "$(awk -F= '$1=="private_scratch_cleanup"{print $2}' "$receipt")"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit "$code"
+          }
+          trap finish EXIT
+
+          source_sha=$SOURCE_SHA
+          expected_ref=refs/heads/claude/v1-g08-owned-event-detail-check-20261122
+          set_receipt workflow_sha "$GITHUB_SHA"
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 &&
+             "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == "$expected_ref" &&
+             "$(git rev-parse HEAD 2>/dev/null)" == "$GITHUB_SHA" &&
+             "$(git status --porcelain=v1 --untracked-files=all 2>/dev/null)" == "" &&
+             "$(git show -s --format=%P HEAD 2>/dev/null)" == "$source_sha" &&
+             "$(git diff --name-only "$source_sha" HEAD 2>/dev/null)" == .github/workflows/lot-verify.yaml ]] || {
+              set_receipt source_guard FAIL
+              echo 'G08 source/ref guard failed; details omitted.' >&2
+              exit 1
+          }
+          set_receipt source_guard PASS
+
+          stage=toolchain
+          rustc_line="$(rustc --version 2>/dev/null)" || rustc_line=''
+          [[ "$rustc_line" =~ ^rustc\ 1\.99\.1($|[[:space:]]) ]] || { set_receipt rustc_version MISMATCH; exit 1; }
+          set_receipt rustc_version 1.99.1
+          node_line="$(node --version 2>/dev/null)" || node_line=''
+          [[ "$node_line" == v24.22.2 ]] || { set_receipt node_version MISMATCH; exit 1; }
+          set_receipt node_version 24.22.2
+          chrome_version="$(timeout --kill-after=5s 10s "$PLAYWRIGHT_CHROMIUM_EXECUTABLE" --product-version 2>/dev/null)" || chrome_version=''
+          [[ "$chrome_version" =~ ^[0-9]+(\.[0-9]+){3}$ ]] || { set_receipt chrome_version MISSING; exit 1; }
+          set_receipt chrome_version "$chrome_version"
+
+          stage=private_setup
+          private_root="$(mktemp -d "$RUNNER_TEMP/g08-private.XXXXXX")" || exit 1
+          chmod 700 "$private_root"
+          cargo_target="$GITHUB_WORKSPACE/target"
+          playwright_modules="/tmp/g08-playwright-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          [[ ! -e "$cargo_target" && ! -e "$playwright_modules" &&
+             ! -e "$GITHUB_WORKSPACE/front/node_modules" && ! -e "$GITHUB_WORKSPACE/front/dist" ]] || exit 1
+          mkdir -m 755 "$cargo_target" "$playwright_modules"
+          export CARGO_TARGET_DIR="$cargo_target" AI_GUARD_BUILD_REVISION="$source_sha"
+          export CARGO_TERM_COLOR=never npm_config_cache="$private_root/npm-cache"
+
+          stage=playwright_install
+          if timeout --kill-after=5s 10m npm install --prefix "$playwright_modules" --ignore-scripts --no-audit --no-fund \
+              --save-exact "playwright@$PLAYWRIGHT_VERSION" > "$private_root/playwright.log" 2>&1; then
+            set_receipt playwright_version "$PLAYWRIGHT_VERSION"
+          else
+            set_receipt playwright_version FAIL
+            exit 1
+          fi
+          chmod -R a+rX "$playwright_modules"
+
+          stage=frontend_build
+          frontend_touched=1
+          if timeout --kill-after=5s 10m npm ci --prefix "$GITHUB_WORKSPACE/front" --no-audit --no-fund \
+              > "$private_root/frontend-install.log" 2>&1 &&
+             timeout --kill-after=5s 10m npm --prefix "$GITHUB_WORKSPACE/front" run build \
+              > "$private_root/frontend-build.log" 2>&1 &&
+             [[ -s "$GITHUB_WORKSPACE/front/dist/index.html" ]]; then
+            set_receipt frontend_build PASS
+          else
+            set_receipt frontend_build FAIL
+            echo 'Pinned Vite bundle build failed; raw output omitted.' >&2
+            exit 1
+          fi
+
+          stage=cargo_fetch
+          if timeout --kill-after=10s 10m cargo fetch --locked > "$private_root/cargo-fetch.log" 2>&1; then
+            set_receipt dependency_fetch PASS
+          else
+            set_receipt dependency_fetch FAIL
+            exit 1
+          fi
+          stage=libtest_compile
+          build_json="$private_root/libtest.jsonl"
+          if timeout --kill-after=15s 40m cargo test --locked --offline --no-default-features --lib --no-run --message-format=json \
+              > "$build_json" 2> "$private_root/libtest.stderr"; then
+            libtest="$(jq -ers '[.[] | select(.reason == "compiler-artifact" and
+                .target.name == "agentsandbox" and .target.kind == ["lib"] and
+                .profile.test == true and .features == [] and .executable != null) |
+                .executable] | unique | if length == 1 then .[0] else empty end' "$build_json" 2>/dev/null || true)"
+            [[ -n "$libtest" && -x "$libtest" ]] || { set_receipt libtest_compile ARTIFACT_MISMATCH; exit 1; }
+            set_receipt libtest_compile PASS
+          else
+            set_receipt libtest_compile FAIL
+            exit 1
+          fi
+          chmod -R a+rX "$CARGO_TARGET_DIR"
+          list="$private_root/libtest.list"
+          if ! env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$private_root" TMPDIR="$private_root" \
+              "$libtest" --list > "$list" 2> "$private_root/list.stderr"; then
+            exit 1
+          fi
+          if [[ "$(grep -Fxc "$BROWSER_FIXTURE_FQN: test" "$list" || true)" == 1 ]]; then
+            set_receipt browser_fixture_selected 1
+          else
+            set_receipt browser_fixture_selected 0
+            exit 1
+          fi
+
+          run_exact() {
+            local field="$1" selector="$2" log="$3" status=0 selected counts passed failed ignored
+            if ! grep -Fxc "$selector: test" "$list" | grep -qx 1; then
+              set_receipt "${field}_selected" 0
+              set_receipt "${field}_passed" unknown
+              set_receipt "${field}_failed" unknown
+              set_receipt "${field}_ignored" unknown
+              set_receipt "${field}_exit" NOT_RUN
+              return 1
+            fi
+            set_receipt "${field}_selected" 1
+            env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$private_root" TMPDIR="$private_root" RUST_BACKTRACE=0 \
+              timeout --kill-after=5s 180s "$libtest" "$selector" --exact --test-threads=1 --color=never \
+              > "$log" 2>&1 || status=$?
+            selected="$(grep -Fxc 'running 1 test' "$log" || true)"
+            counts="$(sed -nE 's/^test result: [^ ]+\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored;.*/\1 \2 \3/p' "$log" | tail -n 1)"
+            passed=unknown failed=unknown ignored=unknown
+            if [[ -n "$counts" ]]; then read -r passed failed ignored <<< "$counts"; fi
+            set_receipt "${field}_selected" "${selected:-0}"
+            set_receipt "${field}_passed" "$passed"
+            set_receipt "${field}_failed" "$failed"
+            set_receipt "${field}_ignored" "$ignored"
+            set_receipt "${field}_exit" "$status"
+            (( status == 0 )) && [[ "$selected" == 1 && "$passed" == 1 && "$failed" == 0 && "$ignored" == 0 ]] &&
+              grep -Fqx "test $selector ... ok" "$log" &&
+              grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+([.][0-9]+)?s$' "$log"
+          }
+          stage=sqlite_oracles
+          run_exact format14 "$FORMAT14_SELECTOR" "$private_root/format14-bff.log" || { echo 'Format14 BFF exact selector failed; details omitted.' >&2; exit 1; }
+          run_exact format14_journal "$FORMAT14_JOURNAL_SELECTOR" \
+            "$private_root/format14-journal.log" || { echo 'Format14 rights/scope exact selector failed; details omitted.' >&2; exit 1; }
+          run_exact e1_format15 "$E1_FORMAT15_SELECTOR" "$private_root/e1-format15.log" || { echo 'E1 format15 exact selector failed; details omitted.' >&2; exit 1; }
+
+          stage=browser_fixture
+          [[ -x /usr/bin/setpriv && -x /usr/bin/sudo ]] || { set_receipt browser_fixture PREREQUISITE_MISSING; exit 1; }
+          browser_root="$(mktemp -d /tmp/g08-browser.XXXXXX)" || exit 1
+          sudo -n chown 1000:1000 "$browser_root" && sudo -n chmod 700 "$browser_root" || exit 1
+          sudo -n install -d -o 1000 -g 1000 -m 700 \
+            "$browser_root/home" "$browser_root/tmp" "$browser_root/tmp/control" "$browser_root/tmp/artifacts" || exit 1
+          browser_node="$(readlink -f "$(command -v node)")"
+          stage=browser_user_access
+          browser_user_can_read() {
+            sudo -n setpriv --reuid=1000 --regid=1000 --clear-groups -- \
+              /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin /usr/bin/test "$1" "$2"
+          }
+          if ! browser_user_can_read -x "$browser_node" ||
+             ! browser_user_can_read -r "$libtest" || ! browser_user_can_read -x "$libtest" ||
+             ! browser_user_can_read -r "$GITHUB_WORKSPACE/front/tests/browser_owned_snapshot.mjs" ||
+             ! browser_user_can_read -r "$GITHUB_WORKSPACE/front/tests/browser_failure.mjs" ||
+             ! browser_user_can_read -x "$GITHUB_WORKSPACE/front/dist" ||
+             ! browser_user_can_read -r "$GITHUB_WORKSPACE/front/dist/index.html" ||
+             ! browser_user_can_read -x "$playwright_modules/node_modules/playwright" ||
+             ! browser_user_can_read -r "$playwright_modules/node_modules/playwright/package.json" ||
+             ! browser_user_can_read -x "$PLAYWRIGHT_CHROMIUM_EXECUTABLE"; then
+            set_receipt browser_user_access FAIL
+            exit 1
+          fi
+          set_receipt browser_user_access PASS
+
+          stage=browser_fixture
+          browser_rc=0
+          sudo -n setpriv --reuid=1000 --regid=1000 --clear-groups -- \
+            /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$browser_root/home" TMPDIR="$browser_root/tmp" \
+            CODEX_PRIMARY_RUNTIME_NODE_MODULES="$playwright_modules/node_modules" \
+            PLAYWRIGHT_CHROMIUM_EXECUTABLE="$PLAYWRIGHT_CHROMIUM_EXECUTABLE" \
+            AI_GUARD_OWNED_BROWSER_FIXTURE=run-v1 AI_GUARD_OWNED_BROWSER_LIBTEST="$libtest" \
+            AI_GUARD_OWNED_BROWSER_DIST="$GITHUB_WORKSPACE/front/dist" \
+            AI_GUARD_OWNED_BROWSER_CONTROL="$browser_root/tmp/control" \
+            AI_GUARD_OWNED_BROWSER_ARTIFACTS="$browser_root/tmp/artifacts" \
+            AI_GUARD_OWNED_BROWSER_SECONDS=300 \
+            timeout --kill-after=10s 360s "$browser_node" "$GITHUB_WORKSPACE/front/tests/browser_owned_snapshot.mjs" \
+            > "$private_root/browser.stdout" 2> "$private_root/browser.stderr" || browser_rc=$?
+          set_receipt browser_exit "$browser_rc"
+          browser_result="$browser_root/tmp/artifacts/RESULT.json"
+          browser_summary=unknown
+          if sudo -n setpriv --reuid=1000 --regid=1000 --clear-groups -- \
+              /usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/test -f "$browser_result"; then
+            result_metadata="$(sudo -n stat -c '%u %g %a %s' "$browser_result" 2>/dev/null)" || result_metadata=''
+            read -r result_uid result_gid result_mode result_size <<< "$result_metadata"
+            [[ "$result_uid" == 1000 && "$result_gid" == 1000 && "$result_mode" == 600 &&
+               "$result_size" =~ ^[0-9]+$ ]] || { set_receipt browser_fixture RESULT_METADATA_INVALID; exit 1; }
+            (( result_size <= 524288 )) || { set_receipt browser_fixture RESULT_SIZE_INVALID; exit 1; }
+            browser_summary="$(sudo -n setpriv --reuid=1000 --regid=1000 --clear-groups -- \
+              /usr/bin/jq -er '
+                select(.version == 1 and
+                  (.status == "PASS_THREE_BOUNDED_OWNED_SCENARIOS" or .status == "FAIL_NOT_QUALIFIED" or .status == "BLOCKED_NOT_RUN") and
+                  (.interrupted | type == "boolean") and (.observed | type == "object") and
+                  (.captures | type == "array") and (.page_errors | type == "array") and
+                  (.external_destinations | type == "array") and (.fixture_exit | type == "object")) |
+                [.status, ([.observed.scenario1,.observed.scenario2,.observed.scenario3] | map(select(type == "string")) | length),
+                 ([.captures[] | select(.name | test("^owned-snapshot-(1440|320|390)-(light|dark)\\.png$"))] | length),
+                 (.page_errors | length), (.external_destinations | length),
+                 (if .interrupted == false and .failure == null and .cleanup_failure == null and
+                     .fixture_exit.code == 0 and .fixture_exit.signal == null then "CLOSED" else "NOT_CLOSED" end)] | @tsv' \
+              "$browser_result" 2>/dev/null || true)"
+          fi
+          if [[ "$browser_summary" =~ ^([A-Z_]+)[[:space:]]([0-9]+)[[:space:]]([0-9]+)[[:space:]]([0-9]+)[[:space:]]([0-9]+)[[:space:]](CLOSED|NOT_CLOSED)$ ]]; then
+            browser_status="${BASH_REMATCH[1]}"
+            scenario_count="${BASH_REMATCH[2]}"
+            capture_count="${BASH_REMATCH[3]}"
+            page_error_count="${BASH_REMATCH[4]}"
+            external_count="${BASH_REMATCH[5]}"
+            closed_state="${BASH_REMATCH[6]}"
+            if [[ "$browser_status" == PASS_THREE_BOUNDED_OWNED_SCENARIOS && "$scenario_count" == 3 &&
+                  "$capture_count" == 4 && "$page_error_count" == 0 && "$external_count" == 0 &&
+                  "$closed_state" == CLOSED && "$browser_rc" == 0 ]]; then
+              set_receipt browser_fixture PASS
+              set_receipt browser_fixture_selected 1
+              set_receipt browser_scenarios 3
+            else
+              set_receipt browser_fixture "$browser_status"
+              set_receipt browser_scenarios "$scenario_count"
+              exit 1
+            fi
+          else
+            set_receipt browser_fixture UNKNOWN
+            exit 1
+          fi
+          stage=complete
+
+      - name: Upload only the closed G08 receipt
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: g08-owned-event-detail-${{ github.sha }}
+          path: ${{ runner.temp }}/g08-owned-event-detail-receipt.txt
+          if-no-files-found: warn
+          retention-days: 14
