@@ -1,198 +1,292 @@
-name: Lot verification
-
-# Verifies V1 development branches on a hosted Linux x86_64 runner so that the
-# development Mac keeps its memory for engine, browser and macOS recipes.
-# It complements ci.yaml (dev/main) and never creates tags, releases or
-# artifacts outside this run. Engine (Docker/Podman/Kubernetes) and provider
-# recipes stay out of this workflow: ignored tests are not run and are never
-# counted as passes.
+name: G11 relay Awaiting diagnostic check
 
 on:
   push:
-    branches: ['claude/v1-**']
+    branches: ['claude/v1-g11-relay-awaiting-stack-check-20261122']
 
 permissions:
   contents: read
 
 concurrency:
-  group: lot-verify-${{ github.ref }}
+  group: g11-relay-awaiting-stack-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  rust:
+  relay-awaiting-canary:
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 45
     env:
-      AI_GUARD_BUILD_REVISION: ${{ github.sha }}
-      # Match CI's build limit when compiling and linking the full test suite.
       CARGO_BUILD_JOBS: '1'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
-      RUST_MIN_STACK: '8388608'
       CARGO_TERM_COLOR: never
+      LC_ALL: C
     steps:
+      - name: Initialize sanitized receipt
+        shell: bash
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          printf 'workflow_sha=%s\nworkflow_parent_initial=NOT_VERIFIED\ncandidate=5e9f8994d4360ab7bd3a64be120cd04539397af4\ncandidate_parent=e1e8d1b0d0647398e8eaa9d8a687abf353f6249b\nsource_port=src/runner/broker/executor/journal.rs\nstack_sufficiency=NOT_CLAIMED\nsource_initial=NOT_RUN\nworkflow_lineage_initial=NOT_RUN\nfetch_initial=NOT_RUN\nbuild_initial=NOT_RUN\nlibtest_initial=NOT_RUN\ncanary_initial=NOT_RUN\nphase_initial=unknown\nawaiting_a_diagnostic_initial=unknown\n' "$WORKFLOW_SHA" > "$RUNNER_TEMP/g11-relay-awaiting-receipt.txt"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: 5e9f8994d4360ab7bd3a64be120cd04539397af4
+          fetch-depth: 0
           persist-credentials: false
-      - name: Free runner disk for the test targets
+      - name: Guard the exact candidate and workflow-only delta
+        shell: bash
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
         run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
-      - name: Fetch dependencies with the pinned Rust toolchain
-        run: |
-          rustc --version
-          cargo fetch --locked
-      - name: Check Rust formatting
-        run: cargo fmt --all -- --check
-      - name: Check all targets with MySQL enabled
-        run: cargo check --locked --offline --all-targets --features mysql-storage --keep-going
-      - name: Check all targets without default features (SQLite only)
-        run: cargo check --locked --offline --all-targets --no-default-features --keep-going
-      - name: Third-party licence guard and its unit tests
-        # `cargo test` builds examples but does not run their unit tests.
-        run: |
-          cargo test --locked --offline --example third_party_notices
-          cargo run --quiet --locked --offline --example third_party_notices -- check --allowed .github/third-party-license-expressions.txt
-      - name: Provider harness regressions
-        run: |
-          python3 -B tests/e2e/interactive_driver.py --self-test
-          python3 -B tests/e2e/test_run_provider_preflight.py ProviderPreflightTests ProviderBrowserStageTests
-          python3 -B tests/e2e/test_run_provider_broker.py BrokerRecipeTests
-      - name: Rust test suite (ignored engine and provider tests excluded)
-        if: github.ref_name != 'claude/v1-integration-regressions-20261122'
+          set -uo pipefail
+          receipt="$RUNNER_TEMP/g11-relay-awaiting-receipt.txt"
+          source_status=FAIL
+          lineage_status=FAIL
+          source_delta="$(git diff --name-only e1e8d1b0d0647398e8eaa9d8a687abf353f6249b 5e9f8994d4360ab7bd3a64be120cd04539397af4)"
+          if [[ "$(git rev-parse HEAD)" == 5e9f8994d4360ab7bd3a64be120cd04539397af4 &&
+                "$(git rev-parse HEAD^)" == e1e8d1b0d0647398e8eaa9d8a687abf353f6249b &&
+                "$source_delta" == 'src/runner/broker/executor/journal.rs' ]] &&
+              grep -Fq 'async fn software_broker_scoped_relay_ipc_refuses_before_private_detail()' tests/broker_relay_handoff.rs &&
+              grep -Fq 'eprintln!("g11_relay_awaiting_a {diagnostic}")' tests/broker_relay_handoff.rs &&
+              grep -Fq 'async fn awaiting_diagnostic(&mut self, job: Uuid) -> Value' tests/support/broker_relay_handoff.rs; then
+            source_status=PASS
+          fi
+          workflow_delta="$(git diff --name-only 5e9f8994d4360ab7bd3a64be120cd04539397af4 "$WORKFLOW_SHA")"
+          if [[ "$(git rev-parse "$WORKFLOW_SHA^")" == 5e9f8994d4360ab7bd3a64be120cd04539397af4 &&
+                "$workflow_delta" == '.github/workflows/lot-verify.yaml' ]]; then
+            lineage_status=PASS
+          fi
+          printf 'source=%s\nworkflow_lineage=%s\nworkflow_parent=5e9f8994d4360ab7bd3a64be120cd04539397af4\nsource_delta=%s\n' \
+            "$source_status" "$lineage_status" "$source_delta" >> "$receipt"
+          cat "$receipt" >> "$GITHUB_STEP_SUMMARY"
+          [[ "$source_status" == PASS && "$lineage_status" == PASS ]]
+      - name: Fetch locked dependencies
         shell: bash
         run: |
-          set -o pipefail
-          export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
-          cargo test --locked --offline --no-fail-fast 2>&1 | tee cargo-test.log
-      - name: Targeted SQLite library regressions
-        if: github.ref_name == 'claude/v1-integration-regressions-20261122'
+          set -uo pipefail
+          if cargo fetch --locked > "$RUNNER_TEMP/g11-relay-fetch-private.log" 2>&1; then rc=0; else rc=$?; fi
+          printf 'fetch=%s fetch_exit=%s\n' "$([[ "$rc" == 0 ]] && echo PASS || echo FAIL)" "$rc" >> "$RUNNER_TEMP/g11-relay-awaiting-receipt.txt"
+          exit "$rc"
+      - name: Compile one targeted relay libtest executable
+        id: build
         shell: bash
+        run: |
+          set -uo pipefail
+          scratch="$RUNNER_TEMP/g11-relay-private"
+          mkdir -m 700 "$scratch"
+          export CARGO_TARGET_DIR="$scratch/target"
+          if cargo test --locked --offline --no-default-features --test broker_relay_handoff \
+              --no-run --message-format=json > "$scratch/build.jsonl" 2> "$scratch/build.stderr"; then
+            rc=0
+          else
+            rc=$?
+          fi
+          printf 'build=%s build_exit=%s\n' "$([[ "$rc" == 0 ]] && echo PASS || echo FAIL)" "$rc" >> "$RUNNER_TEMP/g11-relay-awaiting-receipt.txt"
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          if [[ "$rc" != 0 ]]; then
+            diagnostics_status=unavailable
+            diagnostics_count=0
+            if jq -r '
+                select(.reason == "compiler-message" and .message.level == "error")
+                | .message as $message
+                | ($message.code.code // "") as $code
+                | select(($code | type) == "string" and ($code | test("^E[0-9]{4}$")))
+                | $message.spans[]? | select(.is_primary == true) | . as $span
+                | select(($span.file_name | type) == "string" and
+                    ($span.file_name | test("^(src|tests)/([A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+\\.rs$")))
+                | select(($span.line_start | type) == "number" and $span.line_start >= 1 and
+                    $span.line_start <= 1000000 and ($span.line_start | floor) == $span.line_start)
+                | select(($span.column_start | type) == "number" and $span.column_start >= 1 and
+                    $span.column_start <= 1000000 and ($span.column_start | floor) == $span.column_start)
+                | "code=\($code) span=\($span.file_name):\($span.line_start):\($span.column_start)"
+              ' "$scratch/build.jsonl" > "$scratch/diagnostics.txt" 2>/dev/null; then
+              /usr/bin/sort -u "$scratch/diagnostics.txt" -o "$scratch/diagnostics.txt"
+              diagnostics_count="$(/usr/bin/wc -l < "$scratch/diagnostics.txt" | /usr/bin/tr -d ' ')"
+              diagnostics_status=filtered
+            fi
+            printf 'compiler_diagnostics=%s count=%s\n' "$diagnostics_status" "$diagnostics_count" >> "$RUNNER_TEMP/g11-relay-awaiting-receipt.txt"
+            if [[ "$diagnostics_status" == filtered && "$diagnostics_count" -gt 0 ]]; then
+              while IFS= read -r diagnostic; do
+                printf 'compiler_%s\n' "$diagnostic" >> "$RUNNER_TEMP/g11-relay-awaiting-receipt.txt"
+              done < <(/usr/bin/sed -n '1,8p' "$scratch/diagnostics.txt")
+            fi
+          else
+            printf 'compiler_diagnostics=not_applicable count=0\n' >> "$RUNNER_TEMP/g11-relay-awaiting-receipt.txt"
+          fi
+          if [[ "$rc" == 0 ]]; then
+            if binary="$(jq -ers '[.[] | select(.reason == "compiler-artifact" and .target.name == "broker_relay_handoff" and .target.kind == ["test"] and .profile.test == true and .features == [] and .executable != null) | .executable] | unique | if length == 1 then .[0] else empty end' "$scratch/build.jsonl" 2>/dev/null)" && [[ -x "$binary" ]]; then
+              digest="$(sha256sum "$binary" | cut -d ' ' -f1)"
+              printf 'libtest=PASS\nlibtest_sha256=%s\n' "$digest" >> "$RUNNER_TEMP/g11-relay-awaiting-receipt.txt"
+              echo "binary=$binary" >> "$GITHUB_OUTPUT"
+            else
+              printf 'libtest=FAIL artifact_resolution=FAIL\n' >> "$RUNNER_TEMP/g11-relay-awaiting-receipt.txt"
+              exit 1
+            fi
+          fi
+          exit "$rc"
+      - name: Run the exact canary and filter the Awaiting diagnostic
+        id: canary
+        if: steps.build.outputs.exit_code == '0'
+        shell: bash
+        env:
+          TEST_BINARY: ${{ steps.build.outputs.binary }}
         run: |
           set -euo pipefail
-          export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
-          build_json="$TMPDIR/libtest.jsonl"
-          test_log="$TMPDIR/selector.log"
-          summary=cargo-test-summary.txt
-          failures=cargo-test-failed.txt
-          : > "$summary"
-          : > "$failures"
-
-          settlement=broker::service::server::retirement_settlement_tests::same_original_not_queued_final_retries_its_retained_input_before_another_q
-          selectors=(
-            audit::resource_tests::retention_confirms_the_committed_segment_after_a_filesystem_ack_failure
-            api::human_sources::journal_tests::owned_event_page_reports_the_archived_prefix_after_adoption
-            api::human_sources::tests::owned_admin_reads_refuse_head_before_authentication
-            api::human_sources::journal_tests::owned_admin_reads::owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
-            identity::operations::tests::owned_event_availability_preserves_granted_permissions
-            broker::writer::inventory_tests::completed_inventory_releases_its_permit_before_reply
-            broker::writer::inventory_tests::timed_out_inventory_keeps_one_permit_and_cannot_queue_a_series_before_cancel
-            broker::writer::status_projection_tests::coverage_only_pending_arm_does_not_taint_a_valid_last_confirmed_status
-            "$settlement"
-          )
-          expected=9
-          if (( ${#selectors[@]} != expected )); then
-            echo 'Invalid regression selector count' | tee -a "$summary"
-            exit 1
+          umask 077
+          scratch="$RUNNER_TEMP/g11-relay-private"
+          receipt="$RUNNER_TEMP/g11-relay-awaiting-receipt.txt"
+          selector=software_broker_scoped_relay_ipc_refuses_before_private_detail
+          log="$scratch/canary.log"
+          if timeout --kill-after=5s 180s "$TEST_BINARY" "$selector" --exact --test-threads=1 --color=never > "$log" 2>&1; then test_exit=0; else test_exit=$?; fi
+          selection_banners="$(grep -Ec '^running [0-9]+ tests?$' "$log" || true)"
+          selected="$(awk '/^running [0-9]+ tests?$/ { count += $2 } END { print count + 0 }' "$log")"
+          case_results="$(grep -Ec '^test .+ \.\.\. (ok|FAILED|ignored)(,.*)?$' "$log" || true)"
+          exact_pass="$(grep -Fxc "test $selector ... ok" "$log" || true)"
+          exact_failure="$(grep -Fxc "test $selector ... FAILED" "$log" || true)"
+          ignored="$(grep -Ec '^test .* \.\.\. ignored(,.*)?$' "$log" || true)"
+          result_summaries="$(grep -c '^test result: ' "$log" || true)"
+          marker_lines="$(grep -F 'g11_relay_fixture_failure phase=' "$log" || true)"
+          phase_marker_count="$(printf '%s\n' "$marker_lines" | awk 'NF { count++ } END { print count + 0}')"
+          allowed_phase_lines="$(printf '%s\n' "$marker_lines" | grep -E '^Error: g11_relay_fixture_failure phase=(fixture_open|submit_a|awaiting_a|submit_b|running_b|scoped_reads|terminal|guardian_shutdown|fixture_close)$' || true)"
+          allowed_phase_count="$(printf '%s\n' "$allowed_phase_lines" | awk 'NF { count++ } END { print count + 0}')"
+          phase=unknown
+          if [[ "$phase_marker_count" == 1 && "$allowed_phase_count" == 1 ]]; then
+            phase="${allowed_phase_lines#Error: g11_relay_fixture_failure phase=}"
           fi
-          printf 'Revision %s; %s exact SQLite library tests expected\n' "$GITHUB_SHA" "$expected" | tee -a "$summary"
-
-          # Keep raw Cargo and test output in the runner's private scratch directory.
-          if ! cargo test --locked --offline --no-default-features --lib --no-run \
-              --message-format=json > "$build_json" 2> "$TMPDIR/build.stderr"; then
-            echo 'SQLite library build failed; tests not run' | tee -a "$summary"
-            jq -r 'select(.reason == "compiler-message" and .message.level == "error")
-              | .message.code.code // empty | select(test("^E[0-9]{4}$"))' "$build_json" \
-              2>/dev/null | sort -u | tee -a "$summary" || true
-            exit 1
+          pass_summary=false
+          if [[ "$test_exit" == 0 && "$selection_banners" == 1 && "$selected" == 1 &&
+                "$case_results" == 1 && "$exact_pass" == 1 && "$exact_failure" == 0 &&
+                "$ignored" == 0 && "$result_summaries" == 1 ]] &&
+              grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; [0-9]+ measured; [0-9]+ filtered out; finished in [0-9]+(\.[0-9]+)?s$' "$log"; then
+            pass_summary=true
           fi
-          if ! libtest="$(jq -ers '[.[] | select(.reason == "compiler-artifact"
-              and .target.name == "agentsandbox" and .target.kind == ["lib"]
-              and .profile.test == true and .executable != null) | .executable]
-              | unique | if length == 1 then .[0] else empty end' "$build_json")" \
-              || [[ ! -x "$libtest" ]]; then
-            echo 'Expected one SQLite library test executable; tests not run' | tee -a "$summary"
-            exit 1
+          unique_failure=false
+          if [[ "$test_exit" != 0 && "$selection_banners" == 1 && "$selected" == 1 &&
+                "$case_results" == 1 && "$exact_failure" == 1 && "$exact_pass" == 0 &&
+                "$ignored" == 0 && "$result_summaries" == 1 ]] &&
+              grep -Eq '^test result: FAILED\. 0 passed; 1 failed; 0 ignored; [0-9]+ measured; [0-9]+ filtered out; finished in [0-9]+(\.[0-9]+)?s$' "$log"; then
+            unique_failure=true
           fi
-          printf 'SQLite libtest SHA-256 %s\n' "$(sha256sum "$libtest" | awk '{print $1}')" | tee -a "$summary"
-
-          passed=0
-          for selector in "${selectors[@]}"; do
-            if "$libtest" "$selector" --exact --test-threads=1 > "$test_log" 2>&1 \
-                && grep -Fxq 'running 1 test' "$test_log" \
-                && grep -Fxq "test $selector ... ok" "$test_log" \
-                && grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$test_log"; then
-              printf 'PASS %s\n' "$selector" | tee -a "$summary"
-              ((passed += 1))
-            else
-              printf 'FAIL %s\n' "$selector" | tee -a "$summary"
-              printf '%s\n' "$selector" >> "$failures"
-              if [[ "$selector" == "$settlement" ]]; then
-                phases='bind_full3|enqueue_signal|ack_signal|load_before_retirement|begin_retirement|ack_pending|authorize_retirement|read_pending|load_before_final|pause_writer'
-                categories='InvalidInput|UnsupportedVersion|TooLarge|LimitExceeded|Busy|Conflict|Interrupted|Corrupt|UnsafeFilesystem|ControlSecret|Io'
-                grep -Eo "settlement phase=($phases) category=($categories)\b" "$test_log" \
-                  | sort -u | tee -a "$summary" || true
+          diagnostic_status=not_applicable
+          filtered_json=unknown
+          diagnostic_marker_count=0
+          duplicate_json_key_count=0
+          if [[ "$unique_failure" == true && "$phase" == awaiting_a ]]; then
+            diagnostic_status=unknown
+            diagnostic_lines="$(grep -F 'g11_relay_awaiting_a' "$log" || true)"
+            diagnostic_marker_count="$(printf '%s\n' "$diagnostic_lines" | awk 'NF { count++ } END { print count + 0}')"
+            if [[ "$diagnostic_marker_count" == 1 ]]; then
+              diagnostic_line="$diagnostic_lines"
+              if [[ "${#diagnostic_line}" -le 4096 && "$diagnostic_line" =~ ^g11_relay_awaiting_a\ (.+)$ ]]; then
+                payload="${BASH_REMATCH[1]}"
+                printf '%s\n' "$payload" > "$scratch/awaiting-diagnostic.json"
+                if jq --stream -c 'select(length == 2) | .[0]' "$scratch/awaiting-diagnostic.json" > "$scratch/json-paths.txt" 2>/dev/null; then
+                  duplicate_json_key_count="$(sort "$scratch/json-paths.txt" | uniq -d | wc -l | tr -d ' ')"
+                  schema=''
+                  read -r -d '' schema <<'JQ' || true
+          def exact_keys($expected):
+            type == "object" and ((keys | sort) == ($expected | sort));
+          def enum($values):
+            type == "string" and (. as $value | ($values | index($value)) != null);
+          def nullable_enum($values): . == null or enum($values);
+          def nullable_boolean: . == null or type == "boolean";
+          def uint8: type == "number" and . >= 0 and . <= 255 and floor == .;
+          def valid_broker:
+            if exact_keys(["state"]) then (.state | enum(["live", "unknown"]))
+            elif exact_keys(["state", "code"]) then
+              (.state | enum(["exit", "signal"])) and (.code | uint8)
+            else false end;
+          def valid_witness:
+            exact_keys(["phase", "has_errors"]) and
+            (.phase | enum(["worker_created", "verification_created", "import_removed", "import_created", "not_observed", "unknown"])) and
+            (.has_errors | nullable_boolean);
+          def valid_relay:
+            if .reply == "projection" then
+              exact_keys(["reply", "configured", "phase", "error", "endpoint_present"]) and
+              (.configured | type == "boolean") and
+              (.phase | nullable_enum(["awaiting_issued_workload", "admitted", "unknown", "closed"])) and
+              (.error | nullable_enum(["unavailable", "invalid_material", "scope", "expired", "clock", "cancelled", "capacity", "unknown"])) and
+              (.endpoint_present | type == "boolean")
+            elif .reply == "refused" then
+              exact_keys(["reply", "code"]) and
+              (.code | enum(["unauthorized", "forbidden", "unavailable", "incompatible_control", "busy", "invalid_input", "conflict", "interrupted", "limit_exceeded", "needs_reconciliation"]))
+            elif .reply == "timeout" or .reply == "transport_error" or .reply == "unexpected_reply" then
+              exact_keys(["reply"])
+            else false end;
+          def valid_job:
+            if .reply == "projection" then
+              exact_keys(["reply", "state", "worker_state", "pending_rpc", "executor_running", "executor_error"]) and
+              (.state | enum(["absent", "reserved_in_process", "interrupted", "rejected", "accepted"])) and
+              (.worker_state | nullable_enum(["reserved", "preparing", "created", "start_issued", "running", "stopping", "terminal", "in_doubt", "cancelled"])) and
+              (.pending_rpc | nullable_boolean) and
+              (.executor_running | type == "boolean") and
+              (.executor_error | nullable_enum(["unauthorized", "forbidden", "unavailable", "incompatible_control", "busy", "invalid_input", "conflict", "interrupted", "limit_exceeded", "needs_reconciliation"]))
+            elif .reply == "timeout" or .reply == "transport_error" or .reply == "unexpected_reply" then
+              exact_keys(["reply"])
+            elif .reply == "refused" then
+              exact_keys(["reply", "code"]) and
+              (.code | enum(["unauthorized", "forbidden", "unavailable", "incompatible_control", "busy", "invalid_input", "conflict", "interrupted", "limit_exceeded", "needs_reconciliation"]))
+            else false end;
+          def valid:
+            exact_keys(["broker", "witness", "relay", "job"]) and
+            (.broker | valid_broker) and (.witness | valid_witness) and
+            (.relay | valid_relay) and (.job | valid_job);
+          def filtered:
+            . as $root |
+            {
+              broker: (if ($root.broker.state == "exit" or $root.broker.state == "signal")
+                then {state: $root.broker.state, code: $root.broker.code}
+                else {state: $root.broker.state} end),
+              witness: {phase: $root.witness.phase, has_errors: $root.witness.has_errors},
+              relay: (if $root.relay.reply == "projection" then
+                {reply: $root.relay.reply, configured: $root.relay.configured,
+                 phase: $root.relay.phase, error: $root.relay.error,
+                 endpoint_present: $root.relay.endpoint_present}
+                elif $root.relay.reply == "refused" then
+                {reply: $root.relay.reply, code: $root.relay.code}
+                else {reply: $root.relay.reply} end),
+              job: (if $root.job.reply == "projection" then
+                {reply: $root.job.reply, state: $root.job.state,
+                 worker_state: $root.job.worker_state, pending_rpc: $root.job.pending_rpc,
+                 executor_running: $root.job.executor_running,
+                 executor_error: $root.job.executor_error}
+                elif $root.job.reply == "refused" then
+                {reply: $root.job.reply, code: $root.job.code}
+                else {reply: $root.job.reply} end)
+            };
+          if length == 1 then .[0] as $value | if ($value | valid) then ($value | filtered) else empty end else empty end
+          JQ
+                  if [[ "$duplicate_json_key_count" == 0 ]] &&
+                      jq -cS -e -s "$schema" "$scratch/awaiting-diagnostic.json" > "$scratch/filtered-diagnostic.json" 2>/dev/null &&
+                      [[ "$(wc -l < "$scratch/filtered-diagnostic.json" | tr -d ' ')" == 1 ]]; then
+                    filtered_json="$(<"$scratch/filtered-diagnostic.json")"
+                    diagnostic_status=filtered
+                  fi
+                fi
               fi
             fi
-          done
-          printf 'Passed %s of %s exact selectors\n' "$passed" "$expected" | tee -a "$summary"
-          (( passed == expected ))
-      - name: Summarize test results
-        if: always()
-        shell: bash
-        run: |
-          if [ -f cargo-test.log ]; then
-            grep -E '^test result:|^     Running ' cargo-test.log > cargo-test-summary.txt || true
-            grep -E '\.\.\. FAILED$' cargo-test.log | sed 's/^test //; s/ \.\.\. FAILED$//' > cargo-test-failed.txt || true
-            {
-              echo "### Rust test suite"
-              echo
-              echo "Failed tests: $(wc -l < cargo-test-failed.txt)"
-              echo
-              echo '```'
-              head -n 100 cargo-test-failed.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-          elif [ -f cargo-test-summary.txt ]; then
-            {
-              echo "### Targeted SQLite library tests"
-              echo '```'
-              cat cargo-test-summary.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
           fi
-      - name: Upload test logs
+          canary_status=FAIL
+          if [[ "$pass_summary" == true ]]; then canary_status=PASS; fi
+          if [[ "$unique_failure" == true ]]; then canary_status=FAIL_UNIQUE; fi
+          {
+            printf 'canary=%s\ncanary_exit=%s\n' "$canary_status" "$test_exit"
+            printf 'selection_banners=%s\nselected=%s\ncase_results=%s\n' "$selection_banners" "$selected" "$case_results"
+            printf 'exact_pass=%s\nexact_failure=%s\nignored=%s\nresult_summaries=%s\n' "$exact_pass" "$exact_failure" "$ignored" "$result_summaries"
+            printf 'phase=%s\nphase_marker_count=%s\nallowed_phase_count=%s\n' "$phase" "$phase_marker_count" "$allowed_phase_count"
+            printf 'awaiting_a_diagnostic_status=%s\nawaiting_a_diagnostic_marker_count=%s\nduplicate_json_key_count=%s\n' \
+              "$diagnostic_status" "$diagnostic_marker_count" "$duplicate_json_key_count"
+            printf 'awaiting_a_diagnostic_json=%s\n' "$filtered_json"
+          } >> "$receipt"
+          cat "$receipt" >> "$GITHUB_STEP_SUMMARY"
+          echo "canary_status=$canary_status" >> "$GITHUB_OUTPUT"
+          test "$canary_status" = PASS
+      - name: Upload sanitized relay result
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: lot-verify-rust-${{ github.sha }}
-          path: |
-            cargo-test.log
-            cargo-test-summary.txt
-            cargo-test-failed.txt
-          if-no-files-found: ignore
+          name: g11-relay-awaiting-stack-${{ github.sha }}
+          path: ${{ runner.temp }}/g11-relay-awaiting-receipt.txt
+          if-no-files-found: warn
           retention-days: 14
-
-  frontend:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: front
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Setup Node
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '24.22.2'
-          package-manager-cache: false
-      - name: Install
-        run: npm ci --no-audit --no-fund
-      - name: Build
-        run: npm run build
-      - name: Test
-        run: npm test
