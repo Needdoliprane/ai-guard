@@ -717,13 +717,6 @@ fn load_operation(
         })
         .transpose()
 }
-/// One explicit backed-up maintenance: a format step, or the additive
-/// Kubernetes session effect capability that keeps the format.
-#[derive(Clone, Copy)]
-enum MaintenanceStep {
-    Version { from_version: u32, to_version: u32 },
-    KubernetesSessionEffects,
-}
 
 pub(super) fn quota_usage(db: &Connection, policy: &QuotaPolicyV1) -> anyhow::Result<QuotaUsageV1> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -1224,6 +1217,12 @@ impl Store {
     ) -> anyhow::Result<MigrationReportV1> {
         self.migrate_control_version(backup_path, 9, 10)
     }
+    /// Explicit backed-up offline maintenance appending the human rights
+    /// marker on a store that already carries the worker-access marker. The
+    /// store format (`user_version`) is unchanged; never activates supervision.
+    pub fn migrate_human_rights_v2(&self, backup_path: &Path) -> anyhow::Result<MigrationReportV1> {
+        self.backed_up_maintenance(backup_path, Maintenance::HumanRights)
+    }
     pub(super) fn migrate_control_version(
         &self,
         backup_path: &Path,
@@ -1233,9 +1232,9 @@ impl Store {
         // The recovery format has one explicit semantic edge. An internal
         // caller cannot skip the checkpoint marker and history of schema12.
         invalid(to_version != 13 || from_version == 12)?;
-        self.maintain_with_backup(
+        self.backed_up_maintenance(
             backup_path,
-            MaintenanceStep::Version {
+            Maintenance::Version {
                 from_version,
                 to_version,
             },
@@ -1248,37 +1247,56 @@ impl Store {
         &self,
         backup_path: &Path,
     ) -> anyhow::Result<MigrationReportV1> {
-        self.maintain_with_backup(backup_path, MaintenanceStep::KubernetesSessionEffects)
+        self.backed_up_maintenance(backup_path, Maintenance::KubernetesSessionEffects)
     }
-    fn maintain_with_backup(
+    fn backed_up_maintenance(
         &self,
         backup_path: &Path,
-        step: MaintenanceStep,
+        step: Maintenance,
     ) -> anyhow::Result<MigrationReportV1> {
-        let (from_version, to_version) = match step {
-            MaintenanceStep::Version {
-                from_version,
-                to_version,
-            } => (from_version, to_version),
-            MaintenanceStep::KubernetesSessionEffects => {
-                let db = self
-                    .db
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-                let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-                drop(db);
-                invalid([11, 12, 13].contains(&version))?;
-                let version = u32::try_from(version)?;
-                (version, version)
-            }
-        };
         let mut db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         let preflight = self.begin_checked(&mut db)?;
         let version: i64 = preflight.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        invalid(version == i64::from(from_version))?;
+        let (from_version, to_version) = match step {
+            Maintenance::Version {
+                from_version,
+                to_version,
+            } => {
+                invalid(version == i64::from(from_version))?;
+                (from_version, to_version)
+            }
+            Maintenance::HumanRights => {
+                // Legacy stores only; an owned 14/15 store receives the marker
+                // through its journaled source maintenance.
+                anyhow::ensure!(
+                    (10..=13).contains(&version),
+                    "migrate-human-rights requires the worker registry marker: store formats 10 to 13 (this store is format {version}; run migrate-control up to --target-version 10 first)"
+                );
+                anyhow::ensure!(
+                    super::human_rights::maintenance_pending(&preflight)?,
+                    "the human rights marker is already installed on this store; nothing was changed"
+                );
+                let version = u32::try_from(version)?;
+                (version, version)
+            }
+            Maintenance::KubernetesSessionEffects => {
+                // Legacy stores only; an owned 14/15 store receives the
+                // capability through its in-place source maintenance.
+                anyhow::ensure!(
+                    (11..=13).contains(&version),
+                    "enable-kubernetes-session-effects requires store format 11 to 13 (this store is format {version})"
+                );
+                anyhow::ensure!(
+                    !super::kubernetes_session::effects::enabled(&preflight)?,
+                    "the Kubernetes session effect capability is already enabled on this store; nothing was changed"
+                );
+                let version = u32::try_from(version)?;
+                (version, version)
+            }
+        };
         validate_schema(&preflight, false)?;
         Self::validate_metadata(&preflight, &self.tenant_id)?;
         let expected = Self::check_integrity(&preflight)?;
@@ -1344,37 +1362,82 @@ impl Store {
                 && current.event_count == expected.event_count
                 && current.head_hash == expected.head_hash,
         )?;
-        let activate_supervision = matches!(step, MaintenanceStep::Version { .. })
-            && to_version == 3
-            && tx.lease.untouched_fresh_origin(&tx)?;
-        if matches!(step, MaintenanceStep::KubernetesSessionEffects) {
+        if step == Maintenance::KubernetesSessionEffects {
             conflict(!super::kubernetes_session::effects::enabled(&tx)?)?;
             super::kubernetes_session::effects::initialize(self, &tx)?;
-        } else {
-            match to_version {
-                2 => initialize(&tx, self.max_events, &self.redactor)?,
-                3 => self.initialize_supervision(&tx)?,
-                4 => self.initialize_identity(&tx)?,
-                5 => self.initialize_human_access(&tx)?,
-                6 => {
-                    super::workload::initialize(self, &tx)?;
-                    super::broker_registry::initialize(self, &tx)?;
-                    super::relay::initialize(&tx)?;
-                    for (_, _, sql) in WORKLOAD_INDEX_SCHEMA {
-                        tx.execute_batch(sql)?;
-                    }
-                }
-                7 => self.initialize_human_brokers(&tx)?,
-                8 => super::kubernetes_admission::initialize(self, &tx)?,
-                9 => super::kubernetes_admission::initialize_policy(self, &tx)?,
-                10 => self.initialize_human_workers(&tx)?,
-                11 => super::kubernetes_session::initialize(self, &tx)?,
-                12 => super::broker_checkpoint_migration::initialize(self, &tx)?,
-                13 => super::kubernetes_admission::initialize_recovery(self, &tx)?,
-                _ => return Err(ControlFailure::InvalidRequest.into()),
-            }
-            tx.pragma_update(None, "user_version", to_version)?;
+            validate_schema(&tx, false)?;
+            validate(&tx)?;
+            Self::validate_metadata(&tx, &self.tenant_id)?;
+            anyhow::ensure!(
+                Self::check_integrity(&tx)?.valid,
+                "post-maintenance audit integrity failure"
+            );
+            let (seq, hash): (i64, String) = tx.query_row(
+                "SELECT genesis_seq,genesis_hash FROM kubernetes_session_effect_meta WHERE singleton=1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            self.commit_checked(tx)?;
+            return Ok(MigrationReportV1 {
+                from_version,
+                to_version,
+                backup_path: target.to_string_lossy().into(),
+                genesis_seq: seq,
+                genesis_hash: hash,
+            });
         }
+        if step == Maintenance::HumanRights {
+            conflict(super::human_rights::maintenance_pending(&tx)?)?;
+            // Each step installs only what this store still lacks, in order,
+            // in the one transaction that follows the verified backup.
+            if !super::human_rights::installed(&tx)? {
+                self.initialize_human_rights(&tx)?;
+            }
+            validate_schema(&tx, false)?;
+            validate(&tx)?;
+            Self::validate_metadata(&tx, &self.tenant_id)?;
+            anyhow::ensure!(
+                Self::check_integrity(&tx)?.valid,
+                "post-maintenance audit integrity failure"
+            );
+            let (seq, hash): (i64, String) = tx.query_row(
+                "SELECT seq,hash FROM events WHERE kind=?1",
+                [super::human_rights::GENESIS_KIND],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            self.commit_checked(tx)?;
+            return Ok(MigrationReportV1 {
+                from_version,
+                to_version,
+                backup_path: target.to_string_lossy().into(),
+                genesis_seq: seq,
+                genesis_hash: hash,
+            });
+        }
+        let activate_supervision = to_version == 3 && tx.lease.untouched_fresh_origin(&tx)?;
+        match to_version {
+            2 => initialize(&tx, self.max_events, &self.redactor)?,
+            3 => self.initialize_supervision(&tx)?,
+            4 => self.initialize_identity(&tx)?,
+            5 => self.initialize_human_access(&tx)?,
+            6 => {
+                super::workload::initialize(self, &tx)?;
+                super::broker_registry::initialize(self, &tx)?;
+                super::relay::initialize(&tx)?;
+                for (_, _, sql) in WORKLOAD_INDEX_SCHEMA {
+                    tx.execute_batch(sql)?;
+                }
+            }
+            7 => self.initialize_human_brokers(&tx)?,
+            8 => super::kubernetes_admission::initialize(self, &tx)?,
+            9 => super::kubernetes_admission::initialize_policy(self, &tx)?,
+            10 => self.initialize_human_workers(&tx)?,
+            11 => super::kubernetes_session::initialize(self, &tx)?,
+            12 => super::broker_checkpoint_migration::initialize(self, &tx)?,
+            13 => super::kubernetes_admission::initialize_recovery(self, &tx)?,
+            _ => return Err(ControlFailure::InvalidRequest.into()),
+        }
+        tx.pragma_update(None, "user_version", to_version)?;
         validate_schema(&tx, false)?;
         validate(&tx)?;
         Self::validate_metadata(&tx, &self.tenant_id)?;
@@ -1383,11 +1446,7 @@ impl Store {
             "post-migration audit integrity failure"
         );
         let (seq, hash): (i64, String) = tx.query_row(
-            match (step, to_version) {
-                (MaintenanceStep::KubernetesSessionEffects, _) => {
-                    "SELECT genesis_seq,genesis_hash FROM kubernetes_session_effect_meta WHERE singleton=1"
-                }
-                (_, to_version) => match to_version {
+            match to_version {
                 2 => "SELECT genesis_seq,genesis_hash FROM control_meta WHERE singleton=1",
                 3 => "SELECT genesis_seq,genesis_hash FROM supervision_meta WHERE singleton=1",
                 4 => "SELECT genesis_seq,genesis_hash FROM identity_meta WHERE singleton=1",
@@ -1403,7 +1462,6 @@ impl Store {
                 12 => "SELECT seq,hash FROM events WHERE kind='control.broker_checkpoints.genesis'",
                 13 => "SELECT seq,hash FROM events WHERE kind='control.kubernetes.create.recovery.genesis'",
                 _ => return Err(ControlFailure::InvalidRequest.into()),
-                },
             },
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
@@ -1499,4 +1557,13 @@ fn validate_admission_input(
         "worker admission exceeds historical shared tenant quota"
     );
     Ok(())
+}
+
+/// One backed-up offline maintenance step. A version step changes the store
+/// format; the human rights marker never does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Maintenance {
+    Version { from_version: u32, to_version: u32 },
+    HumanRights,
+    KubernetesSessionEffects,
 }

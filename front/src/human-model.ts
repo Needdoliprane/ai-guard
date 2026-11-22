@@ -1,6 +1,10 @@
 export type HumanView = "metadata" | "content";
 export type ResourceKind = "session" | "sandbox" | "agent" | "project";
-export type Capability = "read_metadata" | "read_content" | "export" | "read_tenant_metadata" | "manage_memberships" | "manage_grants" | "read_broker_registry" | "read_worker_registry";
+/** Closed list of the capabilities the Rust control can place in a context. Presence is a server fact, not a permission check. */
+export const CAPABILITIES = ["read_metadata", "read_content", "export", "read_tenant_metadata", "manage_memberships", "manage_grants",
+  "read_broker_registry", "read_worker_registry", "approve_launch", "read_memberships", "read_configuration", "launch_session",
+  "send_session_message", "approve_egress"] as const;
+export type Capability = typeof CAPABILITIES[number];
 export type Principal = { kind: "human_local"; installation_id: string; account_id: string } |
   { kind: "human_oidc"; issuer: string; subject: string };
 export interface HumanContext {
@@ -118,8 +122,8 @@ export function parseHumanIdentity(value: unknown): HumanIdentity {
     requireContract(object(item) && opaque(item.id) && !seen.has(item.id) && boundedText(item.tenant_id, 128) &&
       boundedText(item.organization_scope, 1024) && ["personal", "administration"].includes(String(item.mode)) &&
       revision(item.membership_revision) && authorizationVersion(item.authorization_version) && timestamp(item.expires_at) &&
-      Array.isArray(item.capabilities) && item.capabilities.length <= 8 && new Set(item.capabilities).size === item.capabilities.length && item.capabilities.every((capability) =>
-        ["read_metadata", "read_content", "export", "read_tenant_metadata", "manage_memberships", "manage_grants", "read_broker_registry", "read_worker_registry"].includes(String(capability))));
+      Array.isArray(item.capabilities) && item.capabilities.length <= CAPABILITIES.length && new Set(item.capabilities).size === item.capabilities.length &&
+      item.capabilities.every((capability) => (CAPABILITIES as readonly string[]).includes(String(capability))));
     seen.add(item.id);
     return { id: item.id, tenant_id: item.tenant_id, organization_scope: item.organization_scope,
       mode: item.mode as HumanContext["mode"], membership_revision: item.membership_revision,

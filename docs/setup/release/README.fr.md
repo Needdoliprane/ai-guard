@@ -17,6 +17,14 @@ candidate sont **NOT_RUN dans ce lot documentaire**. Les résultats datés de
 manifest/verify ci-dessus gardent leur source ; ils ne qualifient pas cette
 nouvelle composition.
 
+**Retour arrière après un marqueur d’identité.** Une maintenance explicite de
+la base comme `migrate-human-rights` ajoute un marqueur de chaîne d’identité
+que les versions antérieures refusent de rejouer : après lui, une version
+antérieure n’ouvre plus la base du tenant. Revenir en arrière impose de
+restaurer la sauvegarde écrite par cette maintenance, ce qui abandonne tous les
+événements d’audit enregistrés après elle. Voir le
+[guide d’identité](../identity/README.fr.md#activer-les-capacités-des-droits-humains).
+
 ### Lire l'identité distribuée
 
 `Cargo.toml [package].version` est la version produit ai-guard canonique,

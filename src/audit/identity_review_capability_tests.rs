@@ -90,13 +90,19 @@ fn approval_capability_is_personal_and_not_a_legacy_resource_permission() {
 }
 
 #[test]
-fn approval_membership_requires_exact_format_fourteen_even_when_inactive() {
+fn approval_membership_requires_an_owned_format_or_the_rights_marker_even_when_inactive() {
     let ordinary = provision();
     let mut approval = with_approval(ordinary.clone());
     for version in 1..=15 {
-        assert!(require_approval_capability_format(&ordinary.mutations[2], version).is_ok());
-        let result = require_approval_capability_format(&approval.mutations[2], version);
-        assert_eq!(result.is_ok(), version == 14, "format {version}");
+        assert!(require_approval_capability_format(&ordinary.mutations[2], version, false).is_ok());
+        let result = require_approval_capability_format(&approval.mutations[2], version, false);
+        // Owned formats 14 and 15 carry the approval protocol; legacy formats
+        // need the explicit human rights marker (the `true` cases below).
+        assert_eq!(
+            result.is_ok(),
+            matches!(version, 14 | 15),
+            "format {version}"
+        );
         if let Err(error) = result {
             assert_eq!(
                 error.downcast_ref::<IdentityFailureV1>(),
@@ -108,7 +114,9 @@ fn approval_membership_requires_exact_format_fourteen_even_when_inactive() {
         panic!("test fixture requires a membership");
     };
     membership.active = false;
-    assert!(require_approval_capability_format(&approval.mutations[2], 13).is_err());
+    assert!(require_approval_capability_format(&approval.mutations[2], 13, false).is_err());
+    // On a legacy store the explicit human rights marker admits it.
+    assert!(require_approval_capability_format(&approval.mutations[2], 13, true).is_ok());
 }
 
 #[test]

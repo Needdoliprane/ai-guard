@@ -355,6 +355,23 @@ that does not poll can occupy its share. Every poll still rechecks expiry and
 revocation. These bounds do not establish a limit on all HTTP sockets or an
 autonomous eviction guarantee.
 
+## Enable the human rights capabilities
+
+Five capabilities are fenced by an explicit identity marker: `read_memberships`, `read_configuration` and `approve_egress` (administration contexts) and `launch_session` and `send_session_message` (personal contexts). On a legacy store the marker also admits `approve_launch`, which the owned formats 14 and 15 already accept. Until a tenant store carries the marker, a membership or local preparation that contains any of them is refused with `migration_required` and nothing is appended; the new human read actions (summary, memberships, quota, usage, configuration and the session-control reads) are refused the same way. The marker does not change the store format; it is an identity-chain event that earlier releases refuse to replay: they open such a store unhealthy and refuse every operation on it. Keep the backup it creates if you may need to return to an earlier release.
+
+The marker requires a store that already carries the worker registry marker (formats 10 to 13, after the explicit 9→10 migration). Stop the gateway and every broker first, then run:
+
+```sh
+"$AIGUARD_BIN" migrate-human-rights --data <tenant.sqlite> --tenant-id <tenant> \
+  --backup <new-private-backup.sqlite> --confirm-control-stopped --max-events <capacity>
+```
+
+The command refuses to start without `--confirm-control-stopped`. It writes a verified new backup, appends the marker once and prints a JSON report whose `from_version` and `to_version` are both the unchanged format. A second run is refused with `the human rights marker is already installed`; a store below format 10 is refused with `requires the worker registry marker: store formats 10 to 13`.
+
+An earlier release cannot use a store that carries the marker: plan an upgrade, not a downgrade. Returning to an earlier release means restoring the backup into a new private destination, which **discards every audit event recorded after the marker**; the restored store refuses the fenced capabilities again. On owned source stores (formats 14 and 15), the fenced capabilities are admitted only when the verified marker is present: install it on the legacy store before adopting it into the owned profile; a journaled maintenance for stores already adopted is not yet available. MySQL tenant stores refuse the marker and the fenced capabilities until the MySQL identity replay supports them.
+
+Trusted control may introduce or reactivate any of these capabilities: `human apply` with no caller `actor`, or `human provision --capability read-memberships` (likewise `read-configuration`, `launch-session`, `send-session-message`, `approve-launch`, `approve-egress`) after the marker. An organization administrator holding `manage_memberships` may keep or remove the control-only ones (`read_memberships`, `read_configuration`, `launch_session`, `send_session_message` and the two registry reads) but never add or reactivate them; `approve_egress` and `approve_launch` are delegable within the organization only by an administrator whose own active membership holds them, to another member or to itself; a right removed from oneself is not reactivated by oneself. A capability alone opens no view or command: the gateway still revalidates the membership, the OIDC ceiling and each resource permission on every request.
+
 ## Authorize named worker registry readers
 
 The separate administration capability `read_worker_registry` requires explicit9→10 migration and trusted membership approval. Follow [named worker registry reads](WORKERS.md) for the local/OIDC procedure, shared audit budgets, restore behavior, data limits and the obligatory personal-attribution gap. No existing broker/resource permission grants this right.

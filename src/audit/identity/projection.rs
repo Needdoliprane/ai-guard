@@ -17,6 +17,10 @@ pub(crate) struct Projection {
     pub(super) resources: BTreeMap<String, (ResourceGrantV1, i64)>,
     pub(super) operations: BTreeMap<String, (String, i64)>,
     pub(super) revision: u64,
+    /// After the human rights marker, a grant that binds a resource for the
+    /// first time only adds rights: it keeps the tenant authorization revision,
+    /// so it revokes no live context. Every other change still advances it.
+    pub(super) additive_resource_grants: bool,
 }
 
 pub(super) fn invalid(ok: bool) -> anyhow::Result<()> {
@@ -46,6 +50,51 @@ impl Projection {
         self.memberships.values().any(|(m, _)| {
             &m.principal == principal && m.active && m.organization_scope == organization
         })
+    }
+    /// The delegable approval rights (`approve_launch`, `approve_egress`)
+    /// pass only from a holder: a human actor adds or reactivates one, for
+    /// another member or for itself, only while its own active membership in
+    /// the same organization holds it. Removal and retention stay free.
+    ///
+    /// Checked on the live mutation path before effect. Historical records
+    /// keep replaying under the rules they were accepted with, so an existing
+    /// format 14/15 history is never refused at reopen.
+    pub(crate) fn check_holder_delegation(
+        &self,
+        mutation: &IdentityMutationV1,
+    ) -> anyhow::Result<()> {
+        if !mutation.actor.is_human() {
+            return Ok(());
+        }
+        let IdentityChangeV1::Membership { membership, .. } = &mutation.change else {
+            return Ok(());
+        };
+        let previous = self
+            .memberships
+            .get(&membership.membership_id)
+            .map(|(previous, _)| previous);
+        for capability in [
+            HumanCapabilityV1::ApproveLaunch,
+            HumanCapabilityV1::ApproveEgress,
+        ] {
+            if !membership.capabilities.contains(&capability) {
+                continue;
+            }
+            let retained = previous.is_some_and(|previous| {
+                previous.capabilities.contains(&capability)
+                    && (previous.active || !membership.active)
+            });
+            let held = self.memberships.values().any(|(m, _)| {
+                m.active
+                    && m.principal == mutation.actor
+                    && m.organization_scope == membership.organization_scope
+                    && m.capabilities.contains(&capability)
+            });
+            if !retained && !held {
+                return Err(IdentityFailureV1::PermissionDenied.into());
+            }
+        }
+        Ok(())
     }
     pub(crate) fn apply(
         &mut self,
@@ -89,6 +138,7 @@ impl Projection {
             }
             _ => return Err(IdentityFailureV1::PermissionDenied.into()),
         }
+        let mut keeps_revision = false;
         match &mutation.change {
             IdentityChangeV1::Account {
                 expected_revision,
@@ -138,31 +188,19 @@ impl Projection {
                         && m.0.organization_scope == membership.organization_scope
                 }))?;
                 // Organization administrators may retain or remove an existing
-                // tenant-wide grant, but only trusted control may introduce or
+                // control-only grant, but only trusted control may introduce or
                 // reactivate it. Identity and organization are immutable above.
                 if mutation.actor.is_human()
                     && membership
                         .capabilities
-                        .contains(&HumanCapabilityV1::ReadBrokerRegistry)
-                    && old.is_none_or(|(previous, _)| {
-                        !previous
-                            .capabilities
-                            .contains(&HumanCapabilityV1::ReadBrokerRegistry)
-                            || (!previous.active && membership.active)
-                    })
-                {
-                    return Err(IdentityFailureV1::PermissionDenied.into());
-                }
-                if mutation.actor.is_human()
-                    && membership
-                        .capabilities
-                        .contains(&HumanCapabilityV1::ReadWorkerRegistry)
-                    && old.is_none_or(|(previous, _)| {
-                        !previous
-                            .capabilities
-                            .contains(&HumanCapabilityV1::ReadWorkerRegistry)
-                            || (!previous.active && membership.active)
-                    })
+                        .iter()
+                        .filter(|capability| capability.is_control_only())
+                        .any(|capability| {
+                            old.is_none_or(|(previous, _)| {
+                                !previous.capabilities.contains(capability)
+                                    || (!previous.active && membership.active)
+                            })
+                        })
                 {
                     return Err(IdentityFailureV1::PermissionDenied.into());
                 }
@@ -205,13 +243,17 @@ impl Projection {
                     *expected_revision,
                     grant.revision,
                 )?;
+                keeps_revision =
+                    self.additive_resource_grants && !self.resources.contains_key(&key);
                 self.resources.insert(key, (grant.clone(), seq));
             }
         }
-        self.revision = self
-            .revision
-            .checked_add(1)
-            .ok_or(IdentityFailureV1::InvalidRequest)?;
+        if !keeps_revision {
+            self.revision = self
+                .revision
+                .checked_add(1)
+                .ok_or(IdentityFailureV1::InvalidRequest)?;
+        }
         i64::try_from(self.revision)
             .context("identity authorization revision exceeds SQLite integer range")?;
         self.operations

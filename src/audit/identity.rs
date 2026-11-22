@@ -26,13 +26,16 @@ mod authentication_metadata_tests;
 #[path = "identity_review_capability_tests.rs"]
 mod review_capability_tests;
 
-/// The new capability must not enter a legacy history, even through a retry of
-/// an existing operation. This is only a format fence, never approval authority.
+/// The approval capability enters a history only on the modern source formats
+/// or, on a legacy store, after the human rights marker; never through a retry
+/// that predates it. This is only a format fence, never approval authority.
 fn require_approval_capability_format(
     mutation: &IdentityMutationV1,
     version: i64,
+    rights_access: bool,
 ) -> anyhow::Result<()> {
     if !matches!(version, 14 | 15)
+        && !rights_access
         && matches!(
             &mutation.change,
             IdentityChangeV1::Membership { membership, .. }
@@ -49,10 +52,12 @@ pub(crate) fn require_replay_capabilities(
     version: i64,
     broker_access: bool,
     worker_access: bool,
+    rights_access: bool,
 ) -> anyhow::Result<()> {
     super::human_brokers::require_mutation_capability(mutation, broker_access)?;
     super::human_workers::require_mutation_capability(mutation, worker_access)?;
-    require_approval_capability_format(mutation, version)
+    super::human_rights::require_mutation_capability(mutation, rights_access)?;
+    require_approval_capability_format(mutation, version, rights_access)
 }
 
 pub(super) const SCHEMA: [(&str, &str, &str); 11] = [
@@ -338,6 +343,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     let mut seen_human_access = false;
     let mut seen_broker_access = false;
     let mut seen_worker_access = false;
+    let mut seen_rights_access = false;
     for row in statement.query_map([], row_event)? {
         let stored = row?;
         if stored.event.kind == "control.identity.genesis" {
@@ -370,6 +376,10 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
             let record: super::human::HumanReadAuditV1 =
                 serde_json::from_value(stored.event.data.clone())?;
             super::human::validate_read(&record)?;
+            invalid(
+                !super::human_rights::read_action_requires_marker(&record.action)
+                    || seen_rights_access,
+            )?;
             invalid(record.authorization_revision == projection.revision)?;
             let account = projection
                 .accounts
@@ -449,6 +459,21 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
             seen_worker_access = true;
             continue;
         }
+        if stored.event.kind == super::human_rights::GENESIS_KIND {
+            let (expected, revision) =
+                super::human_rights::genesis(db)?.ok_or(IdentityFailureV1::InvalidRequest)?;
+            invalid(
+                super::human_rights::format_admits_marker(version)
+                    && seen_worker_access
+                    && !seen_rights_access
+                    && stored.seq == expected.seq
+                    && stored.hash == expected.hash
+                    && revision == projection.revision,
+            )?;
+            seen_rights_access = true;
+            projection.additive_resource_grants = true;
+            continue;
+        }
         if stored.event.kind == super::human_workers::READ_KIND {
             invalid(
                 matches!(version, 10 | 11 | 12 | 13 | 14 | 15)
@@ -492,6 +517,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
             version,
             seen_broker_access,
             seen_worker_access,
+            seen_rights_access,
         )?;
         projection.apply(&record.mutation, &tenant, stored.seq)?;
         ensure_resource_known(db, &record.mutation, stored.seq)?;
@@ -825,11 +851,12 @@ impl Store {
         provision.validate()?;
         require_identity_projection(&tx)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        let rights_access = super::human_rights::installed(&tx)?;
         // Validate the complete atomic preparation before any replay lookup or
         // append, including the schema7 capability retained by schemas8–10 in its
         // third operation.
         for mutation in &provision.mutations {
-            require_approval_capability_format(mutation, version)?;
+            require_approval_capability_format(mutation, version, rights_access)?;
             super::human_brokers::require_mutation_capability(
                 mutation,
                 [7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&version),
@@ -838,6 +865,7 @@ impl Store {
                 mutation,
                 matches!(version, 10 | 11 | 12 | 13 | 14 | 15),
             )?;
+            super::human_rights::require_mutation_capability(mutation, rights_access)?;
         }
         let existing = provision
             .mutations
@@ -865,7 +893,8 @@ impl Store {
         tx.require_identity_authority()?;
         mutation.validate()?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        require_approval_capability_format(mutation, version)?;
+        let rights_access = super::human_rights::installed(tx)?;
+        require_approval_capability_format(mutation, version, rights_access)?;
         super::human_brokers::require_mutation_capability(
             mutation,
             [7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&version),
@@ -874,6 +903,7 @@ impl Store {
             mutation,
             matches!(version, 10 | 11 | 12 | 13 | 14 | 15),
         )?;
+        super::human_rights::require_mutation_capability(mutation, rights_access)?;
         let value = serde_json::to_value(mutation)?;
         invalid(self.redactor.value(&value) == value)?;
         let hash = mutation.input_hash()?;
@@ -886,6 +916,9 @@ impl Store {
             .checked_add(1)
             .context("audit sequence exhausted")?;
         let mut projection = load_projection(tx, mutation)?;
+        projection.additive_resource_grants = rights_access;
+        let previous_revision = projection.revision;
+        projection.check_holder_delegation(mutation)?;
         projection.apply(mutation, &self.tenant_id, next_seq)?;
         ensure_resource_known(tx, mutation, next_seq)?;
         let record = Record {
@@ -906,13 +939,15 @@ impl Store {
             "INSERT INTO identity_operations(operation_id,input_hash,event_seq) VALUES(?1,?2,?3)",
             params![mutation.operation_id, record.input_hash, stored.seq],
         )?;
-        let next_revision = i64::try_from(projection.revision)
-            .context("identity authorization revision exceeds SQLite integer range")?;
-        let previous_revision = next_revision
-            .checked_sub(1)
-            .context("identity authorization revision has no predecessor")?;
-        let updated = tx.execute("UPDATE identity_meta SET authorization_revision=?1 WHERE singleton=1 AND authorization_revision=?2",params![next_revision,previous_revision])?;
-        conflict(updated == 1)?;
+        if projection.revision != previous_revision {
+            let next_revision = i64::try_from(projection.revision)
+                .context("identity authorization revision exceeds SQLite integer range")?;
+            let previous_revision = i64::try_from(previous_revision)
+                .context("identity authorization revision exceeds SQLite integer range")?;
+            conflict(next_revision.checked_sub(1) == Some(previous_revision))?;
+            let updated = tx.execute("UPDATE identity_meta SET authorization_revision=?1 WHERE singleton=1 AND authorization_revision=?2",params![next_revision,previous_revision])?;
+            conflict(updated == 1)?;
+        }
         Ok(receipt(&stored, &record))
     }
     pub fn human_account(

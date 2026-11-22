@@ -177,6 +177,7 @@ mod human;
 mod human_brokers;
 mod human_modern;
 pub(crate) use human_modern::HumanDiscoveryGeneration;
+mod human_rights;
 mod human_workers;
 pub(crate) mod identity;
 mod kubernetes_admission;
@@ -705,6 +706,7 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
     }
     human_brokers::validate_capability(db, version)?;
     human_workers::validate_capability(db, version)?;
+    human_rights::validate_capability(db, version)?;
     // Old profiles, including audit-only1, must never contain a future
     // reserved egress family. Exact15's complete replay runs under control.
     if version != 15 {
