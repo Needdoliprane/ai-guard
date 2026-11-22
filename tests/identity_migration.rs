@@ -1044,7 +1044,7 @@ async fn schema_four_protocol_preserves_legacy_roles_and_rejects_unknown_capabil
             [SupervisionProtocolV1::BrokerSupervisionV1]
         );
         protocol.validate().unwrap();
-        protocol.schema_version = 6;
+        protocol.schema_version = u32::MAX;
         assert!(protocol.validate().is_err());
         protocol.schema_version = 4;
         protocol.protocols.clear();
