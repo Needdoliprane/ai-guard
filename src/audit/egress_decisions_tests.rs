@@ -74,6 +74,16 @@ fn request(binding: &EgressBindingV1, authority: &str) -> EgressDecideRequestV1 
     }
 }
 
+fn channel_open(binding: &EgressBindingV1) -> EgressObserveRequestV1 {
+    EgressObserveRequestV1 {
+        version: 1,
+        observation_id: IdV1::random(),
+        observation: EgressObservationV1::ChannelOpened {
+            binding: binding.clone(),
+        },
+    }
+}
+
 fn policy() -> EgressPolicySnapshot {
     EgressTenantPolicyV1 {
         version: 1,
@@ -229,17 +239,103 @@ fn egress_store_unknown_destination_is_a_durable_review_and_renewal_closes_unkno
 }
 
 #[test]
+fn egress_store_channel_open_requires_the_current_running_binding() {
+    let directory = private_directory();
+    let a = store(directory.path(), "tenant-a");
+    let b = store(directory.path(), "tenant-b");
+    let own = software_workers::running_from(&a, egress_admission(&a));
+    let foreign = software_workers::running_from(&b, egress_admission(&b));
+    let plain = software_workers::running_now(&a);
+    let admission = software_workers::supervised_request(egress_admission(&a));
+    let reserved = software_workers::admit_supervised(&a, &admission)
+        .worker
+        .unwrap();
+    assert_eq!(reserved.state, WorkerStateV1::Reserved);
+
+    let wrong_attempt = EgressBindingV1 {
+        attempt_id: reserved.attempt.attempt_id.clone(),
+        ..binding(&own)
+    };
+    let wrong_session = EgressBindingV1 {
+        session_id: reserved.launch.session_id.clone(),
+        ..binding(&own)
+    };
+    let head = a.head().unwrap();
+    for rejected in [
+        binding(&reserved),
+        binding(&plain),
+        binding(&foreign),
+        wrong_attempt,
+        wrong_session,
+    ] {
+        let refusal = a.egress_observe(&channel_open(&rejected)).unwrap_err();
+        assert_eq!(
+            refusal.downcast_ref::<EgressJournalError>(),
+            Some(&EgressJournalError::Invalid)
+        );
+        assert_eq!(a.head().unwrap(), head);
+    }
+}
+
+#[test]
+fn egress_store_stopping_revokes_renewal_and_preserves_the_opening_receipt() {
+    let directory = private_directory();
+    let store = store(directory.path(), "tenant-a");
+    let worker = software_workers::running_from(&store, egress_admission(&store));
+    let binding = binding(&worker);
+    let opening = channel_open(&binding);
+    let receipt = store.egress_observe(&opening).unwrap();
+    let policy = policy();
+    let decision_request = request(&binding, "fixture.egress.test:8443");
+    let decision = store
+        .egress_decide(&decision_request, &policy, NOW)
+        .unwrap();
+    assert!(decision.allows(&decision_request));
+    let renew = EgressRenewRequestV1 {
+        version: 1,
+        binding: binding.clone(),
+        decisions: vec![decision.decision_id.clone()],
+    };
+    let live = store.egress_renew(&renew, &policy, NOW + 1).unwrap();
+    assert!(live.revoked.is_empty() && live.expired.is_empty());
+
+    let stopped = store
+        .mutate_worker(&software_workers::mutation(
+            &worker,
+            WorkerTransitionV1::Stop,
+        ))
+        .unwrap()
+        .worker;
+    assert_eq!(stopped.state, WorkerStateV1::Stopping);
+    let head = store.head().unwrap();
+    assert_eq!(store.egress_observe(&opening).unwrap(), receipt);
+    let closed = store.egress_renew(&renew, &policy, NOW + 2).unwrap();
+    assert_eq!(closed.revoked, [decision.decision_id]);
+    assert!(closed.expired.is_empty());
+    let refusal = store.egress_observe(&channel_open(&binding)).unwrap_err();
+    assert_eq!(
+        refusal.downcast_ref::<EgressJournalError>(),
+        Some(&EgressJournalError::Invalid)
+    );
+    assert_eq!(store.head().unwrap(), head);
+    let terminal = EgressObserveRequestV1 {
+        version: 1,
+        observation_id: IdV1::random(),
+        observation: EgressObservationV1::ChannelClosed {
+            binding,
+            reason: "owner_exit".into(),
+            observations_lost: 0,
+        },
+    };
+    assert!(store.egress_observe(&terminal).unwrap().audit_seq > head);
+}
+
+#[test]
 fn egress_store_observations_are_idempotent_and_the_namespace_is_reserved() {
     let directory = private_directory();
     let store = store(directory.path(), "tenant-a");
     let worker = software_workers::running_from(&store, egress_admission(&store));
-    let observed = EgressObserveRequestV1 {
-        version: 1,
-        observation_id: IdV1::random(),
-        observation: EgressObservationV1::ChannelOpened {
-            binding: binding(&worker),
-        },
-    };
+    let observed = channel_open(&binding(&worker));
     let first = store.egress_observe(&observed).unwrap();
     assert_eq!(store.egress_observe(&observed).unwrap(), first);
     let mut divergent = observed.clone();

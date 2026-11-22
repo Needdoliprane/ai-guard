@@ -12,9 +12,10 @@ use crate::{
     control::{
         WorkerStateV1, WorkerV1,
         egress_decision::{
-            Decided, EgressCloseReasonV1, EgressDecideRequestV1, EgressDecisionV1, EgressGrantV1,
-            EgressObservationV1, EgressObserveRequestV1, EgressPolicySnapshot, EgressReceiptV1,
-            EgressRenewRequestV1, EgressRenewResponseV1, WorkerFacts, decide, renewal,
+            Decided, EgressBindingV1, EgressCloseReasonV1, EgressDecideRequestV1, EgressDecisionV1,
+            EgressGrantV1, EgressObservationV1, EgressObserveRequestV1, EgressPolicySnapshot,
+            EgressReceiptV1, EgressRenewRequestV1, EgressRenewResponseV1, WorkerFacts, decide,
+            renewal,
         },
     },
     egress::{Authority, ids::IdV1},
@@ -58,9 +59,7 @@ pub fn observation_kind(observation: &EgressObservationV1) -> &'static str {
     }
 }
 
-fn binding_of(
-    observation: &EgressObservationV1,
-) -> &crate::control::egress_decision::EgressBindingV1 {
+fn binding_of(observation: &EgressObservationV1) -> &EgressBindingV1 {
     match observation {
         EgressObservationV1::ChannelOpened { binding }
         | EgressObservationV1::ChannelClosed { binding, .. }
@@ -101,12 +100,12 @@ fn by_id(tx: &CheckedTransaction<'_>, id: &IdV1) -> anyhow::Result<Option<Stored
 
 fn worker_facts(
     tx: &CheckedTransaction<'_>,
-    request: &EgressDecideRequestV1,
+    binding: &EgressBindingV1,
 ) -> anyhow::Result<WorkerFacts> {
     let snapshot: Option<String> = tx
         .query_row(
             "SELECT snapshot_json FROM workers WHERE worker_id=?1",
-            [&request.binding.worker_id],
+            [&binding.worker_id],
             |row| row.get(0),
         )
         .map(Some)
@@ -119,8 +118,9 @@ fn worker_facts(
     };
     let worker: WorkerV1 = serde_json::from_str(&snapshot)?;
     Ok(
-        if worker.launch.session_id != request.binding.session_id
-            || worker.attempt.attempt_id != request.binding.attempt_id
+        if worker.worker_id != binding.worker_id
+            || worker.launch.session_id != binding.session_id
+            || worker.attempt.attempt_id != binding.attempt_id
         {
             WorkerFacts::BindingMismatch
         } else if worker.launch.egress.is_none() {
@@ -241,7 +241,7 @@ impl Store {
             self.commit_checked(tx)?;
             return Ok(decision);
         }
-        let facts = worker_facts(&tx, request)?;
+        let facts = worker_facts(&tx, &request.binding)?;
         let grants = session_grants(&tx, &request.binding.session_id)?;
         let Decided {
             outcome,
@@ -306,6 +306,17 @@ impl Store {
             self.commit_checked(tx)?;
             return Ok(receipt(&existing));
         }
+        // A fresh channel opening requires the exact durable Running worker.
+        // A replay above still returns the same historical receipt.
+        if matches!(
+            request.observation,
+            EgressObservationV1::ChannelOpened { .. }
+        ) {
+            anyhow::ensure!(
+                worker_facts(&tx, binding)? == WorkerFacts::Eligible,
+                EgressJournalError::Invalid
+            );
+        }
         let event = event(
             kind,
             &request.observation_id,
@@ -335,6 +346,14 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         let tx = self.begin_checked(&mut db)?;
+        if worker_facts(&tx, &request.binding)? != WorkerFacts::Eligible {
+            self.commit_checked(tx)?;
+            return Ok(EgressRenewResponseV1 {
+                version: 1,
+                revoked: request.decisions.clone(),
+                expired: Vec::new(),
+            });
+        }
         let grants = session_grants(&tx, &request.binding.session_id)?;
         let (mut revoked, mut expired) = (Vec::new(), Vec::new());
         for id in &request.decisions {
