@@ -150,6 +150,26 @@ pub(super) fn store_failure(error: anyhow::Error) -> (StatusCode, Json<Value>) {
         ),
     }
 }
+/// Failures of a delegated identity change. A conflict (stale revision, or
+/// an operation identifier reused for another change) asks for a re-read; a
+/// refusal names the change, not a read. Everything else maps like a read.
+pub(super) fn identity_change_failure(error: anyhow::Error) -> (StatusCode, Json<Value>) {
+    match error.downcast_ref::<IdentityFailureV1>() {
+        Some(IdentityFailureV1::Conflict) => failure(
+            StatusCode::CONFLICT,
+            "conflict",
+            "The membership changed since it was read, or this operation identifier was used for another change. Re-read it before deciding again.",
+            "reread",
+        ),
+        Some(IdentityFailureV1::PermissionDenied) => failure(
+            StatusCode::FORBIDDEN,
+            "permission_denied",
+            "This context does not permit this change.",
+            "review_permissions",
+        ),
+        _ => store_failure(error),
+    }
+}
 fn context_failure(code: &str) -> (StatusCode, Json<Value>) {
     failure(
         StatusCode::FORBIDDEN,
@@ -823,6 +843,18 @@ pub(super) fn routes() -> Router<GatewayState> {
         .route("/human/admin/quota", get(admin::quota))
         .route("/human/admin/usage", get(admin::usage))
         .route("/human/admin/memberships", get(admin::memberships))
+        .route(
+            "/human/admin/grants",
+            get(admin::grant).post(admin::change_grant).layer(
+                axum::extract::DefaultBodyLimit::max(GRANT_CHANGE_BODY_MAX_BYTES),
+            ),
+        )
+        .route(
+            "/human/admin/memberships/{membership_id}",
+            post(admin::change_membership).layer(axum::extract::DefaultBodyLimit::max(
+                MEMBERSHIP_CHANGE_BODY_MAX_BYTES,
+            )),
+        )
         .route("/human/admin/configuration", get(admin::configuration))
         .route("/human/resources", get(resources))
         .route("/human/events", get(events))

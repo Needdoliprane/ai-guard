@@ -350,3 +350,144 @@ pub(super) async fn configuration(
     })
     .await
 }
+
+/// `POST /api/v1/human/admin/memberships/{membership_id}`: a delegated change
+/// of one existing membership of the reader's organization. The authenticated
+/// administrator is the actor; the identity mutation and its audit are durable
+/// before the receipt is returned. A replay of the same operation returns the
+/// same receipt; a different change under the same operation is a conflict.
+/// On the owned profile the change runs under the source's write epoch.
+pub(super) async fn change_membership(
+    proof: VerifiedHuman,
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    axum::extract::Path(membership_id): axum::extract::Path<String>,
+    body: Result<Json<HumanMembershipChangeV1>, axum::extract::rejection::JsonRejection>,
+) -> ApiResult<Json<HumanMembershipChangeReceiptV1>> {
+    let Json(change) = body.map_err(|_| invalid_request())?;
+    let expected_revision: u64 = change
+        .expected_revision
+        .parse()
+        .map_err(|_| invalid_request())?;
+    let selected = headers.clone();
+    run_human(&state, &proof, Some(&selected), move |state, proof| {
+        let (_, tenant, scope) = selected_context(&state, &proof, &headers)?;
+        let receipt = match (&state.owned_human, &proof.source) {
+            (Some(owned), HumanProofSource::Local(source)) => {
+                owned.change_membership(*source, &tenant.store, &scope, &membership_id, &change)?
+            }
+            (Some(_), _) => return Err(super::super::human_sources::unavailable()),
+            (None, _) => tenant
+                .store
+                .human_change_membership(&scope, &membership_id, &change)
+                .map_err(identity_change_failure)?,
+        };
+        // The change bumped the authorization revision, so the selecting
+        // context is no longer current: publication checks the credential.
+        reauthenticate(&state, &proof)?;
+        Ok(Json(HumanMembershipChangeReceiptV1 {
+            version: 1,
+            operation_id: receipt.operation_id,
+            membership_id,
+            membership_revision: (expected_revision + 1).to_string(),
+            authorization_revision: receipt.authorization_revision.to_string(),
+            audit_seq: receipt.audit_seq.to_string(),
+        }))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct GrantQuery {
+    resource_kind: ResourceKindV1,
+    resource_id: String,
+}
+
+/// `GET /api/v1/human/admin/grants?resource_kind=&resource_id=`: the grant of
+/// one resource of the context's organization, with its share list, for the
+/// administrator who may change it. Recorded as the `grants` read.
+pub(super) async fn grant(
+    proof: VerifiedHuman,
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    query: Result<Query<GrantQuery>, axum::extract::rejection::QueryRejection>,
+) -> ApiResult<Json<HumanGrantV1>> {
+    let Query(query) = query.map_err(|_| invalid_request())?;
+    let resource = ResourceRefV1 {
+        kind: query.resource_kind,
+        resource_id: query.resource_id,
+    };
+    let selected = headers.clone();
+    run_human(&state, &proof, Some(&selected), move |state, proof| {
+        let (context, tenant, scope) = selected_context(&state, &proof, &headers)?;
+        let frame =
+            crate::audit::HumanGrantFrameV1::new(&context.id, &context.authorization_version)
+                .map_err(store_failure)?;
+        let body = match (&state.owned_human, &proof.source) {
+            (Some(owned), HumanProofSource::Local(source)) => owned.grant(
+                *source,
+                &tenant.store,
+                &scope,
+                &frame,
+                &resource,
+                &proof.redactor,
+            )?,
+            (Some(_), _) => return Err(super::super::human_sources::unavailable()),
+            (None, _) => tenant
+                .store
+                .human_grant(&scope, &frame, &resource, &proof.redactor)
+                .map_err(store_failure)?,
+        };
+        unredacted(&proof, &body)?;
+        publish_check(
+            &state,
+            &proof,
+            &headers,
+            &context.id,
+            &context.authorization_version,
+        )?;
+        Ok(Json(body))
+    })
+    .await
+}
+
+/// `POST /api/v1/human/admin/grants`: a delegated replacement of the shares
+/// of one existing grant of the context's organization. Durable with its
+/// audit before the receipt; exact replay returns the same receipt.
+pub(super) async fn change_grant(
+    proof: VerifiedHuman,
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    body: Result<Json<HumanGrantChangeV1>, axum::extract::rejection::JsonRejection>,
+) -> ApiResult<Json<HumanGrantChangeReceiptV1>> {
+    let Json(change) = body.map_err(|_| invalid_request())?;
+    let expected_revision: u64 = change
+        .expected_revision
+        .parse()
+        .map_err(|_| invalid_request())?;
+    let selected = headers.clone();
+    run_human(&state, &proof, Some(&selected), move |state, proof| {
+        let (_, tenant, scope) = selected_context(&state, &proof, &headers)?;
+        let receipt = match (&state.owned_human, &proof.source) {
+            (Some(owned), HumanProofSource::Local(source)) => {
+                owned.change_grant(*source, &tenant.store, &scope, &change)?
+            }
+            (Some(_), _) => return Err(super::super::human_sources::unavailable()),
+            (None, _) => tenant
+                .store
+                .human_change_grant(&scope, &change)
+                .map_err(identity_change_failure)?,
+        };
+        reauthenticate(&state, &proof)?;
+        Ok(Json(HumanGrantChangeReceiptV1 {
+            version: 1,
+            operation_id: receipt.operation_id,
+            resource: change.resource,
+            grant_revision: (expected_revision + 1).to_string(),
+            authorization_revision: receipt.authorization_revision.to_string(),
+            audit_seq: receipt.audit_seq.to_string(),
+        }))
+    })
+    .await
+}

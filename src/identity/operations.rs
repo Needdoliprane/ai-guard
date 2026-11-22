@@ -240,7 +240,13 @@ fn permission(
             &[C::ManageMemberships, C::ReadMemberships],
             elsewhere,
         ),
-        O::GrantsManage => admin(administration, context, &[C::ManageGrants], elsewhere),
+        // The share list names organization members: a membership reader only.
+        O::GrantsManage => admin(
+            administration,
+            context,
+            &[C::ManageGrants, C::ReadMemberships],
+            elsewhere,
+        ),
         O::EgressGrantApprove | O::EgressGrantRevoke => {
             admin(administration, context, &[C::ApproveEgress], elsewhere)
         }
@@ -324,6 +330,7 @@ const fn requires_marker(operation: HumanOperationV1) -> bool {
             | O::MembershipsRead
             | O::ConfigurationRead
             | O::MembershipsManage
+            | O::GrantsManage
             | O::SessionLaunchPrepare
             | O::SessionLaunch
             | O::SessionMessageSend

@@ -57,4 +57,20 @@ pub struct HumanMembershipChangeV1 {
     pub active: bool,
 }
 
+/// Durable outcome of a delegated membership change. Revisions and the audit
+/// position are decimal strings, like every human count.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HumanMembershipChangeReceiptV1 {
+    pub version: u32,
+    pub operation_id: String,
+    pub membership_id: String,
+    pub membership_revision: String,
+    pub authorization_revision: String,
+    pub audit_seq: String,
+}
+
+/// Bound of a delegated change body: identifiers and at most every capability.
+pub const MEMBERSHIP_CHANGE_BODY_MAX_BYTES: usize = 4096;
+
 pub const MEMBER_CREDENTIALS_MAX: usize = 16;

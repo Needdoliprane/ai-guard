@@ -289,6 +289,66 @@ impl OwnedHumanGateway {
         })
     }
 
+    /// A delegated human identity mutation on the proof's own retained source.
+    /// The owner's write epoch is taken without waiting and released before
+    /// returning; the source binding is checked before and after the commit.
+    /// A failure after the commit is reported like any refusal: the caller
+    /// replays the same operation identifier to read its durable receipt.
+    pub(super) fn change_membership(
+        &self,
+        index: usize,
+        store: &Store,
+        scope: &AuthorizedScopeV1,
+        membership_id: &str,
+        change: &HumanMembershipChangeV1,
+    ) -> ApiResult<IdentityReceiptV1> {
+        self.check()?;
+        let source = self.sources.get(index).ok_or_else(unavailable)?;
+        let receipt = {
+            let epoch = self.owner.try_write_epoch().map_err(|_| unavailable())?;
+            epoch.validate_source(source).map_err(|_| unavailable())?;
+            let result =
+                store.modern_human_change_membership(&epoch, source, scope, membership_id, change);
+            epoch.validate_source(source).map_err(|_| unavailable())?;
+            result.map_err(human::identity_change_failure)?
+        };
+        self.check()?;
+        Ok(receipt)
+    }
+    /// A delegated share change on the proof's own retained source, under the
+    /// owner's write epoch, like [`Self::change_membership`].
+    pub(super) fn change_grant(
+        &self,
+        index: usize,
+        store: &Store,
+        scope: &AuthorizedScopeV1,
+        change: &HumanGrantChangeV1,
+    ) -> ApiResult<IdentityReceiptV1> {
+        self.check()?;
+        let source = self.sources.get(index).ok_or_else(unavailable)?;
+        let receipt = {
+            let epoch = self.owner.try_write_epoch().map_err(|_| unavailable())?;
+            epoch.validate_source(source).map_err(|_| unavailable())?;
+            let result = store.modern_human_change_grant(&epoch, source, scope, change);
+            epoch.validate_source(source).map_err(|_| unavailable())?;
+            result.map_err(human::identity_change_failure)?
+        };
+        self.check()?;
+        Ok(receipt)
+    }
+    pub(super) fn grant(
+        &self,
+        index: usize,
+        store: &Store,
+        scope: &AuthorizedScopeV1,
+        frame: &crate::audit::HumanGrantFrameV1,
+        resource: &ResourceRefV1,
+        redactor: &Redactor,
+    ) -> ApiResult<HumanGrantV1> {
+        self.read(index, store, |access| {
+            store.modern_human_grant(access, scope, frame, resource, redactor)
+        })
+    }
     /// The 360° summary of an owned source's context, read in its scoped
     /// transaction with the same receipt as the legacy profile.
     #[allow(clippy::too_many_arguments)]

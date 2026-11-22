@@ -247,9 +247,11 @@ fn organization_administrators_cannot_introduce_control_only_capabilities() {
     store
         .migrate_human_rights_v2(&path.with_extension("exact13"))
         .unwrap();
+    // The administrator holds what it delegates: delegation never escalates.
     let (admin, admin_membership) = preparation(&[
         HumanCapabilityV1::ManageMemberships,
         HumanCapabilityV1::ReadMetadata,
+        HumanCapabilityV1::ReadContent,
     ]);
     store.provision_local_human(&admin).unwrap();
     let (member, member_membership) = preparation(&[HumanCapabilityV1::ReadMetadata]);

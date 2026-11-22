@@ -798,7 +798,7 @@ impl Store {
             self.begin_checked_scoped(&mut db, &access, StoreOperationClass::IdentityAuthority)?;
         self.mutate_identity_checked(tx, mutation)
     }
-    fn mutate_identity_checked(
+    pub(super) fn mutate_identity_checked(
         &self,
         mut tx: CheckedTransaction<'_>,
         mutation: &IdentityMutationV1,
@@ -922,7 +922,10 @@ impl Store {
         let mut projection = load_projection(tx, mutation)?;
         projection.additive_resource_grants = rights_access;
         let previous_revision = projection.revision;
+        // Delegation rules bind new human-actor changes only; the historical
+        // chain replays under the rules each record was accepted with.
         projection.check_holder_delegation(mutation)?;
+        projection.check_delegation(mutation)?;
         projection.apply(mutation, &self.tenant_id, next_seq)?;
         ensure_resource_known(tx, mutation, next_seq)?;
         let record = Record {

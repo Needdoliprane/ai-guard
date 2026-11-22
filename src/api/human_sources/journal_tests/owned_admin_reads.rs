@@ -128,3 +128,145 @@ async fn owned_sources_serve_the_summary_memberships_and_configuration() {
         "no worker protocol on the owned profile yet"
     );
 }
+
+async fn post(router: &Router, path: &str, context: &str, body: &Value) -> (StatusCode, Value) {
+    let request = axum::http::Request::post(path)
+        .header("authorization", format!("Bearer {}", Fixture::bearer("B")))
+        .header("x-aiguard-context", context)
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(body).unwrap()))
+        .unwrap();
+    let response = router.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 262_144)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+#[tokio::test]
+async fn owned_sources_apply_a_delegated_membership_change_under_the_write_epoch() {
+    use HumanCapabilityV1 as C;
+    let fixture = Fixture::new_owned_with_human_rights();
+    let PrincipalRefV1::HumanLocal {
+        installation_id, ..
+    } = fixture.principal()
+    else {
+        panic!("fixture must retain its local human identity");
+    };
+    let member = PrincipalRefV1::HumanLocal {
+        installation_id: installation_id.clone(),
+        account_id: uuid::Uuid::new_v4().to_string(),
+    };
+    let store = fixture.legacy_store("B");
+    store
+        .mutate_identity(&change(IdentityChangeV1::Account {
+            expected_revision: 0,
+            account: HumanAccountV1 {
+                version: 1,
+                principal: member.clone(),
+                display_name: "Synthetic member".into(),
+                revision: 1,
+                active: true,
+            },
+        }))
+        .unwrap();
+    let organization = store.identity_memberships(fixture.principal()).unwrap()[0]
+        .organization_scope
+        .clone();
+    let membership = MembershipV1 {
+        version: 1,
+        membership_id: uuid::Uuid::new_v4().to_string(),
+        principal: member,
+        tenant_id: "B".into(),
+        organization_scope: organization,
+        revision: 1,
+        active: true,
+        capabilities: [C::ReadMetadata].into_iter().collect(),
+    };
+    store
+        .mutate_identity(&change(IdentityChangeV1::Membership {
+            expected_revision: 0,
+            membership: membership.clone(),
+        }))
+        .unwrap();
+    grant(
+        &fixture,
+        &[
+            C::ReadMetadata,
+            C::ReadTenantMetadata,
+            C::ReadMemberships,
+            C::ManageMemberships,
+        ],
+    );
+    let (bundle, credentials, tokens) = fixture.owned_startup();
+    let state = GatewayState::for_owned_human_sources(
+        bundle,
+        credentials,
+        tokens,
+        Policy::default(),
+        None,
+        Redactor::new(vec![]),
+    )
+    .unwrap();
+    let router = gateway_router(state);
+    let (status, identity) = get(&router, "/api/v1/human/identity", None).await;
+    assert_eq!(status, StatusCode::OK, "{identity}");
+    let context = identity["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|context| context["tenant_id"] == "B" && context["mode"] == "administration")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let path = format!(
+        "/api/v1/human/admin/memberships/{}",
+        membership.membership_id
+    );
+    let body = serde_json::json!({
+        "operation_id": uuid::Uuid::new_v4().to_string(),
+        "expected_revision": "1",
+        "capabilities": ["read_metadata"],
+        "active": false,
+    });
+    let (status, receipt) = post(&router, &path, &context, &body).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_eq!(receipt["membership_revision"], "2");
+    // A right the administrator does not hold is refused on this profile too.
+    let (status, identity) = get(&router, "/api/v1/human/identity", None).await;
+    assert_eq!(status, StatusCode::OK, "{identity}");
+    let context = identity["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|context| context["tenant_id"] == "B" && context["mode"] == "administration")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let escalation = serde_json::json!({
+        "operation_id": uuid::Uuid::new_v4().to_string(),
+        "expected_revision": "2",
+        "capabilities": ["read_metadata", "read_content"],
+        "active": true,
+    });
+    let (status, refusal) = post(&router, &path, &context, &escalation).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refusal}");
+    // The owned memberships read shows the durable change.
+    let (status, page) = get(&router, "/api/v1/human/admin/memberships", Some(&context)).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let item = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["membership_id"] == membership.membership_id.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(item["active"], false);
+    assert_eq!(item["revision"], "2");
+}

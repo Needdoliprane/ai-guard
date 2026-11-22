@@ -47,9 +47,10 @@ pub(crate) fn read_action_requires_marker(action: &str) -> bool {
 
 /// Every marker-fenced read action: the administration views and the
 /// session-control reads, with the exact strings their lots record.
-pub(crate) const MARKER_READ_ACTIONS: [&str; 13] = [
+pub(crate) const MARKER_READ_ACTIONS: [&str; 14] = [
     "summary",
     "memberships",
+    "grants",
     "quota",
     "usage",
     "configuration",
@@ -80,6 +81,11 @@ pub(super) fn read_action_permitted(action: &str, scope: &AuthorizedScopeV1) -> 
             }
         }
         "memberships" => administration && scope.has_capability(C::ReadMemberships),
+        "grants" => {
+            administration
+                && scope.has_capability(C::ManageGrants)
+                && scope.has_capability(C::ReadMemberships)
+        }
         "quota" | "usage" => administration && scope.has_capability(C::ReadWorkerRegistry),
         "configuration" => administration && scope.has_capability(C::ReadConfiguration),
         _ => true,

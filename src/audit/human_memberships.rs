@@ -239,3 +239,110 @@ fn local_credentials(
         .collect::<anyhow::Result<Vec<_>>>()?;
     Ok((credentials, complete))
 }
+
+impl Store {
+    /// Delegated change of one existing membership of the reader's
+    /// organization (`memberships_manage`), on a legacy store.
+    pub(crate) fn human_change_membership(
+        &self,
+        scope: &AuthorizedScopeV1,
+        membership_id: &str,
+        change: &HumanMembershipChangeV1,
+    ) -> anyhow::Result<IdentityReceiptV1> {
+        let mut db = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
+        let tx = self.begin_checked(&mut db)?;
+        self.human_change_membership_checked(tx, scope, membership_id, change)
+    }
+    /// The same change on an owned 14/15 source, under its write epoch. The
+    /// epoch is never held across a second wait for the store connection.
+    pub(crate) fn modern_human_change_membership(
+        &self,
+        epoch: &crate::human_authority::HumanSourcesWriteEpoch,
+        source: &crate::human_authority::OwnedSourceToken,
+        scope: &AuthorizedScopeV1,
+        membership_id: &str,
+        change: &HumanMembershipChangeV1,
+    ) -> anyhow::Result<IdentityReceiptV1> {
+        let access = HumanSourceAccess::write(epoch, source)?;
+        let mut db = self
+            .db
+            .try_lock()
+            .map_err(|_| crate::human_authority::HumanAuthorityFailure::StorageUnavailable)?;
+        let tx =
+            self.begin_checked_scoped(&mut db, &access, StoreOperationClass::IdentityAuthority)?;
+        self.human_change_membership_checked(tx, scope, membership_id, change)
+    }
+    /// Principal, tenant and organization come from the stored membership.
+    /// Besides the projection's delegation rules, a capability the change adds
+    /// must be held by the reader's effective context, so an OIDC ceiling
+    /// bounds what it can delegate. The mutation and its audit are durable
+    /// before the receipt returns; an exact replay returns the same receipt.
+    fn human_change_membership_checked(
+        &self,
+        tx: CheckedTransaction<'_>,
+        scope: &AuthorizedScopeV1,
+        membership_id: &str,
+        change: &HumanMembershipChangeV1,
+    ) -> anyhow::Result<IdentityReceiptV1> {
+        crate::control::uuid(membership_id).map_err(|_| IdentityFailureV1::InvalidRequest)?;
+        let expected_revision: u64 = change
+            .expected_revision
+            .parse()
+            .map_err(|_| IdentityFailureV1::InvalidRequest)?;
+        if !super::human_rights::installed(&tx)? {
+            return Err(IdentityFailureV1::MigrationRequired.into());
+        }
+        let current = identity::revalidate_scope_checked(&tx, scope, &self.tenant_id)?;
+        if current.mode() != ContextModeV1::Administration
+            || !current.has_capability(HumanCapabilityV1::ManageMemberships)
+            || !current.has_capability(HumanCapabilityV1::ReadMemberships)
+        {
+            return Err(IdentityFailureV1::PermissionDenied.into());
+        }
+        let stored: Option<String> = tx
+            .query_row(
+                "SELECT payload_json FROM identity_memberships WHERE membership_id=?1",
+                [membership_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let stored: MembershipV1 =
+            serde_json::from_str(&stored.ok_or(IdentityFailureV1::NotFound)?)?;
+        if stored.organization_scope != current.organization_scope()
+            || stored.tenant_id != self.tenant_id
+        {
+            // Another organization's membership is not disclosed.
+            return Err(IdentityFailureV1::NotFound.into());
+        }
+        for capability in &change.capabilities {
+            let retained =
+                stored.capabilities.contains(capability) && (stored.active || !change.active);
+            if !retained && !current.has_capability(*capability) {
+                return Err(IdentityFailureV1::PermissionDenied.into());
+            }
+        }
+        let mutation = IdentityMutationV1 {
+            version: 1,
+            operation_id: change.operation_id.clone(),
+            actor: current.principal().clone(),
+            change: IdentityChangeV1::Membership {
+                expected_revision,
+                membership: MembershipV1 {
+                    revision: expected_revision
+                        .checked_add(1)
+                        .ok_or(IdentityFailureV1::InvalidRequest)?,
+                    active: change.active,
+                    capabilities: change.capabilities.iter().copied().collect(),
+                    ..stored
+                },
+            },
+        };
+        mutation
+            .validate()
+            .map_err(|_| IdentityFailureV1::InvalidRequest)?;
+        self.mutate_identity_checked(tx, &mutation)
+    }
+}
