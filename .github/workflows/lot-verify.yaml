@@ -32,11 +32,11 @@ jobs:
           set -euo pipefail
           umask 077
           receipt="$RUNNER_TEMP/g07-v5-ack-receipt.txt"
-          printf 'source_sha=46499d960c76800ecabaaa2ffbaf62480f37e820\nworkflow_sha=%s\nworkflow_parent_sha=103b9822b0cd174000aa0a41cdf8556643738d75\nselector=runner::broker::executor::journal::tests::export_retirement_tests::full3_v5_commits_worker_cleanup_ack_after_acknowledged_result\nsource_check=NOT_RUN\nworkflow_check=NOT_RUN\ndependency_fetch=NOT_RUN\ndependency_fetch_exit=unknown\nlibtest_build=NOT_RUN\nlibtest_build_exit=unknown\nlibtest_artifact=NOT_RUN\nlibtest_artifact_sha256=unknown\ntest_verdict=NOT_RUN\ntest_exit=unknown\ntest_selected_count=unknown\ntest_duration_ms=unknown\nack_complete=unknown\nack_milestone_set=NOT_RUN\nfixture_cleanup=unknown\n' "$WORKFLOW_SHA" > "$receipt"
+          printf 'source_sha=46499d960c76800ecabaaa2ffbaf62480f37e820\nworkflow_sha=%s\nworkflow_parent_sha=0e70a94b15fe0b1fbb66cbb7cb7343a506020f2c\nselector=runner::broker::executor::journal::tests::export_retirement_tests::full3_v5_commits_worker_cleanup_ack_after_acknowledged_result\nsource_check=NOT_RUN\nworkflow_check=NOT_RUN\ndependency_fetch=NOT_RUN\ndependency_fetch_exit=unknown\nlibtest_build=NOT_RUN\nlibtest_build_exit=unknown\nlibtest_artifact=NOT_RUN\nlibtest_artifact_sha256=unknown\ntest_verdict=NOT_RUN\ntest_exit=unknown\ntest_selected_count=unknown\ntest_duration_ms=unknown\nack_complete=unknown\nack_milestone_set=NOT_RUN\nfixture_cleanup=unknown\n' "$WORKFLOW_SHA" > "$receipt"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 5
+          fetch-depth: 6
           persist-credentials: false
       - name: Verify the exact source and workflow-only commit
         shell: bash
@@ -60,7 +60,7 @@ jobs:
                 "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/claude/v1-g07-cleanup-ack-v5-check-20261122 &&
                 "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ &&
                 "$(git rev-parse HEAD)" == "$GITHUB_SHA" &&
-                "$(git rev-parse HEAD^)" == 103b9822b0cd174000aa0a41cdf8556643738d75 &&
+                "$(git rev-parse HEAD^)" == 0e70a94b15fe0b1fbb66cbb7cb7343a506020f2c &&
                 "$(git rev-parse "$source^")" == "$parent" &&
                 "$(git diff --name-only "$parent" "$source")" == "$test_source" &&
                 "$(git diff --name-only "$source" HEAD)" == .github/workflows/lot-verify.yaml &&
