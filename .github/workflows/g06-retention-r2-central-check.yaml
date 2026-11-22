@@ -1,0 +1,53 @@
+name: G06 R2 central SQLite fixture
+
+on:
+  push:
+    branches: ['claude/v1-g06-retention-r2-central-check-20261122']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: g06-retention-r2-central-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  central-sqlite:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      AI_GUARD_BUILD_REVISION: ${{ github.sha }}
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run the exact SQLite supervision fixture
+        shell: bash
+        run: |
+          selector=supervised_api_arms_import_and_worker_claims_once_then_maintenance_blocks_new_effects
+          printf '### G06 R2 central SQLite fixture on Linux\n\n' >> "$GITHUB_STEP_SUMMARY"
+          revision=$(git rev-parse HEAD)
+          if [[ ! "$revision" =~ ^[0-9a-f]{40}$ || "$revision" != "$GITHUB_SHA" ]]; then
+            echo 'FAIL checkout revision mismatch' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          printf 'Commit `%s`\n\n' "$revision" >> "$GITHUB_STEP_SUMMARY"
+
+          output=$(mktemp "$RUNNER_TEMP/r2-central.XXXXXX")
+          trap 'rm -f -- "$output"' EXIT
+          if cargo test --locked --no-default-features --test supervision_api "$selector" -- --exact > "$output" 2>&1 \
+              && [[ "$(grep -Fxc 'running 1 test' "$output")" == 1 ]] \
+              && [[ "$(grep -Fxc "test $selector ... ok" "$output")" == 1 ]] \
+              && [[ "$(grep -c '^test result: ' "$output")" == 1 ]] \
+              && grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;' "$output"; then
+            printf 'PASS `%s` (1/1, 0 ignored)\n' "$selector" >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf 'FAIL `%s` did not produce the required 1/1 result with 0 ignored\n' "$selector" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
