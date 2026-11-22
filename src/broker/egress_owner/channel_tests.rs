@@ -36,6 +36,7 @@ struct Gateway {
 
 enum ObservationReply {
     Wait(Arc<ObservationGate>),
+    WaitAfterCommit(Arc<PendingOperation>),
     LostAfterCommit,
 }
 
@@ -131,6 +132,9 @@ impl EgressControl for Gateway {
                 gate.release.acquire().await.unwrap().forget();
             }
             self.observations.lock().unwrap().push(request.observation);
+            if let Some(ObservationReply::WaitAfterCommit(pending)) = reply {
+                pending.hold().await;
+            }
             if matches!(reply, Some(ObservationReply::LostAfterCommit)) {
                 Err(ControlError::Unavailable)
             } else {
@@ -1232,6 +1236,122 @@ async fn egress_broker_eof_without_socket_confirmation_keeps_quiescence_unknown(
         }
     );
     assert!(control.observations.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn egress_broker_stop_cancels_a_pending_handshake() {
+    for waits_for_ready in [false, true] {
+        let (broker, mut helper) = tokio::io::duplex(if waits_for_ready { 4096 } else { 1 });
+        let control = Arc::new(Gateway::default());
+        let resolver = Arc::new(
+            Resolver::new(Arc::new(NoLookup(AtomicUsize::new(0))), vec![], vec![]).unwrap(),
+        );
+        let (stop, stopped) = ChannelStop::new();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let ((), terminal) = tokio::join!(
+            async {
+                if waits_for_ready {
+                    channel_protocol::read_handshake(&mut helper, deadline)
+                        .await
+                        .unwrap();
+                } else {
+                    // A one-byte pipe keeps the rest of HELLO blocked.
+                    timeout_at(deadline, helper.read_u8())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                }
+                stop.stop();
+            },
+            timeout_at(
+                deadline,
+                run(
+                    broker,
+                    fixture_binding(),
+                    control.clone(),
+                    resolver,
+                    ChannelTimes::default(),
+                    stopped,
+                ),
+            ),
+        );
+        let terminal = terminal.expect("STOP must interrupt the handshake");
+        assert_eq!(terminal.cause, ChannelExit::Stopped);
+        assert_eq!(terminal.local_quiescence, LocalQuiescence::Confirmed);
+        assert_eq!(terminal.audit, ChannelAuditClosure::NotOpened);
+        assert!(control.observations.lock().unwrap().is_empty());
+        assert!(control.decisions.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn egress_broker_stop_during_opening_ack_keeps_audit_unknown() {
+    let (broker, mut helper) = tokio::io::duplex(4096);
+    let pending = Arc::new(PendingOperation::default());
+    let control = Arc::new(Gateway {
+        allow: AtomicBool::new(true),
+        prior_observation_reply: Some(ObservationReply::WaitAfterCommit(pending.clone())),
+        ..Gateway::default()
+    });
+    let lookups = Arc::new(NoLookup(AtomicUsize::new(0)));
+    let resolver = Arc::new(Resolver::new(lookups.clone(), vec![], vec![]).unwrap());
+    let (stop, stopped) = ChannelStop::new();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let ((), terminal) = tokio::join!(
+        async {
+            let hello = channel_protocol::read_handshake(&mut helper, deadline)
+                .await
+                .unwrap();
+            channel_protocol::write_handshake(&mut helper, &hello, deadline)
+                .await
+                .unwrap();
+            timeout_at(deadline, pending.started.notified())
+                .await
+                .unwrap();
+            channel_protocol::write_message(
+                &mut helper,
+                &EgressMessageV1::Open {
+                    flow_id: 1,
+                    authority: format!("{FIXTURE}:443"),
+                },
+                deadline,
+            )
+            .await
+            .unwrap();
+            stop.stop();
+        },
+        timeout_at(
+            deadline,
+            run(
+                broker,
+                fixture_binding(),
+                control.clone(),
+                resolver,
+                ChannelTimes::default(),
+                stopped,
+            ),
+        ),
+    );
+
+    let terminal = terminal.expect("STOP must interrupt the opening ACK wait");
+    assert_eq!(terminal.cause, ChannelExit::Stopped);
+    assert_eq!(terminal.local_quiescence, LocalQuiescence::Confirmed);
+    assert_eq!(
+        terminal.audit,
+        ChannelAuditClosure::Unknown {
+            observations_lost: 0,
+            observations_unconfirmed: 1,
+        }
+    );
+    timeout_at(deadline, pending.dropped.notified())
+        .await
+        .unwrap();
+    assert!(matches!(
+        control.observations.lock().unwrap().as_slice(),
+        [EgressObservationV1::ChannelOpened { .. }]
+    ));
+    assert!(control.decisions.lock().unwrap().is_empty());
+    assert_eq!(lookups.0.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

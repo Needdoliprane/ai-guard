@@ -273,6 +273,13 @@ impl Drop for ChannelStop {
     }
 }
 
+async fn wait_for_channel_stop(stop: &mut watch::Receiver<ChannelStopState>) {
+    if !stop.borrow().0 {
+        // Loss of the stop owner also invalidates the channel.
+        let _ = stop.changed().await;
+    }
+}
+
 struct OpeningLifetime {
     owner: watch::Receiver<Option<ObservedStop>>,
     stop: watch::Receiver<ChannelStopState>,
@@ -629,32 +636,54 @@ where
         capability: EgressCapabilityV1::default(),
     };
     let deadline = Instant::now() + HANDSHAKE_TIME;
-    if channel_protocol::write_handshake(&mut output, &hello, deadline)
-        .await
-        .is_err()
-        || channel_protocol::read_handshake(&mut input, deadline)
-            .await
-            .ok()
-            .as_ref()
-            != Some(&hello)
-    {
+    let ready = tokio::select! {
+        biased;
+        () = wait_for_channel_stop(&mut stop) => {
+            return ChannelTermination::without_flows(
+                ChannelExit::Stopped,
+                ChannelAuditClosure::NotOpened,
+            );
+        }
+        ready = async {
+            channel_protocol::write_handshake(&mut output, &hello, deadline).await.is_ok()
+                && channel_protocol::read_handshake(&mut input, deadline).await.ok().as_ref()
+                    == Some(&hello)
+        } => ready,
+    };
+    if !ready {
         return ChannelTermination::without_flows(
             ChannelExit::Protocol,
             ChannelAuditClosure::NotOpened,
         );
     }
     // The channel is durably known before any flow can be admitted.
-    let opened = EgressObservationV1::ChannelOpened {
-        binding: binding.clone(),
+    let mut opening_started = false;
+    let opened = tokio::select! {
+        biased;
+        () = wait_for_channel_stop(&mut stop) => None,
+        ack = async {
+            opening_started = true;
+            control.observe(observation(EgressObservationV1::ChannelOpened {
+                binding: binding.clone(),
+            })).await
+        } => Some(ack),
     };
-    if control.observe(observation(opened)).await.is_err() {
-        return ChannelTermination::without_flows(
-            ChannelExit::AuditUnavailable,
+    if !matches!(opened, Some(Ok(()))) {
+        let cause = if opened.is_none() {
+            ChannelExit::Stopped
+        } else {
+            ChannelExit::AuditUnavailable
+        };
+        let audit = if opening_started {
+            // Dropping the wait cannot establish whether the gateway committed.
             ChannelAuditClosure::Unknown {
                 observations_lost: 0,
                 observations_unconfirmed: 1,
-            },
-        );
+            }
+        } else {
+            ChannelAuditClosure::NotOpened
+        };
+        return ChannelTermination::without_flows(cause, audit);
     }
     let started = Instant::now();
     let mut ledger = EgressChannelState::new(0);
@@ -698,7 +727,7 @@ where
     let exit = loop {
         tokio::select! {
             biased;
-            _ = stop.changed() => break ChannelExit::Stopped,
+            () = wait_for_channel_stop(&mut stop) => break ChannelExit::Stopped,
             frame = reader.read(&mut input) => match frame {
                 Ok(Some(message)) => {
                     if owner.worker_frame(message).await.is_err() { break ChannelExit::Protocol; }
