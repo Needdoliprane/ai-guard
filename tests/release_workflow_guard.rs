@@ -334,6 +334,15 @@ fn no_tag_can_exist_before_the_metadata_job_succeeds() {
 }
 
 #[test]
+fn release_checks_and_packages_notices_without_missing_text_exceptions() {
+    let release = workflow("release.yaml");
+    let metadata = run_blocks(&job(&release, "metadata")).join("\n");
+    assert!(metadata.contains("--example third_party_notices -- check --for-release --allowed"));
+    let build = run_blocks(&job(&release, "build")).join("\n");
+    assert!(build.contains("--example third_party_notices -- notices --for-release --allowed"));
+}
+
+#[test]
 fn draft_publishes_and_digest_checks_the_metadata_assets() {
     let release = workflow("release.yaml");
     let draft = run_blocks(&job(&release, "draft")).join("\n");

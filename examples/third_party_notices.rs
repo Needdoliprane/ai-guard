@@ -16,7 +16,15 @@
 //! - a bare line is an accepted SPDX expression;
 //! - `no-expression: NAME VERSION` accepts one crate that declares no expression (its licence file
 //!   must still be present, and a person has reviewed it);
-//! - `no-text: NAME VERSION` accepts one crate that has an expression but ships no licence text.
+//! - `no-text: NAME VERSION` accepts one crate that has an expression but ships no licence text;
+//! - `supplement: NAME VERSION FILE SHA256` supplies upstream text for a crate whose published
+//!   package ships none: `FILE` is read from `third-party-notices/` next to the list. It must have
+//!   exactly that SHA-256 and contain non-blank UTF-8 text of at most 256 KiB. The provenance
+//!   (URL, revision) of each file is recorded in the list.
+//! - `licence-selection: NAME VERSION SPDX` records the selected identifier from a crate's simple
+//!   `OR` expression and includes the choice in the generated notices.
+//!
+//! The release workflow passes `--for-release` to both modes, which forbids all `no-text:` exceptions.
 //!
 //! Anything else fails: an unlisted expression, an unlisted crate without expression, an unlisted
 //! crate without text. A `Cargo.lock` change that brings such a crate therefore needs a reviewed edit
@@ -25,6 +33,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -64,6 +73,9 @@ struct Policy {
     expressions: BTreeSet<String>,
     no_expression: BTreeSet<String>,
     no_text: BTreeSet<String>,
+    /// `NAME VERSION` to the supplied `(file, sha256)` pairs.
+    supplements: BTreeMap<String, Vec<(String, String)>>,
+    selected_licences: BTreeMap<String, String>,
 }
 
 impl Policy {
@@ -81,7 +93,45 @@ impl Policy {
                     _ => Err(format!("line {}: expected `NAME VERSION`", number + 1)),
                 }
             };
-            if let Some(rest) = line.strip_prefix("no-expression:") {
+            if let Some(rest) = line.strip_prefix("supplement:") {
+                let parts: Vec<_> = rest.split_whitespace().collect();
+                let [name, version, file, sha] = parts.as_slice() else {
+                    return Err(format!(
+                        "line {}: expected `NAME VERSION FILE SHA256`",
+                        number + 1
+                    ));
+                };
+                if sha.len() != 64
+                    || !sha
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    || file.contains(['/', '\\'])
+                    || file.starts_with('.')
+                {
+                    return Err(format!("line {}: invalid file name or SHA-256", number + 1));
+                }
+                policy
+                    .supplements
+                    .entry(format!("{name} {version}"))
+                    .or_default()
+                    .push(((*file).to_owned(), (*sha).to_owned()));
+            } else if let Some(rest) = line.strip_prefix("licence-selection:") {
+                let parts: Vec<_> = rest.split_whitespace().collect();
+                let [name, version, licence] = parts.as_slice() else {
+                    return Err(format!("line {}: expected `NAME VERSION SPDX`", number + 1));
+                };
+                let id = format!("{name} {version}");
+                if policy
+                    .selected_licences
+                    .insert(id.clone(), (*licence).to_owned())
+                    .is_some()
+                {
+                    return Err(format!(
+                        "line {}: duplicate licence selection for {id}",
+                        number + 1
+                    ));
+                }
+            } else if let Some(rest) = line.strip_prefix("no-expression:") {
                 policy.no_expression.insert(exception(rest)?);
             } else if let Some(rest) = line.strip_prefix("no-text:") {
                 policy.no_text.insert(exception(rest)?);
@@ -94,18 +144,22 @@ impl Policy {
 }
 
 fn main() {
-    if let Err(message) = run() {
+    if let Err(message) = run(std::env::args().skip(1)) {
         eprintln!("third_party_notices: {message}");
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<(), String> {
-    let mut args = std::env::args().skip(1);
+fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
     let mode = args.next().ok_or("expected `notices` or `check`")?;
     let mut output = None;
     let mut allowed = None;
+    let mut for_release = false;
     while let Some(flag) = args.next() {
+        if flag == "--for-release" {
+            for_release = true;
+            continue;
+        }
         let value = args.next().ok_or_else(|| format!("{flag} needs a value"))?;
         match flag.as_str() {
             "--output" => output = Some(PathBuf::from(value)),
@@ -116,7 +170,24 @@ fn run() -> Result<(), String> {
     let path = allowed.ok_or("--allowed LIST is required")?;
     let list = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let policy = Policy::parse(&list)?;
-    let krates = linked_crates()?;
+    if for_release && !policy.no_text.is_empty() {
+        return Err(
+            "release policy forbids `no-text:` exceptions; supply upstream licence texts with `supplement:`"
+                .into(),
+        );
+    }
+    let mut krates = linked_crates()?;
+    let directory = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("third-party-notices");
+    apply_supplements(&mut krates, &policy, &|file| {
+        let mut bytes = Vec::new();
+        std::fs::File::open(directory.join(file))
+            .and_then(|source| source.take(MAX_TEXT_BYTES + 1).read_to_end(&mut bytes))
+            .map_err(|e| format!("{file}: {e}"))?;
+        Ok(bytes)
+    })?;
     let problems = problems(&krates, &policy);
     if !problems.is_empty() {
         return Err(problems.join("\n"));
@@ -124,7 +195,7 @@ fn run() -> Result<(), String> {
     match mode.as_str() {
         "notices" => {
             let output = output.ok_or("notices needs --output FILE")?;
-            std::fs::write(&output, render(&krates))
+            std::fs::write(&output, render(&krates, &policy))
                 .map_err(|e| format!("{}: {e}", output.display()))?;
             eprintln!(
                 "wrote notices for {} crates to {}",
@@ -144,8 +215,66 @@ fn run() -> Result<(), String> {
     }
 }
 
+/// Adds the supplied upstream texts. Each supplement must name a linked crate that ships no text
+/// of its own (otherwise it is stale) and its bytes must have the recorded SHA-256.
+fn apply_supplements(
+    krates: &mut [Krate],
+    policy: &Policy,
+    read: &dyn Fn(&str) -> Result<Vec<u8>, String>,
+) -> Result<(), String> {
+    for (id, files) in &policy.supplements {
+        let krate = krates
+            .iter_mut()
+            .find(|k| k.id() == *id)
+            .ok_or_else(|| format!("{id}: supplement for a crate that is not linked"))?;
+        if !krate.texts.is_empty() {
+            return Err(format!(
+                "{id}: ships its own licence text; drop the supplement"
+            ));
+        }
+        for (file, sha) in files {
+            let bytes = read(file)?;
+            if bytes.len() as u64 > MAX_TEXT_BYTES {
+                return Err(format!("{id}: {file} exceeds {MAX_TEXT_BYTES} bytes"));
+            }
+            let actual = hex::encode(Sha256::digest(&bytes));
+            if actual != *sha {
+                return Err(format!(
+                    "{id}: {file} has SHA-256 {actual}, the list records {sha}"
+                ));
+            }
+            let text = std::str::from_utf8(&bytes)
+                .map_err(|_| format!("{id}: {file} is not valid UTF-8"))?;
+            if text.trim().is_empty() {
+                return Err(format!("{id}: {file} contains no licence text"));
+            }
+            let text = text.replace("\r\n", "\n");
+            krate.texts.push((file.clone(), text.trim_end().to_owned()));
+        }
+    }
+    Ok(())
+}
+
 fn problems(krates: &[Krate], policy: &Policy) -> Vec<String> {
     let mut found = Vec::new();
+    for (id, selected) in &policy.selected_licences {
+        let expression = krates
+            .iter()
+            .find(|krate| krate.id() == *id)
+            .and_then(|krate| krate.expression.as_deref());
+        let valid = expression.is_some_and(|expression| {
+            !expression.contains(['(', ')'])
+                && expression.contains(" OR ")
+                && expression
+                    .split(" OR ")
+                    .any(|alternative| alternative == selected)
+        });
+        if !valid {
+            found.push(format!(
+                "{id}: `{selected}` is not a declared licence alternative"
+            ));
+        }
+    }
     for k in krates {
         let id = k.id();
         match &k.expression {
@@ -331,7 +460,7 @@ fn license_texts(dir: &Path, declared: Option<&str>) -> Result<Vec<(String, Stri
     Ok(texts)
 }
 
-fn render(krates: &[Krate]) -> String {
+fn render(krates: &[Krate], policy: &Policy) -> String {
     let mut out = String::new();
     out.push_str("# Third-party notices\n\n");
     out.push_str("ai-guard native binaries statically link the Rust crates listed below. ");
@@ -372,6 +501,12 @@ fn render(krates: &[Krate]) -> String {
         out.push_str("Only the SPDX expression declared by the crate is available for these (reviewed individually):\n\n");
         for id in &without_text {
             let _ = writeln!(out, "- {id}");
+        }
+    }
+    if !policy.selected_licences.is_empty() {
+        out.push_str("\n## Licences selected for distribution\n\n");
+        for (id, licence) in &policy.selected_licences {
+            let _ = writeln!(out, "- `{id}` uses `{licence}`.");
         }
     }
     out.push_str("\n## Licence texts\n");
@@ -443,6 +578,29 @@ mod tests {
     }
 
     #[test]
+    fn release_commands_refuse_a_missing_text_exception_before_generating_notices() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = dir.path().join("allowed.txt");
+        let output = dir.path().join("THIRD-PARTY-NOTICES");
+        std::fs::write(&policy, "MIT\n  no-text: fixture 1.0.0 # reviewed\n").unwrap();
+        for mode in ["check", "notices"] {
+            let args = [
+                mode,
+                "--for-release",
+                "--allowed",
+                policy.to_str().unwrap(),
+                "--output",
+                output.to_str().unwrap(),
+            ];
+            assert_eq!(
+                run(args.into_iter().map(str::to_owned)).unwrap_err(),
+                "release policy forbids `no-text:` exceptions; supply upstream licence texts with `supplement:`"
+            );
+            assert!(!output.exists());
+        }
+    }
+
+    #[test]
     fn only_normal_edges_are_linked() {
         let names: Vec<_> = with_texts(&[]).into_iter().map(|k| k.name).collect();
         assert_eq!(names, ["a", "d"]);
@@ -509,6 +667,69 @@ mod tests {
             found
                 .iter()
                 .any(|m| m.contains("no licence expression and no licence text"))
+        );
+    }
+
+    fn hash(text: &str) -> String {
+        hex::encode(Sha256::digest(text.as_bytes()))
+    }
+
+    #[test]
+    fn a_supplement_with_the_recorded_hash_clears_the_missing_text() {
+        let mut krates = with_texts(&[("a", "text a")]);
+        let list = format!(
+            "MIT\nMIT OR Apache-2.0\nsupplement: d 1.0.0 d.txt {}\n",
+            hash("upstream")
+        );
+        let policy = policy(&list);
+        assert!(!problems(&krates, &policy).is_empty());
+        apply_supplements(&mut krates, &policy, &|_| Ok(b"upstream\n".to_vec())).unwrap_err();
+        apply_supplements(&mut krates, &policy, &|_| Ok(b"upstream".to_vec())).unwrap();
+        assert!(problems(&krates, &policy).is_empty());
+    }
+
+    #[test]
+    fn a_valid_supplement_digest_does_not_replace_text_validation() {
+        let oversized = vec![b'a'; MAX_TEXT_BYTES as usize + 1];
+        let cases: &[(&[u8], &str)] = &[
+            (b"", "contains no licence text"),
+            (b" \t\r\n", "contains no licence text"),
+            (b"license\xff\n", "is not valid UTF-8"),
+            (&oversized, "exceeds 262144 bytes"),
+        ];
+        for (bytes, reason) in cases {
+            let mut krates = with_texts(&[("a", "text a")]);
+            let digest = hex::encode(Sha256::digest(bytes));
+            let list = format!("MIT\nMIT OR Apache-2.0\nsupplement: d 1.0.0 d.txt {digest}\n");
+            let error = apply_supplements(&mut krates, &policy(&list), &|_| Ok(bytes.to_vec()))
+                .unwrap_err();
+            assert_eq!(error, format!("d 1.0.0: d.txt {reason}"));
+        }
+    }
+
+    #[test]
+    fn a_supplement_is_refused_when_stale_unlinked_or_malformed() {
+        let hex = hash("x");
+        let mut krates = with_texts(&[("a", "text a"), ("d", "text d")]);
+        let stale = policy(&format!("supplement: d 1.0.0 d.txt {hex}\n"));
+        assert!(apply_supplements(&mut krates, &stale, &|_| Ok(b"x".to_vec())).is_err());
+        let unlinked = policy(&format!("supplement: nowhere 1.0.0 n.txt {hex}\n"));
+        assert!(apply_supplements(&mut krates, &unlinked, &|_| Ok(b"x".to_vec())).is_err());
+        assert!(Policy::parse("supplement: d 1.0.0 d.txt abc\n").is_err());
+        assert!(Policy::parse(&format!("supplement: d 1.0.0 ../d.txt {hex}\n")).is_err());
+    }
+
+    #[test]
+    fn notices_state_the_selected_alternative_and_refuse_an_undeclared_choice() {
+        let krates = with_texts(&[("a", "text a"), ("d", "text d")]);
+        let chosen = policy("MIT\nMIT OR Apache-2.0\nlicence-selection: d 1.0.0 MIT\n");
+        assert!(problems(&krates, &chosen).is_empty());
+        assert!(render(&krates, &chosen).contains("- `d 1.0.0` uses `MIT`."));
+
+        let undeclared = policy("MIT\nMIT OR Apache-2.0\nlicence-selection: d 1.0.0 Zlib\n");
+        assert_eq!(
+            problems(&krates, &undeclared),
+            ["d 1.0.0: `Zlib` is not a declared licence alternative"]
         );
     }
 
