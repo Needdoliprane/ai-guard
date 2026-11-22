@@ -458,7 +458,7 @@ fn export_receipts(root: &Directory, path: &Path, tenant: &str) -> Result<()> {
             row.audit_event_id.len() <= 64
                 && row.request_id.len() <= 64
                 && row.received_at.len() <= 64
-                && ["identity", "resources", "events"].contains(&row.action.as_str()),
+                && ["identity", "resources", "events", "event"].contains(&row.action.as_str()),
             "invalid bounded access receipt"
         );
         receipts.push(row);

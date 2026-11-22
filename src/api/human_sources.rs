@@ -601,6 +601,8 @@ mod owned_policy_tests;
 #[cfg(test)]
 pub(super) mod tests;
 
+const HUMAN_EVENT_DETAIL_PATH: &str = "/api/v1/human/events/{id}";
+
 const OWNED_HUMAN_GET_PATHS: &[&str] = &[
     "/api/v1/human/admin/configuration",
     "/api/v1/human/admin/grants",
@@ -687,7 +689,7 @@ const REGISTERED_ROUTES: &[(&str, &[&str])] = &[
     ("/api/v1/human/brokers", &["GET", "HEAD"]),
     ("/api/v1/human/events", &["GET", "HEAD"]),
     ("/api/v1/human/events/recent", &["GET", "HEAD"]),
-    ("/api/v1/human/events/{id}", &["GET", "HEAD"]),
+    (HUMAN_EVENT_DETAIL_PATH, &["GET", "HEAD"]),
     ("/api/v1/human/export", &["GET", "HEAD"]),
     ("/api/v1/human/federation/workers", &["GET", "HEAD"]),
     ("/api/v1/human/identity", &["GET", "HEAD"]),
@@ -783,7 +785,8 @@ pub(super) async fn route_gate(
         || super::control_transport::owned_broker_request(&request)
         || super::control_transport::owned_policy_request(&request)
         || super::control_transport::owned_policy_inspection_request(&request)
-        || request.method() == "GET" && OWNED_HUMAN_GET_PATHS.contains(&path)
+        || request.method() == "GET"
+            && (OWNED_HUMAN_GET_PATHS.contains(&path) || template == Some(HUMAN_EVENT_DETAIL_PATH))
         || request.method() == "GET"
             && !owned.oidc_selected()
             && ["/auth/oidc/status", "/auth/oidc/cli-profile"].contains(&path);

@@ -74,8 +74,7 @@ async fn owned_events_metadata_cursor_is_query_bound() {
 
 #[tokio::test]
 async fn owned_events_metadata_refuses_unadopted_views_and_routes() {
-    // Widening the modern route/filter gate would admit unsupported content,
-    // detail, live or export paths before their owned contracts exist.
+    // Keep content, live, export and HEAD outside the owned metadata routes.
     let fixture = Fixture::new_owned();
     let event_id = seed_event(&fixture, "B", "owned-closed-b", fixture.principal());
     let state = state(&fixture);
@@ -83,16 +82,21 @@ async fn owned_events_metadata_refuses_unadopted_views_and_routes() {
     let context = context(&router).await;
     let database = connection(&state);
     let before = snapshot(&database);
-    let (status, body) = get(&router, "/api/v1/human/events?view=content", Some(&context)).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
-    assert_eq!(body["error"]["code"], "identity_unavailable");
-    assert!(body.get("items").is_none());
-    assert_eq!(snapshot(&database), before);
+    for path in [
+        "/api/v1/human/events?view=content".to_owned(),
+        format!("/api/v1/human/events/{event_id}?view=content"),
+    ] {
+        let (status, body) = get(&router, &path, Some(&context)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(body["error"]["code"], "identity_unavailable");
+        assert!(body.get("items").is_none());
+        assert_eq!(snapshot(&database), before);
+    }
     let observed =
         crate::audit::read_test_observer::observe(state.tenants[1].store.sqlite().unwrap());
     for (method, path) in [
         ("HEAD", "/api/v1/human/events".to_owned()),
-        ("GET", format!("/api/v1/human/events/{event_id}")),
+        ("HEAD", format!("/api/v1/human/events/{event_id}")),
         ("GET", "/api/v1/human/export".to_owned()),
         ("GET", "/api/v1/human/stream".to_owned()),
     ] {

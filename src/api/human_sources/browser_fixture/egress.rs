@@ -433,3 +433,113 @@ async fn serve_owned_egress_browser_fixture() -> Result<()> {
     read_receipts?;
     policy_proof
 }
+
+#[tokio::test]
+async fn owned_event_detail_format15_returns_metadata_and_commits_receipt() {
+    use axum::{
+        Router,
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+
+    async fn get(router: &Router, bearer: &str, path: &str, context: Option<&str>) -> Value {
+        let mut request = Request::get(path).header("authorization", format!("Bearer {bearer}"));
+        if let Some(context) = context {
+            request = request.header("x-aiguard-context", context);
+        }
+        let response = router
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 262_144)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    let resource = ResourceRefV1 {
+        kind: ResourceKindV1::Session,
+        resource_id: Uuid::new_v4().to_string(),
+    };
+    let mut event = Event::new("fixture.event-detail");
+    event.session_id = Some(resource.resource_id.clone());
+    event.data = json!({"fixture_note": "synthetic-format15-event-body"});
+    let event_id = event.id.clone();
+    let mut files = Store::owned_control_fixture_with_legacy_setup_for_test(15, |store| {
+        store.append(event).unwrap();
+    });
+    let (bundle, credentials, tokens) = files.take_startup();
+    let (bearer, _) = provision_humans(&bundle, &resource).unwrap();
+    let database = bundle
+        .owner
+        .closure()
+        .sources
+        .iter()
+        .find(|source| source.tenant_id.as_deref() == Some(TENANT) && source.required_format == 15)
+        .unwrap()
+        .storage_binding
+        .path();
+    let state = GatewayState::for_owned_human_sources(
+        bundle,
+        credentials,
+        tokens,
+        Policy::default(),
+        None,
+        Redactor::new(vec![]),
+    )
+    .unwrap();
+    let router = gateway_router(state);
+    let identity = get(&router, &bearer, "/api/v1/human/identity", None).await;
+    let context = identity["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|context| context["tenant_id"] == TENANT && context["mode"] == "personal")
+        .unwrap();
+    let detail = get(
+        &router,
+        &bearer,
+        &format!("/api/v1/human/events/{event_id}?view=metadata"),
+        context["id"].as_str(),
+    )
+    .await;
+    assert_eq!(detail["context_id"], context["id"]);
+    assert_eq!(
+        detail["authorization_version"],
+        context["authorization_version"]
+    );
+    assert_eq!(detail["view"], "metadata");
+    assert_eq!(detail["has_more"], false);
+    assert!(detail["next_cursor"].is_null());
+    let items: Vec<crate::identity::HumanEventItemV1> =
+        serde_json::from_value(detail["items"].clone()).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].metadata.id, event_id);
+    assert_eq!(items[0].metadata.resource, resource);
+    assert!(items[0].content.is_none());
+    assert!(!detail.to_string().contains("synthetic-format15-event-body"));
+
+    let reader = rusqlite::Connection::open_with_flags(
+        database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    let receipt = &detail["read_receipt"];
+    let (payload, received_at): (String, String) = reader
+        .query_row(
+            "SELECT payload,received_at FROM events WHERE kind='control.identity.access' AND id=?1",
+            [receipt["audit_event_id"].as_str().unwrap()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let audit: Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(audit["data"]["action"], "event");
+    assert_eq!(audit["data"]["result_count"], 1);
+    assert_eq!(audit["data"]["principal"], identity["principal"]);
+    assert_eq!(audit["data"]["mode"], context["mode"]);
+    assert_eq!(audit["data"]["request_id"], receipt["request_id"]);
+    assert_eq!(received_at, receipt["received_at"].as_str().unwrap());
+}

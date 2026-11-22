@@ -1272,9 +1272,7 @@ fn event_page_sync(
     } else {
         Traversal::Events
     })?;
-    if state.owned_human.is_some()
-        && (id.is_some() || is_export || key.view != HumanReadViewV1::Metadata)
-    {
+    if state.owned_human.is_some() && (is_export || key.view != HumanReadViewV1::Metadata) {
         return Err(super::human_sources::unavailable());
     }
     let mut cursor = context

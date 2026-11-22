@@ -266,6 +266,50 @@ async fn owned_events_metadata_returns_authorized_items_and_committed_scope_rece
     assert!(!serialized.contains("synthetic-private-journal-content"));
     assert!(neighbor.try_recv().is_err());
 
+    let context_id = context["id"].as_str().unwrap();
+    let detail_path = format!("/api/v1/human/events/{visible}?view=metadata&limit=10");
+    let (status, detail) = get(&router, &detail_path, Some(context_id)).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    for field in [
+        "view",
+        "context_id",
+        "authorization_version",
+        "coverage",
+        "items",
+    ] {
+        assert_eq!(detail[field], page[field], "{field}");
+    }
+    assert_eq!(detail["has_more"], false);
+    assert!(detail["next_cursor"].is_null());
+    let item: crate::identity::HumanEventItemV1 =
+        serde_json::from_value(detail["items"][0].clone()).unwrap();
+    assert_eq!(item.metadata.resource.resource_id, "owned-visible-b");
+    assert!(item.content.is_none());
+    assert!(
+        !detail
+            .to_string()
+            .contains("synthetic-private-journal-content")
+    );
+
+    let (status, denied) = get(&router, &detail_path, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(denied["error"]["code"], "context_required");
+    assert!(denied.get("items").is_none());
+    let missing = uuid::Uuid::new_v4().to_string();
+    for id in [&hidden, &foreign, &missing] {
+        let (status, denied) = get(
+            &router,
+            &format!("/api/v1/human/events/{id}"),
+            Some(context_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{denied}");
+        assert_eq!(denied["error"]["code"], "not_found");
+        assert!(denied.get("items").is_none());
+        assert!(denied.get("read_receipt").is_none());
+    }
+    assert!(neighbor.try_recv().is_err());
+
     // Independent SQLite observation proves actual commit and scope. A UUID
     // returned by the handler alone would not establish a durable read audit.
     let source = &state.owned_human.as_ref().unwrap().sources[1];
@@ -274,7 +318,30 @@ async fn owned_events_metadata_returns_authorized_items_and_committed_scope_rece
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .unwrap();
-    let receipt = &page["read_receipt"];
+    assert_committed_journal_receipt(
+        &connection,
+        &page,
+        "events",
+        &identity["principal"],
+        context,
+    );
+    assert_committed_journal_receipt(
+        &connection,
+        &detail,
+        "event",
+        &identity["principal"],
+        context,
+    );
+}
+
+fn assert_committed_journal_receipt(
+    connection: &rusqlite::Connection,
+    response: &Value,
+    action: &str,
+    principal: &Value,
+    context: &Value,
+) {
+    let receipt = &response["read_receipt"];
     let (payload, received): (String, String) = connection
         .query_row(
             "SELECT payload,received_at FROM events WHERE id=?1",
@@ -285,10 +352,10 @@ async fn owned_events_metadata_returns_authorized_items_and_committed_scope_rece
     let audit: Value = serde_json::from_str(&payload).unwrap();
     assert_eq!(audit["kind"], "control.identity.access");
     let record = &audit["data"];
-    assert_eq!(record["action"], "events");
+    assert_eq!(record["action"], action);
     assert_eq!(record["result_count"], 1);
     assert_eq!(record["request_id"], receipt["request_id"]);
-    assert_eq!(record["principal"], identity["principal"]);
+    assert_eq!(record["principal"], *principal);
     assert_eq!(record["mode"], context["mode"]);
     assert_eq!(received, receipt["received_at"].as_str().unwrap());
     let membership: String = connection
@@ -299,8 +366,8 @@ async fn owned_events_metadata_returns_authorized_items_and_committed_scope_rece
         )
         .unwrap();
     let membership: Value = serde_json::from_str(&membership).unwrap();
-    assert_eq!(membership["tenant_id"], "B");
-    assert_eq!(membership["principal"], identity["principal"]);
+    assert_eq!(membership["tenant_id"], context["tenant_id"]);
+    assert_eq!(membership["principal"], *principal);
     assert_eq!(
         membership["organization_scope"],
         context["organization_scope"]
@@ -320,12 +387,12 @@ async fn owned_events_metadata_returns_authorized_items_and_committed_scope_rece
     let authorization_revision = u64::try_from(authorization_revision).unwrap();
     assert_eq!(record["authorization_revision"], authorization_revision);
     let floor: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM audit_time_floors f JOIN events e ON f.event_seq>=e.seq WHERE e.id=?1)",
-            [receipt["audit_event_id"].as_str().unwrap()],
-            |row| row.get(0),
-        )
-        .unwrap();
+    .query_row(
+        "SELECT EXISTS(SELECT 1 FROM audit_time_floors f JOIN events e ON f.event_seq>=e.seq WHERE e.id=?1)",
+        [receipt["audit_event_id"].as_str().unwrap()],
+        |row| row.get(0),
+    )
+    .unwrap();
     assert!(
         floor,
         "real committed receipt must retain its durable wall floor"
