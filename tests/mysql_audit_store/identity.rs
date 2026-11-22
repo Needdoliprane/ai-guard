@@ -18,6 +18,7 @@ use anyhow::{Context, Result, ensure};
 use futures_util::FutureExt;
 use mysql_async::{Conn, Transaction, TxOpts, prelude::Queryable};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     fs::Permissions,
     io::Write,
@@ -961,6 +962,115 @@ async fn prepared_registry_probe_verifies_control_projections() -> Result<()> {
     )?;
     ensure!(audit_snapshot(&mut conn).await? == before);
     Ok(())
+}
+
+async fn assert_owned_origin_lock_released(conn: &mut Conn, lock: &str) -> Result<()> {
+    let owner = conn
+        .exec_first::<Option<u64>, _, _>("SELECT IS_USED_LOCK(?)", (lock,))
+        .await
+        .map_err(|_| anyhow::anyhow!("cannot observe the QA origin lock"))?;
+    ensure!(owner == Some(None), "QA probe left its origin lock held");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a built mysql_storage_probe and two fresh private MySQL 8.4 QA schemas"]
+async fn prepared_registry_probe_verifies_owned_origin_and_preserves_audits() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(90), async {
+        let program = PathBuf::from(
+            std::env::var_os("AI_GUARD_MYSQL_REGISTRY_QA_BIN")
+                .context("absolute built registry probe path is required")?,
+        );
+        let program = TrustedExecutable::open(&program)?;
+        let a = FixtureFiles::open_gateway("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_A")?;
+        let b = FixtureFiles::open_gateway("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_B")?;
+        ensure!(
+            a.target.port == b.target.port
+                && a.target.namespace != b.target.namespace
+                && a.target.username != b.target.username
+                && a.target.maintenance_username != b.target.maintenance_username
+                && a.client_identity.is_some() == b.client_identity.is_some(),
+            "origin QA requires distinct schemas and accounts on one loopback profile"
+        );
+        let mut conn_a = a.maintenance().await?;
+        let mut conn_b = b.maintenance().await?;
+        require_fresh(&mut conn_a).await?;
+        require_fresh(&mut conn_b).await?;
+
+        let scratch = tempfile::Builder::new()
+            .prefix("mysql-registry-origin-")
+            .permissions(Permissions::from_mode(0o700))
+            .tempdir()?;
+        let directory = scratch.path().canonicalize()?;
+        let entries = [registry_entry(&a, TENANT_A)?, registry_entry(&b, TENANT_B)?];
+        a.initialize(TENANT_A).await?;
+        let initialized = b.initialize(TENANT_B).await?;
+        let (_, identity_head) =
+            prepare_identity(&mut conn_b, b.target.namespace, &initialized, &DIGEST_B).await?;
+        let head = super::workload::prepare_capability(
+            &mut conn_b,
+            TENANT_B,
+            b.target.namespace,
+            (identity_head.seq, &identity_head.hash),
+        )
+        .await?;
+        let before_a = audit_snapshot(&mut conn_a).await?;
+        let before_b = audit_snapshot(&mut conn_b).await?;
+
+        let server: String = conn_b
+            .query_first("SELECT @@GLOBAL.server_uuid")
+            .await
+            .map_err(|_| anyhow::anyhow!("cannot read the QA server UUID"))?
+            .context("QA server UUID is missing")?;
+        let server = Uuid::parse_str(&server).context("invalid QA server UUID")?;
+        let mut lock = Sha256::new();
+        lock.update(b"ai-guard:owned-mysql-source:v1\0");
+        lock.update(server.as_bytes());
+        lock.update(b.target.database.as_bytes());
+        let lock = hex::encode(lock.finalize());
+        let server = server.to_string();
+        let seq = head.seq.to_string();
+
+        let flags = ["--verify-owned-origin", &server, &seq, &head.hash];
+        let confirmed =
+            run_registry_probe_with_flags(&program, &directory, TENANT_B, &entries, &flags).await?;
+        assert_owned_origin_lock_released(&mut conn_b, &lock).await?;
+        assert_registry_probe_receipt(
+            confirmed,
+            &json!({
+                "configured_authentication": entries[1]["storage"]["authentication"]["mode"],
+                "binding_verified": true,
+                "audit_head": &head,
+                "control_projections_verified": true,
+                "verification_mode": "owned_origin_preflight",
+            }),
+        )?;
+
+        let wrong_seq = head
+            .seq
+            .checked_add(1)
+            .context("QA audit sequence overflow")?
+            .to_string();
+        let flags = ["--verify-owned-origin", &server, &wrong_seq, &head.hash];
+        let refused =
+            run_registry_probe_with_flags(&program, &directory, TENANT_B, &entries, &flags).await?;
+        assert_owned_origin_lock_released(&mut conn_b, &lock).await?;
+        assert_registry_probe_refusal(
+            refused,
+            "MySQL owned audit head differs from the expected head",
+        )?;
+        ensure!(
+            audit_snapshot(&mut conn_a).await? == before_a,
+            "origin QA changed tenant A"
+        );
+        ensure!(
+            audit_snapshot(&mut conn_b).await? == before_b,
+            "origin QA changed tenant B"
+        );
+        Ok(())
+    })
+    .await
+    .context("owned origin QA exceeded its deadline")?
 }
 
 #[tokio::test]
