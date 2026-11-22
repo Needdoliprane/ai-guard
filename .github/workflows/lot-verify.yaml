@@ -1,198 +1,414 @@
-name: Lot verification
-
-# Verifies V1 development branches on a hosted Linux x86_64 runner so that the
-# development Mac keeps its memory for engine, browser and macOS recipes.
-# It complements ci.yaml (dev/main) and never creates tags, releases or
-# artifacts outside this run. Engine (Docker/Podman/Kubernetes) and provider
-# recipes stay out of this workflow: ignored tests are not run and are never
-# counted as passes.
+name: MySQL gateway batch transport verification
 
 on:
   push:
-    branches: ['claude/v1-**']
+    branches: ['claude/v1-g06-mysql-health-green-check-20261122']
 
 permissions:
   contents: read
 
 concurrency:
   group: lot-verify-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
-  rust:
+  mysql-gateway:
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 90
     env:
-      AI_GUARD_BUILD_REVISION: ${{ github.sha }}
-      # Match CI's build limit when compiling and linking the full test suite.
+      QA_PRODUCT_SHA: 5bdff7184a83b8f0c77a981d824247ea3efc2c74
+      QA_PRODUCT_PARENT_SHA: 69854f8a95b02ac6c19f779b99be432863b27375
+      QA_GATEWAY_BASE_SHA: 8d83c733ce1d3a7f4a3cfb45a4e18bf698472b42
+      QA_GATEWAY_BLOB_SHA: f5f2cc3b7424ff9d41982cae50c81f1f570a2565
+      QA_SELECTOR: identity::gateway::gateway_reports_unverified_selected_mysql_audit_and_recovers
+      QA_MYSQL_IMAGE_DIGEST: 72c368d898861f3b3a07af0e6d690400f44f048799ed46822783d9224cc2c86d
+      QA_COMMON_PHASES: runner_scope checkout private_directory fetch build store_oracle_timeout store_oracle_guarded_write local_engine recipe_source job_pki
+      QA_PROFILE_PHASES: fixture_material disposable_server verified_transport fresh_schemas gateway_oracle project_cleanup
       CARGO_BUILD_JOBS: '1'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
-      RUST_MIN_STACK: '8388608'
       CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Free runner disk for the test targets
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
-      - name: Fetch dependencies with the pinned Rust toolchain
-        run: |
-          rustc --version
-          cargo fetch --locked
-      - name: Check Rust formatting
-        run: cargo fmt --all -- --check
-      - name: Check all targets with MySQL enabled
-        run: cargo check --locked --offline --all-targets --features mysql-storage --keep-going
-      - name: Check all targets without default features (SQLite only)
-        run: cargo check --locked --offline --all-targets --no-default-features --keep-going
-      - name: Third-party licence guard and its unit tests
-        # `cargo test` builds examples but does not run their unit tests.
-        run: |
-          cargo test --locked --offline --example third_party_notices
-          cargo run --quiet --locked --offline --example third_party_notices -- check --allowed .github/third-party-license-expressions.txt
-      - name: Provider harness regressions
-        run: |
-          python3 -B tests/e2e/interactive_driver.py --self-test
-          python3 -B tests/e2e/test_run_provider_preflight.py ProviderPreflightTests ProviderBrowserStageTests
-          python3 -B tests/e2e/test_run_provider_broker.py BrokerRecipeTests
-      - name: Rust test suite (ignored engine and provider tests excluded)
-        if: github.ref_name != 'claude/v1-integration-regressions-20261122'
+          fetch-depth: 3
+      - name: Run the exact gateway test with fresh TLS and mTLS fixtures
+        id: verify
         shell: bash
         run: |
-          set -o pipefail
-          export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
-          cargo test --locked --offline --no-fail-fast 2>&1 | tee cargo-test.log
-      - name: Targeted SQLite library regressions
-        if: github.ref_name == 'claude/v1-integration-regressions-20261122'
-        shell: bash
-        run: |
+          set +x
           set -euo pipefail
-          export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
-          build_json="$TMPDIR/libtest.jsonl"
-          test_log="$TMPDIR/selector.log"
-          summary=cargo-test-summary.txt
-          failures=cargo-test-failed.txt
-          : > "$summary"
-          : > "$failures"
+          umask 077
+          product_sha=$QA_PRODUCT_SHA
+          selector=$QA_SELECTOR
+          image="mysql:8.4@sha256:$QA_MYSQL_IMAGE_DIGEST"
+          stage=runner_scope
+          receipt="$RUNNER_TEMP/mysql-gateway-receipt.txt"
+          read -r -a phases <<< "$QA_COMMON_PHASES"
+          read -r -a profile_phases <<< "$QA_PROFILE_PHASES"
+          declare -A result test_exit test_counts transport client_certificate
+          project_owned=0
+          libtest_hash=unknown
+          store_libtest_hash=unknown
+          gateway_hash=unknown
+          qa=
 
-          settlement=broker::service::server::retirement_settlement_tests::same_original_not_queued_final_retries_its_retained_input_before_another_q
-          selectors=(
-            audit::resource_tests::retention_confirms_the_committed_segment_after_a_filesystem_ack_failure
-            api::human_sources::journal_tests::owned_event_page_reports_the_archived_prefix_after_adoption
-            api::human_sources::tests::owned_admin_reads_refuse_head_before_authentication
-            api::human_sources::journal_tests::owned_admin_reads::owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
-            identity::operations::tests::owned_event_availability_preserves_granted_permissions
-            broker::writer::inventory_tests::completed_inventory_releases_its_permit_before_reply
-            broker::writer::inventory_tests::timed_out_inventory_keeps_one_permit_and_cannot_queue_a_series_before_cancel
-            broker::writer::status_projection_tests::coverage_only_pending_arm_does_not_taint_a_valid_last_confirmed_status
-            "$settlement"
-          )
-          expected=9
-          if (( ${#selectors[@]} != expected )); then
-            echo 'Invalid regression selector count' | tee -a "$summary"
-            exit 1
-          fi
-          printf 'Revision %s; %s exact SQLite library tests expected\n' "$GITHUB_SHA" "$expected" | tee -a "$summary"
-
-          # Keep raw Cargo and test output in the runner's private scratch directory.
-          if ! cargo test --locked --offline --no-default-features --lib --no-run \
-              --message-format=json > "$build_json" 2> "$TMPDIR/build.stderr"; then
-            echo 'SQLite library build failed; tests not run' | tee -a "$summary"
-            jq -r 'select(.reason == "compiler-message" and .message.level == "error")
-              | .message.code.code // empty | select(test("^E[0-9]{4}$"))' "$build_json" \
-              2>/dev/null | sort -u | tee -a "$summary" || true
-            exit 1
-          fi
-          if ! libtest="$(jq -ers '[.[] | select(.reason == "compiler-artifact"
-              and .target.name == "agentsandbox" and .target.kind == ["lib"]
-              and .profile.test == true and .executable != null) | .executable]
-              | unique | if length == 1 then .[0] else empty end' "$build_json")" \
-              || [[ ! -x "$libtest" ]]; then
-            echo 'Expected one SQLite library test executable; tests not run' | tee -a "$summary"
-            exit 1
-          fi
-          printf 'SQLite libtest SHA-256 %s\n' "$(sha256sum "$libtest" | awk '{print $1}')" | tee -a "$summary"
-
-          passed=0
-          for selector in "${selectors[@]}"; do
-            if "$libtest" "$selector" --exact --test-threads=1 > "$test_log" 2>&1 \
-                && grep -Fxq 'running 1 test' "$test_log" \
-                && grep -Fxq "test $selector ... ok" "$test_log" \
-                && grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$test_log"; then
-              printf 'PASS %s\n' "$selector" | tee -a "$summary"
-              ((passed += 1))
-            else
-              printf 'FAIL %s\n' "$selector" | tee -a "$summary"
-              printf '%s\n' "$selector" >> "$failures"
-              if [[ "$selector" == "$settlement" ]]; then
-                phases='bind_full3|enqueue_signal|ack_signal|load_before_retirement|begin_retirement|ack_pending|authorize_retirement|read_pending|load_before_final|pause_writer'
-                categories='InvalidInput|UnsupportedVersion|TooLarge|LimitExceeded|Busy|Conflict|Interrupted|Corrupt|UnsafeFilesystem|ControlSecret|Io'
-                grep -Eo "settlement phase=($phases) category=($categories)\b" "$test_log" \
-                  | sort -u | tee -a "$summary" || true
+          exec 3>&1
+          report() { printf '%s\n' "$*" | tee -a "$GITHUB_STEP_SUMMARY" >&3; }
+          begin() { result["$stage"]=pass; stage=$1; }
+          write_receipt() {
+            local phase name verification_sha=unknown
+            if [[ $GITHUB_SHA =~ ^[0-9a-f]{40}$ ]]; then verification_sha=$GITHUB_SHA; fi
+            {
+              printf 'schema=2\nproduct_sha=%s\nverification_sha=%s\nimage_digest=%s\nselector=%s\ngateway_baseline_sha=%s\ngateway_baseline_blob_sha256=%s\n' \
+                "$product_sha" "$verification_sha" "$QA_MYSQL_IMAGE_DIGEST" "$selector" \
+                "$QA_GATEWAY_BASE_SHA" "$QA_GATEWAY_BLOB_SHA"
+              printf 'verification=%s\nfailure_stage=%s\nverification_exit=%s\n' "$1" "$2" "$3"
+              printf 'test_binary_sha256=%s\nstore_test_binary_sha256=%s\ngateway_binary_sha256=%s\n' \
+                "$libtest_hash" "$store_libtest_hash" "$gateway_hash"
+              for phase in "${phases[@]}"; do
+                printf 'phase=%s outcome=%s\n' "$phase" "${result[$phase]:-unknown}"
+              done
+              for name in password mtls; do
+                for phase in "${profile_phases[@]}"; do
+                  printf 'profile=mysql-%s phase=%s outcome=%s\n' "$name" "$phase" "${result[$name:$phase]:-unknown}"
+                done
+                printf 'profile=mysql-%s tls=%s client_certificate=%s\n' "$name" \
+                  "${transport[$name]:-unknown}" "${client_certificate[$name]:-unknown}"
+                printf 'profile=mysql-%s test_exit=%s test_counts_pass_fail_ignore=%s oracle_a_b_verified=%s\n' "$name" \
+                  "${test_exit[$name]:-unknown}" "${test_counts[$name]:-unknown}" "${result[$name:gateway_oracle]:-unknown}"
+              done
+              printf 'phase=private_directory_cleanup outcome=%s\n' "${result[private_directory_cleanup]:-unknown}"
+            } > "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          docker() { timeout --kill-after=5s 60s docker "$@"; }
+          docker_qa() { docker --context desktop-linux "$@"; }
+          compose_qa() {
+            docker_qa compose --env-file /dev/null --project-name "$QA_MYSQL_PROJECT" \
+              -f tests/e2e/mysql/compose.yaml --profile "$QA_MYSQL_PROFILE" "$@"
+          }
+          project_empty() {
+            local resources named label="com.docker.compose.project=$QA_MYSQL_PROJECT"
+            resources=$(docker_qa ps -aq --filter "label=$label") && [[ -z $resources ]] &&
+              resources=$(docker_qa volume ls -q --filter "label=$label") && [[ -z $resources ]] &&
+              resources=$(docker_qa network ls -q --filter "label=$label") && [[ -z $resources ]] &&
+              resources=$(docker_qa ps -aq --filter "label=ai-guard.qa.project=$QA_MYSQL_PROJECT") &&
+              [[ -z $resources ]] || return 1
+            named=$(docker_qa ps -a --format '{{.Names}}' && docker_qa volume ls --format '{{.Name}}' &&
+              docker_qa network ls --format '{{.Name}}') || return 1
+            ! grep -qE "^$QA_MYSQL_PROJECT[-_]" <<< "$named"
+          }
+          cleanup_project() {
+            local probe
+            probe=$(docker_qa ps -a --format '{{.Names}}' \
+              --filter "label=ai-guard.qa.project=$QA_MYSQL_PROJECT") || return 1
+            if [[ -n $probe ]]; then
+              [[ $probe == "$QA_MYSQL_PROJECT-probe" ]] && docker_qa rm -f "$probe" || return 1
+            fi
+            compose_qa down --timeout 10 --volumes && project_empty || return 1
+            project_owned=0
+          }
+          finish() {
+            local status=$? failure_stage=none outcome=pass
+            trap - EXIT
+            if (( status == 130 || status == 143 )); then
+              outcome=unknown
+            elif (( status )); then
+              failure_stage=$stage
+              result["$stage"]=fail
+              outcome=fail
+            fi
+            if (( project_owned )); then
+              if cleanup_project >> "$qa/cleanup.log" 2>&1; then
+                result["$profile:project_cleanup"]=pass
+              else
+                result["$profile:project_cleanup"]=fail
+                if [[ $failure_stage == none ]]; then failure_stage="$profile:project_cleanup"; fi
+                outcome=fail
+                status=1
               fi
             fi
+            if [[ -n $qa ]]; then
+              if [[ $qa =~ ^/tmp/aig-sql\.[A-Za-z0-9]{6}$ ]] && rm -rf -- "$qa" && [[ ! -e $qa ]]; then
+                result[private_directory_cleanup]=pass
+              else
+                result[private_directory_cleanup]=fail
+                if [[ $failure_stage == none ]]; then failure_stage=private_directory_cleanup; fi
+                outcome=fail
+                status=1
+              fi
+            fi
+            if [[ $outcome == fail ]]; then
+              report "FAIL stage=$failure_stage exit=$status"
+            elif [[ $outcome == pass ]]; then
+              report 'PASS private_directory_cleanup'
+            fi
+            write_receipt "$outcome" "$failure_stage" "$status"
+            exit "$status"
+          }
+          trap finish EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+
+          verify_checkout() {
+            local worktree_status source_delta expected_source_delta
+            worktree_status=$(git status --porcelain=v1 --untracked-files=all 2>/dev/null) || return 1
+            source_delta=$(git diff --name-only "$QA_PRODUCT_PARENT_SHA" "$product_sha" 2>/dev/null) || return 1
+            expected_source_delta=$'src/mysql_storage/audit.rs\nsrc/tenant_store.rs'
+            [[ -z $worktree_status && $GITHUB_SHA =~ ^[0-9a-f]{40}$ &&
+               $(git rev-parse HEAD 2>/dev/null) == "$GITHUB_SHA" &&
+               $(git show -s --format=%P HEAD 2>/dev/null) == "$product_sha" &&
+               $(git diff --name-only "$product_sha" HEAD 2>/dev/null) == .github/workflows/lot-verify.yaml &&
+               $(git rev-parse "$product_sha^" 2>/dev/null) == "$QA_PRODUCT_PARENT_SHA" &&
+               "$source_delta" == "$expected_source_delta" &&
+               $(git rev-parse "$product_sha:tests/mysql_audit_store/gateway.rs" 2>/dev/null) == "$QA_GATEWAY_BLOB_SHA" ]]
+          }
+          [[ $RUNNER_ENVIRONMENT == github-hosted && $RUNNER_OS == Linux && $RUNNER_ARCH == X64 &&
+             $GITHUB_EVENT_NAME == push &&
+             $GITHUB_REF == refs/heads/claude/v1-g06-mysql-health-green-check-20261122 &&
+             -S /var/run/docker.sock ]]
+          begin checkout
+          verify_checkout
+          report "product_sha=$product_sha verification_sha=$GITHUB_SHA"
+
+          begin private_directory
+          qa=$(mktemp -d /tmp/aig-sql.XXXXXX)
+          [[ $(realpath "$qa") == "$qa" && $(stat -c '%a' "$qa") == 700 ]]
+          mkdir -m 700 "$qa/tmp" "$qa/docker" "$qa/ca" "$qa/password" "$qa/mtls" "$qa/client"
+          export TMPDIR="$qa/tmp" QA_MYSQL_PRIVATE_DIR="$qa" DOCKER_CONFIG="$qa/docker"
+          export AI_GUARD_BUILD_REVISION="$product_sha" CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"
+          exec > "$qa/diagnostics.log" 2>&1
+
+          [[ ! -e $CARGO_TARGET_DIR && ! -L $CARGO_TARGET_DIR ]]
+          begin fetch
+          cargo fetch --locked
+          begin build
+          if ! cargo test --locked --offline --no-default-features --features mysql-storage --lib \
+            --test mysql_audit_store --no-run --message-format=json > "$qa/cargo.jsonl"; then
+            codes=$(jq -r 'select(.reason == "compiler-message") | .message.code.code // empty |
+              select(test("^E[0-9]{4}$"))' "$qa/cargo.jsonl" | sort -u | paste -sd, -)
+            report "FAIL compile codes=${codes:-unavailable}"
+            exit 1
+          fi
+          libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact" and
+            .target.name == "mysql_audit_store" and .target.kind == ["test"] and .profile.test) |
+            .executable | select(. != null)] | if length == 1 then .[0] else error("test artifact count") end' \
+            "$qa/cargo.jsonl")
+          store_libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact" and
+            .target.name == "agentsandbox" and .target.kind == ["lib"] and .profile.test) |
+            .executable | select(. != null)] | if length == 1 then .[0] else error("library test artifact count") end' \
+            "$qa/cargo.jsonl")
+          gateway="$CARGO_TARGET_DIR/debug/agentsandbox"
+          [[ $libtest == "$CARGO_TARGET_DIR"/debug/deps/mysql_audit_store-* && -x $libtest &&
+             $store_libtest == "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* && -x $store_libtest && -x $gateway ]]
+          read -r test_sha256 _ < <(sha256sum "$libtest")
+          read -r store_test_sha256 _ < <(sha256sum "$store_libtest")
+          read -r gateway_sha256 _ < <(sha256sum "$gateway")
+          [[ $test_sha256 =~ ^[0-9a-f]{64}$ && $store_test_sha256 =~ ^[0-9a-f]{64}$ &&
+             $gateway_sha256 =~ ^[0-9a-f]{64}$ ]]
+          libtest_hash=$test_sha256
+          store_libtest_hash=$store_test_sha256
+          gateway_hash=$gateway_sha256
+          report "PASS compile mysql_test_sha256=$libtest_hash store_libtest_sha256=$store_libtest_hash gateway_sha256=$gateway_hash"
+
+          run_store_oracle() {
+            local selector=$1 phase=$2 status=0 counts running exact summaries
+            begin "$phase"
+            timeout --kill-after=5s 30s "$store_libtest" "$selector" --exact --test-threads=1 --color=never \
+              > "$qa/$phase.log" 2>&1 || status=$?
+            counts=$(sed -nE 's/^test result: (ok|FAILED)\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored; [0-9]+ measured; [0-9]+ filtered out;.*/\2 \3 \4/p' "$qa/$phase.log")
+            running=$(grep -Ec '^running 1 test$' "$qa/$phase.log" || true)
+            exact=$(grep -Fxc "test $selector ... ok" "$qa/$phase.log" || true)
+            summaries=$(grep -Ec '^test result: ' "$qa/$phase.log" || true)
+            if (( status == 0 )) && [[ $counts == '1 0 0' && $running == 1 && $exact == 1 && $summaries == 1 ]]; then
+              report "PASS phase=$phase selector=$selector exit=0 counts=1,0,0"
+            else
+              result["$phase"]=fail
+              [[ $counts =~ ^[0-9]+\ [0-9]+\ [0-9]+$ ]] || counts=unavailable
+              if [[ $counts =~ ^[0-9]+\ [0-9]+\ [0-9]+$ ]]; then counts=${counts// /,}; else counts=unavailable; fi
+              report "FAIL phase=$phase selector=$selector exit=$status counts=$counts"
+              return 1
+            fi
+          }
+          run_store_oracle tenant_store::tests::a_timeout_before_proof_requires_more_than_transport_recovery store_oracle_timeout
+          run_store_oracle tenant_store::tests::guarded_write_verification_failure_stays_visible_after_other_results store_oracle_guarded_write
+
+          begin local_engine
+          unset DOCKER_HOST DOCKER_CONTEXT DOCKER_TLS DOCKER_TLS_VERIFY DOCKER_CERT_PATH DOCKER_DEFAULT_PLATFORM
+          unset COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_ENV_FILES MYSQL_PWD
+          docker context create desktop-linux --docker 'host=unix:///var/run/docker.sock'
+          [[ $(docker_qa context inspect desktop-linux --format '{{.Endpoints.docker.Host}}') == unix:///var/run/docker.sock &&
+             $(docker_qa version --format '{{.Server.Os}}/{{.Server.Arch}}') == linux/amd64 ]]
+          timeout --kill-after=10s 300s docker --context desktop-linux pull --platform linux/amd64 "$image"
+          image_id=$(docker_qa image inspect --format '{{.Id}}' "$image")
+          [[ $image_id =~ ^sha256:[0-9a-f]{64}$ &&
+             $(docker_qa image inspect --format '{{.Os}}/{{.Architecture}}' "$image") == linux/amd64 ]]
+
+          begin recipe_source
+          # Load only the named functions from the exact checked-in QA recipes.
+          copy_recipe() {
+            awk -v start="$1" -v end="$2" '
+              $0 == start { copying = 1 }
+              copying { print }
+              copying && $0 == end { found = 1; exit }
+              END { if (!found) exit 1 }
+            ' "$3"
+          }
+          recipe=tests/e2e/mysql/README.md
+          {
+            copy_recipe 'make_ca() {' '}' "$recipe"
+            copy_recipe 'issue_leaf() {' '}' "$recipe"
+            copy_recipe 'mysql_case() (' ')' "$recipe"
+            copy_recipe 'wait_mysql_ready() {' '}' "$recipe"
+            copy_recipe 'prepare_gateway_fixture() (' ')' tests/e2e/mysql/GATEWAY_FIXTURE.md
+          } > "$qa/recipe.sh"
+          bash -n "$qa/recipe.sh"
+          source "$qa/recipe.sh"
+          uuidgen() { cat /proc/sys/kernel/random/uuid; }
+          # Use the pinned 8.4 client on the already checked server's loopback.
+          # Only the probe option file and its public CA or client material are mounted.
+          mysql() {
+            timeout --kill-after=3s 12s docker --context desktop-linux run --rm --pull never \
+              --name "$QA_MYSQL_PROJECT-probe" --label "ai-guard.qa.project=$QA_MYSQL_PROJECT" \
+              --network "container:$container" --read-only --cap-drop ALL \
+              --user "$(id -u):$(id -g)" --entrypoint mysql \
+              --mount "type=bind,src=$qa/client,dst=$qa/client,readonly" \
+              --mount "type=bind,src=$qa/ca/ca.pem,dst=$qa/ca/ca.pem,readonly" "$image" "$@"
+          }
+
+          begin job_pki
+          printf '[req]\ndistinguished_name=dn\n[dn]\n' > "$qa/req.cnf"
+          make_ca ca 'ai-guard ephemeral MySQL QA'
+          chmod 0444 "$qa/ca/ca.pem"
+          export QA_MYSQL_PORT=13306 QA_MYSQL_HOST=localhost QA_MYSQL_CLIENT_PORT=3306
+
+          for profile in password mtls; do
+            begin "$profile:fixture_material"
+            export QA_MYSQL_PROFILE="mysql-$profile"
+            project_random=$(openssl rand -hex 12)
+            export QA_MYSQL_PROJECT="aig-sql-$profile-$project_random"
+            container="$QA_MYSQL_PROJECT-$QA_MYSQL_PROFILE-1"
+            issue_leaf "$profile/server" "$QA_MYSQL_PROFILE" ca serverAuth "DNS:localhost,DNS:$QA_MYSQL_PROFILE"
+            openssl rand -hex 24 > "$qa/$profile/root.password"
+            openssl rand -hex 24 > "$qa/$profile/probe.password"
+            openssl verify -CAfile "$qa/ca/ca.pem" -purpose sslserver -verify_hostname localhost "$qa/$profile/server.pem"
+            chmod 0444 "$qa/$profile/"{server.pem,server.key,root.password,probe.password}
+            tls_args=(--ssl-ca="$qa/ca/ca.pem")
+            if [[ $profile == mtls ]]; then
+              issue_leaf client/probe qa-probe ca clientAuth
+              openssl verify -CAfile "$qa/ca/ca.pem" -purpose sslclient "$qa/client/probe.pem"
+              tls_args+=(--ssl-cert="$qa/client/probe.pem" --ssl-key="$qa/client/probe.key")
+            fi
+
+            begin "$profile:disposable_server"
+            [[ $QA_MYSQL_PROJECT =~ ^aig-sql-(password|mtls)-[0-9a-f]{24}$ ]]
+            project_empty
+            listeners=$(ss -H -ltn 'sport = :13306')
+            [[ -z $listeners ]]
+            compose_qa config --quiet
+            project_owned=1
+            compose_qa up -d --pull never "$QA_MYSQL_PROFILE"
+            [[ $(docker_qa inspect --type container --format \
+              '{{index .Config.Labels "com.docker.compose.project"}} {{index .Config.Labels "com.docker.compose.service"}} {{.Image}} {{.State.Running}}' \
+              "$container") == "$QA_MYSQL_PROJECT $QA_MYSQL_PROFILE $image_id true" &&
+              $(docker_qa port "$container" 3306/tcp) == "127.0.0.1:$QA_MYSQL_PORT" ]]
+
+            begin "$profile:verified_transport"
+            probe_secret="$qa/$profile/probe.password"
+            proof=$(wait_mysql_ready verified ok "$probe_secret" VERIFY_IDENTITY "${tls_args[@]}")
+            [[ $proof =~ ^verified\ PASS\ 8\.4\.13\ (TLSv1\.[23])$ ]]
+            tls_version=${BASH_REMATCH[1]}
+            client_cert=not_used
+            if [[ $profile == mtls ]]; then
+              [[ $(mysql_case missing-cert credentials "$probe_secret" VERIFY_IDENTITY "${tls_args[0]}") == 'missing-cert PASS refused=1045' ]]
+              [[ $(mysql_case verified ok "$probe_secret" VERIFY_IDENTITY "${tls_args[@]}") == "$proof" ]]
+              client_cert=required
+            fi
+            transport["$profile"]=$tls_version
+            client_certificate["$profile"]=$client_cert
+
+            begin "$profile:fresh_schemas"
+            config_a=$(prepare_gateway_fixture writer)
+            config_b=$(prepare_gateway_fixture witness)
+            begin "$profile:gateway_oracle"
+            status=0
+            AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_A="$config_a" AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_B="$config_b" \
+              timeout --kill-after=10s 180s "$libtest" --ignored --exact --test-threads=1 --color=never "$selector" \
+              > "$qa/test.log" 2>&1 || status=$?
+            test_exit["$profile"]=$status
+            counts=$(sed -nE 's/^test result: (ok|FAILED)\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored; [0-9]+ measured; [0-9]+ filtered out;.*/\2 \3 \4/p' "$qa/test.log")
+            running=$(grep -Ec '^running 1 test$' "$qa/test.log" || true)
+            exact=$(grep -Fxc "test $selector ... ok" "$qa/test.log" || true)
+            summaries=$(grep -Ec '^test result: ' "$qa/test.log" || true)
+            if [[ $counts =~ ^[0-9]+\ [0-9]+\ [0-9]+$ ]]; then
+              test_counts["$profile"]=${counts// /,}
+            fi
+            if (( status != 0 )) || [[ $counts != '1 0 0' || $running != 1 || $exact != 1 || $summaries != 1 ]]; then
+              [[ $counts =~ ^[0-9]+\ [0-9]+\ [0-9]+$ ]] || counts=unavailable
+              report "FAIL profile=$QA_MYSQL_PROFILE selector=$selector exit=$status counts=$counts"
+              exit 1
+            fi
+
+            begin "$profile:project_cleanup"
+            cleanup_project
+            report "PASS profile=$QA_MYSQL_PROFILE mysql=8.4.13 digest=$QA_MYSQL_IMAGE_DIGEST tls=$tls_version client_cert=$client_cert selector=$selector passed=1 failed=0 ignored=0 cleanup=confirmed"
           done
-          printf 'Passed %s of %s exact selectors\n' "$passed" "$expected" | tee -a "$summary"
-          (( passed == expected ))
-      - name: Summarize test results
+          begin finished
+
+      - name: Finalize the redacted verification receipt
         if: always()
         shell: bash
+        env:
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
+          VERIFY_OUTCOME: ${{ steps.verify.outcome }}
         run: |
-          if [ -f cargo-test.log ]; then
-            grep -E '^test result:|^     Running ' cargo-test.log > cargo-test-summary.txt || true
-            grep -E '\.\.\. FAILED$' cargo-test.log | sed 's/^test //; s/ \.\.\. FAILED$//' > cargo-test-failed.txt || true
+          set -euo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/mysql-gateway-receipt.txt"
+          outcome() {
+            case "$1" in
+              success) printf '%s' pass ;;
+              failure) printf '%s' fail ;;
+              *) printf '%s' unknown ;;
+            esac
+          }
+          if [[ ! -f $receipt ]]; then
+            verification_sha=unknown
+            if [[ $GITHUB_SHA =~ ^[0-9a-f]{40}$ ]]; then verification_sha=$GITHUB_SHA; fi
+            read -r -a phases <<< "$QA_COMMON_PHASES"
+            read -r -a profile_phases <<< "$QA_PROFILE_PHASES"
             {
-              echo "### Rust test suite"
-              echo
-              echo "Failed tests: $(wc -l < cargo-test-failed.txt)"
-              echo
-              echo '```'
-              head -n 100 cargo-test-failed.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-          elif [ -f cargo-test-summary.txt ]; then
-            {
-              echo "### Targeted SQLite library tests"
-              echo '```'
-              cat cargo-test-summary.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
+              printf 'schema=2\nproduct_sha=%s\nverification_sha=%s\nimage_digest=%s\nselector=%s\ngateway_baseline_sha=%s\ngateway_baseline_blob_sha256=%s\n' \
+                "$QA_PRODUCT_SHA" "$verification_sha" "$QA_MYSQL_IMAGE_DIGEST" "$QA_SELECTOR" \
+                "$QA_GATEWAY_BASE_SHA" "$QA_GATEWAY_BLOB_SHA"
+              printf 'verification=unknown\nfailure_stage=none\nverification_exit=unknown\n'
+              printf 'test_binary_sha256=unknown\nstore_test_binary_sha256=unknown\ngateway_binary_sha256=unknown\n'
+              for phase in "${phases[@]}"; do
+                printf 'phase=%s outcome=unknown\n' "$phase"
+              done
+              for profile in mysql-password mysql-mtls; do
+                for phase in "${profile_phases[@]}"; do
+                  printf 'profile=%s phase=%s outcome=unknown\n' "$profile" "$phase"
+                done
+                printf 'profile=%s tls=unknown client_certificate=unknown\n' "$profile"
+                printf 'profile=%s test_exit=unknown test_counts_pass_fail_ignore=unknown oracle_a_b_verified=unknown\n' "$profile"
+              done
+              printf 'phase=private_directory_cleanup outcome=unknown\n'
+            } > "$receipt"
           fi
-      - name: Upload test logs
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: lot-verify-rust-${{ github.sha }}
-          path: |
-            cargo-test.log
-            cargo-test-summary.txt
-            cargo-test-failed.txt
-          if-no-files-found: ignore
-          retention-days: 14
+          printf 'checkout_action=%s\nverification_action=%s\n' \
+            "$(outcome "$CHECKOUT_OUTCOME")" "$(outcome "$VERIFY_OUTCOME")" >> "$receipt"
 
-  frontend:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: front
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
         with:
-          persist-credentials: false
-      - name: Setup Node
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '24.22.2'
-          package-manager-cache: false
-      - name: Install
-        run: npm ci --no-audit --no-fund
-      - name: Build
-        run: npm run build
-      - name: Test
-        run: npm test
+          name: mysql-gateway-receipt
+          path: ${{ runner.temp }}/mysql-gateway-receipt.txt
+          if-no-files-found: error
+          retention-days: 14
