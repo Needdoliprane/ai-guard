@@ -146,10 +146,15 @@ impl Invocation {
     pub fn observed(&self, name: &str) -> Option<Vec<u8>> {
         fs::read(self.observed.join(name)).ok()
     }
-    /// The environment the engine CLI was started with, as sorted `NAME=value` lines.
+    /// The control settings the engine CLI was started with, as sorted `NAME=value` lines:
+    /// the `AGENTSANDBOX_*` and `AI_GUARD_*` entries. The fixed baseline of the product (`HOME`,
+    /// `PATH`, locale, engine configuration) is not part of what these tests state.
     pub fn environment(&self) -> Vec<String> {
         let text = fs::read_to_string(self.observed.join("environment")).unwrap_or_default();
-        text.lines().map(str::to_owned).collect()
+        text.lines()
+            .filter(|line| line.starts_with("AGENTSANDBOX_") || line.starts_with("AI_GUARD_"))
+            .map(str::to_owned)
+            .collect()
     }
     /// Every file the build consumer read in its context: relative path, bytes.
     pub fn context_files(&self) -> BTreeMap<String, Vec<u8>> {

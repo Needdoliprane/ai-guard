@@ -991,9 +991,13 @@ fn recipes_reader_extracts_base_images_and_marks_shell_lines_unknown() {
     assert_eq!(declared_stages, internal);
     assert!(facts.recipes.iter().all(|recipe| {
         recipe.base_images.value().is_some_and(|images| {
-            images
-                .iter()
-                .all(|image| image.value().is_some_and(|image| !image.pinned_by_digest))
+            images.iter().all(|image| {
+                // The shipped recipes pin every external base image by digest; an
+                // internal stage names a build stage and has no digest.
+                image
+                    .value()
+                    .is_some_and(|image| image.pinned_by_digest == !image.internal_stage)
+            })
         })
     }));
     let mut found = Vec::new();

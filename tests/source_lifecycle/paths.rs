@@ -108,9 +108,10 @@ impl Readiness {
         for &port in ports {
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap_or_else(|error| {
                 panic!(
-                    "SETUP: 127.0.0.1:{port} cannot be bound ({error}). agentsandbox up asks this \
-                     fixed port for readiness, so this test needs it free: stop a local ai-guard \
-                     stack before running it"
+                    "BLOCKED: 127.0.0.1:{port} cannot be bound ({error}). This test states the \
+                     default behaviour of `agentsandbox up`, which asks the default ports for \
+                     readiness, so it needs them free: run it where no ai-guard stack holds \
+                     them. r19 covers custom ports and needs no fixed port"
                 )
             });
             listener
