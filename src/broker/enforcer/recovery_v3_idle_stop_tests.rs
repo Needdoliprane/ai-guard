@@ -15,6 +15,10 @@ struct IdleStopFixture {
 
 impl IdleStopFixture {
     fn new() -> Self {
+        Self::with_stop_budget(0)
+    }
+
+    fn with_stop_budget(budget: u32) -> Self {
         let configured = std::env::var_os("AI_GUARD_TEST_D5_IPC_ROOT").map(PathBuf::from);
         let fallback = if cfg!(target_os = "macos") {
             "/private/tmp"
@@ -54,6 +58,10 @@ impl IdleStopFixture {
         capability(&root, true).unwrap();
         let listener = PrivateListener::bind_new(&ledger.lease().listener_root().unwrap()).unwrap();
         let mut state = full_fixture_state(Arc::clone(&ledger), listener.endpoint(), 8).unwrap();
+        Arc::get_mut(&mut state)
+            .unwrap()
+            .install_recovery_budget(budget)
+            .unwrap();
         // No inherited fault paths or external process selection. Every new
         // restored reservation consumes a locally rearmed pre-spawn failure.
         Arc::get_mut(&mut state).unwrap().faults = TestFaults {
@@ -196,6 +204,95 @@ impl Drop for IdleStopFixture {
             let _preserved = files.keep();
         }
     }
+}
+
+#[tokio::test]
+async fn fresh_full3_idle_ack_requires_actual_catch_up_join() {
+    let mut fixture = IdleStopFixture::with_stop_budget(1);
+    let attempt = fixture.state.recovery_attempt.as_ref().unwrap().clone();
+    assert!(!attempt.known_idle_joined());
+    let mut retained_stop = fixture.stop_connection().await;
+    let (mut closing, session) = fixture.authenticated(RequestedRole::Full).await;
+    let reply = request_full(
+        &mut closing,
+        &session,
+        FullCommand::ShutdownIfIdle {},
+        REGISTER_TIMEOUT,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(reply, FullReply::Acknowledged {}));
+    assert!(attempt.known_idle_joined());
+    assert!(fixture.state.shutdown_requested.load(Ordering::SeqCst));
+
+    assert!(matches!(
+        request(&mut retained_stop, StopRequest::RecoveryIncomplete {}).await,
+        Err(EnforcerError::Unhealthy)
+    ));
+    let late = fixture.restore_request("idle-stop-after-catch-up-join");
+    assert!(matches!(
+        request(
+            &mut retained_stop,
+            StopRequest::RestoreRequiredStop {
+                value: Box::new(late),
+            },
+        )
+        .await,
+        Err(EnforcerError::Unhealthy)
+    ));
+    assert!(fixture.state.admitted.recovery_generation().is_none());
+    assert!(!fixture.state.recovery_incomplete.load(Ordering::SeqCst));
+    assert!(fixture.state.admitted.lock().unwrap().is_empty());
+    assert!(fixture.state.slots.lock().unwrap().is_empty());
+    assert!(fixture.state.faults.armed.load(Ordering::SeqCst));
+    let (attempts, failures, in_flight) = attempt.observations();
+    assert_eq!((attempts, failures, in_flight), (0, 0, false));
+
+    drop((retained_stop, closing));
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn fresh_full3_idle_join_outlives_an_ipc_disconnect() {
+    let mut fixture = IdleStopFixture::with_stop_budget(1);
+    let gate = Arc::new(IdleShutdownTestGate::default());
+    *fixture.state.idle_shutdown_test_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let attempt = fixture.state.recovery_attempt.as_ref().unwrap().clone();
+    let (mut closing, session) = fixture.authenticated(RequestedRole::Full).await;
+    send_full_request_only_for_test(&mut closing, &session, FullCommand::ShutdownIfIdle {})
+        .await
+        .unwrap();
+    tokio::time::timeout(IO_TIMEOUT, gate.entered.notified())
+        .await
+        .unwrap();
+    let mut completion = fixture
+        .state
+        .idle_shutdown
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .completion
+        .clone();
+    assert!(completion.borrow().is_none());
+    assert!(!attempt.known_idle_joined());
+
+    drop(closing);
+    let disconnected = tokio::time::timeout(IO_TIMEOUT, fixture.connections.join_next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(disconnected, Err(EnforcerError::Unavailable));
+    gate.release.notify_one();
+    tokio::time::timeout(IO_TIMEOUT, completion.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(*completion.borrow(), Some(Ok(())));
+    assert!(attempt.known_idle_joined());
+    assert!(!fixture.state.shutdown_requested.load(Ordering::SeqCst));
+    fixture.finish().await;
 }
 
 #[tokio::test]

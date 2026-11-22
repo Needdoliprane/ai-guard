@@ -21,7 +21,7 @@ use std::{
     sync::atomic::AtomicBool,
     time::Instant,
 };
-use tokio::net::UnixStream;
+use tokio::{net::UnixStream, sync::watch};
 
 const HANDSHAKE_FRAME: u32 = 4096;
 const RETRY_WINDOW: Duration = Duration::from_secs(10);
@@ -539,12 +539,25 @@ enum StopResponse {
     },
 }
 
+struct RetainedIdleShutdown {
+    completion: watch::Receiver<Option<EnforcerResult<()>>>,
+    _owner: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct IdleShutdownTestGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
 pub(super) struct RecoveryState {
     pub(super) epoch: Uuid,
     pub(super) max_slots: u32,
     pub(super) max_recovery_stop_owners: u32,
     recovery_attempt: Option<RecoveryAttemptOwner>,
     recovery_incomplete: AtomicBool,
+    idle_shutdown: Mutex<Option<RetainedIdleShutdown>>,
     pub(super) capability: [u8; 32],
     pub(super) root_binding: String,
     pub(super) clock: Option<Arc<NativeHostClock>>,
@@ -565,6 +578,8 @@ pub(super) struct RecoveryState {
     transport_failed_at: AtomicU64,
     #[cfg(test)]
     faults: TestFaults,
+    #[cfg(test)]
+    idle_shutdown_test_gate: Mutex<Option<Arc<IdleShutdownTestGate>>>,
 }
 impl RecoveryState {
     pub(super) fn full_owner(&self) -> EnforcerResult<Option<Arc<super::retirement::FullState>>> {
@@ -588,6 +603,7 @@ impl RecoveryState {
             max_recovery_stop_owners: 0,
             recovery_attempt: None,
             recovery_incomplete: AtomicBool::new(false),
+            idle_shutdown: Mutex::new(None),
             capability,
             root_binding,
             clock,
@@ -606,6 +622,8 @@ impl RecoveryState {
             transport_failed_at: AtomicU64::new(0),
             #[cfg(test)]
             faults: TestFaults::from_environment(),
+            #[cfg(test)]
+            idle_shutdown_test_gate: Mutex::new(None),
         }
     }
     fn install_recovery_budget(&mut self, budget: u32) -> EnforcerResult<()> {
@@ -630,12 +648,94 @@ impl RecoveryState {
         }
         Ok(())
     }
-    fn begin_recovery(&self) -> EnforcerResult<u64> {
-        let generation = self.admitted.begin_recovery()?;
+    fn begin_recovery(&self, incomplete: bool) -> EnforcerResult<u64> {
+        self.admitted.publish_recovery_intent()?;
+        if incomplete {
+            self.recovery_incomplete.store(true, Ordering::SeqCst);
+        }
+        let generation = self.admitted.commit_recovery()?;
         if let Some(full) = self.full_owner()? {
             full.reserve_recovery_stops()?;
         }
         Ok(generation)
+    }
+
+    async fn finish_idle_with_recovery(
+        self: &Arc<Self>,
+        full: &Arc<super::retirement::FullState>,
+    ) -> EnforcerResult<()> {
+        let retained = self
+            .idle_shutdown
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?
+            .as_ref()
+            .map(|shutdown| shutdown.completion.clone());
+        let mut completion = if let Some(retained) = retained {
+            retained
+        } else {
+            let coverage = full.complete().await;
+            let mut shutdown = self
+                .idle_shutdown
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)?;
+            if let Some(retained) = shutdown.as_ref() {
+                retained.completion.clone()
+            } else {
+                coverage?;
+                if self.recovery_incomplete.load(Ordering::SeqCst) {
+                    return Err(EnforcerError::NotIdle);
+                }
+                let attempt = self
+                    .recovery_attempt
+                    .clone()
+                    .ok_or(EnforcerError::Unhealthy)?;
+                full.reserve_idle_with_recovery(&attempt)?;
+                let owner = Arc::clone(self);
+                let full = Arc::clone(full);
+                let (report, completion) = watch::channel(None);
+                // Reservation and owner installation have no intervening
+                // await. EOF or an IPC deadline drops only a reporter's waiter.
+                let task = tokio::spawn(async move {
+                    let result = async {
+                        #[cfg(test)]
+                        {
+                            let gate = owner
+                                .idle_shutdown_test_gate
+                                .lock()
+                                .map_err(|_| EnforcerError::Unhealthy)?
+                                .take();
+                            if let Some(gate) = gate {
+                                gate.entered.notify_one();
+                                gate.release.notified().await;
+                            }
+                        }
+                        attempt
+                            .join_idle()
+                            .await
+                            .map_err(|_| EnforcerError::Unhealthy)?;
+                        full.join_idle().await?;
+                        owner.check_transport_v3().await?;
+                        attempt.release_joined_sealed_idle()
+                    }
+                    .await;
+                    report.send_replace(Some(result));
+                });
+                *shutdown = Some(RetainedIdleShutdown {
+                    completion: completion.clone(),
+                    _owner: task,
+                });
+                completion
+            }
+        };
+        loop {
+            if let Some(result) = *completion.borrow() {
+                return result;
+            }
+            completion
+                .changed()
+                .await
+                .map_err(|_| EnforcerError::Unhealthy)?;
+        }
     }
     fn active_capacity(&self) -> usize {
         self.max_slots as usize + self.max_recovery_stop_owners.saturating_sub(1) as usize
@@ -1163,16 +1263,13 @@ async fn serve_connection_with_permit(
 fn dispatch(state: &Arc<RecoveryState>, request: StopRequest) -> EnforcerResult<StopResponse> {
     match request {
         StopRequest::BeginRecovery {} => Ok(StopResponse::RecoveryFenced {
-            generation: state.begin_recovery()?,
+            generation: state.begin_recovery(false)?,
             max_recovery_stop_owners: state.max_recovery_stop_owners,
         }),
-        StopRequest::RecoveryIncomplete {} => {
-            state.recovery_incomplete.store(true, Ordering::SeqCst);
-            Ok(StopResponse::RecoveryFenced {
-                generation: state.begin_recovery()?,
-                max_recovery_stop_owners: state.max_recovery_stop_owners,
-            })
-        }
+        StopRequest::RecoveryIncomplete {} => Ok(StopResponse::RecoveryFenced {
+            generation: state.begin_recovery(true)?,
+            max_recovery_stop_owners: state.max_recovery_stop_owners,
+        }),
         StopRequest::StatusStops {} => Ok(StopResponse::StatusStops {
             value: state.status()?,
         }),
@@ -1279,7 +1376,7 @@ fn reserve(
     request: RestoreRequiredStopV1,
 ) -> EnforcerResult<StopResponse> {
     request.validate()?;
-    state.begin_recovery()?;
+    state.begin_recovery(false)?;
     let mut admitted = state
         .admitted
         .lock()

@@ -4,6 +4,7 @@ use super::native_stop_failure::{CauseTarget, FailureFacts, NativeStopFailures};
 use super::*;
 use super::{
     ledger::{ClosingCommitted, LedgerCoverageV1, RetirementLedger, TombstoneCommitted},
+    recovery::RecoveryAttemptOwner,
     server::lifetime::{ActorKey, NativeOwners},
 };
 use crate::{
@@ -127,12 +128,16 @@ pub(super) enum RegistryOwner {
     Restored,
     Prospective,
 }
+const FRESH_ADMISSION: u8 = 0;
+const RECOVERY_INTENT: u8 = 1;
+const IDLE_CLOSING: u8 = 2;
+
 /// The admission policy belongs to the same native owner as its retained
 /// registrations. Every Full view, including one published after a scan,
 /// receives this one registry. Constructing a view cannot reopen admission.
 pub(super) struct NativeAdmissionRegistry {
     entries: Mutex<BTreeMap<String, RegistryOwner>>,
-    recovery_requested: AtomicBool,
+    phase: AtomicU8,
     // Written only while entries is locked. Zero is the exclusive fresh
     // generation; this protocol has no transition back from recovery.
     recovery_generation: AtomicU64,
@@ -144,7 +149,7 @@ impl NativeAdmissionRegistry {
     pub(super) fn fresh() -> AdmissionRegistry {
         Arc::new(Self {
             entries: Mutex::new(BTreeMap::new()),
-            recovery_requested: AtomicBool::new(false),
+            phase: AtomicU8::new(FRESH_ADMISSION),
             recovery_generation: AtomicU64::new(0),
         })
     }
@@ -153,7 +158,7 @@ impl NativeAdmissionRegistry {
     pub(super) fn recovery_fenced() -> AdmissionRegistry {
         Arc::new(Self {
             entries: Mutex::new(BTreeMap::new()),
-            recovery_requested: AtomicBool::new(true),
+            phase: AtomicU8::new(RECOVERY_INTENT),
             recovery_generation: AtomicU64::new(1),
         })
     }
@@ -164,11 +169,31 @@ impl NativeAdmissionRegistry {
         self.entries.lock()
     }
 
-    /// Restrictive intent precedes the gate. The returned generation confirms
-    /// its native commit; cancellation of an RPC waiter cannot undo either.
+    #[cfg(test)]
     pub(super) fn begin_recovery(&self) -> EnforcerResult<u64> {
-        self.recovery_requested.store(true, Ordering::SeqCst);
+        self.publish_recovery_intent()?;
+        self.commit_recovery()
+    }
+
+    /// Restrictive intent still precedes waiting on the admission mutex. An
+    /// idle closure and a first STOP intent contend for the same transition.
+    pub(super) fn publish_recovery_intent(&self) -> EnforcerResult<()> {
+        match self.phase.compare_exchange(
+            FRESH_ADMISSION,
+            RECOVERY_INTENT,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) | Err(RECOVERY_INTENT) => Ok(()),
+            Err(_) => Err(EnforcerError::Unhealthy),
+        }
+    }
+
+    pub(super) fn commit_recovery(&self) -> EnforcerResult<u64> {
         let _admitted = self.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        if !self.fenced() {
+            return Err(EnforcerError::Unhealthy);
+        }
         let current = self.recovery_generation.load(Ordering::SeqCst);
         let generation = if current == 0 { 1 } else { current };
         self.recovery_generation.store(generation, Ordering::SeqCst);
@@ -176,7 +201,21 @@ impl NativeAdmissionRegistry {
     }
 
     pub(super) fn fenced(&self) -> bool {
-        self.recovery_requested.load(Ordering::SeqCst)
+        self.phase.load(Ordering::SeqCst) == RECOVERY_INTENT
+    }
+
+    /// The caller holds this registry's empty admission map. A recovery
+    /// intent already published outside that lock always defeats closure.
+    fn close_fresh_idle(&self) -> EnforcerResult<()> {
+        self.phase
+            .compare_exchange(
+                FRESH_ADMISSION,
+                IDLE_CLOSING,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .map(|_| ())
+            .map_err(|_| EnforcerError::NotIdle)
     }
 
     pub(super) fn recovery_generation(&self) -> Option<u64> {
@@ -189,7 +228,7 @@ impl NativeAdmissionRegistry {
     /// Caller holds this registry's admission lock through the mutation or
     /// grant. A failed/poisoned gate never yields a new Original or Prepare.
     fn check_original(&self) -> EnforcerResult<()> {
-        if self.fenced() {
+        if self.phase.load(Ordering::SeqCst) != FRESH_ADMISSION {
             return Err(EnforcerError::NotReady);
         }
         Ok(())
@@ -442,9 +481,37 @@ impl FullState {
             if !admitted.is_empty() {
                 return Err(EnforcerError::NotIdle);
             }
-            self.idle_admission_closed.store(true, Ordering::SeqCst);
-            self.closed.store(true, Ordering::SeqCst);
+            self.seal_idle_admission();
         }
+        self.join_idle().await
+    }
+
+    /// The RecoveryState already checked ledger coverage and retains the
+    /// actual W owner. Serialize both closures with admitted Full and STOP work.
+    pub(super) fn reserve_idle_with_recovery(
+        &self,
+        attempt: &RecoveryAttemptOwner,
+    ) -> EnforcerResult<()> {
+        let admitted = self.admitted.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        if self.closed.load(Ordering::SeqCst) || self.owners.failed() {
+            return Err(EnforcerError::Unhealthy);
+        }
+        if !admitted.is_empty() {
+            return Err(EnforcerError::NotIdle);
+        }
+        attempt.check_sealed_idle()?;
+        self.admitted.close_fresh_idle()?;
+        self.seal_idle_admission();
+        attempt.seal_idle();
+        Ok(())
+    }
+
+    fn seal_idle_admission(&self) {
+        self.idle_admission_closed.store(true, Ordering::SeqCst);
+        self.closed.store(true, Ordering::SeqCst);
+    }
+
+    pub(super) async fn join_idle(&self) -> EnforcerResult<()> {
         let joiner = self
             .joiner
             .lock()
