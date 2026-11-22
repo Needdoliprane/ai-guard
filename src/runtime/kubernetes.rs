@@ -29,6 +29,7 @@ pub(crate) mod session;
 pub(crate) mod session_admission;
 pub(crate) mod session_attach;
 pub(crate) mod session_claim;
+pub(crate) mod session_driver;
 pub(crate) mod session_effect;
 pub(crate) mod session_instance;
 pub(crate) mod session_lifecycle;

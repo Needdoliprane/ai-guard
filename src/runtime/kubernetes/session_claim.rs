@@ -424,4 +424,4 @@ fn valid_resource_version(value: &str) -> bool {
 
 #[cfg(test)]
 #[path = "session_claim_tests.rs"]
-mod tests;
+pub(crate) mod tests;

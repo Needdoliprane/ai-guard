@@ -15,11 +15,12 @@ use crate::{
 };
 use std::os::unix::fs::PermissionsExt;
 
-const TOKEN: &str = "public-session-claim-loopback-fixture-token-0000000000000";
-const CLAIM_UID: &str = "55555555-5555-4555-8555-555555555555";
-const CREATE: &str = "/api/v1/namespaces/tenant-a/persistentvolumeclaims?fieldValidation=Strict";
+pub(crate) const TOKEN: &str = "public-session-claim-loopback-fixture-token-0000000000000";
+pub(crate) const CLAIM_UID: &str = "55555555-5555-4555-8555-555555555555";
+pub(crate) const CREATE: &str =
+    "/api/v1/namespaces/tenant-a/persistentvolumeclaims?fieldValidation=Strict";
 
-fn storage() -> KubernetesSessionStorageRequestV2 {
+pub(crate) fn storage() -> KubernetesSessionStorageRequestV2 {
     KubernetesSessionStorageRequestV2 {
         version: 1,
         storage_class_name: "ai-guard-rwop".into(),
@@ -100,7 +101,7 @@ impl Case {
     }
 }
 
-fn namespace_reply(name: &str, uid: &str) -> PeerReply {
+pub(crate) fn namespace_reply(name: &str, uid: &str) -> PeerReply {
     PeerReply::json(
         200,
         &json!({"apiVersion":"v1","kind":"Namespace","metadata":{"name":name,"uid":uid},
@@ -108,7 +109,7 @@ fn namespace_reply(name: &str, uid: &str) -> PeerReply {
     )
 }
 /// Echo of the received body with the server facts a 201 adds.
-fn created(body: &[u8]) -> Value {
+pub(crate) fn created(body: &[u8]) -> Value {
     let mut claim: Value = serde_json::from_slice(body).unwrap();
     claim["metadata"]["uid"] = json!(CLAIM_UID);
     claim["metadata"]["resourceVersion"] = json!("7");
