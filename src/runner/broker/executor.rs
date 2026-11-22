@@ -37,7 +37,7 @@ use crate::{
     },
     control::*,
     model::Outcome,
-    provider_activity::session::LiveSession,
+    provider_activity::session::{LiveSession, report_terminal_unconfirmed},
     runner::{AuditClient, CheckpointDataV1, CheckpointPayloadV1, managed},
     runtime::{
         ContainerObservation, ManagedPrearmedExecution, ManagedRuntime, OwnedContainerSnapshot,
@@ -244,7 +244,6 @@ struct ActiveWorkerPhase {
     runtime: Box<ActiveRuntimePhase>,
     _draft: Box<Draft>,
     worker: Box<WorkerV1>,
-    activity: Option<LiveSession>,
 }
 
 // Construct the concrete phase future inside a separate call boundary before
@@ -298,13 +297,22 @@ impl BatchExecutor {
         let execution = Execution::open(self, operation, context)
             .await
             .map_err(|_| BatchFailure)?;
-        match boxed_execution_phase(|| execution.run()).await {
+        let mut activity = None;
+        let outcome = match boxed_execution_phase(|| execution.run(&mut activity)).await {
             Ok(outcome) => Ok(outcome),
             Err(error) => {
+                if let Some(session) = &mut activity {
+                    session.begin_producer_drain();
+                }
                 execution.failure(execution.phase(), &error).await;
                 Err(BatchFailure)
             }
+        };
+        if let Some(session) = activity {
+            let terminal_confirmed = matches!(&outcome, Ok(BatchOutcome::Terminal));
+            boxed_execution_phase(|| session.finish_terminal(terminal_confirmed)).await;
         }
+        outcome
     }
     pub(crate) async fn export(
         &self,
@@ -409,14 +417,14 @@ pub(crate) async fn deliver_cancellation(
 impl<'a> Execution<'a> {
     // Bound inline composition of heavy phase futures: a debug poll reserves
     // its frame before the cancellation branch can return early.
-    async fn run(&self) -> Result<BatchOutcome> {
+    async fn run(&self, activity: &mut Option<LiveSession>) -> Result<BatchOutcome> {
         self.stage(LocalFailurePhaseV1::Decision);
         let prepared = self.prepare_run_phase().await?;
         if prepared.draft.cancelled() {
             return self.cancelled_run_phase(prepared).await;
         }
         let PreparedRunPhase { job, draft } = *prepared;
-        boxed_execution_phase(|| self.run_active(job, draft)).await
+        boxed_execution_phase(|| self.run_active(job, draft, activity)).await
     }
 
     fn prepare_run_phase(&self) -> BoxFuture<'_, Result<Box<PreparedRunPhase>>> {
@@ -479,6 +487,7 @@ impl<'a> Execution<'a> {
         &self,
         job: Box<AcceptedJobV1>,
         mut draft: Box<Draft>,
+        activity: &mut Option<LiveSession>,
     ) -> Result<BatchOutcome> {
         self.generation_current()?;
         if draft.run.plan.managed.is_none() {
@@ -488,7 +497,7 @@ impl<'a> Execution<'a> {
             };
             draft = boxed_execution_phase(|| self.prepare_active(&job, answer)).await?;
         }
-        let outcome = boxed_execution_phase(|| self.execute_active(draft)).await;
+        let outcome = boxed_execution_phase(|| self.execute_active(draft, activity)).await;
         // Keep the accepted job and its retained files through every phase,
         // just as the original single run_active body did.
         drop(job);
@@ -663,7 +672,11 @@ impl<'a> Execution<'a> {
         Ok(Box::new(draft))
     }
 
-    async fn execute_active(&self, draft: Box<Draft>) -> Result<BatchOutcome> {
+    async fn execute_active(
+        &self,
+        draft: Box<Draft>,
+        activity: &mut Option<LiveSession>,
+    ) -> Result<BatchOutcome> {
         let runtime = match self.active_runtime_phase(draft).await? {
             ControlFlow::Break(outcome) => return Ok(outcome),
             ControlFlow::Continue(runtime) => runtime,
@@ -674,13 +687,14 @@ impl<'a> Execution<'a> {
             }
             ControlFlow::Continue(prepared) => prepared,
         };
-        let prepared = match self.active_worker_phase(prepared).await? {
+        let prepared = match self.active_worker_phase(prepared, activity).await? {
             ControlFlow::Break(abandoned) => {
                 return Ok(BatchOutcome::AbandonedBeforeClaim(abandoned));
             }
             ControlFlow::Continue(prepared) => prepared,
         };
-        self.active_terminal_phase(prepared).await
+        self.active_terminal_phase(prepared, activity.is_some())
+            .await
     }
 
     fn active_runtime_phase(
@@ -758,15 +772,15 @@ impl<'a> Execution<'a> {
                 runtime,
                 _draft: Box::new(draft),
                 worker: Box::new(worker),
-                activity: None,
             })))
         })
     }
 
-    fn active_worker_phase(
-        &self,
-        mut prepared: Box<ActiveWorkerPhase>,
-    ) -> BoxFuture<'_, Result<BatchStep<Box<ActiveWorkerPhase>>>> {
+    fn active_worker_phase<'phase>(
+        &'phase self,
+        prepared: Box<ActiveWorkerPhase>,
+        activity: &'phase mut Option<LiveSession>,
+    ) -> BoxFuture<'phase, Result<BatchStep<Box<ActiveWorkerPhase>>>> {
         Box::pin(async move {
             let worker = &prepared.worker;
             if (worker.state == WorkerStateV1::Preparing
@@ -780,9 +794,11 @@ impl<'a> Execution<'a> {
                         | WorkerStateV1::Stopping
                 )
             {
-                prepared.activity = continue_step!(
-                    boxed_execution_phase(|| self.execute_worker(&prepared.runtime.runtime))
-                        .await?
+                continue_step!(
+                    boxed_execution_phase(
+                        || self.execute_worker(&prepared.runtime.runtime, activity)
+                    )
+                    .await?
                 );
             }
             Ok(ControlFlow::Continue(prepared))
@@ -791,7 +807,8 @@ impl<'a> Execution<'a> {
 
     fn active_terminal_phase(
         &self,
-        mut prepared: Box<ActiveWorkerPhase>,
+        prepared: Box<ActiveWorkerPhase>,
+        live_activity: bool,
     ) -> BoxFuture<'_, Result<BatchOutcome>> {
         Box::pin(async move {
             let (_, draft) = self.load().await?;
@@ -812,10 +829,13 @@ impl<'a> Execution<'a> {
             {
                 return Ok(BatchOutcome::AbandonedBeforeClaim(abandoned));
             }
-            // Activity uses its own spool and delivery cursor. The result
-            // and final scan already have their own acknowledgements.
-            let activity = prepared.activity.take();
-            let _ = boxed_execution_phase(|| self.finish_terminal_activity(&draft, activity)).await;
+            if !live_activity
+                && boxed_execution_phase(|| self.replay_terminal_activity(&draft))
+                    .await
+                    .is_err()
+            {
+                report_terminal_unconfirmed();
+            }
             Ok(BatchOutcome::Terminal)
         })
     }
@@ -890,7 +910,8 @@ impl<'a> Execution<'a> {
     async fn execute_worker(
         &self,
         runtime: &ManagedRuntime,
-    ) -> Result<BatchStep<Option<LiveSession>>> {
+        activity: &mut Option<LiveSession>,
+    ) -> Result<BatchStep<()>> {
         self.stage(LocalFailurePhaseV1::Worker);
         let (job, draft) = self.load().await?;
         let worker = draft.worker()?.clone();
@@ -978,14 +999,15 @@ impl<'a> Execution<'a> {
                     .retire(self.context, current, self.executor.clock.clone())
                     .await?;
             }
-            return Ok(ControlFlow::Continue(None));
+            return Ok(ControlFlow::Continue(()));
         }
         // Live activity is durable before the start control is emitted.
-        let mut activity = self.open_activity(&draft).await?;
-        let tap = activity.as_mut().and_then(|(live, _)| live.take_tap());
-        let hooks = activity
+        let mut opened = self.open_activity(&draft).await?;
+        let tap = opened.as_mut().and_then(|(live, _)| live.take_tap());
+        let hooks = opened
             .as_ref()
             .map(|(live, client)| live.hook_attacher(*client));
+        *activity = opened.map(|(session, _)| session);
         let callback = |owned: OwnedContainerSnapshot| {
             boxed_execution_phase(|| async move {
                 self.patch(|draft| {
@@ -1114,7 +1136,7 @@ impl<'a> Execution<'a> {
                 })));
             }
         };
-        if let Some((session, _)) = activity.as_mut() {
+        if let Some(session) = activity.as_mut() {
             session.begin_producer_drain();
         }
         self.save_worker_result(&retained, activity.is_some())
@@ -1149,6 +1171,6 @@ impl<'a> Execution<'a> {
         })
         .await?;
         ensure!(removed, "worker cleanup requires reconciliation");
-        Ok(ControlFlow::Continue(activity.map(|(session, _)| session)))
+        Ok(ControlFlow::Continue(()))
     }
 }

@@ -76,16 +76,9 @@ impl Execution<'_> {
         Ok(Some((session, client)))
     }
 
-    /// Finish or replay activity after the terminal result and scan.
-    pub(super) async fn finish_terminal_activity(
-        &self,
-        draft: &super::Draft,
-        activity: Option<LiveSession>,
-    ) -> Result<()> {
-        if let Some(session) = activity {
-            session.finish().await?;
-        } else if let (Some(root), Some(context)) =
-            (&self.executor.activity_root, activity_context(draft))
+    /// Replay retained activity after the terminal result and scan.
+    pub(super) async fn replay_terminal_activity(&self, draft: &super::Draft) -> Result<()> {
+        if let (Some(root), Some(context)) = (&self.executor.activity_root, activity_context(draft))
         {
             let directory = root.open_existing_child(ACTIVITY_DIRECTORY)?;
             LiveSession::replay_retained(

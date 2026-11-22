@@ -2570,10 +2570,24 @@ async fn launch_worker(
         supervision.clone(),
     );
     let (execution, monitor) = tokio::join!(execute, monitor);
-    if let Some((session, _)) = live {
-        // Finalization only: a coverage error never changes the run outcome.
-        let _ = session.finish().await;
+    let mut live = live.map(|(session, _)| session);
+    if let Some(session) = &mut live {
+        session.begin_producer_drain();
     }
+    let outcome = settle_managed_launch(runtime, client, state, execution, monitor).await;
+    if let Some(session) = live {
+        session.finish_terminal(outcome.is_ok()).await;
+    }
+    outcome
+}
+
+async fn settle_managed_launch(
+    runtime: &ManagedRuntime,
+    client: &AuditClient,
+    state: &PlanState,
+    execution: Result<crate::runtime::ManagedRetainedExecution>,
+    monitor: std::result::Result<(), control_monitor::ControlFailure>,
+) -> Result<RunSummary> {
     // Recover only a native completion qualified by this same runtime. The
     // carrier's original cause/contexts remain owned beside that completion.
     let (execution, execution_error) = match execution {

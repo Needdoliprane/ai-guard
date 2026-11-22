@@ -5,7 +5,6 @@
 use super::{
     collector::{
         ActivityChannel, ActivityClient, ActivityCollector, ActivityContext, ActivityLimits,
-        ActivitySummary,
     },
     forwarder::{ActivitySink, ForwardOutcome, forward},
     hooks::{HookAck, HookFrame, HookPumpOutcome, HookTransport, pump_hooks},
@@ -118,6 +117,15 @@ pub(crate) struct HookAttacher {
     client: ClientV1,
 }
 
+pub(crate) fn report_terminal_unconfirmed() {
+    use std::io::Write;
+
+    let _ = writeln!(
+        std::io::stderr(),
+        "provider_activity phase=terminal state=unconfirmed"
+    );
+}
+
 impl LiveSession {
     /// Open (or reopen after an interruption) the session spool in the
     /// private `root` and start its forwarder; with `live_stdout`, for a
@@ -204,11 +212,16 @@ impl LiveSession {
         }
     }
 
-    /// Finish after the transport ended: close the hook channel, drain the
-    /// stdout pump, spool the observed coverage summary and drain the
-    /// forwarder, each bounded. Undelivered events stay in the spool for a
-    /// later recovery run.
-    pub(crate) async fn finish(mut self) -> Result<ActivitySummary> {
+    /// Settle the activity after execution and its required audit. The session
+    /// owner reports incomplete collection separately from the execution result.
+    pub(crate) async fn finish_terminal(self, terminal_confirmed: bool) {
+        let finished = self.finish(terminal_confirmed).await;
+        if !terminal_confirmed || finished.is_err() {
+            report_terminal_unconfirmed();
+        }
+    }
+
+    async fn finish(mut self, terminal_confirmed: bool) -> Result<()> {
         // An unused tap (no start emitted) must not keep the pump open.
         self.begin_producer_drain();
         let (hook, poisoned) = self.close_hook_slot();
@@ -242,6 +255,11 @@ impl LiveSession {
                 anyhow::anyhow!("provider activity stdout closure is unknown ({error:?})")
             })?;
             anyhow::ensure!(!poisoned, "provider activity hook ownership is unknown");
+            if !terminal_confirmed {
+                // The same session may still need a fresh activity producer
+                // on recovery. Leave its verified prefix open until terminal.
+                return Ok(());
+            }
             if unattached {
                 let _ = self.collector.channel_state(
                     ActivityChannel::Hook,
@@ -257,7 +275,8 @@ impl LiveSession {
                     .collector
                     .channel_state(ActivityChannel::Stdout, "closed", None);
             }
-            self.collector.finish()
+            self.collector.finish()?;
+            Ok(())
         })();
         self.stop.send_replace(true);
         let delivery = match self.forwarder.take() {
@@ -267,17 +286,17 @@ impl LiveSession {
                 .map(Some),
             None => Ok(None),
         };
-        let mut summary = coverage?;
+        coverage?;
         let delivery = delivery.map_err(|error| {
             anyhow::anyhow!("provider activity forwarding is unknown ({error:?})")
         })?;
         if let Some(outcome) = delivery {
-            let undelivered = outcome
-                .undelivered
-                .ok_or_else(|| anyhow::anyhow!("provider activity delivery is unknown"))?;
-            summary.complete &= undelivered == 0;
+            anyhow::ensure!(
+                outcome.undelivered == Some(0),
+                "provider activity delivery is unconfirmed"
+            );
         }
-        Ok(summary)
+        Ok(())
     }
 
     fn close_hook_slot(&self) -> (HookTask, bool) {

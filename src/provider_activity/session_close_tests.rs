@@ -139,6 +139,60 @@ fn retained_fixture() -> (tempfile::TempDir, Directory, ActivityContext) {
 }
 
 #[tokio::test]
+async fn an_interrupted_session_leaves_coverage_open_for_terminal_replay() {
+    let (_temporary, root, context) = retained_fixture();
+    let session_id = context.session;
+    let mut spool = ActivitySpool::create(&root, session_id).unwrap();
+    spool.append(vec![Event::new("activity.channel")]).unwrap();
+    let collector = ActivityCollector::new(
+        spool,
+        context.clone(),
+        Redactor::new(Vec::new()),
+        ActivityLimits::default(),
+    )
+    .unwrap();
+    let (stop, _) = watch::channel(false);
+    let (hook_stop, _) = watch::channel(false);
+    let session = LiveSession {
+        collector,
+        tap: None,
+        pump: None,
+        forwarder: None,
+        stop,
+        hook_task: Arc::new(Mutex::new(HookTask::Idle)),
+        hook_stop,
+    };
+    session.finish(false).await.unwrap();
+
+    let (spool, _) = ActivitySpool::reopen(&root, session_id).unwrap();
+    assert_eq!(spool.len(), 1, "interruption must keep the prefix open");
+    drop(spool);
+
+    let sink = RecordedActivity::default();
+    LiveSession::replay_retained(
+        &root,
+        context,
+        Redactor::new(Vec::new()),
+        &sink,
+        ActivityLimits::default(),
+    )
+    .await
+    .unwrap();
+    let events = sink.0.lock().unwrap();
+    let [_, event] = events.as_slice() else {
+        panic!("terminal replay must record one coverage fact after the prefix");
+    };
+    assert_eq!(event.kind, "activity.coverage");
+    assert_eq!(event.provenance, "observed");
+    assert_eq!(event.coverage, "partial");
+    assert_eq!(event.data["complete"], false);
+    assert_eq!(event.data["reason"], "activity_finalization_unconfirmed");
+    for field in ["stdout", "hook", "spooled_events", "delivered_events"] {
+        assert!(event.data.get(field).is_none(), "{field} is unknown");
+    }
+}
+
+#[tokio::test]
 async fn replay_retains_coverage_event_and_only_advances_its_delivery_cursor() {
     let (temporary, root, context) = retained_fixture();
     let session = context.session;
