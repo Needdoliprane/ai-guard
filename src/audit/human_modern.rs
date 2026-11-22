@@ -201,7 +201,8 @@ impl Store {
                         && filter.resource.is_none()
                         && after == 0
                         && upper.is_none()
-                        && uuid::Uuid::parse_str(event_id).is_ok()
+                        && uuid::Uuid::parse_str(event_id)
+                            .is_ok_and(|uuid| uuid.to_string() == event_id)
                 })
                 && !filter.export
                 && !filter.stream

@@ -772,6 +772,10 @@ struct QueryKey {
     resource: Option<ResourceRefV1>,
 }
 impl PageQuery {
+    fn has_event_detail_filters(&self) -> bool {
+        self.cursor.is_some() || self.resource_id.is_some() || self.resource_kind.is_some()
+    }
+
     fn key(&self, traversal: Traversal) -> ApiResult<QueryKey> {
         let limit = self.limit.unwrap_or(25);
         if !(1..=HUMAN_MAX_PAGE_ITEMS).contains(&limit) {
@@ -1219,14 +1223,26 @@ async fn export(
 ) -> ApiResult<Json<HumanPageV1<HumanEventItemV1>>> {
     event_page(proof, state, headers, query, None, true).await
 }
+pub(super) fn owned_event_detail_query(uri: &axum::http::Uri) -> bool {
+    Query::<PageQuery>::try_from_uri(uri).is_ok_and(|Query(query)| {
+        !query.has_event_detail_filters()
+            && matches!(query.view, None | Some(HumanReadViewV1::Metadata))
+    })
+}
+
 async fn event(
     proof: VerifiedHuman,
     State(state): State<GatewayState>,
     headers: HeaderMap,
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
     Path(id): Path<String>,
     query: Result<Query<PageQuery>, QueryRejection>,
 ) -> ApiResult<Json<HumanPageV1<HumanEventItemV1>>> {
-    if uuid::Uuid::parse_str(&id).is_err() {
+    let valid_id = uuid::Uuid::parse_str(&id).is_ok_and(|uuid| {
+        state.owned_human.is_none()
+            || (uuid.to_string() == id && uri.path().rsplit('/').next() == Some(id.as_str()))
+    });
+    if !valid_id {
         return Err(failure(
             StatusCode::NOT_FOUND,
             "not_found",
@@ -1262,7 +1278,7 @@ fn event_page_sync(
     let Query(mut query) = query.map_err(|_| invalid_request())?;
     let (context, tenant, scope) = selected_context(&state, &proof, &headers)?;
     if id.is_some() {
-        if query.cursor.is_some() || query.resource_id.is_some() || query.resource_kind.is_some() {
+        if query.has_event_detail_filters() {
             return Err(invalid_request());
         }
         query.limit = Some(1);
