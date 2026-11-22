@@ -229,8 +229,13 @@ impl<'a> Execution<'a> {
         &self,
         change: impl Fn(&mut Draft) -> Result<()>,
     ) -> Result<Box<CommittedDraftAtHead>> {
-        self.patch_committed_with(change, UncertainPublication::FailClosed)
-            .await
+        commit_patch(
+            &self.executor.writer,
+            self.operation,
+            self.context.scope(),
+            change,
+        )
+        .await
     }
 
     async fn patch_committed_with(
