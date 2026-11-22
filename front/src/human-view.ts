@@ -433,7 +433,7 @@ export class HumanDashboard {
   }
   #journalDescription() {
     return this.#snapshotOnly() ?
-      "Historique des métadonnées autorisées, à l’heure de lecture. Direct, contenu, détail et export indisponibles pour ce profil. Actualiser effectue une nouvelle lecture." :
+      "Historique des métadonnées autorisées, à l’heure de lecture. Direct, contenu et export indisponibles pour ce profil. Actualiser effectue une nouvelle lecture." :
       this.#currentJournalProfile() ?
         "Tous les événements que ce contexte peut lire, les plus récents d’abord, puis en direct. L’onglet Événements reste la lecture d’une ressource choisie, avec son contenu et son export selon vos droits." :
         "Les événements les plus récents que ce contexte peut lire. Le mode de suivi et la portée disponibles seront indiqués après une lecture réussie.";
@@ -1243,7 +1243,7 @@ export class HumanDashboard {
       state.error ? this.#error(state.error, () => { void this.#loadEvents(); }) : "",
       state.error && selection.view === "content" ? el("div", "", el("p", "muted", "Le contenu n’a pas été lu. Vous pouvez demander les métadonnées depuis Ressources."),
         action("Revenir aux ressources", "human-content-resources", () => this.#openView("resources"))) : null,
-      this.#snapshotOnly() ? el("p", "muted", "Métadonnées uniquement pour ce profil. Détail d’événement, contenu et export indisponibles.") : null,
+      this.#snapshotOnly() ? el("p", "muted", "Métadonnées uniquement pour ce profil. Le contenu et l’export sont indisponibles.") : null,
       state.value?.archived_through_seq ? el("p", "notice notice-info retention-notice",
         `Historique archivé hors ligne jusqu’à l’événement n° ${state.value.archived_through_seq} : les événements retirés de la base vivante n’apparaissent ni dans ce journal ni dans ses exports. Leur vérification exige les archives de l’opérateur.`) : null,
       !state.value ? empty(state.loading ? "Chargement des événements…" : "Événements inconnus", "Une lecture absente ou refusée ne constitue pas une absence d’activité.") :
@@ -1253,7 +1253,7 @@ export class HumanDashboard {
               el("p", "muted", `Source : ${item.metadata.source} · Reçu le ${formatDate(item.metadata.received_at, true)}`),
               el("div", "detail-badges", badge(`Provenance : ${item.metadata.provenance}`), badge(`Couverture : ${item.metadata.coverage}`),
                 item.metadata.decision ? badge(`Décision : ${item.metadata.decision}`) : badge("Décision non fournie"))),
-            action("Détails", `human-event-${index}`, () => { void this.#showEvent(item); }, this.#snapshotOnly() || this.#resourceStreamAwaitingAccess())))),
+            action("Détails", `human-event-${index}`, () => { void this.#showEvent(item); }, !this.#canShowEvent(selection))))),
       this.#pagination(state, (next, previous) => { void this.#loadEvents(next, previous); }), this.#renderExport());
   }
   #usesResourceStream() {
@@ -1301,9 +1301,14 @@ export class HumanDashboard {
       this.#refreshActive(true);
     }, 1000);
   }
+  #canShowEvent(selection: { item: HumanResource; view: HumanView }) {
+    return this.#mode === "events" && this.#canEvents() && selection.item.permissions.metadata &&
+      !this.#api.readBudgetStopped && !this.#resourceStreamAwaitingAccess() &&
+      (!this.#snapshotOnly() || selection.view === "metadata");
+  }
   async #showEvent(item: HumanEvent) {
-    if (this.#snapshotOnly() || this.#resourceStreamAwaitingAccess()) return;
-    const selection = this.#selection; if (!selection || this.#mode !== "events" || !this.#canEvents() || this.#api.readBudgetStopped) return;
+    const selection = this.#selection;
+    if (!selection || !this.#canShowEvent(selection)) return;
     this.#detailAbort.abort(); this.#detailAbort = new AbortController(); const request = ++this.#detailGeneration;
     this.#dialog?.remove();
     const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;

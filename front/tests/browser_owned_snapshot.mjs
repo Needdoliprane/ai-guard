@@ -191,7 +191,12 @@ function validateReady(value) {
   return value;
 }
 const recentPath = (path) => new URL(path, "http://fixture.invalid").pathname === "/api/v1/human/events/recent";
-const pageAction = (path) => ({ "/api/v1/human/resources": "resources", "/api/v1/human/events": "events", "/api/v1/human/events/recent": "events" })[new URL(path, "http://fixture.invalid").pathname] ?? null;
+const eventDetailPrefix = "/api/v1/human/events/";
+function pageAction(path) {
+  const pathname = new URL(path, "http://fixture.invalid").pathname;
+  if (pathname.startsWith(eventDetailPrefix) && uuid(pathname.slice(eventDetailPrefix.length))) return "event";
+  return ({ "/api/v1/human/resources": "resources", "/api/v1/human/events": "events", "/api/v1/human/events/recent": "events" })[pathname] ?? null;
+}
 function requiredReceipt(body) {
   must(object(body), "PAGE_BODY_REQUIRED");
   const receipt = body.read_receipt;
@@ -457,11 +462,28 @@ async function runOwnedSnapshot() {
   must(await page.locator('[data-focus-key="human-export"]').isDisabled(), "EXPORT_CONTROL_NOT_DISABLED");
   const details = page.locator('.human-event-row [data-focus-key^="human-event-"]');
   must(await details.count() === 2, "REAL_DETAIL_CONTROLS_REQUIRED");
-  for (const detail of await details.all()) must(await detail.isDisabled(), "DETAIL_CONTROL_NOT_DISABLED");
+  const eventId = events.items[0].metadata.id;
+  must(ready.event_ids.includes(eventId), "DETAIL_ID_NOT_IN_AUTHORIZED_FIXTURE");
+  const detailPath = eventDetailPrefix + eventId;
+  const detailButton = details.first();
+  must(await detailButton.isEnabled(), "METADATA_DETAIL_CONTROL_NOT_ENABLED");
+  await detailButton.focus();
+  const detailPage = await readByAction(detailPath, 200, () => detailButton.press("Enter"));
+  must(detailPage.view === "metadata" && detailPage.context_id === events.context_id &&
+    detailPage.authorization_version === events.authorization_version && detailPage.has_more === false &&
+    detailPage.next_cursor === null && detailPage.items.length === 1 && detailPage.items[0].metadata.id === eventId &&
+    detailPage.items[0].content === null && detailPage.items[0].metadata.resource.kind === ready.resource.kind &&
+    detailPage.items[0].metadata.resource.resource_id === ready.resource.resource_id, "REAL_METADATA_DETAIL_SCOPE");
+  const dialog = page.getByRole("dialog");
+  await dialog.getByText(/^Métadonnées uniquement · Reçu du contrôle le /u).waitFor({ timeout: remaining() });
+  const renderedDetail = JSON.parse(await dialog.locator("pre.code-block").textContent());
+  must(renderedDetail.metadata.id === eventId && renderedDetail.content === null, "DOM_REAL_METADATA_DETAIL");
+  await dialog.getByRole("button", { name: "Fermer les détails", exact: true }).click();
+  await page.waitForFunction(() => document.activeElement?.getAttribute("data-focus-key") === "human-event-0", undefined, { timeout: remaining() });
   await button("Journal").focus(); body = await readByAction("/api/v1/human/events/recent", 200, () => button("Journal").press("Enter")); await snapshotVisible(body);
   must(await heading("Journal des événements autorisés.").evaluate((node) => document.activeElement === node), "NAVIGATION_HEADING_FOCUS_LOST");
   must(streamRequests(navigationStart).length === 0, "KNOWN_PROFILE_NAVIGATION_OPENED_STREAM"); await noSecret();
-  observed.scenario2 = "real_grants_unchanged_controls_unavailable_profile_kept_and_keyboard_focus";
+  observed.scenario2 = "real_metadata_detail_with_grants_unchanged_closed_content_export_and_keyboard_focus";
 
   stage = "real_sqlite_busy_and_recovery";
   const previousReceipt = body.read_receipt.audit_event_id;
@@ -478,9 +500,11 @@ async function runOwnedSnapshot() {
   observed.busy_quiet = { elapsed_ms: Date.now() - busyAt, human_requests: requests.length - busyStart, recent_requests: countRecent(busyStart) };
   must(countRecent(busyStart) === 1 && requests.length - busyStart === 1, "BUSY_TRIGGERED_FALLBACK_OR_RETRY");
   await command("unlock_own_sqlite"); body = await refresh(200); await snapshotVisible(body);
+  const detailRequests = requests.slice(journalStart).filter((row) => row.path.startsWith(eventDetailPrefix) && !recentPath(row.path));
+  must(same(detailRequests, [{ method: "GET", path: detailPath + "?view=metadata" }]), "EXACT_ONE_METADATA_DETAIL_REQUEST");
   must(streamRequests(journalStart).length === 0 && !requests.slice(journalStart).some((row) => {
     const url = new URL(row.path, "http://fixture.invalid");
-    return url.searchParams.get("view") === "content" || url.pathname === "/api/v1/human/export" || url.pathname.startsWith("/api/v1/human/events/") && !recentPath(row.path);
+    return url.searchParams.get("view") === "content" || url.pathname === "/api/v1/human/export";
   }), "CLOSED_OPERATION_OR_CONTENT_FALLBACK_ATTEMPTED");
   observed.scenario3 = "actual_sqlite_lock_503_withdrawal_restrictive_fact_and_explicit_200_recovery";
   must(pageErrors.length === 0 && external.length === 0, "PAGE_ERROR_OR_EXTERNAL_DESTINATION");
@@ -586,10 +610,10 @@ finally {
       closed(receipts, ["version", "tenant_id", "complete", "limit", "records"], "RECEIPTS_SHAPE");
       must(receipts.version === 1 && receipts.tenant_id === (egressMode ? "A" : "B") && receipts.complete === true && receipts.limit === 1000 && Array.isArray(receipts.records) && receipts.records.length <= 1000, "RECEIPTS_INCOMPLETE");
       const byId = new Map();
-      for (const record of receipts.records) { closed(record, ["audit_event_id", "request_id", "action", "received_at"], "RECEIPT_RECORD"); must(["identity", "resources", "events"].includes(record.action) && typeof record.audit_event_id === "string" && typeof record.request_id === "string" && typeof record.received_at === "string", "RECEIPT_RECORD_TYPES"); byId.set(record.audit_event_id, record); }
+      for (const record of receipts.records) { closed(record, ["audit_event_id", "request_id", "action", "received_at"], "RECEIPT_RECORD"); must(["identity", "resources", "events", "event"].includes(record.action) && typeof record.audit_event_id === "string" && typeof record.request_id === "string" && typeof record.received_at === "string", "RECEIPT_RECORD_TYPES"); byId.set(record.audit_event_id, record); }
       must(byId.size === receipts.records.length, "DUPLICATE_DURABLE_RECEIPT_ID");
       await finishWireCaptures(); let compared = 0;
-      // Identity has no page receipt. Every200 on these three page endpoints
+      // Identity has no page receipt. Every 200 on a page or detail endpoint
       // requires one; malformed/missing receipts are failures, never skipped.
       const successfulPages = wires.filter((wire) => wire.status === 200 && pageAction(wire.path) !== null);
       for (const wire of successfulPages) {
