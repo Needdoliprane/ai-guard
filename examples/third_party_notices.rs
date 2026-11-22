@@ -16,7 +16,10 @@
 //! - a bare line is an accepted SPDX expression;
 //! - `no-expression: NAME VERSION` accepts one crate that declares no expression (its licence file
 //!   must still be present, and a person has reviewed it);
-//! - `no-text: NAME VERSION` accepts one crate that has an expression but ships no licence text.
+//! - `no-text: NAME VERSION` accepts one crate that has an expression but ships no licence text;
+//! - `supplement: NAME VERSION FILE SHA256` supplies upstream text for a crate whose published
+//!   package ships none: `FILE` is read from `third-party-notices/` next to the list and must have
+//!   exactly that SHA-256. The provenance (URL, revision) of each file is recorded in the list.
 //!
 //! Anything else fails: an unlisted expression, an unlisted crate without expression, an unlisted
 //! crate without text. A `Cargo.lock` change that brings such a crate therefore needs a reviewed edit
@@ -64,6 +67,8 @@ struct Policy {
     expressions: BTreeSet<String>,
     no_expression: BTreeSet<String>,
     no_text: BTreeSet<String>,
+    /// `NAME VERSION` to the supplied `(file, sha256)` pairs.
+    supplements: BTreeMap<String, Vec<(String, String)>>,
 }
 
 impl Policy {
@@ -81,7 +86,29 @@ impl Policy {
                     _ => Err(format!("line {}: expected `NAME VERSION`", number + 1)),
                 }
             };
-            if let Some(rest) = line.strip_prefix("no-expression:") {
+            if let Some(rest) = line.strip_prefix("supplement:") {
+                let parts: Vec<_> = rest.split_whitespace().collect();
+                let [name, version, file, sha] = parts.as_slice() else {
+                    return Err(format!(
+                        "line {}: expected `NAME VERSION FILE SHA256`",
+                        number + 1
+                    ));
+                };
+                if sha.len() != 64
+                    || !sha
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    || file.contains(['/', '\\'])
+                    || file.starts_with('.')
+                {
+                    return Err(format!("line {}: invalid file name or SHA-256", number + 1));
+                }
+                policy
+                    .supplements
+                    .entry(format!("{name} {version}"))
+                    .or_default()
+                    .push(((*file).to_owned(), (*sha).to_owned()));
+            } else if let Some(rest) = line.strip_prefix("no-expression:") {
                 policy.no_expression.insert(exception(rest)?);
             } else if let Some(rest) = line.strip_prefix("no-text:") {
                 policy.no_text.insert(exception(rest)?);
@@ -116,7 +143,14 @@ fn run() -> Result<(), String> {
     let path = allowed.ok_or("--allowed LIST is required")?;
     let list = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let policy = Policy::parse(&list)?;
-    let krates = linked_crates()?;
+    let mut krates = linked_crates()?;
+    let directory = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("third-party-notices");
+    apply_supplements(&mut krates, &policy, &|file| {
+        std::fs::read(directory.join(file)).map_err(|e| format!("{file}: {e}"))
+    })?;
     let problems = problems(&krates, &policy);
     if !problems.is_empty() {
         return Err(problems.join("\n"));
@@ -142,6 +176,38 @@ fn run() -> Result<(), String> {
         }
         _ => Err("expected `notices` or `check`".into()),
     }
+}
+
+/// Adds the supplied upstream texts. Each supplement must name a linked crate that ships no text
+/// of its own (otherwise it is stale) and its bytes must have the recorded SHA-256.
+fn apply_supplements(
+    krates: &mut [Krate],
+    policy: &Policy,
+    read: &dyn Fn(&str) -> Result<Vec<u8>, String>,
+) -> Result<(), String> {
+    for (id, files) in &policy.supplements {
+        let krate = krates
+            .iter_mut()
+            .find(|k| k.id() == *id)
+            .ok_or_else(|| format!("{id}: supplement for a crate that is not linked"))?;
+        if !krate.texts.is_empty() {
+            return Err(format!(
+                "{id}: ships its own licence text; drop the supplement"
+            ));
+        }
+        for (file, sha) in files {
+            let bytes = read(file)?;
+            let actual = hex::encode(Sha256::digest(&bytes));
+            if actual != *sha {
+                return Err(format!(
+                    "{id}: {file} has SHA-256 {actual}, the list records {sha}"
+                ));
+            }
+            let text = String::from_utf8_lossy(&bytes).replace("\r\n", "\n");
+            krate.texts.push((file.clone(), text.trim_end().to_owned()));
+        }
+    }
+    Ok(())
 }
 
 fn problems(krates: &[Krate], policy: &Policy) -> Vec<String> {
@@ -510,6 +576,36 @@ mod tests {
                 .iter()
                 .any(|m| m.contains("no licence expression and no licence text"))
         );
+    }
+
+    fn hash(text: &str) -> String {
+        hex::encode(Sha256::digest(text.as_bytes()))
+    }
+
+    #[test]
+    fn a_supplement_with_the_recorded_hash_clears_the_missing_text() {
+        let mut krates = with_texts(&[("a", "text a")]);
+        let list = format!(
+            "MIT\nMIT OR Apache-2.0\nsupplement: d 1.0.0 d.txt {}\n",
+            hash("upstream")
+        );
+        let policy = policy(&list);
+        assert!(!problems(&krates, &policy).is_empty());
+        apply_supplements(&mut krates, &policy, &|_| Ok(b"upstream\n".to_vec())).unwrap_err();
+        apply_supplements(&mut krates, &policy, &|_| Ok(b"upstream".to_vec())).unwrap();
+        assert!(problems(&krates, &policy).is_empty());
+    }
+
+    #[test]
+    fn a_supplement_is_refused_when_stale_unlinked_or_malformed() {
+        let hex = hash("x");
+        let mut krates = with_texts(&[("a", "text a"), ("d", "text d")]);
+        let stale = policy(&format!("supplement: d 1.0.0 d.txt {hex}\n"));
+        assert!(apply_supplements(&mut krates, &stale, &|_| Ok(b"x".to_vec())).is_err());
+        let unlinked = policy(&format!("supplement: nowhere 1.0.0 n.txt {hex}\n"));
+        assert!(apply_supplements(&mut krates, &unlinked, &|_| Ok(b"x".to_vec())).is_err());
+        assert!(Policy::parse("supplement: d 1.0.0 d.txt abc\n").is_err());
+        assert!(Policy::parse(&format!("supplement: d 1.0.0 ../d.txt {hex}\n")).is_err());
     }
 
     #[test]

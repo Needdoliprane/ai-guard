@@ -32,10 +32,12 @@ Unlicense/MIT
 Zlib
 Zlib OR Apache-2.0 OR MIT
 
-# Crates whose published package ships no licence text. Their SPDX expression is listed in the notices
-# table and in a dedicated section. OPEN for the maintainers: fetch the upstream licence text and ship it
-# (or replace the crate) before a release that claims complete attribution.
-no-text: keyed_priority_queue 0.4.2
-no-text: r-efi 5.3.0
-no-text: r-efi 6.0.0
-no-text: rsqlite-vfs 0.2.0
+# Crates whose published package ships no licence text. The upstream text is committed under
+# third-party-notices/ and its SHA-256 is checked on every run. Provenance, fetched 2026-11-22:
+#  - keyed_priority_queue 0.4.2: https://raw.githubusercontent.com/AngelicosPhosphoros/keyed_priority_queue/v0.4.2/LICENSE.md (MIT, copyright holder named in the text)
+#  - rsqlite-vfs 0.2.0: https://raw.githubusercontent.com/Spxg/sqlite-wasm-rs/master/LICENSE at commit 27faf7c5c7b12d03c6e8f3b1ba916cc02d977f4e (MIT; the repository root licence of the workspace that publishes the crate, not a per-version tag)
+#  - r-efi 5.3.0 / 6.0.0: https://raw.githubusercontent.com/r-efi/r-efi/v5.3.0/AUTHORS and .../v6.0.0/AUTHORS (the upstream AUTHORS file holds the MIT, Apache-2.0 and LGPL-2.1+ statement and the copyright holders; the repository has no separate LICENSE file)
+supplement: keyed_priority_queue 0.4.2 keyed_priority_queue-0.4.2.LICENSE.md 824f627ec8266fa82057490c3d0982c9b327dca9de1c3c77ebb0128a13621a13
+supplement: rsqlite-vfs 0.2.0 rsqlite-vfs-0.2.0.LICENSE e1c1975c3474cce31722836f101a40ffaf1cc784e4d2f38ce3e77b9712934e78
+supplement: r-efi 5.3.0 r-efi-5.3.0.AUTHORS ff92bed461f50338dd703a9ba9aee496a425957873df1d91192776e4bdf5dda7
+supplement: r-efi 6.0.0 r-efi-6.0.0.AUTHORS d027e91dbc9cdbb2f1190068e498bd6b61cff022b6a032b191021ba658d96111
