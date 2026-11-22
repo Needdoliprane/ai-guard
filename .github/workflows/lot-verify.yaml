@@ -13,6 +13,7 @@ jobs:
     timeout-minutes: 65
     env:
       SOURCE_SHA: 5e092e7e01ca70bbdc491401283dd1321117e514
+      PRIOR_WORKFLOW_SHA: 572341c8bd7d40b3287c7f703f6c6bce2ddf73c2
       DOCKER_HOST: unix:///var/run/docker.sock
       G04_IDP_PROJECT: g04-idp-${{ github.run_id }}-${{ github.run_attempt }}
       G04_CONTROL_PROJECT: g04-control-${{ github.run_id }}-${{ github.run_attempt }}
@@ -32,7 +33,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 2
+          fetch-depth: 3
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -65,6 +66,50 @@ jobs:
             [[ -z "$ids" ]]
           }
 
+          record_control_build_failure() {
+            local diagnosis category=unknown step=unknown
+            # BuildKit can report more than one failure. Emit only unique matches.
+            if diagnosis="$(tail -c 262144 "$G04_PRIVATE/control-build.log" 2>/dev/null | LC_ALL=C awk '
+              function unique(values, count, key, result) {
+                for (key in values) {
+                  count++
+                  result = key
+                }
+                return count == 1 ? result : "unknown"
+              }
+              { line = tolower($0) }
+              line ~ /^(error:|#[0-9]+ error:)/ &&
+                line ~ /(failed to resolve source metadata for .*\/library\/(node|rust|debian):|no match for platform in manifest|no matching manifest for linux\/amd64)/ {
+                category["base_or_platform"] = 1
+                step["base_image"] = 1
+              }
+              line ~ /^(error:|#[0-9]+ error:)/ && line ~ /failed to (compute cache key|calculate checksum)/ && line ~ /not found/ &&
+                line ~ /"\/(front\/package(-lock)?\.json|cargo\.(toml|lock)|rust-toolchain\.toml|src|policies|license|build\/front\/dist|build\/target\/release\/(agentsandbox|ai-guard-audit-checkpoint|ai-guard-diagnose))"/ {
+                category["package_artifact"] = 1
+                step["artifact_copy"] = 1
+              }
+              line ~ /npm (err!|error).*can only install.*(package(-lock)?\.json|npm-shrinkwrap\.json)|cannot find module .*@rollup\/rollup-linux-x64-(gnu|musl)/ {
+                category["package_artifact"] = 1
+              }
+              line ~ /error: (failed to (parse|load) manifest|manifest path .* does not exist|cannot update the lock file .*cargo\.lock)/ {
+                category["cargo_manifest"] = 1
+                step["cargo_build"] = 1
+              }
+              line ~ /^(error:|#[0-9]+ error:).*process .*\/bin\/sh -c .*did not complete successfully/ {
+                if (line ~ /\/bin\/sh -c npm ci"/) step["npm_ci"] = 1
+                if (line ~ /\/bin\/sh -c npm run build"/) step["frontend_build"] = 1
+                if (line ~ /\/bin\/sh -c cargo build /) step["cargo_build"] = 1
+                if (line ~ /\/bin\/sh -c apt-get update /) step["runtime_packages"] = 1
+              }
+              END { print unique(category), unique(step) }
+            ' 2>/dev/null)"; then
+              read -r category step <<< "$diagnosis"
+            fi
+            jq -n --arg category "$category" --arg step "$step" --argjson exit_code "$1" --argjson elapsed_seconds "$2" \
+              '{category:$category,step:$step,exit_code:$exit_code,elapsed_seconds:$elapsed_seconds}' \
+              > "$receipt/control-build.json"
+          }
+
           finish() {
             local code=$? ports
             trap - EXIT
@@ -80,9 +125,9 @@ jobs:
               fi
             fi
             if [[ "$status" == PASS && "$code" != 0 ]]; then status=FAIL; fi
-            jq -n --arg source "$SOURCE_SHA" --arg workflow "$GITHUB_SHA" \
+            jq -n --arg source "$SOURCE_SHA" --arg workflow "$GITHUB_SHA" --arg prior_workflow "$PRIOR_WORKFLOW_SHA" \
               --arg phase "$phase" --arg status "$status" --arg cleanup "$cleanup" \
-              '{source_sha:$source,workflow_sha:$workflow,phase:$phase,status:$status,cleanup:$cleanup}' \
+              '{source_sha:$source,workflow_sha:$workflow,prior_workflow_sha:$prior_workflow,phase:$phase,status:$status,cleanup:$cleanup}' \
               > "$receipt/result.json"
             printf 'G04 Keycloak Web %s (%s), cleanup %s\n' "$status" "$phase" "$cleanup"
             exit "$code"
@@ -91,8 +136,10 @@ jobs:
           trap 'exit 130' INT
           trap 'exit 143' TERM
 
-          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" && "$(git show -s --format=%P HEAD)" == "$SOURCE_SHA" ]] || exit 1
-          [[ "$(git diff --name-only "$SOURCE_SHA" HEAD)" == .github/workflows/lot-verify.yaml ]] || exit 1
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" && "$(git show -s --format=%P HEAD)" == "$PRIOR_WORKFLOW_SHA" ]] || exit 1
+          [[ "$(git show -s --format=%P "$PRIOR_WORKFLOW_SHA")" == "$SOURCE_SHA" ]] || exit 1
+          [[ "$(git diff --name-only "$SOURCE_SHA" "$PRIOR_WORKFLOW_SHA")" == .github/workflows/lot-verify.yaml ]] || exit 1
+          [[ "$(git diff --name-only "$PRIOR_WORKFLOW_SHA" HEAD)" == .github/workflows/lot-verify.yaml ]] || exit 1
           source_tree="$G04_PRIVATE/source"
           mkdir "$source_tree"
           git archive --format=tar "$SOURCE_SHA" | tar -xf - -C "$source_tree"
@@ -171,9 +218,15 @@ jobs:
           control=("${compose[@]}" -p "$G04_CONTROL_PROJECT" -f "$source_tree/deploy/docker/compose.sso.yaml")
 
           phase=control_image
-          timeout -k 5s 35m docker build --build-arg AI_GUARD_BUILD_REVISION="$SOURCE_SHA" \
+          build_started=$SECONDS
+          BUILDKIT_PROGRESS=plain timeout -k 5s 35m docker build --build-arg AI_GUARD_BUILD_REVISION="$SOURCE_SHA" \
             -f "$source_tree/images/control.Dockerfile" -t "$AI_GUARD_CONTROL_IMAGE" "$source_tree" \
-            > "$G04_PRIVATE/control-build.log" 2>&1
+            > "$G04_PRIVATE/control-build.log" 2>&1 || {
+            build_exit=$?
+            record_control_build_failure "$build_exit" "$((SECONDS - build_started))" ||
+              printf '%s\n' 'Control build summary unavailable.'
+            exit "$build_exit"
+          }
           phase=keycloak_image
           timeout -k 5s 10m docker build -f "$source_tree/deploy/keycloak-demo/Dockerfile" -t "$AI_GUARD_DEMO_IDP_IMAGE" \
             "$source_tree/deploy/keycloak-demo" > "$G04_PRIVATE/idp-build.log" 2>&1
