@@ -1409,59 +1409,59 @@ async fn open_upstream(
         }
     };
     let source = resolution.source.code();
+    // Keep the resolver's validated order. This permit authorizes one connect.
+    let Some(address) = resolution.addresses.first() else {
+        return Err(Refusal {
+            reason: EgressReasonV1::Unavailable,
+            failure: None,
+        });
+    };
+    if lifetime.loss().is_some() {
+        return Err(cancelled_opening());
+    }
+    let now = Instant::now();
+    if now >= deadline {
+        return Err(Refusal {
+            reason: elapsed_reason,
+            failure: None,
+        });
+    }
+    let target = SocketAddr::new(*address, authority.port());
+    let attempt = (now + times.connect_attempt).min(deadline);
     let mut attempted = false;
-    for address in &resolution.addresses {
-        if lifetime.loss().is_some() {
-            return Err(cancelled_opening());
+    let connect = async {
+        if Instant::now() >= attempt || lifetime.loss().is_some() {
+            return None;
         }
-        let now = Instant::now();
-        if now >= deadline {
-            break;
-        }
-        let target = SocketAddr::new(*address, authority.port());
-        let attempt = (now + times.connect_attempt).min(deadline);
-        let connect = async {
-            if Instant::now() >= attempt || lifetime.loss().is_some() {
-                return None;
-            }
-            attempted = true;
-            progress.pending = true;
-            let result = TcpStream::connect(target).await;
-            progress.pending = false;
-            result.ok()
-        };
-        // An elapsed attempt takes precedence over a ready connect future.
-        let stream = tokio::select! {
-            biased;
-            _ = sleep_until(attempt) => None,
-            stream = connect => Some(stream),
-        };
-        let Some(stream) = stream else {
-            // The wait ended without the OS result. Never turn it into a
-            // definite failure in the audit, even if another attempt follows.
+        attempted = true;
+        progress.pending = true;
+        let result = TcpStream::connect(target).await;
+        progress.pending = false;
+        result.ok()
+    };
+    // An elapsed attempt takes precedence over a ready connect future.
+    let stream = tokio::select! {
+        biased;
+        _ = sleep_until(attempt) => {
+            // The wait ended without an observed OS result.
             progress.unobserved |= progress.pending;
             progress.pending = false;
-            continue;
-        };
-        let Some(stream) = stream else {
-            continue;
-        };
-        // The connected peer must be exactly the pinned address.
-        let peer = match stream.peer_addr() {
-            Ok(peer) if peer == target => peer,
-            _ => {
-                progress.unobserved = true;
-                continue;
-            }
-        };
-        let _ = stream.set_nodelay(true);
-        return Ok(Opened {
-            stream,
-            peer,
-            connected_at: Instant::now(),
-            valid_until,
-            resolver: source,
-        });
+            None
+        }
+        stream = connect => stream,
+    };
+    if let Some(stream) = stream {
+        if stream.peer_addr().is_ok_and(|peer| peer == target) {
+            let _ = stream.set_nodelay(true);
+            return Ok(Opened {
+                stream,
+                peer: target,
+                connected_at: Instant::now(),
+                valid_until,
+                resolver: source,
+            });
+        }
+        progress.unobserved = true;
     }
     Err(Refusal {
         reason: if Instant::now() >= deadline {

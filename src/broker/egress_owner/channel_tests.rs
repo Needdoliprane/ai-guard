@@ -331,6 +331,66 @@ fn fixture_opening_lifetime() -> (
 }
 
 #[tokio::test]
+async fn egress_broker_an_unavailable_first_address_exhausts_the_permit() {
+    let fallback = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = fallback.local_addr().unwrap().port();
+    let first = SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port));
+    // Own the first loopback address on hosts that provide it, without
+    // listening. On hosts without IPv6 loopback there is no listener either.
+    let _first = tokio::net::TcpSocket::new_v6()
+        .ok()
+        .and_then(|socket| match socket.bind(first) {
+            Ok(()) => Some(socket),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrNotAvailable => None,
+            Err(error) => panic!("reserve first loopback address: {error}"),
+        });
+    let authority = Authority::new(FIXTURE, port, EgressTransport::ConnectTcpOpaque).unwrap();
+    let (mut request, _) = fixture_open_request();
+    request.authority = format!("{FIXTURE}:{port}");
+    let resolver = Arc::new(
+        Resolver::new(
+            Arc::new(NoLookup(AtomicUsize::new(0))),
+            vec![InternalService {
+                authority: authority.clone(),
+                addresses: vec![first.ip(), fallback.local_addr().unwrap().ip()],
+            }],
+            vec![],
+        )
+        .unwrap(),
+    );
+    let control = gateway(true);
+    let (lifetime, _opening, _stop) = fixture_opening_lifetime();
+    let mut progress = ConnectProgress::default();
+
+    let result = open_upstream(
+        control.clone(),
+        resolver,
+        ChannelTimes {
+            connect_attempt: Duration::from_millis(200),
+            ..ChannelTimes::default()
+        },
+        request,
+        authority,
+        &lifetime,
+        &mut progress,
+    )
+    .await;
+
+    assert_eq!(control.decisions.lock().unwrap().len(), 1);
+    assert!(!progress.pending);
+    assert!(
+        matches!(
+            result,
+            Err(Refusal {
+                reason: EgressReasonV1::Unavailable,
+                failure: Some(("connect_failed", "internal_service")),
+            })
+        ),
+        "the unavailable first address must end the only authorized connect"
+    );
+}
+
+#[tokio::test]
 async fn egress_broker_late_allow_receipt_expires_before_resolution() {
     let control = Arc::new(Gateway {
         allow: AtomicBool::new(true),
