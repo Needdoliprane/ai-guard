@@ -210,6 +210,7 @@ impl Cache {
                 && !kind.starts_with("control.relay.")
                 && !kind.starts_with("control.kubernetes.create.")
                 && !kind.starts_with("control.kubernetes.session.")
+                && !kind.starts_with("control.kubernetes.session_effect.")
             {
                 continue;
             }
