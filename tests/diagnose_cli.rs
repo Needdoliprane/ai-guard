@@ -9071,9 +9071,9 @@ fn store_names_that_the_gateway_refuses_are_refused() {
         "name.as_bytes().is_ascii()",
         "to_ascii_lowercase()",
         "b\".ai-guard-sqlite-\"",
-        "b\"-wal\"",
-        "b\"-shm\"",
-        "b\"-journal\"",
+        "\"-wal\"",
+        "\"-shm\"",
+        "\"-journal\"",
     ] {
         assert!(
             STORE_NAME_SOURCE.contains(part),

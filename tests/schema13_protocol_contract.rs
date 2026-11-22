@@ -216,7 +216,18 @@ async fn read_gateway(
         .unwrap();
     assert_eq!(forbidden.status(), reqwest::StatusCode::FORBIDDEN);
     let integrity: Value = read_json(get("integrity", VIEWER)).await;
-    assert_eq!(integrity, serde_json::to_value(expected_integrity).unwrap());
+    let mut expected = serde_json::to_value(expected_integrity).unwrap();
+    expected["stored_events"] = json!(expected_integrity.event_count);
+    expected["retention"] = json!({
+        "capability": false,
+        "segments": 0,
+        "archived_through_seq": 0,
+        "reclaimed_events": 0,
+        "reclaimed_bytes": 0,
+        "last": null,
+        "segment_list": [],
+    });
+    assert_eq!(integrity, expected);
     timeout(Duration::from_secs(5), child.kill())
         .await
         .expect("fixture gateway exit deadline")
