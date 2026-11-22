@@ -319,7 +319,8 @@ pub fn load_owned_sources(
                 .find(|other| other.tenant_id == tenant.tenant_id)
                 .context("tenant configuration changed")?;
             anyhow::ensure!(
-                absolute_path(&tenant.data)? == absolute_path(&other.data)?
+                absolute_path(tenant.storage.sqlite_path()?)?
+                    == absolute_path(other.storage.sqlite_path()?)?
                     && tenant.runner_token == other.runner_token
                     && tenant.viewer_token == other.viewer_token,
                 "tenant configuration changed"
@@ -438,7 +439,8 @@ pub fn load_owned_sources(
                             && seen.insert(tenant.tenant_id.clone()),
                         "human source format/union differs; offline migration required"
                     );
-                    descriptor.storage_binding = observe_human_storage_binding(&tenant.data)?;
+                    descriptor.storage_binding =
+                        observe_human_storage_binding(tenant.storage.sqlite_path()?)?;
                     let effective = public
                         .tenants
                         .iter()

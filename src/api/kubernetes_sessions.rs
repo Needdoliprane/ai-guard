@@ -59,8 +59,11 @@ fn forbidden() -> (StatusCode, Json<Value>) {
     )
 }
 
-fn failure(store: &Store, error: anyhow::Error) -> (StatusCode, Json<Value>) {
-    if !store.healthy() {
+fn failure(
+    store: &impl crate::tenant_store::StoreHealth,
+    error: anyhow::Error,
+) -> (StatusCode, Json<Value>) {
+    if !store.store_healthy() {
         return unavailable(error);
     }
     use KubernetesSessionReservationFailureV2 as F;
@@ -194,6 +197,7 @@ async fn recover(
                 return Err(invalid());
             }
             let authorization = store
+                .sqlite_api()?
                 .authorize_kubernetes_session_control_recovery(auth, &target, policy)
                 .map_err(|error| failure(store, error))?;
             match (request, authorization) {
@@ -202,6 +206,7 @@ async fn recover(
                     KubernetesSessionControlRecoveryAuthorizationV2::BeforeEffect(cap),
                 ) => {
                     let body = store
+                        .sqlite_api()?
                         .observe_kubernetes_session_control_recovery(auth, &cap, policy)
                         .map_err(|error| failure(store, error))?;
                     kubernetes::encode_response(StatusCode::OK, &body, &redactor)
@@ -211,6 +216,7 @@ async fn recover(
                     KubernetesSessionControlRecoveryAuthorizationV2::BeforeEffect(cap),
                 ) => {
                     let body = store
+                        .sqlite_api()?
                         .close_kubernetes_session_control_before_effect(auth, &cap, &close, policy)
                         .map_err(|error| failure(store, error))?;
                     kubernetes::encode_response(StatusCode::OK, &body, &redactor)
@@ -221,6 +227,7 @@ async fn recover(
                     KubernetesSessionControlRecoveryAuthorizationV2::ReceiptLookup(cap),
                 ) => {
                     let body = store
+                        .sqlite_api()?
                         .lookup_kubernetes_session_control_recovery_receipt(auth, &cap, policy)
                         .map_err(|error| failure(store, error))?;
                     kubernetes::encode_response(StatusCode::OK, &body, &redactor)

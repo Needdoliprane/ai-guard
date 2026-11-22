@@ -57,7 +57,7 @@ use uuid::Uuid;
 
 pub use super::supervision::MysqlSupervisionOrigin;
 
-const DEADLINE: Duration = Duration::from_secs(8);
+pub(crate) const DEADLINE: Duration = Duration::from_secs(8);
 // The gateway's CredentialIndex admits one runner and one viewer for at most 256 tenants.
 const MAX_CONTROL_COLLISION_CANDIDATES: usize = 512;
 const GENESIS: &str = "control.mysql.audit.genesis";
@@ -346,6 +346,34 @@ impl VerifiedPrefix {
     }
 }
 
+/// The authenticated technical credential collides with a human or workload
+/// binding in the verified prefix of this very transaction. Nothing is written.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ControlGuardRefused(pub ControlCollision);
+
+impl fmt::Display for ControlGuardRefused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("control credential is ambiguous with another identity class")
+    }
+}
+impl std::error::Error for ControlGuardRefused {}
+
+tokio::task_local! {
+    static CONTROL_GUARD: [u8; 32];
+}
+
+/// Run one Store operation with the authenticated technical digest bound to
+/// its write transaction. The collision check runs against the same verified
+/// snapshot as the append, so a binding committed between an earlier presence
+/// read and this write cannot be missed. A projection that cannot be verified
+/// refuses the write.
+pub async fn with_control_guard<F: std::future::Future>(
+    digest: [u8; 32],
+    operation: F,
+) -> F::Output {
+    CONTROL_GUARD.scope(digest, operation).await
+}
+
 enum Mutation<'a> {
     Initialize,
     InitializeSupervised,
@@ -430,6 +458,33 @@ impl MysqlAuditStore {
         })
     }
 
+    pub fn tenant_id(&self) -> &str {
+        &self.tenant
+    }
+
+    pub fn redactor_union(&self, additional: &Redactor) -> Redactor {
+        self.redactor.union(additional)
+    }
+
+    pub fn redactor_covers(&self, additional: &Redactor) -> bool {
+        self.redactor.covers(additional)
+    }
+
+    /// Attach a masking union before the first connection. Only an unverified
+    /// instance can change its codec; a verified head is never rebound.
+    pub fn with_additional_redaction(mut self, additional: &Redactor) -> Result<Self> {
+        ensure!(
+            self.confirmed.get_mut().head.seq == 0,
+            "redaction cannot change after the audit prefix was verified"
+        );
+        self.redactor = self.redactor.union(additional);
+        Ok(self)
+    }
+
+    pub fn capacity_policy(&self) -> &AuditCapacityPolicyV1 {
+        &self.capacity_policy
+    }
+
     pub fn with_capacity_policy(mut self, policy: AuditCapacityPolicyV1) -> Result<Self> {
         policy.validate(self.max_events as u64)?;
         self.capacity_policy = policy;
@@ -439,6 +494,11 @@ impl MysqlAuditStore {
     /// Track only the configured runner and viewer digests, before verifying this Store.
     /// After verification, a candidate change requires a new Store.
     pub fn with_control_collision_candidates(mut self, digests: &[[u8; 32]]) -> Result<Self> {
+        self.set_control_collision_candidates(digests)?;
+        Ok(self)
+    }
+
+    pub(crate) fn set_control_collision_candidates(&mut self, digests: &[[u8; 32]]) -> Result<()> {
         ensure!(
             digests.len() <= MAX_CONTROL_COLLISION_CANDIDATES
                 && self.confirmed.get_mut().head.seq == 0,
@@ -448,7 +508,7 @@ impl MysqlAuditStore {
             .iter()
             .map(|digest| (hex::encode(digest), *digest))
             .collect();
-        Ok(self)
+        Ok(())
     }
 
     fn genesis_data(&self) -> Value {
@@ -1047,6 +1107,29 @@ impl MysqlAuditStore {
             .context("MySQL supervision genesis missing")
     }
 
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    /// Verified capabilities of this target. An operation is announced only
+    /// when its MySQL port, replay and export are all implemented; the
+    /// identity and workload projections are verified first. No operation of
+    /// the broker supervision contract is ported to MySQL yet, so the
+    /// answer is the empty set bound to the verified tenant and namespace.
+    pub async fn control_capabilities(&self) -> Result<crate::control::ControlCapabilitiesV1> {
+        self.verify_control_projections().await?;
+        let capabilities = crate::control::ControlCapabilitiesV1 {
+            version: 1,
+            role: "runner".into(),
+            tenant_id: self.tenant.clone(),
+            control_namespace_uuid: Some(self.namespace.clone()),
+            storage: crate::control::ControlStorageBackendV1::Mysql,
+            operations: Vec::new(),
+        };
+        capabilities.validate()?;
+        Ok(capabilities)
+    }
+
     pub async fn supervision_origin(&self) -> Result<MysqlSupervisionOrigin> {
         let (prefix, _, retained) = self.read_verified(None, None).await?;
         Ok(MysqlSupervisionOrigin {
@@ -1354,6 +1437,11 @@ impl MysqlAuditStore {
             .verify_bound_origin(tx, bound, prior, confirmed, None)
             .await?;
         *origin = retained;
+        if let Ok(digest) = CONTROL_GUARD.try_with(|digest| *digest) {
+            if let Some(collision) = prefix.control_credential_presence(&digest)? {
+                return Err(ControlGuardRefused(collision).into());
+            }
+        }
         let mut head = prefix.head;
         let (event, kind) = match operation {
             Mutation::Initialize => {

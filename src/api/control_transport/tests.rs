@@ -195,6 +195,8 @@ async fn broker_presence_is_separate_and_revocation_is_rechecked_after_upload() 
     let credential_id = Uuid::new_v4().to_string();
     let incarnation_id = Uuid::new_v4().to_string();
     store
+        .sqlite()
+        .unwrap()
         .issue_workload_binding(&WorkloadBindingIssueV1 {
             version: 1,
             operation_id: Uuid::new_v4().to_string(),
@@ -209,6 +211,8 @@ async fn broker_presence_is_separate_and_revocation_is_rechecked_after_upload() 
         })
         .unwrap();
     store
+        .sqlite()
+        .unwrap()
         .mutate_broker_grant(&BrokerGrantMutationV1 {
             version: 1,
             operation_id: Uuid::new_v4().to_string(),
@@ -277,6 +281,8 @@ async fn broker_presence_is_separate_and_revocation_is_rechecked_after_upload() 
         .unwrap();
     assert_eq!(capacity.presence.available_permits(), BROKER_PRESENCE - 1);
     store
+        .sqlite()
+        .unwrap()
         .revoke_broker(&BrokerRevocationV1 {
             version: 1,
             operation_id: Uuid::new_v4().to_string(),

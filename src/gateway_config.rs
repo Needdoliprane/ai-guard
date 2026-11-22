@@ -3,8 +3,10 @@ use agentsandbox::control::kubernetes_session::{
     KubernetesSessionControlRecoveryPolicyV2, KubernetesSessionRecoveryPolicyV2,
     KubernetesSessionReservationPolicyV2,
 };
+#[cfg(feature = "mysql-storage")]
+use agentsandbox::diagnostics::gateway_files::MySqlAuthenticationFiles;
 use agentsandbox::diagnostics::gateway_files::{
-    decode_tenant_registry, read_tenant_registry_file, sqlite_path_for_gateway,
+    SelectedTenantStorage, decode_tenant_registry, read_tenant_registry_file, storage_for_gateway,
 };
 pub(crate) mod human_sources;
 use anyhow::{Context, Result};
@@ -17,7 +19,7 @@ use std::{
 
 pub struct ConfiguredTenant {
     pub tenant_id: String,
-    pub data: PathBuf,
+    pub storage: ConfiguredStorage,
     pub runner_token_file: PathBuf,
     pub viewer_token_file: PathBuf,
     pub runner_token: String,
@@ -31,6 +33,133 @@ pub struct ConfiguredTenant {
     pub session_reservation_policy: Option<KubernetesSessionReservationPolicyV2>,
     pub session_recovery_policy: Option<KubernetesSessionRecoveryPolicyV2>,
     pub session_control_recovery_policy: Option<KubernetesSessionControlRecoveryPolicyV2>,
+}
+
+/// Interim, explicit refusal: the owned-sources profile (formats 14/15, a
+/// retained local source owner and storage binding) is not yet defined for a
+/// MySQL target. It never degrades to legacy human sources or to SQLite.
+pub fn refuse_owned_sources_on_mysql(tenants: &[ConfiguredTenant], owned: bool) -> Result<()> {
+    #[cfg(feature = "mysql-storage")]
+    anyhow::ensure!(
+        !owned
+            || !tenants
+                .iter()
+                .any(|tenant| matches!(tenant.storage, ConfiguredStorage::Mysql(_))),
+        "owned human sources are not available on a MySQL tenant yet; use the SQLite profile for owned_sources or the legacy human source mode"
+    );
+    #[cfg(not(feature = "mysql-storage"))]
+    let _ = (tenants, owned);
+    Ok(())
+}
+
+/// The tenant's selected audit backend with its private material, already read.
+/// Secrets stay in memory only and never reach Debug, logs or diagnostics.
+#[derive(Clone)]
+pub enum ConfiguredStorage {
+    Sqlite(PathBuf),
+    #[cfg(feature = "mysql-storage")]
+    Mysql(Box<MysqlTarget>),
+}
+
+impl ConfiguredStorage {
+    /// Offline maintenance and the human-source migration target SQLite files.
+    pub fn sqlite_path(&self) -> Result<&Path> {
+        match self {
+            Self::Sqlite(path) => Ok(path),
+            #[cfg(feature = "mysql-storage")]
+            Self::Mysql(_) => anyhow::bail!(
+                "This operation targets a SQLite tenant database; the tenant uses MySQL storage"
+            ),
+        }
+    }
+}
+
+#[cfg(feature = "mysql-storage")]
+#[derive(Clone)]
+pub struct MysqlTarget {
+    pub host: String,
+    pub port: u16,
+    pub database: String,
+    pub username: String,
+    pub namespace: uuid::Uuid,
+    pub password: String,
+    pub ca_pem: Vec<u8>,
+    pub client_identity: Option<(Vec<u8>, Vec<u8>)>,
+}
+
+#[cfg(feature = "mysql-storage")]
+impl std::fmt::Debug for MysqlTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MysqlTarget")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("database", &self.database)
+            .field("namespace", &self.namespace)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "mysql-storage")]
+impl MysqlTarget {
+    fn load(
+        profile: &agentsandbox::diagnostics::gateway_files::MySqlStorageFiles,
+        resolve: &dyn Fn(PathBuf) -> Result<PathBuf>,
+    ) -> Result<Self> {
+        use agentsandbox::{control_fs::PrivateFile, mysql_storage as limits};
+        let read = |path: &Path, maximum: u64, what: &str| -> Result<PrivateFile> {
+            let file = PrivateFile::open(&resolve(path.to_owned())?, maximum)
+                .with_context(|| format!("MySQL {what} reference is not a private regular file"))?;
+            Ok(file)
+        };
+        let password_file = read(
+            &profile.password_file,
+            limits::MAX_PASSWORD_BYTES as u64 + 2,
+            "password",
+        )?;
+        let mut password = std::str::from_utf8(password_file.bytes())
+            .context("MySQL password file is not UTF-8")?;
+        password = password.strip_suffix('\n').unwrap_or(password);
+        anyhow::ensure!(
+            !password.is_empty()
+                && password.len() <= limits::MAX_PASSWORD_BYTES
+                && !password.chars().any(char::is_control),
+            "MySQL password file does not hold one bounded password"
+        );
+        let ca = read(
+            &profile.ca_file,
+            limits::MAX_CERTIFICATE_BYTES as u64,
+            "CA bundle",
+        )?;
+        let client_identity = match &profile.authentication {
+            MySqlAuthenticationFiles::Password {} => None,
+            MySqlAuthenticationFiles::PasswordAndMtls {
+                client_cert_file,
+                client_key_file,
+            } => {
+                let cert = read(
+                    client_cert_file,
+                    limits::MAX_CERTIFICATE_BYTES as u64,
+                    "client certificate",
+                )?;
+                let key = read(
+                    client_key_file,
+                    limits::MAX_PRIVATE_KEY_BYTES as u64,
+                    "client key",
+                )?;
+                Some((cert.bytes().to_vec(), key.bytes().to_vec()))
+            }
+        };
+        Ok(Self {
+            host: profile.host.clone(),
+            port: profile.port.get(),
+            database: profile.database.clone(),
+            username: profile.username.clone(),
+            namespace: profile.namespace,
+            password: password.to_owned(),
+            ca_pem: ca.bytes().to_vec(),
+            client_identity,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -277,14 +406,27 @@ fn load_registry_bytes(
             parent.join(value)
         })
     };
-    // A later unsupported backend must stop the whole registry before any
-    // earlier tenant's credentials are opened.
+    // An unsupported or invalid backend selection must stop the whole registry
+    // before any tenant's credentials are opened.
     let tenants = registry
         .tenants
         .into_iter()
         .map(|tenant| {
-            let data = sqlite_path_for_gateway(tenant.data.as_deref(), tenant.storage.as_ref())?;
-            let data = resolve(data.to_owned())?;
+            let selected = storage_for_gateway(tenant.data.as_deref(), tenant.storage.as_ref())?;
+            let data = match selected {
+                SelectedTenantStorage::Sqlite(path) => {
+                    ConfiguredStorage::Sqlite(resolve(path.to_owned())?)
+                }
+                #[cfg(feature = "mysql-storage")]
+                SelectedTenantStorage::MySql(profile) => {
+                    ConfiguredStorage::Mysql(Box::new(MysqlTarget::load(profile, &resolve)?))
+                }
+                // `storage_for_gateway` already refused this profile.
+                #[cfg(not(feature = "mysql-storage"))]
+                SelectedTenantStorage::MySql(_) => {
+                    return Err(agentsandbox::diagnostics::gateway_files::TenantStorageRefusal::MySqlUnavailable.into());
+                }
+            };
             Ok((tenant, data))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -336,7 +478,7 @@ fn load_registry_bytes(
         }
         result.push(ConfiguredTenant {
             tenant_id: tenant.tenant_id,
-            data,
+            storage: data,
             runner_token_file,
             viewer_token_file,
             runner_token,
@@ -625,14 +767,14 @@ mod tests {
         assert_eq!(tenants.len(), 1);
         assert_eq!(tenants[0].tenant_id, "tenant-a");
         assert_eq!(
-            tenants[0].data,
+            tenants[0].storage.sqlite_path().unwrap(),
             path.parent()
                 .unwrap()
                 .canonicalize()
                 .unwrap()
                 .join("a.sqlite")
         );
-        assert!(!tenants[0].data.exists());
+        assert!(!tenants[0].storage.sqlite_path().unwrap().exists());
         assert_eq!(tenants[0].runner_token, "r".repeat(48));
         assert_eq!(tenants[0].viewer_token, "v".repeat(48));
     }
@@ -643,7 +785,13 @@ mod tests {
 
         let (_dir, path, mut registry) = fixture();
         std::fs::write(&path, registry.to_string()).unwrap();
-        let expected = load(&path).unwrap().remove(0).data;
+        let expected = load(&path)
+            .unwrap()
+            .remove(0)
+            .storage
+            .sqlite_path()
+            .unwrap()
+            .to_owned();
         let tenant = registry["tenants"][0].as_object_mut().unwrap();
         tenant.remove("data").unwrap();
         tenant.insert(
@@ -651,11 +799,96 @@ mod tests {
             json!({"backend":"sqlite","path":"a.sqlite"}),
         );
         std::fs::write(&path, registry.to_string()).unwrap();
-        assert_eq!(load(&path).unwrap().remove(0).data, expected);
+        assert_eq!(
+            load(&path)
+                .unwrap()
+                .remove(0)
+                .storage
+                .sqlite_path()
+                .unwrap(),
+            expected
+        );
         assert!(!expected.exists());
         let inspection = inspect_registry(&path, 100_000);
         assert!(inspection.refusals.is_empty());
         assert_eq!(inspection.tenants[0].data.as_ref(), Some(&expected));
+    }
+
+    #[cfg(feature = "mysql-storage")]
+    fn mysql_files(
+        dir: &Path,
+        mtls: bool,
+    ) -> agentsandbox::diagnostics::gateway_files::MySqlStorageFiles {
+        use std::os::unix::fs::PermissionsExt;
+        for (name, body) in [
+            ("sql-password", "pw-fixture\n".to_owned()),
+            ("sql-ca.pem", "-----BEGIN CERTIFICATE-----\n".to_owned()),
+            ("sql-client.pem", "-----BEGIN CERTIFICATE-----\n".to_owned()),
+            ("sql-client.key", "-----BEGIN PRIVATE KEY-----\n".to_owned()),
+        ] {
+            let file = dir.join(name);
+            std::fs::write(&file, body).unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let authentication = if mtls {
+            json!({"mode":"password_and_mtls","client_cert_file":dir.join("sql-client.pem"),"client_key_file":dir.join("sql-client.key")})
+        } else {
+            json!({"mode":"password"})
+        };
+        serde_json::from_value(json!({
+            "backend":"mysql","host":"db.example.invalid","port":3306,"database":"audit_a",
+            "username":"writer_a","namespace":"5657019d-5302-4ced-922f-406aa3d8ec5c",
+            "password_file":dir.join("sql-password"),"ca_file":dir.join("sql-ca.pem"),
+            "authentication":authentication
+        }))
+        .unwrap()
+    }
+
+    #[cfg(feature = "mysql-storage")]
+    #[test]
+    fn mysql_private_material_is_read_once_and_never_printed() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolve = |path: PathBuf| -> Result<PathBuf> { Ok(path) };
+        let target = MysqlTarget::load(&mysql_files(dir.path(), true), &resolve).unwrap();
+        assert_eq!(target.password, "pw-fixture");
+        assert!(target.client_identity.is_some());
+        let debug = format!("{target:?}");
+        assert!(!debug.contains("pw-fixture") && !debug.contains("PRIVATE KEY"));
+        let plain = MysqlTarget::load(&mysql_files(dir.path(), false), &resolve).unwrap();
+        assert!(plain.client_identity.is_none());
+        // A MySQL tenant never gives an offline SQLite maintenance path.
+        let storage = ConfiguredStorage::Mysql(Box::new(plain));
+        assert!(storage.sqlite_path().is_err());
+    }
+
+    #[cfg(feature = "mysql-storage")]
+    #[test]
+    fn mysql_private_material_refuses_shared_oversized_or_malformed_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let resolve = |path: PathBuf| -> Result<PathBuf> { Ok(path) };
+        let write = |dir: &Path, name: &str, body: &[u8], mode: u32| {
+            let file = dir.join(name);
+            std::fs::write(&file, body).unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        for (name, body, mode) in [
+            ("sql-password", b"pw\n".as_slice(), 0o644),
+            ("sql-password", b"pw\r\n".as_slice(), 0o600),
+            ("sql-password", b"\n".as_slice(), 0o600),
+            ("sql-password", b"a\x07b".as_slice(), 0o600),
+            ("sql-password", &[b'p'; 1100], 0o600),
+            ("sql-ca.pem", &vec![b'c'; 70_000], 0o600),
+            ("sql-ca.pem", b"ca".as_slice(), 0o644),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let files = mysql_files(dir.path(), false);
+            write(dir.path(), name, body, mode);
+            assert!(
+                MysqlTarget::load(&files, &resolve).is_err(),
+                "{name} {mode:o} {} bytes",
+                body.len()
+            );
+        }
     }
 
     #[test]
@@ -733,9 +966,17 @@ mod tests {
                 [code]
             );
         };
-        check(None, Some(mysql.clone()), Some(MySqlUnavailable));
-        check(None, Some(mtls), Some(MySqlUnavailable));
-        check(Some(json!("b.sqlite")), Some(mysql), Some(InvalidSelection));
+        // Without the feature the profile is refused before any credential read.
+        #[cfg(not(feature = "mysql-storage"))]
+        {
+            check(None, Some(mysql.clone()), Some(MySqlUnavailable));
+            check(None, Some(mtls.clone()), Some(MySqlUnavailable));
+        }
+        check(
+            Some(json!("b.sqlite")),
+            Some(mysql.clone()),
+            Some(InvalidSelection),
+        );
         check(None, None, Some(InvalidSelection));
         check(None, Some(invalid_host), Some(InvalidMySqlProfile));
         check(Some(json!("b.sqlite")), Some(json!(null)), None);
@@ -749,6 +990,27 @@ mod tests {
         }
         assert!(!path.with_file_name("a.sqlite").exists());
         assert!(!path.with_file_name("b.sqlite").exists());
+        // With the feature, a valid profile is selected: diagnostics report no
+        // storage refusal and the gateway refuses only the unreadable private
+        // material, never as a storage-selection refusal, before any token.
+        #[cfg(feature = "mysql-storage")]
+        for storage in [mysql, mtls] {
+            let tenant = registry["tenants"][1].as_object_mut().unwrap();
+            tenant.remove("data");
+            tenant.insert("storage".into(), storage);
+            let bytes = serde_json::to_vec(&registry).unwrap();
+            let mut credentials_read = 0;
+            let refusal = load_registry_bytes(&path, &bytes, |_| {
+                credentials_read += 1;
+                anyhow::bail!("fixture credential reader called");
+            })
+            .err()
+            .expect("absent private SQL material must refuse");
+            assert_eq!(credentials_read, 0);
+            assert!(refusal.downcast_ref::<TenantStorageRefusal>().is_none());
+            std::fs::write(&path, bytes).unwrap();
+            assert!(inspect_registry(&path, 100_000).refusals.is_empty());
+        }
     }
 
     #[test]
@@ -788,5 +1050,26 @@ mod tests {
         let registry_link = path.with_file_name("registry-link");
         std::os::unix::fs::symlink(&path, &registry_link).unwrap();
         assert!(load(&registry_link).is_err());
+    }
+
+    #[cfg(feature = "mysql-storage")]
+    #[test]
+    fn owned_sources_are_refused_explicitly_on_a_mysql_tenant() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolve = |path: PathBuf| -> Result<PathBuf> { Ok(path) };
+        let target = MysqlTarget::load(&mysql_files(dir.path(), false), &resolve).unwrap();
+        let (_dir, path, value) = fixture();
+        std::fs::write(&path, value.to_string()).unwrap();
+        std::fs::write(path.with_file_name("runner"), "r".repeat(48)).unwrap();
+        let mut tenants = load(&path).unwrap();
+        refuse_owned_sources_on_mysql(&tenants, true).unwrap();
+        tenants[0].storage = ConfiguredStorage::Mysql(Box::new(target));
+        refuse_owned_sources_on_mysql(&tenants, false).unwrap();
+        let refusal = refuse_owned_sources_on_mysql(&tenants, true).unwrap_err();
+        assert!(
+            refusal
+                .to_string()
+                .contains("not available on a MySQL tenant")
+        );
     }
 }

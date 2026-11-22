@@ -33,6 +33,8 @@ async fn fixation_fixture_with_pkce_ttl(pkce_ttl_seconds: u64) -> FixationFixtur
     };
     state.tenants[0]
         .store
+        .sqlite()
+        .unwrap()
         .mutate_identity(&identity_change(IdentityChangeV1::Account {
             expected_revision: 0,
             account: HumanAccountV1 {
@@ -46,6 +48,8 @@ async fn fixation_fixture_with_pkce_ttl(pkce_ttl_seconds: u64) -> FixationFixtur
         .unwrap();
     state.tenants[0]
         .store
+        .sqlite()
+        .unwrap()
         .mutate_identity(&identity_change(IdentityChangeV1::Membership {
             expected_revision: 0,
             membership: MembershipV1 {

@@ -18,6 +18,8 @@ fn migrate(state: &GatewayState, directory: &std::path::Path) {
     for tenant in state.tenants.iter() {
         tenant
             .store
+            .sqlite()
+            .unwrap()
             .migrate_workload_v6(&directory.join(format!("{}-before-v6.sqlite", tenant.tenant_id)))
             .unwrap();
     }
@@ -27,6 +29,8 @@ fn alias(state: &GatewayState, source: usize, digest: &[u8; 32]) {
     // digest alone is never used as a live broker/worker proof by this test.
     state.tenants[source]
         .store
+        .sqlite()
+        .unwrap()
         .issue_workload_binding(&WorkloadBindingIssueV1 {
             version: 1,
             operation_id: Uuid::new_v4().to_string(),
@@ -118,6 +122,8 @@ async fn admitted_oidc_proof_rechecks_workload_collision_on_authentication_and_r
     };
     state.tenants[0]
         .store
+        .sqlite()
+        .unwrap()
         .mutate_identity(&identity_change(IdentityChangeV1::Account {
             expected_revision: 0,
             account: HumanAccountV1 {
@@ -131,6 +137,8 @@ async fn admitted_oidc_proof_rechecks_workload_collision_on_authentication_and_r
         .unwrap();
     state.tenants[0]
         .store
+        .sqlite()
+        .unwrap()
         .mutate_identity(&identity_change(IdentityChangeV1::Membership {
             expected_revision: 0,
             membership: MembershipV1 {

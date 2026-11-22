@@ -273,7 +273,21 @@ pub fn select_tenant_storage<'a>(
     }
 }
 
-// MySQL can be inspected separately. The gateway still needs all transactions.
+/// The gateway's selection. MySQL is served only by a build with the
+/// `mysql-storage` feature; without it the profile is refused, never ignored.
+pub fn storage_for_gateway<'a>(
+    data: Option<&'a Path>,
+    storage: Option<&'a TenantStorageFiles>,
+) -> Result<SelectedTenantStorage<'a>, TenantStorageRefusal> {
+    let selected = select_tenant_storage(data, storage)?;
+    #[cfg(not(feature = "mysql-storage"))]
+    if matches!(selected, SelectedTenantStorage::MySql(_)) {
+        return Err(TenantStorageRefusal::MySqlUnavailable);
+    }
+    Ok(selected)
+}
+
+// SQLite-only consumers (offline maintenance) refuse MySQL.
 pub fn sqlite_path_for_gateway<'a>(
     data: Option<&'a Path>,
     storage: Option<&'a TenantStorageFiles>,
@@ -683,8 +697,27 @@ pub fn inspect_registry(path: &Path, max_events: u64) -> RegistryInspection {
         if !seen.insert(tenant.tenant_id.clone()) {
             refuse(FindingCode::RegistryTenantIdDuplicate, None);
         }
-        let data = match sqlite_path_for_gateway(tenant.data.as_deref(), tenant.storage.as_ref()) {
-            Ok(path) => resolve(path),
+        let data = match storage_for_gateway(tenant.data.as_deref(), tenant.storage.as_ref()) {
+            Ok(SelectedTenantStorage::Sqlite(path)) => resolve(path),
+            Ok(SelectedTenantStorage::MySql(profile)) => {
+                // Same private references the gateway opens at startup.
+                for reference in [Some(&profile.password_file), Some(&profile.ca_file)]
+                    .into_iter()
+                    .chain(match &profile.authentication {
+                        MySqlAuthenticationFiles::Password {} => [None, None],
+                        MySqlAuthenticationFiles::PasswordAndMtls {
+                            client_cert_file,
+                            client_key_file,
+                        } => [Some(client_cert_file), Some(client_key_file)],
+                    })
+                    .flatten()
+                {
+                    if resolve(reference).is_none() {
+                        refuse(FindingCode::RegistryReferenceEmpty, None);
+                    }
+                }
+                None
+            }
             Err(refusal) => {
                 let code = match refusal {
                     TenantStorageRefusal::InvalidSelection

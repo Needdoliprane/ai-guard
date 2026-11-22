@@ -65,12 +65,16 @@ impl OwnedPolicyInspection {
                         .map_err(policy_authority_failure)?;
                     let access =
                         HumanSourceAccess::read(&epoch, source).map_err(policy_store_failure)?;
-                    let result = identity.tenant.store.modern_egress_policy_inspection(
-                        &access,
-                        &identity.credential,
-                        expected,
-                        &request,
-                    );
+                    let result = identity
+                        .tenant
+                        .store
+                        .sqlite_api()?
+                        .modern_egress_policy_inspection(
+                            &access,
+                            &identity.credential,
+                            expected,
+                            &request,
+                        );
                     if result.as_ref().err().is_some_and(|error| {
                         error.downcast_ref::<crate::audit::egress::EgressStoreFailure>()
                             == Some(&crate::audit::egress::EgressStoreFailure::DiscoveryStale)
@@ -102,6 +106,7 @@ impl OwnedPolicyInspection {
                 let current = identity
                     .tenant
                     .store
+                    .sqlite_api()?
                     .modern_control_protocol(&access, &identity.credential, expected)
                     .map_err(policy_store_failure)?;
                 let Some(current) = current else {

@@ -35,6 +35,7 @@ pub(super) async fn workers(
             .map_err(state_failure)?;
         let page = tenant
             .store
+            .sqlite_api()?
             .human_workers(
                 &scope,
                 &crate::audit::HumanWorkerFrameV1::new(&context.id, &context.authorization_version)
@@ -65,6 +66,7 @@ pub(super) async fn workers(
         }
         let bytes = tenant
             .store
+            .sqlite_api()?
             .check_human_worker_output(&proof.redactor, &body)
             .map_err(store_failure)?;
         cursor = context.advance_workers(cursor, bytes).map_err(|error| {
@@ -85,6 +87,7 @@ pub(super) async fn workers(
         }
         tenant
             .store
+            .sqlite_api()?
             .check_human_worker_output(&proof.redactor, &body)
             .map_err(store_failure)?;
         Ok(Json(body))
@@ -203,6 +206,7 @@ pub(super) async fn federation_workers(
             .map_err(state_failure)?;
         let workers = tenant
             .store
+            .sqlite_api()?
             .human_workers(
                 &scope,
                 &crate::audit::HumanWorkerFrameV1::new(&context.id, &context.authorization_version)
@@ -216,6 +220,7 @@ pub(super) async fn federation_workers(
         // leg. Each receipt describes its own checked snapshot, never delivery.
         let brokers = tenant
             .store
+            .sqlite_api()?
             .human_brokers(
                 &scope,
                 &crate::audit::HumanBrokerFrameV1::new(&context.id, &context.authorization_version)
@@ -240,10 +245,12 @@ pub(super) async fn federation_workers(
         };
         let worker_bytes = tenant
             .store
+            .sqlite_api()?
             .check_human_worker_output(&proof.redactor, &body.workers)
             .map_err(store_failure)?;
         let broker_bytes = tenant
             .store
+            .sqlite_api()?
             .check_human_broker_output(&proof.redactor, &body.brokers)
             .map_err(store_failure)?;
         worker_cursor = context
@@ -268,10 +275,12 @@ pub(super) async fn federation_workers(
         }
         tenant
             .store
+            .sqlite_api()?
             .check_human_worker_output(&proof.redactor, &body.workers)
             .map_err(store_failure)?;
         tenant
             .store
+            .sqlite_api()?
             .check_human_broker_output(&proof.redactor, &body.brokers)
             .map_err(store_failure)?;
         let value = serde_json::to_value(&body).map_err(|_| invalid_request())?;

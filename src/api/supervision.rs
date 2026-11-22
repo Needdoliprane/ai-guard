@@ -1,9 +1,9 @@
 //! HTTP bindings for the versioned, tenant-scoped supervision Store.
 use super::*;
 use crate::control::{
-    AdmissionResultV1, ArmResultV1, ArmV1, ArmedStartClaimV1, ControlProtocolV1, ExportRequestV1,
-    HelperClaimResultV1, HelperCleanupV1, HelperObservationV1, HelperStartClaimV1,
-    MutationReceiptV1, MutationResultV1, SupervisedAdmissionV1,
+    AdmissionResultV1, ArmResultV1, ArmV1, ArmedStartClaimV1, ControlCapabilitiesV1,
+    ControlProtocolV1, ExportRequestV1, HelperClaimResultV1, HelperCleanupV1, HelperObservationV1,
+    HelperStartClaimV1, MutationReceiptV1, MutationResultV1, SupervisedAdmissionV1,
 };
 use axum::{extract::FromRequestParts, http::request::Parts};
 
@@ -11,6 +11,7 @@ use axum::{extract::FromRequestParts, http::request::Parts};
 pub(super) fn routes() -> Router<GatewayState> {
     Router::new()
         .route("/control/protocol", get(protocol))
+        .route("/control/capabilities", get(capabilities))
         .route("/workers/supervised-reservations", post(reserve))
         .route("/workers/{id}/arms", post(arm))
         .route("/workers/{id}/arms/{arm_id}", get(read_arm))
@@ -37,6 +38,7 @@ fn owned_arm(tenant: &TenantState, id: &str, arm_id: &str) -> ApiResult<ArmResul
     crate::control::uuid(id).map_err(control_error)?;
     tenant
         .store
+        .sqlite_api()?
         .execution_arm(arm_id)
         .map_err(control_error)?
         .filter(|result| result.arm.worker_id == id)
@@ -76,6 +78,37 @@ impl FromRequestParts<GatewayState> for ProtocolIdentity {
     }
 }
 
+/// Refuses before authentication unless the private control gate admitted it.
+struct PrivateControlTransport;
+
+impl FromRequestParts<GatewayState> for PrivateControlTransport {
+    type Rejection = (StatusCode, Json<Value>);
+
+    async fn from_request_parts(parts: &mut Parts, _: &GatewayState) -> ApiResult<Self> {
+        parts
+            .extensions
+            .get::<super::control_transport::ControlTransportRequest>()
+            .map(|_| Self)
+            .ok_or_else(|| error(StatusCode::NOT_FOUND, "Route inconnue."))
+    }
+}
+
+async fn capabilities(
+    _private: PrivateControlTransport,
+    RunnerIdentity(tenant): RunnerIdentity,
+) -> ApiResult<Json<ControlCapabilitiesV1>> {
+    tenant
+        .blocking(true, move |tenant| {
+            let capabilities = tenant.store.control_capabilities().map_err(control_error)?;
+            // The answer must match the identity that asked, not only the Store.
+            if capabilities.tenant_id != tenant.tenant_id {
+                return Err(control_error(anyhow::anyhow!("tenant binding mismatch")));
+            }
+            Ok(Json(capabilities))
+        })
+        .await
+}
+
 async fn protocol(identity: ProtocolIdentity) -> ApiResult<Json<ControlProtocolV1>> {
     let (tenant, role) = match identity {
         ProtocolIdentity::Owned(proof) => return proof.read().await,
@@ -83,7 +116,11 @@ async fn protocol(identity: ProtocolIdentity) -> ApiResult<Json<ControlProtocolV
     };
     tenant
         .blocking(true, move |tenant| {
-            let state = tenant.store.supervision_state().map_err(control_error)?;
+            let state = tenant
+                .store
+                .sqlite_api()?
+                .supervision_state()
+                .map_err(control_error)?;
             Ok(Json(ControlProtocolV1 {
                 version: state.version,
                 schema_version: state.schema_version,
@@ -123,6 +160,7 @@ async fn reserve(
         .blocking(false, move |tenant| {
             Ok(tenant
                 .store
+                .sqlite_api()?
                 .worker_operation(&operation_id)
                 .map_err(control_error)?
                 .is_some())
@@ -136,7 +174,11 @@ async fn reserve(
     } else {
         let state = tenant
             .blocking(false, |tenant| {
-                tenant.store.supervision_state().map_err(control_error)
+                tenant
+                    .store
+                    .sqlite_api()?
+                    .supervision_state()
+                    .map_err(control_error)
             })
             .await?;
         if ![3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&state.schema_version) {
@@ -151,6 +193,7 @@ async fn reserve(
         .blocking(false, move |tenant| {
             tenant
                 .store
+                .sqlite_api()?
                 .admit_supervised(&request, &s.policy, decision, jev, &tenant.worker_quota)
                 .map_err(control_error)
         })
@@ -177,6 +220,7 @@ async fn arm(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .arm_execution(&request)
                     .map_err(control_error)?,
             ))
@@ -209,6 +253,7 @@ async fn claim_worker(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .claim_armed_start(&request)
                     .map_err(control_error)?,
             ))
@@ -229,6 +274,7 @@ async fn claim_helper(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .claim_helper_start(&request)
                     .map_err(control_error)?,
             ))
@@ -249,6 +295,7 @@ async fn observe_helper(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .observe_helper(&request)
                     .map_err(control_error)?,
             ))
@@ -269,6 +316,7 @@ async fn cleanup_helper(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .record_helper_cleanup(&request)
                     .map_err(control_error)?,
             ))
@@ -289,6 +337,7 @@ async fn request_export(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .request_export(&request)
                     .map_err(control_error)?,
             ))

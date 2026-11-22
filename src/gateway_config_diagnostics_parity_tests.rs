@@ -186,7 +186,7 @@ fn registry_parity(path: &Path, max_events: u64, case: &str) -> bool {
             .map(|tenant| {
                 (
                     tenant.tenant_id.clone(),
-                    Some(tenant.data.clone()),
+                    Some(tenant.storage.sqlite_path().unwrap().to_owned()),
                     Some(tenant.runner_token_file.clone()),
                     Some(tenant.viewer_token_file.clone()),
                 )
