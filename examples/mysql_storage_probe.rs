@@ -1,4 +1,6 @@
 //! Operator-side read-only probe for MySQL transport and a prepared audit target.
+//! The `owned_origin_preflight` receipt confirms the expected origin under the
+//! schema lock and successful release and disconnect before returning.
 use agentsandbox::{
     control_fs::{PrivateFile, absolute_path},
     diagnostics::{
@@ -85,6 +87,8 @@ struct BoundTargetReceipt {
     audit_head: AuditHead,
     #[serde(skip_serializing_if = "Option::is_none")]
     control_projections_verified: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verification_mode: Option<&'static str>,
 }
 
 fn material(directory: &Path, file: &Path, max: usize) -> Result<PrivateFile> {
@@ -314,27 +318,30 @@ async fn check_target(
                 Redactor::new(Vec::new()),
                 DEFAULT_MAX_EVENTS as i64,
             )?;
-            let (audit_head, control_projections_verified) = match binding.verification {
-                RegistryVerification::Binding => (store.verify().await?, None),
-                RegistryVerification::ControlProjections => {
-                    (store.verify_control_projections().await?, Some(true))
-                }
-                RegistryVerification::OwnedOrigin {
-                    server,
-                    head_seq,
-                    head_hash,
-                } => (
-                    store
-                        .verify_owned_origin(server, head_seq, &head_hash)
-                        .await?,
-                    Some(true),
-                ),
-            };
+            let (audit_head, control_projections_verified, verification_mode) =
+                match binding.verification {
+                    RegistryVerification::Binding => (store.verify().await?, None, None),
+                    RegistryVerification::ControlProjections => {
+                        (store.verify_control_projections().await?, Some(true), None)
+                    }
+                    RegistryVerification::OwnedOrigin {
+                        server,
+                        head_seq,
+                        head_hash,
+                    } => (
+                        store
+                            .verify_owned_origin(server, head_seq, &head_hash)
+                            .await?,
+                        Some(true),
+                        Some("owned_origin_preflight"),
+                    ),
+                };
             serde_json::to_string(&BoundTargetReceipt {
                 configured_authentication,
                 binding_verified: true,
                 audit_head,
                 control_projections_verified,
+                verification_mode,
             })?
         }
         None => serde_json::to_string(&probe(endpoint, credentials).await?)?,
@@ -448,6 +455,32 @@ mod tests {
         ] {
             assert!(parse(args).is_err());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn only_owned_origin_preflight_labels_the_receipt() -> Result<()> {
+        let mut receipt = BoundTargetReceipt {
+            configured_authentication: MysqlAuthentication::Password,
+            binding_verified: true,
+            audit_head: AuditHead {
+                seq: 1,
+                hash: "ab".repeat(32),
+                payload_bytes: 128,
+            },
+            control_projections_verified: Some(true),
+            verification_mode: None,
+        };
+        let mut expected = json!({
+            "configured_authentication": "password",
+            "binding_verified": true,
+            "audit_head": receipt.audit_head,
+            "control_projections_verified": true,
+        });
+        assert_eq!(serde_json::to_value(&receipt)?, expected);
+        receipt.verification_mode = Some("owned_origin_preflight");
+        expected["verification_mode"] = json!("owned_origin_preflight");
+        assert_eq!(serde_json::to_value(&receipt)?, expected);
         Ok(())
     }
 
