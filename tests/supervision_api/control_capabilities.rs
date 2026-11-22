@@ -80,7 +80,7 @@ async fn capabilities_are_private_runner_only_typed_bounded_and_tenant_bound() {
         let response = send(&fixture.router, Method::GET, path, token, None).await;
         assert_eq!(response.status(), status, "{path} {token:?}");
     }
-    // A schema2 tenant announces no operation and no namespace.
+    // A schema2 tenant is served but announces no operation.
     let legacy = send(
         &fixture.router,
         Method::GET,
@@ -90,7 +90,8 @@ async fn capabilities_are_private_runner_only_typed_bounded_and_tenant_bound() {
     )
     .await;
     let legacy: ControlCapabilitiesV1 = response_json(legacy).await;
-    assert!(legacy.operations.is_empty() && legacy.control_namespace_uuid.is_none());
+    assert_eq!(legacy.tenant_id, "tenant-v2");
+    assert!(legacy.operations.is_empty());
     assert_eq!(
         fixture.heads(),
         before,
