@@ -5,6 +5,8 @@
 //! upstream effect: durable decision first, then resolution with full address
 //! validation, then a single connect to a pinned numeric address.
 
-// The channel owner that consumes the resolver lands in the next slice.
+// Consumed by the broker executor hooks of the next slice.
+#[allow(dead_code)]
+pub(crate) mod channel;
 #[allow(dead_code)]
 pub(crate) mod resolve;

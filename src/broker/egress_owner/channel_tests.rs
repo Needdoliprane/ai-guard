@@ -1,0 +1,366 @@
+//! `egress_broker_*`: the real worker helper and this owner over an owned
+//! in-memory pipe, an owned loopback upstream fixture that counts its accepts,
+//! and a scripted gateway port. No DNS, engine or external network is used.
+
+use super::*;
+use crate::broker::egress_owner::resolve::{HostLookup, InternalService, LookupFuture};
+use crate::egress::{
+    EgressTransport,
+    channel_helper::{self, LoopbackConfig},
+    ids::DigestV1,
+};
+use std::sync::{
+    Mutex,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
+use tokio::net::TcpListener;
+
+const FIXTURE: &str = "fixture.egress.test";
+
+#[derive(Default)]
+struct Gateway {
+    allow: AtomicBool,
+    decide_unavailable: AtomicBool,
+    observe_unavailable: AtomicBool,
+    decisions: Mutex<Vec<EgressDecideRequestV1>>,
+    observations: Mutex<Vec<EgressObservationV1>>,
+    revoke: Mutex<Vec<IdV1>>,
+}
+impl EgressControl for Gateway {
+    fn decide(&self, request: EgressDecideRequestV1) -> ControlFuture<'_, EgressDecisionV1> {
+        Box::pin(async move {
+            if self.decide_unavailable.load(Ordering::SeqCst) {
+                return Err(ControlError::Unavailable);
+            }
+            let allow = self.allow.load(Ordering::SeqCst);
+            self.decisions.lock().unwrap().push(request.clone());
+            Ok(EgressDecisionV1 {
+                version: 1,
+                decision_id: request.decision_id,
+                outcome: if allow {
+                    EgressOutcomeV1::Allow
+                } else {
+                    EgressOutcomeV1::Deny
+                },
+                reason: if allow {
+                    EgressDecisionReasonV1::AllowedByPolicy
+                } else {
+                    EgressDecisionReasonV1::NotInPolicy
+                },
+                policy: Some(EgressPolicyRefV1 {
+                    source: EgressPolicySourceV1::OperatorFile,
+                    revision: 1,
+                    digest: DigestV1::of(b"fixture policy"),
+                }),
+                grant_id: None,
+                remaining_ms: allow.then_some(60_000),
+                receipt: EgressReceiptV1 {
+                    audit_seq: 7,
+                    audit_hash: "a".repeat(64),
+                },
+            })
+        })
+    }
+    fn observe(&self, request: EgressObserveRequestV1) -> ControlFuture<'_, ()> {
+        Box::pin(async move {
+            if self.observe_unavailable.load(Ordering::SeqCst) {
+                return Err(ControlError::Unavailable);
+            }
+            self.observations.lock().unwrap().push(request.observation);
+            Ok(())
+        })
+    }
+    fn renew(&self, request: EgressRenewRequestV1) -> ControlFuture<'_, EgressRenewResponseV1> {
+        Box::pin(async move {
+            let revoke = self.revoke.lock().unwrap().clone();
+            Ok(EgressRenewResponseV1 {
+                version: 1,
+                revoked: request
+                    .decisions
+                    .into_iter()
+                    .filter(|id| revoke.contains(id))
+                    .collect(),
+                expired: vec![],
+            })
+        })
+    }
+}
+
+struct NoLookup(AtomicUsize);
+impl HostLookup for NoLookup {
+    fn lookup(&self, _: String, _: u16) -> LookupFuture {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Err(std::io::Error::other("no DNS in this test")) })
+    }
+}
+
+/// An owned loopback echo service counting accepted upstream sockets.
+struct Upstream {
+    port: u16,
+    accepts: Arc<AtomicUsize>,
+    closed: Arc<tokio::sync::Notify>,
+}
+async fn upstream() -> Upstream {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let closed = Arc::new(tokio::sync::Notify::new());
+    let (count, notify) = (accepts.clone(), closed.clone());
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            count.fetch_add(1, Ordering::SeqCst);
+            let notify = notify.clone();
+            tokio::spawn(async move {
+                let mut buffer = [0u8; 1024];
+                loop {
+                    match socket.read(&mut buffer).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(count) => {
+                            if socket.write_all(&buffer[..count]).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                notify.notify_one();
+            });
+        }
+    });
+    Upstream {
+        port,
+        accepts,
+        closed,
+    }
+}
+
+struct Harness {
+    gateway: Arc<Gateway>,
+    lookups: Arc<NoLookup>,
+    helper_port: u16,
+    owner: tokio::task::JoinHandle<ChannelExit>,
+    stop: watch::Sender<bool>,
+}
+
+async fn harness(gateway: Arc<Gateway>, upstream_port: u16) -> Harness {
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let helper_port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let (broker_end, helper_end) = tokio::io::duplex(256 * 1024);
+    let (helper_input, helper_output) = tokio::io::split(helper_end);
+    tokio::spawn(channel_helper::serve(
+        LoopbackConfig::new(helper_port).unwrap(),
+        helper_input,
+        helper_output,
+    ));
+    let lookups = Arc::new(NoLookup(AtomicUsize::new(0)));
+    let fixture =
+        Authority::new(FIXTURE, upstream_port, EgressTransport::ConnectTcpOpaque).unwrap();
+    let resolver = Arc::new(
+        Resolver::new(
+            lookups.clone(),
+            vec![InternalService {
+                authority: fixture,
+                addresses: vec!["127.0.0.1".parse().unwrap()],
+            }],
+            vec![],
+        )
+        .unwrap(),
+    );
+    let binding = EgressBindingV1 {
+        session_id: "00000000-0000-4000-8000-0000000000a1".into(),
+        worker_id: "00000000-0000-4000-8000-0000000000a2".into(),
+        attempt_id: "00000000-0000-4000-8000-0000000000a3".into(),
+        channel_id: IdV1::random(),
+        epoch: 1,
+        context_digest: DigestV1::of(b"fixture worker A1"),
+    };
+    let times = ChannelTimes {
+        lease: Duration::from_millis(1_500),
+        renew_every: Duration::from_millis(200),
+        open_budget: Duration::from_secs(5),
+        connect_attempt: Duration::from_secs(2),
+    };
+    let (stop, stopped) = watch::channel(false);
+    let control: Arc<dyn EgressControl> = gateway.clone();
+    let owner = tokio::spawn(run(broker_end, binding, control, resolver, times, stopped));
+    Harness {
+        gateway,
+        lookups,
+        helper_port,
+        owner,
+        stop,
+    }
+}
+
+/// A worker-side client: CONNECT through the loopback helper.
+async fn connect(helper_port: u16, authority: &str) -> (TcpStream, String) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut client = loop {
+        match TcpStream::connect(("127.0.0.1", helper_port)).await {
+            Ok(client) => break client,
+            Err(_) if Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(20)).await
+            }
+            Err(error) => panic!("helper never listened: {error}"),
+        }
+    };
+    let head = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n");
+    client.write_all(head.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    let mut byte = [0u8; 1];
+    while !response.ends_with(b"\r\n\r\n") {
+        match timeout_at(deadline, client.read(&mut byte))
+            .await
+            .expect("response deadline")
+        {
+            Ok(1) => response.push(byte[0]),
+            _ => break,
+        }
+    }
+    (client, String::from_utf8_lossy(&response).into_owned())
+}
+
+fn gateway(allow: bool) -> Arc<Gateway> {
+    let gateway = Gateway::default();
+    gateway.allow.store(allow, Ordering::SeqCst);
+    Arc::new(gateway)
+}
+
+#[tokio::test]
+async fn egress_broker_allowed_destination_is_decided_durably_before_one_pinned_connect() {
+    let upstream = upstream().await;
+    let harness = harness(gateway(true), upstream.port).await;
+    let authority = format!("{FIXTURE}:{}", upstream.port);
+    let (mut client, response) = connect(harness.helper_port, &authority).await;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    client.write_all(b"ping through the broker").await.unwrap();
+    let mut echoed = [0u8; 23];
+    client.read_exact(&mut echoed).await.unwrap();
+    assert_eq!(&echoed, b"ping through the broker");
+    assert_eq!(
+        upstream.accepts.load(Ordering::SeqCst),
+        1,
+        "exactly one upstream socket"
+    );
+    let decisions = harness.gateway.decisions.lock().unwrap().clone();
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(decisions[0].authority, authority);
+    assert_eq!(
+        harness.lookups.0.load(Ordering::SeqCst),
+        0,
+        "internal service: no DNS"
+    );
+    let observations = harness.gateway.observations.lock().unwrap().clone();
+    assert!(matches!(
+        observations.first(),
+        Some(EgressObservationV1::ChannelOpened { .. })
+    ));
+    assert!(observations.iter().any(|o| matches!(o,
+        EgressObservationV1::Connection { connected: true, peer: Some(peer), resolver, .. }
+            if *peer == format!("127.0.0.1:{}", upstream.port) && resolver == "internal_service")));
+    harness.stop.send(true).unwrap();
+    assert_eq!(harness.owner.await.unwrap(), ChannelExit::Stopped);
+}
+
+#[tokio::test]
+async fn egress_broker_unknown_destination_is_refused_without_resolution_or_connect() {
+    let upstream = upstream().await;
+    let harness = harness(gateway(false), upstream.port).await;
+    let (_client, response) =
+        connect(harness.helper_port, &format!("{FIXTURE}:{}", upstream.port)).await;
+    assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+    let (_client, response) = connect(harness.helper_port, "unknown.example.test:443").await;
+    assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+    assert_eq!(upstream.accepts.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        harness.lookups.0.load(Ordering::SeqCst),
+        0,
+        "a denied name is never resolved"
+    );
+    assert_eq!(
+        harness.gateway.decisions.lock().unwrap().len(),
+        2,
+        "each refusal was decided centrally"
+    );
+    harness.stop.send(true).unwrap();
+}
+
+#[tokio::test]
+async fn egress_broker_audit_outage_blocks_the_connection() {
+    let upstream = upstream().await;
+    let unavailable = gateway(true);
+    unavailable.decide_unavailable.store(true, Ordering::SeqCst);
+    let harness = harness(unavailable, upstream.port).await;
+    let (_client, response) =
+        connect(harness.helper_port, &format!("{FIXTURE}:{}", upstream.port)).await;
+    assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+    assert_eq!(
+        upstream.accepts.load(Ordering::SeqCst),
+        0,
+        "no decision, no socket"
+    );
+    harness.stop.send(true).unwrap();
+}
+
+#[tokio::test]
+async fn egress_broker_refuses_every_flow_when_the_channel_cannot_be_recorded() {
+    let upstream = upstream().await;
+    let unrecorded = gateway(true);
+    unrecorded.observe_unavailable.store(true, Ordering::SeqCst);
+    let harness = harness(unrecorded, upstream.port).await;
+    assert_eq!(harness.owner.await.unwrap(), ChannelExit::AuditUnavailable);
+    assert!(harness.gateway.decisions.lock().unwrap().is_empty());
+    assert_eq!(upstream.accepts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn egress_broker_revocation_closes_the_live_upstream_socket_within_the_renewal() {
+    let upstream = upstream().await;
+    let harness = harness(gateway(true), upstream.port).await;
+    let (mut client, response) =
+        connect(harness.helper_port, &format!("{FIXTURE}:{}", upstream.port)).await;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    let decision = harness.gateway.decisions.lock().unwrap()[0]
+        .decision_id
+        .clone();
+    harness
+        .gateway
+        .revoke
+        .lock()
+        .unwrap()
+        .push(decision.clone());
+    let started = Instant::now();
+    tokio::time::timeout(Duration::from_secs(5), upstream.closed.notified())
+        .await
+        .expect("the broker closed the revoked upstream socket");
+    let mut rest = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), client.read_to_end(&mut rest)).await;
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let closed = harness.gateway.observations.lock().unwrap().iter().any(|o| matches!(o,
+        EgressObservationV1::Closed { reason: EgressCloseReasonV1::Revoked, decision_id, .. } if *decision_id == decision));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut recorded = closed;
+    while !recorded && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        recorded = harness
+            .gateway
+            .observations
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|o| {
+                matches!(
+                    o,
+                    EgressObservationV1::Closed {
+                        reason: EgressCloseReasonV1::Revoked,
+                        ..
+                    }
+                )
+            });
+    }
+    assert!(
+        recorded,
+        "the closure is observed with its revocation cause"
+    );
+    harness.stop.send(true).unwrap();
+}
