@@ -8,6 +8,11 @@ use agentsandbox::{
         BrokerAuthorityV1, BrokerGrantMutationV1, BrokerIdentityViewV1, BrokerMutationResultV1,
         BrokerRuntimeKindV1,
     },
+    identity::{
+        HumanAccountV1, HumanCapabilityV1, HumanIdentityV1, IdentityChangeV1, IdentityMutationV1,
+        LegacyControlRoleV1, LocalCredentialV1, LocalHumanProvisionV1, MembershipV1,
+        PrincipalRefV1, generate_local_credential,
+    },
     model::Event as ModelEvent,
     mysql_storage::{
         MysqlEndpoint, MysqlProbeError,
@@ -559,6 +564,64 @@ async fn gateway_retains_verified_neighbor_collisions_during_projection_failure(
     Ok(())
 }
 
+fn provision_sqlite_reader(store: &Store) -> Result<(PrincipalRefV1, String)> {
+    let proof = generate_local_credential()?;
+    let principal = PrincipalRefV1::HumanLocal {
+        installation_id: Uuid::new_v4().to_string(),
+        account_id: Uuid::new_v4().to_string(),
+    };
+    let mutation = |change| IdentityMutationV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        actor: PrincipalRefV1::LegacyControl {
+            credential_id: "mixed-registry-fixture".into(),
+            role: LegacyControlRoleV1::Runner,
+        },
+        change,
+    };
+    store.provision_local_human(&LocalHumanProvisionV1 {
+        version: 1,
+        mutations: [
+            mutation(IdentityChangeV1::Account {
+                expected_revision: 0,
+                account: HumanAccountV1 {
+                    version: 1,
+                    principal: principal.clone(),
+                    display_name: "SQLite reader".into(),
+                    revision: 1,
+                    active: true,
+                },
+            }),
+            mutation(IdentityChangeV1::Credential {
+                expected_revision: 0,
+                binding: LocalCredentialV1 {
+                    version: 1,
+                    credential_id: Uuid::new_v4().to_string(),
+                    principal: principal.clone(),
+                    sha256_digest: hex::encode(Sha256::digest(proof.as_bytes())),
+                    revision: 1,
+                    active: true,
+                    expires_at: None,
+                },
+            }),
+            mutation(IdentityChangeV1::Membership {
+                expected_revision: 0,
+                membership: MembershipV1 {
+                    version: 1,
+                    membership_id: Uuid::new_v4().to_string(),
+                    principal: principal.clone(),
+                    tenant_id: store.tenant_id().into(),
+                    organization_scope: "engineering".into(),
+                    revision: 1,
+                    active: true,
+                    capabilities: [HumanCapabilityV1::ReadMetadata].into_iter().collect(),
+                },
+            }),
+        ],
+    })?;
+    Ok((principal, proof))
+}
+
 #[tokio::test]
 #[ignore = "requires a fresh prepared private MySQL 8.4 QA schema and a built gateway"]
 async fn gateway_issues_sqlite_workload_credential_when_mysql_neighbor_verifies() -> Result<()> {
@@ -580,6 +643,7 @@ async fn gateway_issues_sqlite_workload_credential_when_mysql_neighbor_verifies(
     a.migrate_identity_v4(&registry.root.join("tenant-a-before-v4.sqlite"))?;
     a.migrate_human_access_v5(&registry.root.join("tenant-a-before-v5.sqlite"))?;
     a.migrate_workload_v6(&registry.root.join("tenant-a-before-v6.sqlite"))?;
+    let (human_principal, human_proof) = provision_sqlite_reader(&a)?;
     let before_a = a.integrity()?;
     drop(a);
 
@@ -594,6 +658,22 @@ async fn gateway_issues_sqlite_workload_credential_when_mysql_neighbor_verifies(
     ])?;
     let http = Client::builder().no_proxy().timeout(DEADLINE).build()?;
     let gateway = Gateway::start(&registry).await?;
+    let identity = http
+        .get(gateway.url("/api/v1/human/identity"))
+        .bearer_auth(&human_proof)
+        .send()
+        .await?;
+    ensure!(identity.status() == StatusCode::OK);
+    let identity = identity.json::<HumanIdentityV1>().await?;
+    ensure!(
+        identity.principal == human_principal
+            && identity.authentication.method == "local_credential"
+            && !identity.contexts_complete
+            && identity.contexts.len() == 1
+            && identity.contexts[0].tenant_id == "tenant-a"
+            && identity.contexts[0].capabilities == [HumanCapabilityV1::ReadMetadata],
+        "the local proof must offer only the verified SQLite context with partial coverage"
+    );
     let broker_id = Uuid::new_v4().to_string();
     let incarnation_id = Uuid::new_v4().to_string();
     let workload_proof = Uuid::new_v4().simple().to_string();
@@ -670,7 +750,7 @@ async fn gateway_issues_sqlite_workload_credential_when_mysql_neighbor_verifies(
 
     let a = Store::open_existing_for_tenant(&data, "tenant-a", Redactor::new(Vec::new()), 128)?;
     let after_a = a.integrity()?;
-    ensure!(after_a.valid && after_a.event_count == before_a.event_count + 2);
+    ensure!(after_a.valid && after_a.event_count == before_a.event_count + 3);
     ensure!(after_a.head_hash == grant.receipt.audit_hash);
     ensure!(audit_snapshot(&mut conn_b).await? == before_b, "B changed");
     Ok(())
