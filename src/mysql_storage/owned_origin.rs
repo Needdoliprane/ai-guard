@@ -1,6 +1,6 @@
 use super::{audit::decode_row, driver_error, supervision::server_uuid};
 use anyhow::{Context, Result, bail, ensure};
-use mysql_async::{Conn, Row, Transaction, prelude::Queryable};
+use mysql_async::{Conn, Row, prelude::Queryable};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -51,8 +51,8 @@ impl OwnedAuditLock {
         }
     }
 
-    pub(super) async fn verify(&self, tx: &mut Transaction<'_>) -> Result<()> {
-        let ownership = tx
+    pub(super) async fn verify(&self, connection: &mut impl Queryable) -> Result<()> {
+        let ownership = connection
             .exec_first::<Row, _, _>("SELECT CONNECTION_ID(), IS_USED_LOCK(?)", (&self.name,))
             .await
             .map_err(driver_error)?
@@ -70,6 +70,7 @@ impl OwnedAuditLock {
             u64::from(conn.id()) == self.session,
             "MySQL owned audit session changed"
         );
+        self.verify(conn).await?;
         let released = conn
             .exec_first::<Row, _, _>("SELECT RELEASE_LOCK(?)", (&self.name,))
             .await

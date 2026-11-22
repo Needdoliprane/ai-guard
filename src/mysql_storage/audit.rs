@@ -234,6 +234,15 @@ async fn close_owned_connection(conn: Conn) -> Result<()> {
         .context("MySQL owned audit connection closure is uncertain")
 }
 
+async fn release_and_close_owned_connection(
+    mut conn: Conn,
+    ownership: OwnedAuditLock,
+) -> Result<()> {
+    let released = ownership.release(&mut conn).await;
+    close_owned_connection(conn).await?;
+    released
+}
+
 /// The verified head and its physical lock travel with the exact connection.
 /// The handle has no lease recovery or authority to write.
 struct RetainedOwnedAudit<'a> {
@@ -247,18 +256,23 @@ struct RetainedOwnedAudit<'a> {
 
 impl RetainedOwnedAudit<'_> {
     async fn close_verified(mut self) -> Result<AuditHead> {
-        let checked = match self.confirm_retained_head().await {
-            Ok(()) => self.ownership.release(&mut self.conn).await,
-            Err(error) => Err(error),
-        };
-        close_owned_connection(self.conn).await?;
-        checked?;
-        Ok(self.head)
+        match self.confirm_retained_head().await {
+            Ok(checked) => {
+                release_and_close_owned_connection(self.conn, self.ownership).await?;
+                checked?;
+                Ok(self.head)
+            }
+            Err(error) => {
+                close_owned_connection(self.conn).await?;
+                Err(error)
+            }
+        }
     }
 
     /// Reconfirm the bound head in a new snapshot of the retained connection.
     /// The chain itself was replayed when this handle was constructed.
-    async fn confirm_retained_head(&mut self) -> Result<()> {
+    /// The outer result confirms rollback before the inner check can be used.
+    async fn confirm_retained_head(&mut self) -> Result<Result<()>> {
         let mut tx = self
             .conn
             .start_transaction(read_snapshot_options())
@@ -276,7 +290,7 @@ impl RetainedOwnedAudit<'_> {
         }
         .await;
         tx.rollback().await.map_err(driver_error)?;
-        checked
+        Ok(checked)
     }
 }
 
@@ -888,22 +902,28 @@ impl MysqlAuditStore {
     ) -> Result<RetainedOwnedAudit<'_>> {
         let confirmed = self.confirmed.lock().await;
         let mut conn = self.connect().await?;
-        let verified = async {
-            let ownership = OwnedAuditLock::acquire(&mut conn, server, &self.database).await?;
-            let head = self
-                .verify_owned_snapshot(&mut conn, &ownership, head_seq, head_hash, &confirmed.head)
-                .await?;
-            Ok((ownership, head))
-        }
-        .await;
+        let ownership = match OwnedAuditLock::acquire(&mut conn, server, &self.database).await {
+            Ok(ownership) => ownership,
+            Err(error) => {
+                close_owned_connection(conn).await?;
+                return Err(error);
+            }
+        };
+        let verified = self
+            .verify_owned_snapshot(&mut conn, &ownership, head_seq, head_hash, &confirmed.head)
+            .await;
         match verified {
-            Ok((ownership, head)) => Ok(RetainedOwnedAudit {
+            Ok(Ok(head)) => Ok(RetainedOwnedAudit {
                 store: self,
                 conn,
                 ownership,
                 head,
                 _confirmed: confirmed,
             }),
+            Ok(Err(error)) => {
+                release_and_close_owned_connection(conn, ownership).await?;
+                Err(error)
+            }
             Err(error) => {
                 close_owned_connection(conn).await?;
                 Err(error)
@@ -911,6 +931,7 @@ impl MysqlAuditStore {
         }
     }
 
+    /// The outer result confirms rollback before the inner check can be used.
     async fn verify_owned_snapshot(
         &self,
         conn: &mut Conn,
@@ -918,7 +939,7 @@ impl MysqlAuditStore {
         head_seq: i64,
         head_hash: &str,
         confirmed: &AuditHead,
-    ) -> Result<AuditHead> {
+    ) -> Result<Result<AuditHead>> {
         let mut tx = conn
             .start_transaction(read_snapshot_options())
             .await
@@ -938,7 +959,7 @@ impl MysqlAuditStore {
         }
         .await;
         tx.rollback().await.map_err(driver_error)?;
-        verified
+        Ok(verified)
     }
 
     /// Report a row-level chain mismatch with the preceding checked prefix.
