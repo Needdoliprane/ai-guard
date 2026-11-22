@@ -33,6 +33,8 @@ Within a reclaimed range the live store also keeps:
 - the **first sighting** of each session, agent, sandbox and project: the event that an identity grant needs to prove that the resource exists;
 - every **signed checkpoint position** of the checkpoint directories passed with `--checkpoint-dir`, so that [signed checkpoints](../audit-signatures/README.md) keep comparing the store with each signed position.
 
+The live store also keeps **egress decisions, observations, and grants** so the broker can retrieve the original receipts. New plans record these positions in `kept_positions`. Choose a shorter segment if the combined retained positions exceed the 4,096-position limit.
+
 Worker lifecycle events are structural. In stores measured during development they were most of the payload bytes. Reclaiming the events of closed workers is a separate lot that is still open: until it is delivered, retention postpones capacity exhaustion but does not remove the growth caused by worker lifecycles.
 
 ## What the live store records

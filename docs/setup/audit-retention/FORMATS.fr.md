@@ -41,7 +41,7 @@ L’archive couvre une plage contiguë `first_seq..=last_seq`, événements stru
 | `event_count`, `payload_bytes` | Événements archivés et somme des tailles de leurs charges utiles |
 | `events_file`, `events_sha256`, `events_bytes` | `events.jsonl`, son empreinte et sa taille |
 | `previous_manifest_sha256` | Empreinte du manifeste du segment précédent ; `null` pour le premier segment et pour les exports |
-| `reclaim` | Rétention seulement : `classes`, `reclaimed_events`, `reclaimed_bytes`, `reclaim_sha256`, `by_class`, `retained_structural`, `retained_pins`, `kept_positions` (événements récupérables conservés parce qu’un point de contrôle signé les nomme) |
+| `reclaim` | Rétention seulement : `classes`, `reclaimed_events`, `reclaimed_bytes`, `reclaim_sha256`, `by_class`, `retained_structural`, `retained_pins`, `kept_positions` (événements récupérables conservés pour les points de contrôle signés ou le rejeu egress) |
 | `snapshot_sha256` | Rétention seulement : empreinte de l’instantané persisté des vues historiques à `last_seq` |
 | `policy_sha256` | Rétention seulement : empreinte de la politique |
 | `created_at` | Déclaré par le producteur ; pas un horodatage de confiance |
