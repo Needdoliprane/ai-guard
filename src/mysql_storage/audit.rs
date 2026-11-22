@@ -57,7 +57,7 @@ use uuid::Uuid;
 
 pub use super::supervision::MysqlSupervisionOrigin;
 
-const DEADLINE: Duration = Duration::from_secs(8);
+pub(crate) const DEADLINE: Duration = Duration::from_secs(8);
 // The gateway's CredentialIndex admits one runner and one viewer for at most 256 tenants.
 const MAX_CONTROL_COLLISION_CANDIDATES: usize = 512;
 const GENESIS: &str = "control.mysql.audit.genesis";

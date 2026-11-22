@@ -83,6 +83,24 @@ impl TenantStore {
         }
     }
 
+    /// A neighboring store can deny issuance with a known binding. An absent
+    /// result requires both identity projections to have been checked.
+    pub(crate) fn neighboring_credential_present(
+        &self,
+        digest: &[u8; 32],
+        #[cfg(feature = "mysql-storage")] mysql_deadline: tokio::time::Instant,
+    ) -> Result<bool> {
+        match self {
+            Self::Sqlite(store) => {
+                let workload = store.try_workload_digest_binding(digest).into_result()?;
+                let human = store.try_local_credential_binding(digest).into_result()?;
+                Ok(workload.is_some() || human.is_some())
+            }
+            #[cfg(feature = "mysql-storage")]
+            Self::Mysql(store) => store.neighboring_credential_present(digest, mysql_deadline),
+        }
+    }
+
     /// Append with the authenticated technical credential bound to the write
     /// transaction on MySQL. SQLite keeps its existing authorization seam.
     pub fn append_guarded(&self, event: Event, guard: Option<[u8; 32]>) -> Result<StoredEvent> {
@@ -288,12 +306,16 @@ mod mysql {
             self.store.set_control_collision_candidates(digests)
         }
 
-        pub fn block<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {
-            let result = if Handle::try_current().is_ok() {
+        fn wait<T>(&self, future: impl Future<Output = T>) -> T {
+            if Handle::try_current().is_ok() {
                 tokio::task::block_in_place(|| self.handle.block_on(future))
             } else {
                 self.handle.block_on(future)
-            };
+            }
+        }
+
+        pub fn block<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {
+            let result = self.wait(future);
             // Only a confirmed transport failure latches a degraded state. A
             // refusal from the Store is an answer, not an outage.
             match &result {
@@ -371,6 +393,29 @@ mod mysql {
         ) -> Result<Option<crate::mysql_storage::audit::ControlCollision>> {
             self.block(self.store.verify_control_credential_presence(digest))
         }
+
+        /// This peer metadata lookup has its own budget and never changes the
+        /// liveness latch used by the selected tenant's operations.
+        pub(super) fn neighboring_credential_present(
+            &self,
+            digest: &[u8; 32],
+            deadline: tokio::time::Instant,
+        ) -> Result<bool> {
+            self.wait(async {
+                anyhow::ensure!(
+                    tokio::time::Instant::now() < deadline,
+                    "MySQL credential lookup budget exhausted"
+                );
+                let presence = tokio::time::timeout_at(
+                    deadline,
+                    self.store.verify_control_credential_presence(digest),
+                )
+                .await
+                .map_err(|_| anyhow::anyhow!("MySQL credential lookup budget exhausted"))??;
+                Ok(presence.is_some())
+            })
+        }
+
         /// A positive from the last fully verified read; opens no connection.
         pub fn known_control_collision(
             &self,

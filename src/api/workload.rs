@@ -564,42 +564,42 @@ async fn issue(
             if state.credential_index.lookup_digest(&digest).is_some() {
                 return Err(failure(WorkloadFailureV1::Conflict.into()));
             }
+            #[cfg(feature = "mysql-storage")]
+            let mysql_deadline =
+                tokio::time::Instant::now() + crate::mysql_storage::audit::DEADLINE;
             for (index, candidate) in state.tenants.iter().enumerate() {
-                let (owner, human) = if index == source {
-                    state.io_scope.with_store(
-                        candidate,
-                        store_io::Lane::Control,
-                        false,
-                        |store| {
-                            Ok::<_, anyhow::Error>((
-                                store.workload_digest_binding(&digest)?,
-                                store.local_credential_binding(&digest)?.is_some(),
-                            ))
-                        },
-                    )?
-                } else {
-                    (|| -> anyhow::Result<_> {
-                        Ok((
-                            candidate
-                                .store
-                                .sqlite()?
-                                .try_workload_digest_binding(&digest)
-                                .into_result()?,
-                            candidate
-                                .store
-                                .sqlite()?
-                                .try_local_credential_binding(&digest)
-                                .into_result()?
-                                .is_some(),
-                        ))
-                    })()
+                if index != source {
+                    #[cfg(feature = "mysql-storage")]
+                    let _metadata_slot = candidate
+                        .store
+                        .mysql()
+                        .map(|_| candidate.io.admit(store_io::Lane::Discovery, false))
+                        .transpose()?;
+                    if candidate
+                        .store
+                        .neighboring_credential_present(
+                            &digest,
+                            #[cfg(feature = "mysql-storage")]
+                            mysql_deadline,
+                        )
+                        .map_err(unavailable)?
+                    {
+                        return Err(failure(WorkloadFailureV1::Conflict.into()));
+                    }
+                    continue;
                 }
-                .map_err(unavailable)?;
+                let (owner, human) = state
+                    .io_scope
+                    .with_store(candidate, store_io::Lane::Control, false, |store| {
+                        Ok::<_, anyhow::Error>((
+                            store.workload_digest_binding(&digest)?,
+                            store.local_credential_binding(&digest)?.is_some(),
+                        ))
+                    })?
+                    .map_err(unavailable)?;
                 if human
                     || owner.is_some_and(|owner| {
-                        index != source
-                            || owner.credential_id != input.credential_id
-                            || owner.subject != input.subject
+                        owner.credential_id != input.credential_id || owner.subject != input.subject
                     })
                 {
                     return Err(failure(WorkloadFailureV1::Conflict.into()));

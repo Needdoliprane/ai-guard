@@ -3,9 +3,12 @@
 //! The external fixture prepares disposable schemas, as for the Store tests.
 use super::*;
 use agentsandbox::{
+    audit::Store,
     model::Event as ModelEvent,
     mysql_storage::audit::{ControlGuardRefused, with_control_guard},
     policy::Policy,
+    redaction::Redactor,
+    workload::{WorkloadBindingIssueV1, WorkloadBindingReceiptV1, WorkloadSubjectV1},
 };
 use reqwest::{Client, StatusCode};
 use sha2::{Digest, Sha256};
@@ -467,6 +470,80 @@ async fn gateway_retains_verified_neighbor_collisions_during_projection_failure(
     during_failure?;
     ensure!(b_reader.verify().await? == head_b);
     ensure!(audit_snapshot(&mut conn_a).await? == before_a, "A changed");
+    ensure!(audit_snapshot(&mut conn_b).await? == before_b, "B changed");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh prepared private MySQL 8.4 QA schema and a built gateway"]
+async fn gateway_issues_sqlite_workload_credential_when_mysql_neighbor_verifies() -> Result<()> {
+    let b = FixtureFiles::open("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_B")?;
+    prepare_gateway_target(&b, "tenant-b", &DIGEST_B).await?;
+    let mut conn_b = b.maintenance().await?;
+    let before_b = audit_snapshot(&mut conn_b).await?;
+
+    let registry = Registry::new()?;
+    let data = registry.root.join("tenant-a.sqlite");
+    let a = Store::create_supervised_for_tenant(
+        &data,
+        "tenant-a",
+        Redactor::new(Vec::new()),
+        128,
+        &registry.root.join("tenant-a-before-v3.sqlite"),
+    )?;
+    a.migrate_identity_v4(&registry.root.join("tenant-a-before-v4.sqlite"))?;
+    a.migrate_human_access_v5(&registry.root.join("tenant-a-before-v5.sqlite"))?;
+    a.migrate_workload_v6(&registry.root.join("tenant-a-before-v6.sqlite"))?;
+    let before_a = a.integrity()?;
+    drop(a);
+
+    registry.write(&[
+        json!({
+            "tenant_id": "tenant-a",
+            "data": data,
+            "runner_token_file": registry.root.join("a-runner"),
+            "viewer_token_file": registry.root.join("a-viewer"),
+        }),
+        registry.entry(&b, "tenant-b", "b")?,
+    ])?;
+    let http = Client::builder().no_proxy().timeout(DEADLINE).build()?;
+    let gateway = Gateway::start(&registry).await?;
+    let issue = WorkloadBindingIssueV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        credential_id: Uuid::new_v4().to_string(),
+        expected_revision: 0,
+        subject: WorkloadSubjectV1::Broker {
+            broker_id: Uuid::new_v4().to_string(),
+            incarnation_id: Uuid::new_v4().to_string(),
+        },
+        sha256_digest: hex::encode(Sha256::digest(b"synthetic QA workload credential")),
+        expires_at: (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
+    };
+    let post = |input: &WorkloadBindingIssueV1| {
+        http.post(gateway.url("/api/v1/workload-bindings"))
+            .bearer_auth(RUNNER_A)
+            .json(input)
+            .send()
+    };
+    let issued = post(&issue).await?;
+    ensure!(issued.status() == StatusCode::CREATED);
+    let receipt: WorkloadBindingReceiptV1 = issued.json().await?;
+    ensure!(receipt.credential_id == issue.credential_id && receipt.revision == 1);
+
+    let alias = WorkloadBindingIssueV1 {
+        operation_id: Uuid::new_v4().to_string(),
+        credential_id: Uuid::new_v4().to_string(),
+        sha256_digest: hex::encode(DIGEST_B),
+        ..issue
+    };
+    ensure!(post(&alias).await?.status() == StatusCode::CONFLICT);
+    gateway.stop().await?;
+
+    let a = Store::open_existing_for_tenant(&data, "tenant-a", Redactor::new(Vec::new()), 128)?;
+    let after_a = a.integrity()?;
+    ensure!(after_a.valid && after_a.event_count == before_a.event_count + 1);
+    ensure!(after_a.head_hash == receipt.audit_hash);
     ensure!(audit_snapshot(&mut conn_b).await? == before_b, "B changed");
     Ok(())
 }
