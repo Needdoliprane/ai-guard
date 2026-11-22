@@ -243,6 +243,34 @@ async fn a_workspace_is_claimed_created_once_and_bound_by_its_exact_uid() {
 }
 
 #[tokio::test]
+async fn a_bound_workspace_must_keep_the_approved_storage_class() {
+    let case = Case::new("ai-guard-rwop").await;
+    let path = case.claim_path();
+    let name = path.rsplit('/').next().unwrap().to_owned();
+    let bound = bound_pvc("tenant-a", &name, CLAIM_UID);
+    let approved = storage();
+    assert_ne!(
+        bound["spec"]["storageClassName"],
+        approved.storage_class_name
+    );
+    case.respond(move |request| match (request.method(), request.target()) {
+        ("POST", CREATE) => PeerReply::json(201, &created(request.body())),
+        ("GET", target) if target == path => PeerReply::json(200, &bound),
+        _ => PeerReply::json(404, &json!({"kind":"Status","code":404})),
+    });
+
+    let result = case.driver().await.provision_workspace(&approved).await;
+    let effects = case.effects();
+    assert_eq!(effects.len(), 1, "exactly one workspace CREATE");
+    assert_eq!(effects[0].line(), format!("POST {CREATE}"));
+    let state = case.state();
+    assert_eq!(state.workspace_claim_uid.as_deref(), Some(CLAIM_UID));
+    assert_eq!(state.last_step, 1);
+    assert!(!state.settled);
+    assert!(result.is_err(), "approved_storage_class_drift_accepted");
+}
+
+#[tokio::test]
 async fn a_second_driver_observes_the_confirmed_workspace_after_pending_expires() {
     let case = Case::new("ai-guard-rwop").await;
     let path = case.claim_path();
