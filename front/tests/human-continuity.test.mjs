@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { identity, principal, uuid, secondUuid } from "./human-fixtures.mjs";
-import { adminContext, personalContext } from "./supervision-fixtures.mjs";
+import { adminContext, adminOperations, ownedAdminOperations, personalContext } from "./supervision-fixtures.mjs";
 
 const module = await import("../src/human-continuity.ts").catch((error) => {
   if (error?.code === "ERR_MODULE_NOT_FOUND") return {};
@@ -32,9 +32,13 @@ test("seule une expiration ou une rotation de session crée une intention, pour 
   assert.ok(!serialized.includes("context-old") && !serialized.includes(future(0)), "ni identifiant de contexte ni échéance de l’ancien contexte");
   assert.ok(capture({ cause: "session_rotated" }), "une rotation de jetons OIDC est reprenable");
   assert.ok(capture({ view: "journal" }));
+  // The summary keeps only its period and cadence: it is resumable with them, like the other two views.
+  const overview = capture({ view: "overview", payload: { overview: { window: "7d", cadence: 0 } } });
+  assert.equal(overview.view, "overview"); assert.deepEqual(overview.payload, { overview: { window: "7d", cadence: 0 } });
   for (const cause of ["context_revoked", "context_invalid", "context_required", "permission_denied", "authentication_required", "credential_expired", "navigation", "logout", ""])
     assert.equal(capture({ cause }), null, `${cause || "cause vide"} ne crée aucune intention`);
-  for (const view of ["contexts", "resources", "events", "brokers", "workers", "federation"]) assert.equal(capture({ view }), null, `la vue ${view} n’est pas reprise`);
+  for (const view of ["contexts", "resources", "events", "brokers", "workers", "federation", "memberships", "usage", "configuration"])
+    assert.equal(capture({ view }), null, `la vue ${view} n’est pas reprise`);
   assert.equal(capture({ budgetStopped: true }), null, "aucune reprise lorsque le budget durable de lecture est arrêté");
   assert.equal(capture({ context: null }), null); assert.equal(capture({ principal: null }), null);
 });
@@ -47,7 +51,10 @@ test("un seul contexte équivalent est proposé à la reprise ; un contexte éla
   assert.deepEqual(decide(intent, [offered({ capabilities: [...offered().capabilities].reverse() })]).kind, "offer", "l’ordre des capacités ne change pas l’attribution");
   const widened = offered({ capabilities: [...offered().capabilities, "manage_grants"] });
   const reduced = offered({ capabilities: offered().capabilities.filter((capability) => capability !== "read_worker_registry") });
-  for (const [contexts, reason] of [[[widened], "none"], [[reduced], "none"], [[], "none"], [[personalContext(undefined, { id: "context-personal" })], "none"],
+  // Same capabilities, another offer: a withdrawn operation or a changed availability is another attribution.
+  const withdrawn = offered({ operations: adminOperations({ brokers_read: ["not_granted"] }) });
+  const unavailable = offered({ operations: ownedAdminOperations() });
+  for (const [contexts, reason] of [[[widened], "none"], [[reduced], "none"], [[withdrawn], "none"], [[unavailable], "none"], [[], "none"], [[personalContext(undefined, { id: "context-personal" })], "none"],
     [[offered({ tenant_id: "tenant-b" })], "none"], [[offered({ organization_scope: "organization-b" })], "none"], [[offered({ membership_revision: "2" })], "none"],
     [[offered(), offered({ id: "context-new-2" })], "ambiguous"]])
     assert.deepEqual(decide(intent, contexts), { kind: "manual", reason });

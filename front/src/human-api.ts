@@ -1,7 +1,12 @@
 import { createSseParser } from "./sse.ts";
 import { HUMAN_FEDERATION_PAGE_BYTES, HumanContractError, boundedText, humanBrokersUrl, humanWorkersUrl, humanFederationWorkersUrl, humanRecentEventsUrl, humanUrl, object, opaque, parseHumanBrokerPage, parseHumanWorkerPage, parseHumanFederationWorkerPage, parseHumanEventPage, parseHumanIdentity, parseHumanRecentEventPage, parseResourcePage, uuid } from "./human-model.ts";
-import type { HumanContext, HumanEventPage, HumanIdentity, HumanRecentEventPage, HumanSelection, HumanFederationSelection, ResourceRef } from "./human-model.ts";
+import type { HumanContext, HumanEventPage, HumanIdentity, HumanOperation, HumanRecentEventPage, HumanSelection, HumanFederationSelection, Principal, ResourceRef } from "./human-model.ts";
 import { humanOwnedBrokersUrl, parseHumanOwnedBrokerPage } from "./human-owned-brokers.ts";
+import { SUMMARY_PAGE_BYTES, humanSummaryUrl, parseHumanSummary, type HumanSummary, type SummaryWindow } from "./summary-model.ts";
+import { ADMIN_PAGE_BYTES, adminUrls, grantChangeBody, membershipChangeBody, parseGrantChangeReceipt, parseHumanConfiguration, parseHumanGrant, parseHumanQuota,
+  parseMembershipChangeReceipt, parseMembershipPage, parseUsagePage, type GrantChange, type GrantChangeReceipt, type HumanConfiguration, type HumanGrant,
+  type HumanQuota, type MembershipChange, type MembershipChangeReceipt, type MembershipPage, type UsagePage } from "./admin-model.ts";
+import { OPERATION_FACTS, access, availabilityText } from "./access-model.ts";
 
 export class HumanSuperseded extends Error { constructor() { super("Lecture abandonnée après changement de contexte."); } }
 export class HumanApiError extends Error {
@@ -29,8 +34,8 @@ interface Handlers {
 }
 const codes = new Set(["authentication_required", "credential_invalid", "credential_expired", "identity_revoked", "context_required",
   "context_invalid", "context_expired", "context_revoked", "permission_denied", "not_found", "invalid_request", "invalid_cursor",
-  "capacity_exhausted", "stream_admission_unavailable", "audit_read_budget_exhausted", "identity_unavailable", "audit_unavailable", "migration_required"]);
-const actions = new Set(["authenticate", "select_context", "review_permissions", "reduce_page", "retry", "contact_operator", "close_unused_streams"]);
+  "capacity_exhausted", "stream_admission_unavailable", "audit_read_budget_exhausted", "identity_unavailable", "audit_unavailable", "migration_required", "conflict"]);
+const actions = new Set(["authenticate", "select_context", "review_permissions", "reduce_page", "retry", "contact_operator", "close_unused_streams", "reread"]);
 
 /** Separate trust boundary: a local human credential can never fall back to the viewer API. */
 export class HumanApiClient {
@@ -120,22 +125,28 @@ export class HumanApiClient {
       return { value: this.#parseText(text), bytes };
     } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
   }
-  async #request(path: string, snapshot: Snapshot, signal?: AbortSignal, stream = false): Promise<Response> {
+  /** `body` makes the request a POST of that JSON text: a delegated change, never a read. */
+  async #request(path: string, snapshot: Snapshot, signal?: AbortSignal, stream = false, body?: string): Promise<Response> {
     this.#assert(snapshot);
-    if (!/^\/api\/v1\/human\/(identity|resources|events|export|stream|brokers|workers)(?:\/[0-9a-f-]{36})?(?:\?[^#]*)?$/.test(path) &&
+    if (!/^\/api\/v1\/human\/(identity|resources|events|export|stream|brokers|workers|summary)(?:\/[0-9a-f-]{36})?(?:\?[^#]*)?$/.test(path) &&
       !/^\/api\/v1\/human\/federation\/workers(?:\?[^#]*)?$/.test(path) && !/^\/api\/v1\/human\/events\/recent(?:\?[^#]*)?$/.test(path) &&
-      !/^\/api\/v1\/human\/owned\/brokers(?:\?[^#]*)?$/.test(path)) throw new HumanContractError();
-    if (this.#readBudgetStopped) {
+      !/^\/api\/v1\/human\/owned\/brokers(?:\?[^#]*)?$/.test(path) &&
+      !/^\/api\/v1\/human\/admin\/(memberships|quota|usage|configuration|grants)(?:\?[^#]*)?$/.test(path) &&
+      !(body !== undefined && /^\/api\/v1\/human\/admin\/memberships\/[0-9a-fA-F-]{36}$/.test(path))) throw new HumanContractError();
+    // The durable read budget bounds reads; a change is not a read and keeps its own refusals.
+    if (this.#readBudgetStopped && body === undefined) {
       if (!this.#operatorReadAllowed || stream) throw new HumanApiError(429, "audit_read_budget_exhausted", "Lecture automatique suspendue : budget durable de lecture atteint. Contactez l’opérateur.", "contact_operator");
       this.#operatorReadAllowed = false; snapshot.operatorRetry = true;
     }
-    const headers: Record<string, string> = { Authorization: `Bearer ${this.#token}`, Accept: stream ? "text/event-stream" : "application/json" };
+    const headers: Record<string, string> = { Authorization: `Bearer ${this.#token}`, Accept: stream ? "text/event-stream" : "application/json",
+      ...(body !== undefined ? { "Content-Type": "application/json" } : {}) };
     if (snapshot.context) headers["X-AiGuard-Context"] = snapshot.context.id;
     const signals = [this.#lifetime.signal, this.#scope.signal];
     if (signal) signals.push(signal);
     if (!stream) signals.push(AbortSignal.timeout(15000));
     const fetcher = this.#fetcher;
-    const response = await fetcher(path, { method: "GET", headers, credentials: "omit", cache: "no-store", redirect: "error", signal: AbortSignal.any(signals) });
+    const response = await fetcher(path, { method: body === undefined ? "GET" : "POST", headers, ...(body !== undefined ? { body } : {}),
+      credentials: "omit", cache: "no-store", redirect: "error", signal: AbortSignal.any(signals) });
     if (!this.#token || this.#lifetime.signal.aborted) {
       void response.body?.cancel().catch(() => {}); throw new HumanSuperseded();
     }
@@ -202,7 +213,9 @@ export class HumanApiClient {
     if (selected && (profilesChanged || !current || current.authorization_version !== selected.authorization_version ||
       current.membership_revision !== selected.membership_revision || current.tenant_id !== selected.tenant_id ||
       current.organization_scope !== selected.organization_scope || current.mode !== selected.mode ||
-      [...current.capabilities].sort().join(",") !== [...selected.capabilities].sort().join(",") || Date.parse(current.expires_at) <= Date.now())) {
+      [...current.capabilities].sort().join(",") !== [...selected.capabilities].sort().join(",") ||
+      // The same context can carry a new catalogue (an operator migration changes an availability): its views were built on the old one.
+      JSON.stringify(current.operations) !== JSON.stringify(selected.operations) || Date.parse(current.expires_at) <= Date.now())) {
       const error = new HumanApiError(403, "context_revoked", "Les accès ont changé. Choisissez à nouveau un contexte autorisé.", "select_context");
       this.clearContext(); this.#handlers.onContextInvalidated(error);
     }
@@ -238,17 +251,92 @@ export class HumanApiClient {
     const body = await this.#json(await this.#request(owned ? humanOwnedBrokersUrl(cursor, limit) : humanBrokersUrl(cursor, limit), snapshot, signal), snapshot);
     return this.#finishRead(this.#validatePage(owned ? parseHumanOwnedBrokerPage(body.value) : parseHumanBrokerPage(body.value), snapshot), snapshot, signal);
   }
+  /**
+   * A read the selected context's catalogue announces as not served (source profile, store marker or build) is refused
+   * here, before any request, whatever its permission: no historical route is substituted. A permission is never
+   * decided here; a served read goes to the control, which authorizes it.
+   */
+  #served(snapshot: Snapshot, operation: HumanOperation) {
+    const entry = access(snapshot.context, operation);
+    if (!entry || entry.availability === "available") return;
+    const code = entry.availability === "profile_unavailable" ? "read_profile_unavailable" : entry.availability;
+    throw new HumanApiError(503, code, `${OPERATION_FACTS[operation].label} : ${availabilityText[entry.availability]}`, "contact_operator");
+  }
+  #anchors(snapshot: Snapshot) {
+    const context = snapshot.context;
+    if (!context) throw new HumanSuperseded();
+    return { contextId: context.id, authorizationVersion: context.authorization_version };
+  }
   async workers(cursor: string | null = null, signal?: AbortSignal, limit?: number) {
     const snapshot = this.#snapshot(true);
-    if (this.#identity?.read_profiles?.worker_registry === "unavailable")
-      throw new HumanApiError(503, "read_profile_unavailable", "Registre des workers indisponible pour le profil annoncé par le contrôle. La couverture reste partielle.", "contact_operator");
+    this.#served(snapshot, "workers_read");
     const body = await this.#json(await this.#request(humanWorkersUrl(cursor, limit), snapshot, signal), snapshot);
     return this.#finishRead(this.#validatePage(parseHumanWorkerPage(body.value), snapshot), snapshot, signal);
   }
+  /** One summary of the selected context; its sections follow the control's decision for this context. */
+  async summary(window: SummaryWindow, signal?: AbortSignal): Promise<HumanSummary> {
+    const snapshot = this.#snapshot(true);
+    this.#served(snapshot, "summary_read");
+    const body = await this.#json(await this.#request(humanSummaryUrl(window), snapshot, signal), snapshot, SUMMARY_PAGE_BYTES);
+    return this.#finishRead(parseHumanSummary(body.value, this.#anchors(snapshot)), snapshot, signal);
+  }
+  /** Memberships of the administered organization, one page; the control decides what each entry discloses. */
+  async memberships(cursor: string | null = null, signal?: AbortSignal): Promise<MembershipPage> {
+    const snapshot = this.#snapshot(true);
+    this.#served(snapshot, "memberships_read");
+    const body = await this.#json(await this.#request(adminUrls.memberships(cursor), snapshot, signal), snapshot, ADMIN_PAGE_BYTES);
+    return this.#finishRead(parseMembershipPage(body.value, this.#anchors(snapshot)), snapshot, signal);
+  }
+  /** The tenant quota policy and its durable reservations. */
+  async quota(signal?: AbortSignal): Promise<HumanQuota> {
+    const snapshot = this.#snapshot(true);
+    this.#served(snapshot, "quota_read");
+    const body = await this.#json(await this.#request(adminUrls.quota(), snapshot, signal), snapshot, ADMIN_PAGE_BYTES);
+    return this.#finishRead(parseHumanQuota(body.value, this.#anchors(snapshot)), snapshot, signal);
+  }
+  /** Terminal allocations observed, method 1, never billable. */
+  async usage(cursor: string | null = null, signal?: AbortSignal): Promise<UsagePage> {
+    const snapshot = this.#snapshot(true);
+    this.#served(snapshot, "usage_read");
+    const body = await this.#json(await this.#request(adminUrls.usage(cursor), snapshot, signal), snapshot, ADMIN_PAGE_BYTES);
+    return this.#finishRead(parseUsagePage(body.value, this.#anchors(snapshot)), snapshot, signal);
+  }
+  /** One resource of the organization with its shares, for the administrator who may change them. */
+  async grant(resource: ResourceRef, signal?: AbortSignal): Promise<HumanGrant> {
+    const snapshot = this.#snapshot(true);
+    this.#served(snapshot, "grants_manage");
+    const body = await this.#json(await this.#request(adminUrls.grant(resource), snapshot, signal), snapshot, ADMIN_PAGE_BYTES);
+    return this.#finishRead(parseHumanGrant(body.value, { ...this.#anchors(snapshot), resource }), snapshot, signal);
+  }
+  /**
+   * A delegated change of one membership. The caller keeps `operation_id` across retries until a definitive answer;
+   * a 200 means a new authorization revision, so the selected context is refused afterwards and must be chosen again.
+   */
+  async changeMembership(membershipId: string, change: MembershipChange, signal?: AbortSignal): Promise<MembershipChangeReceipt> {
+    const snapshot = this.#snapshot(true);
+    this.#served(snapshot, "memberships_manage");
+    const text = membershipChangeBody(change);
+    const body = await this.#json(await this.#request(adminUrls.membershipChange(membershipId), snapshot, signal, false, text), snapshot, ADMIN_PAGE_BYTES);
+    return this.#finishRead(parseMembershipChangeReceipt(body.value, { operationId: change.operation_id, membershipId }), snapshot, signal);
+  }
+  /** A delegated replacement of the shares of one bound resource. `owner` lets the body refuse a share to the owner. */
+  async changeGrant(change: GrantChange, owner?: Principal, signal?: AbortSignal): Promise<GrantChangeReceipt> {
+    const snapshot = this.#snapshot(true);
+    this.#served(snapshot, "grants_manage");
+    const text = grantChangeBody(change, owner);
+    const body = await this.#json(await this.#request(adminUrls.grantChange(), snapshot, signal, false, text), snapshot, ADMIN_PAGE_BYTES);
+    return this.#finishRead(parseGrantChangeReceipt(body.value, { operationId: change.operation_id, resource: change.resource }), snapshot, signal);
+  }
+  /** Effective configuration, types and modes only. */
+  async configuration(signal?: AbortSignal): Promise<HumanConfiguration> {
+    const snapshot = this.#snapshot(true);
+    this.#served(snapshot, "configuration_read");
+    const body = await this.#json(await this.#request(adminUrls.configuration(), snapshot, signal), snapshot, ADMIN_PAGE_BYTES);
+    return this.#finishRead(parseHumanConfiguration(body.value, this.#anchors(snapshot)), snapshot, signal);
+  }
   async federationWorkers(selection: HumanFederationSelection = {}, signal?: AbortSignal) {
     const snapshot = this.#snapshot(true);
-    if (this.#identity?.read_profiles?.federation_registry === "unavailable")
-      throw new HumanApiError(503, "read_profile_unavailable", "Composition workers/brokers indisponible pour le profil annoncé par le contrôle. Ouvrez le registre Brokers autorisé.", "contact_operator");
+    this.#served(snapshot, "federation_read");
     const body = await this.#json(await this.#request(humanFederationWorkersUrl(selection), snapshot, signal), snapshot, HUMAN_FEDERATION_PAGE_BYTES);
     const page = parseHumanFederationWorkerPage(body.value);
     this.#validatePage(page.workers, snapshot); this.#validatePage(page.brokers, snapshot);

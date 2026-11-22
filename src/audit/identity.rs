@@ -391,7 +391,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
                     .memberships
                     .get(id)
                     .ok_or(IdentityFailureV1::ContextRevoked)?;
-                crate::identity::authorize_context(
+                let scope = crate::identity::authorize_context(
                     &record.principal,
                     &member.0,
                     record.mode.ok_or(IdentityFailureV1::InvalidRequest)?,
@@ -399,6 +399,10 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
                         .membership_revision
                         .ok_or(IdentityFailureV1::InvalidRequest)?,
                 )?;
+                invalid(super::human_rights::read_action_permitted(
+                    &record.action,
+                    &scope,
+                ))?;
             }
             continue;
         }
@@ -794,7 +798,7 @@ impl Store {
             self.begin_checked_scoped(&mut db, &access, StoreOperationClass::IdentityAuthority)?;
         self.mutate_identity_checked(tx, mutation)
     }
-    fn mutate_identity_checked(
+    pub(super) fn mutate_identity_checked(
         &self,
         mut tx: CheckedTransaction<'_>,
         mutation: &IdentityMutationV1,
@@ -808,6 +812,36 @@ impl Store {
         self.commit_checked(tx)?;
         Ok(result)
     }
+
+    /// Only an owned membership mutation may advance the expected discovery
+    /// snapshot here. It changes the authorization revision and leaves all
+    /// credential and workload candidates untouched.
+    pub(super) fn mutate_membership_with_discovery(
+        &self,
+        tx: CheckedTransaction<'_>,
+        expected: HumanDiscoveryGeneration,
+        prepare: impl FnOnce(&CheckedTransaction<'_>) -> anyhow::Result<IdentityMutationV1>,
+    ) -> anyhow::Result<(IdentityReceiptV1, Option<HumanDiscoveryGeneration>)> {
+        tx.require_identity_authority()?;
+        require_identity_projection(&tx)?;
+        if human_modern::discovery_generation(&tx)? != expected {
+            return Err(HumanDiscoveryStale.into());
+        }
+        let mutation = prepare(&tx)?;
+        invalid(matches!(
+            &mutation.change,
+            IdentityChangeV1::Membership { .. }
+        ))?;
+        let receipt = self.persist_identity_mutation(&tx, &mutation)?;
+        let next = expected.after_membership_change(
+            human_modern::discovery_generation(&tx)?,
+            receipt.authorization_revision,
+        )?;
+        // A rejected or uncertain commit yields neither receipt nor transition.
+        self.commit_checked(tx)?;
+        Ok((receipt, next))
+    }
+
     /// Atomically activate a prepared local account, credential and membership.
     /// Exact replay requires all three retained operation identities; partial
     /// overlap is a conflict and never an adoption of an existing account.
@@ -918,7 +952,10 @@ impl Store {
         let mut projection = load_projection(tx, mutation)?;
         projection.additive_resource_grants = rights_access;
         let previous_revision = projection.revision;
+        // Delegation rules bind new human-actor changes only; the historical
+        // chain replays under the rules each record was accepted with.
         projection.check_holder_delegation(mutation)?;
+        projection.check_delegation(mutation)?;
         projection.apply(mutation, &self.tenant_id, next_seq)?;
         ensure_resource_known(tx, mutation, next_seq)?;
         let record = Record {

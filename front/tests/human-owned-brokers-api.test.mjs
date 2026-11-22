@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { HumanApiClient, HumanSuperseded } from "../src/human-api.ts";
 import { HumanContractError, parseHumanIdentity } from "../src/human-model.ts";
-import { brokerIdentity, errorResponse } from "./human-fixtures.mjs";
-import { ownedBrokerPage, ownedReadProfiles } from "./owned-brokers-fixture.mjs";
+import { brokerContext, brokerIdentity, brokerOperations, errorResponse } from "./human-fixtures.mjs";
+import { ownedBrokerPage, ownedCatalogue, ownedReadProfiles } from "./owned-brokers-fixture.mjs";
 
-const identity = () => ({ ...brokerIdentity(true), read_profiles: ownedReadProfiles() });
+// The owned control announces the profile twice: as read profiles and as the availability of each operation.
+const identity = () => ({ ...brokerIdentity(true), contexts: [{ ...brokerContext(true), operations: ownedCatalogue(brokerOperations(true)) }], read_profiles: ownedReadProfiles() });
 function make(fetcher) {
   const notices = [];
   return { notices, client: new HumanApiClient("private-human-bearer-123456789", {
@@ -19,6 +20,10 @@ test("owned: les profils d’identité fermés ne donnent aucune permission", ()
     { ...ownedReadProfiles(), worker_registry: "available" }])
     assert.throws(() => parseHumanIdentity({ ...identity(), read_profiles: profiles }), HumanContractError);
   assert.equal(Object.hasOwn(parseHumanIdentity(brokerIdentity()), "read_profiles"), false);
+  // Both announcements come from the same server fact: a context still serving the worker registry contradicts them.
+  for (const operation of ["workers_read", "federation_read"])
+    assert.throws(() => parseHumanIdentity({ ...identity(), contexts: [{ ...brokerContext(true),
+      operations: ownedCatalogue(brokerOperations(true)).map((entry) => entry.operation === operation ? { ...entry, availability: "available" } : entry) }] }), HumanContractError, operation);
 });
 
 test("owned: la route et le parser sont choisis par l’identité avant la lecture", async () => {

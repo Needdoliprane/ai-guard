@@ -1,15 +1,24 @@
 import { button, el, icon } from "./dom.ts";
 import { formatDate } from "./model.ts";
 import { HumanApiClient, HumanApiError, HumanSuperseded } from "./human-api.ts";
-import { HumanContractError, canReadHumanFederation } from "./human-model.ts";
+import { HumanContractError } from "./human-model.ts";
+import { ADMIN_DESTINATIONS, accessExplanation, adminDestinationState, can, destinationState } from "./access-model.ts";
+import type { AdminDestination } from "./access-model.ts";
+import { ConfigurationView, MembershipsView, UsageView } from "./admin-views.ts";
 import { RENDER_STEP, SupervisionView, defaultSupervisionPreferences } from "./supervision-view.ts";
 import { JournalView, defaultJournalPreferences } from "./journal-view.ts";
-import { brokerAuthorityLabel, defaultFleetFilter, supervisionAccess } from "./supervision-model.ts";
+import { OverviewView, defaultOverviewPreferences } from "./overview-view.ts";
+import type { OverviewPreferences } from "./overview-view.ts";
+import { brokerAuthorityLabel, defaultFleetFilter, grantKey, landingDestination, supervisionAccess } from "./supervision-model.ts";
+import { GrantEditor, MembershipEditor } from "./delegation-views.ts";
+import { delegationOffers } from "./delegation-model.ts";
+import type { Membership } from "./admin-model.ts";
 import { captureIntent, deferredReadAllowed, resumeCandidate, resumeRetryDelay } from "./human-continuity.ts";
 import type { ResumeIntent } from "./human-continuity.ts";
 import "./human.css";
 import type { SupervisionPreferences } from "./supervision-view.ts";
 import type { JournalPreferences } from "./journal-view.ts";
+import type { HumanOperation, ResourceRef } from "./human-model.ts";
 import type { HumanBroker, HumanBrokerPage, HumanWorker, HumanWorkerPage, HumanWorkerAssociation, HumanWorkerTimeStatus, HumanFederationWorkerPage, HumanContext, HumanEvent, HumanEventPage, HumanIdentity, HumanPage, HumanResource, HumanView } from "./human-model.ts";
 import { checkpointFacts, checkpointLabel, formatBrokerDate } from "./human-owned-brokers.ts";
 
@@ -29,8 +38,10 @@ function workerTimeLabel(value: string | null, status: HumanWorkerTimeStatus) {
   if (status === "unknown") return "Inconnu · date hors format ou non interprétable";
   return value && Number.isFinite(Date.parse(value)) ? formatDate(value, true) : value ?? "Inconnu";
 }
-type DashboardMode = "contexts" | "supervision" | "journal" | "resources" | "events" | "brokers" | "workers" | "federation";
-interface ViewPreferences { supervision: SupervisionPreferences; journal: JournalPreferences }
+type DashboardMode = "contexts" | "overview" | AdminDestination | "supervision" | "journal" | "resources" | "events" | "brokers" | "workers" | "federation";
+const ADMIN_MODES = Object.keys(ADMIN_DESTINATIONS) as AdminDestination[];
+const isAdminMode = (mode: DashboardMode): mode is AdminDestination => (ADMIN_MODES as readonly string[]).includes(mode);
+interface ViewPreferences { supervision: SupervisionPreferences; journal: JournalPreferences; overview: OverviewPreferences }
 /** Opaque to the session owner: it only hands it from a replaced dashboard to its successor. */
 export type HumanResumeIntent = ResumeIntent<ViewPreferences>;
 /** Shown while a resume the person confirmed waits for the control to propose a context that is not elapsed. */
@@ -86,6 +97,18 @@ export class HumanDashboard {
   #supervisionPreferences: SupervisionPreferences = defaultSupervisionPreferences();
   #journal: JournalView | null = null;
   #journalPreferences: JournalPreferences = defaultJournalPreferences();
+  #overview: OverviewView | null = null;
+  /** Period and cadence chosen for the summary. They hold no server data and never outlive the selected context. */
+  #overviewPreferences: OverviewPreferences = defaultOverviewPreferences();
+  /** A subject asked from the summary: opened once, by the destination that reads it, if it is in the loaded window. */
+  #pendingSupervisionDetail: { kind: "worker"; id: string } | null = null;
+  #pendingBroker: string | null = null;
+  /** The one administration view mounted, with the destination it belongs to. */
+  #admin: { mode: AdminDestination; view: MembershipsView | UsageView | ConfigurationView } | null = null;
+  /** The one delegated-change editor open, withdrawn with its context. */
+  #editor: MembershipEditor | GrantEditor | null = null;
+  /** After a receipt: the attribution of the context the change was made in, the view to read again and the receipt to show. */
+  #changeFollowUp: { key: string; destination: DashboardMode; notice: string } | null = null;
   /** Restrictive coverage observed on a real page, scoped to this exact context. */
   #journalProfile: { contextId: string; authorizationVersion: string; streamMode: "snapshot_only" | null } | null = null;
   /** Set only after a context expiry or a session rotation; dropped by any other context change. */
@@ -205,7 +228,7 @@ export class HumanDashboard {
         const readingIdentity = this.#identityLoading;
         // Captured before the purge and holding no server row: at most the view and the typed filters.
         const intent = captureIntent({ cause: error.code, principal: this.#identity?.principal ?? null, context: this.#context, view: this.#mode,
-          now: Date.now(), budgetStopped: this.#api.readBudgetStopped, payload: { supervision: this.#supervisionPreferences, journal: this.#journalPreferences } });
+          now: Date.now(), budgetStopped: this.#api.readBudgetStopped, payload: { supervision: this.#supervisionPreferences, journal: this.#journalPreferences, overview: this.#overviewPreferences } });
         this.#purgeContext(); this.#resume = intent; this.#message = error.message; this.#mode = "contexts"; this.#render();
         if (!readingIdentity && !this.#api.readBudgetStopped) void this.#loadIdentity();
       },
@@ -234,7 +257,7 @@ export class HumanDashboard {
   continuity(): HumanResumeIntent | null {
     if (this.#closed) return null;
     return this.#resume ?? captureIntent({ cause: "session_rotated", principal: this.#identity?.principal ?? null, context: this.#context, view: this.#mode,
-      now: Date.now(), budgetStopped: this.#api.readBudgetStopped, payload: { supervision: this.#supervisionPreferences, journal: this.#journalPreferences } });
+      now: Date.now(), budgetStopped: this.#api.readBudgetStopped, payload: { supervision: this.#supervisionPreferences, journal: this.#journalPreferences, overview: this.#overviewPreferences } });
   }
   /**
    * After an identity read with a pending intention: offer the one equivalent context the control proposes,
@@ -313,7 +336,7 @@ export class HumanDashboard {
     catch (error) { this.#resumeOffer = null; this.#identityError = failure(error); this.#render(); return; }
     const { view, payload } = intent;
     this.#purgeContext(); this.#context = selected; this.#message = "";
-    this.#supervisionPreferences = payload.supervision; this.#journalPreferences = payload.journal; this.#openView(view);
+    this.#supervisionPreferences = payload.supervision; this.#journalPreferences = payload.journal; this.#overviewPreferences = payload.overview; this.#openView(view);
   }
   /** Reads the accesses for a pending resume. A read that fails or does not start ends a confirmation already given. */
   #readForResume() {
@@ -330,6 +353,7 @@ export class HumanDashboard {
     this.close(); this.#onLogout(detail);
   }
   #purgeContext() {
+    this.#closeEditor();
     this.#generation++; this.#selectionGeneration++; this.#invalidation++;
     this.#scope.abort(); this.#scope = new AbortController();
     this.#selectionAbort.abort(); this.#selectionAbort = new AbortController();
@@ -339,6 +363,8 @@ export class HumanDashboard {
     this.#context = null; this.#journalProfile = null; this.#selection = null; this.#resources = readState(); this.#events = readState();
     this.#closeSupervision(); this.#supervisionPreferences = defaultSupervisionPreferences();
     this.#closeJournal(); this.#journalPreferences = defaultJournalPreferences();
+    this.#closeOverview(); this.#overviewPreferences = defaultOverviewPreferences(); this.#closeAdmin();
+    this.#pendingSupervisionDetail = null; this.#pendingBroker = null;
     this.#resume = null; this.#resumeOffer = null; this.#resumeAttempts = 0; clearTimeout(this.#resumeTimer);
     this.#resumeConfirmed = false; this.#resumeInterrupted = false; clearTimeout(this.#offerTimer);
     this.#purgeBrokers(); this.#brokerForbidden = false; this.#brokerLastLaunch = 0;
@@ -351,22 +377,25 @@ export class HumanDashboard {
     this.#dialog?.close(); this.#dialog?.remove(); this.#dialog = null;
     if (this.#downloadUrl) URL.revokeObjectURL(this.#downloadUrl); this.#downloadUrl = null;
   }
-  #canResources() {
-    return !!this.#context && (this.#context.capabilities.includes("read_metadata") ||
-      this.#context.mode === "administration" && this.#context.capabilities.includes("read_tenant_metadata"));
-  }
-  #canBrokers() { return this.#context?.mode === "administration" && this.#context.capabilities.includes("read_broker_registry"); }
+  // Presentation gating only, from the operation catalogue the control established for the selected context.
+  // A capability list never opens a view; Rust revalidates every read.
+  #canResources() { return can(this.#context, "resources_read"); }
+  #canEvents() { return can(this.#context, "events_read_metadata"); }
+  /** The content view also needs the per-resource content permission returned with the resource. */
+  #canContent() { return can(this.#context, "events_read_content"); }
+  #canExport() { return can(this.#context, "events_export"); }
+  #canBrokers() { return can(this.#context, "brokers_read"); }
   #purgeBrokers() {
     this.#brokerGeneration++; this.#brokerAbort.abort(); this.#brokerAbort = new AbortController(); this.#brokers = readState();
     if (this.#mode === "brokers") { this.#dialog?.close(); this.#dialog?.remove(); this.#dialog = null; }
   }
-  #canWorkers() { return this.#api.readProfiles?.worker_registry !== "unavailable" && this.#context?.mode === "administration" && this.#context.capabilities.includes("read_worker_registry"); }
+  #canWorkers() { return can(this.#context, "workers_read"); }
   #purgeWorkers() {
     this.#workerGeneration++; this.#workerAbort.abort(); this.#workerAbort = new AbortController(); this.#workers = readState();
     if (this.#mode === "workers") { this.#dialog?.close(); this.#dialog?.remove(); this.#dialog = null; }
   }
-  #canFederation() { return this.#api.readProfiles?.federation_registry !== "unavailable" && canReadHumanFederation(this.#context); }
-  #canSupervise() { return supervisionAccess(this.#context, this.#api.readProfiles).any; }
+  #canFederation() { return can(this.#context, "federation_read"); }
+  #canSupervise() { return supervisionAccess(this.#context).any; }
   #closeSupervision() { this.#supervision?.close(); this.#supervision = null; }
   #openSupervision() {
     const context = this.#context; if (!context) return;
@@ -377,7 +406,9 @@ export class HumanDashboard {
       onReadStateChange: () => this.#updateRefreshState(),
       hasRegistry: (view) => view === "workers" ? !!this.#canWorkers() : view === "brokers" ? !!this.#canBrokers() : this.#canResources(),
       openRegistry: (view) => this.#openView(view),
-      openJournal: this.#canJournal() ? (resource) => { this.#journalPreferences = { ...defaultJournalPreferences(), resource }; this.#openView("journal"); } : null });
+      openJournal: this.#canJournal() ? (resource) => { this.#journalPreferences = { ...defaultJournalPreferences(), resource }; this.#openView("journal"); } : null,
+      initialDetail: this.#pendingSupervisionDetail });
+    this.#pendingSupervisionDetail = null;
     this.#supervision.start();
   }
   /**
@@ -390,7 +421,7 @@ export class HumanDashboard {
     const confirmed = await this.#loadIdentity();
     if (confirmed && !this.#closed && generation === this.#generation && this.#context && view && view === this.#supervision) void view.reread();
   }
-  #canJournal() { return supervisionAccess(this.#context, this.#api.readProfiles).journal; }
+  #canJournal() { return supervisionAccess(this.#context).journal; }
   #currentJournalProfile() {
     return this.#journalProfile?.contextId === this.#context?.id &&
       this.#journalProfile?.authorizationVersion === this.#context?.authorization_version ? this.#journalProfile : null;
@@ -408,6 +439,121 @@ export class HumanDashboard {
         "Les événements les plus récents que ce contexte peut lire. Le mode de suivi et la portée disponibles seront indiqués après une lecture réussie.";
   }
   #closeJournal() { const previous = this.#journal; this.#journal = null; previous?.close(); }
+  /** "view": the summary is read; "explanation": granted but not served now, the destination says why; null: no destination. */
+  #overviewState() { return destinationState(this.#context, "summary_read"); }
+  #closeOverview() { const previous = this.#overview; this.#overview = null; previous?.close(); }
+  #openOverview() {
+    const context = this.#context;
+    this.#closeOverview();
+    if (!context || this.#overviewState() !== "view") return;
+    const generation = this.#generation;
+    const view: OverviewView = new OverviewView({ context, preferences: this.#overviewPreferences,
+      read: (window, signal) => this.#api.summary(window, signal),
+      budgetStopped: () => this.#api.readBudgetStopped,
+      // The refused summary already withdrew its values: the identity read decides whether the context still stands.
+      onAccessDoubt: () => { if (!this.#closed && generation === this.#generation && this.#overview === view) void this.#loadIdentity(); },
+      onReadStateChange: () => this.#updateRefreshState(),
+      openSubject: this.#canWorkers() || this.#canBrokers() ? (subject) => this.#openSubject(subject) : null,
+      canOpenSubject: (kind) => kind === "worker" ? this.#canWorkers() : this.#canBrokers() });
+    this.#overview = view; view.start();
+  }
+  /** From a point of attention of the summary to the exact view of its subject, when this context offers it. */
+  #openSubject(subject: { kind: "worker" | "broker"; id: string }) {
+    if (this.#closed || this.#mode !== "overview") return;
+    if (subject.kind === "worker" && this.#canWorkers()) {
+      // Only the worker filter is replaced: the refresh period and the other choices of the person stay.
+      this.#supervisionPreferences = { ...this.#supervisionPreferences, fleet: { ...defaultFleetFilter(), text: subject.id }, rendered: RENDER_STEP };
+      this.#pendingSupervisionDetail = { kind: "worker", id: subject.id }; this.#openView("supervision");
+    } else if (subject.kind === "broker" && this.#canBrokers()) {
+      // The registry read starts with the view; its answer opens this broker when it is on the page read.
+      this.#openView("brokers"); if ((this.#mode as DashboardMode) === "brokers") this.#pendingBroker = subject.id;
+    }
+  }
+  /** A destination granted but not served now: why, operation by operation, with no read and no value in its place. */
+  #renderUnavailable(title: string, operations: readonly HumanOperation[], key: string) {
+    const node = el("section", "panel human-overview-unavailable", el("h2", "", title),
+      ...operations.map((operation) => el("p", "", accessExplanation(this.#context, operation))),
+      el("p", "muted", "Aucune lecture n’est émise et aucune valeur n’est affichée à sa place. Les autres destinations de ce contexte gardent leurs propres accès."),
+      action("Relire mes accès", key, () => this.#openView("contexts")));
+    node.setAttribute("role", "status");
+    return node;
+  }
+  #adminState(mode: AdminDestination) { return adminDestinationState(this.#context, mode); }
+  #closeAdmin() { const previous = this.#admin; this.#admin = null; previous?.view.close(); }
+  #openAdmin(mode: AdminDestination) {
+    const context = this.#context;
+    this.#closeAdmin();
+    if (!context || this.#adminState(mode) !== "view") return;
+    const generation = this.#generation;
+    const host = { context, budgetStopped: () => this.#api.readBudgetStopped,
+      // The refused read already withdrew its values: the identity read decides whether the context still stands.
+      onAccessDoubt: () => { if (!this.#closed && generation === this.#generation && this.#admin?.view === view) void this.#loadIdentity(); },
+      onReadStateChange: () => this.#updateRefreshState() };
+    // The delegated membership change is a later slice: no change command is offered here.
+    const view: MembershipsView | UsageView | ConfigurationView = mode === "memberships" ?
+      // The delegated change is offered only when the catalogue grants and serves memberships_manage.
+      new MembershipsView({ ...host, read: (cursor, signal) => this.#api.memberships(cursor, signal),
+        change: delegationOffers(context).memberships ? (membership) => this.#editMembership(membership) : null }) :
+      mode === "usage" ? new UsageView({ ...host, quota: (signal) => this.#api.quota(signal), usage: (cursor, signal) => this.#api.usage(cursor, signal) }) :
+        new ConfigurationView({ ...host, read: (signal) => this.#api.configuration(signal) });
+    this.#admin = { mode, view }; view.start();
+  }
+  #closeEditor() { const editor = this.#editor; this.#editor = null; editor?.close(); }
+  #editMembership(membership: Membership) {
+    const context = this.#context;
+    if (!context || membership.own || !delegationOffers(context).memberships || this.#closed) return;
+    this.#closeEditor();
+    const generation = this.#generation;
+    const editor: MembershipEditor = new MembershipEditor({ context, membership,
+      send: (change, signal) => this.#api.changeMembership(membership.membership_id, change, signal),
+      onApplied: (receipt) => {
+        if (this.#editor !== editor) return;
+        void this.#followChange("memberships", `Changement enregistré : appartenance de ${membership.display_name} en révision ${receipt.membership_revision} · révision d’autorisation ${receipt.authorization_revision} · position d’audit ${receipt.audit_seq}.`);
+      },
+      onStale: () => { if (this.#editor === editor && this.#mode === "memberships") void this.#admin?.view.refresh(); },
+      onRefused: () => { if (this.#editor !== editor) return; this.#closeEditor(); if (generation === this.#generation) void this.#loadIdentity(); },
+      onClosed: () => { if (this.#editor === editor) this.#editor = null; } });
+    this.#editor = editor; editor.open();
+  }
+  #editGrant(resource: ResourceRef) {
+    const context = this.#context; const self = this.#identity?.principal;
+    if (!context || !self || context.mode !== "administration" || !delegationOffers(context).grants || this.#closed) return;
+    this.#closeEditor();
+    const generation = this.#generation;
+    const editor: GrantEditor = new GrantEditor({ context, self, resource,
+      read: (signal) => this.#api.grant(resource, signal),
+      members: (cursor, signal) => this.#api.memberships(cursor, signal),
+      send: (change, owner, signal) => this.#api.changeGrant(change, owner, signal),
+      onApplied: (receipt) => {
+        if (this.#editor !== editor) return;
+        void this.#followChange("resources", `Partages enregistrés : ${resource.kind} ${resource.resource_id} en révision ${receipt.grant_revision} · révision d’autorisation ${receipt.authorization_revision} · position d’audit ${receipt.audit_seq}.`);
+      },
+      onRefused: () => { if (this.#editor !== editor) return; this.#closeEditor(); if (generation === this.#generation) void this.#loadIdentity(); },
+      onClosed: () => { if (this.#editor === editor) this.#editor = null; } });
+    this.#editor = editor; editor.open();
+  }
+  /**
+   * A change was recorded under a new authorization revision: the selected context is now refused. The accesses are
+   * read again, the one context of the same attribution the control proposes is selected, and the view is read again
+   * with the receipt displayed. Without exactly one such context the person chooses, with the receipt kept on screen.
+   */
+  async #followChange(destination: DashboardMode, notice: string) {
+    const previous = this.#context; if (!previous || this.#closed) return;
+    this.#closeEditor();
+    this.#changeFollowUp = { key: grantKey(previous), destination, notice };
+    const read = await this.#loadIdentity();
+    const followUp = this.#changeFollowUp; this.#changeFollowUp = null;
+    if (!followUp || this.#closed) return;
+    if (read !== true) { this.#message = `${notice} Vos accès n’ont pas pu être relus : actualisez la liste des contextes.`; this.#render(); return; }
+    if (this.#context?.id === previous.id) { this.#message = notice; this.#openView(destination); return; }
+    const candidates = (this.#identity?.contexts ?? []).filter((context) => grantKey(context) === followUp.key && Date.parse(context.expires_at) > Date.now());
+    if (candidates.length !== 1) {
+      this.#message = `${notice} Choisissez de nouveau un contexte : le contrôle n’en propose pas un seul de mêmes droits.`; this.#mode = "contexts"; this.#render(); return;
+    }
+    try { this.#purgeContext(); this.#context = this.#api.selectContext(candidates[0]!.id); }
+    catch (error) { this.#identityError = failure(error); this.#message = notice; this.#mode = "contexts"; this.#render(); return; }
+    this.#message = notice; this.#openView(followUp.destination);
+  }
   #openJournal() {
     const context = this.#context; if (!context) return;
     this.#closeJournal();
@@ -450,7 +596,23 @@ export class HumanDashboard {
     // One view owns server data at a time: leaving the unified view aborts its reads and drops its rows.
     if (mode !== "supervision" && this.#mode === "supervision") this.#closeSupervision();
     if (mode !== "journal" && this.#mode === "journal") this.#closeJournal();
-    if (mode === "journal" && this.#canJournal()) {
+    if (mode !== this.#mode) this.#closeEditor();
+    if (mode !== "overview" && this.#mode === "overview") this.#closeOverview();
+    if (this.#admin && mode !== this.#admin.mode) this.#closeAdmin();
+    if (mode !== "brokers") this.#pendingBroker = null;
+    if (mode === "overview" && this.#overviewState()) {
+      if (this.#mode !== mode || this.#overviewState() === "view" && !this.#overview) {
+        this.#stopViewReads(); this.#resources = readState(); this.#events = readState(); this.#selection = null;
+        this.#purgeBrokers(); this.#purgeWorkers(); this.#purgeFederation(); this.#mode = mode; this.#openOverview();
+      } else void this.#overview?.refresh();
+      this.#streamStatus = this.#overview ? "Synthèse · instantanés ponctuels" : "Synthèse indisponible pour ce contexte";
+    } else if (isAdminMode(mode) && this.#adminState(mode)) {
+      if (this.#mode !== mode || this.#adminState(mode) === "view" && !this.#admin) {
+        this.#stopViewReads(); this.#resources = readState(); this.#events = readState(); this.#selection = null;
+        this.#purgeBrokers(); this.#purgeWorkers(); this.#purgeFederation(); this.#mode = mode; this.#openAdmin(mode);
+      } else void this.#admin?.view.refresh();
+      this.#streamStatus = this.#admin ? "Administration · lectures ponctuelles" : "Lecture indisponible pour ce contexte";
+    } else if (mode === "journal" && this.#canJournal()) {
       if (this.#mode !== mode || !this.#journal) {
         this.#stopViewReads(); this.#resources = readState(); this.#events = readState(); this.#selection = null;
         this.#purgeBrokers(); this.#purgeWorkers(); this.#purgeFederation(); this.#mode = mode; this.#openJournal();
@@ -487,7 +649,7 @@ export class HumanDashboard {
       this.#stopViewReads(); this.#purgeBrokers(); this.#purgeWorkers(); this.#purgeFederation(); this.#mode = mode; this.#resources = readState();
       this.#events = readState(); this.#selection = null;
       this.#startStream(); this.#refreshActive(false);
-    } else if (mode === "events" && this.#selection && this.#canResources()) {
+    } else if (mode === "events" && this.#selection && this.#canEvents()) {
       this.#mode = mode; this.#startStream(); this.#refreshActive(false);
     }
     this.#render(); this.#page?.querySelector<HTMLElement>("h1")?.focus({ preventScroll: true });
@@ -498,15 +660,18 @@ export class HumanDashboard {
     // The unified view runs its own bounded cycle; only an explicit action reads from here.
     if (this.#mode === "supervision") { if (!automatic) void this.#supervision?.refresh(); return; }
     if (this.#mode === "journal") { if (!automatic) void this.#journal?.reload(); return; }
+    if (this.#mode === "overview") { if (!automatic) void this.#overview?.refresh(); return; }
+    if (isAdminMode(this.#mode)) { if (!automatic) void this.#admin?.view.refresh(); return; }
     if (this.#mode === "federation" && this.#canFederation() && !this.#federationForbidden) void this.#loadFederation(undefined, automatic);
     else if (this.#mode === "workers" && this.#canWorkers() && !this.#workerForbidden) void this.#loadWorkers(undefined, undefined, automatic);
     else if (this.#mode === "brokers" && this.#canBrokers() && !this.#brokerForbidden) void this.#loadBrokers(undefined, undefined, automatic);
     else if (this.#mode === "resources" && this.#canResources()) void this.#loadResources();
-    else if (this.#mode === "events" && this.#selection && this.#canResources()) void this.#loadEvents();
+    else if (this.#mode === "events" && this.#selection && this.#canEvents()) void this.#loadEvents();
   }
   #refreshReading() {
     return this.#identityLoading || this.#mode === "supervision" && this.#supervision?.reading === true ||
-      this.#mode === "journal" && this.#journal?.reading === true;
+      this.#mode === "journal" && this.#journal?.reading === true || this.#mode === "overview" && this.#overview?.reading === true ||
+      isAdminMode(this.#mode) && this.#admin?.view.reading === true;
   }
   #updateRefreshState() {
     this.#navigation?.querySelector('[data-focus-key="human-refresh"]')?.setAttribute("aria-disabled", String(this.#refreshReading()));
@@ -535,11 +700,12 @@ export class HumanDashboard {
     this.#scopeLabel!.textContent = `${this.#identity?.display_name ?? "Compte personnel"}${this.#context ? ` · ${modeName(this.#context)} · ${this.#context.tenant_id}` : ""}`;
     this.#streamLabel!.textContent = this.#context ? this.#streamStatus : "Aucun contexte sélectionné";
     this.#notice.hidden = !this.#message; this.#notice.textContent = this.#message;
-    const destinations: DashboardMode[] = ["contexts", ...(this.#canSupervise() ? ["supervision" as const] : []), ...(this.#canJournal() ? ["journal" as const] : []), "resources", "events", ...(this.#canBrokers() ? ["brokers" as const] : []), ...(this.#canWorkers() ? ["workers" as const] : []), ...(this.#canFederation() ? ["federation" as const] : [])];
+    const destinations: DashboardMode[] = ["contexts", ...(this.#overviewState() ? ["overview" as const] : []), ...ADMIN_MODES.filter((mode) => this.#adminState(mode)), ...(this.#canSupervise() ? ["supervision" as const] : []), ...(this.#canJournal() ? ["journal" as const] : []), "resources", "events", ...(this.#canBrokers() ? ["brokers" as const] : []), ...(this.#canWorkers() ? ["workers" as const] : []), ...(this.#canFederation() ? ["federation" as const] : [])];
     const nav = destinations.map((mode) => {
-      const label = { contexts: "Contextes", supervision: "Supervision", journal: "Journal", resources: "Ressources", events: "Événements", brokers: "Brokers", workers: "Workers", federation: "Fédération" }[mode];
+      const label = { contexts: "Contextes", overview: this.#context?.mode === "administration" ? "Vue 360°" : "Mon espace",
+        memberships: "Utilisateurs", usage: "Quotas et usage", configuration: "Configuration", supervision: "Supervision", journal: "Journal", resources: "Ressources", events: "Événements", brokers: "Brokers", workers: "Workers", federation: "Fédération" }[mode];
       const node = action(label, `human-nav-${mode}`, () => this.#openView(mode),
-        mode === "resources" && !this.#canResources() || mode === "events" && (!this.#selection || !this.#canResources()));
+        mode === "resources" && !this.#canResources() || mode === "events" && (!this.#selection || !this.#canEvents()));
       node.className = "button human-tab"; if (mode === this.#mode) node.setAttribute("aria-current", "page"); return node;
     });
     // The destination row may scroll sideways: keep the user's position, bring a newly opened destination into
@@ -561,14 +727,21 @@ export class HumanDashboard {
     row.scrollLeft = scrolled;
     if (this.#navigation.dataset.mode !== this.#mode) row.querySelector<HTMLElement>('[aria-current="page"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
     this.#navigation.dataset.mode = this.#mode; this.#markNavigation();
-    const heading = el("h1", "", { contexts: "Choisir un contexte.", supervision: this.#context?.mode === "administration" ? "Supervision du tenant." : "Supervision de mon espace.", journal: "Journal des événements autorisés.", resources: "Ressources autorisées.", events: "Événements autorisés.", brokers: "Brokers enregistrés du tenant.", workers: "Workers enregistrés du tenant.", federation: "Workers et brokers du tenant." }[this.#mode]);
+    const heading = el("h1", "", { contexts: "Choisir un contexte.", overview: this.#context?.mode === "administration" ? "Vue 360° du tenant." : "Mon espace.",
+      memberships: "Utilisateurs de l’organisation.", usage: "Quotas et usage du tenant.", configuration: "Configuration effective.", supervision: this.#context?.mode === "administration" ? "Supervision du tenant." : "Supervision de mon espace.", journal: "Journal des événements autorisés.", resources: "Ressources autorisées.", events: "Événements autorisés.", brokers: "Brokers enregistrés du tenant.", workers: "Workers enregistrés du tenant.", federation: "Workers et brokers du tenant." }[this.#mode]);
     heading.tabIndex = -1;
     const sections = [el("div", "page-heading", el("p", "eyebrow", this.#identity?.authentication.method === "oidc_access_token" ?
       "COMPTE OIDC / CONSULTATION NOMINATIVE" : "COMPTE LOCAL / CONSULTATION NOMINATIVE"), heading,
       el("p", "page-description", this.#mode === "journal" ? this.#journalDescription() :
+        this.#mode === "memberships" ? "Appartenances de l’organisation que ce contexte administre, lues dans le contrôle. Cette vue ne modifie rien : création de compte, identifiant et changement délégué restent hors de cette page." :
+        this.#mode === "usage" ? "Politique de quota du tenant, réservations durables et allocations terminales observées. Ni consommation mesurée, ni prix, ni facture." :
+        this.#mode === "configuration" ? "Configuration effective du contrôle, axe par axe, avec sa provenance. Types et modes seulement : ni adresse, ni chemin, ni secret." :
+        this.#mode === "overview" ? (this.#context?.mode === "administration" ?
+        "Synthèse de tout ce que ce contexte d’administration peut lire dans le tenant, en un seul instantané du contrôle. Une section non accordée ou indisponible le dit ; le navigateur ne compte rien lui-même." :
+        "Synthèse de vos ressources et de celles partagées avec vous, en un seul instantané du contrôle. Une section non accordée ou indisponible le dit ; le navigateur ne compte rien lui-même.") :
         this.#mode === "supervision" ? (this.#context?.mode === "administration" ?
         "Brokers, workers et ressources que ce contexte d’administration peut lire, réunis sur une page. Chaque valeur vient d’une lecture autorisée par le contrôle ; ce qui n’a pas été lu reste inconnu." :
-        "Les ressources que vous possédez ou qui vous sont partagées, et ce que ce contexte personnel ne permet pas de lire. Chaque valeur vient d’une lecture autorisée par le contrôle.") : this.#mode === "federation" ? "Vue d’administration autorisée par read_worker_registry et read_broker_registry. Workers et brokers enregistrés restent visibles dans deux pages indépendantes du même tenant." : this.#mode === "workers" ? "Workers de tout le tenant · autorisation read_worker_registry. États du contrôle et observations runtime restent distincts." : this.#mode === "brokers" ? "Infrastructure de tout le tenant · autorisation read_broker_registry. Les permissions et l’évaluation du registre proviennent du contrôle." :
+        "Les ressources que vous possédez ou qui vous sont partagées, et ce que ce contexte personnel ne permet pas de lire. Chaque valeur vient d’une lecture autorisée par le contrôle.") : this.#mode === "federation" ? "Vue d’administration offerte par l’opération federation_read de ce contexte. Workers et brokers enregistrés restent visibles dans deux pages indépendantes du même tenant." : this.#mode === "workers" ? "Workers de tout le tenant · opération workers_read de ce contexte. États du contrôle et observations runtime restent distincts." : this.#mode === "brokers" ? "Infrastructure de tout le tenant · opération brokers_read de ce contexte. Les permissions et l’évaluation du registre proviennent du contrôle." :
         "Les permissions sont vérifiées par le serveur. Une ressource visible ne donne aucun droit implicite sur son contenu ou son export.")),
       ...(this.#api.readBudgetStopped ? [el("div", "control-error human-budget-stop", el("p", "", "Lecture automatique suspendue : budget durable de lecture atteint. Contactez l’opérateur ; changer de vue ou de contexte ne réinitialise pas ce budget."),
         action("Relire après intervention de l’opérateur", "human-operator-retry", () => {
@@ -579,8 +752,11 @@ export class HumanDashboard {
         el("strong", "", `${modeName(this.#context)} · ${this.#context.tenant_id}`),
         el("p", "", `Organisation : ${this.#context.organization_scope}`),
         el("p", "", `Contexte valable jusqu’au ${formatDate(this.#context.expires_at, true)}. Source : identité authentifiée du contrôle.`))) : "",
-      this.#mode === "supervision" || this.#mode === "journal" ? "" : this.#mode === "contexts" ? this.#renderContexts() : this.#mode === "resources" ? this.#renderResources() : this.#mode === "brokers" ? this.#renderBrokers() : this.#mode === "workers" ? this.#renderWorkers() : this.#mode === "federation" ? this.#renderFederation() : this.#renderEvents()];
-    const live = this.#mode === "supervision" ? this.#supervision?.element : this.#mode === "journal" ? this.#journal?.element : undefined;
+      this.#mode === "supervision" || this.#mode === "journal" ? "" : this.#mode === "overview" ? (this.#overview ? "" : this.#renderUnavailable("Synthèse indisponible pour ce contexte", ["summary_read"], "human-overview-access")) :
+        isAdminMode(this.#mode) ? (this.#admin ? "" : this.#renderUnavailable({ memberships: "Utilisateurs indisponibles pour ce contexte", usage: "Quotas et usage indisponibles pour ce contexte",
+          configuration: "Configuration indisponible pour ce contexte" }[this.#mode], ADMIN_DESTINATIONS[this.#mode], `human-${this.#mode}-access`)) : this.#mode === "contexts" ? this.#renderContexts() : this.#mode === "resources" ? this.#renderResources() : this.#mode === "brokers" ? this.#renderBrokers() : this.#mode === "workers" ? this.#renderWorkers() : this.#mode === "federation" ? this.#renderFederation() : this.#renderEvents()];
+    const live = this.#mode === "supervision" ? this.#supervision?.element : this.#mode === "journal" ? this.#journal?.element :
+      this.#mode === "overview" ? this.#overview?.element : isAdminMode(this.#mode) ? this.#admin?.view.element : undefined;
     if (live && live.parentElement === this.#page) {
       // The unified view keeps its own element across dashboard renders, so typed filters keep focus and caret.
       while (this.#page.firstChild && this.#page.firstChild !== live) this.#page.firstChild.remove();
@@ -604,6 +780,9 @@ export class HumanDashboard {
     // The stop notice of the dashboard follows the budget of the client: render again once the read settled.
     if (this.#mode === "supervision" && this.#supervision) { await this.#supervision.refresh(); this.#render(); return; }
     if (this.#mode === "journal" && this.#journal) { await this.#journal.reload(); this.#render(); return; }
+    // Without a served summary there is nothing to read again here: only the accesses, which may now serve it.
+    if (this.#mode === "overview") { if (this.#overview) await this.#overview.refresh(); else await this.#loadIdentity(true); this.#render(); return; }
+    if (isAdminMode(this.#mode)) { if (this.#admin) await this.#admin.view.refresh(); else await this.#loadIdentity(true); this.#render(); return; }
     if (this.#mode === "federation" && this.#canFederation() && !this.#federationForbidden) {
       await this.#loadFederation(undefined, false, true); return;
     }
@@ -616,7 +795,7 @@ export class HumanDashboard {
     if (this.#resourceStreamAwaitingAccess()) { await this.#revalidateVisibleContext(true); return; }
     const generation = this.#generation; const mode = this.#mode;
     const success = mode === "resources" && this.#canResources() ? await this.#loadResources(undefined, undefined, true) :
-      mode === "events" && this.#selection && this.#canResources() ? await this.#loadEvents(undefined, undefined, true) : null;
+      mode === "events" && this.#selection && this.#canEvents() ? await this.#loadEvents(undefined, undefined, true) : null;
     if (success && !this.#closed && generation === this.#generation && mode === this.#mode && !this.#api.readBudgetStopped && this.#canResources()) {
       this.#startStream(); return;
     }
@@ -670,7 +849,8 @@ export class HumanDashboard {
     const lost = this.#resume?.cause === "session_rotated" ? "Votre session a été renouvelée et les données affichées ont été retirées." :
       "Le contexte précédent a expiré et ses données ont été retirées.";
     // The offer stays focusable while the accesses are read: announced as unavailable, it ignores activation.
-    const confirm = offer ? action(`Reprendre ${this.#resume?.view === "journal" ? "le journal" : "la supervision"} · ${modeName(offer).toLowerCase()} · ${offer.tenant_id}`, "human-resume",
+    const resumed = this.#resume?.view === "journal" ? "le journal" : this.#resume?.view === "overview" ? offer?.mode === "administration" ? "la vue 360°" : "mon espace" : "la supervision";
+    const confirm = offer ? action(`Reprendre ${resumed} · ${modeName(offer).toLowerCase()} · ${offer.tenant_id}`, "human-resume",
       () => { if (!this.#identityLoading) this.#acceptResume(); }) : null;
     confirm?.setAttribute("aria-disabled", String(this.#identityLoading));
     const resume = offer ? el("div", "control-status human-resume",
@@ -692,15 +872,12 @@ export class HumanDashboard {
         action(`Ouvrir ${modeName(context).toLowerCase()} · ${context.tenant_id}`, `context-${index}`, () => {
           try {
             this.#purgeContext(); this.#context = this.#api.selectContext(context.id); this.#message = "";
-            if (this.#canResources()) this.#openView("resources");
-            else if (this.#canFederation()) this.#openView("federation");
-            else if (this.#canWorkers()) this.#openView("workers");
-            else if (this.#canBrokers()) this.#openView("brokers");
-            else if (this.#canSupervise()) this.#openView("supervision");
-            else { this.#mode = "contexts"; this.#message = "Ce contexte n’offre aucune vue de consultation disponible avec ses capacités. Faites vérifier vos accès."; this.#render(); }
+            const landing = landingDestination(this.#context);
+            if (landing) this.#openView(landing);
+            else { this.#mode = "contexts"; this.#message = "Ce contexte n’offre aucune opération de consultation disponible dans ce build. Faites vérifier vos accès."; this.#render(); }
           } catch (error) { this.#identityError = failure(error); this.#render(); }
         }, this.#identityLoading || Date.parse(context.expires_at) <= Date.now()),
-        supervisionAccess(context, this.#api.readProfiles).any ? action(`Superviser ${modeName(context).toLowerCase()} · ${context.tenant_id}`, `context-supervise-${index}`, () => {
+        supervisionAccess(context).any ? action(`Superviser ${modeName(context).toLowerCase()} · ${context.tenant_id}`, `context-supervise-${index}`, () => {
           try {
             this.#purgeContext(); this.#context = this.#api.selectContext(context.id); this.#message = ""; this.#openView("supervision");
           } catch (error) { this.#identityError = failure(error); this.#render(); }
@@ -793,6 +970,14 @@ export class HumanDashboard {
     } finally {
       state.loading = false;
       if (!this.#closed && generation === this.#generation && this.#mode === "brokers") this.#render();
+    }
+    // A broker asked from the summary opens once, after this read, when it is on the page the control returned.
+    const pending = this.#pendingBroker;
+    if (pending && !this.#closed && generation === this.#generation && request === this.#brokerGeneration && this.#mode === "brokers") {
+      this.#pendingBroker = null;
+      const row = this.#brokers.value?.items.find((item) => item.broker_id === pending);
+      if (row) this.#showBroker(row);
+      else if (this.#brokers.value) { this.#message = `Le broker ${pending} ne figure pas sur cette page du registre : parcourez les pages suivantes.`; this.#render(); }
     }
   }
   async #loadWorkers(cursor = this.#workers.cursor, history = this.#workers.history, automatic = false, operatorRetry = false) {
@@ -1004,13 +1189,17 @@ export class HumanDashboard {
               el("p", "muted", item.owner.kind === "human_local" ? `Propriétaire local : ${item.owner.account_id}` :
                 `Propriétaire OIDC : ${item.owner.subject} · ${item.owner.issuer}`), el("p", "mono", `Révision ${item.revision}`)),
             el("div", "human-resource-actions",
-              action("Métadonnées", `resource-metadata-${index}`, () => this.#select(item, "metadata"), !item.permissions.metadata),
-              action("Contenu", `resource-content-${index}`, () => this.#select(item, "content"), this.#snapshotOnly() || !item.permissions.metadata || !item.permissions.content),
-              badge(item.permissions.export ? this.#snapshotOnly() ? "Droit d’export accordé · indisponible pour ce profil" : "Export autorisé selon la projection" : "Export non autorisé"))))),
+              action("Métadonnées", `resource-metadata-${index}`, () => this.#select(item, "metadata"), !this.#canEvents() || !item.permissions.metadata),
+              action("Contenu", `resource-content-${index}`, () => this.#select(item, "content"), this.#snapshotOnly() || !this.#canContent() || !item.permissions.metadata || !item.permissions.content),
+              badge(item.permissions.export ? this.#snapshotOnly() ? "Droit d’export accordé · indisponible pour ce profil" : "Export autorisé selon la projection" : "Export non autorisé"),
+              // Delegated sharing: offered in the administration context when the catalogue grants and serves grants_manage.
+              this.#context?.mode === "administration" && delegationOffers(this.#context).grants ?
+                action("Gérer les partages", `resource-grants-${index}`, () => this.#editGrant(item.resource)) : null)))),
       this.#pagination(state, (next, previous) => { void this.#loadResources(next, previous); }));
   }
   #select(item: HumanResource, view: HumanView) {
-    if (!this.#canResources() || this.#mode !== "resources" || !item.permissions.metadata || view === "content" && (!item.permissions.content || this.#snapshotOnly())) return;
+    if (!this.#canResources() || !this.#canEvents() || this.#mode !== "resources" || !item.permissions.metadata ||
+      view === "content" && (!this.#canContent() || !item.permissions.content || this.#snapshotOnly())) return;
     this.#selectionGeneration++; this.#selectionAbort.abort(); this.#selectionAbort = new AbortController();
     this.#streamAbort.abort(); this.#exportAbort.abort(); this.#detailAbort.abort(); this.#dialog?.close(); this.#dialog?.remove(); this.#dialog = null;
     if (this.#downloadUrl) URL.revokeObjectURL(this.#downloadUrl); this.#downloadUrl = null;
@@ -1027,7 +1216,7 @@ export class HumanDashboard {
   }
   async #loadEvents(cursor = this.#events.cursor, history = this.#events.history, operatorRetry = false) {
     const selection = this.#selection;
-    if (!selection || this.#mode !== "events" || !this.#canResources() || this.#closed || this.#events.loading ||
+    if (!selection || this.#mode !== "events" || !this.#canEvents() || this.#closed || this.#events.loading ||
       this.#resourceStreamAwaitingAccess() || this.#api.readBudgetStopped && !operatorRetry) return;
     const state = this.#events; const generation = this.#generation; const selected = this.#selectionGeneration; const invalidation = this.#invalidation;
     state.loading = true; this.#render();
@@ -1068,7 +1257,7 @@ export class HumanDashboard {
       this.#pagination(state, (next, previous) => { void this.#loadEvents(next, previous); }), this.#renderExport());
   }
   #usesResourceStream() {
-    return this.#canResources() && !this.#snapshotOnly() && (this.#mode === "resources" || this.#mode === "events");
+    return can(this.#context, "events_stream") && !this.#snapshotOnly() && (this.#mode === "resources" || this.#mode === "events");
   }
   #resourceStreamAwaitingAccess() { return this.#resourceStreamNeedsAccess && this.#usesResourceStream(); }
   #startStream() {
@@ -1114,7 +1303,7 @@ export class HumanDashboard {
   }
   async #showEvent(item: HumanEvent) {
     if (this.#snapshotOnly() || this.#resourceStreamAwaitingAccess()) return;
-    const selection = this.#selection; if (!selection || this.#mode !== "events" || !this.#canResources() || this.#api.readBudgetStopped) return;
+    const selection = this.#selection; if (!selection || this.#mode !== "events" || !this.#canEvents() || this.#api.readBudgetStopped) return;
     this.#detailAbort.abort(); this.#detailAbort = new AbortController(); const request = ++this.#detailGeneration;
     this.#dialog?.remove();
     const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -1145,6 +1334,8 @@ export class HumanDashboard {
     }
   }
   #renderExport() {
+    // Two server facts: the context offers the export operation, and this resource grants its own export.
+    const offered = this.#canExport();
     const permitted = !!this.#selection?.item.permissions.export;
     const covered = !this.#snapshotOnly();
     const status = el("p", "human-export-status", this.#exporting ? `${this.#exportPages} page(s) reçue(s), ${this.#exportBytes} octets · export encore partiel, aucun téléchargement.` : this.#exportMessage);
@@ -1152,14 +1343,15 @@ export class HumanDashboard {
     return el("section", "human-export", el("h3", "", "Exporter cette sélection"),
       el("p", "muted", "JSON · ressource et projection affichées ci-dessus. Limites de cet onglet : 25 pages, 4 Mio, 60 secondes. Le fichier est proposé seulement à la fin de la sélection autorisée, avec ses reçus de lecture."),
       action(`Exporter ${this.#selection?.view === "content" ? "le contenu" : "les métadonnées"}`, "human-export", () => { void this.#export(); },
-        !covered || !permitted || this.#exporting || this.#resourceStreamAwaitingAccess()),
+        !covered || !offered || !permitted || this.#exporting || this.#resourceStreamAwaitingAccess()),
       this.#exporting ? action("Annuler l’export", "human-export-cancel", () => this.#exportAbort.abort()) : null,
       !covered ? el("p", "muted", "Export indisponible pour ce profil, même lorsque le droit d’export est accordé.") : null,
+      !offered ? el("p", "muted", "Ce contexte n’offre pas l’opération events_export : aucun export n’est émis.") : null,
       !permitted ? el("p", "muted", "Le contrôle n’accorde pas le droit d’export pour cette ressource.") : null, status);
   }
   async #export() {
     if (this.#snapshotOnly() || this.#resourceStreamAwaitingAccess()) return;
-    const selection = this.#selection; if (!selection || this.#mode !== "events" || !this.#canResources() || !selection.item.permissions.export || this.#exporting || this.#api.readBudgetStopped) return;
+    const selection = this.#selection; if (!selection || this.#mode !== "events" || !this.#canEvents() || !this.#canExport() || !selection.item.permissions.export || this.#exporting || this.#api.readBudgetStopped) return;
     this.#exportAbort.abort(); this.#exportAbort = new AbortController(); const signal = this.#exportAbort.signal;
     const generation = this.#generation; const selected = this.#selectionGeneration;
     this.#exporting = true; this.#exportPages = 0; this.#exportBytes = 0; this.#exportMessage = ""; this.#render();

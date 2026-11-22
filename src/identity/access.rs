@@ -21,6 +21,10 @@ pub struct HumanContextV1 {
     pub membership_revision: String,
     pub authorization_version: String,
     pub expires_at: String,
+    /// The control's closed operation catalogue for this context. Presentation
+    /// only: every route revalidates. Omitted by gateways that predate it.
+    #[serde(default)]
+    pub operations: Vec<HumanOperationAccessV1>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

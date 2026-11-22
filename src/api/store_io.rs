@@ -152,6 +152,23 @@ impl CleanupReservation {
     }
 }
 
+/// Drop the operation, then the I/O permits, then the retained guard. This
+/// order also applies if Tokio drops the work before running it.
+struct BlockingStoreWork<F, R> {
+    operation: F,
+    _permits: (OwnedSemaphorePermit, Option<OwnedSemaphorePermit>),
+    _retained: R,
+}
+
+impl<F, R> BlockingStoreWork<F, R> {
+    fn run<T>(self) -> ApiResult<T>
+    where
+        F: FnOnce() -> ApiResult<T>,
+    {
+        (self.operation)()
+    }
+}
+
 pub(super) async fn run<T, F>(
     shared: Arc<Gate>,
     tenant: Option<Arc<Gate>>,
@@ -163,16 +180,35 @@ where
     T: Send + 'static,
     F: FnOnce() -> ApiResult<T> + Send + 'static,
 {
+    run_retaining(shared, tenant, lane, expensive, (), operation).await
+}
+
+/// Retain a guard until both the operation and its I/O permits are released.
+pub(super) async fn run_retaining<T, F, R>(
+    shared: Arc<Gate>,
+    tenant: Option<Arc<Gate>>,
+    lane: Lane,
+    expensive: bool,
+    retained: R,
+    operation: F,
+) -> ApiResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> ApiResult<T> + Send + 'static,
+    R: Send + 'static,
+{
     // Never enqueue a waiter for admission. Only admitted tasks reach Tokio's
     // blocking pool, and both bounds survive a dropped HTTP request future.
     let shared_permit = shared.admit(lane, false)?;
     let tenant_permit = tenant.map(|gate| gate.admit(lane, expensive)).transpose()?;
-    tokio::task::spawn_blocking(move || {
-        let _permits = (shared_permit, tenant_permit);
-        operation()
-    })
-    .await
-    .map_err(|_| unavailable(anyhow::anyhow!("blocking Store task failed")))?
+    let work = BlockingStoreWork {
+        operation,
+        _permits: (shared_permit, tenant_permit),
+        _retained: retained,
+    };
+    tokio::task::spawn_blocking(move || work.run())
+        .await
+        .map_err(|_| unavailable(anyhow::anyhow!("blocking Store task failed")))?
 }
 
 #[cfg(test)]

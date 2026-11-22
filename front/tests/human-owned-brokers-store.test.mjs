@@ -4,10 +4,12 @@ import { HumanApiClient } from "../src/human-api.ts";
 import { SupervisionStore } from "../src/supervision-store.ts";
 import { accessLines, fleetCoverage, supervisionAccess } from "../src/supervision-model.ts";
 import { identity, errorResponse } from "./human-fixtures.mjs";
-import { adminContext, contextId, resourcesPage, sessionResource } from "./supervision-fixtures.mjs";
+import { adminContext, contextId, ownedAdminOperations, resourcesPage, sessionResource } from "./supervision-fixtures.mjs";
+import { catalogue } from "./human-fixtures.mjs";
 import { ownedBrokerPage, ownedReadProfiles } from "./owned-brokers-fixture.mjs";
 
-const frame = () => ({ ...identity(), contexts: [adminContext()], read_profiles: ownedReadProfiles() });
+// The owned profile is announced twice by the control: as read profiles, and as the availability of each operation.
+const frame = () => ({ ...identity(), contexts: [adminContext(undefined, { operations: ownedAdminOperations() })], read_profiles: ownedReadProfiles() });
 const clock = () => ({ now: () => 100000, visible: () => true, setTimer: () => 1, clearTimer() {} });
 const deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; };
 
@@ -28,7 +30,8 @@ test("owned: Supervision lit les brokers disponibles et distingue workers indisp
     assert.equal(store.state.brokers.phase, "ready"); assert.equal(store.state.brokers.value.profile, "human_broker_registry_owned_v1");
     assert.equal(store.state.workers.phase, "unavailable"); assert.equal(store.state.workers.value, null);
     assert.equal(store.state.workers.loadedAt, null); assert.equal(store.state.access.composed, false);
-    assert.match(accessLines(context, client.readProfiles).find((line) => line.key === "workers").detail, /permission|Permission/);
+    const workers = accessLines(context).find((line) => line.key === "workers");
+    assert.equal(workers.state, "unavailable"); assert.match(workers.detail, /^Opération workers_read accordée .*profil de sources adopté/);
     const summary = (phase) => ({ phase, loaded: 0, hasMore: false, stale: false, capped: false });
     const coverage = fleetCoverage({ workers: summary("unavailable"), brokers: summary("ready"), resources: summary("ready"), contextsComplete: true });
     assert.match(coverage.notes.find((n) => n.source === "workers").text, /activité inconnue/);
@@ -36,8 +39,9 @@ test("owned: Supervision lit les brokers disponibles et distingue workers indisp
 });
 
 test("owned: un contexte workers seul permet de comprendre son profil sans émettre de lecture legacy", async () => {
-  const reads = { readProfiles: ownedReadProfiles(), readBudgetStopped: false }; const context = adminContext(["read_worker_registry"]);
-  const access = supervisionAccess(context, reads.readProfiles); assert.equal(access.any, true); assert.equal(access.workers, false);
+  const reads = { readProfiles: ownedReadProfiles(), readBudgetStopped: false };
+  const context = adminContext(["read_worker_registry"], { operations: catalogue({ workers_read: ["granted", "tenant", "profile_unavailable"] }) });
+  const access = supervisionAccess(context); assert.equal(access.any, true); assert.equal(access.workers, false); assert.equal(access.workersUnavailable, true);
   const store = new SupervisionStore(reads, context, clock(), () => {});
   try { await store.open(); assert.equal(store.state.workers.phase, "unavailable"); assert.equal(store.state.brokers.phase, "not_granted"); }
   finally { store.close(); }

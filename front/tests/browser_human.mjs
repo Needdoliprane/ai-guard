@@ -10,7 +10,8 @@ import { identity, page as envelope, resource, event, uuid } from "./human-fixtu
 import { brokerIdentity, brokerPage, denseBrokerItems } from "./human-fixtures.mjs";
 import { workerIdentity, workerPage, worker, workerObservation } from "./human-fixtures.mjs";
 import { federationIdentity, federationPage, broker } from "./human-fixtures.mjs";
-import { noCheckpoint, ownedBrokerFromLegacy, ownedBrokerPage, ownedReadProfiles } from "./owned-brokers-fixture.mjs";
+import { catalogue, tenantScope } from "./human-fixtures.mjs";
+import { noCheckpoint, ownedBrokerFromLegacy, ownedBrokerPage, ownedCatalogue, ownedReadProfiles } from "./owned-brokers-fixture.mjs";
 
 const require = createRequire(import.meta.url);
 let chromium;
@@ -32,9 +33,23 @@ const humanIdentity = () => {
   const value = scenario.startsWith("federation") ? federationIdentity() : scenario === "workers" ? workerIdentity() : scenario.startsWith("brokers") ? brokerIdentity(scenario === "brokers-mixed") : identity();
   if (scenario === "brokers-owned") {
     value.contexts[0].capabilities = ["read_broker_registry", "read_worker_registry"];
+    // The control announces the owned profile twice: as read profiles and as the availability of each operation.
+    const registry = ownedProfile ? ["granted", "tenant", "profile_unavailable"] : tenantScope;
+    // The owned profile has no protocol for the registries, the summary or the administration reads; elsewhere these
+    // fixture stores carry no human rights marker.
+    const offer = catalogue({ brokers_read: tenantScope, workers_read: registry, federation_read: registry,
+      quota_read: tenantScope, usage_read: tenantScope, summary_read: tenantScope });
+    value.contexts[0].operations = ownedProfile ? ownedCatalogue(offer) : offer;
     if (ownedProfile) value.read_profiles = ownedReadProfiles();
   }
-  if (brokerCapRemoved) value.contexts[0].capabilities = value.contexts[0].capabilities.filter((cap) => cap !== "read_broker_registry");
+  if (brokerCapRemoved) {
+    // The new offer of the control withdraws the broker registry and the composition that needs it. In the broker-only
+    // scenarios it was the one administration capability of the context, so the summary goes with it.
+    value.contexts[0].capabilities = value.contexts[0].capabilities.filter((cap) => cap !== "read_broker_registry");
+    const withdrawn = ["brokers_read", "federation_read", ...(scenario.startsWith("brokers") && scenario !== "brokers-owned" ? ["summary_read"] : [])];
+    value.contexts[0].operations = value.contexts[0].operations.map((entry) => withdrawn.includes(entry.operation) ?
+      { operation: entry.operation, permission: "not_granted", availability: entry.availability } : entry);
+  }
   if (scenario === "brokers-lifecycle") value.authentication.expires_at = credentialExpiresAt;
   return value;
 };

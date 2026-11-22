@@ -1,7 +1,7 @@
 //! D5 follow-up: real Router producers and disjoint verified memberships.
-//! The anonymous setup resets only its private rate window, not any TTL or
-//! entry. Native pressure then uses real elapsed windows and the original 15s
-//! deadlines. This is a software capacity oracle, not an IdP/load benchmark.
+//! The anonymous setup resets only its private rate window. The rate oracle
+//! uses one fixed instant and verified session memberships. The owner
+//! scenarios use the original 15s deadlines.
 use super::*;
 
 struct Admitted {
@@ -43,6 +43,14 @@ async fn reversed_durable_plan_order_resolves_verified_membership_ids() {
             registry.tenant_limits.as_ref().unwrap().tenant_id(key),
             Some(expected)
         );
+        assert_eq!(
+            registry
+                .rate
+                .as_ref()
+                .and_then(|window| window.tenants.get(&key)),
+            Some(&1),
+            "native admission must charge its verified tenant"
+        );
         owners.push((reader, id));
     }
     for (reader, id) in owners {
@@ -53,65 +61,59 @@ async fn reversed_durable_plan_order_resolves_verified_membership_ids() {
 
 #[tokio::test]
 async fn disjoint_tenant_rate_cannot_take_b_verified_window() {
+    const STARTS_PER_TENANT: usize = 4;
+
     let fixture = fixture().await;
     let oidc = fixture.state.oidc.as_ref().unwrap();
     member(&fixture, "tenant-b", "rate-b-only");
     let b = signed_admission(&fixture, "rate-b-only", 0).await;
     let mut readers = Vec::new();
-    for index in 0..8 {
+    for index in 0..=STARTS_PER_TENANT {
         let subject = format!("rate-a-only-{index}");
         member(&fixture, "tenant-a", &subject);
         readers.push(signed_admission(&fixture, &subject, 0).await);
     }
-    reset_start_window(oidc);
-    let mut pending = Vec::new();
-    for (index, reader) in readers.iter().enumerate() {
-        let (status, reply) = begin(&fixture, reader).await;
-        if status == StatusCode::TOO_MANY_REQUESTS {
-            assert_eq!(reply["error"]["code"], "capacity_exhausted");
-            break;
-        }
-        assert_eq!(status, StatusCode::OK);
-        pending.push((
-            index,
-            Uuid::parse_str(reply["intent_id"].as_str().unwrap()).unwrap(),
-        ));
+    let mut registry = oidc.registry.lock().unwrap();
+    let attributed_start = |reader: &Admitted, expected_tenant: &str| {
+        let session = &registry.sessions[&reader.binding.session_id.to_string()];
+        let mut keys = session.registry_tenants.as_ref().unwrap().keys();
+        let tenant = keys.next().unwrap();
+        assert!(
+            keys.next().is_none(),
+            "fixture must have one verified tenant"
+        );
+        assert_eq!(
+            registry.tenant_limits.as_ref().unwrap().tenant_id(tenant),
+            Some(expected_tenant)
+        );
+        (session.binding.principal.key().unwrap(), tenant)
+    };
+    let starts_a: Vec<_> = readers
+        .iter()
+        .map(|reader| attributed_start(reader, "tenant-a"))
+        .collect();
+    let (principal_b, tenant_b) = attributed_start(&b, "tenant-b");
+    let ((excess_principal, tenant_a), starts_a) = starts_a.split_last().unwrap();
+
+    // Use the same rate transition as native refresh, with one instant for
+    // every start. The reversed-plan test above verifies HTTP ownership and
+    // its recorded charge.
+    registry.rate = None;
+    let now = Instant::now();
+    for (principal, tenant) in starts_a {
+        registry.rate = Some(next_window(&registry, Some(principal), Some(*tenant), now).unwrap());
     }
-    assert!(matches!(pending.len(), 4 | 8));
-    let epoch = oidc.registry.lock().unwrap().rate.as_ref().unwrap().started;
-    assert!(
-        epoch.elapsed() < START_WINDOW,
-        "setup: actual native rate window already expired"
-    );
-    let before = oidc.audit.verify().unwrap();
-    let (status, reply) = begin(&fixture, &b).await;
-    assert_eq!(
-        oidc.registry.lock().unwrap().rate.as_ref().unwrap().started,
-        epoch,
-        "setup: a rollover cannot prove the tenant rate oracle"
-    );
-    if status == StatusCode::OK {
-        finish(
-            &fixture,
-            &b,
-            Uuid::parse_str(reply["intent_id"].as_str().unwrap()).unwrap(),
-        )
-        .await;
-    } else {
-        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(reply["error"]["code"], "capacity_exhausted");
-        assert_eq!(oidc.audit.verify().unwrap(), before);
-    }
-    for (index, id) in &pending {
-        finish(&fixture, &readers[*index], *id).await;
-    }
-    assert_eq!(native_owners(&oidc.registry.lock().unwrap()).count(), 0);
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "A cannot consume B's verified rate share"
-    );
-    assert_eq!(pending.len(), 4);
+    let Err((status, body)) = next_window(&registry, Some(excess_principal), Some(*tenant_a), now)
+    else {
+        panic!("the fifth start for tenant A must be refused");
+    };
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(body.0["error"]["code"], "capacity_exhausted");
+
+    let admitted_b = next_window(&registry, Some(&principal_b), Some(tenant_b), now).unwrap();
+    assert_eq!(admitted_b.started, now);
+    assert_eq!(usize::from(admitted_b.tenants[tenant_a]), STARTS_PER_TENANT);
+    assert_eq!(admitted_b.tenants[&tenant_b], 1);
 }
 
 #[tokio::test]

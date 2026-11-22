@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { HumanApiClient, HumanApiError, HumanRecentUnavailable, HumanSuperseded } from "../src/human-api.ts";
-import { identity } from "./human-fixtures.mjs";
+import { catalogue, identity, organization, tenantScope } from "./human-fixtures.mjs";
 import { adminContext, broker, brokerId, contextId, eventOf, eventsPage, fleetPage, fleetWorker, personalContext, recentPage, registered, resourcesPage, sessionId, sessionResource, workerId, workersPage, brokersPage } from "./supervision-fixtures.mjs";
 
 const module = await import("../src/supervision-store.ts").catch((error) => {
@@ -160,7 +160,8 @@ test("un refus motivé d’un registre non composé retire cette source seule et
   const { store, source, time, doubts } = open({
     workers: async () => { if (denied) throw new HumanApiError(403, "permission_denied", "Refus permission_denied", "review_permissions"); return workersPage(range(1, 3)); },
     resources: async () => resourcesPage([sessionResource(1)]),
-  }, adminContext(["read_worker_registry", "read_tenant_metadata"]));
+  }, adminContext(["read_worker_registry", "read_tenant_metadata"], { operations: catalogue({ workers_read: tenantScope, quota_read: tenantScope, usage_read: tenantScope,
+    summary_read: tenantScope, resources_read: organization, events_read_metadata: organization, events_stream: organization }) }));
   const count = (name) => source.calls.filter((call) => call.name === name).length;
   await store.open(); assert.equal(time.timers.size, 1);
   denied = true; await store.refresh(false);
@@ -225,7 +226,8 @@ test("de retour au premier plan, la vue ne dit plus « onglet masqué » pendant
 
 test("un contexte sans registre n’annonce aucun refus : rien n’est relu automatiquement, et le rythme n’y change rien", async () => {
   present();
-  for (const context of [personalContext(), adminContext(["read_tenant_metadata"])]) {
+  for (const context of [personalContext(), adminContext(["read_tenant_metadata"], { operations: catalogue({ summary_read: tenantScope,
+    resources_read: organization, events_read_metadata: organization, events_stream: organization }) })]) {
     const { store, source, time } = open({ resources: async () => resourcesPage([sessionResource(1)]) }, context);
     await store.open();
     assert.equal(store.state.autoPaused, "not_granted", "« non accordé » n’est pas « refusé par le contrôle »");
@@ -384,7 +386,7 @@ test("la fermeture annule lectures, détails et minuteries et vide l’état", a
 
 test("un contexte brokers seuls n’émet ni lecture de workers, ni ressources, ni événements", async () => {
   present();
-  const { store, source } = open({ brokers: async () => brokersPage(brokers()) }, adminContext(["read_broker_registry"]));
+  const { store, source } = open({ brokers: async () => brokersPage(brokers()) }, adminContext(["read_broker_registry"], { operations: catalogue({ brokers_read: tenantScope, summary_read: tenantScope }) }));
   await store.open();
   assert.deepEqual(source.calls.map((call) => call.name), ["brokers"]);
   assert.deepEqual(source.calls[0].args.filter((value) => !(value instanceof AbortSignal)), [null, 100]);
@@ -394,7 +396,7 @@ test("un contexte brokers seuls n’émet ni lecture de workers, ni ressources, 
   assert.equal(store.state.session.phase, "not_granted");
   assert.deepEqual(source.calls.map((call) => call.name), ["brokers"], "aucune requête d’événements sans capacité de métadonnées");
   store.close();
-  const workersOnly = open({ workers: async () => workersPage(range(1, 2)) }, adminContext(["read_worker_registry"]));
+  const workersOnly = open({ workers: async () => workersPage(range(1, 2)) }, adminContext(["read_worker_registry"], { operations: catalogue({ workers_read: tenantScope, summary_read: tenantScope }) }));
   await workersOnly.store.open();
   assert.deepEqual(workersOnly.source.calls.map((call) => call.name), ["workers"]);
   assert.equal(workersOnly.store.state.brokers.phase, "not_granted");

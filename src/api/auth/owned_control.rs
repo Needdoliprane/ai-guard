@@ -22,9 +22,10 @@ pub(in crate::api) enum PolicyWriteAction {
 /// Header/source admission is not a writer and has no body-derived scope.
 pub(in crate::api) struct OwnedPolicyIdentity(OwnedProtocolIdentity);
 pub(in crate::api) struct OwnedPolicyWriter {
+    // Release the operation before the identity drops its usage.
+    _operation: OwnedSemaphorePermit,
     identity: OwnedProtocolIdentity,
     action: PolicyWriteAction,
-    _operation: OwnedSemaphorePermit,
 }
 impl OwnedPolicyIdentity {
     pub(in crate::api) fn tenant(&self) -> &TenantState {
@@ -50,11 +51,12 @@ pub(in crate::api) async fn authenticate_policy(
     let identity = authenticate(state, headers).await?;
     let shared = identity.state.io.clone();
     let tenant = identity.tenant.io.clone();
-    store_io::run(
+    store_io::run_retaining(
         shared,
         Some(tenant),
         store_io::Lane::Control,
         false,
+        identity._usage.clone(),
         move || {
             let source = identity
                 .owned
@@ -141,11 +143,12 @@ impl OwnedPolicyWriter {
         let owned = self.identity.owned.clone();
         let shared = self.identity.state.io.clone();
         let tenant_io = self.identity.tenant.io.clone();
-        let result = store_io::run(
+        let result = store_io::run_retaining(
             shared,
             Some(tenant_io),
             store_io::Lane::Control,
             false,
+            self.identity._usage.clone(),
             move || {
                 let identity = &self.identity;
                 let owned = &identity.owned;
@@ -160,18 +163,17 @@ impl OwnedPolicyWriter {
                     .sources
                     .get(identity.index)
                     .ok_or_else(human_sources::unavailable)?;
-                let expected = *owned
-                    .discovery_generations
-                    .get(identity.index)
-                    .ok_or_else(human_sources::unavailable)?;
                 let scope = mutation.scope().clone();
-                let receipt = {
+                let (receipt, expected) = {
                     // Accepted work owns the usage/registry/source/operation and
                     // IO permits. An abandoned HTTP future cannot release them.
                     let epoch = owned
                         .owner
                         .try_write_epoch()
                         .map_err(policy_authority_failure)?;
+                    let expected = owned
+                        .discovery_generation(identity.index)
+                        .ok_or_else(human_sources::unavailable)?;
                     let result = match &mutation {
                         PolicyMutation::Replace(value) => {
                             let request = value.store_request().map_err(policy_store_failure)?;
@@ -206,7 +208,7 @@ impl OwnedPolicyWriter {
                     epoch
                         .validate_source(source)
                         .map_err(policy_authority_failure)?;
-                    receipt
+                    (receipt, expected)
                 }; // True E1 commit, SQLite restoration and WriteEpoch end first.
                 #[cfg(test)]
                 test_hook::pause(&identity.state)?;
@@ -222,16 +224,20 @@ impl OwnedPolicyWriter {
                     .map_err(policy_authority_failure)?;
                 let access =
                     HumanSourceAccess::read(&epoch, source).map_err(policy_store_failure)?;
+                let current_generation = owned
+                    .discovery_generation(identity.index)
+                    .ok_or_else(human_sources::unavailable)?;
                 let current = identity
                     .tenant
                     .store
-                    .modern_control_protocol(&access, &identity.credential, expected)
+                    .modern_control_protocol(&access, &identity.credential, current_generation)
                     .map_err(policy_store_failure)?;
                 let Some(current) = current else {
                     owned.require_rebuild();
                     return Err(human_sources::unavailable());
                 };
-                if current.schema_version != 15
+                if current_generation != expected
+                    || current.schema_version != 15
                     || current.control_namespace_uuid.as_deref()
                         != Some(scope.control_namespace_uuid())
                     || identity.tenant.tenant_id != scope.tenant_id()
@@ -269,8 +275,8 @@ pub(in crate::api) struct OwnedProtocolIdentity {
 /// Private retained work, not a wire object. Its permit/usage outlive an HTTP
 /// observer whenever the actual Store job is still queued or running.
 pub(in crate::api) struct OwnedProtocol {
-    identity: OwnedProtocolIdentity,
     _operation: OwnedSemaphorePermit,
+    identity: OwnedProtocolIdentity,
 }
 
 impl OwnedProtocolIdentity {
@@ -313,11 +319,12 @@ pub(in crate::api) async fn authenticate(
     let usage = owned.admit()?;
     let token = token.to_owned();
     let state = state.scoped(Arc::default());
-    store_io::run(
+    store_io::run_retaining(
         state.io.clone(),
         Some(tenant.io.clone()),
         store_io::Lane::Control,
         false,
+        usage.clone(),
         move || {
             if !owned.technical_candidate(&digest)? {
                 return Err(human_sources::unavailable());
@@ -363,11 +370,12 @@ impl OwnedProtocol {
         let owned = self.identity.owned.clone();
         let state = self.identity.state.clone();
         let tenant = self.identity.tenant.clone();
-        let result = store_io::run(
+        let result = store_io::run_retaining(
             state.io.clone(),
             Some(tenant.io.clone()),
             store_io::Lane::Control,
             false,
+            self.identity._usage.clone(),
             move || {
                 // The Arc retains the operation permit and accepted usage in
                 // this actual job even if the response future is abandoned.
@@ -391,10 +399,9 @@ impl OwnedProtocol {
                     .ok_or_else(human_sources::unavailable)?;
                 let access = HumanSourceAccess::read(&epoch, source)
                     .map_err(|_| human_sources::unavailable())?;
-                let expected = *identity
+                let expected = identity
                     .owned
-                    .discovery_generations
-                    .get(identity.index)
+                    .discovery_generation(identity.index)
                     .ok_or_else(human_sources::unavailable)?;
                 let snapshot = tenant
                     .store

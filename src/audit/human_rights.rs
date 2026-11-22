@@ -47,9 +47,10 @@ pub(crate) fn read_action_requires_marker(action: &str) -> bool {
 
 /// Every marker-fenced read action: the administration views and the
 /// session-control reads, with the exact strings their lots record.
-pub(crate) const MARKER_READ_ACTIONS: [&str; 13] = [
+pub(crate) const MARKER_READ_ACTIONS: [&str; 14] = [
     "summary",
     "memberships",
+    "grants",
     "quota",
     "usage",
     "configuration",
@@ -62,6 +63,34 @@ pub(crate) const MARKER_READ_ACTIONS: [&str; 13] = [
     "session_message_receipt",
     "session_attribution",
 ];
+
+/// The mode and capability each administration read action is bound to, the
+/// same in the live append and in replay. Actions owned by other lots (the
+/// session-control reads) are bound by those lots and pass here.
+pub(super) fn read_action_permitted(action: &str, scope: &AuthorizedScopeV1) -> bool {
+    use HumanCapabilityV1 as C;
+    let administration = scope.mode() == ContextModeV1::Administration;
+    match action {
+        "summary" => {
+            if administration {
+                HumanCapabilityV1::ALL.iter().any(|capability| {
+                    capability.is_administration() && scope.has_capability(*capability)
+                })
+            } else {
+                scope.has_capability(C::ReadMetadata)
+            }
+        }
+        "memberships" => administration && scope.has_capability(C::ReadMemberships),
+        "grants" => {
+            administration
+                && scope.has_capability(C::ManageGrants)
+                && scope.has_capability(C::ReadMemberships)
+        }
+        "quota" | "usage" => administration && scope.has_capability(C::ReadWorkerRegistry),
+        "configuration" => administration && scope.has_capability(C::ReadConfiguration),
+        _ => true,
+    }
+}
 
 /// The validated marker, or `None` when the chain does not carry it. More than
 /// one marker, or one that differs from its durable prefix, is invalid.

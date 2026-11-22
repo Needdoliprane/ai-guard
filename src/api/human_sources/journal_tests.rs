@@ -4,6 +4,7 @@ use crate::{human_authority::migration::tests::Fixture, model::Event};
 use tower::ServiceExt;
 
 mod dashboard;
+mod owned_admin_reads;
 mod owned_brokers_live;
 mod races;
 mod selection;

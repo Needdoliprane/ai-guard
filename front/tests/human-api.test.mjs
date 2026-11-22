@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { HumanApiClient, HumanApiError, HumanSuperseded, HUMAN_EXPORT_LIMITS } from "../src/human-api.ts";
 import { HumanContractError } from "../src/human-model.ts";
 import { identity, page, resource, event, errorResponse, uuid } from "./human-fixtures.mjs";
-import { brokerIdentity, brokerPage } from "./human-fixtures.mjs";
+import { brokerIdentity, brokerPage, catalogue } from "./human-fixtures.mjs";
 
 for (const recovery of [
   { name: "events/view", invoke: (client) => client.events({ view: "metadata", resource: resource().resource }),
@@ -119,7 +119,7 @@ test("le budget durable bloque toutes les lectures et survit aux changements de 
 
 test("une identité relue retirant le cap invalide le contexte sans sélection de remplacement", async () => {
   let removed = false;
-  const { client, notifications } = make(async () => { const value = brokerIdentity(); if (removed) value.contexts[0].capabilities = []; return Response.json(value); });
+  const { client, notifications } = make(async () => { const value = brokerIdentity(); if (removed) { value.contexts[0].capabilities = []; value.contexts[0].operations = catalogue(); } return Response.json(value); });
   try {
     await client.identity(); client.selectContext("context-brokers"); removed = true; await client.identity();
     assert.equal(client.context, null); assert.deepEqual(notifications, [["context", "context_revoked"]]);

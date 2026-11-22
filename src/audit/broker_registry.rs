@@ -647,6 +647,32 @@ fn projection_rows(
     Ok(expected)
 }
 
+/// Every registered broker's state at `evaluated_at`, with the last reception
+/// of its current incarnation. Read-only, inside the caller's transaction.
+pub(super) fn states_at(
+    db: &Connection,
+    evaluated_at: &str,
+) -> anyhow::Result<Vec<(String, BrokerStateV1, Option<String>)>> {
+    let mut statement =
+        db.prepare("SELECT payload_json FROM broker_registry_brokers ORDER BY broker_id")?;
+    let brokers = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .map(|json| Ok(serde_json::from_str::<BrokerV1>(&json?)?))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    brokers
+        .into_iter()
+        .map(|broker| {
+            let state = broker.view_at(evaluated_at)?.state;
+            let received = broker
+                .last_heartbeat
+                .as_ref()
+                .filter(|heartbeat| heartbeat.incarnation_id == broker.incarnation_id)
+                .map(|heartbeat| heartbeat.received_at.clone());
+            Ok((broker.broker_id, state, received))
+        })
+        .collect()
+}
+
 fn load_broker(db: &Connection, id: &str) -> anyhow::Result<Option<BrokerV1>> {
     db.query_row(
         "SELECT payload_json FROM broker_registry_brokers WHERE broker_id=?1",

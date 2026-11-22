@@ -1973,6 +1973,10 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
                 "/api/v1/human/events",
                 "/api/v1/human/events/recent",
                 "/api/v1/human/owned/brokers",
+                "/api/v1/human/summary",
+                "/api/v1/human/admin/memberships",
+                "/api/v1/human/admin/grants",
+                "/api/v1/human/admin/configuration",
             ]
             .contains(&request.uri().path()))
     {
@@ -1987,6 +1991,15 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
     let human_path =
         request.uri().path().starts_with("/api/v1/human/") && human_dashboard_path(&canonical_path);
     let federation_path = request.uri().path() == "/api/v1/federation/workers";
+    // This proxy forwards no body: a human mutation is never relayed here.
+    if human_path && request.method() != "GET" {
+        return Err(human::failure(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "method_not_allowed",
+            "The dashboard relays human reads only on this route.",
+            "none",
+        ));
+    }
     let token = (if human_path {
         oidc::human_bearer(request.headers())
     } else {
@@ -2116,6 +2129,12 @@ fn human_dashboard_path(path: &str) -> bool {
         "/api/human/owned/brokers",
         "/api/human/workers",
         "/api/human/federation/workers",
+        "/api/human/summary",
+        "/api/human/admin/quota",
+        "/api/human/admin/usage",
+        "/api/human/admin/memberships",
+        "/api/human/admin/grants",
+        "/api/human/admin/configuration",
         "/api/human/resources",
         "/api/human/events",
         "/api/human/events/recent",

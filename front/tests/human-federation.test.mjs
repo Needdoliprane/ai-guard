@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { HUMAN_FEDERATION_PAGE_BYTES, canReadHumanFederation, humanFederationWorkersUrl, parseHumanFederationWorkerPage, HumanContractError } from "../src/human-model.ts";
+import { HUMAN_FEDERATION_PAGE_BYTES, humanFederationWorkersUrl, parseHumanFederationWorkerPage, HumanContractError } from "../src/human-model.ts";
+import { can } from "../src/access-model.ts";
 import { HumanApiClient, HumanSuperseded } from "../src/human-api.ts";
-import { federationContext, federationIdentity, federationPage, workerPage, brokerPage, broker, errorResponse } from "./human-fixtures.mjs";
+import { catalogue, federationContext, federationIdentity, federationPage, workerPage, brokerPage, broker, errorResponse, tenantScope } from "./human-fixtures.mjs";
 
 test("la composition garde ses deux snapshots, horloges, reçus et brokers sans worker", () => {
   const value = federationPage({ workers: workerPage([], { context_id: "context-federation" }),
@@ -25,11 +26,18 @@ test("la composition V1 fermée refuse une jambe absente, incompatible ou enrich
   assert.throws(() => parseHumanFederationWorkerPage(missing), HumanContractError);
 });
 
-test("la navigation exige les deux droits existants dans le même contexte administration", () => {
-  assert.equal(canReadHumanFederation(federationContext()), true);
-  for (const context of [null, { ...federationContext(), mode: "personal" },
-    { ...federationContext(), capabilities: ["read_worker_registry"] }, { ...federationContext(), capabilities: ["read_broker_registry"] },
-    { ...federationContext(), capabilities: ["read_tenant_metadata"] }]) assert.equal(canReadHumanFederation(context), false);
+test("la navigation de composition suit la seule opération federation_read du catalogue", () => {
+  assert.equal(can(federationContext(), "federation_read"), true);
+  const both = ["read_worker_registry", "read_broker_registry"];
+  for (const context of [null,
+    // Both registry capabilities are present, yet the control does not offer the composition: nothing opens.
+    { ...federationContext(), capabilities: both, operations: catalogue({ brokers_read: tenantScope, workers_read: tenantScope }) },
+    { ...federationContext(), capabilities: both, operations: catalogue({ federation_read: ["granted", "tenant", "profile_unavailable"] }) },
+    { ...federationContext(), capabilities: both, operations: catalogue({ federation_read: ["granted", "tenant", "migration_required"] }) },
+    { ...federationContext(), mode: "personal", capabilities: both, operations: catalogue({ federation_read: ["requires_administration"] }) },
+  ]) assert.equal(can(context, "federation_read"), false);
+  // The offer is followed even when the capability list would not suggest it: capabilities are displayed, never decided on.
+  assert.equal(can({ ...federationContext(), capabilities: [], operations: catalogue({ federation_read: tenantScope }) }, "federation_read"), true);
 });
 
 test("les deux positions de fédération conservent leurs limites et noms indépendants", () => {

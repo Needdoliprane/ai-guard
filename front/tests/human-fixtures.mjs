@@ -1,9 +1,37 @@
 export const uuid = "00000000-0000-4000-8000-000000000001";
 export const secondUuid = "00000000-0000-4000-8000-000000000002";
 export const principal = { kind: "human_local", installation_id: uuid, account_id: uuid };
+/** Closed wire order of the operation catalogue served with every human context. */
+export const OPERATION_ORDER = ["resources_read", "events_read_metadata", "events_read_content", "events_export", "events_stream",
+  "summary_read", "brokers_read", "workers_read", "federation_read", "quota_read", "usage_read", "memberships_read",
+  "configuration_read", "memberships_manage", "grants_manage", "launch_approve", "session_launch_prepare", "session_launch",
+  "session_message_send", "session_messages_read", "session_attribution_read", "egress_policies_read", "egress_attempts_read", "egress_grants_read", "egress_coverage_read", "egress_summary_read", "egress_grant_approve", "egress_grant_revoke"];
+/** Operations served by the build these fixtures describe; every other one is not_in_this_build unless a fixture says otherwise. */
+const SERVED = ["resources_read", "events_read_metadata", "events_read_content", "events_export", "events_stream", "brokers_read", "workers_read", "federation_read"];
+/** Served, but recorded under the human rights marker: the fixture stores do not carry it unless a test states "available". */
+const MARKER_FENCED = ["summary_read", "quota_read", "usage_read", "memberships_read", "configuration_read"];
+const defaultAvailability = (operation) => SERVED.includes(operation) ? "available" : MARKER_FENCED.includes(operation) ? "migration_required" : "not_in_this_build";
+/**
+ * Explicit catalogue of one fixture context: `entries` maps an operation to [permission, scope, availability].
+ * An unlisted operation is not_granted. Nothing here is derived from a capability list: each fixture states its offer.
+ */
+export function catalogue(entries = {}) {
+  for (const key of Object.keys(entries)) if (!OPERATION_ORDER.includes(key)) throw new Error(`unknown operation ${key}`);
+  return OPERATION_ORDER.map((operation) => {
+    const [permission = "not_granted", scope = null, availability = defaultAvailability(operation)] = entries[operation] ?? [];
+    return { operation, permission, ...(scope === null ? {} : { scope }), availability };
+  });
+}
+export const own = ["granted", "own_and_shared"];
+export const organization = ["granted", "organization"];
+export const tenantScope = ["granted", "tenant"];
+/** read_metadata, read_content and export: the resources the person owns or that are shared, with content and export. */
+export const readerOperations = (mode = "personal") => catalogue({ resources_read: own, events_read_metadata: own, events_read_content: own,
+  events_export: own, events_stream: own, ...(mode === "personal" ? { summary_read: own } : {}) });
 export const context = (id = "context-a", mode = "personal") => ({ id, tenant_id: id === "context-b" ? "tenant-b" : "tenant-a",
   organization_scope: "organization-a", mode, capabilities: ["read_metadata", "read_content", "export"],
-  membership_revision: "1", authorization_version: "a".repeat(64), expires_at: new Date(Date.now() + 240000).toISOString() });
+  membership_revision: "1", authorization_version: "a".repeat(64), expires_at: new Date(Date.now() + 240000).toISOString(),
+  operations: readerOperations(mode) });
 export const identity = () => ({ version: 1, principal, display_name: "Alice locale",
   authentication: { method: "local_credential", credential_id: uuid, expires_at: null },
   contexts: [context(), context("context-admin", "administration"), context("context-b")], contexts_complete: true });
@@ -18,8 +46,10 @@ export const page = (contextId = "context-a", items = [], extra = {}) => ({ vers
   authorization_version: "a".repeat(64), items, next_cursor: null, has_more: false, coverage: "authorized_selection",
   read_receipt: { request_id: uuid, audit_event_id: secondUuid, received_at: "2026-11-01T12:00:02Z" }, ...extra });
 export const errorResponse = (status, code, retry_action = "retry") => Response.json({ error: { code, message: `Refus ${code}`, retry_action } }, { status });
+export const brokerOperations = (mixed = false) => catalogue({ brokers_read: tenantScope, summary_read: tenantScope,
+  ...(mixed ? { resources_read: own, events_read_metadata: own, events_stream: own } : {}) });
 export const brokerContext = (mixed = false) => ({ ...context("context-brokers", "administration"),
-  capabilities: mixed ? ["read_metadata", "read_broker_registry"] : ["read_broker_registry"] });
+  capabilities: mixed ? ["read_metadata", "read_broker_registry"] : ["read_broker_registry"], operations: brokerOperations(mixed) });
 export const brokerIdentity = (mixed = false) => ({ ...identity(), contexts: [brokerContext(mixed)] });
 export const broker = (extra = {}) => ({ broker_id: uuid, incarnation_id: secondUuid,
   grant_revision: "9223372036854775807", heartbeat_revision: "2", state: "current",
@@ -32,7 +62,9 @@ export const brokerPage = (items = [broker()], extra = {}) => ({ version: 1, con
   evaluated_at: "2026-11-01T12:00:02Z", runtime_inventory: "unknown", items, has_more: false, next_cursor: null,
   read_receipt: { request_id: uuid, audit_event_id: secondUuid, received_at: "2026-11-01T12:00:02Z" }, ...extra });
 
-export const workerIdentity = () => ({ ...identity(), contexts: [{ ...context("context-workers", "administration"), capabilities: ["read_worker_registry"] }] });
+export const workerOperations = () => catalogue({ workers_read: tenantScope, quota_read: tenantScope, usage_read: tenantScope, summary_read: tenantScope });
+export const workerIdentity = () => ({ ...identity(), contexts: [{ ...context("context-workers", "administration"), capabilities: ["read_worker_registry"],
+  operations: workerOperations() }] });
 export const workerObservation = (extra = {}) => ({ observed_at: "2026-10-29T10:00:02.000000000Z", observed_at_status: "known",
   status: "exited", running: false, started_at: "2026-10-29T10:00:00.000000000Z", started_at_status: "known",
   finished_at: "2026-10-29T10:00:01.000000000Z", finished_at_status: "known", exit_code: "0", oom_killed: false, restart_count: 0, provenance: "observed", ...extra });
@@ -47,8 +79,10 @@ export const workerPage = (items = [worker()], extra = {}) => ({ version: 1, con
   runtime_inventory: "unknown", registry_status: "available", items, has_more: false, next_cursor: null,
   read_receipt: { request_id: uuid, audit_event_id: secondUuid, received_at: "2026-11-01T12:00:02Z" }, ...extra });
 
+export const federationOperations = () => catalogue({ brokers_read: tenantScope, workers_read: tenantScope, federation_read: tenantScope,
+  quota_read: tenantScope, usage_read: tenantScope, summary_read: tenantScope });
 export const federationContext = () => ({ ...context("context-federation", "administration"),
-  capabilities: ["read_worker_registry", "read_broker_registry"] });
+  capabilities: ["read_worker_registry", "read_broker_registry"], operations: federationOperations() });
 export const federationIdentity = () => ({ ...identity(), contexts: [federationContext()] });
 export const federationPage = (extra = {}) => ({ version: 1, source: "tenant_federation_registry", consistency: "independent_snapshots",
   coverage: "partial", runtime_inventory: "unknown",

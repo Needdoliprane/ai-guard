@@ -105,7 +105,7 @@ export class SupervisionStore {
    */
   constructor(reads: SupervisionReads, context: HumanContext, clock: SupervisionClock, onChange: () => void, onAccessDoubt: () => void = () => {}) {
     this.#reads = reads; this.#clock = clock; this.#onChange = onChange; this.#onAccessDoubt = onAccessDoubt;
-    const access = supervisionAccess(context, reads.readProfiles);
+    const access = supervisionAccess(context);
     this.#state = { access, workers: workerSource(access), brokers: source(access.brokers), resources: source(access.resources),
       session: null, cadence: CADENCES[0], autoPaused: access.workers || access.brokers ? "" : "not_granted", closed: false };
   }
@@ -375,7 +375,7 @@ export class SupervisionStore {
     this.#detailAbort.abort(); this.#detailAbort = new AbortController(); const request = ++this.#detailRequest;
     if (!this.#state.access.journal) {
       this.#state.session = { sessionId, phase: "not_granted", page: null, order: "newest_first",
-        message: "Ce contexte ne porte aucune capacité de métadonnées : les événements de session ne sont pas lus." };
+        message: "Ce contexte n’offre pas l’opération events_read_metadata : les événements de session ne sont pas lus." };
       this.#publish(); return;
     }
     const generation = this.#generation;

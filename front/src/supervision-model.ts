@@ -1,48 +1,55 @@
 // Pure model of the unified supervision view. No DOM, no network, no clock of its own.
 // Every relation is an exact identifier match on values the control returned; nothing is inferred.
-import type { HumanBroker, HumanContext, HumanEvent, HumanReadProfiles, HumanResource, HumanWorker, HumanWorkerAssociation, Principal, ResourceKind } from "./human-model.ts";
+import { OPERATION_FACTS, access as operationAccess, accessExplanation, accessState, can, destinationState, grantedUnavailable } from "./access-model.ts";
+import type { AccessState } from "./access-model.ts";
+import type { HumanBroker, HumanContext, HumanEvent, HumanOperation, HumanResource, HumanWorker, HumanWorkerAssociation, Principal, ResourceKind } from "./human-model.ts";
 
-/** Presentation gating only. Rust authorizes every read; a missing flag means no request is sent. */
+/** Presentation gating only, computed from the operation catalogue of the context. Rust authorizes every read; a missing flag means no request is sent. */
 export interface SupervisionAccess {
   workers: boolean; workersUnavailable?: boolean; brokers: boolean; composed: boolean; resources: boolean; journal: boolean; content: boolean; export: boolean; any: boolean;
 }
-export function supervisionAccess(context: HumanContext | null, profiles?: HumanReadProfiles): SupervisionAccess {
-  const has = (capability: HumanContext["capabilities"][number]) => !!context?.capabilities.includes(capability);
-  const administration = context?.mode === "administration";
-  const workersUnavailable = administration && has("read_worker_registry") && profiles?.worker_registry === "unavailable";
-  const workers = administration && has("read_worker_registry") && !workersUnavailable;
-  const brokers = administration && has("read_broker_registry");
-  const resources = has("read_metadata") || administration && has("read_tenant_metadata");
-  return { workers, ...(workersUnavailable ? { workersUnavailable: true } : {}), brokers,
-    composed: workers && brokers && profiles?.federation_registry !== "unavailable", resources, journal: resources,
-    content: resources && has("read_content"), export: resources && has("export"), any: workers || workersUnavailable || brokers || resources };
+/** The availability of every operation, source profile included, is carried by the catalogue itself. */
+export function supervisionAccess(context: HumanContext | null): SupervisionAccess {
+  const workersUnavailable = grantedUnavailable(context, "workers_read") === "profile_unavailable";
+  const workers = can(context, "workers_read"); const brokers = can(context, "brokers_read"); const composed = can(context, "federation_read");
+  const resources = can(context, "resources_read"); const journal = can(context, "events_read_metadata");
+  const content = can(context, "events_read_content"); const exporting = can(context, "events_export");
+  return { workers, ...(workersUnavailable ? { workersUnavailable: true } : {}), brokers, composed, resources, journal, content, export: exporting,
+    any: workers || workersUnavailable || brokers || composed || resources || journal || content || exporting };
 }
-export interface AccessLine { key: "workers" | "brokers" | "resources" | "journal" | "content" | "export" | "personal_workers" | "agents"; granted: boolean; label: string; detail: string }
-/** What the selected context opens and what it does not, in the user's words. */
-export function accessLines(context: HumanContext | null, profiles?: HumanReadProfiles): AccessLine[] {
-  const access = supervisionAccess(context, profiles);
-  const administration = context?.mode === "administration";
-  const registry = (name: string, capability: string) => administration ? `Capacité ${capability} absente de ce contexte : aucune lecture du registre ${name} n’est émise.` :
-    `Le registre ${name} du tenant est réservé à un contexte d’administration portant ${capability}.`;
+export type LandingDestination = "overview" | "resources" | "federation" | "workers" | "brokers" | "supervision";
+/**
+ * Where "Ouvrir …" lands for a newly selected context, from its operation catalogue only: the summary when it is
+ * served, then the existing landings in their historical order, then the summary destination that explains why it is
+ * not served. null: the context offers nothing to consult in this build.
+ */
+export function landingDestination(context: HumanContext | null): LandingDestination | null {
+  const overview = destinationState(context, "summary_read");
+  if (overview === "view") return "overview";
+  if (can(context, "resources_read")) return "resources";
+  if (can(context, "federation_read")) return "federation";
+  if (can(context, "workers_read")) return "workers";
+  if (can(context, "brokers_read")) return "brokers";
+  if (supervisionAccess(context).any) return "supervision";
+  return overview === "explanation" ? "overview" : null;
+}
+export interface AccessLine {
+  key: "workers" | "brokers" | "resources" | "journal" | "content" | "export" | "personal_workers" | "agents";
+  /** Offered and served by this build: the only state in which the view sends the read. */
+  granted: boolean; state: AccessState; label: string; detail: string;
+}
+const lineOperations = [["workers", "workers_read"], ["brokers", "brokers_read"], ["resources", "resources_read"],
+  ["journal", "events_read_metadata"], ["content", "events_read_content"], ["export", "events_export"]] as const satisfies readonly (readonly [AccessLine["key"], HumanOperation])[];
+/** What the selected context opens and what it does not, in the user's words, from its operation catalogue only. */
+export function accessLines(context: HumanContext | null): AccessLine[] {
   return [
-    { key: "workers", granted: access.workers, label: "Registre des workers du tenant",
-      detail: access.workersUnavailable ? "Permission read_worker_registry présente, mais le contrôle annonce worker_registry unavailable pour ce profil. Aucune route historique n’est appelée ; l’activité reste inconnue. Faites vérifier les profils pris en charge par l’opérateur." :
-        access.workers ? "Accordé par read_worker_registry : états du contrôle, dernière observation runtime et associations d’autorité." : registry("workers", "read_worker_registry") },
-    { key: "brokers", granted: access.brokers, label: "Registre des brokers du tenant",
-      detail: access.brokers ? "Accordé par read_broker_registry : baux, autorités déclarées et réceptions observées." : registry("brokers", "read_broker_registry") },
-    { key: "resources", granted: access.resources, label: "Sessions, agents, sandboxes et projets autorisés",
-      detail: access.resources ? (administration && context?.capabilities.includes("read_tenant_metadata") ?
-        "Accordé par read_tenant_metadata : métadonnées des ressources de l’organisation." : "Accordé par read_metadata : ressources possédées ou partagées avec vous.") :
-        "Aucune capacité de métadonnées dans ce contexte : ressources et événements ne sont pas lus." },
-    { key: "journal", granted: access.journal, label: "Événements des ressources autorisées",
-      detail: access.journal ? "Mêmes droits que les ressources ; chaque lecture laisse un reçu durable." : "Indisponible sans capacité de métadonnées." },
-    { key: "content", granted: access.content, label: "Contenu des événements",
-      detail: access.content ? "read_content accordé ; chaque ressource garde sa propre permission de contenu." : "read_content absent : seules les métadonnées sont lisibles." },
-    { key: "export", granted: access.export, label: "Export d’une sélection",
-      detail: access.export ? "export accordé ; chaque ressource garde sa propre permission d’export." : "export absent de ce contexte." },
-    { key: "personal_workers", granted: false, label: "Vue personnelle des workers",
+    ...lineOperations.map(([key, operation]): AccessLine => {
+      const state = accessState(operationAccess(context, operation));
+      return { key, granted: state === "granted", state, label: OPERATION_FACTS[operation].label, detail: accessExplanation(context, operation) };
+    }),
+    { key: "personal_workers", granted: false, state: "unavailable", label: "Vue personnelle des workers",
       detail: "Non raccordée : aucune chaîne authentifiée d’initiation et de délégation ne relie encore un worker à une personne." },
-    { key: "agents", granted: false, label: "Hiérarchie agent / sous-agent",
+    { key: "agents", granted: false, state: "unavailable", label: "Hiérarchie agent / sous-agent",
       detail: "Relation non fournie par le contrat nominatif : elle reste inconnue ici et n’est jamais déduite d’un nom." },
   ];
 }
@@ -50,9 +57,13 @@ export function principalKey(principal: Principal): string {
   return principal.kind === "human_local" ? JSON.stringify(["local", principal.installation_id, principal.account_id]) :
     JSON.stringify(["oidc", principal.issuer, principal.subject]);
 }
-/** Attribution of a context, independent of its opaque identifier and expiry. */
+/**
+ * Attribution of a context, independent of its opaque identifier and expiry: the same offer, operation by
+ * operation, is required too, so that a resume never reopens a view under a different catalogue.
+ */
 export function grantKey(context: HumanContext): string {
-  return JSON.stringify([context.tenant_id, context.organization_scope, context.mode, context.membership_revision, [...context.capabilities].sort()]);
+  return JSON.stringify([context.tenant_id, context.organization_scope, context.mode, context.membership_revision, [...context.capabilities].sort(),
+    context.operations.map((entry) => [entry.operation, entry.permission, entry.permission === "granted" ? entry.scope : null, entry.availability])]);
 }
 
 /** Control states, grouped by what the control recorded. "open" is not an observed execution. */

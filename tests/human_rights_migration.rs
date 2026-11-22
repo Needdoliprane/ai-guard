@@ -247,9 +247,11 @@ fn organization_administrators_cannot_introduce_control_only_capabilities() {
     store
         .migrate_human_rights_v2(&path.with_extension("exact13"))
         .unwrap();
+    // The administrator holds what it delegates: delegation never escalates.
     let (admin, admin_membership) = preparation(&[
         HumanCapabilityV1::ManageMemberships,
         HumanCapabilityV1::ReadMetadata,
+        HumanCapabilityV1::ReadContent,
     ]);
     store.provision_local_human(&admin).unwrap();
     let (member, member_membership) = preparation(&[HumanCapabilityV1::ReadMetadata]);
@@ -728,10 +730,10 @@ fn approval_rights_pass_only_from_a_holder() {
             .unwrap_or_else(|error| panic!("a holder passes {capability:?}: {error:#}"));
         member_membership = next(&member_membership, &granted, true);
     }
-    // A holder that removes a right from itself cannot reactivate it.
+    // Trusted control removes a right that the former holder cannot restore.
     store
         .mutate_identity(&membership_change(
-            holder_actor,
+            None,
             &holder_membership,
             &[C::ManageMemberships, C::ReadMetadata, C::ApproveLaunch],
             true,
@@ -762,6 +764,10 @@ fn approval_rights_pass_only_from_a_holder() {
     let reopened =
         Store::open_existing_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 1000).unwrap();
     assert!(reopened.healthy());
+    assert_eq!(
+        reopened.identity_memberships(&removed.principal).unwrap(),
+        vec![removed]
+    );
 }
 
 #[test]

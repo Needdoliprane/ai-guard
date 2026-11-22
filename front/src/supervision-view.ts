@@ -7,6 +7,7 @@ import { announce, place, replaceIfChanged, setText, signatureOf, syncRows, sync
 import { formatDate } from "./model.ts";
 import { CADENCES, SupervisionStore, sessionAnnouncement, summarize } from "./supervision-store.ts";
 import { checkpointFacts, checkpointLabel, formatBrokerDate } from "./human-owned-brokers.ts";
+import { accessStateLabel } from "./access-model.ts";
 import { accessLines, activityLabel, associationLabel, brokerAuthorityLabel, brokerStateLabel, defaultFleetFilter, FILTER_ANNOUNCE_MS, filterBrokers, filterResources, filterWorkers, fleetCoverage, freshness,
   heartbeatOfPreviousIncarnation, isDefaultFleetFilter, joinFleet, resourceKindLabel, SEARCH_MAX_LENGTH, sessionResource, shownOfLoaded, sortWorkers, sourceAnnouncement, windowSummary,
   workerActivity, workerFlagLabel, workerFlags, workersOfSession, workerStateLabel } from "./supervision-model.ts";
@@ -35,6 +36,8 @@ export interface SupervisionHost {
   hasRegistry: (view: "workers" | "brokers" | "resources") => boolean;
   /** Opens the Journal limited to one resource, when this context can read events. */
   openJournal: ((resource: ResourceRef) => void) | null;
+  /** A worker asked from another view: its detail opens once, after the first read of the fleet, if that read loaded it. */
+  initialDetail?: { kind: "worker"; id: string } | null;
 }
 type Detail = { kind: "worker"; id: string } | { kind: "broker"; id: string } | { kind: "resource"; resourceKind: ResourceKind; id: string };
 /** The three lists of the view, in the order their counts are said. */
@@ -163,9 +166,10 @@ export class SupervisionView {
   #afterDialog: HTMLElement | null = null;
   #ticker: ReturnType<typeof setInterval> | undefined;
   #closed = false;
+  #pendingDetail: { kind: "worker"; id: string } | null = null;
 
   constructor(host: SupervisionHost) {
-    this.#host = host; this.#preferences = host.preferences;
+    this.#host = host; this.#preferences = host.preferences; this.#pendingDetail = host.initialDetail ?? null;
     this.#store = new SupervisionStore(host.reads, host.context, browserClock, () => { this.#render(); host.onReadStateChange(); }, () => host.onAccessDoubt());
     if (this.#preferences.cadence !== CADENCES[0]) this.#store.setCadence(this.#preferences.cadence);
     this.#announce.setAttribute("role", "status"); this.#announce.setAttribute("aria-live", "polite");
@@ -217,8 +221,8 @@ export class SupervisionView {
   #buildAccess() {
     const context = this.#host.context;
     this.#access.append(el("summary", "", icon("chevron"), el("span", "", "Accès de ce contexte")),
-      el("p", "muted", `Capacités fournies par le contrôle : ${context.capabilities.join(", ") || "aucune"}. Le navigateur n’en déduit aucune autre ; chaque lecture est autorisée de nouveau par le serveur.`),
-      el("ul", "sv-access-list", ...accessLines(context, this.#host.reads.readProfiles).map((line) => el("li", "", badge(line.granted ? "Accordé" : "Non disponible", line.granted ? "teal" : "neutral"),
+      el("p", "muted", `Capacités fournies par le contrôle : ${context.capabilities.join(", ") || "aucune"}. Les accès ci-dessous viennent du catalogue d’opérations que le contrôle a établi pour ce contexte ; le navigateur n’en déduit aucun droit et chaque lecture est autorisée de nouveau par le serveur.`),
+      el("ul", "sv-access-list", ...accessLines(context).map((line) => el("li", "", badge(accessStateLabel[line.state], line.state === "granted" ? "teal" : line.state === "unavailable" ? "amber" : "neutral"),
         el("div", "", el("strong", "", line.label), el("p", "muted", line.detail))))));
   }
   #buildBrokerPanel() {
@@ -234,7 +238,7 @@ export class SupervisionView {
   #buildWorkerPanel() {
     if (this.#store.state.access.workersUnavailable) {
       this.#workers.append(el("div", "panel-heading", el("h2", "", "Workers · profil indisponible")),
-        emptyState("Registre des workers indisponible pour ce profil", "La permission read_worker_registry est présente, mais le contrôle annonce worker_registry unavailable et federation_registry unavailable. Aucune route historique n’est appelée. L’activité et les associations restent inconnues ; les checkpoints ne remplacent pas ce registre."),
+        emptyState("Registre des workers indisponible pour ce profil", "L’opération workers_read est accordée à ce contexte, mais le contrôle l’annonce indisponible pour le profil de sources adopté. Aucune route historique n’est appelée. L’activité et les associations restent inconnues ; les checkpoints ne remplacent pas ce registre."),
         el("p", "sv-note muted", "Faites vérifier par l’opérateur les profils de lecture pris en charge. Relire les accès vérifie une nouvelle annonce du contrôle ; cette action n’active aucune capacité."),
         action("Relire mes accès", "sv-profile-access", () => this.#host.onReviewAccess()));
       return;
@@ -276,7 +280,7 @@ export class SupervisionView {
     this.#resourceTools.append(field("Rechercher dans les ressources chargées", search, "sv-resource-search"), field("Type", kind, "sv-resource-kind"));
     if (!this.#store.state.access.resources) {
       this.#resources.append(el("div", "panel-heading", el("div", "", el("h2", "", "Ressources autorisées"),
-        el("p", "", "Ce contexte ne porte aucune capacité de métadonnées : sessions, agents, sandboxes, projets et leurs événements ne sont pas lus."))));
+        el("p", "", "Ce contexte n’offre pas l’opération resources_read : sessions, agents, sandboxes, projets et leurs événements ne sont pas lus."))));
       return;
     }
     this.#resources.append(
@@ -343,6 +347,18 @@ export class SupervisionView {
     this.#renderStatus(); this.#renderBrokers(); this.#renderWorkers(); this.#renderResources(); this.#renderDialog();
     this.#announceRead();
     if (scope && !scope.isConnected && !this.element.contains(document.activeElement)) this.#refocus(key, region, footer);
+    this.#openPendingDetail();
+  }
+  /**
+   * Settles the requested detail once the fleet read ended: it opens when the worker is in the loaded window; otherwise
+   * the fleet stays filtered on its identifier, which says that it was not loaded. A refused or failed read opens nothing.
+   */
+  #openPendingDetail() {
+    const pending = this.#pendingDetail; if (!pending || this.#closed) return;
+    const workers = this.#store.state.workers;
+    if (workers.busy || workers.phase === "idle" || workers.phase === "loading") return;
+    this.#pendingDetail = null;
+    if (workers.phase === "ready" && workers.value?.items.some((item) => item.worker_id === pending.id) && !document.querySelector("dialog[open]")) this.#open(pending);
   }
   /** The first place of the view that can always take the focus. */
   #anchor(): HTMLElement { return [this.#workerSummary, this.#brokerSummary, this.#resourceSummary].find((node) => node.isConnected) ?? this.#statusFacts; }

@@ -2,11 +2,12 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::identity::{
     HumanAccountV1, HumanCapabilityV1, IdentityChangeV1, IdentityFailureV1, IdentityMutationV1,
     LegacyControlRoleV1, LocalCredentialV1, MembershipV1, PrincipalRefV1, ResourceGrantV1,
+    ResourcePermissionV1,
 };
 
 #[derive(Default)]
@@ -93,6 +94,90 @@ impl Projection {
             if !retained && !held {
                 return Err(IdentityFailureV1::PermissionDenied.into());
             }
+        }
+        Ok(())
+    }
+    /// Delegation rules of a human actor, checked on the live mutation path
+    /// before effect. Historical records keep replaying under the rules they
+    /// were accepted with; trusted control is not a human actor.
+    ///
+    /// A human actor never changes its own membership or grants itself a
+    /// share, and may keep or remove a right but add only one it holds in the
+    /// same organization. A share never changes a resource's owner.
+    pub(crate) fn check_delegation(&self, mutation: &IdentityMutationV1) -> anyhow::Result<()> {
+        let actor = &mutation.actor;
+        if !actor.is_human() {
+            return Ok(());
+        }
+        let held = |organization: &str| -> BTreeSet<HumanCapabilityV1> {
+            self.memberships
+                .values()
+                .filter(|(m, _)| {
+                    m.active && &m.principal == actor && m.organization_scope == organization
+                })
+                .flat_map(|(m, _)| m.capabilities.iter().copied())
+                .collect()
+        };
+        match &mutation.change {
+            IdentityChangeV1::Membership { membership, .. } => {
+                if &membership.principal == actor {
+                    return Err(IdentityFailureV1::PermissionDenied.into());
+                }
+                let held = held(&membership.organization_scope);
+                let previous = self
+                    .memberships
+                    .get(&membership.membership_id)
+                    .map(|(m, _)| m);
+                for capability in &membership.capabilities {
+                    let retained = previous.is_some_and(|p| {
+                        p.capabilities.contains(capability) && (p.active || !membership.active)
+                    });
+                    if !retained && !held.contains(capability) {
+                        return Err(IdentityFailureV1::PermissionDenied.into());
+                    }
+                }
+            }
+            IdentityChangeV1::ResourceGrant { grant, .. } => {
+                let previous = self.resources.get(&grant.resource.key()?).map(|(g, _)| g);
+                let Some(previous) = previous else {
+                    return Err(IdentityFailureV1::PermissionDenied.into());
+                };
+                if previous.owner != grant.owner {
+                    return Err(IdentityFailureV1::PermissionDenied.into());
+                }
+                let held = held(&grant.organization_scope);
+                for share in &grant.shares {
+                    let before = previous
+                        .shares
+                        .iter()
+                        .find(|s| s.principal == share.principal)
+                        .map(|s| &s.permissions);
+                    for permission in &share.permissions {
+                        if before.is_some_and(|p| p.contains(permission)) && previous.active {
+                            continue;
+                        }
+                        if &share.principal == actor {
+                            return Err(IdentityFailureV1::PermissionDenied.into());
+                        }
+                        let allowed = match permission {
+                            ResourcePermissionV1::Metadata => {
+                                held.contains(&HumanCapabilityV1::ReadMetadata)
+                                    || held.contains(&HumanCapabilityV1::ReadTenantMetadata)
+                            }
+                            ResourcePermissionV1::Content => {
+                                held.contains(&HumanCapabilityV1::ReadContent)
+                            }
+                            ResourcePermissionV1::Export => {
+                                held.contains(&HumanCapabilityV1::Export)
+                            }
+                        };
+                        if !allowed {
+                            return Err(IdentityFailureV1::PermissionDenied.into());
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
         Ok(())
     }

@@ -116,9 +116,8 @@ impl OwnedHumanGateway {
         })?;
         let access = HumanSourceAccess::read(&epoch, source)
             .map_err(|error| store.owned_failure_code(&error))?;
-        let expected = *self
-            .discovery_generations
-            .get(index)
+        let expected = self
+            .discovery_generation(index)
             .ok_or(Code::SourceRebuildRequired)?;
         let window = OwnedBrokerWindow::new(expected, token);
         let outcome = work(&access, &window);

@@ -11,6 +11,7 @@ use crate::{
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use serde::{Deserialize, Serialize};
+mod admin;
 mod brokers;
 /// Proposed owned (formats 14/15) human broker registry projection, served on
 /// its own path because its page shape is not the legacy page's.
@@ -18,6 +19,7 @@ mod brokers_owned;
 #[cfg(test)]
 pub(super) mod event_read_test_hook;
 mod recent;
+mod summary;
 mod workers;
 
 const CONTEXT_HEADER: &str = "x-aiguard-context";
@@ -146,6 +148,26 @@ pub(super) fn store_failure(error: anyhow::Error) -> (StatusCode, Json<Value>) {
             "The required identity or audit store is unavailable.",
             "contact_operator",
         ),
+    }
+}
+/// Failures of a delegated identity change. A conflict (stale revision, or
+/// an operation identifier reused for another change) asks for a re-read; a
+/// refusal names the change, not a read. Everything else maps like a read.
+pub(super) fn identity_change_failure(error: anyhow::Error) -> (StatusCode, Json<Value>) {
+    match error.downcast_ref::<IdentityFailureV1>() {
+        Some(IdentityFailureV1::Conflict) => failure(
+            StatusCode::CONFLICT,
+            "conflict",
+            "The membership changed since it was read, or this operation identifier was used for another change. Re-read it before deciding again.",
+            "reread",
+        ),
+        Some(IdentityFailureV1::PermissionDenied) => failure(
+            StatusCode::FORBIDDEN,
+            "permission_denied",
+            "This context does not permit this change.",
+            "review_permissions",
+        ),
+        _ => store_failure(error),
     }
 }
 fn context_failure(code: &str) -> (StatusCode, Json<Value>) {
@@ -818,6 +840,23 @@ pub(super) fn routes() -> Router<GatewayState> {
             "/human/federation/workers",
             get(workers::federation_workers),
         )
+        .route("/human/summary", get(summary::summary))
+        .route("/human/admin/quota", get(admin::quota))
+        .route("/human/admin/usage", get(admin::usage))
+        .route("/human/admin/memberships", get(admin::memberships))
+        .route(
+            "/human/admin/grants",
+            get(admin::grant).post(admin::change_grant).layer(
+                axum::extract::DefaultBodyLimit::max(GRANT_CHANGE_BODY_MAX_BYTES),
+            ),
+        )
+        .route(
+            "/human/admin/memberships/{membership_id}",
+            post(admin::change_membership).layer(axum::extract::DefaultBodyLimit::max(
+                MEMBERSHIP_CHANGE_BODY_MAX_BYTES,
+            )),
+        )
+        .route("/human/admin/configuration", get(admin::configuration))
         .route("/human/resources", get(resources))
         .route("/human/events", get(events))
         .route("/human/events/recent", get(recent::recent))
@@ -933,6 +972,10 @@ fn identity_sync(
         let revision = snapshot
             .authorization_revision
             .ok_or_else(|| context_failure("context_revoked"))?;
+        let facts = OperationFactsV1 {
+            owned_profile: state.owned_human.is_some(),
+            human_rights_marker: snapshot.human_rights_marker,
+        };
         for mut member in snapshot.memberships {
             if let Some(ceiling) = proof.ceiling() {
                 member.capabilities = member.capabilities.intersection(ceiling).copied().collect();
@@ -987,12 +1030,18 @@ fn identity_sync(
                         }
                         Err(error) => return Err(state_failure(error)),
                     };
-                let capabilities = member
+                let capabilities: Vec<HumanCapabilityV1> = member
                     .capabilities
                     .iter()
                     .copied()
                     .filter(|cap| mode == ContextModeV1::Administration || !cap.is_administration())
                     .collect();
+                let operations = context_operations(
+                    mode,
+                    &capabilities.iter().copied().collect(),
+                    &member.capabilities,
+                    facts,
+                );
                 contexts.push(HumanContextV1 {
                     id: context.id.clone(),
                     tenant_id: tenant.tenant_id.clone(),
@@ -1002,6 +1051,7 @@ fn identity_sync(
                     membership_revision: member.revision.to_string(),
                     authorization_version: context.authorization_version.clone(),
                     expires_at: context.expires_at.clone(),
+                    operations,
                 });
             }
         }

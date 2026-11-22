@@ -1,15 +1,31 @@
 // Test-only builders for the unified supervision tests. Never imported by the application.
-import { broker, brokerPage, context, federationPage, page, resource, worker, workerObservation, workerPage, uuid, secondUuid } from "./human-fixtures.mjs";
+import { ownedCatalogue } from "./owned-brokers-fixture.mjs";
+import { broker, brokerPage, catalogue, context, federationPage, organization, own, page, readerOperations, resource, tenantScope, worker, workerObservation, workerPage, uuid, secondUuid } from "./human-fixtures.mjs";
 
 export const hexId = (prefix, number) => `${prefix}0000000-0000-4000-8000-${number.toString(16).padStart(12, "0")}`;
 export const workerId = (number) => hexId("1", number);
 export const brokerId = (number) => hexId("2", number);
 export const sessionId = (number) => hexId("3", number);
 export const contextId = "context-supervision";
-export const adminContext = (capabilities = ["read_metadata", "read_content", "export", "read_tenant_metadata", "read_broker_registry", "read_worker_registry"], extra = {}) =>
-  ({ ...context(contextId, "administration"), capabilities, ...extra });
-export const personalContext = (capabilities = ["read_metadata", "read_content", "export"], extra = {}) =>
-  ({ ...context(contextId, "personal"), capabilities, ...extra });
+/** The full administration offer of the supervision tests, stated operation by operation; `overrides` replaces single entries. */
+export const adminOperations = (overrides = {}) => catalogue({ resources_read: organization, events_read_metadata: organization, events_stream: organization,
+  events_read_content: own, events_export: own, summary_read: tenantScope, brokers_read: tenantScope, workers_read: tenantScope,
+  federation_read: tenantScope, quota_read: tenantScope, usage_read: tenantScope, ...overrides });
+/** The owned source profile: the worker registry, the composition and the administration reads are announced unavailable for it. */
+export const ownedAdminOperations = () => ownedCatalogue(adminOperations());
+/** A context whose capabilities differ from the default must state its own catalogue: no offer is derived from capabilities. */
+const explicit = (capabilities, extra, label) => {
+  if (capabilities !== undefined && !Object.hasOwn(extra, "operations")) throw new Error(`${label}: a custom capability list needs an explicit operations catalogue`);
+};
+export const adminContext = (capabilities, extra = {}) => {
+  explicit(capabilities, extra, "adminContext");
+  return { ...context(contextId, "administration"), capabilities: capabilities ?? ["read_metadata", "read_content", "export", "read_tenant_metadata", "read_broker_registry", "read_worker_registry"],
+    operations: adminOperations(), ...extra };
+};
+export const personalContext = (capabilities, extra = {}) => {
+  explicit(capabilities, extra, "personalContext");
+  return { ...context(contextId, "personal"), capabilities: capabilities ?? ["read_metadata", "read_content", "export"], operations: readerOperations("personal"), ...extra };
+};
 
 export const registered = (id, extra = {}) => ({ status: "registered", runtime_kind: "docker", runtime_matches: true, in_current_grant: true,
   broker: { broker_id: id, current_incarnation_id: secondUuid, state: "current", grant_revision: "1", heartbeat_revision: "2",
