@@ -1,0 +1,15 @@
+# Default deny for every Pod of the tenant namespace, in both directions, with
+# no allow rule. ai-guard expects exactly this one policy in the namespace.
+# A created policy is not proof of enforcement: the CNI enforcement must be
+# observed separately (plan step 4a of the Kubernetes runtime guide).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ai-guard-default-deny
+  labels:
+    app.kubernetes.io/part-of: ai-guard
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress

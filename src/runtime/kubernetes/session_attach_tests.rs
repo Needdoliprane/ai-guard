@@ -3742,6 +3742,7 @@ fn owner_task_that_never_ran_drops_its_request_before_the_slot_and_the_record() 
         binding: rendered.binding.clone(),
         bootstrap: bootstrap_capacity(&bootstrap_pool()),
         until: Instant::now() + SOON,
+        relay: None,
     };
     assert_eq!(slots.available_permits(), 0);
     assert!(attempt.report().is_none());
@@ -3979,4 +3980,303 @@ async fn frame_that_cannot_be_built_locally_is_closed_by_us_not_by_the_peer() {
     assert_eq!(close.opcode(), 0x8);
     assert_eq!(close.payload, 1000_u16.to_be_bytes());
     assert!(next_frame(&mut server).await.is_none());
+}
+
+// ---- streaming attach (session protocol v3, G11 K3) -------------------------
+//
+// The streaming bracket runs through the same real HTTPS client and TLS
+// loopback peer as above. After the `101`, a fixture bridge relays the v5
+// stdin payloads to a pipe and the pipe's bytes back as stdout messages, and
+// reports the end of the pipe as a `Success` status. Behind the pipe runs the
+// real protocol v3 supervisor with `/bin/cat` as provider and egress helper.
+// Declared fixture facts only: no API server, kubelet, container, worker
+// image, real provider or G05 helper is exercised.
+
+/// Bridges one upgraded fixture stream to a worker pipe in both directions.
+async fn bridge_stream(
+    stream: PeerStream,
+    worker: DuplexStream,
+    seen: Arc<Mutex<Seen>>,
+    worker_out: Arc<Mutex<Vec<u8>>>,
+) {
+    let (mut tls_read, mut tls_write) = tokio::io::split(stream);
+    let (mut worker_read, mut worker_write) = tokio::io::split(worker);
+    let inbound = async {
+        while let Ok(Some(frame)) = read_client_frame(&mut tls_read).await {
+            match (frame.opcode(), frame.payload.as_slice()) {
+                (0x2, [255, 0]) => {
+                    seen.lock().unwrap().stdin_closes += 1;
+                    let _ = worker_write.shutdown().await;
+                }
+                (0x2, [0, bytes @ ..]) => {
+                    seen.lock().unwrap().stdin.extend_from_slice(bytes);
+                    if worker_write.write_all(bytes).await.is_err() {
+                        break;
+                    }
+                }
+                (0x8, [high, low, ..]) => {
+                    seen.lock()
+                        .unwrap()
+                        .closes
+                        .push(u16::from_be_bytes([*high, *low]));
+                    break;
+                }
+                (0x8, []) => break,
+                _ => seen.lock().unwrap().unexpected += 1,
+            }
+        }
+        seen.lock().unwrap().ended = true;
+    };
+    let outbound = async {
+        let mut chunk = vec![0_u8; 16 * 1024];
+        loop {
+            match worker_read.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(count) => {
+                    worker_out
+                        .lock()
+                        .unwrap()
+                        .extend_from_slice(&chunk[..count]);
+                    if tls_write
+                        .write_all(&server_message(1, &chunk[..count]))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+        let _ = tls_write
+            .write_all(&server_message(3, br#"{"status":"Success"}"#))
+            .await;
+        let _ = tls_write.flush().await;
+    };
+    tokio::join!(inbound, outbound);
+}
+
+fn supervisor_config(
+    workspace: &std::path::Path,
+    home: &std::path::Path,
+) -> crate::runtime::kubernetes::session_supervisor::SupervisorConfigV3 {
+    use crate::runtime::kubernetes::session_supervisor::{
+        LauncherV3, ReapScopeV3, SupervisorConfigV3,
+    };
+    SupervisorConfigV3 {
+        workspace: workspace.to_owned(),
+        home: home.to_owned(),
+        helper_program: "/bin/cat".into(),
+        helper_args: Vec::new(),
+        egress_port: 3128,
+        handoff_time: Duration::from_secs(5),
+        import_time: Duration::from_secs(10),
+        start_time: Duration::from_secs(5),
+        launcher: LauncherV3::Fixed {
+            program: "/bin/cat".into(),
+            args: Vec::new(),
+            environment: Default::default(),
+        },
+        reap: ReapScopeV3::ProcessGroups,
+    }
+}
+
+/// The next event of a broker channel, which must exist.
+async fn next_v3_event(
+    events: &mut crate::runtime::kubernetes::session_protocol::SessionEventsV3,
+) -> crate::runtime::kubernetes::session_protocol::WorkerEventV3 {
+    watched(events.next())
+        .await
+        .unwrap()
+        .expect("an event before the end")
+}
+
+#[tokio::test]
+async fn streaming_attach_carries_protocol_v3_to_the_real_supervisor_after_the_bracket() {
+    use crate::runtime::kubernetes::{
+        session_protocol::{
+            BrokerControlV3, HandoffV3, SessionModeV3, WorkerControlV3, WorkerEventV3,
+            tests::{SECRET_CANARY, payload_json, sha256_hex},
+        },
+        session_supervisor::{SupervisorEndV3, serve},
+    };
+    let case = Case::new().await;
+    let (worker_end, bridge_end) = tokio::io::duplex(256 * 1024);
+    let (worker_input, worker_output) = tokio::io::split(worker_end);
+    let workspace = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = supervisor_config(workspace.path(), home.path());
+    let worker = tokio::spawn(async move {
+        serve(SessionModeV3::Session, worker_input, worker_output, &config).await
+    });
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let worker_out = Arc::new(Mutex::new(Vec::new()));
+    {
+        let (seen, worker_out) = (seen.clone(), worker_out.clone());
+        case.expect_reply(move |request: &PeerRequest| {
+            let headers = exact_headers(request);
+            let borrowed: Vec<(&str, &str)> = headers
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str()))
+                .collect();
+            PeerReply::switching(&borrowed, move |stream: PeerStream| {
+                bridge_stream(stream, bridge_end, seen, worker_out)
+            })
+        });
+    }
+    let attempt = case.new_attempt();
+    let start = case.peer.requests().len();
+    let mut channel = watched(case.runtime.attach_exact_instance_streaming(
+        &case.instance,
+        case.rendered.binding.clone(),
+        case.attach_guard(),
+        &attempt,
+        bootstrap_capacity(&case.bootstrap),
+        Instant::now() + CONTRACT_WINDOW,
+        Instant::now() + Duration::from_secs(60),
+        &AtomicBool::new(false),
+        SessionModeV3::Session,
+    ))
+    .await
+    .unwrap();
+    // The same bracket as the preamble: anchors, Pod, attach, Pod, anchors.
+    assert_eq!(
+        case.lines_since(start),
+        [
+            ANCHORS[0].to_owned(),
+            ANCHORS[1].to_owned(),
+            case.pod_line(),
+            case.attach_line(),
+            case.pod_line(),
+            ANCHORS[0].to_owned(),
+            ANCHORS[1].to_owned(),
+        ]
+    );
+    // The stream and its slot stay owned while the session runs.
+    assert!(attempt.report().is_none());
+    assert_eq!(
+        case.runtime.attach_slots_available(),
+        MAX_CONCURRENT_ATTACH - 1
+    );
+    let mut egress = channel.take_egress().unwrap();
+    let (mut sender, mut events, _) = channel.split();
+    let args: Vec<String> = [
+        "exec",
+        "--client",
+        "codex",
+        "--auth-mode",
+        "api",
+        "--transport",
+        "batch",
+        "--preset-version",
+        "1",
+        "--prompt",
+        "public session fixture",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    // The fixture profile commits an empty workspace: an empty tar.
+    let archive = tar::Builder::new(Vec::new()).into_inner().unwrap();
+    let handoff = HandoffV3::new(
+        case.rendered.intent.profile(),
+        &payload_json(SECRET_CANARY),
+        crate::provider::BOOTSTRAP_PROGRAM,
+        &args,
+        archive.len() as u64,
+        &sha256_hex(&archive),
+    )
+    .unwrap();
+    sender
+        .send_control(BrokerControlV3::Handoff(Box::new(handoff)))
+        .await
+        .unwrap();
+    sender.send_archive(&archive).await.unwrap();
+    assert!(matches!(
+        next_v3_event(&mut events).await,
+        WorkerEventV3::Control(WorkerControlV3::Imported(_))
+    ));
+    sender.send_control(BrokerControlV3::Start).await.unwrap();
+    assert!(matches!(
+        next_v3_event(&mut events).await,
+        WorkerEventV3::Control(WorkerControlV3::Started)
+    ));
+    sender.send_stdin(b"over the attach\n").await.unwrap();
+    egress.write_all(b"egress over the attach").await.unwrap();
+    let mut echoed = [0_u8; 22];
+    watched(egress.read_exact(&mut echoed)).await.unwrap();
+    assert_eq!(&echoed, b"egress over the attach");
+    let mut stdout = Vec::new();
+    while stdout.len() < 16 {
+        match next_v3_event(&mut events).await {
+            WorkerEventV3::Stdout(bytes) => stdout.extend_from_slice(&bytes),
+            other => panic!("unexpected event {other:?}"),
+        }
+    }
+    assert_eq!(stdout, b"over the attach\n");
+    sender
+        .send_control(BrokerControlV3::StdinClose)
+        .await
+        .unwrap();
+    assert!(matches!(
+        next_v3_event(&mut events).await,
+        WorkerEventV3::Control(WorkerControlV3::Exited(_))
+    ));
+    // The worker ended its output: the relay ends, then the channel.
+    assert!(watched(events.next()).await.unwrap().is_none());
+    drop((sender, events));
+    assert_eq!(watched(worker).await.unwrap(), SupervisorEndV3::Complete);
+    let outcome = watched(attempt.join()).await.unwrap();
+    assert!(matches!(
+        outcome.end(),
+        AttachEndV2::StatusSuccess | AttachEndV2::ClosedByUsAfterIdentity
+    ));
+    let report = attempt.report().unwrap();
+    assert!(report.request_initiated());
+    assert_eq!(report.cause(), None);
+    assert_eq!(
+        report.stdout_bytes(),
+        worker_out.lock().unwrap().len() as u64
+    );
+    assert_eq!(case.runtime.attach_slots_available(), MAX_CONCURRENT_ATTACH);
+    case.peer.finish_scripts().await;
+    let seen = snapshot(&seen);
+    assert_eq!((seen.stdin_closes, seen.unexpected), (1, 0));
+    assert_eq!(seen.closes, [1000]);
+    // The credential travels only towards the worker, never back.
+    let canary = SECRET_CANARY.as_bytes();
+    let contains = |bytes: &[u8]| bytes.windows(canary.len()).any(|window| window == canary);
+    assert!(contains(&seen.stdin));
+    assert!(!contains(&worker_out.lock().unwrap()));
+}
+
+#[tokio::test]
+async fn streaming_attach_refuses_a_session_deadline_before_any_request() {
+    use crate::runtime::kubernetes::session_protocol::SessionModeV3;
+    let case = Case::new().await;
+    let start = case.peer.requests().len();
+    for session_after in [Duration::ZERO, Duration::from_secs(26 * 3600)] {
+        let attempt = case.new_attempt();
+        let until = Instant::now() + SOON;
+        let result = watched(case.runtime.attach_exact_instance_streaming(
+            &case.instance,
+            case.rendered.binding.clone(),
+            case.attach_guard(),
+            &attempt,
+            bootstrap_capacity(&case.bootstrap),
+            until,
+            until + session_after,
+            &AtomicBool::new(false),
+            SessionModeV3::Session,
+        ))
+        .await;
+        assert_eq!(
+            result.err(),
+            Some(KubernetesSessionRuntimeError::AttachDeadline)
+        );
+        let report = attempt.report().unwrap();
+        assert!(!report.request_initiated());
+        assert_eq!(report.end(), None);
+    }
+    assert!(case.lines_since(start).is_empty());
+    assert_eq!(case.runtime.attach_slots_available(), MAX_CONCURRENT_ATTACH);
 }

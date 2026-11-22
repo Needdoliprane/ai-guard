@@ -1,0 +1,17 @@
+# ai-guard LOCAL TEST recipe (Docker Desktop only, not production).
+# Holds only the per-tenant broker ServiceAccounts. No Pod ever runs here:
+# the brokers run in the trusted control perimeter outside the cluster and use
+# short-lived TokenRequest credentials for these accounts.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai-guard-control
+  labels:
+    app.kubernetes.io/part-of: ai-guard
+    app.kubernetes.io/component: broker-identities
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.36
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: v1.36
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: v1.36

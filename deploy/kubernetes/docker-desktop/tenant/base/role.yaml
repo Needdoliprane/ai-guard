@@ -1,0 +1,27 @@
+# Exactly the namespaced rights of one tenant's session broker. Nothing else:
+# no exec, log, secrets, update, list/watch of Pods, ephemeral containers,
+# port-forward, binding or token request. RBAC cannot restrict create by
+# object name or spec; ai-guard renders the exact Pod and claim requests.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ai-guard-session-broker
+  labels:
+    app.kubernetes.io/part-of: ai-guard
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "create", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["pods/attach"]
+  verbs: ["create"]
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "create", "delete"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["networkpolicies"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["serviceaccounts"]
+  resourceNames: ["default"]
+  verbs: ["get"]

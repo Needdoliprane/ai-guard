@@ -237,11 +237,18 @@ inspectés ; sinon il est absent du rapport sérialisé (et non `null`).
   réussi.
 - **Credentials :** le broker garde les credentials Kubernetes ; le Pod n'a ni
   montage automatique de jeton, ni environnement, ni Secret, ni secret en argv.
-- **Permissions futures du broker** (étape 1 du plan ci-dessous, non
-  provisionnées par ce travail) : get sur les deux Namespaces, get sur les PersistentVolumeClaims,
-  get/create/patch/delete sur les Pods du Namespace du tenant, et la permission
-  d'attachement dont le verbe reste à confirmer (EXT-8). Ni exec, ni logs, ni
-  Secrets. RBAC ne peut pas restreindre create par nom d'objet ou par spec.
+- **Permissions du broker** (étape 1 du plan ci-dessous ; modèle revu dans la
+  [recette Docker Desktop](../../../deploy/kubernetes/docker-desktop/README.fr.md)) :
+  get sur les deux Namespaces ; get/create/delete sur les PersistentVolumeClaims
+  (le broker crée chaque claim de tentative, décision D4) ; get/create/patch/delete
+  sur les Pods du Namespace du tenant ; create sur `pods/attach` (savoir si
+  l'upgrade WebSocket exige aussi `get` relève d'EXT-8, vérifié en direct avant
+  tout attachement) ; get/list sur les NetworkPolicies ; get sur le ServiceAccount
+  `default` ; et get sur la StorageClass configurée et son CSIDriver. `delete`
+  est accordé dès le départ : ai-guard n'envoie que des suppressions portant une
+  précondition d'UID, après un claim central. Ni exec, ni logs, ni Secrets, ni
+  conteneurs éphémères, ni port-forward, ni update, ni binding, ni demande de
+  jeton. RBAC ne peut pas restreindre create par nom d'objet ou par spec.
 - **Tenancy :** le tenant provient uniquement de l'identité authentifiée.
   Refuser au chargement de la configuration deux tenants qui partagent une
   autorité ou un namespace (R10) est un prérequis de tout attachement.
@@ -308,8 +315,8 @@ mainteneur.
 | Étape | Action | Oracle et preuves | Arrêt |
 |---|---|---|---|
 | 0 | Consigner l'environnement de 8.1. | Versions et contexte conservés. | Contexte autre que `docker-desktop`. |
-| 1 | (Exige une autorisation explicite du mainteneur, non accordée par ce travail.) Provisionner le Namespace du tenant avec Pod Security `restricted` `v1.36`, une NetworkPolicy de refus par défaut en entrée et en sortie, un ServiceAccount sans montage automatique de jeton et un Role portant les permissions de la section 7, à partir d'un modèle revu à ce moment. `delete` n'est accordé que pour l'étape d'arrêt ultérieure. | Objets créés et leurs UID conservés. Une NetworkPolicy créée ne prouve pas son application (étape 4a). | Toute création partielle : inspecter, ne jamais supprimer puis recréer. |
-| 2 | `agentsandbox kubernetes doctor --check-permissions` avec l'identité du broker. | Rapport conservé. Ses douze revues d'accès fixes incluent `patch pods`, `update pods`, `delete pods` et `create pods/attach` ; reste à confirmer que `create` est bien le verbe vérifié pour un upgrade WebSocket d'attachement (EXT-8). `delete pods` doit rester refusé jusqu'à l'étape d'arrêt ; `update pods`, exec, logs, Secrets, bindings et demandes de jeton doivent être refusés. | Tout refus des revues, ou l'une de ces permissions refusées accordée. |
+| 1 | (Exige une autorisation explicite du mainteneur, non accordée par ce travail.) Provisionner le Namespace du tenant avec Pod Security `restricted` `v1.36`, une NetworkPolicy de refus par défaut en entrée et en sortie, un ServiceAccount sans montage automatique de jeton et un Role portant les permissions de la section 7, à partir d'un modèle revu à ce moment. `delete` sur les Pods et les claims est accordé dès le départ et n'est utilisé que par des suppressions avec précondition d'UID. | Objets créés et leurs UID conservés. Une NetworkPolicy créée ne prouve pas son application (étape 4a). | Toute création partielle : inspecter, ne jamais supprimer puis recréer. |
+| 2 | `agentsandbox kubernetes doctor --check-permissions` avec l'identité du broker. | Rapport conservé. Ses douze revues d'accès fixes incluent `patch pods`, `update pods`, `delete pods` et `create pods/attach` ; reste à confirmer que `create` est bien le verbe vérifié pour un upgrade WebSocket d'attachement (EXT-8). `delete pods` est autorisé (suppressions avec précondition d'UID uniquement) ; `update pods`, exec, logs, Secrets, bindings et demandes de jeton doivent être refusés. | Tout refus des revues, ou l'une de ces permissions refusées accordée. |
 | 3 | (Exige une autorisation explicite du mainteneur, non accordée par ce travail.) L'opérateur crée un PVC `ReadWriteOncePod` nommé pour une tentative. La commande `kubernetes inspect-workspace` vérifie en lecture seule qu'il est `Bound` et retourne son UID. | Projection du claim conservée. | Classe sans RWOP ou `WaitForFirstConsumer` : `BLOCKED`. |
 
 ### 8.4 Suite d'effets (toute BLOCKED)
@@ -793,3 +800,300 @@ corps/ACK sont limités à64/128KiB, JSON fermé sans membre dupliqué. Chaque
 requête contrôle a un timeout12s, sans redirection, proxy ambiant ou retry
 automatique ; la lecture du corps entrant est limitée à5s. Les secrets sont
 refusés avant persistance/diffusion, les erreurs transport restent opaques.
+
+## 13. Chemin d'effet G11 : état des sources (non qualifié)
+
+Le lot G11 ajoute, dans les sources, les éléments du chemin d'effet ci-dessous.
+**Aucune session ne tourne encore** : le pilote du broker et l'exécution de
+session existent sans leur entrée CLI ; le journal privé r3, la composition de
+l'export et le portage MySQL sont en cours de livraison, et rien n'a été exécuté contre un cluster. La [recette Docker Desktop](../../../deploy/kubernetes/docker-desktop/README.fr.md)
+contient les objets de cluster revus.
+
+| Élément | Source | Ce qu'il fait et ne fait pas |
+|---|---|---|
+| Claim de workspace créé par le broker (R5, décision D4) | `src/runtime/kubernetes/session_claim.rs` | Rend le claim exact `ReadWriteOncePod` Filesystem `ai-guard-ws-<tentative>` à partir de l'intention confirmée et de la demande de stockage du tenant (classe, Mio). Au plus un POST ; seule une réponse 201 validée donne l'UID du claim ; toute autre réponse laisse la propriété inconnue. Le DELETE porte la précondition d'UID. La taille du claim n'est pas un quota d'octets. |
+| Rendu r2 des Pods à effet | `src/runtime/kubernetes/session_pod.rs` | Le Pod de session porte le finalizer `ai-guard.io/session-terminal` et le mode v3 `kubernetes-session-v3` ; l'auxiliaire d'export `ai-guard-export-<tentative>` monte le même claim en lecture seule, exécute `kubernetes-workspace-export-v3` et a sa propre borne d'exécution de 1800 s. La demande r1 d'attente est inchangée. |
+| Finalizer terminal (décision D5) | `src/runtime/kubernetes/session_effect.rs` | Le finalizer n'est retiré que par un JSON Patch qui teste l'UID et la liste exacte des finalizers, après un conteneur observé terminé ou la suppression d'un Pod jamais libéré. Un Pod bloqué par le finalizer après la perte du broker suit la procédure opérateur du guide de recette. |
+| Constructeurs de requêtes partagés | `src/runtime/kubernetes/session_requests.rs` | Une seule source pour les corps exacts des PATCH et DELETE et leurs empreintes, utilisée par le runtime pour envoyer et par le registre central pour recalculer. |
+| Permis d'effet de production (S5) | `src/runtime/kubernetes/session_permit.rs` | Seule implémentation de production du garde scellé. Construit à partir d'un acquittement central `EmitOnce` ; refuse un autre type d'effet, une autre empreinte de requête ou une autre autorité, une fenêtre centrale écoulée et une annulation levée, avant tout octet envoyé ; consommé par son unique requête. |
+| Admission de session (R7) et R10 | `src/runtime/kubernetes/session_admission.rs` | Activation explicite par tenant, liée à une autorité. Lit le namespace du tenant et refuse, chacun avec son motif : un Pod Security autre que `restricted` à la version épinglée, un ensemble de NetworkPolicies autre que la seule politique de refus par défaut, un ServiceAccount `default` pouvant monter un jeton, une StorageClass qui n'est pas `Immediate` ou n'est pas servie par un CSIDriver enregistré, une permission de session manquante, ou une permission interdite (exec, logs, Secrets, update, binding, jeton, conteneurs éphémères, port-forward) non refusée. `refuse_shared_authorities` refuse au chargement de la configuration deux tenants qui partagent un identifiant d'autorité, un endpoint et un namespace, ou un UID de namespace. L'admission est une observation d'objets, jamais une preuve que la CNI applique la politique ou qu'aucun autre sujet ne peut s'attacher. |
+| Registre central des effets (R1, Q7, règlement) | `src/control/kubernetes_session/effects.rs`, `src/audit/kubernetes_session/effects.rs` | Famille de capacité activée par la maintenance sauvegardée `enable_kubernetes_session_effects_v1` sur un Store de schéma 11 à 13, sans changement de format. Chaque claim, résultat, terminal et règlement est un événement audité avec ses lignes de projection. Le Store recalcule toutes les empreintes de requête qu'il peut, impose l'ordre claim → Pod de session → libération avec échéance armée → un seul attachement → terminal → finalizer → export → suppression du claim, lie chaque UID de claim à une seule réservation, et ne libère le quota qu'une fois que chaque Pod créé a une fin observée et qu'aucun CREATE ne reste incertain. Un rejeu ne renvoie jamais un second `EmitOnce`. |
+| Pilote du broker (K4) | `src/runtime/kubernetes/session_driver.rs` | Compose chaque effet dans un ordre unique : requête exacte, claim central, permis issu de l'unique acquittement `EmitOnce`, un seul envoi, résultat enregistré. Un claim `ObserveOnly` ou rejoué n'est jamais envoyé. Une réponse non prouvée est enregistrée `Uncertain`. Un permis refusé localement après un claim (annulation, fenêtre écoulée) est enregistré `NotSent`, afin que l'étape ne reste jamais ouverte. L'attachement unique réclame une empreinte liée à l'identité un du conteneur en cours d'exécution. Une réponse de résultat perdue est renvoyée à l'identique. L'écriture de chaque acquittement dans le journal privé avant son permis n'est pas encore implémentée. |
+| Exécution de session côté broker (K4) | `src/runtime/kubernetes/session_run.rs` | Pilote le protocole v3 après l'encadrement de l'attachement : Handoff et archive, import déclaré, Start, stdin métier, sortie du fournisseur vers un récepteur (comptée, jamais mise en tampon), au plus un Stop, sortie déclarée. La fin déclarée reste distincte des fenêtres du broker, d'un flux perdu et de la fin observée du conteneur. Les octets d'egress sont laissés au propriétaire G05. |
+| Demande d'egress par le broker (liaison G05) | `src/runtime/kubernetes/session_profile.rs`, `src/audit/kubernetes_session/effects.rs` | Le profil engage `network: denied` (par défaut) ou `broker_egress`. Le réseau du Pod reste refusé par la NetworkPolicy dans les deux cas. `egress_binding_active` est le prédicat en lecture seule que la décision d'egress G05 appelle dans sa propre transaction. Il ne répond `active` que pour une session dont le profil a demandé l'egress par le broker, dont la libération du gate et l'unique attachement sont appliqués, et sans terminal, suppression ni règlement enregistré. Chaque destination reste décidée par la politique d'egress du tenant. La composition du propriétaire à travers l'attachement n'est pas encore câblée. |
+
+### Activer les sessions à effet pour un tenant
+
+Les effets s'activent par tenant avec le champ facultatif `session_effect_policy`
+de l'entrée tenant du `--tenants-file`, à côté des trois politiques de session
+du [guide Kubernetes](../kubernetes/README.fr.md#configurer-les-politiques-de-réservation-de-session-v2).
+Absente ou `null`, aucun effet n'est accordé, sauf le nettoyage (DELETE, retrait
+du finalizer) d'effets déjà émis, avec une fenêtre de claim fixe de 30 s.
+Exemple public fictif :
+
+```json
+{
+  "session_effect_policy": {
+    "version": 1,
+    "claim_window_seconds": 30,
+    "storage": {
+      "version": 1,
+      "allowed_storage_classes": ["ai-guard-rwop"],
+      "max_capacity_mib": 4096
+    },
+    "authorities": [{
+      "version": 1,
+      "authority_id": "00000000-0000-4000-8000-000000000001",
+      "endpoint": "https://127.0.0.1:6443/",
+      "cluster_namespace_uid": "11111111-1111-4111-8111-111111111111",
+      "namespace": "ai-guard-tenant-a",
+      "namespace_uid": "22222222-2222-4222-8222-222222222222",
+      "trust_sha256": "<sha256-hex-minuscule-64-des-octets-de-la-ca-préparée>"
+    }]
+  }
+}
+```
+
+Règles vérifiées au démarrage, avant l'ouverture de toute base de tenant :
+
+- `version` vaut 1.
+- `claim_window_seconds` est compris entre 1 et 60. C'est la validité d'un claim `EmitOnce`, pas une échéance de session.
+- `storage` liste 1 à 8 classes de stockage distinctes et un `max_capacity_mib` compris entre 1 et 262144.
+- `authorities` contient 1 à 8 objets d'autorité exacts.
+- Deux tenants qui partagent un identifiant d'autorité, un endpoint et un namespace, ou un UID de namespace sont refusés (R10). Il en va de même à l'intérieur d'une politique.
+- Les champs inconnus sont refusés. Le diagnostic signale une politique invalide sous `tenants[].session_effect_policy`.
+
+La politique n'est lue que depuis la configuration de confiance, jamais depuis
+un corps de requête. Chaque nouveau claim d'effet exige aussi que l'autorité
+exacte de la réservation fasse partie des autorités activées (R7).
+
+Les routes du broker sont authentifiées par l'identité broker, comme les autres
+routes de session :
+
+- `POST /brokers/kubernetes/session-reservations/{id}/effects` réclame une étape.
+- `GET` sur le même chemin lit l'état des effets.
+- `POST .../effect-results` enregistre un résultat : `applied`, `not_applied`, `uncertain` ou `not_sent`.
+- `POST .../terminals` enregistre une fin de Pod observée.
+- `POST .../settlements` libère le quota.
+
+`SessionProtocolV2.effects_available` indique si le tenant a une politique. Le
+registre lui-même s'active une fois par Store de tenant, hors ligne, sur un
+Store de format 11 à 13, avec un nouveau chemin de sauvegarde privé :
+
+```sh
+agentsandbox enable-kubernetes-session-effects \
+  --tenant-id tenant-a \
+  --data /private/path/tenant-a.sqlite \
+  --backup /private/path/tenant-a.before-effects.sqlite \
+  --confirm-control-stopped
+```
+
+`--confirm-control-stopped` est une attestation de l'opérateur que le gateway
+et tous les brokers sont arrêtés, pas une barrière d'exécution. La commande
+vérifie la sauvegarde, ajoute un marqueur de genèse, conserve le format, affiche
+un rapport JSON et refuse une seconde exécution. Sans elle, les routes d'effet
+répondent HTTP 503 `session_lifecycle_unavailable`.
+
+Limites : les sessions Kubernetes ne fonctionnent aujourd'hui que sur les
+formats de Store 11 à 13 ; en mode sources détenues (formats 14 et 15), les
+routes de session refusent avant tout effet. Le mainteneur a décidé le
+21 novembre 2026 que les Stores détenus doivent atteindre la même capacité.
+Cette parité est une cible, non livrée : elle exige une authentification broker
+détenue à chaque requête, une transaction de Store délimitée pour chaque entrée
+de session, le marqueur d'effets installé par la maintenance détenue en place
+et la décision d'egress détenue, chacun restant à implémenter et à relire. Un CREATE incertain garde le quota retenu jusqu'à ce qu'une reprise
+autorisée le résolve. Les tenants MySQL refusent la famille jusqu'à l'arrivée
+de son portage.
+
+## 14. Protocole de session v3
+
+Le protocole v3 (exigence R4, lot G11 K3) est le tramage fermé qui suit le
+Hello/Ready v2 inchangé sur l'unique flux `pods/attach` d'un Pod de session.
+Il existe dans les sources ([protocole](../../../src/runtime/kubernetes/session_protocol.rs),
+[superviseur dans le Pod](../../../src/runtime/kubernetes/session_supervisor.rs),
+variante en flux du [propriétaire d'attachement](../../../src/runtime/kubernetes/session_attach.rs)).
+**Aucun parcours du produit ne l'atteint :** le permis d'effet est composé
+séparément, et aucun cluster, image de worker réelle, CLI fournisseur ou
+modèle ne l'a exercé. L'état de ses tests figure au paragraphe 14.7.
+
+### 14.1 Canaux et trames
+
+Chaque trame est une longueur `L` sur 4 octets big-endian (octet de canal
+compris, donc `L >= 1`), un octet de canal, puis `L - 1` octets de charge. Le
+récepteur juge la longueur déclarée, puis la borne du canal, avant de réserver
+exactement la charge.
+
+| Canal | Octet | Sens | Borne de charge |
+|---|---|---|---|
+| CONTROL | 0 | les deux | JSON fermé, 1 à 16 Kio ; l'unique Handoff 1 à 256 Kio |
+| STDIN | 1 | broker vers worker | 1 à 64 Kio |
+| STDOUT | 2 | worker vers broker | 1 à 64 Kio |
+| STDERR | 3 | worker vers broker | 1 à 64 Kio |
+| EGRESS | 4 | les deux | 1 à 64 Kio, octets G05 opaques, jamais analysés par v3 |
+| ARCHIVE | 5 | broker vers worker (session), worker vers broker (export) | 1 à 64 Kio |
+
+Sont des refus de protocole :
+
+- une charge de données vide ;
+- un canal inconnu, ou utilisé dans le mauvais sens ou la mauvaise phase ;
+- un membre JSON inconnu ou dupliqué, une autre version ou un encodage de
+  contrôle non canonique ;
+- toute trame hors ordre.
+
+Le Handoff porte le profil canonique (64 Kio au plus), la charge de
+credential fournisseur (64 Kio au plus) et l'invocation métier (32 Kio
+d'arguments au plus). Il n'est admis que comme première trame d'une session :
+une seule trame de cette taille est donc détenue au plus. Ces bornes sont des
+valeurs logicielles configurées, pas des capacités mesurées.
+
+### 14.2 Ordre
+
+Pod de session (`kubernetes-session-v3`), après Ready :
+
+1. broker : `handoff`, puis exactement `archive_bytes` octets d'ARCHIVE ;
+2. worker : `imported` (engagement de workspace vérifié) ou `refused` ;
+3. broker : `start` ;
+4. worker : `started`, après le démarrage de l'assistant egress et du fournisseur, ou `refused` ;
+5. broker : STDIN, EGRESS, au plus un `stdin_close`, au plus un `stop` ;
+   worker : STDOUT, STDERR, EGRESS ;
+6. worker : `exited` (`code` ou `signal`), puis le flux se termine.
+
+Un `stop` avant `start` reçoit `refused` avec `stopped`. Pod d'export
+(`kubernetes-workspace-export-v3`) : `start` (ou `stop`) du broker, puis les
+trames ARCHIVE du worker et `archive_end`, qui porte le nombre d'octets et le
+SHA-256 du tar écrit, ou `refused`. Dans les deux modes, rien n'est envoyé
+après Ready avant que le broker parle. Le bracket du broker reste donc celui
+de la section 11 : un octet reçu après Ready et avant l'identité deux est
+refusé.
+
+### 14.3 Contrôles et effets côté worker
+
+Avant tout effet, le superviseur vérifie les points suivants :
+
+- les octets du profil sont canoniques, leur hash égale le `profile_hash` du
+  Hello et leur liaison égale les identifiants du Hello ;
+- l'invocation correspond à `invocation_sha256` ;
+- le transport n'est pas interactif : un transport interactif est refusé avec
+  `interactive_unsupported`, faute de PTY dans le Pod ; ce point reste ouvert ;
+- la charge de credential passe les contrôles existants de `prepare_execution`.
+
+L'archive est reçue dans un tampon réservé à la taille exacte déclarée ; la
+limite mémoire du Pod doit donc la dépasser. Elle est ensuite traitée dans
+cet ordre :
+
+1. son SHA-256 est comparé au Handoff ;
+2. elle est analysée avec les règles de workspace existantes : aucun lien,
+   fichier spécial, traversée, doublon ni conflit, et respect des `Limits` ;
+3. son manifeste est comparé à l'engagement du profil ;
+4. elle est écrite dans `/workspace` vide, par créations exclusives sans
+   suivi de lien et ancrées sur des descripteurs de répertoire. Un workspace
+   non vide est refusé avec `workspace_not_empty`.
+
+Sur `start`, le superviseur lance deux **enfants**, jamais `exec` : il reste PID 1.
+
+- L'assistant G05 inchangé `/usr/local/bin/ai-guard-relay serve-egress-v1 --port 3128`.
+  Ses flux standard sont portés à l'octet près sur EGRESS. Ses diagnostics
+  fixes vont au journal du conteneur.
+- Le fournisseur, par `BootstrapExecution::spawn_child`, avec la même sonde et
+  la même connexion privée que le parcours Docker, des flux standard en tubes
+  et l'environnement préparé. Les variables `HTTP(S)_PROXY`/`http(s)_proxy` et
+  `AI_GUARD_EGRESS_PROXY` pointent vers `http://127.0.0.1:3128` ; `NO_PROXY`
+  désigne les noms de boucle locale.
+
+À la sortie du fournisseur, ses tubes sont vidés pendant 1 s au plus, puis
+`exited` est envoyé et l'entrée de l'assistant est fermée. En PID 1, le
+superviseur envoie ensuite `kill(-1, SIGKILL)` et récolte les processus
+pendant 2 s au plus. Sinon, il tue les groupes de processus du fournisseur et
+de l'assistant. Les orphelins ne sont récoltés qu'à cette fin.
+
+| Fenêtre | Borne |
+|---|---|
+| Hello et Ready | 5 s à partir du premier octet (inchangé) |
+| Ready vers Handoff (session) ou `start` (export) | 30 s |
+| Handoff vers import écrit | 600 s |
+| `imported` vers `start` | 120 s |
+| Vidage après la sortie du fournisseur | 1 s |
+| Session en cours | aucune borne locale ; `activeDeadlineSeconds` du Pod |
+
+### 14.4 Codes de sortie
+
+| Sortie | Fin |
+|---|---|
+| 0 | `exited` ou `archive_end` a été écrit. Le protocole est terminé ; ce n'est **pas** un succès du fournisseur ni de la session. |
+| 64 | Refus de protocole : trame, borne, ordre ou argument supplémentaire. `refused`/`protocol` est envoyé si le flux le permet. |
+| 65 | Fenêtre Hello, Handoff, import ou start écoulée (`refused`/`deadline`). |
+| 66 | Entrée terminée avant le Hello ou avant le Handoff (export : avant `start`). |
+| 67 | Handoff, import, start ou export refusé avec un motif fermé. |
+| 68 | `stop` avant `start`, ou pendant l'export. |
+| 69 | Entrée terminée après le Handoff, avant le marqueur de fin. Le superviseur demande l’arrêt du fournisseur et envoie `exited` uniquement s’il a obtenu son statut de sortie. |
+| 70 | Échec local de flux ou de runtime. |
+
+### 14.5 Variante en flux côté broker
+
+`attach_exact_instance_streaming` reprend le bracket, le garde
+(`SessionEffectKindV2::Attach`), l'annulation et les refus de l'attachement de
+préambule. Quand les deux observations concordent, la tâche propriétaire ne
+ferme pas le flux : elle remet un bout d'un tube en mémoire (128 Kio) à
+`SessionChannelV3`. Elle relaie ensuite stdin et stdout jusqu'à l'échéance
+de session (25 h au plus), la fermeture du canal ou la fin du pair. Stderr
+reste compté dans 16 Kio, un statut termine le flux, et la fermeture de stdin
+puis la trame de fermeture suivent comme au paragraphe 11.2. Le slot
+d'attachement est détenu jusqu'à cette fin. Les deux slots d'un runtime
+bornent donc les sessions en flux simultanées à **deux**, point ouvert pour la
+cible de 100 workers.
+
+Le canal offre des envois bornés (contrôle, stdin, archive), des événements
+bornés (contrôle, stdout, stderr, archive) et un `DuplexStream` pour le
+propriétaire egress G05. L'egress du broker est retenu jusqu'à `start` et
+s'arrête à `stop`. Le broker refuse :
+
+- ses propres envois hors ordre ;
+- une archive qui diffère de son empreinte déclarée ;
+- un `imported` qui diffère de l'engagement du profil ;
+- un `archive_end` qui diffère des octets reçus.
+
+L'appelant doit mener envois et événements en parallèle, car chaque file
+applique une contre-pression.
+
+### 14.6 Limites
+
+- Chaque message du worker est **déclaré**. `exited` n'est pas l'état terminal
+  observé du conteneur, que le broker lit par UID de Pod (D5).
+  Si le statut du fournisseur reste inconnu, le worker ferme le flux sans
+  `exited` et le broker signale que le flux est incomplet.
+  `imported` n'est pas un workspace observé.
+- La sortie standard ne porte que Ready et les trames v3. Le runtime du nœud
+  la conserve dans ses journaux, donc aucun secret ne doit y passer. Le
+  superviseur n'écrit jamais la charge du Handoff dans une trame ni sur
+  stderr. Le fournisseur reçoit le credential par conception, et sa sortie
+  n'est pas filtrée ici : le masquage avant persistance reste au broker.
+- Les tampons de charge possédés par v3 sont écrasés avant libération. Les
+  zones de travail du décodeur JSON, la préparation fournisseur et
+  l'environnement de l'enfant ne sont pas couverts. C'est une hygiène, pas une
+  protection mémoire.
+- Aucun réattachement : un flux perdu est définitif pour le Pod (D6). La
+  reprise passe par un état terminal, un export et une nouvelle tentative.
+- La contre-pression STDIN d'un fournisseur qui ne lit pas bloque la suite des
+  entrées du broker. L'échéance du Pod et la fermeture par le broker restent
+  les bornes.
+- Un `lost+found` ext4 à la racine du claim rendrait le workspace non vide.
+  Cette question reste ouverte pour la classe de stockage.
+
+### 14.7 Tests et périmètre
+
+Les tests de source couvrent :
+
+- le codec, les messages de contrôle et les deux automates d'ordre ;
+- le canal broker face à des trames scriptées et au vrai superviseur ;
+- le superviseur par de vrais tubes d'enfants, avec `/bin/cat`,
+  `/usr/bin/false`, `/bin/sleep` et une fixture du binaire de test qui laisse
+  un descendant ;
+- le vrai binaire `ai-guard-provider` pour les deux modes v3 et leurs sorties
+  de refus ;
+- l'attachement en flux par le pair TLS de boucle locale, avec un pont de
+  fixture vers le vrai superviseur.
+
+Ils ne qualifient ni kubelet, ni serveur API, ni conteneur, ni image de
+worker, ni gestion des signaux en PID 1, ni fournisseur réel, ni assistant G05
+réel, ni modèle. Leurs résultats sont consignés dans les preuves du lot K3,
+pas ici. La qualification sur cluster reste BLOCKED comme au paragraphe 11.6.

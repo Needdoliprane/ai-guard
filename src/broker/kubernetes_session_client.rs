@@ -137,11 +137,9 @@ impl SessionControlClientV2 {
         let identity = self.identity().await?;
         let (status, protocol): (_, SessionProtocolV2) =
             self.transport.exchange(PROTOCOL_PATH, None).await?;
-        if status != StatusCode::OK
-            || protocol.version != 2
-            || protocol.identity != identity
-            || protocol.effects_available
-        {
+        // `effects_available` only reports whether the tenant's ledger and
+        // effect policy are configured; pre-effect commands ignore it.
+        if status != StatusCode::OK || protocol.version != 2 || protocol.identity != identity {
             return Err(SessionControlErrorV2::Protocol);
         }
         Ok(protocol)
@@ -347,6 +345,136 @@ impl SessionControlClientV2 {
             return Err(SessionControlErrorV2::Protocol);
         }
         Ok(response)
+    }
+    /// Central claim of one exact effect request. `EmitOnce` comes back once;
+    /// a replay of a lost answer returns the historical `ObserveOnly`.
+    pub(crate) async fn claim_effect(
+        &self,
+        request: &crate::control::kubernetes_session::effects::KubernetesSessionEffectRequestV2,
+    ) -> Result<crate::control::kubernetes_session::effects::KubernetesSessionEffectClaimAckV2>
+    {
+        request
+            .validate()
+            .map_err(|_| SessionControlErrorV2::InvalidInput)?;
+        let path = format!("{RESERVATIONS_PATH}/{}/effects", request.reservation_id);
+        let (status, ack): (
+            _,
+            crate::control::kubernetes_session::effects::KubernetesSessionEffectClaimAckV2,
+        ) = self.effect_exchange(&path, request).await?;
+        ack.validate()
+            .map_err(|_| SessionControlErrorV2::Protocol)?;
+        let expected = if ack.replayed {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        };
+        if status != expected
+            || ack.request != *request
+            || ack.receipt.control_namespace_uuid != self.scope().control_namespace_uuid
+        {
+            return Err(SessionControlErrorV2::Protocol);
+        }
+        Ok(ack)
+    }
+    pub(crate) async fn record_effect_result(
+        &self,
+        result: &crate::control::kubernetes_session::effects::KubernetesSessionEffectResultV2,
+    ) -> Result<crate::control::kubernetes_session::effects::KubernetesSessionEffectStateV2> {
+        result
+            .validate()
+            .map_err(|_| SessionControlErrorV2::InvalidInput)?;
+        let path = format!(
+            "{RESERVATIONS_PATH}/{}/effect-results",
+            result.reservation_id
+        );
+        self.effect_state_exchange(&path, &result.reservation_id, result)
+            .await
+    }
+    pub(crate) async fn record_terminal(
+        &self,
+        terminal: &crate::control::kubernetes_session::effects::KubernetesSessionTerminalV2,
+    ) -> Result<crate::control::kubernetes_session::effects::KubernetesSessionEffectStateV2> {
+        terminal
+            .validate()
+            .map_err(|_| SessionControlErrorV2::InvalidInput)?;
+        let path = format!("{RESERVATIONS_PATH}/{}/terminals", terminal.reservation_id);
+        self.effect_state_exchange(&path, &terminal.reservation_id, terminal)
+            .await
+    }
+    pub(crate) async fn settle(
+        &self,
+        settlement: &crate::control::kubernetes_session::effects::KubernetesSessionSettlementV2,
+    ) -> Result<crate::control::kubernetes_session::effects::KubernetesSessionEffectStateV2> {
+        settlement
+            .validate()
+            .map_err(|_| SessionControlErrorV2::InvalidInput)?;
+        let path = format!(
+            "{RESERVATIONS_PATH}/{}/settlements",
+            settlement.reservation_id
+        );
+        self.effect_state_exchange(&path, &settlement.reservation_id, settlement)
+            .await
+    }
+    pub(crate) async fn effect_state(
+        &self,
+        reservation_id: &str,
+    ) -> Result<crate::control::kubernetes_session::effects::KubernetesSessionEffectStateV2> {
+        crate::control::kubernetes_session::validation::uuid(reservation_id)
+            .map_err(|_| SessionControlErrorV2::InvalidInput)?;
+        let before = self.protocol().await?.identity;
+        let (status, state): (
+            _,
+            crate::control::kubernetes_session::effects::KubernetesSessionEffectStateV2,
+        ) = self
+            .transport
+            .exchange(
+                &format!("{RESERVATIONS_PATH}/{reservation_id}/effects"),
+                None,
+            )
+            .await?;
+        if status != StatusCode::OK
+            || state.version != 1
+            || state.reservation_id != reservation_id
+            || self.identity().await? != before
+        {
+            return Err(SessionControlErrorV2::Protocol);
+        }
+        Ok(state)
+    }
+    /// One effect POST bracketed by the same authenticated broker identity.
+    async fn effect_exchange<B: serde::Serialize, T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<(StatusCode, T)> {
+        let bytes = self.transport.request_bytes(body)?;
+        let before = self.protocol().await?.identity;
+        let response = self.transport.exchange(path, Some(bytes)).await?;
+        if self
+            .identity()
+            .await
+            .map_err(|_| SessionControlErrorV2::ReceptionUnknown)?
+            != before
+        {
+            return Err(SessionControlErrorV2::Protocol);
+        }
+        Ok(response)
+    }
+    async fn effect_state_exchange<B: serde::Serialize>(
+        &self,
+        path: &str,
+        reservation_id: &str,
+        body: &B,
+    ) -> Result<crate::control::kubernetes_session::effects::KubernetesSessionEffectStateV2> {
+        let (status, state): (
+            _,
+            crate::control::kubernetes_session::effects::KubernetesSessionEffectStateV2,
+        ) = self.effect_exchange(path, body).await?;
+        if status != StatusCode::OK || state.version != 1 || state.reservation_id != reservation_id
+        {
+            return Err(SessionControlErrorV2::Protocol);
+        }
+        Ok(state)
     }
     pub(crate) fn filesystem_permit(&self) -> Result<tokio::sync::OwnedSemaphorePermit> {
         self.transport

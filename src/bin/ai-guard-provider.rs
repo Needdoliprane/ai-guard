@@ -6,7 +6,7 @@ fn main() {
     }
     let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     if let Some(code) =
-        agentsandbox::runtime::kubernetes::session_worker::dispatch_waiting_mode(&raw)
+        agentsandbox::runtime::kubernetes::session_worker::dispatch_worker_mode(&raw)
     {
         std::process::exit(code);
     }

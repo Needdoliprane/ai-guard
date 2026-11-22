@@ -57,8 +57,45 @@ pub enum KubernetesPermissionActionV1 {
     GetSecrets,
     ListSecrets,
     CreateServiceAccountToken,
+    /// G11 session admission (R5, D4): the broker creates and deletes the
+    /// per-attempt claim and reads the tenant's NetworkPolicies and default
+    /// ServiceAccount. Not part of the legacy twelve doctor reviews.
+    GetPersistentVolumeClaims,
+    CreatePersistentVolumeClaims,
+    DeletePersistentVolumeClaims,
+    ListNetworkPolicies,
+    GetServiceAccounts,
+    /// Must stay denied: an ephemeral container or a port forward would
+    /// bypass the closed Pod request and the attach-only channel.
+    PatchPodEphemeralContainers,
+    CreatePodPortForward,
 }
 impl KubernetesPermissionActionV1 {
+    /// Reviews required by `admit_session_workload`: allowed for the session
+    /// lifecycle, then denied for every bypass of it.
+    pub(super) const SESSION_REQUIRED: [Self; 10] = [
+        Self::GetPods,
+        Self::CreatePods,
+        Self::PatchPods,
+        Self::DeletePods,
+        Self::CreatePodAttach,
+        Self::GetPersistentVolumeClaims,
+        Self::CreatePersistentVolumeClaims,
+        Self::DeletePersistentVolumeClaims,
+        Self::ListNetworkPolicies,
+        Self::GetServiceAccounts,
+    ];
+    pub(super) const SESSION_FORBIDDEN: [Self; 9] = [
+        Self::UpdatePods,
+        Self::CreatePodBinding,
+        Self::CreatePodExec,
+        Self::GetPodLogs,
+        Self::GetSecrets,
+        Self::ListSecrets,
+        Self::CreateServiceAccountToken,
+        Self::PatchPodEphemeralContainers,
+        Self::CreatePodPortForward,
+    ];
     pub(super) const ALL: [Self; 12] = [
         Self::GetPods,
         Self::CreatePods,
@@ -75,6 +112,7 @@ impl KubernetesPermissionActionV1 {
     ];
 
     pub(super) fn attributes(self, namespace: &str) -> Value {
+        let mut group = "";
         let (verb, resource, subresource) = match self {
             Self::GetPods => ("get", "pods", None),
             Self::CreatePods => ("create", "pods", None),
@@ -88,10 +126,20 @@ impl KubernetesPermissionActionV1 {
             Self::GetSecrets => ("get", "secrets", None),
             Self::ListSecrets => ("list", "secrets", None),
             Self::CreateServiceAccountToken => ("create", "serviceaccounts", Some("token")),
+            Self::GetPersistentVolumeClaims => ("get", "persistentvolumeclaims", None),
+            Self::CreatePersistentVolumeClaims => ("create", "persistentvolumeclaims", None),
+            Self::DeletePersistentVolumeClaims => ("delete", "persistentvolumeclaims", None),
+            Self::ListNetworkPolicies => {
+                group = "networking.k8s.io";
+                ("list", "networkpolicies", None)
+            }
+            Self::GetServiceAccounts => ("get", "serviceaccounts", None),
+            Self::PatchPodEphemeralContainers => ("patch", "pods", Some("ephemeralcontainers")),
+            Self::CreatePodPortForward => ("create", "pods", Some("portforward")),
         };
         // No caller-controlled verb, resource, identity or all-namespace scope.
         let mut attributes = json!({
-            "namespace":namespace, "group":"", "version":"v1",
+            "namespace":namespace, "group":group, "version":"v1",
             "resource":resource, "verb":verb
         });
         if let Some(subresource) = subresource {

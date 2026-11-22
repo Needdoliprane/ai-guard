@@ -59,7 +59,9 @@ use tokio::time::{Instant, timeout_at};
 
 #[path = "session_create_response.rs"]
 mod create_response;
-pub(in crate::runtime::kubernetes) use create_response::CreatedSessionResponseV2;
+pub(in crate::runtime::kubernetes) use create_response::{
+    CreatedClaimResponseV2, CreatedSessionResponseV2,
+};
 
 /// Release and delete bodies are a few hundred bytes.
 const MAX_SMALL_EFFECT_BYTES: usize = 4096;
@@ -88,6 +90,10 @@ impl Transport {
         // Captured from the actual fixed route, never supplied as response data.
         let create_target = match &effect {
             SessionHttpEffectV2::CreateHeld { request } => Some(request.target().clone()),
+            _ => None,
+        };
+        let claim_target = match &effect {
+            SessionHttpEffectV2::CreateClaim { request } => Some(request.target().clone()),
             _ => None,
         };
         let (method, path, content_type, body, digest) = match effect {
@@ -130,6 +136,47 @@ impl Transport {
                 let digest = effect_request_sha256(kind, &fingerprint, "DELETE", &path, &body);
                 (Method::DELETE, path, "application/json", body, digest)
             }
+            SessionHttpEffectV2::ReleaseFinalizer { name, body } => {
+                if !super::super::valid_dns_label(name) || body.len() > MAX_SMALL_EFFECT_BYTES {
+                    return Err(refused);
+                }
+                let path =
+                    format!("/api/v1/namespaces/{namespace}/pods/{name}?fieldValidation=Strict");
+                let digest = effect_request_sha256(kind, &fingerprint, "PATCH", &path, &body);
+                (
+                    Method::PATCH,
+                    path,
+                    "application/json-patch+json",
+                    body,
+                    digest,
+                )
+            }
+            SessionHttpEffectV2::CreateClaim { request } => {
+                let target = request.target();
+                if target.authority_fingerprint() != fingerprint
+                    || request.bytes().len() > MAX_SMALL_EFFECT_BYTES
+                {
+                    return Err(refused);
+                }
+                // The central claim binds the rendered claim request digest.
+                (
+                    Method::POST,
+                    format!(
+                        "/api/v1/namespaces/{namespace}/persistentvolumeclaims?fieldValidation=Strict"
+                    ),
+                    "application/json",
+                    request.bytes().to_vec(),
+                    target.request_sha256().to_owned(),
+                )
+            }
+            SessionHttpEffectV2::DeleteClaimExact { name, body } => {
+                if !super::super::valid_dns_label(name) || body.len() > MAX_SMALL_EFFECT_BYTES {
+                    return Err(refused);
+                }
+                let path = format!("/api/v1/namespaces/{namespace}/persistentvolumeclaims/{name}");
+                let digest = effect_request_sha256(kind, &fingerprint, "DELETE", &path, &body);
+                (Method::DELETE, path, "application/json", body, digest)
+            }
         };
         let _permit = self
             .permits
@@ -166,9 +213,12 @@ impl Transport {
         let status = response.status().as_u16();
         Ok(
             match read_response_bytes_limited(response, MAX_RESPONSE_BYTES).await {
-                Ok(bytes) => match (status, create_target) {
-                    (201, Some(target)) => SessionHttpResponseV2::CreatedResponse(Box::new(
+                Ok(bytes) => match (status, create_target, claim_target) {
+                    (201, Some(target), _) => SessionHttpResponseV2::CreatedResponse(Box::new(
                         CreatedSessionResponseV2::from_created_post(target, bytes),
+                    )),
+                    (201, None, Some(target)) => SessionHttpResponseV2::CreatedClaim(Box::new(
+                        CreatedClaimResponseV2::from_created_post(target, bytes),
                     )),
                     _ => SessionHttpResponseV2::Complete { status, bytes },
                 },

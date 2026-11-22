@@ -1,0 +1,8 @@
+# ai-guard LOCAL TEST recipe: control namespace and broker ServiceAccounts.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- namespace.yaml
+- serviceaccounts.yaml
+- resourcequota.yaml

@@ -545,6 +545,76 @@ pub fn run_from_environment(args: &[String]) -> Result<i32> {
     bail!("client_missing: provider executable could not replace the bootstrap process")
 }
 
+impl BootstrapExecution {
+    /// Resolved transport of the prepared request.
+    pub fn transport(&self) -> ClientTransport {
+        self.transport
+    }
+
+    /// Kubernetes session protocol v3 entry (G11 K3): the payload was given
+    /// in memory to `prepare_execution` by the in-Pod supervisor, never read
+    /// from the environment. This runs the same capability probe and private
+    /// login as `run_from_environment`, then **spawns** the provider as a
+    /// child instead of replacing the caller, so that the supervisor stays
+    /// PID 1. Standard streams are piped, the child gets its own process
+    /// group and is killed if its handle is dropped.
+    ///
+    /// The child environment is exactly the prepared one plus `extra`
+    /// (the loopback egress proxy variables); a name already prepared is
+    /// refused rather than overridden. The prepared environment, which holds
+    /// the credential, is consumed and its values overwritten after the
+    /// spawn; copies kept by the operating system for the child, and the
+    /// child's own memory, are not covered.
+    pub async fn spawn_child(
+        mut self,
+        workspace: &Path,
+        extra: &BTreeMap<String, String>,
+    ) -> Result<tokio::process::Child> {
+        ensure!(
+            extra
+                .keys()
+                .all(|name| !self.environment.contains_key(name)),
+            "invalid provider bootstrap request: environment collision"
+        );
+        self.probe().await?;
+        self.login().await?;
+        self.home.revalidate()?;
+        self.state.revalidate()?;
+        let mut command = tokio::process::Command::new(self.program);
+        command
+            .args(&self.arguments)
+            .env_clear()
+            .envs(&self.environment)
+            .envs(extra)
+            .current_dir(workspace)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .process_group(0);
+        let spawned = command.spawn();
+        drop(command);
+        for value in self.environment.values_mut() {
+            overwrite(value);
+        }
+        if let Some(secret) = self.api_login.as_mut() {
+            overwrite(secret);
+        }
+        spawned
+            .map_err(|_| anyhow!("client_missing: provider executable is absent or cannot start"))
+    }
+}
+
+/// Best-effort overwrite of a private value before it is dropped.
+fn overwrite(value: &mut String) {
+    // SAFETY: zero bytes keep the string valid UTF-8; each write targets an
+    // exclusively borrowed byte.
+    for byte in unsafe { value.as_mut_vec() }.iter_mut() {
+        unsafe { std::ptr::write_volatile(byte, 0) };
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Fixed diagnostics only: captured help/login output and payload are private.
 pub fn public_error(error: &anyhow::Error) -> &'static str {
     let text = error.to_string();

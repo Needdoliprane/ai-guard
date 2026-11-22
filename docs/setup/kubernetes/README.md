@@ -507,8 +507,11 @@ An approval matches all eight fields exactly: authority UUID, fingerprint of
 `profile_id` (1–80 ASCII letters/digits/`_`/`-`) and positive 32-bit
 `profile_revision`. Image validation is the same as for held-create above.
 No wildcard, model, credential, argv or fallback is added. `worker_quota`
-independently bounds allocation; the reservation profile keeps networking
-denied. A reservation creates durable central state, not a Pod or a start right.
+independently bounds allocation. The Pod network of a session is always denied
+by its NetworkPolicy; the profile's committed `network` request is `denied`
+(default) or `broker_egress`, which only asks the broker to carry the
+provider traffic under the tenant egress policy (see the
+[runtime guide](../kubernetes-runtime/README.md#13-g11-effect-path-source-state-not-qualified)). A reservation creates durable central state, not a Pod or a start right.
 
 `session_recovery_policy` permits only before-effect recovery by a currently
 authenticated broker with the same historical broker ID. The separate

@@ -1,0 +1,13 @@
+# ai-guard LOCAL TEST recipe (Docker Desktop only, not production).
+# The CSI node plugin and its sidecars run privileged with hostPath mounts,
+# as any CSI node plugin does, so this namespace is labelled "privileged".
+# No ai-guard workload ever runs here; session Pods run in the restricted
+# tenant namespaces.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai-guard-csi-hostpath
+  labels:
+    app.kubernetes.io/part-of: ai-guard
+    app.kubernetes.io/component: local-test-storage
+    pod-security.kubernetes.io/enforce: privileged

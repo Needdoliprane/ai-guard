@@ -70,6 +70,7 @@ fn fields(refusal: &Refusal) -> &'static [&'static str] {
             PolicyKind::KubernetesSessionControlRecovery => {
                 &["tenants[].session_control_recovery_policy"]
             }
+            PolicyKind::KubernetesSessionEffect => &["tenants[].session_effect_policy"],
             PolicyKind::AuditCapacity => &["tenants[].audit_capacity_policy"],
             PolicyKind::WorkloadAudit => &["tenants[].workload_audit_policy"],
             PolicyKind::RelayRetention => &["tenants[].relay_retention_policy"],

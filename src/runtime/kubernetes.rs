@@ -26,12 +26,20 @@ mod prerequisites;
 #[path = "kubernetes/prerequisites_tests.rs"]
 mod prerequisites_tests;
 pub(crate) mod session;
+pub(crate) mod session_admission;
 pub(crate) mod session_attach;
+pub(crate) mod session_claim;
+pub(crate) mod session_driver;
 pub(crate) mod session_effect;
 pub(crate) mod session_instance;
 pub(crate) mod session_lifecycle;
+pub(crate) mod session_permit;
 pub(crate) mod session_pod;
 pub mod session_profile;
+pub(crate) mod session_protocol;
+pub(crate) mod session_requests;
+pub(crate) mod session_run;
+pub(crate) mod session_supervisor;
 #[cfg(test)]
 #[path = "kubernetes/session_test_peer.rs"]
 pub(crate) mod session_test_peer;
@@ -50,6 +58,7 @@ pub use prerequisites::{
     KubernetesPermissionActionV1, KubernetesPermissionCoverageV1, KubernetesPermissionDecisionV1,
     KubernetesPermissionReviewStatusV1, KubernetesPrerequisitesV1,
 };
+pub use session_claim::KubernetesSessionStorageRequestV2;
 pub use session_instance::KubernetesSessionWorkspaceClaimV2;
 use transport::Transport;
 
@@ -196,6 +205,12 @@ impl KubernetesAuthorityV1 {
     }
     pub fn namespace(&self) -> &str {
         &self.namespace
+    }
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+    pub fn namespace_uid(&self) -> &str {
+        &self.namespace_uid
     }
     pub fn authority_id(&self) -> Uuid {
         self.authority_id

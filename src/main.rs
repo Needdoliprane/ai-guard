@@ -129,6 +129,21 @@ enum Command {
     },
     /// Offline audit retention: install, plan, apply, verify and export archives.
     AuditRetention(agentsandbox::audit::retention::cli::AuditRetentionArgs),
+    /// Enable the Kubernetes session effect ledger on one offline store of
+    /// format 11 to 13, without a format change, after a verified new backup.
+    EnableKubernetesSessionEffects {
+        #[arg(long)]
+        data: PathBuf,
+        #[arg(long)]
+        tenant_id: String,
+        #[arg(long)]
+        backup: PathBuf,
+        /// Operator attestation: gateway and brokers are stopped; not runtime fencing.
+        #[arg(long, required = true)]
+        confirm_control_stopped: bool,
+        #[arg(long, default_value_t = 100_000)]
+        max_events: u64,
+    },
     /// Migrate the existing offline SSO audit one explicit version with a new backup.
     MigrateAuthentication {
         /// Existing private gateway OIDC configuration; no provider contact.
@@ -579,6 +594,7 @@ fn configured_local_tenant(args: &GatewayArgs) -> Result<gateway_config::Configu
         session_reservation_policy: None,
         session_recovery_policy: None,
         session_control_recovery_policy: None,
+        session_effect_policy: None,
     })
 }
 
@@ -595,6 +611,10 @@ struct GatewaySessionPolicies {
     control_recovery: Vec<(
         String,
         agentsandbox::control::kubernetes_session::KubernetesSessionControlRecoveryPolicyV2,
+    )>,
+    effect: Vec<(
+        String,
+        agentsandbox::control::kubernetes_session::effects::KubernetesSessionEffectPolicyV2,
     )>,
 }
 
@@ -707,6 +727,11 @@ impl GatewaySessionPolicies {
                     .control_recovery
                     .push((tenant.tenant_id.clone(), policy.clone()));
             }
+            if let Some(policy) = &tenant.session_effect_policy {
+                policies
+                    .effect
+                    .push((tenant.tenant_id.clone(), policy.clone()));
+            }
         }
         policies
     }
@@ -715,6 +740,7 @@ impl GatewaySessionPolicies {
         state
             .with_kubernetes_session_reservation_policies(self.reservation)?
             .with_kubernetes_session_recovery_policies(self.recovery)?
+            .with_kubernetes_session_effect_policies(self.effect)?
             .with_kubernetes_session_control_recovery_policies(self.control_recovery)
     }
 }
@@ -1192,6 +1218,36 @@ async fn run() -> Result<()> {
                 max_events,
             )?;
             let report = store.migrate_human_rights_v2(&backup)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::EnableKubernetesSessionEffects {
+            data,
+            tenant_id,
+            backup,
+            confirm_control_stopped,
+            max_events,
+        } => {
+            anyhow::ensure!(
+                confirm_control_stopped,
+                "Stop the control plane and all brokers before this maintenance"
+            );
+            anyhow::ensure!(
+                (1..=1_000_000).contains(&max_events),
+                "invalid audit capacity"
+            );
+            let metadata = std::fs::symlink_metadata(&data)
+                .context("The maintenance requires an existing audit database")?;
+            anyhow::ensure!(
+                metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() > 0,
+                "The maintenance requires an existing regular audit database"
+            );
+            let store = Store::open_existing_for_tenant(
+                &data,
+                &tenant_id,
+                Redactor::new(vec![]),
+                max_events,
+            )?;
+            let report = store.enable_kubernetes_session_effects_v1(&backup)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::MigrateAuthentication {

@@ -904,6 +904,7 @@ pub enum PolicyKind {
     KubernetesSessionReservation,
     KubernetesSessionRecovery,
     KubernetesSessionControlRecovery,
+    KubernetesSessionEffect,
     AuditCapacity,
     WorkloadAudit,
     RelayRetention,

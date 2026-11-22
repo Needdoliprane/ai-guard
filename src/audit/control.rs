@@ -352,6 +352,17 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
             super::kubernetes_admission::recovery_event(&stored.event)?;
             continue;
         }
+        if stored
+            .event
+            .kind
+            .starts_with(super::kubernetes_session::effects::PREFIX)
+        {
+            anyhow::ensure!(
+                [11, 12, 13, 14, 15].contains(&version),
+                "Kubernetes session effect event requires schema11"
+            );
+            continue;
+        }
         if stored.event.kind.starts_with("control.kubernetes.session.") {
             anyhow::ensure!(
                 [11, 12, 13, 14, 15].contains(&version),
@@ -716,13 +727,23 @@ fn load_operation(
         })
         .transpose()
 }
+
 pub(super) fn quota_usage(db: &Connection, policy: &QuotaPolicyV1) -> anyhow::Result<QuotaUsageV1> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     // This reader is a projection, not a business-access gate. Its callers
     // retain their own checked transaction and exact legacy schema guards.
     invalid([2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&version))?;
+    // A settled effectful reservation keeps its historical row but no quota.
+    let settled = if [11, 12, 13, 14, 15].contains(&version) {
+        super::kubernetes_session::effects::settled_clause(db)?
+    } else {
+        ""
+    };
+    let modern = format!(
+        "SELECT count(*),COALESCE(SUM(cpu_millis),0),COALESCE(SUM(memory_bytes),0) FROM (SELECT cpu_millis,memory_bytes FROM workers WHERE quota_held=1 UNION ALL SELECT cpu_millis,memory_bytes FROM kubernetes_creates WHERE quota_held=1 UNION ALL SELECT cpu_millis,memory_bytes FROM kubernetes_session_reservations WHERE quota_held=1{settled})"
+    );
     let query = if [11, 12, 13, 14, 15].contains(&version) {
-        "SELECT count(*),COALESCE(SUM(cpu_millis),0),COALESCE(SUM(memory_bytes),0) FROM (SELECT cpu_millis,memory_bytes FROM workers WHERE quota_held=1 UNION ALL SELECT cpu_millis,memory_bytes FROM kubernetes_creates WHERE quota_held=1 UNION ALL SELECT cpu_millis,memory_bytes FROM kubernetes_session_reservations WHERE quota_held=1)"
+        modern.as_str()
     } else if [8, 9, 10].contains(&version) {
         "SELECT count(*),COALESCE(SUM(cpu_millis),0),COALESCE(SUM(memory_bytes),0) FROM (SELECT cpu_millis,memory_bytes FROM workers WHERE quota_held=1 UNION ALL SELECT cpu_millis,memory_bytes FROM kubernetes_creates WHERE quota_held=1)"
     } else {
@@ -1298,6 +1319,15 @@ impl Store {
             },
         )
     }
+    /// Explicit backed-up maintenance that adds the Kubernetes session effect
+    /// ledger capability (G11) to a schema 11, 12 or 13 store, without any
+    /// format change. Never activates supervision or a runtime effect.
+    pub fn enable_kubernetes_session_effects_v1(
+        &self,
+        backup_path: &Path,
+    ) -> anyhow::Result<MigrationReportV1> {
+        self.backed_up_maintenance(backup_path, Maintenance::KubernetesSessionEffects)
+    }
     fn backed_up_maintenance(
         &self,
         backup_path: &Path,
@@ -1325,13 +1355,24 @@ impl Store {
                     );
                     Ok(())
                 }
+                Maintenance::KubernetesSessionEffects => {
+                    anyhow::ensure!(
+                        (11..=13).contains(&version),
+                        "enable-kubernetes-session-effects requires store format 11 to 13 (this store is format {version})"
+                    );
+                    anyhow::ensure!(
+                        !super::kubernetes_session::effects::enabled(preflight)?,
+                        "the Kubernetes session effect capability is already enabled on this store; nothing was changed"
+                    );
+                    Ok(())
+                }
             })?;
         let (from_version, to_version) = match step {
             Maintenance::Version {
                 from_version,
                 to_version,
             } => (from_version, to_version),
-            Maintenance::HumanRights => {
+            Maintenance::HumanRights | Maintenance::KubernetesSessionEffects => {
                 let version = u32::try_from(version)?;
                 (version, version)
             }
@@ -1348,6 +1389,30 @@ impl Store {
                 && current.event_count == expected.event_count
                 && current.head_hash == expected.head_hash,
         )?;
+        if step == Maintenance::KubernetesSessionEffects {
+            conflict(!super::kubernetes_session::effects::enabled(&tx)?)?;
+            super::kubernetes_session::effects::initialize(self, &tx)?;
+            validate_schema(&tx, false)?;
+            validate(&tx)?;
+            Self::validate_metadata(&tx, &self.tenant_id)?;
+            anyhow::ensure!(
+                Self::check_integrity(&tx)?.valid,
+                "post-maintenance audit integrity failure"
+            );
+            let (seq, hash): (i64, String) = tx.query_row(
+                "SELECT genesis_seq,genesis_hash FROM kubernetes_session_effect_meta WHERE singleton=1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            self.commit_checked(tx)?;
+            return Ok(MigrationReportV1 {
+                from_version,
+                to_version,
+                backup_path: target.to_string_lossy().into(),
+                genesis_seq: seq,
+                genesis_hash: hash,
+            });
+        }
         if step == Maintenance::HumanRights {
             conflict(super::human_rights::maintenance_pending(&tx)?)?;
             // Each step installs only what this store still lacks, in order,
@@ -1527,4 +1592,5 @@ fn validate_admission_input(
 enum Maintenance {
     Version { from_version: u32, to_version: u32 },
     HumanRights,
+    KubernetesSessionEffects,
 }

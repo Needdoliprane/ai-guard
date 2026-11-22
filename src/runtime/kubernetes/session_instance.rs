@@ -35,6 +35,7 @@ pub(crate) enum KubernetesSessionRuntimeError {
     InstanceReplaced,
     InstanceRestarted,
     WorkspaceClaimInvalid,
+    WorkspaceClaimReplaced,
     WorkspaceClaimPending,
     WorkspaceClaimAccessMode,
     WorkspaceClaimStorageClass,
@@ -78,6 +79,9 @@ impl fmt::Display for KubernetesSessionRuntimeError {
             | Self::WorkspaceClaimStorageClass => f.write_str(
                 "Kubernetes session workspace claim is not a bound ReadWriteOncePod claim for this attempt",
             ),
+            Self::WorkspaceClaimReplaced => {
+                f.write_str("Kubernetes session workspace claim has a different UID")
+            }
             Self::EffectRefusedBeforeSend => f.write_str(
                 "Kubernetes session effect was refused before any request was sent",
             ),
@@ -219,7 +223,7 @@ pub(crate) fn parse_workspace_claim(
     pvc: Value,
     observed_at: &str,
 ) -> Outcome<KubernetesSessionWorkspaceClaimV2> {
-    parse_workspace_claim_detailed(authority, name, pvc, observed_at).map_err(|error| {
+    parse_workspace_claim_detailed(authority, name, None, pvc, observed_at).map_err(|error| {
         if error.is_workspace_prerequisite() {
             KubernetesSessionRuntimeError::WorkspaceClaimInvalid
         } else {
@@ -231,6 +235,7 @@ pub(crate) fn parse_workspace_claim(
 fn parse_workspace_claim_detailed(
     authority: &KubernetesAuthorityV1,
     name: &str,
+    expected_uid: Option<&str>,
     pvc: Value,
     observed_at: &str,
 ) -> Outcome<KubernetesSessionWorkspaceClaimV2> {
@@ -279,6 +284,9 @@ fn parse_workspace_claim_detailed(
     let resource_version = required("/metadata/resourceVersion")?;
     if !valid_uid(&uid) || !valid_resource_version(&resource_version) {
         return Err(invalid);
+    }
+    if expected_uid.is_some_and(|expected| expected != uid.as_str()) {
+        return Err(KubernetesSessionRuntimeError::WorkspaceClaimReplaced);
     }
     let pending = match text("/status/phase") {
         Some("Bound") => false,
@@ -537,8 +545,15 @@ pub(crate) struct SessionObservedV2 {
     pod_uid: String,
     resource_version: String,
     state: SessionObservationStateV2,
+    /// The scheduling gate was still present in this observation.
+    gated: bool,
 }
 impl SessionObservedV2 {
+    /// True when this exact observation shows the gate still present: the
+    /// Pod was never released, so it was never scheduled or started.
+    pub(crate) fn gated(&self) -> bool {
+        self.gated
+    }
     pub(crate) fn pod_uid(&self) -> &str {
         &self.pod_uid
     }
@@ -636,6 +651,7 @@ pub(crate) fn parse_session_observation(
         pod_uid: instance.pod_uid.clone(),
         resource_version,
         state,
+        gated: held,
     })
 }
 
@@ -758,7 +774,7 @@ impl KubernetesRuntime {
         &self,
         name: &str,
     ) -> KubernetesResult<KubernetesSessionWorkspaceClaimV2> {
-        self.inspect_workspace_claim(name, false)
+        self.inspect_workspace_claim(name, false, None)
             .await
             .map_err(|error| match error {
                 KubernetesSessionRuntimeError::Kubernetes(error) => error,
@@ -771,13 +787,26 @@ impl KubernetesRuntime {
         &self,
         name: &str,
     ) -> Outcome<KubernetesSessionWorkspaceClaimV2> {
-        self.inspect_workspace_claim(name, true).await
+        self.inspect_workspace_claim(name, true, None).await
+    }
+
+    /// Observe the exact workspace instance, including while it is Pending.
+    pub(crate) async fn inspect_session_workspace_claim_exact(
+        &self,
+        name: &str,
+        uid: &str,
+    ) -> Outcome<KubernetesSessionWorkspaceClaimV2> {
+        if !valid_uid(uid) {
+            return Err(KubernetesSessionRuntimeError::WorkspaceClaimInvalid);
+        }
+        self.inspect_workspace_claim(name, true, Some(uid)).await
     }
 
     async fn inspect_workspace_claim(
         &self,
         name: &str,
         diagnose_prerequisites: bool,
+        expected_uid: Option<&str>,
     ) -> Outcome<KubernetesSessionWorkspaceClaimV2> {
         use KubernetesSessionRuntimeError::Kubernetes;
         if !valid_dns_label(name) {
@@ -794,14 +823,15 @@ impl KubernetesRuntime {
             .map_err(Kubernetes)?;
         let observed_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
         let claim = if diagnose_prerequisites {
-            parse_workspace_claim_detailed(&self.binding, name, pvc, &observed_at)
+            parse_workspace_claim_detailed(&self.binding, name, expected_uid, pvc, &observed_at)
         } else {
             parse_workspace_claim(&self.binding, name, pvc, &observed_at)
         };
         if claim.is_ok()
-            || claim
-                .as_ref()
-                .is_err_and(KubernetesSessionRuntimeError::is_workspace_prerequisite)
+            || claim.as_ref().is_err_and(|error| {
+                error.is_workspace_prerequisite()
+                    || *error == KubernetesSessionRuntimeError::WorkspaceClaimReplaced
+            })
         {
             self.verify_active_authority().await.map_err(Kubernetes)?;
         }

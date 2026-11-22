@@ -7,7 +7,7 @@ mod support;
 
 use agentsandbox::{
     audit::{
-        Store,
+        EventQuery, Store,
         retention::{
             AuditRetentionPolicyV1, PlannedRetentionV1, ReclaimClassV1, RetentionApplyRequest,
             failure::refusal,
@@ -191,6 +191,55 @@ fn apply_reissues_the_durable_receipt_when_its_acknowledgement_was_lost() {
     );
     assert_eq!(reopened.head().unwrap(), head);
     assert_eq!(reopened.audit_retention_ledger().unwrap().segments, 1);
+}
+
+#[test]
+fn retention_and_kubernetes_effects_preserve_both_capabilities_on_reopen() {
+    let dir = support::private_tempdir();
+    let (data, store) = store13(dir.path());
+    let retention = store
+        .install_audit_retention(&dir.path().join("before-retention.sqlite"))
+        .unwrap();
+    let effects = store
+        .enable_kubernetes_session_effects_v1(&dir.path().join("before-effects.sqlite"))
+        .unwrap();
+    assert_eq!((effects.from_version, effects.to_version), (13, 13));
+    assert!(effects.genesis_seq > retention.genesis_seq);
+    for index in 0..12 {
+        activity(&store, index).unwrap();
+    }
+
+    let plan = store
+        .audit_retention_plan(&policy(), later(), None, &BTreeSet::new())
+        .unwrap();
+    assert!(plan.plan.reclaimed_events > 0);
+    let archive = dir.path().join("archive");
+    apply(&store, &plan, &archive).unwrap();
+    drop(store);
+
+    let reopened = reopen(&data).unwrap();
+    let verified = reopened.verify_audit_archives(&[archive]).unwrap();
+    assert_eq!(verified.verdict, "verified", "{:?}", verified.failure);
+    assert_eq!(verified.segments_verified, 1);
+    let events = reopened.events(&EventQuery::default()).unwrap();
+    for (kind, seq, hash) in [
+        (
+            "control.audit_retention.genesis",
+            retention.genesis_seq,
+            retention.genesis_hash,
+        ),
+        (
+            "control.kubernetes.session_effect.genesis",
+            effects.genesis_seq,
+            effects.genesis_hash,
+        ),
+    ] {
+        assert!(
+            events
+                .iter()
+                .any(|row| { row.event.kind == kind && row.seq == seq && row.hash == hash })
+        );
+    }
 }
 
 #[test]

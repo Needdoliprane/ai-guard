@@ -1,0 +1,19 @@
+# ai-guard LOCAL TEST recipe (Docker Desktop only, not production).
+# Tenant namespace for session Pods. Each overlay sets the real name
+# (ai-guard-tenant-a, ai-guard-tenant-b) through its `namespace:` field; a
+# rendering that still contains "ai-guard-tenant-unset" must not be applied.
+# ai-guard refuses a namespace whose enforced Pod Security level is not
+# restricted at version v1.36.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai-guard-tenant-unset
+  labels:
+    app.kubernetes.io/part-of: ai-guard
+    app.kubernetes.io/component: tenant-sessions
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.36
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: v1.36
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: v1.36

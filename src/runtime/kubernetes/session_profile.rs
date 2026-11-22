@@ -341,11 +341,18 @@ impl WorkspaceCommitment {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+/// The network a session profile asks for. In both cases the Pod network
+/// stays denied by its NetworkPolicy. `BrokerEgress` asks the broker to
+/// carry the provider traffic inside the attach, where the G05 tenant policy
+/// decides each destination; `Denied` asks for no egress at all. Committed
+/// by the profile hash, so it is fixed at reservation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum NetworkRequest {
+pub enum KubernetesSessionNetworkV2 {
     Denied,
+    BrokerEgress,
 }
+type NetworkRequest = KubernetesSessionNetworkV2;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -412,6 +419,41 @@ impl KubernetesSessionProfileV2 {
     pub(crate) fn retained_provider(&self) -> SessionProfileResult<ProviderResolutionV1> {
         self.0.provider.resolution()
     }
+    /// Authority fingerprint of the retained binding. Validated data only.
+    pub(crate) fn retained_authority_fingerprint(&self) -> &str {
+        &self.0.binding.authority_fingerprint
+    }
+    /// Workspace commitment: manifest digest, file count, total bytes.
+    pub(crate) fn retained_workspace_commitment(&self) -> (&str, u64, u64) {
+        (
+            &self.0.workspace.manifest_sha256,
+            self.0.workspace.file_count,
+            self.0.workspace.total_bytes,
+        )
+    }
+
+    /// Worker-side reading of the canonical bytes carried by the protocol v3
+    /// Handoff (G11 K3). The Pod holds no Kubernetes authority, so none is
+    /// checked here: the caller compares `profile_hash` with the accepted
+    /// Hello and the retained binding with the Hello identifiers. Bytes that
+    /// are not exactly the canonical form of a valid profile are refused, so
+    /// the hash the worker computes is over the bytes it received. Validation
+    /// grants no authority and establishes no artifact.
+    pub(crate) fn from_canonical_bytes(bytes: &[u8]) -> SessionProfileResult<Self> {
+        if bytes.len() > MAX_PROFILE_BYTES {
+            return Err(KubernetesSessionProfileError::InputTooLarge);
+        }
+        let value = crate::json::decode_unique(bytes, MAX_DEPTH)
+            .map_err(|_| KubernetesSessionProfileError::InvalidProfile)?;
+        let wire: ProfileWire = serde_json::from_value(value)
+            .map_err(|_| KubernetesSessionProfileError::InvalidProfile)?;
+        wire.validate()?;
+        let profile = Self(wire);
+        if profile.canonical_bytes()? != bytes {
+            return Err(KubernetesSessionProfileError::InvalidProfile);
+        }
+        Ok(profile)
+    }
 
     /// Persistence parser only. The retained binding is validated data and is
     /// rechecked against authenticated/historical authority by the Store.
@@ -431,6 +473,7 @@ impl KubernetesSessionProfileV2 {
         Self::from_json(bytes, authority, &binding)
     }
 
+    /// A profile without egress (`KubernetesSessionNetworkV2::Denied`).
     pub fn build(
         authority: &KubernetesAuthorityV1,
         binding: &KubernetesSessionBindingV2,
@@ -440,12 +483,39 @@ impl KubernetesSessionProfileV2 {
         invocation: KubernetesSessionInvocationV2<'_>,
         manifest: &Manifest,
     ) -> SessionProfileResult<Self> {
+        Self::build_with_network(
+            authority,
+            binding,
+            image,
+            resources,
+            provider,
+            invocation,
+            manifest,
+            KubernetesSessionNetworkV2::Denied,
+        )
+    }
+
+    /// Same profile with an explicit network request.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the closed profile fields, each validated by its own type"
+    )]
+    pub fn build_with_network(
+        authority: &KubernetesAuthorityV1,
+        binding: &KubernetesSessionBindingV2,
+        image: &str,
+        resources: KubernetesSessionResourcesV2,
+        provider: &ProviderResolutionV1,
+        invocation: KubernetesSessionInvocationV2<'_>,
+        manifest: &Manifest,
+        network: KubernetesSessionNetworkV2,
+    ) -> SessionProfileResult<Self> {
         let profile = Self(ProfileWire {
             version: 2,
             profile: PROFILE.into(),
             binding: binding.0.clone(),
             image: image.into(),
-            network: NetworkRequest::Denied,
+            network,
             resources,
             provider: ProviderWire::new(provider)?,
             invocation_sha256: invocation.commitment(provider)?,
@@ -492,6 +562,11 @@ impl KubernetesSessionProfileV2 {
             return Err(KubernetesSessionProfileError::BindingMismatch);
         }
         Ok(())
+    }
+
+    /// The committed network request.
+    pub fn network(&self) -> KubernetesSessionNetworkV2 {
+        self.0.network
     }
 
     pub fn canonical_bytes(&self) -> SessionProfileResult<Vec<u8>> {

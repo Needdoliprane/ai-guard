@@ -19,6 +19,16 @@
 //! Pod. The effect guard stays sealed without a production implementor, so
 //! no product binary reaches this code.
 //!
+//! Streaming variant (session protocol v3, G11 K3). The same bracket, guard
+//! and owner run. Only once both observations matched around the accepted
+//! Ready does the owner, instead of closing, hand one end of an in-memory
+//! pipe to the caller and relay it to the attach stdin and stdout until the
+//! session deadline, the caller's close or the peer's end; the protocol v3
+//! channel (`session_protocol::SessionChannelV3`) runs on that pipe. The
+//! same channel policy, bounds and ending discipline apply to the relay, and
+//! the attach slot is held until its effective end. Nothing of protocol v3
+//! travels before identity two: a byte after Ready is still refused there.
+//!
 //! The stream side speaks the `v5.channel.k8s.io` subprotocol only, on the
 //! stream that the retained HTTPS client upgraded and that this module
 //! validated. WebSocket framing is done by a maintained library behind the
@@ -64,6 +74,7 @@ use super::{
         SessionObservationStateV2, SessionObservedV2, parse_session_observation,
     },
     session_pod::session_pod_name,
+    session_protocol::{SessionChannelV3, SessionModeV3},
     valid_dns_label,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -131,6 +142,11 @@ const ATTACH_BRACKET_MAX: Duration = Duration::from_secs(15);
 pub(in crate::runtime::kubernetes) const MAX_CONCURRENT_ATTACH: usize = 2;
 /// Bound of each write of the final close, after any deadline.
 const CLOSE_WRITE_LIMIT: Duration = Duration::from_secs(1);
+/// Upper bound of the session deadline of one streaming attach (protocol
+/// v3): the 24 h ceiling of a session profile deadline plus one hour.
+const ATTACH_SESSION_MAX: Duration = Duration::from_secs(25 * 3600);
+/// In-memory pipe between the owner task and the protocol v3 channel.
+const RELAY_PIPE_BYTES: usize = 128 * 1024;
 /// Period at which a wait of the bracket reads the caller's cancellation
 /// flag. The flag is an `AtomicBool` and wakes nobody, so it is polled.
 const CANCEL_POLL: Duration = Duration::from_millis(50);
@@ -865,6 +881,7 @@ impl AttachClaimV2 {
             binding,
             bootstrap,
             until,
+            relay: None,
         };
         self.start_opening(&runtime, std::future::ready(Ok(io)), inputs)
     }
@@ -1087,6 +1104,67 @@ struct StreamInputs {
     binding: SessionBootstrapBindingV2,
     bootstrap: BootstrapCapacity,
     until: Instant,
+    /// Streaming attach only: where the proven stream is handed over.
+    relay: Option<RelayRequestV3>,
+}
+
+/// Request of a streaming attach (protocol v3). After a proven bracket the
+/// owner task hands one end of an in-memory pipe to `pipe` and relays it to
+/// the attach stdin and stdout until `until`, the caller's close of the
+/// pipe, or the peer's end.
+struct RelayRequestV3 {
+    pipe: oneshot::Sender<DuplexStream>,
+    until: Instant,
+}
+
+/// How the relay of a streaming attach ended.
+enum RelayEnding {
+    /// The caller ended or dropped its end of the pipe.
+    CallerClosed,
+    /// The peer ended the stream: close, transport end or channel 3 status.
+    Peer(AttachEndV2),
+    /// Refused here: a frame or bound violation, the session deadline, or a
+    /// local failure.
+    Refused {
+        error: KubernetesSessionRuntimeError,
+        cause: Option<AttachCauseV2>,
+        close_code: u16,
+    },
+}
+impl RelayEnding {
+    fn violation(violation: Violation) -> Self {
+        match StreamEnding::violation(violation) {
+            StreamEnding::Refused {
+                error,
+                cause,
+                close_code,
+            } => Self::Refused {
+                error,
+                cause,
+                close_code,
+            },
+            _ => Self::Refused {
+                error: PROTOCOL,
+                cause: None,
+                close_code: CLOSE_PROTOCOL,
+            },
+        }
+    }
+    fn write(failure: WriteFailure) -> Self {
+        match failure {
+            WriteFailure::Deadline => Self::Refused {
+                error: DEADLINE,
+                cause: None,
+                close_code: CLOSE_NORMAL,
+            },
+            WriteFailure::Broken => Self::Peer(AttachEndV2::PeerClosed),
+            WriteFailure::Local => Self::Refused {
+                error: PROTOCOL,
+                cause: Some(AttachCauseV2::LocalFailure),
+                close_code: CLOSE_NORMAL,
+            },
+        }
+    }
 }
 
 /// The stream and its counters; lives only inside the owner task.
@@ -1313,6 +1391,90 @@ impl<S: AsyncRead + AsyncWrite + Unpin> OwnedStream<S> {
         }
     }
 
+    /// Relay of a proven streaming attach (protocol v3). Stdout payloads go
+    /// to the caller's pipe as they arrive; what the caller writes leaves as
+    /// stdin messages of at most `STDIN_CHUNK_BYTES`, each written whole or
+    /// ending the stream. The same channel policy as the bracket applies:
+    /// stderr is counted then dropped within `MAX_STDERR_BYTES`, a status
+    /// ends the stream with its closed projection, and stdin, resize, close
+    /// or unknown channels from the server are refused. Every wait is bounded
+    /// by `until`. Nothing is buffered beyond the pipe and the codec bounds.
+    async fn relay(&mut self, pipe: DuplexStream, until: Instant) -> RelayEnding {
+        let (mut from_caller, mut to_caller) = tokio::io::split(pipe);
+        let mut chunk = [0_u8; STDIN_CHUNK_BYTES];
+        loop {
+            tokio::select! {
+                biased;
+                () = tokio::time::sleep_until(until) => {
+                    return RelayEnding::Refused { error: DEADLINE, cause: None, close_code: CLOSE_NORMAL };
+                }
+                item = self.codec.read() => match item {
+                    ServerItem::Message(message) => {
+                        let Some((channel, payload)) = message.bytes().split_first() else {
+                            return RelayEnding::violation(Violation::Protocol);
+                        };
+                        match *channel {
+                            CHANNEL_STDOUT => {
+                                if payload.is_empty() {
+                                    continue;
+                                }
+                                match timeout_at(until, to_caller.write_all(payload)).await {
+                                    Ok(Ok(())) => {
+                                        self.stdout_bytes = self.stdout_bytes.saturating_add(
+                                            u64::try_from(payload.len()).unwrap_or(u64::MAX),
+                                        );
+                                    }
+                                    Ok(Err(_)) => return RelayEnding::CallerClosed,
+                                    Err(_) => {
+                                        return RelayEnding::Refused { error: DEADLINE, cause: None, close_code: CLOSE_NORMAL };
+                                    }
+                                }
+                            }
+                            CHANNEL_STDERR => {
+                                let total = u64::try_from(payload.len())
+                                    .ok()
+                                    .and_then(|length| self.stderr_bytes.checked_add(length))
+                                    .filter(|total| *total <= MAX_STDERR_BYTES);
+                                match total {
+                                    Some(total) => self.stderr_bytes = total,
+                                    None => return RelayEnding::violation(Violation::TooBig),
+                                }
+                            }
+                            CHANNEL_STATUS => {
+                                return match project_status(payload) {
+                                    Ok(end) => RelayEnding::Peer(end),
+                                    Err(violation) => RelayEnding::violation(violation),
+                                };
+                            }
+                            _ => return RelayEnding::violation(Violation::Protocol),
+                        }
+                    }
+                    ServerItem::Ping => {
+                        if let Err(failure) = self.codec.flush(until).await {
+                            return RelayEnding::write(failure);
+                        }
+                    }
+                    ServerItem::Pong => {}
+                    ServerItem::Closed | ServerItem::Gone => {
+                        return RelayEnding::Peer(AttachEndV2::PeerClosed);
+                    }
+                    ServerItem::Refused(violation) => return RelayEnding::violation(violation),
+                },
+                read = from_caller.read(&mut chunk) => match read {
+                    Ok(0) | Err(_) => return RelayEnding::CallerClosed,
+                    Ok(count) => {
+                        let Some(message) = stdin_message(chunk.get(..count).unwrap_or(NO_BYTES)) else {
+                            return RelayEnding::write(WriteFailure::Local);
+                        };
+                        if let Err(failure) = self.codec.send(message, until).await {
+                            return RelayEnding::write(failure);
+                        }
+                    }
+                },
+            }
+        }
+    }
+
     /// Bounded close of the stream, after which every IO object of the
     /// stream is dropped. The codec first writes what its state still allows
     /// (see `AttachCodec::close`), then the attach side of the bootstrap
@@ -1391,6 +1553,7 @@ where
         binding,
         bootstrap,
         until,
+        relay,
     } = inputs;
     // Wrapping the stream reads and writes nothing; the bound is there
     // because the owner awaits nothing without one.
@@ -1421,14 +1584,48 @@ where
         Ok(owner) => stream.drive(owner, ready, &mut verdict).await,
         Err(error) => StreamEnding::bootstrap(*error),
     };
-    let (close_code, result, end, cause) = match (ending, stream.preamble.clone()) {
-        (StreamEnding::Proven, Some(preamble)) => (
+    let (close_code, result, end, cause) = match (ending, stream.preamble.clone(), relay) {
+        (StreamEnding::Proven, Some(preamble), None) => (
             CLOSE_NORMAL,
             Ok((identity, preamble)),
             AttachEndV2::ClosedByUsAfterIdentity,
             None,
         ),
-        (StreamEnding::Proven, None) => (
+        // Streaming attach: the proven stream is relayed to the caller until
+        // its own end. A caller that is gone when the bracket is proven gets
+        // no stream and the attempt is not a success.
+        (StreamEnding::Proven, Some(preamble), Some(request)) => {
+            let (caller_side, owner_side) = tokio::io::duplex(RELAY_PIPE_BYTES);
+            if request.pipe.send(caller_side).is_err() {
+                (
+                    CLOSE_NORMAL,
+                    Err(UNPROVEN),
+                    AttachEndV2::ClosedByUsAfterIdentity,
+                    Some(AttachCauseV2::CallerGone),
+                )
+            } else {
+                match stream.relay(owner_side, request.until).await {
+                    RelayEnding::CallerClosed => (
+                        CLOSE_NORMAL,
+                        Ok((identity, preamble)),
+                        AttachEndV2::ClosedByUsAfterIdentity,
+                        None,
+                    ),
+                    RelayEnding::Peer(end) => (CLOSE_NORMAL, Ok((identity, preamble)), end, None),
+                    RelayEnding::Refused {
+                        error,
+                        cause,
+                        close_code,
+                    } => (
+                        close_code,
+                        Err(error),
+                        AttachEndV2::ClosedByUsAfterIdentity,
+                        cause,
+                    ),
+                }
+            }
+        }
+        (StreamEnding::Proven, None, _) => (
             CLOSE_NORMAL,
             Err(UNPROVEN),
             AttachEndV2::ClosedByUsWithoutIdentity,
@@ -1441,13 +1638,14 @@ where
                 close_code,
             },
             _,
+            _,
         ) => (
             close_code,
             Err(error),
             AttachEndV2::ClosedByUsWithoutIdentity,
             cause,
         ),
-        (StreamEnding::Peer(end), _) => (CLOSE_NORMAL, Err(UNPROVEN), end, None),
+        (StreamEnding::Peer(end), _, _) => (CLOSE_NORMAL, Err(UNPROVEN), end, None),
     };
     // The bounded close ends stdin in every case, exactly once: by the v5
     // stdin close while the stream still takes a frame, and by dropping the
@@ -1582,9 +1780,111 @@ impl KubernetesRuntime {
         until: Instant,
         cancelled: &AtomicBool,
     ) -> Outcome<()> {
+        let held = self
+            .attach_bracket(
+                instance, binding, guard, attempt, bootstrap, until, cancelled, None,
+            )
+            .await?;
+        let joined = attempt.join().await.map(|_| ());
+        drop(held);
+        joined
+    }
+
+    /// Streaming attach of the exact instance (session protocol v3, G11 K3).
+    ///
+    /// The bracket is exactly the one of `attach_exact_instance`: same
+    /// requests, single initiated attach, `stdinOnce`, Hello and Ready only
+    /// before identity two, the same guard (`SessionEffectKindV2::Attach`),
+    /// cancellation and refusals. When the bracket is proven the owner task
+    /// does not close the stream: it relays it to the returned protocol v3
+    /// channel until `session_until`, the end of the worker or the drop of
+    /// the channel, and keeps the attach slot until that effective end. The
+    /// record, read through `attempt.join()` once the stream ended, is `Ok`
+    /// for a proven bracket whose relay ended by the caller or the peer, and
+    /// an error for a relay refused here (bound, channel or deadline).
+    ///
+    /// `session_until` must lie after `until` and at most
+    /// `ATTACH_SESSION_MAX` away. There is no second attach: a lost stream
+    /// is final for the Pod (decision D6).
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the bracket inputs of attach_exact_instance plus the session deadline and mode"
+    )]
+    pub(in crate::runtime::kubernetes) async fn attach_exact_instance_streaming<
+        G: SessionEffectGuardV2,
+    >(
+        &self,
+        instance: &SessionInstanceV2,
+        binding: SessionBootstrapBindingV2,
+        guard: G,
+        attempt: &AttachAttemptV2,
+        bootstrap: BootstrapCapacity,
+        until: Instant,
+        session_until: Instant,
+        cancelled: &AtomicBool,
+        mode: SessionModeV3,
+    ) -> Outcome<SessionChannelV3> {
+        let (pipe, delivered) = oneshot::channel();
+        let relay = RelayRequestV3 {
+            pipe,
+            until: session_until,
+        };
+        let held = self
+            .attach_bracket(
+                instance,
+                binding,
+                guard,
+                attempt,
+                bootstrap,
+                until,
+                cancelled,
+                Some(relay),
+            )
+            .await?;
+        match delivered.await {
+            Ok(stream) => {
+                drop(held);
+                // The stream is dropped on failure: the owner then ends it.
+                SessionChannelV3::broker(stream, mode).map_err(|_| UNPROVEN)
+            }
+            Err(_) => {
+                let joined = attempt.join().await;
+                drop(held);
+                match joined {
+                    Err(error) => Err(error),
+                    Ok(_) => Err(UNPROVEN),
+                }
+            }
+        }
+    }
+
+    /// Body shared by the preamble-only and the streaming attach, up to the
+    /// verdict. The unsent verdict sender, if any, is returned so that the
+    /// caller keeps it until it has read the record: dropping it earlier
+    /// would read as a lost caller.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one parameter per independent input of the bracket, as in the reviewed design"
+    )]
+    async fn attach_bracket<G: SessionEffectGuardV2>(
+        &self,
+        instance: &SessionInstanceV2,
+        binding: SessionBootstrapBindingV2,
+        guard: G,
+        attempt: &AttachAttemptV2,
+        bootstrap: BootstrapCapacity,
+        until: Instant,
+        cancelled: &AtomicBool,
+        relay: Option<RelayRequestV3>,
+    ) -> Outcome<Option<oneshot::Sender<BracketVerdictV2>>> {
         let claim = attempt.claim()?;
         let now = Instant::now();
         if until <= now || until.duration_since(now) > ATTACH_BRACKET_MAX {
+            return Err(claim.refuse(DEADLINE, None));
+        }
+        if relay.as_ref().is_some_and(|relay| {
+            relay.until <= until || relay.until.duration_since(now) > ATTACH_SESSION_MAX
+        }) {
             return Err(claim.refuse(DEADLINE, None));
         }
         // Local refusals before any request: another authority, a binding
@@ -1641,17 +1941,21 @@ impl KubernetesRuntime {
             binding,
             bootstrap,
             until,
+            relay,
         };
         let AttachBracketV2 { ready, verdict } = claim.start_opening(&runtime, opening, inputs)?;
-        if let Some(answer) = self
+        match self
             .bracket_verdict(instance, attempt, &identity, ready, until, cancelled)
             .await
         {
-            // A lost receiver means that the owner task already ended on its
-            // own recorded cause.
-            let _ = verdict.send(answer);
+            Some(answer) => {
+                // A lost receiver means that the owner task already ended on
+                // its own recorded cause.
+                let _ = verdict.send(answer);
+                Ok(None)
+            }
+            None => Ok(Some(verdict)),
         }
-        attempt.join().await.map(|_| ())
     }
 
     /// Caller side of the bracket once the owner task holds the attempt:

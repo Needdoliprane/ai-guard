@@ -31,6 +31,8 @@ pub struct ConfiguredTenant {
     pub session_reservation_policy: Option<KubernetesSessionReservationPolicyV2>,
     pub session_recovery_policy: Option<KubernetesSessionRecoveryPolicyV2>,
     pub session_control_recovery_policy: Option<KubernetesSessionControlRecoveryPolicyV2>,
+    pub session_effect_policy:
+        Option<agentsandbox::control::kubernetes_session::effects::KubernetesSessionEffectPolicyV2>,
 }
 
 #[derive(Deserialize)]
@@ -349,6 +351,7 @@ fn load_registry_bytes(
             session_reservation_policy,
             session_recovery_policy,
             session_control_recovery_policy,
+            session_effect_policy: tenant.session_effect_policy,
         });
     }
     Ok(result)
@@ -407,6 +410,11 @@ pub fn validate_policies_for(
             policy
                 .validate()
                 .context("Politique de récupération contrôle de session Kubernetes invalide")?;
+        }
+        if let Some(policy) = &tenant.session_effect_policy {
+            policy
+                .validate()
+                .context("Politique d'effets de session Kubernetes invalide")?;
         }
         agentsandbox::tenancy::validate_tenant_id(&tenant.tenant_id)?;
         for credential in [&tenant.runner_token, &tenant.viewer_token] {

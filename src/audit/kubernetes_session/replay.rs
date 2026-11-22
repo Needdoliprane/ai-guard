@@ -360,8 +360,9 @@ pub(super) fn held_usage_before(db: &Connection, before: i64) -> anyhow::Result<
     let mut count = 0u64;
     let mut cpu = 0u64;
     let mut memory = 0u64;
+    let settled = super::effects::settled_before(db, before)?;
     for (snapshot, _) in prefix(db, before)?.values() {
-        if snapshot.state.quota_held {
+        if snapshot.state.quota_held && !settled.contains(snapshot.intent.reservation_id()) {
             count = count.checked_add(1).ok_or(Failure::QuotaExceeded)?;
             cpu = cpu
                 .checked_add(u64::from(snapshot.intent.resources().cpu_millis))

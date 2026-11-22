@@ -567,6 +567,19 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
     } else {
         version
     };
+    // The Kubernetes session effect ledger is a capability family: its
+    // tables exist exactly when its genesis marker does (no format change).
+    let effect_capability: &[(&str, &str, &str)] =
+        if [11, 12, 13, 14, 15].contains(&version) && kubernetes_session::effects::enabled(db)? {
+            &kubernetes_session::effects::SCHEMA
+        } else {
+            &[]
+        };
+    let effect_indexes: &[(&str, u32)] = if effect_capability.is_empty() {
+        &[]
+    } else {
+        &kubernetes_session::effects::AUTO_INDEX_COUNTS
+    };
     let automatic = AUTO_INDEX_COUNTS
         .iter()
         .chain(
@@ -617,6 +630,7 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
                 .iter()
                 .filter(move |_| retention),
         )
+        .chain(effect_indexes.iter())
         .filter(|(table, _)| {
             if *table == "events" {
                 true
@@ -645,8 +659,9 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
             );
             continue;
         }
-        let expected =
-            schema_objects(version, retention).find(|(expected_kind, expected_name, _)| {
+        let expected = schema_objects(version, retention)
+            .chain(effect_capability.iter())
+            .find(|(expected_kind, expected_name, _)| {
                 kind == expected_kind && name == expected_name
             });
         anyhow::ensure!(
@@ -697,7 +712,7 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
             "unexpected audit schema object"
         );
     }
-    for &(kind, name, _) in schema_objects(version, retention) {
+    for &(kind, name, _) in schema_objects(version, retention).chain(effect_capability.iter()) {
         if allow_legacy && version == 0 && name == "tenant_binding" {
             continue;
         }

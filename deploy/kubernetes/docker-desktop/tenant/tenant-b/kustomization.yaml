@@ -1,0 +1,12 @@
+# ai-guard LOCAL TEST recipe: tenant B namespace and its broker rights.
+# Apply after control (the subject ServiceAccount lives in ai-guard-control).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Sets the namespace of every namespaced object and renames the base
+# Namespace object; binding subjects keep their explicit ai-guard-control.
+namespace: ai-guard-tenant-b
+
+resources:
+- ../base
+- rbac.yaml

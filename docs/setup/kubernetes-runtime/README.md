@@ -217,11 +217,18 @@ inspected; otherwise it is absent from the serialized report (not `null`).
   until the observed CNI enforcement probe of plan step 4a passes.
 - **Credentials:** the broker keeps the Kubernetes credentials; the Pod has no
   token automount, environment, Secret or argv secret.
-- **Future broker permissions** (plan step 1 below, not provisioned by this
-  work): get on the two Namespaces, get on PersistentVolumeClaims, get/create/patch/delete on
-  Pods in the tenant Namespace, and the attach permission whose verb must be
-  confirmed (EXT-8). No exec, logs or Secrets. RBAC cannot restrict create by
-  object name or spec.
+- **Broker permissions** (plan step 1 below; reviewed template in the
+  [Docker Desktop recipe](../../../deploy/kubernetes/docker-desktop/README.md)):
+  get on the two Namespaces; get/create/delete on PersistentVolumeClaims (the
+  broker creates each per-attempt claim, decision D4); get/create/patch/delete
+  on Pods in the tenant Namespace; create on `pods/attach` (whether the
+  WebSocket upgrade also needs `get` is EXT-8, verified live before any attach);
+  get/list on NetworkPolicies; get on the `default` ServiceAccount; and get on
+  the configured StorageClass and its CSIDriver. `delete` is granted from the
+  start: ai-guard only sends deletes that carry a UID precondition, after a
+  central claim. No exec, logs, Secrets, ephemeral containers, port-forward,
+  update, binding or token request. RBAC cannot restrict create by object name
+  or spec.
 - **Tenancy:** the tenant comes only from the authenticated identity. Refusing
   two tenants that share an authority or a namespace at configuration load
   (R10) is a prerequisite of any attach.
@@ -284,8 +291,8 @@ authorization.
 | Step | Action | Oracle and evidence | Stop |
 |---|---|---|---|
 | 0 | Record the environment of 8.1. | Versions and context retained. | Context other than `docker-desktop`. |
-| 1 | (Requires an explicit maintainer authorization, not granted by this work.) Provision the tenant Namespace with Pod Security `restricted` `v1.36`, a default-deny ingress and egress NetworkPolicy, a ServiceAccount without token automount and a Role with the permissions of section 7, from a template reviewed at that time. `delete` is granted only for the later stop step. | Created objects and their UIDs retained. A created NetworkPolicy is not proof of enforcement (step 4a). | Any partial creation: inspect, never delete and recreate. |
-| 2 | `agentsandbox kubernetes doctor --check-permissions` with the broker identity. | Report retained. Its twelve fixed access reviews include `patch pods`, `update pods`, `delete pods` and `create pods/attach`; whether `create` is the verb checked for a WebSocket attach upgrade is still to confirm (EXT-8). `delete pods` must stay denied until the stop step; `update pods`, exec, logs, Secrets, bindings and token requests must be denied. | Any refusal of the reviews, or any of those denied permissions allowed. |
+| 1 | (Requires an explicit maintainer authorization, not granted by this work.) Provision the tenant Namespace with Pod Security `restricted` `v1.36`, a default-deny ingress and egress NetworkPolicy, a ServiceAccount without token automount and a Role with the permissions of section 7, from a template reviewed at that time. `delete` on Pods and claims is granted from the start and used only by UID-precondition deletes. | Created objects and their UIDs retained. A created NetworkPolicy is not proof of enforcement (step 4a). | Any partial creation: inspect, never delete and recreate. |
+| 2 | `agentsandbox kubernetes doctor --check-permissions` with the broker identity. | Report retained. Its twelve fixed access reviews include `patch pods`, `update pods`, `delete pods` and `create pods/attach`; whether `create` is the verb checked for a WebSocket attach upgrade is still to confirm (EXT-8). `delete pods` is allowed (UID-precondition deletes only); `update pods`, exec, logs, Secrets, bindings and token requests must be denied. | Any refusal of the reviews, or any of those denied permissions allowed. |
 | 3 | (Requires an explicit maintainer authorization, not granted by this work.) The operator creates one `ReadWriteOncePod` PVC named for an attempt. The read-only `kubernetes inspect-workspace` CLI verifies that it is `Bound` and returns its UID. | Claim projection retained. | Class not RWOP-capable or `WaitForFirstConsumer`: `BLOCKED`. |
 
 ### 8.4 Effect suite (all BLOCKED)
@@ -733,3 +740,293 @@ and ACKs are limited to64/128KiB, closed JSON without duplicate members. Each
 control request has a12s timeout, without redirects, ambient proxies or
 automatic retries; incoming body reading is limited to5s. Secrets are refused
 before persistence/distribution and transport errors stay opaque.
+
+## 13. G11 effect path: source state (not qualified)
+
+The G11 lot adds, in source, the pieces of the effect path below. **No session
+runs yet**: the broker driver and session run exist without their CLI entry,
+the private journal r3, the export composition and the MySQL port are still
+being delivered, and nothing here
+has run against a cluster. The [Docker Desktop recipe](../../../deploy/kubernetes/docker-desktop/README.md)
+holds the reviewed cluster objects.
+
+| Piece | Source | What it does and does not do |
+|---|---|---|
+| Workspace claim created by the broker (R5, decision D4) | `src/runtime/kubernetes/session_claim.rs` | Renders the exact `ReadWriteOncePod` Filesystem claim `ai-guard-ws-<attempt>` from the confirmed intent and the tenant storage request (class, MiB). One POST at most; only a validated 201 yields the claim UID; any other answer leaves ownership unknown. DELETE carries the UID precondition. The claim size is not a byte quota. |
+| Effectful Pod renderer r2 | `src/runtime/kubernetes/session_pod.rs` | The session Pod carries the finalizer `ai-guard.io/session-terminal` and the protocol v3 mode `kubernetes-session-v3`; the export helper `ai-guard-export-<attempt>` mounts the same claim read-only, runs `kubernetes-workspace-export-v3` and has its own 1800 s runtime bound. The r1 waiting request is unchanged. |
+| Terminal finalizer (decision D5) | `src/runtime/kubernetes/session_effect.rs` | The finalizer is removed only by a JSON Patch that tests the UID and the exact finalizer list, after an observed terminated container or a deletion of a Pod that was never released. A Pod stuck with the finalizer after a lost broker follows the operator procedure of the recipe guide. |
+| Shared request builders | `src/runtime/kubernetes/session_requests.rs` | One source for the exact PATCH and DELETE bodies and their digests, used by the runtime to send and by the central ledger to re-derive. |
+| Production effect permit (S5) | `src/runtime/kubernetes/session_permit.rs` | The only production implementor of the sealed guard. Built from one central `EmitOnce` acknowledgement; refuses another effect kind, request digest or authority, an elapsed central window and a raised cancellation, before any byte is sent; consumed by its single request. |
+| Session admission (R7) and R10 | `src/runtime/kubernetes/session_admission.rs` | Explicit per-tenant activation bound to one authority. Reads the tenant namespace and refuses, each with its own reason: Pod Security other than `restricted` at the pinned version, a NetworkPolicy set other than the single default-deny policy, a default ServiceAccount that may automount a token, a StorageClass that is not `Immediate` or not served by a registered CSIDriver, a missing session permission, or a forbidden permission (exec, logs, Secrets, update, binding, token, ephemeral containers, port-forward) not denied. `refuse_shared_authorities` refuses at configuration load two tenants that share an authority id, an endpoint and namespace, or a namespace UID. The admission is an observation of objects, never a proof that the CNI enforces the policy or that no other subject can attach. |
+| Central effect ledger (R1, Q7, settlement) | `src/control/kubernetes_session/effects.rs`, `src/audit/kubernetes_session/effects.rs` | A capability family enabled by the backed-up maintenance `enable_kubernetes_session_effects_v1` on a schema 11–13 store, without any format change. Each claim, result, terminal and settlement is one audited event with its projection rows. The Store re-derives every request digest it can, enforces the order claim → session Pod → release with an armed deadline → one attach → terminal → finalizer → export → claim delete, binds each claim UID to one reservation only, and releases the quota only after every created Pod has an observed end and no CREATE stays uncertain. A replay never returns a second `EmitOnce`. |
+| Broker driver (K4) | `src/runtime/kubernetes/session_driver.rs` | Composes each effect in one order: exact request, central claim, permit from the single `EmitOnce` acknowledgement, one send, recorded outcome. An `ObserveOnly` or replayed claim is never sent. An unproven answer is recorded `Uncertain`. A permit refused locally after a claim (cancellation, elapsed window) is recorded `NotSent`, so the step never stays open. The single attach claims a digest bound to identity one of the running container. A lost result answer is re-sent identically. The private journal write of each acknowledgement before its permit is not implemented yet. |
+| Broker session run (K4) | `src/runtime/kubernetes/session_run.rs` | Drives protocol v3 after the attach bracket: Handoff and archive, declared import, Start, business stdin, provider output to a sink (counted, never buffered), at most one Stop, declared exit. The declared end stays apart from the broker windows, a lost stream and the observed container end. Egress bytes are left to the G05 owner. |
+| Broker egress request (G05 binding) | `src/runtime/kubernetes/session_profile.rs`, `src/audit/kubernetes_session/effects.rs` | The profile commits `network: denied` (default) or `broker_egress`. The Pod network stays denied by the NetworkPolicy in both cases. `egress_binding_active` is the read-only predicate the G05 egress decision calls in its own transaction. It answers `active` only for a session whose profile asked for broker egress, with its gate release and its single attach applied, and no terminal, delete or settlement recorded. Each destination is still decided by the tenant egress policy. The owner composition through the attach is not wired yet. |
+
+### Activate effectful sessions for a tenant
+
+Effects are activated per tenant by the optional `session_effect_policy` field
+of the tenant entry in `--tenants-file`, next to the three session policies of
+the [Kubernetes guide](../kubernetes/README.md#configure-session-reservation-v2-policies).
+Absent or `null`, no effect is granted except the cleanup (DELETE, finalizer
+release) of effects already issued, with a fixed 30 s claim window. Public
+fictional example:
+
+```json
+{
+  "session_effect_policy": {
+    "version": 1,
+    "claim_window_seconds": 30,
+    "storage": {
+      "version": 1,
+      "allowed_storage_classes": ["ai-guard-rwop"],
+      "max_capacity_mib": 4096
+    },
+    "authorities": [{
+      "version": 1,
+      "authority_id": "00000000-0000-4000-8000-000000000001",
+      "endpoint": "https://127.0.0.1:6443/",
+      "cluster_namespace_uid": "11111111-1111-4111-8111-111111111111",
+      "namespace": "ai-guard-tenant-a",
+      "namespace_uid": "22222222-2222-4222-8222-222222222222",
+      "trust_sha256": "<64-lowercase-hex-sha256-of-prepared-ca-bytes>"
+    }]
+  }
+}
+```
+
+Rules checked at startup, before any tenant database is opened:
+
+- `version` is 1.
+- `claim_window_seconds` is between 1 and 60. It is the validity of one `EmitOnce` claim, not a session deadline.
+- `storage` lists 1 to 8 distinct storage classes and a `max_capacity_mib` between 1 and 262144.
+- `authorities` holds 1 to 8 exact authority objects.
+- Two tenants that share an authority id, an endpoint and namespace, or a namespace UID are refused (R10). The same applies inside one policy.
+- Unknown fields are refused. Diagnostics report an invalid policy as `tenants[].session_effect_policy`.
+
+The policy is read only from trusted configuration, never from a request body.
+Every new effect claim also requires the exact reservation authority to be one
+of the activated authorities (R7).
+
+The broker routes are authenticated by the broker identity, like the other
+session routes:
+
+- `POST /brokers/kubernetes/session-reservations/{id}/effects` claims a step.
+- `GET` on the same path reads the effect state.
+- `POST .../effect-results` records an outcome: `applied`, `not_applied`, `uncertain` or `not_sent`.
+- `POST .../terminals` records an observed Pod end.
+- `POST .../settlements` releases the quota.
+
+`SessionProtocolV2.effects_available` reports whether the tenant has a policy.
+The ledger itself is enabled once per tenant store, offline, on a store of
+format 11 to 13, with a new private backup path:
+
+```sh
+agentsandbox enable-kubernetes-session-effects \
+  --tenant-id tenant-a \
+  --data /private/path/tenant-a.sqlite \
+  --backup /private/path/tenant-a.before-effects.sqlite \
+  --confirm-control-stopped
+```
+
+`--confirm-control-stopped` is an operator attestation that the gateway and
+every broker are stopped, not a runtime fence. The command verifies the backup,
+appends one genesis marker, keeps the format, prints a JSON report and refuses
+a second run. Without it, the effect routes answer HTTP 503
+`session_lifecycle_unavailable`.
+
+Limits: Kubernetes sessions currently run on store formats 11–13 only; in
+owned-source mode (formats 14 and 15) the session routes refuse before any
+effect. The maintainer decided on 21 November 2026 that owned stores must reach
+the same capability. That parity is a target, not delivered: it needs a
+per-request owned broker authentication, a scoped Store transaction for every
+session entry, the effect marker installed by the owned in-place maintenance
+and the owned egress decision, each still to implement and review. An uncertain
+CREATE keeps the quota held until an authorized recovery resolves it. MySQL
+tenants refuse the family until its port lands.
+
+## 14. Session protocol v3
+
+Protocol v3 (requirement R4, lot G11 K3) is the closed framing that follows
+the unchanged v2 Hello/Ready on the single `pods/attach` stream of a session
+Pod. It exists in source ([protocol](../../../src/runtime/kubernetes/session_protocol.rs),
+[in-Pod supervisor](../../../src/runtime/kubernetes/session_supervisor.rs),
+streaming variant of the [attach owner](../../../src/runtime/kubernetes/session_attach.rs)).
+**No product path reaches it:** the effect permit is composed separately and
+no cluster, real worker image, provider CLI or model has exercised it.
+The status of its tests is in section 14.7.
+
+### 14.1 Channels and frames
+
+Every frame is a 4-byte big-endian length `L` (channel byte included, so
+`L >= 1`), one channel byte, then `L - 1` payload bytes. The receiver judges
+the declared length, then the channel bound, before reserving exactly the
+payload.
+
+| Channel | Byte | Direction | Payload bound |
+|---|---|---|---|
+| CONTROL | 0 | both | closed JSON, 1 to 16 KiB; the single Handoff 1 to 256 KiB |
+| STDIN | 1 | broker to worker | 1 to 64 KiB |
+| STDOUT | 2 | worker to broker | 1 to 64 KiB |
+| STDERR | 3 | worker to broker | 1 to 64 KiB |
+| EGRESS | 4 | both | 1 to 64 KiB, opaque G05 bytes, never parsed by v3 |
+| ARCHIVE | 5 | broker to worker (session), worker to broker (export) | 1 to 64 KiB |
+
+The following are protocol refusals:
+
+- an empty data payload;
+- an unknown channel, or a channel in the wrong direction or phase;
+- an unknown or duplicate JSON member, another version or a non-canonical
+  control encoding;
+- any frame out of order.
+
+The Handoff carries the canonical profile (64 KiB at most), the provider
+credential payload (64 KiB at most) and the business invocation (32 KiB of
+arguments at most). It is admitted only as the first frame of a session, so
+at most one frame of that size is held. These bounds are configured software
+values, not measured capacities.
+
+### 14.2 Order
+
+Session Pod (`kubernetes-session-v3`), after Ready:
+
+1. broker: `handoff`, then exactly `archive_bytes` of ARCHIVE;
+2. worker: `imported` (verified workspace commitment) or `refused`;
+3. broker: `start`;
+4. worker: `started`, after starting the egress helper and the provider, or `refused`;
+5. broker: STDIN, EGRESS, at most one `stdin_close`, at most one `stop`;
+   worker: STDOUT, STDERR, EGRESS;
+6. worker: `exited` (`code` or `signal`), then the stream ends.
+
+A `stop` before `start` is answered by `refused` with `stopped`. Export Pod
+(`kubernetes-workspace-export-v3`): broker `start` (or `stop`), then worker
+ARCHIVE frames and `archive_end` with the byte count and SHA-256 of the tar it
+wrote, or `refused`. In both modes nothing is sent after Ready until the broker
+speaks. The broker bracket therefore stays as in section 11: a byte after
+Ready and before identity two is refused.
+
+### 14.3 Worker checks and effects
+
+Before any effect the supervisor checks the following.
+
+- The profile bytes are canonical, they hash to the Hello `profile_hash`, and
+  their binding equals the Hello identifiers.
+- The invocation matches `invocation_sha256`.
+- The transport is not interactive. An interactive transport is refused with
+  `interactive_unsupported`: no in-Pod PTY exists, and this is an open item.
+- The credential payload passes the existing `prepare_execution` checks.
+
+The archive is received into a buffer reserved for exactly the declared size,
+so the Pod memory limit must exceed it. It is then processed in this order:
+
+1. the SHA-256 is compared with the Handoff;
+2. the archive is scanned with the existing workspace rules: no link, special
+   file, traversal, duplicate or conflict, and the workspace `Limits`;
+3. the manifest is compared with the profile commitment;
+4. the files are written into the empty `/workspace` with exclusive,
+   no-follow creations anchored to directory descriptors. A non-empty
+   workspace is refused with `workspace_not_empty`.
+
+On `start` the supervisor spawns two **children**, never `exec`: it stays PID 1.
+
+- The unchanged G05 helper `/usr/local/bin/ai-guard-relay serve-egress-v1 --port 3128`.
+  Its standard streams are carried byte-exact on EGRESS frames, and its fixed
+  diagnostics go to the container log.
+- The provider, through `BootstrapExecution::spawn_child`: the same probe and
+  private login as the Docker path, piped standard streams and the prepared
+  environment. The proxy variables `HTTP(S)_PROXY`/`http(s)_proxy` and
+  `AI_GUARD_EGRESS_PROXY` point to `http://127.0.0.1:3128`, and
+  `NO_PROXY` to the loopback names.
+
+When the provider exits, its pipes are drained for at most 1 s, `exited` is
+sent and the helper stdin is closed. As PID 1 the supervisor then sends
+`kill(-1, SIGKILL)` and reaps for at most 2 s. Otherwise it kills the
+provider and helper process groups. Orphans are reaped only at that end.
+
+| Window | Bound |
+|---|---|
+| Hello and Ready | 5 s from the first byte (unchanged) |
+| Ready to Handoff (session) or `start` (export) | 30 s |
+| Handoff to written import | 600 s |
+| `imported` to `start` | 120 s |
+| Drain after the provider exit | 1 s |
+| Running session | no local bound; the Pod `activeDeadlineSeconds` |
+
+### 14.4 Exit codes
+
+| Exit | End |
+|---|---|
+| 0 | `exited` or `archive_end` was written. The protocol ended; this is **not** a provider or session success. |
+| 64 | Protocol refusal: frame, bound, order or extra argument. `refused`/`protocol` is sent when the stream allows it. |
+| 65 | Hello, Handoff, import or start window elapsed (`refused`/`deadline`). |
+| 66 | Input ended before the Hello or before the Handoff (export: before `start`). |
+| 67 | Handoff, import, start or export refused with a closed reason. |
+| 68 | `stop` before `start`, or during the export. |
+| 69 | Input ended after the Handoff before the end marker. The supervisor requests provider termination and sends `exited` only if it obtained an exit status. |
+| 70 | Local stream or runtime failure. |
+
+### 14.5 Broker streaming variant
+
+`attach_exact_instance_streaming` runs the same bracket, guard
+(`SessionEffectKindV2::Attach`), cancellation and refusals as the preamble
+attach. When both observations match, the owner task hands one end of an
+in-memory pipe (128 KiB) to `SessionChannelV3` instead of closing. It then
+relays stdin and stdout until the session deadline (25 h at most), the
+channel's close or the peer's end. Stderr stays counted within 16 KiB, a
+status ends the stream, and the stdin close and close frame follow as in
+section 11.2. The attach slot is held until that end. The two slots of a
+runtime therefore bound concurrent streaming sessions to **two**, an open
+item for the 100-worker target.
+
+The channel offers bounded sends (control, stdin, archive), bounded events
+(control, stdout, stderr, archive) and a `DuplexStream` for the G05 egress
+owner. Broker egress is held until `start` and stops at `stop`. The broker
+refuses:
+
+- its own out-of-order sends;
+- an archive that differs from its declared digest;
+- an `imported` that differs from the profile commitment;
+- an `archive_end` that differs from the received bytes.
+
+A caller must drive sends and events concurrently, because every queue
+applies backpressure.
+
+### 14.6 Limits
+
+- Every worker message is **declared**. `exited` is not the observed
+  container terminal state, which the broker reads by Pod UID (D5).
+  Without a provider exit status the worker closes without `exited`,
+  and the broker reports the stream as incomplete.
+  `imported` is not an observed workspace.
+- Standard output carries only Ready and v3 frames. The node runtime keeps it
+  in its logs, so no secret may travel on it. The supervisor never writes the
+  Handoff payload to a frame or to stderr. The provider receives the
+  credential by design and its output is not filtered here: masking before
+  persistence remains with the broker.
+- The payload buffers owned by v3 are overwritten before they are dropped.
+  JSON decoder scratch space, the provider preparation and the child
+  environment are not covered. This is hygiene, not memory protection.
+- No re-attach: a lost stream is final for the Pod (D6). Resuming requires
+  a terminal state, an export and a new attempt.
+- STDIN backpressure from a provider that does not read stalls further
+  broker input. The Pod deadline and the broker's close remain the bounds.
+- An ext4 `lost+found` at the claim root would make the workspace non-empty.
+  This is an open question for the storage class.
+
+### 14.7 Tests and their scope
+
+Source tests cover the following:
+
+- the codec, the control messages and both order machines;
+- the broker channel against scripted frames and against the real supervisor;
+- the supervisor through real child pipes, with `/bin/cat`, `/usr/bin/false`,
+  `/bin/sleep` and a test-binary fixture that leaves a descendant;
+- the real `ai-guard-provider` binary for both v3 modes and their refusal
+  exits;
+- the streaming attach over the TLS loopback attach peer, with a fixture
+  bridge to the real supervisor.
+
+They qualify no kubelet, API server, container, worker image, PID-1 signal
+handling, real provider, real G05 helper or model. Their results are recorded
+in the K3 lot evidence, not here. Cluster qualification remains BLOCKED as in
+section 11.6.
