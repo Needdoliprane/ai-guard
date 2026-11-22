@@ -181,12 +181,12 @@ fn retention_confirms_the_committed_segment_after_a_filesystem_ack_failure() {
     let error = store.apply_audit_retention(&request).unwrap_err();
     assert!(typed_code(&error, libc::EMFILE));
     assert_eq!(refusal(&error).unwrap().code, code::COMMIT_UNCONFIRMED);
-    let committed = store.head().unwrap();
-    assert_eq!(committed.0, before.0 + 1);
+    let committed = audit_head(&store.db.lock().unwrap()).unwrap();
+    assert_eq!(committed.0, before + 1);
     let replayed = store.apply_audit_retention(&request).unwrap();
     assert_eq!(replayed.retention_event_seq, committed.0);
     assert_eq!(replayed.retention_event_hash, committed.1);
-    assert_eq!(store.head().unwrap(), committed);
+    assert_eq!(audit_head(&store.db.lock().unwrap()).unwrap(), committed);
     let report = store.verify_audit_archives(&[archive]).unwrap();
     assert_eq!(report.verdict, "verified");
     assert_eq!(report.segments_verified, 1);

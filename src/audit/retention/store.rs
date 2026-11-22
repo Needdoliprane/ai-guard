@@ -23,6 +23,7 @@ use crate::{
     broker_registry::{format_time, parse_time},
     model::Event,
 };
+use anyhow::Context;
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
