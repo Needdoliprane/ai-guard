@@ -176,6 +176,15 @@ pub use runtime::{
     relay_attempt, worker_terminal,
 };
 
+#[derive(Debug)]
+pub(super) struct GuardianCleanupUnconfirmed;
+
+impl std::fmt::Display for GuardianCleanupUnconfirmed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("fixture guardian cleanup was not confirmed")
+    }
+}
+
 pub struct Fixture {
     pub root: PathBuf,
     pub a: Arc<Store>,
@@ -875,7 +884,7 @@ impl Fixture {
         .await
         .context("fixture guardian cleanup timed out")
         .and_then(|result| result)
-        .context("fixture guardian cleanup was not confirmed");
+        .context(GuardianCleanupUnconfirmed);
         if let Some(stop) = self.engine_stop.take() {
             let _ = stop.send(());
         }

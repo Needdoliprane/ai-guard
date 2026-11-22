@@ -23,7 +23,8 @@ use agentsandbox::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use harness::{
-    A_RUNNER, B_RUNNER, Fixture, RelayAttempt, exchange, grant, relay_attempt, worker_terminal,
+    A_RUNNER, B_RUNNER, Fixture, GuardianCleanupUnconfirmed, RelayAttempt, exchange, grant,
+    relay_attempt, worker_terminal,
 };
 use std::{sync::atomic::Ordering, time::Duration};
 use tokio::time::{sleep, timeout};
@@ -493,23 +494,66 @@ async fn software_broker_lost_claim_recovery_retains_history_without_exec() -> R
     fixture.close().await
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn software_broker_scoped_relay_ipc_refuses_before_private_detail() -> Result<()> {
-    let fixture = Fixture::new(90).await?;
-    let result = verify_scoped_relay_ipc(&fixture).await;
-    let cleanup = fixture.close().await;
-    match (result, cleanup) {
-        (Err(error), Err(_)) => Err(error.context("fixture cleanup was not confirmed")),
-        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-        (Ok(()), Ok(())) => Ok(()),
+#[derive(Clone, Copy)]
+enum ScopedRelayPhase {
+    FixtureOpen,
+    SubmitA,
+    AwaitingA,
+    SubmitB,
+    RunningB,
+    ScopedReads,
+    Terminal,
+    GuardianShutdown,
+    FixtureClose,
+}
+
+impl std::fmt::Debug for ScopedRelayPhase {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let phase = match self {
+            Self::FixtureOpen => "fixture_open",
+            Self::SubmitA => "submit_a",
+            Self::AwaitingA => "awaiting_a",
+            Self::SubmitB => "submit_b",
+            Self::RunningB => "running_b",
+            Self::ScopedReads => "scoped_reads",
+            Self::Terminal => "terminal",
+            Self::GuardianShutdown => "guardian_shutdown",
+            Self::FixtureClose => "fixture_close",
+        };
+        write!(formatter, "g11_relay_fixture_failure phase={phase}")
     }
 }
 
-async fn verify_scoped_relay_ipc(fixture: &Fixture) -> Result<()> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn software_broker_scoped_relay_ipc_refuses_before_private_detail()
+-> std::result::Result<(), ScopedRelayPhase> {
+    // Libtest prints the failing Result with Debug. Only the phase leaves this test.
+    let fixture = Fixture::new(90)
+        .await
+        .map_err(|_| ScopedRelayPhase::FixtureOpen)?;
+    let mut phase = ScopedRelayPhase::SubmitA;
+    let result = verify_scoped_relay_ipc(&fixture, &mut phase)
+        .await
+        .map_err(|_| phase);
+    let cleanup = fixture.close().await.map_err(|error| {
+        if error.is::<GuardianCleanupUnconfirmed>() {
+            ScopedRelayPhase::GuardianShutdown
+        } else {
+            ScopedRelayPhase::FixtureClose
+        }
+    });
+    result.and(cleanup)
+}
+
+async fn verify_scoped_relay_ipc(fixture: &Fixture, phase: &mut ScopedRelayPhase) -> Result<()> {
     let a_job = fixture.submit("a", 90).await?;
+    *phase = ScopedRelayPhase::AwaitingA;
     let a_endpoint = fixture.wait_endpoint(a_job).await?;
+    *phase = ScopedRelayPhase::SubmitB;
     let b_job = fixture.submit("b", 90).await?;
+    *phase = ScopedRelayPhase::RunningB;
     let b_endpoint = fixture.wait_worker("b").await?;
+    *phase = ScopedRelayPhase::ScopedReads;
     let own = service::request(
         &fixture.broker_root,
         "b",
@@ -576,6 +620,7 @@ async fn verify_scoped_relay_ipc(fixture: &Fixture) -> Result<()> {
         fixture.exec_count().await == 0 && fixture.committed_claims()? == 0,
         "diagnostics confer no execution authority"
     );
+    *phase = ScopedRelayPhase::Terminal;
     fixture.cancel("a", a_job).await?;
     fixture.cancel("b", b_job).await?;
     worker_terminal(&fixture.a, &a_endpoint).await?;
