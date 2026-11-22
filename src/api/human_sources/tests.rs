@@ -464,15 +464,7 @@ async fn modern_route_matrix_closes_before_body_extractors_and_store() {
     let router = gateway_router(state.clone());
     for (path, methods) in REGISTERED_ROUTES {
         for method in *methods {
-            if *method == "GET"
-                && [
-                    "/api/v1/human/identity",
-                    "/api/v1/human/resources",
-                    "/api/v1/human/events",
-                    "/api/v1/human/events/recent",
-                    "/api/v1/human/owned/brokers",
-                ]
-                .contains(path)
+            if *method == "GET" && OWNED_HUMAN_GET_PATHS.contains(path)
                 || *path == "/healthz"
                 || *path == "/api/v1/status" && ["GET", "HEAD"].contains(method)
             {
@@ -525,6 +517,52 @@ async fn modern_route_matrix_closes_before_body_extractors_and_store() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
+async fn owned_admin_reads_refuse_head_before_authentication() {
+    let (_fixture, state) = fixture();
+    let observers = state
+        .tenants
+        .iter()
+        .map(|tenant| crate::audit::read_test_observer::observe(&tenant.store))
+        .collect::<Vec<_>>();
+    let router = gateway_router(state);
+    for (path, get_status) in [
+        ("/api/v1/human/summary", StatusCode::UNAUTHORIZED),
+        (
+            "/api/v1/human/admin/configuration",
+            StatusCode::UNAUTHORIZED,
+        ),
+        ("/api/v1/human/admin/grants", StatusCode::UNAUTHORIZED),
+        ("/api/v1/human/admin/memberships", StatusCode::UNAUTHORIZED),
+        ("/api/v1/human/admin/quota", StatusCode::SERVICE_UNAVAILABLE),
+        ("/api/v1/human/admin/usage", StatusCode::SERVICE_UNAVAILABLE),
+    ] {
+        // No bearer: adopted GETs reach the extractor, while HEAD is
+        // refused by the gate even when Axum registered it implicitly.
+        for (method, status) in [
+            ("GET", get_status),
+            ("HEAD", StatusCode::SERVICE_UNAVAILABLE),
+            ("PATCH", StatusCode::METHOD_NOT_ALLOWED),
+        ] {
+            let request = axum::http::Request::builder()
+                .method(method)
+                .uri(path)
+                .body(Body::empty())
+                .unwrap();
+            let response = router.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), status, "{method} {path}");
+            if method == "HEAD" {
+                assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
+            }
+        }
+    }
+    assert!(
+        observers
+            .iter()
+            .all(|observer| observer.try_recv().is_err())
+    );
 }
 
 #[tokio::test]

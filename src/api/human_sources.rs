@@ -601,6 +601,18 @@ mod owned_policy_tests;
 #[cfg(test)]
 pub(super) mod tests;
 
+const OWNED_HUMAN_GET_PATHS: &[&str] = &[
+    "/api/v1/human/admin/configuration",
+    "/api/v1/human/admin/grants",
+    "/api/v1/human/admin/memberships",
+    "/api/v1/human/events",
+    "/api/v1/human/events/recent",
+    "/api/v1/human/identity",
+    "/api/v1/human/owned/brokers",
+    "/api/v1/human/resources",
+    "/api/v1/human/summary",
+];
+
 // Exact existing route templates, reviewed in CONTRACT_W0_R2.
 const REGISTERED_ROUTES: &[(&str, &[&str])] = &[
     ("/api/v1/egress/policies/replace", &["POST"]),
@@ -661,6 +673,12 @@ const REGISTERED_ROUTES: &[(&str, &[&str])] = &[
     ("/api/v1/events", &["GET", "POST", "HEAD"]),
     ("/api/v1/export", &["GET", "HEAD"]),
     ("/api/v1/federation/workers", &["GET", "HEAD"]),
+    ("/api/v1/human/admin/configuration", &["GET", "HEAD"]),
+    // The S6 POST on this path still uses the existing mutation handler.
+    ("/api/v1/human/admin/grants", &["GET", "HEAD"]),
+    ("/api/v1/human/admin/memberships", &["GET", "HEAD"]),
+    ("/api/v1/human/admin/quota", &["GET", "HEAD"]),
+    ("/api/v1/human/admin/usage", &["GET", "HEAD"]),
     ("/api/v1/human/brokers", &["GET", "HEAD"]),
     ("/api/v1/human/events", &["GET", "HEAD"]),
     ("/api/v1/human/events/recent", &["GET", "HEAD"]),
@@ -671,6 +689,7 @@ const REGISTERED_ROUTES: &[(&str, &[&str])] = &[
     ("/api/v1/human/owned/brokers", &["GET", "HEAD"]),
     ("/api/v1/human/resources", &["GET", "HEAD"]),
     ("/api/v1/human/stream", &["GET", "HEAD"]),
+    ("/api/v1/human/summary", &["GET", "HEAD"]),
     ("/api/v1/human/workers", &["GET", "HEAD"]),
     ("/api/v1/identity", &["GET", "HEAD"]),
     ("/api/v1/integrity", &["GET", "HEAD"]),
@@ -759,15 +778,7 @@ pub(super) async fn route_gate(
         || super::control_transport::owned_broker_request(&request)
         || super::control_transport::owned_policy_request(&request)
         || super::control_transport::owned_policy_inspection_request(&request)
-        || request.method() == "GET"
-            && [
-                "/api/v1/human/identity",
-                "/api/v1/human/resources",
-                "/api/v1/human/events",
-                "/api/v1/human/events/recent",
-                "/api/v1/human/owned/brokers",
-            ]
-            .contains(&path)
+        || request.method() == "GET" && OWNED_HUMAN_GET_PATHS.contains(&path)
         || request.method() == "GET"
             && !owned.oidc_selected()
             && ["/auth/oidc/status", "/auth/oidc/cli-profile"].contains(&path);
