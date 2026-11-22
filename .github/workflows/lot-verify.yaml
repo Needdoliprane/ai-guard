@@ -13,7 +13,8 @@ jobs:
     timeout-minutes: 65
     env:
       SOURCE_SHA: 5e092e7e01ca70bbdc491401283dd1321117e514
-      PRIOR_WORKFLOW_SHA: 572341c8bd7d40b3287c7f703f6c6bce2ddf73c2
+      FIRST_WORKFLOW_SHA: 572341c8bd7d40b3287c7f703f6c6bce2ddf73c2
+      PRIOR_WORKFLOW_SHA: 20127f7375d9634e434ec19f9f1a7a271742af29
       DOCKER_HOST: unix:///var/run/docker.sock
       G04_IDP_PROJECT: g04-idp-${{ github.run_id }}-${{ github.run_attempt }}
       G04_CONTROL_PROJECT: g04-control-${{ github.run_id }}-${{ github.run_attempt }}
@@ -33,7 +34,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 3
+          fetch-depth: 4
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -67,7 +68,7 @@ jobs:
           }
 
           record_control_build_failure() {
-            local diagnosis category=unknown step=unknown
+            local diagnosis category=unknown step=unknown cargo_category=unknown rust_error_lines=null rust_codes=
             # BuildKit can report more than one failure. Emit only unique matches.
             if diagnosis="$(tail -c 262144 "$G04_PRIVATE/control-build.log" 2>/dev/null | LC_ALL=C awk '
               function unique(values, count, key, result) {
@@ -78,6 +79,24 @@ jobs:
                 return count == 1 ? result : "unknown"
               }
               { line = tolower($0) }
+              line ~ /^#[0-9]+ \[rust-build [0-9]+\/[0-9]+\] run cargo build / { cargo_runs[$1] = 1 }
+              /^#[0-9]+ [0-9]+(\.[0-9]+)?[[:space:]]/ {
+                message = $0
+                sub(/^#[0-9]+ [0-9]+(\.[0-9]+)?[[:space:]]+/, "", message)
+                sampled[$1] = 1
+                lower = tolower(message)
+                if (message ~ /^error\[E[0-9][0-9][0-9][0-9]\]:/) {
+                  codes[$1, substr(message, 7, 5)] = 1
+                  rust_lines[$1]++
+                  compiler[$1] = 1
+                } else if (lower ~ /^error: (component download failed|could not download (file|nonexistent rust version)|toolchain .* (is not installed|is not installable)|no default toolchain|rustup could not choose|rustc .* is not supported|failed to (download component|install component|parse override toolchain file))/) {
+                  toolchain[$1] = 1
+                } else if (lower ~ /^(error: )?(failed to (download (from|crate|any data)|fetch |query (replaced )?source registry)|unable to update registry|download of .* failed)/) {
+                  fetch[$1] = 1
+                } else if (lower ~ /^error: (could not compile |failed to run custom build command |linking with |couldn.t read )/) {
+                  compiler[$1] = 1
+                }
+              }
               line ~ /^(error:|#[0-9]+ error:)/ &&
                 line ~ /(failed to resolve source metadata for .*\/library\/(node|rust|debian):|no match for platform in manifest|no matching manifest for linux\/amd64)/ {
                 category["base_or_platform"] = 1
@@ -91,22 +110,53 @@ jobs:
               line ~ /npm (err!|error).*can only install.*(package(-lock)?\.json|npm-shrinkwrap\.json)|cannot find module .*@rollup\/rollup-linux-x64-(gnu|musl)/ {
                 category["package_artifact"] = 1
               }
-              line ~ /error: (failed to (parse|load) manifest|manifest path .* does not exist|cannot update the lock file .*cargo\.lock)/ {
+              line ~ /error: ((failed to (parse|load)|could not parse) manifest|manifest path .* does not exist|cannot update the lock file .*cargo\.lock)/ {
                 category["cargo_manifest"] = 1
                 step["cargo_build"] = 1
               }
               line ~ /^(error:|#[0-9]+ error:).*process .*\/bin\/sh -c .*did not complete successfully/ {
                 if (line ~ /\/bin\/sh -c npm ci"/) step["npm_ci"] = 1
                 if (line ~ /\/bin\/sh -c npm run build"/) step["frontend_build"] = 1
-                if (line ~ /\/bin\/sh -c cargo build /) step["cargo_build"] = 1
+                if (line ~ /\/bin\/sh -c cargo build /) {
+                  step["cargo_build"] = 1
+                  if ($1 ~ /^#[0-9]+$/) {
+                    cargo_failures[$1] = 1
+                    has_cargo_failure = 1
+                  }
+                }
                 if (line ~ /\/bin\/sh -c apt-get update /) step["runtime_packages"] = 1
               }
-              END { print unique(category), unique(step) }
+              END {
+                build_step = unique(step)
+                vertex = has_cargo_failure ? unique(cargo_failures) : unique(cargo_runs)
+                printf "%s %s", unique(category), build_step
+                if (build_step != "cargo_build" || vertex == "unknown" || !sampled[vertex]) {
+                  print " unknown null"
+                } else {
+                  kind = toolchain[vertex] ? "toolchain" : (fetch[vertex] ? "fetch" : "compile")
+                  if (toolchain[vertex] + fetch[vertex] + compiler[vertex] != 1) kind = "unknown"
+                  printf " %s %d", kind, rust_lines[vertex]
+                  for (i = 0; i < 10000 && emitted < 16; i++) {
+                    code = sprintf("E%04d", i)
+                    if ((vertex, code) in codes) {
+                      printf " %s", code
+                      emitted++
+                    }
+                  }
+                  printf "\n"
+                }
+              }
             ' 2>/dev/null)"; then
-              read -r category step <<< "$diagnosis"
+              read -r category step cargo_category rust_error_lines rust_codes <<< "$diagnosis"
             fi
             jq -n --arg category "$category" --arg step "$step" --argjson exit_code "$1" --argjson elapsed_seconds "$2" \
-              '{category:$category,step:$step,exit_code:$exit_code,elapsed_seconds:$elapsed_seconds}' \
+              --arg cargo_category "$cargo_category" --argjson rust_error_lines "$rust_error_lines" --arg rust_codes "$rust_codes" \
+              '{category:$category,step:$step,exit_code:$exit_code,elapsed_seconds:$elapsed_seconds}
+                + (if $step == "cargo_build" then {
+                    cargo_category:$cargo_category,
+                    rust_error_lines:$rust_error_lines,
+                    rust_error_codes:($rust_codes | split(" ") | map(select(length > 0)))
+                  } else {} end)' \
               > "$receipt/control-build.json"
           }
 
@@ -137,9 +187,11 @@ jobs:
           trap 'exit 143' TERM
 
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" && "$(git show -s --format=%P HEAD)" == "$PRIOR_WORKFLOW_SHA" ]] || exit 1
-          [[ "$(git show -s --format=%P "$PRIOR_WORKFLOW_SHA")" == "$SOURCE_SHA" ]] || exit 1
-          [[ "$(git diff --name-only "$SOURCE_SHA" "$PRIOR_WORKFLOW_SHA")" == .github/workflows/lot-verify.yaml ]] || exit 1
-          [[ "$(git diff --name-only "$PRIOR_WORKFLOW_SHA" HEAD)" == .github/workflows/lot-verify.yaml ]] || exit 1
+          [[ "$(git show -s --format=%P "$PRIOR_WORKFLOW_SHA")" == "$FIRST_WORKFLOW_SHA" ]] || exit 1
+          [[ "$(git show -s --format=%P "$FIRST_WORKFLOW_SHA")" == "$SOURCE_SHA" ]] || exit 1
+          for workflow_sha in "$FIRST_WORKFLOW_SHA" "$PRIOR_WORKFLOW_SHA" "$GITHUB_SHA"; do
+            [[ "$(git diff --name-only "$workflow_sha^" "$workflow_sha")" == .github/workflows/lot-verify.yaml ]] || exit 1
+          done
           source_tree="$G04_PRIVATE/source"
           mkdir "$source_tree"
           git archive --format=tar "$SOURCE_SHA" | tar -xf - -C "$source_tree"
