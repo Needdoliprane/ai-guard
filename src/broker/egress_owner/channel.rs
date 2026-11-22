@@ -21,7 +21,12 @@ use crate::egress::{
     },
 };
 use std::{
-    collections::HashMap, future::Future, net::SocketAddr, pin::Pin, sync::Arc, time::Duration,
+    collections::{HashMap, HashSet},
+    future::Future,
+    net::SocketAddr,
+    pin::Pin,
+    sync::Arc,
+    time::Duration,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -118,7 +123,7 @@ struct PendingOpen {
 }
 
 struct SocketControl {
-    authority: watch::Sender<SocketAuthority>,
+    authority: Arc<watch::Sender<SocketAuthority>>,
     commands: mpsc::Sender<Command>,
     closed: oneshot::Receiver<SocketClosure>,
     valid_until: Instant,
@@ -217,7 +222,7 @@ impl SocketControl {
             closed_sender,
         ));
         Self {
-            authority,
+            authority: Arc::new(authority),
             commands,
             closed,
             valid_until,
@@ -251,7 +256,7 @@ impl SocketControl {
         });
     }
 
-    fn data_deadline(&self) -> Option<Instant> {
+    fn active_io_deadline(&self) -> Option<Instant> {
         let state = *self.authority.borrow();
         state.lease_until?;
         if self.commands.is_closed() || state.loss(self.valid_until, Instant::now()).is_some() {
@@ -268,8 +273,7 @@ impl SocketControl {
         reason: EgressCloseReasonV1,
     ) -> ClosingFlow {
         let at = Instant::now();
-        self.authority
-            .send_modify(|state| state.stop = Some((at, reason)));
+        signal_loss(&self.authority, at, reason);
         ClosingFlow {
             flow_id,
             decision_id,
@@ -277,6 +281,20 @@ impl SocketControl {
             closed: self.closed,
         }
     }
+}
+
+fn signal_loss(
+    authority: &watch::Sender<SocketAuthority>,
+    observed_at: Instant,
+    reason: EgressCloseReasonV1,
+) {
+    authority.send_if_modified(|state| {
+        if state.stop.is_some() {
+            return false;
+        }
+        state.stop = Some((observed_at, reason));
+        true
+    });
 }
 
 struct Refusal {
@@ -331,6 +349,8 @@ impl Flow {
 
 struct Owner<W> {
     output: Option<W>,
+    stop: watch::Receiver<bool>,
+    stopped_during_write: bool,
     binding: EgressBindingV1,
     control: Arc<dyn EgressControl>,
     resolver: Arc<Resolver>,
@@ -403,6 +423,8 @@ where
     let (events, mut incoming) = mpsc::channel(64);
     let mut owner = Owner {
         output: Some(output),
+        stop: stop.clone(),
+        stopped_during_write: false,
         binding,
         control,
         resolver,
@@ -440,6 +462,11 @@ where
             }
             _ = renew.tick() => owner.renew(),
         }
+    };
+    let exit = if owner.stopped_during_write {
+        ChannelExit::Stopped
+    } else {
+        exit
     };
     // A timed-out write may have emitted only a frame prefix. Close both
     // halves before waiting for the audit work, without sending another frame.
@@ -488,6 +515,10 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
             let output = self.output.as_mut().ok_or(())?;
             tokio::select! {
                 biased;
+                _ = self.stop.changed() => {
+                    self.stopped_during_write = true;
+                    return Err(());
+                }
                 _ = sleep_until(deadline) => return Err(()),
                 written = channel_protocol::write_message(output, &message, deadline) => {
                     written.map_err(|_| ())?;
@@ -495,6 +526,27 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
             }
         }
         Ok(admission)
+    }
+
+    async fn send_active(&mut self, message: EgressMessageV1) -> Result<Admission, ()> {
+        let Some(socket) = self
+            .flows
+            .get(&message.flow_id())
+            .and_then(|flow| flow.socket.as_ref())
+        else {
+            return Ok(Admission::Stale);
+        };
+        let Some(deadline) = socket.active_io_deadline() else {
+            return Ok(Admission::Stale);
+        };
+        let commands = socket.commands.clone();
+        // Closing a socket during publication can leave a partial frame. An
+        // error abandons the channel rather than reusing that transport.
+        tokio::select! {
+            biased;
+            _ = commands.closed() => Err(()),
+            result = self.send_before(message, deadline) => result,
+        }
     }
 
     fn record(&mut self, observation_value: EgressObservationV1) {
@@ -707,27 +759,9 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
                 result,
             } => self.opened(flow_id, decision_id, result).await,
             Event::Upstream { flow_id, data } => {
-                let Some(socket) = self
-                    .flows
-                    .get(&flow_id)
-                    .and_then(|flow| flow.socket.as_ref())
-                else {
-                    return Ok(());
-                };
-                let Some(deadline) = socket.data_deadline() else {
-                    return Ok(());
-                };
-                let commands = socket.commands.clone();
                 let length = data.len();
                 let message = EgressMessageV1::data(flow_id, &data).map_err(|_| ())?;
-                // Cancelling the writer may leave a partial frame. An error
-                // closes the channel instead of reusing that transport.
-                let admission = tokio::select! {
-                    biased;
-                    _ = commands.closed() => return Err(()),
-                    result = self.send_before(message, deadline) => result?,
-                };
-                if admission == Admission::Applied {
+                if self.send_active(message).await? == Admission::Applied {
                     self.ledger
                         .release_buffer(flow_id, DirectionV1::BrokerToWorker, length)
                         .map_err(|_| ())?;
@@ -745,7 +779,7 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
                     .map_err(|_| ())?;
                 if !worker_closed {
                     let bytes = u32::try_from(bytes).map_err(|_| ())?;
-                    self.send(EgressMessageV1::Credit { flow_id, bytes })
+                    self.send_active(EgressMessageV1::Credit { flow_id, bytes })
                         .await?;
                 }
                 self.finish_if_done(flow_id).await
@@ -755,11 +789,13 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
                     return Ok(());
                 };
                 flow.upstream_closed = true;
-                self.send(EgressMessageV1::HalfClose { flow_id }).await?;
+                self.send_active(EgressMessageV1::HalfClose { flow_id })
+                    .await?;
                 self.finish_if_done(flow_id).await
             }
             Event::SocketClosed { flow_id, reason } => {
                 let wire = match reason {
+                    EgressCloseReasonV1::Revoked => EgressReasonV1::Revoked,
                     EgressCloseReasonV1::Expired => EgressReasonV1::Expired,
                     EgressCloseReasonV1::LeaseLost => EgressReasonV1::AuditUnavailable,
                     _ => EgressReasonV1::Transport,
@@ -861,13 +897,13 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
                     }
                     _ => {
                         self.flows.remove(&flow_id);
-                        self.close_opening(
-                            flow_id,
-                            decision_id,
-                            opened,
-                            EgressCloseReasonV1::Protocol,
-                        )
-                        .await?;
+                        let reason = if self.stopped_during_write {
+                            EgressCloseReasonV1::OwnerExit
+                        } else {
+                            EgressCloseReasonV1::Protocol
+                        };
+                        self.close_opening(flow_id, decision_id, opened, reason)
+                            .await?;
                         Err(())
                     }
                 }
@@ -943,7 +979,14 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
 
     async fn finish_if_done(&mut self, flow_id: u64) -> Result<(), ()> {
         let done = self.flows.get(&flow_id).is_some_and(|flow| {
-            flow.worker_closed && flow.upstream_closed && flow.in_flight_up == 0
+            flow.worker_closed
+                && flow.upstream_closed
+                && flow.in_flight_up == 0
+                && flow
+                    .socket
+                    .as_ref()
+                    .and_then(SocketControl::active_io_deadline)
+                    .is_some()
         });
         if done && let Some(flow) = self.flows.remove(&flow_id) {
             self.record_closed(flow.stop(flow_id, EgressCloseReasonV1::EndOfStream))
@@ -980,15 +1023,22 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
     }
 
     fn renew(&mut self) {
-        let decisions: Vec<IdV1> = self
-            .flows
-            .values()
-            .filter(|flow| flow.socket.is_some())
-            .map(|flow| flow.decision_id.clone())
-            .collect();
-        if self.renewing || decisions.is_empty() {
+        if self.renewing {
             return;
         }
+        let sockets: Vec<_> = self
+            .flows
+            .values()
+            .filter_map(|flow| {
+                flow.socket
+                    .as_ref()
+                    .map(|socket| (flow.decision_id.clone(), Arc::downgrade(&socket.authority)))
+            })
+            .collect();
+        if sockets.is_empty() {
+            return;
+        }
+        let decisions: Vec<_> = sockets.iter().map(|(id, _)| id.clone()).collect();
         self.renewing = true;
         let request = EgressRenewRequestV1 {
             version: 1,
@@ -999,7 +1049,27 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
         let events = self.events.clone();
         tokio::spawn(async move {
             let sent = Instant::now();
-            let result = control.renew(request).await;
+            let result = control.renew(request).await.and_then(|answer| {
+                if !valid_renewal(&answer, &decisions) {
+                    return Err(ControlError::Refused);
+                }
+                let observed = Instant::now();
+                for (id, socket) in sockets {
+                    let reason = if answer.revoked.contains(&id) {
+                        EgressCloseReasonV1::Revoked
+                    } else if answer.expired.contains(&id) {
+                        EgressCloseReasonV1::Expired
+                    } else {
+                        continue;
+                    };
+                    // A response only narrows authority on the exact socket
+                    // generation named when that renewal was sent.
+                    if let Some(authority) = socket.upgrade() {
+                        signal_loss(&authority, observed, reason);
+                    }
+                }
+                Ok(answer)
+            });
             let _ = events
                 .send(Event::Renewed {
                     sent,
@@ -1040,6 +1110,16 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
         }
         self.observations.abort_all();
     }
+}
+
+fn valid_renewal(answer: &EgressRenewResponseV1, decisions: &[IdV1]) -> bool {
+    let mut seen = HashSet::new();
+    answer.version == 1
+        && answer
+            .revoked
+            .iter()
+            .chain(&answer.expired)
+            .all(|id| decisions.contains(id) && seen.insert(id))
 }
 
 /// Durable decision first; resolution and connect only after an allow.
