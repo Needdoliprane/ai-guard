@@ -1725,17 +1725,18 @@ fn serve_backend(
                             .iter()
                             .any(|issue| issue.error() != JournalError::Interrupted)
                 });
-                if invalid_inventory || must_invalidate_status(&backend, &result, false) {
-                    // Preserve the useful bounded STOP inventory reply while
-                    // closing a diagnostic cache contradicted by its findings.
-                    // Ordinary pagination and a coverage-only Interrupted
-                    // (for example an unacknowledged Arm) are not corruption.
-                    status.invalidate();
-                }
-                // The scan is complete. Release admission before waking a
-                // caller that can immediately ask for the next page.
-                drop(permit);
-                let _ = status.reply(reply, result, status_cache::Update::None, false, false);
+                // Keep a useful bounded STOP reply even when the findings
+                // invalidate the retained view. Coverage-only Interrupted
+                // keeps the last confirmed view.
+                let failed = invalid_inventory || must_invalidate_status(&backend, &result, false);
+                let _ = status.reply_before_send(
+                    reply,
+                    result,
+                    status_cache::Update::None,
+                    false,
+                    failed,
+                    || drop(permit),
+                );
             }
             Command::EnqueueEvents {
                 operation_id,
