@@ -615,6 +615,10 @@ const OWNED_HUMAN_GET_PATHS: &[&str] = &[
 
 // Exact existing route templates, reviewed in CONTRACT_W0_R2.
 const REGISTERED_ROUTES: &[(&str, &[&str])] = &[
+    ("/api/v1/egress/decisions", &["POST"]),
+    ("/api/v1/egress/events", &["GET", "HEAD"]),
+    ("/api/v1/egress/observations", &["POST"]),
+    ("/api/v1/egress/renewals", &["POST"]),
     ("/api/v1/egress/policies/replace", &["POST"]),
     ("/api/v1/egress/policies/revoke", &["POST"]),
     ("/api/v1/egress/policies/inspect", &["POST"]),

@@ -458,6 +458,19 @@ async fn own_sqlite_busy_is_503_without_legacy_or_neighbor_lookup() {
 
 #[tokio::test]
 async fn modern_route_matrix_closes_before_body_extractors_and_store() {
+    // The mounted egress routes must stay covered even if the inventory changes.
+    let egress_routes: &[(&str, &[&str])] = &[
+        ("/api/v1/egress/decisions", &["POST"]),
+        ("/api/v1/egress/events", &["GET", "HEAD"]),
+        ("/api/v1/egress/observations", &["POST"]),
+        ("/api/v1/egress/renewals", &["POST"]),
+    ];
+    for route in egress_routes {
+        assert!(
+            REGISTERED_ROUTES.contains(route),
+            "missing guard for {route:?}"
+        );
+    }
     let (_fixture, state) = fixture();
     let observed = crate::audit::read_test_observer::observe(&state.tenants[0].store);
     let observed_b = crate::audit::read_test_observer::observe(&state.tenants[1].store);
