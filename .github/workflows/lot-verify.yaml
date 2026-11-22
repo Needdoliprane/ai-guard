@@ -1,198 +1,230 @@
-name: Lot verification
+name: G01 Rust HTTP wire fixtures
 
-# Verifies V1 development branches on a hosted Linux x86_64 runner so that the
-# development Mac keeps its memory for engine, browser and macOS recipes.
-# It complements ci.yaml (dev/main) and never creates tags, releases or
-# artifacts outside this run. Engine (Docker/Podman/Kubernetes) and provider
-# recipes stay out of this workflow: ignored tests are not run and are never
-# counted as passes.
-
+# Run the existing Rust-to-frontend wire harness for this exact candidate.
+# No browser, Docker, runtime, provider, cloud or release operation is involved.
 on:
   push:
-    branches: ['claude/v1-**']
+    branches:
+      - claude/v1-g01-http-wire-fixtures-check-20261122
 
 permissions:
   contents: read
 
 concurrency:
-  group: lot-verify-${{ github.ref }}
+  group: g01-http-wire-fixtures-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  rust:
+  rust-http-wire:
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 90
+    permissions:
+      contents: read
     env:
-      AI_GUARD_BUILD_REVISION: ${{ github.sha }}
-      # Match CI's build limit when compiling and linking the full test suite.
+      SOURCE_SHA: 4b6ae87a712f782e28e035432967c0bed270e0fc
+      EXPECTED_BRANCH: claude/v1-g01-http-wire-fixtures-check-20261122
       CARGO_BUILD_JOBS: '1'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
-      RUST_MIN_STACK: '8388608'
       CARGO_TERM_COLOR: never
+      RUST_BACKTRACE: '0'
     steps:
+      - name: Initialize closed wire receipt
+        shell: bash
+        run: |
+          umask 077
+          receipt="$RUNNER_TEMP/g01-http-wire-receipt.txt"
+          cat > "$receipt" <<'EOF'
+          source_sha=4b6ae87a712f782e28e035432967c0bed270e0fc
+          workflow_sha=NOT_RUN
+          source_guard=NOT_RUN
+          rustc=NOT_RUN
+          node=NOT_RUN
+          cargo_fetch=NOT_RUN
+          driver=NOT_RUN
+          federation_rust=NOT_RUN
+          human_workers_rust=NOT_RUN
+          supervision_rust=NOT_RUN
+          human_recent_rust=NOT_RUN
+          node_wire_tests=NOT_RUN
+          wire_files=NOT_RUN
+          private_cleanup=NOT_RUN
+          last_phase=NOT_RUN
+          result=NOT_RUN
+          scope=11 exact Rust fixture producers and 8 existing Node wire assertions; loopback synthetic SQLite only
+          EOF
+          chmod 600 "$receipt"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Free runner disk for the test targets
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
-      - name: Fetch dependencies with the pinned Rust toolchain
-        run: |
-          rustc --version
-          cargo fetch --locked
-      - name: Check Rust formatting
-        run: cargo fmt --all -- --check
-      - name: Check all targets with MySQL enabled
-        run: cargo check --locked --offline --all-targets --features mysql-storage --keep-going
-      - name: Check all targets without default features (SQLite only)
-        run: cargo check --locked --offline --all-targets --no-default-features --keep-going
-      - name: Third-party licence guard and its unit tests
-        # `cargo test` builds examples but does not run their unit tests.
-        run: |
-          cargo test --locked --offline --example third_party_notices
-          cargo run --quiet --locked --offline --example third_party_notices -- check --allowed .github/third-party-license-expressions.txt
-      - name: Provider harness regressions
-        run: |
-          python3 -B tests/e2e/interactive_driver.py --self-test
-          python3 -B tests/e2e/test_run_provider_preflight.py ProviderPreflightTests ProviderBrowserStageTests
-          python3 -B tests/e2e/test_run_provider_broker.py BrokerRecipeTests
-      - name: Rust test suite (ignored engine and provider tests excluded)
-        if: github.ref_name != 'claude/v1-integration-regressions-20261122'
-        shell: bash
-        run: |
-          set -o pipefail
-          export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
-          cargo test --locked --offline --no-fail-fast 2>&1 | tee cargo-test.log
-      - name: Targeted SQLite library regressions
-        if: github.ref_name == 'claude/v1-integration-regressions-20261122'
-        shell: bash
-        run: |
-          set -euo pipefail
-          export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
-          build_json="$TMPDIR/libtest.jsonl"
-          test_log="$TMPDIR/selector.log"
-          summary=cargo-test-summary.txt
-          failures=cargo-test-failed.txt
-          : > "$summary"
-          : > "$failures"
+          fetch-depth: 2
 
-          settlement=broker::service::server::retirement_settlement_tests::same_original_not_queued_final_retries_its_retained_input_before_another_q
-          selectors=(
-            audit::resource_tests::retention_confirms_the_committed_segment_after_a_filesystem_ack_failure
-            api::human_sources::journal_tests::owned_event_page_reports_the_archived_prefix_after_adoption
-            api::human_sources::tests::owned_admin_reads_refuse_head_before_authentication
-            api::human_sources::journal_tests::owned_admin_reads::owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
-            identity::operations::tests::owned_event_availability_preserves_granted_permissions
-            broker::writer::inventory_tests::completed_inventory_releases_its_permit_before_reply
-            broker::writer::inventory_tests::timed_out_inventory_keeps_one_permit_and_cannot_queue_a_series_before_cancel
-            broker::writer::status_projection_tests::coverage_only_pending_arm_does_not_taint_a_valid_last_confirmed_status
-            "$settlement"
-          )
-          expected=9
-          if (( ${#selectors[@]} != expected )); then
-            echo 'Invalid regression selector count' | tee -a "$summary"
-            exit 1
-          fi
-          printf 'Revision %s; %s exact SQLite library tests expected\n' "$GITHUB_SHA" "$expected" | tee -a "$summary"
-
-          # Keep raw Cargo and test output in the runner's private scratch directory.
-          if ! cargo test --locked --offline --no-default-features --lib --no-run \
-              --message-format=json > "$build_json" 2> "$TMPDIR/build.stderr"; then
-            echo 'SQLite library build failed; tests not run' | tee -a "$summary"
-            jq -r 'select(.reason == "compiler-message" and .message.level == "error")
-              | .message.code.code // empty | select(test("^E[0-9]{4}$"))' "$build_json" \
-              2>/dev/null | sort -u | tee -a "$summary" || true
-            exit 1
-          fi
-          if ! libtest="$(jq -ers '[.[] | select(.reason == "compiler-artifact"
-              and .target.name == "agentsandbox" and .target.kind == ["lib"]
-              and .profile.test == true and .executable != null) | .executable]
-              | unique | if length == 1 then .[0] else empty end' "$build_json")" \
-              || [[ ! -x "$libtest" ]]; then
-            echo 'Expected one SQLite library test executable; tests not run' | tee -a "$summary"
-            exit 1
-          fi
-          printf 'SQLite libtest SHA-256 %s\n' "$(sha256sum "$libtest" | awk '{print $1}')" | tee -a "$summary"
-
-          passed=0
-          for selector in "${selectors[@]}"; do
-            if "$libtest" "$selector" --exact --test-threads=1 > "$test_log" 2>&1 \
-                && grep -Fxq 'running 1 test' "$test_log" \
-                && grep -Fxq "test $selector ... ok" "$test_log" \
-                && grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$test_log"; then
-              printf 'PASS %s\n' "$selector" | tee -a "$summary"
-              ((passed += 1))
-            else
-              printf 'FAIL %s\n' "$selector" | tee -a "$summary"
-              printf '%s\n' "$selector" >> "$failures"
-              if [[ "$selector" == "$settlement" ]]; then
-                phases='bind_full3|enqueue_signal|ack_signal|load_before_retirement|begin_retirement|ack_pending|authorize_retirement|read_pending|load_before_final|pause_writer'
-                categories='InvalidInput|UnsupportedVersion|TooLarge|LimitExceeded|Busy|Conflict|Interrupted|Corrupt|UnsafeFilesystem|ControlSecret|Io'
-                grep -Eo "settlement phase=($phases) category=($categories)\b" "$test_log" \
-                  | sort -u | tee -a "$summary" || true
-              fi
-            fi
-          done
-          printf 'Passed %s of %s exact selectors\n' "$passed" "$expected" | tee -a "$summary"
-          (( passed == expected ))
-      - name: Summarize test results
-        if: always()
-        shell: bash
-        run: |
-          if [ -f cargo-test.log ]; then
-            grep -E '^test result:|^     Running ' cargo-test.log > cargo-test-summary.txt || true
-            grep -E '\.\.\. FAILED$' cargo-test.log | sed 's/^test //; s/ \.\.\. FAILED$//' > cargo-test-failed.txt || true
-            {
-              echo "### Rust test suite"
-              echo
-              echo "Failed tests: $(wc -l < cargo-test-failed.txt)"
-              echo
-              echo '```'
-              head -n 100 cargo-test-failed.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-          elif [ -f cargo-test-summary.txt ]; then
-            {
-              echo "### Targeted SQLite library tests"
-              echo '```'
-              cat cargo-test-summary.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
-      - name: Upload test logs
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: lot-verify-rust-${{ github.sha }}
-          path: |
-            cargo-test.log
-            cargo-test-summary.txt
-            cargo-test-failed.txt
-          if-no-files-found: ignore
-          retention-days: 14
-
-  frontend:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: front
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Setup Node
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24.22.2'
           package-manager-cache: false
-      - name: Install
-        run: npm ci --no-audit --no-fund
-      - name: Build
-        run: npm run build
-      - name: Test
-        run: npm test
+
+      - name: Fetch locked dependencies and run the existing wire pilot
+        id: verify
+        shell: bash
+        run: |
+          set +x
+          set -euo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/g01-http-wire-receipt.txt"
+          private_root=
+          phase=source_guard
+          result=FAIL
+          rust_counts=()
+          node_counts=()
+          set_receipt() {
+            awk -F= -v key="$1" -v value="$2" '$1 == key { $0 = key "=" value } { print }' "$receipt" > "$receipt.tmp"
+            chmod 600 "$receipt.tmp"
+            mv -- "$receipt.tmp" "$receipt"
+          }
+          finish() {
+            local code=$? cleanup_rc=0 final_phase
+            trap - EXIT
+            set +e
+            if [[ -n "$private_root" && "$private_root" == /tmp/g01-wire-* ]]; then
+              rm -rf -- "$private_root" >/dev/null 2>&1 || cleanup_rc=1
+              [[ ! -e "$private_root" ]] || cleanup_rc=1
+            fi
+            case "$phase" in
+              source_guard|toolchain|scratch_setup|dependency_fetch|wire_driver|wire_parse|complete)
+                final_phase="$phase" ;;
+              *) final_phase=unknown ;;
+            esac
+            if (( cleanup_rc != 0 )); then final_phase=private_cleanup; fi
+            if (( cleanup_rc == 0 )); then set_receipt private_cleanup PASS; else set_receipt private_cleanup FAIL; fi
+            if (( code == 0 && cleanup_rc == 0 )); then result=PASS; else result=FAIL; fi
+            set_receipt last_phase "$final_phase"
+            set_receipt result "$result"
+            {
+              printf 'G01 HTTP wire fixtures=%s source=%s\n' "$result" "$SOURCE_SHA"
+              printf 'Rust exact summaries federation=%s human_workers=%s supervision=%s human_recent=%s\n' \
+                "$(awk -F= '$1=="federation_rust"{print $2}' "$receipt")" \
+                "$(awk -F= '$1=="human_workers_rust"{print $2}' "$receipt")" \
+                "$(awk -F= '$1=="supervision_rust"{print $2}' "$receipt")" \
+                "$(awk -F= '$1=="human_recent_rust"{print $2}' "$receipt")"
+              printf 'Node wire assertions=%s wire_files=%s cleanup=%s phase=%s\n' \
+                "$(awk -F= '$1=="node_wire_tests"{print $2}' "$receipt")" \
+                "$(awk -F= '$1=="wire_files"{print $2}' "$receipt")" \
+                "$(awk -F= '$1=="private_cleanup"{print $2}' "$receipt")" "$final_phase"
+            } >> "$GITHUB_STEP_SUMMARY"
+            if (( code == 0 && cleanup_rc != 0 )); then code=1; fi
+            exit "$code"
+          }
+          trap finish EXIT
+
+          set_receipt workflow_sha "$GITHUB_SHA"
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 &&
+             "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == "refs/heads/$EXPECTED_BRANCH" &&
+             "$(git rev-parse HEAD 2>/dev/null)" == "$GITHUB_SHA" &&
+             "$(git status --porcelain=v1 --untracked-files=all 2>/dev/null)" == "" &&
+             "$(git show -s --format=%P HEAD 2>/dev/null)" == "$SOURCE_SHA" &&
+             "$(git diff --name-only "$SOURCE_SHA" HEAD 2>/dev/null)" == .github/workflows/lot-verify.yaml ]] || {
+            set_receipt source_guard FAIL
+            echo 'G01 source/ref guard failed; details omitted.' >&2
+            exit 1
+          }
+          set_receipt source_guard PASS
+
+          phase=toolchain
+          rustc_line="$(rustc --version 2>/dev/null)" || rustc_line=''
+          [[ "$rustc_line" =~ ^rustc\ 1\.99\.1($|[[:space:]]) ]] || { set_receipt rustc MISMATCH; exit 1; }
+          set_receipt rustc 1.99.1
+          node_line="$(node --version 2>/dev/null)" || node_line=''
+          [[ "$node_line" == v24.22.2 ]] || { set_receipt node MISMATCH; exit 1; }
+          set_receipt node 24.22.2
+
+          phase=scratch_setup
+          private_root="$(mktemp -d /tmp/g01-wire.XXXXXX)" || exit 1
+          private_root="$(realpath -e "$private_root")" || exit 1
+          chmod 700 "$private_root"
+          mkdir -m 700 "$private_root/cargo-target"
+          export TMPDIR="$private_root" CARGO_TARGET_DIR="$private_root/cargo-target"
+          unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+
+          phase=dependency_fetch
+          if cargo fetch --locked > "$private_root/cargo-fetch.log" 2>&1; then
+            set_receipt cargo_fetch PASS
+          else
+            set_receipt cargo_fetch FAIL
+            exit 1
+          fi
+
+          phase=wire_driver
+          driver_rc=0
+          CARGO_NET_OFFLINE=true timeout --kill-after=15s 80m \
+            node front/tests/run_rust_wire.mjs all > "$private_root/wire-driver.log" 2>&1 || driver_rc=$?
+          set_receipt driver "$driver_rc"
+          if (( driver_rc != 0 )); then exit 1; fi
+
+          phase=wire_parse
+          rust_summaries=()
+          while IFS= read -r rust_summary; do rust_summaries+=("$rust_summary"); done \
+            < <(grep -E '^test result: ' "$private_root/wire-driver.log" || true)
+          expected_counts=(2 3 3 3)
+          [[ "${#rust_summaries[@]}" == 4 ]] || { set_receipt driver SUMMARY_COUNT_MISMATCH; exit 1; }
+          for index in 0 1 2 3; do
+            expected="${expected_counts[$index]}"
+            summary="${rust_summaries[$index]}"
+            [[ "$summary" =~ ^test\ result:\ ok\.\ ${expected}\ passed\;\ 0\ failed\;\ 0\ ignored\;\ [0-9]+\ measured\;\ [0-9]+\ filtered\ out\;\ finished\ in\ [0-9]+(\.[0-9]+)?s$ ]] || {
+              set_receipt driver SUMMARY_MISMATCH
+              exit 1
+            }
+          done
+          set_receipt federation_rust PASS_2_0_0
+          set_receipt human_workers_rust PASS_3_0_0
+          set_receipt supervision_rust PASS_3_0_0
+          set_receipt human_recent_rust PASS_3_0_0
+
+          node_summaries=()
+          while IFS= read -r node_summary; do node_summaries+=("$node_summary"); done \
+            < <(grep -E '^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$' "$private_root/wire-driver.log" || true)
+          [[ "${#node_summaries[@]}" == 6 &&
+             "${node_summaries[0]}" == '# tests 8' && "${node_summaries[1]}" == '# pass 8' &&
+             "${node_summaries[2]}" == '# fail 0' && "${node_summaries[3]}" == '# cancelled 0' &&
+             "${node_summaries[4]}" == '# skipped 0' && "${node_summaries[5]}" == '# todo 0' &&
+             "$(grep -Fxc '1..8' "$private_root/wire-driver.log" || true)" == 1 ]] || {
+            set_receipt node_wire_tests SUMMARY_MISMATCH
+            exit 1
+          }
+          set_receipt node_wire_tests PASS_8_0_0
+
+          shopt -s nullglob
+          wire_dirs=( "$private_root"/aig-rust-wire-* )
+          [[ "${#wire_dirs[@]}" == 1 && -d "${wire_dirs[0]}" && ! -L "${wire_dirs[0]}" ]] || {
+            set_receipt wire_files DIRECTORY_MISMATCH
+            exit 1
+          }
+          [[ "$(stat -c '%a' "${wire_dirs[0]}")" == 700 ]] || { set_receipt wire_files MODE_MISMATCH; exit 1; }
+          nested_dir_count="$(find "${wire_dirs[0]}" -mindepth 1 -type d -print | wc -l | tr -d ' ')"
+          [[ "$nested_dir_count" == 3 ]] || { set_receipt wire_files DIRECTORY_COUNT_MISMATCH; exit 1; }
+          while IFS= read -r -d '' wire_dir; do
+            [[ "$(stat -c '%a' "$wire_dir")" == 700 ]] || { set_receipt wire_files MODE_MISMATCH; exit 1; }
+          done < <(find "${wire_dirs[0]}" -mindepth 1 -type d -print0)
+          file_count="$(find "${wire_dirs[0]}" -type f -print | wc -l | tr -d ' ')"
+          symlink_count="$(find "${wire_dirs[0]}" -type l -print | wc -l | tr -d ' ')"
+          [[ "$file_count" == 16 && "$symlink_count" == 0 ]] || { set_receipt wire_files COUNT_OR_LINK_MISMATCH; exit 1; }
+          while IFS= read -r -d '' wire_file; do
+            [[ "$(stat -c '%a' "$wire_file")" == 600 && "$(stat -c '%s' "$wire_file")" =~ ^[0-9]+$ ]] || {
+              set_receipt wire_files MODE_OR_SIZE_MISMATCH
+              exit 1
+            }
+            (( $(stat -c '%s' "$wire_file") <= 524288 )) || { set_receipt wire_files SIZE_LIMIT; exit 1; }
+          done < <(find "${wire_dirs[0]}" -type f -print0)
+          set_receipt wire_files 16_PRIVATE
+          phase=complete
+
+      - name: Upload only the closed HTTP wire receipt
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: g01-http-wire-fixtures-${{ github.sha }}
+          path: ${{ runner.temp }}/g01-http-wire-receipt.txt
+          if-no-files-found: warn
+          retention-days: 14
