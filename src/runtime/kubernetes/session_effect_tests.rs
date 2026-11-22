@@ -15,6 +15,7 @@ use crate::{
         session_test_peer::{PeerReply, PeerRequest, SessionTestPeer},
     },
 };
+use serde_json::json;
 use std::{
     collections::BTreeSet,
     os::unix::fs::PermissionsExt,
@@ -1161,4 +1162,177 @@ async fn non_201_or_non_create_http_reply_never_produces_a_create_response_witne
         SessionHttpResponseV2::Complete { status: 201, .. }
     ));
     assert_eq!(case.effect_count(), 2);
+}
+
+fn terminated(pod: &Value) -> Value {
+    let mut pod = running(pod);
+    pod["status"]["phase"] = json!("Succeeded");
+    pod["status"]["containerStatuses"][0]["state"] = json!({"terminated":{"exitCode":0,
+        "reason":"Completed","startedAt":"2026-11-12T08:01:00Z","finishedAt":"2026-11-12T08:02:00Z"}});
+    pod
+}
+
+#[tokio::test]
+async fn finalizer_release_needs_an_observed_terminal_and_tests_uid_and_finalizers() {
+    let case = Case::new().await;
+    let instance = case.created().await;
+    let admitted_pod = admitted(&case.rendered.request);
+    let patch_target = format!("{}?fieldValidation=Strict", case.pod_path());
+    // Written out by hand: canonical JSON Patch.
+    let body = format!(
+        "[{{\"op\":\"test\",\"path\":\"/metadata/uid\",\"value\":\"{POD_UID}\"}},\
+         {{\"op\":\"test\",\"path\":\"/metadata/finalizers\",\"value\":[\"ai-guard.io/session-terminal\"]}},\
+         {{\"op\":\"remove\",\"path\":\"/metadata/finalizers\"}}]"
+    );
+    let digest = effect_request_sha256(
+        SessionEffectKindV2::ReleaseFinalizer,
+        &case.fingerprint(),
+        "PATCH",
+        &patch_target,
+        body.as_bytes(),
+    );
+    // Held, released-unscheduled and running observations refuse before
+    // any request: the terminal is not observed.
+    for pod in [
+        admitted_pod.clone(),
+        without_gate(&admitted_pod, "45"),
+        running(&admitted_pod),
+    ] {
+        let observed = case.observe(&instance, &pod).await;
+        let before = case.effect_count();
+        assert_eq!(
+            case.runtime
+                .release_session_finalizer(
+                    &instance,
+                    &observed,
+                    case.guard(SessionEffectKindV2::ReleaseFinalizer, &digest),
+                    &AtomicBool::new(false),
+                )
+                .await
+                .err(),
+            Some(KubernetesSessionRuntimeError::EffectRefusedBeforeSend)
+        );
+        assert_eq!(case.effect_count(), before);
+    }
+    let done = terminated(&admitted_pod);
+    let mut released = done.clone();
+    released["metadata"]["resourceVersion"] = json!("50");
+    let still_held = replace(
+        &done,
+        "/metadata/finalizers",
+        json!(["ai-guard.io/session-terminal"]),
+    );
+    for (reply, expected) in [
+        (
+            PeerReply::json(200, &released),
+            SessionFinalizerOutcomeV2::Released,
+        ),
+        (
+            status(409),
+            SessionFinalizerOutcomeV2::RefusedNotApplied { status: 409 },
+        ),
+        (
+            status(422),
+            SessionFinalizerOutcomeV2::RefusedNotApplied { status: 422 },
+        ),
+        (status(404), SessionFinalizerOutcomeV2::NotFound),
+        (
+            PeerReply::json(200, &still_held),
+            SessionFinalizerOutcomeV2::Uncertain {
+                http_status: Some(200),
+                cause: KubernetesSessionRuntimeError::Kubernetes(KubernetesError::InvalidResponse),
+            },
+        ),
+    ] {
+        let observed = case.observe(&instance, &done).await;
+        let mut reply = Some(reply);
+        case.respond(Some(done.clone()), move |_: &PeerRequest| {
+            reply.take().unwrap_or_else(not_found)
+        });
+        let start = case.peer.requests().len();
+        let outcome = case
+            .runtime
+            .release_session_finalizer(
+                &instance,
+                &observed,
+                case.guard(SessionEffectKindV2::ReleaseFinalizer, &digest),
+                &AtomicBool::new(false),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, expected);
+        let seen = case.requests_since(start);
+        let patch = format!("PATCH {patch_target}");
+        assert_eq!(lines(&seen)[..3], [ANCHORS[0], ANCHORS[1], patch.as_str()]);
+        assert_eq!(seen[2].body(), body.as_bytes());
+        assert_eq!(
+            seen[2].header("content-type"),
+            Some("application/json-patch+json")
+        );
+    }
+}
+
+#[tokio::test]
+async fn finalizer_release_is_allowed_for_a_deleted_pod_that_was_never_released() {
+    let case = Case::new().await;
+    let instance = case.created().await;
+    let deleting_held = replace(
+        &admitted(&case.rendered.request),
+        "/metadata/deletionTimestamp",
+        json!("2026-11-12T08:05:00Z"),
+    );
+    let observed = case.observe(&instance, &deleting_held).await;
+    assert!(observed.gated());
+    let patch_target = format!("{}?fieldValidation=Strict", case.pod_path());
+    let body = canonical(&json!([
+        {"op":"test","path":"/metadata/uid","value":POD_UID},
+        {"op":"test","path":"/metadata/finalizers","value":["ai-guard.io/session-terminal"]},
+        {"op":"remove","path":"/metadata/finalizers"}
+    ]))
+    .unwrap();
+    let digest = effect_request_sha256(
+        SessionEffectKindV2::ReleaseFinalizer,
+        &case.fingerprint(),
+        "PATCH",
+        &patch_target,
+        &body,
+    );
+    let mut released = deleting_held.clone();
+    released["metadata"]["resourceVersion"] = json!("51");
+    case.respond(Some(deleting_held.clone()), move |_: &PeerRequest| {
+        PeerReply::json(200, &released)
+    });
+    assert_eq!(
+        case.runtime
+            .release_session_finalizer(
+                &instance,
+                &observed,
+                case.guard(SessionEffectKindV2::ReleaseFinalizer, &digest),
+                &AtomicBool::new(false),
+            )
+            .await
+            .unwrap(),
+        SessionFinalizerOutcomeV2::Released
+    );
+    // A deleting Pod that was released and bound to a node, with no
+    // container status yet, may still be starting: refused.
+    let mut deleting_bound = without_gate(&admitted(&case.rendered.request), "52");
+    deleting_bound["spec"]["nodeName"] = json!("node-a");
+    deleting_bound["metadata"]["deletionTimestamp"] = json!("2026-11-12T08:05:00Z");
+    let observed = case.observe(&instance, &deleting_bound).await;
+    assert!(!observed.gated());
+    let before = case.effect_count();
+    assert_eq!(
+        case.runtime
+            .release_session_finalizer(
+                &instance,
+                &observed,
+                case.guard(SessionEffectKindV2::ReleaseFinalizer, &digest),
+                &AtomicBool::new(false),
+            )
+            .await
+            .err(),
+        Some(KubernetesSessionRuntimeError::EffectRefusedBeforeSend)
+    );
+    assert_eq!(case.effect_count(), before);
 }

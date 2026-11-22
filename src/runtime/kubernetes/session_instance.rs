@@ -537,8 +537,15 @@ pub(crate) struct SessionObservedV2 {
     pod_uid: String,
     resource_version: String,
     state: SessionObservationStateV2,
+    /// The scheduling gate was still present in this observation.
+    gated: bool,
 }
 impl SessionObservedV2 {
+    /// True when this exact observation shows the gate still present: the
+    /// Pod was never released, so it was never scheduled or started.
+    pub(crate) fn gated(&self) -> bool {
+        self.gated
+    }
     pub(crate) fn pod_uid(&self) -> &str {
         &self.pod_uid
     }
@@ -636,6 +643,7 @@ pub(crate) fn parse_session_observation(
         pod_uid: instance.pod_uid.clone(),
         resource_version,
         state,
+        gated: held,
     })
 }
 

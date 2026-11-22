@@ -14,15 +14,18 @@
 )]
 use super::{
     KubernetesAuthorityV1, KubernetesError, KubernetesRuntime,
+    session_claim::KubernetesSessionClaimRequestV2,
     session_instance::{
-        KubernetesSessionRuntimeError, SessionInstanceV2, SessionObservationStateV2,
-        SessionObservedV2, parse_session_observation, validate_admitted_session_pod,
+        KubernetesSessionRuntimeError, SessionContainerStateV2, SessionInstanceV2,
+        SessionObservationStateV2, SessionObservedV2, parse_session_observation,
+        validate_admitted_session_pod,
     },
-    session_pod::{KubernetesSessionPodRequestV2, SESSION_SCHEDULING_GATE},
-    transport::CreatedSessionResponseV2,
+    session_pod::{KubernetesSessionPodRequestV2, SESSION_TERMINAL_FINALIZER},
+    session_requests::{delete_pod_request, release_finalizer_request, release_gate_request},
+    transport::{CreatedClaimResponseV2, CreatedSessionResponseV2},
     valid_dns_label,
 };
-use serde_json::{Map, Value, json};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -66,6 +69,12 @@ pub(crate) enum SessionEffectKindV2 {
     ReleaseGate,
     Attach,
     DeleteExact,
+    /// Per-attempt workspace claim CREATE (R5).
+    CreateClaim,
+    /// Workspace claim DELETE with a UID precondition.
+    DeleteClaimExact,
+    /// Removal of the terminal finalizer after the terminal was read (D5).
+    ReleaseFinalizer,
 }
 impl SessionEffectKindV2 {
     pub(crate) fn as_str(self) -> &'static str {
@@ -74,6 +83,9 @@ impl SessionEffectKindV2 {
             Self::ReleaseGate => "release_gate",
             Self::Attach => "attach",
             Self::DeleteExact => "delete_exact",
+            Self::CreateClaim => "create_claim",
+            Self::DeleteClaimExact => "delete_claim_exact",
+            Self::ReleaseFinalizer => "release_finalizer",
         }
     }
 }
@@ -118,6 +130,14 @@ pub(in crate::runtime::kubernetes) enum SessionHttpEffectV2<'a> {
     ReleaseGate { name: &'a str, body: Vec<u8> },
     /// `DELETE .../pods/{name}`, DeleteOptions body with preconditions.
     DeleteExact { name: &'a str, body: Vec<u8> },
+    /// `POST .../persistentvolumeclaims?fieldValidation=Strict`, exact bytes.
+    CreateClaim {
+        request: &'a KubernetesSessionClaimRequestV2,
+    },
+    /// `DELETE .../persistentvolumeclaims/{name}`, UID precondition.
+    DeleteClaimExact { name: &'a str, body: Vec<u8> },
+    /// `PATCH .../pods/{name}?fieldValidation=Strict`, JSON Patch body.
+    ReleaseFinalizer { name: &'a str, body: Vec<u8> },
 }
 impl SessionHttpEffectV2<'_> {
     pub(in crate::runtime::kubernetes) fn kind(&self) -> SessionEffectKindV2 {
@@ -125,6 +145,9 @@ impl SessionHttpEffectV2<'_> {
             Self::CreateHeld { .. } => SessionEffectKindV2::CreateHeld,
             Self::ReleaseGate { .. } => SessionEffectKindV2::ReleaseGate,
             Self::DeleteExact { .. } => SessionEffectKindV2::DeleteExact,
+            Self::CreateClaim { .. } => SessionEffectKindV2::CreateClaim,
+            Self::DeleteClaimExact { .. } => SessionEffectKindV2::DeleteClaimExact,
+            Self::ReleaseFinalizer { .. } => SessionEffectKindV2::ReleaseFinalizer,
         }
     }
 }
@@ -133,6 +156,8 @@ impl SessionHttpEffectV2<'_> {
 pub(in crate::runtime::kubernetes) enum SessionHttpResponseV2 {
     /// Real bounded 201 of this exact CREATE POST; still needs admission checks.
     CreatedResponse(Box<CreatedSessionResponseV2>),
+    /// Real bounded 201 of this exact claim POST; still needs its projection.
+    CreatedClaim(Box<CreatedClaimResponseV2>),
     /// Status and body read within the response bound.
     Complete { status: u16, bytes: Vec<u8> },
     /// Transport error, timeout, unreadable or oversized body.
@@ -177,6 +202,22 @@ pub(crate) enum SessionDeleteOutcomeV2 {
     DeletionRequested,
     NotFound,
     PreconditionFailed,
+    Uncertain {
+        http_status: Option<u16>,
+        cause: KubernetesSessionRuntimeError,
+    },
+}
+
+/// Finalizer removal result. None of these is a settlement; only the later
+/// observation of absence by UID or the retained terminal settles the Pod.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SessionFinalizerOutcomeV2 {
+    /// Validated 200 of the same UID without the ai-guard finalizer.
+    Released,
+    /// 409 or 422: not applied (UID or finalizer `test` failed).
+    RefusedNotApplied { status: u16 },
+    /// 404: no object at the name; never proof that this UID was released.
+    NotFound,
     Uncertain {
         http_status: Option<u16>,
         cause: KubernetesSessionRuntimeError,
@@ -291,6 +332,9 @@ impl KubernetesRuntime {
             .await?
         {
             SessionHttpResponseV2::CreatedResponse(response) => response,
+            SessionHttpResponseV2::CreatedClaim(_) => {
+                return Ok(ownership_unknown(Some(201), INVALID));
+            }
             SessionHttpResponseV2::Complete { status, .. } => {
                 return Ok(ownership_unknown(Some(status), rejected(status)));
             }
@@ -345,12 +389,13 @@ impl KubernetesRuntime {
             SessionObservationStateV2::ReleasedUnscheduled
             | SessionObservationStateV2::Scheduled { .. } => return Err(REFUSED),
         }
-        let body = canonical(&json!([
-            {"op":"test","path":"/metadata/uid","value":instance.pod_uid()},
-            {"op":"test","path":"/metadata/resourceVersion","value":observed.resource_version()},
-            {"op":"test","path":"/spec/schedulingGates","value":[{"name":SESSION_SCHEDULING_GATE}]},
-            {"op":"remove","path":"/spec/schedulingGates"}
-        ]))?;
+        let body = release_gate_request(
+            &self.binding,
+            target.pod_name(),
+            instance.pod_uid(),
+            observed.resource_version(),
+        )?
+        .body;
         self.verify_active_authority()
             .await
             .map_err(KubernetesSessionRuntimeError::Kubernetes)?;
@@ -364,7 +409,7 @@ impl KubernetesRuntime {
             .await?
         {
             SessionHttpResponseV2::Complete { status, bytes } => (status, bytes),
-            SessionHttpResponseV2::CreatedResponse(_) => {
+            SessionHttpResponseV2::CreatedResponse(_) | SessionHttpResponseV2::CreatedClaim(_) => {
                 return Ok(SessionReleaseOutcomeV2::Uncertain {
                     http_status: Some(201),
                     cause: INVALID,
@@ -424,17 +469,16 @@ impl KubernetesRuntime {
         if observed.pod_uid() != instance.pod_uid() {
             return Err(REFUSED);
         }
-        let mut preconditions = Map::new();
-        preconditions.insert("uid".into(), json!(instance.pod_uid()));
-        if matches!(observed.state(), SessionObservationStateV2::Held) {
-            preconditions.insert("resourceVersion".into(), json!(observed.resource_version()));
-        }
         // A forced deletion (gracePeriodSeconds 0) can remove the object
         // while its containers still run (EXT-11), so it is never requested.
-        let body = canonical(&json!({
-            "apiVersion":"v1","kind":"DeleteOptions",
-            "preconditions":Value::Object(preconditions),"propagationPolicy":"Background"
-        }))?;
+        let held = matches!(observed.state(), SessionObservationStateV2::Held);
+        let body = delete_pod_request(
+            &self.binding,
+            target.pod_name(),
+            instance.pod_uid(),
+            held.then(|| observed.resource_version()),
+        )?
+        .body;
         self.verify_active_authority()
             .await
             .map_err(KubernetesSessionRuntimeError::Kubernetes)?;
@@ -448,7 +492,7 @@ impl KubernetesRuntime {
             .await?
         {
             SessionHttpResponseV2::Complete { status, .. } => status,
-            SessionHttpResponseV2::CreatedResponse(_) => {
+            SessionHttpResponseV2::CreatedResponse(_) | SessionHttpResponseV2::CreatedClaim(_) => {
                 return Ok(SessionDeleteOutcomeV2::Uncertain {
                     http_status: Some(201),
                     cause: INVALID,
@@ -477,6 +521,75 @@ impl KubernetesRuntime {
                 http_status: Some(status),
                 cause: KubernetesSessionRuntimeError::Kubernetes(error),
             });
+        }
+        Ok(outcome)
+    }
+
+    /// Removal of the ai-guard terminal finalizer, bound by JSON Patch
+    /// `test` operations on the UID and the exact finalizer list.
+    ///
+    /// Refused before any request unless `observed` is this exact instance
+    /// with a terminated container, or a deletion of a Pod that was never
+    /// released. The terminal must already be retained by the caller.
+    pub(in crate::runtime::kubernetes) async fn release_session_finalizer<
+        G: SessionEffectGuardV2,
+    >(
+        &self,
+        instance: &SessionInstanceV2,
+        observed: &SessionObservedV2,
+        guard: G,
+        cancelled: &AtomicBool,
+    ) -> Outcome<SessionFinalizerOutcomeV2> {
+        let target = instance.target();
+        self.require_session_effect_target(
+            target.authority_fingerprint(),
+            target.pod_name(),
+            cancelled,
+        )?;
+        if observed.pod_uid() != instance.pod_uid() || !terminal_or_never_released(observed) {
+            return Err(REFUSED);
+        }
+        let body =
+            release_finalizer_request(&self.binding, target.pod_name(), instance.pod_uid())?.body;
+        self.verify_active_authority()
+            .await
+            .map_err(KubernetesSessionRuntimeError::Kubernetes)?;
+        let effect = SessionHttpEffectV2::ReleaseFinalizer {
+            name: target.pod_name(),
+            body,
+        };
+        let uncertain =
+            |http_status, cause| SessionFinalizerOutcomeV2::Uncertain { http_status, cause };
+        let (status, bytes) = match self
+            .transport
+            .send_session_effect(&self.binding, effect, guard, cancelled)
+            .await?
+        {
+            SessionHttpResponseV2::Complete { status, bytes } => (status, bytes),
+            SessionHttpResponseV2::CreatedResponse(_) | SessionHttpResponseV2::CreatedClaim(_) => {
+                return Ok(uncertain(Some(201), INVALID));
+            }
+            SessionHttpResponseV2::Uncertain { status, error } => {
+                return Ok(uncertain(
+                    status,
+                    KubernetesSessionRuntimeError::Kubernetes(error),
+                ));
+            }
+        };
+        let outcome = match status {
+            200 => match finalizer_released(instance, &bytes) {
+                Ok(()) => SessionFinalizerOutcomeV2::Released,
+                Err(cause) => return Ok(uncertain(Some(status), cause)),
+            },
+            404 => SessionFinalizerOutcomeV2::NotFound,
+            409 | 422 => SessionFinalizerOutcomeV2::RefusedNotApplied { status },
+            _ => return Ok(uncertain(Some(status), rejected(status))),
+        };
+        if let Err(error) = self.verify_active_authority().await {
+            return Ok(uncertain(
+                Some(status),
+                KubernetesSessionRuntimeError::Kubernetes(error),
+            ));
         }
         Ok(outcome)
     }
@@ -544,6 +657,39 @@ fn released_resource_version(
         }
     }
 }
+/// The finalizer may be removed only once the container of this exact
+/// instance is observed terminated, or the Pod is being deleted while still
+/// gated (never released, so never scheduled or started).
+fn terminal_or_never_released(observed: &SessionObservedV2) -> bool {
+    match observed.state() {
+        SessionObservationStateV2::Scheduled { container, .. } => {
+            matches!(container, SessionContainerStateV2::Terminated { .. })
+        }
+        SessionObservationStateV2::Deleting { container } => {
+            matches!(container, SessionContainerStateV2::Terminated { .. })
+                || (observed.gated() && matches!(container, SessionContainerStateV2::Absent))
+        }
+        SessionObservationStateV2::Held | SessionObservationStateV2::ReleasedUnscheduled => false,
+    }
+}
+/// A validated 200 of the finalizer PATCH: same UID, finalizer gone.
+fn finalizer_released(instance: &SessionInstanceV2, bytes: &[u8]) -> Outcome<()> {
+    let pod = crate::json::decode_unique(bytes, 64).map_err(|_| INVALID)?;
+    let finalizers = pod.pointer("/metadata/finalizers");
+    if pod.pointer("/metadata/uid").and_then(Value::as_str) != Some(instance.pod_uid())
+        || finalizers.is_some_and(|value| {
+            value.as_array().is_none_or(|values| {
+                values
+                    .iter()
+                    .any(|value| value.as_str() == Some(SESSION_TERMINAL_FINALIZER))
+            })
+        })
+    {
+        return Err(INVALID);
+    }
+    Ok(())
+}
+#[cfg(test)]
 fn canonical(value: &Value) -> Outcome<Vec<u8>> {
     crate::control::kubernetes_session::validation::canonical(value).map_err(|_| REFUSED)
 }
