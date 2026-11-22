@@ -337,7 +337,7 @@ async fn the_stdout_pump_frames_split_chunks_and_counts_unframed_records() {
 async fn a_stalled_audit_bounds_the_stdout_stall_and_records_the_overflow() {
     let (_temp, directory) = directory();
     let limits = ActivityLimits {
-        max_events: 100,
+        max_events: 1_000,
         max_bytes: 1024 * 1024,
         max_backlog_events: 2,
         max_backlog_bytes: 64 * 1024,
@@ -379,6 +379,7 @@ async fn a_stalled_audit_bounds_the_stdout_stall_and_records_the_overflow() {
     assert!(outcome.overflow_bytes > 0);
     assert!(collector.summary().unwrap().stalled);
     // Delivered and undelivered events alike, as a recovery run reads them.
+    drop(collector);
     let (spool, _) = ActivitySpool::reopen(&directory, session).unwrap();
     let events: Vec<Event> = spool.events().iter().map(|e| e.event.clone()).collect();
     assert!(

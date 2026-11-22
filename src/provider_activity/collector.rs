@@ -7,6 +7,7 @@
 use super::{
     hooks::HookPumpOutcome,
     spool::{ActivitySpool, SpooledEvent},
+    stdout::StdoutLossReason,
 };
 use crate::{
     adapters::{AdapterContext, RecordDisposition, normalize_hook_record, normalize_stdout_record},
@@ -444,15 +445,24 @@ impl ActivityCollector {
     /// Bytes the stdout tap stopped forwarding after its stall bound: one
     /// observed loss for the rest of the stream.
     pub fn stdout_overflow(&self, bytes: u64) -> Admission {
+        self.record_stdout_loss(bytes, StdoutLossReason::StallDeadline)
+    }
+
+    pub(super) fn record_stdout_loss(&self, bytes: u64, reason: StdoutLossReason) -> Admission {
         let Ok(mut state) = self.lock() else {
             return Admission::Unavailable;
         };
         Self::counts(&mut state, ActivityChannel::Stdout).dropped += 1;
-        let marker = self.control_event(
+        let reason = match reason {
+            StdoutLossReason::StallDeadline => "stdout_stall_limit_exceeded",
+            StdoutLossReason::NotForwarded => "stdout_not_forwarded",
+        };
+        let mut marker = self.control_event(
             "activity.loss",
             "observed",
-            json!({"channel":"stdout","bytes":bytes,"reason":"stdout_stall_limit_exceeded"}),
+            json!({"channel":"stdout","bytes":bytes}),
         );
+        marker.data["reason"] = json!(reason);
         self.append_locked(&mut state, ActivityChannel::Stdout, vec![marker])
     }
 
@@ -978,5 +988,64 @@ mod tests {
             collector.pending(1, usize::MAX)[0].event.data["complete"],
             false
         );
+    }
+
+    #[tokio::test]
+    async fn stdout_loss_reports_the_first_abandoned_chunk_without_inventing_a_deadline() {
+        use super::super::stdout::{TAP_CHUNKS, pump, stdout_tap_with_stall};
+        use std::time::Duration;
+
+        enum End {
+            Deadline,
+            Transport,
+            Abandoned,
+        }
+
+        for (end, reason) in [
+            (End::Deadline, "stdout_stall_limit_exceeded"),
+            (End::Transport, "stdout_not_forwarded"),
+            (End::Abandoned, "stdout_not_forwarded"),
+        ] {
+            let (_temp, collector) = fixture(false);
+            collector.channel_state(ActivityChannel::Stdout, "opened", None);
+            let stall = if matches!(end, End::Deadline) {
+                Duration::from_millis(10)
+            } else {
+                Duration::from_secs(30)
+            };
+            let (tap, chunks) = stdout_tap_with_stall(stall);
+            let release = tap.stall_release();
+            for _ in 0..TAP_CHUNKS {
+                tap.send(b"").await;
+            }
+            let mut send = Box::pin(tap.send(b"pending"));
+            tokio::select! {
+                biased;
+                () = &mut send => panic!("the full tap must apply backpressure"),
+                () = std::future::ready(()) => {}
+            }
+            match end {
+                End::Deadline => send.await,
+                End::Transport => {
+                    release.send_replace(true);
+                    send.await;
+                }
+                End::Abandoned => drop(send),
+            }
+            tap.send(b"tail").await;
+            drop(tap);
+
+            assert_eq!(pump(collector.clone(), chunks).await.overflow_bytes, 11);
+            let losses: Vec<_> = collector
+                .pending(8, usize::MAX)
+                .into_iter()
+                .filter(|item| item.event.kind == "activity.loss")
+                .collect();
+            assert_eq!(losses.len(), 1);
+            assert_eq!(losses[0].event.provenance, "observed");
+            assert_eq!(losses[0].event.data["reason"], reason);
+            assert_eq!(losses[0].event.data["bytes"], 11);
+            assert_eq!(collector.summary().unwrap().stdout.unwrap().dropped, 1);
+        }
     }
 }

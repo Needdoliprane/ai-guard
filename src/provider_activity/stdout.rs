@@ -12,8 +12,8 @@ use super::collector::{ActivityChannel, ActivityCollector, Admission};
 use crate::adapters::MAX_LINE_BYTES;
 use std::{
     sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -25,15 +25,22 @@ pub const TAP_CHUNKS: usize = 64;
 pub const TAP_STALL_LIMIT: Duration = Duration::from_secs(30);
 const STALL_POLL: Duration = Duration::from_millis(250);
 
+#[derive(Clone, Copy, Debug)]
+pub(super) enum StdoutLossReason {
+    StallDeadline,
+    NotForwarded,
+}
+
 #[derive(Debug, Default)]
 struct TapState {
-    overflowed: AtomicBool,
+    first_loss: OnceLock<StdoutLossReason>,
     lost_bytes: AtomicU64,
 }
 
 struct PendingChunk<'a> {
     state: &'a TapState,
     bytes: u64,
+    loss_reason: StdoutLossReason,
 }
 
 impl Drop for PendingChunk<'_> {
@@ -41,7 +48,9 @@ impl Drop for PendingChunk<'_> {
         // The stop path may cancel the capture task before this send is polled
         // again. Count its observed bytes before dropping the channel sender.
         if self.bytes != 0 {
-            self.state.overflowed.store(true, Ordering::Release);
+            // Later bytes are discarded because the stream already has a
+            // gap. Preserve the reason for the first lost chunk.
+            self.state.first_loss.get_or_init(|| self.loss_reason);
             self.state
                 .lost_bytes
                 .fetch_add(self.bytes, Ordering::AcqRel);
@@ -72,21 +81,26 @@ impl StdoutTap {
         let mut pending = PendingChunk {
             state: &self.state,
             bytes: chunk.len() as u64,
+            loss_reason: StdoutLossReason::NotForwarded,
         };
-        if self.state.overflowed.load(Ordering::Acquire) {
+        if self.state.first_loss.get().is_some() {
             return;
         }
         let mut stop = self.stop_stalling.subscribe();
         tokio::select! {
             // Continue delivering available tail chunks during capture drain.
             biased;
-            result = tokio::time::timeout(self.stall_limit, self.sender.reserve()) => {
-                if let Ok(Ok(permit)) = result {
+            result = self.sender.reserve() => {
+                if let Ok(permit) = result {
                     permit.send(chunk.to_vec());
                     pending.bytes = 0;
                 }
             }
+            // A notified end wins over a timer that is also ready on this poll.
             _ = stop.wait_for(|ended| *ended) => {}
+            () = tokio::time::sleep(self.stall_limit) => {
+                pending.loss_reason = StdoutLossReason::StallDeadline;
+            }
         }
     }
 }
@@ -225,7 +239,12 @@ pub async fn pump(collector: ActivityCollector, tap: TapReceiver) -> PumpOutcome
     }
     outcome.overflow_bytes = state.lost_bytes.load(Ordering::Acquire);
     if outcome.overflow_bytes > 0 {
-        let _ = collector.stdout_overflow(outcome.overflow_bytes);
+        let reason = state
+            .first_loss
+            .get()
+            .copied()
+            .unwrap_or(StdoutLossReason::NotForwarded);
+        let _ = collector.record_stdout_loss(outcome.overflow_bytes, reason);
     }
     if framer.unterminated() {
         outcome.unterminated_final_record = true;
