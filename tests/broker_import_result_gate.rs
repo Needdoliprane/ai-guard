@@ -42,7 +42,7 @@ fn diagnostic_phase(marker: &'static str) {
 
     let stdout = io::stdout();
     let mut output = stdout.lock();
-    let _ = writeln!(output, "{marker}");
+    let _ = writeln!(output, "\n{marker}");
     let _ = output.flush();
 }
 
