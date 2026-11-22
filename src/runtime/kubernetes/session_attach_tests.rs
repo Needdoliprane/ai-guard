@@ -3742,6 +3742,7 @@ fn owner_task_that_never_ran_drops_its_request_before_the_slot_and_the_record() 
         binding: rendered.binding.clone(),
         bootstrap: bootstrap_capacity(&bootstrap_pool()),
         until: Instant::now() + SOON,
+        relay: None,
     };
     assert_eq!(slots.available_permits(), 0);
     assert!(attempt.report().is_none());
