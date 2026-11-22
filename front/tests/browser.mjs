@@ -99,6 +99,9 @@ const agents = [
 ];
 let mode = "data";
 let limitNextJournalRead = false;
+let pagedJournal = false;
+let olderPageFailures = 0;
+const olderEvent = { seq: 11, id: "evt-11", timestamp: "2026-10-29T12:07:00Z", kind: "workspace.diff", provenance: "observed", data: { path: "older.txt" } };
 let controlMode = "data";
 let controlReadBarrier = null;
 const workerId = "00000000-0000-4000-8000-000000000001";
@@ -243,6 +246,16 @@ const server = createServer(async (request, response) => {
         response.end();
         return;
       }
+      if (pagedJournal && url.searchParams.has("before")) {
+        if (olderPageFailures > 0) {
+          olderPageFailures--;
+          response.writeHead(503);
+          response.end();
+          return;
+        }
+        return json(response, { items: [olderEvent], next_cursor: null });
+      }
+      if (pagedJournal) return json(response, { items: events, next_cursor: 12 });
       const q = url.searchParams.get("q")?.toLowerCase();
       return json(response, {
         items:
@@ -752,6 +765,37 @@ try {
   await page.getByRole("button", { name: "Voir l’événement 14", exact: true }).waitFor();
   await unavailableJournal.waitFor({ state: "hidden" });
   await journalLimit.waitFor({ state: "hidden" });
+
+  // A failed "load older" must keep the history already read and offer a retry: never an empty journal.
+  pagedJournal = true;
+  olderPageFailures = 1;
+  await refreshOverview.click();
+  await page.getByRole("button", { name: "Voir l’événement 14", exact: true }).waitFor();
+  const pageRequestStart = requests.length;
+  await page.getByRole("button", { name: "Charger les précédents", exact: true }).focus();
+  await page.keyboard.press("Enter");
+  const historyAlert = page.getByRole("alert").filter({ hasText: "Historique incomplet" });
+  await historyAlert.waitFor();
+  assert.equal(await page.getByText("Journal indisponible", { exact: true }).count(), 0);
+  await page.getByRole("button", { name: "Voir l’événement 14", exact: true }).waitFor();
+  const retryHistory = page.getByRole("button", { name: "Réessayer de charger les précédents", exact: true });
+  assert.equal(await retryHistory.evaluate((node) => node === document.activeElement), true,
+    "Le focus doit rester sur la reprise après un échec de lecture");
+  await page.keyboard.press("Enter");
+  await page.getByRole("button", { name: "Voir l’événement 11", exact: true }).waitFor();
+  await historyAlert.waitFor({ state: "hidden" });
+  await page.getByText("Fin de l’historique chargé", { exact: true }).waitFor();
+  assert.equal(await page.locator(".event-slot .table-footer").evaluate((footer) =>
+    footer.contains(document.activeElement) && document.activeElement.textContent.includes("chargés")), true,
+    "En fin d’historique, le focus doit rejoindre le résumé");
+  const cursors = requests.slice(pageRequestStart)
+    .map(({ path }) => new URL(path, "http://localhost"))
+    .filter((url) => url.pathname === "/api/events" && url.searchParams.has("before"))
+    .map((url) => url.searchParams.get("before"));
+  assert.deepEqual(cursors, ["12", "12"], "La reprise relit la même limite du journal");
+  pagedJournal = false;
+  await refreshOverview.click();
+  await page.getByRole("button", { name: "Voir l’événement 14", exact: true }).waitFor();
 
   const download = page.waitForEvent("download");
   await page.getByRole("button", { name: "Exporter JSONL" }).click();
