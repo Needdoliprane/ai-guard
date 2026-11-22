@@ -302,10 +302,26 @@ async fn a_running_gateway_refuses_the_maintenance_and_restarts_with_the_marker(
     assert!(names(&dir.join("journal")).is_empty());
     stop(child).await;
 
-    // The persisted plan is resumed once the control is stopped.
+    // An interruption before publishing the intent can leave a partial draft.
+    // Resume reconstructs the intent from the admitted plan and source and
+    // preserves the unpublished draft.
+    let journal = dir.join("journal");
+    let draft = journal.join(format!("identity-markers-stage-{}", uuid::Uuid::new_v4()));
+    let partial_record = b"{\"version\":1";
+    support::private_dir(&draft);
+    support::private_file(&draft.join("record-v1.json"), partial_record);
+    let plan: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("plan.json")).unwrap()).unwrap();
     let stopped = state(&a);
     let resumed = report(&human_rights(&f, "resume", "tenant-a", &dir, true));
     assert_eq!(resumed["state"], "installed");
+    assert_eq!(
+        std::fs::read(draft.join("record-v1.json")).unwrap(),
+        partial_record
+    );
+    let published = journal.join("identity-markers-intent-v1/record-v1.json");
+    let intent: Value = serde_json::from_slice(&std::fs::read(published).unwrap()).unwrap();
+    assert_eq!(intent["migration_id"], plan["migration_id"]);
     let after = state(&a);
     assert_eq!(after.markers.len(), 1);
     assert_eq!(after.markers[0].0, stopped.head.0 + 1);

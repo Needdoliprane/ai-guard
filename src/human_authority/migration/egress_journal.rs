@@ -225,8 +225,28 @@ impl<'a> RetainedSourceIntent<'a> {
         )
     }
 
+    /// Use only published identity-marker records to choose the phase. An
+    /// unpublished draft survives for inspection and supplies no intent bytes.
+    pub(crate) fn enter_identity_markers(
+        token: &'a HumanMaintenanceSourceToken,
+        writer: &ReviewStoreMaintenanceWriter<'_, '_>,
+        journal: Directory,
+        backup_parent: Directory,
+    ) -> Result<Self> {
+        let fresh = journal_stage(&journal, &IDENTITY_MARKER_NAMES)? == JournalStage::Empty;
+        Self::enter(
+            token,
+            writer,
+            journal,
+            backup_parent,
+            StepRequest::IdentityMarkers,
+            fresh,
+        )
+    }
+
     /// First in-place identity-marker attempt on an adopted source, with an
     /// empty journal and backup namespace. Refused when nothing is pending.
+    #[cfg(test)]
     pub(crate) fn prepare_identity_markers(
         token: &'a HumanMaintenanceSourceToken,
         writer: &ReviewStoreMaintenanceWriter<'_, '_>,
@@ -244,6 +264,7 @@ impl<'a> RetainedSourceIntent<'a> {
     }
 
     /// Reopen a complete in-place intent after loss of acknowledgement.
+    #[cfg(test)]
     pub(crate) fn resume_identity_markers(
         token: &'a HumanMaintenanceSourceToken,
         writer: &ReviewStoreMaintenanceWriter<'_, '_>,

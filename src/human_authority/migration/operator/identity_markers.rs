@@ -335,24 +335,14 @@ pub fn install_owned_identity_markers(
         &token,
     )
     .map_err(|error| refusal(error, Refusal::FormatUnsupported))?;
-    let fresh_journal = !super::directory_has_entries(&maintenance.journal).map_err(conflict)?;
     let (intent, already_committed) = opened
         .with_review_maintenance_writer(&token, |writer| {
-            let intent = if fresh_journal {
-                RetainedSourceIntent::prepare_identity_markers(
-                    &token,
-                    writer,
-                    maintenance.journal.clone(),
-                    maintenance.backups.clone(),
-                )?
-            } else {
-                RetainedSourceIntent::resume_identity_markers(
-                    &token,
-                    writer,
-                    maintenance.journal.clone(),
-                    maintenance.backups.clone(),
-                )?
-            };
+            let intent = RetainedSourceIntent::enter_identity_markers(
+                &token,
+                writer,
+                maintenance.journal.clone(),
+                maintenance.backups.clone(),
+            )?;
             if writer.identity_markers_committed(&token)? {
                 return Ok((intent, true));
             }
