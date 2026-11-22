@@ -121,3 +121,17 @@ cargo test --locked --offline --features mysql-storage --test mysql_audit_store 
 Use an absolute, non-symlink `TMPDIR` and the same source revision for the gateway binary and tests. The refused-material case accepts file references in `AI_GUARD_MYSQL_GATEWAY_OTHER_CA`, `AI_GUARD_MYSQL_GATEWAY_EXPIRED_CERT` with `AI_GUARD_MYSQL_GATEWAY_EXPIRED_KEY`, and `AI_GUARD_MYSQL_GATEWAY_FOREIGN_CERT` with `AI_GUARD_MYSQL_GATEWAY_FOREIGN_KEY`. Record an omitted optional case as `NOT_RUN`. Keep the source SHA, profile, server version and digest, exact selector, exit status, and redacted assertions. Keep all private files and raw output out of the receipt.
 
 Utiliser un `TMPDIR` absolu sans lien symbolique et la même révision pour le binaire gateway et les tests. Les références facultatives indiquées ci-dessus activent les refus de CA, de certificat expiré ou de certificat étranger. Inscrire `NOT_RUN` pour tout cas facultatif omis. Conserver le SHA source, le profil, la version et le digest du serveur, le sélecteur exact, le code de sortie et les assertions expurgées. Garder les fichiers privés et les sorties brutes hors du reçu.
+
+## Read-only origin preflight · Prévol d’origine en lecture seule
+
+Prepare fresh A with `writer` and fresh B with `witness` for each profile. Use a probe built at the test’s source revision. The test selects the read-only service account for B, checks the exact receipt for the expected head, then supplies a different head and checks for a refusal without a receipt. After each invocation it verifies that no session holds the expected lock. It compares both audits before and after the invocations. Both profiles use the existing audit schema. Owned formats 14 and 15 require separate acceptance tests.
+
+Pour chaque profil, préparer A avec `writer` et B avec `witness`, tous deux neufs. Utiliser une sonde construite à la révision du test. Le test sélectionne le compte de service en lecture seule de B, vérifie le reçu exact de la tête attendue, puis soumet une tête différente et vérifie le refus sans reçu. Après chaque appel, il vérifie qu’aucune session ne détient le verrou attendu. Il compare les deux audits avant et après les appels. Les deux profils utilisent le schéma d’audit existant. Les formats owned 14 et 15 exigent des tests d’acceptation distincts.
+
+```sh
+cargo build --locked --offline --features mysql-storage --example mysql_storage_probe
+AI_GUARD_MYSQL_REGISTRY_QA_BIN="$PWD/target/debug/examples/mysql_storage_probe" \
+  cargo test --locked --offline --features mysql-storage --test mysql_audit_store -- \
+  --ignored --exact identity::prepared_registry_probe_verifies_owned_origin_and_preserves_audits \
+  --test-threads=1
+```
