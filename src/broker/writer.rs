@@ -276,7 +276,7 @@ enum Command {
         after: Option<Uuid>,
         limit: u32,
         reply: Reply<StopInventoryPageV1>,
-        _permit: InventoryPermit,
+        permit: InventoryPermit,
     },
     EnqueueEvents {
         operation_id: Uuid,
@@ -612,7 +612,7 @@ impl StopWriterClient {
                 after,
                 limit,
                 reply,
-                _permit: permit,
+                permit,
             })
             .await
     }
@@ -1710,7 +1710,7 @@ fn serve_backend(
                 after,
                 limit,
                 reply,
-                _permit,
+                permit,
             } => {
                 let result = match &backend {
                     Backend::Full(journal) => {
@@ -1718,27 +1718,24 @@ fn serve_backend(
                     }
                     Backend::Stops(journal) => journal.recovery_inventory(after, limit),
                 };
-                if result.as_ref().is_ok_and(|page| {
+                let invalid_inventory = result.as_ref().is_ok_and(|page| {
                     page.issues_truncated()
                         || page
                             .issues()
                             .iter()
                             .any(|issue| issue.error() != JournalError::Interrupted)
-                }) {
+                });
+                if invalid_inventory || must_invalidate_status(&backend, &result, false) {
                     // Preserve the useful bounded STOP inventory reply while
                     // closing a diagnostic cache contradicted by its findings.
                     // Ordinary pagination and a coverage-only Interrupted
                     // (for example an unacknowledged Arm) are not corruption.
                     status.invalidate();
                 }
-                let _ = respond(
-                    &backend,
-                    &status,
-                    reply,
-                    result,
-                    status_cache::Update::None,
-                    false,
-                );
+                // The scan is complete. Release admission before waking a
+                // caller that can immediately ask for the next page.
+                drop(permit);
+                let _ = status.reply(reply, result, status_cache::Update::None, false, false);
             }
             Command::EnqueueEvents {
                 operation_id,
@@ -1796,10 +1793,14 @@ fn respond<T>(
     update: status_cache::Update<'_>,
     mutation: bool,
 ) -> Result<(), JournalResult<T>> {
-    let failed = backend.full().is_ok_and(Journal::status_projection_failed)
-        || (!mutation
-            && matches!(&result, Err(error) if !matches!(error, JournalError::InvalidInput | JournalError::Busy | JournalError::Interrupted)));
+    let failed = must_invalidate_status(backend, &result, mutation);
     status.reply(reply, result, update, mutation, failed)
+}
+
+fn must_invalidate_status<T>(backend: &Backend, result: &JournalResult<T>, mutation: bool) -> bool {
+    backend.full().is_ok_and(Journal::status_projection_failed)
+        || (!mutation
+            && matches!(result, Err(error) if !matches!(error, JournalError::InvalidInput | JournalError::Busy | JournalError::Interrupted)))
 }
 
 fn append_command(
