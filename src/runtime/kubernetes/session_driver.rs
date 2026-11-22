@@ -83,6 +83,8 @@ pub(crate) enum SessionDriverErrorV2 {
     ClaimNotBound,
     /// The observed claim is not the object of the 201 that created it.
     ClaimReplaced,
+    /// The bound claim differs from the authorized storage request.
+    ClaimStorageClassChanged,
     /// This reservation does not confirm a resumable first claim.
     WorkspaceResumeUnavailable,
 }
@@ -113,6 +115,9 @@ impl fmt::Display for SessionDriverErrorV2 {
             }
             Self::ClaimReplaced => {
                 f.write_str("the workspace claim is not the object created by this attempt")
+            }
+            Self::ClaimStorageClassChanged => {
+                f.write_str("the bound workspace claim does not match the approved storage class")
             }
             Self::WorkspaceResumeUnavailable => {
                 f.write_str("the current reservation does not confirm this workspace claim")
@@ -404,8 +409,13 @@ impl<'a, L: SessionLedgerV2> SessionDriverV2<'a, L> {
             },
         )
         .await?;
-        self.wait_for_bound_workspace(created.claim_name(), created.uid())
-            .await
+        let bound = self
+            .wait_for_bound_workspace(created.claim_name(), created.uid())
+            .await?;
+        if bound.storage_class_name() != storage.storage_class_name.as_str() {
+            return Err(SessionDriverErrorV2::ClaimStorageClassChanged);
+        }
+        Ok(bound)
     }
 
     /// Observe a confirmed first PVC CREATE after reopening the driver.

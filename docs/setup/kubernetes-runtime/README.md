@@ -763,6 +763,10 @@ holds the reviewed cluster objects.
 | Broker session run (K4) | `src/runtime/kubernetes/session_run.rs` | Drives protocol v3 after the attach bracket: Handoff and archive, declared import, Start, business stdin, provider output to a sink (counted, never buffered), at most one Stop, declared exit. The declared end stays apart from the broker windows, a lost stream and the observed container end. Egress bytes are left to the G05 owner. |
 | Broker egress request (G05 binding) | `src/runtime/kubernetes/session_profile.rs`, `src/audit/kubernetes_session/effects.rs` | The profile commits `network: denied` (default) or `broker_egress`. The Pod network stays denied by the NetworkPolicy in both cases. `egress_binding_active` is the read-only predicate the G05 egress decision calls in its own transaction. It answers `active` only for a session whose profile asked for broker egress, with its gate release and its single attach applied, and no terminal, delete or settlement recorded. Each destination is still decided by the tenant egress policy. The owner composition through the attach is not wired yet. |
 
+The driver requires the bound claim to retain the confirmed UID and the approved
+storage class before it returns a workspace for the next step. A conflicting
+observation preserves the recorded CREATE and leaves the quota held.
+
 ### Activate effectful sessions for a tenant
 
 Effects are activated per tenant by the optional `session_effect_policy` field

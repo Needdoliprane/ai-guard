@@ -1,14 +1,14 @@
-name: G11 workspace storage class reproduction
+name: G11 workspace storage class check
 
 on:
   push:
-    branches: ['claude/v1-g11-pvc-storage-class-oracle-20261122']
+    branches: ['claude/v1-g11-pvc-storage-class-check-20261122']
 
 permissions:
   contents: read
 
 jobs:
-  reproduce:
+  verify:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:
@@ -21,36 +21,37 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Reproduce a changed storage class after claim creation
+      - name: Verify workspace claims and exact storage class
         shell: bash
         run: |
           set -euo pipefail
           umask 077
           scratch=$(mktemp -d /tmp/aig.XXXXXX)
           export TMPDIR="$scratch"
-          receipt="$RUNNER_TEMP/g11-storage-class-reproduction.txt"
-          selector=runtime::kubernetes::session_driver::tests::a_bound_workspace_must_keep_the_approved_storage_class
+          receipt="$RUNNER_TEMP/g11-storage-class-check.txt"
+          selector=runtime::kubernetes::session_driver::tests::
           printf 'revision=%s\nselector=%s\n' "$GITHUB_SHA" "$selector" > "$receipt"
           cargo fmt --all -- --check > "$scratch/fmt.log" 2>&1
           cargo fetch --locked > "$scratch/fetch.log" 2>&1
           status=0
           cargo test --locked --offline --no-default-features --lib "$selector" \
-            -- --exact --test-threads=1 > "$scratch/test.log" 2>&1 || status=$?
+            -- --test-threads=1 > "$scratch/test.log" 2>&1 || status=$?
           printf 'cargo_exit=%s\n' "$status" >> "$receipt"
-          if [[ "$status" == 101 ]] \
-              && [[ "$(grep -Fxc 'running 1 test' "$scratch/test.log")" == 1 ]] \
-              && [[ "$(grep -Fxc "test $selector ... FAILED" "$scratch/test.log")" == 1 ]] \
-              && grep -Fxq 'approved_storage_class_drift_accepted' "$scratch/test.log" \
-              && grep -Eq '^test result: FAILED\. 0 passed; 1 failed; 0 ignored; 0 measured;' "$scratch/test.log"; then
-            printf 'verdict=approved_storage_class_drift_reproduced\n' >> "$receipt"
+          if [[ "$status" == 0 ]] \
+              && [[ "$(grep -Fxc 'running 6 tests' "$scratch/test.log")" == 1 ]] \
+              && grep -Fxq "test ${selector}a_bound_workspace_must_keep_the_approved_storage_class ... ok" "$scratch/test.log" \
+              && grep -Fxq "test ${selector}a_workspace_is_claimed_created_once_and_bound_by_its_exact_uid ... ok" "$scratch/test.log" \
+              && grep -Eq '^test result: ok\. 6 passed; 0 failed; 0 ignored; 0 measured;' "$scratch/test.log"; then
+            printf 'verdict=PASS\nconfirmed=6/6\n' >> "$receipt"
           else
-            printf 'verdict=reproduction_unconfirmed\n' >> "$receipt"
+            printf 'verdict=FAIL\n' >> "$receipt"
+            grep -Eo 'error\[E[0-9]{4}\]' "$scratch/test.log" | sort -u >> "$receipt" || true
             exit 1
           fi
-      - name: Upload sanitized reproduction receipt
+      - name: Upload sanitized verification receipt
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: g11-storage-class-reproduction-${{ github.sha }}
-          path: ${{ runner.temp }}/g11-storage-class-reproduction.txt
+          name: g11-storage-class-check-${{ github.sha }}
+          path: ${{ runner.temp }}/g11-storage-class-check.txt
           if-no-files-found: error
