@@ -1,6 +1,61 @@
 //! The pause is the existing queue harness; journal reads use real files.
 use super::tests::{paused_client, private_journal};
 use super::*;
+use std::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Wake, Waker},
+};
+
+struct InventoryReplyWake {
+    pending: Arc<AtomicBool>,
+    observed: mpsc::SyncSender<JournalResult<()>>,
+}
+
+impl Wake for InventoryReplyWake {
+    fn wake(self: Arc<Self>) {
+        let reacquired = InventoryPermit::acquire(&self.pending).map(drop);
+        let _ = self.observed.try_send(reacquired);
+    }
+}
+
+#[test]
+fn completed_inventory_releases_its_permit_before_reply() {
+    let (_root, journal) = private_journal();
+    let (writer, receiver) = paused_client(&journal, 4, Duration::from_secs(5));
+    let pending = Arc::clone(&writer.0.inventory_pending);
+    let permit = InventoryPermit::acquire(&pending).unwrap();
+    let (reply, mut receive) = oneshot::channel();
+    let (observed, observation) = mpsc::sync_channel(1);
+    let waker = Waker::from(Arc::new(InventoryReplyWake { pending, observed }));
+    assert!(
+        Pin::new(&mut receive)
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+    assert!(
+        writer
+            .0
+            .sender
+            .try_send(Command::RecoveryInventory {
+                after: None,
+                limit: 20,
+                reply,
+                permit,
+            })
+            .is_ok()
+    );
+    let worker = std::thread::spawn(move || serve(journal, receiver));
+    let reacquired = observation.recv_timeout(Duration::from_secs(5)).unwrap();
+    let page = receive.try_recv().unwrap().unwrap();
+    drop(writer);
+    worker.join().unwrap();
+    assert!(page.entries().is_empty());
+    assert!(
+        reacquired.is_ok(),
+        "the permit must be available when the reply wakes its caller: {reacquired:?}"
+    );
+}
 
 #[tokio::test(flavor = "current_thread")]
 async fn timed_out_inventory_keeps_one_permit_and_cannot_queue_a_series_before_cancel() {

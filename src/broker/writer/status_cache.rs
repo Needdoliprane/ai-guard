@@ -165,6 +165,20 @@ impl StatusCache {
         mutation: bool,
         strict_failed: bool,
     ) -> Result<(), JournalResult<T>> {
+        self.reply_before_send(reply, result, update, mutation, strict_failed, || {})
+    }
+
+    /// `before_send` must be nonblocking. It runs under the status lock after
+    /// invalidation and immediately before the reply can wake its waiter.
+    pub(super) fn reply_before_send<T>(
+        &self,
+        reply: Reply<T>,
+        result: JournalResult<T>,
+        update: Update<'_>,
+        mutation: bool,
+        strict_failed: bool,
+        before_send: impl FnOnce(),
+    ) -> Result<(), JournalResult<T>> {
         let mut state = self
             .state
             .lock()
@@ -186,6 +200,7 @@ impl StatusCache {
         let succeeded = result.is_ok();
         // send is nonblocking and performs no IO. Holding this bounded metadata
         // mutex until publication prevents a reader seeing a head before ACK.
+        before_send();
         match reply.send(result) {
             Ok(()) => {
                 if succeeded && state.alive && !state.tainted {
