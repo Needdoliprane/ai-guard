@@ -19,7 +19,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -68,11 +68,49 @@ mod retirement_audit_tests {
     }
 }
 
+/// Periodic background reconciliation yields to the business path: the
+/// journal writer is one FIFO actor, and a background read queued in a gap of
+/// an execution delays that execution's next commit. Each loop supplies its
+/// own business-activity signal (see `ProfileJobs::admit_*`). After
+/// `MAX_DEFERRED_TICKS` consecutive deferrals one tick runs anyway, so
+/// recovery work is delayed but never starved. No deadline is changed.
+pub(super) struct BackgroundYield {
+    deferred: AtomicU32,
+}
+impl BackgroundYield {
+    pub(super) const MAX_DEFERRED_TICKS: u32 = 6;
+
+    const fn new() -> Self {
+        Self {
+            deferred: AtomicU32::new(0),
+        }
+    }
+
+    /// Whether this tick may issue background writer calls.
+    pub(super) fn admit(&self, business_active: bool) -> bool {
+        if !business_active {
+            self.deferred.store(0, Ordering::SeqCst);
+            return true;
+        }
+        let deferred = self
+            .deferred
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
+        if deferred > Self::MAX_DEFERRED_TICKS {
+            self.deferred.store(0, Ordering::SeqCst);
+            return true;
+        }
+        false
+    }
+}
+
 pub(super) struct ProfileJobs {
     pub(super) writer: OnceCell<ProfileWriterCapabilities>,
     identity: Arc<AsyncMutex<()>>,
     jobs: Mutex<BTreeMap<Uuid, Arc<Job>>>,
     retirement_audit_cursor: Mutex<Option<Uuid>>,
+    reconcile_yield: BackgroundYield,
+    retirement_audit_yield: BackgroundYield,
     pub(super) retirement_startup: super::retirement_startup::StartupSlot,
     #[cfg(test)]
     retirement_snapshot_gate: Mutex<Option<RetirementSnapshotGate>>,
@@ -94,6 +132,8 @@ impl ProfileJobs {
             identity: Arc::new(AsyncMutex::new(())),
             jobs: Mutex::new(BTreeMap::new()),
             retirement_audit_cursor: Mutex::new(None),
+            reconcile_yield: BackgroundYield::new(),
+            retirement_audit_yield: BackgroundYield::new(),
             retirement_startup: super::retirement_startup::StartupSlot::default(),
             #[cfg(test)]
             retirement_snapshot_gate: Mutex::new(None),
@@ -224,6 +264,26 @@ impl ProfileJobs {
     }
     pub(super) fn known(&self, operation: Uuid) -> Option<Arc<Job>> {
         self.jobs.lock().ok()?.get(&operation).cloned()
+    }
+    /// An execution of this profile currently holds its Job gate. A poisoned
+    /// registry is treated as active: background work then yields until its
+    /// bounded deferral expires.
+    pub(super) fn execution_active(&self) -> bool {
+        match self.jobs.lock() {
+            Ok(jobs) => jobs.values().any(|job| job.running.load(Ordering::SeqCst)),
+            Err(_) => true,
+        }
+    }
+    /// Admission of one autonomous-reconciliation tick for this profile.
+    pub(super) fn admit_reconcile(&self, writer_outstanding: usize) -> bool {
+        self.reconcile_yield
+            .admit(writer_outstanding > 0 || self.execution_active())
+    }
+    /// Admission of one retirement-audit tick for this profile. Its audit
+    /// delivery is promised independently of a live Full owner, so only actual
+    /// writer contention defers it, never an execution holding its Job.
+    pub(super) fn admit_retirement_audit(&self, writer_outstanding: usize) -> bool {
+        self.retirement_audit_yield.admit(writer_outstanding > 0)
     }
     /// Process-local exclusion over the original known Job. Authentication
     /// and durable/native evidence remain necessary for every guardian action.
@@ -484,6 +544,10 @@ impl Job {
         *count += 1;
         *last = Some(Instant::now());
         true
+    }
+    /// This Job's gate is currently held by an execution.
+    pub(super) fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
     }
     pub(super) fn execution_status(&self) -> (bool, Option<BrokerErrorCodeV1>) {
         let running = self.running.load(Ordering::SeqCst);
@@ -772,6 +836,50 @@ pub(super) fn require_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_reconcile_yields_to_an_active_execution_for_a_bounded_number_of_ticks() {
+        let jobs = ProfileJobs::new();
+        let job = jobs.job(Uuid::new_v4()).expect("job");
+        assert!(jobs.admit_reconcile(0), "an idle profile runs its tick");
+        let running = job.enter().expect("execution gate");
+        assert!(jobs.execution_active());
+        for tick in 0..BackgroundYield::MAX_DEFERRED_TICKS {
+            assert!(
+                !jobs.admit_reconcile(0),
+                "tick {tick} must yield to the active execution"
+            );
+        }
+        assert!(
+            jobs.admit_reconcile(0),
+            "the deferral is bounded: recovery work is delayed, never starved"
+        );
+        assert!(
+            !jobs.admit_reconcile(0),
+            "the bound restarts after one admitted tick"
+        );
+        drop(running);
+        assert!(!jobs.execution_active());
+        assert!(jobs.admit_reconcile(0), "inactivity resets the deferral");
+        assert!(
+            !jobs.admit_reconcile(1),
+            "a caller awaiting a writer reply also defers the tick"
+        );
+    }
+
+    #[test]
+    fn retirement_audit_yields_only_to_writer_contention() {
+        let jobs = ProfileJobs::new();
+        let job = jobs.job(Uuid::new_v4()).expect("job");
+        let running = job.enter().expect("execution gate");
+        // Its audit delivery is promised independently of a live Full owner.
+        assert!(jobs.admit_retirement_audit(0));
+        for _ in 0..BackgroundYield::MAX_DEFERRED_TICKS {
+            assert!(!jobs.admit_retirement_audit(2));
+        }
+        assert!(jobs.admit_retirement_audit(2), "bounded deferral");
+        drop(running);
+    }
 
     #[test]
     fn cancel_generation_invalidates_while_execution_gate_is_held() {

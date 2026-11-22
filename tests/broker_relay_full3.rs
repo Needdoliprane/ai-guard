@@ -1,6 +1,9 @@
 //! Product composition: real Full3 CLI, service IPC, Core HTTP/SQLite and helper.
 //! Engine observations come only from the strict software witness.
 #![cfg(unix)]
+// The shared harness also serves the Fresh import gate (macOS); its entry
+// points that this composition does not call are not dead product code.
+#[allow(dead_code)]
 #[path = "support/broker_relay_full3.rs"]
 mod harness;
 

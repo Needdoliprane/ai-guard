@@ -152,6 +152,10 @@ async fn effect_capability_cli_requires_attestation_keeps_the_format_and_runs_on
     // A second run is refused and appends nothing.
     let again = dir.path().join("effects-again.sqlite");
     assert!(!enable_effects(&data, &again, true).await.status.success());
+    assert!(
+        !again.exists(),
+        "no backup when the capability is already enabled"
+    );
     let current =
         Store::open_existing_for_tenant(&data, "tenant-a", Redactor::new(vec![]), 100_000).unwrap();
     assert_eq!(current.head().unwrap(), head + 1);

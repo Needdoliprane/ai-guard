@@ -1069,15 +1069,24 @@ async fn serve_full_command(
         } else {
             IO_TIMEOUT
         };
+        let dispatch = async {
+            if shutting_down && state.max_recovery_stop_owners != 0 {
+                state.finish_idle_with_recovery(&full).await?;
+                Ok(FullReply::Acknowledged {})
+            } else {
+                full.dispatch(command, state.progress.load(Ordering::SeqCst))
+                    .await
+            }
+        };
         let mut extra = [0_u8; 1];
-        // This waits only for the IPC outcome. The retirement coordinator is
-        // separately owned by FullState and survives EOF and this deadline.
+        // Retirement and joint Full/W closure own their work and outlive
+        // the IPC waiter, including EOF and this deadline.
         let result = tokio::select! {
             received = reader.read(&mut extra) => {
                 let _ = received;
                 return Err(EnforcerError::Unavailable);
             }
-            dispatched = tokio::time::timeout(wait,full.dispatch(command,state.progress.load(Ordering::SeqCst))) => {
+            dispatched = tokio::time::timeout(wait, dispatch) => {
                 match dispatched { Ok(Ok(result)) => result, Ok(Err(code)) => FullReply::Error {code},
                     Err(_) => FullReply::Error {code:EnforcerError::Unavailable} }
             }

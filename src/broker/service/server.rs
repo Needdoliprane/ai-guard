@@ -12,8 +12,8 @@ use crate::{
         clock::NativeHostClock,
         discovery::RoleLease,
         enforcer::{
-            CancelGeneration, EnforcerClient, EnforcerFullClientV3, EnforcerStopClient,
-            ExecutionEnforcerV1, RegistrationV1,
+            CancelGeneration, EnforcerClient, EnforcerError, EnforcerFullClientV3,
+            EnforcerStopClient, ExecutionEnforcerV1, FreshEnforcerOwner, RegistrationV1,
         },
         journal::{
             AcceptedJobV1, CancelStopProjectionV1, ControlSecrets, FsExclusions, Journal,
@@ -592,6 +592,7 @@ pub struct RetainedServiceShutdown {
     service: Arc<Service>,
     listener: PrivateListener,
     _lease: Arc<RoleLease>,
+    fresh_guardian: Option<FreshEnforcerOwner>,
     terminate: tokio::signal::unix::Signal,
     interrupt: tokio::signal::unix::Signal,
 }
@@ -599,21 +600,32 @@ impl RetainedServiceShutdown {
     pub async fn supervise(self) -> Result<()> {
         let mut owner = self;
         eprintln!(
-            "broker shutdown is not drained: broker ownership and the private endpoint remain retained; inspect the operation or request Cancel with the existing broker CLI; a further termination explicitly ends this process without proving retirement"
+            "broker shutdown is not drained: broker ownership and the private endpoint remain retained; inspect recovery status and request Cancel if the STOP connection is available; a further termination ends this broker without proving retirement"
         );
         let mut requests = JoinSet::new();
         let capacity = Arc::new(Semaphore::new(64));
         let mut retry = tokio::time::interval(Duration::from_secs(5));
-        loop {
+        let mut guardian_drained = false;
+        let drained = loop {
             tokio::select! {
-                _ = owner.terminate.recv() => break,
-                _ = owner.interrupt.recv() => break,
+                _ = owner.terminate.recv() => break false,
+                _ = owner.interrupt.recv() => break false,
                 Some(_) = requests.join_next(), if !requests.is_empty() => {},
                 _ = retry.tick() => {
                     // Only exact, previously admitted Final continuations and
                     // their audit are eligible. No new Begin/starts are opened.
                     owner.service.reconcile_retirement_audit().await;
-                    if !owner.service.requires_retained_shutdown() { break; }
+                    // An unconfirmed Fresh drain keeps its original process
+                    // custody. A later audit ACK cannot certify its exit.
+                    if let Some(guardian) = owner.fresh_guardian.as_mut()
+                        && matches!(guardian.reap_acknowledged_exit(), Ok(true))
+                    {
+                        owner.fresh_guardian = None;
+                        guardian_drained = true;
+                    }
+                    if owner.fresh_guardian.is_none() && !owner.service.requires_retained_shutdown() {
+                        break guardian_drained;
+                    }
                 },
                 accepted = owner.listener.accept_checked() => {
                     match accepted {
@@ -626,18 +638,21 @@ impl RetainedServiceShutdown {
                             // Keep the actual owner/lease until the explicit
                             // termination below; no unsafe endpoint replacement.
                             tokio::select! { _ = owner.terminate.recv() => {}, _ = owner.interrupt.recv() => {} }
-                            break;
+                            break false;
                         }
                     }
                 }
             }
-        }
+        };
         requests.abort_all();
         while requests.join_next().await.is_some() {}
-        // `owner` is still alive here. This is an explicit degraded process
-        // shutdown, not an ACK, a successful drain or evidence of native join.
+        if drained {
+            return Ok(());
+        }
+        // `owner` is still alive here. An explicit degraded termination
+        // preserves remaining STOP authority outside the broker.
         Err(anyhow!(
-            "broker stopped with a degraded retirement shutdown; no safe drain is claimed"
+            "broker stopped with a degraded shutdown; no safe drain is claimed"
         ))
     }
 }
@@ -681,7 +696,7 @@ pub async fn serve_selected_owned(
     let executable =
         std::env::current_exe().map_err(|_| anyhow!("broker executable is unavailable"))?;
     let mut material = early_material.map(Arc::new);
-    let (enforcer, stop_enforcer) = match selection {
+    let (enforcer, stop_enforcer, mut fresh_guardian) = match selection {
         ServiceEnforcerSelectionV1::Legacy => {
             let client = EnforcerClient::connect_or_spawn_legacy_with_budget(
                 &root,
@@ -691,7 +706,7 @@ pub async fn serve_selected_owned(
                 registry.data.max_recovery_stop_owners,
             )
             .await?;
-            (Some(ExecutionEnforcerV1::Legacy(client)), None)
+            (Some(ExecutionEnforcerV1::Legacy(client)), None, None)
         }
         ServiceEnforcerSelectionV1::Recovery { role_name } => {
             let sealed = role_name.is_some();
@@ -715,7 +730,7 @@ pub async fn serve_selected_owned(
                 )
                 .await?
             };
-            (None, Some(stop))
+            (None, Some(stop), None)
         }
         ServiceEnforcerSelectionV1::Full3Fresh { role_name } => {
             if material.is_none() {
@@ -738,7 +753,7 @@ pub async fn serve_selected_owned(
                 verify_fresh_installation(&scan_root, &scan_registry, &scan_material)
             })
             .await??;
-            let client = EnforcerFullClientV3::spawn_fresh_with_budget(
+            let (client, owner) = EnforcerFullClientV3::spawn_fresh_with_budget(
                 &root,
                 &role_name,
                 &executable,
@@ -749,7 +764,7 @@ pub async fn serve_selected_owned(
             .await?;
             client.verify_installation(registry.data.installation_id)?;
             drop(reports);
-            (Some(ExecutionEnforcerV1::Full3(client)), None)
+            (Some(ExecutionEnforcerV1::Full3(client)), None, Some(owner))
         }
         ServiceEnforcerSelectionV1::Full3Existing { role_name } => {
             let role = root
@@ -769,7 +784,7 @@ pub async fn serve_selected_owned(
                 registry.data.max_recovery_stop_owners,
             )
             .await?;
-            (Some(ExecutionEnforcerV1::Full3(client)), Some(stop))
+            (Some(ExecutionEnforcerV1::Full3(client)), Some(stop), None)
         }
     };
     let material = if let Some(material) = material {
@@ -875,10 +890,10 @@ pub async fn serve_selected_owned(
     let reconciler = tokio::spawn(async move {
         reconciler_service.reconcile_loop().await;
     });
-    loop {
+    let operator_shutdown = loop {
         tokio::select! {
-            _ = terminate.recv() => break,
-            _ = interrupt.recv() => break,
+            _ = terminate.recv() => break true,
+            _ = interrupt.recv() => break true,
             Some(_) = requests.join_next(), if !requests.is_empty() => {},
             Some(result) = presence_tasks.join_next(), if !presence_tasks.is_empty() => {
                 if result.is_err() {
@@ -900,11 +915,11 @@ pub async fn serve_selected_owned(
                                 reply: BrokerReplyV1::Error { code: BrokerErrorCodeV1::Busy } }, FRAME_BYTES, WRITE_TIMEOUT).await;
                         }
                     },
-                    Err(_) => { service.fenced.store(true, Ordering::SeqCst); break; },
+                    Err(_) => { service.fenced.store(true, Ordering::SeqCst); break false; },
                 }
             }
         }
-    }
+    };
     let result = service
         .shutdown_owned(
             reconciler,
@@ -914,18 +929,45 @@ pub async fn serve_selected_owned(
             &presence_owners,
         )
         .await;
-    if service.requires_retained_shutdown() {
+    let retain_service = service.requires_retained_shutdown();
+    if operator_shutdown
+        && result.is_ok()
+        && !retain_service
+        && let Some(guardian) = fresh_guardian.as_mut()
+    {
+        match guardian.shutdown_if_idle().await {
+            Ok(true) => fresh_guardian = None,
+            Ok(false) => {
+                eprintln!("broker guardian acknowledged idle shutdown; waiting for child exit");
+            }
+            Err(EnforcerError::NotIdle) => {
+                eprintln!(
+                    "broker guardian is not idle; keep it running and inspect or cancel retained jobs"
+                );
+            }
+            Err(_) => {
+                eprintln!("broker guardian shutdown is unconfirmed; reconciliation is required");
+            }
+        }
+    }
+    if retain_service || (operator_shutdown && fresh_guardian.is_some()) {
         return Ok(ServiceShutdown::Retained(RetainedServiceShutdown {
             service,
             listener,
             _lease: lease,
+            fresh_guardian,
             terminate,
             interrupt,
         }));
     }
     drop(listener);
     drop(lease);
-    result.map(|()| ServiceShutdown::Drained)
+    result?;
+    ensure!(
+        operator_shutdown,
+        "broker listener failed; no clean shutdown is claimed"
+    );
+    Ok(ServiceShutdown::Drained)
 }
 
 impl Service {
@@ -3027,6 +3069,11 @@ impl Service {
                 else {
                     continue;
                 };
+                // The writer is one FIFO actor shared with this profile's
+                // executions. Yield this tick to their commits (bounded).
+                if !jobs.admit_reconcile(writer.outstanding()) {
+                    continue;
+                }
                 let credential = match self.material.reconciler(profile) {
                     Ok(value) => value,
                     Err(_) => continue,
@@ -3042,6 +3089,11 @@ impl Service {
                     };
                     for entry in page.entries() {
                         let operation = entry.operation_id();
+                        // A Job whose gate is held cannot be entered by this
+                        // pass below; do not queue its strict load either.
+                        if jobs.known(operation).is_some_and(|job| job.is_running()) {
+                            continue;
+                        }
                         let durable = match writer.load(operation).await {
                             Ok(Some(job)) => job,
                             _ => continue,
@@ -3155,6 +3207,12 @@ impl Service {
             return Ok(());
         };
         let writer = capabilities.stops();
+        // Same FIFO actor as this profile's executions: yield (bounded) while
+        // a caller awaits its reply. Pending events stay durable in the
+        // journal and a later tick delivers them, even under a live owner.
+        if !jobs.admit_retirement_audit(writer.outstanding()) {
+            return Ok(());
+        }
         let material = Arc::clone(&self.material);
         let credential_profile = profile.clone();
         let credential = self

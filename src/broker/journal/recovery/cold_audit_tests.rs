@@ -29,6 +29,109 @@ struct Fixture {
     head: RevisionRefV1,
 }
 
+#[test]
+fn warm_and_reopened_reads_preserve_checkpoint_and_historical_receipts() {
+    use crate::control_fs::cost_probe::{EXCLUSIVE, Measurement, Operation};
+
+    let Fixture {
+        _root: root,
+        journal,
+        operation_id,
+        head: birth_head,
+    } = Fixture::new();
+    let command_id = Uuid::new_v4();
+    // The STOP reader validates and appends independently of the Full
+    // reader's verified prefix. The next Full load must check the suffix.
+    let cancellation = StopJournal::from_full(&journal)
+        .append_cancel(operation_id, command_id)
+        .unwrap()
+        .receipt()
+        .clone();
+    assert_eq!(cancellation.head().revision(), birth_head.revision() + 1);
+
+    let initial_revision = journal
+        .0
+        .jobs
+        .path()
+        .join(operation_id.to_string())
+        .join(crate::broker::journal::revision_name(0));
+    let updated = {
+        let _exclusive = EXCLUSIVE.blocking_lock();
+        let measurement = Measurement::start(&initial_revision).unwrap();
+        let job = journal.load(operation_id).unwrap().unwrap();
+        let measured = measurement.finish().unwrap();
+        assert_eq!(measured.outstanding, 0);
+        assert_eq!(measured.metric(Operation::FileSyncAll).calls, 1);
+        assert_eq!(measured.metric(Operation::FileSyncAll).succeeded, 1);
+        job
+    };
+    assert_eq!(updated.head(), cancellation.head());
+
+    let pending = updated.broker_checkpoint_v4().unwrap();
+    let first_event = &pending.events()[0];
+    let audit_seq = 7;
+    let mut events = pending.events().to_vec();
+    events[0] = first_event.acknowledged(audit_seq).unwrap();
+    let checkpoint = BrokerCheckpointV4::new(pending.lifecycle().clone(), events).unwrap();
+    let ack = journal
+        .advance_outbox(operation_id, updated.head().clone(), &checkpoint)
+        .unwrap();
+    let expected_payload = checkpoint.canonical_bytes().unwrap();
+    let assert_selected = |selected: &Journal| {
+        let job = selected.load(operation_id).unwrap().unwrap();
+        assert_eq!(job.head(), ack.head());
+        assert_eq!(job.0.last_cancel_operations, Some(0));
+        assert!(
+            job.broker_checkpoint_v4()
+                .unwrap()
+                .canonical_bytes()
+                .unwrap()
+                == expected_payload
+        );
+        let command = selected
+            .command_receipt(operation_id, command_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(command.command_id(), command_id);
+        assert_eq!(command.head(), cancellation.head());
+        assert_eq!(command.input_hash(), cancellation.input_hash());
+        for (seq, expected_head) in [(None, &birth_head), (Some(audit_seq), ack.head())] {
+            let receipt = selected
+                .outbox_receipt(operation_id, first_event.event_id(), seq)
+                .unwrap()
+                .unwrap();
+            assert_eq!(receipt.operation_id(), operation_id);
+            assert_eq!(receipt.event_id(), first_event.event_id());
+            assert_eq!(receipt.input_hash(), first_event.input_hash());
+            assert_eq!(receipt.audit_seq(), seq);
+            assert_eq!(receipt.head(), expected_head);
+        }
+    };
+    assert_selected(&journal);
+
+    let initial_bytes = fs::read(&initial_revision).unwrap();
+    fs::write(&initial_revision, b"{").unwrap();
+    assert!(matches!(
+        journal.load(operation_id),
+        Err(JournalError::Corrupt)
+    ));
+    fs::write(&initial_revision, initial_bytes).unwrap();
+    assert_selected(&journal);
+
+    let scope = journal.scope().clone();
+    drop(journal);
+    let directory = Directory::open_existing(&root.path().canonicalize().unwrap()).unwrap();
+    let reopened = Journal::open(
+        &directory,
+        scope,
+        &FsExclusions::new(),
+        JournalLimitsV1::default(),
+        ControlSecrets::new(Vec::new()).unwrap(),
+    )
+    .unwrap();
+    assert_selected(&reopened);
+}
+
 impl Fixture {
     fn new() -> Self {
         Self::with_pending_fillers(0)

@@ -1102,3 +1102,42 @@ async fn status_projection_capacity_keeps_a_miss_distinct_from_an_absent_job() {
         "a cache refusal must not hide the real strict job"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn outstanding_counts_each_caller_awaiting_the_actor_until_its_reply_or_cancellation() {
+    let (_root, journal) = private_journal();
+    let job = accepted(&journal);
+    let operation = job.operation_id();
+    let writer = WriterClient::start(journal, 8, Duration::from_secs(10)).unwrap();
+    assert_eq!(writer.outstanding(), 0);
+    let pause = writer.pause_for_test().await.unwrap();
+    assert!(pause.is_paused());
+    assert_eq!(writer.outstanding(), 0, "the pause itself was acknowledged");
+    let waiting = tokio::spawn({
+        let writer = writer.clone();
+        async move { writer.load(operation).await }
+    });
+    let cancelled = tokio::spawn({
+        let writer = writer.clone();
+        async move { writer.load(operation).await }
+    });
+    // Bounded observation of the two queued callers; no product timing.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while writer.outstanding() != 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("both callers awaiting the paused actor are counted");
+    cancelled.abort();
+    assert!(cancelled.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        writer.outstanding(),
+        1,
+        "a cancelled waiter is no longer counted"
+    );
+    drop(pause);
+    let loaded = waiting.await.unwrap().unwrap().unwrap();
+    assert_eq!(loaded.head(), job.head());
+    assert_eq!(writer.outstanding(), 0, "a replied caller is released");
+}

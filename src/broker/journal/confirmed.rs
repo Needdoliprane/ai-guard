@@ -2,6 +2,7 @@
 use super::*;
 use crate::broker::lifecycle::LocalCommandRequestV1;
 
+#[derive(Clone)]
 pub(super) struct ConfirmedChainV1 {
     pub payload: LoadedCheckpoint,
     pub legacy_managed_seen: bool,
@@ -63,6 +64,19 @@ impl<'a> ChainVerifierV1<'a> {
             outbox_receipts: HashMap::new(),
             last_cancel_operations: None,
         })
+    }
+
+    /// Resume only after the caller has rechecked every file in this prefix
+    /// under the same operation, intent and binding.
+    pub(super) fn with_verified_prefix(mut self, prefix: ConfirmedChainV1) -> Self {
+        self.chain = prefix.chain;
+        self.payload = Some(prefix.payload);
+        self.legacy_managed_seen = prefix.legacy_managed_seen;
+        self.command_receipts = prefix.command_receipts;
+        self.cancel_boundaries = prefix.cancel_boundaries;
+        self.outbox_receipts = prefix.outbox_receipts;
+        self.last_cancel_operations = prefix.last_cancel_operations;
+        self
     }
 
     pub fn push(&mut self, revision: u64, bytes: &[u8]) -> JournalResult<()> {

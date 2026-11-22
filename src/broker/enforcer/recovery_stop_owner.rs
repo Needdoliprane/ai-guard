@@ -244,11 +244,12 @@ struct AttemptState {
     stopping: AtomicBool,
     outstanding: AtomicU64,
     normal_idle_exit: AtomicBool,
+    idle_joined: AtomicBool,
     native_failed: Option<Arc<AtomicBool>>,
     // The historical sealed transport has no NativeOwners at construction.
     // Its single W context therefore pins this ACTUAL lease/handle/queue cell
-    // until process exit. This is one bounded native owner, not a new pool or
-    // permission from DATA; no join/timeout/Q clears unknown custody.
+    // until process exit or verified idle closure. Only actual joins can
+    // release this pin; a timeout or a retirement receipt cannot do so.
     sealed_lease_pin: Mutex<Option<Arc<AttemptState>>>,
     attempts: AtomicU64,
     failures: AtomicU64,
@@ -308,6 +309,7 @@ impl RecoveryAttemptOwner {
             stopping: AtomicBool::new(false),
             outstanding: AtomicU64::new(0),
             normal_idle_exit: AtomicBool::new(false),
+            idle_joined: AtomicBool::new(false),
             native_failed: owners.map(|owner| owner.failure_latch()),
             sealed_lease_pin: Mutex::new(None),
             attempts: AtomicU64::new(0),
@@ -539,6 +541,45 @@ impl RecoveryAttemptOwner {
         Ok(())
     }
     pub(in crate::broker::enforcer) async fn finish_legacy_idle(&self) -> EnforcerResult<()> {
+        self.join_idle().await
+    }
+
+    /// The caller holds the shared admission map. All real W submissions
+    /// acquire that same lock, so an idle reservation cannot miss queued work.
+    pub(in crate::broker::enforcer) fn check_sealed_idle(&self) -> EnforcerResult<()> {
+        if !matches!(self.0._lease, AttemptLease::Sealed { .. })
+            || !self.0.ready.load(Ordering::SeqCst)
+            || self.0.stopping.load(Ordering::SeqCst)
+            || !self
+                .0
+                .handle
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)?
+                .as_ref()
+                .is_some_and(|handle| !handle.is_finished())
+        {
+            return Err(EnforcerError::Unhealthy);
+        }
+        if self.0.outstanding.load(Ordering::SeqCst) != 0
+            || self.0.cause_history.facts().uncollected_io
+            || self
+                .0
+                .current
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)?
+                .is_some()
+        {
+            return Err(EnforcerError::NotIdle);
+        }
+        Ok(())
+    }
+
+    /// Same admission lock, after the irreversible idle transition won.
+    pub(in crate::broker::enforcer) fn seal_idle(&self) {
+        self.0.stopping.store(true, Ordering::SeqCst);
+    }
+
+    pub(super) async fn join_idle(&self) -> EnforcerResult<()> {
         if !self.0.stopping.load(Ordering::SeqCst) || self.0.outstanding.load(Ordering::SeqCst) != 0
         {
             return Err(EnforcerError::NotIdle);
@@ -553,13 +594,36 @@ impl RecoveryAttemptOwner {
         tokio::task::spawn_blocking(move || handle.join().map_err(|_| EnforcerError::Unhealthy))
             .await
             .map_err(|_| EnforcerError::Unhealthy)??;
+        self.0.idle_joined.store(true, Ordering::SeqCst);
         if !self.known_idle_joined() {
             return Err(EnforcerError::Unhealthy);
         }
         Ok(())
     }
+
+    /// Release only after the same sealed W and Full owners have joined.
+    pub(super) fn release_joined_sealed_idle(&self) -> EnforcerResult<()> {
+        if !self.known_idle_joined() {
+            return Err(EnforcerError::Unhealthy);
+        }
+        let mut pin = self
+            .0
+            .sealed_lease_pin
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        if !pin
+            .as_ref()
+            .is_some_and(|owner| Arc::ptr_eq(owner, &self.0))
+        {
+            return Err(EnforcerError::Unhealthy);
+        }
+        drop(pin.take());
+        Ok(())
+    }
+
     pub(in crate::broker::enforcer) fn known_idle_joined(&self) -> bool {
-        self.0.normal_idle_exit.load(Ordering::SeqCst)
+        self.0.idle_joined.load(Ordering::SeqCst)
+            && self.0.normal_idle_exit.load(Ordering::SeqCst)
             && self.0.outstanding.load(Ordering::SeqCst) == 0
             && self.0.current.lock().is_ok_and(|current| current.is_none())
             && self.0.handle.lock().is_ok_and(|handle| handle.is_none())

@@ -476,6 +476,57 @@ fn submit() -> &'static [u8] {
     br#"{"action":"crash-test"}"#
 }
 
+fn accept_cost_job(
+    journal: &Journal,
+    operation_id: Uuid,
+) -> (RevisionRefV1, crate::broker::lifecycle::BrokerCheckpointV3) {
+    use crate::broker::{
+        checkpoint::{BrokerCheckpointV2, SupervisionCheckpointV1},
+        lifecycle::BrokerCheckpointV3,
+    };
+
+    let intent = intent_for(operation_id);
+    let initial = CheckpointPayloadV1::initial(&intent).unwrap();
+    let ReserveResult::New(ticket) = journal.reserve(operation_id, submit()).unwrap() else {
+        panic!("cost fixture requires a fresh reservation");
+    };
+    let accepted = journal
+        .accept(ticket, &intent, BindingInputs::None, &initial)
+        .unwrap();
+    assert_eq!(accepted.operation_id(), operation_id);
+    assert_eq!(accepted.head().revision(), 0);
+    let lifecycle = BrokerCheckpointV3::new(
+        BrokerCheckpointV2::new(
+            initial,
+            SupervisionCheckpointV1::new(journal.scope().control_namespace_uuid(), vec![], vec![])
+                .unwrap(),
+        )
+        .unwrap(),
+        vec![],
+    )
+    .unwrap();
+    (accepted.head().clone(), lifecycle)
+}
+
+async fn advance_cost_job(
+    writer: &crate::broker::writer::WriterClient,
+    operation_id: Uuid,
+    head: &mut RevisionRefV1,
+    lifecycle: &crate::broker::lifecycle::BrokerCheckpointV3,
+    target: u64,
+) {
+    while head.revision() < target {
+        let receipt = writer
+            .advance_lifecycle(operation_id, head.clone(), lifecycle.clone())
+            .await
+            .unwrap();
+        assert_eq!(receipt.operation_id(), operation_id);
+        assert_eq!(receipt.head().revision(), head.revision() + 1);
+        *head = receipt.head().clone();
+    }
+    assert_eq!(head.revision(), target);
+}
+
 /// A manual diagnostic, not a latency threshold or a runtime qualification.
 /// Measures real FS calls without changing the normal Journal/Writer path.
 /// The 600-second timeout is cooperative: synchronous filesystem calls may
@@ -483,12 +534,7 @@ fn submit() -> &'static [u8] {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "opt-in bounded Journal/Writer cost measurement; no runtime or provider"]
 async fn measure_durable_journal_cost_without_runtime() {
-    use crate::broker::{
-        checkpoint::{BrokerCheckpointV2, SupervisionCheckpointV1},
-        journal::cost_measurement::WriterKind,
-        lifecycle::BrokerCheckpointV3,
-        writer::WriterClient,
-    };
+    use crate::broker::{journal::cost_measurement::WriterKind, writer::WriterClient};
 
     tokio::time::timeout(Duration::from_secs(600), async {
         let mut output = StableCostOutput::default();
@@ -504,53 +550,14 @@ async fn measure_durable_journal_cost_without_runtime() {
         let _retained = temporary.keep();
         let journal = open(&root);
         let operation_id = operation();
-        let intent = intent_for(operation_id);
-        let initial = CheckpointPayloadV1::initial(&intent).unwrap();
-        let ReserveResult::New(ticket) = journal.reserve(operation_id, submit()).unwrap() else {
-            panic!("cost fixture requires a fresh reservation");
-        };
-        let accepted = journal
-            .accept(ticket, &intent, BindingInputs::None, &initial)
-            .unwrap();
-        assert!(
-            accepted.operation_id() == operation_id,
-            "accepted operation changed"
-        );
-        assert_eq!(accepted.head().revision(), 0);
-        let mut head = accepted.head().clone();
-        let lifecycle = BrokerCheckpointV3::new(
-            BrokerCheckpointV2::new(
-                initial,
-                SupervisionCheckpointV1::new(
-                    journal.scope().control_namespace_uuid(),
-                    vec![],
-                    vec![],
-                )
-                .unwrap(),
-            )
-            .unwrap(),
-            vec![],
-        )
-        .unwrap();
+        let (mut head, lifecycle) = accept_cost_job(&journal, operation_id);
         // Only this diagnostic fixture uses this caller wait. Product defaults
         // and the cooperative 600-second overall observation bound are intact.
         let writer = WriterClient::start(journal.clone(), 8, Duration::from_secs(60)).unwrap();
 
         for target in [0, 8, 17] {
             // Prepare the actual acknowledged chain outside every measurement.
-            while head.revision() < target {
-                let receipt = writer
-                    .advance_lifecycle(operation_id, head.clone(), lifecycle.clone())
-                    .await
-                    .unwrap();
-                assert!(
-                    receipt.operation_id() == operation_id,
-                    "receipt operation changed"
-                );
-                assert_eq!(receipt.head().revision(), head.revision() + 1);
-                head = receipt.head().clone();
-            }
-            assert_eq!(head.revision(), target);
+            advance_cost_job(&writer, operation_id, &mut head, &lifecycle, target).await;
             for stage in ["load_first", "load_second"] {
                 measure_stable_read_cost(
                     &root,
@@ -558,6 +565,7 @@ async fn measure_durable_journal_cost_without_runtime() {
                     &writer,
                     operation_id,
                     &head,
+                    head.revision() + 1,
                     stage,
                     WriterKind::Load,
                     writer.load(operation_id),
@@ -569,26 +577,25 @@ async fn measure_durable_journal_cost_without_runtime() {
                 )
                 .await;
             }
-            for stage in ["status_first", "status_second"] {
-                measure_stable_read_cost(
-                    &root,
-                    &journal,
-                    &writer,
-                    operation_id,
-                    &head,
-                    stage,
-                    WriterKind::Status,
-                    writer.status(operation_id),
-                    |status| match status {
-                        Some(JournalStatusV1::Accepted(job)) => {
-                            Some((job.operation_id(), job.head().clone()))
-                        }
-                        _ => None,
-                    },
-                    &mut output,
-                )
-                .await;
-            }
+            measure_stable_read_cost(
+                &root,
+                &journal,
+                &writer,
+                operation_id,
+                &head,
+                head.revision() + 1,
+                "status_first",
+                WriterKind::Status,
+                writer.status(operation_id),
+                |status| match status {
+                    Some(JournalStatusV1::Accepted(job)) => {
+                        Some((job.operation_id(), job.head().clone()))
+                    }
+                    _ => None,
+                },
+                &mut output,
+            )
+            .await;
             // Independent functional confirmation remains outside samples.
             let confirmed = journal.load(operation_id).unwrap().unwrap();
             assert!(
@@ -623,6 +630,63 @@ async fn measure_durable_journal_cost_without_runtime() {
                 "refused CAS must preserve the acknowledged chain"
             );
         }
+
+        let other_id = second_operation();
+        let (mut other_head, other_lifecycle) = accept_cost_job(&journal, other_id);
+        advance_cost_job(
+            &writer,
+            other_id,
+            &mut other_head,
+            &other_lifecycle,
+            head.revision(),
+        )
+        .await;
+        // Same head depth as the preceding warm samples. Switching away
+        // from each operation exercises the bound of the one-entry cache.
+        for (stage, id, selected_head) in [
+            ("alternate_first", operation_id, &head),
+            ("alternate_second", other_id, &other_head),
+        ] {
+            measure_stable_read_cost(
+                &root,
+                &journal,
+                &writer,
+                id,
+                selected_head,
+                0,
+                stage,
+                WriterKind::Load,
+                writer.load(id),
+                |job| {
+                    job.as_ref()
+                        .map(|job| (job.operation_id(), job.head().clone()))
+                },
+                &mut output,
+            )
+            .await;
+        }
+        let cancel = super::StopJournal::from_full(&journal)
+            .append_cancel(other_id, Uuid::new_v4())
+            .unwrap();
+        let suffix_head = cancel.receipt().head();
+        assert_eq!(suffix_head.revision(), other_head.revision() + 1);
+        measure_stable_read_cost(
+            &root,
+            &journal,
+            &writer,
+            other_id,
+            suffix_head,
+            other_head.revision() + 1,
+            "load_suffix",
+            WriterKind::Load,
+            writer.load(other_id),
+            |job| {
+                job.as_ref()
+                    .map(|job| (job.operation_id(), job.head().clone()))
+            },
+            &mut output,
+        )
+        .await;
     })
     .await
     .expect("durable cost measurement exceeded its cooperative 600-second observation bound");
@@ -676,6 +740,7 @@ async fn measure_stable_read_cost<T>(
     writer: &crate::broker::writer::WriterClient,
     operation: Uuid,
     head: &RevisionRefV1,
+    expected_reuse: u64,
     stage: &'static str,
     kind: super::cost_measurement::WriterKind,
     call: impl std::future::Future<Output = JournalResult<T>>,
@@ -766,6 +831,16 @@ async fn measure_stable_read_cost<T>(
         "actor measurement is incomplete"
     );
     assert_eq!(journal.context_conflicts, 0, "measurement context changed");
+    let revision_count = head.revision() + 1;
+    assert_eq!(
+        journal.verified_revisions,
+        revision_count - expected_reuse,
+        "load verified an unexpected number of revisions"
+    );
+    assert_eq!(journal.reused_revisions, expected_reuse);
+    // Binding kind None leaves exactly five non-revision file barriers
+    // (reservation, intent, bindings, accepted, and current).
+    verify_cost_snapshot(&filesystem, revision_count + 5, 3);
     assert_eq!(
         journal.missed_hooks, 0,
         "measurement hook coverage is incomplete"

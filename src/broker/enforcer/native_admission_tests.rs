@@ -174,6 +174,10 @@ fn recovery_intent_refuses_original_before_waiting_for_its_commit_gate() {
         admitted.check_original(),
         Err(EnforcerError::NotReady)
     ));
+    assert!(matches!(
+        admitted.close_fresh_idle(),
+        Err(EnforcerError::NotIdle)
+    ));
     drop(guard);
     assert_eq!(pending.join().unwrap().unwrap(), 1);
     assert_eq!(admitted.recovery_generation(), Some(1));
