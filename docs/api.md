@@ -78,6 +78,7 @@ Gateway et proxy dashboard refusent les champs Authorization multiples, y compri
 | `GET /healthz` | Aucune | État du composant ; le gateway refuse aussi les configurations invalides et les échecs d'audit déjà constatés |
 | `POST /api/events` | Runner | Événement normalisé, expurgé puis stocké ; séquence et hashes |
 | `POST /api/v1/control/events` | Runner | Fait du contrôle de la liste fermée ci-dessous ; même reçu, budget distinct de l'ingestion ; aucun alias `/api` |
+| `POST /api/v1/events/batch` | Runner | Lot de 1 à 64 événements ordinaires (activité fournisseur live), une transaction, débit compté par événement, rejeu idempotent, conflit `409` ; aucun alias `/api` |
 | `POST /api/decide` | Runner | Décision tracée, hash de demande et `audit_seq` |
 | `GET /api/events` | Viewer ou runner | Historique paginé et `next_cursor` |
 | `GET /api/stream` | Viewer ou runner | SSE `event: audit`, `id: <seq>`, JSON d'événement |
@@ -1383,6 +1384,12 @@ Le schéma d'ingestion est dans `schemas/event.schema.json`. Les champs optionne
 
 `POST /api/events` and `/api/v1/events` share an ingestion budget of **200 writes per one-second window per tenant**. `POST /api/v1/control/events`, decisions and control mutations use a separate **200-write window per tenant**. The route selects the budget; worker-controlled `kind`, `source` or `provenance` values in `/events` cannot promote a request to the control budget. These rate budgets reserve neither durable audit space nor availability under load.
 
+#### Lot d'événements de l'activité fournisseur / Provider activity event batch
+
+`POST /api/v1/events/batch` est réservé au rôle `runner` ; il n'a pas d'alias `/api`. Le corps est `{"events": [Event, ...]}` (champ inconnu refusé), de 1 à 64 événements dans la limite globale de 256 Kio. Chaque événement suit le schéma et les refus de l'ingestion ordinaire, y compris les namespaces réservés (`403` sur l'ensemble du lot). Le lot est écrit dans **une seule transaction** : tous les événements ou aucun. Le budget d'ingestion est débité **d'une écriture par événement** ; un lot qui dépasserait la fenêtre reçoit `429 write_rate_limited` sans consommer d'écriture. Un identifiant déjà stocké avec un contenu identique renvoie la ligne existante (rejeu idempotent) ; un contenu différent pour un identifiant existant renvoie `409` et n'écrit rien. La réponse est `{"stored": [{"id": ..., "seq": ...}, ...]}` dans l'ordre du lot. Le transmetteur de la collecte live l'utilise avec des identifiants dérivés de la position dans le spool du broker ; voir [Adaptateurs et collecte live](adapters.md#collecte-live).
+
+`POST /api/v1/events/batch` is runner-only and has no `/api` alias. The body is `{"events": [Event, ...]}` (unknown fields refused), with 1 to 64 events within the global 256 KiB body limit. Each event follows the ordinary ingestion schema and refusals, including reserved namespaces (`403` for the whole batch). The batch is written in **one transaction**: all events or none. The ingestion budget is charged **one write per event**; a batch that would exceed the window receives `429 write_rate_limited` without spending any write. An id already stored with an identical payload returns the stored row (idempotent replay); a different payload for an existing id returns `409` and writes nothing. The response is `{"stored": [{"id": ..., "seq": ...}, ...]}` in batch order. The live collection forwarder uses it with ids derived from the broker spool position; see [Adapters and live collection](adapters.md#collecte-live).
+
 #### Namespaces réservés / Reserved namespaces
 
 On both ordinary ingestion aliases, reserved namespace checks ignore **ASCII case** and match only the namespace root or a descendant separated by `.`. An otherwise valid event such as `Control.relay.x`, `SECURITY.decision` or `Relay_Channel.v1` is refused with `403` before an audit write. Authentication, event validation and rate limits still apply.
@@ -1391,7 +1398,7 @@ Sur les deux alias d'ingestion ordinaire, la comparaison des namespaces réserv�
 
 | Frontière / Boundary | Namespaces réservés / Reserved namespaces |
 |---|---|
-| `POST /api/events`, `POST /api/v1/events` | `security.decision`, `control`, `worker`, `usage.allocation`, `relay_channel` |
+| `POST /api/events`, `POST /api/v1/events`, `POST /api/v1/events/batch` | `security.decision`, `control`, `worker`, `usage.allocation`, `relay_channel` |
 | Écriture générique interne / Internal generic `Store::append` | `control`, `relay_channel` |
 
 The Store guard is deliberately narrower than the API guard: it does not copy the API's deny-list onto internal security, worker or usage writers. Separately, ordinary HTTP ingestion rejects the four exact D5 kinds listed below, while `Store::append` retains its exact `broker.retirement.resume.requested` guard. These literal checks remain case-sensitive; namespace matching alone ignores ASCII case. The closed kind list on `/api/v1/control/events` remains exact; a similar name grants no control authority.

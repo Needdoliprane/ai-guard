@@ -71,6 +71,7 @@ pub struct PrearmedStartControl {
     guard: Box<dyn BeforeSpawnGuard>,
     stop: tokio::sync::watch::Receiver<bool>,
     launch_profile: Option<Box<launch_profile::DockerLaunchProfileBindingV1>>,
+    stdout_tap: Option<crate::provider_activity::StdoutTap>,
 }
 impl PrearmedStartControl {
     pub fn new(guard: Box<dyn BeforeSpawnGuard>, stop: tokio::sync::watch::Receiver<bool>) -> Self {
@@ -78,6 +79,7 @@ impl PrearmedStartControl {
             guard,
             stop,
             launch_profile: None,
+            stdout_tap: None,
         }
     }
     pub(crate) fn with_launch_profile(
@@ -89,7 +91,15 @@ impl PrearmedStartControl {
             guard,
             stop,
             launch_profile: launch_profile.map(Box::new),
+            stdout_tap: None,
         }
+    }
+    /// Forward the batch client stdout live to the activity collector, in
+    /// addition to the unchanged bounded terminal capture. The tap neither
+    /// authorizes nor delays the start; its stall is bounded by the tap.
+    pub(crate) fn with_stdout_tap(mut self, tap: crate::provider_activity::StdoutTap) -> Self {
+        self.stdout_tap = Some(tap);
+        self
     }
 }
 struct ProfileBoundSpawnGuard {
@@ -589,6 +599,37 @@ pub async fn capture_stream<R: AsyncRead + Unpin>(mut reader: R, limit: usize) -
         if count == 0 {
             break;
         }
+        capture.total_bytes = capture.total_bytes.saturating_add(count as u64);
+        let retain = count.min(limit.saturating_sub(capture.bytes.len()));
+        capture.bytes.extend_from_slice(&buffer[..retain]);
+        if retain < count {
+            capture.truncated = true;
+        }
+    }
+    Ok(capture)
+}
+/// `capture_stream` plus an optional live tap receiving every chunk read.
+/// The terminal capture keeps its own bound; the tap bounds its own stall.
+pub(crate) async fn capture_stream_tapped<R: AsyncRead + Unpin>(
+    mut reader: R,
+    limit: usize,
+    tap: Option<crate::provider_activity::StdoutTap>,
+) -> Result<Capture> {
+    let Some(tap) = tap else {
+        return capture_stream(reader, limit).await;
+    };
+    let mut capture = Capture {
+        bytes: Vec::with_capacity(limit.min(16 * 1024)),
+        total_bytes: 0,
+        truncated: false,
+    };
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let count = reader.read(&mut buffer).await?;
+        if count == 0 {
+            break;
+        }
+        tap.send(&buffer[..count]).await;
         capture.total_bytes = capture.total_bytes.saturating_add(count as u64);
         let retain = count.min(limit.saturating_sub(capture.bytes.len()));
         capture.bytes.extend_from_slice(&buffer[..retain]);
@@ -1814,6 +1855,7 @@ impl Runtime {
             guard,
             mut stop,
             launch_profile,
+            stdout_tap,
         } = control;
         let guard: Box<dyn BeforeSpawnGuard> = Box::new(ProfileBoundSpawnGuard {
             inner: guard,
@@ -1842,9 +1884,10 @@ impl Runtime {
             .with_context(guard_failure)?;
         let mut child = command.spawn().with_context(spawn_failure)?;
         let mut tasks = TransportTasks::default();
-        let stdout = tokio::spawn(capture_stream(
+        let stdout = tokio::spawn(capture_stream_tapped(
             child.stdout.take().context("missing stdout")?,
             stdout_limit,
+            stdout_tap,
         ));
         tasks.0.push(stdout.abort_handle());
         let stderr = tokio::spawn(capture_stream(

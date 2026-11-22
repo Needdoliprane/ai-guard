@@ -266,6 +266,33 @@ impl Directory {
         Ok(file)
     }
 
+    /// Reopen an existing private entry for reading and appending, never
+    /// following a link. Absence is `None` only for ENOENT; an entry that is
+    /// not a private regular single-link file is refused, never repaired.
+    pub(crate) fn open_private_entry_rw(&self, name: &OsStr) -> Result<Option<File>> {
+        if self.private_entry(name)?.is_none() {
+            return Ok(None);
+        }
+        let encoded = child_name(name)?;
+        // SAFETY: retained directory FD and one C component; no creation.
+        let fd = unsafe {
+            libc::openat(
+                self.0.file.as_raw_fd(),
+                encoded.as_ptr(),
+                libc::O_RDWR | FILE_FLAGS,
+            )
+        };
+        ensure!(
+            fd >= 0,
+            "private entry cannot be reopened without following a link: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: successful openat transfers a new owned descriptor.
+        let file = unsafe { File::from_raw_fd(fd) };
+        check_private_file(&file)?;
+        Ok(Some(file))
+    }
+
     /// Open the separately reserved SQLite initialization lock, never a main
     /// or sidecar inode. Its lifetime does not interfere with VFS POSIX locks.
     pub(crate) fn sqlite_initialization_lock(&self) -> Result<File> {

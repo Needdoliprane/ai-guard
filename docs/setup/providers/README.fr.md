@@ -201,6 +201,25 @@ Avec Podman, remplacer `docker compose` et le fichier de base par `podman compos
 
 L'adaptateur utilise l'[API System One](https://docs.typesafe.ai/api/system-one) authentifiée et une [question Choice](https://docs.typesafe.ai/primitives/choice) pour `allow`, `deny` ou `review`. `jev-latest` est un alias évolutif : conserver le modèle réellement retourné avec le résultat. Un score de décision n'est pas une probabilité de sûreté calibrée. Une panne d'audit ou de décision bloque l'action protégée ; retirer une clé ne constitue pas un repli automatique sûr vers un autre moteur.
 
+## Suivre l'activité du fournisseur en direct
+
+ai-guard collecte ce que Codex CLI et Claude Code exposent officiellement pendant la session, puis l'affiche dans le journal du dashboard avec sa provenance. Tout ce qu'un client rapporte reste **déclaré** : ai-guard le reçoit sans le vérifier de façon indépendante. Les observations propres d'ai-guard restent distinctes : cycle de vie du conteneur, code de sortie, changements de l'espace de travail, décisions et canaux de collecte eux-mêmes.
+
+- **Sessions batch.** La sortie structurée du client (`claude --output-format stream-json`, `codex exec --json`) est lue enregistrement par enregistrement, au fil de l'eau : messages visibles, résumés de raisonnement, appels d'outils et résultats, commandes (comme texte d'affichage, jamais comme argv exécutable), changements de fichiers, plans et délégations à des sous-agents.
+- **Sessions batch et interactives.** L'image du worker installe des configurations de hooks gérées sur sa racine en lecture seule : `/etc/claude-code/managed-settings.json` (avec `allowManagedHooksOnly`) et `/etc/codex/requirements.toml` (avec `allow_managed_hooks_only`). Les hooks appellent `/usr/local/bin/ai-guard-activity`, qui remet chaque charge au broker par un canal `exec` dédié. Ce canal ne transporte aucun credential et n'utilise pas le réseau. Un `.claude/settings.json` ou un `.codex/config.toml` de l'espace de travail ne peut ni ajouter ni retirer ces hooks. Le bootstrap refuse de démarrer un client dont la configuration gérée manque ou a été modifiée (`activity_unavailable`).
+- **Blocage en cas de perte d'audit.** `PreToolUse` et `UserPromptSubmit` ne sont acquittés qu'une fois leur enregistrement durable dans le spool du broker. Si le spool est indisponible, si l'arriéré non livré dépasse sa borne ou si le budget de la session est épuisé, ces hooks refusent l'action, et la lecture du stdout d'une session batch est suspendue pour une durée bornée. Cela vaut lorsque le client de hook s'exécute. Claude Code 2.1.295 et suivants bloquent aussi lorsque le hook lui-même échoue (`onFailure: "block"`) ; avec Claude Code 2.1.140 et Codex, un hook qui plante ou expire laisse l'outil s'exécuter.
+- **Budgets et pertes.** Par défaut, chaque session conserve au plus 1 000 événements et 2 Mio, avec un arriéré non livré de 200 événements ou 512 Kio. `--activity-max-events` et `--activity-max-bytes` les relèvent jusqu'à 5 000 événements et 8 Mio ; l'arriéré suit au cinquième des événements et au quart des octets. Toute perte est explicite : événements `activity.loss`, puis un bilan `activity.coverage` en fin de session avec ses compteurs par canal.
+- **Dimensionner l'audit du tenant.** L'audit n'a pas encore de rotation (écart G06 ouvert) et refuse toute écriture une fois plein, lancements compris. Garder `--max-events` du gateway divisé par le budget d'événements, et 256 Mio divisés par le budget d'octets, à 50 sessions ou plus. Avec les valeurs par défaut : 100 000 / 1 000 = 100 sessions en événements et 256 Mio / 2 Mio = 128 sessions en octets. `ai-guard-diagnose` avertit en dessous de 50.
+- **Sous-agents.** Un `spawn_agent` Codex nomme le fil parent. Un sous-agent Claude est relié à l'agent qui l'a délégué par une jointure d'identifiants exacts, affichée comme `inferred`. Un parent qu'aucun canal ne nomme reste non résolu ; aucun parent n'est inventé.
+
+| Capacité | Claude Code 2.1.140 | Claude Code 2.1.329 | Codex CLI 0.165.0 / 0.170.0 |
+|---|---|---|---|
+| Messages, outils et commandes en batch | Implémenté, non qualifié | Implémenté, non qualifié | Fil principal seulement ; sous-agents par les hooks |
+| Activité interactive (TTY) | Hooks : consignes, outils, sous-agents, dernier message de chaque tour | Idem | Idem ; recherche web hébergée non couverte |
+| Blocage si l'audit est indisponible | Quand le client de hook s'exécute | Aussi si le hook échoue | Quand le client de hook s'exécute |
+
+« Non qualifié » signifie des parseurs testés sur fixtures, sans session authentifiée pour cette version. Une version absente de ce tableau est inconnue. Aucune ligne n'est une médiation : le client et ses hooks s'exécutent dans le worker non fiable, sous le même utilisateur que l'agent. Non couverts : OpenTelemetry, transcriptions et fichiers rollout des clients, app-server de Codex et actions qu'un agent effectue hors des points de hook du client. Voir le [contrat des adaptateurs](../../adapters.md#collecte-live) pour les correspondances et limites des enregistrements.
+
 ## Diagnostiquer les problèmes fournisseur
 
 | Résultat | Action |

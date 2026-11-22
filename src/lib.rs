@@ -28,6 +28,7 @@ pub mod oidc;
 pub mod operations;
 pub mod policy;
 pub mod provider;
+pub mod provider_activity;
 pub mod redaction;
 pub mod relay;
 pub mod runner;

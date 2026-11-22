@@ -10,6 +10,7 @@ impl Execution<'_> {
     pub(super) async fn save_worker_result(
         &self,
         retained: &ManagedPrearmedExecution,
+        live_activity: bool,
     ) -> Result<()> {
         let (_, draft) = self.load().await?;
         if draft
@@ -65,13 +66,21 @@ impl Execution<'_> {
             correlation_id: request.correlation_id.clone().unwrap_or_default(),
             trace_id: request.trace_id.clone().unwrap_or_default(),
         };
-        let normalized = crate::adapters::parse_redacted_capture(
+        // With live collection the stdout records were already spooled and
+        // delivered as they arrived, with their own `activity.coverage`. The
+        // terminal batch then carries no second copy of them: its historical
+        // coverage counts zero post-run events, and the capture keeps only its
+        // byte and truncation facts.
+        let mut normalized = crate::adapters::parse_redacted_capture(
             &draft.run.options().provider,
             &retained.result().stdout.bytes,
             retained.result().stdout.truncated,
             &adapter_context,
             &self.client.redactor,
         );
+        if live_activity {
+            normalized.events.clear();
+        }
         let mut events = Vec::with_capacity(normalized.events.len() + 2);
         for value in normalized.events {
             let mut event: crate::model::Event = serde_json::from_value(value)?;

@@ -1,8 +1,8 @@
-# Adaptateurs JSONL livrés
+# Adaptateurs fournisseurs livrés : stdout JSONL et hooks
 
 ## Périmètre réellement implémenté
 
-`src/adapters.rs` contient un normaliseur Rust sans accès réseau, sans accès au système de fichiers et sans exécution de commande. Il prend une ligne JSONL complète et produit zéro ou plusieurs événements du modèle du gateway.
+`src/adapters.rs` et ses modules `claude`, `codex` et `hooks` forment un normaliseur Rust sans accès réseau, sans accès au système de fichiers et sans exécution de commande. Il prend un enregistrement complet (ligne JSONL du stdout ou charge d'un hook officiel) et produit zéro ou plusieurs événements du modèle du gateway, avec la catégorie de l'enregistrement.
 
 ```rust
 pub struct AdapterContext {
@@ -14,45 +14,68 @@ pub struct AdapterContext {
     pub trace_id: String,
 }
 
-pub fn parse_line(
-    provider: &str,
-    line: &str,
-    context: &AdapterContext,
-) -> Vec<serde_json::Value>;
+pub enum RecordDisposition { Mapped, Ignored, Unrecognized, Oversized, Invalid }
+pub struct NormalizedRecord { pub events: Vec<serde_json::Value>, pub disposition: RecordDisposition }
+
+pub fn normalize_stdout_record(provider: &str, line: &str, context: &AdapterContext, redactor: &Redactor) -> NormalizedRecord;
+pub fn normalize_hook_record(client: &str, payload: &str, context: &AdapterContext, redactor: &Redactor) -> NormalizedRecord;
+pub fn parse_line(provider: &str, line: &str, context: &AdapterContext) -> Vec<serde_json::Value>;
 ```
 
-Les valeurs reconnues de `provider` sont `codex`, `claude`, `claude-code` et `generic`. L'alias `claude-code` produit la source canonique `claude-adapter`. Une valeur inconnue ou une ligne non reconnue produit `[]`.
+Les valeurs reconnues de `provider` sont `codex`, `claude`, `claude-code` et `generic` ; celles de `client` sont `claude-code` (alias `claude`) et `codex`. Les sources canoniques sont `claude-adapter`, `codex-adapter` et `generic-adapter`. Une valeur inconnue produit `Unrecognized` et aucun événement. `Ignored` désigne un type connu volontairement non projeté (par exemple `stream_event` ou `PermissionRequest`) ; `Oversized` et `Invalid` restent des pertes comptées par le collecteur.
 
-Ces parseurs sont validés sur des **fixtures synthétiques de schémas documentés**, pas sur une session authentifiée exécutée contre chaque service. Le niveau affiché reste `coverage: "observed"` et la provenance reste **toujours** `declared`. Le mot Observed décrit ici le niveau d'intégration de la session ; il ne transforme pas une déclaration du CLI en preuve indépendante de l'effet système.
+Ces parseurs sont validés sur des **fixtures synthétiques écrites d'après les schémas officiels** (`tests/adapters_fixtures/SOURCES.json` liste les sources et les champs non confirmés), pas sur une session authentifiée. Les événements Claude Code et Codex portent `coverage: "native"` (canal officiel du client) et **toujours** `provenance: "declared"`. Le contrat générique conserve `coverage: "observed"`. Ni l'un ni l'autre ne transforme une déclaration du CLI en preuve indépendante de l'effet système.
 
 ## Identité et temps
 
-Le normaliseur crée un UUID et un timestamp UTC pour chaque événement. Ce timestamp est l'heure de normalisation. Lorsque le runner traite le stdout à la fin d'une exécution, ce n'est donc pas l'heure réelle de chaque appel d'outil. Une éventuelle date déclarée par un agent générique reste dans `data.declared_timestamp`.
+Le normaliseur crée un UUID et un timestamp UTC pour chaque événement. En collecte live, le collecteur remplace ensuite l'identifiant par une valeur déterministe dérivée de la position dans le spool et le timestamp par l'heure de réception observée (`data.activity.received_at`). Dans le traitement historique de fin d'exécution, le timestamp reste l'heure de normalisation, et non l'heure réelle de chaque appel d'outil. Une éventuelle date déclarée par un agent générique reste dans `data.declared_timestamp`.
 
-Les six identifiants du contexte proviennent du runner de confiance. Les champs homonymes d'une ligne ne peuvent pas les remplacer. Les identifiants fournisseurs sont conservés dans `data.provider_session_id`, `provider_item_id`, `provider_message_id` ou `provider_tool_use_id` selon leur disponibilité.
+Les six identifiants du contexte proviennent du runner de confiance. Les champs homonymes d'un enregistrement ne peuvent pas les remplacer. Les identifiants fournisseurs sont conservés dans `data.provider_session_id`, `provider_agent_id`, `provider_turn_id`, `provider_item_id`, `provider_message_id`, `provider_uuid` ou `provider_tool_use_id` selon leur disponibilité. Les chemins de transcription internes au worker (`transcript_path`, `agent_transcript_path`) ne sont jamais conservés.
 
-`parent_tool_use_id` de Claude désigne un appel d'outil ; il est conservé comme `data.provider_parent_tool_use_id`, sans le convertir en `parent_agent_id`. Ce normaliseur sans état ne fabrique pas de hiérarchie de sous-agents. Le contrat générique peut déclarer des IDs d'agents. Le composant Rust `src/declared_agents.rs` valide et corrèle ces déclarations dans une projection distincte, décrite ci-dessous.
+`parent_tool_use_id` de Claude désigne l'appel d'outil `Agent` (anciennement `Task`) qui a lancé un sous-agent ; il est conservé comme `data.provider_parent_tool_use_id`, sans le convertir en `parent_agent_id`. Le normaliseur reste sans état : il déclare l'agent racine et les sous-agents nommés par le fournisseur, mais il ne calcule aucun lien parent par jointure. Le composant `src/declared_agents.rs` corrèle ces déclarations dans une projection distincte, décrite ci-dessous.
 
-## Mappings
+## Mappings du stdout (mode batch)
 
 | Entrée | Événement normalisé | Données retenues |
 |---|---|---|
-| Codex `thread.started` | `session.declared` | ID de thread fourni. |
+| Codex `thread.started` | `session.declared` puis `agent.declared` | ID de thread ; agent racine `agent_role: "root"` sans parent. |
 | Codex `turn.started` / `turn.completed` / `turn.failed` / `error` | `session.declared` | État rapporté, erreur si exposée. |
-| Codex `turn.completed.usage` | `usage.reported` | Compteurs entiers positifs ou nuls explicitement présents. |
-| Codex `item.started` de type `command_execution` | `tool.requested` | ID d'item, texte de commande, statut rapporté. |
-| Codex `item.completed` de type `command_execution` | `tool.result` | Même contexte ; code de sortie et sortie agrégée si fournis. |
-| Codex `item.completed` de type `file_change` | `file.declared` | Chemins, `add`/`update`/`delete`, statut rapporté y compris échec. |
-| Claude `system` / `init` | `session.declared` | Session, modèle et répertoire déclarés lorsqu'ils existent. |
-| Claude `assistant.message.content[]` / `tool_use` | `tool.requested` | Nom, ID et entrée de l'outil. |
-| Claude `user.message.content[]` / `tool_result` | `tool.result` | ID de l'appel, contenu et état d'erreur éventuel. |
+| Codex `turn.completed.usage` | `usage.reported` | Compteurs entiers présents, dont `reasoning_output_tokens`. |
+| Codex `agent_message` / `reasoning` (`item.completed`) | `message.declared` / `reasoning.declared` | Texte visible ou résumé de raisonnement, borné, `text_truncated`. |
+| Codex `command_execution` (`item.started` / `item.completed`) | `tool.requested` / `tool.result` | Texte de commande (chaîne d'affichage, jamais argv), statut dont `declined`, code de sortie et sortie agrégée bornée. |
+| Codex `file_change` (`item.completed`) | `file.declared` | Chemins, `add`/`update`/`delete`, statut rapporté y compris échec. |
+| Codex `mcp_tool_call` | `tool.requested` / `tool.result` | `mcp_server`, `mcp_tool`, arguments et résultat bornés, erreur. |
+| Codex `web_search` | `tool.requested` / `tool.result` | Requête déclarée. |
+| Codex `todo_list` (`item.started` / `item.updated` / `item.completed`) | `plan.declared` | Étapes et état coché. |
+| Codex `collab_tool_call` | `delegation.declared`, puis à la complétion `agent.declared` par destinataire | Outil (`spawn_agent`, `send_input`, `wait`, `close_agent`), expéditeur, destinataires, consigne bornée ; un `spawn_agent` déclare le parent de chaque destinataire. |
+| Codex élément `error` « event stream lagged » | `session.declared` | `provider_reported_loss: true` : perte déclarée par Codex. |
+| Claude `system` / `init` | `session.declared` puis `agent.declared` | Session, modèle, répertoire, `declared_client_version`, mode de permission ; agent racine. |
+| Claude `system` / `compact_boundary`, `api_retry` | `session.declared` | État `compacted` ou `api_retry`, compteurs entiers. |
+| Claude blocs `text` | `message.declared` | Rôle `assistant` ou `user`, texte borné. |
+| Claude blocs `thinking` / `redacted_thinking` | `reasoning.declared` | Texte borné, sans la signature ; ou `redacted: true`. |
+| Claude `tool_use` | `tool.requested`, plus `delegation.declared` pour `Agent`/`Task` | Nom, ID, entrée ; `agent_type`, `description` et consigne bornée de la délégation. |
+| Claude `tool_result` | `tool.result` | ID de l'appel, contenu et état d'erreur éventuel. |
 | Claude `result` | `session.declared` puis éventuellement `usage.reported` | Résultat de session et compteurs effectivement présents. |
 
-Le code de sortie rapporté par Codex reste une déclaration du fournisseur. Le résultat du processus `codex` ou `claude` lui-même doit être enregistré séparément par le runner.
+Codex n'émet sur `exec --json` que le fil principal : les commandes d'un sous-agent n'y apparaissent pas. Elles arrivent par les hooks lorsque l'image les configure. Le code de sortie rapporté par Codex reste une déclaration du fournisseur ; le résultat du processus `codex` ou `claude` est enregistré séparément par le runner.
 
-Les fragments `stream_event` Claude sont ignorés. Les blocs complets évitent de reconstruire des arguments à partir de fragments incomplets. L'usage des messages `assistant` n'est pas additionné : ces messages peuvent être partiels et conduire à des doubles comptes. Aucun coût n'est calculé par ces adaptateurs.
+Les fragments `stream_event` Claude sont ignorés : seuls les messages complets sont projetés, ce qui évite de reconstruire ou de masquer partiellement un secret réparti sur plusieurs fragments. L'usage des messages `assistant` n'est pas additionné. Aucun coût n'est calculé, y compris `total_cost_usd`.
 
-Les mappings Codex sont fondés sur les types du dépôt officiel : [events.ts](https://github.com/openai/codex/blob/main/sdk/typescript/src/events.ts) et [items.ts](https://github.com/openai/codex/blob/main/sdk/typescript/src/items.ts). Les blocs Claude sont documentés dans [Streaming output](https://code.claude.com/docs/en/agent-sdk/streaming-output) et [Handle tool calls](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls). Consultation : 29 octobre 2026.
+## Mappings des hooks officiels (batch et TTY)
+
+| Hook (Claude Code et Codex) | Événement normalisé | Données retenues |
+|---|---|---|
+| `SessionStart` | `session.declared` ; pour Claude, aussi l'agent racine | Source et modèle déclarés. |
+| `UserPromptSubmit` | `message.declared` (`role: "user"`) | Consigne bornée. |
+| `PreToolUse` | `tool.requested`, plus `delegation.declared` pour `Agent`/`Task` (Claude) ou les outils collab (Codex) | Nom, ID, entrée bornée, `command_text`, `mcp_server`. |
+| `PostToolUse` / `PostToolUseFailure` / `PermissionDenied` | `tool.result` | Réponse bornée, `duration_ms`, erreur, interruption ou refus. |
+| `SubagentStart` / `SubagentStop` | `agent.declared` (`started` / `completed`), plus le dernier message à l'arrêt | ID et type du sous-agent ; **aucun champ parent**, le hook ne le nomme pas. |
+| `Stop` | `message.declared` (`turn_final: true`) | Dernier message de l'assistant pour le tour. |
+| `SessionEnd`, `StopFailure`, `Notification`, `PreCompact` | `session.declared` | État, raison ou type de notification. |
+
+Les événements définis par un client mais non projetés (`PermissionRequest`, `PreModelRequest`, `PostModelRequest`, `PostCompact`, `Interrupt`, `MessageDisplay` et les autres hooks de configuration) sont `Ignored`. Les charges des hooks sont acceptées jusqu'à 1 Mio : un champ volumineux est borné par la projection au lieu de faire perdre l'enregistrement.
+
+Sources consultées le 21 novembre 2026 : types de `codex-rs/exec/src/exec_events.rs` et schémas `codex-rs/hooks/schema/generated` aux tags [rust-v0.165.0](https://github.com/openai/codex/tree/rust-v0.165.0) et [rust-v0.170.0](https://github.com/openai/codex/tree/rust-v0.170.0) ; [hooks Claude Code](https://code.claude.com/docs/en/hooks), [mode headless](https://code.claude.com/docs/en/headless) et [types du SDK TypeScript](https://code.claude.com/docs/en/agent-sdk/typescript). Aucune de ces sources ne promet la stabilité de ces formats ; la [matrice de couverture](#couverture-par-version-du-client) indique ce qui est qualifié.
 
 ## Contrat générique explicite v1
 
@@ -120,25 +143,52 @@ Les fiches portent toujours `provenance: "declared"`, `compatibility: "observed"
 
 L'état est calculé uniquement depuis `data.state` : `started` donne `running`, `completed` donne `completed`, `failed` donne `error`, `stopped` donne `stopped`. Un état inconnu donne `unknown`, et un champ absent conserve l'état précédent. Le premier `started` explicite renseigne `started_at` avec le timestamp de normalisation de l'événement ; `last_activity` utilise le dernier événement reçu. Ces dates ne prouvent pas le démarrage ou l'activité d'un processus enfant. `provider`, `name`, `model` et `task`, lorsqu'ils existent, restent des métadonnées déclarées et bornées. Aucun coût ou usage n'est inventé.
 
-Cette voie permet à un agent personnalisé de rendre son arbre visible. Les parseurs Codex et Claude livrés ne produisent pas d'événements `agent.declared` à partir de leurs sorties actuelles ; ils n'affirment donc pas découvrir leurs sous-agents natifs. L'existence de hooks documentés chez un fournisseur ne vaut pas intégration de ces hooks dans ce projet.
+Cette voie permet à un agent personnalisé de rendre son arbre visible.
+
+Les parseurs Claude Code et Codex déclarent désormais l'agent racine de la session (`agent_role: "root"`, identifiant de session Claude ou fil racine Codex) et les sous-agents que le fournisseur nomme : `SubagentStart`/`SubagentStop` des deux clients et `collab_tool_call` de Codex. Seul un `spawn_agent` Codex nomme un parent ; un hook `SubagentStart` ne déclare aucun parent, et une mise à jour sans parent conserve le lien connu. Un sous-agent n'est jamais `observed` : ai-guard n'observe pas un sous-agent indépendamment du client qui le déclare.
 
 ## Limites et erreurs
 
 | Contrôle | Limite / comportement |
 |---|---|
-| Taille d'une ligne avant parsing | 64 Kio maximum, mesurés en octets UTF-8. |
-| Amplification en événements | 32 événements maximum par ligne. |
-| Texte projeté | 4 096 octets maximum, coupe sur une frontière UTF-8, suffixe `[truncated]`. |
-| Objet de données projeté | Budget de 12 Kio et vérification de la taille JSON après échappement. |
+| Taille d'un enregistrement avant parsing | 1 Mio maximum, mesurés en octets UTF-8 ; au-delà, `Oversized`. |
+| Amplification en événements | 32 événements maximum par enregistrement. |
+| Message, raisonnement, consigne | 8 Kio maximum mesurés après échappement JSON, coupe sur une frontière UTF-8, `text_truncated: true`. |
+| Autre texte projeté | 4 096 octets maximum, coupe sur une frontière UTF-8, suffixe `[truncated]`. |
+| Objet de données projeté | Budget de 12 Kio, message inclus, et vérification de la taille JSON après échappement. |
 | Structure projetée | Profondeur de 8 ; 32 éléments par collection ; clés bornées. |
 | Arguments génériques | Au plus 64 ; 8 192 octets cumulés ; 4 096 octets par argument. |
-| JSON invalide, type inconnu, schéma incompatible | `[]`, sans exception et sans événement de succès fictif. |
+| JSON invalide, type inconnu, schéma incompatible | Aucun événement, sans exception ni succès fictif ; catégorie `Invalid` ou `Unrecognized`. |
 
 Les projections tronquées d'objets portent `adapter_payload_truncated: true`. Si l'échappement JSON dépasse le budget, l'objet est remplacé par cet indicateur. Les troncatures empêchent une restitution exhaustive ; elles doivent rester visibles dans l'IHM.
 
-Le runner doit émettre un **bilan de couverture par session** : taille du stdout capturé, collecte complète ou tronquée, parseur sélectionné et éventuelles limites. Le normaliseur ne produit pas un événement d'erreur pour chaque ligne de bruit. Une ligne ignorée ne signifie pas qu'aucune action n'a eu lieu.
+Le runner émet un **bilan de couverture par session** ; en collecte live, c'est l'événement observé `activity.coverage` décrit ci-dessous. Le normaliseur ne produit pas un événement d'erreur pour chaque ligne de bruit ; il retourne sa catégorie au collecteur, qui la compte. Une ligne ignorée ne signifie pas qu'aucune action n'a eu lieu.
 
-Le masquage des secrets reste appliqué par le serveur avant stockage, sur tous les champs. Les parseurs ne prétendent pas détecter tous les secrets. Les données normalisées restent non fiables et doivent être rendues comme texte dans le frontend.
+Le masquage des secrets est appliqué aux valeurs JSON décodées avant toute projection, avec le dictionnaire des credentials de la session et les motifs connus, puis de nouveau par le serveur avant stockage. Les parseurs ne prétendent pas détecter tous les secrets : un secret inconnu affiché par un outil peut être conservé dans un contenu. Les données normalisées restent non fiables et doivent être rendues comme texte dans le frontend.
+
+## Collecte live
+
+`src/provider_activity/` collecte l'activité pendant la session, au lieu de la normaliser après la fin :
+
+1. **Canaux.** En batch, le stdout du client est découpé en enregistrements complets au fil de l'eau, en plus de la capture terminale bornée existante. En batch comme en TTY, les hooks officiels configurés sur la racine en lecture seule de l'image appellent `ai-guard-activity`, qui transmet la charge au broker par un canal `exec` dédié, sans credential ni réseau.
+2. **Durabilité.** Chaque enregistrement est masqué, normalisé puis ajouté à un spool local au broker, append-only et chaîné par SHA-256, avec `sync_data` avant l'accusé de réception. C'est le point de durabilité du hook bloquant : `PreToolUse` et `UserPromptSubmit` ne sont acquittés qu'après cette écriture ; sinon l'action du client est refusée.
+3. **Livraison.** Un transmetteur envoie le spool au gateway par lots d'au plus 64 événements sur `POST /api/v1/events/batch`. L'identifiant d'événement dérive de la position dans le spool : une reprise après interruption est un rejeu idempotent, et un contenu divergent pour un même identifiant est un conflit 409.
+4. **Budgets.** Par défaut, 1 000 événements et 2 Mio par session, plus un arriéré non livré de 200 événements ou 512 Kio. `--activity-max-events` et `--activity-max-bytes` les relèvent jusqu'à 5 000 événements et 8 Mio ; l'arriéré suit au cinquième des événements et au quart des octets. Sans rotation de l'audit (écart G06 ouvert), dimensionner le tenant : `--max-events` du gateway divisé par le budget d'événements, et 256 Mio divisés par le budget d'octets, doivent rester d'au moins 50 sessions ; `ai-guard-diagnose` signale un dimensionnement inférieur. Un budget épuisé produit un unique `activity.loss` observé (`session_budget_exhausted`), puis les enregistrements suivants sont comptés comme perdus et les hooks bloquants sont refusés. Un arriéré dépassé ou un spool indisponible est une panne d'audit : la lecture du stdout est suspendue jusqu'à l'échéance existante de la session (le client se bloque sur son écriture) et les hooks bloquants sont refusés.
+5. **Faits observés par ai-guard.** `activity.channel` (ouverture, attachement, suspension, fermeture d'un canal), `activity.loss` (perte observée par le contrôle, ou `provenance: "declared"` lorsqu'elle est rapportée par l'assistant du worker) et `activity.coverage` (bilan final : compteurs par canal et par catégorie, budget, arriéré, suspension, complétude). Ces événements portent `source: "runner"`.
+
+Chaque événement fournisseur porte `data.activity` : canal (`stdout` ou `hook`), rang de l'enregistrement, client, mode interactif, version demandée pour l'image, worker, tentative et heure de réception. Ces champs viennent du contrôle, jamais du worker.
+
+## Couverture par version du client
+
+| Capacité | Claude Code 2.1.140 | Claude Code 2.1.329 | Codex CLI 0.165.0 / 0.170.0 |
+|---|---|---|---|
+| Messages, outils et commandes en batch | Implémenté, non qualifié (stream-json) | Implémenté, non qualifié (stream-json) | Fil principal seulement (exec --json) ; sous-agents par les hooks |
+| Activité en TTY | Hooks : consignes, outils, sous-agents, dernier message du tour | Idem ; `MessageDisplay` non projeté | Hooks : idem ; recherche web hébergée non couverte |
+| Hiérarchie des sous-agents | IDs déclarés par les hooks et `parent_tool_use_id` | Idem | `spawn_agent` nomme le parent ; parents imbriqués possiblement non résolus |
+| Blocage si l'audit est indisponible | Quand le client de hook s'exécute ; un échec du hook lui-même laisse passer | Aussi en cas d'échec du hook (`onFailure: "block"`, 2.1.295+) | Quand le client de hook s'exécute ; un échec ou délai du hook laisse passer |
+| Non couvert | OpenTelemetry, transcriptions internes, actions transitives hors hooks | Idem | app-server, OpenTelemetry, fichiers rollout, actions transitives hors hooks |
+
+« Implémenté, non qualifié » signifie que le parseur et les tests sur fixtures existent, sans session réelle authentifiée pour cette version. Une version absente de ce tableau est inconnue : la collecte s'applique aux formats reconnus, sans affirmation de couverture. Aucune ligne de ce tableau n'est une médiation : le client et ses hooks s'exécutent dans le worker non fiable, sous le même utilisateur que l'agent.
 
 ## Tests et critères d'acceptation
 
@@ -147,11 +197,13 @@ Commande depuis la racine du dépôt :
 ```sh
 cargo test --lib adapters
 cargo test --test declared_agents
+cargo test --test provider_activity_adapters
+cargo test --test provider_activity_live
 ```
 
-Les fixtures sont dans `tests/adapters_fixtures/`. Elles contiennent uniquement des données de test ; `fixture-model` n'est pas un nom de modèle supporté promis par le projet.
+Les fixtures sont dans `tests/adapters_fixtures/` ; `SOURCES.json` indique pour chacune les sources officielles et les champs non confirmés. Elles contiennent uniquement des données de test ; `fixture-model` n'est pas un nom de modèle supporté promis par le projet.
 
-Les tests vérifient les deux formats fournisseurs, le contrat générique, la conservation des caractères Unicode, les schémas malformés, l'usurpation de source/provenance/identité, la taille des lignes, l'amplification, les caractères de contrôle échappés, l'absence de faux parent-agent et la compatibilité du résultat avec le modèle `Event` du gateway.
+Les tests vérifient les formats stdout et hooks des deux fournisseurs, le contrat générique, la conservation des caractères Unicode, les schémas malformés et leur catégorie, l'usurpation de source/provenance/identité, la taille des enregistrements, l'amplification, les caractères de contrôle échappés, le masquage avant projection, l'absence de faux parent-agent et la compatibilité du résultat avec le modèle `Event` du gateway. Les tests de collecte live vérifient le spool (chaîne, coupe d'une écriture incomplète, refus d'une altération, reprise), les budgets et pertes explicites, le refus d'un hook bloquant pendant une panne, le découpage du stdout, la livraison avec reprise sans perte et la route de lot du gateway (atomicité, rejeu idempotent, conflit, refus des namespaces réservés, rôle runner, débit compté par événement).
 
 Les tests de projection vérifient les enfants reçus avant leur parent, les aliases génériques, la stabilité des IDs, l'isolation entre namespaces, le refus des identifiants invalides, les tentatives de promotion de provenance, les orphelins, les cycles, les mises à jour partielles et les transitions d'état explicites.
 

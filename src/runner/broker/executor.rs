@@ -9,6 +9,7 @@ macro_rules! continue_step {
     };
 }
 
+mod activity;
 mod cancelled;
 mod diagnostics;
 mod helpers;
@@ -70,6 +71,7 @@ pub(crate) struct BatchExecutor {
     enforcer: ExecutionEnforcerV1,
     clock: Arc<dyn HostClock>,
     relays: Option<Arc<crate::broker::relay_owner::RelayRegistry>>,
+    activity: Option<crate::control_fs::Directory>,
 }
 impl fmt::Debug for BatchExecutor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -263,6 +265,7 @@ impl BatchExecutor {
             enforcer: enforcer.into(),
             clock,
             relays: None,
+            activity: None,
         }
     }
     pub(crate) fn with_relays(
@@ -270,6 +273,12 @@ impl BatchExecutor {
         relays: Option<Arc<crate::broker::relay_owner::RelayRegistry>>,
     ) -> Self {
         self.relays = relays;
+        self
+    }
+    /// Private broker directory holding one live provider activity spool per
+    /// session. Without it, a provider session refuses to start.
+    pub(crate) fn with_activity_root(mut self, root: crate::control_fs::Directory) -> Self {
+        self.activity = Some(root);
         self
     }
     pub(crate) async fn run(
@@ -939,6 +948,11 @@ impl<'a> Execution<'a> {
                     .await?;
             }
             let terminal = runtime.resume_terminal(&owned.handle).await?;
+            // A resumed worker is observed only: drain what an interrupted
+            // run spooled and state its coverage; no stdout is replayed.
+            if let Some(activity) = self.open_activity(&draft)? {
+                activity.finish().await?;
+            }
             self.save_observed_result(&terminal).await?;
             self.mutate(WorkerTransitionV1::Observe {
                 observation: managed::observation_dto(&worker, &terminal)?,
@@ -953,6 +967,9 @@ impl<'a> Execution<'a> {
             }
             return Ok(ControlFlow::Continue(terminal));
         }
+        // Live activity is durable before the start control is emitted.
+        let mut activity = self.open_activity(&draft)?;
+        let tap = activity.as_mut().and_then(activity::LiveActivity::take_tap);
         let callback = |owned: OwnedContainerSnapshot| {
             boxed_execution_phase(|| async move {
                 self.patch(|draft| {
@@ -997,7 +1014,16 @@ impl<'a> Execution<'a> {
                     .as_ref()
                     .and_then(|m| m.owned.clone())
                     .context("worker ownership was not persisted")?;
-                boxed_execution_phase(|| self.arm_and_claim(runtime, durable, None)).await
+                let directive =
+                    boxed_execution_phase(|| self.arm_and_claim(runtime, durable, None)).await?;
+                Ok(match (directive, tap) {
+                    (crate::runtime::PrearmedStartDirective::EmitOnce(control), Some(tap)) => {
+                        crate::runtime::PrearmedStartDirective::EmitOnce(
+                            control.with_stdout_tap(tap),
+                        )
+                    }
+                    (directive, _) => directive,
+                })
             })
         };
         let relay_spec = spec.clone();
@@ -1054,7 +1080,14 @@ impl<'a> Execution<'a> {
                 })));
             }
         };
-        self.save_worker_result(&retained).await?;
+        let live = match activity {
+            Some(activity) => {
+                activity.finish().await?;
+                true
+            }
+            None => false,
+        };
+        self.save_worker_result(&retained, live).await?;
         let (_, draft) = self.load().await?;
         self.mutate(WorkerTransitionV1::Observe {
             observation: managed::observation_dto(draft.worker()?, retained.terminal())?,

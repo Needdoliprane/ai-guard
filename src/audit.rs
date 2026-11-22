@@ -228,6 +228,19 @@ use storage::{InitializationGuard, StoreStorage};
 #[cfg(test)]
 mod resource_tests;
 
+/// An event id already stored with a different payload; the batch was not
+/// appended. The id is a public, worker-independent event identifier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchConflict {
+    pub id: String,
+}
+impl std::fmt::Display for BatchConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("event batch conflicts with a stored event")
+    }
+}
+impl std::error::Error for BatchConflict {}
+
 #[derive(Debug, Serialize)]
 pub struct Integrity {
     pub valid: bool,
@@ -1221,6 +1234,45 @@ impl Store {
         let tx = self.begin_checked(&mut db)?;
         let stored =
             self.append_with_capacity_class(&tx, event, payload, capacity::Class::OrdinaryWrite)?;
+        self.commit_checked(tx)?;
+        Ok(stored)
+    }
+    /// Append ordinary events in one transaction: all of them, or none.
+    /// Each event keeps `append`'s semantics: ordinary kinds only, masking
+    /// before persistence, ordinary capacity class, and an idempotent replay
+    /// of an existing id with an identical payload. A divergent payload for an
+    /// existing id fails the whole batch with `BatchConflict`.
+    pub fn append_batch(&self, events: Vec<Event>) -> anyhow::Result<Vec<StoredEvent>> {
+        anyhow::ensure!(
+            !events.is_empty() && events.len() <= 64,
+            "event batch size is outside its bound"
+        );
+        let mut prepared = Vec::with_capacity(events.len());
+        for event in events {
+            event_codec::require_ordinary_kind(&event.kind)?;
+            prepared.push(self.prepare_event(event)?);
+        }
+        let mut db = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
+        let tx = self.begin_checked(&mut db)?;
+        let mut stored = Vec::with_capacity(prepared.len());
+        for (event, payload) in prepared {
+            let id = event.id.clone();
+            match self.append_with_capacity_class(
+                &tx,
+                event,
+                payload,
+                capacity::Class::OrdinaryWrite,
+            ) {
+                Ok(row) => stored.push(row),
+                Err(error) if error.to_string() == "event id conflict" => {
+                    return Err(BatchConflict { id }.into());
+                }
+                Err(error) => return Err(error),
+            }
+        }
         self.commit_checked(tx)?;
         Ok(stored)
     }

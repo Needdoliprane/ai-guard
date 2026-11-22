@@ -746,6 +746,27 @@ impl TenantState {
     fn ingestion_quota(&self) -> ApiResult<()> {
         Self::take_write_slot(&self.ingestion_rate)
     }
+    /// Charge one ingestion slot per batched event, all or none.
+    fn ingestion_quota_for(&self, count: usize) -> ApiResult<()> {
+        let count = u32::try_from(count).unwrap_or(u32::MAX);
+        let mut state = self
+            .ingestion_rate
+            .lock()
+            .map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "Limiteur indisponible."))?;
+        if state.0.elapsed() >= Duration::from_secs(1) {
+            *state = (Instant::now(), 0);
+        }
+        if state.1.saturating_add(count) > 200 {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(
+                    json!({"error":{"code":"write_rate_limited","message":"Maximum 200 écritures par seconde."}}),
+                ),
+            ));
+        }
+        state.1 += count;
+        Ok(())
+    }
     fn take_write_slot(rate: &Mutex<(Instant, u32)>) -> ApiResult<()> {
         let mut state = rate
             .lock()
@@ -917,6 +938,7 @@ fn gateway_base_router(state: GatewayState) -> Router {
             routes
                 .clone()
                 .route("/control/events", post(ingest_control_event))
+                .route("/events/batch", post(ingest_batch))
                 .merge(supervision::routes())
                 .merge(egress_policy::router())
                 .merge(workload::routes())
@@ -981,12 +1003,7 @@ async fn ingest(
             event
                 .validate()
                 .map_err(|_| error(StatusCode::BAD_REQUEST, "Événement invalide."))?;
-            if crate::audit::D5_CONTROL_EVENT_KINDS.contains(&event.kind.as_str())
-                || crate::relay::admission::reserved_kind(&event.kind)
-                || ["security.decision", "control", "worker", "usage.allocation"]
-                    .iter()
-                    .any(|namespace| crate::model::event_kind_in_namespace(&event.kind, namespace))
-            {
+            if reserved_ingestion_kind(&event.kind) {
                 return Err(error(
                     StatusCode::FORBIDDEN,
                     "Ce namespace est réservé aux opérations du contrôle.",
@@ -995,6 +1012,73 @@ async fn ingest(
             Ok(Json(tenant.store.append(event).map_err(unavailable)?))
         })
         .await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EventBatchRequest {
+    events: Vec<Event>,
+}
+
+/// Runner-only bounded batch of ordinary events (provider activity). One
+/// transaction; the rate budget is charged per event; an identical replay of
+/// stored ids returns the stored rows; a divergent payload is a 409 conflict.
+async fn ingest_batch(
+    RunnerIdentity(tenant): RunnerIdentity,
+    Json(request): Json<EventBatchRequest>,
+) -> ApiResult<Json<Value>> {
+    tenant
+        .blocking(false, move |tenant| {
+            let events = request.events;
+            if events.is_empty() || events.len() > MAX_EVENT_BATCH {
+                return Err(error(
+                    StatusCode::BAD_REQUEST,
+                    "Lot d'événements vide ou supérieur à 64 événements.",
+                ));
+            }
+            for event in &events {
+                event
+                    .validate()
+                    .map_err(|_| error(StatusCode::BAD_REQUEST, "Événement invalide."))?;
+                if reserved_ingestion_kind(&event.kind) {
+                    return Err(error(
+                        StatusCode::FORBIDDEN,
+                        "Ce namespace est réservé aux opérations du contrôle.",
+                    ));
+                }
+            }
+            tenant.ingestion_quota_for(events.len())?;
+            match tenant.store.append_batch(events) {
+                Ok(stored) => Ok(Json(json!({
+                    "stored": stored
+                        .iter()
+                        .map(|row| json!({"id": row.event.id, "seq": row.seq}))
+                        .collect::<Vec<_>>()
+                }))),
+                Err(failure)
+                    if failure
+                        .downcast_ref::<crate::audit::BatchConflict>()
+                        .is_some() =>
+                {
+                    Err(error(
+                        StatusCode::CONFLICT,
+                        "Un identifiant du lot existe déjà avec un contenu différent.",
+                    ))
+                }
+                Err(failure) => Err(unavailable(failure)),
+            }
+        })
+        .await
+}
+
+const MAX_EVENT_BATCH: usize = 64;
+
+fn reserved_ingestion_kind(kind: &str) -> bool {
+    crate::audit::D5_CONTROL_EVENT_KINDS.contains(&kind)
+        || crate::relay::admission::reserved_kind(kind)
+        || ["security.decision", "control", "worker", "usage.allocation"]
+            .iter()
+            .any(|namespace| crate::model::event_kind_in_namespace(kind, namespace))
 }
 
 /// The route is the source of delivery authority. Worker-controlled Event
@@ -2394,6 +2478,61 @@ mod ingestion_window_tests {
                         && row.event.data["request_id"] == decision_id.to_string())
             );
         }
+    }
+
+    // Seeded window, independent of host throughput: a batch is charged one
+    // ingestion slot per event, and a refused batch spends no slot at all.
+    #[tokio::test]
+    async fn event_batches_charge_one_ingestion_slot_per_event_all_or_none() {
+        let directory = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let store = Arc::new(
+            Store::open(
+                &directory.path().join("audit.sqlite"),
+                Redactor::new(vec![]),
+                1000,
+            )
+            .unwrap(),
+        );
+        let state = GatewayState::for_tenants(
+            vec![TenantGateway {
+                tenant_id: "local".into(),
+                store: store.clone(),
+                runner_token: "synthetic-runner".into(),
+                viewer_token: "synthetic-viewer".into(),
+            }],
+            Policy::default(),
+            None,
+            Redactor::new(vec![]),
+        )
+        .unwrap();
+        *state.tenants[0].ingestion_rate.lock().unwrap() =
+            (Instant::now() + Duration::from_secs(60), 190);
+        let router = gateway_router(state.clone());
+        // Opening the store appends its own genesis events first.
+        let base = store.events(&EventQuery::default()).unwrap().len();
+        let batch = |count: usize| json!({"events": (0..count).map(|_| Event::new("tool.result")).collect::<Vec<_>>()});
+        let refused = router
+            .clone()
+            .oneshot(request("/api/v1/events/batch", batch(11)))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(store.events(&EventQuery::default()).unwrap().len(), base);
+        assert_eq!(state.tenants[0].ingestion_rate.lock().unwrap().1, 190);
+        let accepted = router
+            .clone()
+            .oneshot(request("/api/v1/events/batch", batch(10)))
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::OK);
+        assert_eq!(
+            store.events(&EventQuery::default()).unwrap().len(),
+            base + 10
+        );
+        assert_eq!(state.tenants[0].ingestion_rate.lock().unwrap().1, 200);
     }
 
     #[tokio::test]

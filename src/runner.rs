@@ -5,7 +5,7 @@ use crate::{
     runtime::{ContainerPurpose, ContainerSpec, NetworkMode, Runtime, RuntimeKind},
     workspace::{self, Limits, Manifest},
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -650,6 +650,68 @@ impl AuditClient {
                 .ok_or_else(|| EventPostFailure::InvalidResponse.into());
         }
         Err(EventPostFailure::RateLimitRetryExhausted.into())
+    }
+    /// Deliver one bounded batch of masked provider activity events to the
+    /// runner-only batch route. One attempt: the activity forwarder owns retry
+    /// and backoff. Success requires one stored sequence per submitted event,
+    /// in order; an old gateway's 404 is a refusal, never a per-event fallback.
+    pub async fn post_events_batch(&self, events: &[crate::model::Event]) -> Result<()> {
+        ensure!(
+            !events.is_empty() && events.len() <= 64,
+            "activity batch size is outside its bound"
+        );
+        let events: Vec<Value> = events
+            .iter()
+            .map(|event| Ok(self.redactor.value(&serde_json::to_value(event)?)))
+            .collect::<Result<_>>()?;
+        let body = serde_json::to_vec(&json!({"events": events}))?;
+        ensure!(
+            body.len() <= 256 * 1024,
+            "activity batch exceeds the gateway body bound"
+        );
+        let mut response = self
+            .http
+            .post(self.base.join("api/v1/events/batch")?)
+            .bearer_auth(&self.token)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .timeout(EVENT_POST_REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(|_| EventPostFailure::Unavailable)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(EventPostFailure::Rejected(status).into());
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| EventPostFailure::Unavailable)?
+        {
+            if bytes.len().saturating_add(chunk.len()) > 512 * 1024 {
+                return Err(EventPostFailure::InvalidResponse.into());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let answer: Value =
+            serde_json::from_slice(&bytes).map_err(|_| EventPostFailure::InvalidResponse)?;
+        let stored = answer
+            .get("stored")
+            .and_then(Value::as_array)
+            .ok_or(EventPostFailure::InvalidResponse)?;
+        let matches = stored.len() == events.len()
+            && stored.iter().zip(&events).all(|(row, event)| {
+                row.get("id") == event.get("id")
+                    && row
+                        .get("seq")
+                        .and_then(Value::as_i64)
+                        .is_some_and(|seq| seq > 0)
+            });
+        if !matches {
+            return Err(EventPostFailure::InvalidResponse.into());
+        }
+        Ok(())
     }
     async fn decide(&self, request: &DecisionRequest) -> Result<Value> {
         self.validate_identity_payload(request)?;
