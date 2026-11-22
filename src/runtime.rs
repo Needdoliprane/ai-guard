@@ -770,9 +770,15 @@ fn ensure_prearmed_live(stop: &tokio::sync::watch::Receiver<bool>) -> Result<()>
     Ok(())
 }
 
-async fn wait_prearmed_stop(stop: &mut tokio::sync::watch::Receiver<bool>) -> Result<()> {
+async fn wait_prearmed_stop(
+    stop: &mut tokio::sync::watch::Receiver<bool>,
+    stdout_release: Option<&tokio::sync::watch::Sender<bool>>,
+) -> Result<()> {
     loop {
         if *stop.borrow_and_update() {
+            if let Some(release) = stdout_release {
+                release.send_replace(true);
+            }
             return Ok(());
         }
         stop.changed()
@@ -1916,6 +1922,9 @@ impl Runtime {
             .check_before_spawn(&instance.target)
             .with_context(guard_failure)?;
         let mut child = command.spawn().with_context(spawn_failure)?;
+        let stdout_release = stdout_tap
+            .as_ref()
+            .map(crate::provider_activity::StdoutTap::stall_release);
         let mut tasks = TransportTasks::default();
         let stdout = tokio::spawn(capture_stream_tapped(
             child.stdout.take().context("missing stdout")?,
@@ -1973,12 +1982,18 @@ impl Runtime {
                 tokio::select! {
                     // A known stop/closed notifier wins over simultaneous EOF.
                     biased;
-                    stopped = wait_prearmed_stop(&mut stop) => {
+                    stopped = wait_prearmed_stop(&mut stop, stdout_release.as_ref()) => {
                         drain_prearmed_transport(&mut child).await?;
                         stopped?;
                         bail!("independent stop signalled; owned instance retained for terminal reconciliation");
                     }
-                    status = child.wait() => break status?,
+                    status = child.wait() => {
+                        let status = status?;
+                        if let Some(release) = &stdout_release {
+                            release.send_replace(true);
+                        }
+                        break status;
+                    }
                     result = &mut started, if !observed_start => {
                         result?;
                         observed_start = true;
@@ -1987,7 +2002,7 @@ impl Runtime {
             };
             let state = tokio::select! {
                 biased;
-                stopped = wait_prearmed_stop(&mut stop) => {
+                stopped = wait_prearmed_stop(&mut stop, stdout_release.as_ref()) => {
                     stopped?;
                     bail!("independent stop signalled during observation; terminal reconciliation required");
                 }
@@ -2017,7 +2032,7 @@ impl Runtime {
                 // create a different operation instead of replaying the first.
                 tokio::select! {
                     biased;
-                    stopped = wait_prearmed_stop(&mut stop) => {
+                    stopped = wait_prearmed_stop(&mut stop, stdout_release.as_ref()) => {
                         stopped?;
                         bail!("independent stop signalled during started acknowledgement; terminal reconciliation required");
                     }
@@ -2056,7 +2071,7 @@ impl Runtime {
         };
         tokio::select! {
             biased;
-            stopped = wait_prearmed_stop(&mut stop) => {
+            stopped = wait_prearmed_stop(&mut stop, stdout_release.as_ref()) => {
                 stopped?;
                 bail!("independent stop signalled during observation; terminal reconciliation required");
             }
@@ -2689,6 +2704,23 @@ fn parse_runtime_info(kind: RuntimeKind, bytes: &[u8], allow_rootful: bool) -> R
 #[cfg(test)]
 mod capture_error_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn armed_stop_releases_stdout_backpressure_and_disconnect_does_not() {
+        for notified in [true, false] {
+            let (enforcer, mut stop) = tokio::sync::watch::channel(false);
+            let (release, released) = tokio::sync::watch::channel(false);
+            if notified {
+                enforcer.send_replace(true);
+            }
+            drop(enforcer);
+            assert_eq!(
+                wait_prearmed_stop(&mut stop, Some(&release)).await.is_ok(),
+                notified
+            );
+            assert_eq!(*released.borrow(), notified);
+        }
+    }
 
     #[test]
     fn abandoned_before_claim_requires_non_nil_identities_and_a_final_revision() {
