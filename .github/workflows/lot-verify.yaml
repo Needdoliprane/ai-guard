@@ -32,7 +32,7 @@ jobs:
           set -euo pipefail
           umask 077
           receipt="$RUNNER_TEMP/g07-v5-ack-receipt.txt"
-          printf 'source_sha=46499d960c76800ecabaaa2ffbaf62480f37e820\nworkflow_sha=%s\nselector=runner::broker::executor::journal::tests::export_retirement_tests::full3_v5_commits_worker_cleanup_ack_after_acknowledged_result\nsource_check=NOT_RUN\nworkflow_check=NOT_RUN\ndependency_fetch=NOT_RUN\ndependency_fetch_exit=unknown\nlibtest_build=NOT_RUN\nlibtest_build_exit=unknown\nlibtest_artifact=NOT_RUN\nlibtest_artifact_sha256=unknown\ntest_verdict=NOT_RUN\ntest_exit=unknown\ntest_selected_count=unknown\ntest_duration_ms=unknown\nack_complete=unknown\nack_milestone_set=NOT_RUN\nfixture_cleanup=unknown\n' "$WORKFLOW_SHA" > "$receipt"
+          printf 'source_sha=46499d960c76800ecabaaa2ffbaf62480f37e820\nworkflow_sha=%s\nworkflow_parent_sha=103b9822b0cd174000aa0a41cdf8556643738d75\nselector=runner::broker::executor::journal::tests::export_retirement_tests::full3_v5_commits_worker_cleanup_ack_after_acknowledged_result\nsource_check=NOT_RUN\nworkflow_check=NOT_RUN\ndependency_fetch=NOT_RUN\ndependency_fetch_exit=unknown\nlibtest_build=NOT_RUN\nlibtest_build_exit=unknown\nlibtest_artifact=NOT_RUN\nlibtest_artifact_sha256=unknown\ntest_verdict=NOT_RUN\ntest_exit=unknown\ntest_selected_count=unknown\ntest_duration_ms=unknown\nack_complete=unknown\nack_milestone_set=NOT_RUN\nfixture_cleanup=unknown\n' "$WORKFLOW_SHA" > "$receipt"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -60,11 +60,12 @@ jobs:
                 "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/claude/v1-g07-cleanup-ack-v5-check-20261122 &&
                 "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ &&
                 "$(git rev-parse HEAD)" == "$GITHUB_SHA" &&
-                "$(git rev-parse HEAD^)" == "$source" &&
+                "$(git rev-parse HEAD^)" == 103b9822b0cd174000aa0a41cdf8556643738d75 &&
                 "$(git rev-parse "$source^")" == "$parent" &&
                 "$(git diff --name-only "$parent" "$source")" == "$test_source" &&
                 "$(git diff --name-only "$source" HEAD)" == .github/workflows/lot-verify.yaml &&
                 -z "$(git status --porcelain=v1 --untracked-files=all)" ]] &&
+              git merge-base --is-ancestor "$source" HEAD &&
               grep -Fq 'mod tests;' src/runner/broker/executor/journal.rs &&
               grep -Fq '#[path = "export_retirement_tests.rs"]' src/runner/broker/executor/journal_tests.rs &&
               grep -Fq 'async fn full3_v5_commits_worker_cleanup_ack_after_acknowledged_result()' "$test_source" &&
@@ -214,8 +215,25 @@ jobs:
           else
             test_rc=$?
           fi
+          libtest_completion_observed() {
+            local selector=$1 log=$2 test_start_count ok_inline_count standalone_ok_count standalone_ok_line_number
+            local failed_line_count native_marker_count native_marker_line_number
+            test_start_count="$(grep -Foc "test $selector ... " "$log" || true)"
+            ok_inline_count="$(grep -Fxc "test $selector ... ok" "$log" || true)"
+            standalone_ok_count="$(grep -Fxc 'ok' "$log" || true)"
+            standalone_ok_line_number="$(grep -nFx 'ok' "$log" | cut -d: -f1 || true)"
+            failed_line_count="$(grep -Fxc "test $selector ... FAILED" "$log" || true)"
+            native_marker_count="$(grep -Ec '^export-retirement phase=cleanup_v5_native_fixture_joined elapsed_ms=[0-9]{1,7}$' "$log" || true)"
+            native_marker_line_number="$(grep -nE '^export-retirement phase=cleanup_v5_native_fixture_joined elapsed_ms=[0-9]{1,7}$' "$log" | cut -d: -f1 || true)"
+            [[ $test_start_count == 1 && $failed_line_count == 0 ]] || return 1
+            if [[ $ok_inline_count == 1 && $standalone_ok_count == 0 ]]; then return 0; fi
+            [[ $ok_inline_count == 0 && $standalone_ok_count == 1 && $native_marker_count == 1 &&
+               $standalone_ok_line_number =~ ^[0-9]+$ && $native_marker_line_number =~ ^[0-9]+$ ]] &&
+              (( standalone_ok_line_number > native_marker_line_number ))
+          }
           selected="$(grep -Fxc 'running 1 test' "$log" || true)"
-          ok_line="$(grep -Fxc "test $selector ... ok" "$log" || true)"
+          test_completed=0
+          if libtest_completion_observed "$selector" "$log"; then test_completed=1; fi
           summaries="$(grep -Ec '^test result: ' "$log" || true)"
           ok_summaries="$(grep -Ec '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+(\.[0-9]+)?s$' "$log" || true)"
           test_duration_ms="$(bounded_duration_ms)"
@@ -224,7 +242,7 @@ jobs:
           test_verdict=fail
           if (( test_rc == 124 || test_rc == 137 || test_rc == 143 || test_rc == 130 )); then
             test_verdict=unknown
-          elif (( test_rc == 0 )) && [[ $selected == 1 && $ok_line == 1 && $summaries == 1 &&
+          elif (( test_rc == 0 )) && [[ $selected == 1 && $test_completed == 1 && $summaries == 1 &&
                 $ok_summaries == 1 && $test_duration_ms != unknown && $milestone_set == 1 ]]; then
             test_verdict=pass
             ack_complete=confirmed
