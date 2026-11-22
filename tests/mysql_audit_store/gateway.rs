@@ -635,6 +635,114 @@ async fn gateway_commits_ordinary_batch_and_replays_after_restart() -> Result<()
     restarted.stop().await
 }
 
+async fn with_unverifiable_identity_projection(
+    conn: &mut Conn,
+    observe: impl std::future::Future<Output = Result<()>>,
+) -> Result<()> {
+    let anchor = conn
+        .query_first::<Vec<u8>, _>(
+            "SELECT genesis_hash FROM ai_guard_identity_meta WHERE singleton=1",
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("cannot read QA identity anchor"))?
+        .context("prepared QA identity anchor is missing")?;
+    let mut divergent = anchor.clone();
+    let first = divergent
+        .first_mut()
+        .context("QA identity anchor is empty")?;
+    *first = if *first == b'0' { b'1' } else { b'0' };
+    let update = "UPDATE ai_guard_identity_meta SET genesis_hash=? WHERE singleton=1";
+    conn.exec_drop(update, (divergent.as_slice(),))
+        .await
+        .map_err(|_| anyhow::anyhow!("cannot introduce QA identity projection fault"))?;
+    let observation = observe.await;
+    conn.exec_drop(update, (anchor.as_slice(),))
+        .await
+        .map_err(|_| anyhow::anyhow!("cannot restore QA identity projection"))?;
+    observation
+}
+
+#[tokio::test]
+#[ignore = "requires two fresh prepared private MySQL 8.4 QA schemas and a built gateway"]
+async fn gateway_reports_unverified_selected_mysql_audit_and_recovers() -> Result<()> {
+    let a = FixtureFiles::open_gateway("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_A")?;
+    let b = FixtureFiles::open_gateway("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_B")?;
+    let (mut conn_a, mut conn_b) = fresh_gateway_pair(&a, &b).await?;
+    prepare_gateway_target(&mut conn_a, &a, "tenant-a", &DIGEST_A).await?;
+    prepare_gateway_target(&mut conn_b, &b, "tenant-b", &DIGEST_B).await?;
+    let before_a = audit_snapshot(&mut conn_a).await?;
+    let before_b = audit_snapshot(&mut conn_b).await?;
+
+    let registry = Registry::new()?;
+    registry.write(&[
+        registry.entry(&a, "tenant-a", "a")?,
+        registry.entry(&b, "tenant-b", "b")?,
+    ])?;
+    let http = Client::builder().no_proxy().timeout(DEADLINE).build()?;
+    let gateway = Gateway::start(&registry).await?;
+    let health =
+        async || Ok::<_, anyhow::Error>(http.get(gateway.url("/healthz")).send().await?.status());
+    let integrity = async |token: &str| {
+        Ok::<_, anyhow::Error>(
+            http.get(gateway.url("/api/v1/integrity"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .status(),
+        )
+    };
+    ensure!(
+        health().await? == StatusCode::OK,
+        "prepared gateway is unhealthy"
+    );
+    with_unverifiable_identity_projection(&mut conn_b, async {
+        ensure!(
+            integrity(VIEWER_A).await? == StatusCode::OK,
+            "A lost verified read access"
+        );
+        ensure!(
+            health().await? == StatusCode::OK,
+            "peer discovery changed selected audit health"
+        );
+        ensure!(
+            integrity(VIEWER_B).await? == StatusCode::SERVICE_UNAVAILABLE,
+            "B read was served without its required projection"
+        );
+        ensure!(
+            health().await? == StatusCode::SERVICE_UNAVAILABLE,
+            "gateway served healthy after the selected audit proof failed"
+        );
+        Ok(())
+    })
+    .await?;
+
+    ensure!(
+        integrity(VIEWER_A).await? == StatusCode::OK,
+        "A lost verified read access after repair"
+    );
+    ensure!(
+        health().await? == StatusCode::SERVICE_UNAVAILABLE,
+        "peer verification cleared the selected audit failure"
+    );
+    ensure!(
+        integrity(VIEWER_B).await? == StatusCode::OK,
+        "B did not recover with its verified projection"
+    );
+    ensure!(
+        health().await? == StatusCode::OK,
+        "gateway stayed degraded after fresh verification of B"
+    );
+    ensure!(
+        audit_snapshot(&mut conn_a).await? == before_a,
+        "A audit changed"
+    );
+    ensure!(
+        audit_snapshot(&mut conn_b).await? == before_b,
+        "B audit changed"
+    );
+    gateway.stop().await
+}
+
 #[tokio::test]
 #[ignore = "requires two fresh prepared private MySQL 8.4 QA schemas and a built gateway"]
 async fn gateway_retains_verified_neighbor_collisions_during_projection_failure() -> Result<()> {
@@ -659,20 +767,7 @@ async fn gateway_retains_verified_neighbor_collisions_during_projection_failure(
 
     // After the startup verification, make only B's disposable projection
     // temporarily unverifiable. No authenticated request has primed its cache.
-    let anchor = conn_b
-        .query_first::<Vec<u8>, _>(
-            "SELECT genesis_hash FROM ai_guard_identity_meta WHERE singleton=1",
-        )
-        .await?
-        .context("B's prepared identity anchor is missing")?;
-    let mut divergent = anchor.clone();
-    let first = divergent
-        .first_mut()
-        .context("B's identity anchor is empty")?;
-    *first = if *first == b'0' { b'1' } else { b'0' };
-    let update = "UPDATE ai_guard_identity_meta SET genesis_hash=? WHERE singleton=1";
-    conn_b.exec_drop(update, (divergent.as_slice(),)).await?;
-    let during_failure = async {
+    let during_failure = with_unverifiable_identity_projection(&mut conn_b, async {
         ensure!(b_reader.verify().await.is_err(), "B remained verifiable");
         let url = gateway.url("/api/v1/integrity");
         let unrelated = http.get(url.as_str()).bearer_auth(VIEWER_A).send().await?;
@@ -687,9 +782,8 @@ async fn gateway_retains_verified_neighbor_collisions_during_projection_failure(
         );
         ensure!(colliding.json::<Value>().await?["error"]["code"] == "identity_unavailable");
         Ok::<_, anyhow::Error>(())
-    }
+    })
     .await;
-    conn_b.exec_drop(update, (anchor.as_slice(),)).await?;
     gateway.stop().await?;
     during_failure?;
     ensure!(b_reader.verify().await? == head_b);
