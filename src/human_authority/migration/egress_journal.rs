@@ -21,7 +21,7 @@ use crate::{
     redaction::Redactor,
 };
 use anyhow::{Context, Result, ensure};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
@@ -35,6 +35,7 @@ struct JournalNames {
     confirmed: &'static str,
     stage_prefix: &'static str,
     label: &'static str,
+    retry_backup: bool,
 }
 
 const EGRESS_NAMES: JournalNames = JournalNames {
@@ -43,6 +44,7 @@ const EGRESS_NAMES: JournalNames = JournalNames {
     confirmed: "egress15-confirmed-v2",
     stage_prefix: "egress15-stage-",
     label: "egress",
+    retry_backup: false,
 };
 const IDENTITY_MARKER_NAMES: JournalNames = JournalNames {
     intent: "identity-markers-intent-v1",
@@ -50,10 +52,14 @@ const IDENTITY_MARKER_NAMES: JournalNames = JournalNames {
     confirmed: "identity-markers-confirmed-v1",
     stage_prefix: "identity-markers-stage-",
     label: "identity marker",
+    retry_backup: true,
 };
 const IDENTITY_MARKER_STEP: &str = "in_place_identity_markers";
 const RECORD_NAME: &str = "record-v1.json";
 const MAX_JOURNAL_ENTRIES: u32 = 32;
+const MAX_BACKUP_ENTRIES: u32 = 32;
+// A new SQLite copy can leave its main file, three sidecars and the lock.
+const BACKUP_CREATION_SLOTS: u32 = 5;
 // One unrenamed confirmation stage may survive a crash. Preserve a slot
 // for its replacement before committing SQLite.
 const CONFIRMATION_SLOTS: u32 = 2;
@@ -117,7 +123,8 @@ struct IdentityMarkersIntentV1<'a> {
     backup_name: &'static str,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BackupV1<'a> {
     version: u32,
     intent_digest: &'a str,
@@ -447,7 +454,32 @@ impl<'a> RetainedSourceIntent<'a> {
 
     pub(crate) fn backup_path(&self) -> Result<PathBuf> {
         self.revalidate()?;
-        Ok(self.backup_parent.path().join(BACKUP_NAME))
+        let names = self.names();
+        if !names.retry_backup || journal_stage(&self.journal, names)? == JournalStage::Intent {
+            return Ok(self.backup_parent.path().join(BACKUP_NAME));
+        }
+        let (_, name) = read_record(
+            self.token,
+            &self.journal,
+            &self.backup_parent,
+            names,
+            names.backup,
+            |bytes| {
+                let receipt: BackupV1<'_> = serde_json::from_slice(bytes)?;
+                self.validate_backup_record(&receipt)?;
+                let binding = &receipt.binding;
+                let entry = self
+                    .backup_parent
+                    .private_entry_same_mount(OsStr::new(&binding.file_name))?;
+                ensure!(
+                    entry.physical_identity() == binding.source_identity(),
+                    "{} backup file identity differs",
+                    names.label
+                );
+                Ok(receipt.binding.file_name)
+            },
+        )?;
+        Ok(self.backup_parent.path().join(name))
     }
 
     /// Markers recorded by an in-place intent; empty for egress.
@@ -488,7 +520,8 @@ impl<'a> RetainedSourceIntent<'a> {
         Ok(())
     }
 
-    /// Prepare only after verifying the intent and the absence of a backup.
+    /// Prepare a new copy for the verified intent. In-place retries leave
+    /// any earlier copies without a published record untouched.
     pub(crate) fn prepare_backup(
         &self,
         writer: &ReviewStoreMaintenanceWriter<'_, '_>,
@@ -500,19 +533,29 @@ impl<'a> RetainedSourceIntent<'a> {
             "{} backup preparation already started",
             names.label
         );
-        ensure!(
-            sqlite_entries(&self.backup_parent, BACKUP_NAME)?.is_empty(),
-            "{} backup namespace is occupied",
-            names.label
-        );
+        if names.retry_backup {
+            self.backup_parent
+                .persistent_entries(MAX_BACKUP_ENTRIES - BACKUP_CREATION_SLOTS)?;
+        }
+        let backup_path = if sqlite_entries(&self.backup_parent, BACKUP_NAME)?.is_empty() {
+            self.backup_parent.path().join(BACKUP_NAME)
+        } else {
+            ensure!(
+                names.retry_backup,
+                "{} backup namespace is occupied",
+                names.label
+            );
+            self.backup_parent
+                .path()
+                .join(format!("source-{}.sqlite", Uuid::new_v4()))
+        };
         self.journal
             .persistent_entries(MAX_JOURNAL_ENTRIES - CONFIRMATION_SLOTS - 1)?;
+        self.revalidate()?;
         let proof = match &self.step {
-            SourceStepV1::Egress15(_) => {
-                writer.prepare_egress_backup(self.token, &self.backup_path()?)?
-            }
+            SourceStepV1::Egress15(_) => writer.prepare_egress_backup(self.token, &backup_path)?,
             SourceStepV1::IdentityMarkers(_) => {
-                writer.prepare_identity_markers_backup(self.token, &self.backup_path()?)?
+                writer.prepare_identity_markers_backup(self.token, &backup_path)?
             }
         };
         let bytes = self.backup_record(&proof)?;
@@ -722,27 +765,37 @@ impl<'a> RetainedSourceIntent<'a> {
     fn backup_record(&self, proof: &VerifiedEgressSourceBackup<'_>) -> Result<Vec<u8>> {
         let label = self.names().label;
         let (binding, source_prefix, event_count) = proof.journal_observation(self.token)?;
-        binding.validate()?;
-        ensure!(
-            binding.parent_path == self.backup_parent.path()
-                && binding.parent_identity() == self.backup_parent.physical_identity()?
-                && binding.file_name == BACKUP_NAME
-                && source_prefix == self.source_prefix
-                && event_count > 0,
-            "{label} backup does not match the intent"
-        );
-        let bytes = serde_json::to_vec(&BackupV1 {
+        let receipt = BackupV1 {
             version: 1,
             intent_digest: self.file.digest(),
             binding,
             source_prefix,
             event_count,
-        })?;
+        };
+        self.validate_backup_record(&receipt)?;
+        let bytes = serde_json::to_vec(&receipt)?;
         ensure!(
             u64::try_from(bytes.len())? <= MAX_RECORD_BYTES,
             "{label} backup record exceeds bound"
         );
         Ok(bytes)
+    }
+
+    fn validate_backup_record(&self, receipt: &BackupV1<'_>) -> Result<()> {
+        let binding = &receipt.binding;
+        binding.validate()?;
+        ensure!(
+            receipt.version == 1
+                && receipt.intent_digest == self.file.digest()
+                && receipt.source_prefix == self.source_prefix
+                && receipt.event_count > 0
+                && binding.parent_path == self.backup_parent.path()
+                && binding.parent_identity() == self.backup_parent.physical_identity()?
+                && admitted_backup_name(self.names(), &binding.file_name),
+            "{} backup does not match the intent",
+            self.names().label
+        );
+        Ok(())
     }
 }
 
@@ -899,6 +952,21 @@ fn read_exact_record(
     bytes: &[u8],
     mismatch: &str,
 ) -> Result<PrivateFile> {
+    let (file, ()) = read_record(token, journal, backup_parent, names, name, |actual| {
+        ensure!(actual == bytes, "{mismatch}");
+        Ok(())
+    })?;
+    Ok(file)
+}
+
+fn read_record<T>(
+    token: &HumanMaintenanceSourceToken,
+    journal: &Directory,
+    backup_parent: &Directory,
+    names: &JournalNames,
+    name: &str,
+    inspect: impl FnOnce(&[u8]) -> Result<T>,
+) -> Result<(PrivateFile, T)> {
     let label = names.label;
     token.check()?;
     let slot = journal
@@ -912,7 +980,18 @@ fn read_exact_record(
     );
     let identity = slot.private_entry_same_mount(OsStr::new(RECORD_NAME))?;
     let (plan, _) = token.retained_plan();
-    let mut exclusions = sqlite_entries(backup_parent, BACKUP_NAME)?;
+    let mut exclusions = if names.retry_backup {
+        // Exclude all direct private files by metadata before reading the
+        // record. Its contents cannot choose which SQLite inodes are protected.
+        backup_parent
+            .persistent_entries(MAX_BACKUP_ENTRIES)?
+            .into_iter()
+            .filter(|entry| !entry.directory)
+            .map(|entry| backup_parent.private_entry_same_mount(OsStr::new(&entry.name)))
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        sqlite_entries(backup_parent, BACKUP_NAME)?
+    };
     for source in &plan.target.sources {
         let binding = &source.storage_binding;
         let parent = Directory::open_existing(&binding.parent_path)?;
@@ -925,7 +1004,7 @@ fn read_exact_record(
     let file = slot
         .persistent_read(RECORD_NAME, MAX_RECORD_BYTES, &exclusions)?
         .with_context(|| format!("{label} journal record missing"))?;
-    ensure!(file.bytes() == bytes, "{mismatch}");
+    let observed = inspect(file.bytes())?;
     file.persistent_sync()?;
     slot.sync()?;
     journal.sync()?;
@@ -936,7 +1015,19 @@ fn read_exact_record(
     );
     file.persistent_revalidate()?;
     token.check()?;
-    Ok(file)
+    Ok((file, observed))
+}
+
+fn admitted_backup_name(names: &JournalNames, name: &str) -> bool {
+    name == BACKUP_NAME
+        || (names.retry_backup
+            && name
+                .strip_prefix("source-")
+                .and_then(|stem| stem.strip_suffix(".sqlite"))
+                .is_some_and(|suffix| {
+                    Uuid::parse_str(suffix)
+                        .is_ok_and(|uuid| uuid.get_version_num() == 4 && uuid.to_string() == suffix)
+                }))
 }
 
 fn require_egress_transition(

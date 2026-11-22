@@ -4,6 +4,9 @@ use super::*;
 use crate::audit::identity_markers::{IdentityMarkersFailure, InPlaceIdentityMarkerV1};
 use crate::control_fs::publication::FAIL_AFTER_RENAME;
 use crate::human_authority::migration::egress_journal::RetainedSourceIntent;
+use crate::human_authority::migration::operator::{
+    OwnedIdentityMarkersRefusalV1, OwnedIdentityMarkersRequest, install_owned_identity_markers,
+};
 
 const MARKER_KIND: &str = "control.identity.human_rights.genesis";
 
@@ -549,6 +552,113 @@ fn lost_acknowledgements_resume_to_exactly_one_marker() {
 }
 
 #[test]
+fn operator_resume_preserves_an_unpublished_backup_and_confirms_one_marker() {
+    let adopted = adopted(14);
+    let initial = maintenance_source_state(&adopted.base);
+    let neighbor = store_source_state(&adopted.base.stores[1]);
+    let directory = adopted
+        .base
+        .root
+        .exclusive_child("interrupted-backup")
+        .unwrap();
+    let journal = directory.exclusive_child("journal").unwrap();
+    let backups = directory.exclusive_child("backups").unwrap();
+    let configuration = adopted.configuration_dir();
+    let plan = HumanSourcesMaintenancePlanV1::in_place(
+        Uuid::new_v4(),
+        &adopted.closure,
+        binding(&configuration, &adopted.manifest_name),
+        adopted.source_id(0),
+    );
+    let plan_bytes = serde_json::to_vec(&plan).unwrap();
+    let plan_file = directory
+        .persistent_create("plan.json", &plan_bytes)
+        .unwrap();
+    plan_file.persistent_sync().unwrap();
+    directory.sync().unwrap();
+
+    // Persist a real intent and SQLite copy, stopping before the backup receipt.
+    let unpublished = backups.path().join("source.sqlite");
+    {
+        let guard = adopted.acquire(&plan, &plan_file).unwrap();
+        let token = guard.target_source(adopted.source_id(0)).unwrap();
+        let opened = adopted.base.open_maintenance(0, &token);
+        opened
+            .with_review_maintenance_writer(&token, |writer| {
+                RetainedSourceIntent::prepare_identity_markers(
+                    &token,
+                    writer,
+                    journal.clone(),
+                    backups.clone(),
+                )?;
+                writer.prepare_identity_markers_backup(&token, &unpublished)?;
+                Ok(())
+            })
+            .unwrap();
+    }
+    let retained_copy = std::fs::read(&unpublished).unwrap();
+    let retained_inode = backups
+        .private_entry(OsStr::new("source.sqlite"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(journal_names(&journal), ["identity-markers-intent-v1"]);
+    assert_eq!(maintenance_source_state(&adopted.base), initial);
+
+    let resume = || {
+        install_owned_identity_markers(OwnedIdentityMarkersRequest {
+            manifest: adopted.manifest(),
+            configuration: adopted.closure.configuration.clone(),
+            files: adopted.base.configuration_files.clone(),
+            tenant_id: "A".into(),
+            redactor: Redactor::new(vec![]),
+            max_events: 10_000,
+            maintenance_directory: directory.path().to_owned(),
+            excluded_directories: vec![configuration.path().to_owned()],
+            resume: true,
+        })
+    };
+    let installed = resume().unwrap();
+    assert_eq!(installed.state, "installed");
+    assert_eq!(installed.backup_path.parent(), Some(backups.path()));
+    assert_ne!(installed.backup_path, unpublished);
+    assert!(installed.backup_path.is_file());
+    assert_eq!(installed.markers.len(), 1);
+    assert_eq!(installed.markers[0].seq, initial.head.0 + 1);
+    assert_eq!(marker_rows(&adopted.base.stores[0]).len(), 1);
+    assert_eq!(std::fs::read(&unpublished).unwrap(), retained_copy);
+    assert_eq!(
+        backups.private_entry(OsStr::new("source.sqlite")).unwrap(),
+        Some(retained_inode)
+    );
+    assert_eq!(std::fs::read(plan_file.path()).unwrap(), plan_bytes);
+    assert_eq!(store_source_state(&adopted.base.stores[1]), neighbor);
+
+    let backup_names = journal_names(&backups);
+    let confirmed = resume().unwrap();
+    assert_eq!(confirmed.state, "confirmed");
+    assert_eq!(confirmed.backup_path, installed.backup_path);
+    assert_eq!(confirmed.markers, installed.markers);
+    assert_eq!(journal_names(&backups), backup_names);
+    assert_eq!(marker_rows(&adopted.base.stores[0]).len(), 1);
+
+    // Losing the chosen copy after publication must not select another one.
+    std::fs::rename(
+        &installed.backup_path,
+        installed.backup_path.with_extension("retained"),
+    )
+    .unwrap();
+    let before_refusal = journal_names(&backups);
+    let error = resume().unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<OwnedIdentityMarkersRefusalV1>(),
+        Some(&OwnedIdentityMarkersRefusalV1::JournalConflict)
+    );
+    assert_eq!(journal_names(&backups), before_refusal);
+    assert_eq!(std::fs::read(&unpublished).unwrap(), retained_copy);
+    assert_eq!(marker_rows(&adopted.base.stores[0]).len(), 1);
+}
+
+#[test]
 fn refusals_leave_the_store_and_journal_unchanged() {
     let adopted = adopted(14);
     let (_, guard) = adopted.in_place(0);
@@ -629,7 +739,6 @@ fn refusals_leave_the_store_and_journal_unchanged() {
             // A backup without its journal frame is never adopted.
             writer.prepare_identity_markers_backup(&token, &intent.backup_path()?)?;
             assert!(intent.resume_backup(writer).is_err());
-            assert!(intent.prepare_backup(writer).is_err());
             Ok(())
         })
         .unwrap();

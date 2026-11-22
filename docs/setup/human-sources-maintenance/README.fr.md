@@ -164,6 +164,12 @@ codes de refus, le chemin de retour et les capacités admises par ces marqueurs
 sont décrits dans
 [l'accès local nominatif](../identity/README.fr.md#bases-possédées-déjà-adoptées-formats-14-et-15).
 
+Après une interruption, `resume` conserve les copies sans reçu de sauvegarde
+publié. Si le chemin de sauvegarde initial est occupé, la reprise écrit une
+nouvelle copie vérifiée et publie son reçu sous la même intention. Une fois ce
+reçu publié, chaque reprise utilise sa copie et rend le même `backup_path`.
+Une copie manquante ou divergente pour un reçu publié arrête la maintenance.
+
 ## Périmètre de validation
 
 Les [preuves datées du parcours opérateur et du startup owned](../../engineering/evidence/2026-11-13/human-sources-operator/README.fr.md)

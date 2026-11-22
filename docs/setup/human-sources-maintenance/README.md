@@ -157,6 +157,12 @@ activation and store formats are unchanged. The refusal codes, the return path
 and the capabilities these markers admit are described in
 [named local access](../identity/README.md#already-adopted-owned-stores-formats-14-and-15).
 
+After an interruption, `resume` preserves copies that have no published backup
+receipt. If the original backup location is occupied, it writes a new verified
+copy and publishes its receipt under the same intention. Once that receipt is
+published, every retry uses its copy and reports the same `backup_path`. A
+missing or divergent copy for a published receipt stops the maintenance.
+
 ## Validation scope
 
 The [dated operator and owned-startup evidence](../../engineering/evidence/2026-11-13/human-sources-operator/README.md)
