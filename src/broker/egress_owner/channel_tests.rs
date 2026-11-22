@@ -205,7 +205,7 @@ struct Harness {
     lookups: Arc<NoLookup>,
     helper_port: u16,
     owner: tokio::task::JoinHandle<ChannelExit>,
-    stop: watch::Sender<bool>,
+    stop: ChannelStop,
 }
 
 fn fixture_binding() -> EgressBindingV1 {
@@ -255,7 +255,7 @@ async fn harness(gateway: Arc<Gateway>, upstream_port: u16) -> Harness {
         open_budget: Duration::from_secs(5),
         connect_attempt: Duration::from_secs(2),
     };
-    let (stop, stopped) = watch::channel(false);
+    let (stop, stopped) = ChannelStop::new();
     let control: Arc<dyn EgressControl> = gateway.clone();
     let owner = tokio::spawn(run(broker_end, binding, control, resolver, times, stopped));
     Harness {
@@ -313,13 +313,9 @@ fn fixture_open_request() -> (EgressDecideRequestV1, Authority) {
     (request, authority)
 }
 
-fn fixture_opening_lifetime() -> (
-    OpeningLifetime,
-    watch::Sender<Option<ObservedStop>>,
-    watch::Sender<bool>,
-) {
-    let (owner, opening) = watch::channel(None);
-    let (stop, running) = watch::channel(false);
+fn fixture_opening_lifetime() -> (OpeningLifetime, OpeningOwner, ChannelStop) {
+    let (owner, opening) = OpeningOwner::new();
+    let (stop, running) = ChannelStop::new();
     (
         OpeningLifetime {
             owner: opening,
@@ -328,6 +324,48 @@ fn fixture_opening_lifetime() -> (
         owner,
         stop,
     )
+}
+
+#[test]
+fn egress_broker_connect_and_invalidation_share_the_initial_poll() {
+    for stop_channel in [false, true] {
+        let (lifetime, opening, stop) = fixture_opening_lifetime();
+        std::thread::scope(|scope| {
+            let (announced, ready) = std::sync::mpsc::sync_channel(0);
+            let (published, observed) = std::sync::mpsc::channel();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            scope.spawn(move || {
+                announced.send(()).unwrap();
+                if stop_channel {
+                    stop.stop();
+                } else {
+                    opening.retire(EgressCloseReasonV1::WorkerReset);
+                }
+                published.send(()).unwrap();
+            });
+
+            let polled = lifetime.poll_connect(deadline, || {
+                ready.recv_timeout(Duration::from_secs(1)).unwrap();
+                assert!(
+                    matches!(
+                        observed.recv_timeout(Duration::from_millis(150)),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                    ),
+                    "invalidation must wait for the synchronous connect poll"
+                );
+                Poll::<()>::Pending
+            });
+            assert!(matches!(polled, Some(Poll::Pending)));
+            observed.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert!(
+                lifetime
+                    .poll_connect(deadline, || -> Poll<()> {
+                        panic!("a terminal opening must never poll a connect")
+                    })
+                    .is_none()
+            );
+        });
+    }
 }
 
 #[tokio::test]
@@ -525,7 +563,7 @@ struct BlockedHarness {
     helper: tokio::io::DuplexStream,
     owner: tokio::task::JoinHandle<ChannelExit>,
     blocked: Arc<tokio::sync::Notify>,
-    stop: watch::Sender<bool>,
+    stop: ChannelStop,
 }
 
 async fn open_with_blocked_publication(
@@ -543,7 +581,7 @@ async fn open_with_blocked_publication(
         prefix_after_frames,
         blocked: blocked.clone(),
     };
-    let (stop, stopped) = watch::channel(false);
+    let (stop, stopped) = ChannelStop::new();
     let owner = tokio::spawn(run(
         broker,
         fixture_binding(),
@@ -772,13 +810,13 @@ fn fixture_owner<W>(
     gateway: Arc<Gateway>,
     upstream_port: u16,
     times: ChannelTimes,
-) -> (Owner<W>, mpsc::Receiver<Event>, watch::Sender<bool>) {
+) -> (Owner<W>, mpsc::Receiver<Event>, ChannelStop) {
     let mut ledger = EgressChannelState::new(0);
     ledger
         .accept_capability(Some(&EgressCapabilityV1::default()), 0)
         .unwrap();
     let (events, incoming) = mpsc::channel(8);
-    let (stop, stopping) = watch::channel(false);
+    let (stop, stopping) = ChannelStop::new();
     let owner = Owner {
         output: Some(output),
         stop: stopping,
@@ -813,7 +851,7 @@ async fn egress_broker_stop_cancels_an_opening_waiting_for_a_decision() {
     timeout_at(deadline, pending.started.notified())
         .await
         .unwrap();
-    channel.stop.send(true).unwrap();
+    channel.stop.stop();
 
     timeout_at(deadline, pending.dropped.notified())
         .await
@@ -920,7 +958,7 @@ async fn egress_broker_retirement_closes_observed_socket_before_handoff() {
         0
     );
     let newer = IdV1::random();
-    let (new_owner, _opened) = watch::channel(None);
+    let (new_owner, _opened) = OpeningOwner::new();
     let (_reported, outcome) = oneshot::channel();
     let mut replacement = owner.pending_flow(newer.clone());
     replacement.opening = Some(OpeningHandle {
@@ -1228,7 +1266,7 @@ async fn egress_broker_stop_interrupts_partial_helper_publication() {
     let control = gateway(true);
     let (mut channel, mut upstream, mut frames) = open_for_partial_data(control.clone()).await;
     let deadline = block_data_frame(&mut channel, &mut upstream).await;
-    channel.stop.send(true).unwrap();
+    channel.stop.stop();
 
     let count = timeout_at(deadline, upstream.read(&mut [0; 1]))
         .await
@@ -1365,7 +1403,7 @@ async fn egress_broker_allowed_destination_is_decided_durably_before_one_pinned_
     assert!(observations.iter().any(|o| matches!(o,
         EgressObservationV1::Connection { connected: true, peer: Some(peer), resolver, .. }
             if *peer == format!("127.0.0.1:{}", upstream.port) && resolver == "internal_service")));
-    harness.stop.send(true).unwrap();
+    harness.stop.stop();
     assert_eq!(harness.owner.await.unwrap(), ChannelExit::Stopped);
 }
 
@@ -1389,7 +1427,7 @@ async fn egress_broker_unknown_destination_is_refused_without_resolution_or_conn
         2,
         "each refusal was decided centrally"
     );
-    harness.stop.send(true).unwrap();
+    harness.stop.stop();
 }
 
 #[tokio::test]
@@ -1406,7 +1444,7 @@ async fn egress_broker_audit_outage_blocks_the_connection() {
         0,
         "no decision, no socket"
     );
-    harness.stop.send(true).unwrap();
+    harness.stop.stop();
 }
 
 #[tokio::test]
@@ -1469,5 +1507,5 @@ async fn egress_broker_revocation_closes_the_live_upstream_socket_within_the_ren
         recorded,
         "the closure is observed with its revocation cause"
     );
-    harness.stop.send(true).unwrap();
+    harness.stop.stop();
 }

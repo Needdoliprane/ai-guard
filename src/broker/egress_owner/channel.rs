@@ -22,15 +22,16 @@ use crate::egress::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    future::Future,
+    future::{Future, poll_fn},
     net::SocketAddr,
     pin::Pin,
     sync::Arc,
+    task::Poll,
     time::Duration,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::TcpStream,
+    net::{TcpSocket, TcpStream},
     sync::{Semaphore, mpsc, oneshot, watch},
     task::JoinSet,
     time::{Instant, MissedTickBehavior, sleep_until, timeout_at},
@@ -176,7 +177,7 @@ struct ClosingFlow {
 }
 
 struct OpeningHandle {
-    owner: watch::Sender<Option<ObservedStop>>,
+    owner: OpeningOwner,
     outcome: oneshot::Receiver<OpeningOutcome>,
 }
 
@@ -185,19 +186,86 @@ struct OpeningOutcome {
     socket_unobserved: bool,
 }
 
+struct OpeningOwner(watch::Sender<Option<ObservedStop>>);
+
+impl OpeningOwner {
+    fn new() -> (Self, watch::Receiver<Option<ObservedStop>>) {
+        let (sender, receiver) = watch::channel(None);
+        (Self(sender), receiver)
+    }
+
+    fn retire(&self, reason: EgressCloseReasonV1) {
+        self.0.send_if_modified(|stop| {
+            if stop.is_some() {
+                return false;
+            }
+            *stop = Some((Instant::now(), reason));
+            true
+        });
+    }
+}
+
+impl Drop for OpeningOwner {
+    fn drop(&mut self) {
+        self.retire(EgressCloseReasonV1::OwnerExit);
+    }
+}
+
+pub(crate) struct ChannelStop(watch::Sender<ChannelStopState>);
+
+pub(crate) struct ChannelStopState(bool);
+
+impl ChannelStop {
+    pub(crate) fn new() -> (Self, watch::Receiver<ChannelStopState>) {
+        let (sender, receiver) = watch::channel(ChannelStopState(false));
+        (Self(sender), receiver)
+    }
+
+    pub(crate) fn stop(&self) {
+        self.0.send_replace(ChannelStopState(true));
+    }
+}
+
+impl Drop for ChannelStop {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 struct OpeningLifetime {
     owner: watch::Receiver<Option<ObservedStop>>,
-    stop: watch::Receiver<bool>,
+    stop: watch::Receiver<ChannelStopState>,
 }
 
 impl OpeningLifetime {
     fn loss(&self) -> Option<ObservedStop> {
-        (*self.owner.borrow()).or_else(|| {
+        let retired = *self.owner.borrow();
+        retired.or_else(|| {
             (self.owner.has_changed().is_err()
-                || *self.stop.borrow()
+                || self.stop.borrow().0
                 || !matches!(self.stop.has_changed(), Ok(false)))
             .then(|| (Instant::now(), EgressCloseReasonV1::OwnerExit))
         })
+    }
+
+    fn poll_connect<T>(
+        &self,
+        deadline: Instant,
+        poll: impl FnOnce() -> Poll<T>,
+    ) -> Option<Poll<T>> {
+        // Both invalidators publish through these watch values before dropping.
+        // Hold the snapshots through one synchronous poll only.
+        let stop = self.stop.borrow();
+        let owner = self.owner.borrow();
+        if stop.0
+            || owner.is_some()
+            || !matches!(self.stop.has_changed(), Ok(false))
+            || !matches!(self.owner.has_changed(), Ok(false))
+            || Instant::now() >= deadline
+        {
+            return None;
+        }
+        Some(poll())
     }
 
     async fn cancelled(&self) {
@@ -443,7 +511,7 @@ impl Flow {
             )));
         }
         let opening = self.opening?;
-        let _ = opening.owner.send(Some((Instant::now(), reason)));
+        opening.owner.retire(reason);
         Some(RetiredFlow::Opening {
             flow_id,
             decision_id: self.decision_id,
@@ -455,7 +523,7 @@ impl Flow {
 
 struct Owner<W> {
     output: Option<W>,
-    stop: watch::Receiver<bool>,
+    stop: watch::Receiver<ChannelStopState>,
     stopped_during_write: bool,
     binding: EgressBindingV1,
     control: Arc<dyn EgressControl>,
@@ -479,7 +547,7 @@ pub(crate) async fn run<IO>(
     control: Arc<dyn EgressControl>,
     resolver: Arc<Resolver>,
     times: ChannelTimes,
-    mut stop: watch::Receiver<bool>,
+    mut stop: watch::Receiver<ChannelStopState>,
 ) -> ChannelExit
 where
     IO: AsyncRead + AsyncWrite + Send + 'static,
@@ -876,7 +944,7 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
             self.flows.insert(flow_id, self.pending_flow(decision_id));
             return self.reset_pending(flow_id, EgressReasonV1::Protocol).await;
         };
-        let (owner, owned) = watch::channel(None);
+        let (owner, owned) = OpeningOwner::new();
         let (reported, outcome) = oneshot::channel();
         let mut flow = self.pending_flow(decision_id.clone());
         flow.opening = Some(OpeningHandle { owner, outcome });
@@ -1092,13 +1160,13 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
     }
 
     fn stop_requested(&self) -> bool {
-        *self.stop.borrow() || !matches!(self.stop.has_changed(), Ok(false))
+        self.stop.borrow().0 || !matches!(self.stop.has_changed(), Ok(false))
     }
 
     fn arm_opening(&self, opened: &PendingOpen) -> bool {
         // Hold the Stop snapshot through this synchronous handoff.
         let stop = self.stop.borrow();
-        !*stop
+        !stop.0
             && matches!(self.stop.has_changed(), Ok(false))
             && opened.socket.arm_lease(Instant::now() + self.times.lease)
     }
@@ -1429,16 +1497,30 @@ async fn open_upstream(
     let target = SocketAddr::new(*address, authority.port());
     let attempt = (now + times.connect_attempt).min(deadline);
     let mut attempted = false;
-    let connect = async {
-        if Instant::now() >= attempt || lifetime.loss().is_some() {
-            return None;
+    let mut connecting = std::pin::pin!(async {
+        let socket = match target {
+            SocketAddr::V4(_) => TcpSocket::new_v4()?,
+            SocketAddr::V6(_) => TcpSocket::new_v6()?,
+        };
+        // Tokio's TcpSocket issues the nonblocking connect on its first poll.
+        // Later polls only wait for the result of this same attempt.
+        socket.connect(target).await
+    });
+    let connect = poll_fn(|cx| {
+        if let Some(polled) = lifetime.poll_connect(attempt, || {
+            attempted = true;
+            progress.pending = true;
+            connecting.as_mut().poll(cx)
+        }) {
+            return polled.map(|result| {
+                progress.pending = false;
+                result.ok()
+            });
         }
-        attempted = true;
-        progress.pending = true;
-        let result = TcpStream::connect(target).await;
+        progress.unobserved |= progress.pending;
         progress.pending = false;
-        result.ok()
-    };
+        Poll::Ready(None)
+    });
     // An elapsed attempt takes precedence over a ready connect future.
     let stream = tokio::select! {
         biased;
