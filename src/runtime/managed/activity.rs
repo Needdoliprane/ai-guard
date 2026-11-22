@@ -569,7 +569,7 @@ mod tests {
                 process: ProcessObservation {
                     status: Some(if running { "running" } else { "exited" }.into()),
                     running: Some(running),
-                    started_at: Some(started.into()),
+                    started_at: Some(started),
                     finished_at: None,
                     exit_code: None,
                     oom_killed: Some(false),
