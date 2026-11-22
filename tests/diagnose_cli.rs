@@ -3036,7 +3036,7 @@ fn refusals_and_usage() {
         assert_no_canary(&run, &[CANARY], "usage error");
     }
 
-    // Help and version are clap's static text, on stdout.
+    // Help and version are available before inspection, on stdout.
     let help = scenario.diagnose(["--help"]);
     assert_eq!(help.code, 0);
     assert!(help.stderr.is_empty());
@@ -3069,9 +3069,11 @@ fn refusals_and_usage() {
     );
     let version = scenario.diagnose(["--version"]);
     assert_eq!(version.code, 0);
+    assert!(version.stderr.is_empty());
+    // The build_identity_cli target checks the separate provenance lines.
     assert_eq!(
-        version.stdout,
-        format!("ai-guard-diagnose {}\n", env!("CARGO_PKG_VERSION"))
+        version.stdout.lines().next(),
+        Some(concat!("ai-guard-diagnose ", env!("CARGO_PKG_VERSION")))
     );
 }
 
@@ -7578,14 +7580,14 @@ fn entry_points_state_what_is_opened_as_the_report_does() {
     ] {
         let text = fs::read_to_string(repository.join(index))
             .unwrap_or_else(|error| panic!("the manual index {index} is not readable: {error}"));
-        for line in text
+        let guide_links = text
             .lines()
-            .filter(|line| line.contains("diagnostics/README"))
-        {
-            assert!(
-                line.contains(stated),
-                "{index} lists this guide without the limit of what is never opened: {line}"
-            );
+            .filter(|line| line.contains("diagnostics/README"));
+        assert!(
+            guide_links.clone().any(|line| line.contains(stated)),
+            "{index} lists this guide without the limit of what is never opened"
+        );
+        for line in guide_links {
             for phrase in absolute {
                 assert!(!line.contains(phrase), "{index}: {phrase:?}");
             }

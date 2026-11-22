@@ -440,8 +440,9 @@ fn broker_registry_membership_is_refused_before_any_setup_publication() {
     let refused = prepare(&input, &root);
     assert!(!refused.status.success());
     let diagnostic = String::from_utf8_lossy(&refused.stderr);
-    assert!(diagnostic.contains("prepare without read_broker_registry"));
-    assert!(diagnostic.contains("migrate6→7"));
+    assert!(diagnostic.contains("prepare without infrastructure registry capabilities"));
+    assert!(diagnostic.contains("explicitly migrate to the required schema"));
+    assert!(diagnostic.contains("then apply a trusted control membership mutation"));
     assert_no_setup_files(parent.path(), &root);
 }
 

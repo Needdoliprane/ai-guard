@@ -874,20 +874,26 @@ fn sbom_lists_locked_components_with_their_registry_hashes_and_names_what_locks_
         "true"
     ));
 
-    let images: Vec<&serde_json::Value> = components
+    let images: Vec<_> = components
         .iter()
         .filter(|(reference, _)| reference.starts_with("image:"))
-        .map(|(_, component)| component)
         .collect();
     assert_eq!(images.len(), 3, "FAIL: base images at this base");
-    for image in images {
+    for (reference, image) in images {
+        let (_, digest) = reference
+            .rsplit_once("@sha256:")
+            .expect("all external base images are pinned by digest");
         assert_eq!(image["type"], "container");
-        assert!(has_property(image, "ai-guard:pinning", "tag"));
+        assert!(has_property(image, "ai-guard:pinning", "digest"));
         assert!(has_property(
             image,
             "ai-guard:version-evidence",
-            "declared:tag"
+            "declared:digest"
         ));
+        assert_eq!(
+            image["hashes"],
+            serde_json::json!([{ "alg": "SHA-256", "content": digest }])
+        );
     }
     let compositions = sbom["compositions"].as_array().expect("FAIL: compositions");
     assert!(compositions.contains(&serde_json::json!({

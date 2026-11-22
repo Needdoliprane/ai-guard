@@ -24,6 +24,8 @@ jobs:
     timeout-minutes: 180
     env:
       AI_GUARD_BUILD_REVISION: ${{ github.sha }}
+      # Match CI's build limit when compiling and linking the full test suite.
+      CARGO_BUILD_JOBS: '1'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
@@ -45,9 +47,14 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
       - name: Check all targets with MySQL enabled
-        run: cargo check --locked --offline --all-targets --features mysql-storage
+        run: cargo check --locked --offline --all-targets --features mysql-storage --keep-going
       - name: Check all targets without default features (SQLite only)
-        run: cargo check --locked --offline --all-targets --no-default-features
+        run: cargo check --locked --offline --all-targets --no-default-features --keep-going
+      - name: Third-party licence guard and its unit tests
+        # `cargo test` builds examples but does not run their unit tests.
+        run: |
+          cargo test --locked --offline --example third_party_notices
+          cargo run --quiet --locked --offline --example third_party_notices -- check --allowed .github/third-party-license-expressions.txt
       - name: Provider harness regressions
         run: |
           python3 -B tests/e2e/interactive_driver.py --self-test

@@ -654,14 +654,14 @@ catalogue! {
         axis: Tenants, status: Error, basis: Observed,
         consumer: "agentsandbox gateway",
         message: "A tenant must declare either data or a valid storage profile.",
-        action: "Declare one storage selector. For MySQL, provide the database, account, namespace, host, port and the TLS and credential references required by its authentication mode.",
+        action: "Declare one storage selector in the registry supplied with --tenants-file. For MySQL, provide the database, account, namespace, host, port and the TLS and credential references required by its authentication mode.",
         commands: &[product(&["gateway"], &["--tenants-file"])],
     }
     RegistryMySqlUnavailable = "registry.mysql_unavailable" {
         axis: Tenants, status: Error, basis: Observed,
         consumer: "agentsandbox gateway",
         message: "The tenant declares MySQL storage. This gateway lacks the MySQL transactions required to serve it.",
-        action: "Keep the configured destination and use a gateway that supports its MySQL storage profile.",
+        action: "Keep the destination in the registry supplied with --tenants-file. Use a gateway that supports the selected MySQL storage profile.",
         commands: &[product(&["gateway"], &["--tenants-file"])],
     }
     RegistryPolicyInvalid = "registry.policy_invalid" {

@@ -1,6 +1,7 @@
 # Licence expressions accepted for crates linked into the native ai-guard binaries.
 # Checked by `cargo run --example third_party_notices -- check|notices --allowed <this file>` (CI and release).
-# Line forms: an accepted SPDX expression; `no-expression: NAME VERSION`; `no-text: NAME VERSION`.
+# Add an accepted SPDX expression directly. The forms for missing expressions, missing texts,
+# upstream supplements and licence selections are documented in examples/third_party_notices.rs.
 # A Cargo.lock change that brings an expression not listed here fails CI: review the new licence
 # (copyleft obligations, redistribution, attribution) and add the exact expression in the same change.
 # Initial list generated from Cargo.lock on 2026-11-21 (350 crates, all features). Every expression is
@@ -32,10 +33,19 @@ Unlicense/MIT
 Zlib
 Zlib OR Apache-2.0 OR MIT
 
-# Crates whose published package ships no licence text. Their SPDX expression is listed in the notices
-# table and in a dedicated section. OPEN for the maintainers: fetch the upstream licence text and ship it
-# (or replace the crate) before a release that claims complete attribution.
-no-text: keyed_priority_queue 0.4.2
-no-text: r-efi 5.3.0
-no-text: r-efi 6.0.0
-no-text: rsqlite-vfs 0.2.0
+# Crates whose published package ships no licence text. The upstream text is committed under
+# third-party-notices/ and its SHA-256 is checked on every run. Sources at the revisions
+# recorded in the packages' .cargo_vcs_info.json, verified 2026-11-22:
+# keyed_priority_queue 0.4.2 (MIT)
+# https://raw.githubusercontent.com/AngelicosPhosphoros/keyed_priority_queue/2656a970a1ff174010bb8ebfb676f922d2d59599/LICENSE.md
+# rsqlite-vfs 0.2.0 (MIT, workspace root licence)
+# https://raw.githubusercontent.com/Spxg/sqlite-wasm-rs/3d8318430bacd7d6a1aafdf5b5e54fb0fee8d451/LICENSE
+# r-efi 5.3.0 and 6.0.0 (MIT selected from the upstream alternatives)
+# https://raw.githubusercontent.com/r-efi/r-efi/97b55bed1c2c91dcbf787674849f05337ff80b33/AUTHORS
+# https://raw.githubusercontent.com/r-efi/r-efi/7e1b0322d31d625f81a5656096330934f9cd835d/AUTHORS
+supplement: keyed_priority_queue 0.4.2 keyed_priority_queue-0.4.2.LICENSE.md 824f627ec8266fa82057490c3d0982c9b327dca9de1c3c77ebb0128a13621a13
+supplement: rsqlite-vfs 0.2.0 rsqlite-vfs-0.2.0.LICENSE e1c1975c3474cce31722836f101a40ffaf1cc784e4d2f38ce3e77b9712934e78
+supplement: r-efi 5.3.0 r-efi-5.3.0.AUTHORS ff92bed461f50338dd703a9ba9aee496a425957873df1d91192776e4bdf5dda7
+supplement: r-efi 6.0.0 r-efi-6.0.0.AUTHORS d027e91dbc9cdbb2f1190068e498bd6b61cff022b6a032b191021ba658d96111
+licence-selection: r-efi 5.3.0 MIT
+licence-selection: r-efi 6.0.0 MIT

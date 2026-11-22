@@ -253,17 +253,24 @@ async fn sse(headers: HeaderMap, active: Arc<AtomicUsize>) -> Response {
 
 #[tokio::test]
 async fn streams_sse_immediately_and_disconnect_releases_a_slot_and_upstream_body() {
+    // The ingress reserves sixteen of its 64 exchanges for ordinary traffic.
+    const SSE_LIMIT: usize = 48;
+
     let active = Arc::new(AtomicUsize::new(0));
     let count = active.clone();
-    let upstream = serve(Router::new().route(
-        "/stream",
-        get(move |headers: HeaderMap| sse(headers, count.clone())),
-    ))
+    let upstream = serve(
+        Router::new()
+            .route(
+                "/stream",
+                get(move |headers: HeaderMap| sse(headers, count.clone())),
+            )
+            .route("/healthz", get(|| async { StatusCode::NO_CONTENT })),
+    )
     .await;
     let ingress = serve(ingress_router(&upstream.url).unwrap()).await;
     let client = client();
     let mut held = Vec::new();
-    for _ in 0..64 {
+    for _ in 0..SSE_LIMIT {
         let mut response = tokio::time::timeout(
             Duration::from_secs(2),
             client
@@ -284,7 +291,7 @@ async fn streams_sse_immediately_and_disconnect_releases_a_slot_and_upstream_bod
         assert!(String::from_utf8_lossy(&chunk).contains("id: 27"));
         held.push(response);
     }
-    assert_eq!(active.load(Ordering::SeqCst), 64);
+    assert_eq!(active.load(Ordering::SeqCst), SSE_LIMIT);
     assert_eq!(
         client
             .get(format!("{}/stream", ingress.url))
@@ -294,10 +301,18 @@ async fn streams_sse_immediately_and_disconnect_releases_a_slot_and_upstream_bod
             .status(),
         StatusCode::TOO_MANY_REQUESTS
     );
+    let health = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.get(format!("{}/healthz", ingress.url)).send(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(health.status(), StatusCode::NO_CONTENT);
     drop(held.pop());
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if active.load(Ordering::SeqCst) == 63 {
+            if active.load(Ordering::SeqCst) == SSE_LIMIT - 1 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
