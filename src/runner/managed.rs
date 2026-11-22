@@ -2574,9 +2574,17 @@ async fn launch_worker(
     if let Some(session) = &mut live {
         session.begin_producer_drain();
     }
-    let outcome = settle_managed_launch(runtime, client, state, execution, monitor).await;
+    let outcome = settle_managed_launch(runtime, client, state, &spec, execution, monitor).await;
     if let Some(session) = live {
-        session.finish_terminal(outcome.is_ok()).await;
+        // A later control or observation error can carry the result of the
+        // same terminal audit and keep the launch error visible to the caller.
+        let terminal_confirmed = match &outcome {
+            Ok(_) => true,
+            Err(error) => error
+                .downcast_ref::<control_monitor::RejectedLaunch>()
+                .is_some_and(|rejected| rejected.summary.is_some()),
+        };
+        session.finish_terminal(terminal_confirmed).await;
     }
     outcome
 }
@@ -2585,6 +2593,7 @@ async fn settle_managed_launch(
     runtime: &ManagedRuntime,
     client: &AuditClient,
     state: &PlanState,
+    spec: &ContainerSpec,
     execution: Result<crate::runtime::ManagedRetainedExecution>,
     monitor: std::result::Result<(), control_monitor::ControlFailure>,
 ) -> Result<RunSummary> {
@@ -2592,7 +2601,7 @@ async fn settle_managed_launch(
     // carrier's original cause/contexts remain owned beside that completion.
     let (execution, execution_error) = match execution {
         Ok(retained) => (Ok(retained), None),
-        Err(error) => match runtime.take_completed_legacy_failure(&spec, error) {
+        Err(error) => match runtime.take_completed_legacy_failure(spec, error) {
             Ok((retained, error)) => (Ok(retained), Some(error)),
             Err(error) => (Err(error), None),
         },
