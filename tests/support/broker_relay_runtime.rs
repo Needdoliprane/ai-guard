@@ -419,6 +419,8 @@ pub fn contradictory_create_flags_are_refused_before_fixture_mutation() -> Resul
     }
 
     let mut contradictions: Vec<Vec<String>> = [
+        vec!["--pull=never"],
+        vec!["--pull=always"],
         vec!["--network", "host"],
         vec!["--privileged=true"],
         vec!["--tty=true"],
@@ -513,7 +515,7 @@ fn validate_create(args: &[String]) -> Result<ValidatedCreate> {
             .get(at)
             .context("missing create image separator")?
             .as_str();
-        if matches!(key, "--read-only" | "--interactive") {
+        if matches!(key, "--pull=never" | "--read-only" | "--interactive") {
             ensure!(flags.insert(key), "duplicate create flag");
             at += 1;
             continue;
@@ -595,7 +597,7 @@ fn validate_create(args: &[String]) -> Result<ValidatedCreate> {
         ensure!(required(key)? == expected, "fixture create option {key}");
     }
     ensure!(
-        singles.len() == 12 && flags.contains("--read-only"),
+        singles.len() == 12 && flags.contains("--pull=never") && flags.contains("--read-only"),
         "create option inventory"
     );
     ensure!(labels.len() == 3, "create label inventory");
