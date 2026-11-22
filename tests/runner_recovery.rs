@@ -1111,9 +1111,59 @@ async fn broker_crash_recovery_observes_then_stops_the_same_running_instance() {
 
     fs::remove_file(audit_refusal).unwrap();
     let reconciled = resume_with_adoption().await;
+    let reconciliation_diagnostic = (!reconciled.status.success()).then(|| {
+        const SAFE_CLI_MESSAGE_MARKERS: [(&str, &str); 4] = [
+            ("no terminal proof", "no_terminal_proof"),
+            (
+                "invocation adoption is pending",
+                "invocation_adoption_pending",
+            ),
+            ("audit", "audit_related"),
+            ("runtime", "runtime_related"),
+        ];
+        let classify_cli_message = |message: &str| {
+            let message = message.to_ascii_lowercase();
+            SAFE_CLI_MESSAGE_MARKERS
+                .iter()
+                .find_map(|(marker, category)| message.contains(marker).then_some(*category))
+        };
+        let cli_message_category = serde_json::from_slice::<Value>(&reconciled.stdout)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .and_then(classify_cli_message)
+            })
+            .or_else(|| {
+                let stderr_prefix = &reconciled.stderr[..reconciled.stderr.len().min(4096)];
+                let stderr_message = String::from_utf8_lossy(stderr_prefix);
+                classify_cli_message(&stderr_message)
+            })
+            .unwrap_or("no_safe_cli_message");
+        let worker_snapshot = scenario.store.workers().ok();
+        let worker = worker_snapshot
+            .as_ref()
+            .and_then(|workers| workers.first());
+        let worker_state = worker
+            .map(|worker| format!("{:?}", worker.state))
+            .unwrap_or_else(|| "unavailable".into());
+        let quota_held = worker.map(|worker| worker.quota_held);
+        let usage_count = scenario.store.worker_usage().ok().map(|usage| usage.len());
+        let audit_head_unchanged = scenario.store.head().ok().map(|head| head == before_rejected_audit);
+        let terminal_ack = scenario.root.join("terminal_ack").is_file();
+        format!(
+            "exit_code={:?}, cli_message_category={}, worker_state={}, quota_held={:?}, usage_count={:?}, terminal_ack={}, audit_head_unchanged={:?}",
+            reconciled.status.code(), cli_message_category, worker_state, quota_held,
+            usage_count, terminal_ack, audit_head_unchanged,
+        )
+    });
     assert!(
         reconciled.status.success(),
-        "authenticated terminal reconciliation failed"
+        "authenticated terminal reconciliation failed: {}",
+        reconciliation_diagnostic
+            .as_deref()
+            .unwrap_or("diagnostic unavailable")
     );
     let workers = scenario.store.workers().unwrap();
     let [worker] = workers.as_slice() else {
