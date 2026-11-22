@@ -396,7 +396,7 @@ impl std::fmt::Debug for AcceptedHelloV2 {
 #[derive(Clone, Debug)]
 pub(crate) enum WaitingForAttachHelloV2 {
     EofBeforeHello,
-    ReadyWritten(AcceptedHelloV2),
+    ReadyWritten(Box<AcceptedHelloV2>),
 }
 
 /// `bootstrap_waiting_for_attach`, returning the accepted Hello metadata.
@@ -454,7 +454,7 @@ where
     // Same fence as `bootstrap_waiting`: the Ready IO may finish in one poll
     // after `until`.
     check_deadline(until)?;
-    Ok(WaitingForAttachHelloV2::ReadyWritten(accepted))
+    Ok(WaitingForAttachHelloV2::ReadyWritten(Box::new(accepted)))
 }
 
 struct State {

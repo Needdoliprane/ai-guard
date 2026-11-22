@@ -323,7 +323,7 @@ where
         .map_err(|_| SupervisorEndV3::Io)
         .and_then(|permit| BootstrapCapacity::new(permit).map_err(|_| SupervisorEndV3::Io))?;
     match bootstrap_waiting_for_attach_hello(input, output, &capacity, MAX_HANDSHAKE_TIME).await {
-        Ok(WaitingForAttachHelloV2::ReadyWritten(hello)) => Ok(hello),
+        Ok(WaitingForAttachHelloV2::ReadyWritten(hello)) => Ok(*hello),
         Ok(WaitingForAttachHelloV2::EofBeforeHello) => Err(SupervisorEndV3::NoHandoff),
         Err(
             BootstrapError::Protocol

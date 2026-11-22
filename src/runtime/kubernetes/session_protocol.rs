@@ -348,7 +348,7 @@ impl FrameReaderV3 {
             self.header[3],
         ]) as usize;
         // The largest admissible frame, before the channel is known.
-        if declared < 2 || declared > MAX_HANDOFF_BYTES + 1 {
+        if !(2..=MAX_HANDOFF_BYTES + 1).contains(&declared) {
             return Err(SessionProtocolError::FrameSize);
         }
         if self.header_used < FRAME_HEADER_BYTES {
