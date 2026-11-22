@@ -174,7 +174,9 @@ impl Run<'_> {
             Err(end) => return end,
         }
         // A Stop requested before Start is answered by a `stopped` refusal.
-        if let Some(reason) = *self.stop.borrow_and_update() {
+        // Copied out: the watch guard is never held across an await.
+        let requested = *self.stop.borrow_and_update();
+        if let Some(reason) = requested {
             return self.stop_before_start(reason, waits).await;
         }
         if let Err(error) = self.sender.send_control(BrokerControlV3::Start).await {
