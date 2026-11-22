@@ -1075,7 +1075,7 @@ async fn run() -> Result<()> {
             let mut gateways = Vec::new();
             let mut quotas = Vec::new();
             let mut held_create_policies = Vec::new();
-            let mut event_count = 0_u64;
+            let mut sqlite_event_count = 0_u64;
             let mut capacity_diagnostics = Vec::with_capacity(tenants.len());
             for tenant in tenants {
                 quotas.push((tenant.tenant_id.clone(), tenant.worker_quota));
@@ -1213,7 +1213,7 @@ async fn run() -> Result<()> {
                     check.valid,
                     "Audit altéré : le collecteur refuse de démarrer"
                 );
-                event_count = event_count
+                sqlite_event_count = sqlite_event_count
                     .checked_add(check.event_count)
                     .context("Nombre d'événements hors limite")?;
                 gateways.push(TenantGateway {
@@ -1224,6 +1224,10 @@ async fn run() -> Result<()> {
                 });
             }
             let tenant_count = gateways.len();
+            let sqlite_tenant_count = gateways
+                .iter()
+                .filter(|tenant| matches!(&tenant.store, TenantStore::Sqlite(_)))
+                .count();
             let oidc = args
                 .oidc_config
                 .as_ref()
@@ -1254,9 +1258,18 @@ async fn run() -> Result<()> {
                     control,
                     shutdown,
                     move |listen, _control| {
+                        let audit_counts = match sqlite_tenant_count {
+                            0 => "nombre d’événements MySQL non relevé".into(),
+                            count if count == tenant_count => {
+                                format!("{sqlite_event_count} événements dans les chaînes SQLite")
+                            }
+                            count => format!(
+                                "{sqlite_event_count} événements dans les chaînes SQLite ({count} tenant(s)), nombre d’événements MySQL non relevé"
+                            ),
+                        };
                         eprintln!(
-                            "Gateway {} — {} tenant(s), audit vérifié, {} événements",
-                            listen, tenant_count, event_count
+                            "Gateway {} — {} tenant(s), audit vérifié, {}",
+                            listen, tenant_count, audit_counts
                         );
                         for diagnostic in capacity_diagnostics {
                             eprintln!("{diagnostic}");
