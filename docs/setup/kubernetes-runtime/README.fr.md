@@ -822,6 +822,10 @@ contient les objets de cluster revus.
 | Exécution de session côté broker (K4) | `src/runtime/kubernetes/session_run.rs` | Pilote le protocole v3 après l'encadrement de l'attachement : Handoff et archive, import déclaré, Start, stdin métier, sortie du fournisseur vers un récepteur (comptée, jamais mise en tampon), au plus un Stop, sortie déclarée. La fin déclarée reste distincte des fenêtres du broker, d'un flux perdu et de la fin observée du conteneur. Les octets d'egress sont laissés au propriétaire G05. |
 | Demande d'egress par le broker (liaison G05) | `src/runtime/kubernetes/session_profile.rs`, `src/audit/kubernetes_session/effects.rs` | Le profil engage `network: denied` (par défaut) ou `broker_egress`. Le réseau du Pod reste refusé par la NetworkPolicy dans les deux cas. `egress_binding_active` est le prédicat en lecture seule que la décision d'egress G05 appelle dans sa propre transaction. Il ne répond `active` que pour une session dont le profil a demandé l'egress par le broker, dont la libération du gate et l'unique attachement sont appliqués, et sans terminal, suppression ni règlement enregistré. Chaque destination reste décidée par la politique d'egress du tenant. La composition du propriétaire à travers l'attachement n'est pas encore câblée. |
 
+Avant de remettre le workspace à l’étape suivante, le pilote exige que le claim
+lié conserve l’UID confirmé et la classe de stockage approuvée. Une observation
+divergente conserve le CREATE enregistré et le quota réservé.
+
 ### Activer les sessions à effet pour un tenant
 
 Les effets s'activent par tenant avec le champ facultatif `session_effect_policy`
