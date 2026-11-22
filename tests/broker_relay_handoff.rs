@@ -496,6 +496,12 @@ async fn software_broker_lost_claim_recovery_retains_history_without_exec() -> R
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn software_broker_scoped_relay_ipc_refuses_before_private_detail() -> Result<()> {
     let fixture = Fixture::new(90).await?;
+    let result = verify_scoped_relay_ipc(&fixture).await;
+    let cleanup = fixture.close().await;
+    result.and(cleanup)
+}
+
+async fn verify_scoped_relay_ipc(fixture: &Fixture) -> Result<()> {
     let a_job = fixture.submit("a", 90).await?;
     let a_endpoint = fixture.wait_endpoint(a_job).await?;
     let b_job = fixture.submit("b", 90).await?;
@@ -570,7 +576,7 @@ async fn software_broker_scoped_relay_ipc_refuses_before_private_detail() -> Res
     fixture.cancel("b", b_job).await?;
     fixture.wait_worker_a_terminal(&a_endpoint).await?;
     worker_terminal(&fixture.b, &b_endpoint).await?;
-    fixture.close().await
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
