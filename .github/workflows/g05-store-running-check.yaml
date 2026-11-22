@@ -1,0 +1,117 @@
+name: G05 SQLite store verification
+
+on:
+  push:
+    branches: ['claude/v1-g05-store-running-check-20261122']
+
+permissions:
+  contents: read
+
+jobs:
+  sqlite-store:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      AI_GUARD_BUILD_REVISION: a1aefa717eb069025b2b3a8ff104469e7b124eb5
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+    steps:
+      - name: Check out exact Store candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.AI_GUARD_BUILD_REVISION }}
+          persist-credentials: false
+      - name: Verify the seven Store selectors
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="$RUNNER_TEMP/g05-store-receipt.txt"
+          : > "$receipt"
+          record() { printf '%s\n' "$1" | tee -a "$receipt"; }
+          phase=source
+          finish() {
+            status=$?
+            record "phase=$phase exit_code=$status"
+            cat "$receipt" >> "$GITHUB_STEP_SUMMARY"
+          }
+          trap finish EXIT
+
+          [[ "$(uname -sm)" == 'Linux x86_64' ]]
+          [[ "$(git rev-parse HEAD)" == "$AI_GUARD_BUILD_REVISION" ]]
+          sha256sum --check --status <<'SHA256'
+          55df326c5a9105d6298354659af1a36c1b82941b475ac51a1e30034bdb29cdfa  src/audit/egress_decisions.rs
+          7b16561d409b0790b88d4f11adbd7f173e0aa512c5fb387da5f69e34f4c2b9d8  src/audit/egress_decisions_tests.rs
+          7fd7195c582fef1844c91e7d1c9dca6dd4916bbb28767adf72675f4c3c7fe55a  tests/support/relay_admission_fixture.rs
+          SHA256
+          record "source_sha=$AI_GUARD_BUILD_REVISION workflow_sha=$GITHUB_SHA phase=source result=verified"
+          record "host=linux-x86_64 profile=sqlite-only run_id=$GITHUB_RUN_ID attempt=$GITHUB_RUN_ATTEMPT"
+
+          phase=format
+          rustfmt --edition 2024 --check src/audit/egress_decisions.rs src/audit/egress_decisions_tests.rs >/dev/null 2>&1
+          record 'phase=format result=pass'
+          phase=fetch
+          cargo fetch --locked >/dev/null 2>&1
+          record 'phase=fetch result=pass'
+
+          phase=build
+          export CARGO_TARGET_DIR="$(mktemp -d "$RUNNER_TEMP/g05-store-target.XXXXXX")"
+          # Publish only the digest of Cargo's unique library test artifact.
+          binary="$(
+            cargo test --locked --offline --no-default-features --lib --no-run --message-format=json 2>/dev/null |
+              jq -nre '
+                [inputs | select(.reason == "compiler-artifact" and .profile.test
+                  and .target.name == "agentsandbox" and .target.kind == ["lib"])
+                  | .executable | select(type == "string")] | unique
+                | if length == 1 then .[0] else empty end
+              ' 2>/dev/null
+          )"
+          [[ "$binary" == "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* && -f "$binary" && -x "$binary" ]]
+          read -r binary_sha256 _ < <(sha256sum -- "$binary")
+          record "phase=build result=pass binary_sha256=$binary_sha256"
+
+          phase=inventory
+          prefix=audit::egress_decisions::tests::egress_store_
+          selectors=(
+            "${prefix}allow_is_durable_bound_to_the_running_egress_worker_and_idempotent"
+            "${prefix}channel_open_requires_the_current_running_binding"
+            "${prefix}masks_text_and_refuses_canonical_redaction_collisions"
+            "${prefix}observations_are_idempotent_and_the_namespace_is_reserved"
+            "${prefix}refuses_workers_without_egress_unknown_or_foreign_bindings"
+            "${prefix}stopping_revokes_renewal_and_preserves_the_opening_receipt"
+            "${prefix}unknown_destination_is_a_durable_review_and_renewal_closes_unknown_decisions"
+          )
+          actual="$("$binary" --list "$prefix" 2>/dev/null | sed -n 's/: test$//p' | LC_ALL=C sort)"
+          expected="$(printf '%s\n' "${selectors[@]}" | LC_ALL=C sort)"
+          [[ "$actual" == "$expected" ]]
+          record "phase=inventory result=pass expected=${#selectors[@]}"
+
+          phase=test
+          export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
+          passed=0
+          failures=0
+          for selector in "${selectors[@]}"; do
+            if output="$("$binary" --exact "$selector" --test-threads=1 --color never 2>&1)" &&
+              grep -Fxq "test $selector ... ok" <<<"$output" &&
+              grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' <<<"$output"; then
+              record "test=$selector result=pass"
+              passed=$((passed + 1))
+            else
+              record "test=$selector result=fail"
+              failures=$((failures + 1))
+            fi
+          done
+          record "phase=test expected=${#selectors[@]} pass=$passed fail=$failures"
+          [[ "$passed" -eq "${#selectors[@]}" && "$failures" -eq 0 ]]
+          printf '%s  %s\n' "$binary_sha256" "$binary" | sha256sum --check --status
+          record 'phase=test result=pass ignored=0 binary_unchanged=yes'
+      - name: Upload sanitized Store receipt
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: g05-sqlite-store-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g05-store-receipt.txt
+          if-no-files-found: error
+          retention-days: 14

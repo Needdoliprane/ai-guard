@@ -9,7 +9,9 @@ name: Lot verification
 
 on:
   push:
-    branches: ['claude/v1-**']
+    branches:
+      - 'claude/v1-**'
+      - '!claude/v1-g05-store-running-check-20261122'
 
 permissions:
   contents: read
