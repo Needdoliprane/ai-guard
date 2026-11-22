@@ -564,7 +564,7 @@ async fn write_client(socket: &mut TcpStream, bytes: &[u8]) -> Result<()> {
 pub async fn serve<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     config: LoopbackConfig,
     mut input: R,
-    mut output: W,
+    output: W,
 ) -> Result<()> {
     let started = Instant::now();
     let deadline = started + HANDSHAKE_TIME;

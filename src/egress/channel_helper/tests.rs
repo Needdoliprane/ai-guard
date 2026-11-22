@@ -215,7 +215,8 @@ async fn premature_client_data_is_cancelled_without_a_data_frame() {
             reason: EgressReasonV1::Cancelled
         }
     ));
-    // A late acceptance of the cancelled ID is a channel protocol failure.
+    // A late acceptance crossing the cancellation names a retired flow: it is
+    // discarded and the epoch keeps serving new flows.
     write_message(
         &mut output,
         &EgressMessageV1::Accepted { flow_id: 1 },
@@ -223,7 +224,18 @@ async fn premature_client_data_is_cancelled_without_a_data_frame() {
     )
     .await
     .unwrap();
-    assert_eq!(task.await.unwrap(), Err(CommonEgressHelperError::Protocol));
+    let mut second = TcpStream::connect(address).await.unwrap();
+    second
+        .write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\n\r\n")
+        .await
+        .unwrap();
+    assert!(matches!(
+        reader.read(&mut input).await.unwrap().unwrap(),
+        EgressMessageV1::Open { flow_id: 2, .. }
+    ));
+    drop(output);
+    let exit = tokio::time::timeout(std::time::Duration::from_secs(10), task).await;
+    assert_eq!(exit.expect("helper ends on pipe EOF").unwrap(), Ok(()));
 }
 
 #[tokio::test]
