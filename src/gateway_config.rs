@@ -533,13 +533,42 @@ pub fn validate_policies_for(
             ConfiguredStorage::Sqlite(_) => physical_bytes,
             #[cfg(feature = "mysql-storage")]
             ConfiguredStorage::Mysql(_) => {
-                anyhow::ensure!(
-                    tenant.workload_audit_policy.is_none()
-                        && tenant.relay_retention_policy.is_none()
-                        && tenant.egress_policy.is_none()
-                        && tenant.session_effect_policy.is_none(),
-                    "workload audit, relay retention, egress and session effect policies require SQLite storage"
-                );
+                use agentsandbox::tenant_store::StorageCapabilityUnavailable;
+
+                if let Some(field) = [
+                    (
+                        "workload_audit_policy",
+                        tenant.workload_audit_policy.is_some(),
+                    ),
+                    (
+                        "relay_retention_policy",
+                        tenant.relay_retention_policy.is_some(),
+                    ),
+                    ("egress_policy", tenant.egress_policy.is_some()),
+                    (
+                        "session_effect_policy",
+                        tenant.session_effect_policy.is_some(),
+                    ),
+                    ("held_create_policy", tenant.held_create_policy.is_some()),
+                    (
+                        "session_reservation_policy",
+                        tenant.session_reservation_policy.is_some(),
+                    ),
+                    (
+                        "session_recovery_policy",
+                        tenant.session_recovery_policy.is_some(),
+                    ),
+                    (
+                        "session_control_recovery_policy",
+                        tenant.session_control_recovery_policy.is_some(),
+                    ),
+                ]
+                .into_iter()
+                .find_map(|(field, configured)| configured.then_some(field))
+                {
+                    return Err(anyhow::Error::new(StorageCapabilityUnavailable(field))
+                        .context(format!("{field} requires SQLite storage")));
+                }
                 agentsandbox::audit::DEFAULT_PHYSICAL_BYTES
             }
         };
@@ -1100,6 +1129,61 @@ mod tests {
         let registry_link = path.with_file_name("registry-link");
         std::os::unix::fs::symlink(&path, &registry_link).unwrap();
         assert!(load(&registry_link).is_err());
+    }
+
+    #[cfg(feature = "mysql-storage")]
+    #[test]
+    fn mysql_preflight_refuses_sqlite_only_kubernetes_policies() {
+        use agentsandbox::tenant_store::StorageCapabilityUnavailable;
+
+        let (dir, path, registry) = fixture();
+        let files = mysql_files(dir.path(), false);
+        let target = MysqlTarget::load(&files, &Ok).unwrap();
+        let storage = ConfiguredStorage::Mysql(Box::new(target));
+
+        std::fs::write(&path, registry.to_string()).unwrap();
+        let mut tenants = load(&path).unwrap();
+        tenants[0].storage = storage.clone();
+        validate_policies(&tenants, 10_000).expect("MySQL supports the default policies");
+
+        let recovery = json!({"version": 2, "decision_ttl_seconds": 30, "allowed_broker_ids": []});
+        for (field, policy) in [
+            (
+                "held_create_policy",
+                json!({
+                    "version": 1,
+                    "decision_ttl_seconds": 30,
+                    "approvals": [{
+                        "authority_fingerprint": "a".repeat(64),
+                        "image": format!("worker-a@sha256:{}", "d".repeat(64)),
+                        "profile": "kubernetes_held_pod_v1"
+                    }]
+                }),
+            ),
+            (
+                "session_reservation_policy",
+                json!({"version": 2, "decision_ttl_seconds": 30, "approvals": []}),
+            ),
+            ("session_recovery_policy", recovery.clone()),
+            ("session_control_recovery_policy", recovery),
+        ] {
+            let mut configured = registry.clone();
+            configured["tenants"][0][field] = policy;
+            std::fs::write(&path, configured.to_string()).unwrap();
+            let mut tenants = load(&path).unwrap();
+            validate_policies(&tenants, 10_000).expect("SQLite supports the configured policy");
+            tenants[0].storage = storage.clone();
+            let refusal = validate_policies(&tenants, 10_000).unwrap_err();
+            assert_eq!(
+                refusal.downcast_ref::<StorageCapabilityUnavailable>(),
+                Some(&StorageCapabilityUnavailable(field))
+            );
+            assert_eq!(
+                refusal.to_string(),
+                format!("{field} requires SQLite storage")
+            );
+        }
+        assert!(!dir.path().join("a.sqlite").exists());
     }
 
     #[cfg(feature = "mysql-storage")]
