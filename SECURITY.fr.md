@@ -6,7 +6,7 @@
 
 Signalez toute vulnérabilité en privé par les **GitHub Security Advisories** de ce dépôt : ouvrez l'onglet **Security** du dépôt et choisissez **Report a vulnerability**. Ne placez ni vulnérabilité ni détail de reproduction dans une issue, une pull request ou une discussion.
 
-**État actuel du canal.** Le dépôt est privé. Les mainteneurs peuvent ouvrir dès maintenant des avis de sécurité en brouillon. Le signalement privé par des tiers sera activé lorsque le dépôt deviendra public ; d'ici là, un rapporteur doit demander à un mainteneur d'ouvrir un avis en brouillon et de l'y inviter. Aucune adresse e-mail, prime ni engagement de délai de réponse n'est proposé.
+**État actuel du canal.** Le signalement privé GitHub est activé pour ce dépôt public. Les mainteneurs traitent les signalements dans des avis de sécurité en brouillon. Aucune adresse e-mail, prime ni engagement de délai de réponse n'est proposé.
 
 ## Informations à fournir
 

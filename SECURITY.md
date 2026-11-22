@@ -6,7 +6,7 @@
 
 Report vulnerabilities privately through **GitHub Security Advisories** of this repository: open the repository's **Security** tab and choose **Report a vulnerability**. Do not put vulnerabilities or reproduction details in issues, pull requests or discussions.
 
-**Current state of the channel.** The repository is private. Maintainers can open draft security advisories now. Private vulnerability reporting by third parties will be enabled when the repository becomes public; until then, a reporter needs a maintainer to open a draft advisory and invite them. No email address, bounty or response-time commitment is offered.
+**Current state of the channel.** GitHub private vulnerability reporting is enabled for this public repository. Maintainers handle reports in draft security advisories. No email address, bounty or response-time commitment is offered.
 
 ## What to include
 
