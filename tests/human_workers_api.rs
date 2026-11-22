@@ -210,6 +210,7 @@ fn reserve_with_session(
             credential_binding_id: None,
             credential_names: vec![],
             provider_resolution: None,
+            egress: None,
         },
         decision_request: request,
     };

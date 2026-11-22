@@ -478,6 +478,7 @@ fn prepare_manual_arm(
                 credential_binding_id: binding.binding_id().map(|id| id.to_string()),
                 credential_names: binding.names().to_vec(),
                 provider_resolution: None,
+                egress: None,
             },
         },
     };

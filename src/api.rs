@@ -52,6 +52,7 @@ pub use auth::{
 };
 mod brokers;
 mod control_transport;
+mod egress;
 mod egress_policy;
 #[cfg(test)]
 mod held_policy_tests;
@@ -972,6 +973,7 @@ fn gateway_base_router(state: GatewayState) -> Router {
                 .route("/control/events", post(ingest_control_event))
                 .merge(supervision::routes())
                 .merge(egress_policy::router())
+                .merge(egress::routes())
                 .merge(workload::routes())
                 .merge(relay::routes())
                 .merge(relay_admission::routes())
@@ -1036,9 +1038,15 @@ async fn ingest(
                 .map_err(|_| error(StatusCode::BAD_REQUEST, "Événement invalide."))?;
             if crate::audit::D5_CONTROL_EVENT_KINDS.contains(&event.kind.as_str())
                 || crate::relay::admission::reserved_kind(&event.kind)
-                || ["security.decision", "control", "worker", "usage.allocation"]
-                    .iter()
-                    .any(|namespace| crate::model::event_kind_in_namespace(&event.kind, namespace))
+                || [
+                    "security.decision",
+                    "control",
+                    "worker",
+                    "usage.allocation",
+                    "egress",
+                ]
+                .iter()
+                .any(|namespace| crate::model::event_kind_in_namespace(&event.kind, namespace))
             {
                 return Err(error(
                     StatusCode::FORBIDDEN,

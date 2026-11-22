@@ -2126,6 +2126,7 @@ mod tests {
                 credential_binding_id: None,
                 credential_names: Vec::new(),
                 provider_resolution: None,
+                egress: None,
             },
             spec_hash: "5".repeat(64),
             policy_hash: "6".repeat(64),

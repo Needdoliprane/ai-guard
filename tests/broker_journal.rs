@@ -236,6 +236,7 @@ fn versioned_managed_plan() -> (ExecutionIntentV1, Value) {
             credential_binding_id: None,
             credential_names: vec![],
             provider_resolution: None,
+            egress: None,
         },
         decision_request: request,
     };

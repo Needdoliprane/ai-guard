@@ -1680,6 +1680,7 @@ pub(super) async fn broker_prepare(input: BrokerPreparation<'_>) -> Result<Manag
         credential_binding_id: input.binding.binding_id().map(|id| id.to_string()),
         credential_names: input.binding.names().to_vec(),
         provider_resolution: plan.request.provider_resolution.clone(),
+        egress: None,
     };
     Ok(ManagedCheckpoint {
         tenant_id: input.scope.tenant_id().into(),
@@ -2180,6 +2181,7 @@ pub(super) async fn execute_plan(
             .map(|credentials| credentials.names.clone())
             .unwrap_or_default(),
         provider_resolution: plan.request.provider_resolution.clone(),
+        egress: None,
     };
     let admission = AdmissionV1 {
         version: 1,

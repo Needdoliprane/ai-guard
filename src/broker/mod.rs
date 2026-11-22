@@ -6,6 +6,7 @@ pub mod checkpoint;
 pub mod clock;
 pub(crate) mod cold_terminal;
 pub(crate) mod discovery;
+pub(crate) mod egress_owner;
 #[doc(hidden)]
 pub mod enforcer;
 pub(crate) mod held_create_client;

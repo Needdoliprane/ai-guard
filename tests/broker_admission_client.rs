@@ -169,6 +169,7 @@ impl Fixture {
                 credential_binding_id: None,
                 credential_names: vec![],
                 provider_resolution: None,
+                egress: None,
             },
         };
         let supervised = SupervisedAdmissionV1 {

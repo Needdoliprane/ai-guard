@@ -25,6 +25,82 @@ fn accepted(state: &mut EgressChannelState, flow_id: u64, now: u64) {
 }
 
 #[test]
+fn egress_protocol_unavailable_round_trips_without_inventing_a_narrower_cause() {
+    for message in [
+        EgressMessageV1::Rejected {
+            flow_id: 1,
+            reason: EgressReasonV1::Unavailable,
+        },
+        EgressMessageV1::Reset {
+            flow_id: 1,
+            reason: EgressReasonV1::Unavailable,
+        },
+        EgressMessageV1::Closed {
+            flow_id: 1,
+            reason: EgressReasonV1::Unavailable,
+        },
+    ] {
+        let encoded = message.encode_payload().unwrap();
+        let decoded = EgressMessageV1::decode_payload(&encoded).unwrap();
+        assert_eq!(decoded.encode_payload().unwrap(), encoded);
+        assert!(matches!(
+            decoded,
+            EgressMessageV1::Rejected {
+                reason: EgressReasonV1::Unavailable,
+                ..
+            } | EgressMessageV1::Reset {
+                reason: EgressReasonV1::Unavailable,
+                ..
+            } | EgressMessageV1::Closed {
+                reason: EgressReasonV1::Unavailable,
+                ..
+            }
+        ));
+    }
+    assert!(
+        EgressMessageV1::decode_payload(
+            br#"{"operation":"rejected","flow_id":1,"reason":"unknown_guess"}"#
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn egress_protocol_end_of_stream_is_a_closed_observation_only() {
+    let message = EgressMessageV1::Closed {
+        flow_id: 1,
+        reason: EgressReasonV1::EndOfStream,
+    };
+    let encoded = message.encode_payload().unwrap();
+    assert!(matches!(
+        EgressMessageV1::decode_payload(&encoded).unwrap(),
+        EgressMessageV1::Closed {
+            flow_id: 1,
+            reason: EgressReasonV1::EndOfStream
+        }
+    ));
+    for message in [
+        EgressMessageV1::Rejected {
+            flow_id: 1,
+            reason: EgressReasonV1::EndOfStream,
+        },
+        EgressMessageV1::Reset {
+            flow_id: 1,
+            reason: EgressReasonV1::EndOfStream,
+        },
+    ] {
+        assert_eq!(message.encode_payload(), Err(EgressProtocolError::Protocol));
+    }
+    assert_eq!(
+        EgressMessageV1::decode_payload(
+            br#"{"operation":"reset","flow_id":1,"reason":"end_of_stream"}"#
+        )
+        .err(),
+        Some(EgressProtocolError::Protocol)
+    );
+}
+
+#[test]
 fn egress_protocol_requires_explicit_capability_and_current_handshake() {
     let mut absent = EgressChannelState::new(0);
     assert_eq!(
@@ -314,18 +390,21 @@ fn egress_protocol_limits_pending_live_and_open_rate_without_unbounded_replay_st
 
 #[test]
 fn egress_protocol_deadlines_unknown_flows_and_clock_rollback_close_the_epoch() {
+    // Flow-level open/idle expiry is reported per flow (see the test below);
+    // only the handshake deadline, a never-opened id and a clock rollback
+    // invalidate the whole epoch.
+    let mut handshake = EgressChannelState::new(0);
+    assert_eq!(
+        handshake.check_deadlines(5_000),
+        Err(EgressProtocolError::Timeout)
+    );
+    assert!(handshake.is_closed());
     let mut pending = ready();
     pending.on_worker(&open(1), 0).unwrap();
-    assert_eq!(
-        pending.check_deadlines(10_000),
-        Err(EgressProtocolError::Timeout)
-    );
+    assert_eq!(pending.check_deadlines(10_000), Ok(vec![1]));
     let mut idle = ready();
     accepted(&mut idle, 1, 0);
-    assert_eq!(
-        idle.check_deadlines(60_000),
-        Err(EgressProtocolError::Timeout)
-    );
+    assert_eq!(idle.check_deadlines(60_000), Ok(vec![1]));
     let mut unknown = ready();
     assert!(
         unknown
@@ -460,4 +539,133 @@ fn egress_protocol_control_size_precedes_unknown_or_escaped_dto_decoding() {
             Some(EgressProtocolError::Size)
         );
     }
+}
+
+// Real multiplexed IO: a peer frame may already be in flight when this side
+// terminates a flow. Such stale frames for a retired id are discarded; only
+// a never-opened id or a protocol violation still invalidates the epoch.
+#[test]
+fn egress_protocol_frames_crossing_a_reset_are_discarded_without_closing_the_channel() {
+    let mut state = ready();
+    accepted(&mut state, 1, 0);
+    accepted(&mut state, 2, 0);
+    for flow_id in [1, 2] {
+        state
+            .on_broker(&EgressMessageV1::Credit { flow_id, bytes: 16 }, 1)
+            .unwrap();
+    }
+    state
+        .on_broker(
+            &EgressMessageV1::Reset {
+                flow_id: 1,
+                reason: EgressReasonV1::Revoked,
+            },
+            2,
+        )
+        .unwrap();
+    // The worker had already written these before it read the Reset.
+    for message in [
+        EgressMessageV1::data(1, b"in-flight").unwrap(),
+        EgressMessageV1::HalfClose { flow_id: 1 },
+        EgressMessageV1::Credit {
+            flow_id: 1,
+            bytes: 16,
+        },
+        EgressMessageV1::Reset {
+            flow_id: 1,
+            reason: EgressReasonV1::Cancelled,
+        },
+    ] {
+        assert!(state.on_worker(&message, 3).is_ok());
+        assert_eq!(
+            state.on_worker(&message, 3),
+            Ok(super::protocol::Admission::Stale)
+        );
+    }
+    assert!(
+        !state.is_closed(),
+        "a crossing frame must not end every flow of the worker"
+    );
+    assert_eq!(state.flow_count(), 1, "the retired flow is not resurrected");
+    assert_eq!(state.buffered_bytes(), 0, "stale data reserves no buffer");
+    // The other flow and new opens continue on the same epoch.
+    assert!(
+        state
+            .on_worker(&EgressMessageV1::data(2, b"live").unwrap(), 4)
+            .is_ok()
+    );
+    accepted(&mut state, 3, 5);
+    // A never-opened id is still a protocol violation.
+    assert!(
+        state
+            .on_worker(&EgressMessageV1::data(9, b"x").unwrap(), 6)
+            .is_err()
+    );
+    assert!(state.is_closed());
+}
+
+#[test]
+fn egress_protocol_an_idle_or_pending_flow_expires_alone_and_the_channel_stays_open() {
+    let mut state = ready();
+    accepted(&mut state, 1, 0);
+    state.on_worker(&open(2), 59_000).unwrap();
+    accepted(&mut state, 3, 59_000);
+    // Flow 1 is idle for the full window; flow 2 is still within its open time.
+    assert!(state.check_deadlines(60_000).is_ok());
+    assert!(
+        !state.is_closed(),
+        "one idle flow must not close the worker's other flows"
+    );
+    assert_eq!(
+        state.flow_count(),
+        3,
+        "expiry is reported; the owner resets the flow"
+    );
+    assert_eq!(state.check_deadlines(60_000), Ok(vec![1]));
+    state
+        .on_broker(
+            &EgressMessageV1::Reset {
+                flow_id: 1,
+                reason: EgressReasonV1::Timeout,
+            },
+            60_000,
+        )
+        .unwrap();
+    assert_eq!(state.check_deadlines(60_001), Ok(vec![]));
+    assert_eq!(state.flow_count(), 2);
+}
+
+#[test]
+fn egress_protocol_forwarding_completion_after_a_reset_is_a_no_op() {
+    let mut state = ready();
+    accepted(&mut state, 1, 0);
+    state
+        .on_broker(
+            &EgressMessageV1::Credit {
+                flow_id: 1,
+                bytes: 16,
+            },
+            1,
+        )
+        .unwrap();
+    state
+        .on_worker(&EgressMessageV1::data(1, b"queued").unwrap(), 2)
+        .unwrap();
+    state
+        .on_broker(
+            &EgressMessageV1::Reset {
+                flow_id: 1,
+                reason: EgressReasonV1::Revoked,
+            },
+            3,
+        )
+        .unwrap();
+    // The pump finishes its write after the Reset was decided.
+    assert!(
+        state
+            .release_buffer(1, DirectionV1::WorkerToBroker, 6)
+            .is_ok()
+    );
+    assert!(!state.is_closed());
+    assert_eq!(state.buffered_bytes(), 0);
 }

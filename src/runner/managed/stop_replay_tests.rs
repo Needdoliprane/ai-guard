@@ -137,6 +137,7 @@ fn prepare_reservation(root: &Path, origin: &str, store: &Store) -> Result<(RunP
             credential_binding_id: None,
             credential_names: vec![],
             provider_resolution: None,
+            egress: None,
         },
     };
     let admitted = store.admit_worker(

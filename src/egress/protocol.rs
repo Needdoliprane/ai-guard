@@ -131,6 +131,10 @@ pub enum EgressReasonV1 {
     Revoked,
     Expired,
     AuditUnavailable,
+    /// The path is unavailable and this wire cannot establish a narrower cause.
+    Unavailable,
+    /// The broker observed upstream read EOF; this is not business success.
+    EndOfStream,
     Transport,
 }
 
@@ -329,6 +333,8 @@ impl<'a> BorrowedMessage<'a> {
                     "revoked" => EgressReasonV1::Revoked,
                     "expired" => EgressReasonV1::Expired,
                     "audit_unavailable" => EgressReasonV1::AuditUnavailable,
+                    "unavailable" => EgressReasonV1::Unavailable,
+                    "end_of_stream" => EgressReasonV1::EndOfStream,
                     "transport" => EgressReasonV1::Transport,
                     _ => return Err(EgressProtocolError::Protocol),
                 };
@@ -390,6 +396,14 @@ impl EgressMessageV1 {
             Self::Credit { bytes, .. } if *bytes == 0 || *bytes as usize > MAX_CREDIT_BYTES => {
                 Err(EgressProtocolError::Credit)
             }
+            Self::Rejected {
+                reason: EgressReasonV1::EndOfStream,
+                ..
+            }
+            | Self::Reset {
+                reason: EgressReasonV1::EndOfStream,
+                ..
+            } => Err(EgressProtocolError::Protocol),
             _ => Ok(()),
         }
     }
@@ -606,11 +620,24 @@ struct Flow {
     half_closed: [bool; 2],
 }
 
+/// Outcome of admitting one frame. `Stale` means the frame names a flow id that
+/// this epoch already retired (a peer frame crossed a local Reset/Close/Reject):
+/// it was discarded without effect and must not be forwarded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Admission {
+    Applied,
+    Stale,
+}
+
 /// Fixed-size local ledger for one externally owned epoch. It reserves payload
 /// bytes but stores none. The owner must not queue a payload until admission
 /// succeeds, and must release its reservation only after forwarding/drop.
 /// Every error invalidates the channel and discards all reservations. The owner
 /// must then close its actual FDs; clearing this state is no observation of IO.
+/// Flow ids are opened by the worker in strictly increasing order and never
+/// reused, so a frame for a retired id is stale rather than a violation; a
+/// never-opened id still invalidates the epoch. Pending and idle expiry is
+/// reported per flow by `check_deadlines`; the owner resets that flow alone.
 pub struct EgressChannelState {
     phase: Phase,
     created_at: u64,
@@ -643,7 +670,7 @@ impl EgressChannelState {
         now_ms: u64,
     ) -> Result<(), EgressProtocolError> {
         let result = (|| {
-            self.check_deadlines(now_ms)?;
+            self.advance_clock(now_ms)?;
             if self.phase != Phase::AwaitingCapability {
                 return Err(EgressProtocolError::State);
             }
@@ -660,7 +687,7 @@ impl EgressChannelState {
         &mut self,
         message: &EgressMessageV1,
         now_ms: u64,
-    ) -> Result<(), EgressProtocolError> {
+    ) -> Result<Admission, EgressProtocolError> {
         self.on_message(message, DirectionV1::WorkerToBroker, now_ms)
     }
 
@@ -668,8 +695,12 @@ impl EgressChannelState {
         &mut self,
         message: &EgressMessageV1,
         now_ms: u64,
-    ) -> Result<(), EgressProtocolError> {
+    ) -> Result<Admission, EgressProtocolError> {
         self.on_message(message, DirectionV1::BrokerToWorker, now_ms)
+    }
+
+    fn retired(&self, flow_id: u64) -> bool {
+        flow_id != 0 && flow_id <= self.last_flow_id && self.flow_index(flow_id).is_err()
     }
 
     fn on_message(
@@ -677,14 +708,17 @@ impl EgressChannelState {
         message: &EgressMessageV1,
         sender: DirectionV1,
         now_ms: u64,
-    ) -> Result<(), EgressProtocolError> {
+    ) -> Result<Admission, EgressProtocolError> {
         let result = (|| {
-            self.check_deadlines(now_ms)?;
+            self.advance_clock(now_ms)?;
             if self.phase != Phase::Open {
                 return Err(EgressProtocolError::Capability);
             }
             message.validate()?;
             let worker = sender == DirectionV1::WorkerToBroker;
+            if !matches!(message, EgressMessageV1::Open { .. }) && self.retired(message.flow_id()) {
+                return Ok(Admission::Stale);
+            }
             match message {
                 EgressMessageV1::Open { flow_id, .. } if worker => self.open(*flow_id, now_ms),
                 EgressMessageV1::Accepted { flow_id } if !worker => {
@@ -747,6 +781,7 @@ impl EgressChannelState {
                 }
                 _ => Err(EgressProtocolError::Protocol),
             }
+            .map(|()| Admission::Applied)
         })();
         self.finish(result)
     }
@@ -865,6 +900,10 @@ impl EgressChannelState {
             if self.phase != Phase::Open {
                 return Err(EgressProtocolError::Closed);
             }
+            // Reset/Close already released a retired flow's reservations.
+            if self.retired(flow_id) {
+                return Ok(());
+            }
             let index = self.flow_index(flow_id)?;
             let flow = self.flows[index]
                 .as_mut()
@@ -880,30 +919,40 @@ impl EgressChannelState {
         self.finish(result)
     }
 
-    pub fn check_deadlines(&mut self, now_ms: u64) -> Result<(), EgressProtocolError> {
-        let result = (|| {
-            if self.phase == Phase::Closed {
-                return Err(EgressProtocolError::Closed);
-            }
-            if now_ms < self.last_now {
-                return Err(EgressProtocolError::Clock);
-            }
-            self.last_now = now_ms;
-            if self.phase == Phase::AwaitingCapability && now_ms - self.created_at >= HANDSHAKE_MS {
-                return Err(EgressProtocolError::Timeout);
-            }
-            for flow in self.flows.iter().flatten() {
-                let expired = if flow.pending {
-                    now_ms - flow.opened_at >= OPEN_MS
-                } else {
-                    now_ms - flow.last_active >= IDLE_MS
-                };
-                if expired {
-                    return Err(EgressProtocolError::Timeout);
-                }
-            }
-            Ok(())
-        })();
+    /// Channel-fatal time checks only: closed epoch, clock rollback and the
+    /// handshake deadline.
+    fn advance_clock(&mut self, now_ms: u64) -> Result<(), EgressProtocolError> {
+        if self.phase == Phase::Closed {
+            return Err(EgressProtocolError::Closed);
+        }
+        if now_ms < self.last_now {
+            return Err(EgressProtocolError::Clock);
+        }
+        self.last_now = now_ms;
+        if self.phase == Phase::AwaitingCapability && now_ms - self.created_at >= HANDSHAKE_MS {
+            return Err(EgressProtocolError::Timeout);
+        }
+        Ok(())
+    }
+
+    /// Fatal clock checks, then the ids of flows whose open or idle time has
+    /// elapsed. Expired flows stay live until their owner resets them, so the
+    /// worker's other flows and the epoch remain open.
+    pub fn check_deadlines(&mut self, now_ms: u64) -> Result<Vec<u64>, EgressProtocolError> {
+        let result = self.advance_clock(now_ms).map(|()| {
+            self.flows
+                .iter()
+                .flatten()
+                .filter(|flow| {
+                    if flow.pending {
+                        now_ms - flow.opened_at >= OPEN_MS
+                    } else {
+                        now_ms - flow.last_active >= IDLE_MS
+                    }
+                })
+                .map(|flow| flow.id)
+                .collect()
+        });
         self.finish(result)
     }
 

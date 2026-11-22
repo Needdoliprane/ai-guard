@@ -523,7 +523,22 @@ pub fn run_from_environment(args: &[String]) -> Result<i32> {
         .map_err(|_| anyhow!("invalid provider bootstrap credential encoding"))?;
     let mut argv = vec![BOOTSTRAP_PROGRAM.into()];
     argv.extend_from_slice(args);
-    let execution = prepare_execution(&argv, &payload, Path::new("/home/agent"))?;
+    let mut execution = prepare_execution(&argv, &payload, Path::new("/home/agent"))?;
+    // Broker egress: the provider reaches its destinations only through the
+    // loopback helper the broker attaches after start. Wait, bounded, for it.
+    if let Some(marker) = std::env::var_os(crate::egress::proxy_env::EGRESS_PROXY_MARKER) {
+        let port = marker
+            .to_str()
+            .and_then(crate::egress::proxy_env::parse_marker)
+            .ok_or_else(|| anyhow!("egress_transport_unavailable: invalid egress proxy marker"))?;
+        ensure!(
+            crate::egress::proxy_env::wait_for_helper(port, std::time::Duration::from_secs(30)),
+            "egress_transport_unavailable: the broker egress channel did not become ready"
+        );
+        for (name, value) in crate::egress::proxy_env::proxy_environment(port) {
+            execution.environment.insert(name.into(), value);
+        }
+    }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -630,6 +645,8 @@ pub fn public_error(error: &anyhow::Error) -> &'static str {
         "credential_unsafe: provider authentication storage is not private or has changed"
     } else if text.starts_with("probe_failed:") {
         "probe_failed: provider capability probe timed out; no model command was started"
+    } else if text.starts_with("egress_transport_unavailable:") {
+        "egress_transport_unavailable: the broker egress channel is not ready; no provider was started and no other network path is used"
     } else {
         "invalid provider bootstrap request; prepare a new authorized request"
     }

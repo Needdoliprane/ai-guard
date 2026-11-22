@@ -25,6 +25,82 @@ fn direct_secret_handle_cannot_bypass_the_64_kib_credential_limit() {
     );
 }
 
+#[test]
+fn egress_credentials_reach_a_none_worker_only_through_the_broker_egress_profile() {
+    use agentsandbox::{control::EgressLaunchV1, control_fs::Directory};
+    let temporary = tempfile::tempdir().unwrap();
+    let config =
+        Directory::open_or_create(&temporary.path().canonicalize().unwrap().join("config"))
+            .unwrap();
+    let snapshot = config
+        .snapshot(b"OPENAI_API_KEY=fixture-private-provider-value\n")
+        .unwrap();
+    let spec = |network| {
+        ContainerSpec::new(
+            uuid::Uuid::new_v4(),
+            ContainerPurpose::Run,
+            "worker:fixture",
+            vec!["/usr/bin/id".into()],
+            network,
+        )
+        .unwrap()
+    };
+    let egress = EgressLaunchV1::broker_proxy(3128).unwrap();
+    // Without the egress profile, network none still refuses credentials.
+    assert!(
+        spec(NetworkMode::None)
+            .with_secret_env_handle(snapshot.private_file())
+            .is_err()
+    );
+    // The egress profile never applies to bridge or to import/export helpers.
+    assert!(
+        spec(NetworkMode::Bridge)
+            .with_broker_egress(&egress)
+            .is_err()
+    );
+    let import = ContainerSpec::new(
+        uuid::Uuid::new_v4(),
+        ContainerPurpose::Import,
+        "worker:fixture",
+        vec!["/usr/bin/id".into()],
+        NetworkMode::None,
+    )
+    .unwrap();
+    assert!(import.with_broker_egress(&egress).is_err());
+    let mediated = spec(NetworkMode::None)
+        .with_broker_egress(&egress)
+        .unwrap()
+        .with_secret_env_handle(snapshot.private_file())
+        .unwrap();
+    assert_eq!(mediated.egress_proxy_port(), Some(3128));
+    for runtime in [RuntimeKind::Docker, RuntimeKind::Podman] {
+        let args = mediated.create_args(runtime).unwrap();
+        let position = args.iter().position(|arg| arg == "--network").unwrap();
+        assert_eq!(
+            args[position + 1],
+            "none",
+            "the physical network stays none"
+        );
+        assert!(!args.iter().any(|arg| arg == "bridge"));
+        assert!(args.iter().any(|arg| arg == "--env-file"));
+        for expected in [
+            "HTTPS_PROXY=http://127.0.0.1:3128",
+            "https_proxy=http://127.0.0.1:3128",
+            "HTTP_PROXY=http://127.0.0.1:3128",
+            "http_proxy=http://127.0.0.1:3128",
+            "NO_PROXY=localhost,127.0.0.1,::1",
+            "no_proxy=localhost,127.0.0.1,::1",
+            "AI_GUARD_EGRESS_PROXY=http://127.0.0.1:3128",
+        ] {
+            let found = args
+                .windows(2)
+                .any(|pair| pair[0] == "--env" && pair[1] == expected);
+            assert!(found, "{expected}");
+        }
+        assert!(!args.join(" ").contains("fixture-private-provider-value"));
+    }
+}
+
 #[tokio::test]
 async fn export_refuses_a_fifo_checkpoint_without_blocking_or_contacting_runtime() {
     use std::os::unix::ffi::OsStrExt;

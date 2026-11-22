@@ -191,6 +191,7 @@ fn admit_worker(f: &Fixture, quota: &QuotaPolicyV1) -> (WorkerV1, i64, ControlRe
                 credential_binding_id: None,
                 credential_names: vec![],
                 provider_resolution: None,
+                egress: None,
             },
             decision_request: request,
         },

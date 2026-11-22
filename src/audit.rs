@@ -176,6 +176,7 @@ mod capacity_tests;
 mod collision_isolation_tests;
 mod control;
 pub(crate) mod egress;
+pub mod egress_decisions;
 mod human;
 mod human_brokers;
 mod human_modern;
@@ -264,6 +265,7 @@ pub struct Store {
     workload_audit_policy: WorkloadAuditPolicyV1,
     workload_audit_policy_explicit: bool,
     relay_retention_policy: crate::relay::RelayRetentionPolicyV1,
+    egress_policy: Option<crate::control::egress_decision::EgressPolicySnapshot>,
     unhealthy: AtomicBool,
     validated_data_version: AtomicI64,
     validated_total_changes: AtomicU64,
@@ -1028,6 +1030,7 @@ impl Store {
             ),
             workload_audit_policy_explicit: false,
             relay_retention_policy: crate::relay::RelayRetentionPolicyV1::default(),
+            egress_policy: None,
             unhealthy: AtomicBool::new(!initial_valid),
             validated_data_version: AtomicI64::new(validated_data_version),
             validated_total_changes: AtomicU64::new(validated_total_changes),
