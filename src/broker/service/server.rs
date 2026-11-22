@@ -605,10 +605,11 @@ impl RetainedServiceShutdown {
         let mut requests = JoinSet::new();
         let capacity = Arc::new(Semaphore::new(64));
         let mut retry = tokio::time::interval(Duration::from_secs(5));
-        loop {
+        let mut guardian_drained = false;
+        let drained = loop {
             tokio::select! {
-                _ = owner.terminate.recv() => break,
-                _ = owner.interrupt.recv() => break,
+                _ = owner.terminate.recv() => break false,
+                _ = owner.interrupt.recv() => break false,
                 Some(_) = requests.join_next(), if !requests.is_empty() => {},
                 _ = retry.tick() => {
                     // Only exact, previously admitted Final continuations and
@@ -616,8 +617,14 @@ impl RetainedServiceShutdown {
                     owner.service.reconcile_retirement_audit().await;
                     // An unconfirmed Fresh drain keeps its original process
                     // custody. A later audit ACK cannot certify its exit.
+                    if let Some(guardian) = owner.fresh_guardian.as_mut()
+                        && matches!(guardian.reap_acknowledged_exit(), Ok(true))
+                    {
+                        owner.fresh_guardian = None;
+                        guardian_drained = true;
+                    }
                     if owner.fresh_guardian.is_none() && !owner.service.requires_retained_shutdown() {
-                        break;
+                        break guardian_drained;
                     }
                 },
                 accepted = owner.listener.accept_checked() => {
@@ -631,16 +638,19 @@ impl RetainedServiceShutdown {
                             // Keep the actual owner/lease until the explicit
                             // termination below; no unsafe endpoint replacement.
                             tokio::select! { _ = owner.terminate.recv() => {}, _ = owner.interrupt.recv() => {} }
-                            break;
+                            break false;
                         }
                     }
                 }
             }
-        }
+        };
         requests.abort_all();
         while requests.join_next().await.is_some() {}
-        // `owner` is still alive here. This is an explicit degraded process
-        // shutdown, not an ACK, a successful drain or evidence of native join.
+        if drained {
+            return Ok(());
+        }
+        // `owner` is still alive here. An explicit degraded termination
+        // preserves remaining STOP authority outside the broker.
         Err(anyhow!(
             "broker stopped with a degraded shutdown; no safe drain is claimed"
         ))
@@ -926,9 +936,14 @@ pub async fn serve_selected_owned(
         && let Some(guardian) = fresh_guardian.as_mut()
     {
         match guardian.shutdown_if_idle().await {
-            Ok(()) => fresh_guardian = None,
+            Ok(true) => fresh_guardian = None,
+            Ok(false) => {
+                eprintln!("broker guardian acknowledged idle shutdown; waiting for child exit");
+            }
             Err(EnforcerError::NotIdle) => {
-                eprintln!("broker guardian is not idle; STOP and reconciliation remain available");
+                eprintln!(
+                    "broker guardian is not idle; keep it running and inspect or cancel retained jobs"
+                );
             }
             Err(_) => {
                 eprintln!("broker guardian shutdown is unconfirmed; reconciliation is required");
@@ -947,7 +962,12 @@ pub async fn serve_selected_owned(
     }
     drop(listener);
     drop(lease);
-    result.map(|()| ServiceShutdown::Drained)
+    result?;
+    ensure!(
+        operator_shutdown,
+        "broker listener failed; no clean shutdown is claimed"
+    );
+    Ok(ServiceShutdown::Drained)
 }
 
 impl Service {

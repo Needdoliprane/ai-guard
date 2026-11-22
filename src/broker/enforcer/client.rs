@@ -134,10 +134,13 @@ impl fmt::Debug for EnforcerFullClientV3 {
 pub(crate) struct FreshEnforcerOwner {
     client: EnforcerFullClientV3,
     process: SpawnedHelper,
+    shutdown_acknowledged: bool,
 }
 
 impl FreshEnforcerOwner {
-    pub(crate) async fn shutdown_if_idle(&mut self) -> EnforcerResult<()> {
+    /// `Ok(false)` means the guardian acknowledged idle shutdown and its
+    /// exact child exit remains pending.
+    pub(crate) async fn shutdown_if_idle(&mut self) -> EnforcerResult<bool> {
         let child = self.process.0.as_mut().ok_or(EnforcerError::Unavailable)?;
         let pid = child.id();
         let reply = self
@@ -164,17 +167,32 @@ impl FreshEnforcerOwner {
             FullReply::Error { code } => return Err(code),
             _ => return Err(EnforcerError::Unauthorized),
         }
+        self.shutdown_acknowledged = true;
         let deadline = Instant::now() + IO_TIMEOUT;
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) if status.success() => {
-                    self.process.0 = None;
-                    return Ok(());
-                }
-                Ok(None) if Instant::now() < deadline => tokio::time::sleep(POLL).await,
-                _ => return Err(EnforcerError::Unavailable),
+        while !self.reap_acknowledged_exit()? {
+            if Instant::now() >= deadline {
+                return Ok(false);
             }
+            tokio::time::sleep(POLL).await;
         }
+        Ok(true)
+    }
+
+    pub(crate) fn reap_acknowledged_exit(&mut self) -> EnforcerResult<bool> {
+        if !self.shutdown_acknowledged {
+            return Ok(false);
+        }
+        let Some(child) = self.process.0.as_mut() else {
+            return Ok(true);
+        };
+        let Some(status) = child.try_wait().map_err(|_| EnforcerError::Unavailable)? else {
+            return Ok(false);
+        };
+        if !status.success() {
+            return Err(EnforcerError::Unhealthy);
+        }
+        self.process.0 = None;
+        Ok(true)
     }
 }
 
@@ -425,6 +443,7 @@ impl EnforcerFullClientV3 {
                         let owner = FreshEnforcerOwner {
                             client: client.clone(),
                             process,
+                            shutdown_acknowledged: false,
                         };
                         return Ok((client, owner));
                     }

@@ -2008,6 +2008,8 @@ impl Fixture {
             .fresh_guardian
             .as_ref()
             .context("missing Fresh guardian")?;
+        // A deterministic hold before guardian exit would be required to
+        // assert the relative order of the two process exits.
         guardian.identity.wait_exit().await?;
         guardian.endpoint.assert_closed().await?;
 
