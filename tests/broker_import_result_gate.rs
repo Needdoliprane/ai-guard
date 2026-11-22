@@ -65,6 +65,48 @@ fn broker_cli(fixture: &Fixture, action: &str, operation: Uuid) -> Command {
     command
 }
 
+fn broker_reply_failure_category(error: &anyhow::Error) -> &'static str {
+    let error = format!("{error:#}");
+    [
+        ("category=spawn_failed", "reply_spawn_failed"),
+        (
+            "category=missing_cli_stdout_pipe",
+            "reply_stdout_pipe_missing",
+        ),
+        (
+            "category=missing_cli_stderr_pipe",
+            "reply_stderr_pipe_missing",
+        ),
+        ("category=cli_harness_timeout", "reply_harness_timeout"),
+        ("category=cli_capture_failed", "reply_capture_failed"),
+        ("category=cli_output_limit", "reply_output_limit"),
+        ("category=broker_error", "broker_error_reply"),
+        ("category=broker_rejected", "broker_rejected_reply"),
+        (
+            "category=missing_or_invalid_cli_reply",
+            "reply_missing_or_invalid",
+        ),
+        (
+            "category=typed_reply_with_nonzero_exit",
+            "reply_typed_nonzero_exit",
+        ),
+        (
+            "ipc_reply_unavailable_or_invalid",
+            "reply_ipc_unavailable_or_invalid",
+        ),
+        ("ipc_request_outcome_unknown", "reply_ipc_outcome_unknown"),
+        (
+            "ipc_unavailable_before_request",
+            "reply_ipc_unavailable_before_request",
+        ),
+        ("cli_arguments", "reply_cli_arguments"),
+        ("unclassified_cli_failure", "reply_cli_failure_unclassified"),
+    ]
+    .iter()
+    .find_map(|(needle, category)| error.contains(needle).then_some(*category))
+    .unwrap_or("reply_failed_unclassified")
+}
+
 async fn capture_cli(stream: impl AsyncRead + Unpin) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     stream
@@ -427,11 +469,14 @@ async fn after_import_worker_terminal(
         "phase=worker category=unexpected_running_worker"
     );
     diagnostic_phase("phase=arm stage=worker_running status=confirmed");
+    diagnostic_phase("phase=worker stage=synthetic_completion status=starting");
     println!("phase=worker state=Running quota_held=true");
     fixture
         .complete_running_worker(operation, &running.launch.session_id, container_id)
         .await
         .map_err(|_| anyhow::anyhow!("phase=worker category=synthetic_completion_refused"))?;
+    diagnostic_phase("phase=worker stage=synthetic_completion status=confirmed");
+    diagnostic_phase("phase=result stage=terminal_wait status=started");
 
     let (worker, terminal) = timeout(WORKER_WAIT, async {
         loop {
@@ -441,11 +486,21 @@ async fn after_import_worker_terminal(
                 .map_err(|_| anyhow::anyhow!("phase=result category=sqlite_worker_read"))?
                 .context("phase=result category=sqlite_worker_missing")?;
             if worker.state == WorkerStateV1::Terminal && worker.cleanup_removed == Some(true) {
+                diagnostic_phase("phase=result stage=terminal_state status=confirmed");
+                diagnostic_phase("phase=result stage=cli_query status=starting");
                 let BrokerReplyV1::Result { result } =
-                    read_reply(broker_cli(fixture, "result", operation), "result").await?
+                    read_reply(broker_cli(fixture, "result", operation), "result")
+                        .await
+                        .map_err(|error| {
+                            anyhow::anyhow!(
+                                "phase=result category={}",
+                                broker_reply_failure_category(&error)
+                            )
+                        })?
                 else {
                     bail!("phase=result category=unexpected_result_reply");
                 };
+                diagnostic_phase("phase=result stage=cli_query status=received");
                 ensure!(
                     result.version == 1
                         && result.operation_id == operation
