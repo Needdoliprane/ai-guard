@@ -623,6 +623,25 @@ async fn measure_durable_journal_cost_without_runtime() {
                 "refused CAS must preserve the acknowledged chain"
             );
         }
+
+        let initial_revision = journal
+            .0
+            .jobs
+            .path()
+            .join(operation_id.to_string())
+            .join(super::revision_name(0));
+        let original = std::fs::read(&initial_revision).unwrap();
+        std::fs::write(&initial_revision, b"{").unwrap();
+        assert!(matches!(
+            writer.load(operation_id).await,
+            Err(JournalError::Corrupt)
+        ));
+        std::fs::write(&initial_revision, original).unwrap();
+        assert_eq!(
+            writer.load(operation_id).await.unwrap().unwrap().head(),
+            &head,
+            "exact repair must reload the confirmed chain"
+        );
     })
     .await
     .expect("durable cost measurement exceeded its cooperative 600-second observation bound");
@@ -766,6 +785,15 @@ async fn measure_stable_read_cost<T>(
         "actor measurement is incomplete"
     );
     assert_eq!(journal.context_conflicts, 0, "measurement context changed");
+    assert_eq!(
+        journal.verified_revisions, 0,
+        "warm load repeated chain validation for confirmed revisions"
+    );
+    assert_eq!(journal.reused_revisions, head.revision() + 1);
+    assert!(
+        filesystem.metric(Operation::FileSync).succeeded > head.revision(),
+        "warm load lost confirmed revision synchronizations"
+    );
     assert_eq!(
         journal.missed_hooks, 0,
         "measurement hook coverage is incomplete"

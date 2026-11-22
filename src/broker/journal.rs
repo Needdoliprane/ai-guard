@@ -112,8 +112,9 @@ pub(in crate::broker) mod cost_measurement {
         entries_visited: [u64; 4],
         loads_started: u64,
         accepted_loads_completed: u64,
-        verified_revisions: u64,
+        pub(super) verified_revisions: u64,
         verified_revision_bytes: u64,
+        pub(super) reused_revisions: u64,
         writer_load: [u64; WRITER_COUNTERS],
         writer_status: [u64; WRITER_COUNTERS],
         pub(in crate::broker) caller_outstanding: u64,
@@ -164,7 +165,8 @@ pub(in crate::broker) mod cost_measurement {
                     self.inventories[kind as usize] > 0 && self.entries_visited[kind as usize] > 0
                 }),
                 accepted_load: self.loads_started > 0 && self.accepted_loads_completed > 0,
-                revisions: self.verified_revisions > 0 && self.verified_revision_bytes > 0,
+                revisions: self.reused_revisions > 0
+                    || (self.verified_revisions > 0 && self.verified_revision_bytes > 0),
             }
         }
     }
@@ -183,6 +185,7 @@ pub(in crate::broker) mod cost_measurement {
         accepted_loads_completed: AtomicU64,
         verified_revisions: AtomicU64,
         verified_revision_bytes: AtomicU64,
+        reused_revisions: AtomicU64,
         load: WriterCounters,
         status: WriterCounters,
         caller_outstanding: AtomicU64,
@@ -240,6 +243,7 @@ pub(in crate::broker) mod cost_measurement {
                 accepted_loads_completed: self.accepted_loads_completed.load(Ordering::Relaxed),
                 verified_revisions: self.verified_revisions.load(Ordering::Relaxed),
                 verified_revision_bytes: self.verified_revision_bytes.load(Ordering::Relaxed),
+                reused_revisions: self.reused_revisions.load(Ordering::Relaxed),
                 writer_load: self.load.snapshot(),
                 writer_status: self.status.snapshot(),
                 caller_outstanding: self.caller_outstanding.load(Ordering::Relaxed),
@@ -290,6 +294,7 @@ pub(in crate::broker) mod cost_measurement {
                 accepted_loads_completed: AtomicU64::new(0),
                 verified_revisions: AtomicU64::new(0),
                 verified_revision_bytes: AtomicU64::new(0),
+                reused_revisions: AtomicU64::new(0),
                 load: WriterCounters::default(),
                 status: WriterCounters::default(),
                 caller_outstanding: AtomicU64::new(0),
@@ -360,6 +365,11 @@ pub(in crate::broker) mod cost_measurement {
                 &active.verified_revision_bytes,
                 u64::try_from(bytes).unwrap_or(u64::MAX),
             );
+        }
+    }
+    pub(super) fn reused(root: &Path, count: u64) {
+        if let Some(active) = selected(root) {
+            add(&active.reused_revisions, count);
         }
     }
     pub(in crate::broker) struct Caller {
@@ -551,6 +561,18 @@ struct Writer {
     rejected_floors: HashMap<Uuid, String>,
     observed_jobs: HashSet<Uuid>,
     cold_audit: Weak<recovery::cold_audit::ReservationState>,
+    // Retain only the most recently loaded prefix. File handles and raw
+    // contents are never cached here.
+    verified_prefix: Option<VerifiedPrefix>,
+}
+
+struct VerifiedPrefix {
+    operation_id: Uuid,
+    intent_hash: String,
+    bindings_hash: String,
+    initial: RevisionRefV1,
+    fingerprints: Vec<String>,
+    confirmed: confirmed::ConfirmedChainV1,
 }
 pub(super) enum ExistingProfileV1 {
     Full(Journal),
@@ -1118,6 +1140,9 @@ impl Journal {
         writer: &mut Writer,
     ) -> JournalResult<Option<JournalStatusV1>> {
         let result = self.status_locked_inner(operation_id, writer);
+        if result.is_err() {
+            writer.verified_prefix = None;
+        }
         self.note_status_failure(&result);
         result
     }
@@ -1956,6 +1981,7 @@ impl Journal {
     ) -> JournalResult<Option<AcceptedJobV1>> {
         #[cfg(test)]
         cost_measurement::load(self.0.directory.path(), operation_id, false);
+        let previous_prefix = writer.verified_prefix.take();
         let name = operation_id.to_string();
         let Some(job) = fscheck(self.0.jobs.persistent_child(&name, false))? else {
             return if writer.observed_jobs.contains(&operation_id)
@@ -2054,7 +2080,7 @@ impl Journal {
             return Err(JournalError::Corrupt);
         }
         valid_hash(&current.head.hash).map_err(|_| JournalError::Corrupt)?;
-        let mut verifier = confirmed::ChainVerifierV1::new_with_launch_profile(
+        let verifier = confirmed::ChainVerifierV1::new_with_launch_profile(
             &self.0.scope,
             &self.0.control,
             &intent,
@@ -2062,27 +2088,11 @@ impl Journal {
             &accepted.initial_checkpoint,
             bindings.docker_launch_profile.as_ref(),
         )?;
-        for revision in 0..=current.head.revision {
-            let file = self
-                .read_file(&job, &revision_name(revision), CHECKPOINT)?
-                .ok_or(JournalError::Interrupted)?;
-            verifier.push(revision, file.bytes())?;
-            #[cfg(test)]
-            cost_measurement::verified(self.0.directory.path(), file.bytes().len());
-            io(file.persistent_sync())?;
-        }
-        let confirmed::ConfirmedChainV1 {
-            payload,
-            legacy_managed_seen,
-            chain,
-            command_receipts,
-            cancel_boundaries: _,
-            outbox_receipts,
-            last_cancel_operations,
-        } = verifier.finish(&current.head)?;
+        let verified =
+            self.verify_confirmed_chain(&job, &accepted, &current.head, verifier, previous_prefix)?;
         if let Some(floor) = writer.floors.get(&operation_id) {
             let index = usize::try_from(floor.revision).map_err(|_| JournalError::Corrupt)?;
-            if chain.get(index) != Some(floor) {
+            if verified.confirmed.chain.get(index) != Some(floor) {
                 return Err(JournalError::Conflict);
             }
         }
@@ -2092,6 +2102,16 @@ impl Journal {
         io(job.sync())?;
         io(self.0.jobs.sync())?;
         io(self.0.directory.sync())?;
+        let confirmed::ConfirmedChainV1 {
+            payload,
+            legacy_managed_seen,
+            chain,
+            command_receipts,
+            cancel_boundaries: _,
+            outbox_receipts,
+            last_cancel_operations,
+        } = verified.confirmed.clone();
+        writer.verified_prefix = Some(verified);
         writer.floors.insert(operation_id, current.head.clone());
         writer.observed_jobs.insert(operation_id);
         #[cfg(test)]
@@ -2115,6 +2135,66 @@ impl Journal {
             last_cancel_operations,
         }))))
     }
+
+    fn verify_confirmed_chain(
+        &self,
+        job: &Directory,
+        accepted: &Accepted,
+        head: &RevisionRefV1,
+        verifier: confirmed::ChainVerifierV1<'_>,
+        previous_prefix: Option<VerifiedPrefix>,
+    ) -> JournalResult<VerifiedPrefix> {
+        let (mut verifier, mut fingerprints) = match previous_prefix {
+            Some(prefix)
+                if prefix.operation_id == accepted.operation_id
+                    && prefix.intent_hash == accepted.intent_hash
+                    && prefix.bindings_hash == accepted.bindings_hash
+                    && prefix.initial == accepted.initial_checkpoint
+                    && prefix.fingerprints.len() as u64 <= head.revision + 1
+                    && self.revalidate_prefix(job, &prefix.fingerprints)? =>
+            {
+                (
+                    verifier.with_verified_prefix(prefix.confirmed),
+                    prefix.fingerprints,
+                )
+            }
+            _ => (verifier, Vec::new()),
+        };
+        for revision in fingerprints.len() as u64..=head.revision {
+            let file = self
+                .read_file(job, &revision_name(revision), CHECKPOINT)?
+                .ok_or(JournalError::Interrupted)?;
+            verifier.push(revision, file.bytes())?;
+            #[cfg(test)]
+            cost_measurement::verified(self.0.directory.path(), file.bytes().len());
+            io(file.persistent_sync())?;
+            fingerprints.push(file.digest().to_owned());
+        }
+        Ok(VerifiedPrefix {
+            operation_id: accepted.operation_id,
+            intent_hash: accepted.intent_hash.clone(),
+            bindings_hash: accepted.bindings_hash.clone(),
+            initial: accepted.initial_checkpoint.clone(),
+            fingerprints,
+            confirmed: verifier.finish(head)?,
+        })
+    }
+
+    fn revalidate_prefix(&self, job: &Directory, fingerprints: &[String]) -> JournalResult<bool> {
+        for (revision, expected) in fingerprints.iter().enumerate() {
+            let file = self
+                .read_file(job, &revision_name(revision as u64), CHECKPOINT)?
+                .ok_or(JournalError::Interrupted)?;
+            if file.digest() != expected {
+                return Ok(false);
+            }
+            io(file.persistent_sync())?;
+        }
+        #[cfg(test)]
+        cost_measurement::reused(self.0.directory.path(), fingerprints.len() as u64);
+        Ok(true)
+    }
+
     fn check_writer(&self) -> JournalResult<()> {
         let result = self.check_writer_inner();
         self.note_status_failure(&result);
