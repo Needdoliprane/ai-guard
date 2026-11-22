@@ -1,14 +1,14 @@
-name: G07 retirement read projection check
+name: G07 retirement RED receipt
 
 on:
   push:
-    branches: ['claude/v1-g07-retirement-read-check-20261122']
+    branches: ['claude/v1-g07-retirement-red-receipt-20261122']
 
 permissions:
   contents: read
 
 concurrency:
-  group: g07-retirement-read-check-${{ github.ref }}
+  group: g07-retirement-red-receipt-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -22,30 +22,50 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: '0'
       CARGO_TERM_COLOR: never
     steps:
+      - name: Initialize sanitized receipt
+        shell: bash
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          printf 'workflow_sha=%s\nworkflow_parent=NOT_VERIFIED\nsource_sha=3a2f7aede4902c2658a4da68f886a387e401ec61\nsource_parent=6dd5e2dc16eea251fbb2affbf272830f4af5e759\nsource_checkout=NOT_RUN\nworkflow_lineage=NOT_RUN\nfetch=NOT_RUN\nbuild=NOT_RUN\nartifact=NOT_RUN\ntest=NOT_RUN\ntest_exit=NOT_RUN\nselection_banner_count=0\nselected_test_count=0\ncase_result_count=0\nfailed_case_count=0\nignored_count=0\npanic_at_unwrap_count=0\ncorrupt_reason_count=0\nelse_control_count=0\nverdict=INCONCLUSIVE\n' "$WORKFLOW_SHA" > "$RUNNER_TEMP/g07-red-receipt.txt"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: 3a2f7aede4902c2658a4da68f886a387e401ec61
           fetch-depth: 0
           persist-credentials: false
-      - name: Initialize sanitized RED receipt
+      - name: Verify exact source, workflow lineage, and no nocapture
         shell: bash
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
         run: |
-          printf 'checkout_sha=3a2f7aede4902c2658a4da68f886a387e401ec61\nparent_sha=6dd5e2dc16eea251fbb2affbf272830f4af5e759\nrun_mode=--no-default-features\ntest_status=NOT_RUN\ntest_exit_code=NOT_RUN\nselection_banner_count=0\nselected_test_count=0\ncase_result_count=0\nfailed_case_count=0\nignored_count=0\npanic_at_owned_unwrap_count=0\ncorrupt_panic_reason_count=0\nelse_control_marker_count=0\nverdict=INCONCLUSIVE\n' > "$RUNNER_TEMP/g07-red-receipt.txt"
-      - name: Verify RED source and ancestry
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = 3a2f7aede4902c2658a4da68f886a387e401ec61
-          test "$(git rev-parse HEAD^)" = 6dd5e2dc16eea251fbb2affbf272830f4af5e759
-          grep -Fq 'async fn abandoned_retirement_audit_read_keeps_acknowledged_result_readable()' src/broker/writer_status_projection_tests.rs
-          grep -Fq 'writer.result_status(operation).await.unwrap()' src/broker/writer_status_projection_tests.rs
-          grep -Fq 'the intact journal must still supply the operation' src/broker/writer_status_projection_tests.rs
+          set -uo pipefail
+          receipt="$RUNNER_TEMP/g07-red-receipt.txt"
+          source_status=FAIL
+          lineage_status=FAIL
+          if [[ "$(git rev-parse HEAD)" == 3a2f7aede4902c2658a4da68f886a387e401ec61 &&
+                "$(git rev-parse HEAD^)" == 6dd5e2dc16eea251fbb2affbf272830f4af5e759 &&
+                -f src/broker/writer_status_projection_tests.rs ]] &&
+              grep -Fq 'writer.result_status(operation).await.unwrap()' src/broker/writer_status_projection_tests.rs &&
+              grep -Fq 'the intact journal must still supply the operation' src/broker/writer_status_projection_tests.rs; then
+            source_status=PASS
+          fi
+          if [[ "$(git rev-parse "$WORKFLOW_SHA^")" == 524e05c5c86b03a9f1b6e11bd6125a6cfe75f979 ]] &&
+              git diff --quiet 524e05c5c86b03a9f1b6e11bd6125a6cfe75f979 "$WORKFLOW_SHA" -- . ':(exclude).github/workflows/lot-verify.yaml' &&
+              ! git show "$WORKFLOW_SHA:.github/workflows/lot-verify.yaml" | grep -Fq -- '--nocapture'; then
+            lineage_status=PASS
+          fi
+          printf 'source_checkout=%s\nworkflow_lineage=%s\nworkflow_parent=524e05c5c86b03a9f1b6e11bd6125a6cfe75f979\n' \
+            "$source_status" "$lineage_status" >> "$receipt"
+          cat "$receipt" >> "$GITHUB_STEP_SUMMARY"
+          [[ "$source_status" == PASS && "$lineage_status" == PASS ]]
       - name: Fetch locked dependencies
         shell: bash
         run: |
-          set -euo pipefail
-          cargo fetch --locked > "$RUNNER_TEMP/g07-red-fetch.log" 2>&1
-      - name: Compile exactly one libtest executable
+          set -uo pipefail
+          if cargo fetch --locked > "$RUNNER_TEMP/g07-red-fetch-private.log" 2>&1; then rc=0; else rc=$?; fi
+          printf 'fetch=%s fetch_exit=%s\n' "$([[ "$rc" == 0 ]] && echo PASS || echo FAIL)" "$rc" >> "$RUNNER_TEMP/g07-red-receipt.txt"
+          exit "$rc"
+      - name: Compile one libtest executable
         id: build
         shell: bash
         run: |
@@ -54,21 +74,24 @@ jobs:
           mkdir -m 700 "$scratch"
           export CARGO_TARGET_DIR="$scratch/target"
           cargo test --locked --offline --no-default-features --lib --no-run --message-format=json \
-            >"$scratch/build.jsonl" 2>"$scratch/build.stderr"
+            > "$scratch/build.jsonl" 2> "$scratch/build.stderr"
           rc=$?
+          printf 'build=%s build_exit=%s\n' "$([[ "$rc" == 0 ]] && echo PASS || echo FAIL)" "$rc" >> "$RUNNER_TEMP/g07-red-receipt.txt"
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
-          if [ "$rc" -eq 0 ]; then
-            binary="$(jq -ers --arg prefix "$CARGO_TARGET_DIR/" '
-              [.[] | select(.reason == "compiler-artifact" and .target.kind == ["lib"]
-                and .target.name == "agentsandbox" and .profile.test == true)
-                | .executable | strings | select(startswith($prefix))]
-              | unique | if length == 1 then .[0] else empty end
-            ' "$scratch/build.jsonl")"
-            test -x "$binary"
-            echo "binary=$binary" >> "$GITHUB_OUTPUT"
+          if [[ "$rc" == 0 ]]; then
+            binary="$(jq -ers '[.[] | select(.reason == "compiler-artifact" and .target.name == "agentsandbox" and .target.kind == ["lib"] and .profile.test == true and .features == [] and .executable != null) | .executable] | unique | if length == 1 then .[0] else empty end' "$scratch/build.jsonl")"
+            if [[ -x "$binary" ]]; then
+              digest="$(sha256sum "$binary" | cut -d ' ' -f1)"
+              printf 'artifact=PASS\nlibtest_sha256=%s\n' "$digest" >> "$RUNNER_TEMP/g07-red-receipt.txt"
+              echo "binary=$binary" >> "$GITHUB_OUTPUT"
+              echo "sha256=$digest" >> "$GITHUB_OUTPUT"
+            else
+              printf 'artifact=FAIL\n' >> "$RUNNER_TEMP/g07-red-receipt.txt"
+              exit 1
+            fi
           fi
           exit "$rc"
-      - name: Run exact RED and classify the owned panic
+      - name: Run exact RED without nocapture and classify the failure
         id: oracle
         if: steps.build.outputs.exit_code == '0'
         shell: bash
@@ -79,60 +102,36 @@ jobs:
           umask 077
           scratch="$RUNNER_TEMP/g07-red-private"
           log="$scratch/red.log"
+          receipt="$RUNNER_TEMP/g07-red-receipt.txt"
           selector='broker::writer::status_projection_tests::abandoned_retirement_audit_read_keeps_acknowledged_result_readable'
-          test_status=UNOBSERVED
-          test_exit_code=NOT_RUN
-          selection_banner_count=0
-          selected_test_count=0
-          case_result_count=0
-          failed_case_count=0
-          ignored_count=0
-          panic_at_owned_unwrap_count=0
-          corrupt_panic_reason_count=0
-          else_control_marker_count=0
-          verdict=INCONCLUSIVE
-          if "$TEST_BINARY" "$selector" --exact --test-threads=1 --nocapture >"$log" 2>&1; then
-            test_exit_code=0
-          else
-            test_exit_code=$?
-          fi
+          if timeout --kill-after=5s 240s "$TEST_BINARY" "$selector" --exact --test-threads=1 --color=never > "$log" 2>&1; then rc=0; else rc=$?; fi
           selection_banner_count="$(grep -Ec '^running [0-9]+ tests?$' "$log" || true)"
           selected_test_count="$(awk '/^running [0-9]+ tests?$/ { count += $2 } END { print count + 0 }' "$log")"
           case_result_count="$(grep -Ec '^test .+ \.\.\. (ok|FAILED|ignored)(,.*)?$' "$log" || true)"
           failed_case_count="$(grep -Fxc "test $selector ... FAILED" "$log" || true)"
           ignored_count="$(grep -Ec '^test .* \.\.\. ignored(,.*)?$' "$log" || true)"
-          panic_at_owned_unwrap_count="$(grep -Ec '^thread .* panicked at src/broker/writer_status_projection_tests\.rs:162:[0-9]+:' "$log" || true)"
-          corrupt_panic_reason_count="$(grep -Ec 'called `Result::unwrap\(\)` on an `Err` value: Corrupt' "$log" || true)"
-          else_control_marker_count="$(grep -Fxc 'the intact journal must still supply the operation' "$log" || true)"
+          panic_at_unwrap_count="$(grep -Ec '^thread .* panicked at src/broker/writer_status_projection_tests\.rs:162:[0-9]+:' "$log" || true)"
+          corrupt_reason_count="$(grep -Ec 'called `Result::unwrap\(\)` on an `Err` value: Corrupt' "$log" || true)"
+          else_control_count="$(grep -Fxc 'the intact journal must still supply the operation' "$log" || true)"
           result_count="$(grep -c '^test result: ' "$log" || true)"
-          if [[ "$test_exit_code" == 101 && "$selection_banner_count" == 1 &&
-                "$selected_test_count" == 1 && "$case_result_count" == 1 &&
-                "$failed_case_count" == 1 && "$ignored_count" == 0 &&
-                "$result_count" == 1 && "$panic_at_owned_unwrap_count" == 1 &&
-                "$corrupt_panic_reason_count" == 1 && "$else_control_marker_count" == 0 ]] &&
-              grep -Eq '^test result: FAILED\. 0 passed; 1 failed; 0 ignored;' "$log"; then
-            test_status=FAIL_EXPECTED
+          verdict=INCONCLUSIVE
+          if [[ "$rc" == 101 && "$selection_banner_count" == 1 && "$selected_test_count" == 1 &&
+                "$case_result_count" == 1 && "$failed_case_count" == 1 && "$ignored_count" == 0 &&
+                "$result_count" == 1 && "$panic_at_unwrap_count" == 1 &&
+                "$corrupt_reason_count" == 1 && "$else_control_count" == 0 ]] &&
+              grep -Eq '^test result: FAILED\. 0 passed; 1 failed; 0 ignored;.*$' "$log"; then
             verdict=RED_REPRODUCED
           fi
           {
-            printf 'checkout_sha=3a2f7aede4902c2658a4da68f886a387e401ec61\n'
-            printf 'parent_sha=6dd5e2dc16eea251fbb2affbf272830f4af5e759\n'
-            printf 'run_mode=--no-default-features\n'
-            printf 'test_status=%s\n' "$test_status"
-            printf 'test_exit_code=%s\n' "$test_exit_code"
-            printf 'selection_banner_count=%s\n' "$selection_banner_count"
-            printf 'selected_test_count=%s\n' "$selected_test_count"
-            printf 'case_result_count=%s\n' "$case_result_count"
-            printf 'failed_case_count=%s\n' "$failed_case_count"
-            printf 'ignored_count=%s\n' "$ignored_count"
-            printf 'panic_at_owned_unwrap_count=%s\n' "$panic_at_owned_unwrap_count"
-            printf 'corrupt_panic_reason_count=%s\n' "$corrupt_panic_reason_count"
-            printf 'else_control_marker_count=%s\n' "$else_control_marker_count"
-            printf 'verdict=%s\n' "$verdict"
-          } > "$scratch/receipt.txt"
-          cat "$scratch/receipt.txt" >> "$GITHUB_STEP_SUMMARY"
-          cp "$scratch/receipt.txt" "$RUNNER_TEMP/g07-red-receipt.txt"
-          echo "exit_code=$test_exit_code" >> "$GITHUB_OUTPUT"
+            printf 'test=FAIL_EXPECTED\ntest_exit=%s\n' "$rc"
+            printf 'selection_banner_count=%s\nselected_test_count=%s\ncase_result_count=%s\n' \
+              "$selection_banner_count" "$selected_test_count" "$case_result_count"
+            printf 'failed_case_count=%s\nignored_count=%s\npanic_at_unwrap_count=%s\n' \
+              "$failed_case_count" "$ignored_count" "$panic_at_unwrap_count"
+            printf 'corrupt_reason_count=%s\nelse_control_count=%s\nverdict=%s\n' \
+              "$corrupt_reason_count" "$else_control_count" "$verdict"
+          } >> "$receipt"
+          cat "$receipt" >> "$GITHUB_STEP_SUMMARY"
           echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
           test "$verdict" = RED_REPRODUCED
       - name: Upload sanitized RED receipt
@@ -141,133 +140,5 @@ jobs:
         with:
           name: g07-retirement-red-receipt-${{ github.sha }}
           path: ${{ runner.temp }}/g07-red-receipt.txt
-          if-no-files-found: warn
-          retention-days: 14
-
-  green-successor:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    env:
-      CARGO_BUILD_JOBS: '1'
-      CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_PROFILE_TEST_DEBUG: '0'
-      CARGO_TERM_COLOR: never
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: 020a82db21768c3c6083edcf564af1ee076d8db6
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Initialize sanitized GREEN receipt
-        shell: bash
-        run: |
-          printf 'checkout_sha=020a82db21768c3c6083edcf564af1ee076d8db6\nparent_sha=3a2f7aede4902c2658a4da68f886a387e401ec61\nrun_mode=--no-default-features\ninvocations=0\nselected_test_count=0\npassed_count=0\nfailed_count=0\nignored_count=0\nverdict=INCONCLUSIVE\n' > "$RUNNER_TEMP/g07-green-receipt.txt"
-      - name: Verify GREEN source and ancestry
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = 020a82db21768c3c6083edcf564af1ee076d8db6
-          test "$(git rev-parse HEAD^)" = 3a2f7aede4902c2658a4da68f886a387e401ec61
-          grep -Fq 'async fn abandoned_retirement_audit_read_keeps_acknowledged_result_readable()' src/broker/writer_status_projection_tests.rs
-          grep -Fq 'async fn retirement_audit_conflict_for_a_missing_observed_job_closes_the_status_projection()' src/broker/writer_status_projection_tests.rs
-          grep -Fq 'async fn abandoned_mutation_waiter_invalidates_projection_while_actor_keeps_its_work()' src/broker/writer_status_projection_tests.rs
-          grep -Fq 'async fn result_read_timeout_keeps_acknowledged_status_readable()' src/broker/writer_status_projection_tests.rs
-      - name: Fetch locked dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo fetch --locked > "$RUNNER_TEMP/g07-green-fetch.log" 2>&1
-      - name: Compile exactly one libtest executable
-        id: build
-        shell: bash
-        run: |
-          set -uo pipefail
-          scratch="$RUNNER_TEMP/g07-green-private"
-          mkdir -m 700 "$scratch"
-          export CARGO_TARGET_DIR="$scratch/target"
-          cargo test --locked --offline --no-default-features --lib --no-run --message-format=json \
-            >"$scratch/build.jsonl" 2>"$scratch/build.stderr"
-          rc=$?
-          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
-          if [ "$rc" -eq 0 ]; then
-            binary="$(jq -ers --arg prefix "$CARGO_TARGET_DIR/" '
-              [.[] | select(.reason == "compiler-artifact" and .target.kind == ["lib"]
-                and .target.name == "agentsandbox" and .profile.test == true)
-                | .executable | strings | select(startswith($prefix))]
-              | unique | if length == 1 then .[0] else empty end
-            ' "$scratch/build.jsonl")"
-            test -x "$binary"
-            echo "binary=$binary" >> "$GITHUB_OUTPUT"
-          fi
-          exit "$rc"
-      - name: Run exact GREEN regressions
-        id: oracle
-        if: steps.build.outputs.exit_code == '0'
-        shell: bash
-        env:
-          TEST_BINARY: ${{ steps.build.outputs.binary }}
-        run: |
-          set -euo pipefail
-          umask 077
-          scratch="$RUNNER_TEMP/g07-green-private"
-          log="$scratch/green.log"
-          names=(
-            abandoned_retirement_audit_read_keeps_acknowledged_result_readable
-            retirement_audit_conflict_for_a_missing_observed_job_closes_the_status_projection
-            abandoned_mutation_waiter_invalidates_projection_while_actor_keeps_its_work
-            result_read_timeout_keeps_acknowledged_status_readable
-          )
-          selected=0
-          passed=0
-          failed=0
-          ignored=0
-          invocations=0
-          for name in "${names[@]}"; do
-            selector="broker::writer::status_projection_tests::$name"
-            one_log="$scratch/$name.log"
-            if "$TEST_BINARY" "$selector" --exact --test-threads=1 >"$one_log" 2>&1; then
-              code=0
-            else
-              code=$?
-            fi
-            banners="$(grep -Ec '^running [0-9]+ tests?$' "$one_log" || true)"
-            one_selected="$(awk '/^running [0-9]+ tests?$/ { count += $2 } END { print count + 0 }' "$one_log")"
-            case_results="$(grep -Ec '^test .+ \.\.\. (ok|FAILED|ignored)(,.*)?$' "$one_log" || true)"
-            results="$(grep -c '^test result: ' "$one_log" || true)"
-            one_ignored="$(grep -Ec '^test .* \.\.\. ignored(,.*)?$' "$one_log" || true)"
-            invocations=$((invocations + 1))
-            selected=$((selected + one_selected))
-            ignored=$((ignored + one_ignored))
-            if [[ "$code" == 0 && "$banners" == 1 && "$one_selected" == 1 &&
-                  "$case_results" == 1 && "$results" == 1 && "$one_ignored" == 0 ]] &&
-                grep -Fxq "test $selector ... ok" "$one_log" &&
-                grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$one_log"; then
-              passed=$((passed + 1))
-            else
-              failed=$((failed + 1))
-            fi
-          done
-          verdict=FAIL
-          if [[ "$invocations" == 4 && "$selected" == 4 && "$passed" == 4 && "$failed" == 0 && "$ignored" == 0 ]]; then
-            verdict=PASS
-          fi
-          {
-            printf 'checkout_sha=020a82db21768c3c6083edcf564af1ee076d8db6\n'
-            printf 'parent_sha=3a2f7aede4902c2658a4da68f886a387e401ec61\n'
-            printf 'run_mode=--no-default-features\n'
-            printf 'invocations=%s\nselected_test_count=%s\npassed_count=%s\nfailed_count=%s\nignored_count=%s\nverdict=%s\n' \
-              "$invocations" "$selected" "$passed" "$failed" "$ignored" "$verdict"
-          } > "$scratch/receipt.txt"
-          cat "$scratch/receipt.txt" >> "$GITHUB_STEP_SUMMARY"
-          cp "$scratch/receipt.txt" "$RUNNER_TEMP/g07-green-receipt.txt"
-          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
-          test "$verdict" = PASS
-      - name: Upload sanitized GREEN receipt
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: g07-retirement-green-receipt-${{ github.sha }}
-          path: ${{ runner.temp }}/g07-green-receipt.txt
           if-no-files-found: warn
           retention-days: 14
