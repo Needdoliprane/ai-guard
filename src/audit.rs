@@ -22,7 +22,10 @@ pub mod authentication;
 mod capacity;
 pub(crate) mod capacity_policy;
 pub use capacity::WorkloadAuditPolicyV1;
-pub use capacity_policy::{AuditCapacityFailureV1, AuditCapacityPolicyV1, AuditCapacityV1};
+pub use capacity_policy::{
+    AuditCapacityFailureV1, AuditCapacityPolicyV1, AuditCapacityV1, DEFAULT_PHYSICAL_BYTES,
+    MAX_SQLITE_PHYSICAL_BYTES,
+};
 pub(crate) mod decision_codec;
 pub use decision_codec::DecisionFailure;
 pub(crate) mod entities;
@@ -223,6 +226,7 @@ pub(crate) use human_brokers::owned::{OwnedHumanBrokerPageV1, OwnedHumanBrokerSt
 pub(crate) use human_workers::HumanWorkerFrameV1;
 pub(crate) use worker_transition::expected_worker_transition;
 pub(crate) use workload::owned_broker_identity::OwnedBrokerBindingStepV1;
+pub mod retention;
 pub mod signed_checkpoint;
 mod storage;
 use storage::{InitializationGuard, StoreStorage};
@@ -243,6 +247,8 @@ pub struct Store {
     backing: StoreStorage,
     redactor: Redactor,
     max_events: u64,
+    /// Payload byte cap of this store (`capacity_policy::PHYSICAL_BYTES` by default).
+    physical_bytes: u64,
     capacity_policy: AuditCapacityPolicyV1,
     workload_audit_policy: WorkloadAuditPolicyV1,
     workload_audit_policy_explicit: bool,
@@ -425,6 +431,7 @@ const WORKER_SNAPSHOT_PREDICATE: &str = "action IN ('admit','prepare','create_is
 
 fn schema_objects(
     version: i64,
+    retention: bool,
 ) -> impl Iterator<Item = &'static (&'static str, &'static str, &'static str)> {
     // Format14 inherits the complete, closed13 profile. Its extensions are
     // explicit; no future version can inherit it by a range comparison.
@@ -436,6 +443,8 @@ fn schema_objects(
     inherited_schema_objects(inherited)
         .chain(review_format14::schema_objects().filter(move |_| matches!(version, 14 | 15)))
         .chain(egress::SCHEMA.iter().filter(move |_| version == 15))
+        // The retention ledger exists exactly when its chain marker does.
+        .chain(retention::ledger::SCHEMA.iter().filter(move |_| retention))
 }
 
 fn inherited_schema_objects(
@@ -534,6 +543,14 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
         );
         return Ok(true);
     }
+    let retention = objects
+        .iter()
+        .any(|(kind, name, _, _)| kind == "table" && name == "events")
+        && retention::ledger::capability_present(db)?;
+    anyhow::ensure!(
+        !retention || retention::ledger::format_admits(version),
+        "audit retention requires schema13, 14 or 15"
+    );
     let inherited = if matches!(version, 14 | 15) {
         13
     } else {
@@ -584,6 +601,11 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
                 .iter()
                 .filter(move |_| version == 15),
         )
+        .chain(
+            retention::ledger::AUTO_INDEX_COUNTS
+                .iter()
+                .filter(move |_| retention),
+        )
         .filter(|(table, _)| {
             if *table == "events" {
                 true
@@ -612,9 +634,10 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
             );
             continue;
         }
-        let expected = schema_objects(version).find(|(expected_kind, expected_name, _)| {
-            kind == expected_kind && name == expected_name
-        });
+        let expected =
+            schema_objects(version, retention).find(|(expected_kind, expected_name, _)| {
+                kind == expected_kind && name == expected_name
+            });
         anyhow::ensure!(
             expected.is_some_and(|(_, _, expected_sql)| sql
                 .as_ref()
@@ -663,7 +686,7 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
             "unexpected audit schema object"
         );
     }
-    for &(kind, name, _) in schema_objects(version) {
+    for &(kind, name, _) in schema_objects(version, retention) {
         if allow_legacy && version == 0 && name == "tenant_binding" {
             continue;
         }
@@ -971,6 +994,7 @@ impl Store {
             backing,
             redactor,
             max_events,
+            physical_bytes: capacity::PHYSICAL_BYTES,
             capacity_policy: AuditCapacityPolicyV1::resolved(max_events),
             workload_audit_policy: WorkloadAuditPolicyV1::resolved(
                 max_events,
@@ -1023,6 +1047,7 @@ impl Store {
         )?;
         // The parent's resolved policy is immutable, including disabled defaults
         // for small stores. Do not resolve defaults again on this connection.
+        sibling.physical_bytes = self.physical_bytes;
         sibling.capacity_policy = self.capacity_policy.clone();
         sibling.workload_audit_policy = self.workload_audit_policy.clone();
         sibling.workload_audit_policy_explicit = self.workload_audit_policy_explicit;
@@ -1624,7 +1649,27 @@ impl Store {
             )
             .optional()?
             .unwrap_or((0, "0".repeat(64)));
-        let count = u64::try_from(last).context("invalid audit event count")?;
+        // Capacity counts the events physically stored, not the chain length.
+        let count = u64::try_from(retention::ledger::stored_events(tx, last)?)
+            .context("invalid audit event count")?;
+        if retention::classify::classify(&event.kind)
+            == retention::classify::EventClass::Reclaimable(retention::ReclaimClassV1::Ordinary)
+        {
+            if let Some(floor) = retention::ledger::latest_floor(tx)? {
+                // An event declared at or before the archived horizon could be a
+                // retry of a reclaimed event whose identifier is no longer live.
+                let declared = chrono::DateTime::parse_from_rfc3339(&event.timestamp)?;
+                let archived = chrono::DateTime::parse_from_rfc3339(&floor)?;
+                if declared <= archived {
+                    return Err(retention::RetentionFailure::new(
+                        retention::failure::code::EVENT_PREDATES_ARCHIVE,
+                        "an ordinary event declared at or before the archived horizon is refused",
+                    )
+                    .with("archived_floor", floor)
+                    .into());
+                }
+            }
+        }
         if let capacity::Class::EgressTerminal(reservation) = &class {
             reservation.validate(tx, &event)?;
         }
@@ -1634,7 +1679,7 @@ impl Store {
             tx,
             AuditCapacityV1 {
                 events: self.max_events,
-                bytes: capacity::PHYSICAL_BYTES,
+                bytes: self.physical_bytes,
             },
         )?;
         if available.events < self.max_events && count >= available.events {
@@ -1647,7 +1692,7 @@ impl Store {
         let used: i64 = tx.query_row("SELECT bytes FROM quota WHERE id=1", [], |r| r.get(0))?;
         let used_bytes = u64::try_from(used).context("invalid audit byte usage")?;
         let payload_bytes = u64::try_from(payload.len()).context("audit payload too large")?;
-        if available.bytes < capacity::PHYSICAL_BYTES
+        if available.bytes < self.physical_bytes
             && used_bytes
                 .checked_add(payload_bytes)
                 .is_none_or(|next| next > available.bytes)
@@ -1919,10 +1964,29 @@ impl Store {
         } else {
             "SELECT seq,received_at,prev_hash,hash,payload,id,kind,agent_id,sandbox_id,project_id,decision FROM events ORDER BY seq"
         };
+        // A retained store has a sparse closed prefix; its segments account
+        // for every reclaimed event and carry each boundary hash and floor.
+        let segments = retention::ledger::segments(db)?;
+        let boundary_floors: BTreeMap<i64, String> = segments
+            .iter()
+            .map(|segment| (segment.last_seq, segment.floor_at_last.clone()))
+            .collect();
+        let Some(mut chain) = retention::chain::RetainedChain::new(
+            segments
+                .iter()
+                .map(retention::ledger::SegmentRow::bound)
+                .collect(),
+        ) else {
+            return Ok(Integrity {
+                valid: false,
+                event_count: 0,
+                head_hash: "0".repeat(64),
+                error: Some("audit retention ledger does not tile the archived prefix".into()),
+            });
+        };
+        let base = chain.base().0;
         let mut stmt = db.prepare(query)?;
         let mut rows = stmt.query([])?;
-        let mut prev = "0".repeat(64);
-        let mut count = 0;
         let mut time_floor: Option<chrono::DateTime<chrono::Utc>> = None;
         while let Some(row) = rows.next()? {
             let seq: i64 = row.get(0)?;
@@ -1946,28 +2010,56 @@ impl Store {
                 let received = workload::canonical_control_time(
                     crate::broker_registry::parse_time(&received)?,
                 )?;
-                let maximum = time_floor.map_or(received, |previous| previous.max(received));
-                time_floor = Some(maximum);
-                row.get::<_, Option<String>>(11)?
-                    == Some(crate::broker_registry::format_time(maximum))
+                let stored = row.get::<_, Option<String>>(11)?;
+                if seq <= base {
+                    // A sparse prefix keeps its recorded floors: each covers its
+                    // own receive time, never decreases, and each boundary
+                    // carries the floor that its segment recorded.
+                    match stored
+                        .as_deref()
+                        .map(crate::broker_registry::parse_time)
+                        .transpose()
+                    {
+                        Ok(Some(floor)) => {
+                            let ordered = floor >= received
+                                && time_floor.is_none_or(|previous| floor >= previous)
+                                && boundary_floors
+                                    .get(&seq)
+                                    .is_none_or(|recorded| stored.as_ref() == Some(recorded));
+                            time_floor = Some(floor);
+                            ordered
+                        }
+                        _ => false,
+                    }
+                } else {
+                    let maximum = time_floor.map_or(received, |previous| previous.max(received));
+                    time_floor = Some(maximum);
+                    stored == Some(crate::broker_registry::format_time(maximum))
+                }
             } else {
                 true
             };
-            if seq != count + 1
-                || previous != prev
-                || hash != digest(seq, &received, &previous, &payload)
+            let (verified, prefix_hash) = chain.head();
+            if !chain.accept(seq, &received, &previous, &hash, &payload)
                 || !projection_valid
                 || !time_valid
             {
                 return Ok(Integrity {
                     valid: false,
-                    event_count: count as u64,
-                    head_hash: prev,
+                    event_count: verified as u64,
+                    head_hash: prefix_hash,
                     error: Some(format!("integrity violation at sequence {seq}")),
                 });
             }
-            prev = hash;
-            count += 1;
+        }
+        let (head, head_hash) = chain.head();
+        if !chain.complete() {
+            return Ok(Integrity {
+                valid: false,
+                event_count: head as u64,
+                head_hash,
+                error: Some("audit retention accounting violation".into()),
+            });
         }
         if [6, 7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&schema) {
             let floors: i64 =
@@ -1975,14 +2067,14 @@ impl Store {
                     row.get(0)
                 })?;
             anyhow::ensure!(
-                floors == count,
+                u64::try_from(floors).ok() == Some(chain.stored()),
                 "control time floor projection has unexpected rows"
             );
         }
         Ok(Integrity {
             valid: true,
-            event_count: count as u64,
-            head_hash: prev,
+            event_count: head as u64,
+            head_hash,
             error: None,
         })
     }
@@ -2053,13 +2145,28 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         self.verify_storage(&db)?;
+        // After retention the fold resumes from the snapshot of the complete
+        // history through the last segment boundary.
+        let (base, mut projection) = match retention::ledger::latest_snapshot(&db)? {
+            Some(snapshot) => (
+                snapshot.through_seq,
+                entities::Projection::from_state(
+                    sandboxes,
+                    if sandboxes {
+                        snapshot.sandboxes
+                    } else {
+                        snapshot.agents
+                    },
+                ),
+            ),
+            None => (0, entities::Projection::new(sandboxes)),
+        };
         let mut stmt = db.prepare(if sandboxes {
-            "SELECT payload FROM events WHERE sandbox_id IS NOT NULL ORDER BY seq"
+            "SELECT payload FROM events WHERE sandbox_id IS NOT NULL AND seq>?1 ORDER BY seq"
         } else {
-            "SELECT payload FROM events WHERE agent_id IS NOT NULL ORDER BY seq"
+            "SELECT payload FROM events WHERE agent_id IS NOT NULL AND seq>?1 ORDER BY seq"
         })?;
-        let mut projection = entities::Projection::new(sandboxes);
-        let mut rows = stmt.query([])?;
+        let mut rows = stmt.query([base])?;
         while let Some(row) = rows.next()? {
             let event: Event = serde_json::from_str(&row.get::<_, String>(0)?)?;
             projection.observe(&event);
@@ -2074,20 +2181,26 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         self.verify_storage(&db)?;
+        // Counters cover the complete history: the snapshot through the last
+        // retention boundary plus the live events after it. Decisions are
+        // structural and never reclaimed, so pending reviews read them all.
+        let (base, archived) = retention::ledger::latest_snapshot(&db)?
+            .map(|snapshot| (snapshot.through_seq, snapshot.counts))
+            .unwrap_or_default();
         let count = |condition: &str| -> anyhow::Result<i64> {
             Ok(db.query_row(
-                &format!("SELECT count(*) FROM events WHERE {condition}"),
-                [],
+                &format!("SELECT count(*) FROM events WHERE ({condition}) AND seq>?1"),
+                [base],
                 |r| r.get(0),
             )?)
         };
         let pending:i64=db.query_row("SELECT count(*) FROM events e WHERE e.kind='security.decision' AND e.decision='review' AND NOT EXISTS(SELECT 1 FROM events later WHERE later.kind='security.decision' AND later.seq>e.seq AND json_extract(later.payload,'$.data.request_id')=json_extract(e.payload,'$.data.request_id'))",[],|r|r.get(0))?;
         let counts = overview::EventCounts {
-            commands: count("kind='command.requested'")?,
-            allowed: count("kind='security.decision' AND decision='allow'")?,
-            denied: count("kind='security.decision' AND decision='deny'")?,
+            commands: archived.commands + count("kind='command.requested'")?,
+            allowed: archived.allowed + count("kind='security.decision' AND decision='allow'")?,
+            denied: archived.denied + count("kind='security.decision' AND decision='deny'")?,
             pending,
-            security: count("kind LIKE 'security.%'")?,
+            security: archived.security + count("kind LIKE 'security.%'")?,
         };
         let sequence = db.query_row("SELECT COALESCE(MAX(seq),0) FROM events", [], |row| {
             row.get(0)

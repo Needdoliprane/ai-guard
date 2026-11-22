@@ -116,8 +116,12 @@ export interface Overview {
 }
 export interface Integrity {
   valid: boolean;
+  /** Chain length; after audit retention, more than the events still stored. */
   event_count?: number | null;
   head_hash?: string | null;
+  stored_events?: number | null;
+  /** Parsed by `parseRetentionLedger`; unknown until it validates. */
+  retention?: unknown;
 }
 export interface EventPage {
   items: AuditEvent[];

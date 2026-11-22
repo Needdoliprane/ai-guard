@@ -102,6 +102,97 @@ fn descriptor_shortage_at_every_store_boundary_requires_full_validation_then_rec
 }
 
 #[test]
+fn retention_confirms_the_committed_segment_after_a_filesystem_ack_failure() {
+    use crate::audit::retention::{
+        AuditRetentionPolicyV1, ReclaimClassV1, RetentionApplyRequest,
+        failure::{code, refusal},
+    };
+
+    let (directory, store) = fixture();
+    for (index, migrate) in [
+        Store::migrate_control_v3,
+        Store::migrate_identity_v4,
+        Store::migrate_human_access_v5,
+        Store::migrate_workload_v6,
+        Store::migrate_human_brokers_v7,
+        Store::migrate_kubernetes_create_v8,
+        Store::migrate_kubernetes_policy_v9,
+        Store::migrate_human_workers_v10,
+        Store::migrate_kubernetes_session_reservations_v11,
+        Store::migrate_broker_checkpoints_v12,
+        Store::migrate_kubernetes_recovery_v13,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        migrate(&store, &directory.path().join(format!("before-{index}"))).unwrap();
+    }
+    store
+        .install_audit_retention(&directory.path().join("pre-retention.sqlite"))
+        .unwrap();
+    for _ in 0..4 {
+        store.append(Event::new("fixture.retention")).unwrap();
+    }
+    let policy = AuditRetentionPolicyV1 {
+        version: 1,
+        min_age_seconds: 86_400,
+        keep_recent_events: 1,
+        max_segment_events: 100,
+        classes: vec![ReclaimClassV1::Ordinary],
+    };
+    let now = chrono::Utc::now() + chrono::Duration::days(2);
+    let positions = std::collections::BTreeSet::new();
+    let planned = store
+        .audit_retention_plan(&policy, now, None, &positions)
+        .unwrap();
+    let archive = directory.path().join("segment");
+    let request = RetentionApplyRequest {
+        policy: &policy,
+        now,
+        through_seq: planned.plan.last_seq,
+        expect_plan_sha256: &planned.plan_sha256,
+        archive_dir: &archive,
+        kept_positions: &positions,
+    };
+    let before = store.head().unwrap();
+    // A separate read connection can see the ledger row only once the
+    // maintenance transaction has committed.
+    let observer = Connection::open_with_flags(
+        directory.path().join("audit.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let mut awaiting_ack = true;
+    store.backing.test_hook.set(move || {
+        if awaiting_ack
+            && observer.query_row(
+                "SELECT EXISTS(SELECT 1 FROM audit_retention_segments)",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?
+        {
+            awaiting_ack = false;
+            return Err(io::Error::from_raw_os_error(libc::EMFILE))
+                .context("injected postcommit retention metadata failure");
+        }
+        Ok(())
+    });
+
+    let error = store.apply_audit_retention(&request).unwrap_err();
+    assert!(typed_code(&error, libc::EMFILE));
+    assert_eq!(refusal(&error).unwrap().code, code::COMMIT_UNCONFIRMED);
+    let committed = store.head().unwrap();
+    assert_eq!(committed.0, before.0 + 1);
+    let replayed = store.apply_audit_retention(&request).unwrap();
+    assert_eq!(replayed.retention_event_seq, committed.0);
+    assert_eq!(replayed.retention_event_hash, committed.1);
+    assert_eq!(store.head().unwrap(), committed);
+    let report = store.verify_audit_archives(&[archive]).unwrap();
+    assert_eq!(report.verdict, "verified");
+    assert_eq!(report.segments_verified, 1);
+}
+
+#[test]
 fn suspended_origin_recovers_before_append_or_redaction_attachment() {
     for recover_by_append in [true, false] {
         let (_directory, store) = fixture();

@@ -145,6 +145,10 @@ pub struct HumanPageV1<T> {
     pub view: Option<HumanReadViewV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selection_complete: Option<bool>,
+    /// Event pages of a store whose closed prefix is archived offline: the
+    /// live journal holds no reclaimed event at or below this sequence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_through_seq: Option<i64>,
 }
 
 /// Typed CLI preparation; contains digests and operation identities, never a raw secret.

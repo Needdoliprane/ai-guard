@@ -117,6 +117,10 @@ struct Manifest {
     response_bytes: usize,
     pages: Vec<PageEvidence>,
     receipt_scope: &'static str,
+    /// Set when the store archived a closed prefix offline: events at or
+    /// below this sequence that are not exported were reclaimed, not absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archived_through_seq: Option<i64>,
 }
 struct Prepared {
     page_count: usize,
@@ -125,6 +129,7 @@ struct Prepared {
     next_cursor: Option<String>,
     authorization_version: Option<String>,
     complete: bool,
+    archived_through_seq: Option<i64>,
     evidence: Vec<PageEvidence>,
     cursors: BTreeSet<String>,
     files: Vec<PrivateFile>,
@@ -276,6 +281,7 @@ fn inspect(stage: &Directory, plan: &Plan, plan_file: &PrivateFile) -> Result<Pr
         next_cursor: None,
         authorization_version: None,
         complete: false,
+        archived_through_seq: None,
         evidence: vec![],
         cursors: BTreeSet::new(),
         files: vec![],
@@ -373,6 +379,9 @@ fn admit(
     prepared.next_cursor = record.page.next_cursor.clone();
     prepared.authorization_version = Some(record.page.authorization_version.clone());
     prepared.complete = record.page.selection_complete == Some(true);
+    prepared.archived_through_seq = prepared
+        .archived_through_seq
+        .max(record.page.archived_through_seq);
     prepared.page_count += 1;
     Ok(())
 }
@@ -470,6 +479,7 @@ fn manifest(prepared: &Prepared) -> Result<Vec<u8>> {
         page_count:prepared.page_count,response_bytes:prepared.response_bytes,
         pages:prepared.evidence.iter().map(|p| PageEvidence { file:p.file.clone(),sha256:p.sha256.clone(),response_bytes:p.response_bytes,read_receipt:p.read_receipt.clone() }).collect(),
         receipt_scope:"control recorded each authorized batch; this is not a signed complete audit chain or proof of a human reading the files",
+        archived_through_seq:prepared.archived_through_seq,
     }).map_err(Into::into)
 }
 fn verify_manifest(stage: &Directory, prepared: &Prepared) -> Result<()> {

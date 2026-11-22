@@ -84,8 +84,8 @@ Gateway et proxy dashboard refusent les champs Authorization multiples, y compri
 | `GET /api/overview` | Viewer ou runner | Compteurs observés/déclarés séparés et état des composants |
 | `GET /api/agents` | Viewer ou runner | `{items:[...]}` ; relations connues et provenance |
 | `GET /api/sandboxes` | Viewer ou runner | `{items:[...]}` ; informations réellement recueillies |
-| `GET /api/export` | Viewer ou runner | JSONL ou tableau JSON, borné par la tête de l'audit au début |
-| `GET /api/integrity` | Viewer ou runner | Résultat de contrôle, nombre vérifié et hash de tête |
+| `GET /api/export` | Viewer ou runner | JSONL ou tableau JSON, borné par la tête de l'audit au début. Après une [rétention](setup/audit-retention/README.fr.md), l'en-tête `ai-guard-audit-retention` et un premier enregistrement typé `ai-guard.audit.retention-notice.v1` nomment le préfixe archivé hors ligne / After retention, a header and a leading typed notice name the archived prefix |
+| `GET /api/integrity` | Viewer ou runner | Résultat de contrôle, longueur de chaîne vérifiée (`event_count`) et hash de tête ; `stored_events` et `retention` (segments, `archived_through_seq`, événements et octets récupérés, dernière archive) / verified chain length, stored events and the retention ledger |
 | `POST /api/workers/reservations` | Runner | Admission fraîche, réservation et reçu d'audit durables |
 | `POST /api/workers/{id}/transitions` | Runner | Mutation CAS du worker et reçu d'audit ; aucun appel moteur dans le gateway |
 | `GET /api/workers` | Viewer ou runner | Page `{items,next_cursor}` des workers du tenant |

@@ -46,6 +46,16 @@ pub(super) struct StoreStorage {
     pub(super) test_hook: super::resource_tests::StorageHook,
 }
 
+const SQLITE_SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
+
+fn uses_reserved_sqlite_name(name: &[u8]) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with(b".ai-guard-sqlite-")
+        || SQLITE_SIDECAR_SUFFIXES
+            .iter()
+            .any(|suffix| lower.ends_with(suffix.as_bytes()))
+}
+
 /// Serializes creation and initialization, including case/Unicode aliases on
 /// case-insensitive filesystems, with one reserved lock per private directory.
 /// This is a separate inode; closing it cannot release SQLite's POSIX locks.
@@ -113,12 +123,8 @@ impl StoreStorage {
             name.as_bytes().is_ascii(),
             "audit database filename must use ASCII to avoid SQLite namespace aliases; preserve existing data and plan a controlled offline migration to an ASCII filename"
         );
-        let lower = name.as_bytes().to_ascii_lowercase();
         ensure!(
-            !lower.starts_with(b".ai-guard-sqlite-")
-                && ![b"-wal".as_slice(), b"-shm", b"-journal"]
-                    .iter()
-                    .any(|suffix| lower.ends_with(suffix)),
+            !uses_reserved_sqlite_name(name.as_bytes()),
             "audit database filename uses a reserved SQLite sidecar or initialization-lock name"
         );
         let parent_path = path.parent().context("audit database parent is missing")?;
@@ -185,12 +191,21 @@ impl StoreStorage {
 
     fn check_sidecars(parent: &Directory, name: &OsStr) -> Result<bool> {
         let mut present = false;
-        for suffix in ["-wal", "-shm", "-journal"] {
+        for suffix in SQLITE_SIDECAR_SUFFIXES {
             let mut sidecar = name.to_os_string();
             sidecar.push(suffix);
             present |= parent.private_entry(&sidecar)?.is_some();
         }
         Ok(present)
+    }
+
+    /// Non-ASCII leaves can alias reserved ASCII names on some filesystems.
+    /// The SQLite naming policy applies only to the retained database parent.
+    pub(super) fn reserves_directory_name(&self, parent: &Directory, leaf: &str) -> Result<bool> {
+        if leaf.is_ascii() && !uses_reserved_sqlite_name(leaf.as_bytes()) {
+            return Ok(false);
+        }
+        Ok(parent.physical_identity()? == self.parent.physical_identity()?)
     }
 
     pub(super) fn path(&self) -> &Path {

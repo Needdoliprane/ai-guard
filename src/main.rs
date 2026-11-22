@@ -18,7 +18,7 @@ use futures_util::FutureExt;
 use sha2::{Digest, Sha256};
 use std::{
     future::Future,
-    io::Read,
+    io::{Read, Write},
     net::SocketAddr,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
@@ -127,6 +127,8 @@ enum Command {
         #[arg(long, default_value_t = 100_000)]
         max_events: u64,
     },
+    /// Offline audit retention: install, plan, apply, verify and export archives.
+    AuditRetention(agentsandbox::audit::retention::cli::AuditRetentionArgs),
     /// Migrate the existing offline SSO audit one explicit version with a new backup.
     MigrateAuthentication {
         /// Existing private gateway OIDC configuration; no provider contact.
@@ -156,7 +158,7 @@ enum Command {
 #[derive(Args)]
 struct GatewayArgs {
     /// Published private owned-source activation; reconstruct and replay at every startup.
-    #[arg(long, conflicts_with_all=["human_source_mode","human_sources_manifest","human_credentials_envelope","human_control_config_revision","human_oidc_mapping_revision","tenants_file","audit_capacity_file","workload_audit_file","relay_retention_file","oidc_config","initialize_oidc_audit","data","runner_token_file","viewer_token_file","max_events","initialize_supervised_stores","worker_limit","worker_cpu_millis","worker_memory_bytes","worker_max_seconds"])]
+    #[arg(long, conflicts_with_all=["human_source_mode","human_sources_manifest","human_credentials_envelope","human_control_config_revision","human_oidc_mapping_revision","tenants_file","audit_capacity_file","workload_audit_file","relay_retention_file","oidc_config","initialize_oidc_audit","data","runner_token_file","viewer_token_file","max_events","audit_max_bytes","initialize_supervised_stores","worker_limit","worker_cpu_millis","worker_memory_bytes","worker_max_seconds"])]
     human_sources_activation: Option<PathBuf>,
     /// Explicit human source protocol; legacy preserves the existing gateway.
     #[arg(long,value_parser=["legacy","owned_sources"])]
@@ -208,6 +210,10 @@ struct GatewayArgs {
     policy: PathBuf,
     #[arg(long, default_value_t = 100_000)]
     max_events: u64,
+    /// Payload byte cap of each SQLite tenant store, 256 MiB to 2 GiB. A larger
+    /// cap lengthens every full validation; MySQL keeps 256 MiB.
+    #[arg(long, default_value_t = agentsandbox::audit::DEFAULT_PHYSICAL_BYTES)]
+    audit_max_bytes: u64,
     /// Create only new supervised stores, with private verified schema2 backups.
     #[arg(long, value_name = "BACKUP_ROOT")]
     initialize_supervised_stores: Option<PathBuf>,
@@ -754,6 +760,18 @@ async fn run() -> Result<()> {
         Command::Setup(args) => agentsandbox::setup::execute(args)?,
         Command::Workload(args) => agentsandbox::workload_cli::run(args).await?,
         Command::Kubernetes(args) => agentsandbox::kubernetes_cli::execute(args).await?,
+        Command::AuditRetention(args) => {
+            let completed = agentsandbox::audit::retention::cli::run(args);
+            let mut stdout = std::io::stdout().lock();
+            let written = writeln!(stdout, "{}", completed.stdout).and_then(|()| stdout.flush());
+            drop(stdout);
+            if written.is_err() {
+                std::process::exit(1);
+            }
+            if completed.exit_code != 0 {
+                std::process::exit(completed.exit_code);
+            }
+        }
         Command::ModelTls(args) => {
             agentsandbox::model_tls::execute(args, shutdown_signal()?).await?
         }
@@ -918,7 +936,7 @@ async fn run() -> Result<()> {
             }
             // Validate the complete registry before preparing backups or any
             // fresh origin: a later tenant must not strand an earlier one.
-            gateway_config::validate_policies(&tenants, args.max_events)?;
+            gateway_config::validate_policies_for(&tenants, args.max_events, args.audit_max_bytes)?;
             if args.human_source_mode.as_deref() == Some("owned_sources") {
                 return serve_owned_human_gateway(&args, tenants, policy, jev, redactor).await;
             }
@@ -977,6 +995,7 @@ async fn run() -> Result<()> {
                         args.max_events,
                     )?
                 };
+                let store = store.with_physical_bytes(args.audit_max_bytes)?;
                 let capacity_source = if tenant.audit_capacity_policy.is_some() {
                     "explicit_operator_policy"
                 } else {

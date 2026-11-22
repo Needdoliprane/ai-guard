@@ -301,6 +301,17 @@ impl Directory {
             .context("retained control directory descriptor could not be cloned")
     }
 
+    /// Open an existing private regular child for a streaming read whose size
+    /// the caller bounds itself. The metadata is the identity before reading;
+    /// compare it with the file metadata afterwards to detect a change.
+    pub(crate) fn open_private_stream(&self, name: impl AsRef<OsStr>) -> Result<(File, Metadata)> {
+        self.revalidate()?;
+        let encoded = child_name(name.as_ref())?;
+        let file = open_file(&self.0.file, &encoded)?;
+        let facts = check_private_file(&file)?;
+        Ok((file, facts))
+    }
+
     pub fn read_private_file(
         &self,
         name: impl AsRef<OsStr>,
