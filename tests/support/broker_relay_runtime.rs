@@ -1272,11 +1272,19 @@ pub async fn relay_attempt(
 }
 
 pub async fn worker_terminal(store: &Store, endpoint: &RelayEndpointV1) -> Result<WorkerV1> {
+    wait_worker_terminal(store, endpoint, |_| {}).await
+}
+
+pub(super) async fn wait_worker_terminal(
+    store: &Store,
+    endpoint: &RelayEndpointV1,
+    mut observe: impl FnMut(&Result<Option<WorkerV1>>),
+) -> Result<WorkerV1> {
     timeout(Duration::from_secs(15), async {
         loop {
-            let worker = store
-                .worker(&endpoint.worker_id)?
-                .context("worker missing")?;
+            let read = store.worker(&endpoint.worker_id);
+            observe(&read);
+            let worker = read?.context("worker missing")?;
             if worker.state == WorkerStateV1::Terminal && !worker.quota_held {
                 return Ok(worker);
             }

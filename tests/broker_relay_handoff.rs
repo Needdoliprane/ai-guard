@@ -568,7 +568,7 @@ async fn software_broker_scoped_relay_ipc_refuses_before_private_detail() -> Res
     );
     fixture.cancel("a", a_job).await?;
     fixture.cancel("b", b_job).await?;
-    worker_terminal(&fixture.a, &a_endpoint).await?;
+    fixture.wait_worker_a_terminal(&a_endpoint).await?;
     worker_terminal(&fixture.b, &b_endpoint).await?;
     fixture.close().await
 }

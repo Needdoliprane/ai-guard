@@ -207,6 +207,18 @@ pub use runtime::{
     relay_attempt, worker_terminal,
 };
 
+enum TerminalWorkerRead {
+    Unknown,
+    Absent,
+    Error,
+    Present {
+        state: WorkerStateV1,
+        quota_held: bool,
+        same_attempt: bool,
+        container_id: Option<String>,
+    },
+}
+
 pub struct Fixture {
     pub root: PathBuf,
     pub a: Arc<Store>,
@@ -774,6 +786,85 @@ impl Fixture {
         })
         .await?
     }
+
+    pub(super) async fn wait_worker_a_terminal(&self, endpoint: &RelayEndpointV1) -> Result<()> {
+        // Keep the last reading inside the existing deadline and avoid a second Store read.
+        let mut last = TerminalWorkerRead::Unknown;
+        let result = runtime::wait_worker_terminal(&self.a, endpoint, |read| {
+            last = match read {
+                Ok(Some(worker)) => {
+                    let same_attempt = worker.attempt.attempt_id == endpoint.attempt_id;
+                    TerminalWorkerRead::Present {
+                        state: worker.state,
+                        quota_held: worker.quota_held,
+                        same_attempt,
+                        container_id: worker
+                            .attempt
+                            .container_id
+                            .as_ref()
+                            .filter(|_| same_attempt)
+                            .cloned(),
+                    }
+                }
+                Ok(None) => TerminalWorkerRead::Absent,
+                Err(_) => TerminalWorkerRead::Error,
+            };
+        })
+        .await;
+        if let Err(error) = &result {
+            let wait = if error.is::<tokio::time::error::Elapsed>() {
+                "timeout"
+            } else {
+                "read_failed"
+            };
+            match last {
+                TerminalWorkerRead::Present {
+                    state,
+                    quota_held,
+                    same_attempt,
+                    container_id,
+                } => {
+                    let witness = self.terminal_witness_state(container_id.as_deref());
+                    eprintln!(
+                        "g11_relay_terminal_a wait={wait} store=present state={state:?} quota_held={quota_held} same_attempt={same_attempt} witness={witness}"
+                    );
+                }
+                read => {
+                    let store = match read {
+                        TerminalWorkerRead::Absent => "absent",
+                        TerminalWorkerRead::Error => "error",
+                        _ => "unknown",
+                    };
+                    eprintln!("g11_relay_terminal_a wait={wait} store={store} witness=unknown");
+                }
+            }
+        }
+        result.map(|_| ())
+    }
+
+    fn terminal_witness_state(&self, container_id: Option<&str>) -> &'static str {
+        let Some(container_id) = container_id else {
+            return "unknown";
+        };
+        let Ok(engine) = self.engine.try_lock() else {
+            return "unknown";
+        };
+        let Some(container) = engine.containers.get(container_id) else {
+            return "absent";
+        };
+        let state = &container.facts["State"];
+        match (
+            state["Status"].as_str(),
+            state["Running"].as_bool(),
+            *container.done.borrow(),
+        ) {
+            (Some("created"), Some(false), false) => "created",
+            (Some("running"), Some(true), false) => "running",
+            (Some("exited"), Some(false), true) => "terminal",
+            _ => "unknown",
+        }
+    }
+
     pub async fn closed(&self, job: Uuid) -> Result<()> {
         timeout(Duration::from_secs(15), async {
             loop {
