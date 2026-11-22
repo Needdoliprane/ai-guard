@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseHumanIdentity, parseResourcePage, parseHumanEventPage, humanUrl } from "../src/human-model.ts";
 import * as humanModel from "../src/human-model.ts";
-import { broker, brokerPage, brokerIdentity, catalogue, own, tenantScope, OPERATION_ORDER } from "./human-fixtures.mjs";
+import { broker, brokerPage, brokerIdentity, catalogue, event, own, tenantScope, OPERATION_ORDER } from "./human-fixtures.mjs";
 
 const uuid = "00000000-0000-4000-8000-000000000001";
 const principal = { kind: "human_local", installation_id: uuid, account_id: uuid };
@@ -147,6 +147,16 @@ test("la projection metadata interdit contenus, séquences et identités de cont
   const denseStream = { ...envelope, items: [event], view: "metadata", has_more: true, next_cursor: null };
   assert.throws(() => parseHumanEventPage(denseStream), /Contrat/);
   assert.equal(parseHumanEventPage(denseStream, false, "stream").has_more, true);
+});
+
+test("le détail owned exige un UUID canonique et la liste préserve les UUID historiques", () => {
+  const historical = "ABCDEF01-2345-4678-9ABC-DEF012345678";
+  const canonical = "abcdef01-2345-4678-9abc-def012345678";
+  const data = event();
+  const items = [historical, canonical].map((id) => ({ ...data, metadata: { ...data.metadata, id } }));
+  const parsed = parseHumanEventPage({ ...envelope, items, view: "metadata" }).items;
+  assert.deepEqual(parsed.map((item) => item.metadata.id), [historical, canonical]);
+  assert.deepEqual(parsed.map(humanModel.hasCanonicalEventId), [false, true]);
 });
 
 test("une page d’événements d’une base archivée nomme le préfixe archivé", () => {

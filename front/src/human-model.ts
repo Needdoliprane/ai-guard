@@ -243,6 +243,11 @@ export function parseHumanEvent(value: unknown, view: HumanView): HumanEvent {
     content: content === null ? null : { command: (content as Record<string, unknown>).command,
       decision: (content as Record<string, unknown>).decision, result: (content as Record<string, unknown>).result, data: (content as Record<string, unknown>).data } };
 }
+/** Event decoding already requires a hyphenated UUID and preserves historical letter case. */
+export function hasCanonicalEventId(event: HumanEvent): boolean {
+  const { id } = event.metadata;
+  return id === id.toLowerCase();
+}
 export function parseHumanEventPage(value: unknown, exporting = false, transport: "rest" | "stream" = "rest"): HumanEventPage {
   requireContract(object(value) && ["metadata", "content"].includes(String(value.view)));
   const view = value.view as HumanView;

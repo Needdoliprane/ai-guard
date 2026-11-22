@@ -1,7 +1,7 @@
 import { button, el, icon } from "./dom.ts";
 import { formatDate } from "./model.ts";
 import { HumanApiClient, HumanApiError, HumanSuperseded } from "./human-api.ts";
-import { HumanContractError } from "./human-model.ts";
+import { HumanContractError, hasCanonicalEventId } from "./human-model.ts";
 import { ADMIN_DESTINATIONS, accessExplanation, adminDestinationState, can, destinationState } from "./access-model.ts";
 import type { AdminDestination } from "./access-model.ts";
 import { ConfigurationView, MembershipsView, UsageView } from "./admin-views.ts";
@@ -1253,7 +1253,7 @@ export class HumanDashboard {
               el("p", "muted", `Source : ${item.metadata.source} · Reçu le ${formatDate(item.metadata.received_at, true)}`),
               el("div", "detail-badges", badge(`Provenance : ${item.metadata.provenance}`), badge(`Couverture : ${item.metadata.coverage}`),
                 item.metadata.decision ? badge(`Décision : ${item.metadata.decision}`) : badge("Décision non fournie"))),
-            action("Détails", `human-event-${index}`, () => { void this.#showEvent(item); }, !this.#canShowEvent(selection))))),
+            action("Détails", `human-event-${index}`, () => { void this.#showEvent(item); }, !this.#canShowEvent(selection, item))))),
       this.#pagination(state, (next, previous) => { void this.#loadEvents(next, previous); }), this.#renderExport());
   }
   #usesResourceStream() {
@@ -1301,14 +1301,16 @@ export class HumanDashboard {
       this.#refreshActive(true);
     }, 1000);
   }
-  #canShowEvent(selection: { item: HumanResource; view: HumanView }) {
+  #canShowEvent(selection: { item: HumanResource; view: HumanView }, item: HumanEvent) {
+    const snapshot = this.#snapshotOnly();
+    const requiresCanonicalId = snapshot || this.#identity?.read_profiles?.broker_registry === "human_broker_registry_owned_v1";
     return this.#mode === "events" && this.#canEvents() && selection.item.permissions.metadata &&
       !this.#api.readBudgetStopped && !this.#resourceStreamAwaitingAccess() &&
-      (!this.#snapshotOnly() || selection.view === "metadata");
+      (!snapshot || selection.view === "metadata") && (!requiresCanonicalId || hasCanonicalEventId(item));
   }
   async #showEvent(item: HumanEvent) {
     const selection = this.#selection;
-    if (!selection || !this.#canShowEvent(selection)) return;
+    if (!selection || !this.#canShowEvent(selection, item)) return;
     this.#detailAbort.abort(); this.#detailAbort = new AbortController(); const request = ++this.#detailGeneration;
     this.#dialog?.remove();
     const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
