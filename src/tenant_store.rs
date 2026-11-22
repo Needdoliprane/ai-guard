@@ -682,7 +682,7 @@ mod tests {
             assert!(store.healthy());
         }
 
-        let cause = MysqlProbeError::ServerRefused(1146);
+        let cause = MysqlProbeError::SessionMismatch;
         let tagged = RequiredAuditVerificationFailed::tag(cause.into(), true);
         assert_eq!(tagged.to_string(), cause.to_string());
         assert_eq!(tagged.downcast_ref::<MysqlProbeError>(), Some(&cause));
@@ -699,6 +699,37 @@ mod tests {
         assert!(is_transport_failure(&timed_out));
         assert!(tenant.block(async { Ok(()) }).is_ok());
         assert!(tenant.block_guarded(guard, async { Ok(()) }).is_ok());
+        assert!(!store.healthy());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_timeout_before_proof_requires_more_than_transport_recovery() {
+        use crate::mysql_storage::audit::RequiredAuditVerificationFailed;
+
+        let store = mysql_store(Redactor::new(vec![]));
+        let tenant = store.mysql().unwrap();
+        let guard = Some([0; 32]);
+        let timeout = MysqlProbeError::TimedOut;
+
+        let after_proof = RequiredAuditVerificationFailed::tag(timeout.into(), false);
+        assert!(is_transport_failure(&after_proof));
+        assert!(
+            tenant
+                .block_guarded(guard, async { Err::<(), _>(after_proof) })
+                .is_err()
+        );
+        assert!(!store.healthy());
+        assert!(tenant.block(async { Ok(()) }).is_ok() && store.healthy());
+
+        let before_proof = RequiredAuditVerificationFailed::tag(timeout.into(), true);
+        assert!(is_transport_failure(&before_proof));
+        assert!(
+            tenant
+                .block_guarded(guard, async { Err::<(), _>(before_proof) })
+                .is_err()
+        );
+        assert!(!store.healthy());
+        assert!(tenant.block(async { Ok(()) }).is_ok());
         assert!(!store.healthy());
     }
 }

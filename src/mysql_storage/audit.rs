@@ -1245,15 +1245,16 @@ impl MysqlAuditStore {
         worker_read: Option<WorkerRead<'_>>,
         observer: Option<&mut ReadObserver<'_>>,
     ) -> Result<(VerifiedPrefix, Option<QuotaUsageV1>, bool)> {
-        timeout_at(Instant::now() + DEADLINE, async {
+        let mut proof_pending = true;
+        let result = timeout_at(Instant::now() + DEADLINE, async {
+            let verification_failure = |error| RequiredAuditVerificationFailed::tag(error, true);
             let mut confirmed = self.confirmed.lock().await;
             let prior = confirmed.origin.take();
-            let mut conn = self.connect().await?;
+            let mut conn = self.connect().await.map_err(verification_failure)?;
             let mut tx = conn
                 .start_transaction(read_snapshot_options())
                 .await
-                .map_err(driver_error)?;
-            let verification_failure = |error| RequiredAuditVerificationFailed::tag(error, true);
+                .map_err(|error| verification_failure(driver_error(error).into()))?;
             let bound = binding(&mut tx, STATE)
                 .await
                 .map_err(verification_failure)?;
@@ -1264,6 +1265,7 @@ impl MysqlAuditStore {
                 .verify_bound_origin(&mut tx, bound, prior, &confirmed.head, observer)
                 .await
                 .map_err(verification_failure)?;
+            proof_pending = false;
             let usage = match worker_read {
                 Some(WorkerRead::Quota(policy)) => Some(worker::usage(&mut tx, policy).await?),
                 Some(WorkerRead::Operation(id, receipt)) => {
@@ -1299,8 +1301,10 @@ impl MysqlAuditStore {
             self.publish_control_collisions(&prefix);
             Ok((prefix, usage, retained))
         })
-        .await
-        .map_err(|_| MysqlProbeError::TimedOut)?
+        .await;
+        result.map_err(|_| {
+            RequiredAuditVerificationFailed::tag(MysqlProbeError::TimedOut.into(), proof_pending)
+        })?
     }
 
     pub async fn initialize(&self) -> Result<StoredEvent> {
@@ -1585,21 +1589,25 @@ impl MysqlAuditStore {
         let deadline = Instant::now() + DEADLINE;
         let initialize_supervised = matches!(&operation, Mutation::InitializeSupervised);
         let batch = matches!(&operation, Mutation::AppendBatch { .. });
+        let mut proof_pending = CONTROL_GUARD.try_with(|_| ()).is_ok();
+        let verification_failure =
+            |error| RequiredAuditVerificationFailed::tag(error, proof_pending);
         let mut confirmed = timeout_at(deadline, self.confirmed.lock())
             .await
-            .map_err(|_| MysqlProbeError::TimedOut)?;
+            .map_err(|_| verification_failure(MysqlProbeError::TimedOut.into()))?;
         let mut origin = confirmed.origin.take();
         let mut conn = timeout_at(deadline, self.connect())
             .await
-            .map_err(|_| MysqlProbeError::TimedOut)??;
+            .map_err(|_| verification_failure(MysqlProbeError::TimedOut.into()))?
+            .map_err(verification_failure)?;
         let mut options = TxOpts::new();
         options
             .with_readonly(false)
             .with_isolation_level(IsolationLevel::RepeatableRead);
         let mut tx = timeout_at(deadline, conn.start_transaction(options))
             .await
-            .map_err(|_| MysqlProbeError::TimedOut)?
-            .map_err(driver_error)?;
+            .map_err(|_| verification_failure(MysqlProbeError::TimedOut.into()))?
+            .map_err(|error| verification_failure(driver_error(error).into()))?;
         // The prefix verifier holds full worker DTOs across awaits. Keep its
         // transaction state off the stack of nested callers.
         let preparation = Box::pin(async {
@@ -1611,6 +1619,7 @@ impl MysqlAuditStore {
                     &confirmed.head,
                     &mut origin,
                     &mut workload_clock,
+                    &mut proof_pending,
                 )
                 .await?;
             if let Some(clock) = workload_clock {
@@ -1642,7 +1651,12 @@ impl MysqlAuditStore {
                 }
                 return Err(error);
             }
-            Err(_) => return Err(MysqlProbeError::TimedOut.into()),
+            Err(_) => {
+                return Err(RequiredAuditVerificationFailed::tag(
+                    MysqlProbeError::TimedOut.into(),
+                    proof_pending,
+                ));
+            }
         };
         if initialize_supervised {
             let boundary = prepared
@@ -1672,11 +1686,12 @@ impl MysqlAuditStore {
         confirmed: &AuditHead,
         origin: &mut Option<supervision::Witness>,
         workload_clock: &mut Option<workload::ControlClock>,
+        proof_pending: &mut bool,
     ) -> Result<PreparedWrite> {
         let prior = origin.take();
         let control_guard = CONTROL_GUARD.try_with(|digest| *digest).ok();
         let verification_failure =
-            |error| RequiredAuditVerificationFailed::tag(error, control_guard.is_some());
+            |error| RequiredAuditVerificationFailed::tag(error, *proof_pending);
         let bound = binding(tx, LOCK_STATE)
             .await
             .map_err(verification_failure)?;
@@ -1702,12 +1717,14 @@ impl MysqlAuditStore {
             .await
             .map_err(verification_failure)?;
         *origin = retained;
-        if let Some(digest) = control_guard
-            && let Some(collision) = prefix
+        if let Some(digest) = control_guard {
+            let collision = prefix
                 .control_credential_presence(&digest)
-                .map_err(verification_failure)?
-        {
-            return Err(ControlGuardRefused(collision).into());
+                .map_err(verification_failure)?;
+            *proof_pending = false;
+            if let Some(collision) = collision {
+                return Err(ControlGuardRefused(collision).into());
+            }
         }
         let mut head = prefix.head;
         let (event, kind) = match operation {
