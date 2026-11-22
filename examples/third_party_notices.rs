@@ -21,6 +21,8 @@
 //!   package ships none: `FILE` is read from `third-party-notices/` next to the list. It must have
 //!   exactly that SHA-256 and contain non-blank UTF-8 text of at most 256 KiB. The provenance
 //!   (URL, revision) of each file is recorded in the list.
+//! - `licence-selection: NAME VERSION SPDX` records the selected identifier from a crate's simple
+//!   `OR` expression and includes the choice in the generated notices.
 //!
 //! The release workflow passes `--for-release` to both modes, which forbids all `no-text:` exceptions.
 //!
@@ -73,6 +75,7 @@ struct Policy {
     no_text: BTreeSet<String>,
     /// `NAME VERSION` to the supplied `(file, sha256)` pairs.
     supplements: BTreeMap<String, Vec<(String, String)>>,
+    selected_licences: BTreeMap<String, String>,
 }
 
 impl Policy {
@@ -112,6 +115,22 @@ impl Policy {
                     .entry(format!("{name} {version}"))
                     .or_default()
                     .push(((*file).to_owned(), (*sha).to_owned()));
+            } else if let Some(rest) = line.strip_prefix("licence-selection:") {
+                let parts: Vec<_> = rest.split_whitespace().collect();
+                let [name, version, licence] = parts.as_slice() else {
+                    return Err(format!("line {}: expected `NAME VERSION SPDX`", number + 1));
+                };
+                let id = format!("{name} {version}");
+                if policy
+                    .selected_licences
+                    .insert(id.clone(), (*licence).to_owned())
+                    .is_some()
+                {
+                    return Err(format!(
+                        "line {}: duplicate licence selection for {id}",
+                        number + 1
+                    ));
+                }
             } else if let Some(rest) = line.strip_prefix("no-expression:") {
                 policy.no_expression.insert(exception(rest)?);
             } else if let Some(rest) = line.strip_prefix("no-text:") {
@@ -176,7 +195,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
     match mode.as_str() {
         "notices" => {
             let output = output.ok_or("notices needs --output FILE")?;
-            std::fs::write(&output, render(&krates))
+            std::fs::write(&output, render(&krates, &policy))
                 .map_err(|e| format!("{}: {e}", output.display()))?;
             eprintln!(
                 "wrote notices for {} crates to {}",
@@ -238,6 +257,24 @@ fn apply_supplements(
 
 fn problems(krates: &[Krate], policy: &Policy) -> Vec<String> {
     let mut found = Vec::new();
+    for (id, selected) in &policy.selected_licences {
+        let expression = krates
+            .iter()
+            .find(|krate| krate.id() == *id)
+            .and_then(|krate| krate.expression.as_deref());
+        let valid = expression.is_some_and(|expression| {
+            !expression.contains(['(', ')'])
+                && expression.contains(" OR ")
+                && expression
+                    .split(" OR ")
+                    .any(|alternative| alternative == selected)
+        });
+        if !valid {
+            found.push(format!(
+                "{id}: `{selected}` is not a declared licence alternative"
+            ));
+        }
+    }
     for k in krates {
         let id = k.id();
         match &k.expression {
@@ -423,7 +460,7 @@ fn license_texts(dir: &Path, declared: Option<&str>) -> Result<Vec<(String, Stri
     Ok(texts)
 }
 
-fn render(krates: &[Krate]) -> String {
+fn render(krates: &[Krate], policy: &Policy) -> String {
     let mut out = String::new();
     out.push_str("# Third-party notices\n\n");
     out.push_str("ai-guard native binaries statically link the Rust crates listed below. ");
@@ -464,6 +501,12 @@ fn render(krates: &[Krate]) -> String {
         out.push_str("Only the SPDX expression declared by the crate is available for these (reviewed individually):\n\n");
         for id in &without_text {
             let _ = writeln!(out, "- {id}");
+        }
+    }
+    if !policy.selected_licences.is_empty() {
+        out.push_str("\n## Licences selected for distribution\n\n");
+        for (id, licence) in &policy.selected_licences {
+            let _ = writeln!(out, "- `{id}` uses `{licence}`.");
         }
     }
     out.push_str("\n## Licence texts\n");
@@ -674,6 +717,20 @@ mod tests {
         assert!(apply_supplements(&mut krates, &unlinked, &|_| Ok(b"x".to_vec())).is_err());
         assert!(Policy::parse("supplement: d 1.0.0 d.txt abc\n").is_err());
         assert!(Policy::parse(&format!("supplement: d 1.0.0 ../d.txt {hex}\n")).is_err());
+    }
+
+    #[test]
+    fn notices_state_the_selected_alternative_and_refuse_an_undeclared_choice() {
+        let krates = with_texts(&[("a", "text a"), ("d", "text d")]);
+        let chosen = policy("MIT\nMIT OR Apache-2.0\nlicence-selection: d 1.0.0 MIT\n");
+        assert!(problems(&krates, &chosen).is_empty());
+        assert!(render(&krates, &chosen).contains("- `d 1.0.0` uses `MIT`."));
+
+        let undeclared = policy("MIT\nMIT OR Apache-2.0\nlicence-selection: d 1.0.0 Zlib\n");
+        assert_eq!(
+            problems(&krates, &undeclared),
+            ["d 1.0.0: `Zlib` is not a declared licence alternative"]
+        );
     }
 
     #[test]
