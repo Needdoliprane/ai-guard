@@ -1,4 +1,4 @@
-name: Lot verification
+name: G06 private material verification
 
 # Verifies V1 development branches on a hosted Linux x86_64 runner so that the
 # development Mac keeps its memory for engine, browser and macOS recipes.
@@ -24,7 +24,7 @@ jobs:
     timeout-minutes: 180
     env:
       AI_GUARD_BUILD_REVISION: ${{ github.sha }}
-      # Match CI's build limit when compiling and linking the full test suite.
+      # Match CI's build limit when compiling and linking the selected tests.
       CARGO_BUILD_JOBS: '1'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -60,12 +60,29 @@ jobs:
           python3 -B tests/e2e/interactive_driver.py --self-test
           python3 -B tests/e2e/test_run_provider_preflight.py ProviderPreflightTests ProviderBrowserStageTests
           python3 -B tests/e2e/test_run_provider_broker.py BrokerRecipeTests
-      - name: Rust test suite (ignored engine and provider tests excluded)
+      - name: MySQL private material and diagnostic regressions
+        id: g06_mysql
         shell: bash
         run: |
           set -o pipefail
           export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
-          cargo test --locked --offline --no-fail-fast 2>&1 | tee cargo-test.log
+          cargo test --locked --offline --no-default-features --features mysql-storage --lib -- --exact --test-threads=1 \
+            gateway_config::tests::mysql_private_material_is_read_once_and_never_printed \
+            gateway_config::tests::mysql_private_material_refuses_shared_oversized_or_malformed_files \
+            gateway_config::tests::owned_sources_are_refused_explicitly_on_a_mysql_tenant \
+            diagnostics::tenants::tests::a_mysql_private_reference_does_not_open_as_a_gateway_ca \
+            2>&1 | tee cargo-test.log
+          grep -Fq 'test result: ok. 4 passed; 0 failed;' cargo-test.log
+      - name: SQLite-only MySQL reference protection regression
+        if: ${{ !cancelled() && (steps.g06_mysql.outcome == 'success' || steps.g06_mysql.outcome == 'failure') }}
+        shell: bash
+        run: |
+          set -o pipefail
+          export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
+          cargo test --locked --offline --no-default-features --lib -- --exact --test-threads=1 \
+            diagnostics::tenants::tests::a_mysql_private_reference_does_not_open_as_a_gateway_ca \
+            2>&1 | tee -a cargo-test.log sqlite-test.log
+          grep -Fq 'test result: ok. 1 passed; 0 failed;' sqlite-test.log
       - name: Summarize test results
         if: always()
         shell: bash
@@ -74,7 +91,7 @@ jobs:
             grep -E '^test result:|^     Running ' cargo-test.log > cargo-test-summary.txt || true
             grep -E '\.\.\. FAILED$' cargo-test.log | sed 's/^test //; s/ \.\.\. FAILED$//' > cargo-test-failed.txt || true
             {
-              echo "### Rust test suite"
+              echo "### G06 targeted test results"
               echo
               echo "Failed tests: $(wc -l < cargo-test-failed.txt)"
               echo
@@ -90,6 +107,7 @@ jobs:
           name: lot-verify-rust-${{ github.sha }}
           path: |
             cargo-test.log
+            sqlite-test.log
             cargo-test-summary.txt
             cargo-test-failed.txt
           if-no-files-found: ignore
