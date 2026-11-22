@@ -122,6 +122,16 @@ fn unavailable(failure: anyhow::Error) -> (StatusCode, Json<Value>) {
     if let Some(response) = audit_capacity_failure(&failure) {
         return response;
     }
+    if crate::audit::retention::failure::refusal(&failure).is_some_and(|refusal| {
+        refusal.code == crate::audit::retention::failure::code::EVENT_PREDATES_ARCHIVE
+    }) {
+        return (
+            StatusCode::CONFLICT,
+            Json(
+                json!({"error":{"code":"event_predates_archive","message":"This event is declared at or before the archived audit horizon and could repeat an archived event. Send a new event.","retry_action":"send_new_event"}}),
+            ),
+        );
+    }
     error(
         StatusCode::SERVICE_UNAVAILABLE,
         "Audit indisponible, incohérent ou plein : opération refusée.",
@@ -1384,6 +1394,10 @@ async fn overview(
     tenant
         .blocking(true, move |tenant| {
             let mut value = tenant.store.overview().map_err(unavailable)?;
+            // Counters include the archived prefix; say how much of it is archived.
+            value["retention"] =
+                serde_json::to_value(tenant.store.audit_retention_ledger().map_err(unavailable)?)
+                    .map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "Synthèse indisponible."))?;
             value["health"]["jev"] = json!(if s.jev.is_some() {
                 "configured"
             } else {
@@ -1423,11 +1437,18 @@ async fn sandboxes(ReadIdentity(tenant, _): ReadIdentity) -> ApiResult<Json<Valu
 async fn integrity(ReadIdentity(tenant, _): ReadIdentity) -> ApiResult<Json<Value>> {
     tenant
         .blocking(true, move |tenant| {
-            Ok(Json(
-                serde_json::to_value(tenant.store.integrity().map_err(unavailable)?).map_err(
-                    |_| error(StatusCode::SERVICE_UNAVAILABLE, "Intégrité indisponible."),
-                )?,
-            ))
+            let unavailable_integrity =
+                |_| error(StatusCode::SERVICE_UNAVAILABLE, "Intégrité indisponible.");
+            let integrity = tenant.store.integrity().map_err(unavailable)?;
+            let ledger = tenant.store.audit_retention_ledger().map_err(unavailable)?;
+            let mut value = serde_json::to_value(&integrity).map_err(unavailable_integrity)?;
+            // `event_count` stays the chain length; the stored count and the
+            // archived prefix make a retained store explicit.
+            value["stored_events"] = json!(
+                i64::try_from(integrity.event_count).unwrap_or(i64::MAX) - ledger.reclaimed_events
+            );
+            value["retention"] = serde_json::to_value(&ledger).map_err(unavailable_integrity)?;
+            Ok(Json(value))
         })
         .await
 }
@@ -1496,17 +1517,51 @@ async fn export(
             ));
         }
     };
-    let head = tenant
-        .blocking(true, |tenant| tenant.store.head().map_err(unavailable))
+    let (head, ledger) = tenant
+        .blocking(true, |tenant| {
+            Ok((
+                tenant.store.head().map_err(unavailable)?,
+                tenant.store.audit_retention_ledger().map_err(unavailable)?,
+            ))
+        })
         .await?;
     let mut filter = query;
     filter.order = Some("asc".into());
     filter.limit = Some(200);
     filter.after = Some(filter.after.unwrap_or(0).max(0));
     filter.before = Some(filter.before.unwrap_or(head + 1).min(head + 1));
+    // An export that reaches into the archived prefix starts with a typed
+    // notice: the reclaimed events are in the offline archives, not omitted.
+    let notice = (ledger.segments > 0
+        && filter.after.unwrap_or(0) < ledger.archived_through_seq)
+        .then(|| {
+            json!({
+                "type": "ai-guard.audit.retention-notice.v1",
+                "archived_through_seq": ledger.archived_through_seq,
+                "segments": ledger.segments,
+                "reclaimed_events": ledger.reclaimed_events,
+                "last_archive_id": ledger.last.as_ref().map(|last| last.archive_id.clone()),
+                "last_manifest_sha256": ledger.last.as_ref().map(|last| last.manifest_sha256.clone()),
+                "message": "Events up to archived_through_seq that are not listed here were reclaimed into offline archives; verify them with agentsandbox audit-retention verify."
+            })
+            .to_string()
+        });
+    let retention_header = (ledger.segments > 0).then(|| {
+        format!(
+            "segments={}; archived-through={}; reclaimed-events={}; last-manifest={}",
+            ledger.segments,
+            ledger.archived_through_seq,
+            ledger.reclaimed_events,
+            ledger
+                .last
+                .as_ref()
+                .map_or("none", |last| last.manifest_sha256.as_str())
+        )
+    });
     let body = async_stream::stream! {
         let mut first=true;
         if json_format{yield Ok::<_,std::io::Error>("[".to_string());}
+        if let Some(notice)=notice{first=false;yield Ok(if json_format{notice}else{format!("{notice}\n")});}
         loop {
             let page_filter = filter.clone();
             match tenant.blocking(true, move |tenant| tenant.store.events(&page_filter).map_err(unavailable)).await {
@@ -1525,6 +1580,12 @@ async fn export(
             "application/x-ndjson"
         }),
     );
+    if let Some(value) = retention_header.and_then(|value| HeaderValue::from_str(&value).ok()) {
+        response.headers_mut().insert(
+            header::HeaderName::from_static("ai-guard-audit-retention"),
+            value,
+        );
+    }
     response.headers_mut().insert(
         header::CONTENT_DISPOSITION,
         HeaderValue::from_static(if json_format {

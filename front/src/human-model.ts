@@ -37,7 +37,11 @@ export interface HumanEvent {
     resource: ResourceRef; decision: "allow" | "deny" | "review" | null };
   content: { command: unknown; decision: unknown; result: unknown; data: unknown } | null;
 }
-export interface HumanEventPage extends HumanPage<HumanEvent> { view: HumanView; selection_complete?: boolean }
+export interface HumanEventPage extends HumanPage<HumanEvent> {
+  view: HumanView; selection_complete?: boolean;
+  /** The store archived its closed prefix offline through this sequence. */
+  archived_through_seq?: number;
+}
 export interface HumanSelection { view: HumanView; resource?: ResourceRef; cursor?: string | null; limit?: number }
 export interface HumanBroker {
   broker_id: string; incarnation_id: string; grant_revision: string; heartbeat_revision: string;
@@ -193,7 +197,10 @@ export function parseHumanEventPage(value: unknown, exporting = false, transport
   const view = value.view as HumanView;
   const parsed = page(value, (item) => parseHumanEvent(item, view), transport === "stream");
   if (exporting) requireContract(typeof value.selection_complete === "boolean" && value.selection_complete === !parsed.has_more);
-  return { ...parsed, view, ...(exporting ? { selection_complete: value.selection_complete as boolean } : {}) };
+  const archived = value.archived_through_seq;
+  requireContract(archived === undefined || (typeof archived === "number" && Number.isSafeInteger(archived) && archived >= 1));
+  return { ...parsed, view, ...(exporting ? { selection_complete: value.selection_complete as boolean } : {}),
+    ...(archived === undefined ? {} : { archived_through_seq: archived as number }) };
 }
 /** Server bound of one page. A cursor stays bound to the limit of its traversal. */
 export const HUMAN_DEFAULT_PAGE_LIMIT = 25;

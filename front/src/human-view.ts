@@ -1055,6 +1055,8 @@ export class HumanDashboard {
       state.error && selection.view === "content" ? el("div", "", el("p", "muted", "Le contenu n’a pas été lu. Vous pouvez demander les métadonnées depuis Ressources."),
         action("Revenir aux ressources", "human-content-resources", () => this.#openView("resources"))) : null,
       this.#snapshotOnly() ? el("p", "muted", "Métadonnées uniquement pour ce profil. Détail d’événement, contenu et export indisponibles.") : null,
+      state.value?.archived_through_seq ? el("p", "notice notice-info retention-notice",
+        `Historique archivé hors ligne jusqu’à l’événement n° ${state.value.archived_through_seq} : les événements retirés de la base vivante n’apparaissent ni dans ce journal ni dans ses exports. Leur vérification exige les archives de l’opérateur.`) : null,
       !state.value ? empty(state.loading ? "Chargement des événements…" : "Événements inconnus", "Une lecture absente ou refusée ne constitue pas une absence d’activité.") :
         !state.value.items.length ? empty("Aucun événement sur cette page", "Aucune trace reçue pour cette sélection autorisée, à cette lecture.") :
           el("div", "human-event-list", ...state.value.items.map((item, index) => el("article", "human-event-row",

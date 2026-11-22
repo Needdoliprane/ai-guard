@@ -10,6 +10,7 @@ import { OidcSession, OidcSessionError } from "./oidc-session.ts";
 import { FRONTEND_IDENTITY } from "./frontend-version.ts";
 import { buildIdentityFooter } from "./build-identity-view.ts";
 import { relatedAgents, relatedSandboxes, workerRelation } from "./control.ts";
+import { integrityCoverage, parseRetentionLedger, retentionNotice } from "./retention.ts";
 import type { WorkerRecord } from "./control.ts";
 import type { BrokerCapture } from "./model.ts";
 import {
@@ -1229,6 +1230,11 @@ function updateFilterChoices() {
       .map((kind) => [kind, kind]),
   );
 }
+function retentionCardNote(): HTMLElement | null {
+  const archived = retentionNotice(parseRetentionLedger(integrity?.retention));
+  return archived ? el("p", "support-footnote", archived) : null;
+}
+
 function renderEvents() {
   if (!eventSlot) return;
   updateFilterChoices();
@@ -1342,6 +1348,13 @@ function renderEvents() {
     table.append(body);
     eventSlot.replaceChildren(el("div", "table-scroll", table));
   }
+  // The live journal ends at the archived prefix: say so, never imply less activity.
+  const archived = retentionNotice(parseRetentionLedger(integrity?.retention));
+  if (archived) {
+    const note = el("p", "notice notice-info retention-notice", archived);
+    note.setAttribute("role", "note");
+    eventSlot.prepend(note);
+  }
   const footer = el(
     "div",
     "table-footer",
@@ -1361,7 +1374,16 @@ function renderEvents() {
     );
     more.disabled = loadingEvents;
     footer.append(more);
-  } else footer.append(el("span", "muted", "Fin de l’historique chargé"));
+  } else
+    footer.append(
+      el(
+        "span",
+        "muted",
+        archived
+          ? "Fin de l’historique vivant ; la partie antérieure est archivée hors ligne"
+          : "Fin de l’historique chargé",
+      ),
+    );
   eventSlot.append(footer);
   eventSlot.setAttribute("aria-busy", String(loadingEvents));
 }
@@ -1454,8 +1476,13 @@ function renderSupport() {
     el(
       "p",
       "support-copy",
-      `${formatMetric(integrity?.event_count)} événements vérifiés par le collecteur.`,
+      integrityCoverage(
+        integrity?.event_count,
+        integrity?.stored_events,
+        parseRetentionLedger(integrity?.retention),
+      ),
     ),
+    retentionCardNote(),
     el(
       "p",
       "support-footnote",

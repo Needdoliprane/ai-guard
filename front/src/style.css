@@ -213,6 +213,7 @@ svg.icon { width: 19px; height: 19px; flex-shrink: 0; vertical-align: middle; }
 .page-footer .icon { width: 14px; height: 14px; }
 .notice { display: flex; align-items: flex-start; gap: 12px; max-width: calc(1800px - var(--gutter) * 2); padding: 16px 20px; margin: 24px var(--gutter) 0; border: 1px solid var(--red-border); border-radius: 4px; background: var(--red-bg); color: var(--red-text); font-size: 14px; }
 .notice-info { background: var(--surface-alt); color: var(--text); border-color: var(--line); }
+.retention-notice { max-width: none; margin: 0 0 12px; }
 .notice .icon { margin-top: 2px; }
 .info-strip { display: flex; align-items: flex-start; gap: 12px; padding: 18px 0; margin-bottom: 28px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); color: var(--muted); font-size: 14px; }
 .info-strip .icon { margin-top: 2px; }

@@ -97,6 +97,14 @@ test("la projection metadata interdit contenus, séquences et identités de cont
   assert.equal(parseHumanEventPage(denseStream, false, "stream").has_more, true);
 });
 
+test("une page d’événements d’une base archivée nomme le préfixe archivé", () => {
+  const page = { ...envelope, items: [], view: "metadata" };
+  assert.equal(parseHumanEventPage(page).archived_through_seq, undefined);
+  assert.equal(parseHumanEventPage({ ...page, archived_through_seq: 240 }).archived_through_seq, 240);
+  for (const bad of [0, -1, 1.5, "240", null])
+    assert.throws(() => parseHumanEventPage({ ...page, archived_through_seq: bad }), /Contrat/);
+});
+
 test("les URLs humaines ne contiennent aucun tenant ni identifiant de contexte libre", () => {
   const path = humanUrl("events", { view: "metadata", resource: { kind: "sandbox", resource_id: "a/b & c" }, cursor: "opaque-cursor" });
   const url = new URL(path, "http://localhost");
