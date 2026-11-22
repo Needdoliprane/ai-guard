@@ -174,6 +174,10 @@ fn resolve_sync(state: &GatewayState, token: &str) -> ApiResult<(usize, Authenti
     let mut human = false;
     let mut unavailable_source = None;
     for (index, tenant) in state.tenants.iter().enumerate() {
+        #[cfg(feature = "mysql-storage")]
+        if tenant.store.mysql().is_some() {
+            continue;
+        }
         match tenant
             .store
             .sqlite_api()?
@@ -210,10 +214,23 @@ fn resolve_sync(state: &GatewayState, token: &str) -> ApiResult<(usize, Authenti
         if control || human {
             return Err(forbidden());
         }
+        #[cfg(feature = "mysql-storage")]
+        if state
+            .tenants
+            .iter()
+            .any(|tenant| tenant.store.mysql().is_some())
+        {
+            return Err(unavailable(anyhow::anyhow!(
+                "MySQL workload source was not verified"
+            )));
+        }
         return Err(unavailable_source.unwrap_or_else(unauthorized));
     };
+    // Only a workload with a candidate local source needs remote discovery.
+    #[cfg(feature = "mysql-storage")]
+    require_mysql_neighbor_absence(state, &digest)?;
     // Policy B: a readable, independently authenticated source wins over an
-    // unavailable neighbor. No unavailable source is ever treated as absent.
+    // unavailable SQLite neighbor. No unavailable source is treated as absent.
     let local_collision = state
         .io_scope
         .with_store(
@@ -468,6 +485,34 @@ fn mysql_collision(
     }
 }
 
+/// A MySQL peer can deny a Legacy proof, but cannot authenticate it here.
+/// A cache miss is unknown. Require fresh verified absence because the cache
+/// retains positives for technical credentials only.
+#[cfg(feature = "mysql-storage")]
+fn require_mysql_neighbor_absence(state: &GatewayState, digest: &[u8; 32]) -> ApiResult<()> {
+    let deadline = tokio::time::Instant::now() + crate::mysql_storage::audit::DEADLINE;
+    for tenant in state.tenants.iter() {
+        let Some(mysql) = tenant.store.mysql() else {
+            continue;
+        };
+        if matches!(
+            mysql.known_control_collision(digest),
+            crate::mysql_storage::audit::KnownControlCollision::Known(_)
+        ) {
+            return Err(ambiguous());
+        }
+        let _metadata_slots = state.io_scope.admit_peer_discovery(&state.io, tenant)?;
+        if tenant
+            .store
+            .neighboring_credential_present(digest, deadline)
+            .map_err(unavailable)?
+        {
+            return Err(ambiguous());
+        }
+    }
+    Ok(())
+}
+
 /// Negative class guard for an independently verified human proof. The caller
 /// must verify its local source/OIDC session before applying policy B here.
 /// This reads historical ownership, including rotated and revoked digests;
@@ -490,17 +535,28 @@ pub(super) fn reject_human_collision(
             "contact_operator",
         )
     };
+    let guard_failure = |response: (StatusCode, Json<Value>)| {
+        if response.0 == StatusCode::TOO_MANY_REQUESTS {
+            response
+        } else {
+            unavailable_identity()
+        }
+    };
     if own_source.is_some_and(|source| source >= state.tenants.len()) {
         return Err(unavailable_identity());
     }
     for (index, tenant) in state.tenants.iter().enumerate() {
+        #[cfg(feature = "mysql-storage")]
+        if own_source != Some(index) && tenant.store.mysql().is_some() {
+            continue;
+        }
         let lookup = if own_source == Some(index) {
             state
                 .io_scope
                 .with_store(tenant, store_io::Lane::Read, true, |store| {
                     store.workload_digest_binding(digest)
                 })
-                .map_err(|_| unavailable_identity())?
+                .map_err(guard_failure)?
         } else {
             tenant
                 .store
@@ -517,6 +573,8 @@ pub(super) fn reject_human_collision(
             Err(_) => (),
         }
     }
+    #[cfg(feature = "mysql-storage")]
+    require_mysql_neighbor_absence(state, digest).map_err(guard_failure)?;
     Ok(())
 }
 
@@ -570,10 +628,10 @@ async fn issue(
             for (index, candidate) in state.tenants.iter().enumerate() {
                 if index != source {
                     #[cfg(feature = "mysql-storage")]
-                    let _metadata_slot = candidate
+                    let _metadata_slots = candidate
                         .store
                         .mysql()
-                        .map(|_| candidate.io.admit(store_io::Lane::Discovery, false))
+                        .map(|_| state.io_scope.admit_peer_discovery(&state.io, candidate))
                         .transpose()?;
                     if candidate
                         .store

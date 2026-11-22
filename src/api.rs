@@ -304,16 +304,10 @@ impl GatewayState {
             .map(|owned| owned.admit())
             .transpose()?;
         let state = self.scoped(Arc::default());
-        store_io::run(
-            Arc::clone(&self.io),
-            None,
-            store_io::Lane::Discovery,
-            false,
-            move || {
-                let _usage = usage;
-                operation(state)
-            },
-        )
+        store_io::run_discovery(Arc::clone(&self.io), move |scope| {
+            let _usage = usage;
+            operation(state.scoped(scope))
+        })
         .await
     }
     pub fn with_oidc(mut self, oidc: OidcGateway) -> anyhow::Result<Self> {
