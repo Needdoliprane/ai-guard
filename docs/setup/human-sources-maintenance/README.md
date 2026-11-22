@@ -127,8 +127,11 @@ loss or production readiness.
 
 The SQLite maintenance command upgrades one Store14 in an adopted owned
 installation. Stop the gateway and every consumer first. Keep the prior
-activation and select an absolute new output directory outside the source
-directories. Generate a new operation UUID and retain it with the command.
+activation and select an absolute new output directory. Use a location outside
+the source directories and the directories holding the prior manifest and
+technical envelope, including the initial activation directory. Aliases of
+those directories are subject to the same check. Generate a new operation UUID
+and retain it with the command.
 
 ```sh
 agentsandbox human-sources upgrade-egress \
@@ -160,6 +163,18 @@ confirmed genesis. If the final output directory was never published, preserve
 its staging sibling and begin in a fresh directory after checking offline that
 the selected source remains Store14. A backup with no recorded receipt requires
 reconciliation before retrying. Preserve that copy and the journal for diagnosis.
+
+- `store15_output_protected` refuses a location overlapping the retained
+  layout. Choose a new directory outside it.
+- `store15_output_not_fresh` requires an available new destination. Preserve
+  existing files and use `--resume` only for the same prepared operation.
+- `store15_control_active` reports owner contention before a SQLite
+  transition. Retry after the controls have stopped. Use `--resume` if the same
+  preparation was already published.
+- `store15_preparation_publication_unconfirmed` leaves preparation files to
+  inspect before resuming. `store15_transition_unconfirmed` can follow a durable
+  SQLite commit. Preserve every file and resume the same operation to confirm.
+
 The command reports publication and leaves gateway readiness to startup.
 
 ## Validation scope

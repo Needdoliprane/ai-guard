@@ -133,8 +133,10 @@ reprise après coupure physique ou préparation à la production.
 La commande de maintenance SQLite fait passer un Store14 d'une installation
 owned adoptée au format 15. Arrêter le gateway et tous les consommateurs.
 Conserver l'activation précédente et choisir un répertoire de sortie absolu,
-neuf et extérieur aux répertoires sources. Générer un UUID d'opération et le
-conserver avec la commande.
+neuf et extérieur aux répertoires sources et à ceux qui contiennent le
+manifeste et l'enveloppe technique précédents, dont le répertoire d'activation
+initiale. Le même contrôle s'applique aux alias de ces répertoires. Générer un
+UUID d'opération et le conserver avec la commande.
 
 ```sh
 agentsandbox human-sources upgrade-egress \
@@ -168,7 +170,22 @@ final n'a jamais été publié, préserver son répertoire de préparation voisi
 repartir dans une nouvelle destination après vérification hors ligne que la
 source est toujours au format 14. Une sauvegarde sans reçu enregistré demande
 une réconciliation avant reprise. Conserver la copie et le journal pour le
-diagnostic. L'état de disponibilité du gateway sera établi à son démarrage.
+diagnostic.
+
+- `store15_output_protected` refuse une sortie qui recoupe un répertoire
+  retenu. Choisir une destination extérieure.
+- `store15_output_not_fresh` exige une nouvelle destination disponible.
+  Préserver les fichiers existants et utiliser `--resume` pour reprendre la
+  même opération préparée.
+- `store15_control_active` signale une contention du propriétaire avant la
+  transition SQLite. Réessayer après l'arrêt des contrôles. Utiliser `--resume`
+  si la même préparation a déjà été publiée.
+- `store15_preparation_publication_unconfirmed` laisse des fichiers de
+  préparation à vérifier avant la reprise. `store15_transition_unconfirmed`
+  peut suivre un commit SQLite durable. Conserver tous les fichiers et
+  reprendre la même opération pour confirmer le résultat.
+
+L'état de disponibilité du gateway sera établi à son démarrage.
 
 ## Périmètre de validation
 

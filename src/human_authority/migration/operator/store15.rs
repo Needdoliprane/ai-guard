@@ -6,7 +6,7 @@ use crate::{
     control_fs::{Directory, PrivateFile},
     human_authority::{
         HumanAuthorityClosureV1, HumanConfigurationFileKindV1, HumanSourceKindV1,
-        MAX_HUMAN_MANIFEST_BYTES,
+        HumanSourcesConfigurationV1, MAX_HUMAN_MANIFEST_BYTES, OwnedHumanSources,
         maintenance::{
             HumanMaintenanceActiveManifestV1, HumanMaintenanceResolvedViewV1,
             HumanMaintenanceViewV1, HumanSourcesMaintenanceConfigurationV1,
@@ -17,7 +17,7 @@ use crate::{
     },
 };
 use anyhow::{Context, Result, ensure};
-use std::{ffi::OsStr, path::Path};
+use std::{ffi::OsStr, fmt, path::Path};
 use uuid::Uuid;
 
 const TECHNICAL: &str = "technical-credentials.json";
@@ -46,7 +46,35 @@ pub struct Store15UpgradeResult {
     pub genesis_sequence: i64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Store15UpgradeRefusal {
+    OutputProtected,
+    OutputNotFresh,
+    PreparationPublicationUnconfirmed,
+    TransitionUnconfirmed,
+}
+
+impl fmt::Display for Store15UpgradeRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::OutputProtected => "store15_output_protected choose_a_new_directory",
+            Self::OutputNotFresh => {
+                "store15_output_not_fresh preserve_output use_resume_for_the_same_operation"
+            }
+            Self::PreparationPublicationUnconfirmed => {
+                "store15_preparation_publication_unconfirmed preserve_output check_before_resume"
+            }
+            Self::TransitionUnconfirmed => {
+                "store15_transition_unconfirmed preserve_output reconcile_and_resume_same_operation"
+            }
+        })
+    }
+}
+
+impl std::error::Error for Store15UpgradeRefusal {}
+
 pub fn upgrade_store15(request: Store15UpgradeRequest<'_>) -> Result<Store15UpgradeResult> {
+    use Store15UpgradeRefusal as Refusal;
     validate_absolute_path(request.output_directory)?;
     ensure!(
         !request.operation_id.is_nil(),
@@ -139,19 +167,44 @@ pub fn upgrade_store15(request: Store15UpgradeRequest<'_>) -> Result<Store15Upgr
         .file_name()
         .and_then(OsStr::to_str)
         .context("Store15 output name invalid")?;
-    let source_parents = prior_view
+    // The initial activation's closed catalogue holds its technical envelope.
+    // With explicit references, the prior manifest/envelope may also be seals
+    // of another operation. Preserve their directories in both cases.
+    let protected_directories = prior_view
         .sources
         .iter()
-        .map(|source| Directory::open_existing(&source.storage_binding.parent_path))
+        .map(|source| source.storage_binding.parent_path.as_path())
+        .chain([
+            retained_parent(&request.prior.manifest)?,
+            retained_parent(old_credentials)?,
+        ])
+        .map(Directory::open_existing)
         .collect::<Result<Vec<_>>>()?;
-    for source_parent in &source_parents {
+    for protected in &protected_directories {
         ensure!(
-            !parent.is_within_directory(source_parent)?,
-            "Store15 output overlaps a source parent"
+            !parent.is_within_directory(protected)?,
+            Refusal::OutputProtected
         );
     }
     if !request.resume {
-        parent.require_absent_child(name)?;
+        parent
+            .require_absent_child(name)
+            .map_err(|_| Refusal::OutputNotFresh)?;
+        // This owner takes the real prior authority locks without opening SQLite.
+        // After metadata publication, maintenance takes them again over the
+        // complete prior/target union before any backup or mutation.
+        let prior_owner = OwnedHumanSources::acquire(
+            request.prior.manifest.clone(),
+            HumanSourcesConfigurationV1::new(
+                actual.sources.clone(),
+                actual.configuration.clone(),
+                actual
+                    .files
+                    .iter()
+                    .map(|(kind, file)| (*kind, file.clone()))
+                    .collect(),
+            )?,
+        )?;
         let stage = parent.exclusive_child(&format!("store15-stage-{}", Uuid::new_v4()))?;
         parent.require_same_mount_child(&stage)?;
         let credentials = stage.persistent_create(TECHNICAL, &target_bytes)?;
@@ -171,14 +224,21 @@ pub fn upgrade_store15(request: Store15UpgradeRequest<'_>) -> Result<Store15Upgr
         stage.exclusive_child(BACKUP)?;
         parent
             .publish_child_exclusive(&stage, name)
-            .map_err(|_| anyhow::anyhow!("Store15 preparation publication unconfirmed"))?;
+            .map_err(|_| Refusal::PreparationPublicationUnconfirmed)?;
+        drop(prior_owner);
     }
     let output = parent.open_existing_child(name)?;
     parent.require_same_mount_child(&output)?;
-    for source_parent in &source_parents {
+    for protected in &protected_directories {
         ensure!(
-            !source_parent.is_within_directory(&output)?,
-            "Store15 output overlaps a source parent"
+            !protected.is_within_directory(&output)?,
+            Refusal::OutputProtected
+        );
+    }
+    for file in actual.files.values() {
+        ensure!(
+            !file.is_within_directory(output.path())?,
+            Refusal::OutputProtected
         );
     }
     output.persistent_entries(MAX_OUTPUT_ENTRIES)?;
@@ -253,53 +313,63 @@ pub fn upgrade_store15(request: Store15UpgradeRequest<'_>) -> Result<Store15Upgr
     let backup = output.open_existing_child(BACKUP)?;
     output.require_same_mount_child(&journal)?;
     output.require_same_mount_child(&backup)?;
-    let published = output.persistent_child(CLOSURE, false)?;
-    if let Some(existing) = &published {
-        output.require_same_mount_child(existing)?;
+    let outcome = (|| -> Result<_> {
+        let published = output.persistent_child(CLOSURE, false)?;
+        if let Some(existing) = &published {
+            output.require_same_mount_child(existing)?;
+            read_exact(
+                existing,
+                MANIFEST,
+                &manifest_bytes,
+                MAX_HUMAN_MANIFEST_BYTES as u64,
+            )?;
+        } else {
+            output.persistent_entries(MAX_OUTPUT_ENTRIES - 1)?;
+        }
+        let receipt = apply_egress_format15(
+            &token,
+            options,
+            journal,
+            backup,
+            &EgressStoreLimitsV1::default(),
+            published.is_some(),
+        )?;
+        guard.check()?;
+        if published.is_none() {
+            let stage = output.exclusive_child(&format!("{CLOSURE_STAGE}{}", Uuid::new_v4()))?;
+            stage
+                .persistent_create(MANIFEST, &manifest_bytes)?
+                .persistent_sync()?;
+            output.require_same_mount_child(&stage)?;
+            guard.check()?;
+            output
+                .publish_child_exclusive(&stage, CLOSURE)
+                .map_err(|_| anyhow::anyhow!("Store15 closure publication unconfirmed"))?;
+        }
+        let closure = output.open_existing_child(CLOSURE)?;
+        output.require_same_mount_child(&closure)?;
         read_exact(
-            existing,
+            &closure,
             MANIFEST,
             &manifest_bytes,
             MAX_HUMAN_MANIFEST_BYTES as u64,
         )?;
-    } else {
-        output.persistent_entries(MAX_OUTPUT_ENTRIES - 1)?;
-    }
-    let receipt = apply_egress_format15(
-        &token,
-        options,
-        journal,
-        backup,
-        &EgressStoreLimitsV1::default(),
-        published.is_some(),
-    )?;
-    guard.check()?;
-    if published.is_none() {
-        let stage = output.exclusive_child(&format!("{CLOSURE_STAGE}{}", Uuid::new_v4()))?;
-        stage
-            .persistent_create(MANIFEST, &manifest_bytes)?
-            .persistent_sync()?;
-        output.require_same_mount_child(&stage)?;
+        output.sync()?;
+        parent.sync()?;
         guard.check()?;
-        output
-            .publish_child_exclusive(&stage, CLOSURE)
-            .map_err(|_| anyhow::anyhow!("Store15 closure publication unconfirmed"))?;
-    }
-    let closure = output.open_existing_child(CLOSURE)?;
-    output.require_same_mount_child(&closure)?;
-    read_exact(
-        &closure,
-        MANIFEST,
-        &manifest_bytes,
-        MAX_HUMAN_MANIFEST_BYTES as u64,
-    )?;
-    output.sync()?;
-    parent.sync()?;
-    guard.check()?;
-    Ok(Store15UpgradeResult {
-        closure_revision,
-        genesis_sequence: receipt.seq,
-    })
+        Ok(Store15UpgradeResult {
+            closure_revision,
+            genesis_sequence: receipt.seq,
+        })
+    })();
+    outcome.context(Refusal::TransitionUnconfirmed)
+}
+
+fn retained_parent(file: &PrivateFile) -> Result<&Path> {
+    file.persistent_revalidate()?;
+    file.path()
+        .parent()
+        .context("Store15 retained file parent missing")
 }
 
 fn update_envelope_binding(

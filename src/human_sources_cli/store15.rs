@@ -70,14 +70,16 @@ pub(super) fn run(args: UpgradeEgressArgs) -> Result<()> {
             );
             Ok(())
         }
-        Err(error)
+        Err(error) => {
+            if let Some(refusal) = error.downcast_ref::<operator::Store15UpgradeRefusal>() {
+                bail!("{refusal}");
+            }
             if error.downcast_ref::<HumanAuthorityFailure>()
-                == Some(&HumanAuthorityFailure::OwnerContended) =>
-        {
-            bail!("store15_control_active preserve_output resume_after_control_stops")
-        }
-        Err(_) => {
-            bail!("store15_closure_unconfirmed preserve_output reconcile_and_resume_same_operation")
+                == Some(&HumanAuthorityFailure::OwnerContended)
+            {
+                bail!("store15_control_active preserve_output retry_after_control_stops");
+            }
+            bail!("store15_preparation_refused preserve_output verify_inputs_and_resume")
         }
     }
 }
