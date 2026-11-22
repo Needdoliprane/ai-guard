@@ -68,6 +68,8 @@ async fn verified_oidc_memberships_do_not_open_saturated_profile_stores() {
     for tenant in state.tenants.iter() {
         tenant
             .store
+            .sqlite()
+            .unwrap()
             .mutate_identity(&identity_change(IdentityChangeV1::Account {
                 expected_revision: 0,
                 account: HumanAccountV1 {
@@ -81,6 +83,8 @@ async fn verified_oidc_memberships_do_not_open_saturated_profile_stores() {
             .unwrap();
         tenant
             .store
+            .sqlite()
+            .unwrap()
             .mutate_identity(&identity_change(IdentityChangeV1::Membership {
                 expected_revision: 0,
                 membership: MembershipV1 {
@@ -170,8 +174,8 @@ async fn verified_oidc_memberships_do_not_open_saturated_profile_stores() {
             .unwrap(),
         )
         .unwrap();
-    let observations_a = observe(&state.tenants[0].store);
-    let observations_b = observe(&state.tenants[1].store);
+    let observations_a = observe(state.tenants[0].store.sqlite().unwrap());
+    let observations_b = observe(state.tenants[1].store.sqlite().unwrap());
     let expected = BTreeSet::from([HumanCapabilityV1::ReadMetadata]);
     assert_eq!(
         verified_memberships(&state, &access).await.unwrap(),
@@ -359,6 +363,8 @@ async fn exhausted_unscoped_budget_preserves_healthy_b_when_first_tenant_read_is
         assert!(
             state.tenants[0]
                 .store
+                .sqlite()
+                .unwrap()
                 .human_account(&principal)
                 .unwrap()
                 .is_none()
@@ -390,6 +396,8 @@ async fn exhausted_unscoped_budget_preserves_healthy_b_when_first_tenant_read_is
         ] {
             state.tenants[1]
                 .store
+                .sqlite()
+                .unwrap()
                 .mutate_identity(&identity_change(change))
                 .unwrap();
         }

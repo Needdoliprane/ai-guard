@@ -29,6 +29,7 @@ async fn grant(
             tenant.write_quota()?;
             let result = tenant
                 .store
+                .sqlite_api()?
                 .mutate_broker_grant(&input)
                 .map_err(|error| workload::store_failure(&tenant.store, error))?;
             Ok((
@@ -52,9 +53,13 @@ async fn revoke(
     tenant
         .blocking(false, move |tenant| {
             tenant.write_quota()?;
-            Ok(Json(tenant.store.revoke_broker(&input).map_err(
-                |error| workload::store_failure(&tenant.store, error),
-            )?))
+            Ok(Json(
+                tenant
+                    .store
+                    .sqlite_api()?
+                    .revoke_broker(&input)
+                    .map_err(|error| workload::store_failure(&tenant.store, error))?,
+            ))
         })
         .await
 }
@@ -70,6 +75,7 @@ async fn heartbeat(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .broker_heartbeat(&identity, &input)
                     .map_err(|error| workload::store_failure(&tenant.store, error))?,
             ))
@@ -79,9 +85,13 @@ async fn heartbeat(
 async fn own(broker: VerifiedBroker) -> ApiResult<Json<BrokerViewV1>> {
     broker
         .blocking(move |tenant, identity, _redactor| {
-            Ok(Json(tenant.store.broker_for_identity(&identity).map_err(
-                |error| workload::store_failure(&tenant.store, error),
-            )?))
+            Ok(Json(
+                tenant
+                    .store
+                    .sqlite_api()?
+                    .broker_for_identity(&identity)
+                    .map_err(|error| workload::store_failure(&tenant.store, error))?,
+            ))
         })
         .await
 }
@@ -100,6 +110,7 @@ async fn checkpoint(
             }
             let scope = tenant
                 .store
+                .sqlite_api()?
                 .broker_authenticated_identity(&identity)
                 .map_err(|error| workload::store_failure(&tenant.store, error))?;
             if !checkpoint_is_public(&scope, &redactor)? {
@@ -112,6 +123,7 @@ async fn checkpoint(
             }
             let result = tenant
                 .store
+                .sqlite_api()?
                 .broker_checkpoint(&identity, &input)
                 .map_err(|error| workload::store_failure(&tenant.store, error))?;
             // Never mask identifiers or commitments into a different receipt.
@@ -129,6 +141,7 @@ async fn own_checkpoint(broker: VerifiedBroker) -> ApiResult<Json<BrokerCheckpoi
         .blocking(move |tenant, identity, redactor| {
             let view = tenant
                 .store
+                .sqlite_api()?
                 .broker_checkpoint_for_identity(&identity)
                 .map_err(|error| workload::store_failure(&tenant.store, error))?;
             if !checkpoint_is_public(&view, &redactor)? {
@@ -157,6 +170,7 @@ async fn identity(broker: VerifiedBroker) -> ApiResult<Json<BrokerIdentityViewV1
         .blocking(move |tenant, identity, redactor| {
             let view = tenant
                 .store
+                .sqlite_api()?
                 .broker_authenticated_identity(&identity)
                 .map_err(|error| workload::store_failure(&tenant.store, error))?;
             let value = serde_json::to_value(&view).map_err(|_| identity_unavailable())?;
@@ -200,6 +214,7 @@ async fn federation_workers(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .federation_workers_page(query.cursor.as_deref(), limit)
                     .map_err(|error| workload::store_failure(&tenant.store, error))?,
             ))
@@ -222,6 +237,7 @@ async fn list(
         .blocking(true, move |tenant| {
             let items = tenant
                 .store
+                .sqlite_api()?
                 .brokers_page(query.cursor.as_deref(), limit)
                 .map_err(|error| workload::store_failure(&tenant.store, error))?;
             let next_cursor = if items.len() == limit as usize {
@@ -229,6 +245,7 @@ async fn list(
                 if let Some(last) = last {
                     if tenant
                         .store
+                        .sqlite_api()?
                         .brokers_page(Some(&last), 1)
                         .map_err(|error| workload::store_failure(&tenant.store, error))?
                         .is_empty()

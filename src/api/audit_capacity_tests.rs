@@ -33,20 +33,24 @@ fn exhaust_profile_budget(store: &Store, principal: &PrincipalRefV1) {
 async fn exhausted_neighbor_profile_stays_partial_but_source_budget_refuses_identity() {
     let (_directory, state, token) = local_identity_state();
     let a = Arc::clone(
-        &state
+        state
             .tenants
             .iter()
             .find(|t| t.tenant_id == "tenant-a")
             .unwrap()
-            .store,
+            .store
+            .sqlite()
+            .unwrap(),
     );
     let b = Arc::clone(
-        &state
+        state
             .tenants
             .iter()
             .find(|t| t.tenant_id == "tenant-b")
             .unwrap()
-            .store,
+            .store
+            .sqlite()
+            .unwrap(),
     );
     let router = gateway_router(state);
     let (status, initial) = human_get(&router, &token, "/api/v1/human/identity", None).await;

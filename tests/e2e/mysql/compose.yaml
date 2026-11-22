@@ -1,0 +1,96 @@
+name: "${QA_MYSQL_PROJECT:?Set a new QA-only Compose project name}"
+
+x-mysql-server: &mysql-server
+  image: "mysql:8.4@sha256:${QA_MYSQL_IMAGE_DIGEST:?Set the local MySQL 8.4 manifest digest (64 hex digits)}"
+  pull_policy: never
+  cpus: 1.0
+  mem_limit: 1g
+  command:
+    - --require-secure-transport=ON
+    - --ssl-ca=/run/secrets/qa_ca
+    - --ssl-cert=/run/secrets/server_cert
+    - --ssl-key=/run/secrets/server_key
+    - --mysqlx=OFF
+  environment:
+    MYSQL_ROOT_HOST: localhost
+    MYSQL_ROOT_PASSWORD_FILE: /run/secrets/root_password
+    MYSQL_USER: qa_probe
+    MYSQL_PASSWORD_FILE: /run/secrets/probe_password
+  ports:
+    - target: 3306
+      published: "${QA_MYSQL_PORT:-13306}"
+      host_ip: 127.0.0.1
+      protocol: tcp
+  networks: [mysql-qa]
+
+services:
+  mysql-password:
+    <<: *mysql-server
+    profiles: [mysql-password]
+    volumes:
+      - password_data:/var/lib/mysql
+      - type: bind
+        source: ./require-ssl.sql
+        target: /docker-entrypoint-initdb.d/10-transport.sql
+        read_only: true
+        bind:
+          create_host_path: false
+    secrets:
+      - qa_ca
+      - source: password_server_cert
+        target: server_cert
+      - source: password_server_key
+        target: server_key
+      - source: password_root_password
+        target: root_password
+      - source: password_probe_password
+        target: probe_password
+
+  mysql-mtls:
+    <<: *mysql-server
+    profiles: [mysql-mtls]
+    volumes:
+      - mtls_data:/var/lib/mysql
+      - type: bind
+        source: ./require-x509.sql
+        target: /docker-entrypoint-initdb.d/10-transport.sql
+        read_only: true
+        bind:
+          create_host_path: false
+    secrets:
+      - qa_ca
+      - source: mtls_server_cert
+        target: server_cert
+      - source: mtls_server_key
+        target: server_key
+      - source: mtls_root_password
+        target: root_password
+      - source: mtls_probe_password
+        target: probe_password
+
+networks:
+  mysql-qa: {}
+
+volumes:
+  password_data: {}
+  mtls_data: {}
+
+secrets:
+  qa_ca:
+    file: "${QA_MYSQL_PRIVATE_DIR:?Set an absolute private QA directory}/ca/ca.pem"
+  password_server_cert:
+    file: "${QA_MYSQL_PRIVATE_DIR:?Set an absolute private QA directory}/password/server.pem"
+  password_server_key:
+    file: "${QA_MYSQL_PRIVATE_DIR:?Set an absolute private QA directory}/password/server.key"
+  password_root_password:
+    file: "${QA_MYSQL_PRIVATE_DIR:?Set an absolute private QA directory}/password/root.password"
+  password_probe_password:
+    file: "${QA_MYSQL_PRIVATE_DIR:?Set an absolute private QA directory}/password/probe.password"
+  mtls_server_cert:
+    file: "${QA_MYSQL_PRIVATE_DIR:?Set an absolute private QA directory}/mtls/server.pem"
+  mtls_server_key:
+    file: "${QA_MYSQL_PRIVATE_DIR:?Set an absolute private QA directory}/mtls/server.key"
+  mtls_root_password:
+    file: "${QA_MYSQL_PRIVATE_DIR:?Set an absolute private QA directory}/mtls/root.password"
+  mtls_probe_password:
+    file: "${QA_MYSQL_PRIVATE_DIR:?Set an absolute private QA directory}/mtls/probe.password"

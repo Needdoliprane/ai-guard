@@ -309,6 +309,77 @@ impl SupervisionStateV1 {
     }
 }
 
+/// The backend that verified the capabilities. It is evidence, not a switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlStorageBackendV1 {
+    Sqlite,
+    Mysql,
+}
+
+/// An operation the verified target actually serves, with its replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlOperationV1 {
+    RecoveryInspect,
+    StopReconcile,
+    SupervisedAdmission,
+}
+
+/// Private, runner-only answer to `GET /control/api/v1/control/capabilities`.
+/// The client binds role, tenant and namespace before opening any journal and
+/// never falls back to `ControlProtocolV1` or the public transport.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlCapabilitiesV1 {
+    pub version: u32,
+    pub role: String,
+    pub tenant_id: String,
+    pub control_namespace_uuid: Option<String>,
+    pub storage: ControlStorageBackendV1,
+    pub operations: Vec<ControlOperationV1>,
+}
+
+impl ControlCapabilitiesV1 {
+    pub const MAX_BYTES: usize = 16 * 1024;
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        invalid(self.version == 1 && self.role == "runner")?;
+        crate::tenancy::validate_tenant_id(&self.tenant_id)?;
+        if let Some(namespace) = &self.control_namespace_uuid {
+            uuid(namespace)?;
+        }
+        // Closed, sorted and duplicate-free: one canonical answer per state.
+        invalid(self.operations.windows(2).all(|pair| pair[0] < pair[1]))?;
+        // An operation needs a verified namespace to be bound to.
+        invalid(self.operations.is_empty() || self.control_namespace_uuid.is_some())
+    }
+
+    /// The SQLite mapping of its versioned supervision state. Admission also
+    /// requires an active authority, as the proposal specifies.
+    pub fn from_sqlite_state(tenant_id: &str, state: &SupervisionStateV1) -> Self {
+        let served = state
+            .protocols
+            .contains(&SupervisionProtocolV1::BrokerSupervisionV1);
+        let mut operations = Vec::new();
+        if served {
+            operations.push(ControlOperationV1::RecoveryInspect);
+            operations.push(ControlOperationV1::StopReconcile);
+            if state.active {
+                operations.push(ControlOperationV1::SupervisedAdmission);
+            }
+        }
+        Self {
+            version: 1,
+            role: "runner".into(),
+            tenant_id: tenant_id.into(),
+            control_namespace_uuid: state.control_namespace_uuid.clone(),
+            storage: ControlStorageBackendV1::Sqlite,
+            operations,
+        }
+    }
+}
+
 impl ControlProtocolV1 {
     pub fn validate(&self) -> anyhow::Result<()> {
         crate::tenancy::validate_tenant_id(&self.tenant_id)?;

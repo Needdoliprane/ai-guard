@@ -91,7 +91,7 @@ fn recent_sync(
         };
         owned.recent(
             *source,
-            &tenant.store,
+            tenant.store.sqlite_api()?,
             &scope,
             &filter,
             cursor.upper_event,
@@ -101,6 +101,7 @@ fn recent_sync(
     } else {
         tenant
             .store
+            .sqlite_api()?
             .human_events_recent(
                 &scope,
                 &filter,

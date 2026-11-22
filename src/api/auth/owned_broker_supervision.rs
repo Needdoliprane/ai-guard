@@ -164,7 +164,11 @@ impl Presented {
     /// one checked transaction inside the discovery-generation window, with
     /// the candidate rechecked after.
     fn verify(self) -> OwnedChecked<OwnedBrokerSupervisionIdentity> {
-        let store: &Store = &self.tenant.store;
+        let store: &Store = self
+            .tenant
+            .store
+            .sqlite()
+            .map_err(|_| Code::SupervisionUnavailable)?;
         require(
             self.owned.broker_source(&self.digest)? == self.index,
             Code::SourceRebuildRequired,
@@ -233,7 +237,11 @@ impl OwnedBrokerSupervisionIdentity {
             &BrokerIdentityV1,
         ) -> OwnedChecked<T>,
     ) -> OwnedChecked<T> {
-        let store: &Store = &self.tenant.store;
+        let store: &Store = self
+            .tenant
+            .store
+            .sqlite()
+            .map_err(|_| Code::SupervisionUnavailable)?;
         require(
             self.owned.broker_source(&self.digest)? == self.index,
             Code::SourceRebuildRequired,

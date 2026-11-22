@@ -476,7 +476,7 @@ async fn owned_control_nonrunner_absent_and_duplicate_headers_refuse_before_stor
     let observations = state
         .tenants
         .iter()
-        .map(|entry| crate::audit::read_test_observer::observe(&entry.store))
+        .map(|entry| crate::audit::read_test_observer::observe(entry.store.sqlite().unwrap()))
         .collect::<Vec<_>>();
     for headers in [
         vec![],
@@ -523,7 +523,12 @@ async fn owned_control_historical_human_collision_refuses_before_either_store() 
             state
                 .tenants
                 .iter()
-                .map(|entry| (entry.tenant_id.clone(), Arc::clone(&entry.store)))
+                .map(|entry| {
+                    (
+                        entry.tenant_id.clone(),
+                        Arc::clone(entry.store.sqlite().unwrap()),
+                    )
+                })
                 .collect(),
             RUNNER,
         )
@@ -533,6 +538,8 @@ async fn owned_control_historical_human_collision_refuses_before_either_store() 
             let epoch = owned.owner.try_read_epoch().unwrap();
             state.tenants[a]
                 .store
+                .sqlite()
+                .unwrap()
                 .assert_owned_control_fixture_binding_for_test(
                     &epoch,
                     &owned.sources[a],
@@ -546,7 +553,7 @@ async fn owned_control_historical_human_collision_refuses_before_either_store() 
         let observations = state
             .tenants
             .iter()
-            .map(|entry| crate::audit::read_test_observer::observe(&entry.store))
+            .map(|entry| crate::audit::read_test_observer::observe(entry.store.sqlite().unwrap()))
             .collect::<Vec<_>>();
         let (status, _, body) = response(&router, "GET", RESERVED_PROTOCOL, &[RUNNER], false).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
@@ -608,6 +615,8 @@ async fn owned_control_revoked_review_binding_cannot_publish_a_protocol() {
         let epoch = owned.owner.try_write_epoch().unwrap();
         let result = state.tenants[a]
             .store
+            .sqlite()
+            .unwrap()
             .revoke_review_binding(
                 &epoch,
                 &owned.sources[a],
@@ -625,7 +634,8 @@ async fn owned_control_revoked_review_binding_cannot_publish_a_protocol() {
         assert!(!result.snapshot.binding.active);
         assert_eq!(result.snapshot.binding.revision, 2);
     }
-    let observed_b = crate::audit::read_test_observer::observe(&state.tenants[b].store);
+    let observed_b =
+        crate::audit::read_test_observer::observe(state.tenants[b].store.sqlite().unwrap());
     for _ in 0..2 {
         let (status, _, body) = response(&router, "GET", RESERVED_PROTOCOL, &[RUNNER], false).await;
         assert!(
@@ -652,7 +662,7 @@ async fn owned_control_changed_retained_registry_refuses_before_sql() {
     let observations = state
         .tenants
         .iter()
-        .map(|entry| crate::audit::read_test_observer::observe(&entry.store))
+        .map(|entry| crate::audit::read_test_observer::observe(entry.store.sqlite().unwrap()))
         .collect::<Vec<_>>();
     // Valid JSON whitespace changes the actual retained private file, not DTO fields.
     let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
@@ -713,7 +723,7 @@ async fn owned_control_missing_source_path_refuses_without_neighbor_sql() {
     let observations = state
         .tenants
         .iter()
-        .map(|entry| crate::audit::read_test_observer::observe(&entry.store))
+        .map(|entry| crate::audit::read_test_observer::observe(entry.store.sqlite().unwrap()))
         .collect::<Vec<_>>();
     let held = MovedSource::hold(owned.sources[a].descriptor().storage_binding.path());
     let (status, _, body) = response(&router, "GET", RESERVED_PROTOCOL, &[RUNNER], false).await;
@@ -769,10 +779,11 @@ async fn owned_control_own_mutex_refuses_while_held_and_preserves_timeout713() {
     require_protocol(&router, RUNNER, "A").await;
     let a = tenant(&state, "A");
     let b = tenant(&state, "B");
-    let store = Arc::clone(&state.tenants[a].store);
+    let store = Arc::clone(state.tenants[a].store.sqlite().unwrap());
     assert!(store.healthy());
     store.owned_control_set_busy_timeout_for_test(713).unwrap();
-    let observed_b = crate::audit::read_test_observer::observe(&state.tenants[b].store);
+    let observed_b =
+        crate::audit::read_test_observer::observe(state.tenants[b].store.sqlite().unwrap());
     let held = HeldMutex::hold(Arc::clone(&store));
     let result = tokio::time::timeout(
         OBSERVE,
@@ -805,8 +816,13 @@ async fn owned_control_own_sqlite_busy_refuses_and_restores_timeout713() {
     let b = tenant(&state, "B");
     let store = &state.tenants[a].store;
     assert!(store.healthy());
-    store.owned_control_set_busy_timeout_for_test(713).unwrap();
-    let observed_b = crate::audit::read_test_observer::observe(&state.tenants[b].store);
+    store
+        .sqlite()
+        .unwrap()
+        .owned_control_set_busy_timeout_for_test(713)
+        .unwrap();
+    let observed_b =
+        crate::audit::read_test_observer::observe(state.tenants[b].store.sqlite().unwrap());
     let connection =
         rusqlite::Connection::open(owned.sources[a].descriptor().storage_binding.path()).unwrap();
     connection.execute_batch("BEGIN IMMEDIATE").unwrap();
@@ -815,7 +831,11 @@ async fn owned_control_own_sqlite_busy_refuses_and_restores_timeout713() {
         !connection.is_autocommit(),
         "the real competing writer is still held at the refusal"
     );
-    let timeout_after_refusal = store.owned_control_busy_timeout_for_test().unwrap();
+    let timeout_after_refusal = store
+        .sqlite()
+        .unwrap()
+        .owned_control_busy_timeout_for_test()
+        .unwrap();
     connection.execute_batch("ROLLBACK").unwrap();
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     no_protocol(&body);
@@ -824,7 +844,14 @@ async fn owned_control_own_sqlite_busy_refuses_and_restores_timeout713() {
     assert!(observed_b.try_recv().is_err());
     require_protocol(&router, RUNNER, "A").await;
     assert!(store.healthy());
-    assert_eq!(store.owned_control_busy_timeout_for_test().unwrap(), 713);
+    assert_eq!(
+        store
+            .sqlite()
+            .unwrap()
+            .owned_control_busy_timeout_for_test()
+            .unwrap(),
+        713
+    );
     drain(&state).await;
 }
 
@@ -843,12 +870,14 @@ async fn owned_control_b_sdk_succeeds_while_a_mutex_and_sqlite_are_unavailable()
         .to_string();
     let router = gateway_router(state.clone());
     require_protocol(&router, B_RUNNER, "B").await;
-    let observed_a = crate::audit::read_test_observer::observe(&state.tenants[a].store);
-    let observed_b = crate::audit::read_test_observer::observe(&state.tenants[b].store);
+    let observed_a =
+        crate::audit::read_test_observer::observe(state.tenants[a].store.sqlite().unwrap());
+    let observed_b =
+        crate::audit::read_test_observer::observe(state.tenants[b].store.sqlite().unwrap());
     let connection =
         rusqlite::Connection::open(owned.sources[a].descriptor().storage_binding.path()).unwrap();
     connection.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let held = HeldMutex::hold(Arc::clone(&state.tenants[a].store));
+    let held = HeldMutex::hold(Arc::clone(state.tenants[a].store.sqlite().unwrap()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = oneshot::channel();
@@ -900,7 +929,7 @@ async fn owned_control_public_head_mutations_and_unknown_routes_keep_their_bound
     let observations = state
         .tenants
         .iter()
-        .map(|entry| crate::audit::read_test_observer::observe(&entry.store))
+        .map(|entry| crate::audit::read_test_observer::observe(entry.store.sqlite().unwrap()))
         .collect::<Vec<_>>();
     for (method, path, expected) in [
         (
@@ -1010,7 +1039,7 @@ async fn owned_control_retired_owner_refuses_before_any_new_store_work() {
     let observations = state
         .tenants
         .iter()
-        .map(|entry| crate::audit::read_test_observer::observe(&entry.store))
+        .map(|entry| crate::audit::read_test_observer::observe(entry.store.sqlite().unwrap()))
         .collect::<Vec<_>>();
     let retirement = state.human_retirement().unwrap();
     retirement.retire();

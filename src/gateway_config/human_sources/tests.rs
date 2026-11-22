@@ -32,7 +32,7 @@ fn canonicalization_preserves_semantic_array_order_and_refuses_noninteger_number
 fn tenant(id: &str) -> ConfiguredTenant {
     ConfiguredTenant {
         tenant_id: id.into(),
-        data: "/private/data".into(),
+        storage: crate::gateway_config::ConfiguredStorage::Sqlite("/private/data".into()),
         runner_token_file: "/private/runner".into(),
         viewer_token_file: "/private/viewer".into(),
         runner_token: "synthetic-PRIVATE-runner".into(),
@@ -66,7 +66,8 @@ fn public_digest_sorts_tenants_excludes_credentials_and_paths_and_binds_effectiv
     }
     tenants.reverse();
     tenants[0].runner_token = "another-private-secret".into();
-    tenants[0].data = "/elsewhere/sensitive".into();
+    tenants[0].storage =
+        crate::gateway_config::ConfiguredStorage::Sqlite("/elsewhere/sensitive".into());
     assert_eq!(
         before,
         public_control_digest_v1(&resolved_control(1, 10_000, &tenants, None).unwrap()).unwrap()

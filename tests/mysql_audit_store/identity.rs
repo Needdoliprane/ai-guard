@@ -30,6 +30,9 @@ use std::{
 use tokio::process::Command;
 use uuid::Uuid;
 
+#[path = "gateway.rs"]
+mod gateway;
+
 const TENANT_A: &str = "tenant-qa-a";
 const TENANT_B: &str = "tenant-qa-b";
 const DIGEST_A: [u8; 32] = [0x42; 32];
@@ -124,7 +127,7 @@ impl FixtureFiles {
         .await
     }
 
-    async fn initialize(&self, tenant: &str) -> Result<StoredEvent> {
+    pub(super) async fn initialize(&self, tenant: &str) -> Result<StoredEvent> {
         self.target
             .open(
                 &self.target.maintenance_username,
@@ -150,7 +153,7 @@ async fn audit_state(conn: &mut Conn) -> Result<AuditState> {
     .context("identity QA audit state is missing")
 }
 
-async fn audit_snapshot(conn: &mut Conn) -> Result<AuditSnapshot> {
+pub(super) async fn audit_snapshot(conn: &mut Conn) -> Result<AuditSnapshot> {
     let state = audit_state(conn).await?;
     let events = fixture_prefix(conn, i64::MAX).await?;
     Ok((state, events))
@@ -740,7 +743,7 @@ fn registry_file_reference(file: &PrivateFile) -> Result<&str> {
         .context("registry QA requires a UTF-8 file reference")
 }
 
-fn registry_entry(fixture: &FixtureFiles, tenant: &str) -> Result<Value> {
+pub(super) fn registry_entry(fixture: &FixtureFiles, tenant: &str) -> Result<Value> {
     let authentication = match &fixture.client_identity {
         Some((cert, key)) => json!({
             "mode": "password_and_mtls",

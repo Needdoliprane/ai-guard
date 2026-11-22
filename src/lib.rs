@@ -34,6 +34,7 @@ pub mod runner;
 pub mod runtime;
 pub mod setup;
 pub mod tenancy;
+pub mod tenant_store;
 pub mod tls;
 pub mod workload;
 pub mod workload_cli;

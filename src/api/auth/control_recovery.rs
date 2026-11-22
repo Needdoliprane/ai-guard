@@ -141,7 +141,7 @@ fn same_runner(
         .authorize_sync(&proof.headers, true)?;
     if role != "runner"
         || tenant.tenant_id != expected_tenant
-        || !Arc::ptr_eq(&tenant.store, expected_store)
+        || !Arc::ptr_eq(tenant.store.sqlite_api()?, expected_store)
         || epoch.retired()
     {
         return Err(denied());
@@ -231,14 +231,14 @@ impl VerifiedControlRecoveryRunnerV2 {
         let tenant = same_runner(
             &self.proof,
             &scope,
-            &self.tenant.store,
+            self.tenant.store.sqlite_api()?,
             &self.tenant.tenant_id,
             &epoch,
         )?;
         let created = Instant::now();
         let authenticated_utc = Utc::now();
         let auth = AuthenticatedControlRecoveryV2 {
-            store: Arc::clone(&tenant.store),
+            store: Arc::clone(tenant.store.sqlite_api()?),
             tenant_id: tenant.tenant_id.clone(),
             proof: self.proof,
             scope,
@@ -292,7 +292,7 @@ where
     let verified = VerifiedControlRecoveryRunnerV2::from_request_parts(&mut parts, state).await?;
     verified
         .blocking(move |auth, tenant| {
-            operation(auth, tenant.store).map_err(super::super::unavailable)
+            operation(auth, tenant.store.sqlite_api()?.clone()).map_err(super::super::unavailable)
         })
         .await
 }
@@ -322,10 +322,11 @@ where
     first
         .blocking(move |auth, tenant| {
             let (other, selected) = second.into_authenticated(Arc::clone(&auth.scope))?;
-            if !Arc::ptr_eq(&tenant.store, &selected.store) {
+            if !tenant.store.ptr_eq(&selected.store) {
                 return Err(denied());
             }
-            operation(auth, &other, tenant.store).map_err(super::super::unavailable)
+            operation(auth, &other, tenant.store.sqlite_api()?.clone())
+                .map_err(super::super::unavailable)
         })
         .await
 }

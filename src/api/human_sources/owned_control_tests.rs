@@ -66,7 +66,12 @@ async fn diagnostic_and_broker_boundary(format: u32) {
         state
             .tenants
             .iter()
-            .map(|tenant| (tenant.tenant_id.clone(), Arc::clone(&tenant.store)))
+            .map(|tenant| {
+                (
+                    tenant.tenant_id.clone(),
+                    Arc::clone(tenant.store.sqlite().unwrap()),
+                )
+            })
             .collect(),
         RUNNER,
     )
@@ -81,6 +86,8 @@ async fn diagnostic_and_broker_boundary(format: u32) {
         let epoch = owned.owner.try_read_epoch().unwrap();
         state.tenants[index]
             .store
+            .sqlite()
+            .unwrap()
             .assert_owned_control_fixture_binding_for_test(
                 &epoch,
                 &owned.sources[index],

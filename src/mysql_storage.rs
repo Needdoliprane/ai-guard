@@ -79,6 +79,14 @@ impl fmt::Display for MysqlProbeError {
 
 impl std::error::Error for MysqlProbeError {}
 
+/// A confirmed transport or timeout failure, as opposed to a Store refusal.
+pub fn is_transport_failure(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<MysqlProbeError>(),
+        Some(MysqlProbeError::TransportUnavailable | MysqlProbeError::TimedOut)
+    )
+}
+
 fn driver_error(error: mysql_async::Error) -> MysqlProbeError {
     match error {
         mysql_async::Error::Server(error) => MysqlProbeError::ServerRefused(error.code),

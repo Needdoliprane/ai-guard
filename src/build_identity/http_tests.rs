@@ -26,7 +26,7 @@ async fn owned_build_status_is_public_without_store_work_and_is_not_health() {
     let observations: Vec<_> = state
         .tenants
         .iter()
-        .map(|tenant| crate::audit::read_test_observer::observe(&tenant.store))
+        .map(|tenant| crate::audit::read_test_observer::observe(tenant.store.sqlite().unwrap()))
         .collect();
     state.valid_credentials = false;
     let router = gateway_router(state);

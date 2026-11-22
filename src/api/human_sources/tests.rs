@@ -56,7 +56,8 @@ async fn same_incarnation_identity_or_workload_change_requires_rebuild_without_n
     for workload_change in [false, true] {
         let (_fixture, state) = fixture();
         let owned = state.owned_human.as_ref().unwrap();
-        let observed_a = crate::audit::read_test_observer::observe(&state.tenants[0].store);
+        let observed_a =
+            crate::audit::read_test_observer::observe(state.tenants[0].store.sqlite().unwrap());
         let incarnation = owned.owner.incarnation();
         let source = &owned.sources[1];
         let epoch = owned.owner.try_write_epoch().unwrap();
@@ -64,6 +65,8 @@ async fn same_incarnation_identity_or_workload_change_requires_rebuild_without_n
         let store = &state.tenants[1].store;
         if workload_change {
             store
+                .sqlite()
+                .unwrap()
                 .issue_workload_binding_scoped(
                     &access,
                     &crate::workload::WorkloadBindingIssueV1 {
@@ -84,11 +87,15 @@ async fn same_incarnation_identity_or_workload_change_requires_rebuild_without_n
         } else {
             let digest: [u8; 32] = Sha256::digest(Fixture::bearer("B").as_bytes()).into();
             let mut binding = store
+                .sqlite()
+                .unwrap()
                 .local_credential_binding_scoped(&access, &digest)
                 .unwrap()
                 .unwrap();
             binding.revision += 1;
             store
+                .sqlite()
+                .unwrap()
                 .mutate_identity_scoped(
                     &epoch,
                     source,
@@ -151,18 +158,23 @@ async fn real_exhausted_owned_profile_budget_preserves_429_without_publishing_co
     )
     .unwrap();
     let owned = state.owned_human.as_ref().unwrap();
-    let observed_a = crate::audit::read_test_observer::observe(&state.tenants[0].store);
+    let observed_a =
+        crate::audit::read_test_observer::observe(state.tenants[0].store.sqlite().unwrap());
     let source = &owned.sources[1];
     let epoch = owned.owner.try_read_epoch().unwrap();
     let access = HumanSourceAccess::read(&epoch, source).unwrap();
     for _ in 0..2 {
         state.tenants[1]
             .store
+            .sqlite()
+            .unwrap()
             .modern_human_profile(&access, fixture.principal(), &Redactor::new(vec![]))
             .unwrap();
     }
     let error = state.tenants[1]
         .store
+        .sqlite()
+        .unwrap()
         .modern_human_profile(&access, fixture.principal(), &Redactor::new(vec![]))
         .err()
         .unwrap();
@@ -275,8 +287,10 @@ async fn historical_revoked_neighbor_collision_refuses_even_while_a_sqlite_is_bu
         })
         .unwrap();
     let state = state_from_fixture(&fixture);
-    let observed_a = crate::audit::read_test_observer::observe(&state.tenants[0].store);
-    let observed_b = crate::audit::read_test_observer::observe(&state.tenants[1].store);
+    let observed_a =
+        crate::audit::read_test_observer::observe(state.tenants[0].store.sqlite().unwrap());
+    let observed_b =
+        crate::audit::read_test_observer::observe(state.tenants[1].store.sqlite().unwrap());
     let a = rusqlite::Connection::open(
         state.owned_human.as_ref().unwrap().sources[0]
             .descriptor()
@@ -403,11 +417,16 @@ async fn require_b_identity_resources(state: &GatewayState) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_b_proof_and_receipt_while_mutex_a_stays_held_without_neighbor_sql() {
     let (_fixture, state) = fixture();
-    let observed = crate::audit::read_test_observer::observe(&state.tenants[0].store);
+    let observed =
+        crate::audit::read_test_observer::observe(state.tenants[0].store.sqlite().unwrap());
     let (ready, ready_rx) = std::sync::mpsc::channel();
     let (release, release_rx) = std::sync::mpsc::channel();
     let a = state.tenants[0].store.clone();
-    let held = std::thread::spawn(move || a.modern_test_hold_mutex(ready, release_rx));
+    let held = std::thread::spawn(move || {
+        a.sqlite()
+            .unwrap()
+            .modern_test_hold_mutex(ready, release_rx)
+    });
     ready_rx.recv().unwrap();
     require_b_identity_resources(&state).await;
     assert!(observed.try_recv().is_err());
@@ -418,7 +437,8 @@ async fn real_b_proof_and_receipt_while_mutex_a_stays_held_without_neighbor_sql(
 #[tokio::test]
 async fn real_b_proof_and_receipt_while_sqlite_a_immediate_stays_held_without_neighbor_sql() {
     let (_fixture, state) = fixture();
-    let observed = crate::audit::read_test_observer::observe(&state.tenants[0].store);
+    let observed =
+        crate::audit::read_test_observer::observe(state.tenants[0].store.sqlite().unwrap());
     let path = state.owned_human.as_ref().unwrap().sources[0]
         .descriptor()
         .storage_binding
@@ -434,7 +454,8 @@ async fn real_b_proof_and_receipt_while_sqlite_a_immediate_stays_held_without_ne
 #[tokio::test]
 async fn own_sqlite_busy_is_503_without_legacy_or_neighbor_lookup() {
     let (_fixture, state) = fixture();
-    let observed = crate::audit::read_test_observer::observe(&state.tenants[0].store);
+    let observed =
+        crate::audit::read_test_observer::observe(state.tenants[0].store.sqlite().unwrap());
     let path = state.owned_human.as_ref().unwrap().sources[1]
         .descriptor()
         .storage_binding
@@ -459,8 +480,10 @@ async fn own_sqlite_busy_is_503_without_legacy_or_neighbor_lookup() {
 #[tokio::test]
 async fn modern_route_matrix_closes_before_body_extractors_and_store() {
     let (_fixture, state) = fixture();
-    let observed = crate::audit::read_test_observer::observe(&state.tenants[0].store);
-    let observed_b = crate::audit::read_test_observer::observe(&state.tenants[1].store);
+    let observed =
+        crate::audit::read_test_observer::observe(state.tenants[0].store.sqlite().unwrap());
+    let observed_b =
+        crate::audit::read_test_observer::observe(state.tenants[1].store.sqlite().unwrap());
     let router = gateway_router(state.clone());
     for (path, methods) in REGISTERED_ROUTES {
         for method in *methods {
@@ -726,7 +749,8 @@ async fn no_oidc_selection_adopts_only_existing_disabled_status_and_profile() {
 async fn dashboard_head_and_unadopted_get_refuse_before_any_upstream_or_store_work() {
     use std::os::unix::fs::PermissionsExt;
     let (_fixture, state) = fixture();
-    let observed = crate::audit::read_test_observer::observe(&state.tenants[0].store);
+    let observed =
+        crate::audit::read_test_observer::observe(state.tenants[0].store.sqlite().unwrap());
     let front = tempfile::Builder::new()
         .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir()
@@ -808,8 +832,10 @@ fn candidate_limit_refuses_before_insertion_and_never_truncates() {
 #[tokio::test]
 async fn every_existing_control_alias_and_head_closes_before_body_and_store() {
     let (_fixture, state) = fixture();
-    let observed_a = crate::audit::read_test_observer::observe(&state.tenants[0].store);
-    let observed_b = crate::audit::read_test_observer::observe(&state.tenants[1].store);
+    let observed_a =
+        crate::audit::read_test_observer::observe(state.tenants[0].store.sqlite().unwrap());
+    let observed_b =
+        crate::audit::read_test_observer::observe(state.tenants[1].store.sqlite().unwrap());
     let dedicated = gateway_control_router(state.clone());
     let nested = gateway_router(state);
     let routes = &[
@@ -1006,7 +1032,7 @@ fn workload_discovery_retains_its_nonzero_source_index_without_neighbor_sql() {
     let observers = state
         .tenants
         .iter()
-        .map(|tenant| crate::audit::read_test_observer::observe(&tenant.store))
+        .map(|tenant| crate::audit::read_test_observer::observe(tenant.store.sqlite().unwrap()))
         .collect::<Vec<_>>();
     let owned = state.owned_human.as_ref().unwrap();
     assert!(matches!(
@@ -1034,7 +1060,7 @@ async fn owned_broker_page_requires_human_auth_while_legacy_and_head_stay_closed
         .tenants
         .iter()
         .chain(legacy.tenants.iter())
-        .map(|tenant| crate::audit::read_test_observer::observe(&tenant.store))
+        .map(|tenant| crate::audit::read_test_observer::observe(tenant.store.sqlite().unwrap()))
         .collect::<Vec<_>>();
     let owned_router = gateway_router(owned);
     let legacy_router = gateway_router(legacy);

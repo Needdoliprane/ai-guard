@@ -88,7 +88,8 @@ async fn owned_events_metadata_refuses_unadopted_views_and_routes() {
     assert_eq!(body["error"]["code"], "identity_unavailable");
     assert!(body.get("items").is_none());
     assert_eq!(snapshot(&database), before);
-    let observed = crate::audit::read_test_observer::observe(&state.tenants[1].store);
+    let observed =
+        crate::audit::read_test_observer::observe(state.tenants[1].store.sqlite().unwrap());
     for (method, path) in [
         ("HEAD", "/api/v1/human/events".to_owned()),
         ("GET", format!("/api/v1/human/events/{event_id}")),
@@ -159,7 +160,8 @@ async fn owned_events_metadata_does_not_query_neighbor_while_neighbor_locked() {
     let state = state(&fixture);
     let router = gateway_router(state.clone());
     let context = context(&router).await;
-    let observed = crate::audit::read_test_observer::observe(&state.tenants[0].store);
+    let observed =
+        crate::audit::read_test_observer::observe(state.tenants[0].store.sqlite().unwrap());
     let neighbor = rusqlite::Connection::open(
         state.owned_human.as_ref().unwrap().sources[0]
             .descriptor()
@@ -237,12 +239,23 @@ async fn owned_events_metadata_budget_exhaustion_is_429_without_publication() {
     assert_eq!(status, StatusCode::OK, "{page}"); // Second and last principal debit.
     let database = connection(&state);
     let before = snapshot(&database);
-    let usage = state.tenants[1].store.modern_test_human_usage();
+    let usage = state.tenants[1]
+        .store
+        .sqlite()
+        .unwrap()
+        .modern_test_human_usage();
     let (status, refused) = get(&router, "/api/v1/human/events", Some(&context)).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{refused}");
     assert_eq!(refused["error"]["code"], "audit_read_budget_exhausted");
     assert!(refused.get("items").is_none());
     assert!(refused.get("read_receipt").is_none());
     assert_eq!(snapshot(&database), before);
-    assert_eq!(state.tenants[1].store.modern_test_human_usage(), usage);
+    assert_eq!(
+        state.tenants[1]
+            .store
+            .sqlite()
+            .unwrap()
+            .modern_test_human_usage(),
+        usage
+    );
 }

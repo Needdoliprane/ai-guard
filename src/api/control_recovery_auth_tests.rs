@@ -76,7 +76,7 @@ async fn real_runner_usage_rejects_a_different_store_even_for_the_same_tenant() 
         .await
         .blocking(move |auth, tenant| {
             assert!(auth.acquire_usage(&wrong_store).is_err());
-            let _usage = auth.acquire_usage(&tenant.store).unwrap();
+            let _usage = auth.acquire_usage(tenant.store.sqlite().unwrap()).unwrap();
             assert_eq!(auth.tenant_id(), "tenant-a");
             assert!(!auth.auth_epoch_id().is_nil());
             assert!(!auth.request_auth_id().is_nil());
@@ -121,15 +121,23 @@ fn binding_schema(directory: &tempfile::TempDir, state: &GatewayState) {
     let path = directory.path().join("tenant.sqlite");
     let store = &state.tenants[0].store;
     store
+        .sqlite()
+        .unwrap()
         .migrate_control_v3(&path.with_extension("before3"))
         .unwrap();
     store
+        .sqlite()
+        .unwrap()
         .migrate_identity_v4(&path.with_extension("before4"))
         .unwrap();
     store
+        .sqlite()
+        .unwrap()
         .migrate_human_access_v5(&path.with_extension("before5"))
         .unwrap();
     store
+        .sqlite()
+        .unwrap()
         .migrate_workload_v6(&path.with_extension("before6"))
         .unwrap();
 }
@@ -159,7 +167,7 @@ async fn real_collision_after_extraction_is_denied_before_the_blocking_operation
     let (directory, state) = fixture();
     binding_schema(&directory, &state);
     let runner = extract(&state).await;
-    collide_with_the_real_runner(&state.tenants[0].store);
+    collide_with_the_real_runner(state.tenants[0].store.sqlite().unwrap());
     let head = state.tenants[0].store.head().unwrap();
     let called = Arc::new(AtomicBool::new(false));
     let reached = Arc::clone(&called);
@@ -184,10 +192,10 @@ async fn every_usage_reauthenticates_a_real_new_collision() {
     extract(&state)
         .await
         .blocking(|auth, tenant| {
-            drop(auth.acquire_usage(&tenant.store).unwrap());
-            collide_with_the_real_runner(&tenant.store);
+            drop(auth.acquire_usage(tenant.store.sqlite().unwrap()).unwrap());
+            collide_with_the_real_runner(tenant.store.sqlite().unwrap());
             let head = tenant.store.head().unwrap();
-            assert!(auth.acquire_usage(&tenant.store).is_err());
+            assert!(auth.acquire_usage(tenant.store.sqlite().unwrap()).is_err());
             assert_eq!(tenant.store.head().unwrap(), head);
             Ok(())
         })
@@ -225,10 +233,10 @@ async fn retiring_a_clone_denies_unused_proofs_but_drains_live_usage() {
     extract(&state)
         .await
         .blocking(move |auth, tenant| {
-            let usage = auth.acquire_usage(&tenant.store).unwrap();
+            let usage = auth.acquire_usage(tenant.store.sqlite().unwrap()).unwrap();
             retirement.retire();
             assert!(!retirement.drained());
-            assert!(auth.acquire_usage(&tenant.store).is_err());
+            assert!(auth.acquire_usage(tenant.store.sqlite().unwrap()).is_err());
             drop(usage);
             assert!(retirement.drained());
             retirement.retire();
@@ -264,7 +272,7 @@ async fn retirement_handle_drop_closes_only_its_shared_epoch() {
     extract(&other)
         .await
         .blocking(|auth, tenant| {
-            let _usage = auth.acquire_usage(&tenant.store).unwrap();
+            let _usage = auth.acquire_usage(tenant.store.sqlite().unwrap()).unwrap();
             Ok(())
         })
         .await
@@ -326,9 +334,9 @@ async fn usage_reuses_the_admitted_scope_when_the_control_lane_is_full() {
     runner
         .blocking(move |auth, tenant| {
             assert!(tenant_io.admit(store_io::Lane::Control, false).is_err());
-            let _usage = auth.acquire_usage(&tenant.store).unwrap();
+            let _usage = auth.acquire_usage(tenant.store.sqlite().unwrap()).unwrap();
             // Each usage must also keep the same scope after real reauth.
-            let _second = auth.acquire_usage(&tenant.store).unwrap();
+            let _second = auth.acquire_usage(tenant.store.sqlite().unwrap()).unwrap();
             drop(remaining_slots);
             Ok(())
         })
@@ -353,7 +361,7 @@ async fn cancelled_waiter_keeps_its_store_lease_until_the_blocking_operation_fin
     let (release, wait) = std::sync::mpsc::channel();
     let (finished, finish) = tokio::sync::oneshot::channel();
     let job = tokio::spawn(runner.blocking(move |auth, tenant| {
-        let usage = auth.acquire_usage(&tenant.store).unwrap();
+        let usage = auth.acquire_usage(tenant.store.sqlite().unwrap()).unwrap();
         started.send(()).unwrap();
         wait.recv().unwrap();
         drop(usage);
@@ -782,8 +790,8 @@ async fn route_recovers_after_all_broker_authority_is_revoked_and_store_reopens_
         ("tenant-b".into(), policy),
     ])
     .unwrap();
-    let a = Arc::clone(&state.tenants[0].store);
-    let b = Arc::clone(&state.tenants[1].store);
+    let a = Arc::clone(state.tenants[0].store.sqlite().unwrap());
+    let b = Arc::clone(state.tenants[1].store.sqlite().unwrap());
     let app = RecoveryHttp::start(state.clone()).await;
     let observe_request = json!({"version":2,"action":"observe_reserved",
         "reservation_input_hash":reserved.snapshot.input_hash});

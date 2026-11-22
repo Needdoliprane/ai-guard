@@ -110,8 +110,11 @@ fn failure(error: anyhow::Error) -> (StatusCode, Json<Value>) {
     };
     workload::response(status, code, message)
 }
-fn store_failure(store: &Store, error: anyhow::Error) -> (StatusCode, Json<Value>) {
-    if store.healthy() {
+fn store_failure(
+    store: &impl crate::tenant_store::StoreHealth,
+    error: anyhow::Error,
+) -> (StatusCode, Json<Value>) {
+    if store.store_healthy() {
         failure(error)
     } else {
         unavailable(error)
@@ -128,6 +131,7 @@ async fn grant(
             tenant.write_quota()?;
             let receipt = tenant
                 .store
+                .sqlite_api()?
                 .relay_grant(&input)
                 .map_err(|error| store_failure(&tenant.store, error))?;
             Ok((
@@ -154,6 +158,7 @@ async fn revoke(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .relay_revoke(&input)
                     .map_err(|error| store_failure(&tenant.store, error))?,
             ))
@@ -181,6 +186,7 @@ async fn send(
             }
             let receipt = tenant
                 .store
+                .sqlite_api()?
                 .relay_send(&identity, &input)
                 .map_err(|error| store_failure(&tenant.store, error))?;
             Ok((
@@ -210,6 +216,7 @@ async fn inbox(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .relay_inbox(&identity, query.after, query.limit.unwrap_or(32))
                     .map_err(|error| store_failure(&tenant.store, error))?,
             ))
@@ -228,6 +235,7 @@ async fn ack(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .relay_ack(&identity, &input)
                     .map_err(|error| store_failure(&tenant.store, error))?,
             ))
@@ -247,6 +255,7 @@ async fn prune(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .relay_prune(&input)
                     .map_err(|error| store_failure(&tenant.store, error))?,
             ))
@@ -271,6 +280,7 @@ async fn retention(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .relay_retention_status(limit)
                     .map_err(|error| store_failure(&tenant.store, error))?,
             ))
