@@ -671,6 +671,7 @@ const REGISTERED_ROUTES: &[(&str, &[&str])] = &[
     ("/api/v1/control/protocol", &["GET", "HEAD"]),
     ("/api/v1/decide", &["POST"]),
     ("/api/v1/events", &["GET", "POST", "HEAD"]),
+    ("/api/v1/events/batch", &["POST"]),
     ("/api/v1/export", &["GET", "HEAD"]),
     ("/api/v1/federation/workers", &["GET", "HEAD"]),
     ("/api/v1/human/admin/configuration", &["GET", "HEAD"]),

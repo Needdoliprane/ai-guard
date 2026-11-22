@@ -6,6 +6,7 @@
 mod support;
 
 use agentsandbox::{
+    api::{GatewayState, TenantGateway, gateway_router},
     audit::{
         EventQuery, Store,
         retention::{
@@ -15,14 +16,22 @@ use agentsandbox::{
     },
     identity::*,
     model::Event,
+    policy::Policy,
     redaction::Redactor,
 };
+use axum::{
+    body::{Body, to_bytes},
+    http::{Request, StatusCode, header},
+};
 use chrono::{Duration, Utc};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
+    sync::Arc,
 };
+use tower::ServiceExt;
 use uuid::Uuid;
 
 const TENANT: &str = "tenant-a";
@@ -476,6 +485,88 @@ fn an_ordinary_event_dated_before_the_archived_horizon_is_refused() {
     let refused = store.append(replay).unwrap_err();
     assert_eq!(code_of(&refused), Some("event_predates_archive"));
     store.append(Event::new("command.requested")).unwrap();
+}
+
+#[tokio::test]
+async fn batch_at_the_archived_horizon_rolls_back_and_keeps_the_typed_conflict() {
+    let dir = support::private_tempdir();
+    let (_data, store) = store13(dir.path());
+    store
+        .install_audit_retention(&dir.path().join("before-retention.sqlite"))
+        .unwrap();
+    for index in 0..10 {
+        activity(&store, index).unwrap();
+    }
+    let planned = store
+        .audit_retention_plan(&policy(), later(), None, &BTreeSet::new())
+        .unwrap();
+    apply(&store, &planned, &dir.path().join("archive-1")).unwrap();
+    let store = Arc::new(store);
+    let router = gateway_router(
+        GatewayState::for_tenants(
+            vec![TenantGateway {
+                tenant_id: TENANT.into(),
+                store: Arc::clone(&store),
+                runner_token: "r".repeat(48),
+                viewer_token: "v".repeat(48),
+            }],
+            Policy::default(),
+            None,
+            Redactor::new(vec![]),
+        )
+        .unwrap(),
+    );
+    let request = |payload: Value| {
+        Request::post("/api/v1/events/batch")
+            .header(header::AUTHORIZATION, format!("Bearer {}", "r".repeat(48)))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap()
+    };
+
+    let floor = planned.plan.floor_at_last;
+    let mut at_horizon = Event::new("command.requested");
+    at_horizon.timestamp = floor.clone();
+    let mut recent = Event::new("command.requested");
+    recent.timestamp = (chrono::DateTime::parse_from_rfc3339(&floor).unwrap()
+        + Duration::milliseconds(1))
+    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let head = store.head().unwrap();
+    let hash = store.integrity().unwrap().head_hash;
+    let refused = router
+        .clone()
+        .oneshot(request(json!({"events": [&recent, &at_horizon]})))
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let bytes = to_bytes(refused.into_body(), 4096).await.unwrap();
+    let refusal: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(refusal["error"]["code"], "event_predates_archive");
+    assert_eq!(refusal["error"]["retry_action"], "send_new_event");
+    let after = store.integrity().unwrap();
+    assert!(after.valid);
+    assert_eq!(after.head_hash, hash);
+    assert_eq!(store.head().unwrap(), head);
+    assert!(
+        store
+            .events(&EventQuery {
+                after: Some(head),
+                ..EventQuery::default()
+            })
+            .unwrap()
+            .is_empty()
+    );
+
+    let retried = router
+        .oneshot(request(json!({"events": [&recent]})))
+        .await
+        .unwrap();
+    assert_eq!(retried.status(), StatusCode::OK);
+    let bytes = to_bytes(retried.into_body(), 4096).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap(),
+        json!({"stored": [{"id": recent.id, "seq": head + 1}]})
+    );
 }
 
 fn operator() -> PrincipalRefV1 {

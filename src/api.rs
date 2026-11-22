@@ -1,5 +1,7 @@
 use crate::{
-    audit::{AuditCapacityFailureV1, DecisionFailure, EventQuery, Store},
+    audit::{
+        AuditCapacityFailureV1, BatchConflict, DecisionFailure, EventQuery, MAX_EVENT_BATCH, Store,
+    },
     control::{
         AdmissionRefusalV1, AdmissionV1, ControlFailure, DecisionPhaseV1, DecisionReceiptV1,
         QuotaPolicyV1, WorkerMutationV1,
@@ -795,19 +797,24 @@ impl TenantState {
         .await
     }
     fn write_quota(&self) -> ApiResult<()> {
-        Self::take_write_slot(&self.rate)
+        Self::take_write_slots(&self.rate, 1)
     }
     fn ingestion_quota(&self) -> ApiResult<()> {
-        Self::take_write_slot(&self.ingestion_rate)
+        self.ingestion_quota_for(1)
     }
-    fn take_write_slot(rate: &Mutex<(Instant, u32)>) -> ApiResult<()> {
+    /// Charge one ingestion slot per event, for the entire lot or none of it.
+    fn ingestion_quota_for(&self, count: usize) -> ApiResult<()> {
+        Self::take_write_slots(&self.ingestion_rate, count)
+    }
+    fn take_write_slots(rate: &Mutex<(Instant, u32)>, count: usize) -> ApiResult<()> {
+        let count = u32::try_from(count).unwrap_or(u32::MAX);
         let mut state = rate
             .lock()
             .map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "Limiteur indisponible."))?;
         if state.0.elapsed() >= Duration::from_secs(1) {
             *state = (Instant::now(), 0);
         }
-        if state.1 >= 200 {
+        if state.1.saturating_add(count) > 200 {
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(
@@ -815,7 +822,7 @@ impl TenantState {
                 ),
             ));
         }
-        state.1 += 1;
+        state.1 += count;
         Ok(())
     }
 }
@@ -971,6 +978,7 @@ fn gateway_base_router(state: GatewayState) -> Router {
             routes
                 .clone()
                 .route("/control/events", post(ingest_control_event))
+                .route("/events/batch", post(ingest_batch))
                 .merge(supervision::routes())
                 .merge(egress_policy::router())
                 .merge(egress::routes())
@@ -1036,18 +1044,7 @@ async fn ingest(
             event
                 .validate()
                 .map_err(|_| error(StatusCode::BAD_REQUEST, "Événement invalide."))?;
-            if crate::audit::D5_CONTROL_EVENT_KINDS.contains(&event.kind.as_str())
-                || crate::relay::admission::reserved_kind(&event.kind)
-                || [
-                    "security.decision",
-                    "control",
-                    "worker",
-                    "usage.allocation",
-                    "egress",
-                ]
-                .iter()
-                .any(|namespace| crate::model::event_kind_in_namespace(&event.kind, namespace))
-            {
+            if reserved_ingestion_kind(&event.kind) {
                 return Err(error(
                     StatusCode::FORBIDDEN,
                     "Ce namespace est réservé aux opérations du contrôle.",
@@ -1056,6 +1053,73 @@ async fn ingest(
             Ok(Json(tenant.store.append(event).map_err(unavailable)?))
         })
         .await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EventBatchRequest {
+    events: Vec<Event>,
+}
+
+/// Legacy runner delivery of ordinary activity events. The selected Store
+/// commits the entire batch before returning its ordered receipts.
+async fn ingest_batch(
+    RunnerIdentity(tenant): RunnerIdentity,
+    Json(request): Json<EventBatchRequest>,
+) -> ApiResult<Json<Value>> {
+    tenant
+        .blocking(false, move |tenant| {
+            let events = request.events;
+            if events.is_empty() || events.len() > MAX_EVENT_BATCH {
+                return Err(error(
+                    StatusCode::BAD_REQUEST,
+                    "Lot d'événements vide ou supérieur à 64 événements.",
+                ));
+            }
+            for event in &events {
+                event
+                    .validate()
+                    .map_err(|_| error(StatusCode::BAD_REQUEST, "Événement invalide."))?;
+                if reserved_ingestion_kind(&event.kind) {
+                    return Err(error(
+                        StatusCode::FORBIDDEN,
+                        "Ce namespace est réservé aux opérations du contrôle.",
+                    ));
+                }
+            }
+            tenant.ingestion_quota_for(events.len())?;
+            let stored = tenant.store.append_batch(events).map_err(|failure| {
+                if failure.is::<BatchConflict>() {
+                    error(
+                        StatusCode::CONFLICT,
+                        "Un identifiant du lot existe déjà avec un contenu différent.",
+                    )
+                } else {
+                    unavailable(failure)
+                }
+            })?;
+            Ok(Json(json!({
+                "stored": stored
+                    .iter()
+                    .map(|row| json!({"id": row.event.id, "seq": row.seq}))
+                    .collect::<Vec<_>>()
+            })))
+        })
+        .await
+}
+
+fn reserved_ingestion_kind(kind: &str) -> bool {
+    crate::audit::D5_CONTROL_EVENT_KINDS.contains(&kind)
+        || crate::relay::admission::reserved_kind(kind)
+        || [
+            "security.decision",
+            "control",
+            "worker",
+            "usage.allocation",
+            "egress",
+        ]
+        .iter()
+        .any(|namespace| crate::model::event_kind_in_namespace(kind, namespace))
 }
 
 /// The route is the source of delivery authority. Worker-controlled Event
