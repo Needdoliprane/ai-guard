@@ -644,12 +644,13 @@ impl agentsandbox::provider_activity::HookTransport for ScriptedHooks {
 
 #[tokio::test]
 async fn the_hook_pump_acknowledges_only_durable_records_and_reports_anomalies() {
+    use agentsandbox::activity_channel::wire::EventV1;
     use agentsandbox::provider_activity::{HookAck, HookFrame, pump_hooks};
     let (_temp, directory) = directory();
     let limits = ActivityLimits {
         max_events: 100,
         max_bytes: 1024 * 1024,
-        max_backlog_events: 5,
+        max_backlog_events: 7,
         max_backlog_bytes: 64 * 1024,
     };
     let collector = collector(&directory, Uuid::new_v4(), limits);
@@ -659,45 +660,57 @@ async fn the_hook_pump_acknowledges_only_durable_records_and_reports_anomalies()
         frames: [
             HookFrame::Hook {
                 seq: 1,
+                event: EventV1::PreToolUse,
                 payload: hooks[2].into(),
                 truncated: false,
-                gate: true,
             },
             // A gated payload the adapter cannot map leaves no audit record:
             // the action must be refused even though nothing failed.
             HookFrame::Hook {
                 seq: 2,
+                event: EventV1::PreToolUse,
                 payload: r#"{"session_id":"s"}"#.into(),
                 truncated: false,
-                gate: true,
+            },
+            HookFrame::Hook {
+                seq: 3,
+                event: EventV1::PreToolUse,
+                payload: hooks[1].into(),
+                truncated: false,
+            },
+            HookFrame::Hook {
+                seq: 4,
+                event: EventV1::PreToolUse,
+                payload: hooks[2].into(),
+                truncated: true,
             },
             HookFrame::Loss {
-                seq: 3,
+                seq: 5,
                 count: 1,
                 reason: "client_unrecorded".into(),
             },
-            // Seq 4 is missing: the helper's numbering is not trusted.
+            // Seq 6 is missing: the helper's numbering is not trusted.
             HookFrame::Hook {
-                seq: 5,
+                seq: 7,
+                event: EventV1::PostToolUse,
                 payload: hooks[3].into(),
                 truncated: true,
-                gate: false,
             },
             // The backlog is now full: a gated hook is refused, not dropped silently.
             HookFrame::Hook {
-                seq: 6,
+                seq: 8,
+                event: EventV1::PreToolUse,
                 payload: hooks[2].into(),
                 truncated: false,
-                gate: true,
             },
         ]
         .into(),
         acks: acks.clone(),
     };
     let outcome = pump_hooks(collector.clone(), transport).await;
-    assert_eq!(outcome.hooks, 4);
-    assert_eq!((outcome.recorded, outcome.refused), (2, 2));
-    assert_eq!(outcome.unrecorded_gates, 1);
+    assert_eq!(outcome.hooks, 6);
+    assert_eq!((outcome.recorded, outcome.refused), (2, 4));
+    assert_eq!(outcome.unrecorded_gates, 3);
     assert_eq!(outcome.declared_losses, 1);
     assert_eq!(outcome.sequence_gaps, 1);
     assert!(!outcome.transport_error);
@@ -706,11 +719,22 @@ async fn the_hook_pump_acknowledges_only_durable_records_and_reports_anomalies()
         [
             (1, HookAck::Recorded),
             (2, HookAck::Refused),
-            (5, HookAck::Recorded),
-            (6, HookAck::Refused)
+            (3, HookAck::Refused),
+            (4, HookAck::Refused),
+            (7, HookAck::Recorded),
+            (8, HookAck::Refused),
         ]
     );
     let events = spooled(&collector);
+    assert!(events.iter().any(|event| {
+        event.kind == "message.declared" && event.data["provider_hook_event"] == "UserPromptSubmit"
+    }));
+    let mut tool_requests = events.iter().filter(|event| event.kind == "tool.requested");
+    let complete_request = tool_requests.next().expect("complete PreToolUse spooled");
+    assert_ne!(complete_request.data["hook_input_truncated"], true);
+    let partial_request = tool_requests.next().expect("partial PreToolUse spooled");
+    assert_eq!(partial_request.data["hook_input_truncated"], true);
+    assert!(tool_requests.next().is_none());
     let truncated = events
         .iter()
         .find(|e| e.kind == "tool.result")

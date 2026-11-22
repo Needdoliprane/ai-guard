@@ -1,8 +1,9 @@
 //! Broker side of the worker hook channel: spool each hook payload, then
 //! acknowledge it to the worker helper. A gated hook (PreToolUse,
-//! UserPromptSubmit) lets the client act only on `recorded`, so the durable
-//! spool append of at least one event always precedes that acknowledgement.
+//! UserPromptSubmit) receives `recorded` only when its complete payload
+//! produced at least one durable event of the same hook type.
 use super::collector::{ActivityChannel, ActivityCollector, Admission};
+use crate::activity_channel::wire::EventV1;
 use crate::adapters::RecordDisposition;
 
 /// One frame received from the worker activity helper.
@@ -10,10 +11,9 @@ use crate::adapters::RecordDisposition;
 pub enum HookFrame {
     Hook {
         seq: u64,
+        event: EventV1,
         payload: String,
         truncated: bool,
-        /// The configured hook is a gate: the client waits for `recorded`.
-        gate: bool,
     },
     /// Losses the helper counted inside the worker: worker declarations.
     Loss {
@@ -21,6 +21,11 @@ pub enum HookFrame {
         count: u64,
         reason: String,
     },
+}
+
+#[derive(serde::Deserialize)]
+struct HookPayloadKind {
+    hook_event_name: EventV1,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,7 +46,7 @@ pub struct HookPumpOutcome {
     pub hooks: u64,
     pub recorded: u64,
     pub refused: u64,
-    /// Gated hooks refused because their payload left no event to record.
+    /// Gated hooks refused because admission yielded no matching, complete record.
     pub unrecorded_gates: u64,
     pub declared_losses: u64,
     /// The helper skipped or repeated a sequence number: observed loss.
@@ -82,19 +87,24 @@ pub async fn pump_hooks<T: HookTransport>(
         match frame {
             HookFrame::Hook {
                 seq,
+                event,
                 payload,
                 truncated,
-                gate,
             } => {
                 outcome.hooks += 1;
                 let collector_ref = collector.clone();
-                let (admission, disposition) = tokio::task::spawn_blocking(move || {
-                    collector_ref.hook_record(&payload, truncated)
+                let (admission, recorded) = tokio::task::spawn_blocking(move || {
+                    let (admission, disposition) = collector_ref.hook_record(&payload, truncated);
+                    let recorded = admission == Admission::Recorded
+                        && (!event.is_gate()
+                            || (disposition == RecordDisposition::Mapped
+                                && !truncated
+                                && serde_json::from_str::<HookPayloadKind>(&payload)
+                                    .is_ok_and(|kind| kind.hook_event_name == event)));
+                    (admission, recorded)
                 })
                 .await
-                .unwrap_or((Admission::Unavailable, RecordDisposition::Invalid));
-                let recorded = admission == Admission::Recorded
-                    && (!gate || disposition == RecordDisposition::Mapped);
+                .unwrap_or((Admission::Unavailable, false));
                 if admission == Admission::Recorded && !recorded {
                     outcome.unrecorded_gates += 1;
                 }

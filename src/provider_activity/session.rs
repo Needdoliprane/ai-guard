@@ -393,9 +393,9 @@ impl ExecHooks {
                 };
                 Some(HookFrame::Hook {
                     seq: hook.seq,
+                    event: submit.event,
                     payload,
                     truncated: submit.stdin_truncated || submit.payload_invalid_utf8,
-                    gate: submit.gate,
                 })
             }
             HelperFrameV1::Loss(loss) => Some(HookFrame::Loss {
