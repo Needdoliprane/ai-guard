@@ -29,6 +29,9 @@ pub(crate) fn relay_worker_inspection(
     managed::inspection(worker, observed)
 }
 pub(crate) mod relay_admission;
+// Consumed by the broker executor egress hook of the next slice.
+#[allow(dead_code)]
+pub(crate) mod egress_control;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, clap::Args)]
 pub struct RunOptions {
