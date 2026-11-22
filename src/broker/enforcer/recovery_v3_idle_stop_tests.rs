@@ -211,7 +211,8 @@ async fn fresh_full3_idle_ack_requires_actual_catch_up_join() {
     let mut fixture = IdleStopFixture::with_stop_budget(1);
     let attempt = fixture.state.recovery_attempt.as_ref().unwrap().clone();
     assert!(!attempt.known_idle_joined());
-    let mut retained_stop = fixture.stop_connection().await;
+    let mut retained_recovery = fixture.stop_connection().await;
+    let mut retained_reservation = fixture.stop_connection().await;
     let (mut closing, session) = fixture.authenticated(RequestedRole::Full).await;
     let reply = request_full(
         &mut closing,
@@ -226,13 +227,13 @@ async fn fresh_full3_idle_ack_requires_actual_catch_up_join() {
     assert!(fixture.state.shutdown_requested.load(Ordering::SeqCst));
 
     assert!(matches!(
-        request(&mut retained_stop, StopRequest::RecoveryIncomplete {}).await,
+        request(&mut retained_recovery, StopRequest::RecoveryIncomplete {}).await,
         Err(EnforcerError::Unhealthy)
     ));
     let late = fixture.restore_request("idle-stop-after-catch-up-join");
     assert!(matches!(
         request(
-            &mut retained_stop,
+            &mut retained_reservation,
             StopRequest::RestoreRequiredStop {
                 value: Box::new(late),
             },
@@ -248,7 +249,7 @@ async fn fresh_full3_idle_ack_requires_actual_catch_up_join() {
     let (attempts, failures, in_flight) = attempt.observations();
     assert_eq!((attempts, failures, in_flight), (0, 0, false));
 
-    drop((retained_stop, closing));
+    drop((retained_recovery, retained_reservation, closing));
     fixture.finish().await;
 }
 
