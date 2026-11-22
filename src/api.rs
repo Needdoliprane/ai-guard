@@ -2624,3 +2624,25 @@ mod ingestion_window_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod storage_refusal_tests {
+    use super::*;
+    use crate::tenant_store::StorageCapabilityUnavailable;
+
+    #[test]
+    fn an_unported_family_is_a_typed_501_never_an_audit_outage() {
+        let refusal = StorageCapabilityUnavailable("kubernetes_session");
+        let (status, Json(body)) = storage_capability_refusal(refusal);
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(body["error"]["code"], "storage_capability_unavailable");
+        assert_eq!(body["error"]["capability"], "kubernetes_session");
+        // The generic failure mapper keeps the same answer instead of the 503
+        // reserved for an unavailable, inconsistent or full audit.
+        let (status, Json(mapped)) = unavailable(anyhow::Error::new(refusal));
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(mapped, body);
+        let (status, _) = unavailable(anyhow::anyhow!("other"));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+}

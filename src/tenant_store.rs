@@ -364,3 +364,106 @@ impl StoreHealth for TenantStore {
         self.healthy()
     }
 }
+
+#[cfg(all(test, feature = "mysql-storage"))]
+mod tests {
+    use super::*;
+    use crate::mysql_storage::{
+        MysqlCredentials, MysqlEndpoint, MysqlProbeError, audit::MysqlAuditStore,
+        is_transport_failure,
+    };
+
+    fn mysql_store(redactor: Redactor) -> TenantStore {
+        // No connection is opened: construction only validates the profile.
+        let store = MysqlAuditStore::new(
+            MysqlEndpoint {
+                host: "db.example.invalid",
+                port: 3306,
+                database: "audit_a",
+                username: "writer_a",
+            },
+            MysqlCredentials {
+                password: "fixture-password",
+                ca_pem: b"-----BEGIN CERTIFICATE-----\n",
+                client_identity: None,
+            },
+            "tenant-a",
+            uuid::Uuid::from_u128(1),
+            redactor,
+            100,
+        )
+        .unwrap();
+        TenantStore::Mysql(Arc::new(MysqlTenant::new(
+            store,
+            tokio::runtime::Handle::current(),
+        )))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_mysql_tenant_refuses_sqlite_families_with_a_typed_error() {
+        let store = mysql_store(Redactor::new(vec![]));
+        assert_eq!(store.backend_name(), "mysql");
+        assert!(store.mysql().is_some());
+        let refusal = store.sqlite().err().expect("MySQL has no SQLite Store");
+        assert_eq!(refusal, StorageCapabilityUnavailable("sqlite_family"));
+        let wrapped = anyhow::Error::new(refusal);
+        assert!(
+            wrapped
+                .downcast_ref::<StorageCapabilityUnavailable>()
+                .is_some()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_mysql_tenant_keeps_its_masking_codec_and_refuses_a_wider_union() {
+        let store = mysql_store(Redactor::new(vec!["fixture-secret-a".into()]));
+        let covered = Redactor::new(vec!["fixture-secret-a".into()]);
+        assert!(store.with_additional_redaction(&covered).is_ok());
+        let wider = Redactor::new(vec!["fixture-secret-b".into()]);
+        assert!(store.with_additional_redaction(&wider).is_err());
+        assert!(!store.owned_redaction_covers(&wider));
+    }
+
+    #[test]
+    fn only_a_transport_or_timeout_failure_is_an_outage() {
+        for error in [
+            MysqlProbeError::TransportUnavailable,
+            MysqlProbeError::TimedOut,
+        ] {
+            assert!(is_transport_failure(&anyhow::Error::new(error)));
+        }
+        for error in [
+            MysqlProbeError::InvalidConfiguration,
+            MysqlProbeError::ServerRefused(1045),
+            MysqlProbeError::SessionMismatch,
+        ] {
+            assert!(!is_transport_failure(&anyhow::Error::new(error)));
+        }
+        assert!(!is_transport_failure(&anyhow::anyhow!("other")));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_health_latch_follows_outages_and_ignores_store_refusals() {
+        let store = mysql_store(Redactor::new(vec![]));
+        let TenantStore::Mysql(tenant) = &store else {
+            unreachable!()
+        };
+        assert!(store.healthy());
+        let refused =
+            tenant.block(async { Err::<(), _>(MysqlProbeError::ServerRefused(1045).into()) });
+        assert!(
+            refused.is_err() && store.healthy(),
+            "a refusal is an answer"
+        );
+        let outage =
+            tenant.block(async { Err::<(), _>(MysqlProbeError::TransportUnavailable.into()) });
+        assert!(outage.is_err() && !store.healthy());
+        let refused =
+            tenant.block(async { Err::<(), _>(MysqlProbeError::ServerRefused(1045).into()) });
+        assert!(
+            refused.is_err() && !store.healthy(),
+            "a refusal does not clear an outage"
+        );
+        assert!(tenant.block(async { Ok(()) }).is_ok() && store.healthy());
+    }
+}

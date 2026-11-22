@@ -527,6 +527,7 @@ fn prepare_supervised_backups(root: &Path, credential_files: &[&Path]) -> Result
 /// from the database here: the first handshake, the schema, tenant and
 /// namespace binding and the audit chain are verified by the gateway state
 /// before any listener is bound, with no fallback to another backend.
+#[cfg(feature = "mysql-storage")]
 fn open_mysql_tenant(
     tenant_id: &str,
     target: &gateway_config::MysqlTarget,
@@ -999,6 +1000,7 @@ async fn run() -> Result<()> {
                 if let Some(held_create_policy) = tenant.held_create_policy {
                     held_create_policies.push((tenant.tenant_id.clone(), held_create_policy));
                 }
+                #[cfg(feature = "mysql-storage")]
                 if let gateway_config::ConfiguredStorage::Mysql(target) = &tenant.storage {
                     anyhow::ensure!(
                         backup_root.is_none(),

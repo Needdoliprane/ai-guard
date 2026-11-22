@@ -10,7 +10,14 @@ async fn capabilities_are_private_runner_only_typed_bounded_and_tenant_bound() {
     let fixture = Fixture::new();
     let before = fixture.heads();
 
-    let response = send(&fixture.router, Method::GET, PRIVATE, Some(&fixture.runner_a), None).await;
+    let response = send(
+        &fixture.router,
+        Method::GET,
+        PRIVATE,
+        Some(&fixture.runner_a),
+        None,
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = to_bytes(response.into_body(), 65_536).await.unwrap();
     assert!(bytes.len() <= ControlCapabilitiesV1::MAX_BYTES);
@@ -43,24 +50,50 @@ async fn capabilities_are_private_runner_only_typed_bounded_and_tenant_bound() {
     );
 
     // The identity, never a request field, selects the tenant.
-    let b = send(&fixture.router, Method::GET, PRIVATE, Some(&fixture.runner_b), None).await;
+    let b = send(
+        &fixture.router,
+        Method::GET,
+        PRIVATE,
+        Some(&fixture.runner_b),
+        None,
+    )
+    .await;
     let b: ControlCapabilitiesV1 = response_json(b).await;
     assert_eq!(b.tenant_id, "tenant-b");
     assert_ne!(b.control_namespace_uuid, a.control_namespace_uuid);
 
     // A viewer, a missing credential and the public transport are refused.
     for (path, token, status) in [
-        (PRIVATE, Some(fixture.viewer_a.as_str()), StatusCode::FORBIDDEN),
+        (
+            PRIVATE,
+            Some(fixture.viewer_a.as_str()),
+            StatusCode::FORBIDDEN,
+        ),
         (PRIVATE, None, StatusCode::UNAUTHORIZED),
-        (PUBLIC, Some(fixture.runner_a.as_str()), StatusCode::NOT_FOUND),
+        (
+            PUBLIC,
+            Some(fixture.runner_a.as_str()),
+            StatusCode::NOT_FOUND,
+        ),
         (PUBLIC, None, StatusCode::NOT_FOUND),
     ] {
         let response = send(&fixture.router, Method::GET, path, token, None).await;
         assert_eq!(response.status(), status, "{path} {token:?}");
     }
     // A schema2 tenant announces no operation and no namespace.
-    let legacy = send(&fixture.router, Method::GET, PRIVATE, Some(&fixture.runner_v2), None).await;
+    let legacy = send(
+        &fixture.router,
+        Method::GET,
+        PRIVATE,
+        Some(&fixture.runner_v2),
+        None,
+    )
+    .await;
     let legacy: ControlCapabilitiesV1 = response_json(legacy).await;
     assert!(legacy.operations.is_empty() && legacy.control_namespace_uuid.is_none());
-    assert_eq!(fixture.heads(), before, "capabilities never write an audit row");
+    assert_eq!(
+        fixture.heads(),
+        before,
+        "capabilities never write an audit row"
+    );
 }
