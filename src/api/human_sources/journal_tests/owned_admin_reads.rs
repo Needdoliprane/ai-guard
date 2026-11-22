@@ -202,6 +202,13 @@ async fn owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
             C::ManageMemberships,
         ],
     );
+    let withheld = C::Export;
+    let administrator = store.identity_memberships(fixture.principal()).unwrap();
+    assert_eq!(administrator.len(), 1);
+    assert!(
+        !administrator[0].capabilities.contains(&withheld),
+        "the fixture administrator must lack export"
+    );
     let (bundle, credentials, tokens) = fixture.owned_startup();
     let state = GatewayState::for_owned_human_sources(
         bundle,
@@ -288,11 +295,16 @@ async fn owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
     let escalation = serde_json::json!({
         "operation_id": uuid::Uuid::new_v4().to_string(),
         "expected_revision": "2",
-        "capabilities": ["read_metadata", "read_content"],
+        "capabilities": [C::ReadMetadata, withheld],
         "active": true,
     });
+    let audit_before_refusal = super::races::snapshot(&database);
     let (status, refusal) = post(&router, &path, &context, &escalation).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{refusal}");
+    assert_eq!(refusal["error"]["code"], "permission_denied");
+    assert_eq!(super::races::snapshot(&database), audit_before_refusal);
+    assert!(expected_generation() == after);
+    assert_eq!(count_mutations(), mutations_before + 1);
     // The owned memberships read shows the durable change.
     let (status, page) = get(&router, "/api/v1/human/admin/memberships", Some(&context)).await;
     assert_eq!(status, StatusCode::OK, "{page}");
