@@ -25,10 +25,13 @@ use axum::{
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
-    io,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    fmt, io,
+    os::unix::{
+        fs::{OpenOptionsExt, PermissionsExt},
+        process::ExitStatusExt,
+    },
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{ExitStatus, Stdio},
     sync::{
         Arc, Mutex as StdMutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -702,6 +705,63 @@ impl Role {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum FixtureStartStage {
+    BrokerSpawn,
+    GuardianRole,
+    GuardianGenesis,
+    GuardianPublication,
+    GuardianSocket,
+    GuardianIdentity,
+    GuardianRevalidation,
+    BrokerList,
+}
+
+#[derive(Debug)]
+enum FixtureStartEnd {
+    BrokerSpawnFailed,
+    BrokerOwnerMissing,
+    BrokerExited(ExitStatus),
+    BrokerWaitFailed {
+        kind: io::ErrorKind,
+        errno: Option<i32>,
+    },
+    Deadline,
+}
+
+#[derive(Debug)]
+struct FixtureStartFailure {
+    stage: FixtureStartStage,
+    end: FixtureStartEnd,
+}
+
+impl fmt::Display for FixtureStartFailure {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(output, "phase=fixture_start stage={:?}", self.stage)?;
+        match self.end {
+            FixtureStartEnd::BrokerSpawnFailed => write!(output, " category=broker_spawn_failed"),
+            FixtureStartEnd::BrokerOwnerMissing => {
+                write!(output, " category=broker_owner_missing")
+            }
+            FixtureStartEnd::BrokerExited(status) => write!(
+                output,
+                " category=broker_exited exit_code={:?} signal={:?}",
+                status.code(),
+                status.signal()
+            ),
+            FixtureStartEnd::BrokerWaitFailed { kind, errno } => {
+                write!(
+                    output,
+                    " category=broker_wait_failed kind={kind:?} errno={errno:?}"
+                )
+            }
+            FixtureStartEnd::Deadline => write!(output, " category=fixture_deadline"),
+        }
+    }
+}
+
+impl std::error::Error for FixtureStartFailure {}
+
 /// Own only real subprocesses, not simulated guardian state.
 struct ObservedChild {
     child: Child,
@@ -809,19 +869,30 @@ struct FreshGuardian {
     identity: DarwinIdentity,
 }
 impl FreshGuardian {
-    async fn capture(broker_root: &Path, installation: Uuid, broker_pid: u32) -> Result<Self> {
+    async fn capture(
+        broker_root: &Path,
+        installation: Uuid,
+        broker_pid: u32,
+        stage: &mut FixtureStartStage,
+    ) -> Result<Self> {
+        *stage = FixtureStartStage::GuardianRole;
         let root = Directory::open_existing(broker_root)?;
         let role_path = root.path().join(Role::FullA.name());
         let role = Directory::open_existing(&role_path)?;
         ensure!(role.path() == role_path, "unexpected Full3 role location");
+        *stage = FixtureStartStage::GuardianGenesis;
         let genesis = read_json(&role.path().join("retirement/genesis.json"), 4096)?;
         ensure!(
             genesis["installation_id"] == installation.to_string(),
             "foreign Full3 installation"
         );
+        *stage = FixtureStartStage::GuardianPublication;
         let endpoint = RetainedFixtureEndpoint::capture(role)?;
+        *stage = FixtureStartStage::GuardianSocket;
         let peer = endpoint.checked_peer().await?;
+        *stage = FixtureStartStage::GuardianIdentity;
         let identity = DarwinIdentity::capture(&peer, broker_pid, Path::new(BIN))?;
+        *stage = FixtureStartStage::GuardianRevalidation;
         root.revalidate()?;
         endpoint.revalidate()?;
         Ok(Self { endpoint, identity })
@@ -911,7 +982,14 @@ impl Fixture {
     /// The production `--enforcer-full3-new` selection: the broker creates its
     /// sole Full3 guardian, whose custody this fixture attests before submit.
     pub async fn new_fresh() -> Result<Self> {
-        Self::start(Role::FullA, true).await
+        // Startup details are safe to surface only when built from closed
+        // phases and outcomes. Do not forward arbitrary I/O error chains.
+        Self::start(Role::FullA, true).await.map_err(|error| {
+            match error.downcast::<FixtureStartFailure>() {
+                Ok(failure) => failure.into(),
+                Err(_) => anyhow::anyhow!("phase=fixture_start category=fixture_setup_failed"),
+            }
+        })
     }
 
     async fn start(selection: Role, fresh_role: bool) -> Result<Self> {
@@ -1211,10 +1289,10 @@ impl Fixture {
         broker.id().context("missing live fixture broker identity")
     }
 
-    async fn bind_fresh_guardian(&mut self) -> Result<()> {
+    async fn bind_fresh_guardian(&mut self, stage: &mut FixtureStartStage) -> Result<()> {
         let broker_pid = self.live_broker_pid()?;
         let guardian =
-            FreshGuardian::capture(&self.broker_root, self.installation, broker_pid).await?;
+            FreshGuardian::capture(&self.broker_root, self.installation, broker_pid, stage).await?;
         ensure!(
             self.live_broker_pid()? == broker_pid,
             "fixture broker owner changed"
@@ -1251,33 +1329,60 @@ impl Fixture {
                 matches!(std::fs::symlink_metadata(self.broker_root.join(role.name())), Err(e) if e.kind() == io::ErrorKind::NotFound),
                 "Fresh role path must be absent"
             );
+            // Both roles use the private IPC layout with a fixed-width
+            // generation name. Report its size without exposing the root.
+            let socket = self
+                .broker_root
+                .join(role.name())
+                .join("endpoints/i-0000000000000000/s");
+            println!(
+                "phase=fixture_start_preflight expected_socket_path_bytes={}",
+                socket.as_os_str().as_encoded_bytes().len()
+            );
         }
-        self.broker = Some(ObservedChild::spawn_with_custody(
-            &mut command,
-            self.root
-                .join(format!("broker-{}.stderr", self.broker_starts)),
-            !fresh,
-        )?);
+        self.broker = Some(
+            ObservedChild::spawn_with_custody(
+                &mut command,
+                self.root
+                    .join(format!("broker-{}.stderr", self.broker_starts)),
+                !fresh,
+            )
+            .map_err(|_| FixtureStartFailure {
+                stage: FixtureStartStage::BrokerSpawn,
+                end: FixtureStartEnd::BrokerSpawnFailed,
+            })?,
+        );
         self.fresh_start_attempted = fresh;
         self.selection = role;
-        timeout(Duration::from_secs(60), async {
+        let mut stage = if fresh {
+            FixtureStartStage::GuardianRole
+        } else {
+            FixtureStartStage::BrokerList
+        };
+        let ready = timeout(Duration::from_secs(60), async {
             loop {
-                ensure!(
-                    self.broker
-                        .as_mut()
-                        .context("broker owner")?
-                        .child
-                        .try_wait()?
-                        .is_none(),
-                    "real broker exited before IPC preflight"
-                );
+                let broker = self
+                    .broker
+                    .as_mut()
+                    .ok_or(FixtureStartEnd::BrokerOwnerMissing)?;
+                match broker.child.try_wait() {
+                    Ok(None) => {}
+                    Ok(Some(status)) => return Err(FixtureStartEnd::BrokerExited(status)),
+                    Err(error) => {
+                        return Err(FixtureStartEnd::BrokerWaitFailed {
+                            kind: error.kind(),
+                            errno: error.raw_os_error(),
+                        });
+                    }
+                }
                 if fresh && self.fresh_guardian.is_none() {
-                    if self.bind_fresh_guardian().await.is_err() {
+                    if self.bind_fresh_guardian(&mut stage).await.is_err() {
                         sleep(Duration::from_millis(25)).await;
                         continue;
                     }
                     println!("phase=fixture_start_guardian category=identity_attested");
                 }
+                stage = FixtureStartStage::BrokerList;
                 if matches!(
                     service::request(
                         &self.broker_root,
@@ -1291,12 +1396,18 @@ impl Fixture {
                     .await,
                     Ok(BrokerReplyV1::Page { .. })
                 ) {
-                    return Ok::<_, anyhow::Error>(());
+                    return Ok(());
                 }
                 sleep(Duration::from_millis(20)).await;
             }
         })
-        .await?
+        .await;
+        let end = match ready {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(end)) => end,
+            Err(_) => FixtureStartEnd::Deadline,
+        };
+        Err(FixtureStartFailure { stage, end }.into())
     }
     pub async fn restart(&mut self, role: Role) -> Result<(Uuid, Uuid)> {
         let before = self.broker_epoch()?;
@@ -1465,6 +1576,32 @@ impl Fixture {
 
     pub async fn import_counts(&self) -> ImportCounts {
         self.engine.lock().await.import_counts
+    }
+
+    pub async fn complete_running_worker(
+        &self,
+        operation: Uuid,
+        session_id: &str,
+        container_id: &str,
+    ) -> Result<()> {
+        let mut engine = self.engine.lock().await;
+        let facts = &engine
+            .containers
+            .get(container_id)
+            .context("synthetic worker missing")?
+            .facts;
+        let labels = &facts["Config"]["Labels"];
+        ensure!(
+            engine.import_counts.workers_created == 1
+                && labels["agentsandbox.purpose"] == "run"
+                && labels["agentsandbox.operation"] == operation.to_string()
+                && labels["agentsandbox.session"] == session_id
+                && facts["State"]["Status"] == "running"
+                && facts["State"]["Running"] == true,
+            "synthetic worker is not the running allocation"
+        );
+        // End the existing attach and make the terminal available to runtime inspection.
+        engine.terminal(container_id)
     }
 
     pub async fn submit(&self, profile: &str, seconds: u32) -> Result<Uuid> {
@@ -2097,9 +2234,10 @@ impl Fixture {
 
     async fn close_fresh_guardian(&mut self) -> Result<()> {
         if self.fresh_guardian.is_none() {
+            let mut stage = FixtureStartStage::GuardianRole;
             timeout(Duration::from_secs(4), async {
                 loop {
-                    if self.bind_fresh_guardian().await.is_ok() {
+                    if self.bind_fresh_guardian(&mut stage).await.is_ok() {
                         return;
                     }
                     sleep(Duration::from_millis(25)).await;
