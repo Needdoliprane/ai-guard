@@ -1249,6 +1249,11 @@ function updateFilterChoices() {
 }
 function renderEvents() {
   if (!eventSlot || !historyNotice) return;
+  const active = document.activeElement;
+  const focusedHistory = active instanceof HTMLElement && eventSlot.contains(active)
+    ? active.dataset.historyFocus
+    : undefined;
+  const wasLoadingHistory = focusedHistory === "more" && active?.getAttribute("aria-disabled") === "true";
   const partialError = historyError ? `Historique incomplet. ${historyError}` : "";
   historyNotice.hidden = !partialError;
   if (historyNotice.textContent !== partialError) historyNotice.textContent = partialError;
@@ -1368,28 +1373,34 @@ function renderEvents() {
     table.append(body);
     eventSlot.replaceChildren(el("div", "table-scroll", table));
   }
-  const footer = el(
-    "div",
-    "table-footer",
-    el(
-      "span",
-      "",
-      `${formatMetric(visible.length)} événement${visible.length === 1 ? "" : "s"} affiché${visible.length === 1 ? "" : "s"} · ${formatMetric(events.length)} chargé${events.length === 1 ? "" : "s"}`,
-    ),
+  const summary = el(
+    "span",
+    "",
+    `${formatMetric(visible.length)} événement${visible.length === 1 ? "" : "s"} affiché${visible.length === 1 ? "" : "s"} · ${formatMetric(events.length)} chargé${events.length === 1 ? "" : "s"}`,
   );
+  summary.tabIndex = -1;
+  summary.dataset.historyFocus = "summary";
+  const footer = el("div", "table-footer", summary);
+  let more: HTMLButtonElement | null = null;
   if (nextCursor !== null) {
-    const more = button(
+    more = button(
       loadingEvents ? "Chargement…" : historyError ? "Réessayer de charger les précédents" : "Charger les précédents",
       "button button-quiet",
       () => {
         if (!loadingEvents) void loadEvents(true);
       },
     );
+    more.dataset.historyFocus = "more";
     if (loadingEvents) more.setAttribute("aria-disabled", "true");
     footer.append(more);
   } else footer.append(el("span", "muted", "Fin de l’historique chargé"));
   eventSlot.append(footer);
   eventSlot.setAttribute("aria-busy", String(loadingEvents));
+  if (focusedHistory) {
+    const target = focusedHistory === "more" ? more ?? summary : summary;
+    const keepVisible = !loadingEvents && (wasLoadingHistory || (focusedHistory === "more" && !more));
+    target.focus({ preventScroll: !keepVisible });
+  }
 }
 function renderSupport() {
   if (!sideSlot) return;

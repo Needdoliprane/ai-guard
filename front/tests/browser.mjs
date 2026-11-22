@@ -771,15 +771,22 @@ try {
   olderPageFailures = 1;
   await refreshOverview.click();
   await page.getByRole("button", { name: "Voir l’événement 14", exact: true }).waitFor();
-  await page.getByRole("button", { name: "Charger les précédents", exact: true }).click();
+  await page.getByRole("button", { name: "Charger les précédents", exact: true }).focus();
+  await page.keyboard.press("Enter");
   const historyAlert = page.getByRole("alert").filter({ hasText: "Historique incomplet" });
   await historyAlert.waitFor();
   assert.equal(await page.getByText("Journal indisponible", { exact: true }).count(), 0);
   await page.getByRole("button", { name: "Voir l’événement 14", exact: true }).waitFor();
-  await page.getByRole("button", { name: "Réessayer de charger les précédents", exact: true }).click();
+  const retryHistory = page.getByRole("button", { name: "Réessayer de charger les précédents", exact: true });
+  assert.equal(await retryHistory.evaluate((node) => node === document.activeElement), true,
+    "Le focus doit rester sur la reprise après un échec de lecture");
+  await page.keyboard.press("Enter");
   await page.getByRole("button", { name: "Voir l’événement 11", exact: true }).waitFor();
   await historyAlert.waitFor({ state: "hidden" });
   await page.getByText("Fin de l’historique chargé", { exact: true }).waitFor();
+  assert.equal(await page.locator(".event-slot .table-footer").evaluate((footer) =>
+    footer.contains(document.activeElement) && document.activeElement.textContent.includes("chargés")), true,
+    "En fin d’historique, le focus doit rejoindre le résumé");
   pagedJournal = false;
   await refreshOverview.click();
   await page.getByRole("button", { name: "Voir l’événement 14", exact: true }).waitFor();
