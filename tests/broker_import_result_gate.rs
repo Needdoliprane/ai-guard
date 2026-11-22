@@ -483,9 +483,7 @@ fn broker_import_witness_requires_exact_pull_policy() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn broker_import_result_pending_then_acknowledged() -> Result<()> {
-    let fixture = Fixture::new_fresh()
-        .await
-        .map_err(|_| anyhow::anyhow!("phase=fixture_start category=full3_fixture_not_confirmed"))?;
+    let fixture = Fixture::new_fresh().await?;
     let operation = Uuid::new_v4();
     let result = timeout(PLAYBACK_WAIT, exercise(&fixture, operation))
         .await
