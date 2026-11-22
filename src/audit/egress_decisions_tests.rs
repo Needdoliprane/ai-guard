@@ -147,6 +147,116 @@ fn egress_store_allow_is_durable_bound_to_the_running_egress_worker_and_idempote
 }
 
 #[test]
+fn egress_store_retention_preserves_decision_and_channel_receipts() {
+    use crate::audit::retention::{
+        AuditRetentionPolicyV1, ReclaimClassV1, RetentionApplyRequest, verify_archive_chain,
+    };
+    use std::collections::BTreeSet;
+
+    let directory = private_directory();
+    let path = directory.path();
+    let store = store(path, "tenant-a");
+    for (version, migrate) in [
+        Store::migrate_human_brokers_v7,
+        Store::migrate_kubernetes_create_v8,
+        Store::migrate_kubernetes_policy_v9,
+        Store::migrate_human_workers_v10,
+        Store::migrate_kubernetes_session_reservations_v11,
+        Store::migrate_broker_checkpoints_v12,
+        Store::migrate_kubernetes_recovery_v13,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        migrate(
+            &store,
+            &path.join(format!("before-v{}.sqlite", version + 7)),
+        )
+        .unwrap();
+    }
+    store
+        .install_audit_retention(&path.join("before-retention.sqlite"))
+        .unwrap();
+    let worker = software_workers::running_from(&store, egress_admission(&store));
+    let binding = binding(&worker);
+    let open = channel_open(&binding);
+    let opening = store.egress_observe(&open).unwrap();
+    let request = request(&binding, "fixture.egress.test:8443");
+    let policy = policy();
+    let decision = store.egress_decide(&request, &policy, NOW).unwrap();
+    assert_eq!(decision.outcome, EgressOutcomeV1::Allow);
+    store.append(Event::new("tool.metric")).unwrap();
+    store.append(Event::new("tool.metric")).unwrap();
+    store.append(Event::new("tool.metric")).unwrap();
+
+    let retention = AuditRetentionPolicyV1 {
+        version: 1,
+        min_age_seconds: 86_400,
+        keep_recent_events: 1,
+        max_segment_events: 1_000,
+        classes: vec![ReclaimClassV1::Ordinary],
+    };
+    let now = chrono::Utc::now() + chrono::Duration::days(2);
+    let kept = BTreeSet::new();
+    let plan = store
+        .audit_retention_plan(&retention, now, None, &kept)
+        .unwrap();
+    assert!(plan.plan.last_seq > decision.receipt.audit_seq);
+    let archive = path.join("archive");
+    let applied = store
+        .apply_audit_retention(&RetentionApplyRequest {
+            policy: &retention,
+            now,
+            through_seq: plan.plan.last_seq,
+            expect_plan_sha256: &plan.plan_sha256,
+            archive_dir: &archive,
+            kept_positions: &kept,
+        })
+        .unwrap();
+    assert!(applied.reclaimed_events > 0);
+    drop(store);
+
+    let reopened = Store::open_existing_for_tenant(
+        &path.join("tenant-a.sqlite"),
+        "tenant-a",
+        Redactor::new(vec![]),
+        10_000,
+    )
+    .unwrap();
+    let archived = [archive];
+    let verified = reopened.verify_audit_archives(&archived).unwrap();
+    assert_eq!(verified.verdict, "verified", "{:?}", verified.failure);
+    let ledger = reopened.audit_retention_ledger().unwrap();
+    assert_eq!(
+        verify_archive_chain("tenant-a", &ledger, &archived).verdict,
+        "verified"
+    );
+
+    let events = reopened
+        .egress_session_events(&binding.session_id, 10)
+        .unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| receipt(event) == decision.receipt),
+        "egress_decision_retention_lost"
+    );
+    assert!(events.iter().any(|event| receipt(event) == opening));
+    assert!(
+        plan.plan
+            .kept_positions
+            .contains(&decision.receipt.audit_seq)
+    );
+    let head = reopened.head().unwrap();
+    assert_eq!(reopened.egress_observe(&open).unwrap(), opening);
+    assert_eq!(
+        reopened.egress_decide(&request, &policy, NOW + 1).unwrap(),
+        decision
+    );
+    assert_eq!(reopened.head().unwrap(), head);
+}
+
+#[test]
 fn egress_store_refuses_workers_without_egress_unknown_or_foreign_bindings() {
     let directory = private_directory();
     let a = store(directory.path(), "tenant-a");
