@@ -78,7 +78,10 @@ fn cli_store15_reuses_exact_closure_and_leaves_the_neighbor_unchanged() {
     use agentsandbox::human_authority::HumanAuthorityClosureV1;
     use rusqlite::{Connection, OpenFlags};
     use std::{
-        os::{fd::AsRawFd, unix::fs::MetadataExt},
+        os::{
+            fd::AsRawFd,
+            unix::fs::{MetadataExt, PermissionsExt},
+        },
         path::Path,
     };
     use uuid::Uuid;
@@ -297,10 +300,9 @@ fn cli_store15_reuses_exact_closure_and_leaves_the_neighbor_unchanged() {
         &second_output,
         "tenant-b",
     ));
-    let second = HumanAuthorityClosureV1::from_bytes(
-        &fs::read(second_output.join("closure/manifest.json")).unwrap(),
-    )
-    .unwrap();
+    let second_manifest = second_output.join("closure/manifest.json");
+    let second_bytes = fs::read(&second_manifest).unwrap();
+    let second = HumanAuthorityClosureV1::from_bytes(&second_bytes).unwrap();
     assert_eq!(second.closure_revision, upgraded.closure_revision + 1);
     let mut expected_sources = upgraded.sources.clone();
     expected_sources
@@ -315,6 +317,63 @@ fn cli_store15_reuses_exact_closure_and_leaves_the_neighbor_unchanged() {
     assert_eq!(after_b.1.len(), before_b.1.len() + 1);
     assert_eq!(&after_b.1[..before_b.1.len()], before_b.1.as_slice());
     assert_eq!(after_b.1.last().unwrap().1, "control.egress_policy.genesis");
+
+    let maintenance_root = tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let maintenance_dir = maintenance_root
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("rights");
+    let rights = |step| {
+        let output = Command::new(env!("CARGO_BIN_EXE_agentsandbox"))
+            .env_clear()
+            .args([
+                "human-sources",
+                "human-rights",
+                step,
+                "--human-sources-manifest",
+            ])
+            .arg(&second_manifest)
+            .arg("--human-credentials-envelope")
+            .arg(second_output.join("technical-credentials.json"))
+            .arg("--tenants-file")
+            .arg(&f.registry)
+            .args([
+                "--human-control-config-revision",
+                "7",
+                "--tenant-id",
+                "tenant-a",
+                "--maintenance-dir",
+            ])
+            .arg(&maintenance_dir)
+            .arg("--confirm-control-stopped")
+            .output()
+            .unwrap();
+        let report = serde_json::from_slice::<Value>(&output.stdout);
+        successful(output);
+        report.unwrap()
+    };
+    let installed = rights("install");
+    assert_eq!(installed["state"], "installed");
+    assert_eq!(installed["store_format"], 15);
+    assert_eq!(installed["tenant_id"], "tenant-a");
+    let after_rights = snapshot(0);
+    assert_eq!(after_rights.0, 15);
+    assert_eq!(after_rights.1.len(), after_a.1.len() + 1);
+    assert_eq!(&after_rights.1[..after_a.1.len()], after_a.1.as_slice());
+    let marker = after_rights.1.last().unwrap();
+    assert_eq!(marker.1, "control.identity.human_rights.genesis");
+    assert_eq!(installed["markers"][0]["seq"], marker.0);
+    assert_eq!(installed["markers"][0]["hash"], marker.2.as_str());
+    let resumed = rights("resume");
+    assert_eq!(resumed["state"], "confirmed");
+    assert_eq!(resumed["markers"], installed["markers"]);
+    assert_eq!(snapshot(0), after_rights);
+    assert_eq!(snapshot(1), after_b);
+    assert!(fs::read(&second_manifest).unwrap() == second_bytes);
 }
 
 #[test]

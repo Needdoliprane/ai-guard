@@ -161,6 +161,7 @@ pub fn upgrade_store15(request: Store15UpgradeRequest<'_>) -> Result<Store15Upgr
         },
         prior_active_manifest: Some(prior_manifest),
         supported_storage_profile: target.supported_storage_profile,
+        selected_source_id: None,
     };
     let parent = Directory::open_existing(
         request

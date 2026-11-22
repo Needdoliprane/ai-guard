@@ -177,6 +177,85 @@ reconciliation before retrying. Preserve that copy and the journal for diagnosis
 
 The command reports publication and leaves gateway readiness to startup.
 
+## In-place identity markers on adopted stores
+
+After adoption, the fenced human rights capabilities need the identity marker
+`human_rights_v2` on each tenant Store14/15. With every consumer stopped, run
+the offline in-place maintenance once per tenant, each with a new private
+maintenance directory outside the preparation and source directories. The
+command checks the actual directory identities, including alternate names
+resolved by the filesystem.
+
+```sh
+agentsandbox human-sources human-rights install \
+  --human-sources-activation /absolute/control/human-preparation/activation.json \
+  --tenant-id tenant-a \
+  --maintenance-dir /absolute/control/human-rights-tenant-a \
+  --confirm-control-stopped
+agentsandbox human-sources human-rights resume \
+  --human-sources-activation /absolute/control/human-preparation/activation.json \
+  --tenant-id tenant-a \
+  --maintenance-dir /absolute/control/human-rights-tenant-a \
+  --confirm-control-stopped
+```
+
+For an already published explicit closure, use its manifest, technical
+credential envelope, tenant registry and control revision together. Supply
+`--max-events` if the closure uses a value other than `100000`. For OIDC, also
+supply `--oidc-config` and `--human-oidc-mapping-revision` with the same values
+used at publication. Use private directories with mode `0700` for the closure,
+its configuration and the runner and viewer token files. Keep the maintenance
+directory outside those directories and every source directory.
+
+```sh
+agentsandbox human-sources human-rights install \
+  --human-sources-manifest /absolute/control/published/closure.json \
+  --human-credentials-envelope /absolute/control/published/technical-credentials.json \
+  --tenants-file /absolute/control/config/tenants.json \
+  --human-control-config-revision 7 \
+  --tenant-id tenant-a \
+  --maintenance-dir /absolute/control/human-rights-tenant-a \
+  --confirm-control-stopped
+```
+
+For `resume`, reuse the same explicit arguments and maintenance directory.
+`human_rights_closure_refused` means the explicit closure or one of its inputs
+could not be verified. Preserve the files and verify that the manifest,
+envelope, configured tokens and revisions match the same publication.
+
+`install` takes the owner locks of the whole union, writes a verified SQLite
+backup, journals its intent, backup and confirmation, and appends every pending
+marker in one transaction. The maintenance plan identifies the selected
+source. `resume` needs the same tenant and resynchronizes the plan and its
+directories before opening the store. It can finish or re-confirm that
+maintenance without appending a second marker. A plan created by a test build
+before source binding is refused with `human_rights_journal_conflict`. Preserve
+its plan, journal and backup for review. The
+activation and store formats are unchanged. The refusal codes, the return path
+and the capabilities these markers admit are described in
+[named local access](../identity/README.md#already-adopted-owned-stores-formats-14-and-15).
+
+After an interruption, `resume` preserves copies that have no published backup
+receipt. If the original backup location is occupied, it writes a new verified
+copy and publishes its receipt under the same intention. Once that receipt is
+published, every retry uses its copy and reports the same `backup_path`. A
+missing or divergent copy for a published receipt stops the maintenance.
+
+`human_rights_backup_inventory_limit` means `backups/` contains more than 27
+entries before creating a copy or more than 32 entries when verifying journal
+records. The creation limit reserves five entries for the SQLite file, its
+sidecars and the initialization lock. The count includes every direct entry
+under `backups/`, including retained copies and SQLite support files.
+
+`human_rights_backup_directory_invalid` means `backups/` or an inventory entry
+could not be verified as private. The refusal line reports the state without
+printing private entry names. For either refusal, keep the maintenance directory
+and sources intact for offline operator review. Verify the identity, owner and
+permissions of the original directory and the bound above. Resume with the same
+tenant, source arguments and maintenance directory once those checks can pass.
+If the limit still prevents resume, retain the whole directory for review with
+the maintainer before starting another maintenance.
+
 ## Validation scope
 
 The [dated operator and owned-startup evidence](../../engineering/evidence/2026-11-13/human-sources-operator/README.md)

@@ -169,43 +169,7 @@ impl Store {
         installed(&db)
     }
     pub(super) fn initialize_human_rights(&self, tx: &Transaction<'_>) -> anyhow::Result<()> {
-        let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        anyhow::ensure!(
-            format_admits_marker(version),
-            "human rights marker requires the worker access marker"
-        );
-        crate::control::invalid(genesis(tx)?.is_none())?;
-        let (identity_genesis_seq, identity_genesis_hash): (i64, String) = tx.query_row(
-            "SELECT genesis_seq,genesis_hash FROM identity_meta WHERE singleton=1",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        let control_namespace_uuid = tx.query_row(
-            "SELECT namespace_uuid FROM control_meta WHERE singleton=1",
-            [],
-            |r| r.get(0),
-        )?;
-        let workers_access_seq: Option<i64> = tx.query_row(
-            "SELECT MAX(seq) FROM events WHERE kind=?1",
-            [super::human_workers::GENESIS_KIND],
-            |r| r.get(0),
-        )?;
-        let workers_access_seq = workers_access_seq.ok_or_else(|| {
-            anyhow::anyhow!("human rights marker requires the worker access marker")
-        })?;
-        let (previous_seq, previous_hash) = audit_head(tx)?;
-        let mut event = Event::new(GENESIS_KIND);
-        event.data = serde_json::to_value(Genesis {
-            version: MARKER_VERSION,
-            protocol: PROTOCOL.into(),
-            control_namespace_uuid,
-            identity_genesis_seq,
-            identity_genesis_hash,
-            workers_access_seq,
-            authorization_revision: identity::authorization_revision(tx)?,
-            previous_seq,
-            previous_hash,
-        })?;
+        let event = marker_event(tx)?;
         let original = serde_json::to_value(&event)?;
         let (event, payload) = self.prepare_event(event)?;
         anyhow::ensure!(
@@ -215,4 +179,47 @@ impl Store {
         self.append_identity_in_transaction(tx, event, payload)?;
         Ok(())
     }
+}
+
+/// The marker event, bound to its durable prefix, shared by the legacy and the
+/// owned in-place maintenance. Refuses a second marker or a missing worker
+/// access marker; the caller chooses the event id and the appender.
+pub(super) fn marker_event(tx: &Transaction<'_>) -> anyhow::Result<Event> {
+    let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    anyhow::ensure!(
+        format_admits_marker(version),
+        "human rights marker requires the worker access marker"
+    );
+    crate::control::invalid(genesis(tx)?.is_none())?;
+    let (identity_genesis_seq, identity_genesis_hash): (i64, String) = tx.query_row(
+        "SELECT genesis_seq,genesis_hash FROM identity_meta WHERE singleton=1",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let control_namespace_uuid = tx.query_row(
+        "SELECT namespace_uuid FROM control_meta WHERE singleton=1",
+        [],
+        |r| r.get(0),
+    )?;
+    let workers_access_seq: Option<i64> = tx.query_row(
+        "SELECT MAX(seq) FROM events WHERE kind=?1",
+        [super::human_workers::GENESIS_KIND],
+        |r| r.get(0),
+    )?;
+    let workers_access_seq = workers_access_seq
+        .ok_or_else(|| anyhow::anyhow!("human rights marker requires the worker access marker"))?;
+    let (previous_seq, previous_hash) = audit_head(tx)?;
+    let mut event = Event::new(GENESIS_KIND);
+    event.data = serde_json::to_value(Genesis {
+        version: MARKER_VERSION,
+        protocol: PROTOCOL.into(),
+        control_namespace_uuid,
+        identity_genesis_seq,
+        identity_genesis_hash,
+        workers_access_seq,
+        authorization_revision: identity::authorization_revision(tx)?,
+        previous_seq,
+        previous_hash,
+    })?;
+    Ok(event)
 }

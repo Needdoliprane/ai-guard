@@ -402,6 +402,7 @@ fn maintenance_resume_requires_a_distinct_backup_parent() {
             closure_digest: closure.closure_digest.clone(),
         }),
         supported_storage_profile: closure.supported_storage_profile,
+        selected_source_id: None,
     };
     let files: Vec<_> = closure
         .configuration

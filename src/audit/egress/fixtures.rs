@@ -122,6 +122,7 @@ impl BaseFixture {
             },
             prior_active_manifest: None,
             supported_storage_profile: HumanStorageProfileV1::LocalPosixFlockV1,
+            selected_source_id: None,
         };
         let plan_file = config
             .persistent_create("maintenance.json", &serde_json::to_vec(&plan).unwrap())
@@ -2689,3 +2690,6 @@ impl Store {
         Ok(())
     }
 }
+
+/// In-place identity markers on adopted owned sources (journaled maintenance).
+mod identity_markers_tests;

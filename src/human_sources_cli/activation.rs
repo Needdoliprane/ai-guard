@@ -404,3 +404,91 @@ pub(crate) fn load_human_sources_activation(path: &Path) -> Result<LoadedHumanSo
         )
     })
 }
+
+/// Inputs of the in-place identity-marker maintenance. Files and metadata;
+/// opening these inputs never acquires an owner or opens SQLite.
+pub(super) struct LoadedIdentityMarkerInputs {
+    pub manifest: PrivateFile,
+    pub configuration: HumanAuthorityConfigurationV1,
+    pub files: Vec<(HumanConfigurationFileKindV1, PrivateFile)>,
+    pub excluded_directories: Vec<PathBuf>,
+    pub redactor: Redactor,
+    pub max_events: u64,
+}
+
+pub(super) fn load_identity_marker_inputs(
+    path: &Path,
+    tenant_id: &str,
+) -> Result<LoadedIdentityMarkerInputs> {
+    validate_absolute_path(path)?;
+    ensure!(
+        path.file_name().and_then(|n| n.to_str()) == Some("activation.json"),
+        "human_sources_activation_leaf_invalid"
+    );
+    let directory = path
+        .parent()
+        .context("human_sources_activation_parent_missing")?;
+    let mut loaded = preparation::load_preparation(directory, false)
+        .map_err(|_| anyhow::anyhow!("human_sources_preparation_invalid"))?;
+    let (_, _, manifest) =
+        validate_activation(&mut loaded)?.context("human_sources_activation_incomplete")?;
+    validate_manifest(&mut loaded, &manifest)?;
+    let (configuration, files) = loaded
+        .inputs
+        .configuration(&loaded.recovery, &loaded.envelope)?;
+    let source = loaded
+        .recovery
+        .target_sources
+        .iter()
+        .find(|source| {
+            source.kind == HumanSourceKindV1::TenantStore
+                && source.tenant_id.as_deref() == Some(tenant_id)
+        })
+        .context("human_rights_source_unknown")?;
+    let OperatorSourceOptions::TenantStore {
+        redactor,
+        max_events,
+        ..
+    } = loaded
+        .inputs
+        .options_for(source, loaded.recovery.max_events)?
+    else {
+        bail!("human_rights_source_unknown");
+    };
+    loaded.inputs.budget.revalidate()?;
+    Ok(LoadedIdentityMarkerInputs {
+        manifest,
+        configuration,
+        files,
+        excluded_directories: vec![loaded.directory.path().to_owned()],
+        redactor,
+        max_events,
+    })
+}
+
+pub(super) fn load_explicit_identity_marker_inputs(
+    args: &ExplicitOwnedSourcesArgs,
+) -> Result<LoadedIdentityMarkerInputs> {
+    let (resolved, redactor, max_events) = args.resolve_for_maintenance()?;
+    let mut excluded_directories = std::iter::once(&resolved.manifest)
+        .chain(resolved.files.iter().map(|(_, file)| file))
+        .chain(&resolved.token_files)
+        .map(|file| {
+            file.revalidate()?;
+            file.path()
+                .parent()
+                .map(Path::to_owned)
+                .context("owned source reference parent missing")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    excluded_directories.sort();
+    excluded_directories.dedup();
+    Ok(LoadedIdentityMarkerInputs {
+        manifest: resolved.manifest,
+        configuration: resolved.configuration,
+        files: resolved.files,
+        excluded_directories,
+        redactor,
+        max_events,
+    })
+}

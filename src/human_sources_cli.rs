@@ -28,6 +28,7 @@ use std::{
 use uuid::Uuid;
 mod activation;
 mod broker_identity;
+mod human_rights;
 mod inputs;
 mod preparation;
 mod schema;
@@ -57,6 +58,8 @@ pub(crate) enum HumanSourcesCommand {
     BrokerIdentity(broker_identity::BrokerIdentityArgs),
     /// Migrate one owned SQLite Store14 and publish a successor closure.
     UpgradeEgress(store15::UpgradeEgressArgs),
+    /// Offline in-place identity markers (human rights) on one adopted Store14/15.
+    HumanRights(human_rights::HumanRightsArgs),
 }
 #[derive(Args)]
 pub(crate) struct PrepareArgs {
@@ -130,6 +133,9 @@ pub(crate) async fn run(args: HumanSourcesArgs) -> Result<()> {
         HumanSourcesCommand::UpgradeEgress(_) => {
             ("upgrade-egress", "resume_same_store15_operation")
         }
+        HumanSourcesCommand::HumanRights(_) => {
+            ("human-rights", "preserve_the_maintenance_directory")
+        }
     };
     let result = match args.command {
         HumanSourcesCommand::Prepare(args) => {
@@ -167,6 +173,7 @@ pub(crate) async fn run(args: HumanSourcesArgs) -> Result<()> {
         // Its own closed report and refusal vocabulary; no shared state here.
         HumanSourcesCommand::BrokerIdentity(args) => return broker_identity::run(args),
         HumanSourcesCommand::UpgradeEgress(args) => return store15::run(args),
+        HumanSourcesCommand::HumanRights(args) => return human_rights::run(args),
     };
     match result {
         Ok((state, count)) => {

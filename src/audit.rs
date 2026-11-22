@@ -180,6 +180,7 @@ pub(crate) use human_modern::HumanDiscoveryGeneration;
 mod human_rights;
 mod human_workers;
 pub(crate) mod identity;
+pub(crate) mod identity_markers;
 mod kubernetes_admission;
 pub(crate) mod kubernetes_session;
 mod metadata;

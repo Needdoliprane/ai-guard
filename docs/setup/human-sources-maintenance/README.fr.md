@@ -187,6 +187,91 @@ diagnostic.
 
 L'état de disponibilité du gateway sera établi à son démarrage.
 
+## Marqueurs d'identité en place sur les bases adoptées
+
+Après l'adoption, les capacités protégées des droits humains exigent le marqueur
+d'identité `human_rights_v2` sur chaque Store14/15 de tenant. Tous les
+consommateurs arrêtés, lancez la maintenance hors ligne en place une fois par
+tenant, chacun avec un nouveau répertoire de maintenance privé situé hors du
+répertoire de préparation et des répertoires des sources. La commande vérifie
+l'identité réelle des répertoires, y compris les autres noms que le système de
+fichiers résout vers ces mêmes répertoires.
+
+```sh
+agentsandbox human-sources human-rights install \
+  --human-sources-activation /absolute/control/human-preparation/activation.json \
+  --tenant-id tenant-a \
+  --maintenance-dir /absolute/control/human-rights-tenant-a \
+  --confirm-control-stopped
+agentsandbox human-sources human-rights resume \
+  --human-sources-activation /absolute/control/human-preparation/activation.json \
+  --tenant-id tenant-a \
+  --maintenance-dir /absolute/control/human-rights-tenant-a \
+  --confirm-control-stopped
+```
+
+Pour une clôture explicite déjà publiée, fournissez ensemble son manifeste,
+son enveloppe de credentials techniques, son registre de tenants et sa révision
+de contrôle. Indiquez `--max-events` si la clôture utilise une valeur différente
+de `100000`. Pour OIDC, indiquez aussi `--oidc-config` et
+`--human-oidc-mapping-revision` avec les mêmes valeurs qu'à la publication.
+Utilisez des répertoires privés en mode `0700` pour la clôture, sa configuration
+et les fichiers des tokens runner et viewer. Placez le répertoire de maintenance
+hors de ces répertoires et de tous les répertoires sources.
+
+```sh
+agentsandbox human-sources human-rights install \
+  --human-sources-manifest /absolute/control/published/closure.json \
+  --human-credentials-envelope /absolute/control/published/technical-credentials.json \
+  --tenants-file /absolute/control/config/tenants.json \
+  --human-control-config-revision 7 \
+  --tenant-id tenant-a \
+  --maintenance-dir /absolute/control/human-rights-tenant-a \
+  --confirm-control-stopped
+```
+
+Pour `resume`, reprenez les mêmes arguments explicites et le même répertoire
+de maintenance. `human_rights_closure_refused` indique que la clôture explicite
+ou l'une de ses entrées n'a pas pu être vérifiée. Conservez les fichiers et
+vérifiez que le manifeste, l'enveloppe, les tokens configurés et les révisions
+correspondent à la même publication.
+
+`install` prend les verrous propriétaires de toute l'union, écrit une sauvegarde
+SQLite vérifiée, journalise son intention, sa sauvegarde et sa confirmation, et
+ajoute chaque marqueur en attente dans une seule transaction. Le plan de
+maintenance identifie la source sélectionnée. `resume` exige le même tenant et
+resynchronise le plan et ses répertoires avant d'ouvrir la base. Il peut terminer
+ou reconfirmer cette maintenance sans ajouter de second marqueur. Une version
+d'essai qui a créé le plan avant l'ajout de cette liaison laisse un plan refusé
+avec `human_rights_journal_conflict`. Conservez son plan, son journal et sa
+sauvegarde pour examen. L'activation et les formats des bases restent inchangés. Les
+codes de refus, le chemin de retour et les capacités admises par ces marqueurs
+sont décrits dans
+[l'accès local nominatif](../identity/README.fr.md#bases-possédées-déjà-adoptées-formats-14-et-15).
+
+Après une interruption, `resume` conserve les copies sans reçu de sauvegarde
+publié. Si le chemin de sauvegarde initial est occupé, la reprise écrit une
+nouvelle copie vérifiée et publie son reçu sous la même intention. Une fois ce
+reçu publié, chaque reprise utilise sa copie et rend le même `backup_path`.
+Une copie manquante ou divergente pour un reçu publié arrête la maintenance.
+
+`human_rights_backup_inventory_limit` indique que `backups/` contient plus de
+27 entrées avant la création d'une copie, ou plus de 32 lors de la vérification
+des enregistrements du journal. Le plafond de création réserve cinq entrées
+pour le fichier SQLite, ses fichiers auxiliaires et le verrou d'initialisation.
+Le décompte comprend chaque entrée directe de `backups/`, y compris les copies
+conservées et les fichiers auxiliaires SQLite.
+
+`human_rights_backup_directory_invalid` indique que le caractère privé de
+`backups/` ou d'une entrée de son inventaire n'a pas pu être vérifié. La ligne
+de refus indique l'état sans afficher les noms privés. Dans les deux cas,
+gardez le répertoire de maintenance et les sources intacts pour examen hors
+ligne. Vérifiez l'identité, le propriétaire et les permissions du répertoire
+d'origine, ainsi que le plafond ci-dessus. Reprenez avec le même tenant, la
+mêmes arguments de source et le même répertoire de maintenance lorsque ces
+contrôles peuvent réussir. Si le plafond empêche toujours la reprise, conservez
+le répertoire entier pour examen avec le mainteneur avant toute autre maintenance.
+
 ## Périmètre de validation
 
 Les [preuves datées du parcours opérateur et du startup owned](../../engineering/evidence/2026-11-13/human-sources-operator/README.fr.md)
