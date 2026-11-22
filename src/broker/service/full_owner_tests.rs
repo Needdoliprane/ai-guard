@@ -163,21 +163,11 @@ async fn full_service(seed: &ColdRecoverySeed) -> (Arc<Service>, WriterClient, N
     (service, writer, child)
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn normal_shutdown_retains_a_full_deferred_run_until_its_owned_future_finishes() {
-    let seed = terminal_pending_seed_for_cold_audit_test().await;
-    assert!(seed.is_terminal() && seed.result_pending());
-    assert!(!seed.result_acknowledged());
-    let store = Store::open_for_tenant(
-        seed.database(),
-        seed.scope().tenant_id(),
-        Redactor::new(vec![]),
-        1000,
-    )
-    .unwrap();
-    let initial_head = store.head().unwrap();
-    let worker_before = store.worker(seed.worker_id()).unwrap().unwrap();
-    let (service, writer, child) = full_service(&seed).await;
+async fn prepare_full_run(
+    seed: &ColdRecoverySeed,
+    service: &Arc<Service>,
+    writer: &WriterClient,
+) -> (Arc<Job>, DeferredRun) {
     let profile = service
         .registry
         .profile(seed.scope().profile_id())
@@ -204,6 +194,97 @@ async fn normal_shutdown_retains_a_full_deferred_run_until_its_owned_future_fini
         _capacity: Arc::clone(&service.execution).try_acquire_owned().unwrap(),
         stopping: Arc::clone(&service.stopping),
     };
+    (job, run)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn full_reconciliation_acknowledges_pending_result_with_unavailable_activity_spool() {
+    let seed = terminal_pending_seed_for_cold_audit_test().await;
+    let (service, writer, _child) = full_service(&seed).await;
+    let spool = seed.root().join("provider-activity");
+    write_private(&spool, b"synthetic unavailable activity directory");
+    let before = writer.load(seed.operation_id()).await.unwrap().unwrap();
+    assert!(needs_autonomous_reconciliation(&before));
+    assert!(seed.is_terminal() && seed.result_pending() && !seed.result_acknowledged());
+
+    let (job, run) = prepare_full_run(&seed, &service, &writer).await;
+    run.start().unwrap();
+    tokio::time::timeout(Duration::from_secs(60), service.full_owners.drain())
+        .await
+        .expect("the owned reconciliation must finish")
+        .unwrap();
+
+    assert_eq!(job.execution_status(), (false, None));
+    let after = writer.load(seed.operation_id()).await.unwrap().unwrap();
+    let store = Store::open_for_tenant(
+        seed.database(),
+        seed.scope().tenant_id(),
+        Redactor::new(vec![]),
+        1000,
+    )
+    .unwrap();
+    for (kind, event_id, input_hash) in [
+        (
+            "broker.batch.result",
+            seed.event_id(),
+            seed.event_input_hash(),
+        ),
+        (
+            "observer.coverage",
+            seed.coverage_event_id(),
+            seed.coverage_event_input_hash(),
+        ),
+    ] {
+        let rows = store
+            .events(&EventQuery {
+                kind: Some(kind.into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let [row] = rows.as_slice() else {
+            panic!("expected one committed event for {kind}");
+        };
+        let event = after
+            .broker_checkpoint_v4()
+            .unwrap()
+            .events()
+            .iter()
+            .find(|event| event.event_id() == event_id)
+            .unwrap();
+        assert_eq!(event.audit_seq(), Some(row.seq));
+        assert!(
+            event.input_hash() == input_hash,
+            "the retained event hash changed"
+        );
+        assert!(
+            serde_json::to_value(event.event()).unwrap()
+                == serde_json::to_value(&row.event).unwrap(),
+            "the gateway must commit the exact retained event"
+        );
+    }
+    assert!(seed.runtime_calls() == seed.runtime_call_snapshot());
+    assert_eq!(
+        fs::read(&spool).unwrap(),
+        b"synthetic unavailable activity directory"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn normal_shutdown_retains_a_full_deferred_run_until_its_owned_future_finishes() {
+    let seed = terminal_pending_seed_for_cold_audit_test().await;
+    assert!(seed.is_terminal() && seed.result_pending());
+    assert!(!seed.result_acknowledged());
+    let store = Store::open_for_tenant(
+        seed.database(),
+        seed.scope().tenant_id(),
+        Redactor::new(vec![]),
+        1000,
+    )
+    .unwrap();
+    let initial_head = store.head().unwrap();
+    let worker_before = store.worker(seed.worker_id()).unwrap().unwrap();
+    let (service, writer, child) = full_service(&seed).await;
+    let (job, run) = prepare_full_run(&seed, &service, &writer).await;
     let accepted = writer.load(seed.operation_id()).await.unwrap().unwrap();
     let expected = accepted
         .broker_checkpoint_v4()
