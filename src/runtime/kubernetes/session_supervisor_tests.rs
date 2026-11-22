@@ -49,7 +49,7 @@ fn orphan_fixture() {
     std::mem::forget(child);
 }
 
-fn hello_envelope(binding: &SessionBootstrapBindingV2) -> Vec<u8> {
+pub(crate) fn hello_envelope(binding: &SessionBootstrapBindingV2) -> Vec<u8> {
     let body = serde_json::to_vec(&json!({
         "kind": "hello",
         "version": 2,
@@ -75,11 +75,11 @@ fn hello_envelope(binding: &SessionBootstrapBindingV2) -> Vec<u8> {
     envelope
 }
 
-struct Dirs {
-    workspace: tempfile::TempDir,
-    home: tempfile::TempDir,
+pub(crate) struct Dirs {
+    pub(crate) workspace: tempfile::TempDir,
+    pub(crate) home: tempfile::TempDir,
 }
-fn fresh_dirs() -> Dirs {
+pub(crate) fn fresh_dirs() -> Dirs {
     let dirs = Dirs {
         workspace: tempfile::tempdir().unwrap(),
         home: tempfile::tempdir().unwrap(),
@@ -88,7 +88,7 @@ fn fresh_dirs() -> Dirs {
     dirs
 }
 
-fn config(
+pub(crate) fn config(
     dirs: &Dirs,
     program: &str,
     args: &[&str],

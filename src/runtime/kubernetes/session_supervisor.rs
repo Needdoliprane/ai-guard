@@ -1357,4 +1357,4 @@ fn export_directory(
 
 #[cfg(test)]
 #[path = "session_supervisor_tests.rs"]
-mod tests;
+pub(crate) mod tests;
