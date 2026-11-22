@@ -28,7 +28,10 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     io,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::{
+        fd::AsRawFd,
+        unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    },
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
@@ -165,40 +168,6 @@ fn fresh(root: &Path, tenant: &str) -> Result<Arc<Store>> {
     store.migrate_workload_v6(&root.join(format!("{tenant}-before6.sqlite")))?;
     Ok(Arc::new(store))
 }
-async fn start_fixture_enforcer(root: &Path, broker_root: &Path) -> Result<Child> {
-    let enforcer_root = private_dir(broker_root, "enforcer")?;
-    // The relay fixture retains its existing guardian configuration.
-    private_file(&enforcer_root.join("auth"), &[0x51; 32])?;
-    let mut enforcer = Command::new(BIN)
-        .args(["__broker-enforcer", "--root"])
-        .arg(&enforcer_root)
-        .args(["--max-slots", "32"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(diagnostic(&root.join("enforcer.stderr"))?)
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-        .env("HOME", root)
-        .current_dir(root)
-        .kill_on_drop(true)
-        .spawn()?;
-    timeout(Duration::from_secs(10), async {
-        loop {
-            ensure!(
-                enforcer.try_wait()?.is_none(),
-                "native fixture enforcer exited"
-            );
-            if std::fs::read_dir(enforcer_root.join("announcements"))
-                .is_ok_and(|mut entries| entries.next().is_some())
-            {
-                return Ok::<_, anyhow::Error>(());
-            }
-            sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await??;
-    Ok(enforcer)
-}
 #[path = "broker_relay_runtime.rs"]
 mod runtime;
 use runtime::{Engine, EngineFailure, engine_connection};
@@ -257,7 +226,6 @@ pub struct Fixture {
     registry: PathBuf,
     runner_a: PathBuf,
     broker: Option<Child>,
-    enforcer: Option<Child>,
     engine: Arc<Mutex<Engine>>,
     engine_stop: Option<oneshot::Sender<()>>,
     engine_task: JoinHandle<()>,
@@ -451,12 +419,7 @@ impl Fixture {
                 &json!({"version":2,"installation_id":Uuid::new_v4(),"root":broker_root,"max_enforcer_slots":32,"profiles":profiles,"additional_control_secret_files":[]}),
             )?,
         )?;
-        let enforcer = if admission_only {
-            // The actual broker must create and attest the new role itself.
-            None
-        } else {
-            Some(start_fixture_enforcer(root.as_path(), &broker_root).await?)
-        };
+        // Leave the role absent so the actual broker creates and attests it.
         let mut fixture = Self {
             root,
             a,
@@ -469,7 +432,6 @@ impl Fixture {
             registry,
             runner_a,
             broker: None,
-            enforcer,
             engine,
             engine_stop: Some(engine_stop),
             engine_task,
@@ -477,15 +439,12 @@ impl Fixture {
             server_task,
         };
         if let Err(error) = fixture.start_broker().await {
-            if admission_only {
-                let cleanup = fixture.close().await;
-                return Err(error.context(if cleanup.is_ok() {
-                    "admission fixture broker did not start"
-                } else {
-                    "admission fixture broker did not start and cleanup is unconfirmed"
-                }));
-            }
-            return Err(error);
+            let cleanup = fixture.close_owned(false).await;
+            return Err(error.context(if cleanup.is_ok() {
+                "fixture broker did not start"
+            } else {
+                "fixture broker did not start and cleanup is unconfirmed"
+            }));
         }
         Ok(fixture)
     }
@@ -1018,26 +977,25 @@ impl Fixture {
         );
         Ok(())
     }
-    pub async fn close(mut self) -> Result<()> {
-        for child in [&mut self.broker, &mut self.enforcer] {
-            if let Some(mut owned) = child.take() {
-                if owned.try_wait()?.is_none() {
-                    owned.start_kill()?;
-                    timeout(Duration::from_secs(5), owned.wait()).await??;
-                }
-            }
+    pub async fn close(self) -> Result<()> {
+        self.close_owned(true).await
+    }
+    async fn close_owned(mut self, expect_guardian: bool) -> Result<()> {
+        // Reap the broker first so its monitor cannot replace the guardian.
+        if let Some(mut broker) = self.broker.take()
+            && broker.try_wait()?.is_none()
+        {
+            broker.start_kill()?;
+            timeout(Duration::from_secs(5), broker.wait()).await??;
         }
-        let guardian = if self.faults.before_import.is_some() {
-            timeout(
-                Duration::from_secs(15),
-                close_admission_guardian(&self.broker_root),
-            )
-            .await
-            .context("admission guardian cleanup was not confirmed")
-            .and_then(|result| result)
-        } else {
-            Ok(())
-        };
+        let guardian = timeout(
+            Duration::from_secs(15),
+            close_fixture_guardian(&self.broker_root, expect_guardian),
+        )
+        .await
+        .context("fixture guardian cleanup timed out")
+        .and_then(|result| result)
+        .context("fixture guardian cleanup was not confirmed");
         if let Some(stop) = self.engine_stop.take() {
             let _ = stop.send(());
         }
@@ -1094,10 +1052,10 @@ fn terminal_store_receipt(
     }
 }
 
-async fn close_admission_guardian(broker_root: &Path) -> Result<()> {
+async fn close_fixture_guardian(broker_root: &Path, expect_guardian: bool) -> Result<()> {
     let role = broker_root.join("enforcer");
     match std::fs::symlink_metadata(&role) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound && !expect_guardian => return Ok(()),
         Err(error) => return Err(error.into()),
         Ok(_) => {}
     }
@@ -1105,7 +1063,7 @@ async fn close_admission_guardian(broker_root: &Path) -> Result<()> {
     let announcements = Directory::open_existing(&role.path().join("announcements"))?;
     ensure!(
         std::fs::read_dir(announcements.path())?.count() == 1,
-        "fresh admission guardian did not publish exactly one endpoint"
+        "fresh fixture guardian did not publish exactly one endpoint"
     );
     let publication = announcements.read_private_file("e-0001.json", 4096)?;
     let record: Value = serde_json::from_slice(publication.bytes())?;
@@ -1115,6 +1073,19 @@ async fn close_admission_guardian(broker_root: &Path) -> Result<()> {
     );
     let endpoint: EndpointRecordV1 = serde_json::from_value(record["endpoint"].clone())?;
     let endpoints = Directory::open_existing(&role.path().join("endpoints"))?;
+    // The listener can disappear before the guardian releases its native owners.
+    let role_lock = role.read_private_file(".owner.lock", 0)?;
+    let owner = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(role_lock.path())?;
+    let opened = owner.metadata()?;
+    let named = std::fs::symlink_metadata(role_lock.path())?;
+    ensure!(
+        (opened.dev(), opened.ino()) == (named.dev(), named.ino()),
+        "fixture guardian lock changed during preparation"
+    );
+    role_lock.revalidate()?;
     let capability = role.read_private_file("auth", 32)?;
     ensure!(
         capability.bytes().len() == 32,
@@ -1163,36 +1134,44 @@ async fn close_admission_guardian(broker_root: &Path) -> Result<()> {
     let socket = endpoints.path().join(endpoint.directory_name()).join("s");
     timeout(Duration::from_secs(5), async {
         loop {
-            match UnixStream::connect(&socket).await {
-                Ok(stream) => drop(stream),
+            let socket_closed = match UnixStream::connect(&socket).await {
+                Ok(_) => false,
                 Err(error)
                     if matches!(
                         error.kind(),
                         io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
                     ) =>
                 {
+                    true
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if socket_closed {
+                // SAFETY: Nonblocking probe using only the retained fixture lock FD.
+                if unsafe { libc::flock(owner.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
                     endpoints.revalidate()?;
                     publication.revalidate()?;
+                    role_lock.revalidate()?;
                     ensure!(
                         std::fs::read_dir(announcements.path())?.count() == 1,
                         "guardian was replaced during shutdown"
                     );
                     return Ok::<_, anyhow::Error>(());
                 }
-                Err(error) => return Err(error.into()),
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::WouldBlock {
+                    return Err(error.into());
+                }
             }
             sleep(Duration::from_millis(50)).await;
         }
     })
     .await
-    .context("guardian acknowledged shutdown but its IPC remained reachable")?
+    .context("guardian acknowledged shutdown but its endpoint and lock did not confirm closure")?
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
         if let Some(child) = self.broker.as_mut() {
-            let _ = child.start_kill();
-        }
-        if let Some(child) = self.enforcer.as_mut() {
             let _ = child.start_kill();
         }
         if let Some(stop) = self.engine_stop.take() {
