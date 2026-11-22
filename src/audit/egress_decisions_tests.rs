@@ -84,7 +84,7 @@ fn channel_open(binding: &EgressBindingV1) -> EgressObserveRequestV1 {
     }
 }
 
-fn policy() -> EgressPolicySnapshot {
+fn configured_policy() -> EgressTenantPolicyV1 {
     EgressTenantPolicyV1 {
         version: 1,
         revision: 1,
@@ -93,8 +93,10 @@ fn policy() -> EgressPolicySnapshot {
         grantable_destinations: vec![],
         max_grant_seconds: 300,
     }
-    .snapshot()
-    .unwrap()
+}
+
+fn policy() -> EgressPolicySnapshot {
+    configured_policy().snapshot().unwrap()
 }
 
 fn store(directory: &Path, tenant: &str) -> Store {
@@ -108,6 +110,28 @@ fn private_directory() -> tempfile::TempDir {
         .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap())
         .unwrap()
+}
+
+#[test]
+fn sqlite_sibling_keeps_egress_policy_when_gateway_expands_redaction() {
+    let directory = private_directory();
+    let payload_limit = crate::audit::DEFAULT_PHYSICAL_BYTES * 2;
+    let store = std::sync::Arc::new(
+        store(directory.path(), "tenant-a")
+            .with_physical_bytes(payload_limit)
+            .unwrap()
+            .with_egress_policy(&configured_policy())
+            .unwrap(),
+    );
+    let masking_union = Redactor::new(vec!["synthetic-neighbor-material".into()]);
+    let rebound = store.with_additional_redaction(&masking_union).unwrap();
+    assert!(!std::sync::Arc::ptr_eq(&store, &rebound));
+    assert_eq!(rebound.egress_policy().digest, store.egress_policy().digest);
+    assert_eq!(
+        rebound.egress_policy().revision,
+        store.egress_policy().revision
+    );
+    assert_eq!(rebound.physical_bytes(), payload_limit);
 }
 
 #[test]

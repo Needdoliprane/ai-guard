@@ -20,7 +20,7 @@ async fn either_federation_capability_revoked_after_both_receipts_prevents_publi
         HumanCapabilityV1::ReadBrokerRegistry,
     ] {
         let (files, state, token) = local_identity_state();
-        let store = Arc::clone(&state.tenants[1].store);
+        let store = Arc::clone(state.tenants[1].store.sqlite().unwrap());
         for (version, suffix) in [
             (6, "six"),
             (7, "seven"),

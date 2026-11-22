@@ -1106,6 +1106,7 @@ impl Store {
         sibling.workload_audit_policy = self.workload_audit_policy.clone();
         sibling.workload_audit_policy_explicit = self.workload_audit_policy_explicit;
         sibling.relay_retention_policy = self.relay_retention_policy.clone();
+        sibling.egress_policy = self.egress_policy.clone();
         anyhow::ensure!(
             sibling.backing.identity_key() == self.backing.identity_key(),
             "sibling backing differs from live origin"

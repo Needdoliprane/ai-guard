@@ -399,8 +399,13 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("client_key_file");
+        let valid_code = if cfg!(feature = "mysql-storage") {
+            FindingCode::RegistryOfflineRulesPassed
+        } else {
+            FindingCode::RegistryMySqlUnavailable
+        };
         for (document, code) in [
-            (valid, FindingCode::RegistryMySqlUnavailable),
+            (valid, valid_code),
             (invalid_port, FindingCode::RegistryJsonInvalid),
             (incomplete_mtls, FindingCode::RegistryJsonInvalid),
         ] {

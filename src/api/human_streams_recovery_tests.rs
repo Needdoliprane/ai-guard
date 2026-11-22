@@ -225,7 +225,8 @@ async fn capacity_case(saturated: Saturated) -> Result<()> {
                 },
             "setup: production read capacity was not fully retained"
         );
-        let observations = crate::audit::read_test_observer::observe(&state.tenants[1].store);
+        let observations =
+            crate::audit::read_test_observer::observe(state.tenants[1].store.sqlite().unwrap());
         release
             .send(())
             .map_err(|_| anyhow!("setup: response barrier owner lost"))?;

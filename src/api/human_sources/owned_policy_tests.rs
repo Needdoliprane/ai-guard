@@ -93,7 +93,12 @@ async fn owned_policy_replace_reaches_real_e1_after_reserved_sdk_diagnostic() {
         state
             .tenants
             .iter()
-            .map(|tenant| (tenant.tenant_id.clone(), Arc::clone(&tenant.store)))
+            .map(|tenant| {
+                (
+                    tenant.tenant_id.clone(),
+                    Arc::clone(tenant.store.sqlite().unwrap()),
+                )
+            })
             .collect(),
         RUNNER,
     )
@@ -103,6 +108,8 @@ async fn owned_policy_replace_reaches_real_e1_after_reserved_sdk_diagnostic() {
         let epoch = owned.owner.try_read_epoch().unwrap();
         state.tenants[index]
             .store
+            .sqlite()
+            .unwrap()
             .assert_owned_control_fixture_binding_for_test(&epoch, source, &credential, 15)
     };
     let database = source.descriptor().storage_binding.path();
@@ -386,7 +393,8 @@ async fn expected_scope_conflicts_before_fresh_and_replayed_policy_with_no_neigh
         .iter()
         .position(|t| t.tenant_id == "B")
         .unwrap();
-    let neighbor = crate::audit::read_test_observer::observe(&state.tenants[b].store);
+    let neighbor =
+        crate::audit::read_test_observer::observe(state.tenants[b].store.sqlite().unwrap());
     let request = policy_body(&state);
     for replay in [false, true] {
         if replay {
@@ -519,7 +527,8 @@ async fn policy_role_format_and_declared_size_refuse_before_body_polling() {
             .iter()
             .position(|t| t.tenant_id == "B")
             .unwrap();
-        let neighbor = crate::audit::read_test_observer::observe(&state.tenants[b].store);
+        let neighbor =
+            crate::audit::read_test_observer::observe(state.tenants[b].store.sqlite().unwrap());
         let polls = Arc::new(AtomicUsize::new(0));
         let observed = polls.clone();
         // An actual untrusted request stream witnesses ordering: polling it
@@ -571,7 +580,8 @@ async fn retained_read_gate_refuses_policy_write_until_the_same_guard_is_release
         .iter()
         .position(|t| t.tenant_id == "B")
         .unwrap();
-    let neighbor = crate::audit::read_test_observer::observe(&state.tenants[b].store);
+    let neighbor =
+        crate::audit::read_test_observer::observe(state.tenants[b].store.sqlite().unwrap());
     let request = policy_body(&state);
     let before = policy_snapshot(&state);
     let retained = owned.owner.try_read_epoch().unwrap();
@@ -662,6 +672,8 @@ async fn binding_revoked_after_real_policy_commit_cannot_publish_a_receipt() {
         let epoch = owned.owner.try_write_epoch().unwrap();
         let result = state.tenants[a]
             .store
+            .sqlite()
+            .unwrap()
             .revoke_review_binding(
                 &epoch,
                 &owned.sources[a],

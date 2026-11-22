@@ -11,6 +11,7 @@ use agentsandbox::{
     operations::{self, OperatorCommand},
     policy::Policy,
     redaction::Redactor,
+    tenant_store::TenantStore,
 };
 use anyhow::{Context, Result};
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, parser::ValueSource};
@@ -564,10 +565,64 @@ fn prepare_supervised_backups(root: &Path, credential_files: &[&Path]) -> Result
     Ok(root)
 }
 
+/// Build the tenant's MySQL Store from its private material. Nothing is read
+/// from the database here: the first handshake, the schema, tenant and
+/// namespace binding and the audit chain are verified by the gateway state
+/// before any listener is bound, with no fallback to another backend.
+#[cfg(feature = "mysql-storage")]
+fn open_mysql_tenant(
+    tenant_id: &str,
+    target: &gateway_config::MysqlTarget,
+    redactor: &Redactor,
+    max_events: u64,
+    capacity_policy: Option<agentsandbox::audit::AuditCapacityPolicyV1>,
+) -> Result<TenantStore> {
+    use agentsandbox::{
+        mysql_storage::{
+            MysqlClientIdentity, MysqlCredentials, MysqlEndpoint, audit::MysqlAuditStore,
+        },
+        tenant_store::MysqlTenant,
+    };
+    let credentials = MysqlCredentials {
+        password: &target.password,
+        ca_pem: &target.ca_pem,
+        client_identity: target
+            .client_identity
+            .as_ref()
+            .map(|(cert, key)| MysqlClientIdentity {
+                certificate_chain_pem: cert,
+                private_key_pem: key,
+            }),
+    };
+    let endpoint = MysqlEndpoint {
+        host: &target.host,
+        port: target.port,
+        database: &target.database,
+        username: &target.username,
+    };
+    let mut store = MysqlAuditStore::new(
+        endpoint,
+        credentials,
+        tenant_id,
+        target.namespace,
+        redactor.union(&Redactor::new(
+            std::iter::once(target.password.clone()).collect(),
+        )),
+        i64::try_from(max_events).context("invalid audit capacity")?,
+    )?;
+    if let Some(policy) = capacity_policy {
+        store = store.with_capacity_policy(policy)?;
+    }
+    Ok(TenantStore::Mysql(std::sync::Arc::new(MysqlTenant::new(
+        store,
+        tokio::runtime::Handle::current(),
+    ))))
+}
+
 fn configured_local_tenant(args: &GatewayArgs) -> Result<gateway_config::ConfiguredTenant> {
     Ok(gateway_config::ConfiguredTenant {
         tenant_id: "local".into(),
-        data: args.data.clone(),
+        storage: gateway_config::ConfiguredStorage::Sqlite(args.data.clone()),
         runner_token_file: args.runner_token_file.clone(),
         viewer_token_file: args.viewer_token_file.clone(),
         runner_token: read_token(&args.runner_token_file)?,
@@ -869,6 +924,24 @@ async fn run() -> Result<()> {
                         None,
                     )
                 };
+            gateway_config::refuse_owned_sources_on_mysql(
+                &tenants,
+                args.human_source_mode.as_deref() == Some("owned_sources")
+                    || activation_request.is_some(),
+            )?;
+            #[cfg(feature = "mysql-storage")]
+            if tenants.iter().any(|tenant| {
+                matches!(&tenant.storage, gateway_config::ConfiguredStorage::Mysql(_))
+            }) {
+                anyhow::ensure!(
+                    args.initialize_supervised_stores.is_none(),
+                    "--initialize-supervised-stores creates SQLite origins; a MySQL target is prepared by its operator"
+                );
+                anyhow::ensure!(
+                    args.oidc_config.is_none(),
+                    "legacy OIDC source separation is not available on a MySQL tenant"
+                );
+            }
             let mut secrets: Vec<String> = tenants
                 .iter()
                 .flat_map(|tenant| [tenant.runner_token.clone(), tenant.viewer_token.clone()])
@@ -1009,6 +1082,32 @@ async fn run() -> Result<()> {
                 if let Some(held_create_policy) = tenant.held_create_policy {
                     held_create_policies.push((tenant.tenant_id.clone(), held_create_policy));
                 }
+                #[cfg(feature = "mysql-storage")]
+                if let gateway_config::ConfiguredStorage::Mysql(target) = &tenant.storage {
+                    let store = open_mysql_tenant(
+                        &tenant.tenant_id,
+                        target,
+                        &redactor,
+                        args.max_events,
+                        tenant.audit_capacity_policy,
+                    )?;
+                    capacity_diagnostics.push(redactor.text(&format!(
+                        "Storage tenant={} backend=mysql host={} port={} database={} server_tls=verified client_certificate={}",
+                        tenant.tenant_id,
+                        target.host,
+                        target.port,
+                        target.database,
+                        if target.client_identity.is_some() { "required" } else { "absent" },
+                    )));
+                    gateways.push(TenantGateway {
+                        tenant_id: tenant.tenant_id,
+                        store,
+                        runner_token: tenant.runner_token,
+                        viewer_token: tenant.viewer_token,
+                    });
+                    continue;
+                }
+                let data = tenant.storage.sqlite_path()?;
                 let store = if let Some(root) = &backup_root {
                     root.revalidate()?;
                     let name = format!(
@@ -1016,7 +1115,7 @@ async fn run() -> Result<()> {
                         hex::encode(Sha256::digest(tenant.tenant_id.as_bytes()))
                     );
                     Store::create_supervised_for_tenant(
-                        &tenant.data,
+                        data,
                         &tenant.tenant_id,
                         redactor.clone(),
                         args.max_events,
@@ -1024,7 +1123,7 @@ async fn run() -> Result<()> {
                     )?
                 } else {
                     Store::open_for_tenant(
-                        &tenant.data,
+                        data,
                         &tenant.tenant_id,
                         redactor.clone(),
                         args.max_events,
@@ -1119,7 +1218,7 @@ async fn run() -> Result<()> {
                     .context("Nombre d'événements hors limite")?;
                 gateways.push(TenantGateway {
                     tenant_id: tenant.tenant_id,
-                    store,
+                    store: TenantStore::from(store),
                     runner_token: tenant.runner_token,
                     viewer_token: tenant.viewer_token,
                 });
@@ -1133,7 +1232,7 @@ async fn run() -> Result<()> {
                 })
                 .transpose()?;
             let mut state =
-                GatewayState::for_tenants_with_backend(gateways, policy, jev, redactor)?;
+                GatewayState::for_tenant_stores_with_backend(gateways, policy, jev, redactor)?;
             // Own retirement before any fallible setup after state creation.
             let server = GatewayServer::new(state.control_recovery_retirement());
             state = state

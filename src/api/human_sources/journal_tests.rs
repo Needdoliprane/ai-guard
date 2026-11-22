@@ -225,7 +225,8 @@ async fn owned_events_metadata_returns_authorized_items_and_committed_scope_rece
         Redactor::new(vec![]),
     )
     .unwrap();
-    let neighbor = crate::audit::read_test_observer::observe(&state.tenants[0].store);
+    let neighbor =
+        crate::audit::read_test_observer::observe(state.tenants[0].store.sqlite().unwrap());
     let router = gateway_router(state.clone());
     let (status, identity) = get(&router, "/api/v1/human/identity", None).await;
     assert_eq!(status, StatusCode::OK, "{identity}");

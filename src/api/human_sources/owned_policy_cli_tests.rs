@@ -310,7 +310,12 @@ async fn actual_cli_preserves_operation_after_lost_receipt_then_revokes_without_
         state
             .tenants
             .iter()
-            .map(|tenant| (tenant.tenant_id.clone(), Arc::clone(&tenant.store)))
+            .map(|tenant| {
+                (
+                    tenant.tenant_id.clone(),
+                    Arc::clone(tenant.store.sqlite().unwrap()),
+                )
+            })
             .collect(),
         RUNNER,
     )?;
@@ -319,6 +324,8 @@ async fn actual_cli_preserves_operation_after_lost_receipt_then_revokes_without_
         let epoch = owned.owner.try_read_epoch()?;
         state.tenants[index]
             .store
+            .sqlite()
+            .unwrap()
             .assert_owned_control_fixture_binding_for_test(&epoch, source, &credential, 15)
     };
     let database = source.descriptor().storage_binding.path();

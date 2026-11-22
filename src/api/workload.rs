@@ -126,8 +126,11 @@ fn authentication_failure(error: anyhow::Error) -> (StatusCode, Json<Value>) {
         unavailable(error)
     }
 }
-pub(super) fn store_failure(store: &Store, error: anyhow::Error) -> (StatusCode, Json<Value>) {
-    if store.healthy() {
+pub(super) fn store_failure(
+    store: &impl crate::tenant_store::StoreHealth,
+    error: anyhow::Error,
+) -> (StatusCode, Json<Value>) {
+    if store.store_healthy() {
         failure(error)
     } else {
         unavailable(error)
@@ -171,8 +174,13 @@ fn resolve_sync(state: &GatewayState, token: &str) -> ApiResult<(usize, Authenti
     let mut human = false;
     let mut unavailable_source = None;
     for (index, tenant) in state.tenants.iter().enumerate() {
+        #[cfg(feature = "mysql-storage")]
+        if tenant.store.mysql().is_some() {
+            continue;
+        }
         match tenant
             .store
+            .sqlite_api()?
             .try_workload_digest_binding(&digest)
             .into_result()
         {
@@ -186,6 +194,7 @@ fn resolve_sync(state: &GatewayState, token: &str) -> ApiResult<(usize, Authenti
         }
         match tenant
             .store
+            .sqlite_api()?
             .try_local_credential_binding(&digest)
             .into_result()
         {
@@ -205,10 +214,23 @@ fn resolve_sync(state: &GatewayState, token: &str) -> ApiResult<(usize, Authenti
         if control || human {
             return Err(forbidden());
         }
+        #[cfg(feature = "mysql-storage")]
+        if state
+            .tenants
+            .iter()
+            .any(|tenant| tenant.store.mysql().is_some())
+        {
+            return Err(unavailable(anyhow::anyhow!(
+                "MySQL workload source was not verified"
+            )));
+        }
         return Err(unavailable_source.unwrap_or_else(unauthorized));
     };
+    // Only a workload with a candidate local source needs remote discovery.
+    #[cfg(feature = "mysql-storage")]
+    require_mysql_neighbor_absence(state, &digest)?;
     // Policy B: a readable, independently authenticated source wins over an
-    // unavailable neighbor. No unavailable source is ever treated as absent.
+    // unavailable SQLite neighbor. No unavailable source is treated as absent.
     let local_collision = state
         .io_scope
         .with_store(
@@ -403,8 +425,36 @@ pub(super) fn reject_control_collision(
         return Err(super::human_sources::unavailable());
     }
     let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+    #[cfg(feature = "mysql-storage")]
+    let peer_deadline = tokio::time::Instant::now() + crate::mysql_storage::audit::DEADLINE;
     for (index, tenant) in state.tenants.iter().enumerate() {
-        let lookup = if let Some((_, lane)) = own.filter(|(source, _)| *source == index) {
+        let own_lane = own
+            .filter(|(source, _)| *source == index)
+            .map(|(_, lane)| lane);
+        #[cfg(feature = "mysql-storage")]
+        if let Some(mysql) = tenant.store.mysql() {
+            if known_mysql_collision(mysql, &digest) {
+                return Err(ambiguous());
+            }
+            // The selected store keeps its own check and its existing budget.
+            // Sibling reads share the discovery budget and admission limits.
+            let present = if own_lane.is_some() {
+                mysql
+                    .control_presence(&digest)
+                    .map(|presence| presence.is_some())
+                    .map_err(unavailable)
+            } else {
+                read_mysql_peer_presence(state, tenant, &digest, peer_deadline)
+            };
+            match present {
+                Ok(true) => return Err(ambiguous()),
+                Err(response) if own_lane.is_some() => return Err(response),
+                // Policy B permits an independently selected source when a
+                // sibling's metadata is unavailable. Known positives still refuse.
+                _ => continue,
+            }
+        }
+        let lookup = if let Some(lane) = own_lane {
             state
                 .io_scope
                 .with_store(tenant, lane, lane == store_io::Lane::Read, |store| {
@@ -413,16 +463,69 @@ pub(super) fn reject_control_collision(
         } else {
             tenant
                 .store
+                .sqlite_api()?
                 .try_workload_digest_binding(&digest)
                 .into_result()
         };
         match lookup {
             Ok(Some(_)) => return Err(ambiguous()),
             Ok(None) => (),
-            Err(error) if own.is_some_and(|(source, _)| source == index) => {
+            Err(error) if own_lane.is_some() => {
                 return Err(unavailable(error));
             }
             _ => (),
+        }
+    }
+    // A concurrent verified read may have published a positive while this
+    // scan was waiting for another store.
+    #[cfg(feature = "mysql-storage")]
+    if state
+        .tenants
+        .iter()
+        .filter_map(|tenant| tenant.store.mysql())
+        .any(|mysql| known_mysql_collision(mysql, &digest))
+    {
+        return Err(ambiguous());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "mysql-storage")]
+fn known_mysql_collision(mysql: &crate::tenant_store::MysqlTenant, digest: &[u8; 32]) -> bool {
+    matches!(
+        mysql.known_control_collision(digest),
+        crate::mysql_storage::audit::KnownControlCollision::Known(_)
+    )
+}
+
+#[cfg(feature = "mysql-storage")]
+fn read_mysql_peer_presence(
+    state: &GatewayState,
+    tenant: &TenantState,
+    digest: &[u8; 32],
+    deadline: tokio::time::Instant,
+) -> ApiResult<bool> {
+    let _metadata_slots = state.io_scope.admit_peer_discovery(&state.io, tenant)?;
+    tenant
+        .store
+        .neighboring_credential_present(digest, deadline)
+        .map_err(unavailable)
+}
+
+/// A MySQL peer can deny a Legacy proof, but cannot authenticate it here.
+/// A cache miss is unknown. Require fresh verified absence because the cache
+/// retains positives for technical credentials only.
+#[cfg(feature = "mysql-storage")]
+fn require_mysql_neighbor_absence(state: &GatewayState, digest: &[u8; 32]) -> ApiResult<()> {
+    let deadline = tokio::time::Instant::now() + crate::mysql_storage::audit::DEADLINE;
+    for tenant in state.tenants.iter() {
+        let Some(mysql) = tenant.store.mysql() else {
+            continue;
+        };
+        if known_mysql_collision(mysql, digest)
+            || read_mysql_peer_presence(state, tenant, digest, deadline)?
+        {
+            return Err(ambiguous());
         }
     }
     Ok(())
@@ -450,10 +553,22 @@ pub(super) fn reject_human_collision(
             "contact_operator",
         )
     };
+    #[cfg(feature = "mysql-storage")]
+    let guard_failure = |response: (StatusCode, Json<Value>)| {
+        if response.0 == StatusCode::TOO_MANY_REQUESTS {
+            response
+        } else {
+            unavailable_identity()
+        }
+    };
     if own_source.is_some_and(|source| source >= state.tenants.len()) {
         return Err(unavailable_identity());
     }
     for (index, tenant) in state.tenants.iter().enumerate() {
+        #[cfg(feature = "mysql-storage")]
+        if own_source != Some(index) && tenant.store.mysql().is_some() {
+            continue;
+        }
         let lookup = if own_source == Some(index) {
             state
                 .io_scope
@@ -464,6 +579,7 @@ pub(super) fn reject_human_collision(
         } else {
             tenant
                 .store
+                .sqlite_api()?
                 .try_workload_digest_binding(digest)
                 .into_result()
         };
@@ -476,6 +592,8 @@ pub(super) fn reject_human_collision(
             Err(_) => (),
         }
     }
+    #[cfg(feature = "mysql-storage")]
+    require_mysql_neighbor_absence(state, digest).map_err(guard_failure)?;
     Ok(())
 }
 
@@ -489,7 +607,7 @@ async fn issue(
     let source = state
         .tenants
         .iter()
-        .position(|candidate| Arc::ptr_eq(&candidate.store, &tenant.store))
+        .position(|candidate| candidate.store.ptr_eq(&tenant.store))
         .ok_or_else(ambiguous)?;
     let digest_vec = hex::decode(&input.sha256_digest).map_err(|_| invalid())?;
     let digest: [u8; 32] = digest_vec.try_into().map_err(|_| invalid())?;
@@ -516,47 +634,49 @@ async fn issue(
                 .state
                 .scoped(Arc::clone(&_scope))
                 .authorize_sync(&proof.headers, true)?;
-            if role != "runner" || !Arc::ptr_eq(&current.store, &tenant.store) {
+            if role != "runner" || !current.store.ptr_eq(&tenant.store) {
                 return Err(forbidden());
             }
             tenant.write_quota()?;
             if state.credential_index.lookup_digest(&digest).is_some() {
                 return Err(failure(WorkloadFailureV1::Conflict.into()));
             }
+            #[cfg(feature = "mysql-storage")]
+            let mysql_deadline =
+                tokio::time::Instant::now() + crate::mysql_storage::audit::DEADLINE;
             for (index, candidate) in state.tenants.iter().enumerate() {
-                let (owner, human) = if index == source {
-                    state.io_scope.with_store(
-                        candidate,
-                        store_io::Lane::Control,
-                        false,
-                        |store| {
-                            Ok::<_, anyhow::Error>((
-                                store.workload_digest_binding(&digest)?,
-                                store.local_credential_binding(&digest)?.is_some(),
-                            ))
-                        },
-                    )?
-                } else {
-                    (|| -> anyhow::Result<_> {
-                        Ok((
-                            candidate
-                                .store
-                                .try_workload_digest_binding(&digest)
-                                .into_result()?,
-                            candidate
-                                .store
-                                .try_local_credential_binding(&digest)
-                                .into_result()?
-                                .is_some(),
-                        ))
-                    })()
+                if index != source {
+                    #[cfg(feature = "mysql-storage")]
+                    let _metadata_slots = candidate
+                        .store
+                        .mysql()
+                        .map(|_| state.io_scope.admit_peer_discovery(&state.io, candidate))
+                        .transpose()?;
+                    if candidate
+                        .store
+                        .neighboring_credential_present(
+                            &digest,
+                            #[cfg(feature = "mysql-storage")]
+                            mysql_deadline,
+                        )
+                        .map_err(unavailable)?
+                    {
+                        return Err(failure(WorkloadFailureV1::Conflict.into()));
+                    }
+                    continue;
                 }
-                .map_err(unavailable)?;
+                let (owner, human) = state
+                    .io_scope
+                    .with_store(candidate, store_io::Lane::Control, false, |store| {
+                        Ok::<_, anyhow::Error>((
+                            store.workload_digest_binding(&digest)?,
+                            store.local_credential_binding(&digest)?.is_some(),
+                        ))
+                    })?
+                    .map_err(unavailable)?;
                 if human
                     || owner.is_some_and(|owner| {
-                        index != source
-                            || owner.credential_id != input.credential_id
-                            || owner.subject != input.subject
+                        owner.credential_id != input.credential_id || owner.subject != input.subject
                     })
                 {
                     return Err(failure(WorkloadFailureV1::Conflict.into()));
@@ -564,6 +684,7 @@ async fn issue(
             }
             let receipt = tenant
                 .store
+                .sqlite_api()?
                 .issue_workload_binding(&input)
                 .map_err(|error| store_failure(&tenant.store, error))?;
             Ok((
@@ -591,6 +712,7 @@ async fn revoke(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .revoke_workload_binding(&input)
                     .map_err(|error| store_failure(&tenant.store, error))?,
             ))

@@ -65,7 +65,8 @@ impl OwnedPolicyInspection {
                     let expected = owned
                         .discovery_generation(identity.index)
                         .ok_or_else(human_sources::unavailable)?;
-                    let result = identity.tenant.store.modern_egress_policy_inspection(
+                    let store = identity.tenant.store.sqlite_api()?;
+                    let result = store.modern_egress_policy_inspection(
                         &access,
                         &identity.credential,
                         expected,
@@ -105,6 +106,7 @@ impl OwnedPolicyInspection {
                 let current = identity
                     .tenant
                     .store
+                    .sqlite_api()?
                     .modern_control_protocol(&access, &identity.credential, current_generation)
                     .map_err(policy_store_failure)?;
                 let Some(current) = current else {

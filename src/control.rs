@@ -18,10 +18,11 @@ pub(crate) mod review_binding;
 mod supervision;
 pub use supervision::{
     ArmReceiptV1, ArmResultV1, ArmSubjectV1, ArmV1, ArmedStartClaimV1, BindLegacyIntentV1,
-    ControlProtocolV1, ExportRequestV1, HelperClaimResultV1, HelperCleanupV1,
-    HelperExecutionPolicyV1, HelperObservationV1, HelperPermissionV1, HelperPurposeV1,
-    HelperStartClaimV1, HostClockMethodV1, HostClockSampleV1, ImportVerificationReportV1,
-    SupervisedAdmissionV1, SupervisionProtocolV1, SupervisionStateV1, helper_execution_policy_v1,
+    ControlCapabilitiesV1, ControlOperationV1, ControlProtocolV1, ControlStorageBackendV1,
+    ExportRequestV1, HelperClaimResultV1, HelperCleanupV1, HelperExecutionPolicyV1,
+    HelperObservationV1, HelperPermissionV1, HelperPurposeV1, HelperStartClaimV1,
+    HostClockMethodV1, HostClockSampleV1, ImportVerificationReportV1, SupervisedAdmissionV1,
+    SupervisionProtocolV1, SupervisionStateV1, helper_execution_policy_v1,
 };
 
 macro_rules! closed_enum {

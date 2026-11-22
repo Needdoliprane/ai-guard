@@ -284,7 +284,7 @@ fn authenticate(state: &GatewayState, headers: &HeaderMap) -> ApiResult<Verified
         })?;
         let usage = owned.admit()?;
         let credential = owned
-            .authenticate(source, &state.tenants[source].store, &digest)?
+            .authenticate(source, state.tenants[source].store.sqlite_api()?, &digest)?
             .ok_or_else(super::human_sources::unavailable)?;
         return Ok(VerifiedHuman {
             credential: HumanAuthenticationProof {
@@ -318,11 +318,10 @@ fn authenticate(state: &GatewayState, headers: &HeaderMap) -> ApiResult<Verified
         }
         reject_control_collision(state, token, None)?;
         let proof = oidc.authenticate(token)?;
-        super::workload::reject_human_collision(state, &proof.digest, None)?;
         let expiry = chrono::DateTime::from_timestamp(proof.expires_at, 0)
             .ok_or_else(invalid_request)?
             .to_rfc3339();
-        return Ok(VerifiedHuman {
+        let proof = VerifiedHuman {
             credential: HumanAuthenticationProof {
                 principal: proof.principal.clone(),
                 credential_id: proof.authentication_id.clone(),
@@ -333,7 +332,9 @@ fn authenticate(state: &GatewayState, headers: &HeaderMap) -> ApiResult<Verified
             source: HumanProofSource::Oidc(proof),
             redactor: state.redactor.union(&Redactor::new(vec![token.to_owned()])),
             _owned_usage: None,
-        });
+        };
+        check_legacy_human_collision(state, &proof)?;
+        return Ok(proof);
     }
     let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
     let mut matches = Vec::new();
@@ -393,8 +394,7 @@ fn authenticate(state: &GatewayState, headers: &HeaderMap) -> ApiResult<Verified
                 "authenticate",
             )
         })?;
-    super::workload::reject_human_collision(state, &digest, Some(source))?;
-    Ok(VerifiedHuman {
+    let proof = VerifiedHuman {
         credential: HumanAuthenticationProof {
             principal: credential.principal,
             credential_id: credential.credential_id,
@@ -405,7 +405,9 @@ fn authenticate(state: &GatewayState, headers: &HeaderMap) -> ApiResult<Verified
         digest,
         redactor: state.redactor.union(&Redactor::new(vec![token.to_owned()])),
         _owned_usage: None,
-    })
+    };
+    check_legacy_human_collision(state, &proof)?;
+    Ok(proof)
 }
 // Unavailable metadata is not an absent binding. A neighboring failure may be
 // tolerated only with the separate, freshly verified source proof (policy B).
@@ -430,6 +432,8 @@ fn credential_binding(
     let Some(lane) = own_lane else {
         return tenant
             .store
+            .sqlite()
+            .map_err(|refusal| MetadataUnavailable::Storage(refusal.into()))?
             .try_local_credential_binding(digest)
             .into_result()
             .map_err(MetadataUnavailable::Storage);
@@ -452,6 +456,12 @@ pub(super) fn reject_control_collision(
     }
     let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
     for (index, tenant) in state.tenants.iter().enumerate() {
+        // MySQL tenants are checked once, with the workload family, from a
+        // single verified snapshot (see workload::reject_control_collision).
+        #[cfg(feature = "mysql-storage")]
+        if tenant.store.mysql().is_some() {
+            continue;
+        }
         let lane = own
             .filter(|(source, _)| *source == index)
             .map(|(_, lane)| lane);
@@ -486,7 +496,11 @@ fn reauthenticate(state: &GatewayState, proof: &VerifiedHuman) -> ApiResult<()> 
             return Err(super::human_sources::unavailable());
         };
         let verified = owned
-            .authenticate(source, &state.tenants[source].store, &proof.digest)?
+            .authenticate(
+                source,
+                state.tenants[source].store.sqlite_api()?,
+                &proof.digest,
+            )?
             .ok_or_else(super::human_sources::unavailable)?;
         if verified.principal != proof.credential.principal
             || verified.credential_id != proof.credential.credential_id
@@ -497,34 +511,59 @@ fn reauthenticate(state: &GatewayState, proof: &VerifiedHuman) -> ApiResult<()> 
         }
         return Ok(());
     }
+    if let HumanProofSource::Local(source) = proof.source {
+        let mut count = 0usize;
+        for (index, tenant) in state.tenants.iter().enumerate() {
+            let lane = (index == source).then_some(store_io::Lane::Read);
+            match credential_binding(state, tenant, &proof.digest, lane) {
+                Ok(binding) => count += usize::from(binding.is_some()),
+                Err(error) if index == source => return Err(error.into_api()),
+                Err(_) => {}
+            }
+        }
+        if count != 1 {
+            return Err(failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "identity_unavailable",
+                "A credential binding changed or is ambiguous.",
+                "contact_operator",
+            ));
+        }
+    }
+    validate_legacy_human_proof(state, proof)?;
+    check_legacy_human_collision(state, proof)
+}
+
+fn check_legacy_human_collision(state: &GatewayState, proof: &VerifiedHuman) -> ApiResult<()> {
+    let source = match &proof.source {
+        HumanProofSource::Local(source) => Some(*source),
+        HumanProofSource::Oidc(_) => None,
+    };
+    super::workload::reject_human_collision(state, &proof.digest, source)?;
+    // A verified peer lookup can consume its network budget. Check the same
+    // source and proof again before proceeding, without another peer lookup.
+    #[cfg(feature = "mysql-storage")]
+    if state
+        .tenants
+        .iter()
+        .any(|tenant| tenant.store.mysql().is_some())
+    {
+        validate_legacy_human_proof(state, proof)?;
+    }
+    Ok(())
+}
+
+fn validate_legacy_human_proof(state: &GatewayState, proof: &VerifiedHuman) -> ApiResult<()> {
     let source = match &proof.source {
         HumanProofSource::Oidc(oidc_proof) => {
-            state
+            return state
                 .oidc
                 .as_ref()
                 .ok_or_else(|| context_failure("context_revoked"))?
-                .reauthenticate(oidc_proof)?;
-            return super::workload::reject_human_collision(state, &proof.digest, None);
+                .reauthenticate(oidc_proof);
         }
         HumanProofSource::Local(source) => *source,
     };
-    let mut count = 0usize;
-    for (index, tenant) in state.tenants.iter().enumerate() {
-        let lane = (index == source).then_some(store_io::Lane::Read);
-        match credential_binding(state, tenant, &proof.digest, lane) {
-            Ok(binding) => count += usize::from(binding.is_some()),
-            Err(error) if index == source => return Err(error.into_api()),
-            Err(_) => {}
-        }
-    }
-    if count != 1 {
-        return Err(failure(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "identity_unavailable",
-            "A credential binding changed or is ambiguous.",
-            "contact_operator",
-        ));
-    }
     let verified = state
         .io_scope
         .with_store(
@@ -555,7 +594,7 @@ fn reauthenticate(state: &GatewayState, proof: &VerifiedHuman) -> ApiResult<()> 
     if verified.revision != proof.credential.revision {
         return Err(context_failure("context_revoked"));
     }
-    super::workload::reject_human_collision(state, &proof.digest, Some(source))
+    Ok(())
 }
 
 fn state_failure(error: StateFailure) -> (StatusCode, Json<Value>) {
@@ -626,7 +665,7 @@ fn selected_context(
         }
         owned.authorize(
             source,
-            &tenant.store,
+            tenant.store.sqlite_api()?,
             &proof.credential.principal,
             &binding.membership_id,
             binding.membership_revision,
@@ -635,6 +674,7 @@ fn selected_context(
     } else {
         tenant
             .store
+            .sqlite_api()?
             .authorize_human_context(
                 &proof.credential.principal,
                 &binding.membership_id,
@@ -1142,7 +1182,7 @@ fn resources_sync(
         };
         owned.resources(
             source,
-            &tenant.store,
+            tenant.store.sqlite_api()?,
             &scope,
             &cursor.after_resource,
             key.limit,
@@ -1151,6 +1191,7 @@ fn resources_sync(
     } else {
         tenant
             .store
+            .sqlite_api()?
             .human_resources(&scope, &cursor.after_resource, key.limit, &proof.redactor)
             .map_err(store_failure)?
     };
@@ -1252,7 +1293,7 @@ fn event_page_sync(
         };
         owned.events(
             source,
-            &tenant.store,
+            tenant.store.sqlite_api()?,
             &scope,
             &filter,
             cursor.after_event,
@@ -1263,6 +1304,7 @@ fn event_page_sync(
     } else {
         tenant
             .store
+            .sqlite_api()?
             .human_events(
                 &scope,
                 &filter,
@@ -1382,6 +1424,7 @@ fn stream_poll(
     };
     let poll = tenant
         .store
+        .sqlite_api()?
         .human_events(
             scope,
             &filter,
@@ -1487,7 +1530,7 @@ mod admission_tests {
         let proof = VerifiedHuman::from_request_parts(&mut parts, &state)
             .await
             .unwrap();
-        let observations = observe(&state.tenants[1].store);
+        let observations = observe(state.tenants[1].store.sqlite_api().unwrap());
         let _three_source_slots: Vec<_> = (0..3)
             .map(|_| {
                 state.tenants[1]

@@ -225,7 +225,7 @@ async fn owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
         .iter()
         .position(|tenant| tenant.tenant_id == membership.tenant_id)
         .unwrap();
-    let store = state.tenants[tenant].store.clone();
+    let store = state.tenants[tenant].store.sqlite().unwrap().clone();
     let database = super::races::connection(&state);
     let expected_generation = || {
         let _epoch = owned.owner.try_read_epoch().unwrap();

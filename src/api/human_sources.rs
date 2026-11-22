@@ -5,6 +5,7 @@ use crate::{
     control_fs::PrivateFile,
     human_authority::{OwnedHumanSources, OwnedSourceToken, startup::HumanOwnedStartupBundle},
     identity::*,
+    tenant_store::TenantStore,
 };
 use std::{
     collections::HashMap,
@@ -483,7 +484,7 @@ impl GatewayState {
                 tenant_id,
                 runner_token,
                 viewer_token,
-                store: Arc::new(store),
+                store: TenantStore::from(Arc::new(store)),
             });
         }
         anyhow::ensure!(
@@ -530,18 +531,17 @@ impl GatewayState {
         for (i, tenant) in tenants.iter().enumerate() {
             let epoch = bundle.owner.try_read_epoch()?;
             let access = HumanSourceAccess::read(&epoch, &sources[i])?;
-            let revision = tenant
-                .store
-                .modern_visit_candidates(&access, |digest, workload| {
-                    candidates.insert(
-                        digest,
-                        if workload {
-                            Candidate::Workload(i)
-                        } else {
-                            Candidate::Local(i)
-                        },
-                    )
-                })?;
+            let store = tenant.store.sqlite()?;
+            let revision = store.modern_visit_candidates(&access, |digest, workload| {
+                candidates.insert(
+                    digest,
+                    if workload {
+                        Candidate::Workload(i)
+                    } else {
+                        Candidate::Local(i)
+                    },
+                )
+            })?;
             discovery_generations.push(arc_swap::ArcSwap::from_pointee(revision));
             epoch.check()?;
         }

@@ -72,6 +72,7 @@ pub(super) async fn quota(
             .map_err(store_failure)?;
         let body = tenant
             .store
+            .sqlite_api()?
             .human_quota(&scope, &frame, &tenant.worker_quota, &proof.redactor)
             .map_err(store_failure)?;
         publish_check(
@@ -110,6 +111,7 @@ pub(super) async fn usage(
             .map_err(store_failure)?;
         let page = tenant
             .store
+            .sqlite_api()?
             .human_usage(
                 &scope,
                 &frame,
@@ -165,10 +167,11 @@ pub(super) async fn memberships(
         let frame = HumanMembershipFrameV1::new(&context.id, &context.authorization_version)
             .map_err(store_failure)?;
         let after = cursor.after_worker_id.clone();
+        let store = tenant.store.sqlite_api()?;
         let page = match (&state.owned_human, &proof.source) {
             (Some(owned), HumanProofSource::Local(source)) => owned.memberships(
                 *source,
-                &tenant.store,
+                store,
                 &scope,
                 &frame,
                 after.as_deref(),
@@ -176,8 +179,7 @@ pub(super) async fn memberships(
                 &proof.redactor,
             )?,
             (Some(_), _) => return Err(super::super::human_sources::unavailable()),
-            (None, _) => tenant
-                .store
+            (None, _) => store
                 .human_memberships(&scope, &frame, after.as_deref(), limit, &proof.redactor)
                 .map_err(store_failure)?,
         };
@@ -216,13 +218,13 @@ pub(super) async fn configuration(
     let selected = headers.clone();
     run_human(&state, &proof, Some(&selected), move |state, proof| {
         let (context, tenant, scope) = selected_context(&state, &proof, &headers)?;
+        let store = tenant.store.sqlite_api()?;
         let facts = match (&state.owned_human, &proof.source) {
             (Some(owned), HumanProofSource::Local(source)) => {
-                owned.configuration_facts(*source, &tenant.store, &scope, &proof.redactor)?
+                owned.configuration_facts(*source, store, &scope, &proof.redactor)?
             }
             (Some(_), _) => return Err(super::super::human_sources::unavailable()),
-            (None, _) => tenant
-                .store
+            (None, _) => store
                 .human_configuration_facts(&scope, &proof.redactor)
                 .map_err(store_failure)?,
         };
@@ -373,13 +375,13 @@ pub(super) async fn change_membership(
     let selected = headers.clone();
     run_human(&state, &proof, Some(&selected), move |state, proof| {
         let (_, tenant, scope) = selected_context(&state, &proof, &headers)?;
+        let store = tenant.store.sqlite_api()?;
         let receipt = match (&state.owned_human, &proof.source) {
             (Some(owned), HumanProofSource::Local(source)) => {
-                owned.change_membership(*source, &tenant.store, &scope, &membership_id, &change)?
+                owned.change_membership(*source, store, &scope, &membership_id, &change)?
             }
             (Some(_), _) => return Err(super::super::human_sources::unavailable()),
-            (None, _) => tenant
-                .store
+            (None, _) => store
                 .human_change_membership(&scope, &membership_id, &change)
                 .map_err(identity_change_failure)?,
         };
@@ -425,18 +427,13 @@ pub(super) async fn grant(
         let frame =
             crate::audit::HumanGrantFrameV1::new(&context.id, &context.authorization_version)
                 .map_err(store_failure)?;
+        let store = tenant.store.sqlite_api()?;
         let body = match (&state.owned_human, &proof.source) {
-            (Some(owned), HumanProofSource::Local(source)) => owned.grant(
-                *source,
-                &tenant.store,
-                &scope,
-                &frame,
-                &resource,
-                &proof.redactor,
-            )?,
+            (Some(owned), HumanProofSource::Local(source)) => {
+                owned.grant(*source, store, &scope, &frame, &resource, &proof.redactor)?
+            }
             (Some(_), _) => return Err(super::super::human_sources::unavailable()),
-            (None, _) => tenant
-                .store
+            (None, _) => store
                 .human_grant(&scope, &frame, &resource, &proof.redactor)
                 .map_err(store_failure)?,
         };
@@ -470,13 +467,13 @@ pub(super) async fn change_grant(
     let selected = headers.clone();
     run_human(&state, &proof, Some(&selected), move |state, proof| {
         let (_, tenant, scope) = selected_context(&state, &proof, &headers)?;
+        let store = tenant.store.sqlite_api()?;
         let receipt = match (&state.owned_human, &proof.source) {
             (Some(owned), HumanProofSource::Local(source)) => {
-                owned.change_grant(*source, &tenant.store, &scope, &change)?
+                owned.change_grant(*source, store, &scope, &change)?
             }
             (Some(_), _) => return Err(super::super::human_sources::unavailable()),
-            (None, _) => tenant
-                .store
+            (None, _) => store
                 .human_change_grant(&scope, &change)
                 .map_err(identity_change_failure)?,
         };

@@ -28,10 +28,11 @@ pub(super) async fn summary(
         let (context, tenant, scope) = selected_context(&state, &proof, &headers)?;
         let frame = HumanSummaryFrameV1::new(&context.id, &context.authorization_version)
             .map_err(store_failure)?;
+        let store = tenant.store.sqlite_api()?;
         let body = match (&state.owned_human, &proof.source) {
             (Some(owned), HumanProofSource::Local(source)) => owned.summary(
                 *source,
-                &tenant.store,
+                store,
                 &scope,
                 &frame,
                 window,
@@ -39,8 +40,7 @@ pub(super) async fn summary(
                 &proof.redactor,
             )?,
             (Some(_), _) => return Err(super::super::human_sources::unavailable()),
-            (None, _) => tenant
-                .store
+            (None, _) => store
                 .human_summary(
                     &scope,
                     &frame,

@@ -264,7 +264,8 @@ mod extended {
         for administration in [false, true] {
             let (fixture, expected, foreign) = seeded(administration);
             let state = state(&fixture);
-            let neighbor = crate::audit::read_test_observer::observe(&state.tenants[0].store);
+            let neighbor =
+                crate::audit::read_test_observer::observe(state.tenants[0].store.sqlite().unwrap());
             let router = gateway_router(state.clone());
             let context = context(
                 &router,
@@ -466,8 +467,9 @@ mod extended {
         let state = state(&fixture);
         let router = gateway_router(state.clone());
         let context = context(&router, "personal").await;
-        let neighbor = crate::audit::read_test_observer::observe(&state.tenants[0].store);
-        let held = HeldMutex::acquire(state.tenants[0].store.clone());
+        let neighbor =
+            crate::audit::read_test_observer::observe(state.tenants[0].store.sqlite().unwrap());
+        let held = HeldMutex::acquire(state.tenants[0].store.clone().sqlite().unwrap().clone());
         let path = state.owned_human.as_ref().unwrap().sources[0]
             .descriptor()
             .storage_binding
@@ -490,8 +492,9 @@ mod extended {
         let state = state(&fixture);
         let router = gateway_router(state.clone());
         let context = context(&router, "personal").await;
-        let neighbor = crate::audit::read_test_observer::observe(&state.tenants[0].store);
-        let held = HeldMutex::acquire(state.tenants[1].store.clone());
+        let neighbor =
+            crate::audit::read_test_observer::observe(state.tenants[0].store.sqlite().unwrap());
+        let held = HeldMutex::acquire(state.tenants[1].store.clone().sqlite().unwrap().clone());
         let (status, refused) = get(&router, RECENT, Some(&context)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
         assert!(refused.get("items").is_none());
@@ -617,6 +620,8 @@ mod extended {
                 let digest: [u8; 32] = Sha256::digest(Fixture::bearer("B").as_bytes()).into();
                 let mut binding = state.tenants[1]
                     .store
+                    .sqlite()
+                    .unwrap()
                     .local_credential_binding_scoped(&access, &digest)
                     .unwrap()
                     .unwrap();
@@ -625,6 +630,8 @@ mod extended {
                 binding.active = false;
                 state.tenants[1]
                     .store
+                    .sqlite()
+                    .unwrap()
                     .mutate_identity_scoped(
                         &epoch,
                         &owned.sources[1],

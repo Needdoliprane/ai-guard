@@ -63,7 +63,7 @@ impl Gate {
 /// proof, session or slow HTTP body. Unknown neighboring Stores use temporary
 /// leases; known source/context Stores retain and reuse their leases.
 struct StoreLease {
-    store: Arc<Store>,
+    store: TenantStore,
     gate: Arc<Gate>,
     lane: Lane,
     _permit: OwnedSemaphorePermit,
@@ -71,8 +71,23 @@ struct StoreLease {
 #[derive(Default)]
 pub(super) struct Scope {
     held: Vec<Arc<StoreLease>>,
+    _shared_discovery: Option<(Arc<Gate>, OwnedSemaphorePermit)>,
 }
 impl Scope {
+    #[cfg(feature = "mysql-storage")]
+    pub(super) fn admit_peer_discovery(
+        &self,
+        shared: &Arc<Gate>,
+        tenant: &TenantState,
+    ) -> ApiResult<(Option<OwnedSemaphorePermit>, OwnedSemaphorePermit)> {
+        let shared_permit = match &self._shared_discovery {
+            Some((gate, _)) if Arc::ptr_eq(gate, shared) => None,
+            _ => Some(shared.admit(Lane::Discovery, false)?),
+        };
+        let tenant_permit = tenant.io.admit(Lane::Discovery, false)?;
+        Ok((shared_permit, tenant_permit))
+    }
+
     pub(super) fn hold(
         &mut self,
         tenant: &TenantState,
@@ -89,14 +104,14 @@ impl Scope {
             .iter()
             .find(|lease| {
                 lease.lane == lane
-                    && Arc::ptr_eq(&lease.store, &tenant.store)
+                    && lease.store.ptr_eq(&tenant.store)
                     && Arc::ptr_eq(&lease.gate, &tenant.io)
             })
             .cloned()
     }
     fn acquire(tenant: &TenantState, lane: Lane, expensive: bool) -> ApiResult<Arc<StoreLease>> {
         Ok(Arc::new(StoreLease {
-            store: Arc::clone(&tenant.store),
+            store: tenant.store.clone(),
             gate: Arc::clone(&tenant.io),
             lane,
             _permit: tenant.io.admit(lane, expensive)?,
@@ -113,7 +128,7 @@ impl Scope {
             Some(lease) => lease,
             None => Self::acquire(tenant, lane, expensive)?,
         };
-        Ok(operation(&lease.store))
+        Ok(operation(lease.store.sqlite_api()?))
     }
 }
 pub(super) fn capacity() -> (StatusCode, Json<Value>) {
@@ -154,13 +169,13 @@ impl CleanupReservation {
 
 /// Drop the operation, then the I/O permits, then the retained guard. This
 /// order also applies if Tokio drops the work before running it.
-struct BlockingStoreWork<F, R> {
+struct BlockingStoreWork<F, P, R> {
     operation: F,
-    _permits: (OwnedSemaphorePermit, Option<OwnedSemaphorePermit>),
+    _permits: P,
     _retained: R,
 }
 
-impl<F, R> BlockingStoreWork<F, R> {
+impl<F, P, R> BlockingStoreWork<F, P, R> {
     fn run<T>(self) -> ApiResult<T>
     where
         F: FnOnce() -> ApiResult<T>,
@@ -206,7 +221,41 @@ where
         _permits: (shared_permit, tenant_permit),
         _retained: retained,
     };
-    tokio::task::spawn_blocking(move || work.run())
+    run_blocking(move || work.run()).await
+}
+
+pub(super) async fn run_discovery<T, F, R>(
+    shared: Arc<Gate>,
+    retained: R,
+    operation: F,
+) -> ApiResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce(Arc<Scope>) -> ApiResult<T> + Send + 'static,
+    R: Send + 'static,
+{
+    let permit = shared.admit(Lane::Discovery, false)?;
+    // The blocking segment can reuse this shared slot for MySQL peer work.
+    // Keep the scope through operation drop and release it before owned usage.
+    let scope = Arc::new(Scope {
+        _shared_discovery: Some((shared, permit)),
+        ..Scope::default()
+    });
+    let operation_scope = Arc::clone(&scope);
+    let work = BlockingStoreWork {
+        operation: move || operation(operation_scope),
+        _permits: scope,
+        _retained: retained,
+    };
+    run_blocking(move || work.run()).await
+}
+
+async fn run_blocking<T, F>(operation: F) -> ApiResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> ApiResult<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
         .await
         .map_err(|_| unavailable(anyhow::anyhow!("blocking Store task failed")))?
 }

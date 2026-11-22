@@ -89,7 +89,9 @@ impl CredentialIndex {
     pub(super) fn digests(&self) -> impl Iterator<Item = &[u8; 32]> {
         self.entries.keys()
     }
-    pub(super) fn for_tenants(tenants: &[TenantGateway]) -> anyhow::Result<Self> {
+    pub(super) fn for_tenants(
+        tenants: &[TenantGateway<crate::tenant_store::TenantStore>],
+    ) -> anyhow::Result<Self> {
         let order = tenants
             .iter()
             .map(|tenant| tenant.tenant_id.clone())

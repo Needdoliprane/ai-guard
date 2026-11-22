@@ -244,12 +244,41 @@ impl AuditClient {
         self.protocol_identity_at(url).await
     }
 
+    /// Read the private, runner-only capabilities of the selected target on the
+    /// control transport. A refusal, an absent route, an oversized, unknown or
+    /// invalid answer ends the request: there is no fallback to the protocol
+    /// diagnostic, to V1 or to the public transport.
+    pub async fn control_capabilities(
+        &self,
+    ) -> std::result::Result<crate::control::ControlCapabilitiesV1, ControlIdentityError> {
+        let url = self
+            .control_url(reqwest::Method::GET, "api/v1/control/capabilities")
+            .map_err(|_| ControlIdentityError::InvalidResponse)?;
+        let capabilities: crate::control::ControlCapabilitiesV1 =
+            self.bounded_control_json(url).await?;
+        capabilities
+            .validate()
+            .map_err(|_| ControlIdentityError::InvalidResponse)?;
+        Ok(capabilities)
+    }
+
     /// Both explicit callers retain the same bounded parser and opaque error
     /// classes; neither response data nor an error selects another transport.
     async fn protocol_identity_at(
         &self,
         url: reqwest::Url,
     ) -> std::result::Result<crate::control::ControlProtocolV1, ControlIdentityError> {
+        let protocol: crate::control::ControlProtocolV1 = self.bounded_control_json(url).await?;
+        protocol
+            .validate()
+            .map_err(|_| ControlIdentityError::InvalidResponse)?;
+        Ok(protocol)
+    }
+
+    async fn bounded_control_json<T: serde::de::DeserializeOwned>(
+        &self,
+        url: reqwest::Url,
+    ) -> std::result::Result<T, ControlIdentityError> {
         use ControlIdentityError as Error;
         let mut response = self
             .http
@@ -273,15 +302,13 @@ impl AuditClient {
         }
         let mut decoder = serde_json::Deserializer::from_slice(&bytes);
         let mut ignored = false;
-        let protocol: crate::control::ControlProtocolV1 =
-            serde_ignored::deserialize(&mut decoder, |_| ignored = true)
-                .map_err(|_| Error::InvalidResponse)?;
+        let value: T = serde_ignored::deserialize(&mut decoder, |_| ignored = true)
+            .map_err(|_| Error::InvalidResponse)?;
         decoder.end().map_err(|_| Error::InvalidResponse)?;
         if ignored {
             return Err(Error::InvalidResponse);
         }
-        protocol.validate().map_err(|_| Error::InvalidResponse)?;
-        Ok(protocol)
+        Ok(value)
     }
 
     fn validate_identity_payload(&self, value: &impl Serialize) -> Result<()> {

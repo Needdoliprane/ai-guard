@@ -59,9 +59,9 @@ async fn decide(
     healthy(&tenant)?;
     tenant
         .blocking(false, move |tenant| {
-            let policy = tenant.store.egress_policy();
-            tenant
-                .store
+            let store = tenant.store.sqlite_api()?;
+            let policy = store.egress_policy();
+            store
                 .egress_decide(&request, &policy, now_ms())
                 .map(Json)
                 .map_err(journal_failure)
@@ -79,6 +79,7 @@ async fn observe(
         .blocking(false, move |tenant| {
             tenant
                 .store
+                .sqlite_api()?
                 .egress_observe(&request)
                 .map(Json)
                 .map_err(journal_failure)
@@ -93,9 +94,9 @@ async fn renew(
     healthy(&tenant)?;
     tenant
         .blocking(false, move |tenant| {
-            let policy = tenant.store.egress_policy();
-            tenant
-                .store
+            let store = tenant.store.sqlite_api()?;
+            let policy = store.egress_policy();
+            store
                 .egress_renew(&request, &policy, now_ms())
                 .map(Json)
                 .map_err(journal_failure)
@@ -121,6 +122,7 @@ async fn events(
             let limit = query.limit.unwrap_or(200).clamp(1, 1_000);
             let items = tenant
                 .store
+                .sqlite_api()?
                 .egress_session_events(&query.session_id, limit)
                 .map_err(unavailable)?;
             let complete = items.len() < limit;

@@ -312,6 +312,60 @@ async fn trusted_client_refusal_never_retries_on_the_public_transport() {
 }
 
 #[tokio::test]
+async fn control_capabilities_never_fall_back_to_the_public_transport_or_protocol() {
+    for status in [
+        StatusCode::NOT_FOUND,
+        StatusCode::SERVICE_UNAVAILABLE,
+        StatusCode::FORBIDDEN,
+        StatusCode::TEMPORARY_REDIRECT,
+    ] {
+        let gateway = Gateway::new(Some(status)).await;
+        let before = gateway.store.head().unwrap();
+        assert!(gateway.client.control_capabilities().await.is_err());
+        assert_eq!(gateway.store.head().unwrap(), before);
+        assert_eq!(
+            *gateway.seen.lock().unwrap(),
+            vec![(Method::GET, "/control/api/v1/control/capabilities".into())],
+            "a refusal must end the request without another route"
+        );
+    }
+}
+
+#[tokio::test]
+async fn control_capabilities_bind_the_runner_tenant_and_namespace_on_sqlite() {
+    use crate::control::{ControlOperationV1, ControlStorageBackendV1};
+    let gateway = Gateway::new(None).await;
+    let before = gateway.store.head().unwrap();
+    let capabilities = gateway.client.control_capabilities().await.unwrap();
+    let identity = gateway.client.control_supervision_identity().await.unwrap();
+    assert_eq!(capabilities.role, "runner");
+    assert_eq!(capabilities.tenant_id, "fixture-tenant");
+    assert_eq!(capabilities.storage, ControlStorageBackendV1::Sqlite);
+    assert_eq!(
+        capabilities.control_namespace_uuid,
+        identity.control_namespace_uuid
+    );
+    assert_eq!(
+        capabilities.operations,
+        [
+            ControlOperationV1::RecoveryInspect,
+            ControlOperationV1::StopReconcile,
+            ControlOperationV1::SupervisedAdmission,
+        ]
+    );
+    let viewer = AuditClient::new(
+        gateway.client.base.as_str(),
+        "fixture-control-client-viewer",
+    )
+    .unwrap();
+    assert_eq!(
+        viewer.control_capabilities().await.unwrap_err(),
+        ControlIdentityError::Forbidden
+    );
+    assert_eq!(gateway.store.head().unwrap(), before);
+}
+
+#[tokio::test]
 async fn public_supervision_diagnostic_keeps_viewer_permissions_separate_from_control_identity() {
     // Break caught: moving the existing read diagnostic onto Runner-only
     // capacity, or falling back to that public diagnostic after a control 403.

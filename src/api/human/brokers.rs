@@ -31,6 +31,7 @@ pub(super) async fn brokers(
             .map_err(state_failure)?;
         let page = tenant
             .store
+            .sqlite_api()?
             .human_brokers(
                 &scope,
                 &crate::audit::HumanBrokerFrameV1::new(&context.id, &context.authorization_version)
@@ -61,6 +62,7 @@ pub(super) async fn brokers(
         }
         let bytes = tenant
             .store
+            .sqlite_api()?
             .check_human_broker_output(&proof.redactor, &body)
             .map_err(store_failure)?;
         cursor = context.advance_brokers(cursor, bytes).map_err(|error| {
@@ -81,6 +83,7 @@ pub(super) async fn brokers(
         }
         tenant
             .store
+            .sqlite_api()?
             .check_human_broker_output(&proof.redactor, &body)
             .map_err(store_failure)?;
         Ok(Json(body))

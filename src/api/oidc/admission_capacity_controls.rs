@@ -14,9 +14,18 @@ async fn issue_session(fixture: &Fixture, subject: &str, salt: usize) -> ReaderT
         subject: subject.into(),
     };
     for tenant in fixture.state.tenants.iter() {
-        if tenant.store.human_account(&principal).unwrap().is_none() {
+        if tenant
+            .store
+            .sqlite()
+            .unwrap()
+            .human_account(&principal)
+            .unwrap()
+            .is_none()
+        {
             tenant
                 .store
+                .sqlite()
+                .unwrap()
                 .mutate_identity(&identity_change(IdentityChangeV1::Account {
                     expected_revision: 0,
                     account: HumanAccountV1 {
@@ -30,6 +39,8 @@ async fn issue_session(fixture: &Fixture, subject: &str, salt: usize) -> ReaderT
                 .unwrap();
             tenant
                 .store
+                .sqlite()
+                .unwrap()
                 .mutate_identity(&identity_change(IdentityChangeV1::Membership {
                     expected_revision: 0,
                     membership: MembershipV1 {

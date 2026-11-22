@@ -1,4 +1,4 @@
-use super::driver_error;
+use super::{audit::decode_row, driver_error};
 use crate::{audit::supervision_genesis, control::hash, model::StoredEvent};
 use anyhow::{Context, Result, anyhow, ensure};
 use mysql_async::{Row, Transaction, from_row_opt, prelude::Queryable};
@@ -62,12 +62,14 @@ pub(super) async fn persist(tx: &mut Transaction<'_>, event: &StoredEvent) -> Re
     Ok(())
 }
 
-async fn server_uuid(tx: &mut Transaction<'_>) -> Result<Uuid> {
-    let id = tx
-        .query_first::<String, _>("SELECT @@GLOBAL.server_uuid")
+pub(super) async fn server_uuid(connection: &mut impl Queryable) -> Result<Uuid> {
+    let row = connection
+        .query_first::<Row, _>("SELECT @@GLOBAL.server_uuid")
         .await
         .map_err(driver_error)?
         .context("MySQL server identity is unavailable")?;
+    let id: String = decode_row(row)?;
+    ensure!(id.len() == 36, "invalid MySQL server identity");
     let uuid = Uuid::parse_str(&id).map_err(|_| anyhow!("invalid MySQL server identity"))?;
     ensure!(
         !uuid.is_nil() && uuid.to_string() == id,

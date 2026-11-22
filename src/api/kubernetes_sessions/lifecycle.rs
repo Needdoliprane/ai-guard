@@ -22,9 +22,12 @@ fn forbidden() -> (StatusCode, Json<Value>) {
         "The current broker scope or tenant policy does not authorize this session lifecycle operation.",
     )
 }
-fn failure(store: &Store, error: anyhow::Error) -> (StatusCode, Json<Value>) {
+fn failure(
+    store: &impl crate::tenant_store::StoreHealth,
+    error: anyhow::Error,
+) -> (StatusCode, Json<Value>) {
     use KubernetesSessionReservationFailureV2 as F;
-    if !store.healthy() {
+    if !store.store_healthy() {
         return unavailable(error);
     }
     match error.downcast_ref::<F>() {
@@ -185,6 +188,7 @@ async fn protocol(SessionBroker(broker): SessionBroker, request: Request) -> Api
         .blocking(|tenant, identity, redactor| {
             let identity = tenant
                 .store
+                .sqlite_api()?
                 .broker_authenticated_identity(&identity)
                 .map_err(|e| failure(&tenant.store, e))?;
             if ![11, 12, 13].contains(&identity.schema_version) {
@@ -222,6 +226,7 @@ async fn reserve(SessionBroker(broker): SessionBroker, request: Request) -> ApiR
                 .with_additional_redaction(&redactor)
                 .map_err(|e| failure(&tenant.store, e))?;
             let authorization = store
+                .sqlite_api()?
                 .authorize_kubernetes_session_reservation(
                     &identity,
                     &intent,
@@ -230,6 +235,7 @@ async fn reserve(SessionBroker(broker): SessionBroker, request: Request) -> ApiR
                 )
                 .map_err(|e| failure(&store, e))?;
             let response = store
+                .sqlite_api()?
                 .reserve_kubernetes_session(
                     &identity,
                     &authorization,
@@ -264,10 +270,12 @@ async fn observe(
         .blocking(move |tenant, identity, redactor| {
             let authorization = tenant
                 .store
+                .sqlite_api()?
                 .authorize_kubernetes_session_reconciliation(&identity, &id, None)
                 .map_err(|e| failure(&tenant.store, e))?;
             let current = tenant
                 .store
+                .sqlite_api()?
                 .observe_kubernetes_session(&identity, &authorization, &id)
                 .map_err(|e| failure(&tenant.store, e))?;
             output(StatusCode::OK, &current, &redactor)
@@ -288,10 +296,12 @@ async fn confirm(
             screen(&request, &redactor)?;
             let authorization = tenant
                 .store
+                .sqlite_api()?
                 .authorize_kubernetes_session_reconciliation(&identity, &id, None)
                 .map_err(|e| failure(&tenant.store, e))?;
             let confirmed = tenant
                 .store
+                .sqlite_api()?
                 .confirm_kubernetes_session_before_effect(&identity, &authorization, &id)
                 .map_err(|e| failure(&tenant.store, e))?;
             if confirmed.snapshot().input_hash != request.reservation_input_hash {
@@ -299,6 +309,7 @@ async fn confirm(
             }
             let identity = tenant
                 .store
+                .sqlite_api()?
                 .broker_authenticated_identity(&identity)
                 .map_err(|e| failure(&tenant.store, e))?;
             let response = SessionConfirmationResponseV2 {
@@ -338,9 +349,11 @@ async fn abandon(
                 .with_additional_redaction(&redactor)
                 .map_err(|e| failure(&tenant.store, e))?;
             let intent = store
+                .sqlite_api()?
                 .kubernetes_session_intent_for_reconciliation(&identity, &id)
                 .map_err(|e| failure(&store, e))?;
             let broker_view = store
+                .sqlite_api()?
                 .broker_authenticated_identity(&identity)
                 .map_err(|e| failure(&store, e))?;
             let response = if intent
@@ -351,9 +364,11 @@ async fn abandon(
                 == broker_view.incarnation_id
             {
                 let authorization = store
+                    .sqlite_api()?
                     .authorize_kubernetes_session_reconciliation(&identity, &id, Some(&close))
                     .map_err(|e| failure(&store, e))?;
                 store
+                    .sqlite_api()?
                     .close_kubernetes_session_before_effect(&identity, &authorization, &close)
                     .map_err(|e| failure(&store, e))?
             } else {
@@ -362,10 +377,12 @@ async fn abandon(
                     .as_deref()
                     .ok_or_else(forbidden)?;
                 match store
+                    .sqlite_api()?
                     .authorize_kubernetes_session_recovery(&identity, &id, Some(&close), policy)
                     .map_err(|e| failure(&store, e))?
                 {
                     KubernetesSessionRecoveryAuthorizationV2::BeforeEffect(authorization) => store
+                        .sqlite_api()?
                         .recover_kubernetes_session_before_effect(
                             &identity,
                             &authorization,
@@ -374,6 +391,7 @@ async fn abandon(
                         )
                         .map_err(|e| failure(&store, e))?,
                     KubernetesSessionRecoveryAuthorizationV2::ReceiptLookup(authorization) => store
+                        .sqlite_api()?
                         .lookup_kubernetes_session_recovery_receipt(
                             &identity,
                             &authorization,
@@ -412,6 +430,7 @@ async fn claim_effect(
                 .with_additional_redaction(&redactor)
                 .map_err(|e| failure(&tenant.store, e))?;
             let ack = store
+                .sqlite_api()?
                 .claim_kubernetes_session_effect(
                     &identity,
                     &effect,
@@ -447,6 +466,7 @@ async fn effect_result(
             screen(&result, &redactor)?;
             let state = tenant
                 .store
+                .sqlite_api()?
                 .record_kubernetes_session_effect_result(&identity, &result)
                 .map_err(|e| failure(&tenant.store, e))?;
             output(StatusCode::OK, &state, &redactor)
@@ -470,6 +490,7 @@ async fn effect_terminal(
             screen(&terminal, &redactor)?;
             let state = tenant
                 .store
+                .sqlite_api()?
                 .record_kubernetes_session_terminal(&identity, &terminal)
                 .map_err(|e| failure(&tenant.store, e))?;
             output(StatusCode::OK, &state, &redactor)
@@ -493,6 +514,7 @@ async fn effect_settlement(
             screen(&settlement, &redactor)?;
             let state = tenant
                 .store
+                .sqlite_api()?
                 .settle_kubernetes_session(&identity, &settlement)
                 .map_err(|e| failure(&tenant.store, e))?;
             output(StatusCode::OK, &state, &redactor)
@@ -512,6 +534,7 @@ async fn effect_state(
         .blocking(move |tenant, identity, redactor| {
             let state = tenant
                 .store
+                .sqlite_api()?
                 .kubernetes_session_effect_state(&identity, &id)
                 .map_err(|e| failure(&tenant.store, e))?;
             output(StatusCode::OK, &state, &redactor)

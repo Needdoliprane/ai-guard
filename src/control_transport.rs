@@ -175,6 +175,7 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
         | (&Method::POST, ["workers", "reservations"])
         | (&Method::POST, ["workers", _, "transitions"]) => Some(Runner),
         (&Method::GET, ["control", "protocol"])
+        | (&Method::GET, ["control", "capabilities"])
         | (&Method::GET, ["workers", _, "arms", _])
         | (&Method::POST, ["control", "events"])
         | (&Method::POST, ["egress", "policies", "replace"])

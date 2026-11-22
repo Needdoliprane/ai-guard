@@ -30,6 +30,9 @@ use std::{
 use tokio::process::Command;
 use uuid::Uuid;
 
+#[path = "gateway.rs"]
+mod gateway;
+
 const TENANT_A: &str = "tenant-qa-a";
 const TENANT_B: &str = "tenant-qa-b";
 const DIGEST_A: [u8; 32] = [0x42; 32];
@@ -46,6 +49,19 @@ pub(super) struct FixtureFiles {
 
 impl FixtureFiles {
     pub(super) fn open(config_env: &str) -> Result<Self> {
+        Self::open_checked(config_env, |target| {
+            target.username == "qa_reader" && target.maintenance_username == "qa_probe"
+        })
+    }
+
+    pub(super) fn open_gateway(config_env: &str) -> Result<Self> {
+        Self::open_checked(config_env, gateway_accounts_match_namespace)
+    }
+
+    fn open_checked(
+        config_env: &str,
+        accounts_match: impl FnOnce(&Fixture) -> bool,
+    ) -> Result<Self> {
         let path = PathBuf::from(
             std::env::var_os(config_env)
                 .context("private identity QA configuration is required")?,
@@ -55,10 +71,10 @@ impl FixtureFiles {
             .map_err(|_| anyhow::anyhow!("invalid private identity QA configuration"))?;
         ensure!(
             target.host == "localhost"
-                && target.username == "qa_reader"
-                && target.maintenance_username == "qa_probe"
+                && target.port != 0
                 && !target.namespace.is_nil()
-                && target.database == format!("qa_audit_{}", target.namespace.simple()),
+                && target.database == format!("qa_audit_{}", target.namespace.simple())
+                && accounts_match(&target),
             "identity QA requires a dedicated loopback database and QA accounts"
         );
         let directory = path.parent().context("identity QA directory is missing")?;
@@ -124,7 +140,7 @@ impl FixtureFiles {
         .await
     }
 
-    async fn initialize(&self, tenant: &str) -> Result<StoredEvent> {
+    pub(super) async fn initialize(&self, tenant: &str) -> Result<StoredEvent> {
         self.target
             .open(
                 &self.target.maintenance_username,
@@ -136,6 +152,34 @@ impl FixtureFiles {
             .initialize()
             .await
     }
+}
+
+fn gateway_accounts_match_namespace(target: &Fixture) -> bool {
+    let namespace = target.namespace.simple().to_string();
+    let account_suffix = &namespace[..24];
+    target.username == format!("qa_s_{account_suffix}")
+        && target.maintenance_username == format!("qa_m_{account_suffix}")
+}
+
+#[test]
+fn gateway_fixture_accounts_are_named_for_their_namespace_and_role() -> Result<()> {
+    let mut target: Fixture = serde_json::from_value(json!({
+        "host": "localhost",
+        "port": 13306,
+        "database": "qa_audit_0123456789abcdef0123456789abcdef",
+        "namespace": "01234567-89ab-cdef-0123-456789abcdef",
+        "username": "qa_s_0123456789abcdef01234567",
+        "maintenance_username": "qa_m_0123456789abcdef01234567",
+        "password_file": "service.password",
+        "maintenance_password_file": "maintenance.password",
+        "ca_file": "ca.pem",
+    }))?;
+    assert!(gateway_accounts_match_namespace(&target));
+    target.username = "qa_reader".into();
+    assert!(!gateway_accounts_match_namespace(&target));
+    target.username = "qa_s_0123456789abcdef01234568".into();
+    assert!(!gateway_accounts_match_namespace(&target));
+    Ok(())
 }
 
 type AuditState = (u16, Option<String>, Option<String>, i64, String, u64);
@@ -150,7 +194,7 @@ async fn audit_state(conn: &mut Conn) -> Result<AuditState> {
     .context("identity QA audit state is missing")
 }
 
-async fn audit_snapshot(conn: &mut Conn) -> Result<AuditSnapshot> {
+pub(super) async fn audit_snapshot(conn: &mut Conn) -> Result<AuditSnapshot> {
     let state = audit_state(conn).await?;
     let events = fixture_prefix(conn, i64::MAX).await?;
     Ok((state, events))
@@ -740,7 +784,7 @@ fn registry_file_reference(file: &PrivateFile) -> Result<&str> {
         .context("registry QA requires a UTF-8 file reference")
 }
 
-fn registry_entry(fixture: &FixtureFiles, tenant: &str) -> Result<Value> {
+pub(super) fn registry_entry(fixture: &FixtureFiles, tenant: &str) -> Result<Value> {
     let authentication = match &fixture.client_identity {
         Some((cert, key)) => json!({
             "mode": "password_and_mtls",

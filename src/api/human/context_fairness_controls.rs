@@ -78,6 +78,8 @@ async fn all_shares_full_return_capacity_and_credential_revocation_keeps_its_err
     let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
     let mut credential = state.tenants[1]
         .store
+        .sqlite()
+        .unwrap()
         .local_credential_binding(&digest)
         .unwrap()
         .unwrap();
@@ -85,6 +87,8 @@ async fn all_shares_full_return_capacity_and_credential_revocation_keeps_its_err
     credential.revision += 1;
     state.tenants[1]
         .store
+        .sqlite()
+        .unwrap()
         .mutate_identity(&identity_change(IdentityChangeV1::Credential {
             expected_revision: credential.revision - 1,
             binding: credential,

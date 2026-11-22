@@ -16,7 +16,7 @@ impl Drop for ResumeOnDrop {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn broker_membership_revoked_after_durable_read_is_rechecked_before_publication() {
     let (files, state, token) = local_identity_state();
-    let store = Arc::clone(&state.tenants[1].store);
+    let store = Arc::clone(state.tenants[1].store.sqlite().unwrap());
     store
         .migrate_workload_v6(&files.path().join("broker-before-v6.sqlite"))
         .unwrap();
@@ -150,7 +150,7 @@ async fn broker_membership_revoked_after_durable_read_is_rechecked_before_public
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn worker_membership_revoked_after_durable_read_is_rechecked_before_publication() {
     let (files, state, token) = local_identity_state();
-    let store = Arc::clone(&state.tenants[1].store);
+    let store = Arc::clone(state.tenants[1].store.sqlite().unwrap());
     store
         .migrate_workload_v6(&files.path().join("broker-before-v6.sqlite"))
         .unwrap();

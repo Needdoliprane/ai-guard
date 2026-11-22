@@ -74,6 +74,7 @@ pub(in crate::api) async fn authenticate_policy(
             identity
                 .tenant
                 .store
+                .sqlite_api()?
                 .modern_control_write_admission(&access)
                 .map_err(policy_store_failure)?;
             epoch.check().map_err(policy_authority_failure)?;
@@ -177,25 +178,33 @@ impl OwnedPolicyWriter {
                     let result = match &mutation {
                         PolicyMutation::Replace(value) => {
                             let request = value.store_request().map_err(policy_store_failure)?;
-                            identity.tenant.store.egress_replace_policy_scoped(
-                                &epoch,
-                                source,
-                                &identity.credential,
-                                &scope,
-                                expected,
-                                &request,
-                            )
+                            identity
+                                .tenant
+                                .store
+                                .sqlite_api()?
+                                .egress_replace_policy_scoped(
+                                    &epoch,
+                                    source,
+                                    &identity.credential,
+                                    &scope,
+                                    expected,
+                                    &request,
+                                )
                         }
                         PolicyMutation::Revoke(value) => {
                             let request = value.store_request().map_err(policy_store_failure)?;
-                            identity.tenant.store.egress_revoke_policy_scoped(
-                                &epoch,
-                                source,
-                                &identity.credential,
-                                &scope,
-                                expected,
-                                &request,
-                            )
+                            identity
+                                .tenant
+                                .store
+                                .sqlite_api()?
+                                .egress_revoke_policy_scoped(
+                                    &epoch,
+                                    source,
+                                    &identity.credential,
+                                    &scope,
+                                    expected,
+                                    &request,
+                                )
                         }
                     };
                     if result.as_ref().err().is_some_and(|error| {
@@ -230,6 +239,7 @@ impl OwnedPolicyWriter {
                 let current = identity
                     .tenant
                     .store
+                    .sqlite_api()?
                     .modern_control_protocol(&access, &identity.credential, current_generation)
                     .map_err(policy_store_failure)?;
                 let Some(current) = current else {
@@ -405,6 +415,7 @@ impl OwnedProtocol {
                     .ok_or_else(human_sources::unavailable)?;
                 let snapshot = tenant
                     .store
+                    .sqlite_api()?
                     .modern_control_protocol(&access, &identity.credential, expected)
                     .map_err(super::super::human::store_failure)?;
                 let Some(snapshot) = snapshot else {

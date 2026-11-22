@@ -12,6 +12,7 @@ mod broker_registry;
 mod decision;
 mod event_read;
 mod identity;
+mod owned_origin;
 mod supervision;
 mod worker;
 mod workload;
@@ -78,6 +79,14 @@ impl fmt::Display for MysqlProbeError {
 }
 
 impl std::error::Error for MysqlProbeError {}
+
+/// A confirmed transport or timeout failure, as opposed to a Store refusal.
+pub fn is_transport_failure(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<MysqlProbeError>(),
+        Some(MysqlProbeError::TransportUnavailable | MysqlProbeError::TimedOut)
+    )
+}
 
 fn driver_error(error: mysql_async::Error) -> MysqlProbeError {
     match error {

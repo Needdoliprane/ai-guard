@@ -19,6 +19,9 @@ const UPLOAD_IDLE: Duration = Duration::from_secs(2);
 /// client header can put this marker into request extensions.
 #[derive(Clone)]
 pub(super) struct ReservedProtocol(());
+/// Present only on requests admitted by the private control transport gate.
+#[derive(Clone, Copy)]
+pub(super) struct ControlTransportRequest(());
 #[derive(Clone)]
 pub(super) struct ReservedPolicy(());
 #[derive(Clone)]
@@ -253,6 +256,7 @@ async fn gate(State(state): State<GatewayState>, request: Request, next: Next) -
         );
     };
     let (mut parts, body) = request.into_parts();
+    parts.extensions.insert(ControlTransportRequest(()));
     let mut owned_identity = None;
     let mut owned_policy_identity = None;
     let mut owned_broker_identity = None;

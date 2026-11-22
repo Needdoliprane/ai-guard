@@ -11,6 +11,7 @@ use crate::{
     policy::{self, Policy},
     redaction::Redactor,
     tenancy::validate_tenant_id,
+    tenant_store::TenantStore,
 };
 use axum::{
     Json, Router,
@@ -123,7 +124,40 @@ fn audit_capacity_failure(failure: &anyhow::Error) -> Option<(StatusCode, Json<V
         Json(json!({"error":{"code":code,"message":message,"retry_action":"contact_operator"}})),
     ))
 }
+impl TenantStore {
+    /// The SQLite-only families. A MySQL tenant is refused before any effect.
+    pub(crate) fn sqlite_api(&self) -> ApiResult<&Arc<Store>> {
+        self.sqlite().map_err(storage_capability_refusal)
+    }
+}
+fn storage_capability_refusal(
+    refusal: crate::tenant_store::StorageCapabilityUnavailable,
+) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({"error":{
+            "code":"storage_capability_unavailable",
+            "message":"The configured storage backend does not provide this capability.",
+            "capability":refusal.0,
+        }})),
+    )
+}
 fn unavailable(failure: anyhow::Error) -> (StatusCode, Json<Value>) {
+    #[cfg(feature = "mysql-storage")]
+    if failure
+        .downcast_ref::<crate::mysql_storage::audit::ControlGuardRefused>()
+        .is_some()
+    {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Classes d'identité ambiguës : accès refusé.",
+        );
+    }
+    if let Some(refusal) =
+        failure.downcast_ref::<crate::tenant_store::StorageCapabilityUnavailable>()
+    {
+        return storage_capability_refusal(*refusal);
+    }
     if let Some(response) = audit_capacity_failure(&failure) {
         return response;
     }
@@ -189,9 +223,9 @@ pub fn token_matches(received: &str, expected: &str) -> bool {
         == 0
 }
 #[derive(Clone)]
-pub struct TenantGateway {
+pub struct TenantGateway<S = Arc<Store>> {
     pub tenant_id: String,
-    pub store: Arc<Store>,
+    pub store: S,
     pub runner_token: String,
     pub viewer_token: String,
 }
@@ -199,7 +233,7 @@ pub struct TenantGateway {
 #[derive(Clone)]
 struct TenantState {
     tenant_id: String,
-    store: Arc<Store>,
+    store: TenantStore,
     streams: Arc<tokio::sync::Semaphore>,
     human_streams: Arc<human_streams::Admission>,
     rate: Arc<Mutex<(Instant, u32)>>,
@@ -227,7 +261,7 @@ struct ControlProof {
     lane: store_io::Lane,
 }
 impl TenantState {
-    fn from_gateway(tenant: TenantGateway, shared_io: Arc<store_io::Gate>) -> Self {
+    fn from_gateway(tenant: TenantGateway<TenantStore>, shared_io: Arc<store_io::Gate>) -> Self {
         Self {
             tenant_id: tenant.tenant_id,
             store: tenant.store,
@@ -288,16 +322,9 @@ impl GatewayState {
             .map(|owned| owned.admit())
             .transpose()?;
         let state = self.scoped(Arc::default());
-        store_io::run(
-            Arc::clone(&self.io),
-            None,
-            store_io::Lane::Discovery,
-            false,
-            move || {
-                let _usage = usage;
-                operation(state)
-            },
-        )
+        store_io::run_discovery(Arc::clone(&self.io), usage, move |scope| {
+            operation(state.scoped(scope))
+        })
         .await
     }
     pub fn with_oidc(mut self, oidc: OidcGateway) -> anyhow::Result<Self> {
@@ -306,7 +333,8 @@ impl GatewayState {
             "owned human OIDC handlers are not adopted"
         );
         for tenant in self.tenants.iter() {
-            oidc.audit.ensure_distinct_from_business(&tenant.store)?;
+            oidc.audit
+                .ensure_distinct_from_business(tenant.store.sqlite()?)?;
         }
         let version = oidc.audit.format_version()?;
         anyhow::ensure!(
@@ -553,7 +581,7 @@ impl GatewayState {
         };
         let tenants = vec![TenantGateway {
             tenant_id: store.tenant_id().into(),
-            store,
+            store: TenantStore::from(store),
             runner_token,
             viewer_token,
         }];
@@ -603,7 +631,29 @@ impl GatewayState {
         )
     }
     pub fn for_tenants_with_backend(
-        mut tenants: Vec<TenantGateway>,
+        tenants: Vec<TenantGateway>,
+        policy: Policy,
+        jev: Option<JevBackend>,
+        redactor: Redactor,
+    ) -> anyhow::Result<Self> {
+        Self::for_tenant_stores_with_backend(
+            tenants
+                .into_iter()
+                .map(|tenant| TenantGateway {
+                    tenant_id: tenant.tenant_id,
+                    store: TenantStore::from(tenant.store),
+                    runner_token: tenant.runner_token,
+                    viewer_token: tenant.viewer_token,
+                })
+                .collect(),
+            policy,
+            jev,
+            redactor,
+        )
+    }
+    /// Tenants on any configured backend. The identity still selects the tenant.
+    pub fn for_tenant_stores_with_backend(
+        tenants: Vec<TenantGateway<TenantStore>>,
         policy: Policy,
         jev: Option<JevBackend>,
         redactor: Redactor,
@@ -629,8 +679,12 @@ impl GatewayState {
             )?;
             client.validate_redaction(&redactor)?;
         }
+        let credential_index = CredentialIndex::for_tenants(&tenants)?;
+        #[cfg(feature = "mysql-storage")]
+        let control_collision_candidates: Vec<_> = credential_index.digests().copied().collect();
         let mut identities = HashSet::new();
-        for tenant in &mut tenants {
+        let mut bound = Vec::with_capacity(tenants.len());
+        for mut tenant in tenants {
             validate_tenant_id(&tenant.tenant_id)?;
             anyhow::ensure!(
                 identities.insert(tenant.tenant_id.clone()),
@@ -642,11 +696,16 @@ impl GatewayState {
             );
             tenant.store = tenant
                 .store
-                .with_additional_redaction(&redactor)
+                .bind_redaction(&redactor)
                 .map_err(|_| anyhow::anyhow!("gateway audit redaction attachment failed"))?;
-            anyhow::ensure!(tenant.store.integrity()?.valid, "audit integrity failure");
+            #[cfg(feature = "mysql-storage")]
+            tenant
+                .store
+                .bind_control_collision_candidates(&control_collision_candidates)?;
+            tenant.store.verify_gateway_startup()?;
+            bound.push(tenant);
         }
-        let credential_index = CredentialIndex::for_tenants(&tenants)?;
+        let tenants = bound;
         let human = human::HumanAccessState::for_tenants(
             tenants.iter().map(|tenant| tenant.tenant_id.as_str()),
         )?;
@@ -795,6 +854,13 @@ impl TenantState {
             },
         )
         .await
+    }
+    /// Digest of the authenticated technical credential, for guards that must
+    /// run inside the write transaction. Absent without a control proof.
+    fn control_guard(&self) -> Option<[u8; 32]> {
+        let proof = self.control_proof.as_ref()?;
+        let token = bearer(&proof.headers)?;
+        Some(Sha256::digest(token.as_bytes()).into())
     }
     fn write_quota(&self) -> ApiResult<()> {
         Self::take_write_slots(&self.rate, 1)
@@ -1050,7 +1116,12 @@ async fn ingest(
                     "Ce namespace est réservé aux opérations du contrôle.",
                 ));
             }
-            Ok(Json(tenant.store.append(event).map_err(unavailable)?))
+            Ok(Json(
+                tenant
+                    .store
+                    .append_guarded(event, tenant.control_guard())
+                    .map_err(unavailable)?,
+            ))
         })
         .await
 }
@@ -1087,17 +1158,23 @@ async fn ingest_batch(
                     ));
                 }
             }
+            let digest = tenant
+                .control_guard()
+                .ok_or_else(human_sources::unavailable)?;
             tenant.ingestion_quota_for(events.len())?;
-            let stored = tenant.store.append_batch(events).map_err(|failure| {
-                if failure.is::<BatchConflict>() {
-                    error(
-                        StatusCode::CONFLICT,
-                        "Un identifiant du lot existe déjà avec un contenu différent.",
-                    )
-                } else {
-                    unavailable(failure)
-                }
-            })?;
+            let stored = tenant
+                .store
+                .append_batch_guarded(events, digest)
+                .map_err(|failure| {
+                    if failure.is::<BatchConflict>() {
+                        error(
+                            StatusCode::CONFLICT,
+                            "Un identifiant du lot existe déjà avec un contenu différent.",
+                        )
+                    } else {
+                        unavailable(failure)
+                    }
+                })?;
             Ok(Json(json!({
                 "stored": stored
                     .iter()
@@ -1143,6 +1220,7 @@ async fn ingest_control_event(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .append_control_event(event)
                     .map_err(unavailable)?,
             ))
@@ -1165,7 +1243,11 @@ async fn decide(
     let lookup = request.clone();
     if let Some(stored) = tenant
         .blocking(false, move |tenant| {
-            tenant.store.decision(&lookup, None).map_err(decision_error)
+            tenant
+                .store
+                .sqlite_api()?
+                .decision(&lookup, None)
+                .map_err(decision_error)
         })
         .await?
     {
@@ -1176,6 +1258,7 @@ async fn decide(
         .blocking(false, move |tenant| {
             tenant
                 .store
+                .sqlite_api()?
                 .decision(&request, Some((decision, jev)))
                 .map_err(decision_error)
         })
@@ -1315,6 +1398,7 @@ async fn reserve_worker(
         .blocking(false, move |tenant| {
             Ok(tenant
                 .store
+                .sqlite_api()?
                 .worker_operation(&operation_id)
                 .map_err(control_error)?
                 .is_some())
@@ -1332,6 +1416,7 @@ async fn reserve_worker(
         .blocking(false, move |tenant| {
             tenant
                 .store
+                .sqlite_api()?
                 .admit_worker(&admission, &s.policy, decision, jev, &tenant.worker_quota)
                 .map_err(control_error)
         })
@@ -1361,6 +1446,7 @@ async fn transition_worker(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .mutate_worker(&mutation)
                     .map_err(control_error)?,
             ))
@@ -1378,12 +1464,14 @@ async fn workers(
             let limit = page.limit.unwrap_or(50);
             let items = tenant
                 .store
+                .sqlite_api()?
                 .workers_page(page.cursor.as_deref(), limit)
                 .map_err(control_error)?;
             let next_cursor = if items.len() == limit as usize {
                 let last = items.last().map(|worker| worker.worker_id.clone());
                 if !tenant
                     .store
+                    .sqlite_api()?
                     .workers_page(last.as_deref(), 1)
                     .map_err(control_error)?
                     .is_empty()
@@ -1408,6 +1496,7 @@ async fn worker(
         .blocking(true, move |tenant| {
             let worker = tenant
                 .store
+                .sqlite_api()?
                 .worker(&id)
                 .map_err(control_error)?
                 .ok_or_else(|| control_error(ControlFailure::NotFound.into()))?;
@@ -1425,6 +1514,7 @@ async fn worker_operation(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .worker_operation(&id)
                     .map_err(control_error)?
                     .ok_or_else(|| control_error(ControlFailure::NotFound.into()))?,
@@ -1441,6 +1531,7 @@ async fn worker_quota(
             Ok(Json(
                 tenant
                     .store
+                    .sqlite_api()?
                     .worker_quota(&tenant.worker_quota)
                     .map_err(control_error)?,
             ))
@@ -1458,12 +1549,14 @@ async fn worker_usage(
             let limit = page.limit.unwrap_or(50);
             let items = tenant
                 .store
+                .sqlite_api()?
                 .worker_usage_page(page.cursor.as_deref(), limit)
                 .map_err(control_error)?;
             let next_cursor = if items.len() == limit as usize {
                 let last = items.last().map(|allocation| allocation.attempt_id.clone());
                 if !tenant
                     .store
+                    .sqlite_api()?
                     .worker_usage_page(last.as_deref(), 1)
                     .map_err(control_error)?
                     .is_empty()
@@ -1510,9 +1603,11 @@ async fn overview(
         .blocking(true, move |tenant| {
             let mut value = tenant.store.overview().map_err(unavailable)?;
             // Counters include the archived prefix; say how much of it is archived.
-            value["retention"] =
-                serde_json::to_value(tenant.store.audit_retention_ledger().map_err(unavailable)?)
-                    .map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "Synthèse indisponible."))?;
+            if let Some(ledger) = tenant.store.audit_retention_ledger().map_err(unavailable)? {
+                value["retention"] = serde_json::to_value(ledger).map_err(|_| {
+                    error(StatusCode::SERVICE_UNAVAILABLE, "Synthèse indisponible.")
+                })?;
+            }
             value["health"]["jev"] = json!(if s.jev.is_some() {
                 "configured"
             } else {
@@ -1555,14 +1650,16 @@ async fn integrity(ReadIdentity(tenant, _): ReadIdentity) -> ApiResult<Json<Valu
             let unavailable_integrity =
                 |_| error(StatusCode::SERVICE_UNAVAILABLE, "Intégrité indisponible.");
             let integrity = tenant.store.integrity().map_err(unavailable)?;
-            let ledger = tenant.store.audit_retention_ledger().map_err(unavailable)?;
             let mut value = serde_json::to_value(&integrity).map_err(unavailable_integrity)?;
-            // `event_count` stays the chain length; the stored count and the
-            // archived prefix make a retained store explicit.
-            value["stored_events"] = json!(
-                i64::try_from(integrity.event_count).unwrap_or(i64::MAX) - ledger.reclaimed_events
-            );
-            value["retention"] = serde_json::to_value(&ledger).map_err(unavailable_integrity)?;
+            if let Some(ledger) = tenant.store.audit_retention_ledger().map_err(unavailable)? {
+                // `event_count` stays the chain length. Report the stored count and the archived prefix.
+                value["stored_events"] = json!(
+                    i64::try_from(integrity.event_count).unwrap_or(i64::MAX)
+                        - ledger.reclaimed_events
+                );
+                value["retention"] =
+                    serde_json::to_value(&ledger).map_err(unavailable_integrity)?;
+            }
             Ok(Json(value))
         })
         .await
@@ -1647,9 +1744,10 @@ async fn export(
     filter.before = Some(filter.before.unwrap_or(head + 1).min(head + 1));
     // An export that reaches into the archived prefix starts with a typed
     // notice: the reclaimed events are in the offline archives, not omitted.
-    let notice = (ledger.segments > 0
-        && filter.after.unwrap_or(0) < ledger.archived_through_seq)
-        .then(|| {
+    let archived = ledger.as_ref().filter(|ledger| ledger.segments > 0);
+    let notice = archived
+        .filter(|ledger| filter.after.unwrap_or(0) < ledger.archived_through_seq)
+        .map(|ledger| {
             json!({
                 "type": "ai-guard.audit.retention-notice.v1",
                 "archived_through_seq": ledger.archived_through_seq,
@@ -1661,7 +1759,7 @@ async fn export(
             })
             .to_string()
         });
-    let retention_header = (ledger.segments > 0).then(|| {
+    let retention_header = archived.map(|ledger| {
         format!(
             "segments={}; archived-through={}; reclaimed-events={}; last-manifest={}",
             ledger.segments,
@@ -2592,6 +2690,126 @@ mod ingestion_window_tests {
     }
 
     #[tokio::test]
+    async fn legacy_batch_preserves_receipts_and_rolls_back_before_conflict_reply() {
+        const PATH: &str = "/api/v1/events/batch";
+        const SECRET: &str = "synthetic-batch-private-value";
+        let directory = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let store = Arc::new(
+            Store::open(
+                &directory.path().join("audit.sqlite"),
+                Redactor::new(Vec::new()),
+                1000,
+            )
+            .unwrap(),
+        );
+        let state = GatewayState::for_tenants(
+            vec![TenantGateway {
+                tenant_id: "local".into(),
+                store: store.clone(),
+                runner_token: "synthetic-runner".into(),
+                viewer_token: "synthetic-viewer".into(),
+            }],
+            Policy::default(),
+            None,
+            Redactor::new(vec![SECRET.into()]),
+        )
+        .unwrap();
+        let router = gateway_router(state.clone());
+        let post = |path, value| router.clone().oneshot(request(path, value));
+        let mut original = Event::new("activity.coverage");
+        original.source = "runner".into();
+        original.provenance = "declared".into();
+        original.coverage = "partial".into();
+        original.data = json!({"text": SECRET});
+        let other = Event::new("activity.channel");
+        let batch = json!({"events": [&original, &other, &original]});
+        let base = store.head().unwrap();
+        let expected = json!({"stored": [
+            {"id": original.id, "seq": base + 1},
+            {"id": other.id, "seq": base + 2},
+            {"id": original.id, "seq": base + 1}
+        ]});
+        for _ in 0..2 {
+            let response = post(PATH, batch.clone()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), expected);
+        }
+        let rows = store
+            .events(&EventQuery {
+                after: Some(base),
+                ..EventQuery::default()
+            })
+            .unwrap();
+        let row = rows.iter().find(|row| row.event.id == original.id).unwrap();
+        assert_eq!(row.event.source, "runner");
+        assert_eq!(row.event.provenance, "declared");
+        assert_eq!(row.event.coverage, "partial");
+        assert_eq!(row.event.data["text"], "[REDACTED]");
+
+        let next = Event::new("activity.channel");
+        let mut divergent = original;
+        divergent.data = json!({"text": "different synthetic content"});
+        let conflict = post(PATH, json!({"events": [&next, &divergent]}))
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(conflict.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!({"error": "Un identifiant du lot existe déjà avec un contenu différent."})
+        );
+        assert_eq!(store.head().unwrap(), base + 2);
+        assert_eq!(
+            post("/api/events/batch", batch).await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
+        for invalid in [json!({"events": []}), json!({"events": vec![&other; 65]})] {
+            assert_eq!(
+                post(PATH, invalid).await.unwrap().status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let mut oversized = Event::new("activity.channel");
+        oversized.data = json!({"text": "x".repeat(262_144)});
+        assert_eq!(
+            post(PATH, json!({"events": [oversized]}))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+
+        *state.tenants[0].ingestion_rate.lock().unwrap() =
+            (Instant::now() + Duration::from_secs(60), 199);
+        let overflow = post(PATH, json!({"events": [&next, &other]}))
+            .await
+            .unwrap();
+        assert_eq!(overflow.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(overflow.headers()[header::RETRY_AFTER], "1");
+        let body = axum::body::to_bytes(overflow.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap()["error"]["code"],
+            "write_rate_limited"
+        );
+        assert_eq!(state.tenants[0].ingestion_rate.lock().unwrap().1, 199);
+        assert_eq!(store.head().unwrap(), base + 2);
+        let recovered = post(PATH, json!({"events": [&next]})).await.unwrap();
+        assert_eq!(recovered.status(), StatusCode::OK);
+        assert_eq!(store.head().unwrap(), base + 3);
+        assert_eq!(state.tenants[0].ingestion_rate.lock().unwrap().1, 200);
+    }
+
+    #[tokio::test]
     async fn control_route_is_runner_only_closed_and_tenant_scoped() {
         let directory = tempfile::Builder::new()
             .permissions(std::fs::Permissions::from_mode(0o700))
@@ -2729,5 +2947,27 @@ mod ingestion_window_tests {
                 expected
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod storage_refusal_tests {
+    use super::*;
+    use crate::tenant_store::StorageCapabilityUnavailable;
+
+    #[test]
+    fn an_unported_family_is_a_typed_501_never_an_audit_outage() {
+        let refusal = StorageCapabilityUnavailable("kubernetes_session");
+        let (status, Json(body)) = storage_capability_refusal(refusal);
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(body["error"]["code"], "storage_capability_unavailable");
+        assert_eq!(body["error"]["capability"], "kubernetes_session");
+        // The generic failure mapper keeps the same answer instead of the 503
+        // reserved for an unavailable, inconsistent or full audit.
+        let (status, Json(mapped)) = unavailable(anyhow::Error::new(refusal));
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(mapped, body);
+        let (status, _) = unavailable(anyhow::anyhow!("other"));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     }
 }

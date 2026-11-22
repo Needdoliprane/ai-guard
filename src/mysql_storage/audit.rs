@@ -1,11 +1,12 @@
 //! Transactional audit for a prepared MySQL target.
 use super::{
     MysqlCredentials, MysqlEndpoint, MysqlProbeError, broker_registry, connect_options, decision,
-    driver_error, event_read::Selection, identity, open_verified, supervision, worker, workload,
+    driver_error, event_read::Selection, identity, open_verified, owned_origin::OwnedAuditLock,
+    supervision, worker, workload,
 };
 use crate::{
     audit::{
-        AuditCapacityPolicyV1, AuditCapacityV1, EventQuery, Integrity,
+        AuditCapacityPolicyV1, AuditCapacityV1, EventQuery, Integrity, MAX_EVENT_BATCH,
         RETIREMENT_RESUME_EVENT_KIND,
         capacity_policy::{PHYSICAL_BYTES, ReservedWrite},
         control_delivery_kind,
@@ -50,14 +51,15 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    sync::Mutex,
+    sync::{Mutex, MutexGuard},
     time::{Instant, timeout_at},
 };
 use uuid::Uuid;
 
 pub use super::supervision::MysqlSupervisionOrigin;
+pub use crate::audit::BatchConflict;
 
-const DEADLINE: Duration = Duration::from_secs(8);
+pub(crate) const DEADLINE: Duration = Duration::from_secs(8);
 // The gateway's CredentialIndex admits one runner and one viewer for at most 256 tenants.
 const MAX_CONTROL_COLLISION_CANDIDATES: usize = 512;
 const GENESIS: &str = "control.mysql.audit.genesis";
@@ -162,6 +164,14 @@ pub(super) fn decode_event(row: Row) -> Result<EncodedEvent> {
     decode_event_columns(decode_row(row)?)
 }
 
+async fn event_by_id(tx: &mut Transaction<'_>, id: &str) -> Result<Option<StoredEvent>> {
+    tx.exec_first::<Row, _, _>(EVENT_BY_ID, (id,))
+        .await
+        .map_err(driver_error)?
+        .map(|row| decode_event(row).map(|event| event.stored))
+        .transpose()
+}
+
 pub(super) fn decode_event_columns(
     (seq, id, received_at, prev_hash, hash, payload): EventColumns,
 ) -> Result<EncodedEvent> {
@@ -216,6 +226,81 @@ async fn binding(tx: &mut Transaction<'_>, query: &str) -> Result<Binding> {
             payload_bytes,
         },
     })
+}
+
+fn read_snapshot_options() -> TxOpts {
+    let mut options = TxOpts::new();
+    options
+        .with_readonly(true)
+        .with_isolation_level(IsolationLevel::RepeatableRead);
+    options
+}
+
+async fn close_owned_connection(conn: Conn) -> Result<()> {
+    conn.disconnect()
+        .await
+        .map_err(driver_error)
+        .context("MySQL owned audit connection closure is uncertain")
+}
+
+async fn release_and_close_owned_connection(
+    mut conn: Conn,
+    ownership: OwnedAuditLock,
+) -> Result<()> {
+    let released = ownership.release(&mut conn).await;
+    close_owned_connection(conn).await?;
+    released
+}
+
+/// The verified head and its physical lock travel with the exact connection.
+/// The handle has no lease recovery or authority to write.
+struct RetainedOwnedAudit<'a> {
+    store: &'a MysqlAuditStore,
+    conn: Conn,
+    ownership: OwnedAuditLock,
+    head: AuditHead,
+    // Keep ordinary operations on this Store serialized through disconnect.
+    _confirmed: MutexGuard<'a, Confirmed>,
+}
+
+impl RetainedOwnedAudit<'_> {
+    async fn close_verified(mut self) -> Result<AuditHead> {
+        match self.confirm_retained_head().await {
+            Ok(checked) => {
+                release_and_close_owned_connection(self.conn, self.ownership).await?;
+                checked?;
+                Ok(self.head)
+            }
+            Err(error) => {
+                close_owned_connection(self.conn).await?;
+                Err(error)
+            }
+        }
+    }
+
+    /// Reconfirm the bound head in a new snapshot of the retained connection.
+    /// The chain itself was replayed when this handle was constructed.
+    /// The outer result confirms rollback before the inner check can be used.
+    async fn confirm_retained_head(&mut self) -> Result<Result<()>> {
+        let mut tx = self
+            .conn
+            .start_transaction(read_snapshot_options())
+            .await
+            .map_err(driver_error)?;
+        let checked = async {
+            self.ownership.verify(&mut tx).await?;
+            let bound = binding(&mut tx, STATE).await?;
+            self.store.verify_binding(&bound)?;
+            ensure!(
+                bound.head == self.head,
+                "MySQL owned audit head changed while the session was retained"
+            );
+            Ok(())
+        }
+        .await;
+        tx.rollback().await.map_err(driver_error)?;
+        Ok(checked)
+    }
 }
 
 async fn require_transactional_schema(tx: &mut Transaction<'_>) -> Result<()> {
@@ -346,10 +431,42 @@ impl VerifiedPrefix {
     }
 }
 
+/// The authenticated technical credential collides with a human or workload
+/// binding in the verified prefix of this very transaction. Nothing is written.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ControlGuardRefused(pub ControlCollision);
+
+impl fmt::Display for ControlGuardRefused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("control credential is ambiguous with another identity class")
+    }
+}
+impl std::error::Error for ControlGuardRefused {}
+
+tokio::task_local! {
+    static CONTROL_GUARD: [u8; 32];
+}
+
+/// Run one Store operation with the authenticated technical digest bound to
+/// its write transaction. The collision check runs against the same verified
+/// snapshot as the append, so a binding committed between an earlier presence
+/// read and this write cannot be missed. A projection that cannot be verified
+/// refuses the write.
+pub async fn with_control_guard<F: std::future::Future>(
+    digest: [u8; 32],
+    operation: F,
+) -> F::Output {
+    CONTROL_GUARD.scope(digest, operation).await
+}
+
 enum Mutation<'a> {
     Initialize,
     InitializeSupervised,
     Append(Event),
+    AppendBatch {
+        events: Vec<(Event, String)>,
+        receipts: &'a mut Vec<StoredEvent>,
+    },
     AppendControl {
         event: Event,
         retirement_resume: bool,
@@ -430,6 +547,33 @@ impl MysqlAuditStore {
         })
     }
 
+    pub fn tenant_id(&self) -> &str {
+        &self.tenant
+    }
+
+    pub fn redactor_union(&self, additional: &Redactor) -> Redactor {
+        self.redactor.union(additional)
+    }
+
+    pub fn redactor_covers(&self, additional: &Redactor) -> bool {
+        self.redactor.covers(additional)
+    }
+
+    /// Attach a masking union before the first connection. Only an unverified
+    /// instance can change its codec; a verified head is never rebound.
+    pub fn with_additional_redaction(mut self, additional: &Redactor) -> Result<Self> {
+        ensure!(
+            self.confirmed.get_mut().head.seq == 0,
+            "redaction cannot change after the audit prefix was verified"
+        );
+        self.redactor = self.redactor.union(additional);
+        Ok(self)
+    }
+
+    pub fn capacity_policy(&self) -> &AuditCapacityPolicyV1 {
+        &self.capacity_policy
+    }
+
     pub fn with_capacity_policy(mut self, policy: AuditCapacityPolicyV1) -> Result<Self> {
         policy.validate(self.max_events as u64)?;
         self.capacity_policy = policy;
@@ -439,6 +583,11 @@ impl MysqlAuditStore {
     /// Track only the configured runner and viewer digests, before verifying this Store.
     /// After verification, a candidate change requires a new Store.
     pub fn with_control_collision_candidates(mut self, digests: &[[u8; 32]]) -> Result<Self> {
+        self.set_control_collision_candidates(digests)?;
+        Ok(self)
+    }
+
+    pub(crate) fn set_control_collision_candidates(&mut self, digests: &[[u8; 32]]) -> Result<()> {
         ensure!(
             digests.len() <= MAX_CONTROL_COLLISION_CANDIDATES
                 && self.confirmed.get_mut().head.seq == 0,
@@ -448,7 +597,7 @@ impl MysqlAuditStore {
             .iter()
             .map(|digest| (hex::encode(digest), *digest))
             .collect();
-        Ok(self)
+        Ok(())
     }
 
     fn genesis_data(&self) -> Value {
@@ -473,6 +622,15 @@ impl MysqlAuditStore {
         Ok(connection)
     }
 
+    fn verify_binding(&self, bound: &Binding) -> Result<()> {
+        ensure!(
+            bound.tenant.as_deref() == Some(self.tenant.as_str())
+                && bound.namespace.as_deref() == Some(self.namespace.as_str()),
+            "MySQL audit binding mismatch"
+        );
+        Ok(())
+    }
+
     async fn verify_bound(
         &self,
         tx: &mut Transaction<'_>,
@@ -480,11 +638,7 @@ impl MysqlAuditStore {
         confirmed: &AuditHead,
         mut observer: Option<&mut ReadObserver<'_>>,
     ) -> Result<VerifiedPrefix> {
-        ensure!(
-            bound.tenant.as_deref() == Some(self.tenant.as_str())
-                && bound.namespace.as_deref() == Some(self.namespace.as_str()),
-            "MySQL audit binding mismatch"
-        );
+        self.verify_binding(&bound)?;
         let mut head = AuditHead::empty();
         let mut indexed = 0;
         let mut legacy_worker_events = 0;
@@ -727,6 +881,98 @@ impl MysqlAuditStore {
         let (prefix, _, _) = self.read_verified(None, None).await?;
         prefix.control_projections()?;
         Ok(prefix.head)
+    }
+
+    /// Closed operator preflight. The negotiated connection owns the lock
+    /// during verification and closes before a successful receipt is returned.
+    /// This produces no runtime authority and never updates the Store's cache.
+    pub async fn verify_owned_origin(
+        &self,
+        server: Uuid,
+        head_seq: i64,
+        head_hash: &str,
+    ) -> Result<AuditHead> {
+        ensure!(
+            !server.is_nil() && head_seq > 0,
+            "invalid MySQL owned audit expectation"
+        );
+        crate::control::hash(head_hash)?;
+        timeout_at(Instant::now() + DEADLINE, async {
+            self.retain_owned_origin(server, head_seq, head_hash)
+                .await?
+                .close_verified()
+                .await
+        })
+        .await
+        .map_err(|_| MysqlProbeError::TimedOut)?
+    }
+
+    async fn retain_owned_origin(
+        &self,
+        server: Uuid,
+        head_seq: i64,
+        head_hash: &str,
+    ) -> Result<RetainedOwnedAudit<'_>> {
+        let confirmed = self.confirmed.lock().await;
+        let mut conn = self.connect().await?;
+        let ownership = match OwnedAuditLock::acquire(&mut conn, server, &self.database).await {
+            Ok(ownership) => ownership,
+            Err(error) => {
+                close_owned_connection(conn).await?;
+                return Err(error);
+            }
+        };
+        let verified = self
+            .verify_owned_snapshot(&mut conn, &ownership, head_seq, head_hash, &confirmed.head)
+            .await;
+        match verified {
+            Ok(Ok(head)) => Ok(RetainedOwnedAudit {
+                store: self,
+                conn,
+                ownership,
+                head,
+                _confirmed: confirmed,
+            }),
+            Ok(Err(error)) => {
+                release_and_close_owned_connection(conn, ownership).await?;
+                Err(error)
+            }
+            Err(error) => {
+                close_owned_connection(conn).await?;
+                Err(error)
+            }
+        }
+    }
+
+    /// The outer result confirms rollback before the inner check can be used.
+    async fn verify_owned_snapshot(
+        &self,
+        conn: &mut Conn,
+        ownership: &OwnedAuditLock,
+        head_seq: i64,
+        head_hash: &str,
+        confirmed: &AuditHead,
+    ) -> Result<Result<AuditHead>> {
+        let mut tx = conn
+            .start_transaction(read_snapshot_options())
+            .await
+            .map_err(driver_error)?;
+        let verified = async {
+            ownership.verify(&mut tx).await?;
+            let bound = binding(&mut tx, STATE).await?;
+            require_transactional_schema(&mut tx).await?;
+            let prefix = self.verify_bound(&mut tx, bound, confirmed, None).await?;
+            prefix.control_projections()?;
+            ensure!(
+                prefix.head.seq == head_seq && prefix.head.hash == head_hash,
+                "MySQL owned audit head differs from the expected head"
+            );
+            ownership.verify(&mut tx).await?;
+            Ok(prefix.head)
+        }
+        .await;
+        tx.rollback().await.map_err(driver_error)?;
+        Ok(verified)
     }
 
     /// Report a row-level chain mismatch with the preceding checked prefix.
@@ -979,12 +1225,8 @@ impl MysqlAuditStore {
             let mut confirmed = self.confirmed.lock().await;
             let prior = confirmed.origin.take();
             let mut conn = self.connect().await?;
-            let mut options = TxOpts::new();
-            options
-                .with_readonly(true)
-                .with_isolation_level(IsolationLevel::RepeatableRead);
             let mut tx = conn
-                .start_transaction(options)
+                .start_transaction(read_snapshot_options())
                 .await
                 .map_err(driver_error)?;
             let bound = binding(&mut tx, STATE).await?;
@@ -1047,6 +1289,29 @@ impl MysqlAuditStore {
             .context("MySQL supervision genesis missing")
     }
 
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    /// Verified capabilities of this target. An operation is announced only
+    /// when its MySQL port, replay and export are all implemented; the
+    /// identity and workload projections are verified first. No operation of
+    /// the broker supervision contract is ported to MySQL yet, so the
+    /// answer is the empty set bound to the verified tenant and namespace.
+    pub async fn control_capabilities(&self) -> Result<crate::control::ControlCapabilitiesV1> {
+        self.verify_control_projections().await?;
+        let capabilities = crate::control::ControlCapabilitiesV1 {
+            version: 1,
+            role: "runner".into(),
+            tenant_id: self.tenant.clone(),
+            control_namespace_uuid: Some(self.namespace.clone()),
+            storage: crate::control::ControlStorageBackendV1::Mysql,
+            operations: Vec::new(),
+        };
+        capabilities.validate()?;
+        Ok(capabilities)
+    }
+
     pub async fn supervision_origin(&self) -> Result<MysqlSupervisionOrigin> {
         let (prefix, _, retained) = self.read_verified(None, None).await?;
         Ok(MysqlSupervisionOrigin {
@@ -1061,6 +1326,32 @@ impl MysqlAuditStore {
             .await?
             .0
             .context("MySQL audit receipt missing")
+    }
+
+    /// Append ordinary events in one verified transaction and acknowledge in
+    /// request order. Identical ids and payloads reuse their original receipt.
+    pub async fn append_batch(&self, events: Vec<Event>) -> Result<Vec<StoredEvent>> {
+        ensure!(
+            !events.is_empty() && events.len() <= MAX_EVENT_BATCH,
+            "event batch size is outside its bound"
+        );
+        let mut prepared = Vec::with_capacity(events.len());
+        for event in events {
+            decision::require_ordinary(&event.kind)?;
+            let (event, payload) = prepare_event(&self.redactor, event)
+                .map_err(|_| anyhow!("invalid MySQL audit event"))?;
+            decision::require_ordinary(&event.kind)?;
+            prepared.push((event, payload));
+        }
+        // The transaction fills this private collection. It is returned only
+        // after the common write path confirms COMMIT.
+        let mut receipts = Vec::with_capacity(prepared.len());
+        self.write(Mutation::AppendBatch {
+            events: prepared,
+            receipts: &mut receipts,
+        })
+        .await?;
+        Ok(receipts)
     }
 
     /// Trusted runner delivery. Callers must authenticate the runner before
@@ -1263,6 +1554,7 @@ impl MysqlAuditStore {
     async fn write(&self, operation: Mutation<'_>) -> Result<(Option<StoredEvent>, bool)> {
         let deadline = Instant::now() + DEADLINE;
         let initialize_supervised = matches!(&operation, Mutation::InitializeSupervised);
+        let batch = matches!(&operation, Mutation::AppendBatch { .. });
         let mut confirmed = timeout_at(deadline, self.confirmed.lock())
             .await
             .map_err(|_| MysqlProbeError::TimedOut)?;
@@ -1301,8 +1593,11 @@ impl MysqlAuditStore {
             Ok(Err(error)) => {
                 // Only a verified prefix can retain the witness. Restore it
                 // after a confirmed rollback, including a failed projection.
-                if let Ok(Ok(())) = timeout_at(deadline, tx.rollback()).await {
-                    confirmed.origin = origin;
+                match timeout_at(deadline, tx.rollback()).await {
+                    Ok(Ok(())) => confirmed.origin = origin,
+                    Ok(Err(rollback)) if batch => return Err(driver_error(rollback).into()),
+                    Err(_) if batch => return Err(MysqlProbeError::TimedOut.into()),
+                    _ => {}
                 }
                 return Err(error);
             }
@@ -1354,6 +1649,11 @@ impl MysqlAuditStore {
             .verify_bound_origin(tx, bound, prior, confirmed, None)
             .await?;
         *origin = retained;
+        if let Ok(digest) = CONTROL_GUARD.try_with(|digest| *digest) {
+            if let Some(collision) = prefix.control_credential_presence(&digest)? {
+                return Err(ControlGuardRefused(collision).into());
+            }
+        }
         let mut head = prefix.head;
         let (event, kind) = match operation {
             Mutation::Initialize => {
@@ -1370,6 +1670,39 @@ impl MysqlAuditStore {
             }
             Mutation::InitializeSupervised => return Err(ControlFailure::Conflict.into()),
             Mutation::Append(event) => (event, AppendKind::Ordinary),
+            Mutation::AppendBatch { events, receipts } => {
+                let initial_seq = head.seq;
+                for (event, payload) in events {
+                    let stored = if let Some(previous) = event_by_id(tx, &event.id).await? {
+                        ensure!(
+                            serde_json::to_string(&previous.event)? == payload,
+                            BatchConflict
+                        );
+                        previous
+                    } else {
+                        self.persist_event(
+                            tx,
+                            &mut head,
+                            event,
+                            payload,
+                            ReservedWrite::Ordinary,
+                            None,
+                        )
+                        .await?
+                    };
+                    receipts.push(stored);
+                }
+                let replayed = head.seq == initial_seq;
+                if !replayed {
+                    self.confirm_pending_head(tx, &head, confirmed, origin)
+                        .await?;
+                }
+                return Ok(PreparedWrite {
+                    stored: None,
+                    head,
+                    replayed,
+                });
+            }
             Mutation::AppendControl {
                 event,
                 retirement_resume,
@@ -1554,18 +1887,13 @@ impl MysqlAuditStore {
             AppendKind::IssueWorkload(_) => (None, ReservedWrite::Control),
             AppendKind::RevokeWorkload(_) => (None, ReservedWrite::IdentityMaintenance),
         };
-        if let Some(row) = tx
-            .exec_first::<Row, _, _>(EVENT_BY_ID, (&event.id,))
-            .await
-            .map_err(driver_error)?
-        {
-            let previous = decode_event(row)?;
+        if let Some(previous) = event_by_id(tx, &event.id).await? {
             ensure!(
-                serde_json::to_string(&previous.stored.event)? == payload,
+                serde_json::to_string(&previous.event)? == payload,
                 "event id conflict"
             );
             return Ok(PreparedWrite {
-                stored: Some(previous.stored),
+                stored: Some(previous),
                 head,
                 replayed: true,
             });
@@ -1593,6 +1921,22 @@ impl MysqlAuditStore {
             }
             _ => {}
         }
+        self.confirm_pending_head(tx, &head, confirmed, origin)
+            .await?;
+        Ok(PreparedWrite {
+            stored: Some(stored),
+            head,
+            replayed: false,
+        })
+    }
+
+    async fn confirm_pending_head(
+        &self,
+        tx: &mut Transaction<'_>,
+        head: &AuditHead,
+        confirmed: &AuditHead,
+        origin: &mut Option<supervision::Witness>,
+    ) -> Result<()> {
         tx.exec_drop(
             "UPDATE ai_guard_audit_state SET head_seq=?,head_hash=?,payload_bytes=? WHERE singleton=1",
             (head.seq, &head.hash, head.payload_bytes),
@@ -1605,15 +1949,11 @@ impl MysqlAuditStore {
             .verify_bound_origin(tx, persisted, prior, confirmed, None)
             .await?;
         ensure!(
-            durable.head == head,
+            &durable.head == head,
             "MySQL audit persistence differs from prepared event"
         );
         *origin = retained;
-        Ok(PreparedWrite {
-            stored: Some(stored),
-            head,
-            replayed: false,
-        })
+        Ok(())
     }
 
     async fn prepare_bootstrap(
