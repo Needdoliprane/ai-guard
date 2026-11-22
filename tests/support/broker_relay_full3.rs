@@ -1963,6 +1963,80 @@ impl Fixture {
         }
         Ok(())
     }
+    #[cfg(target_os = "macos")]
+    async fn shutdown_idle_broker(&mut self) -> Result<()> {
+        let broker_pid = self.live_broker_pid()?;
+        let pid = libc::pid_t::try_from(broker_pid)?;
+        let broker_endpoint = RetainedFixtureEndpoint::capture(Directory::open_existing(
+            &self.broker_root.join("broker"),
+        )?)?;
+        broker_endpoint.checked_peer().await?;
+        ensure!(
+            self.live_broker_pid()? == broker_pid,
+            "fixture broker owner changed"
+        );
+        // SAFETY: the fixture holds the exact broker Child and has not waited
+        // for it. Only its PID is signalled, never the descendant or a group.
+        ensure!(
+            unsafe { libc::kill(pid, libc::SIGINT) } == 0,
+            "idle broker Ctrl-C was refused"
+        );
+        let status = timeout(
+            Duration::from_secs(15),
+            self.broker
+                .as_mut()
+                .context("fixture broker owner")?
+                .child
+                .wait(),
+        )
+        .await
+        .context("idle broker drain did not finish")??;
+        ensure!(status.success(), "idle broker drain did not succeed");
+        broker_endpoint.assert_closed().await?;
+        self.broker = None;
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    pub async fn close_idle_fresh_by_service(mut self) -> Result<()> {
+        ensure!(
+            self.fresh_guardian.is_some(),
+            "missing Fresh guardian custody"
+        );
+        self.shutdown_idle_broker().await?;
+        let guardian = self
+            .fresh_guardian
+            .as_ref()
+            .context("missing Fresh guardian")?;
+        guardian.identity.wait_exit().await?;
+        guardian.endpoint.assert_closed().await?;
+
+        // The exact guardian's exit and endpoint closure are already observed.
+        self.fresh_guardian = None;
+        self.fresh_start_attempted = false;
+        self.close().await
+    }
+
+    #[cfg(target_os = "macos")]
+    pub async fn close_idle_existing_by_service(mut self) -> Result<()> {
+        ensure!(!self.fresh_start_attempted && self.selection == Role::FullA);
+        let role = Directory::open_existing(&self.broker_root.join(Role::FullA.name()))?;
+        let endpoint = RetainedFixtureEndpoint::capture(role)?;
+        endpoint.checked_peer().await?;
+        self.shutdown_idle_broker().await?;
+        endpoint.checked_peer().await?;
+        let (_, guardian) = self
+            .enforcers
+            .iter_mut()
+            .find(|(role, _)| *role == Role::FullA)
+            .context("missing pre-started guardian owner")?;
+        ensure!(
+            guardian.child.try_wait()?.is_none(),
+            "broker drained the pre-existing guardian"
+        );
+        self.close().await
+    }
+
     pub async fn close(self) -> Result<()> {
         self.close_inner(None::<fn(&Path)>).await.0
     }

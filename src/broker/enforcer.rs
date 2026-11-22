@@ -31,8 +31,8 @@ use std::{
 };
 use uuid::Uuid;
 
-pub(crate) use client::EnforcerFullClientV3;
 pub use client::{EnforcedSlot, EnforcerClient};
+pub(crate) use client::{EnforcerFullClientV3, FreshEnforcerOwner};
 pub(crate) use diagnostics::EnforcerStageFailure;
 pub(crate) use execution::ExecutionEnforcerV1;
 pub use recovery::{

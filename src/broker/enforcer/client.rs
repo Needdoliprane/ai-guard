@@ -19,7 +19,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{Child, Stdio},
     sync::{Weak, atomic::AtomicBool},
     time::Instant,
 };
@@ -126,6 +126,55 @@ pub(crate) struct EnforcerFullClientV3(EnforcerClient);
 impl fmt::Debug for EnforcerFullClientV3 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("EnforcerFullClientV3(<private explicit Full3>)")
+    }
+}
+
+/// Local custody from one Fresh launch. A reconnecting client has no Child
+/// and cannot request the service-level idle drain.
+pub(crate) struct FreshEnforcerOwner {
+    client: EnforcerFullClientV3,
+    process: SpawnedHelper,
+}
+
+impl FreshEnforcerOwner {
+    pub(crate) async fn shutdown_if_idle(&mut self) -> EnforcerResult<()> {
+        let child = self.process.0.as_mut().ok_or(EnforcerError::Unavailable)?;
+        let pid = child.id();
+        let reply = self
+            .client
+            .0
+            .0
+            .full_request_before_write(
+                self.client.full()?,
+                FullCommand::ShutdownIfIdle {},
+                IO_TIMEOUT,
+                Some(pid),
+                || {
+                    // This is a nonblocking wait check on the actual Child.
+                    // A disappeared or uncollectable child grants no send.
+                    match child.try_wait() {
+                        Ok(None) => Ok(()),
+                        _ => Err(EnforcerError::Unavailable),
+                    }
+                },
+            )
+            .await?;
+        match reply {
+            FullReply::Acknowledged {} => {}
+            FullReply::Error { code } => return Err(code),
+            _ => return Err(EnforcerError::Unauthorized),
+        }
+        let deadline = Instant::now() + IO_TIMEOUT;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) if status.success() => {
+                    self.process.0 = None;
+                    return Ok(());
+                }
+                Ok(None) if Instant::now() < deadline => tokio::time::sleep(POLL).await,
+                _ => return Err(EnforcerError::Unavailable),
+            }
+        }
     }
 }
 
@@ -326,16 +375,6 @@ impl EnforcerFullClientV3 {
         Ok(Self(client))
     }
 
-    pub(crate) async fn spawn_fresh(
-        parent: &Directory,
-        name: &str,
-        executable: &Path,
-        installation_id: Uuid,
-        max_slots: u32,
-    ) -> EnforcerResult<Self> {
-        Self::spawn_fresh_with_budget(parent, name, executable, installation_id, max_slots, 0).await
-    }
-
     pub(crate) async fn spawn_fresh_with_budget(
         parent: &Directory,
         name: &str,
@@ -343,7 +382,7 @@ impl EnforcerFullClientV3 {
         installation_id: Uuid,
         max_slots: u32,
         max_recovery_stop_owners: u32,
-    ) -> EnforcerResult<Self> {
+    ) -> EnforcerResult<(Self, FreshEnforcerOwner)> {
         if name.is_empty()
             || name.len() > 100
             || name == "."
@@ -365,7 +404,7 @@ impl EnforcerFullClientV3 {
         {
             return Err(EnforcerError::Conflict);
         }
-        spawn_helper_config(
+        let process = spawn_helper_process(
             parent,
             executable,
             max_slots,
@@ -382,7 +421,13 @@ impl EnforcerFullClientV3 {
                 .map_err(|_| EnforcerError::UnsafeFilesystem)?
             {
                 match Self::connect_existing(&root, max_slots).await {
-                    Ok(client) => return Ok(client),
+                    Ok(client) => {
+                        let owner = FreshEnforcerOwner {
+                            client: client.clone(),
+                            process,
+                        };
+                        return Ok((client, owner));
+                    }
                     Err(EnforcerError::Unavailable | EnforcerError::Unauthorized)
                         if Instant::now() < expires => {}
                     Err(error) => return Err(error),
@@ -800,6 +845,7 @@ impl EnforcerFullClientV3 {
                     audit_ack: owner.audit_ack().clone(),
                 },
                 REGISTER_TIMEOUT,
+                None,
                 before_write,
             )
             .await?;
@@ -1151,7 +1197,7 @@ impl Client {
         command: FullCommand,
         timeout: Duration,
     ) -> EnforcerResult<FullReply> {
-        self.full_request_before_write(full, command, timeout, || Ok(()))
+        self.full_request_before_write(full, command, timeout, None, || Ok(()))
             .await
     }
 
@@ -1160,12 +1206,18 @@ impl Client {
         full: &FullTransport,
         command: FullCommand,
         timeout: Duration,
+        expected_peer_pid: Option<u32>,
         before_write: F,
     ) -> EnforcerResult<FullReply>
     where
         F: FnOnce() -> EnforcerResult<()> + Send,
     {
         let mut stream = self.endpoint.connect_checked(&self.endpoint_root).await?;
+        if let Some(pid) = expected_peer_pid
+            && peer_pid(&stream) != Some(pid)
+        {
+            return Err(EnforcerError::Unauthorized);
+        }
         let binding = crate::broker::discovery::recovery_root_binding(&self.root, &self.endpoint)?;
         if binding != full.binding {
             return Err(EnforcerError::Unauthorized);
@@ -2797,6 +2849,15 @@ fn spawn_helper_config(
     max_slots: u32,
     mode: HelperMode<'_>,
 ) -> EnforcerResult<()> {
+    spawn_helper_process(root, executable, max_slots, mode)?.detach()
+}
+
+fn spawn_helper_process(
+    root: &Directory,
+    executable: &Path,
+    max_slots: u32,
+    mode: HelperMode<'_>,
+) -> EnforcerResult<SpawnedHelper> {
     use std::io::Write;
     use std::os::unix::process::CommandExt;
     let launch_nonce = match &mode {
@@ -2925,16 +2986,58 @@ fn spawn_helper_config(
     } else {
         Ok(())
     };
-    // Reap the owned helper when it eventually exits; dropping this handle must
-    // not kill it, and the reap thread owns no broker lease/credential FD.
-    std::thread::Builder::new()
-        .name("enforcer-reap".into())
-        .spawn(move || {
-            let _ = child.wait();
-        })
-        .map_err(|_| EnforcerError::Unavailable)?;
+    let process = SpawnedHelper(Some(child));
     bootstrap?;
-    Ok(())
+    Ok(process)
+}
+
+struct SpawnedHelper(Option<Child>);
+
+impl SpawnedHelper {
+    fn detach(&mut self) -> EnforcerResult<()> {
+        let Some(mut child) = self.0.take() else {
+            return Ok(());
+        };
+        // Reap when the helper exits. This thread carries no broker lease or
+        // credential FD, and relinquishing custody never signals the helper.
+        std::thread::Builder::new()
+            .name("enforcer-reap".into())
+            .spawn(move || {
+                let _ = child.wait();
+            })
+            .map_err(|_| EnforcerError::Unavailable)?;
+        Ok(())
+    }
+}
+
+impl Drop for SpawnedHelper {
+    fn drop(&mut self) {
+        let _ = self.detach();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn peer_pid(stream: &UnixStream) -> Option<u32> {
+    let mut pid: libc::pid_t = 0;
+    let expected_len = std::mem::size_of_val(&pid) as libc::socklen_t;
+    let mut len = expected_len;
+    // SAFETY: LOCAL_PEERPID fills one initialized pid_t for this Unix socket;
+    // both pointers are writable for the complete native object sizes.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            (&mut pid as *mut libc::pid_t).cast(),
+            &mut len,
+        )
+    };
+    (rc == 0 && len == expected_len && pid > 0).then_some(pid as u32)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn peer_pid(stream: &UnixStream) -> Option<u32> {
+    u32::try_from(stream.peer_cred().ok()?.pid()?).ok()
 }
 
 #[cfg(test)]

@@ -12,8 +12,8 @@ use crate::{
         clock::NativeHostClock,
         discovery::RoleLease,
         enforcer::{
-            CancelGeneration, EnforcerClient, EnforcerFullClientV3, EnforcerStopClient,
-            ExecutionEnforcerV1, RegistrationV1,
+            CancelGeneration, EnforcerClient, EnforcerError, EnforcerFullClientV3,
+            EnforcerStopClient, ExecutionEnforcerV1, FreshEnforcerOwner, RegistrationV1,
         },
         journal::{
             AcceptedJobV1, CancelStopProjectionV1, ControlSecrets, FsExclusions, Journal,
@@ -592,6 +592,7 @@ pub struct RetainedServiceShutdown {
     service: Arc<Service>,
     listener: PrivateListener,
     _lease: Arc<RoleLease>,
+    fresh_guardian: Option<FreshEnforcerOwner>,
     terminate: tokio::signal::unix::Signal,
     interrupt: tokio::signal::unix::Signal,
 }
@@ -613,7 +614,11 @@ impl RetainedServiceShutdown {
                     // Only exact, previously admitted Final continuations and
                     // their audit are eligible. No new Begin/starts are opened.
                     owner.service.reconcile_retirement_audit().await;
-                    if !owner.service.requires_retained_shutdown() { break; }
+                    // An unconfirmed Fresh drain keeps its original process
+                    // custody. A later audit ACK cannot certify its exit.
+                    if owner.fresh_guardian.is_none() && !owner.service.requires_retained_shutdown() {
+                        break;
+                    }
                 },
                 accepted = owner.listener.accept_checked() => {
                     match accepted {
@@ -637,7 +642,7 @@ impl RetainedServiceShutdown {
         // `owner` is still alive here. This is an explicit degraded process
         // shutdown, not an ACK, a successful drain or evidence of native join.
         Err(anyhow!(
-            "broker stopped with a degraded retirement shutdown; no safe drain is claimed"
+            "broker stopped with a degraded shutdown; no safe drain is claimed"
         ))
     }
 }
@@ -681,7 +686,7 @@ pub async fn serve_selected_owned(
     let executable =
         std::env::current_exe().map_err(|_| anyhow!("broker executable is unavailable"))?;
     let mut material = early_material.map(Arc::new);
-    let (enforcer, stop_enforcer) = match selection {
+    let (enforcer, stop_enforcer, mut fresh_guardian) = match selection {
         ServiceEnforcerSelectionV1::Legacy => {
             let client = EnforcerClient::connect_or_spawn_legacy_with_budget(
                 &root,
@@ -691,7 +696,7 @@ pub async fn serve_selected_owned(
                 registry.data.max_recovery_stop_owners,
             )
             .await?;
-            (Some(ExecutionEnforcerV1::Legacy(client)), None)
+            (Some(ExecutionEnforcerV1::Legacy(client)), None, None)
         }
         ServiceEnforcerSelectionV1::Recovery { role_name } => {
             let sealed = role_name.is_some();
@@ -715,7 +720,7 @@ pub async fn serve_selected_owned(
                 )
                 .await?
             };
-            (None, Some(stop))
+            (None, Some(stop), None)
         }
         ServiceEnforcerSelectionV1::Full3Fresh { role_name } => {
             if material.is_none() {
@@ -738,7 +743,7 @@ pub async fn serve_selected_owned(
                 verify_fresh_installation(&scan_root, &scan_registry, &scan_material)
             })
             .await??;
-            let client = EnforcerFullClientV3::spawn_fresh_with_budget(
+            let (client, owner) = EnforcerFullClientV3::spawn_fresh_with_budget(
                 &root,
                 &role_name,
                 &executable,
@@ -749,7 +754,7 @@ pub async fn serve_selected_owned(
             .await?;
             client.verify_installation(registry.data.installation_id)?;
             drop(reports);
-            (Some(ExecutionEnforcerV1::Full3(client)), None)
+            (Some(ExecutionEnforcerV1::Full3(client)), None, Some(owner))
         }
         ServiceEnforcerSelectionV1::Full3Existing { role_name } => {
             let role = root
@@ -769,7 +774,7 @@ pub async fn serve_selected_owned(
                 registry.data.max_recovery_stop_owners,
             )
             .await?;
-            (Some(ExecutionEnforcerV1::Full3(client)), Some(stop))
+            (Some(ExecutionEnforcerV1::Full3(client)), Some(stop), None)
         }
     };
     let material = if let Some(material) = material {
@@ -875,10 +880,10 @@ pub async fn serve_selected_owned(
     let reconciler = tokio::spawn(async move {
         reconciler_service.reconcile_loop().await;
     });
-    loop {
+    let operator_shutdown = loop {
         tokio::select! {
-            _ = terminate.recv() => break,
-            _ = interrupt.recv() => break,
+            _ = terminate.recv() => break true,
+            _ = interrupt.recv() => break true,
             Some(_) = requests.join_next(), if !requests.is_empty() => {},
             Some(result) = presence_tasks.join_next(), if !presence_tasks.is_empty() => {
                 if result.is_err() {
@@ -900,11 +905,11 @@ pub async fn serve_selected_owned(
                                 reply: BrokerReplyV1::Error { code: BrokerErrorCodeV1::Busy } }, FRAME_BYTES, WRITE_TIMEOUT).await;
                         }
                     },
-                    Err(_) => { service.fenced.store(true, Ordering::SeqCst); break; },
+                    Err(_) => { service.fenced.store(true, Ordering::SeqCst); break false; },
                 }
             }
         }
-    }
+    };
     let result = service
         .shutdown_owned(
             reconciler,
@@ -914,11 +919,28 @@ pub async fn serve_selected_owned(
             &presence_owners,
         )
         .await;
-    if service.requires_retained_shutdown() {
+    let retain_service = service.requires_retained_shutdown();
+    if operator_shutdown
+        && result.is_ok()
+        && !retain_service
+        && let Some(guardian) = fresh_guardian.as_mut()
+    {
+        match guardian.shutdown_if_idle().await {
+            Ok(()) => fresh_guardian = None,
+            Err(EnforcerError::NotIdle) => {
+                eprintln!("broker guardian is not idle; STOP and reconciliation remain available");
+            }
+            Err(_) => {
+                eprintln!("broker guardian shutdown is unconfirmed; reconciliation is required");
+            }
+        }
+    }
+    if retain_service || (operator_shutdown && fresh_guardian.is_some()) {
         return Ok(ServiceShutdown::Retained(RetainedServiceShutdown {
             service,
             listener,
             _lease: lease,
+            fresh_guardian,
             terminate,
             interrupt,
         }));

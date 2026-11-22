@@ -16,7 +16,7 @@ use agentsandbox::{
     model::StoredEvent,
 };
 use anyhow::{Context, Result, bail, ensure};
-use harness::{BIN, Fixture};
+use harness::{BIN, Fixture, Role};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{io, os::unix::process::ExitStatusExt, path::Path, process::Stdio, time::Duration};
@@ -479,6 +479,24 @@ fn broker_import_witness_requires_exact_pull_policy() -> Result<()> {
     harness::contradictory_create_flags_are_refused_before_fixture_mutation()?;
     println!("phase=fixture_create_grammar category=closed_no_pull");
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn broker_ctrl_c_drains_the_owned_idle_full3_guardian() -> Result<()> {
+    Fixture::new_fresh()
+        .await
+        .context("idle Full3 fixture did not start")?
+        .close_idle_fresh_by_service()
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn broker_ctrl_c_leaves_the_existing_full3_guardian_available() -> Result<()> {
+    Fixture::new(Role::FullA)
+        .await
+        .context("existing Full3 fixture did not start")?
+        .close_idle_existing_by_service()
+        .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

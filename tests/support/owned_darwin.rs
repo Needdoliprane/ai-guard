@@ -320,6 +320,10 @@ pub(super) struct DarwinIdentity {
 }
 
 impl DarwinIdentity {
+    pub(super) async fn wait_exit(&self) -> Result<()> {
+        self.exit.wait().await
+    }
+
     pub(super) fn capture(
         stream: &UnixStream,
         broker_pid: u32,
