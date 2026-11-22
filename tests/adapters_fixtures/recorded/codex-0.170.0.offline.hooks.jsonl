@@ -1,0 +1,2 @@
+{"session_id":"01a2006c-6ec3-7a23-8575-c42169e705de","transcript_path":null,"cwd":"/workspace","hook_event_name":"SessionStart","model":"gpt-6-luna","permission_mode":"bypassPermissions","source":"startup"}
+{"session_id":"01a2006c-6ec3-7a23-8575-c42169e705de","turn_id":"01a2006c-9726-77d2-a494-981bffff4352","transcript_path":null,"cwd":"/workspace","hook_event_name":"UserPromptSubmit","model":"gpt-6-luna","permission_mode":"bypassPermissions","prompt":"offline probe"}

@@ -1,14 +1,25 @@
-//! Bounded, read-only normalization of untrusted provider JSONL.
+//! Bounded, read-only normalization of untrusted provider JSONL and hooks.
+//!
+//! Every Claude Code and Codex record is a provider declaration (`declared`)
+//! collected through an official channel (`native` coverage). Context identity
+//! comes from the trusted caller, never from provider output. Nothing here
+//! executes provider content or enforces a decision.
 
 use chrono::{SecondsFormat, Utc};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
+mod claude;
+mod codex;
+mod hooks;
+
 /// Limits apply before parsing and during projection; no line is executed.
-pub const MAX_LINE_BYTES: usize = 64 * 1024;
+pub const MAX_LINE_BYTES: usize = 1024 * 1024;
 pub const MAX_EVENTS_PER_CAPTURE: usize = 500;
 const MAX_EVENTS_PER_LINE: usize = 32;
 const MAX_TEXT_BYTES: usize = 4096;
+/// Message, reasoning and prompt text, measured on its JSON-escaped form.
+pub const MAX_MESSAGE_BYTES: usize = 8 * 1024;
 const MAX_DATA_BYTES: usize = 12 * 1024;
 const MAX_DEPTH: usize = 8;
 const MAX_COLLECTION_ITEMS: usize = 32;
@@ -19,7 +30,10 @@ const USAGE_FIELDS: &[&str] = &[
     "cache_write_input_tokens",
     "cache_read_input_tokens",
     "cache_creation_input_tokens",
+    "reasoning_output_tokens",
 ];
+/// Data fields bounded by `bounded_message` before the generic projection.
+const MESSAGE_FIELDS: &[&str] = &["text", "prompt"];
 
 #[derive(Debug, Clone)]
 pub struct AdapterContext {
@@ -31,13 +45,39 @@ pub struct AdapterContext {
     pub trace_id: String,
 }
 
+/// Outcome class of one untrusted record, for loss and coverage accounting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordDisposition {
+    /// At least one event was produced.
+    Mapped,
+    /// A known record type that is deliberately not projected.
+    Ignored,
+    /// A JSON object whose type or required fields are not recognized.
+    Unrecognized,
+    /// Larger than `MAX_LINE_BYTES`; not parsed.
+    Oversized,
+    /// Not UTF-8 JSON, or not a JSON object.
+    Invalid,
+}
+
+pub struct NormalizedRecord {
+    pub events: Vec<Value>,
+    pub disposition: RecordDisposition,
+}
+
+/// Result of one provider mapping before the disposition is finalized.
+enum Mapping {
+    Events(Vec<Value>),
+    Ignored,
+    Unrecognized,
+}
+
 /// Parse one complete JSONL record without executing any provider content.
 ///
-/// All generated events are declared/observed. Context identity comes from the
-/// trusted caller, never from provider output. Unsupported and incomplete
-/// records return an empty vector. This is not an enforcement hook.
+/// Unsupported and incomplete records return an empty vector. This is not an
+/// enforcement hook.
 pub fn parse_line(provider: &str, line: &str, context: &AdapterContext) -> Vec<Value> {
-    normalize_line(provider, line, context, None)
+    normalize(provider, line, context, None).events
 }
 
 /// Mask decoded JSON values before bounded projections can split a secret.
@@ -47,7 +87,103 @@ pub fn parse_redacted_line(
     context: &AdapterContext,
     redactor: &crate::redaction::Redactor,
 ) -> Vec<Value> {
-    normalize_line(provider, line, context, Some(redactor))
+    normalize(provider, line, context, Some(redactor)).events
+}
+
+/// Normalize one stdout record (Claude stream-json, Codex exec --json or the
+/// generic contract), masked before projection, with its disposition.
+pub fn normalize_stdout_record(
+    provider: &str,
+    line: &str,
+    context: &AdapterContext,
+    redactor: &crate::redaction::Redactor,
+) -> NormalizedRecord {
+    normalize(provider, line, context, Some(redactor))
+}
+
+/// Normalize one official hook payload of `claude-code` or `codex`, masked
+/// before projection. Payloads up to `MAX_LINE_BYTES` are accepted; larger
+/// fields are bounded by the projection rather than dropping the record.
+pub fn normalize_hook_record(
+    client: &str,
+    payload: &str,
+    context: &AdapterContext,
+    redactor: &crate::redaction::Redactor,
+) -> NormalizedRecord {
+    let Some(client) = hooks::Client::parse(client) else {
+        return finish(Mapping::Unrecognized);
+    };
+    match decode(payload, Some(redactor)) {
+        Ok(record) => finish(hooks::record(client, &record, context)),
+        Err(disposition) => NormalizedRecord {
+            events: Vec::new(),
+            disposition,
+        },
+    }
+}
+
+fn decode(
+    input: &str,
+    redactor: Option<&crate::redaction::Redactor>,
+) -> Result<Value, RecordDisposition> {
+    if input.len() > MAX_LINE_BYTES {
+        return Err(RecordDisposition::Oversized);
+    }
+    let record = serde_json::from_str::<Value>(input).map_err(|_| RecordDisposition::Invalid)?;
+    if !record.is_object() {
+        return Err(RecordDisposition::Invalid);
+    }
+    Ok(match redactor {
+        Some(redactor) => redactor.value(&record),
+        None => record,
+    })
+}
+
+fn finish(mapping: Mapping) -> NormalizedRecord {
+    match mapping {
+        Mapping::Events(events) if !events.is_empty() => NormalizedRecord {
+            events,
+            disposition: RecordDisposition::Mapped,
+        },
+        Mapping::Events(_) | Mapping::Ignored => NormalizedRecord {
+            events: Vec::new(),
+            disposition: RecordDisposition::Ignored,
+        },
+        Mapping::Unrecognized => NormalizedRecord {
+            events: Vec::new(),
+            disposition: RecordDisposition::Unrecognized,
+        },
+    }
+}
+
+fn normalize(
+    provider: &str,
+    line: &str,
+    context: &AdapterContext,
+    redactor: Option<&crate::redaction::Redactor>,
+) -> NormalizedRecord {
+    let record = match decode(line, redactor) {
+        Ok(record) => record,
+        Err(disposition) => {
+            return NormalizedRecord {
+                events: Vec::new(),
+                disposition,
+            };
+        }
+    };
+    finish(match provider {
+        "codex" => codex::record(&record, context),
+        "claude" | "claude-code" => claude::record(&record, context),
+        "generic" => {
+            let events = generic(&record, context);
+            if events.is_empty() {
+                Mapping::Unrecognized
+            } else {
+                Mapping::Events(events)
+            }
+        }
+        _ => Mapping::Unrecognized,
+    })
 }
 
 pub struct NormalizedCapture {
@@ -85,33 +221,6 @@ pub fn parse_redacted_capture(
     }
 }
 
-fn normalize_line(
-    provider: &str,
-    line: &str,
-    context: &AdapterContext,
-    redactor: Option<&crate::redaction::Redactor>,
-) -> Vec<Value> {
-    if line.len() > MAX_LINE_BYTES {
-        return Vec::new();
-    }
-    let Ok(record) = serde_json::from_str::<Value>(line) else {
-        return Vec::new();
-    };
-    if !record.is_object() {
-        return Vec::new();
-    }
-    let record = match redactor {
-        Some(redactor) => redactor.value(&record),
-        None => record,
-    };
-    match provider {
-        "codex" => codex(&record, context),
-        "claude" | "claude-code" => claude(&record, context),
-        "generic" => generic(&record, context),
-        _ => Vec::new(),
-    }
-}
-
 fn text(value: &Value, field: &str) -> Option<String> {
     value
         .get(field)?
@@ -132,7 +241,28 @@ fn bounded_text(input: &str) -> String {
     format!("{}{}", &input[..end], SUFFIX)
 }
 
+/// Bound visible text on its JSON-escaped size and report truncation.
+fn bounded_message(input: &str) -> (String, bool) {
+    let mut used = 2;
+    for (index, ch) in input.char_indices() {
+        let escaped = match ch {
+            '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+            ch if (ch as u32) < 0x20 => 6,
+            ch => ch.len_utf8(),
+        };
+        if used + escaped > MAX_MESSAGE_BYTES {
+            return (input[..index].to_owned(), true);
+        }
+        used += escaped;
+    }
+    (input.to_owned(), false)
+}
+
 fn bounded_value(value: &Value) -> Value {
+    bounded_value_within(value, MAX_DATA_BYTES)
+}
+
+fn bounded_value_within(value: &Value, limit: usize) -> Value {
     fn project(value: &Value, depth: usize, budget: &mut usize) -> Value {
         if depth >= MAX_DEPTH || *budget < 4 {
             return Value::Null;
@@ -180,7 +310,7 @@ fn bounded_value(value: &Value) -> Value {
             }
         }
     }
-    let mut budget = MAX_DATA_BYTES;
+    let mut budget = limit;
     let mut result = project(value, 0, &mut budget);
     if &result != value
         && let Value::Object(fields) = &mut result
@@ -189,20 +319,26 @@ fn bounded_value(value: &Value) -> Value {
     }
     // JSON escaping can expand control characters to six bytes. Check the
     // serialized form as well as the projection's allocation budget.
-    if result.to_string().len() > MAX_DATA_BYTES {
+    if result.to_string().len() > limit {
         return json!({"adapter_payload_truncated":true});
     }
     result
 }
 
-fn event(provider: &str, kind: &str, data: Value, context: &AdapterContext) -> Value {
+fn envelope(
+    provider: &str,
+    kind: &str,
+    coverage: &str,
+    data: Value,
+    context: &AdapterContext,
+) -> Value {
     json!({
         "id": Uuid::new_v4().to_string(),
         "timestamp": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         "kind": kind,
         "source": format!("{provider}-adapter"),
         "provenance": "declared",
-        "coverage": "observed",
+        "coverage": coverage,
         "session_id": context.session_id,
         "project_id": context.project_id,
         "sandbox_id": context.sandbox_id,
@@ -213,8 +349,36 @@ fn event(provider: &str, kind: &str, data: Value, context: &AdapterContext) -> V
         "command": null,
         "decision": null,
         "result": null,
-        "data": bounded_value(&data),
+        "data": data,
     })
+}
+
+/// Generic contract events: integration level `observed`, as before.
+fn event(provider: &str, kind: &str, data: Value, context: &AdapterContext) -> Value {
+    envelope(provider, kind, "observed", bounded_value(&data), context)
+}
+
+/// Official Claude Code / Codex channel events: `native` coverage. Message
+/// fields were bounded by `bounded_message`; the rest shares the data budget.
+fn native_event(provider: &str, kind: &str, data: Value, context: &AdapterContext) -> Value {
+    let mut data = data;
+    let mut kept = Map::new();
+    if let Some(fields) = data.as_object_mut() {
+        for key in MESSAGE_FIELDS {
+            if let Some(value) = fields.remove(*key).filter(Value::is_string) {
+                kept.insert((*key).to_owned(), value);
+            }
+        }
+    }
+    let reserved: usize = kept
+        .iter()
+        .map(|(key, value)| key.len() + value.to_string().len() + 4)
+        .sum();
+    let mut data = bounded_value_within(&data, MAX_DATA_BYTES.saturating_sub(reserved).max(256));
+    if let Some(fields) = data.as_object_mut() {
+        fields.extend(kept);
+    }
+    envelope(provider, kind, "native", data, context)
 }
 
 fn usage(value: &Value) -> Option<Value> {
@@ -225,246 +389,6 @@ fn usage(value: &Value) -> Option<Value> {
         }
     }
     (!result.is_empty()).then_some(Value::Object(result))
-}
-
-fn codex(record: &Value, context: &AdapterContext) -> Vec<Value> {
-    match record.get("type").and_then(Value::as_str) {
-        Some("thread.started") => {
-            let Some(id) = text(record, "thread_id") else {
-                return Vec::new();
-            };
-            vec![event(
-                "codex",
-                "session.declared",
-                json!({"state":"started", "provider_session_id":id}),
-                context,
-            )]
-        }
-        Some("turn.started") => vec![event(
-            "codex",
-            "session.declared",
-            json!({"state":"turn.started"}),
-            context,
-        )],
-        Some("turn.completed") => {
-            let mut events = vec![event(
-                "codex",
-                "session.declared",
-                json!({"state":"turn.completed"}),
-                context,
-            )];
-            if let Some(counts) = record.get("usage").and_then(usage) {
-                events.push(event(
-                    "codex",
-                    "usage.reported",
-                    json!({"usage":counts,"scope":"provider-turn"}),
-                    context,
-                ));
-            }
-            events
-        }
-        Some("turn.failed") => vec![event(
-            "codex",
-            "session.declared",
-            json!({"state":"turn.failed","error":record.get("error").and_then(|v|text(v,"message"))}),
-            context,
-        )],
-        Some("error") => {
-            let Some(message) = text(record, "message") else {
-                return Vec::new();
-            };
-            vec![event(
-                "codex",
-                "session.declared",
-                json!({"state":"error","error":message}),
-                context,
-            )]
-        }
-        Some("item.started" | "item.completed") => codex_item(record, context),
-        _ => Vec::new(),
-    }
-}
-
-fn codex_item(record: &Value, context: &AdapterContext) -> Vec<Value> {
-    let Some(item) = record.get("item").filter(|v| v.is_object()) else {
-        return Vec::new();
-    };
-    let Some(id) = text(item, "id") else {
-        return Vec::new();
-    };
-    let completed = record["type"] == "item.completed";
-    match item.get("type").and_then(Value::as_str) {
-        Some("command_execution") => {
-            let Some(command) = text(item, "command") else {
-                return Vec::new();
-            };
-            let status = item.get("status").and_then(Value::as_str);
-            if !matches!(status, Some("in_progress" | "completed" | "failed")) {
-                return Vec::new();
-            }
-            let mut normalized = event(
-                "codex",
-                if completed {
-                    "tool.result"
-                } else {
-                    "tool.requested"
-                },
-                json!({
-                    "provider_item_id":id, "tool_name":"command_execution", "command_text":command, "reported_status":status
-                }),
-                context,
-            );
-            if completed {
-                let mut result = Map::new();
-                if let Some(exit) = item.get("exit_code").and_then(Value::as_i64) {
-                    result.insert("exit_code".into(), json!(exit));
-                }
-                if let Some(output) = item.get("aggregated_output").and_then(Value::as_str) {
-                    result.insert("output".into(), json!(bounded_text(output)));
-                }
-                normalized["result"] = Value::Object(result);
-            }
-            vec![normalized]
-        }
-        Some("file_change") if completed => {
-            let Some(changes) = item.get("changes").and_then(Value::as_array) else {
-                return Vec::new();
-            };
-            let selected: Vec<_> = changes
-                .iter()
-                .filter_map(|change| {
-                    let path = text(change, "path")?;
-                    let kind = change.get("kind")?.as_str()?;
-                    matches!(kind, "add" | "update" | "delete")
-                        .then(|| json!({"path":path,"kind":kind}))
-                })
-                .take(MAX_COLLECTION_ITEMS)
-                .collect();
-            if selected.is_empty() {
-                return Vec::new();
-            }
-            vec![event(
-                "codex",
-                "file.declared",
-                json!({"provider_item_id":id,"changes":selected,"reported_status":text(item,"status")}),
-                context,
-            )]
-        }
-        _ => Vec::new(),
-    }
-}
-
-fn claude_metadata(record: &Value) -> Value {
-    let mut data = Map::new();
-    for (input, output) in [
-        ("session_id", "provider_session_id"),
-        ("parent_tool_use_id", "provider_parent_tool_use_id"),
-    ] {
-        if let Some(value) = text(record, input) {
-            data.insert(output.into(), json!(value));
-        }
-    }
-    if let Some(message) = record.get("message")
-        && let Some(id) = text(message, "id")
-    {
-        data.insert("provider_message_id".into(), json!(id));
-    }
-    Value::Object(data)
-}
-
-fn claude(record: &Value, context: &AdapterContext) -> Vec<Value> {
-    match record.get("type").and_then(Value::as_str) {
-        Some("system") if record["subtype"] == "init" => {
-            let Some(session) = text(record, "session_id") else {
-                return Vec::new();
-            };
-            vec![event(
-                "claude",
-                "session.declared",
-                json!({"state":"started", "provider_session_id":session,"model":text(record,"model"),"declared_cwd":text(record,"cwd")}),
-                context,
-            )]
-        }
-        Some("assistant" | "user") => claude_blocks(record, context),
-        Some("result") => {
-            let Some(subtype) = text(record, "subtype") else {
-                return Vec::new();
-            };
-            let mut data = claude_metadata(record);
-            data["reported_status"] = json!(subtype);
-            if let Some(error) = record.get("is_error").and_then(Value::as_bool) {
-                data["is_error"] = json!(error);
-            }
-            for key in ["duration_ms", "num_turns"] {
-                if let Some(number) = record.get(key).and_then(Value::as_u64) {
-                    data[key] = json!(number);
-                }
-            }
-            let mut events = vec![event("claude", "session.declared", data, context)];
-            if let Some(counts) = record.get("usage").and_then(usage) {
-                let mut data = claude_metadata(record);
-                data["usage"] = counts;
-                data["scope"] = json!("provider-result");
-                events.push(event("claude", "usage.reported", data, context));
-            }
-            events
-        }
-        _ => Vec::new(),
-    }
-}
-
-fn claude_blocks(record: &Value, context: &AdapterContext) -> Vec<Value> {
-    let Some(blocks) = record
-        .get("message")
-        .and_then(|m| m.get("content"))
-        .and_then(Value::as_array)
-    else {
-        return Vec::new();
-    };
-    let mut events = Vec::new();
-    for block in blocks {
-        if events.len() == MAX_EVENTS_PER_LINE {
-            break;
-        }
-        match block.get("type").and_then(Value::as_str) {
-            Some("tool_use") if record["type"] == "assistant" => {
-                let (Some(id), Some(name), Some(input)) = (
-                    text(block, "id"),
-                    text(block, "name"),
-                    block.get("input").filter(|v| v.is_object()),
-                ) else {
-                    continue;
-                };
-                let mut data = claude_metadata(record);
-                data["provider_tool_use_id"] = json!(id);
-                data["tool_name"] = json!(name);
-                data["input"] = bounded_value(input);
-                if let Some(command) = text(input, "command") {
-                    data["command_text"] = json!(command);
-                }
-                events.push(event("claude", "tool.requested", data, context));
-            }
-            Some("tool_result") if record["type"] == "user" => {
-                let Some(id) = text(block, "tool_use_id") else {
-                    continue;
-                };
-                let mut data = claude_metadata(record);
-                data["provider_tool_use_id"] = json!(id);
-                let mut normalized = event("claude", "tool.result", data, context);
-                let mut result = Map::new();
-                if let Some(output) = block.get("content") {
-                    result.insert("content".into(), bounded_value(output));
-                }
-                if let Some(error) = block.get("is_error").and_then(Value::as_bool) {
-                    result.insert("is_error".into(), json!(error));
-                }
-                normalized["result"] = Value::Object(result);
-                events.push(normalized);
-            }
-            _ => {}
-        }
-    }
-    events
 }
 
 fn explicit_command(value: &Value) -> Option<Value> {
@@ -582,6 +506,7 @@ mod tests {
             kinds,
             [
                 "session.declared",
+                "agent.declared",
                 "tool.requested",
                 "tool.result",
                 "file.declared",
@@ -589,13 +514,13 @@ mod tests {
                 "usage.reported"
             ]
         );
-        assert_eq!(events[2]["result"]["exit_code"], 0);
-        assert_eq!(events[3]["data"]["changes"][0]["path"], "src/main.rs");
-        assert_eq!(events[5]["data"]["usage"]["input_tokens"], 100);
+        assert_eq!(events[3]["result"]["exit_code"], 0);
+        assert_eq!(events[4]["data"]["changes"][0]["path"], "src/main.rs");
+        assert_eq!(events[6]["data"]["usage"]["input_tokens"], 100);
         assert!(
             events
                 .iter()
-                .all(|e| e["provenance"] == "declared" && e["coverage"] == "observed")
+                .all(|e| e["provenance"] == "declared" && e["coverage"] == "native")
         );
     }
 
@@ -622,15 +547,16 @@ mod tests {
             kinds,
             [
                 "session.declared",
+                "agent.declared",
                 "tool.requested",
                 "tool.result",
                 "session.declared",
                 "usage.reported"
             ]
         );
-        assert_eq!(events[1]["data"]["tool_name"], "Bash");
-        assert_eq!(events[2]["data"]["provider_tool_use_id"], "toolu-test");
-        assert_eq!(events[4]["data"]["usage"]["output_tokens"], 42);
+        assert_eq!(events[2]["data"]["tool_name"], "Bash");
+        assert_eq!(events[3]["data"]["provider_tool_use_id"], "toolu-test");
+        assert_eq!(events[5]["data"]["usage"]["output_tokens"], 42);
         assert!(events.iter().all(|e| e["provenance"] == "declared"));
     }
 
@@ -767,10 +693,13 @@ mod tests {
     }
 
     #[test]
-    fn lines_over_64_kib_are_rejected_by_utf8_byte_size() {
-        let line = json!({"type":"thread.started","thread_id":"☕".repeat(23000)}).to_string();
-        assert!(line.len() > 64 * 1024);
+    fn lines_over_1_mib_are_rejected_by_utf8_byte_size() {
+        let line = json!({"type":"thread.started","thread_id":"☕".repeat(350_000)}).to_string();
+        assert!(line.len() > 1024 * 1024);
         assert!(parse_line("codex", &line, &context()).is_empty());
+        let bounded = json!({"type":"thread.started","thread_id":"☕".repeat(23000)}).to_string();
+        assert!(bounded.len() > 64 * 1024);
+        assert_eq!(parse_line("codex", &bounded, &context()).len(), 2);
     }
 
     #[test]
@@ -816,14 +745,18 @@ mod tests {
             "claude",
             json!({"type":"assistant","message":{"usage":{"input_tokens":10,"output_tokens":5},"content":[{"type":"text","text":"hello"}]}}),
         );
-        assert!(events.is_empty());
+        // The visible text is declared; its partial usage is never counted.
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["kind"], "message.declared");
+        assert!(events.iter().all(|e| e["kind"] != "usage.reported"));
     }
 
     #[test]
     fn each_normalized_record_gets_a_fresh_uuid_and_utc_reception_time() {
         let a = parse("codex", json!({"type":"thread.started","thread_id":"t"}));
         let b = parse("codex", json!({"type":"thread.started","thread_id":"t"}));
-        assert_eq!(a.len(), 1);
+        // The session declaration and its root agent declaration.
+        assert_eq!(a.len(), 2);
         assert_ne!(a[0]["id"], b[0]["id"]);
         assert!(uuid::Uuid::parse_str(a[0]["id"].as_str().unwrap()).is_ok());
         let timestamp = a[0]["timestamp"].as_str().unwrap();

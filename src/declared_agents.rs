@@ -13,7 +13,16 @@ const MAX_ID_BYTES: usize = 256;
 #[derive(Default)]
 pub struct DeclaredAgentProjection {
     agents: BTreeMap<String, DeclaredAgent>,
+    /// Declared delegation tool calls: (namespace key, tool_use id) -> the
+    /// provider agent that emitted the call (the root session when unnamed).
+    delegations: BTreeMap<(String, String), String>,
+    /// Declared child runs: stable child id -> the delegation tool_use id
+    /// that started it, from records carrying both identifiers.
+    child_delegation: BTreeMap<String, String>,
 }
+
+/// Sub-agent tool names whose declared runs carry `parent_tool_use_id`.
+const DELEGATION_TOOLS: &[&str] = &["Agent", "Task"];
 
 struct Namespace {
     session_id: String,
@@ -50,7 +59,11 @@ impl DeclaredAgentProjection {
     /// cannot manufacture a declared agent. Missing update fields retain their
     /// previous values; an explicit null parent clears the relationship.
     pub fn observe(&mut self, event: &Event) {
-        if event.kind != "agent.declared" || event.provenance != "declared" {
+        if event.provenance != "declared" {
+            return;
+        }
+        if event.kind != "agent.declared" {
+            self.observe_delegation_ids(event);
             return;
         }
         let Some(data) = event.data.as_object() else {
@@ -152,16 +165,82 @@ impl DeclaredAgentProjection {
         agent.last_activity = event.timestamp.clone();
     }
 
+    /// Record the exact identifiers that let a declared Claude sub-agent run
+    /// be joined to the declared delegation call that started it.
+    fn observe_delegation_ids(&mut self, event: &Event) {
+        let Some(data) = event.data.as_object() else {
+            return;
+        };
+        let (Some(session_id), Some(sandbox_id), Some(context_agent_id)) = (
+            event.session_id.as_deref().filter(|id| valid_id(id)),
+            event.sandbox_id.as_deref().filter(|id| valid_id(id)),
+            event.agent_id.as_deref().filter(|id| valid_id(id)),
+        ) else {
+            return;
+        };
+        if !valid_text(&event.source, 80) {
+            return;
+        }
+        let namespace = Namespace {
+            session_id: session_id.into(),
+            sandbox_id: sandbox_id.into(),
+            context_agent_id: context_agent_id.into(),
+            source: event.source.clone(),
+        };
+        let text = |key: &str| {
+            data.get(key)
+                .and_then(Value::as_str)
+                .filter(|id| valid_id(id))
+                .map(str::to_owned)
+        };
+        let emitter = text("provider_agent_id").or_else(|| text("provider_session_id"));
+        if event.kind == "delegation.declared"
+            && data
+                .get("delegation_tool")
+                .and_then(Value::as_str)
+                .is_some_and(|tool| DELEGATION_TOOLS.contains(&tool))
+            && let (Some(tool_use), Some(emitter)) = (text("provider_tool_use_id"), &emitter)
+        {
+            // The first declaration of a delegation id is retained.
+            self.delegations
+                .entry((stable_id(&namespace, ""), tool_use))
+                .or_insert_with(|| emitter.clone());
+        }
+        if let (Some(child), Some(parent_tool_use)) = (
+            text("provider_agent_id"),
+            text("provider_parent_tool_use_id"),
+        ) {
+            self.child_delegation
+                .entry(stable_id(&namespace, &child))
+                .or_insert(parent_tool_use);
+        }
+    }
+
     /// Resolve explicit parent IDs only after all declarations have arrived,
     /// allowing a child to be reported before its parent. Cycle edges are
     /// removed rather than exposed as a recursive tree to the frontend.
     pub fn finish(self) -> Vec<Value> {
         let mut parents = BTreeMap::new();
+        let mut inferred = BTreeSet::new();
         for (id, agent) in &self.agents {
             if let Some(parent) = &agent.provider_parent_agent_id {
                 let parent_id = stable_id(&agent.namespace, parent);
                 if self.agents.contains_key(&parent_id) {
                     parents.insert(id.clone(), parent_id);
+                }
+            } else if agent.parent_warning.is_none()
+                && let Some(tool_use) = self.child_delegation.get(id)
+                && let Some(emitter) = self
+                    .delegations
+                    .get(&(stable_id(&agent.namespace, ""), tool_use.clone()))
+            {
+                // Exact-id join of two declarations: the child run's
+                // parent_tool_use_id names a delegation call declared by the
+                // emitter. The link is inferred, never declared or observed.
+                let parent_id = stable_id(&agent.namespace, emitter);
+                if &parent_id != id && self.agents.contains_key(&parent_id) {
+                    parents.insert(id.clone(), parent_id);
+                    inferred.insert(id.clone());
                 }
             }
         }
@@ -171,6 +250,13 @@ impl DeclaredAgentProjection {
             .map(|(id, agent)| {
                 let is_cycle = cycles.contains(&id);
                 let parent_id = parents.get(&id).filter(|_| !is_cycle);
+                let parent_link = parent_id.map(|_| {
+                    if inferred.contains(&id) {
+                        "inferred"
+                    } else {
+                        "declared"
+                    }
+                });
                 let unresolved = agent
                     .provider_parent_agent_id
                     .as_ref()
@@ -185,6 +271,7 @@ impl DeclaredAgentProjection {
                 json!({
                     "id": id,
                     "parent_id": parent_id,
+                    "parent_link": parent_link,
                     "project_id": agent.project_id,
                     "session_id": agent.namespace.session_id,
                     "sandbox_id": agent.namespace.sandbox_id,
@@ -210,7 +297,7 @@ impl DeclaredAgentProjection {
                         "model": "declared",
                         "task": "declared",
                         "status": "declared",
-                        "parent_id": "declared",
+                        "parent_id": parent_link.unwrap_or("declared"),
                         "provider_agent_id": "declared",
                         "provider_parent_agent_id": "declared",
                         "started_at": "declared",

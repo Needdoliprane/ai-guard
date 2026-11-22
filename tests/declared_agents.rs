@@ -265,3 +265,91 @@ fn removing_cycle_edges_preserves_noncyclic_descendants() {
     assert!(node(&items, "a")["parent_id"].is_null());
     assert!(node(&items, "b")["parent_id"].is_null());
 }
+
+fn provider_events(fixtures: &[(&str, bool, &str)]) -> Vec<Event> {
+    let context = AdapterContext {
+        session_id: "session".into(),
+        project_id: "project".into(),
+        sandbox_id: "sandbox".into(),
+        agent_id: "runner-agent".into(),
+        correlation_id: "correlation".into(),
+        trace_id: "trace".into(),
+    };
+    let redactor = agentsandbox::redaction::Redactor::new(vec![]);
+    let mut events = Vec::new();
+    for (client, hooks, fixture) in fixtures {
+        for line in fixture.lines() {
+            let record = if *hooks {
+                agentsandbox::adapters::normalize_hook_record(client, line, &context, &redactor)
+            } else {
+                agentsandbox::adapters::normalize_stdout_record(client, line, &context, &redactor)
+            };
+            for value in record.events {
+                events.push(serde_json::from_value(value).unwrap());
+            }
+        }
+    }
+    events
+}
+
+#[test]
+fn claude_sub_agents_link_to_their_delegating_agent_by_an_inferred_exact_id_join() {
+    let events = provider_events(&[
+        (
+            "claude-code",
+            false,
+            include_str!("adapters_fixtures/claude-code.stream.jsonl"),
+        ),
+        (
+            "claude-code",
+            true,
+            include_str!("adapters_fixtures/claude-code.hooks.jsonl"),
+        ),
+    ]);
+    let items = project(&events);
+    let root = node(&items, "c0de0000-0000-4000-8000-0000000000c1");
+    let child = node(&items, "a1b2c3d4e5f60718");
+    assert!(root["parent_id"].is_null());
+    assert_eq!(child["parent_id"], root["id"]);
+    assert_eq!(child["parent_link"], "inferred");
+    assert_eq!(child["field_provenance"]["parent_id"], "inferred");
+    assert_eq!(child["provenance"], "declared");
+    assert_eq!(child["status"], "completed");
+}
+
+#[test]
+fn hooks_alone_never_invent_a_claude_parent() {
+    let events = provider_events(&[(
+        "claude-code",
+        true,
+        include_str!("adapters_fixtures/claude-code.hooks.jsonl"),
+    )]);
+    let items = project(&events);
+    let child = node(&items, "a1b2c3d4e5f60718");
+    assert!(child["parent_id"].is_null());
+    assert!(child["parent_link"].is_null());
+    assert!(child["parent_unresolved"].is_null());
+}
+
+#[test]
+fn codex_spawned_threads_keep_their_declared_parent() {
+    let events = provider_events(&[
+        (
+            "codex",
+            false,
+            include_str!("adapters_fixtures/codex.exec.jsonl"),
+        ),
+        (
+            "codex",
+            true,
+            include_str!("adapters_fixtures/codex.hooks.jsonl"),
+        ),
+    ]);
+    let items = project(&events);
+    let root = node(&items, "019a0000-0000-7000-8000-00000000a001");
+    let child = node(&items, "019a0000-0000-7000-8000-00000000a002");
+    assert_eq!(child["parent_id"], root["id"]);
+    assert_eq!(child["parent_link"], "declared");
+    // SubagentStop arrived after the spawn: the declared link is retained.
+    assert_eq!(child["status"], "completed");
+}
