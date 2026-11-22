@@ -2,7 +2,7 @@ name: G07 CleanupResult acknowledgement oracles
 
 on:
   push:
-    branches: ['claude/v1-g07-cleanup-ack-oracle-check-20261122']
+    branches: ['claude/v1-g07-cleanup-ack-oracle-check-r2-20261122']
 
 permissions:
   contents: read
@@ -55,11 +55,11 @@ jobs:
             source_status=PASS
           fi
           workflow_delta="$(git diff --name-only 75bdd7af33e40e60b9586e1a12cb2530225ee414 "$WORKFLOW_SHA")"
-          if [[ "$(git rev-parse "$WORKFLOW_SHA^")" == 75bdd7af33e40e60b9586e1a12cb2530225ee414 &&
+          if [[ "$(git rev-parse "$WORKFLOW_SHA^")" == 0443be0fe0fcaeaad6972484f89fe9b7bac6e92a &&
                 "$workflow_delta" == '.github/workflows/lot-verify.yaml' ]]; then
             lineage_status=PASS
           fi
-          printf 'source=%s\nworkflow_lineage=%s\nworkflow_parent=75bdd7af33e40e60b9586e1a12cb2530225ee414\n' \
+          printf 'source=%s\nworkflow_lineage=%s\nworkflow_parent=0443be0fe0fcaeaad6972484f89fe9b7bac6e92a\n' \
             "$source_status" "$lineage_status" >> "$receipt"
           cat "$receipt" >> "$GITHUB_STEP_SUMMARY"
           [[ "$source_status" == PASS && "$lineage_status" == PASS ]]
