@@ -992,7 +992,20 @@ impl FullState {
         if self.closed.load(Ordering::SeqCst) || self.owners.failed() {
             return Err(EnforcerError::Unhealthy);
         }
-        let coverage = self.ledger_io(false, |ledger| ledger.coverage()).await;
+        self.complete_ledger(false).await
+    }
+
+    pub(super) async fn revalidate_idle_ledger(self: &Arc<Self>) -> EnforcerResult<()> {
+        if !self.idle_admission_closed.load(Ordering::SeqCst) || self.owners.failed() {
+            return Err(EnforcerError::Unhealthy);
+        }
+        // The same ledger retains and revalidates its append-only prefix. A
+        // retirement may have finalized before the idle reservation won.
+        self.complete_ledger(true).await.map(|_| ())
+    }
+
+    async fn complete_ledger(self: &Arc<Self>, promised: bool) -> EnforcerResult<LedgerHeadV1> {
+        let coverage = self.ledger_io(promised, RetirementLedger::coverage).await;
         match coverage {
             Ok(LedgerCoverageV1::Complete { head, .. }) => Ok(head),
             Err(EnforcerError::Unavailable) => Err(EnforcerError::Unavailable),

@@ -715,6 +715,7 @@ impl RecoveryState {
                             .map_err(|_| EnforcerError::Unhealthy)?;
                         full.join_idle().await?;
                         owner.check_transport_v3().await?;
+                        full.revalidate_idle_ledger().await?;
                         attempt.release_joined_sealed_idle()
                     }
                     .await;

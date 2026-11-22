@@ -134,6 +134,21 @@ impl IdleStopFixture {
         }
     }
 
+    fn invalidate_ledger_pointer(&self) {
+        use std::io::Write;
+
+        let path = self.root.path().join("retirement/current.json");
+        let original_length = std::fs::metadata(&path).unwrap().len();
+        let mut pointer = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        pointer.write_all(b"\n").unwrap();
+        pointer.sync_all().unwrap();
+        drop(pointer);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), original_length + 1);
+    }
+
     fn restore_request(&self, suffix: &str) -> RestoreRequiredStopV1 {
         let registration = unavailable_registration(self.root.path(), suffix);
         let value = RestoreRequiredStopV1 {
@@ -297,6 +312,42 @@ async fn fresh_full3_idle_join_outlives_an_ipc_disconnect() {
 }
 
 #[tokio::test]
+async fn fresh_full3_idle_ack_requires_complete_ledger_after_joins() {
+    let mut fixture = IdleStopFixture::with_stop_budget(1);
+    let gate = Arc::new(IdleShutdownTestGate::default());
+    *fixture.state.idle_shutdown_test_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let attempt = fixture.state.recovery_attempt.as_ref().unwrap().clone();
+    let (mut closing, session) = fixture.authenticated(RequestedRole::Full).await;
+    let (reply, ()) = tokio::join!(
+        request_full(
+            &mut closing,
+            &session,
+            FullCommand::ShutdownIfIdle {},
+            REGISTER_TIMEOUT,
+        ),
+        async {
+            tokio::time::timeout(IO_TIMEOUT, gate.entered.notified())
+                .await
+                .unwrap();
+            fixture.invalidate_ledger_pointer();
+            gate.release.notify_one();
+        },
+    );
+    assert!(matches!(
+        reply.unwrap(),
+        FullReply::Error {
+            code: EnforcerError::Unhealthy
+        }
+    ));
+    assert!(attempt.known_idle_joined());
+    assert!(!fixture.state.shutdown_requested.load(Ordering::SeqCst));
+    // Teardown consumes the pin that the refused shutdown retained.
+    attempt.release_joined_sealed_idle().unwrap();
+    drop(closing);
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn authenticated_stop_cannot_reserve_new_actor_after_idle_close() {
     let mut fixture = IdleStopFixture::new();
 
@@ -390,7 +441,6 @@ async fn authenticated_stop_cannot_reserve_new_actor_after_idle_close() {
 #[tokio::test]
 async fn real_ledger_failure_preserves_authenticated_new_stop_recovery() {
     use crate::broker::enforcer::ledger::LedgerCoverageV1;
-    use std::io::Write;
 
     let mut fixture = IdleStopFixture::new();
     let full = fixture.state.full_owner().unwrap().unwrap();
@@ -399,19 +449,7 @@ async fn real_ledger_failure_preserves_authenticated_new_stop_recovery() {
     // This is the real current pointer created by this fixture's fresh ledger.
     // Change its retained file length, then exercise coverage through the real
     // Full dispatcher. No failure flag is assigned by the test.
-    let pointer_path = fixture.root.path().join("retirement/current.json");
-    let original_length = std::fs::metadata(&pointer_path).unwrap().len();
-    let mut pointer = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&pointer_path)
-        .unwrap();
-    pointer.write_all(b"\n").unwrap();
-    pointer.sync_all().unwrap();
-    drop(pointer);
-    assert_eq!(
-        std::fs::metadata(&pointer_path).unwrap().len(),
-        original_length + 1
-    );
+    fixture.invalidate_ledger_pointer();
     let full_reply = request_full(
         &mut full_stream,
         &full_session,
