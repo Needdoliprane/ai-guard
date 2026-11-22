@@ -219,6 +219,32 @@ enum TerminalWorkerRead {
     },
 }
 
+/// Only fixed labels and the closed worker state may leave the private fixture.
+#[derive(serde::Serialize)]
+pub(super) struct TerminalWorkerSample {
+    wait: &'static str,
+    store: &'static str,
+    state: Option<WorkerStateV1>,
+    quota_held: Option<bool>,
+    same_attempt: Option<bool>,
+    witness: &'static str,
+    store_receipt: &'static str,
+}
+
+impl Default for TerminalWorkerSample {
+    fn default() -> Self {
+        Self {
+            wait: "not_sampled",
+            store: "unknown",
+            state: None,
+            quota_held: None,
+            same_attempt: None,
+            witness: "unknown",
+            store_receipt: "not_checked",
+        }
+    }
+}
+
 pub struct Fixture {
     pub root: PathBuf,
     pub a: Arc<Store>,
@@ -787,10 +813,15 @@ impl Fixture {
         .await?
     }
 
-    pub(super) async fn wait_worker_a_terminal(&self, endpoint: &RelayEndpointV1) -> Result<()> {
-        // Keep the last reading inside the existing deadline and avoid a second Store read.
+    pub(super) async fn sample_worker_terminal(
+        &self,
+        store: &Store,
+        endpoint: &RelayEndpointV1,
+        sample: &mut TerminalWorkerSample,
+    ) -> Result<()> {
+        // Reuse the last worker-state reading from the existing wait.
         let mut last = TerminalWorkerRead::Unknown;
-        let result = runtime::wait_worker_terminal(&self.a, endpoint, |read| {
+        let result = runtime::wait_worker_terminal(store, endpoint, |read| {
             last = match read {
                 Ok(Some(worker)) => {
                     let same_attempt = worker.attempt.attempt_id == endpoint.attempt_id;
@@ -811,33 +842,31 @@ impl Fixture {
             };
         })
         .await;
-        if let Err(error) = &result {
-            let wait = if error.is::<tokio::time::error::Elapsed>() {
-                "timeout"
-            } else {
-                "read_failed"
-            };
-            match last {
-                TerminalWorkerRead::Present {
-                    state,
-                    quota_held,
-                    same_attempt,
-                    container_id,
-                } => {
-                    let witness = self.terminal_witness_state(container_id.as_deref());
-                    eprintln!(
-                        "g11_relay_terminal_a wait={wait} store=present state={state:?} quota_held={quota_held} same_attempt={same_attempt} witness={witness}"
-                    );
-                }
-                read => {
-                    let store = match read {
-                        TerminalWorkerRead::Absent => "absent",
-                        TerminalWorkerRead::Error => "error",
-                        _ => "unknown",
-                    };
-                    eprintln!("g11_relay_terminal_a wait={wait} store={store} witness=unknown");
+        sample.wait = match &result {
+            Ok(_) => "completed",
+            Err(error) if error.is::<tokio::time::error::Elapsed>() => "timeout",
+            Err(_) => "read_failed",
+        };
+        match last {
+            TerminalWorkerRead::Present {
+                state,
+                quota_held,
+                same_attempt,
+                container_id,
+            } => {
+                sample.store = "present";
+                sample.state = Some(state);
+                sample.quota_held = Some(quota_held);
+                sample.same_attempt = Some(same_attempt);
+                sample.witness = self.terminal_witness_state(container_id.as_deref());
+                if let Some(container_id) = container_id.as_deref() {
+                    // The receipt is an independent, later sample from the same fixture Store.
+                    sample.store_receipt = terminal_store_receipt(store, endpoint, container_id);
                 }
             }
+            TerminalWorkerRead::Absent => sample.store = "absent",
+            TerminalWorkerRead::Error => sample.store = "error",
+            TerminalWorkerRead::Unknown => {}
         }
         result.map(|_| ())
     }
@@ -1031,6 +1060,40 @@ impl Fixture {
         Ok(())
     }
 }
+
+fn terminal_store_receipt(
+    store: &Store,
+    endpoint: &RelayEndpointV1,
+    container_id: &str,
+) -> &'static str {
+    // There is one worker per fixture Store. A second row makes this sample ambiguous.
+    let Ok(allocations) = store.worker_usage_page(None, 2) else {
+        return "error";
+    };
+    let allocation = match allocations.as_slice() {
+        [] => return "absent",
+        [allocation]
+            if allocation.worker_id == endpoint.worker_id
+                && allocation.attempt_id == endpoint.attempt_id
+                && allocation.source.container_id.as_str() == container_id =>
+        {
+            allocation
+        }
+        _ => return "mismatch",
+    };
+    match store.worker_operation(&allocation.terminal_observation_id) {
+        Ok(Some(receipt))
+            if receipt.operation_id == allocation.terminal_observation_id
+                && receipt.worker_id.as_deref() == Some(endpoint.worker_id.as_str()) =>
+        {
+            "confirmed"
+        }
+        Ok(Some(_)) => "mismatch",
+        Ok(None) => "absent",
+        Err(_) => "error",
+    }
+}
+
 async fn close_admission_guardian(broker_root: &Path) -> Result<()> {
     let role = broker_root.join("enforcer");
     match std::fs::symlink_metadata(&role) {
