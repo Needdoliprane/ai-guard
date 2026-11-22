@@ -985,9 +985,15 @@ async fn ingest(
                 .map_err(|_| error(StatusCode::BAD_REQUEST, "Événement invalide."))?;
             if crate::audit::D5_CONTROL_EVENT_KINDS.contains(&event.kind.as_str())
                 || crate::relay::admission::reserved_kind(&event.kind)
-                || ["security.decision", "control", "worker", "usage.allocation", "egress"]
-                    .iter()
-                    .any(|namespace| crate::model::event_kind_in_namespace(&event.kind, namespace))
+                || [
+                    "security.decision",
+                    "control",
+                    "worker",
+                    "usage.allocation",
+                    "egress",
+                ]
+                .iter()
+                .any(|namespace| crate::model::event_kind_in_namespace(&event.kind, namespace))
             {
                 return Err(error(
                     StatusCode::FORBIDDEN,
