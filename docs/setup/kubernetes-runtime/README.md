@@ -744,8 +744,9 @@ before persistence/distribution and transport errors stay opaque.
 ## 13. G11 effect path: source state (not qualified)
 
 The G11 lot adds, in source, the pieces of the effect path below. **No session
-runs yet**: the broker driver, the worker protocol v3, the HTTP routes of the
-effect ledger and the MySQL port are still being delivered, and nothing here
+runs yet**: the broker driver and session run exist without their CLI entry,
+the private journal r3, the export composition and the MySQL port are still
+being delivered, and nothing here
 has run against a cluster. The [Docker Desktop recipe](../../../deploy/kubernetes/docker-desktop/README.md)
 holds the reviewed cluster objects.
 
@@ -758,6 +759,68 @@ holds the reviewed cluster objects.
 | Production effect permit (S5) | `src/runtime/kubernetes/session_permit.rs` | The only production implementor of the sealed guard. Built from one central `EmitOnce` acknowledgement; refuses another effect kind, request digest or authority, an elapsed central window and a raised cancellation, before any byte is sent; consumed by its single request. |
 | Session admission (R7) and R10 | `src/runtime/kubernetes/session_admission.rs` | Explicit per-tenant activation bound to one authority. Reads the tenant namespace and refuses, each with its own reason: Pod Security other than `restricted` at the pinned version, a NetworkPolicy set other than the single default-deny policy, a default ServiceAccount that may automount a token, a StorageClass that is not `Immediate` or not served by a registered CSIDriver, a missing session permission, or a forbidden permission (exec, logs, Secrets, update, binding, token, ephemeral containers, port-forward) not denied. `refuse_shared_authorities` refuses at configuration load two tenants that share an authority id, an endpoint and namespace, or a namespace UID. The admission is an observation of objects, never a proof that the CNI enforces the policy or that no other subject can attach. |
 | Central effect ledger (R1, Q7, settlement) | `src/control/kubernetes_session/effects.rs`, `src/audit/kubernetes_session/effects.rs` | A capability family enabled by the backed-up maintenance `enable_kubernetes_session_effects_v1` on a schema 11–13 store, without any format change. Each claim, result, terminal and settlement is one audited event with its projection rows. The Store re-derives every request digest it can, enforces the order claim → session Pod → release with an armed deadline → one attach → terminal → finalizer → export → claim delete, binds each claim UID to one reservation only, and releases the quota only after every created Pod has an observed end and no CREATE stays uncertain. A replay never returns a second `EmitOnce`. |
+| Broker driver (K4) | `src/runtime/kubernetes/session_driver.rs` | Composes each effect in one order: exact request, central claim, permit from the single `EmitOnce` acknowledgement, one send, recorded outcome. An `ObserveOnly` or replayed claim is never sent. An unproven answer is recorded `Uncertain`. A permit refused locally after a claim (cancellation, elapsed window) is recorded `NotSent`, so the step never stays open. The single attach claims a digest bound to identity one of the running container. A lost result answer is re-sent identically. The private journal write of each acknowledgement before its permit is not implemented yet. |
+| Broker session run (K4) | `src/runtime/kubernetes/session_run.rs` | Drives protocol v3 after the attach bracket: Handoff and archive, declared import, Start, business stdin, provider output to a sink (counted, never buffered), at most one Stop, declared exit. The declared end stays apart from the broker windows, a lost stream and the observed container end. Egress bytes are left to the G05 owner. |
+
+### Activate effectful sessions for a tenant
+
+Effects are activated per tenant by the optional `session_effect_policy` field
+of the tenant entry in `--tenants-file`, next to the three session policies of
+the [Kubernetes guide](../kubernetes/README.md#configure-session-reservation-v2-policies).
+Absent or `null`, no effect is granted except the cleanup (DELETE, finalizer
+release) of effects already issued, with a fixed 30 s claim window. Public
+fictional example:
+
+```json
+{
+  "session_effect_policy": {
+    "version": 1,
+    "claim_window_seconds": 30,
+    "storage": {
+      "version": 1,
+      "allowed_storage_classes": ["ai-guard-rwop"],
+      "max_capacity_mib": 4096
+    },
+    "authorities": [{
+      "version": 1,
+      "authority_id": "00000000-0000-4000-8000-000000000001",
+      "endpoint": "https://127.0.0.1:6443/",
+      "cluster_namespace_uid": "11111111-1111-4111-8111-111111111111",
+      "namespace": "ai-guard-tenant-a",
+      "namespace_uid": "22222222-2222-4222-8222-222222222222",
+      "trust_sha256": "<64-lowercase-hex-sha256-of-prepared-ca-bytes>"
+    }]
+  }
+}
+```
+
+Rules checked at startup, before any tenant database is opened:
+
+- `version` is 1.
+- `claim_window_seconds` is between 1 and 60. It is the validity of one `EmitOnce` claim, not a session deadline.
+- `storage` lists 1 to 8 distinct storage classes and a `max_capacity_mib` between 1 and 262144.
+- `authorities` holds 1 to 8 exact authority objects.
+- Two tenants that share an authority id, an endpoint and namespace, or a namespace UID are refused (R10). The same applies inside one policy.
+- Unknown fields are refused. Diagnostics report an invalid policy as `tenants[].session_effect_policy`.
+
+The policy is read only from trusted configuration, never from a request body.
+Every new effect claim also requires the exact reservation authority to be one
+of the activated authorities (R7).
+
+The broker routes are authenticated by the broker identity, like the other
+session routes:
+
+- `POST /brokers/kubernetes/session-reservations/{id}/effects` claims a step.
+- `GET` on the same path reads the effect state.
+- `POST .../effect-results` records an outcome: `applied`, `not_applied`, `uncertain` or `not_sent`.
+- `POST .../terminals` records an observed Pod end.
+- `POST .../settlements` releases the quota.
+
+`SessionProtocolV2.effects_available` reports whether the tenant has a policy.
+The capability is enabled per store by the backed-up maintenance
+`enable_kubernetes_session_effects_v1`. Its operator command lands with the
+session CLI; until then the effect routes answer HTTP 503
+`session_lifecycle_unavailable` on a store without the capability.
 
 Limits: Kubernetes sessions stay on store formats 11–13; in owned-source mode
 (formats 14 and 15) the session routes refuse before any effect. An uncertain

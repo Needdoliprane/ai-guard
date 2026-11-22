@@ -856,7 +856,9 @@ impl Store {
         let mut db = self.db.lock().map_err(|_| Failure::Unavailable)?;
         let tx = self.begin_checked(&mut db)?;
         require_schema(&tx)?;
-        permission(enabled(&tx)?)?;
+        if !enabled(&tx)? {
+            return Err(Failure::MigrationRequired.into());
+        }
         let clock = workload::capture_control_time(&tx)?;
         let (_, original) = replay::reservation(&tx, reservation_id, &self.tenant_id)?;
         authorization::current(

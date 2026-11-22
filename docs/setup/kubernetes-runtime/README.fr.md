@@ -804,9 +804,9 @@ refusés avant persistance/diffusion, les erreurs transport restent opaques.
 ## 13. Chemin d'effet G11 : état des sources (non qualifié)
 
 Le lot G11 ajoute, dans les sources, les éléments du chemin d'effet ci-dessous.
-**Aucune session ne tourne encore** : le pilote du broker, le protocole worker v3,
-les routes HTTP du registre d'effets et le portage MySQL sont en cours de
-livraison, et rien n'a été exécuté contre un cluster. La [recette Docker Desktop](../../../deploy/kubernetes/docker-desktop/README.fr.md)
+**Aucune session ne tourne encore** : le pilote du broker et l'exécution de
+session existent sans leur entrée CLI ; le journal privé r3, la composition de
+l'export et le portage MySQL sont en cours de livraison, et rien n'a été exécuté contre un cluster. La [recette Docker Desktop](../../../deploy/kubernetes/docker-desktop/README.fr.md)
 contient les objets de cluster revus.
 
 | Élément | Source | Ce qu'il fait et ne fait pas |
@@ -818,6 +818,68 @@ contient les objets de cluster revus.
 | Permis d'effet de production (S5) | `src/runtime/kubernetes/session_permit.rs` | Seule implémentation de production du garde scellé. Construit à partir d'un acquittement central `EmitOnce` ; refuse un autre type d'effet, une autre empreinte de requête ou une autre autorité, une fenêtre centrale écoulée et une annulation levée, avant tout octet envoyé ; consommé par son unique requête. |
 | Admission de session (R7) et R10 | `src/runtime/kubernetes/session_admission.rs` | Activation explicite par tenant, liée à une autorité. Lit le namespace du tenant et refuse, chacun avec son motif : un Pod Security autre que `restricted` à la version épinglée, un ensemble de NetworkPolicies autre que la seule politique de refus par défaut, un ServiceAccount `default` pouvant monter un jeton, une StorageClass qui n'est pas `Immediate` ou n'est pas servie par un CSIDriver enregistré, une permission de session manquante, ou une permission interdite (exec, logs, Secrets, update, binding, jeton, conteneurs éphémères, port-forward) non refusée. `refuse_shared_authorities` refuse au chargement de la configuration deux tenants qui partagent un identifiant d'autorité, un endpoint et un namespace, ou un UID de namespace. L'admission est une observation d'objets, jamais une preuve que la CNI applique la politique ou qu'aucun autre sujet ne peut s'attacher. |
 | Registre central des effets (R1, Q7, règlement) | `src/control/kubernetes_session/effects.rs`, `src/audit/kubernetes_session/effects.rs` | Famille de capacité activée par la maintenance sauvegardée `enable_kubernetes_session_effects_v1` sur un Store de schéma 11 à 13, sans changement de format. Chaque claim, résultat, terminal et règlement est un événement audité avec ses lignes de projection. Le Store recalcule toutes les empreintes de requête qu'il peut, impose l'ordre claim → Pod de session → libération avec échéance armée → un seul attachement → terminal → finalizer → export → suppression du claim, lie chaque UID de claim à une seule réservation, et ne libère le quota qu'une fois que chaque Pod créé a une fin observée et qu'aucun CREATE ne reste incertain. Un rejeu ne renvoie jamais un second `EmitOnce`. |
+| Pilote du broker (K4) | `src/runtime/kubernetes/session_driver.rs` | Compose chaque effet dans un ordre unique : requête exacte, claim central, permis issu de l'unique acquittement `EmitOnce`, un seul envoi, résultat enregistré. Un claim `ObserveOnly` ou rejoué n'est jamais envoyé. Une réponse non prouvée est enregistrée `Uncertain`. Un permis refusé localement après un claim (annulation, fenêtre écoulée) est enregistré `NotSent`, afin que l'étape ne reste jamais ouverte. L'attachement unique réclame une empreinte liée à l'identité un du conteneur en cours d'exécution. Une réponse de résultat perdue est renvoyée à l'identique. L'écriture de chaque acquittement dans le journal privé avant son permis n'est pas encore implémentée. |
+| Exécution de session côté broker (K4) | `src/runtime/kubernetes/session_run.rs` | Pilote le protocole v3 après l'encadrement de l'attachement : Handoff et archive, import déclaré, Start, stdin métier, sortie du fournisseur vers un récepteur (comptée, jamais mise en tampon), au plus un Stop, sortie déclarée. La fin déclarée reste distincte des fenêtres du broker, d'un flux perdu et de la fin observée du conteneur. Les octets d'egress sont laissés au propriétaire G05. |
+
+### Activer les sessions à effet pour un tenant
+
+Les effets s'activent par tenant avec le champ facultatif `session_effect_policy`
+de l'entrée tenant du `--tenants-file`, à côté des trois politiques de session
+du [guide Kubernetes](../kubernetes/README.fr.md#configurer-les-politiques-de-réservation-de-session-v2).
+Absente ou `null`, aucun effet n'est accordé, sauf le nettoyage (DELETE, retrait
+du finalizer) d'effets déjà émis, avec une fenêtre de claim fixe de 30 s.
+Exemple public fictif :
+
+```json
+{
+  "session_effect_policy": {
+    "version": 1,
+    "claim_window_seconds": 30,
+    "storage": {
+      "version": 1,
+      "allowed_storage_classes": ["ai-guard-rwop"],
+      "max_capacity_mib": 4096
+    },
+    "authorities": [{
+      "version": 1,
+      "authority_id": "00000000-0000-4000-8000-000000000001",
+      "endpoint": "https://127.0.0.1:6443/",
+      "cluster_namespace_uid": "11111111-1111-4111-8111-111111111111",
+      "namespace": "ai-guard-tenant-a",
+      "namespace_uid": "22222222-2222-4222-8222-222222222222",
+      "trust_sha256": "<sha256-hex-minuscule-64-des-octets-de-la-ca-préparée>"
+    }]
+  }
+}
+```
+
+Règles vérifiées au démarrage, avant l'ouverture de toute base de tenant :
+
+- `version` vaut 1.
+- `claim_window_seconds` est compris entre 1 et 60. C'est la validité d'un claim `EmitOnce`, pas une échéance de session.
+- `storage` liste 1 à 8 classes de stockage distinctes et un `max_capacity_mib` compris entre 1 et 262144.
+- `authorities` contient 1 à 8 objets d'autorité exacts.
+- Deux tenants qui partagent un identifiant d'autorité, un endpoint et un namespace, ou un UID de namespace sont refusés (R10). Il en va de même à l'intérieur d'une politique.
+- Les champs inconnus sont refusés. Le diagnostic signale une politique invalide sous `tenants[].session_effect_policy`.
+
+La politique n'est lue que depuis la configuration de confiance, jamais depuis
+un corps de requête. Chaque nouveau claim d'effet exige aussi que l'autorité
+exacte de la réservation fasse partie des autorités activées (R7).
+
+Les routes du broker sont authentifiées par l'identité broker, comme les autres
+routes de session :
+
+- `POST /brokers/kubernetes/session-reservations/{id}/effects` réclame une étape.
+- `GET` sur le même chemin lit l'état des effets.
+- `POST .../effect-results` enregistre un résultat : `applied`, `not_applied`, `uncertain` ou `not_sent`.
+- `POST .../terminals` enregistre une fin de Pod observée.
+- `POST .../settlements` libère le quota.
+
+`SessionProtocolV2.effects_available` indique si le tenant a une politique. La
+capacité s'active par Store avec la maintenance sauvegardée
+`enable_kubernetes_session_effects_v1`. Sa commande opérateur arrive avec la CLI
+de session ; d'ici là, les routes d'effet répondent HTTP 503
+`session_lifecycle_unavailable` sur un Store sans la capacité.
 
 Limites : les sessions Kubernetes restent sur les formats de Store 11 à 13 ; en
 mode sources détenues (formats 14 et 15), les routes de session refusent avant
