@@ -325,7 +325,12 @@ pub(super) fn bind(store: &Store, worker: &WorkerV1, token: &str) -> (String, u6
     (credential_id, receipt.revision)
 }
 pub(super) fn running_now(store: &Store) -> WorkerV1 {
-    let request = supervised_request(decision_admission(store));
+    running_from(store, decision_admission(store))
+}
+
+/// Drive a caller-built admission through the real typed transitions to Running.
+pub(super) fn running_from(store: &Store, admission: AdmissionV1) -> WorkerV1 {
+    let request = supervised_request(admission);
     let admitted = admit_supervised(store, &request);
     let mut worker = admitted.worker.unwrap();
     worker = store

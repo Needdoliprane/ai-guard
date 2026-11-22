@@ -36,6 +36,7 @@ pub(crate) fn digest(seq: i64, received: &str, prev: &str, payload: &str) -> Str
 pub(crate) fn require_ordinary_kind(kind: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
         !event_kind_in_namespace(kind, "control")
+            && !event_kind_in_namespace(kind, super::egress_decisions::NAMESPACE)
             && kind != RETIREMENT_RESUME_EVENT_KIND
             && !crate::relay::admission::reserved_kind(kind),
         "control events require typed mutation"
