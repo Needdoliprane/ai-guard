@@ -82,7 +82,8 @@ fn event(kind: &str, id: &IdV1, session: &str, worker: &str, data: Value) -> Eve
     event.id = id.as_str().into();
     event.source = "gateway".into();
     event.provenance = "observed".into();
-    event.coverage = "proxy_mediated".into();
+    // The journal observes the mediated channel without proving direct-attempt coverage.
+    event.coverage = "partial".into();
     event.session_id = Some(session.into());
     event.sandbox_id = Some(worker.into());
     event.data = data;

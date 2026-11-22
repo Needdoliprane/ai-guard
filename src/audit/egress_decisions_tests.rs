@@ -132,6 +132,8 @@ fn egress_store_allow_is_durable_bound_to_the_running_egress_worker_and_idempote
         .unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].event.kind, DECISION_KIND);
+    assert_eq!(events[0].event.provenance, "observed");
+    assert_eq!(events[0].event.coverage, "partial");
 }
 
 #[test]
