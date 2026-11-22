@@ -535,6 +535,7 @@ pub(super) fn reject_human_collision(
             "contact_operator",
         )
     };
+    #[cfg(feature = "mysql-storage")]
     let guard_failure = |response: (StatusCode, Json<Value>)| {
         if response.0 == StatusCode::TOO_MANY_REQUESTS {
             response
@@ -556,7 +557,7 @@ pub(super) fn reject_human_collision(
                 .with_store(tenant, store_io::Lane::Read, true, |store| {
                     store.workload_digest_binding(digest)
                 })
-                .map_err(guard_failure)?
+                .map_err(|_| unavailable_identity())?
         } else {
             tenant
                 .store
