@@ -893,9 +893,14 @@ vérifie la sauvegarde, ajoute un marqueur de genèse, conserve le format, affic
 un rapport JSON et refuse une seconde exécution. Sans elle, les routes d'effet
 répondent HTTP 503 `session_lifecycle_unavailable`.
 
-Limites : les sessions Kubernetes restent sur les formats de Store 11 à 13 ; en
-mode sources détenues (formats 14 et 15), les routes de session refusent avant
-tout effet. Un CREATE incertain garde le quota retenu jusqu'à ce qu'une reprise
+Limites : les sessions Kubernetes ne fonctionnent aujourd'hui que sur les
+formats de Store 11 à 13 ; en mode sources détenues (formats 14 et 15), les
+routes de session refusent avant tout effet. Le mainteneur a décidé le
+21 novembre 2026 que les Stores détenus doivent atteindre la même capacité.
+Cette parité est une cible, non livrée : elle exige une authentification broker
+détenue à chaque requête, une transaction de Store délimitée pour chaque entrée
+de session, le marqueur d'effets installé par la maintenance détenue en place
+et la décision d'egress détenue, chacun restant à implémenter et à relire. Un CREATE incertain garde le quota retenu jusqu'à ce qu'une reprise
 autorisée le résolve. Les tenants MySQL refusent la famille jusqu'à l'arrivée
 de son portage.
 

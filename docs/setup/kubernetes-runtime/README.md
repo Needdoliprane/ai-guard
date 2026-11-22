@@ -834,8 +834,13 @@ appends one genesis marker, keeps the format, prints a JSON report and refuses
 a second run. Without it, the effect routes answer HTTP 503
 `session_lifecycle_unavailable`.
 
-Limits: Kubernetes sessions stay on store formats 11–13; in owned-source mode
-(formats 14 and 15) the session routes refuse before any effect. An uncertain
+Limits: Kubernetes sessions currently run on store formats 11–13 only; in
+owned-source mode (formats 14 and 15) the session routes refuse before any
+effect. The maintainer decided on 21 November 2026 that owned stores must reach
+the same capability. That parity is a target, not delivered: it needs a
+per-request owned broker authentication, a scoped Store transaction for every
+session entry, the effect marker installed by the owned in-place maintenance
+and the owned egress decision, each still to implement and review. An uncertain
 CREATE keeps the quota held until an authorized recovery resolves it. MySQL
 tenants refuse the family until its port lands.
 
