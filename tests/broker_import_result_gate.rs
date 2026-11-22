@@ -37,6 +37,15 @@ const RELEASED_IMPORT_WAIT: Duration = Duration::from_secs(180);
 const PLAYBACK_WAIT: Duration = Duration::from_secs(600);
 const WORKER_WAIT: Duration = Duration::from_secs(300);
 
+fn diagnostic_phase(marker: &'static str) {
+    use std::io::Write;
+
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    let _ = writeln!(output, "{marker}");
+    let _ = output.flush();
+}
+
 fn broker_cli(fixture: &Fixture, action: &str, operation: Uuid) -> Command {
     let mut command = Command::new(BIN);
     command
@@ -263,6 +272,7 @@ async fn assert_held_sqlite(fixture: &Fixture, operation: Uuid) -> Result<Helper
             && counts.workers_created == 0,
         "phase=held_import category=unexpected_fixture_counts"
     );
+    diagnostic_phase("phase=arm stage=import_claim status=confirmed");
     println!("phase=held_import sqlite=Preparing counts={counts:?}");
     Ok(claim)
 }
@@ -291,6 +301,7 @@ async fn after_import_release(
         loop {
             let counts = fixture.import_counts().await;
             if counts.verification_created > 0 {
+                diagnostic_phase("phase=verification stage=helper_created status=confirmed");
                 break Ok(counts);
             }
             if let Some(diagnostic) = batch_failure(fixture)? {
@@ -374,6 +385,7 @@ async fn after_import_release(
         integrity.valid,
         "phase=released_import category=sqlite_audit_integrity"
     );
+    diagnostic_phase("phase=verification stage=import_receipts status=confirmed");
     println!("phase=released_import observation=Exited cleanup=Removed counts={counts:?}");
     Ok([observation_receipt, cleanup_receipt])
 }
@@ -414,6 +426,7 @@ async fn after_import_worker_terminal(
             && running.quota_held,
         "phase=worker category=unexpected_running_worker"
     );
+    diagnostic_phase("phase=arm stage=worker_running status=confirmed");
     println!("phase=worker state=Running quota_held=true");
     fixture
         .complete_running_worker(operation, &running.launch.session_id, container_id)
@@ -440,7 +453,10 @@ async fn after_import_worker_terminal(
                     "phase=result category=unexpected_result_identity"
                 );
                 match result.outcome {
-                    JobResultOutcomeV1::Terminal { result } => break Ok((worker, result)),
+                    JobResultOutcomeV1::Terminal { result } => {
+                        diagnostic_phase("phase=result stage=terminal_reply status=received");
+                        break Ok((worker, result));
+                    }
                     JobResultOutcomeV1::Pending => {}
                     _ => bail!("phase=result category=unexpected_result_outcome"),
                 }
@@ -479,6 +495,8 @@ async fn after_import_worker_terminal(
             && !terminal.output_captured,
         "phase=result category=unexpected_terminal_worker"
     );
+    diagnostic_phase("phase=result stage=worker_terminal status=confirmed");
+    diagnostic_phase("phase=scan stage=terminal_audit status=starting");
     verify_terminal_audit(fixture, &worker, &terminal)?;
     println!("phase=worker state=Terminal quota_held=false releases=1");
     println!("phase=result outcome=Terminal audit=Confirmed");
@@ -536,6 +554,7 @@ fn verify_terminal_audit(
             && cleaned["cleanup_removed"] == true,
         "phase=result category=audit_tuple_mismatch"
     );
+    diagnostic_phase("phase=scan stage=terminal_audit status=confirmed");
     let mut held = None;
     let mut release = None;
     for entry in events.iter().filter(|entry| {
@@ -634,7 +653,9 @@ struct Playback {
 
 async fn exercise(fixture: &Fixture, operation: Uuid) -> Result<Playback> {
     let source = fixture.root.join("sources");
+    diagnostic_phase("phase=import stage=gate status=installing");
     let mut gate = fixture.hold_import().await?;
+    diagnostic_phase("phase=import stage=gate status=installed");
     let held: Result<_> = async {
         let mut submit = broker_cli(fixture, "submit", operation);
         submit
@@ -655,16 +676,24 @@ async fn exercise(fixture: &Fixture, operation: Uuid) -> Result<Playback> {
             "phase=submit category=unrelated_acceptance"
         );
         println!("phase=submit cli=submit exit_code=0 category=Accepted");
+        diagnostic_phase("phase=import stage=submit status=accepted");
         gate.wait().await?;
+        diagnostic_phase("phase=import stage=gate status=reached");
         let claim = assert_held_sqlite(fixture, operation).await;
         let cli = assert_held_cli(fixture, operation).await;
+        if claim.is_ok() && cli.is_ok() {
+            diagnostic_phase("phase=import stage=held_projection status=confirmed");
+        }
         Ok((claim, cli))
     }
     .await;
+    diagnostic_phase("phase=import stage=release status=starting");
     let release = gate.release();
     let (claim, cli) = held?;
     release?;
+    diagnostic_phase("phase=import stage=release status=confirmed");
     let claim = claim?;
+    diagnostic_phase("phase=verification stage=helper_created status=waiting");
     let receipts = after_import_release(fixture, &claim).await?;
     Ok(Playback {
         cli,
@@ -682,7 +711,15 @@ fn broker_import_witness_requires_exact_pull_policy() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn broker_import_result_pending_then_acknowledged() -> Result<()> {
-    let fixture = Fixture::new_fresh().await?;
+    diagnostic_phase("phase=preflight stage=fresh_fixture status=starting");
+    let fixture = match Fixture::new_fresh().await {
+        Ok(fixture) => fixture,
+        Err(error) => {
+            diagnostic_phase("phase=preflight stage=fresh_fixture status=failed");
+            return Err(error);
+        }
+    };
+    diagnostic_phase("phase=preflight stage=fresh_fixture status=ready");
     let operation = Uuid::new_v4();
     let deadline = Instant::now() + PLAYBACK_WAIT;
     let result = timeout_at(deadline, exercise(&fixture, operation))
@@ -700,6 +737,7 @@ async fn broker_import_result_pending_then_acknowledged() -> Result<()> {
         _ => Ok(()),
     };
     let mut journal_ack = None;
+    diagnostic_phase("phase=closure stage=broker_stop status=starting");
     let (closed, witness_failures) = fixture
         .close_with_broker_stopped(|root| {
             if let Ok(playback) = &result {
@@ -716,6 +754,11 @@ async fn broker_import_result_pending_then_acknowledged() -> Result<()> {
             }
         })
         .await;
+    diagnostic_phase(if closed.is_ok() {
+        "phase=closure stage=fixture_children status=confirmed"
+    } else {
+        "phase=closure stage=fixture_children status=failed"
+    });
     println!(
         "phase=fixture_cleanup category={}",
         if closed.is_ok() {
