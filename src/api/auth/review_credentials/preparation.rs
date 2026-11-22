@@ -184,6 +184,31 @@ pub fn validate_owned_technical_credentials_configuration(
     validate_runtime_configuration(bytes, &index, &tenant_order, closure).map(|_| ())
 }
 
+/// Preserve every technical identity and token when advancing the closure.
+/// Both envelopes must match the independently resolved configuration.
+pub(crate) fn prepare_successor_technical_credentials_configuration(
+    bytes: &[u8],
+    prior: &crate::human_authority::HumanAuthorityClosureV1,
+    tenants: &[(&str, &str, &str)],
+) -> anyhow::Result<Vec<u8>> {
+    validate_owned_technical_credentials_configuration(bytes, prior, tenants)?;
+    let mut envelope: EnvelopeV1 = crate::human_authority::migration::operator::decode_closed(
+        bytes,
+        MAX_ENVELOPE_BYTES,
+        MAX_ENVELOPE_ENTRIES,
+    )?;
+    let mut target = prior.clone();
+    target.closure_revision = target
+        .closure_revision
+        .checked_add(1)
+        .ok_or(ReviewCredentialFailure::InvalidConfiguration)?;
+    envelope.closure_revision = target.closure_revision;
+    let encoded =
+        serde_json::to_vec(&envelope).map_err(|_| ReviewCredentialFailure::InvalidConfiguration)?;
+    validate_owned_technical_credentials_configuration(&encoded, &target, tenants)?;
+    Ok(encoded)
+}
+
 pub(super) fn validate_envelope_configuration(
     bytes: &[u8],
     expected: &EnvelopeExpectationsV1,

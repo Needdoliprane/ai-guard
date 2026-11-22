@@ -40,6 +40,7 @@ use std::{
 #[cfg(test)]
 mod audit_capacity_tests;
 mod auth;
+pub(crate) use auth::prepare_successor_technical_credentials_configuration;
 #[cfg(test)]
 #[path = "build_identity/http_tests.rs"]
 mod build_identity_http_tests;

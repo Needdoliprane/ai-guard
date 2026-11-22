@@ -74,6 +74,163 @@ fn prepare_check_resume_and_readoption_preserve_real_legacy_and_stable_ids() {
 }
 
 #[test]
+fn cli_store15_reuses_exact_closure_and_leaves_the_neighbor_unchanged() {
+    use agentsandbox::human_authority::HumanAuthorityClosureV1;
+    use rusqlite::{Connection, OpenFlags};
+    use std::os::unix::fs::MetadataExt;
+    use uuid::Uuid;
+
+    let f = Fixture::new(false);
+    successful(f.prepare());
+    successful(f.step("apply", true));
+    let activation_path = f.preparation.join("activation.json");
+    let activation: Value = serde_json::from_slice(&fs::read(&activation_path).unwrap()).unwrap();
+    let original_manifest_path = activation["manifest"].as_str().unwrap();
+    let original_manifest = fs::read(original_manifest_path).unwrap();
+    let original = HumanAuthorityClosureV1::from_bytes(&original_manifest).unwrap();
+    let original_envelope = f.preparation.join("technical-credentials.json");
+    let before_credentials = fs::read(&original_envelope).unwrap();
+    let snapshot = |source: usize| {
+        let db = Connection::open_with_flags(
+            &f.sources[source],
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        let format = db
+            .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+            .unwrap();
+        let events = db
+            .prepare("SELECT seq,kind,hash FROM events ORDER BY seq")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        (format, events)
+    };
+    let before_a = snapshot(0);
+    let before_b = snapshot(1);
+    let id = Uuid::new_v4();
+    let destination = f.root.join("store15-a");
+    let upgrade = |resume, operation_id: Uuid| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_agentsandbox"));
+        command
+            .env_clear()
+            .args([
+                "human-sources",
+                "upgrade-egress",
+                "--human-sources-activation",
+            ])
+            .arg(&activation_path)
+            .args(["--tenant", "tenant-a", "--operation-id"])
+            .arg(operation_id.to_string())
+            .arg("--output-dir")
+            .arg(&destination)
+            .arg("--confirm-control-stopped");
+        if resume {
+            command.arg("--resume");
+        }
+        command.output().unwrap()
+    };
+    successful(upgrade(false, id));
+    let after_a = snapshot(0);
+    assert_eq!(before_a.0, 14);
+    assert_eq!(after_a.0, 15);
+    assert_eq!(after_a.1.len(), before_a.1.len() + 1);
+    assert_eq!(&after_a.1[..before_a.1.len()], before_a.1.as_slice());
+    assert_eq!(after_a.1.last().unwrap().1, "control.egress_policy.genesis");
+    assert_eq!(snapshot(1), before_b);
+    let manifest = destination.join("closure/manifest.json");
+    let bytes = fs::read(&manifest).unwrap();
+    let upgraded = HumanAuthorityClosureV1::from_bytes(&bytes).unwrap();
+    assert_eq!(upgraded.closure_id, original.closure_id);
+    assert_eq!(upgraded.closure_revision, original.closure_revision + 1);
+    let mut expected_sources = original.sources.clone();
+    expected_sources
+        .iter_mut()
+        .find(|source| source.tenant_id.as_deref() == Some("tenant-a"))
+        .unwrap()
+        .required_format = 15;
+    assert!(upgraded.sources == expected_sources);
+    let mut expected_credentials: Value = serde_json::from_slice(&before_credentials).unwrap();
+    expected_credentials["closure_revision"] = upgraded.closure_revision.into();
+    let credentials: Value =
+        serde_json::from_slice(&fs::read(destination.join("technical-credentials.json")).unwrap())
+            .unwrap();
+    assert!(
+        credentials == expected_credentials,
+        "technical identities and roles are preserved"
+    );
+    let before_backup = fs::metadata(destination.join("backup/source.sqlite")).unwrap();
+
+    successful(upgrade(true, id));
+    assert!(!upgrade(true, Uuid::new_v4()).status.success());
+    let after_backup = fs::metadata(destination.join("backup/source.sqlite")).unwrap();
+    assert_eq!(
+        (after_backup.dev(), after_backup.ino()),
+        (before_backup.dev(), before_backup.ino())
+    );
+    assert!(fs::read(&manifest).unwrap() == bytes);
+    assert!(fs::read(&original_envelope).unwrap() == before_credentials);
+    assert!(fs::read(original_manifest_path).unwrap() == original_manifest);
+    assert_eq!(snapshot(0), after_a);
+    assert_eq!(snapshot(1), before_b);
+
+    let second_output = f.root.join("store15-b");
+    successful(
+        Command::new(env!("CARGO_BIN_EXE_agentsandbox"))
+            .env_clear()
+            .args([
+                "human-sources",
+                "upgrade-egress",
+                "--human-sources-manifest",
+            ])
+            .arg(&manifest)
+            .arg("--human-credentials-envelope")
+            .arg(destination.join("technical-credentials.json"))
+            .arg("--tenants-file")
+            .arg(&f.registry)
+            .args([
+                "--human-control-config-revision",
+                "7",
+                "--tenant",
+                "tenant-b",
+                "--operation-id",
+            ])
+            .arg(Uuid::new_v4().to_string())
+            .arg("--output-dir")
+            .arg(&second_output)
+            .arg("--confirm-control-stopped")
+            .output()
+            .unwrap(),
+    );
+    let second = HumanAuthorityClosureV1::from_bytes(
+        &fs::read(second_output.join("closure/manifest.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(second.closure_revision, upgraded.closure_revision + 1);
+    let mut expected_sources = upgraded.sources.clone();
+    expected_sources
+        .iter_mut()
+        .find(|source| source.tenant_id.as_deref() == Some("tenant-b"))
+        .unwrap()
+        .required_format = 15;
+    assert!(second.sources == expected_sources);
+    assert_eq!(snapshot(0), after_a);
+    let after_b = snapshot(1);
+    assert_eq!(after_b.0, 15);
+    assert_eq!(after_b.1.len(), before_b.1.len() + 1);
+    assert_eq!(&after_b.1[..before_b.1.len()], before_b.1.as_slice());
+    assert_eq!(after_b.1.last().unwrap().1, "control.egress_policy.genesis");
+}
+
+#[test]
 fn changed_token_before_envelope_and_truncated_publications_are_preserved() {
     let f = Fixture::new(false);
     successful(f.prepare());

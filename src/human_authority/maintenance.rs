@@ -197,7 +197,7 @@ fn same_logical_source(left: &HumanMaintenanceSourceV1, right: &HumanMaintenance
         && left.tenant_id == right.tenant_id
 }
 
-fn from_active_source(source: &HumanSourceDescriptorV1) -> HumanMaintenanceSourceV1 {
+pub(super) fn from_active_source(source: &HumanSourceDescriptorV1) -> HumanMaintenanceSourceV1 {
     // Copy expectations from the real retained old manifest; fabricate no receipt.
     HumanMaintenanceSourceV1 {
         source_id: source.source_id,

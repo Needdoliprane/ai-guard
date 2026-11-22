@@ -12,6 +12,7 @@ use crate::{
             HumanMaintenanceActiveManifestV1, HumanMaintenanceSourceToken,
             HumanMaintenanceSourceV1, HumanSourcesMaintenancePlanV1,
         },
+        startup::HumanOwnedSourceOptions,
     },
     redaction::Redactor,
 };
@@ -105,6 +106,82 @@ pub(crate) struct RetainedEgressBackup<'intent, 'token> {
     intent: &'intent RetainedEgressIntent<'token>,
     frame: PrivateFile,
     proof: VerifiedEgressSourceBackup<'token>,
+}
+
+/// Applies one journaled in-place transition or reopens its committed genesis.
+/// An existing closure requires the same confirmation and permits no install.
+pub(super) fn apply_egress_format15(
+    token: &HumanMaintenanceSourceToken,
+    options: &HumanOwnedSourceOptions,
+    journal: Directory,
+    backup_parent: Directory,
+    limits: &EgressStoreLimitsV1,
+    closure_published: bool,
+) -> Result<AuthorityReceiptV1> {
+    token.check()?;
+    let HumanOwnedSourceOptions::TenantStore {
+        redactor,
+        max_events,
+        capacity,
+        ..
+    } = options
+    else {
+        anyhow::bail!("egress maintenance requires tenant audit options");
+    };
+    let source = token.descriptor();
+    let tenant = source
+        .tenant_id
+        .as_deref()
+        .context("egress tenant missing")?;
+    let store = Store::open_review_maintenance_for_tenant(
+        &source.storage_binding.path(),
+        tenant,
+        redactor.clone(),
+        *max_events,
+        token,
+    )?
+    .with_capacity_policy(capacity.clone())?;
+    let (intent, pending) = store.with_review_maintenance_writer(token, |writer| {
+        let stage = journal_stage(&journal)?;
+        let installed = writer.egress_format15_installed(token)?;
+        ensure!(
+            !closure_published || (installed && stage == JournalStage::Confirmed),
+            "published egress closure requires the committed and confirmed genesis"
+        );
+        ensure!(
+            match stage {
+                JournalStage::Empty | JournalStage::Intent => !installed,
+                JournalStage::Confirmed => installed,
+                JournalStage::Backup => true,
+            },
+            "egress journal stage differs from the retained source"
+        );
+        let intent = if stage == JournalStage::Empty {
+            RetainedEgressIntent::prepare(token, writer, journal, backup_parent, limits)?
+        } else {
+            RetainedEgressIntent::resume(token, writer, journal, backup_parent, limits)?
+        };
+        let pending = if installed {
+            None
+        } else {
+            let backup = if stage == JournalStage::Backup {
+                intent.resume_backup(writer)?
+            } else {
+                intent.prepare_backup(writer)?
+            };
+            let receipt = backup.install_format15(writer)?;
+            writer.commit()?;
+            Some(receipt)
+        };
+        Ok((intent, pending))
+    })?;
+    drop(store);
+    let confirmed = intent.confirm_committed(redactor.clone(), *max_events)?;
+    ensure!(
+        pending.is_none_or(|receipt| receipt == confirmed),
+        "egress committed receipt differs"
+    );
+    Ok(confirmed)
 }
 
 impl<'a> RetainedEgressIntent<'a> {

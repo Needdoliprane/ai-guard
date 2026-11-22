@@ -123,6 +123,45 @@ Available identity/resources reads and their durable receipts do not qualify
 the remaining handlers, remote brokers, cloud, restart after physical power
 loss or production readiness.
 
+## Prepare a tenant for the egress policy registry
+
+The SQLite maintenance command upgrades one Store14 in an adopted owned
+installation. Stop the gateway and every consumer first. Keep the prior
+activation and select an absolute new output directory outside the source
+directories. Generate a new operation UUID and retain it with the command.
+
+```sh
+agentsandbox human-sources upgrade-egress \
+  --human-sources-activation /absolute/control/human-preparation/activation.json \
+  --tenant tenant-a --operation-id 22222222-2222-4222-8222-222222222222 \
+  --output-dir /absolute/control/egress-tenant-a --confirm-control-stopped
+```
+
+Replace the example tenant, UUID and paths with those of the installation. For
+an installation already using explicit references, supply the current
+`--human-sources-manifest`, `--human-credentials-envelope`, `--tenants-file` and
+`--human-control-config-revision` in place of the initial activation. Reuse the
+current `--max-events` if customized and the existing `--oidc-config` and
+`--human-oidc-mapping-revision` if selected.
+
+The command saves a verified copy in `backup/source.sqlite` and confirms the
+committed deny-all egress genesis before publishing `closure/manifest.json`.
+On `store15_closure_published`, select that manifest and
+`technical-credentials.json` from the same output directory in the gateway's
+explicit `owned_sources` configuration. Keep the other configuration inputs
+and revisions. The previous manifest has become stale for the migrated source.
+Use the latest published closure to prepare the next tenant. The registry starts
+with no allowed destinations. Runtime enforcement has its own qualification.
+
+Keep all files after an interrupted run. Run the same command with `--resume`,
+the same prior activation or manifest, operation UUID and directory after
+verifying that the controls are stopped. An existing closure must match the
+confirmed genesis. If the final output directory was never published, preserve
+its staging sibling and begin in a fresh directory after checking offline that
+the selected source remains Store14. A backup with no recorded receipt requires
+reconciliation before retrying. Preserve that copy and the journal for diagnosis.
+The command reports publication and leaves gateway readiness to startup.
+
 ## Validation scope
 
 The [dated operator and owned-startup evidence](../../engineering/evidence/2026-11-13/human-sources-operator/README.md)

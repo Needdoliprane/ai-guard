@@ -26,6 +26,7 @@ pub(crate) use review_credentials::AuthenticatedReviewRunnerCredential;
 pub(super) use review_credentials::ReviewCredentialRegistry;
 #[cfg(test)]
 pub(crate) use review_credentials::authenticate_review_runner_fixture;
+pub(crate) use review_credentials::preparation::prepare_successor_technical_credentials_configuration;
 pub use review_credentials::preparation::{
     EnvelopeExpectationsV1, TechnicalCredentialIdentityV1, TechnicalCredentialInput,
     TechnicalCredentialRoleV1, prepare_envelope_configuration,

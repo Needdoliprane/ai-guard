@@ -29,6 +29,9 @@ use std::{
 };
 use uuid::Uuid;
 
+mod store15;
+pub use store15::{Store15UpgradeRequest, Store15UpgradeResult, upgrade_store15};
+
 /// Non-authorizing source expectation, identical to the maintenance schema.
 /// Conversion into the private maintenance type is checked by its real guard.
 #[derive(Clone, PartialEq, Eq, Serialize, serde::Deserialize)]

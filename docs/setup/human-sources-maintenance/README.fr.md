@@ -128,6 +128,48 @@ peut annoncer des contextes complets. Les lectures identity/resources et leurs
 reçus durables ne qualifient ni les autres handlers, ni brokers distants, cloud,
 reprise après coupure physique ou préparation à la production.
 
+## Préparer un tenant pour le registre des politiques egress
+
+La commande de maintenance SQLite fait passer un Store14 d'une installation
+owned adoptée au format 15. Arrêter le gateway et tous les consommateurs.
+Conserver l'activation précédente et choisir un répertoire de sortie absolu,
+neuf et extérieur aux répertoires sources. Générer un UUID d'opération et le
+conserver avec la commande.
+
+```sh
+agentsandbox human-sources upgrade-egress \
+  --human-sources-activation /absolute/control/human-preparation/activation.json \
+  --tenant tenant-a --operation-id 22222222-2222-4222-8222-222222222222 \
+  --output-dir /absolute/control/egress-tenant-a --confirm-control-stopped
+```
+
+Remplacer le tenant, l'UUID et les chemins par ceux de l'installation. Si la
+configuration courante utilise des références explicites, fournir à la place
+de l'activation `--human-sources-manifest`, `--human-credentials-envelope`,
+`--tenants-file` et `--human-control-config-revision`. Reprendre aussi
+`--max-events` si personnalisé, ainsi que `--oidc-config` et
+`--human-oidc-mapping-revision` si sélectionnés.
+
+La commande sauvegarde une copie vérifiée dans `backup/source.sqlite` et
+confirme la genèse egress durable, qui refuse toute destination. Elle publie
+ensuite `closure/manifest.json`. Au résultat `store15_closure_published`,
+sélectionner ce manifeste et `technical-credentials.json` du même répertoire
+de sortie dans la configuration explicite `owned_sources` du gateway. Garder
+les autres entrées de configuration et leurs révisions. L'ancien manifeste
+est devenu périmé pour la source migrée. Pour préparer un autre tenant,
+utiliser la dernière clôture publiée. L'application au runtime relève de sa
+propre qualification.
+
+Après une interruption, conserver tous les fichiers. Relancer la même commande
+avec `--resume`, la même activation ou le même manifeste antérieur, le même UUID
+et le même répertoire, une fois l'arrêt des contrôles vérifié. Une clôture
+existante doit correspondre à la genèse confirmée. Si le répertoire de sortie
+final n'a jamais été publié, préserver son répertoire de préparation voisin et
+repartir dans une nouvelle destination après vérification hors ligne que la
+source est toujours au format 14. Une sauvegarde sans reçu enregistré demande
+une réconciliation avant reprise. Conserver la copie et le journal pour le
+diagnostic. L'état de disponibilité du gateway sera établi à son démarrage.
+
 ## Périmètre de validation
 
 Les [preuves datées du parcours opérateur et du startup owned](../../engineering/evidence/2026-11-13/human-sources-operator/README.fr.md)

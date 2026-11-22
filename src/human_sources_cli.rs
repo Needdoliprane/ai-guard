@@ -31,6 +31,7 @@ mod broker_identity;
 mod inputs;
 mod preparation;
 mod schema;
+mod store15;
 pub(crate) use activation::{LoadedHumanSourcesActivation, load_human_sources_activation};
 use inputs::*;
 use schema::*;
@@ -54,6 +55,8 @@ pub(crate) enum HumanSourcesCommand {
     Check(PreparationArgs),
     /// Offline owned broker identity (proposal): enroll, rotate, revoke, resume, status.
     BrokerIdentity(broker_identity::BrokerIdentityArgs),
+    /// Migrate one owned SQLite Store14 and publish a successor closure.
+    UpgradeEgress(store15::UpgradeEgressArgs),
 }
 #[derive(Args)]
 pub(crate) struct PrepareArgs {
@@ -124,6 +127,9 @@ pub(crate) async fn run(args: HumanSourcesArgs) -> Result<()> {
         HumanSourcesCommand::BrokerIdentity(_) => {
             ("broker-identity", "preserve_the_plan_directory")
         }
+        HumanSourcesCommand::UpgradeEgress(_) => {
+            ("upgrade-egress", "resume_same_store15_operation")
+        }
     };
     let result = match args.command {
         HumanSourcesCommand::Prepare(args) => {
@@ -160,6 +166,7 @@ pub(crate) async fn run(args: HumanSourcesArgs) -> Result<()> {
         }
         // Its own closed report and refusal vocabulary; no shared state here.
         HumanSourcesCommand::BrokerIdentity(args) => return broker_identity::run(args),
+        HumanSourcesCommand::UpgradeEgress(args) => return store15::run(args),
     };
     match result {
         Ok((state, count)) => {

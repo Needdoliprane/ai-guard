@@ -222,6 +222,16 @@ pub(crate) struct ReviewStoreMaintenanceWriter<'a, 'db> {
 }
 
 impl ReviewStoreMaintenance {
+    pub(crate) fn with_capacity_policy(
+        self,
+        capacity: AuditCapacityPolicyV1,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            store: self.store.with_capacity_policy(capacity)?,
+            token: self.token,
+        })
+    }
+
     pub(crate) fn with_review_maintenance_writer<T>(
         &self,
         token: &HumanMaintenanceSourceToken,
@@ -261,6 +271,18 @@ impl ReviewStoreMaintenance {
 }
 
 impl<'a, 'db> ReviewStoreMaintenanceWriter<'a, 'db> {
+    pub(crate) fn egress_format15_installed(
+        &self,
+        token: &HumanMaintenanceSourceToken,
+    ) -> anyhow::Result<bool> {
+        self.same_token(token)?;
+        require(token.descriptor().required_format == 15)?;
+        let format: i64 = self
+            .transaction()?
+            .pragma_query_value(None, "user_version", |row| row.get(0))?;
+        Ok(format == 15)
+    }
+
     pub(crate) fn egress_maintenance_prefix(
         &self,
         token: &HumanMaintenanceSourceToken,
@@ -772,15 +794,27 @@ impl Store {
         })
     }
 
-    /// Observe one unchanged Store14 in the maintenance union. The returned
+    #[cfg(test)]
+    pub(crate) fn observe_unchanged_review_format14(
+        token: &HumanMaintenanceSourceToken,
+    ) -> anyhow::Result<AuthorityReceiptV1> {
+        if token.descriptor().required_format != 14 {
+            return Err(ReviewAuthorityFailure::Required.into());
+        }
+        Self::observe_unchanged_review_store(token)
+    }
+
+    /// Observe one unchanged Store14 or Store15 in the maintenance union. The returned
     /// head comes from the same snapshot as the verified prior-manifest anchor.
     /// SQLite opens read-only. The storage lock and WAL sidecars still apply.
-    pub(crate) fn observe_unchanged_review_format14(
+    pub(crate) fn observe_unchanged_review_store(
         token: &HumanMaintenanceSourceToken,
     ) -> anyhow::Result<AuthorityReceiptV1> {
         token.check()?;
         let descriptor = token.descriptor();
-        if descriptor.kind != HumanSourceKindV1::TenantStore || descriptor.required_format != 14 {
+        if descriptor.kind != HumanSourceKindV1::TenantStore
+            || !matches!(descriptor.required_format, 14 | 15)
+        {
             return Err(ReviewAuthorityFailure::Required.into());
         }
         let tenant = descriptor
@@ -788,7 +822,7 @@ impl Store {
             .as_deref()
             .ok_or(ReviewAuthorityFailure::Required)?;
         let expected = token
-            .prior_active_anchor(14)?
+            .prior_active_anchor(descriptor.required_format)?
             .ok_or(ReviewAuthorityFailure::Required)?;
         let (backing, _initialization) =
             StoreStorage::open_existing(&descriptor.storage_binding.path())?;
@@ -801,7 +835,10 @@ impl Store {
         db.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")?;
         let tx = Transaction::new_unchecked(&db, rusqlite::TransactionBehavior::Deferred)?;
         observer.physical(&backing, &tx, tenant)?;
-        require(tx.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))? == 14)?;
+        require(
+            tx.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))?
+                == descriptor.required_format,
+        )?;
         verify_store_contents(&tx, tenant)?;
         let snapshot = authority::replay(&tx)?;
         require(
