@@ -349,11 +349,16 @@ fn availability(operation: HumanOperationV1, facts: OperationFactsV1) -> Operati
     } else if facts.owned_profile
         && matches!(
             operation,
-            O::WorkersRead | O::FederationRead | O::QuotaRead | O::UsageRead
+            O::EventsReadContent
+                | O::EventsExport
+                | O::EventsStream
+                | O::WorkersRead
+                | O::FederationRead
+                | O::QuotaRead
+                | O::UsageRead
         )
     {
-        // The owned profile announces worker_registry/federation_registry
-        // unavailable; no historical route is substituted.
+        // Owned sources serve metadata snapshots and lack the worker registry.
         A::ProfileUnavailable
     } else if requires_marker(operation) && !facts.human_rights_marker {
         A::MigrationRequired
@@ -436,6 +441,44 @@ mod tests {
             OperationAvailabilityV1::Available
         );
         assert_eq!(unmarked.len(), HumanOperationV1::ALL.len());
+    }
+
+    #[test]
+    fn owned_event_availability_preserves_granted_permissions() {
+        use HumanCapabilityV1 as C;
+        use HumanOperationV1 as O;
+        let capabilities = [C::ReadMetadata, C::ReadContent, C::Export]
+            .into_iter()
+            .collect();
+        let catalogue = |owned_profile| {
+            context_operations(
+                ContextModeV1::Personal,
+                &capabilities,
+                &capabilities,
+                OperationFactsV1 {
+                    owned_profile,
+                    human_rights_marker: true,
+                },
+            )
+        };
+        let owned = catalogue(true);
+        let legacy = catalogue(false);
+        assert_eq!(
+            entry(&owned, O::EventsReadMetadata).availability,
+            OperationAvailabilityV1::Available
+        );
+        for operation in [O::EventsReadContent, O::EventsExport, O::EventsStream] {
+            let owned = entry(&owned, operation);
+            let legacy = entry(&legacy, operation);
+            assert_eq!(owned.permission, OperationPermissionV1::Granted);
+            assert_eq!(owned.scope, legacy.scope);
+            assert_eq!(
+                owned.availability,
+                OperationAvailabilityV1::ProfileUnavailable,
+                "{operation:?} on the owned profile"
+            );
+            assert_eq!(legacy.availability, OperationAvailabilityV1::Available);
+        }
     }
 
     #[test]
