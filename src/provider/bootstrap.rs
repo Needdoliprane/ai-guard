@@ -9,7 +9,7 @@ use crate::control_fs::Directory;
 use anyhow::{Result, anyhow, bail, ensure};
 use std::{
     collections::BTreeMap,
-    ffi::CString,
+    ffi::{CString, OsStr, OsString},
     fmt,
     fs::File,
     io::Write,
@@ -517,28 +517,13 @@ impl BootstrapExecution {
 /// The inherited entry remains in this process until replacement; no memory or
 /// `/proc` scrubbing guarantee is implied.
 pub fn run_from_environment(args: &[String]) -> Result<i32> {
-    let payload = std::env::var_os(BOOTSTRAP_ENV)
-        .ok_or_else(|| anyhow!("credential_missing: provider bootstrap credential is unavailable"))?
-        .into_string()
-        .map_err(|_| anyhow!("invalid provider bootstrap credential encoding"))?;
+    let payload = standalone_handoff(
+        std::env::var_os(crate::egress::proxy_env::EGRESS_PROXY_MARKER).as_deref(),
+        || std::env::var_os(BOOTSTRAP_ENV),
+    )?;
     let mut argv = vec![BOOTSTRAP_PROGRAM.into()];
     argv.extend_from_slice(args);
-    let mut execution = prepare_execution(&argv, &payload, Path::new("/home/agent"))?;
-    // Broker egress: the provider reaches its destinations only through the
-    // loopback helper the broker attaches after start. Wait, bounded, for it.
-    if let Some(marker) = std::env::var_os(crate::egress::proxy_env::EGRESS_PROXY_MARKER) {
-        let port = marker
-            .to_str()
-            .and_then(crate::egress::proxy_env::parse_marker)
-            .ok_or_else(|| anyhow!("egress_transport_unavailable: invalid egress proxy marker"))?;
-        ensure!(
-            crate::egress::proxy_env::wait_for_helper(port, std::time::Duration::from_secs(30)),
-            "egress_transport_unavailable: the broker egress channel did not become ready"
-        );
-        for (name, value) in crate::egress::proxy_env::proxy_environment(port) {
-            execution.environment.insert(name.into(), value);
-        }
-    }
+    let execution = prepare_execution(&argv, &payload, Path::new("/home/agent"))?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -558,6 +543,22 @@ pub fn run_from_environment(args: &[String]) -> Result<i32> {
         .current_dir("/workspace");
     let _error = command.exec();
     bail!("client_missing: provider executable could not replace the bootstrap process")
+}
+
+fn standalone_handoff(
+    egress_marker: Option<&OsStr>,
+    read_handoff: impl FnOnce() -> Option<OsString>,
+) -> Result<String> {
+    // The helper binds its listener before the broker has the opening receipt.
+    // This entry has no broker release signal after that durable ACK.
+    ensure!(
+        egress_marker.is_none(),
+        "egress_transport_unavailable: the broker's durable channel opening has not released the provider"
+    );
+    read_handoff()
+        .ok_or_else(|| anyhow!("credential_missing: provider bootstrap credential is unavailable"))?
+        .into_string()
+        .map_err(|_| anyhow!("invalid provider bootstrap credential encoding"))
 }
 
 impl BootstrapExecution {
@@ -656,6 +657,19 @@ pub fn public_error(error: &anyhow::Error) -> &'static str {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn marked_standalone_provider_requires_broker_release_before_the_handoff() {
+        for marker in ["http://127.0.0.1:3128", "invalid"] {
+            let error = standalone_handoff(Some(OsStr::new(marker)), || {
+                panic!("the standalone provider must not read its handoff before release");
+            })
+            .unwrap_err();
+            assert!(public_error(&error).starts_with("egress_transport_unavailable:"));
+        }
+        let error = standalone_handoff(None, || None).unwrap_err();
+        assert!(public_error(&error).starts_with("credential_missing:"));
+    }
 
     #[test]
     #[ignore = "internal native subprocess fixture, invoked only by the bounded probe tests"]
