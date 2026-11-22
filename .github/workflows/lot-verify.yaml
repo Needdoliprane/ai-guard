@@ -48,6 +48,11 @@ jobs:
         run: cargo check --locked --offline --all-targets
       - name: Check all targets without default features (SQLite only)
         run: cargo check --locked --offline --all-targets --no-default-features
+      - name: Third-party licence guard and its unit tests
+        # `cargo test` builds examples but does not run their unit tests.
+        run: |
+          cargo test --locked --offline --example third_party_notices
+          cargo run --quiet --locked --offline --example third_party_notices -- check --allowed .github/third-party-license-expressions.txt
       - name: Provider harness regressions
         run: |
           python3 -B tests/e2e/interactive_driver.py --self-test
