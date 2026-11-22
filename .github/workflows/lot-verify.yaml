@@ -68,6 +68,8 @@ jobs:
           rc=$?
           set -e
           count="$(grep -Ec '^running 1 test$' "$log" || true)"
+          rustc_codes="$(sed -nE 's/^error\[(E[0-9]{4})\]:.*/\1/p' "$log" | sort -u | paste -sd ';' -)"
+          rustc_locations="$(sed -nE 's/^[[:space:]]+--> (tests\/broker_import_result_gate\.rs:[0-9]+:[0-9]+)$/\1/p' "$log" | sort -u | paste -sd ';' -)"
           phase_pattern='^phase=(preflight|import|verification|arm|worker|result|scan|closure) stage=(fresh_fixture|gate|submit|held_projection|release|helper_created|import_receipts|import_claim|worker_running|synthetic_completion|terminal_wait|terminal_state|cli_query|terminal_reply|worker_terminal|terminal_audit|broker_stop|fixture_children) status=(starting|installing|installed|reached|accepted|confirmed|waiting|ready|received|started|failed)$'
           phase_progress="$(grep -E "$phase_pattern" "$log" | paste -sd ';' - || true)"
           category_pattern='^(Error: )?phase=(submit|held_import|released_import|worker|result|quota|closed_journal|fixture_cleanup|fixture_witness|playback|install_import_gate|waiting_for_import|fixture_start|fixture_broker_close|fixture_start_guardian) category=(unexpected_acceptance|unrelated_acceptance|invalid_sqlite_claim|premature_observation|sqlite_event_read|sqlite_worker_read|unexpected_fixture_counts|unexpected_result_projection|unexpected_result_reply|unexpected_sqlite_worker|unexpected_status_projection|unexpected_status_reply|unexpected_worker_count|ack_not_checked|ack_not_proven|not_confirmed|errors_observed|fixture_deadline|invalid_audit_snapshot|multiple_releases|release_missing|release_observation_mismatch|arm_receipt_encoding|batch_failure_observed|cleanup_input_hash|invalid_cleanup|invalid_observation|observation_input_hash|sqlite_audit_integrity|sqlite_integrity_read|sqlite_worker_missing|unexpected_import_outcome|verification_not_reached|audit_incomplete|audit_tuple_mismatch|missing_audit_event|terminal_not_reached|terminal_observation_missing|unexpected_result_identity|unexpected_result_outcome|unexpected_terminal_worker|runtime_identity_missing|synthetic_completion_refused|broker_error_code_unauthorized|broker_error_code_forbidden|broker_error_code_unavailable|broker_error_code_incompatible_control|broker_error_code_busy|broker_error_code_invalid_input|broker_error_code_conflict|broker_error_code_interrupted|broker_error_code_limit_exceeded|broker_error_code_needs_reconciliation|other_result_failure|reply_spawn_failed|reply_stdout_pipe_missing|reply_stderr_pipe_missing|reply_harness_timeout|reply_capture_failed|reply_output_limit|broker_error_reply|broker_rejected_reply|reply_missing_or_invalid|reply_typed_nonzero_exit|reply_ipc_unavailable_or_invalid|reply_ipc_outcome_unknown|reply_ipc_unavailable_before_request|reply_cli_arguments|reply_cli_failure_unclassified|reply_failed_unclassified|fixture_state|fixture_timeout|gate_disconnected|fixture_setup_failed|not_started|retained_for_guardian_custody|identity_attested)'
@@ -92,6 +94,8 @@ jobs:
           {
             echo "exit_code=$rc"
             echo "selected_test_count=$count"
+            echo "rustc_error_codes=${rustc_codes:-none}"
+            echo "rustc_locations=${rustc_locations:-none}"
             echo "phase_progress=${phase_progress:-none}"
             echo "closed_error_categories=${closed_errors:-none}"
             echo "failure_snapshot=${failure_snapshot:-unavailable}"
@@ -110,6 +114,8 @@ jobs:
           STACK_INHERITED: ${{ steps.prepare.outputs.rust_min_stack_inherited }}
           TEST_EXIT: ${{ steps.full3.outputs.exit_code }}
           TEST_COUNT: ${{ steps.full3.outputs.selected_test_count }}
+          RUSTC_CODES: ${{ steps.full3.outputs.rustc_error_codes }}
+          RUSTC_LOCATIONS: ${{ steps.full3.outputs.rustc_locations }}
           PHASE_PROGRESS: ${{ steps.full3.outputs.phase_progress }}
           CLOSED_ERRORS: ${{ steps.full3.outputs.closed_error_categories }}
           FAILURE_SNAPSHOT: ${{ steps.full3.outputs.failure_snapshot }}
@@ -127,6 +133,8 @@ jobs:
             echo "- Private short TMPDIR guard: ${PRIVATE_TMPDIR:-not_reached}"
             echo "- RUST_MIN_STACK inherited by the harness or broker child: ${STACK_INHERITED:-not_reached}"
             echo "- Exact test count: ${TEST_COUNT:-not_reached}"
+            echo "- Compiler error codes: ${RUSTC_CODES:-not_reached}"
+            echo "- Compiler locations in the exact test: ${RUSTC_LOCATIONS:-not_reached}"
             echo "- Test exit code: ${TEST_EXIT:-not_reached}"
             echo "- Safe phase markers: ${PHASE_PROGRESS:-none}"
             echo "- Closed failure categories: ${CLOSED_ERRORS:-none}"

@@ -194,8 +194,7 @@ fn read_closed_checkpoint(root: &Path, operation: Uuid) -> Result<Value> {
         current["operation_id"] == operation_id
             && record["operation_id"] == operation_id
             && record["revision"] == revision
-            && current["head"]["hash"]
-                == format!("{:x}", checkpoint_hash(version, checkpoint.bytes())),
+            && current["head"]["hash"] == checkpoint_hash(version, checkpoint.bytes()),
         "checkpoint correlation mismatch"
     );
     Ok(record)
