@@ -1,4 +1,11 @@
 use super::*;
+use clap::Parser;
+
+#[derive(Parser)]
+struct Cli {
+    #[command(flatten)]
+    sources: HumanSourcesArgs,
+}
 
 #[test]
 fn activation_is_closed_and_does_not_accept_unpublished_mode() {
@@ -58,14 +65,6 @@ fn cli_refuses_missing_stop_attestation_before_preparation() {
 
 #[test]
 fn identity_marker_cli_requires_one_complete_source_route() {
-    use clap::Parser;
-
-    #[derive(Parser)]
-    struct Cli {
-        #[command(flatten)]
-        sources: HumanSourcesArgs,
-    }
-
     let activation = ["--human-sources-activation", "/private/activation.json"];
     let explicit = [
         "--human-sources-manifest",
@@ -151,8 +150,14 @@ fn identity_marker_inputs_validate_explicit_store15_without_opening_sqlite() {
     let source = write("events.sqlite", sentinel);
     let runner = "synthetic-runner-credential-long-enough";
     let viewer = "synthetic-viewer-credential-long-enough";
-    let runner_file = write("runner.token", runner.as_bytes());
-    let viewer_file = write("viewer.token", viewer.as_bytes());
+    let [runner_directory, viewer_directory] = ["runner", "viewer"].map(|role| {
+        let directory = root.join(role);
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        directory
+    });
+    let runner_file = write("runner/role.token", runner.as_bytes());
+    let viewer_file = write("viewer/role.token", viewer.as_bytes());
     let registry = write(
         "tenants.json",
         &serde_json::to_vec(&serde_json::json!({
@@ -259,11 +264,49 @@ fn identity_marker_inputs_validate_explicit_store15_without_opening_sqlite() {
     let loaded = load_explicit_identity_marker_inputs(&args).unwrap();
     assert_eq!(loaded.manifest.bytes(), manifest_bytes.as_slice());
     assert_eq!(loaded.max_events, max_events);
-    assert_eq!(loaded.excluded_directories, vec![root.clone()]);
+    assert_eq!(
+        loaded.excluded_directories,
+        vec![
+            root.clone(),
+            runner_directory.clone(),
+            viewer_directory.clone()
+        ]
+    );
     drop(loaded);
 
     fs::write(&envelope, envelope_for(1)).unwrap();
-    assert!(load_explicit_identity_marker_inputs(&args).is_err());
+    let maintenance_path = root.join("unused-maintenance");
+    let command = Cli::try_parse_from([
+        "agentsandbox",
+        "human-rights",
+        "install",
+        "--human-sources-manifest",
+        args.human_sources_manifest
+            .as_deref()
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "--human-credentials-envelope",
+        envelope.to_str().unwrap(),
+        "--tenants-file",
+        args.tenants_file.as_deref().unwrap().to_str().unwrap(),
+        "--human-control-config-revision",
+        "7",
+        "--tenant-id",
+        "tenant-a",
+        "--maintenance-dir",
+        maintenance_path.to_str().unwrap(),
+        "--confirm-control-stopped",
+    ])
+    .unwrap();
+    let HumanSourcesCommand::HumanRights(maintenance) = command.sources.command else {
+        panic!("expected the human-rights command");
+    };
+    let refusal = human_rights::run(maintenance).unwrap_err().to_string();
+    assert_eq!(
+        refusal,
+        "human_rights_step_refused; step=install; state=human_rights_closure_refused; action=preserve_maintenance_directory_and_sources"
+    );
     fs::write(&envelope, envelope_for(2)).unwrap();
     fs::write(
         &runner_file,
@@ -274,6 +317,8 @@ fn identity_marker_inputs_validate_explicit_store15_without_opening_sqlite() {
 
     assert_eq!(fs::read(source).unwrap().as_slice(), sentinel);
     assert_eq!(fs::read_dir(root).unwrap().count(), 6);
+    assert_eq!(fs::read_dir(runner_directory).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(viewer_directory).unwrap().count(), 1);
 }
 
 fn real_legacy_fixture() -> (tempfile::TempDir, PrepareArgs, PathBuf) {

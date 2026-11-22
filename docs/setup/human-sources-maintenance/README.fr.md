@@ -156,8 +156,9 @@ son enveloppe de credentials techniques, son registre de tenants et sa révision
 de contrôle. Indiquez `--max-events` si la clôture utilise une valeur différente
 de `100000`. Pour OIDC, indiquez aussi `--oidc-config` et
 `--human-oidc-mapping-revision` avec les mêmes valeurs qu'à la publication.
-Placez le répertoire de maintenance hors des répertoires qui contiennent la
-clôture, sa configuration et tous les fichiers sources.
+Utilisez des répertoires privés en mode `0700` pour la clôture, sa configuration
+et les fichiers des tokens runner et viewer. Placez le répertoire de maintenance
+hors de ces répertoires et de tous les répertoires sources.
 
 ```sh
 agentsandbox human-sources human-rights install \
@@ -171,7 +172,10 @@ agentsandbox human-sources human-rights install \
 ```
 
 Pour `resume`, reprenez les mêmes arguments explicites et le même répertoire
-de maintenance.
+de maintenance. `human_rights_closure_refused` indique que la clôture explicite
+ou l'une de ses entrées n'a pas pu être vérifiée. Conservez les fichiers et
+vérifiez que le manifeste, l'enveloppe, les tokens configurés et les révisions
+correspondent à la même publication.
 
 `install` prend les verrous propriétaires de toute l'union, écrit une sauvegarde
 SQLite vérifiée, journalise son intention, sa sauvegarde et sa confirmation, et

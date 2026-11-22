@@ -470,10 +470,13 @@ pub(super) fn load_explicit_identity_marker_inputs(
     args: &ExplicitOwnedSourcesArgs,
 ) -> Result<LoadedIdentityMarkerInputs> {
     let (resolved, redactor, max_events) = args.resolve_for_maintenance()?;
-    let mut excluded_directories = std::iter::once(resolved.manifest.path())
-        .chain(resolved.files.iter().map(|(_, file)| file.path()))
-        .map(|path| {
-            path.parent()
+    let mut excluded_directories = std::iter::once(&resolved.manifest)
+        .chain(resolved.files.iter().map(|(_, file)| file))
+        .chain(&resolved.token_files)
+        .map(|file| {
+            file.revalidate()?;
+            file.path()
+                .parent()
                 .map(Path::to_owned)
                 .context("owned source reference parent missing")
         })

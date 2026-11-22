@@ -149,8 +149,9 @@ For an already published explicit closure, use its manifest, technical
 credential envelope, tenant registry and control revision together. Supply
 `--max-events` if the closure uses a value other than `100000`. For OIDC, also
 supply `--oidc-config` and `--human-oidc-mapping-revision` with the same values
-used at publication. Keep the maintenance directory outside the directories
-holding the closure, its configuration and all source files.
+used at publication. Use private directories with mode `0700` for the closure,
+its configuration and the runner and viewer token files. Keep the maintenance
+directory outside those directories and every source directory.
 
 ```sh
 agentsandbox human-sources human-rights install \
@@ -164,6 +165,9 @@ agentsandbox human-sources human-rights install \
 ```
 
 For `resume`, reuse the same explicit arguments and maintenance directory.
+`human_rights_closure_refused` means the explicit closure or one of its inputs
+could not be verified. Preserve the files and verify that the manifest,
+envelope, configured tokens and revisions match the same publication.
 
 `install` takes the owner locks of the whole union, writes a verified SQLite
 backup, journals its intent, backup and confirmation, and appends every pending

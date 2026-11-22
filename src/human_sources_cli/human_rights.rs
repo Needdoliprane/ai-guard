@@ -59,19 +59,19 @@ fn execute(args: &HumanRightsRunArgs, resume: bool) -> Result<OwnedIdentityMarke
         bail!("human_rights_control_stop_attestation_required");
     }
     let inputs = match args.human_sources_activation.as_deref() {
-        Some(path) => load_identity_marker_inputs(path, &args.tenant_id),
-        None => load_explicit_identity_marker_inputs(&args.explicit),
-    }
-    .map_err(|error| {
-        if error
-            .chain()
-            .any(|cause| cause.to_string() == "human_rights_source_unknown")
-        {
-            anyhow::Error::from(OwnedIdentityMarkersRefusalV1::SourceUnknown)
-        } else {
-            anyhow::anyhow!("human_rights_activation_refused")
-        }
-    })?;
+        Some(path) => load_identity_marker_inputs(path, &args.tenant_id).map_err(|error| {
+            if error
+                .chain()
+                .any(|cause| cause.to_string() == "human_rights_source_unknown")
+            {
+                anyhow::Error::from(OwnedIdentityMarkersRefusalV1::SourceUnknown)
+            } else {
+                anyhow::anyhow!("human_rights_activation_refused")
+            }
+        }),
+        None => load_explicit_identity_marker_inputs(&args.explicit)
+            .map_err(|_| anyhow::anyhow!("human_rights_closure_refused")),
+    }?;
     install_owned_identity_markers(OwnedIdentityMarkersRequest {
         manifest: inputs.manifest,
         configuration: inputs.configuration,
@@ -100,12 +100,12 @@ pub(crate) fn run(args: HumanRightsArgs) -> Result<()> {
             let state = error
                 .downcast_ref::<OwnedIdentityMarkersRefusalV1>()
                 .map(|refusal| refusal.code())
-                .unwrap_or_else(|| {
-                    if error.to_string() == "human_rights_control_stop_attestation_required" {
+                .unwrap_or_else(|| match error.to_string().as_str() {
+                    "human_rights_control_stop_attestation_required" => {
                         "human_rights_control_stop_attestation_required"
-                    } else {
-                        "human_rights_activation_refused"
                     }
+                    "human_rights_closure_refused" => "human_rights_closure_refused",
+                    _ => "human_rights_activation_refused",
                 });
             bail!(
                 "human_rights_step_refused; step={step}; state={state}; action=preserve_maintenance_directory_and_sources"
