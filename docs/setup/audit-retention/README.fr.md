@@ -33,6 +33,8 @@ Dans une plage récupérée, la base vivante conserve aussi :
 - la **première mention** de chaque session, agent, sandbox et projet : l’événement dont une attribution d’identité a besoin pour prouver que la ressource existe ;
 - chaque **position d’un point de contrôle signé** des répertoires passés avec `--checkpoint-dir`, pour que les [points de contrôle signés](../audit-signatures/README.fr.md) continuent de comparer la base à chaque position signée.
 
+La base vivante garde aussi les **décisions, observations et autorisations egress** pour que le broker retrouve les reçus d’origine. Les nouveaux plans enregistrent ces positions dans `kept_positions`. Choisir un segment plus court si le total des positions à conserver dépasse la limite de 4 096.
+
 Les événements du cycle de vie des workers sont structurels. Dans les bases mesurées pendant le développement, ils représentaient la majorité des octets. La récupération des événements des workers clos est un lot distinct encore ouvert : d’ici là, la rétention repousse l’épuisement de la capacité sans supprimer la croissance due aux cycles de vie des workers.
 
 ## Ce que la base vivante enregistre

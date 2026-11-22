@@ -21,7 +21,7 @@ use super::{
 use crate::{
     audit::{Store, audit_head, capacity, control, validate_schema},
     broker_registry::{format_time, parse_time},
-    model::Event,
+    model::{Event, event_kind_in_namespace},
 };
 use anyhow::Context;
 use chrono::{DateTime, Utc};
@@ -363,8 +363,13 @@ fn plan_in(
             let bytes = archived_row.payload.len() as u64;
             archived += 1;
             archived_bytes += bytes;
+            // Egress receipts and grants are read from the live journal. Record
+            // their positions in new plans so older segments still replay with
+            // their original selection rules.
+            let keep_live =
+                kept.contains(&archived_row.seq) || event_kind_in_namespace(&event.kind, "egress");
             match selector.select(&event, archived_row.seq == last, &classes) {
-                Selection::Reclaim(_) if kept.contains(&archived_row.seq) => {
+                Selection::Reclaim(_) if keep_live => {
                     pins += 1;
                     kept_positions.push(archived_row.seq);
                     retained_digest.add(archived_row.seq, &archived_row.hash);
@@ -401,7 +406,7 @@ fn plan_in(
     if kept_positions.len() > super::MAX_KEPT_POSITIONS {
         return Err(RetentionFailure::new(
             code::RANGE_INVALID,
-            "the segment holds more signed checkpoint positions than one segment may keep; plan a shorter segment",
+            "the segment exceeds the limit on positions that must stay live; plan a shorter segment",
         )
         .with("kept_positions", kept_positions.len())
         .into());
@@ -1192,7 +1197,7 @@ impl ArchiveReplay {
     ) -> Result<Selection, RetentionFailure> {
         let boundary = archived.seq == segment.last_seq;
         let selection = match self.selector.select(event, boundary, &segment.classes) {
-            // A signed checkpoint position kept live counts as a pin.
+            // A position recorded as kept counts as a pin.
             Selection::Reclaim(_) if segment.kept.contains(&archived.seq) => {
                 segment.kept_seen.push(archived.seq);
                 Selection::Boundary

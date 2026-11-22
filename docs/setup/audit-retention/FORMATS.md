@@ -41,7 +41,7 @@ The archive covers a contiguous range `first_seq..=last_seq`, structural events 
 | `event_count`, `payload_bytes` | Archived events and the sum of their payload sizes |
 | `events_file`, `events_sha256`, `events_bytes` | `events.jsonl`, its digest and size |
 | `previous_manifest_sha256` | Manifest digest of the previous segment; `null` for the first segment and for exports |
-| `reclaim` | Retention only: `classes`, `reclaimed_events`, `reclaimed_bytes`, `reclaim_sha256`, `by_class`, `retained_structural`, `retained_pins`, `kept_positions` (reclaimable events kept live because a signed checkpoint names them) |
+| `reclaim` | Retention only: `classes`, `reclaimed_events`, `reclaimed_bytes`, `reclaim_sha256`, `by_class`, `retained_structural`, `retained_pins`, `kept_positions` (otherwise reclaimable events kept live for signed checkpoints or egress replay) |
 | `snapshot_sha256` | Retention only: digest of the persisted legacy view snapshot at `last_seq` |
 | `policy_sha256` | Retention only: fingerprint of the policy |
 | `created_at` | Declared by the producer; not a trusted timestamp |
