@@ -222,13 +222,17 @@ async fn a_delegated_change_is_durable_attributed_and_idempotent() {
     assert_eq!(stale, "context_revoked");
     let admin = stack.context("admin_a", "administration").await;
     let admin = admin["id"].as_str().unwrap().to_owned();
-    let before = last_mutation(&stack);
+    let mutation_before_replay = last_mutation(&stack);
     let replay = stack
         .change("admin_a", &admin, &member.membership_id, &change)
         .await;
     assert_eq!(replay.status, StatusCode::OK, "{}", replay.body);
     assert_eq!(replay.body["audit_seq"], audit_seq);
-    assert_eq!(last_mutation(&stack), before, "a replay writes nothing");
+    assert_eq!(
+        last_mutation(&stack),
+        mutation_before_replay,
+        "a replay writes nothing"
+    );
 
     // The same operation identifier for another change is a conflict.
     let mut other = body(member.revision, &["read_metadata"], true);
