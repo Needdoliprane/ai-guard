@@ -208,6 +208,22 @@ impl TenantStore {
         }
     }
 
+    /// Verify the bound audit and the authority required to serve requests.
+    pub(crate) fn verify_gateway_startup(&self) -> Result<()> {
+        match self {
+            Self::Sqlite(store) => {
+                anyhow::ensure!(store.integrity()?.valid, "audit integrity failure")
+            }
+            #[cfg(feature = "mysql-storage")]
+            Self::Mysql(store) => {
+                store
+                    .block(store.store().verify_control_projections())
+                    .map_err(|error| error.context("MySQL startup audit verification failed"))?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn append(&self, event: Event) -> Result<StoredEvent> {
         match self {
             Self::Sqlite(store) => store.append(event),

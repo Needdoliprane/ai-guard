@@ -165,7 +165,12 @@ impl Gateway {
 
 /// The gateway must exit non-zero without ever reporting readiness, and its
 /// diagnostics must not echo any secret.
-async fn assert_startup_refused(registry: &Registry, secrets: &[&str], label: &str) -> Result<()> {
+async fn assert_startup_refused(
+    registry: &Registry,
+    secrets: &[&str],
+    label: &str,
+    expected_reason: Option<&str>,
+) -> Result<()> {
     let mut child = registry.command().spawn()?;
     let mut stderr = child.stderr.take().context("stderr missing")?;
     let mut text = Vec::new();
@@ -181,6 +186,12 @@ async fn assert_startup_refused(registry: &Registry, secrets: &[&str], label: &s
     let text = String::from_utf8_lossy(&text);
     ensure!(!status.success(), "{label}: the gateway started");
     ensure!(!text.contains("Gateway "), "{label}: readiness reported");
+    if let Some(reason) = expected_reason {
+        ensure!(
+            text.contains(reason),
+            "{label}: expected startup refusal missing"
+        );
+    }
     for secret in secrets {
         ensure!(!text.contains(secret), "{label}: a secret reached stderr");
     }
@@ -257,7 +268,7 @@ async fn gateway_refuses_wrong_mysql_material_and_writes_no_business_row() -> Re
     }
     for (label, entry) in &cases {
         registry.write(std::slice::from_ref(entry))?;
-        assert_startup_refused(&registry, &[wrong_secret], label).await?;
+        assert_startup_refused(&registry, &[wrong_secret], label, None).await?;
         ensure!(
             audit_snapshot(&mut conn).await? == before,
             "{label}: the target changed"
@@ -282,6 +293,52 @@ async fn gateway_refuses_wrong_mysql_material_and_writes_no_business_row() -> Re
         audit_snapshot(&mut conn).await? == before,
         "serving without a request changed the target"
     );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh prepared private MySQL 8.4 QA schema and a built gateway"]
+async fn gateway_requires_identity_and_workload_projections_before_listening() -> Result<()> {
+    let fixture = FixtureFiles::open("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_A")?;
+    let mut conn = fixture.maintenance().await?;
+    require_fresh(&mut conn).await?;
+    let registry = Registry::new()?;
+    registry.write(&[registry.entry(&fixture, "tenant-a", "a")?])?;
+    let secrets = [RUNNER_A, VIEWER_A];
+
+    let initial = fixture.initialize("tenant-a").await?;
+    let audit_only = audit_snapshot(&mut conn).await?;
+    assert_startup_refused(
+        &registry,
+        &secrets,
+        "missing identity projection",
+        Some(&IdentityFailureV1::MigrationRequired.to_string()),
+    )
+    .await?;
+    ensure!(audit_snapshot(&mut conn).await? == audit_only);
+
+    let (_, identity) =
+        prepare_identity(&mut conn, fixture.target.namespace, &initial, &DIGEST_A).await?;
+    let without_workload = audit_snapshot(&mut conn).await?;
+    assert_startup_refused(
+        &registry,
+        &secrets,
+        "missing workload projection",
+        Some(&WorkloadFailureV1::MigrationRequired.to_string()),
+    )
+    .await?;
+    ensure!(audit_snapshot(&mut conn).await? == without_workload);
+
+    super::super::workload::prepare_capability(
+        &mut conn,
+        "tenant-a",
+        fixture.target.namespace,
+        (identity.seq, &identity.hash),
+    )
+    .await?;
+    let prepared = audit_snapshot(&mut conn).await?;
+    Gateway::start(&registry).await?.stop().await?;
+    ensure!(audit_snapshot(&mut conn).await? == prepared);
     Ok(())
 }
 

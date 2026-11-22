@@ -653,7 +653,7 @@ impl GatewayState {
             tenant
                 .store
                 .bind_control_collision_candidates(&control_collision_candidates)?;
-            anyhow::ensure!(tenant.store.integrity()?.valid, "audit integrity failure");
+            tenant.store.verify_gateway_startup()?;
             bound.push(tenant);
         }
         let tenants = bound;
