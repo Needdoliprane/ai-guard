@@ -5,7 +5,7 @@ name: G09 recovery diagnostic
 
 on:
   push:
-    branches: ['claude/v1-g09-recovery-check-20261122']
+    branches: ['claude/v1-g09-recovery-diagnostic-followup-20261122']
 
 permissions:
   contents: read
