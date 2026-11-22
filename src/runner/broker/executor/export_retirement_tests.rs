@@ -12,7 +12,11 @@ use crate::{
     },
     runtime::{ContainerHandle, RuntimeAuthority},
 };
-use std::{collections::BTreeMap, io::Read, path::Path};
+use std::{
+    collections::BTreeMap,
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 const ENGINE: &str = "export-retirement-synthetic-engine";
 const STARTED: &str = "2026-10-30T12:00:00Z";
@@ -36,10 +40,31 @@ fn trace_phase(phase: &'static str) {
     );
 }
 
+fn fixture_rustc() -> Result<PathBuf> {
+    let configured = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    // Resolve the selected toolchain in the parent, where a rustup shim can
+    // still use the runner's environment. Pass the real compiler to the child.
+    let output = Command::new(configured)
+        .args(["--print", "sysroot"])
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "cannot resolve the fixture toolchain"
+    );
+    let sysroot = std::str::from_utf8(&output.stdout)?;
+    let compiler = Path::new(sysroot.trim_end_matches(['\r', '\n'])).join("bin/rustc");
+    ensure!(
+        compiler.is_absolute() && compiler.is_file(),
+        "fixture toolchain did not provide an absolute compiler path"
+    );
+    Ok(compiler)
+}
+
 /// A failing oracle cannot leave an original native actor in the test runner.
 /// This parent owns the exact child PID and reaps it on every path.
 #[test]
 fn export_helper_abandonment_propagates_without_extraction_or_export_success() {
+    let rustc = fixture_rustc().expect("resolve the export fixture compiler in the parent");
     let mut root = tempfile::Builder::new()
         .prefix("er-parent-")
         .permissions(fs::Permissions::from_mode(0o700))
@@ -58,13 +83,11 @@ fn export_helper_abandonment_propagates_without_extraction_or_export_success() {
         .env_clear()
         .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
         .env("AI_GUARD_TEST_EXPORT_RETIREMENT_CHILD", "owned")
+        .env("RUSTC", rustc)
         .env("TMPDIR", root.path())
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone().unwrap()))
         .stderr(Stdio::from(log));
-    if let Some(rustc) = std::env::var_os("RUSTC") {
-        command.env("RUSTC", rustc);
-    }
     let mut child = NativeChild(command.spawn().unwrap());
     // Fixture budget only, not a production retirement bound.
     let expires = std::time::Instant::now() + FIXTURE_BUDGET;
@@ -1104,7 +1127,12 @@ fn main() {
 "#,
     )?;
     let program = directory.join("fixture");
-    let result = Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
+    let rustc = std::env::var_os("RUSTC").context("missing export fixture compiler handoff")?;
+    ensure!(
+        Path::new(&rustc).is_absolute(),
+        "fixture compiler path is relative"
+    );
+    let result = Command::new(rustc)
         .args([
             "--edition=2024",
             "--crate-name",
