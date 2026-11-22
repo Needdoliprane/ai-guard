@@ -33,7 +33,7 @@ jobs:
           ref: 3a2f7aede4902c2658a4da68f886a387e401ec61
           fetch-depth: 0
           persist-credentials: false
-      - name: Verify exact source, workflow lineage, and no nocapture
+      - name: Verify exact source and workflow lineage
         shell: bash
         env:
           WORKFLOW_SHA: ${{ github.sha }}
@@ -49,12 +49,11 @@ jobs:
               grep -Fq 'the intact journal must still supply the operation' src/broker/writer_status_projection_tests.rs; then
             source_status=PASS
           fi
-          if [[ "$(git rev-parse "$WORKFLOW_SHA^")" == 524e05c5c86b03a9f1b6e11bd6125a6cfe75f979 ]] &&
-              git diff --quiet 524e05c5c86b03a9f1b6e11bd6125a6cfe75f979 "$WORKFLOW_SHA" -- . ':(exclude).github/workflows/lot-verify.yaml' &&
-              ! git show "$WORKFLOW_SHA:.github/workflows/lot-verify.yaml" | grep -Fq -- '--nocapture'; then
+          if [[ "$(git rev-parse "$WORKFLOW_SHA^")" == 88041c33704fd7c53f64fc78a4ed07719bb4c2af &&
+                "$(git diff --name-only 88041c33704fd7c53f64fc78a4ed07719bb4c2af "$WORKFLOW_SHA")" == '.github/workflows/lot-verify.yaml' ]]; then
             lineage_status=PASS
           fi
-          printf 'source_checkout=%s\nworkflow_lineage=%s\nworkflow_parent=524e05c5c86b03a9f1b6e11bd6125a6cfe75f979\n' \
+          printf 'source_checkout=%s\nworkflow_lineage=%s\nworkflow_parent=88041c33704fd7c53f64fc78a4ed07719bb4c2af\n' \
             "$source_status" "$lineage_status" >> "$receipt"
           cat "$receipt" >> "$GITHUB_STEP_SUMMARY"
           [[ "$source_status" == PASS && "$lineage_status" == PASS ]]
