@@ -26,7 +26,7 @@ impl Stack {
         let seed = Seed::build(
             files.path(),
             SeedOptions {
-                workers: 4,
+                workers: 12,
                 events: 8,
                 human_principal_events: None,
             },
