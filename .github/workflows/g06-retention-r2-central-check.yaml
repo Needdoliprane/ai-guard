@@ -74,22 +74,42 @@ jobs:
               | unique | .[:8] | join(",")
             ' "$build" 2>/dev/null) || fail BUILD_FAILED
             if [[ "$codes" =~ ^E[0-9]{4}(,E[0-9]{4}){0,7}$ ]]; then
-              positions=$(jq -Rrs --arg fixture_file "$GITHUB_WORKSPACE/tests/supervision_api.rs" '
-                [split("\n")[] | fromjson? | objects
-                  | select(.reason == "compiler-message" and .message.level == "error")
-                  | .message
-                  | (.code.code | strings | select(test("^E[0-9]{4}$"))) as $code
-                  | .spans[]?
-                  | select(.is_primary == true
-                      and (.file_name == "tests/supervision_api.rs" or .file_name == $fixture_file))
-                  | select((.line_start | numbers | tostring | test("^[1-9][0-9]{0,5}$"))
-                      and (.column_start | numbers | tostring | test("^[1-9][0-9]{0,3}$")))
-                  | "\($code)@\(.line_start):\(.column_start)"]
-                | unique | .[:8] | join(",")
-              ' "$build" 2>/dev/null) || positions=
-              if [[ "$positions" =~ ^E[0-9]{4}@[1-9][0-9]{0,5}:[1-9][0-9]{0,3}(,E[0-9]{4}@[1-9][0-9]{0,5}:[1-9][0-9]{0,3}){0,7}$ ]]; then
-                fail "RUSTC_ERROR $codes at $positions"
+              sources="$capture_dir/sources"
+              targets=unavailable
+              positions=unavailable
+              if git ls-tree -r --name-only "$revision" -- src tests > "$sources" 2>/dev/null \
+                  && locations=$(jq -Rrs --arg root "$GITHUB_WORKSPACE/" --rawfile sources "$sources" '
+                def source_path($tracked):
+                  strings | ltrimstr($root) | ltrimstr("./")
+                  | select(length <= 160 and test("\\A(src|tests)/([A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+\\.rs\\z"))
+                  | select(. as $path | $tracked | has($path));
+                def coordinate($pattern):
+                  numbers | tostring | select(test($pattern));
+                def bounded_list:
+                  unique | .[:8] | if length == 0 then "unavailable" else join(",") end;
+
+                (reduce ($sources | split("\n")[]) as $path ({}; .[$path] = true)) as $tracked
+                | [split("\n")[] | fromjson? | objects
+                    | select(.reason == "compiler-message" and .message.level == "error")
+                    | (.message.code.code | strings | select(test("\\AE[0-9]{4}\\z"))) as $code
+                    | {code: $code, target: .target, spans: .message.spans}] as $errors
+                | [
+                    ([$errors[] | .code as $code | .target
+                      | select([.src_path | source_path($tracked)] | length == 1)
+                      | .name | strings | select(test("\\A[A-Za-z0-9][A-Za-z0-9_-]{0,63}\\z"))
+                      | "\($code)@\(.)"] | bounded_list),
+                    ([$errors[] | .code as $code | .spans[]?
+                      | select(.is_primary == true)
+                      | (.file_name | source_path($tracked)) as $file
+                      | (.line_start | coordinate("\\A[1-9][0-9]{0,5}\\z")) as $line
+                      | (.column_start | coordinate("\\A[1-9][0-9]{0,3}\\z")) as $column
+                      | "\($code)@\($file):\($line):\($column)"] | bounded_list)
+                  ]
+                | @tsv
+                ' "$build" 2>/dev/null); then
+                IFS=$'\t' read -r targets positions <<< "$locations"
               fi
+              printf 'Compiler targets %s\nCompiler positions %s\n' "$targets" "$positions" | emit_receipt
               fail "RUSTC_ERROR $codes"
             fi
             fail BUILD_FAILED
