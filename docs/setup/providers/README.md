@@ -222,6 +222,16 @@ ai-guard collects what Codex CLI and Claude Code officially expose while the ses
 
 ## Diagnose provider problems
 
+Before launching, use the same client, authentication mode, profile and model selectors with `providers check`. Add `--interactive` for a TTY session and pass the same `--providers-file` if you selected one.
+
+```sh
+"$AIGUARD_BIN" providers check --config-dir "$AIGUARD_CONFIG" \
+  --client claude-code --auth-mode api --client-profile claude-api \
+  --model claude-haiku-5-5 --json
+```
+
+The report shows the resolved choice and `credential_status`. `present_unverified` reports a regular, single-link file owned by your account with mode `0600`. `absent` means the entry is missing under a checked parent. For `suspect`, check the referenced directory chain, ownership, mode and links. This offline check reads only reference metadata. Account access, credential contents and worker client capabilities still need verification.
+
 | Result | Next action |
 |---|---|
 | Client missing or incompatible | Rebuild the approved worker with an exact compatible version; check the resolved image. A host installation does not install the worker client. |

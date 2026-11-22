@@ -23,6 +23,7 @@ Il ne remplace pas les diagnostics existants. Il indique lequel lancer ensuite :
 |---|---|
 | `agentsandbox doctor --runtime docker` ou `--runtime podman` | Exécute le moteur pour l'inspecter. |
 | `agentsandbox providers status` | Montre les profils configurés par le CLI du produit, sans chemins privés ni valeurs de credentials. |
+| `agentsandbox providers check` | Résout le choix du fournisseur et affiche l’état des métadonnées de la référence sélectionnée. [Diagnostic fournisseur](../providers/README.fr.md#diagnostiquer-les-problèmes-fournisseur) |
 | `agentsandbox healthcheck --url URL` | Demande son état de santé à un service en cours d'exécution. |
 | `agentsandbox verify-audit` | Demande au gateway sa vérification locale de chaîne. En ligne : le défaut lit le fichier viewer historique ; `--viewer-token-file FILE --gateway URL` sélectionne explicitement celui d’un tenant préparé. Cette lecture n’établit pas la continuité anti-rollback indépendante. |
 | `ai-guard-audit-checkpoint verify` | Vérification hors ligne explicite des checkpoints signés d’un tenant avec une ancre tenue indépendamment ; comparaison facultative à la base décrite dans le [guide des checkpoints](../audit-signatures/README.fr.md). Cette commande séparée n’est jamais appelée par le diagnostic. |

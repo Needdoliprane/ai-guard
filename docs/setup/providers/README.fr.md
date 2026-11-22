@@ -222,6 +222,16 @@ ai-guard collecte ce que Codex CLI et Claude Code exposent officiellement pendan
 
 ## Diagnostiquer les problèmes fournisseur
 
+Avant de lancer, reprendre les mêmes sélecteurs de client, de mode d’authentification, de profil et de modèle avec `providers check`. Ajouter `--interactive` pour une session TTY et reprendre `--providers-file` si un fichier explicite a été choisi.
+
+```sh
+"$AIGUARD_BIN" providers check --config-dir "$AIGUARD_CONFIG" \
+  --client claude-code --auth-mode api --client-profile claude-api \
+  --model claude-haiku-5-5 --json
+```
+
+Le rapport affiche le choix résolu et `credential_status`. `present_unverified` indique un fichier régulier à lien unique, possédé par votre compte et de mode `0600`. `absent` indique une entrée manquante sous un répertoire vérifié. Pour `suspect`, vérifier la chaîne de répertoires, le propriétaire, le mode et les liens. Ce contrôle hors ligne examine uniquement les métadonnées de la référence. L’accès au compte, le contenu du credential et les capacités du client dans le worker restent à vérifier.
+
 | Résultat | Action |
 |---|---|
 | Client absent ou incompatible | Reconstruire le worker approuvé avec une version exacte compatible et vérifier l'image résolue. Un client hôte n'installe pas celui du worker. |

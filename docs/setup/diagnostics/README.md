@@ -23,6 +23,7 @@ It does not replace the existing diagnostics. It tells which one to run next:
 |---|---|
 | `agentsandbox doctor --runtime docker` or `--runtime podman` | Executes the engine to inspect it. |
 | `agentsandbox providers status` | Shows the configured profiles through the product CLI, without private paths or credential values. |
+| `agentsandbox providers check` | Resolves the planned provider and reports file metadata for its selected credential reference. [Provider diagnostics](../providers/README.md#diagnose-provider-problems) |
 | `agentsandbox healthcheck --url URL` | Asks a running service for its health. |
 | `agentsandbox verify-audit` | Asks the running gateway for its local hash-chain check. Online: the default reads the historical viewer file; `--viewer-token-file FILE --gateway URL` explicitly selects the viewer file of a prepared tenant. It does not establish independent rollback continuity. |
 | `ai-guard-audit-checkpoint verify` | Explicit offline verification of signed tenant checkpoints with an independently held anchor; optional database comparison is documented in the [signed-checkpoint guide](../audit-signatures/README.md). This is a separate command, never invoked by this diagnostic. |
