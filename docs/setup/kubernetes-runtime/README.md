@@ -962,7 +962,7 @@ provider and helper process groups. Orphans are reaped only at that end.
 | 66 | Input ended before the Hello or before the Handoff (export: before `start`). |
 | 67 | Handoff, import, start or export refused with a closed reason. |
 | 68 | `stop` before `start`, or during the export. |
-| 69 | Input ended after the Handoff before the end marker. The provider was killed and `exited` was attempted. |
+| 69 | Input ended after the Handoff before the end marker. The supervisor requests provider termination and sends `exited` only if it obtained an exit status. |
 | 70 | Local stream or runtime failure. |
 
 ### 14.5 Broker streaming variant
@@ -995,6 +995,8 @@ applies backpressure.
 
 - Every worker message is **declared**. `exited` is not the observed
   container terminal state, which the broker reads by Pod UID (D5).
+  Without a provider exit status the worker closes without `exited`,
+  and the broker reports the stream as incomplete.
   `imported` is not an observed workspace.
 - Standard output carries only Ready and v3 frames. The node runtime keeps it
   in its logs, so no secret may travel on it. The supervisor never writes the

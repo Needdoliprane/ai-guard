@@ -1025,7 +1025,7 @@ de l'assistant. Les orphelins ne sont récoltés qu'à cette fin.
 | 66 | Entrée terminée avant le Hello ou avant le Handoff (export : avant `start`). |
 | 67 | Handoff, import, start ou export refusé avec un motif fermé. |
 | 68 | `stop` avant `start`, ou pendant l'export. |
-| 69 | Entrée terminée après le Handoff, avant le marqueur de fin. Le fournisseur a été tué et `exited` a été tenté. |
+| 69 | Entrée terminée après le Handoff, avant le marqueur de fin. Le superviseur demande l’arrêt du fournisseur et envoie `exited` uniquement s’il a obtenu son statut de sortie. |
 | 70 | Échec local de flux ou de runtime. |
 
 ### 14.5 Variante en flux côté broker
@@ -1058,8 +1058,10 @@ applique une contre-pression.
 ### 14.6 Limites
 
 - Chaque message du worker est **déclaré**. `exited` n'est pas l'état terminal
-  observé du conteneur, que le broker lit par UID de Pod (D5). `imported`
-  n'est pas un workspace observé.
+  observé du conteneur, que le broker lit par UID de Pod (D5).
+  Si le statut du fournisseur reste inconnu, le worker ferme le flux sans
+  `exited` et le broker signale que le flux est incomplet.
+  `imported` n'est pas un workspace observé.
 - La sortie standard ne porte que Ready et les trames v3. Le runtime du nœud
   la conserve dans ses journaux, donc aucun secret ne doit y passer. Le
   superviseur n'écrit jamais la charge du Handoff dans une trame ni sur

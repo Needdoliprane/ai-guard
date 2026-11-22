@@ -67,7 +67,7 @@ use std::{
         unix::{ffi::OsStrExt, fs::MetadataExt, process::ExitStatusExt},
     },
     path::{Component, Path, PathBuf},
-    process::Stdio,
+    process::{ExitStatus, Stdio},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -374,6 +374,17 @@ impl Output {
                 .is_ok_and(|sent| sent.is_ok()),
             None => false,
         }
+    }
+    async fn provider_exit(&self, status: Option<ExitStatus>) -> bool {
+        let Some(status) = status else {
+            // Closing without an end marker reports an incomplete stream to the broker.
+            return false;
+        };
+        self.control(WorkerControlV3::Exited(ExitedV3 {
+            code: status.code(),
+            signal: status.signal(),
+        }))
+        .await
     }
     /// Closes the queue and waits for the written end, within `FLUSH_TIME`.
     async fn finish(&mut self) -> bool {
@@ -1059,21 +1070,7 @@ async fn run<R: AsyncRead + Unpin>(
                 .and_then(Result::ok),
         );
     }
-    let declared = status.flatten().map_or(
-        ExitedV3 {
-            code: None,
-            signal: Some(libc::SIGKILL),
-        },
-        |status| ExitedV3 {
-            code: status.code(),
-            signal: if status.code().is_some() {
-                None
-            } else {
-                status.signal()
-            },
-        },
-    );
-    let exited = output.control(WorkerControlV3::Exited(declared)).await;
+    let exited = output.provider_exit(status.flatten()).await;
     // Close the helper, then reach every remaining process.
     drop(helper_stdin.take());
     drop(helper_stdout.take());

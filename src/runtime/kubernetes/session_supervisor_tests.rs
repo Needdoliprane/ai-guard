@@ -346,6 +346,21 @@ async fn exit_code_and_stop_signal_are_declared_as_reported() {
     assert_eq!(harness.end().await.0, SupervisorEndV3::Complete);
 }
 
+#[tokio::test]
+async fn a_missing_provider_status_closes_without_an_exit_frame() {
+    let (writer, mut reader) = tokio::io::duplex(128);
+    let mut output = Output::start(writer);
+    assert!(!output.provider_exit(None).await);
+    assert!(output.finish().await);
+    let mut frames = FrameReaderV3::new();
+    assert!(
+        watched(frames.read(&mut reader, MAX_CONTROL_BYTES))
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
 fn alive(pid: i32) -> bool {
     // SAFETY: signal 0 checks existence only.
     unsafe { libc::kill(pid, 0) == 0 }
