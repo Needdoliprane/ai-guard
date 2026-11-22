@@ -9,9 +9,12 @@ use crate::{
     broker::{
         enforcer::{EnforcedSlot, EnforcerError, retirement::test_support::OriginalUnusedFixture},
         intent::ExecutionIntentV1,
-        journal::retirement_live_fixture::{INVOCATION_DATA_PROGRAM, live_fixture_with_gateway},
+        journal::{
+            JournalError,
+            retirement_live_fixture::{INVOCATION_DATA_PROGRAM, live_fixture_with_gateway},
+        },
         service::preclaim::AbandonBeforeClaimV1,
-        writer::BeginUnusedRetirement,
+        writer::{BeginUnusedRetirement, RetirementFailure},
     },
     control::QuotaPolicyV1,
     runner::AuditClient,
@@ -277,6 +280,18 @@ async fn composed_settlement(scenario: Scenario) {
     drained.unwrap();
 }
 
+fn journal_phase(phase: &'static str, error: JournalError) -> anyhow::Error {
+    anyhow::Error::new(error).context(format!("settlement phase={phase} category={error:?}"))
+}
+
+fn retirement_phase<I: Send + Sync + 'static>(
+    phase: &'static str,
+    failure: RetirementFailure<I>,
+) -> anyhow::Error {
+    let category = failure.error();
+    anyhow::Error::new(failure).context(format!("settlement phase={phase} category={category:?}"))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn submitted_final_case(
     service: &Arc<Service>,
@@ -300,7 +315,8 @@ async fn submitted_final_case(
     let arm = binding.arm_id();
     writer
         .bind_full3_registration(operation, head, binding)
-        .await?;
+        .await
+        .map_err(|error| journal_phase("bind_full3", error))?;
     job.preclaim
         .announce_registration(operation, arm, full.epoch(), generation)?;
     job.preclaim
@@ -323,18 +339,23 @@ async fn submitted_final_case(
     event.correlation_id = data.correlation_id.clone();
     event.trace_id = data.trace_id.clone();
     let client = AuditClient::new(origin, RUNNER)?;
-    writer.enqueue_event(operation, event.clone()).await?;
+    writer
+        .enqueue_event(operation, event.clone())
+        .await
+        .map_err(|error| journal_phase("enqueue_signal", error))?;
     let sequence = client
         .post_control_event(serde_json::to_value(event)?)
         .await?;
     writer
         .acknowledge_event(operation, request.command_id, sequence)
-        .await?;
+        .await
+        .map_err(|error| journal_phase("ack_signal", error))?;
     signal.confirm_audit()?;
     let unused = slot.revoke_unused(request.command_id).await?;
     let current = writer
         .load(operation)
-        .await?
+        .await
+        .map_err(|error| journal_phase("load_before_retirement", error))?
         .ok_or_else(|| anyhow!("actual job missing"))?;
     let pending = writer
         .begin_unused_retirement(BeginUnusedRetirement::new(
@@ -342,7 +363,8 @@ async fn submitted_final_case(
             current.head().clone(),
             unused,
         )?)
-        .await?;
+        .await
+        .map_err(|failure| retirement_phase("begin_retirement", failure))?;
     let identity = pending.identity().clone();
     let final_event_id = pending.final_event_id();
     let sequence = client
@@ -350,8 +372,12 @@ async fn submitted_final_case(
         .await?;
     writer
         .acknowledge_event(operation, pending.intention_event_id(), sequence)
-        .await?;
-    let authorized = writer.authorize_unused_retirement(pending).await?;
+        .await
+        .map_err(|error| journal_phase("ack_pending", error))?;
+    let authorized = writer
+        .authorize_unused_retirement(pending)
+        .await
+        .map_err(|failure| retirement_phase("authorize_retirement", failure))?;
     job.preclaim.mark_retiring(arm, full.epoch(), generation)?;
     let owner = job
         .preclaim
@@ -919,7 +945,8 @@ async fn submitted_final_input_case(
         .ok_or_else(|| anyhow!("actual Final input setup guard unavailable"))?;
     let before = stops
         .recovery_status(operation)
-        .await?
+        .await
+        .map_err(|error| journal_phase("read_pending", error))?
         .ok_or_else(|| anyhow!("actual Final input Pending missing"))?;
     ensure!(
         !before.incomplete()
@@ -936,7 +963,8 @@ async fn submitted_final_input_case(
     let pending_bytes = canonical(before.retirements()[0].request())?;
     let initial = writer
         .load(operation)
-        .await?
+        .await
+        .map_err(|error| journal_phase("load_before_final", error))?
         .ok_or_else(|| anyhow!("actual Final input job missing"))?;
     let intent_bytes = initial.intent().canonical_bytes()?;
     let original_operations = canonical(
@@ -978,7 +1006,10 @@ async fn submitted_final_input_case(
 
     match scenario {
         Scenario::FinalNotQueued => {
-            let pause = writer.pause_for_test().await?;
+            let pause = writer
+                .pause_for_test()
+                .await
+                .map_err(|error| journal_phase("pause_writer", error))?;
             ensure!(
                 pause.is_paused(),
                 "actual Final pressure writer did not pause"
@@ -1003,13 +1034,13 @@ async fn submitted_final_input_case(
                 "ordinary queue saturation was not established before Final"
             );
             let returned = match stops.finalize_retirement(input).await {
-                Err(crate::broker::writer::RetirementFailure::NotQueued {
-                    error: crate::broker::journal::JournalError::Busy,
+                Err(RetirementFailure::NotQueued {
+                    error: JournalError::Busy,
                     input,
                 }) => input,
                 Err(failure) => {
                     return Err(anyhow!(
-                        "actual Final pressure did not return its input: {:?}",
+                        "settlement phase=final_not_queued category={:?}: actual Final pressure did not return its input",
                         failure.error()
                     ));
                 }
@@ -1058,10 +1089,16 @@ async fn submitted_final_input_case(
                 "dropping the borrowed Final input did not restore its actual keeper"
             );
             drop(pause);
-            for waiter in queued {
+            for (index, waiter) in queued.into_iter().enumerate() {
+                let read_number = index + 1;
+                let status = waiter.await.map_err(|error| {
+                    anyhow::Error::new(error).context(format!(
+                        "settlement phase=drain_pressure_read index={read_number} category={error:?}"
+                    ))
+                })?;
                 ensure!(
-                    waiter.await?.is_some(),
-                    "ordinary pressure read did not drain"
+                    status.is_some(),
+                    "settlement phase=drain_pressure_read index={read_number}: ordinary pressure read did not drain"
                 );
             }
             eprintln!("BROKER_SUBMITTED_NOT_QUEUED_INPUT_SETUP_CONFIRMED");
