@@ -474,6 +474,17 @@ async fn transition(
     token: &str,
     worker: &WorkerV1,
     transition: WorkerTransitionV1,
+) -> WorkerV1 {
+    transition_with_receipt(router, token, worker, transition)
+        .await
+        .worker
+}
+
+async fn transition_with_receipt(
+    router: &Router,
+    token: &str,
+    worker: &WorkerV1,
+    transition: WorkerTransitionV1,
 ) -> MutationResultV1 {
     let mutation = WorkerMutationV1 {
         version: 1,
@@ -877,8 +888,7 @@ async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_bloc
         &worker,
         WorkerTransitionV1::Prepare,
     )
-    .await
-    .worker;
+    .await;
     let import_id = Uuid::new_v4();
     let import_arm = helper_arm(
         &worker,
@@ -1132,8 +1142,7 @@ async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_bloc
         &worker,
         WorkerTransitionV1::CreateIssued,
     )
-    .await
-    .worker;
+    .await;
     let created_inspection = worker_inspection(&worker);
     worker = transition(
         &fixture.router,
@@ -1143,8 +1152,7 @@ async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_bloc
             inspection: created_inspection.clone(),
         },
     )
-    .await
-    .worker;
+    .await;
 
     let worker_arm = ArmV1 {
         version: 1,
@@ -1227,16 +1235,14 @@ async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_bloc
             ),
         },
     )
-    .await
-    .worker;
+    .await;
     worker = transition(
         &fixture.router,
         &fixture.runner_a,
         &worker,
         WorkerTransitionV1::Stop,
     )
-    .await
-    .worker;
+    .await;
     let terminal_observation = worker_observation(
         &created_inspection,
         RuntimeStatusV1::Exited,
@@ -1244,7 +1250,7 @@ async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_bloc
         Some("2026-10-30T12:00:01Z"),
         Some(0),
     );
-    let terminal = transition(
+    let terminal = transition_with_receipt(
         &fixture.router,
         &fixture.runner_a,
         &worker,
@@ -1254,7 +1260,7 @@ async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_bloc
     )
     .await;
     assert_eq!(terminal.worker.state, WorkerStateV1::Terminal);
-    let cleaned = transition(
+    let cleaned = transition_with_receipt(
         &fixture.router,
         &fixture.runner_a,
         &terminal.worker,
