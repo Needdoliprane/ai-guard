@@ -1112,12 +1112,19 @@ async fn broker_crash_recovery_observes_then_stops_the_same_running_instance() {
     fs::remove_file(audit_refusal).unwrap();
     let reconciled = resume_with_adoption().await;
     let reconciliation_diagnostic = (!reconciled.status.success()).then(|| {
-        const SAFE_CLI_MESSAGE_MARKERS: [(&str, &str); 4] = [
+        const SAFE_CLI_MESSAGE_MARKERS: [(&str, &str); 8] = [
             ("no terminal proof", "no_terminal_proof"),
             (
                 "invocation adoption is pending",
                 "invocation_adoption_pending",
             ),
+            ("cleanup unconfirmed", "cleanup_unconfirmed"),
+            (
+                "worker terminal result recorded after transport stop",
+                "terminal_result_after_transport_stop",
+            ),
+            ("worker command failed", "worker_command_failed"),
+            ("postprocessing failed", "postprocessing_failed"),
             ("audit", "audit_related"),
             ("runtime", "runtime_related"),
         ];
@@ -1149,12 +1156,51 @@ async fn broker_crash_recovery_observes_then_stops_the_same_running_instance() {
             .map(|worker| format!("{:?}", worker.state))
             .unwrap_or_else(|| "unavailable".into());
         let quota_held = worker.map(|worker| worker.quota_held);
+        let store_cleanup_removed = worker.and_then(|worker| worker.cleanup_removed);
         let usage_count = scenario.store.worker_usage().ok().map(|usage| usage.len());
         let audit_head_unchanged = scenario.store.head().ok().map(|head| head == before_rejected_audit);
         let terminal_ack = scenario.root.join("terminal_ack").is_file();
+        let stdout_value = serde_json::from_slice::<Value>(&reconciled.stdout).ok();
+        let stdout_json_object = stdout_value.as_ref().is_some_and(Value::is_object);
+        let cli_result_kind = match stdout_value.as_ref().and_then(|value| value.get("result")) {
+            None => if stdout_json_object { "absent" } else { "unavailable" },
+            Some(Value::Null) => "null",
+            Some(Value::Object(_)) => "preserved",
+            Some(_) => "other",
+        };
+        let result = stdout_value
+            .as_ref()
+            .and_then(|value| value.get("result"))
+            .filter(|value| value.is_object());
+        let cli_result_exit_code = result
+            .and_then(|value| value.get("exit_code"))
+            .and_then(Value::as_i64);
+        let cli_result_timed_out = result
+            .and_then(|value| value.get("timed_out"))
+            .and_then(Value::as_bool);
+        let cli_transport_stop = result
+            .and_then(|value| value.get("transport_stop_reason"))
+            .is_some_and(|value| !value.is_null());
+        let cli_postprocessing_error = result
+            .and_then(|value| value.get("postprocessing_error"))
+            .is_some_and(|value| !value.is_null());
+        let cli_cleanup_removed = stdout_value
+            .as_ref()
+            .and_then(|value| value.get("worker"))
+            .and_then(|worker| worker.get("cleanup_removed"))
+            .and_then(Value::as_bool);
+        let cli_result_cleanup_state = result
+            .and_then(|value| value.get("cleanup"))
+            .and_then(|cleanup| cleanup.get("state"))
+            .and_then(Value::as_str)
+            .filter(|state| matches!(*state, "removed" | "unconfirmed"))
+            .unwrap_or("unavailable");
         format!(
-            "exit_code={:?}, cli_message_category={}, worker_state={}, quota_held={:?}, usage_count={:?}, terminal_ack={}, audit_head_unchanged={:?}",
-            reconciled.status.code(), cli_message_category, worker_state, quota_held,
+            "exit_code={:?}, cli_message_category={}, stdout_json_object={}, cli_result_kind={}, cli_result_exit_code={:?}, cli_result_timed_out={:?}, cli_transport_stop={}, cli_postprocessing_error={}, cli_cleanup_removed={:?}, cli_result_cleanup_state={}, worker_state={}, quota_held={:?}, store_cleanup_removed={:?}, usage_count={:?}, terminal_ack={}, audit_head_unchanged={:?}",
+            reconciled.status.code(), cli_message_category,
+            stdout_json_object, cli_result_kind, cli_result_exit_code, cli_result_timed_out,
+            cli_transport_stop, cli_postprocessing_error, cli_cleanup_removed,
+            cli_result_cleanup_state, worker_state, quota_held, store_cleanup_removed,
             usage_count, terminal_ack, audit_head_unchanged,
         )
     });
