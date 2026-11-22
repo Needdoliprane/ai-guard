@@ -62,6 +62,7 @@ pub const TENANT_FIELDS: &[&str] = &[
     "audit_capacity_policy",
     "workload_audit_policy",
     "relay_retention_policy",
+    "egress_policy",
     "held_create_policy",
     "session_reservation_policy",
     "session_recovery_policy",
