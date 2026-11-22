@@ -390,7 +390,12 @@ impl ClientState {
         tokio::runtime::Handle::try_current().map_err(|_| JournalError::Io)?;
         let (reply, receive) = oneshot::channel();
         let command = command(reply);
-        let result_read = matches!(&command, Command::ReadResult { .. });
+        // These commands inspect durable state. The actor applies its
+        // integrity checks even when the reader abandons the response.
+        let retain_status_on_lost_reply = matches!(
+            &command,
+            Command::ReadResult { .. } | Command::PendingRetirementEvents { .. }
+        );
         #[cfg(test)]
         {
             use super::journal::cost_measurement::{self, WriterKind};
@@ -426,7 +431,7 @@ impl ClientState {
             }
             // Same timeout and nested error mapping as receive. Only this
             // test branch can distinguish reception from an actor's Io reply.
-            let mut waiter = (!result_read)
+            let mut waiter = (!retain_status_on_lost_reply)
                 .then(|| status_cache::WaiterGuard::new(Arc::clone(&self.status_cache)));
             let completed = self.receive_reply(receive).await;
             let received = completed.is_ok();
@@ -447,7 +452,7 @@ impl ClientState {
                 Err(mpsc::TrySendError::Disconnected(_)) => return Err(JournalError::Io),
             }
             // A lost reply never removes or cancels the actor's typed command.
-            if result_read {
+            if retain_status_on_lost_reply {
                 self.receive_reply(receive).await?
             } else {
                 self.receive(receive).await
