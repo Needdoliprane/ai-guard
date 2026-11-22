@@ -2,13 +2,13 @@ name: G07 native worker terminal check
 
 on:
   push:
-    branches: ['claude/v1-g07-full3-result-code-check-20261122']
+    branches: ['claude/v1-g07-full3-closed-progress-20261122']
 
 permissions:
   contents: read
 
 concurrency:
-  group: g07-full3-result-code-check-${{ github.ref }}
+  group: g07-full3-closed-progress-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -75,7 +75,8 @@ jobs:
           category_pattern='^(Error: )?phase=(submit|held_import|released_import|worker|result|quota|closed_journal|fixture_cleanup|fixture_witness|playback|install_import_gate|waiting_for_import|fixture_start|fixture_broker_close|fixture_start_guardian) category=(unexpected_acceptance|unrelated_acceptance|invalid_sqlite_claim|premature_observation|sqlite_event_read|sqlite_worker_read|unexpected_fixture_counts|unexpected_result_projection|unexpected_result_reply|unexpected_sqlite_worker|unexpected_status_projection|unexpected_status_reply|unexpected_worker_count|ack_not_checked|ack_not_proven|not_confirmed|errors_observed|fixture_deadline|invalid_audit_snapshot|multiple_releases|release_missing|release_observation_mismatch|arm_receipt_encoding|batch_failure_observed|cleanup_input_hash|invalid_cleanup|invalid_observation|observation_input_hash|sqlite_audit_integrity|sqlite_integrity_read|sqlite_worker_missing|unexpected_import_outcome|verification_not_reached|audit_incomplete|audit_tuple_mismatch|missing_audit_event|terminal_not_reached|terminal_observation_missing|unexpected_result_identity|unexpected_result_outcome|unexpected_terminal_worker|runtime_identity_missing|synthetic_completion_refused|broker_error_code_unauthorized|broker_error_code_forbidden|broker_error_code_unavailable|broker_error_code_incompatible_control|broker_error_code_busy|broker_error_code_invalid_input|broker_error_code_conflict|broker_error_code_interrupted|broker_error_code_limit_exceeded|broker_error_code_needs_reconciliation|other_result_failure|reply_spawn_failed|reply_stdout_pipe_missing|reply_stderr_pipe_missing|reply_harness_timeout|reply_capture_failed|reply_output_limit|broker_error_reply|broker_rejected_reply|reply_missing_or_invalid|reply_typed_nonzero_exit|reply_ipc_unavailable_or_invalid|reply_ipc_outcome_unknown|reply_ipc_unavailable_before_request|reply_cli_arguments|reply_cli_failure_unclassified|reply_failed_unclassified|fixture_state|fixture_timeout|gate_disconnected|fixture_setup_failed|not_started|retained_for_guardian_custody|identity_attested)'
           start_pattern='^phase=fixture_start stage=(BrokerSpawn|GuardianRole|GuardianGenesis|GuardianPublication|GuardianSocket|GuardianIdentity|GuardianRevalidation|BrokerList) category=(broker_spawn_failed|broker_owner_missing|broker_exited|broker_wait_failed|fixture_deadline)'
           closed_errors="$(grep -Eo "$category_pattern|$start_pattern" "$log" | paste -sd ';' - || true)"
-          snapshot_pattern='^phase=result failure_snapshot category=(broker_error_code_unauthorized|broker_error_code_forbidden|broker_error_code_unavailable|broker_error_code_incompatible_control|broker_error_code_busy|broker_error_code_invalid_input|broker_error_code_conflict|broker_error_code_interrupted|broker_error_code_limit_exceeded|broker_error_code_needs_reconciliation|other_result_failure) pending_replies=[0-9]{1,4} batch_result_event=(present|absent|unknown) batch_scan_event=(present|absent|unknown)$'
+          snapshot_pattern='^phase=result failure_snapshot category=(broker_error_code_unauthorized|broker_error_code_forbidden|broker_error_code_unavailable|broker_error_code_incompatible_control|broker_error_code_busy|broker_error_code_invalid_input|broker_error_code_conflict|broker_error_code_interrupted|broker_error_code_limit_exceeded|broker_error_code_needs_reconciliation|other_result_failure) pending_replies=[0-9]{1,4} batch_result_event=(present|absent|unknown) batch_scan_event=(present|absent|unknown)'
+          snapshot_pattern+=' worker_cleanup_ack=(confirmed_removed|confirmed_not_removed|pending|absent|unknown) final_scan_stage=(prepared|arm_confirmed|claim_confirmed|observation_confirmed|cleanup_confirmed|cleanup_not_removed|absent|unknown) failure_observed=(decision|workspace_preparation|admission|import|import_verification|worker|final_scan|export|cleanup|absent|unknown)$'
           failure_snapshot="$(grep -E "$snapshot_pattern" "$log" | paste -sd ';' - || true)"
           worker_terminal=not_observed
           result_terminal=not_observed

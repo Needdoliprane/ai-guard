@@ -7,12 +7,17 @@ mod harness;
 
 use agentsandbox::{
     audit::EventQuery,
-    broker::service::protocol::{
-        BrokerErrorCodeV1, BrokerReplyV1, JobResultOutcomeV1, JobStateV1, TerminalJobResultV1,
+    broker::{
+        checkpoint::{SupervisionCheckpointV1, SupervisionOperationV1},
+        lifecycle::{BrokerCheckpointV3, LocalCommandRequestV1, LocalFailurePhaseV1},
+        service::protocol::{
+            BrokerErrorCodeV1, BrokerReplyV1, JobResultOutcomeV1, JobStateV1, TerminalJobResultV1,
+        },
     },
     control::{
-        ArmReceiptV1, HelperCleanupV1, HelperObservationV1, HelperStartClaimV1, MutationReceiptV1,
-        RuntimeStatusV1, WorkerStateV1, WorkerV1,
+        ArmReceiptV1, ArmSubjectV1, HelperCleanupV1, HelperObservationV1, HelperPurposeV1,
+        HelperStartClaimV1, MutationReceiptV1, RuntimeStatusV1, WorkerStateV1, WorkerTransitionV1,
+        WorkerV1, content_hash,
     },
     control_fs::Directory,
     model::StoredEvent,
@@ -246,6 +251,225 @@ fn valid_sha256(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn confirmed_receipt(
+    receipt: &MutationReceiptV1,
+    operation_id: &str,
+    worker_id: &str,
+    input_hash: Result<String>,
+) -> bool {
+    receipt.operation_id == operation_id
+        && receipt.worker_id.as_deref() == Some(worker_id)
+        && receipt.audit_seq > 0
+        && valid_sha256(&receipt.audit_hash)
+        && input_hash.is_ok_and(|expected| receipt.input_hash == expected)
+}
+
+fn worker_cleanup_ack(operations: &[SupervisionOperationV1], worker: &WorkerV1) -> &'static str {
+    let cleanup = operations
+        .iter()
+        .rev()
+        .find_map(|operation| match operation {
+            SupervisionOperationV1::WorkerMutation { request, response }
+                if request.worker_id == worker.worker_id
+                    && request.attempt_id == worker.attempt.attempt_id =>
+            {
+                match &request.transition {
+                    WorkerTransitionV1::CleanupResult { removed, .. } => {
+                        Some((request, response.as_ref(), *removed))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        });
+    match cleanup {
+        None => "absent",
+        Some((_, None, _)) => "pending",
+        Some((request, Some(answer), removed))
+            if answer.worker.worker_id == worker.worker_id
+                && answer.worker.attempt.attempt_id == worker.attempt.attempt_id
+                && request.expected_revision.checked_add(1) == Some(answer.worker.revision)
+                && answer.receipt.revision == Some(answer.worker.revision)
+                && answer.worker.state == WorkerStateV1::Terminal
+                && !answer.worker.quota_held
+                && answer.worker.cleanup_removed == Some(removed)
+                && confirmed_receipt(
+                    &answer.receipt,
+                    &request.operation_id,
+                    &worker.worker_id,
+                    content_hash("ai-guard:worker-mutation:v1", request),
+                ) =>
+        {
+            if removed {
+                "confirmed_removed"
+            } else {
+                "confirmed_not_removed"
+            }
+        }
+        Some(_) => "unknown",
+    }
+}
+
+fn final_scan_stage(supervision: &SupervisionCheckpointV1, worker: &WorkerV1) -> &'static str {
+    // A later scan may have its own helper. Do not combine the steps of
+    // different helpers, even for the same worker and attempt.
+    let Some(preparation) = supervision.helpers().iter().rev().find(|helper| {
+        let policy = helper.policy();
+        policy.purpose == HelperPurposeV1::FinalScan
+            && policy.parent_worker_id == worker.worker_id
+            && policy.parent_attempt_id == worker.attempt.attempt_id
+    }) else {
+        return "absent";
+    };
+    let helper_id = &preparation.policy().helper_id;
+    let namespace = supervision.control_namespace_uuid().to_string();
+    let Some((arm, accepted)) =
+        supervision
+            .operations()
+            .iter()
+            .find_map(|operation| match operation {
+                SupervisionOperationV1::Arm {
+                    request,
+                    response: Some(response),
+                    ..
+                } if request.worker_id == worker.worker_id
+                    && request.attempt_id == worker.attempt.attempt_id
+                    && response.receipt.control_namespace_uuid == namespace
+                    && matches!(&request.subject, ArmSubjectV1::Helper {
+                        helper_id: subject, purpose: HelperPurposeV1::FinalScan, ..
+                    } if subject == helper_id) =>
+                {
+                    Some((request, &response.receipt))
+                }
+                _ => None,
+            })
+    else {
+        return "prepared";
+    };
+    let same_arm = |receipt: &ArmReceiptV1| {
+        receipt.validate_for_arm(arm).is_ok()
+            && receipt.control_namespace_uuid == accepted.control_namespace_uuid
+            && receipt.audit_seq == accepted.audit_seq
+            && receipt.audit_hash == accepted.audit_hash
+    };
+    let mut stage = "arm_confirmed";
+    for operation in supervision.operations() {
+        match (stage, operation) {
+            (
+                "arm_confirmed",
+                SupervisionOperationV1::HelperClaim {
+                    request,
+                    response: Some(answer),
+                },
+            ) if &request.helper_id == helper_id
+                && same_arm(&request.arm_receipt)
+                && confirmed_receipt(
+                    &answer.receipt,
+                    &request.operation_id,
+                    &worker.worker_id,
+                    request.input_hash(),
+                ) =>
+            {
+                stage = "claim_confirmed";
+            }
+            (
+                "claim_confirmed",
+                SupervisionOperationV1::HelperObservation {
+                    request,
+                    response: Some(receipt),
+                },
+            ) if &request.helper_id == helper_id
+                && same_arm(&request.arm_receipt)
+                && request.observation.inspection.container_id == arm.inspection.container_id
+                && request.observation.running == Some(false)
+                && request.observation.finished_at.is_some()
+                && confirmed_receipt(
+                    receipt,
+                    &request.operation_id,
+                    &worker.worker_id,
+                    request.input_hash(),
+                ) =>
+            {
+                stage = "observation_confirmed";
+            }
+            (
+                "observation_confirmed",
+                SupervisionOperationV1::HelperCleanup {
+                    request,
+                    response: Some(receipt),
+                },
+            ) if &request.helper_id == helper_id
+                && same_arm(&request.arm_receipt)
+                && confirmed_receipt(
+                    receipt,
+                    &request.operation_id,
+                    &worker.worker_id,
+                    request.input_hash(),
+                ) =>
+            {
+                return if request.removed {
+                    "cleanup_confirmed"
+                } else {
+                    "cleanup_not_removed"
+                };
+            }
+            _ => {}
+        }
+    }
+    stage
+}
+
+fn closed_terminal_progress(
+    record: &Value,
+    operation: Uuid,
+    import_arm: &ArmReceiptV1,
+) -> Result<(&'static str, &'static str, &'static str)> {
+    let payload = match record["version"].as_u64() {
+        Some(3) => &record["payload"],
+        Some(4) => &record["payload"]["lifecycle"],
+        Some(5) => &record["payload"]["outbox"]["lifecycle"],
+        _ => bail!("unsupported checkpoint"),
+    };
+    let lifecycle: BrokerCheckpointV3 = serde_json::from_value(payload.clone())?;
+    let worker: WorkerV1 =
+        serde_json::from_value(payload["broker"]["runner"]["managed"]["worker"].clone())?;
+    let supervision = lifecycle.broker().supervision();
+    ensure!(
+        worker.admission_operation_id == operation.to_string()
+            && worker.worker_id == import_arm.worker_id
+            && worker.attempt.attempt_id == import_arm.attempt_id
+            && supervision.control_namespace_uuid().to_string()
+                == import_arm.control_namespace_uuid,
+        "checkpoint worker or attempt differs from the import witness"
+    );
+    // FailureObserved belongs to the correlated job, with no worker ID in its DTO.
+    let failure = lifecycle
+        .commands()
+        .iter()
+        .rev()
+        .find_map(|command| match command.request() {
+            LocalCommandRequestV1::FailureObserved { phase, .. } => Some(phase),
+            _ => None,
+        });
+    let failure_phase = match failure {
+        None => "absent",
+        Some(LocalFailurePhaseV1::Decision) => "decision",
+        Some(LocalFailurePhaseV1::WorkspacePreparation) => "workspace_preparation",
+        Some(LocalFailurePhaseV1::Admission) => "admission",
+        Some(LocalFailurePhaseV1::Import) => "import",
+        Some(LocalFailurePhaseV1::ImportVerification) => "import_verification",
+        Some(LocalFailurePhaseV1::Worker) => "worker",
+        Some(LocalFailurePhaseV1::FinalScan) => "final_scan",
+        Some(LocalFailurePhaseV1::Export) => "export",
+        Some(LocalFailurePhaseV1::Cleanup) => "cleanup",
+    };
+    Ok((
+        worker_cleanup_ack(supervision.operations(), &worker),
+        final_scan_stage(supervision, &worker),
+        failure_phase,
+    ))
 }
 
 async fn capture_cli(stream: impl AsyncRead + Unpin) -> io::Result<Vec<u8>> {
@@ -916,24 +1140,24 @@ async fn broker_import_result_pending_then_acknowledged() -> Result<()> {
         _ => Ok(()),
     };
     let mut journal_ack = None;
-    let diagnostic_worker_id = result
-        .as_ref()
-        .ok()
-        .map(|playback| playback.import_arm.worker_id.clone());
+    let diagnostic_arm = result.as_ref().ok().map(|playback| &playback.import_arm);
     diagnostic_phase("phase=closure stage=broker_stop status=starting");
     let (closed, witness_failures) = fixture
         .close_with_broker_stopped(|root| {
             let checkpoint = read_closed_checkpoint(root, operation);
             if let Err(error) = &terminal {
-                let (batch_result, batch_scan) = match (checkpoint.as_ref(), diagnostic_worker_id.as_deref()) {
-                    (Ok(record), Some(worker_id)) => (
-                        batch_event_presence(record, "broker.batch.result", worker_id),
-                        batch_event_presence(record, "broker.batch.scan", worker_id),
+                let (batch_result, batch_scan, progress) = match (checkpoint.as_ref(), diagnostic_arm) {
+                    (Ok(record), Some(arm)) => (
+                        batch_event_presence(record, "broker.batch.result", &arm.worker_id),
+                        batch_event_presence(record, "broker.batch.scan", &arm.worker_id),
+                        closed_terminal_progress(record, operation, arm).ok(),
                     ),
-                    _ => ("unknown", "unknown"),
+                    _ => ("unknown", "unknown", None),
                 };
+                let (cleanup_ack, scan_stage, failure_phase) =
+                    progress.unwrap_or(("unknown", "unknown", "unknown"));
                 println!(
-                    "phase=result failure_snapshot category={} pending_replies={} batch_result_event={} batch_scan_event={}",
+                    "phase=result failure_snapshot category={} pending_replies={} batch_result_event={} batch_scan_event={} worker_cleanup_ack={cleanup_ack} final_scan_stage={scan_stage} failure_observed={failure_phase}",
                     result_failure_category(error),
                     pending_replies.load(Ordering::Relaxed),
                     batch_result,
