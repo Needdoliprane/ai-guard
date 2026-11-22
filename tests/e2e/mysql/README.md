@@ -198,6 +198,8 @@ Run the password profile first from the native client, and check that it is stop
 
 The last positive check must pass again after each series. A generic disconnect, a timeout or an availability failure validates no expected refusal. Keep the profile, the server and TLS versions and the result categories. QA volumes remain available after the stop. [TLS session verification](https://dev.mysql.com/doc/refman/8.4/en/using-encrypted-connections.html)
 
+The [gateway SQL-06 fixture](GATEWAY_FIXTURE.md) prepares fresh schemas and dedicated accounts for the application tests.
+
 ## What this preflight does not cover
 
 It proves that the server, accounts and certificates behave as the gateway tests expect. It does not prove ai-guard behaviour: the gateway startup with each profile, the refusal of a wrong password, CA, server name or client certificate with no business audit row, and the SQL-04 to SQL-06 application scenarios are separate verdicts recorded in `docs/engineering/`. An expired client certificate is not issued by the helpers above: issue one with a validity window in the past (for example with `openssl ca -startdate/-enddate`) in a private directory when that case is needed.

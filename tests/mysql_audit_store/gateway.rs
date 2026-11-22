@@ -5,7 +5,11 @@ use super::*;
 use agentsandbox::{
     audit::Store,
     model::Event as ModelEvent,
-    mysql_storage::audit::{ControlGuardRefused, with_control_guard},
+    mysql_storage::{
+        MysqlEndpoint, MysqlProbeError,
+        audit::{ControlGuardRefused, with_control_guard},
+        probe,
+    },
     policy::Policy,
     redaction::Redactor,
     workload::{WorkloadBindingIssueV1, WorkloadBindingReceiptV1, WorkloadSubjectV1},
@@ -34,25 +38,113 @@ fn optional_material(name: &str) -> Option<PathBuf> {
     std::env::var_os(name).map(PathBuf::from)
 }
 
+async fn fresh_gateway_schema(fixture: &FixtureFiles) -> Result<Conn> {
+    let mut conn = fixture.maintenance().await?;
+    let session = conn
+        .query_first::<(String, String), _>("SELECT DATABASE(), CURRENT_USER()")
+        .await
+        .map_err(|_| anyhow::anyhow!("cannot verify QA maintenance identity"))?
+        .context("missing QA maintenance session")?;
+    ensure!(
+        session.0 == fixture.target.database
+            && session.1.rsplit_once('@').map(|(user, _)| user)
+                == Some(fixture.target.maintenance_username.as_str()),
+        "QA maintenance session uses a different database or account"
+    );
+    require_fresh(&mut conn).await?;
+    let tables = conn
+        .query_first::<u64, _>(
+            "SELECT COUNT(*) FROM information_schema.TABLES \
+             WHERE BINARY TABLE_SCHEMA = BINARY DATABASE()",
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("cannot verify the QA base schema"))?;
+    ensure!(
+        tables == Some(10),
+        "QA requires only the prepared base schema"
+    );
+    Ok(conn)
+}
+
+async fn fresh_gateway_pair(a: &FixtureFiles, b: &FixtureFiles) -> Result<(Conn, Conn)> {
+    ensure!(
+        a.target.port == b.target.port
+            && a.client_identity.is_some() == b.client_identity.is_some()
+            && a.target.namespace != b.target.namespace
+            && a.target.username != b.target.username
+            && a.target.maintenance_username != b.target.maintenance_username,
+        "QA requires two distinct schemas and account pairs on the same local MySQL profile"
+    );
+    let mut passwords = std::collections::BTreeSet::new();
+    for fixture in [a, b] {
+        for file in [&fixture.reader_password, &fixture.maintenance_password] {
+            ensure!(
+                passwords.insert(fixture.credentials(file)?.password),
+                "QA requires four distinct SQL account passwords"
+            );
+        }
+    }
+    let conn_a = fresh_gateway_schema(a).await?;
+    let conn_b = fresh_gateway_schema(b).await?;
+    for (source, peer) in [(a, b), (b, a)] {
+        for (account, password) in [
+            (&source.target.username, &source.reader_password),
+            (
+                &source.target.maintenance_username,
+                &source.maintenance_password,
+            ),
+        ] {
+            probe(
+                source.target.endpoint(account),
+                source.credentials(password)?,
+            )
+            .await?;
+            let cross = MysqlEndpoint {
+                database: &peer.target.database,
+                ..source.target.endpoint(account)
+            };
+            ensure!(
+                matches!(
+                    probe(cross, source.credentials(password)?).await,
+                    Err(MysqlProbeError::ServerRefused(1044))
+                ),
+                "QA requires an explicit database privilege refusal for the peer schema"
+            );
+        }
+    }
+    require_read_only_witness(b).await?;
+    Ok((conn_a, conn_b))
+}
+
+async fn require_read_only_witness(fixture: &FixtureFiles) -> Result<()> {
+    let mut conn = maintenance_connection(
+        fixture.target.endpoint(&fixture.target.username),
+        fixture.credentials(&fixture.reader_password)?,
+    )
+    .await?;
+    let result = conn
+        .query_drop("EXPLAIN UPDATE ai_guard_audit_state SET head_seq=head_seq WHERE singleton=1")
+        .await;
+    ensure!(
+        matches!(result, Err(mysql_async::Error::Server(error)) if matches!(error.code, 1142 | 1143)),
+        "the QA witness service account must refuse audit updates"
+    );
+    Ok(())
+}
+
 /// Audit, identity and workload genesis on a fresh target, as the operator's
 /// preparation would leave it before the gateway is pointed at it.
 async fn prepare_gateway_target(
+    conn: &mut Conn,
     fixture: &FixtureFiles,
     tenant: &str,
     credential_digest: &[u8; 32],
 ) -> Result<AuditHead> {
-    let mut conn = fixture.maintenance().await?;
-    require_fresh(&mut conn).await?;
     let initial = fixture.initialize(tenant).await?;
-    let (_, identity_head) = prepare_identity(
-        &mut conn,
-        fixture.target.namespace,
-        &initial,
-        credential_digest,
-    )
-    .await?;
+    let (_, identity_head) =
+        prepare_identity(conn, fixture.target.namespace, &initial, credential_digest).await?;
     super::super::workload::prepare_capability(
-        &mut conn,
+        conn,
         tenant,
         fixture.target.namespace,
         (identity_head.seq, &identity_head.hash),
@@ -218,9 +310,9 @@ async fn post(
 #[tokio::test]
 #[ignore = "requires a fresh prepared private MySQL 8.4 QA schema and a built gateway"]
 async fn gateway_refuses_wrong_mysql_material_and_writes_no_business_row() -> Result<()> {
-    let fixture = FixtureFiles::open("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_A")?;
-    let prepared = prepare_gateway_target(&fixture, "tenant-a", &DIGEST_A).await?;
-    let mut conn = fixture.maintenance().await?;
+    let fixture = FixtureFiles::open_gateway("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_A")?;
+    let mut conn = fresh_gateway_schema(&fixture).await?;
+    let prepared = prepare_gateway_target(&mut conn, &fixture, "tenant-a", &DIGEST_A).await?;
     let before = audit_snapshot(&mut conn).await?;
     let registry = Registry::new()?;
     let good = registry.entry(&fixture, "tenant-a", "a")?;
@@ -302,9 +394,8 @@ async fn gateway_refuses_wrong_mysql_material_and_writes_no_business_row() -> Re
 #[tokio::test]
 #[ignore = "requires a fresh prepared private MySQL 8.4 QA schema and a built gateway"]
 async fn gateway_requires_identity_and_workload_projections_before_listening() -> Result<()> {
-    let fixture = FixtureFiles::open("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_A")?;
-    let mut conn = fixture.maintenance().await?;
-    require_fresh(&mut conn).await?;
+    let fixture = FixtureFiles::open_gateway("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_A")?;
+    let mut conn = fresh_gateway_schema(&fixture).await?;
     let registry = Registry::new()?;
     registry.write(&[registry.entry(&fixture, "tenant-a", "a")?])?;
     let secrets = [RUNNER_A, VIEWER_A];
@@ -348,16 +439,11 @@ async fn gateway_requires_identity_and_workload_projections_before_listening() -
 #[tokio::test]
 #[ignore = "requires two fresh prepared private MySQL 8.4 QA schemas and a built gateway"]
 async fn gateway_appends_to_the_prepared_target_and_replays_after_restart() -> Result<()> {
-    let a = FixtureFiles::open("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_A")?;
-    let b = FixtureFiles::open("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_B")?;
-    ensure!(
-        a.target.namespace != b.target.namespace,
-        "targets must differ"
-    );
-    prepare_gateway_target(&a, "tenant-a", &DIGEST_A).await?;
-    prepare_gateway_target(&b, "tenant-b", &DIGEST_B).await?;
-    let mut conn_a = a.maintenance().await?;
-    let mut conn_b = b.maintenance().await?;
+    let a = FixtureFiles::open_gateway("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_A")?;
+    let b = FixtureFiles::open_gateway("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_B")?;
+    let (mut conn_a, mut conn_b) = fresh_gateway_pair(&a, &b).await?;
+    prepare_gateway_target(&mut conn_a, &a, "tenant-a", &DIGEST_A).await?;
+    prepare_gateway_target(&mut conn_b, &b, "tenant-b", &DIGEST_B).await?;
     let prefix_a = audit_snapshot(&mut conn_a).await?;
     let witness_b = audit_snapshot(&mut conn_b).await?;
 
@@ -409,18 +495,13 @@ async fn gateway_appends_to_the_prepared_target_and_replays_after_restart() -> R
 #[tokio::test]
 #[ignore = "requires two fresh prepared private MySQL 8.4 QA schemas and a built gateway"]
 async fn gateway_retains_verified_neighbor_collisions_during_projection_failure() -> Result<()> {
-    let a = FixtureFiles::open("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_A")?;
-    let b = FixtureFiles::open("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_B")?;
-    ensure!(
-        a.target.namespace != b.target.namespace,
-        "targets must differ"
-    );
+    let a = FixtureFiles::open_gateway("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_A")?;
+    let b = FixtureFiles::open_gateway("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_B")?;
+    let (mut conn_a, mut conn_b) = fresh_gateway_pair(&a, &b).await?;
     let runner_a_digest: [u8; 32] = Sha256::digest(RUNNER_A.as_bytes()).into();
-    prepare_gateway_target(&a, "tenant-a", &DIGEST_A).await?;
-    let head_b = prepare_gateway_target(&b, "tenant-b", &runner_a_digest).await?;
+    prepare_gateway_target(&mut conn_a, &a, "tenant-a", &DIGEST_A).await?;
+    let head_b = prepare_gateway_target(&mut conn_b, &b, "tenant-b", &runner_a_digest).await?;
 
-    let mut conn_a = a.maintenance().await?;
-    let mut conn_b = b.maintenance().await?;
     let before_a = audit_snapshot(&mut conn_a).await?;
     let before_b = audit_snapshot(&mut conn_b).await?;
     let b_reader = b.reader("tenant-b", b.target.namespace)?;
@@ -477,9 +558,10 @@ async fn gateway_retains_verified_neighbor_collisions_during_projection_failure(
 #[tokio::test]
 #[ignore = "requires a fresh prepared private MySQL 8.4 QA schema and a built gateway"]
 async fn gateway_issues_sqlite_workload_credential_when_mysql_neighbor_verifies() -> Result<()> {
-    let b = FixtureFiles::open("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_B")?;
-    prepare_gateway_target(&b, "tenant-b", &DIGEST_B).await?;
-    let mut conn_b = b.maintenance().await?;
+    let b = FixtureFiles::open_gateway("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_B")?;
+    let mut conn_b = fresh_gateway_schema(&b).await?;
+    require_read_only_witness(&b).await?;
+    prepare_gateway_target(&mut conn_b, &b, "tenant-b", &DIGEST_B).await?;
     let before_b = audit_snapshot(&mut conn_b).await?;
 
     let registry = Registry::new()?;
@@ -551,9 +633,9 @@ async fn gateway_issues_sqlite_workload_credential_when_mysql_neighbor_verifies(
 #[tokio::test]
 #[ignore = "requires a fresh prepared private MySQL 8.4 QA schema"]
 async fn the_control_guard_refuses_inside_the_append_transaction() -> Result<()> {
-    let fixture = FixtureFiles::open("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_A")?;
-    prepare_gateway_target(&fixture, "tenant-a", &DIGEST_A).await?;
-    let mut conn = fixture.maintenance().await?;
+    let fixture = FixtureFiles::open_gateway("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_A")?;
+    let mut conn = fresh_gateway_schema(&fixture).await?;
+    prepare_gateway_target(&mut conn, &fixture, "tenant-a", &DIGEST_A).await?;
     let before = audit_snapshot(&mut conn).await?;
     let store = fixture.reader("tenant-a", fixture.target.namespace)?;
 

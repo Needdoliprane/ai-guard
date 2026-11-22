@@ -195,3 +195,5 @@ Lancer d’abord le profil mot de passe depuis le client natif. Vérifier son ar
 ```
 
 Le dernier contrôle positif doit repasser après chaque série. Une déconnexion générique, un timeout ou un échec de disponibilité ne valident aucun refus attendu. Conserver le profil, les versions serveur et TLS et les catégories de résultat. Les volumes QA restent disponibles après l’arrêt. [Vérification de la session TLS](https://dev.mysql.com/doc/refman/8.4/en/using-encrypted-connections.html)
+
+La [fixture gateway SQL-06](GATEWAY_FIXTURE.md) prépare les schémas neufs et les comptes dédiés aux tests applicatifs.
