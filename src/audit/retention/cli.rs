@@ -261,7 +261,11 @@ pub fn run(args: AuditRetentionArgs) -> Completed {
         Ok(done) => done,
         Err(error) => match refusal(&error) {
             Some(refused) => (
-                2,
+                if refused.code == code::COMMIT_UNCONFIRMED {
+                    1
+                } else {
+                    2
+                },
                 json!({
                     "format": ERROR_FORMAT,
                     "code": refused.code,

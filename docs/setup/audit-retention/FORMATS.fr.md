@@ -59,6 +59,8 @@ L’archive couvre une plage contiguë `first_seq..=last_seq`, événements stru
 
 `data` (`RetentionAppliedV1`) : `version`, `protocol`, `control_namespace_uuid`, `segment_index`, `first_seq`, `last_seq`, `last_hash`, `floor_at_last`, `archive_id`, `manifest_sha256`, `events_sha256`, `archived_events`, `archived_bytes`, `classes`, `reclaimed_events`, `reclaimed_bytes`, `reclaim_sha256`, `reclaimed_by_class`, `retained_structural`, `retained_pins`, `kept_positions`, `snapshot_sha256`, `policy_sha256`, `previous_manifest_sha256`, `previous_retention_seq` et `previous_retention_hash` (le marqueur de genèse pour le segment 1, sinon l’enregistrement appliqué précédent), `previous_seq` et `previous_hash` (la tête de chaîne immédiatement avant cet enregistrement).
 
+Les nouveaux enregistrements incluent `apply.plan_sha256` et `apply.usage_before` (`stored_events`, `stored_bytes`). Le chaînage lie le plan et permet à `apply` de retrouver le reçu d’origine à partir d’une archive vérifiée. Le format d’archive reste identique. Un enregistrement sans `apply` reste vérifiable et ne permet pas de restituer le reçu d’application.
+
 ## Documents des commandes
 
 | `format` | Affiché par |

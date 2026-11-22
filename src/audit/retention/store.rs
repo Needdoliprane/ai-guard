@@ -14,7 +14,7 @@ use super::{
     chain::{RetainedDigest, ZERO_HASH},
     classify::{ReclaimClassV1, ReclaimSelector, Selection},
     failure::{RetentionFailure, code},
-    ledger::{self, RetentionAppliedV1, SegmentRow},
+    ledger::{self, RetentionAppliedV1, RetentionApplyRecordV1, SegmentRow},
     policy::AuditRetentionPolicyV1,
     snapshot::{self, SnapshotFold},
 };
@@ -71,7 +71,8 @@ impl RetentionPlanV1 {
     }
 }
 
-#[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct AuditUsageV1 {
     pub stored_events: i64,
     pub stored_bytes: u64,
@@ -465,6 +466,77 @@ fn is_constraint(error: &rusqlite::Error) -> bool {
     )
 }
 
+/// A directory already tied to the exact operation in the checked store can
+/// confirm a previous apply. An unrecorded or older archive remains occupied.
+fn confirm_apply(
+    db: &Connection,
+    request: &RetentionApplyRequest<'_>,
+) -> anyhow::Result<Option<RetentionReceiptV1>> {
+    let Ok(archive) = read_manifest(request.archive_dir) else {
+        return Ok(None);
+    };
+    if archive.manifest.purpose != ArchivePurposeV1::Retention || !ledger::capability_present(db)? {
+        return Ok(None);
+    }
+    let committed: Option<(i64, String, String)> = db
+        .query_row(
+            "SELECT e.seq,e.hash,e.payload FROM audit_retention_segments s JOIN events e ON e.seq=s.event_seq WHERE s.manifest_sha256=?1",
+            [&archive.manifest_sha256],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((event_seq, event_hash, payload)) = committed else {
+        return Ok(None);
+    };
+    let event: Event = serde_json::from_str(&payload)?;
+    let record: RetentionAppliedV1 = serde_json::from_value(event.data)?;
+    let Some(apply) = record.apply else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        apply.plan_sha256 == request.expect_plan_sha256
+            && record.last_seq == request.through_seq
+            && record.policy_sha256 == request.policy.fingerprint(),
+        RetentionFailure::new(
+            code::PLAN_MISMATCH,
+            "the archive is already recorded for a different plan",
+        )
+    );
+    let verified = read_archive(&archive.path, |_, _| Ok(()))?;
+    anyhow::ensure!(
+        verified.manifest_sha256 == archive.manifest_sha256,
+        RetentionFailure::new(
+            code::ARCHIVE_UNVERIFIED,
+            "the recorded archive changed during verification"
+        )
+    );
+    let payload_bytes = u64::try_from(payload.len())?;
+    let usage_after = AuditUsageV1 {
+        stored_events: apply
+            .usage_before
+            .stored_events
+            .checked_sub(record.reclaimed_events)
+            .and_then(|remaining| remaining.checked_add(1))
+            .context("the confirmed retention event count is invalid")?,
+        stored_bytes: apply
+            .usage_before
+            .stored_bytes
+            .checked_sub(record.reclaimed_bytes)
+            .and_then(|remaining| remaining.checked_add(payload_bytes))
+            .context("the confirmed retention byte count is invalid")?,
+    };
+    Ok(Some(RetentionReceiptV1 {
+        plan_sha256: apply.plan_sha256,
+        archive: ArchiveSummaryV1::of(&archive.path, &archive.manifest, &archive.manifest_sha256),
+        retention_event_seq: event_seq,
+        retention_event_hash: event_hash,
+        reclaimed_events: record.reclaimed_events,
+        reclaimed_bytes: record.reclaimed_bytes,
+        usage_before: apply.usage_before,
+        usage_after,
+    }))
+}
+
 impl Store {
     /// Install the retention capability once, after a verified new backup.
     pub fn install_audit_retention(
@@ -568,6 +640,9 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         let tx = self.begin_checked(&mut db)?;
+        if let Some(receipt) = confirm_apply(&tx, request)? {
+            return Ok(receipt);
+        }
         let Work { planned, reclaim } = plan_in(
             self,
             &tx,
@@ -755,6 +830,10 @@ impl Store {
                 previous_retention_hash: previous_retention.1,
                 previous_seq: plan.head_seq,
                 previous_hash: plan.head_hash.clone(),
+                apply: Some(RetentionApplyRecordV1 {
+                    plan_sha256: planned.plan_sha256.clone(),
+                    usage_before: planned.usage_before.clone(),
+                }),
             };
             ledger::insert_segment(
                 &tx,
@@ -823,7 +902,16 @@ impl Store {
             })
         })();
         let receipt = applied.map_err(&orphan)?;
-        self.commit_checked(tx).map_err(&orphan)?;
+        self.commit_checked(tx).map_err(|error| {
+            error.context(
+                RetentionFailure::new(
+                    code::COMMIT_UNCONFIRMED,
+                    "the archive is complete, but the store could not confirm the commit; keep the archive and retry the same apply to check the receipt",
+                )
+                .with("archive", written.path.display().to_string())
+                .with("manifest_sha256", written.manifest_sha256.clone()),
+            )
+        })?;
         // Budgets restart at the new base: the next admission rescans from it.
         *self
             .supervision_lease

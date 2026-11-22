@@ -59,6 +59,8 @@ The archive covers a contiguous range `first_seq..=last_seq`, structural events 
 
 `data` (`RetentionAppliedV1`): `version`, `protocol`, `control_namespace_uuid`, `segment_index`, `first_seq`, `last_seq`, `last_hash`, `floor_at_last`, `archive_id`, `manifest_sha256`, `events_sha256`, `archived_events`, `archived_bytes`, `classes`, `reclaimed_events`, `reclaimed_bytes`, `reclaim_sha256`, `reclaimed_by_class`, `retained_structural`, `retained_pins`, `kept_positions`, `snapshot_sha256`, `policy_sha256`, `previous_manifest_sha256`, `previous_retention_seq` and `previous_retention_hash` (the genesis marker for segment 1, else the previous applied record), `previous_seq` and `previous_hash` (the chain head immediately before this record).
 
+New records include `apply.plan_sha256` and `apply.usage_before` (`stored_events`, `stored_bytes`). The chained record binds the plan and lets `apply` recover the original receipt from a verified archive. The archive format is unchanged. A record without `apply` remains verifiable and cannot reissue an apply receipt.
+
 ## Command documents
 
 | `format` | Printed by |

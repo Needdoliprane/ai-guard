@@ -47,6 +47,7 @@ pub mod code {
     pub const DESTINATION_UNAVAILABLE: &str = "archive_destination_unavailable";
     pub const ARCHIVE_WRITE_FAILED: &str = "archive_write_failed";
     pub const ARCHIVE_UNVERIFIED: &str = "archive_unverified";
+    pub const COMMIT_UNCONFIRMED: &str = "retention_commit_unconfirmed";
     pub const RECLAIM_REFERENCED_EVENT: &str = "reclaim_referenced_event";
     pub const SNAPSHOT_TOO_LARGE: &str = "snapshot_too_large";
     pub const ARCHIVE_MISSING: &str = "archive_missing";

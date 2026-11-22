@@ -114,6 +114,37 @@ fn apply(
 }
 
 #[test]
+fn apply_reissues_the_durable_receipt_when_its_acknowledgement_was_lost() {
+    let directory = support::private_tempdir();
+    let (data, store) = store13(directory.path());
+    store
+        .install_audit_retention(&directory.path().join("pre-retention.sqlite"))
+        .unwrap();
+    for index in 0..18 {
+        activity(&store, index).unwrap();
+    }
+    let planned = store
+        .audit_retention_plan(&policy(), later(), None, &BTreeSet::new())
+        .unwrap();
+    let archive = directory.path().join("segment");
+    let committed = apply(&store, &planned, &archive).unwrap();
+    // Retain the durable state and archive, as after a lost operator response.
+    // A new process may be replaying the operation after further appends.
+    store.append(Event::new("fixture.followup")).unwrap();
+    let head = store.head().unwrap();
+    drop(store);
+
+    let reopened = reopen(&data).unwrap();
+    let replayed = apply(&reopened, &planned, &archive).unwrap();
+    assert_eq!(
+        serde_json::to_value(replayed).unwrap(),
+        serde_json::to_value(committed).unwrap()
+    );
+    assert_eq!(reopened.head().unwrap(), head);
+    assert_eq!(reopened.audit_retention_ledger().unwrap().segments, 1);
+}
+
+#[test]
 fn a_full_store_recovers_capacity_and_verifies_end_to_end() {
     let dir = support::private_tempdir();
     let (data, store) = store13(dir.path());

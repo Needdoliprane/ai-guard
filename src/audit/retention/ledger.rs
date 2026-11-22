@@ -84,6 +84,16 @@ pub struct RetentionAppliedV1 {
     /// Chain head immediately before this event.
     pub previous_seq: i64,
     pub previous_hash: String,
+    /// Receipt inputs for confirming this exact apply after a lost response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) apply: Option<RetentionApplyRecordV1>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RetentionApplyRecordV1 {
+    pub(crate) plan_sha256: String,
+    pub(crate) usage_before: super::AuditUsageV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -349,6 +359,12 @@ pub(crate) fn validate(db: &Connection, version: i64) -> anyhow::Result<()> {
                 ) == previous_retention
                 && applied.previous_seq == stored.seq - 1
                 && applied.previous_hash == stored.prev_hash
+                && applied.apply.as_ref().is_none_or(|apply| {
+                    super::archive::valid_hex(&apply.plan_sha256)
+                        && (applied.reclaimed_events..=applied.previous_seq)
+                            .contains(&apply.usage_before.stored_events)
+                        && apply.usage_before.stored_bytes >= applied.reclaimed_bytes
+                })
                 && uuid::Uuid::parse_str(&applied.archive_id).is_ok(),
         )?;
         expected_rows.push((stored.seq, applied.clone()));

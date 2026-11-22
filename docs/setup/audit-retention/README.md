@@ -92,6 +92,7 @@ Run every command as the control account, with the same `--max-events` and `--au
    ```
 
    `apply` recomputes the plan inside its transaction and refuses with `plan_mismatch` if anything changed. It writes and re-reads the archive before it removes anything.
+   If the response is lost or `retention_commit_unconfirmed` is reported, keep the archive and retry the same command. Once the recorded plan and the archive both verify, the command returns the original receipt without reclaiming again. If it cannot confirm the receipt, run `verify` with the archive and review the result before planning another apply.
 5. **Preserve the archive.** Copy the archive directory to two durable locations and record its `manifest_sha256` out of band. Deleting an archive makes its prefix unverifiable.
 6. **Verify**, then restart the control plane:
 
@@ -142,7 +143,8 @@ Each command prints one JSON document. Exit status `0` is success, `2` a refusal
 | `plan_mismatch` | The store changed since the plan was reviewed | Plan again |
 | `archive_destination_not_new` | The archive path exists | Choose a new path |
 | `archive_destination_unavailable` | The parent is missing or not a private directory | Create a private parent (`0700`) |
-| `archive_write_failed`, `archive_unverified` | The archive could not be written or read back | Nothing was reclaimed; the partial directory is kept for diagnosis |
+| `archive_write_failed`, `archive_unverified` | The archive could not be written or verified | Keep the directory for diagnosis and run `verify` before applying again |
+| `retention_commit_unconfirmed` | The archive is complete and the database did not confirm the commit | Keep the archive and retry the same command to check the receipt |
 | `reclaim_referenced_event` | A projection references an event selected for reclaim | Nothing was reclaimed; report it as a defect |
 | `checkpoint_log_unavailable` | A `--checkpoint-dir` could not be read or belongs to another tenant | Nothing was changed; fix the path |
 | `snapshot_too_large` | The legacy view snapshot exceeds 8 MiB | Nothing was reclaimed |

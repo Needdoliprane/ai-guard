@@ -92,6 +92,7 @@ Exécuter chaque commande avec le compte de contrôle et les mêmes `--max-event
    ```
 
    `apply` recalcule le plan dans sa transaction et refuse avec `plan_mismatch` si quoi que ce soit a changé. Il écrit et relit l’archive avant de retirer quoi que ce soit.
+   Si la réponse se perd ou si `retention_commit_unconfirmed` apparaît, conserver l’archive et relancer la même commande. Une fois le plan enregistré et l’archive vérifiés, la commande restitue le reçu d’origine sans effectuer une nouvelle récupération. Si le reçu reste indéterminé, exécuter `verify` avec l’archive et examiner son résultat avant de planifier un nouvel `apply`.
 5. **Préserver l’archive.** Copier le répertoire d’archive vers deux emplacements durables et noter son `manifest_sha256` par un autre canal. Supprimer une archive rend son préfixe invérifiable.
 6. **Vérifier**, puis redémarrer le plan de contrôle :
 
@@ -142,7 +143,8 @@ Chaque commande affiche un document JSON. Le code de sortie `0` est un succès, 
 | `plan_mismatch` | La base a changé depuis la relecture du plan | Planifier à nouveau |
 | `archive_destination_not_new` | Le chemin d’archive existe | Choisir un nouveau chemin |
 | `archive_destination_unavailable` | Le parent manque ou n’est pas un répertoire privé | Créer un parent privé (`0700`) |
-| `archive_write_failed`, `archive_unverified` | L’archive n’a pas pu être écrite ou relue | Rien n’a été récupéré ; le répertoire partiel est conservé pour le diagnostic |
+| `archive_write_failed`, `archive_unverified` | L’archive n’a pas pu être écrite ou vérifiée | Conserver le répertoire pour le diagnostic et exécuter `verify` avant un nouvel `apply` |
+| `retention_commit_unconfirmed` | L’archive est complète et le commit de la base reste indéterminé | Conserver l’archive et relancer la même commande pour vérifier le reçu |
 | `reclaim_referenced_event` | Une projection référence un événement choisi pour la récupération | Rien n’a été récupéré ; le signaler comme défaut |
 | `checkpoint_log_unavailable` | Un `--checkpoint-dir` est illisible ou appartient à un autre tenant | Rien n’a changé ; corriger le chemin |
 | `snapshot_too_large` | L’instantané des vues historiques dépasse 8 Mio | Rien n’a été récupéré |
