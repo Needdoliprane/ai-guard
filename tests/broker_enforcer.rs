@@ -2,7 +2,7 @@
 
 use agentsandbox::{
     broker::{
-        enforcer::{EnforcerClient, EnforcerStopClient},
+        enforcer::{EnforcerClient, EnforcerError, EnforcerStopClient},
         local_ipc::{EndpointRecordV1, IpcError},
     },
     control_fs::Directory,
@@ -16,7 +16,10 @@ use std::{
     process::{ExitStatus, Stdio},
     time::{Duration, Instant},
 };
-use tokio::process::{Child, Command};
+use tokio::{
+    io::AsyncWriteExt,
+    process::{Child, Command},
+};
 
 #[cfg(target_os = "macos")]
 const PRIVATE_TMP: &str = "/private/tmp";
@@ -510,35 +513,66 @@ async fn real_enforcer_child_health_stop_recovery_and_idle_shutdown() {
 }
 
 #[tokio::test]
-async fn public_client_bootstraps_real_enforcer_from_a_fresh_root_and_shuts_it_down() {
-    let root = tempfile::Builder::new()
+async fn public_client_reconnects_to_the_genuinely_fresh_legacy_enforcer_and_shuts_it_down() {
+    let parent = tempfile::Builder::new()
         .prefix("eb-")
         .permissions(fs::Permissions::from_mode(0o700))
         .tempdir_in(PRIVATE_TMP)
         .unwrap();
-    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
-    // A failed assertion keeps the root and its bounded metadata for diagnosis.
-    let root_path = root.keep();
-    let root_handle = match Directory::open_existing(&root_path) {
-        Ok(value) => value,
-        Err(error) => panic!("cannot open fresh private root: {error:#}; root={root_path:?}"),
-    };
-    let pristine = !root_path.join("auth").exists()
-        && !root_path.join("announcements").exists()
-        && !root_path.join(".owner.lock").exists();
+    let parent_path = parent.keep().canonicalize().unwrap();
+    let parent_handle = Directory::open_existing(&parent_path).unwrap();
     let executable = PathBuf::from(env!("CARGO_BIN_EXE_agentsandbox"))
         .canonicalize()
         .unwrap();
+    assert!(matches!(
+        EnforcerClient::connect_or_spawn(&parent_handle, &executable, 8).await,
+        Err(EnforcerError::Unauthorized)
+    ));
+    assert!(fs::read_dir(&parent_path).unwrap().next().is_none());
+
+    let root_path = parent_path.join("enforcer");
+    let mut child = Command::new(&executable)
+        .args(["__broker-enforcer", "--root"])
+        .arg(&parent_path)
+        .args([
+            "--max-slots",
+            "8",
+            "--legacy-fresh",
+            "--role-name",
+            "enforcer",
+        ])
+        .env_clear()
+        .current_dir("/")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut launch_pipe = child.stdin.take().unwrap();
+    launch_pipe
+        .write_all(uuid::Uuid::new_v4().as_bytes())
+        .await
+        .unwrap();
+    drop(launch_pipe);
+    let announcement_path = wait_for_announcement(&root_path, Duration::from_secs(5))
+        .await
+        .expect("the genuine fresh child must publish its endpoint");
+    let endpoint = endpoint_from_announcement(&announcement_path).unwrap();
+    let role_files = [root_path.join("auth"), root_path.join(".owner.lock")];
+    let identity = |path: &Path| {
+        let metadata = fs::symlink_metadata(path).unwrap();
+        (metadata.dev(), metadata.ino())
+    };
+    let identities = role_files.each_ref().map(|path| identity(path));
+    let root_handle = Directory::open_existing(&root_path).unwrap();
 
     let client = match EnforcerClient::connect_or_spawn(&root_handle, &executable, 8).await {
         Ok(client) => client,
         Err(error) => {
-            let lease_released =
-                wait_for_role_lease_release(&root_path, Duration::from_secs(5)).await;
             let inventory = bounded_root_inventory(&root_path);
-            drop(root_handle);
             panic!(
-                "public enforcer bootstrap failed ({error:?}); role lease released={lease_released}; root retained={root_path:?}; entries={inventory:?}"
+                "public enforcer reconnect failed ({error:?}); root retained={root_path:?}; entries={inventory:?}"
             );
         }
     };
@@ -547,34 +581,29 @@ async fn public_client_bootstraps_real_enforcer_from_a_fresh_root_and_shuts_it_d
     let ready = client.require_admission_ready().await.is_ok();
     let status = client.status().await.ok();
     let status_ok = status.as_ref().is_some_and(|status| {
-        status.healthy() && status.slot_count() == 0 && status.max_slots() == 8
+        status.healthy()
+            && status.slot_count() == 0
+            && status.max_slots() == 8
+            && status.epoch() == endpoint.epoch()
     });
+    let same_installation = identities == role_files.each_ref().map(|path| identity(path));
+    let one_announcement = announcement_names(&root_path).unwrap().len() == 1;
 
-    let announcement_path = wait_for_announcement(&root_path, Duration::from_secs(5))
-        .await
-        .ok();
-    let announcement_metadata_ok = announcement_path
-        .as_ref()
-        .and_then(|path| fs::symlink_metadata(path).ok())
-        .is_some_and(|metadata| {
-            metadata.file_type().is_file()
-                && metadata.uid() == effective_uid()
-                && metadata.mode() & 0o7777 == 0o600
-                && metadata.len() <= 4096
-        });
-    let endpoint = announcement_path
-        .as_deref()
-        .and_then(|path| endpoint_from_announcement(path).ok());
-    let endpoint_root = Directory::open_existing(&root_path.join("endpoints")).ok();
+    let announcement_metadata_ok = fs::symlink_metadata(&announcement_path).is_ok_and(|metadata| {
+        metadata.file_type().is_file()
+            && metadata.uid() == effective_uid()
+            && metadata.mode() & 0o7777 == 0o600
+            && metadata.len() <= 4096
+    });
+    let endpoint_root = Directory::open_existing(&root_path.join("endpoints")).unwrap();
     let auth_metadata_ok = private_regular_file(&root_path.join("auth"), 32).unwrap_or(false);
 
     let shutdown = client.shutdown_if_idle().await.is_ok();
-    let endpoint_refused = match (&endpoint, &endpoint_root) {
-        (Some(endpoint), Some(endpoint_root)) => {
-            wait_for_endpoint_refusal(endpoint, endpoint_root, Duration::from_secs(5)).await
-        }
-        _ => wait_for_role_lease_release(&root_path, Duration::from_secs(5)).await,
-    };
+    let endpoint_refused =
+        wait_for_endpoint_refusal(&endpoint, &endpoint_root, Duration::from_secs(5)).await;
+    let child_exited = wait_for_exit(&mut child, Duration::from_secs(5))
+        .await
+        .is_ok_and(|status| status.success());
     // Listener refusal alone does not prove the owner has completed shutdown.
     // Keep the private evidence until its exclusive role lease is released too.
     let lease_released = wait_for_role_lease_release(&root_path, Duration::from_secs(5)).await;
@@ -582,24 +611,22 @@ async fn public_client_bootstraps_real_enforcer_from_a_fresh_root_and_shuts_it_d
     drop(client);
     drop(endpoint_root);
     drop(root_handle);
-    let success = pristine
-        && ready
+    let success = ready
         && status_ok
-        && announcement_path.is_some()
+        && same_installation
+        && one_announcement
         && announcement_metadata_ok
-        && endpoint.is_some()
         && auth_metadata_ok
         && shutdown
         && endpoint_refused
+        && child_exited
         && lease_released;
     let inventory = bounded_root_inventory(&root_path);
     if success {
-        fs::remove_dir_all(&root_path).unwrap();
+        fs::remove_dir_all(&parent_path).unwrap();
     } else {
         panic!(
-            "public enforcer bootstrap/shutdown observations failed: pristine={pristine}, ready={ready}, status_ok={status_ok}, announcement={:?}, announcement_private={announcement_metadata_ok}, endpoint_parsed={}, auth_private_len32={auth_metadata_ok}, shutdown_ack={shutdown}, endpoint_refused_or_lease_released={endpoint_refused}, role_lease_released={lease_released}; root retained={root_path:?}; entries={inventory:?}",
-            announcement_path.as_ref().map(|path| path.file_name()),
-            endpoint.is_some(),
+            "public enforcer reconnect/shutdown observations failed: ready={ready}, status_ok={status_ok}, same_installation={same_installation}, one_announcement={one_announcement}, announcement_private={announcement_metadata_ok}, auth_private_len32={auth_metadata_ok}, shutdown_ack={shutdown}, endpoint_refused={endpoint_refused}, child_exited={child_exited}, role_lease_released={lease_released}; root retained={root_path:?}; entries={inventory:?}"
         );
     }
 }
