@@ -62,8 +62,8 @@ pub(super) async fn persist(tx: &mut Transaction<'_>, event: &StoredEvent) -> Re
     Ok(())
 }
 
-async fn server_uuid(tx: &mut Transaction<'_>) -> Result<Uuid> {
-    let id = tx
+pub(super) async fn server_uuid(connection: &mut impl Queryable) -> Result<Uuid> {
+    let id = connection
         .query_first::<String, _>("SELECT @@GLOBAL.server_uuid")
         .await
         .map_err(driver_error)?
