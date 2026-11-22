@@ -1,158 +1,246 @@
-name: G07 native worker terminal check
+name: G07 v5 worker cleanup ACK status check
 
 on:
   push:
-    branches: ['claude/v1-g07-full3-closed-progress-20261122']
+    branches: ['claude/v1-g07-cleanup-ack-v5-check-20261122']
 
 permissions:
   contents: read
 
 concurrency:
-  group: g07-full3-closed-progress-${{ github.ref }}
+  group: g07-cleanup-ack-v5-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  full3-terminal:
-    runs-on: macos-15
-    timeout-minutes: 180
+  cleanup-ack-v5:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     env:
-      AI_GUARD_BUILD_REVISION: ${{ github.sha }}
+      AI_GUARD_BUILD_REVISION: 46499d960c76800ecabaaa2ffbaf62480f37e820
       CARGO_BUILD_JOBS: '1'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
       CARGO_TERM_COLOR: never
+      LC_ALL: C
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Prepare private temporary directory and verify runner
-        id: prepare
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(uname -s)" = Darwin
-          test "$(uname -m)" = arm64
-          unset RUST_MIN_STACK
-          tmpdir="$(mktemp -d /private/tmp/g07.XXXXXX)"
-          chmod 700 "$tmpdir"
-          canonical="$(cd "$tmpdir" && pwd -P)"
-          test "$canonical" = "$tmpdir"
-          test "${#canonical}" -lt 52
-          case "$canonical" in /private/tmp/g07.*) ;; *) exit 1 ;; esac
-          echo "TMPDIR=$canonical" >> "$GITHUB_ENV"
-          {
-            echo 'platform=darwin-arm64'
-            echo 'rust_min_stack_inherited=false'
-            echo 'tmpdir_private_short=true'
-          } >> "$GITHUB_OUTPUT"
-      - name: Fetch dependencies with pinned toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          unset RUST_MIN_STACK
-          rustc --version
-          cargo fetch --locked
-      - name: Run the single native Full3 terminal regression
-        id: full3
-        shell: bash
-        run: |
-          set -u
-          unset RUST_MIN_STACK
-          log="$RUNNER_TEMP/g07-full3-phase-private.log"
-          umask 077
-          set +e
-          cargo test --locked --offline --no-default-features --test broker_import_result_gate \
-            broker_import_result_pending_then_acknowledged -- --exact --test-threads=1 --nocapture \
-            >"$log" 2>&1
-          rc=$?
-          set -e
-          count="$(grep -Ec '^running 1 test$' "$log" || true)"
-          rustc_codes="$(sed -nE 's/^error\[(E[0-9]{4})\]:.*/\1/p' "$log" | sort -u | paste -sd ';' -)"
-          rustc_locations="$(sed -nE 's/^[[:space:]]+--> (tests\/broker_import_result_gate\.rs:[0-9]+:[0-9]+)$/\1/p' "$log" | sort -u | paste -sd ';' -)"
-          phase_pattern='^phase=(preflight|import|verification|arm|worker|result|scan|closure) stage=(fresh_fixture|gate|submit|held_projection|release|helper_created|import_receipts|import_claim|worker_running|synthetic_completion|terminal_wait|terminal_state|cli_query|terminal_reply|worker_terminal|terminal_audit|broker_stop|fixture_children) status=(starting|installing|installed|reached|accepted|confirmed|waiting|ready|received|started|failed)$'
-          phase_progress="$(grep -E "$phase_pattern" "$log" | paste -sd ';' - || true)"
-          category_pattern='^(Error: )?phase=(submit|held_import|released_import|worker|result|quota|closed_journal|fixture_cleanup|fixture_witness|playback|install_import_gate|waiting_for_import|fixture_start|fixture_broker_close|fixture_start_guardian) category=(unexpected_acceptance|unrelated_acceptance|invalid_sqlite_claim|premature_observation|sqlite_event_read|sqlite_worker_read|unexpected_fixture_counts|unexpected_result_projection|unexpected_result_reply|unexpected_sqlite_worker|unexpected_status_projection|unexpected_status_reply|unexpected_worker_count|ack_not_checked|ack_not_proven|not_confirmed|errors_observed|fixture_deadline|invalid_audit_snapshot|multiple_releases|release_missing|release_observation_mismatch|arm_receipt_encoding|batch_failure_observed|cleanup_input_hash|invalid_cleanup|invalid_observation|observation_input_hash|sqlite_audit_integrity|sqlite_integrity_read|sqlite_worker_missing|unexpected_import_outcome|verification_not_reached|audit_incomplete|audit_tuple_mismatch|missing_audit_event|terminal_not_reached|terminal_observation_missing|unexpected_result_identity|unexpected_result_outcome|unexpected_terminal_worker|runtime_identity_missing|synthetic_completion_refused|broker_error_code_unauthorized|broker_error_code_forbidden|broker_error_code_unavailable|broker_error_code_incompatible_control|broker_error_code_busy|broker_error_code_invalid_input|broker_error_code_conflict|broker_error_code_interrupted|broker_error_code_limit_exceeded|broker_error_code_needs_reconciliation|other_result_failure|reply_spawn_failed|reply_stdout_pipe_missing|reply_stderr_pipe_missing|reply_harness_timeout|reply_capture_failed|reply_output_limit|broker_error_reply|broker_rejected_reply|reply_missing_or_invalid|reply_typed_nonzero_exit|reply_ipc_unavailable_or_invalid|reply_ipc_outcome_unknown|reply_ipc_unavailable_before_request|reply_cli_arguments|reply_cli_failure_unclassified|reply_failed_unclassified|fixture_state|fixture_timeout|gate_disconnected|fixture_setup_failed|not_started|retained_for_guardian_custody|identity_attested)'
-          start_pattern='^phase=fixture_start stage=(BrokerSpawn|GuardianRole|GuardianGenesis|GuardianPublication|GuardianSocket|GuardianIdentity|GuardianRevalidation|BrokerList) category=(broker_spawn_failed|broker_owner_missing|broker_exited|broker_wait_failed|fixture_deadline)'
-          closed_errors="$(grep -Eo "$category_pattern|$start_pattern" "$log" | paste -sd ';' - || true)"
-          snapshot_pattern='^phase=result failure_snapshot category=(broker_error_code_unauthorized|broker_error_code_forbidden|broker_error_code_unavailable|broker_error_code_incompatible_control|broker_error_code_busy|broker_error_code_invalid_input|broker_error_code_conflict|broker_error_code_interrupted|broker_error_code_limit_exceeded|broker_error_code_needs_reconciliation|other_result_failure) pending_replies=[0-9]{1,4} batch_result_event=(present|absent|unknown) batch_scan_event=(present|absent|unknown)'
-          snapshot_pattern+=' worker_cleanup_ack=(confirmed_removed|confirmed_not_removed|pending|absent|unknown) final_scan_stage=(prepared|arm_confirmed|claim_confirmed|observation_confirmed|cleanup_confirmed|cleanup_not_removed|absent|unknown) failure_observed=(decision|workspace_preparation|admission|import|import_verification|worker|final_scan|export|cleanup|absent|unknown)$'
-          failure_snapshot="$(grep -E "$snapshot_pattern" "$log" | paste -sd ';' - || true)"
-          worker_terminal=not_observed
-          result_terminal=not_observed
-          stack_overflow=not_observed
-          running_timeout=not_observed
-          grep -Fq 'phase=worker state=Terminal quota_held=false releases=1' "$log" && worker_terminal=observed || true
-          grep -Fq 'phase=result outcome=Terminal audit=Confirmed' "$log" && result_terminal=observed || true
-          grep -Fq 'running_not_reached' "$log" && running_timeout=observed || true
-          if grep -Fq 'fatal runtime error: stack overflow' "$log" ||
-             [ -n "$(find "$TMPDIR" -type f -name 'broker-*.stderr' -exec grep -lF 'fatal runtime error: stack overflow' {} +)" ]; then
-            stack_overflow=observed
-          fi
-          if [ "$rc" = 0 ] && { [ "$count" != 1 ] || ! grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$log"; }; then
-            rc=91
-          fi
-          {
-            echo "exit_code=$rc"
-            echo "selected_test_count=$count"
-            echo "rustc_error_codes=${rustc_codes:-none}"
-            echo "rustc_locations=${rustc_locations:-none}"
-            echo "phase_progress=${phase_progress:-none}"
-            echo "closed_error_categories=${closed_errors:-none}"
-            echo "failure_snapshot=${failure_snapshot:-unavailable}"
-            echo "worker_terminal_observed=$worker_terminal"
-            echo "stack_overflow=$stack_overflow"
-            echo "running_timeout=$running_timeout"
-            echo "result_terminal_audit_confirmed=$result_terminal"
-          } >> "$GITHUB_OUTPUT"
-          exit "$rc"
-      - name: Publish sanitized result
-        if: always()
+      - name: Initialize the closed status receipt
         shell: bash
         env:
-          PLATFORM: ${{ steps.prepare.outputs.platform }}
-          PRIVATE_TMPDIR: ${{ steps.prepare.outputs.tmpdir_private_short }}
-          STACK_INHERITED: ${{ steps.prepare.outputs.rust_min_stack_inherited }}
-          TEST_EXIT: ${{ steps.full3.outputs.exit_code }}
-          TEST_COUNT: ${{ steps.full3.outputs.selected_test_count }}
-          RUSTC_CODES: ${{ steps.full3.outputs.rustc_error_codes }}
-          RUSTC_LOCATIONS: ${{ steps.full3.outputs.rustc_locations }}
-          PHASE_PROGRESS: ${{ steps.full3.outputs.phase_progress }}
-          CLOSED_ERRORS: ${{ steps.full3.outputs.closed_error_categories }}
-          FAILURE_SNAPSHOT: ${{ steps.full3.outputs.failure_snapshot }}
-          WORKER_TERMINAL: ${{ steps.full3.outputs.worker_terminal_observed }}
-          STACK_OVERFLOW: ${{ steps.full3.outputs.stack_overflow }}
-          RUNNING_TIMEOUT: ${{ steps.full3.outputs.running_timeout }}
-          RESULT_TERMINAL: ${{ steps.full3.outputs.result_terminal_audit_confirmed }}
+          WORKFLOW_SHA: ${{ github.sha }}
         run: |
+          set -euo pipefail
           umask 077
-          summary="$RUNNER_TEMP/g07-native-summary.txt"
-          {
-            echo '### G07 native Full3 terminal check'
-            echo
-            echo "- Platform guard: ${PLATFORM:-not_reached}"
-            echo "- Private short TMPDIR guard: ${PRIVATE_TMPDIR:-not_reached}"
-            echo "- RUST_MIN_STACK inherited by the harness or broker child: ${STACK_INHERITED:-not_reached}"
-            echo "- Exact test count: ${TEST_COUNT:-not_reached}"
-            echo "- Compiler error codes: ${RUSTC_CODES:-not_reached}"
-            echo "- Compiler locations in the exact test: ${RUSTC_LOCATIONS:-not_reached}"
-            echo "- Test exit code: ${TEST_EXIT:-not_reached}"
-            echo "- Safe phase markers: ${PHASE_PROGRESS:-none}"
-            echo "- Closed failure categories: ${CLOSED_ERRORS:-none}"
-            echo "- Result failure snapshot: ${FAILURE_SNAPSHOT:-unavailable}"
-            echo '- Existing harness wait bounds: CLI 60s; worker result 300s; playback 600s.'
-            echo '- Additional result query retries: none.'
-            echo "- Synthetic worker terminal observed: ${WORKER_TERMINAL:-not_observed}"
-            echo "- Stack overflow signal: ${STACK_OVERFLOW:-not_observed}"
-            echo "- Timeout waiting for Running: ${RUNNING_TIMEOUT:-not_observed}"
-            echo "- Terminal result audit confirmed: ${RESULT_TERMINAL:-not_observed}"
-          } > "$summary"
-          cat "$summary" >> "$GITHUB_STEP_SUMMARY"
-      - name: Upload sanitized native result
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+          receipt="$RUNNER_TEMP/g07-v5-ack-receipt.txt"
+          printf 'source_sha=46499d960c76800ecabaaa2ffbaf62480f37e820\nworkflow_sha=%s\nselector=runner::broker::executor::journal::tests::export_retirement_tests::full3_v5_commits_worker_cleanup_ack_after_acknowledged_result\nsource_check=NOT_RUN\nworkflow_check=NOT_RUN\ndependency_fetch=NOT_RUN\ndependency_fetch_exit=unknown\nlibtest_build=NOT_RUN\nlibtest_build_exit=unknown\nlibtest_artifact=NOT_RUN\nlibtest_artifact_sha256=unknown\ntest_verdict=NOT_RUN\ntest_exit=unknown\ntest_selected_count=unknown\ntest_duration_ms=unknown\nack_complete=unknown\nack_milestone_set=NOT_RUN\nfixture_cleanup=unknown\n' "$WORKFLOW_SHA" > "$receipt"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          name: g07-native-result-${{ github.sha }}
-          path: ${{ runner.temp }}/g07-native-summary.txt
+          ref: ${{ github.sha }}
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Verify the exact source and workflow-only commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/g07-v5-ack-receipt.txt"
+          set_field() {
+            local key=$1 value=$2
+            awk -v prefix="$key=" -v replacement="$key=$value" '
+              index($0, prefix) == 1 { print replacement; found=1; next }
+              { print }
+              END { if (!found) print replacement }
+            ' "$receipt" > "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          source=46499d960c76800ecabaaa2ffbaf62480f37e820
+          parent=cba3f9fde68ffd3f6a2e5c4be287507549bff81a
+          test_source=src/runner/broker/executor/export_retirement_tests.rs
+          if [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 &&
+                "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/claude/v1-g07-cleanup-ack-v5-check-20261122 &&
+                "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ &&
+                "$(git rev-parse HEAD)" == "$GITHUB_SHA" &&
+                "$(git rev-parse HEAD^)" == "$source" &&
+                "$(git rev-parse "$source^")" == "$parent" &&
+                "$(git diff --name-only "$parent" "$source")" == "$test_source" &&
+                "$(git diff --name-only "$source" HEAD)" == .github/workflows/lot-verify.yaml &&
+                -z "$(git status --porcelain=v1 --untracked-files=all)" ]] &&
+              grep -Fq 'mod tests;' src/runner/broker/executor/journal.rs &&
+              grep -Fq '#[path = "export_retirement_tests.rs"]' src/runner/broker/executor/journal_tests.rs &&
+              grep -Fq 'async fn full3_v5_commits_worker_cleanup_ack_after_acknowledged_result()' "$test_source" &&
+              grep -Fq 'trace_phase("cleanup_v5_caller_ack_confirmed")' "$test_source" &&
+              grep -Fq 'trace_phase("cleanup_v5_replay_unchanged")' "$test_source" &&
+              grep -Fq 'trace_phase("cleanup_v5_native_fixture_joined")' "$test_source"; then
+            set_field source_check PASS
+            set_field workflow_check PASS
+          else
+            set_field source_check FAIL
+            set_field workflow_check FAIL
+            cat "$receipt" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          cat "$receipt" >> "$GITHUB_STEP_SUMMARY"
+      - name: Fetch locked dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/g07-v5-ack-receipt.txt"
+          set_field() {
+            local key=$1 value=$2
+            awk -v prefix="$key=" -v replacement="$key=$value" 'index($0, prefix) == 1 { print replacement; found=1; next } { print } END { if (!found) print replacement }' "$receipt" > "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          if cargo fetch --locked > "$RUNNER_TEMP/g07-v5-fetch.log" 2>&1; then
+            set_field dependency_fetch PASS
+            set_field dependency_fetch_exit 0
+          else
+            rc=$?
+            set_field dependency_fetch FAIL
+            set_field dependency_fetch_exit "$rc"
+            set_field libtest_build NOT_RUN
+            set_field test_verdict NOT_RUN
+            set_field test_exit unknown
+            set_field ack_complete unknown
+            exit "$rc"
+          fi
+      - name: Compile the single library test binary
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/g07-v5-ack-receipt.txt"
+          private="$RUNNER_TEMP/g07-v5-private"
+          mkdir -m 700 "$private" "$private/tmp"
+          export TMPDIR="$private/tmp"
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/g07-v5-target"
+          set_field() {
+            local key=$1 value=$2
+            awk -v prefix="$key=" -v replacement="$key=$value" 'index($0, prefix) == 1 { print replacement; found=1; next } { print } END { if (!found) print replacement }' "$receipt" > "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          if cargo test --locked --offline --no-default-features --lib --no-run --message-format=json \
+            > "$private/build.jsonl" 2> "$private/build.stderr"; then
+            rc=0
+          else
+            rc=$?
+          fi
+          if (( rc != 0 )); then
+            set_field libtest_build FAIL
+            set_field libtest_build_exit "$rc"
+            set_field libtest_artifact NOT_RUN
+            set_field test_verdict NOT_RUN
+            set_field test_exit unknown
+            set_field test_duration_ms unknown
+            set_field ack_complete unknown
+            exit "$rc"
+          fi
+          set_field libtest_build PASS
+          set_field libtest_build_exit 0
+          if binary="$(jq -ers '[.[] | select(.reason == "compiler-artifact" and .target.name == "agentsandbox" and .target.kind == ["lib"] and .profile.test == true and .features == [] and .executable != null) | .executable] | unique | if length == 1 then .[0] else empty end' "$private/build.jsonl")" && [[ -x "$binary" ]]; then
+            set_field libtest_artifact PASS
+          else
+            set_field libtest_artifact FAIL
+            set_field test_verdict NOT_RUN
+            set_field test_exit unknown
+            set_field ack_complete unknown
+            exit 1
+          fi
+          digest="$(sha256sum "$binary" | cut -d ' ' -f1)"
+          set_field libtest_artifact_sha256 "$digest"
+          echo "binary=$binary" >> "$GITHUB_OUTPUT"
+      - name: Run the single globally bounded ACK test
+        if: steps.build.outputs.binary != ''
+        shell: bash
+        env:
+          TEST_BINARY: ${{ steps.build.outputs.binary }}
+        run: |
+          set -euo pipefail
+          umask 077
+          selector='runner::broker::executor::journal::tests::export_retirement_tests::full3_v5_commits_worker_cleanup_ack_after_acknowledged_result'
+          private="$(mktemp -d /tmp/aigv5.XXXXXX)"
+          chmod 700 "$private"
+          cleanup_private() {
+            local rc=$?
+            trap - EXIT
+            if [[ $private =~ ^/tmp/aigv5\.[A-Za-z0-9]{6}$ ]]; then rm -rf -- "$private" >/dev/null 2>&1 || true; fi
+            exit "$rc"
+          }
+          trap cleanup_private EXIT
+          export TMPDIR="$private"
+          log="$private/test.log"
+          receipt="$RUNNER_TEMP/g07-v5-ack-receipt.txt"
+          phases=(prefix_confirmed pending_durable writer_advance_returned store_receipt_confirmed caller_ack_confirmed strict_result_confirmed replay_unchanged native_fixture_joined)
+          markers=(cleanup_v5_prefix_confirmed cleanup_v5_pending_durable cleanup_v5_writer_advance_returned cleanup_v5_store_receipt_confirmed cleanup_v5_caller_ack_confirmed cleanup_v5_strict_result_confirmed cleanup_v5_replay_unchanged cleanup_v5_native_fixture_joined)
+          milestone_set=1
+          prior_ms=-1
+          set_field() {
+            local key=$1 value=$2
+            awk -v prefix="$key=" -v replacement="$key=$value" 'index($0, prefix) == 1 { print replacement; found=1; next } { print } END { if (!found) print replacement }' "$receipt" > "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          record_milestones() {
+            local i phase marker hits line elapsed
+            for i in "${!phases[@]}"; do
+              phase=${phases[$i]}
+              marker=${markers[$i]}
+              hits="$(grep -Ec "^export-retirement phase=${marker} elapsed_ms=[0-9]{1,7}$" "$log" || true)"
+              line="$(grep -E "^export-retirement phase=${marker} elapsed_ms=[0-9]{1,7}$" "$log" || true)"
+              if [[ $hits == 1 && $line =~ ^export-retirement\ phase=[a-z0-9_]+\ elapsed_ms=([0-9]{1,7})$ ]]; then
+                elapsed=${BASH_REMATCH[1]}
+                if (( 10#$elapsed <= 600000 && 10#$elapsed >= prior_ms )); then
+                  printf 'ack_milestone=%s state=closed elapsed_ms=%s\n' "$phase" "$elapsed" >> "$receipt"
+                  prior_ms=$((10#$elapsed))
+                  continue
+                fi
+              fi
+              printf 'ack_milestone=%s state=unknown elapsed_ms=unknown\n' "$phase" >> "$receipt"
+              milestone_set=0
+            done
+            if (( milestone_set )); then set_field ack_milestone_set complete; else set_field ack_milestone_set incomplete; fi
+          }
+          bounded_duration_ms() {
+            local seconds computed
+            seconds="$(sed -nE 's/^test result: (ok|FAILED)\. [0-9]+ passed; [0-9]+ failed; [0-9]+ ignored; [0-9]+ measured; [0-9]+ filtered out; finished in ([0-9]+(\.[0-9]+)?)s$/\2/p' "$log")"
+            if [[ $seconds =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+              computed="$(awk -v value="$seconds" 'BEGIN { printf "%.0f", value * 1000 }')"
+              if [[ $computed =~ ^[0-9]+$ ]] && (( computed <= 600000 )); then printf '%s' "$computed"; return 0; fi
+            fi
+            printf 'unknown'
+          }
+          if timeout --kill-after=10s 600s "$TEST_BINARY" "$selector" --exact --test-threads=1 --nocapture --color=never > "$log" 2>&1; then
+            test_rc=0
+          else
+            test_rc=$?
+          fi
+          selected="$(grep -Fxc 'running 1 test' "$log" || true)"
+          ok_line="$(grep -Fxc "test $selector ... ok" "$log" || true)"
+          summaries="$(grep -Ec '^test result: ' "$log" || true)"
+          ok_summaries="$(grep -Ec '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+(\.[0-9]+)?s$' "$log" || true)"
+          test_duration_ms="$(bounded_duration_ms)"
+          record_milestones
+          ack_complete=unknown
+          test_verdict=fail
+          if (( test_rc == 124 || test_rc == 137 || test_rc == 143 || test_rc == 130 )); then
+            test_verdict=unknown
+          elif (( test_rc == 0 )) && [[ $selected == 1 && $ok_line == 1 && $summaries == 1 &&
+                $ok_summaries == 1 && $test_duration_ms != unknown && $milestone_set == 1 ]]; then
+            test_verdict=pass
+            ack_complete=confirmed
+          fi
+          set_field test_verdict "$test_verdict"
+          set_field test_exit "$test_rc"
+          set_field test_selected_count "$selected"
+          set_field test_duration_ms "$test_duration_ms"
+          set_field ack_complete "$ack_complete"
+          set_field fixture_cleanup unknown
+          cat "$receipt" >> "$GITHUB_STEP_SUMMARY"
+          [[ $test_verdict == pass ]]
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: g07-v5-ack-status-${{ github.sha }}
+          path: ${{ runner.temp }}/g07-v5-ack-receipt.txt
           if-no-files-found: ignore
           retention-days: 14
