@@ -21,6 +21,8 @@
 //!   package ships none: `FILE` is read from `third-party-notices/` next to the list and must have
 //!   exactly that SHA-256. The provenance (URL, revision) of each file is recorded in the list.
 //!
+//! The release workflow passes `--for-release` to both modes, which forbids all `no-text:` exceptions.
+//!
 //! Anything else fails: an unlisted expression, an unlisted crate without expression, an unlisted
 //! crate without text. A `Cargo.lock` change that brings such a crate therefore needs a reviewed edit
 //! of the list. The sources must be present locally: run `cargo fetch --locked` first. Unit tests run
@@ -121,18 +123,22 @@ impl Policy {
 }
 
 fn main() {
-    if let Err(message) = run() {
+    if let Err(message) = run(std::env::args().skip(1)) {
         eprintln!("third_party_notices: {message}");
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<(), String> {
-    let mut args = std::env::args().skip(1);
+fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
     let mode = args.next().ok_or("expected `notices` or `check`")?;
     let mut output = None;
     let mut allowed = None;
+    let mut for_release = false;
     while let Some(flag) = args.next() {
+        if flag == "--for-release" {
+            for_release = true;
+            continue;
+        }
         let value = args.next().ok_or_else(|| format!("{flag} needs a value"))?;
         match flag.as_str() {
             "--output" => output = Some(PathBuf::from(value)),
@@ -143,6 +149,12 @@ fn run() -> Result<(), String> {
     let path = allowed.ok_or("--allowed LIST is required")?;
     let list = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let policy = Policy::parse(&list)?;
+    if for_release && !policy.no_text.is_empty() {
+        return Err(
+            "release policy forbids `no-text:` exceptions; supply upstream licence texts with `supplement:`"
+                .into(),
+        );
+    }
     let mut krates = linked_crates()?;
     let directory = path
         .parent()
@@ -506,6 +518,29 @@ mod tests {
 
     fn policy(text: &str) -> Policy {
         Policy::parse(text).unwrap()
+    }
+
+    #[test]
+    fn release_commands_refuse_a_missing_text_exception_before_generating_notices() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = dir.path().join("allowed.txt");
+        let output = dir.path().join("THIRD-PARTY-NOTICES");
+        std::fs::write(&policy, "MIT\n  no-text: fixture 1.0.0 # reviewed\n").unwrap();
+        for mode in ["check", "notices"] {
+            let args = [
+                mode,
+                "--for-release",
+                "--allowed",
+                policy.to_str().unwrap(),
+                "--output",
+                output.to_str().unwrap(),
+            ];
+            assert_eq!(
+                run(args.into_iter().map(str::to_owned)).unwrap_err(),
+                "release policy forbids `no-text:` exceptions; supply upstream licence texts with `supplement:`"
+            );
+            assert!(!output.exists());
+        }
     }
 
     #[test]

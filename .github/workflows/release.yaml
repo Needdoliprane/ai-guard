@@ -146,8 +146,8 @@ jobs:
             test -s "$file"
             shasum -a 256 "$file" > "$file.sha256"
           done
-      - name: Check third-party licence expressions against the reviewed list
-        run: cargo run --quiet --locked --offline --example third_party_notices -- check --allowed .github/third-party-license-expressions.txt
+      - name: Check third-party licences for release
+        run: cargo run --quiet --locked --offline --example third_party_notices -- check --for-release --allowed .github/third-party-license-expressions.txt
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-metadata
@@ -267,7 +267,7 @@ jobs:
           # Every crate source is needed to read the licence texts, whatever the target.
           cargo fetch --locked
           cargo run --quiet --release --locked --offline --target "$RUST_TARGET" \
-            --example third_party_notices -- notices --allowed .github/third-party-license-expressions.txt \
+            --example third_party_notices -- notices --for-release --allowed .github/third-party-license-expressions.txt \
             --output "$package/THIRD-PARTY-NOTICES"
           test -s "$package/THIRD-PARTY-NOTICES"
           read -r -a programs <<< "$NATIVE_BINARIES"
