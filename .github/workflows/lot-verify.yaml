@@ -12,6 +12,7 @@ on:
     branches:
       - 'claude/v1-**'
       - '!claude/v1-g06-retention-r2-central-check-20261122'
+      - '!claude/v1-g06-retention-r2-central-diagnostic-20261122'
 
 permissions:
   contents: read
