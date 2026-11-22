@@ -533,8 +533,11 @@ empreinte de 64 hex minuscules, image immuable, `client:codex|claude_code`,
 `profile_id` (1 à 80 lettres/chiffres ASCII/`_`/`-`) et `profile_revision`
 entier 32 bits positif. L'image suit le validateur held-create ci-dessus.
 Aucun wildcard, modèle, credential, argv ou repli n'est ajouté. `worker_quota`
-borne séparément l'allocation ; le profil de réservation garde le réseau
-refusé. Une réservation crée un état central durable, pas un Pod ou un droit
+borne séparément l'allocation. Le réseau du Pod d'une session est toujours
+refusé par sa NetworkPolicy ; la demande `network` engagée par le profil vaut
+`denied` (par défaut) ou `broker_egress`, qui demande seulement au broker de
+transporter le trafic du fournisseur sous la politique d'egress du tenant (voir
+le [guide runtime](../kubernetes-runtime/README.fr.md#13-chemin-deffet-g11--état-des-sources-non-qualifié)). Une réservation crée un état central durable, pas un Pod ou un droit
 de démarrage.
 
 `session_recovery_policy` autorise seulement la récupération avant effet par
