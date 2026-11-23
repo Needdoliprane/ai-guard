@@ -21,6 +21,7 @@ const ENABLE: &str = "AI_GUARD_OWNED_BROWSER_FIXTURE";
 const WORKER_MODE: &str = "run-workers-v1";
 const USAGE_MODE: &str = "run-usage-v1";
 const MEMBERSHIP_MODE: &str = "run-membership-v1";
+const GRANT_MODE: &str = "run-grants-v1";
 const DIST: &str = "AI_GUARD_OWNED_BROWSER_DIST";
 const CONTROL: &str = "AI_GUARD_OWNED_BROWSER_CONTROL";
 const SECONDS: &str = "AI_GUARD_OWNED_BROWSER_SECONDS";
@@ -309,6 +310,7 @@ enum FixtureMode {
     Workers,
     Usage,
     Membership,
+    Grant,
 }
 
 enum FixtureSeed {
@@ -326,10 +328,18 @@ enum FixtureSeed {
         unmeasured_attempt_id: String,
     },
     Membership(Box<MembershipSeed>),
+    Grant(Box<GrantSeed>),
 }
 
 struct MembershipSeed {
     member: MembershipV1,
+    baseline: IdentityReceiptV1,
+}
+
+struct GrantSeed {
+    member: MembershipV1,
+    resource: ResourceRefV1,
+    grant: ResourceGrantV1,
     baseline: IdentityReceiptV1,
 }
 
@@ -396,6 +406,51 @@ fn seed_membership(
     })))
 }
 
+fn seed_grant(store: &Store, administrator: &PrincipalRefV1) -> Result<FixtureSeed> {
+    use std::collections::BTreeSet;
+
+    let FixtureSeed::Membership(member_seed) =
+        seed_membership(store, administrator, "synthetic-org".into())?
+    else {
+        bail!("grant fixture did not produce its synthetic member");
+    };
+    let resource = ResourceRefV1 {
+        kind: ResourceKindV1::Session,
+        resource_id: RESOURCE.into(),
+    };
+    let mut event = Event::new("fixture.owned-browser-grant");
+    event.session_id = Some(RESOURCE.into());
+    event.data = json!({"private_content": PRIVATE_CONTENT});
+    store.append(event)?;
+    let grant = ResourceGrantV1 {
+        version: 1,
+        tenant_id: "B".into(),
+        organization_scope: "synthetic-org".into(),
+        resource: resource.clone(),
+        owner: administrator.clone(),
+        revision: 1,
+        active: true,
+        shares: vec![ResourceShareV1 {
+            principal: member_seed.member.principal.clone(),
+            permissions: [ResourcePermissionV1::Metadata]
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+        }],
+    };
+    let baseline = store.mutate_identity(&fixture_identity_mutation(
+        IdentityChangeV1::ResourceGrant {
+            expected_revision: 0,
+            grant: grant.clone(),
+        },
+    ))?;
+    Ok(FixtureSeed::Grant(Box::new(GrantSeed {
+        member: member_seed.member,
+        resource,
+        grant,
+        baseline,
+    })))
+}
+
 fn seed_usage(store: &Store) -> Result<FixtureSeed> {
     // Supply the missing terminal time through the same Store transition.
     // Runtime observations here belong only to the software fixture.
@@ -442,7 +497,10 @@ fn seed_usage(store: &Store) -> Result<FixtureSeed> {
 }
 
 fn seed(mode: FixtureMode) -> Result<(Fixture, FixtureSeed)> {
-    let fixture = if matches!(mode, FixtureMode::Usage | FixtureMode::Membership) {
+    let fixture = if matches!(
+        mode,
+        FixtureMode::Usage | FixtureMode::Membership | FixtureMode::Grant
+    ) {
         Fixture::new_owned_with_human_rights()
     } else {
         Fixture::new_owned()
@@ -473,6 +531,16 @@ fn seed(mode: FixtureMode) -> Result<(Fixture, FixtureSeed)> {
             .into_iter()
             .collect();
         }
+        FixtureMode::Grant => {
+            membership.capabilities = [
+                HumanCapabilityV1::ReadMetadata,
+                HumanCapabilityV1::ReadContent,
+                HumanCapabilityV1::ReadMemberships,
+                HumanCapabilityV1::ManageGrants,
+            ]
+            .into_iter()
+            .collect();
+        }
         FixtureMode::Journal => {
             // The Journal tests profile refusal even when the owner holds the right.
             membership.capabilities.insert(HumanCapabilityV1::Export);
@@ -484,6 +552,10 @@ fn seed(mode: FixtureMode) -> Result<(Fixture, FixtureSeed)> {
     }))?;
     if mode == FixtureMode::Membership {
         let seeded = seed_membership(store, fixture.principal(), organization_scope)?;
+        return Ok((fixture, seeded));
+    }
+    if mode == FixtureMode::Grant {
+        let seeded = seed_grant(store, fixture.principal())?;
         return Ok((fixture, seeded));
     }
     if mode != FixtureMode::Journal {
@@ -700,6 +772,95 @@ fn membership_change_proof(
     })
 }
 
+#[derive(Serialize)]
+struct GrantChangeProof {
+    mutation_count: u8,
+    receipt: Option<HumanGrantChangeReceiptV1>,
+}
+
+fn grant_change_proof(
+    path: &Path,
+    seed: &GrantSeed,
+    administrator: &PrincipalRefV1,
+) -> Result<GrantChangeProof> {
+    use std::collections::BTreeSet;
+
+    let connection = open_receipt_database(path)?;
+    let mut statement = connection.prepare(
+        "SELECT seq,payload FROM events WHERE kind='control.identity.mutation' AND seq>?1
+         ORDER BY seq LIMIT 2",
+    )?;
+    let mut rows = statement.query([seed.baseline.audit_seq])?;
+    let Some(row) = rows.next()? else {
+        return Ok(GrantChangeProof {
+            mutation_count: 0,
+            receipt: None,
+        });
+    };
+    let audit_seq: i64 = row.get(0)?;
+    let payload: String = row.get(1)?;
+    ensure!(
+        rows.next()?.is_none(),
+        "more than one identity mutation after grant seed"
+    );
+    ensure!(
+        payload.len() <= OUTPUT_BYTES,
+        "grant audit exceeds its bound"
+    );
+    let event: Event = serde_json::from_str(&payload)?;
+    let record = IdentityAuditRecord::decode_replay(&event.data)?;
+    let mut expected = seed.grant.clone();
+    expected.revision = 2;
+    expected.shares = vec![ResourceShareV1 {
+        principal: seed.member.principal.clone(),
+        permissions: [
+            ResourcePermissionV1::Metadata,
+            ResourcePermissionV1::Content,
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>(),
+    }];
+    ensure!(
+        record.mutation.actor == *administrator
+            && record.mutation.change
+                == (IdentityChangeV1::ResourceGrant {
+                    expected_revision: 1,
+                    grant: expected.clone(),
+                })
+            && seed.baseline.authorization_revision.checked_add(1)
+                == Some(record.authorization_revision),
+        "grant audit differs from the single delegated change"
+    );
+    let indexed: (i64, String) = connection.query_row(
+        "SELECT event_seq,input_hash FROM identity_operations WHERE operation_id=?1",
+        [&record.mutation.operation_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let resource_key = seed.resource.key()?;
+    let (projected_seq, grant_json): (i64, String) = connection.query_row(
+        "SELECT event_seq,payload_json FROM identity_resources WHERE resource_key=?1",
+        [&resource_key],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    ensure!(
+        indexed == (audit_seq, record.input_hash)
+            && projected_seq == audit_seq
+            && serde_json::from_str::<ResourceGrantV1>(&grant_json)? == expected,
+        "grant operation index or projection differs from the audit"
+    );
+    Ok(GrantChangeProof {
+        mutation_count: 1,
+        receipt: Some(HumanGrantChangeReceiptV1 {
+            version: 1,
+            operation_id: record.mutation.operation_id,
+            resource: seed.resource.clone(),
+            grant_revision: expected.revision.to_string(),
+            authorization_revision: record.authorization_revision.to_string(),
+            audit_seq: audit_seq.to_string(),
+        }),
+    })
+}
+
 fn export_receipts(root: &Directory, path: &Path, tenant: &str) -> Result<()> {
     let connection = open_receipt_database(path)?;
     // Worker registry receipts carry their own event kind instead of data.action.
@@ -734,6 +895,7 @@ fn export_receipts(root: &Directory, path: &Path, tenant: &str) -> Result<()> {
                     "quota",
                     "usage",
                     "memberships",
+                    "grants",
                     WORKER_RECEIPT_KIND
                 ]
                 .contains(&row.action.as_str()),
@@ -760,6 +922,7 @@ async fn serve_owned_browser_fixture() -> Result<()> {
         Ok(WORKER_MODE) => (FixtureMode::Workers, WORKER_MODE),
         Ok(USAGE_MODE) => (FixtureMode::Usage, USAGE_MODE),
         Ok(MEMBERSHIP_MODE) => (FixtureMode::Membership, MEMBERSHIP_MODE),
+        Ok(GRANT_MODE) => (FixtureMode::Grant, GRANT_MODE),
         _ => bail!("owned browser fixture requires its explicit opt-in"),
     };
     let config = Config::load(opt_in)?;
@@ -851,6 +1014,15 @@ async fn serve_owned_browser_fixture() -> Result<()> {
                     "revision": seed.member.revision.to_string(),
                 });
             }
+            FixtureSeed::Grant(seed) => {
+                ready["mode"] = json!("grant");
+                ready["grant"] = json!({
+                    "resource": seed.resource,
+                    "revision": seed.grant.revision.to_string(),
+                    "member_display_name": MEMBER_DISPLAY_NAME,
+                    "member_principal": seed.member.principal,
+                });
+            }
         }
         publish(&config.root, "READY.json", &ready)?;
         eprintln!("OWNED_BROWSER_READY {}", config.root.path().join("READY.json").display());
@@ -867,7 +1039,13 @@ async fn serve_owned_browser_fixture() -> Result<()> {
         }
         _ => Ok(None),
     };
-    let receipts_exported = receipts.is_ok() && membership_change.is_ok();
+    let grant_change = match &seeded {
+        FixtureSeed::Grant(seed) if stopped.is_ok() => {
+            grant_change_proof(&database, seed, fixture.principal()).map(Some)
+        }
+        _ => Ok(None),
+    };
+    let receipts_exported = receipts.is_ok() && membership_change.is_ok() && grant_change.is_ok();
     let mut closed = json!({
         "version":1,"completed":work.is_ok() && unlocked && stopped.is_ok() && receipts_exported,
         "commands_processed":work.as_ref().ok().copied(),"sqlite_lock_released":unlocked,
@@ -877,6 +1055,9 @@ async fn serve_owned_browser_fixture() -> Result<()> {
     if mode == FixtureMode::Membership {
         closed["membership_change"] =
             json!(membership_change.as_ref().ok().and_then(Option::as_ref));
+    }
+    if mode == FixtureMode::Grant {
+        closed["grant_change"] = json!(grant_change.as_ref().ok().and_then(Option::as_ref));
     }
     publish(&config.root, "CLOSED.json", &closed)?;
     eprintln!(
@@ -888,6 +1069,7 @@ async fn serve_owned_browser_fixture() -> Result<()> {
     stopped?;
     receipts?;
     let _ = membership_change?;
+    let _ = grant_change?;
     Ok(())
 }
 
