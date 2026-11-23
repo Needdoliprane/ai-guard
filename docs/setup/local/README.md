@@ -91,9 +91,11 @@ The engine CLI then receives only paths inside that copy as arguments; with Dock
 
 ```text
 build --file <copy>/context/images/<name>.Dockerfile --tag <tag> [--build-arg <NAME>=<public-value>]… <copy>/context
-compose --project-name agentsandbox --env-file <copy>/compose-empty.env --file <copy>/context/deploy/<engine>/compose.yaml up --detach --force-recreate
-compose --project-name agentsandbox --env-file <copy>/compose-empty.env --file <copy>/context/deploy/<engine>/compose.yaml down
+compose --project-name <stack-name> --env-file <copy>/compose-empty.env --file <copy>/context/deploy/<engine>/compose.yaml up --detach --force-recreate
+compose --project-name <stack-name> --env-file <copy>/compose-empty.env --file <copy>/context/deploy/<engine>/compose.yaml down
 ```
+
+The CLI uses `agentsandbox` for `<stack-name>` by default and takes an explicit name from `--stack-name`.
 
 The selected source is read without following links, is never written and is never named in these arguments. Each preparation prints one line on standard error:
 
@@ -182,7 +184,7 @@ Remove the link or close the editor that holds the lock, reduce the input, or wa
 - It applies to the CLI `build`, `up` and `down` only. A direct `docker build`, `podman build` or Compose command reads the paths you give it.
 - The build list knows `.dockerignore` only. `.containerignore` and `images/<name>.Dockerfile.containerignore` are not in it: they are neither copied nor compared, so the engine does not receive them through the CLI `build`. How a builder treats those names, and whether it applies a per-Dockerfile ignore file instead of `.dockerignore`, was not observed on a real engine.
 - The removal of the copy is by name after an identity check. This is a check, not a lock: between the comparison and the removal, a process running as the CLI account or as root can still swap the directory; other accounts cannot under the temporary-directory policy. The identity recorded is what the path named right after creation, not that of a descriptor.
-- Compose metadata after `up` (`NOT_RUN` on a real provider). `up` hands Compose a file and an env file under `<TMPDIR>/ai-guard-distribution-<random>/` and removes that directory when the command ends. A provider that records its config files, working directory and env file in project labels then names paths that no longer exist, and under the default Linux `/tmp` another local account can later create a directory of that name. ai-guard never reads those labels: `down` prepares a new copy and addresses the project by name, and the shipped Compose files contain no relative path. A third-party tool or a manual command that re-reads the label path would read whatever is there; none was run. Address the stack by `--project-name agentsandbox` or by the checkout's Compose file, as in [follow a stack started by the CLI `up`](#cli-up-stack), never by the label path, and on a host shared with other local accounts run `up` with a private `TMPDIR` (owned by the account, mode `0700`).
+- Compose metadata after `up` (`NOT_RUN` on a real provider). `up` hands Compose a file and an env file under `<TMPDIR>/ai-guard-distribution-<random>/` and removes that directory when the command ends. A provider that records its config files, working directory and env file in project labels then names paths that no longer exist, and under the default Linux `/tmp` another local account can later create a directory of that name. ai-guard never reads those labels: `down` prepares a new copy and addresses the project by name, and the shipped Compose files contain no relative path. A third-party tool or a manual command that re-reads the label path would read whatever is there; none was run. On a host shared with other local accounts, run `up` with a private `TMPDIR` owned by your account with mode `0700`. Address the stack using its Compose project name and the inspection commands below. [Follow a stack started by the CLI `up`](#cli-up-stack)
 - Compose provider acceptance of `--env-file` (`NOT_RUN`). The CLI `up` and `down` add `--env-file <empty prepared file>` to the Compose command; with Podman the whole command is passed to the external provider. No provider was run, and the fixture that stands for it accepts any argument. The direct Podman commands of this guide already use `podman compose --env-file`: it is the same provider requirement, now also needed by the CLI. If a provider rejects the option, `up` and `down` fail with only `podman command failed (<status>)`; the provider's standard error is captured but [not printed](#engine-output).
 - Descriptors. Executed on Linux: 300 selected directories build under a limit of 128 descriptors, and a selected chain 40 levels deep is refused under a limit of 64 with the message that names the limit. Computed, not measured: about 170 descriptors for the deepest accepted source (64 levels), below the usual macOS soft limit of 256.
 - Directories above the source. Executed on Linux: a source below a directory that the account can only traverse is prepared, with a directory of that same account. `NOT_RUN`: a directory owned by another account, and macOS, where such a source is still refused. On every platform the temporary directory and, for `up` and `down`, the configuration directory need readable ancestors (private-directory policy).
@@ -221,15 +223,17 @@ podman compose --env-file "$AIGUARD_CONFIG/local.env" -f deploy/podman/compose.y
 "$AIGUARD_BIN" healthcheck --url "$AIGUARD_GATEWAY/healthz" --url "$AIGUARD_DASHBOARD/healthz"
 ```
 
-Use the same engine account, context/endpoint, env file and Compose file throughout. Keep to this direct Compose workflow when customizing ports or project names; the CLI `up/down` workflow has its own fixed project and default readiness URLs. The CLI `up` and `down` hand Compose a [private copy](#prepared-source) of `deploy/<engine>/compose.yaml` and an empty `--env-file`, without `--project-directory`, in an environment that carries `AGENTSANDBOX_CONFIG_DIR` from `--config-dir` and none of your shell's Compose variables: the directory of that copy holds no `.env`, so a `.env` placed beside `deploy/<engine>/compose.yaml` is not read by these two commands and the Compose file's defaults apply. The direct `docker compose --env-file …` and `podman compose --env-file …` commands above are unchanged. How a real Compose provider treats the CLI's arguments was not verified.
+Use the same engine account, context or endpoint, env file and Compose file throughout this direct workflow. It supports a custom Compose file and explicit env file. The CLI `up` selects the stack name and host ports from its options and defaults. [Run a second stack](#named-stack)
 
 <a id="cli-up-stack"></a>
 
 ### Follow a stack started by the CLI `up`
 
-The CLI `up` creates its stack under the fixed Compose project name `agentsandbox`, from a temporary copy of `deploy/<engine>/compose.yaml` and an empty env file that are both removed once the Compose command has ended, before the wait for the health URLs. The only variable it gives Compose is `AGENTSANDBOX_CONFIG_DIR`, the absolute path of `--config-dir`. For this stack, "the same configuration" therefore means that project name, that engine and that variable, not a file that still exists. What follows is written from the arguments and the environment the CLI builds; none of these commands was run against Docker Compose or a Podman Compose provider.
+The CLI calls Compose with the name given to `--stack-name`, or `agentsandbox` by default. Each `up` and `down` prepares a private copy of the selected `deploy/<engine>/compose.yaml` and an empty `--env-file`. A normally collected Compose command releases this copy before `up` checks viewer access. The CLI takes `AGENTSANDBOX_CONFIG_DIR` from `--config-dir`. For each nondefault port, `up` sets `AI_GUARD_GATEWAY_PORT` or `AI_GUARD_DASHBOARD_PORT` in the environment passed to Compose. The CLI selects ports from its options and defaults, independently of ambient Compose variables and the checkout's `.env`. To configure these variables yourself, use the env file in the direct Compose workflow. [Prepared build and Compose sources](#prepared-source)
 
-- **Project.** Address the project by its name, `--project-name agentsandbox`. A Compose provider that records the Compose file, the working directory and the env file of a project in the labels of its containers names, for this stack, paths under the removed `<TMPDIR>/ai-guard-distribution-<random>/` directory: never point a command or a tool at such a path (see the Compose metadata limit under [prepared build and Compose sources](#prepared-source)). The direct commands above, run with `--env-file "$AIGUARD_CONFIG/local.env"`, address the project named by that file's `COMPOSE_PROJECT_NAME` (`ai-guard-local` in the example), not this one.
+After Compose succeeds, `up` waits up to 45 seconds for authenticated `GET /api/v1/identity` requests to the gateway and dashboard. Both must accept the configured viewer key, identify it as a viewer and return the same tenant before the CLI prints the stack addresses. A `healthcheck` measures public HTTP reachability. If the viewer check fails, `up` returns an error and leaves the stack started. Inspect the named project's status and logs below. To stop it, run `down` with the same name, configuration, source and engine options.
+
+- **Project.** Set `AIGUARD_STACK_NAME` to the name used by `up` (`agentsandbox` in the examples below) and pass it as `--project-name`. When the provider requires a Compose file, use the checkout's file as shown below. The provider's project labels may still name the removed prepared copy. [Prepared build and Compose sources](#prepared-source)
 - **Engine.** With Docker the CLI targets one endpoint, `--host <endpoint>`: the value of `--runtime-endpoint` when it was given, otherwise the Docker host of the account's current context, which the CLI reads with `docker context inspect --format '{{json .Endpoints.docker.Host}}'` in a rebuilt environment that carries the account's home directory and `DOCKER_CONFIG=<home>/.docker`, and neither `DOCKER_HOST` nor `DOCKER_CONTEXT` from your shell. `doctor` does not print that endpoint. A direct `docker` command run in a shell where these variables are set can address another engine: pass the endpoint explicitly. With Podman the CLI adds no engine-global option, and `--runtime-endpoint` is refused for these commands.
 - **Variable.** A direct command that is given the checkout's Compose file needs `AGENTSANDBOX_CONFIG_DIR` set to the same configuration directory: the file requires it (`${AGENTSANDBOX_CONFIG_DIR:?Run agentsandbox init first}`).
 
@@ -238,25 +242,54 @@ For Docker, read the endpoint the way the CLI does when no `--runtime-endpoint` 
 ```sh
 env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_CONFIG docker context inspect --format '{{json .Endpoints.docker.Host}}'
 AIGUARD_ENDPOINT="unix:///the/endpoint/printed/above"
-docker --host "$AIGUARD_ENDPOINT" compose --project-name agentsandbox ps
-docker --host "$AIGUARD_ENDPOINT" compose --project-name agentsandbox logs --tail 100 gateway dashboard ingress
+AIGUARD_STACK_NAME="agentsandbox"
+docker --host "$AIGUARD_ENDPOINT" compose --project-name "$AIGUARD_STACK_NAME" ps
+docker --host "$AIGUARD_ENDPOINT" compose --project-name "$AIGUARD_STACK_NAME" logs --tail 100 gateway dashboard ingress
 ```
 
 For Podman:
 
 ```sh
-podman compose --project-name agentsandbox ps
-podman compose --project-name agentsandbox logs --tail 100 gateway dashboard ingress
+AIGUARD_STACK_NAME="agentsandbox"
+podman compose --project-name "$AIGUARD_STACK_NAME" ps
+podman compose --project-name "$AIGUARD_STACK_NAME" logs --tail 100 gateway dashboard ingress
 ```
 
 Where a provider needs a Compose file to find the project, add the checkout's file and the variable; `$AIGUARD_CONFIG` stands for the directory given to `up` as `--config-dir`:
 
 ```sh
-AGENTSANDBOX_CONFIG_DIR="$AIGUARD_CONFIG" docker --host "$AIGUARD_ENDPOINT" compose --project-name agentsandbox --file deploy/docker/compose.yaml ps
-AGENTSANDBOX_CONFIG_DIR="$AIGUARD_CONFIG" podman compose --project-name agentsandbox --file deploy/podman/compose.yaml ps
+AGENTSANDBOX_CONFIG_DIR="$AIGUARD_CONFIG" docker --host "$AIGUARD_ENDPOINT" compose --project-name "$AIGUARD_STACK_NAME" --file deploy/docker/compose.yaml ps
+AGENTSANDBOX_CONFIG_DIR="$AIGUARD_CONFIG" podman compose --project-name "$AIGUARD_STACK_NAME" --file deploy/podman/compose.yaml ps
 ```
 
-To stop or recreate that stack, use the CLI `down` and `up` with the same `--runtime`, `--runtime-program`, `--runtime-endpoint` and `--config-dir`: each prepares a new copy and addresses the project by name. Review logs for secrets before sharing them.
+Review the logs for secrets before sharing them.
+
+<a id="named-stack"></a>
+
+### Run a second stack
+
+Choose an unused stack name, a separate private configuration directory outside the source and imported project, and two distinct free ports on `127.0.0.1`. The defaults are `agentsandbox`, gateway port `8787`, and dashboard port `4000`. Stack names have 1 to 63 characters drawn from lowercase ASCII letters, digits, dashes and underscores, with a letter or digit first. Ports range from 1 to 65535. The CLI refuses invalid or equal port values before initializing the configuration. Reusing a name with `up` recreates the services in that project.
+
+Build the CLI and control image first. From the source distribution's root, run the example on a rootless Docker engine. For a non-rootless engine, pass `--allow-rootful-runtime` to `up`. Set `AIGUARD_QA_CONFIG` to the separate configuration path you chose. `up` initializes the configuration there if it is missing.
+
+```sh
+AIGUARD_BIN="$PWD/target/release/agentsandbox"
+AIGUARD_QA_STACK="ai-guard-qa"
+AIGUARD_QA_CONFIG="$HOME/.ai-guard-qa"
+"$AIGUARD_BIN" up --runtime docker --source . --stack-name "$AIGUARD_QA_STACK" \
+  --config-dir "$AIGUARD_QA_CONFIG" --gateway-port 28787 --dashboard-port 24000
+```
+
+The supplied Compose files keep these ports on loopback. An adapted Compose file selected with `--source` must use the two port variables for publication. If another process occupies either host port, Compose can fail to bind it after starting some services. Inspect the named project, then choose free ports and retry with the same name and configuration or stop that project with `down`. [Inspect the named project](#cli-up-stack)
+
+Use `--gateway http://127.0.0.1:28787` and `--config-dir "$AIGUARD_QA_CONFIG"` for commands targeting this stack. Open `http://127.0.0.1:24000` and use this stack's viewer key. Confirm active sessions have stopped before shutting down the named control stack. Repeat any explicit `--runtime-program` and `--runtime-endpoint` selections used at startup. The stack name selects the Compose project. The audit and session volumes are retained. [Stop sessions and preserve data](#stop-preserve-data-and-restart)
+
+```sh
+"$AIGUARD_BIN" down --runtime docker --source . --stack-name "$AIGUARD_QA_STACK" \
+  --config-dir "$AIGUARD_QA_CONFIG"
+```
+
+The validation register records earlier coexistence and viewer-refusal results with their scope. [Dated validation results](../../engineering/VALIDATION.md#coexistence-des-piles-et-démarrage-vérifié)
 
 <a id="http-listener-limits"></a>
 
@@ -383,7 +416,7 @@ The copy excludes known sensitive names and dependency/cache directories, but it
 | `build`, `up` or `down` refuses to start with `SIGCHLD is ignored in this process` | The program that started the CLI ignores `SIGCHLD`; nothing was prepared and no engine command was started. Start the command with the default disposition: see [interrupt or time out a build or Compose command](#interrupt-build-or-compose). |
 | `build`, `up` or `down` interrupted or past its bound | The message states what was observed about the local engine CLI process; see [interrupt or time out a build or Compose command](#interrupt-build-or-compose). Check the engine's own state, then rerun the same command. An interrupted `up` may leave a partial stack: rerun `up` or run `down`. |
 | `termination is unknown`, a `was not removed` or `could not be removed` warning, or an `ai-guard-distribution-*` directory left in the temporary directory | Follow [recover a retained prepared source](#prepared-source-retained) before removing anything. ai-guard does not remove that directory. |
-| Stack unavailable, or `stack started but readiness did not pass within 45 seconds; inspect docker compose logs` | Check Compose `ps` and bounded `logs --tail 100 gateway dashboard ingress` with the same configuration: the same env file and Compose file for the direct workflow, or the project `agentsandbox` addressed by name for a stack started by the CLI `up`, as in [follow a stack started by the CLI `up`](#cli-up-stack). Check host-port collisions and private credential projections. Never publish raw logs without reviewing them for secrets. |
+| Stack unavailable, or `viewer access was not confirmed within 45 seconds` | Inspect `ps` and bounded logs for the selected Compose project. Check both host ports and the viewer identity returned by each service. To stop the stack after a failed start, run `down` with the same name, configuration, source and engine options. [Inspect a CLI stack](#cli-up-stack) |
 | HTTP 429 through ingress | Distinguish the [upload/exchange budgets](#http-ingress-limits) from upstream quotas using the returned message. Reduce parallel requests and retry a read after capacity is available. Check the recorded session before repeating a launch. |
 | HTTP 408 or 413 while sending a body | Check the 5-second total/2-second idle deadlines and 256-KiB body limit. Reduce the payload or fix a stalled sender; changing the dotenv file does not extend these bounds. |
 | HTTP 503 with audit descriptor exhaustion (`EMFILE`/`ENFILE`) | Preserve the session and operation identity. Once descriptors are available, retry an authorized read that reaches Store validation; see [audit descriptor recovery](#audit-descriptor-recovery) before replaying a mutation. |

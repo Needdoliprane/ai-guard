@@ -856,10 +856,26 @@ fn build_and_compose_commands_accept_only_their_closed_grammar() {
         up.arguments[7..],
         strings(&["up", "--detach", "--force-recreate"])
     );
+    // Another valid stack name is carried to Compose as the project name, nothing else changes.
+    let named = compose
+        .compose_command(&strings(&["compose", "--project-name", "qa-other", "down"]))
+        .unwrap();
+    assert_eq!(
+        named.arguments[..3],
+        strings(&["compose", "--project-name", "qa-other"])
+    );
+    assert_eq!(
+        named.arguments[3..],
+        compose.compose_command(&strings(&down)).unwrap().arguments[3..]
+    );
     for options in [
         &["compose"][..],
         &["compose", "--project-name", "agentsandbox"],
-        &["compose", "--project-name", "other", "down"],
+        &["compose", "--project-name", "Other", "down"],
+        &["compose", "--project-name", "-other", "down"],
+        &["compose", "--project-name", "oth er", "down"],
+        &["compose", "--project-name", "../other", "down"],
+        &["compose", "--project-name", "", "down"],
         &["build", "--project-name", "agentsandbox", "down"],
         &["compose", "--file", "/etc/compose.yaml", "down"],
         &["compose", "--project-name", "agentsandbox", "up"],

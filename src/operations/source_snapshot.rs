@@ -27,8 +27,8 @@ use super::{OperatorCommand, OperatorRuntime};
 use crate::runtime::{
     Capture, ManagedRuntime, Runtime, RuntimeKind,
     retained_cli::{
-        Collected, Interruption, InvocationEnd, InvocationFailure, RetainedInput, STOP_OBSERVATION,
-        Stop, StopReason, UnknownEnd, signal_name,
+        COMPOSE_UP_ACTION, Collected, Interruption, InvocationEnd, InvocationFailure,
+        RetainedInput, STOP_OBSERVATION, Stop, StopReason, UnknownEnd, signal_name,
     },
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -229,11 +229,12 @@ impl PreparedSource {
         })
     }
 
-    /// `options` must be exactly `["compose", "--project-name", "agentsandbox"]`
-    /// followed by `up --detach --force-recreate` or by `down`.
+    /// `options` starts with `["compose", "--project-name", <stack>]`, followed
+    /// by `up --detach --force-recreate` or by `down`.
     ///
-    /// Result: `compose --project-name agentsandbox --env-file <empty prepared
-    /// file> --file <copy>/deploy/<kind>/compose.yaml <action…>`.
+    /// Result: `compose --project-name <stack> --env-file <empty prepared
+    /// file> --file <copy>/deploy/<kind>/compose.yaml <action…>`, where the stack
+    /// name is `agentsandbox` unless the operator chose another valid one.
     pub(super) fn compose_command(&self, options: &[String]) -> Result<PreparedCommand> {
         let prepared = self
             .snapshot
@@ -251,14 +252,14 @@ impl PreparedSource {
         ensure!(
             verb == "compose"
                 && flag == "--project-name"
-                && project == "agentsandbox"
-                && (action == ["up", "--detach", "--force-recreate"] || action == ["down"]),
+                && super::parse_stack_name(project).is_ok()
+                && (action == COMPOSE_UP_ACTION || action == ["down"]),
             "unsupported engine Compose options"
         );
         let mut arguments = vec![
             "compose".to_owned(),
             "--project-name".to_owned(),
-            "agentsandbox".to_owned(),
+            project.clone(),
             "--env-file".to_owned(),
             utf8(env_file)?.to_owned(),
             "--file".to_owned(),

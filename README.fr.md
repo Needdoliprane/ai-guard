@@ -47,7 +47,7 @@ Le [diagnostic](docs/setup/diagnostics/README.fr.md) fonctionne en lecture seule
 
 Ouvrir `http://127.0.0.1:4000`. Pour ce parcours technique viewer, lire la valeur dans `$AIGUARD_CONFIG/secrets/viewer` avec un éditeur privé et la saisir uniquement dans le formulaire de connexion de confiance. Conserver le credential runner dans le contrôle de confiance. L’accès personnel nominatif suit sa procédure d’[identité locale](docs/setup/identity/README.fr.md) ou de [SSO](docs/setup/sso/README.fr.md).
 
-Cette pile CLI utilise le nom de projet fixe `agentsandbox` et les ports loopback par défaut ci-dessus. Conserver le même compte/contexte moteur, répertoire de configuration et source pendant son cycle de vie. Pour des ports, noms de projet, fichiers env Compose personnalisés et les logs, suivre le [guide local](docs/setup/local/README.fr.md#cli-up-stack) ; ne pas mélanger les commandes de piles différentes. Une réponse de santé établit seulement que le service est joignable.
+Le nom de pile par défaut est `agentsandbox`, avec les ports loopback ci-dessus. `up` affiche les adresses après que les deux services ont accepté la clé viewer et retourné le même tenant. Pour une seconde pile, utiliser `--stack-name`, `--gateway-port` et `--dashboard-port` avec une configuration privée distincte. Transmettre son nom à `down` avec le même `--config-dir`, le même moteur et la même source. [Lancer une seconde pile](docs/setup/local/README.fr.md#named-stack) · [Consulter une pile CLI](docs/setup/local/README.fr.md#cli-up-stack)
 
 ## Lancer, suivre et examiner une session
 
