@@ -828,8 +828,7 @@ export class HumanDashboard {
         "Brokers, workers et ressources que ce contexte d’administration peut lire, réunis sur une page. Chaque valeur vient d’une lecture autorisée par le contrôle ; ce qui n’a pas été lu reste inconnu." :
         "Les ressources que vous possédez ou qui vous sont partagées, et ce que ce contexte personnel ne permet pas de lire. Chaque valeur vient d’une lecture autorisée par le contrôle.") : this.#mode === "federation" ? "Vue d’administration offerte par l’opération federation_read de ce contexte. Workers et brokers enregistrés restent visibles dans deux pages indépendantes du même tenant." : this.#mode === "workers" ? "Workers de tout le tenant · opération workers_read de ce contexte. États du contrôle et observations runtime restent distincts." : this.#mode === "brokers" ? "Infrastructure de tout le tenant · opération brokers_read de ce contexte. Les permissions et l’évaluation du registre proviennent du contrôle." :
         "Les permissions sont vérifiées par le serveur. Une ressource visible ne donne aucun droit implicite sur son contenu ou son export.")),
-      this.#mode !== "contexts" && this.#delegatedChange.phase === "unknown" ?
-        action("Voir les contextes pour la reprise", `human-${this.#delegatedChange.kind}-recovery-contexts`, () => this.#openView("contexts")) : "",
+      this.#renderDelegatedRecovery() ?? "",
       ...(this.#api.readBudgetStopped ? [el("div", "control-error human-budget-stop", el("p", "", "Lecture automatique suspendue : budget durable de lecture atteint. Contactez l’opérateur ; changer de vue ou de contexte ne réinitialise pas ce budget."),
         action("Relire après intervention de l’opérateur", "human-operator-retry", () => {
           if (this.#delegatedChange.phase === "sending") return;
@@ -941,28 +940,36 @@ export class HumanDashboard {
   #renderDelegatedRecovery() {
     const kind = this.#delegatedChange.kind;
     if (this.#delegatedChange.phase !== "unknown" || !kind) return null;
-    const offer = !this.#identityLoading && !this.#api.readBudgetStopped ? this.#delegatedChange.offer(Date.now()) : null;
+    const choosing = this.#mode === "contexts";
+    const offer = choosing && !this.#identityLoading && !this.#api.readBudgetStopped ? this.#delegatedChange.offer(Date.now()) : null;
     const focusKey = `human-${kind}-recovery`;
     const title = kind === "grant" ? "Reprise du changement de partages" : "Reprise du changement d’appartenance";
-    const status = el("section", "panel", el("h2", "", title));
-    if (!offer) {
+    const status = el("section", "panel", el("h2", "", title),
+      el("p", "", "Tant que cette reprise est en attente, les modifications des appartenances et des partages sont indisponibles."));
+    if (!choosing) {
+      status.append(action("Voir les contextes pour la reprise", `${focusKey}-contexts`, () => this.#openView("contexts")));
+    } else if (!offer) {
       status.append(el("p", "", this.#delegatedChange.unavailable ?
         "Le contrôle ou son audit était indisponible. Un rafraîchissement des accès peut constater la remise en service. Si la panne persiste, contactez l’opérateur." :
         "Relisez vos accès pour vérifier si un contexte d’administration équivalent permet une reprise."));
       if (!this.#api.readBudgetStopped && !this.#identityError)
         status.append(action("Relire les accès", `${focusKey}-access`, () => { void this.#loadIdentity(); }, this.#identityLoading));
-      return status;
-    }
-    const revision = `Révision attendue ${offer.expectedRevision}`;
-    status.append(el("p", "muted", "Votre confirmation renvoie la demande d’origine."));
-    if (offer.kind === "grant") {
-      status.append(el("p", "", `${revision} · Partages demandés ${offer.shareCount}`));
     } else {
-      status.append(el("p", "", `${revision} · `, offer.active ? "Appartenance active" : "Appartenance désactivée"),
-        el("p", "", `Capacités demandées — ${offer.capabilities.map((capability) => CAPABILITY_LABELS[capability]).join(", ") || "aucune"}`));
+      const revision = `Révision attendue ${offer.expectedRevision}`;
+      status.append(el("p", "muted", "Votre confirmation renvoie la demande d’origine."));
+      if (offer.kind === "grant") {
+        status.append(el("p", "", `${revision} · Partages demandés ${offer.shareCount}`));
+      } else {
+        status.append(el("p", "", `${revision} · `, offer.active ? "Appartenance active" : "Appartenance désactivée"),
+          el("p", "", `Capacités demandées — ${offer.capabilities.map((capability) => CAPABILITY_LABELS[capability]).join(", ") || "aucune"}`));
+      }
+      status.append(action(`Réessayer la même opération · tenant ${offer.tenant} · organisation ${offer.organization}`,
+        focusKey, () => { void this.#retryDelegatedChange(); }));
     }
-    status.append(action(`Réessayer la même opération · tenant ${offer.tenant} · organisation ${offer.organization}`,
-      focusKey, () => { void this.#retryDelegatedChange(); }));
+    status.append(el("p", "muted", "L’abandon retire la reprise de cette session. Tout effet déjà enregistré par le contrôle est conservé."),
+      action("Abandonner la reprise", `${focusKey}-abandon`, () => {
+        if (this.#delegatedChange.abandon()) this.#withdrawDelegatedContext("Résultat de la demande précédente toujours inconnu");
+      }));
     return status;
   }
   #selectOfferedContext(id: string) {
@@ -999,7 +1006,7 @@ export class HumanDashboard {
         `${lost} Le contrôle ne renouvelle pas un contexte : il en propose un nouveau, de mêmes droits (${modeName(offer)} · ${offer.tenant_id}). Aucune donnée n’est relue avant votre confirmation ; vos filtres seront rétablis.`),
       confirm) : null;
     resume?.setAttribute("role", "status");
-    return el("section", "human-contexts", resume, this.#renderDelegatedRecovery(),
+    return el("section", "human-contexts", resume,
       el("p", "muted", `Identité authentifiée : ${this.#identity?.display_name ?? "Inconnue"}. Les contextes personnel et administration sont proposés par le serveur selon vos appartenances.`),
       this.#identityLoading ? el("p", "control-status", "Lecture des accès…") : "",
       this.#identityError ? this.#error(this.#identityError, () => { void this.#loadIdentity(); }) : "",

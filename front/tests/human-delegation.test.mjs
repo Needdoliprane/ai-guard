@@ -2,7 +2,7 @@
 // Real HumanApiClient over a recorded fetch. No DOM.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { HumanApiClient, HumanApiError } from "../src/human-api.ts";
+import { HumanApiClient, HumanApiError, HumanSuperseded } from "../src/human-api.ts";
 import { HumanContractError } from "../src/human-model.ts";
 import { grantChangeBody, membershipChangeBody, parseGrantChangeReceipt, parseHumanGrant, parseMembershipChangeReceipt } from "../src/admin-model.ts";
 import { ChangeFlow, DelegatedChangeRecovery, delegatedReplayRefusal } from "../src/delegation-model.ts";
@@ -108,6 +108,41 @@ test("Une reprise de partage en conflit impose une nouvelle lecture et retire la
     const posts = requests.filter(({ options }) => options.method === "POST");
     assert.equal(posts.length, 2);
     assert.equal(posts[1].options.body, posts[0].options.body);
+  } finally { api.close(); }
+});
+
+test("Abandonner une reprise de partage efface la demande et rend possible un changement d’appartenance", async () => {
+  const lost = { operation_id: newId(), resource, expected_revision: "4", shares: [] };
+  const next = { operation_id: newId(), expected_revision: "3", capabilities: [], active: false };
+  const receipt = membershipReceipt(next.operation_id, membershipId);
+  const { api, requests } = client((_path, _options, { body }) => {
+    if (body.operation_id === lost.operation_id) throw new TypeError("Réponse de partage interrompue.");
+    return json(200, receipt);
+  });
+  const recovery = new DelegatedChangeRecovery(api);
+  try {
+    const initial = await api.identity();
+    const context = api.selectContext(adminId);
+    await assert.rejects(recovery.submitGrant(initial.principal, context, lost, grantBody(adminId).owner), TypeError);
+    api.clearContext();
+    const offered = await api.identity();
+    recovery.revalidate(offered, Date.now());
+    assert.equal(recovery.offer(Date.now())?.kind, "grant");
+    const reopened = recovery.selectContext(offered.principal, () => api.selectContext(adminId));
+    assert.equal(reopened.keepChange, true);
+    await assert.rejects(recovery.submitMembership(offered.principal, reopened.context, membershipId, next), HumanSuperseded);
+
+    assert.equal(recovery.abandon(), true);
+    assert.equal(recovery.operationId, null);
+    assert.equal(recovery.offer(Date.now()), null);
+    assert.equal(requests.filter(({ options }) => options.method === "POST").length, 1);
+    api.clearContext();
+    const current = await api.identity();
+    recovery.revalidate(current, Date.now());
+    assert.equal(await recovery.retry(Date.now()), null);
+    assert.deepEqual(await recovery.submitMembership(current.principal, api.selectContext(adminId), membershipId, next), receipt);
+    assert.deepEqual(requests.filter(({ options }) => options.method === "POST").map(({ body }) => body.operation_id),
+      [lost.operation_id, next.operation_id]);
   } finally { api.close(); }
 });
 
@@ -321,6 +356,7 @@ test("Un clic Reprendre pendant le POST d’appartenance ne sélectionne ni ne p
     assert.equal(resume.kind, "offer");
     replay = recovery.retry(now);
     assert.equal(recovery.phase, "sending");
+    assert.equal(recovery.abandon(), false);
     const pendingSignal = requests.at(-1).options.signal;
     let selections = 0;
     const selected = recovery.selectContext(fresh.principal, () => { selections++; return api.selectContext(resume.context.id); });

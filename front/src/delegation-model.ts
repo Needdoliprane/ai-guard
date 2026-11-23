@@ -283,6 +283,11 @@ export class DelegatedChangeRecovery {
   withdrawOffer() { this.#offer = null; }
   noteUnavailable() { if (this.#pending?.phase === "unknown") this.#pending.unavailable = true; }
   clear() { this.#pending = null; this.withdrawOffer(); }
+  abandon() {
+    if (this.phase !== "unknown") return false;
+    this.clear();
+    return true;
+  }
 
   async submitMembership(principal: Principal, context: HumanContext, membershipId: string, change: MembershipChange, signal?: AbortSignal) {
     const body = prepareChangeBody(() => { adminUrls.membershipChange(membershipId); return membershipChangeBody(change); });
