@@ -5,10 +5,9 @@ import { el } from "./dom.ts";
 import { formatDate } from "./model.ts";
 import { HumanApiError, HumanSuperseded } from "./human-api.ts";
 import { accessExplanation, can } from "./access-model.ts";
-import type { HumanContext, Principal } from "./human-model.ts";
+import type { HumanContext, Principal, ReadReceipt } from "./human-model.ts";
 import type { HumanConfiguration, HumanQuota, Membership, MembershipPage, UsagePage } from "./admin-model.ts";
 import { gibibytes, grouped, perSecond } from "./summary-model.ts";
-import "./overview.css";
 
 export interface AdminHost {
   context: HumanContext;
@@ -16,7 +15,12 @@ export interface AdminHost {
   onAccessDoubt: () => void;
   onReadStateChange: () => void;
 }
-type Phase = "loading" | "ready" | "error" | "refused";
+type Phase = "loading" | "ready" | "partial" | "error" | "refused";
+type ReadStamp = { evaluated_at: string; read_receipt: ReadReceipt };
+function provenance(value: ReadStamp) {
+  return el("p", "ov-provenance", el("span", "", "Lecture du contrôle · évaluée le "), el("time", "mono", formatDate(value.evaluated_at, true)),
+    el("span", "", " · reçu de lecture "), el("span", "mono", value.read_receipt.request_id.slice(0, 8)));
+}
 
 /** Shared read lifecycle of one administration view: one read in flight, dated result, stale after failure. */
 abstract class AdminView<T> {
@@ -40,8 +44,8 @@ abstract class AdminView<T> {
   close() { this.#closed = true; this.#controller?.abort(); this.#controller = null; this.value = null; this.element.replaceChildren(); }
   protected abstract fetch(signal: AbortSignal): Promise<T>;
   protected abstract render(value: T): HTMLElement[];
-  protected abstract evaluatedAt(value: T): string;
-  protected abstract receiptId(value: T): string;
+  protected abstract readStamp(value: T): ReadStamp | null;
+  protected partial(_value: T): boolean { return false; }
   protected async read() {
     if (this.#closed || this.#controller) return;
     const controller = new AbortController(); this.#controller = controller;
@@ -50,8 +54,10 @@ abstract class AdminView<T> {
     try {
       const value = await this.fetch(controller.signal);
       if (this.#closed || controller.signal.aborted) return;
-      this.value = value; this.#phase = "ready"; this.#error = "";
-      this.#announce.textContent = `Lecture réussie à ${formatDate(this.evaluatedAt(value), true)}.`;
+      this.value = value; this.#phase = this.partial(value) ? "partial" : "ready"; this.#error = "";
+      const stamp = this.readStamp(value);
+      this.#announce.textContent = this.#phase === "partial" ? "Lectures incomplètes. Consultez l’état de chaque section." :
+        stamp ? `Lecture réussie à ${formatDate(stamp.evaluated_at, true)}.` : "Lectures réussies.";
     } catch (error) {
       if (this.#closed || controller.signal.aborted || error instanceof HumanSuperseded) return;
       if (error instanceof HumanApiError && error.status === 403) {
@@ -71,11 +77,11 @@ abstract class AdminView<T> {
     if (this.#closed) return;
     this.#refresh.setAttribute("aria-disabled", String(this.reading));
     const value = this.value; const stale = this.#phase === "error" && value !== null;
+    const stamp = value ? this.readStamp(value) : null;
     this.element.dataset.state = stale ? "stale" : this.#phase;
     this.#status.replaceChildren(
       this.#phase === "loading" && !value ? el("p", "muted", "Lecture en cours…") : "",
-      value ? el("p", "ov-provenance", el("span", "", "Lecture du contrôle · évaluée le "), el("time", "mono", formatDate(this.evaluatedAt(value), true)),
-        el("span", "", " · reçu de lecture "), el("span", "mono", this.receiptId(value).slice(0, 8))) : "",
+      stamp ? provenance(stamp) : "",
       stale ? el("div", "control-warning", el("p", "", "Données périmées · dernière lecture conservée. "), el("p", "", this.#error)) : "",
       this.#phase === "error" && !value ? el("div", "control-error", el("p", "", `Lecture indisponible. ${this.#error}`)) : "",
       this.#phase === "refused" ? el("div", "control-error", el("p", "", "Lecture refusée pour ce contexte. Vos accès sont relus ; aucune donnée antérieure n’est conservée.")) : "",
@@ -105,8 +111,7 @@ export class MembershipsView extends AdminView<MembershipPage> {
   #membershipHost: MembershipsHost;
   constructor(host: MembershipsHost) { super(host, "ov-memberships"); this.#membershipHost = host; }
   protected fetch(signal: AbortSignal) { return this.#membershipHost.read(this.#cursor, signal); }
-  protected evaluatedAt(value: MembershipPage) { return value.evaluated_at; }
-  protected receiptId(value: MembershipPage) { return value.read_receipt.request_id; }
+  protected readStamp(value: MembershipPage) { return value; }
   protected render(page: MembershipPage) {
     const table = el("table", "ov-groups");
     table.append(el("caption", "", "Appartenances de l’organisation"),
@@ -143,32 +148,92 @@ export class MembershipsView extends AdminView<MembershipPage> {
 }
 
 export interface UsageHost extends AdminHost {
+  owned: boolean;
   quota: (signal: AbortSignal) => Promise<HumanQuota>;
   usage: (cursor: string | null, signal: AbortSignal) => Promise<UsagePage>;
 }
-type QuotaUsageRead = { quota: HumanQuota; usage: UsagePage | null };
+type ReadPart<T> = { value: T | null; error: Error | null };
+type QuotaUsageRead = { quota: ReadPart<HumanQuota>; usage: ReadPart<UsagePage> };
 export class UsageView extends AdminView<QuotaUsageRead> {
-  #usageHost: UsageHost; #cursor: string | null = null;
-  constructor(host: UsageHost) { super(host, "ov-usage"); this.#usageHost = host; }
-  protected async fetch(signal: AbortSignal) {
-    const [quota, usage] = await Promise.all([
-      this.#usageHost.quota(signal),
-      can(this.host.context, "usage_read") ? this.#usageHost.usage(this.#cursor, signal) : null,
-    ]);
+  #usageHost: UsageHost; #cursor: string | null = null; #canUsage: boolean;
+  constructor(host: UsageHost) {
+    super(host, "ov-usage");
+    this.#usageHost = host;
+    this.#canUsage = can(host.context, "usage_read");
+  }
+  protected async fetch(signal: AbortSignal): Promise<QuotaUsageRead> {
+    const cursor = this.#cursor;
+    const readQuota = () => this.#usageHost.quota(signal);
+    const readUsage = () => this.#usageHost.usage(cursor, signal);
+    if (!this.#usageHost.owned) {
+      const [quota, usage] = await Promise.all([readQuota(), this.#canUsage ? readUsage() : null]);
+      return { quota: { value: quota, error: null }, usage: { value: usage, error: null } };
+    }
+
+    // Owned reads share a Store that refuses concurrent access. Keep each successful reading and its receipt.
+    const quota = await this.#readPart(readQuota, this.value?.quota.value ?? null, signal);
+    if (!this.#canUsage) {
+      if (quota.error) throw quota.error;
+      return { quota, usage: { value: null, error: null } };
+    }
+    const lastUsage = this.value?.usage.value ?? null;
+    const limitReached = this.host.budgetStopped() || (quota.error instanceof HumanApiError && quota.error.status === 429);
+    const usage = limitReached ? { value: lastUsage, error: new Error("Lecture de l’usage suspendue par la limite de lecture du contrôle.") } :
+      await this.#readPart(readUsage, lastUsage, signal);
     return { quota, usage };
   }
-  protected evaluatedAt({ quota, usage }: QuotaUsageRead) { return (usage ?? quota).evaluated_at; }
-  protected receiptId({ quota, usage }: QuotaUsageRead) { return (usage ?? quota).read_receipt.request_id; }
+  async #readPart<T>(read: () => Promise<T>, previous: T | null, signal: AbortSignal): Promise<ReadPart<T>> {
+    try {
+      signal.throwIfAborted();
+      const value = await read();
+      signal.throwIfAborted();
+      return { value, error: null };
+    } catch (error) {
+      if (signal.aborted || error instanceof HumanSuperseded || (error instanceof DOMException && error.name === "AbortError") ||
+          (error instanceof HumanApiError && error.status === 401)) {
+        this.close();
+        throw error;
+      }
+      if (error instanceof HumanApiError && error.status === 403) throw error;
+      return { value: previous, error: error instanceof Error ? error : new Error("Lecture impossible.") };
+    }
+  }
+  protected readStamp({ quota, usage }: QuotaUsageRead) {
+    return this.#usageHost.owned && this.#canUsage ? null : usage.value ?? quota.value;
+  }
+  protected partial({ quota, usage }: QuotaUsageRead) { return quota.error !== null || usage.error !== null; }
+  #panel<T extends ReadStamp>(title: string, { value, error }: ReadPart<T>) {
+    const panel = el("section", "panel ov-panel", el("h2", "", title));
+    if (this.#usageHost.owned && this.#canUsage) {
+      panel.dataset.state = error ? (value ? "stale" : "error") : "ready";
+      if (value) panel.append(provenance(value));
+      if (error) panel.append(el("p", value ? "control-warning" : "control-error",
+        `${value ? "Données périmées · dernière lecture conservée." : "Lecture indisponible."} ${error.message}`));
+    }
+    return panel;
+  }
   protected render({ quota, usage }: QuotaUsageRead) {
+    return [this.#renderQuota(quota), this.#renderUsage(usage)];
+  }
+  #renderQuota(read: ReadPart<HumanQuota>) {
+    const reservations = this.#panel("Quota du tenant", read);
+    const quota = read.value;
+    if (!quota) return reservations;
     const q = quota.quota;
-    const reservations = el("section", "panel ov-panel", el("h2", "", "Quota du tenant"),
-      el("div", "ov-stats",
-        el("span", "ov-stat", el("strong", "ov-num", grouped(q.held_workers)), el("span", "ov-stat-label", `workers réservés sur ${grouped(q.max_active_workers)}`)),
-        el("span", "ov-stat", el("strong", "ov-num", grouped(q.held_cpu_millis)), el("span", "ov-stat-label", `milliCPU réservés sur ${grouped(q.max_cpu_millis)}`)),
-        el("span", "ov-stat", el("strong", "ov-num", gibibytes(q.held_memory_bytes)), el("span", "ov-stat-label", `mémoire réservée sur ${gibibytes(q.max_memory_bytes)}`))),
+    reservations.append(el("div", "ov-stats",
+      el("span", "ov-stat", el("strong", "ov-num", grouped(q.held_workers)), el("span", "ov-stat-label", `workers réservés sur ${grouped(q.max_active_workers)}`)),
+      el("span", "ov-stat", el("strong", "ov-num", grouped(q.held_cpu_millis)), el("span", "ov-stat-label", `milliCPU réservés sur ${grouped(q.max_cpu_millis)}`)),
+      el("span", "ov-stat", el("strong", "ov-num", gibibytes(q.held_memory_bytes)), el("span", "ov-stat-label", `mémoire réservée sur ${gibibytes(q.max_memory_bytes)}`))),
       el("p", "muted", `Réservations durables, pas une consommation mesurée. Durée maximale d’un worker : ${grouped(quota.max_timeout_seconds)} s.`));
-    if (!usage) return [reservations, el("section", "panel ov-panel", el("h2", "", "Usage observé"),
-      el("p", "muted", accessExplanation(this.host.context, "usage_read")))];
+    return reservations;
+  }
+  #renderUsage(read: ReadPart<UsagePage>) {
+    const allocations = this.#panel("Usage observé", read);
+    const usage = read.value;
+    if (!usage) {
+      if (!read.error) allocations.append(el("p", "muted", accessExplanation(this.host.context, "usage_read")));
+      return allocations;
+    }
     const table = el("table", "ov-groups");
     table.append(el("caption", "", "Allocations terminales observées · méthode 1 · billable=false"),
       el("thead", "", el("tr", "", th("Worker"), th("Fin observée"), th("Durée allouée"), th("milliCPU·s"), th("Mémoire (Gio·s)"), th("Autorité · runtime"))));
@@ -182,13 +247,15 @@ export class UsageView extends AdminView<QuotaUsageRead> {
       body.append(tr);
     }
     table.append(body);
-    const next = usage.has_more && usage.next_cursor ? (() => {
+    allocations.append(usage.items.length ? el("div", "ov-scroll", table) :
+      el("p", "", "Aucune allocation terminale dans cette page. Un worker actif n’a pas encore de durée."),
+      el("p", "muted", "Ni prix, ni facture : temps d’allocation CPU/mémoire relevé à la fin observée."));
+    if (usage.has_more && usage.next_cursor) {
       const button = el("button", "button button-quiet", "Allocations suivantes"); button.type = "button";
-      button.addEventListener("click", () => { this.#cursor = usage.next_cursor; void this.read(); }); return button;
-    })() : "";
-    return [reservations, el("section", "panel ov-panel", el("h2", "", "Usage observé"),
-      usage.items.length ? el("div", "ov-scroll", table) : el("p", "", "Aucune allocation terminale dans cette page. Un worker actif n’a pas encore de durée."),
-      el("p", "muted", "Ni prix, ni facture : temps d’allocation CPU/mémoire relevé à la fin observée."), next)];
+      button.addEventListener("click", () => { this.#cursor = usage.next_cursor; void this.read(); });
+      allocations.append(button);
+    }
+    return allocations;
   }
 }
 
@@ -200,8 +267,7 @@ export class ConfigurationView extends AdminView<HumanConfiguration> {
   #configurationHost: ConfigurationHost;
   constructor(host: ConfigurationHost) { super(host, "ov-configuration"); this.#configurationHost = host; }
   protected fetch(signal: AbortSignal) { return this.#configurationHost.read(signal); }
-  protected evaluatedAt(value: HumanConfiguration) { return value.evaluated_at; }
-  protected receiptId(value: HumanConfiguration) { return value.read_receipt.request_id; }
+  protected readStamp(value: HumanConfiguration) { return value; }
   protected render(value: HumanConfiguration) {
     const table = el("table", "ov-ledger");
     table.append(el("caption", "", "Configuration effective"), el("thead", "", el("tr", "", th("Axe"), th("Réglage"), th("Provenance"))));
