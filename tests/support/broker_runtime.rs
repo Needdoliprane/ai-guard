@@ -826,6 +826,13 @@ pub async fn audit(client: &reqwest::Client, origin: &str, token: &str) -> Resul
         .context("missing real audit items")
 }
 
+const TERMINAL_FAILURE_STEPS: &[&str] = &[
+    "terminal_observation_ack",
+    "result_audit",
+    "cleanup_confirmation",
+    "cleanup_ack",
+];
+
 /// Test-only projection; arbitrary audit payloads must never enter test logs.
 pub fn batch_failure_marker(page: &Value) -> Result<Option<Value>> {
     let items = page["items"]
@@ -858,25 +865,30 @@ pub fn batch_failure_marker(page: &Value) -> Result<Option<Value>> {
     );
     let phase: LocalFailurePhaseV1 = serde_json::from_value(data["phase"].clone())
         .map_err(|_| anyhow!("invalid diagnostic phase"))?;
-    let broker_step = optional_failure_label(
-        data.get("broker_step"),
-        &[
-            "activity_spool",
-            "failure_observed",
-            "ownership_commit",
-            "ownership_reload",
-            "created_inspection",
-            "created_exchange",
-            "arm_exchange",
-            "registration",
-            "load_after_registration",
-            "readiness_before_claim",
-            "clock_before_claim",
-            "claim_exchange",
-            "generation_before_prepare",
-            "prepare",
-        ],
-    )?;
+    let broker_step = match data.get("broker_step") {
+        Some(Value::String(label)) if TERMINAL_FAILURE_STEPS.contains(&label.as_str()) => {
+            Some(label.as_str())
+        }
+        label => optional_failure_label(
+            label,
+            &[
+                "activity_spool",
+                "failure_observed",
+                "ownership_commit",
+                "ownership_reload",
+                "created_inspection",
+                "created_exchange",
+                "arm_exchange",
+                "registration",
+                "load_after_registration",
+                "readiness_before_claim",
+                "clock_before_claim",
+                "claim_exchange",
+                "generation_before_prepare",
+                "prepare",
+            ],
+        )?,
+    };
     let enforcer_stage = nested_failure_stage(
         data.get("enforcer"),
         &["register", "before_claim", "prepare", "before_spawn"],
@@ -904,6 +916,31 @@ pub fn batch_failure_marker(page: &Value) -> Result<Option<Value>> {
         "phase":phase,"broker_step":broker_step,"enforcer_stage":enforcer_stage,
         "runtime_stage":runtime_stage,"runtime_effect":"unknown"
     })))
+}
+
+pub fn terminal_failure_step(
+    page: &Value,
+    session_id: &str,
+    admission_seq: i64,
+) -> Option<&'static str> {
+    if page.get("next_cursor") != Some(&Value::Null) {
+        return None;
+    }
+    let [event] = page["items"].as_array()?.as_slice() else {
+        return None;
+    };
+    if event["session_id"].as_str() != Some(session_id) || event["provenance"] != "observed" {
+        return None;
+    }
+    let marker = batch_failure_marker(page).ok()??;
+    if marker["audit_seq"].as_i64()? <= admission_seq {
+        return None;
+    }
+    let step = marker["broker_step"].as_str()?;
+    TERMINAL_FAILURE_STEPS
+        .iter()
+        .copied()
+        .find(|label| *label == step)
 }
 
 fn optional_failure_label<'a>(
@@ -946,6 +983,31 @@ pub async fn only_worker(
         "fresh tenant control contains more than one worker"
     );
     Ok(page.items.pop())
+}
+
+pub fn worker_admission_seq(
+    events: &[Value],
+    worker: &agentsandbox::control::WorkerV1,
+) -> Option<i64> {
+    let mut admissions = events.iter().filter(|event| {
+        let data = &event["data"];
+        let input = &data["input"];
+        let admitted = &data["worker_record"]["worker"];
+        event["kind"] == "control.supervision.transition"
+            && event["source"] == "gateway"
+            && event["provenance"] == "observed"
+            && event["session_id"] == worker.launch.session_id
+            && data["version"].as_u64() == Some(2)
+            && input["action"] == "admission"
+            && input["request"]["admission"]["operation_id"] == worker.admission_operation_id
+            && admitted["worker_id"] == worker.worker_id
+            && admitted["attempt"]["attempt_id"] == worker.attempt.attempt_id
+    });
+    let admission = admissions.next()?;
+    if admissions.next().is_some() {
+        return None;
+    }
+    admission["seq"].as_i64().filter(|seq| *seq > 0)
 }
 
 pub fn worker_emissions(events: &[Value], worker: &str) -> Result<(Vec<Value>, Vec<Value>)> {
