@@ -1,6 +1,6 @@
 use crate::{
     provider::{
-        AuthMode, AuthPreference, ClientKind, ClientTransport, CredentialSourceV1,
+        AuthMode, AuthPreference, ChoiceSource, ClientKind, ClientTransport, CredentialSourceV1,
         ProviderChoiceProvenanceV1, ProviderConfigV1, ProviderSelection,
     },
     runner,
@@ -320,11 +320,12 @@ fn load_provider_profiles(
     let config =
         crate::control_fs::Directory::open_existing(&crate::control_fs::absolute_path(config_dir)?)
             .context("private configuration missing or unsafe; run agentsandbox init first")?;
-    let path = providers_file
-        .map(crate::control_fs::absolute_path)
-        .transpose()?
-        .unwrap_or_else(|| config.path().join("providers.json"));
-    crate::provider::load_config(&path).context(
+    if let Some(path) = providers_file {
+        return crate::provider::load_config(path).context(
+            "selected provider configuration is unavailable or invalid; verify or replace the --providers-file reference and preserve existing files",
+        );
+    }
+    crate::provider::load_config(&config.path().join("providers.json")).context(
         "provider configuration missing or unsafe; run agentsandbox providers init --env-file PATH",
     )
 }
@@ -376,6 +377,15 @@ struct ProviderCheckReport {
     next_action: &'static str,
 }
 
+fn choice_source_label(source: ChoiceSource) -> &'static str {
+    match source {
+        ChoiceSource::Cli => "cli",
+        ChoiceSource::Profile => "profile",
+        ChoiceSource::DefaultProfile => "default_profile",
+        ChoiceSource::Auto => "auto",
+    }
+}
+
 fn provider_check(
     config_dir: &Path,
     providers_file: Option<&Path>,
@@ -402,7 +412,7 @@ fn provider_check(
         ),
         Err(_) => (
             "suspect",
-            "Check the referenced parent directories and use a regular, single-link file owned by your account with mode 0600.",
+            "Check that your account can access the referenced parent directories and use a regular, single-link file owned by your account with mode 0600.",
         ),
     };
     Ok(ProviderCheckReport {
@@ -553,6 +563,13 @@ pub async fn execute(command: OperatorCommand) -> Result<()> {
                     if let Some(model) = &report.model {
                         println!("Model {model}");
                     }
+                    println!(
+                        "Provenance client={} auth_mode={} profile={} model={}",
+                        choice_source_label(report.provenance.client),
+                        choice_source_label(report.provenance.auth_mode),
+                        choice_source_label(report.provenance.profile),
+                        choice_source_label(report.provenance.model),
+                    );
                     println!(
                         "Credential metadata {}\n{}",
                         report.credential_status, report.next_action,
