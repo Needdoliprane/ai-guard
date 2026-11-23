@@ -1,5 +1,5 @@
 import { createSseParser } from "./sse.ts";
-import { HUMAN_FEDERATION_PAGE_BYTES, HumanContractError, boundedText, humanBrokersUrl, humanWorkersUrl, humanFederationWorkersUrl, humanRecentEventsUrl, humanUrl, object, opaque, parseHumanBrokerPage, parseHumanWorkerPage, parseHumanFederationWorkerPage, parseHumanEventPage, parseHumanIdentity, parseHumanRecentEventPage, parseResourcePage, uuid } from "./human-model.ts";
+import { HUMAN_FEDERATION_PAGE_BYTES, OWNED_WORKER_PROFILE, HumanContractError, boundedText, humanBrokersUrl, humanWorkersUrl, humanFederationWorkersUrl, humanRecentEventsUrl, humanUrl, object, opaque, parseHumanBrokerPage, parseHumanWorkerPage, parseHumanFederationWorkerPage, parseHumanEventPage, parseHumanIdentity, parseHumanRecentEventPage, parseResourcePage, uuid } from "./human-model.ts";
 import type { HumanContext, HumanEventPage, HumanIdentity, HumanOperation, HumanRecentEventPage, HumanSelection, HumanFederationSelection, Principal, ResourceRef } from "./human-model.ts";
 import { humanOwnedBrokersUrl, parseHumanOwnedBrokerPage } from "./human-owned-brokers.ts";
 import { SUMMARY_PAGE_BYTES, humanSummaryUrl, parseHumanSummary, type HumanSummary, type SummaryWindow } from "./summary-model.ts";
@@ -158,7 +158,8 @@ export class HumanApiClient {
       void response.body?.cancel().catch(() => {}); throw error;
     }
     if (!this.#current(snapshot)) { void response.body?.cancel().catch(() => {}); throw new HumanSuperseded(); }
-    if (response.status === 403 && (path === "/api/v1/human/identity" || /^\/api\/v1\/human\/(?:federation\/workers|owned\/brokers)(?:\?|$)/.test(path))) {
+    const ownedWorkers = this.#identity?.read_profiles?.worker_registry === OWNED_WORKER_PROFILE && path.startsWith("/api/v1/human/workers?");
+    if (response.status === 403 && (ownedWorkers || path === "/api/v1/human/identity" || /^\/api\/v1\/human\/(?:federation\/workers|owned\/brokers)(?:\?|$)/.test(path))) {
       // These reads must retire displayed data as soon as refusal headers arrive.
       // No error body or cancellation acknowledgement may delay that refusal.
       // Other routes keep their existing structured context and stream errors.
