@@ -148,7 +148,7 @@ impl Store {
             } else {
                 broker_states(tx, &evaluated_at)?
             },
-            quota: if let Some(section) = quota_usage_gate(workers, owned, registry) {
+            quota: if let Some(section) = quota_usage_gate(workers, registry) {
                 section
             } else {
                 let usage = super::control::quota_usage(tx, quota)?;
@@ -164,7 +164,7 @@ impl Store {
                     },
                 }
             },
-            usage: match quota_usage_gate(workers, owned, registry) {
+            usage: match quota_usage_gate(workers, registry) {
                 Some(section) => section,
                 None => usage(tx, from.as_deref(), &evaluated_at)?,
             },
@@ -231,13 +231,10 @@ fn unavailable<T>(code: SummaryUnavailableV1) -> SummarySectionV1<T> {
     SummarySectionV1::Unavailable { code }
 }
 
-/// Limits the separate quota and usage sections, whose protocols remain closed
-/// on the owned profile.
-fn quota_usage_gate<T>(granted: bool, owned: bool, registry: bool) -> Option<SummarySectionV1<T>> {
+/// Quota and usage require registry access in an admitted store format.
+fn quota_usage_gate<T>(granted: bool, registry: bool) -> Option<SummarySectionV1<T>> {
     if !granted {
         Some(SummarySectionV1::NotGranted)
-    } else if owned {
-        Some(unavailable(SummaryUnavailableV1::ProfileUnavailable))
     } else if !registry {
         Some(unavailable(SummaryUnavailableV1::MigrationRequired))
     } else {
@@ -456,6 +453,11 @@ fn usage(
     if rows > MAX_ALLOCATION_ROWS {
         return Ok(unavailable(SummaryUnavailableV1::CapacityExceeded));
     }
+    let from = from
+        .map(chrono::DateTime::parse_from_rfc3339)
+        .transpose()
+        .context("invalid usage period start")?;
+    let to = chrono::DateTime::parse_from_rfc3339(to).context("invalid usage period end")?;
     let mut statement = tx.prepare("SELECT payload_json FROM worker_allocations")?;
     let allocations = statement
         .query_map([], |r| r.get::<_, String>(0))?
@@ -467,8 +469,12 @@ fn usage(
             allocation.method_version == 1 && !allocation.billable,
             "unknown allocation method"
         );
-        let finished = allocation.finished_at.as_str();
-        if from.is_some_and(|from| finished < from) || finished > to {
+        // The ledger normalizes runtime observations to UTC and can contain signed years.
+        let finished = allocation
+            .finished_at
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .context("invalid allocation finish time")?;
+        if from.as_ref().is_some_and(|from| &finished < from) || finished > to {
             continue;
         }
         let add = |sum: u128, value: &str| -> anyhow::Result<u128> {
@@ -569,4 +575,121 @@ fn attention(
             has_more,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::control::{AllocationProvenanceV1, AllocationSourceV1, AllocationV1};
+    use chrono::{DateTime, FixedOffset, SecondsFormat, Utc};
+
+    fn allocation_ledger() -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute(
+            "CREATE TABLE worker_allocations (payload_json TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+        db
+    }
+
+    fn insert_observed_allocation(
+        db: &Connection,
+        id: u128,
+        started: DateTime<FixedOffset>,
+        finished: DateTime<FixedOffset>,
+    ) -> AllocationV1 {
+        let duration = u128::try_from((finished - started).num_nanoseconds().unwrap()).unwrap();
+        let allocation = AllocationV1 {
+            worker_id: uuid::Uuid::from_u128(id).to_string(),
+            attempt_id: uuid::Uuid::from_u128(id + 4).to_string(),
+            terminal_observation_id: uuid::Uuid::from_u128(id + 8).to_string(),
+            started_at: started
+                .with_timezone(&Utc)
+                .to_rfc3339_opts(SecondsFormat::Nanos, true),
+            finished_at: finished
+                .with_timezone(&Utc)
+                .to_rfc3339_opts(SecondsFormat::Nanos, true),
+            duration_ns: duration.to_string(),
+            cpu_millicore_nanoseconds: (duration * 2000).to_string(),
+            memory_byte_nanoseconds: (duration * 1_073_741_824).to_string(),
+            method_version: 1,
+            billable: false,
+            source: AllocationSourceV1 {
+                authority_id: uuid::Uuid::from_u128(13).to_string(),
+                runtime_kind: RuntimeKindV1::Docker,
+                container_id: "a".repeat(64),
+                spec_hash: "b".repeat(64),
+                provenance: AllocationProvenanceV1::Observed,
+            },
+        };
+        db.execute(
+            "INSERT INTO worker_allocations (payload_json) VALUES (?1)",
+            [serde_json::to_string(&allocation).unwrap()],
+        )
+        .unwrap();
+        allocation
+    }
+
+    #[test]
+    fn usage_counts_allocations_on_both_bounds_and_excludes_adjacent_instants() {
+        let db = allocation_ledger();
+        for (id, finished_at, duration) in [
+            (1, "2026-11-01T12:00:00.122999999Z", 1),
+            (2, "2026-11-01T12:00:00.123000000Z", 2),
+            (3, "2026-11-02T12:00:00.123000000Z", 4),
+            (4, "2026-11-02T12:00:00.123000001Z", 8),
+        ] {
+            let finished = DateTime::parse_from_rfc3339(finished_at).unwrap();
+            let started = finished - chrono::Duration::nanoseconds(duration);
+            insert_observed_allocation(&db, id, started, finished);
+        }
+
+        let summary = usage(
+            &db,
+            Some("2026-11-01T12:00:00.123Z"),
+            "2026-11-02T12:00:00.123Z",
+        )
+        .unwrap();
+        let SummarySectionV1::Ready { coverage, data } = summary else {
+            panic!("a valid allocation interval must be available");
+        };
+        assert_eq!(coverage, SummaryCoverageV1::CompleteRegistry);
+        assert_eq!(data.allocations, "2");
+        assert_eq!(data.duration_ns, "6");
+        assert_eq!(data.cpu_millicore_nanoseconds, "12000");
+        assert_eq!(data.memory_byte_nanoseconds, "6442450944");
+        assert_eq!(data.method_version, 1);
+        assert!(!data.billable);
+    }
+
+    #[test]
+    fn usage_ignores_valid_normalized_allocation_with_extended_year_outside_window() {
+        let db = allocation_ledger();
+        let started = DateTime::parse_from_rfc3339("9999-12-31T23:59:58.123456789-01:00").unwrap();
+        let finished = DateTime::parse_from_rfc3339("9999-12-31T23:59:59.123456789-01:00").unwrap();
+        let outside = insert_observed_allocation(&db, 1, started, finished);
+        assert_eq!(outside.finished_at, "+10000-01-01T00:59:59.123456789Z");
+
+        let started = DateTime::parse_from_rfc3339("2026-11-01T12:00:00.000000001Z").unwrap();
+        let finished = DateTime::parse_from_rfc3339("2026-11-01T12:00:00.000000004Z").unwrap();
+        insert_observed_allocation(&db, 2, started, finished);
+
+        let summary = usage(
+            &db,
+            Some("2026-11-01T00:00:00.000Z"),
+            "2026-11-02T00:00:00.000Z",
+        )
+        .unwrap();
+        let SummarySectionV1::Ready { coverage, data } = summary else {
+            panic!("the out-of-period allocation must leave usage available");
+        };
+        assert_eq!(coverage, SummaryCoverageV1::CompleteRegistry);
+        assert_eq!(data.allocations, "1");
+        assert_eq!(data.duration_ns, "3");
+        assert_eq!(data.cpu_millicore_nanoseconds, "6000");
+        assert_eq!(data.memory_byte_nanoseconds, "3221225472");
+        assert_eq!(data.method_version, 1);
+        assert!(!data.billable);
+    }
 }

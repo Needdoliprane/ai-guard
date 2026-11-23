@@ -95,7 +95,8 @@ async fn owned_sources_serve_the_summary_memberships_and_configuration() {
             },
         })
     );
-    assert_eq!(summary["sections"]["quota"]["code"], "profile_unavailable");
+    assert_eq!(summary["sections"]["quota"]["status"], "ready");
+    assert_eq!(summary["sections"]["usage"]["status"], "ready");
     assert!(summary["read_receipt"]["audit_event_id"].is_string());
 
     let (status, memberships) = get(&router, "/api/v1/human/admin/memberships", Some(id)).await;
@@ -203,13 +204,14 @@ async fn owned_worker_summary_on(format: u32) {
             },
         })
     );
-    for section in ["quota", "usage", "attention"] {
-        assert_eq!(
-            sections[section],
-            json!({"status":"unavailable", "code":"profile_unavailable"}),
-            "{section}"
-        );
-    }
+    assert_eq!(sections["quota"]["status"], "ready");
+    assert_eq!(sections["quota"]["data"]["held_workers"], "1");
+    assert_eq!(sections["usage"]["status"], "ready");
+    assert_eq!(sections["usage"]["data"]["allocations"], "0");
+    assert_eq!(
+        sections["attention"],
+        json!({"status":"unavailable", "code":"profile_unavailable"})
+    );
     assert_eq!(sections["brokers"], json!({"status":"not_granted"}));
     assert_eq!(sections["resources"]["status"], "ready");
     assert_eq!(sections["decisions"]["status"], "ready");
@@ -232,7 +234,7 @@ async fn owned_worker_summary_on(format: u32) {
     assert_eq!(audited["data"]["mode"], "administration");
     assert_eq!(audited["data"]["principal"], identity["principal"]);
     assert_eq!(audited["data"]["request_id"], receipt["request_id"]);
-    assert_eq!(audited["data"]["result_count"], 3);
+    assert_eq!(audited["data"]["result_count"], 5);
     assert_eq!(received_at, receipt["received_at"].as_str().unwrap());
 
     let (status, broker_identity) = read(&router, &broker_admin, IDENTITY, None).await;
@@ -243,10 +245,12 @@ async fn owned_worker_summary_on(format: u32) {
     ] {
         let (status, summary) = read(&router, bearer, SUMMARY, Some(selected)).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            summary["sections"]["workers"],
-            json!({"status":"not_granted"})
-        );
+        for section in ["workers", "quota", "usage"] {
+            assert_eq!(
+                summary["sections"][section],
+                json!({"status":"not_granted"})
+            );
+        }
     }
 }
 
@@ -258,6 +262,161 @@ async fn owned_worker_summary_format14_counts_only_durable_worker_facts() {
 #[tokio::test]
 async fn owned_worker_summary_format15_counts_only_durable_worker_facts() {
     owned_worker_summary_on(15).await;
+}
+
+async fn owned_accounting_summary_on(format: u32) {
+    use super::owned_workers::{context, provision_reader, read};
+    use crate::control::{QuotaPolicyV1, WorkerStateV1};
+    use std::os::unix::fs::PermissionsExt;
+
+    let historical = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap())
+        .unwrap();
+    let mut files = Store::owned_control_fixture_with_legacy_setup_for_test(format, |legacy| {
+        for seconds in [0, 1] {
+            let terminal = legacy.finish_usage_worker_for_test(Some(seconds));
+            assert_eq!(terminal.worker.state, WorkerStateV1::Terminal);
+            assert!(!terminal.worker.quota_held);
+        }
+        let unknown = legacy.finish_usage_worker_for_test(None);
+        assert_eq!(unknown.worker.state, WorkerStateV1::InDoubt);
+        assert!(unknown.worker.quota_held);
+        legacy
+            .migrate_human_rights_v2(&historical.path().join("before-rights.sqlite"))
+            .unwrap();
+    });
+    let (bundle, credentials, tokens) = files.take_startup();
+    let reader = provision_reader(&bundle, HumanCapabilityV1::ReadWorkerRegistry);
+    let descriptor = bundle
+        .owner
+        .closure()
+        .sources
+        .iter()
+        .find(|source| source.tenant_id.as_deref() == Some("A"))
+        .unwrap();
+    assert_eq!(descriptor.required_format, format);
+    let source = descriptor.storage_binding.path();
+    let state = GatewayState::for_owned_human_sources(
+        bundle,
+        credentials,
+        tokens,
+        Policy::default(),
+        None,
+        Redactor::new(vec![]),
+    )
+    .unwrap()
+    .with_worker_quotas(vec![(
+        "A".into(),
+        QuotaPolicyV1 {
+            version: 1,
+            max_active_workers: 5,
+            max_cpu_millis: 7000,
+            max_memory_bytes: 4 * 1024 * 1024 * 1024,
+            max_timeout_seconds: 7200,
+        },
+    )])
+    .unwrap();
+    let router = gateway_router(state);
+    let (status, identity) = read(&router, &reader, "/api/v1/human/identity", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let admin = context(&identity, "administration");
+    let (status, summary) = read(
+        &router,
+        &reader,
+        "/api/v1/human/summary?window=24h",
+        Some(admin),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(summary["context_id"], admin["id"]);
+    assert_eq!(
+        summary["authorization_version"],
+        admin["authorization_version"]
+    );
+    assert_eq!(summary["consistency"], "transaction_snapshot");
+    let period = &summary["period"];
+    assert_eq!(period["window"], "24h");
+    assert_eq!(period["to"], summary["evaluated_at"]);
+    let from = chrono::DateTime::parse_from_rfc3339(period["from"].as_str().unwrap()).unwrap();
+    let to = chrono::DateTime::parse_from_rfc3339(period["to"].as_str().unwrap()).unwrap();
+    assert_eq!(to - from, chrono::Duration::hours(24));
+
+    let sections = &summary["sections"];
+    assert_eq!(
+        sections["quota"],
+        json!({
+            "status": "ready",
+            "coverage": "complete_registry",
+            "data": {
+                "max_active_workers": "5",
+                "max_cpu_millis": "7000",
+                "max_memory_bytes": "4294967296",
+                "held_workers": "1",
+                "held_cpu_millis": "2000",
+                "held_memory_bytes": "1073741824",
+            },
+        }),
+    );
+    assert_eq!(
+        sections["usage"],
+        json!({
+            "status": "ready",
+            "coverage": "complete_registry",
+            "data": {
+                "allocations": "2",
+                "duration_ns": "1000000000",
+                "cpu_millicore_nanoseconds": "2000000000000",
+                "memory_byte_nanoseconds": "1073741824000000000",
+                "method_version": 1,
+                "billable": false,
+            },
+        }),
+    );
+    assert_eq!(sections["workers"]["data"]["runtime_inventory"], "unknown");
+    assert_eq!(
+        sections["attention"],
+        json!({"status":"unavailable", "code":"profile_unavailable"})
+    );
+
+    let database = rusqlite::Connection::open_with_flags(
+        source,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    let receipt = &summary["read_receipt"];
+    let (payload, received_at): (String, String) = database
+        .query_row(
+            "SELECT payload,received_at FROM events WHERE kind='control.identity.access' AND id=?1",
+            [receipt["audit_event_id"].as_str().unwrap()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let audited: Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(audited["data"]["action"], "summary");
+    assert_eq!(audited["data"]["mode"], "administration");
+    assert_eq!(audited["data"]["principal"], identity["principal"]);
+    assert_eq!(audited["data"]["request_id"], receipt["request_id"]);
+    assert_eq!(audited["data"]["result_count"], 5);
+    assert_eq!(received_at, receipt["received_at"].as_str().unwrap());
+    let count: i64 = database
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE kind='control.identity.access' AND json_extract(payload,'$.data.action') IN ('summary','quota','usage')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1, "quota and usage share the summary receipt");
+}
+
+#[tokio::test]
+async fn owned_accounting_summary_format14_reads_quota_and_observed_usage_with_one_receipt() {
+    owned_accounting_summary_on(14).await;
+}
+
+#[tokio::test]
+async fn owned_accounting_summary_format15_reads_quota_and_observed_usage_with_one_receipt() {
+    owned_accounting_summary_on(15).await;
 }
 
 async fn owned_quota_on(format: u32) {
