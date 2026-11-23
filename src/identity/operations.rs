@@ -234,12 +234,15 @@ fn permission(
         ),
         O::MembershipsRead => admin(administration, context, &[C::ReadMemberships], elsewhere),
         O::ConfigurationRead => admin(administration, context, &[C::ReadConfiguration], elsewhere),
-        O::MembershipsManage => admin(
-            administration,
-            context,
-            &[C::ManageMemberships, C::ReadMemberships],
-            elsewhere,
-        ),
+        O::MembershipsManage => {
+            let (permission, scope) = admin(
+                administration,
+                context,
+                &[C::ManageMemberships, C::ReadMemberships],
+                elsewhere,
+            );
+            (permission, scope.map(|_| S::Organization))
+        }
         // The share list names organization members: a membership reader only.
         O::GrantsManage => admin(
             administration,
@@ -296,9 +299,8 @@ fn personal(
     }
 }
 
-/// Whether this build serves a route for the operation. A slice that adds a
-/// route flips its entry; nothing else in the catalogue changes.
-const fn served(operation: HumanOperationV1) -> bool {
+/// Whether this build serves a route for the operation on the source profile.
+const fn served(operation: HumanOperationV1, owned_profile: bool) -> bool {
     use HumanOperationV1 as O;
     matches!(
         operation,
@@ -315,7 +317,7 @@ const fn served(operation: HumanOperationV1) -> bool {
             | O::UsageRead
             | O::MembershipsRead
             | O::ConfigurationRead
-    )
+    ) || (owned_profile && matches!(operation, O::MembershipsManage))
 }
 
 /// Operations whose reads or effects are recorded under a marker-fenced audit
@@ -344,7 +346,7 @@ const fn requires_marker(operation: HumanOperationV1) -> bool {
 fn availability(operation: HumanOperationV1, facts: OperationFactsV1) -> OperationAvailabilityV1 {
     use HumanOperationV1 as O;
     use OperationAvailabilityV1 as A;
-    if !served(operation) {
+    if !served(operation, facts.owned_profile) {
         A::NotInThisBuild
     } else if facts.owned_profile
         && matches!(
