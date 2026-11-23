@@ -83,7 +83,10 @@ enum RunClientRecoveryStage {
     BrokerLiveness,
     WorkerRead,
     StatusRead,
-    TerminalWait,
+    TerminalWait {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        terminal_wait_sample: Option<TerminalWaitSample>,
+    },
     Executor {
         central_cleanup_sample: CentralCleanupSample,
         executor_error: BrokerErrorCodeV1,
@@ -105,10 +108,114 @@ enum CentralCleanupSample {
 }
 
 #[derive(serde::Serialize)]
+struct TerminalWaitSample {
+    worker: TerminalWaitWorker,
+    status: TerminalWaitStatus,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TerminalWaitWorker {
+    NotTerminal,
+    TerminalQuotaHeld,
+    TerminalQuotaReleased,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TerminalWaitStatus {
+    ExecutorRunning,
+    ExecutorStopped,
+    ExecutorStoppedWithError,
+    BrokerError,
+    OtherReply,
+}
+
+#[derive(serde::Serialize)]
 struct RunClientRecoveryReceipt {
     state: &'static str,
     #[serde(flatten)]
     stage: RunClientRecoveryStage,
+}
+
+#[test]
+fn terminal_wait_receipt_samples_only_expired_pairs_with_closed_fields() {
+    let status_reply = |running, error| BrokerReplyV1::Status {
+        status: serde_json::from_value(json!({
+            "operation_id": Uuid::from_u128(1),
+            "state": "accepted",
+            "cancel_requested": false,
+            "approval_submitted": false,
+            "failure_count": 0,
+            "executor_task_running": running,
+            "executor_error": error,
+        }))
+        .unwrap(),
+    };
+    let samples = [
+        (
+            WorkerStateV1::Running,
+            true,
+            status_reply(true, Some(BrokerErrorCodeV1::Unavailable)),
+            "not_terminal",
+            "executor_running",
+        ),
+        (
+            WorkerStateV1::Terminal,
+            true,
+            status_reply(false, Some(BrokerErrorCodeV1::NeedsReconciliation)),
+            "terminal_quota_held",
+            "executor_stopped_with_error",
+        ),
+        (
+            WorkerStateV1::Stopping,
+            true,
+            status_reply(false, None),
+            "not_terminal",
+            "executor_stopped",
+        ),
+        (
+            WorkerStateV1::Terminal,
+            false,
+            BrokerReplyV1::Error {
+                code: BrokerErrorCodeV1::Busy,
+            },
+            "terminal_quota_released",
+            "broker_error",
+        ),
+        (
+            WorkerStateV1::Terminal,
+            false,
+            BrokerReplyV1::Page {
+                entries: Vec::new(),
+                next_after: None,
+            },
+            "terminal_quota_released",
+            "other_reply",
+        ),
+    ];
+    for (worker, quota_held, reply, expected_worker, expected_status) in samples {
+        let waiting = RunClientRecoveryReceipt {
+            state: "timed_out",
+            stage: terminal_wait_stage(false, worker, quota_held, &reply),
+        };
+        assert_eq!(
+            serde_json::to_value(waiting).unwrap(),
+            json!({"state": "timed_out", "stage": "terminal_wait"})
+        );
+        let expired = RunClientRecoveryReceipt {
+            state: "failed",
+            stage: terminal_wait_stage(true, worker, quota_held, &reply),
+        };
+        assert_eq!(
+            serde_json::to_value(expired).unwrap(),
+            json!({
+                "state": "failed",
+                "stage": "terminal_wait",
+                "terminal_wait_sample": {"worker": expected_worker, "status": expected_status},
+            })
+        );
+    }
 }
 
 #[test]
@@ -717,7 +824,9 @@ async fn run(
         );
         *run_client_stage = RunClientRecoveryStage::BrokerLiveness;
         broker.running()?;
-        *run_client_stage = RunClientRecoveryStage::TerminalWait;
+        *run_client_stage = RunClientRecoveryStage::TerminalWait {
+            terminal_wait_sample: None,
+        };
         evidence.write(
             "stage.json",
             &json!({"stage":"read_original_job_without_resubmit"}),
@@ -1735,6 +1844,37 @@ async fn observe_existing_guard(evidence: &Evidence) -> Result<EnforcerClient> {
     record.revalidate()?;
     Ok(client)
 }
+
+fn terminal_wait_stage(
+    budget_expired: bool,
+    worker_state: WorkerStateV1,
+    quota_held: bool,
+    reply: &BrokerReplyV1,
+) -> RunClientRecoveryStage {
+    let terminal_wait_sample = budget_expired.then(|| {
+        let worker = match (worker_state, quota_held) {
+            (WorkerStateV1::Terminal, true) => TerminalWaitWorker::TerminalQuotaHeld,
+            (WorkerStateV1::Terminal, false) => TerminalWaitWorker::TerminalQuotaReleased,
+            _ => TerminalWaitWorker::NotTerminal,
+        };
+        let status = match reply {
+            BrokerReplyV1::Status { status } if status.executor_task_running => {
+                TerminalWaitStatus::ExecutorRunning
+            }
+            BrokerReplyV1::Status { status } if status.executor_error.is_some() => {
+                TerminalWaitStatus::ExecutorStoppedWithError
+            }
+            BrokerReplyV1::Status { .. } => TerminalWaitStatus::ExecutorStopped,
+            BrokerReplyV1::Error { .. } => TerminalWaitStatus::BrokerError,
+            _ => TerminalWaitStatus::OtherReply,
+        };
+        TerminalWaitSample { worker, status }
+    });
+    RunClientRecoveryStage::TerminalWait {
+        terminal_wait_sample,
+    }
+}
+
 async fn wait_terminal(
     evidence: &Evidence,
     runner: &str,
@@ -1750,8 +1890,8 @@ async fn wait_terminal(
         let worker: WorkerV1 =
             harness::get(http, origin, runner, &format!("workers/{worker_id}")).await?;
         *run_client_stage = RunClientRecoveryStage::StatusRead;
-        if let BrokerReplyV1::Status { status } =
-            ipc(evidence, runner, BrokerCommandV1::Status { operation_id }).await?
+        let reply = ipc(evidence, runner, BrokerCommandV1::Status { operation_id }).await?;
+        if let BrokerReplyV1::Status { status } = &reply
             && worker.state == WorkerStateV1::Terminal
             && !worker.quota_held
             && !status.executor_task_running
@@ -1774,9 +1914,11 @@ async fn wait_terminal(
             );
             return Ok(());
         }
-        *run_client_stage = RunClientRecoveryStage::TerminalWait;
+        let within_budget = Instant::now() < limit;
+        *run_client_stage =
+            terminal_wait_stage(!within_budget, worker.state, worker.quota_held, &reply);
         ensure!(
-            Instant::now() < limit,
+            within_budget,
             "terminal central ACK/reconciliation did not complete"
         );
         sleep(Duration::from_millis(100)).await;
