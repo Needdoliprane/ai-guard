@@ -813,10 +813,10 @@ impl Store {
         Ok(result)
     }
 
-    /// Only an owned membership mutation may advance the expected discovery
-    /// snapshot here. It changes the authorization revision and leaves all
-    /// credential and workload candidates untouched.
-    pub(super) fn mutate_membership_with_discovery(
+    /// Delegated changes of existing memberships and resource grants may advance
+    /// the owned discovery snapshot. Their preparations check the actor's scope,
+    /// and the changes preserve the credential and workload candidates.
+    pub(super) fn mutate_delegation_with_discovery(
         &self,
         tx: CheckedTransaction<'_>,
         expected: HumanDiscoveryGeneration,
@@ -828,12 +828,15 @@ impl Store {
             return Err(HumanDiscoveryStale.into());
         }
         let mutation = prepare(&tx)?;
-        invalid(matches!(
-            &mutation.change,
-            IdentityChangeV1::Membership { .. }
-        ))?;
+        invalid(
+            mutation.actor.is_human()
+                && matches!(
+                    &mutation.change,
+                    IdentityChangeV1::Membership { .. } | IdentityChangeV1::ResourceGrant { .. }
+                ),
+        )?;
         let receipt = self.persist_identity_mutation(&tx, &mutation)?;
-        let next = expected.after_membership_change(
+        let next = expected.after_delegated_change(
             human_modern::discovery_generation(&tx)?,
             receipt.authorization_revision,
         )?;

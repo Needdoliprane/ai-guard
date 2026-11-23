@@ -203,7 +203,8 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         let tx = self.begin_checked(&mut db)?;
-        self.human_change_grant_checked(tx, scope, change)
+        let mutation = self.prepare_human_grant_change(&tx, scope, change)?;
+        self.mutate_identity_checked(tx, &mutation)
     }
     /// The same change on an owned 14/15 source, under its write epoch.
     pub(crate) fn modern_human_change_grant(
@@ -212,7 +213,8 @@ impl Store {
         source: &crate::human_authority::OwnedSourceToken,
         scope: &AuthorizedScopeV1,
         change: &HumanGrantChangeV1,
-    ) -> anyhow::Result<IdentityReceiptV1> {
+        expected: HumanDiscoveryGeneration,
+    ) -> anyhow::Result<(IdentityReceiptV1, Option<HumanDiscoveryGeneration>)> {
         let access = HumanSourceAccess::write(epoch, source)?;
         let mut db = self
             .db
@@ -220,17 +222,19 @@ impl Store {
             .map_err(|_| crate::human_authority::HumanAuthorityFailure::StorageUnavailable)?;
         let tx =
             self.begin_checked_scoped(&mut db, &access, StoreOperationClass::IdentityAuthority)?;
-        self.human_change_grant_checked(tx, scope, change)
+        self.mutate_delegation_with_discovery(tx, expected, |tx| {
+            self.prepare_human_grant_change(tx, scope, change)
+        })
     }
     /// Owner, tenant, organization and state come from the stored grant.
     /// Besides the projection's delegation rules, a permission the change adds
     /// must be held by the reader's effective context (OIDC ceiling included).
-    fn human_change_grant_checked(
+    fn prepare_human_grant_change(
         &self,
-        tx: CheckedTransaction<'_>,
+        tx: &CheckedTransaction<'_>,
         scope: &AuthorizedScopeV1,
         change: &HumanGrantChangeV1,
-    ) -> anyhow::Result<IdentityReceiptV1> {
+    ) -> anyhow::Result<IdentityMutationV1> {
         let expected_revision: u64 = change
             .expected_revision
             .parse()
@@ -243,9 +247,9 @@ impl Store {
         {
             return Err(IdentityFailureV1::InvalidRequest.into());
         }
-        let current = require_manager(&tx, scope, &self.tenant_id)?;
+        let current = require_manager(tx, scope, &self.tenant_id)?;
         let stored = stored_grant(
-            &tx,
+            tx,
             &change.resource,
             &self.tenant_id,
             current.organization_scope(),
@@ -282,6 +286,6 @@ impl Store {
         mutation
             .validate()
             .map_err(|_| IdentityFailureV1::InvalidRequest)?;
-        self.mutate_identity_checked(tx, &mutation)
+        Ok(mutation)
     }
 }

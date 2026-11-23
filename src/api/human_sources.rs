@@ -7,7 +7,10 @@ use crate::{
     },
     control::QuotaPolicyV1,
     control_fs::PrivateFile,
-    human_authority::{OwnedHumanSources, OwnedSourceToken, startup::HumanOwnedStartupBundle},
+    human_authority::{
+        HumanSourcesWriteEpoch, OwnedHumanSources, OwnedSourceToken,
+        startup::HumanOwnedStartupBundle,
+    },
     identity::*,
     tenant_store::TenantStore,
 };
@@ -316,9 +319,6 @@ impl OwnedHumanGateway {
         })
     }
 
-    /// A delegated human identity mutation on the proof's own retained source.
-    /// A checked commit may advance coverage before releasing the write epoch.
-    /// The same operation identifier supports replay after recovery.
     pub(super) fn change_membership(
         &self,
         index: usize,
@@ -326,6 +326,51 @@ impl OwnedHumanGateway {
         scope: &AuthorizedScopeV1,
         membership_id: &str,
         change: &HumanMembershipChangeV1,
+    ) -> ApiResult<IdentityReceiptV1> {
+        self.change_delegated_identity(
+            index,
+            human::membership_change_failure,
+            |epoch, source, expected| {
+                store.modern_human_change_membership(
+                    epoch,
+                    source,
+                    scope,
+                    membership_id,
+                    change,
+                    expected,
+                )
+            },
+        )
+    }
+
+    pub(super) fn change_grant(
+        &self,
+        index: usize,
+        store: &Store,
+        scope: &AuthorizedScopeV1,
+        change: &HumanGrantChangeV1,
+    ) -> ApiResult<IdentityReceiptV1> {
+        self.change_delegated_identity(
+            index,
+            human::identity_change_failure,
+            |epoch, source, expected| {
+                store.modern_human_change_grant(epoch, source, scope, change, expected)
+            },
+        )
+    }
+
+    /// Publish a committed delegated identity change on the proof's own retained
+    /// source before releasing its write epoch. Replays keep the current generation.
+    fn change_delegated_identity(
+        &self,
+        index: usize,
+        map_failure: fn(anyhow::Error) -> (StatusCode, Json<Value>),
+        change: impl FnOnce(
+            &HumanSourcesWriteEpoch,
+            &OwnedSourceToken,
+            HumanDiscoveryGeneration,
+        )
+            -> anyhow::Result<(IdentityReceiptV1, Option<HumanDiscoveryGeneration>)>,
     ) -> ApiResult<IdentityReceiptV1> {
         self.check()?;
         let source = self.sources.get(index).ok_or_else(unavailable)?;
@@ -338,14 +383,7 @@ impl OwnedHumanGateway {
             self.check()?;
             epoch.validate_source(source).map_err(|_| unavailable())?;
             let expected = **generation.load();
-            let result = store.modern_human_change_membership(
-                &epoch,
-                source,
-                scope,
-                membership_id,
-                change,
-                expected,
-            );
+            let result = change(&epoch, source, expected);
             if result
                 .as_ref()
                 .is_err_and(|error| error.is::<HumanDiscoveryStale>())
@@ -354,33 +392,12 @@ impl OwnedHumanGateway {
                 return Err(unavailable());
             }
             epoch.validate_source(source).map_err(|_| unavailable())?;
-            let (receipt, next) = result.map_err(human::membership_change_failure)?;
+            let (receipt, next) = result.map_err(map_failure)?;
             self.check()?;
             if let Some(next) = next {
                 generation.store(Arc::new(next));
             }
             receipt
-        };
-        self.check()?;
-        Ok(receipt)
-    }
-    /// A delegated share change on the proof's own retained source, under the
-    /// owner's write epoch, like [`Self::change_membership`].
-    pub(super) fn change_grant(
-        &self,
-        index: usize,
-        store: &Store,
-        scope: &AuthorizedScopeV1,
-        change: &HumanGrantChangeV1,
-    ) -> ApiResult<IdentityReceiptV1> {
-        self.check()?;
-        let source = self.sources.get(index).ok_or_else(unavailable)?;
-        let receipt = {
-            let epoch = self.owner.try_write_epoch().map_err(|_| unavailable())?;
-            epoch.validate_source(source).map_err(|_| unavailable())?;
-            let result = store.modern_human_change_grant(&epoch, source, scope, change);
-            epoch.validate_source(source).map_err(|_| unavailable())?;
-            result.map_err(human::identity_change_failure)?
         };
         self.check()?;
         Ok(receipt)
