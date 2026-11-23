@@ -38,6 +38,17 @@ pub(crate) struct HumanUsageStorePageV1 {
     pub after_attempt_id: Option<String>,
 }
 
+fn validate_usage_selection(after: Option<&str>, limit: usize) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        (1..=HUMAN_MAX_PAGE_ITEMS).contains(&limit),
+        "invalid human usage page"
+    );
+    if let Some(after) = after {
+        crate::control::uuid(after)?;
+    }
+    Ok(())
+}
+
 impl Store {
     fn worker_registry_read_scope(
         &self,
@@ -51,17 +62,12 @@ impl Store {
         {
             return Err(IdentityFailureV1::PermissionDenied.into());
         }
-        Ok(current)
-    }
-
-    fn usage_scope(
-        &self,
-        tx: &CheckedTransaction<'_>,
-        scope: &AuthorizedScopeV1,
-    ) -> anyhow::Result<AuthorizedScopeV1> {
-        let current = self.worker_registry_read_scope(tx, scope)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if !(6..=13).contains(&version) || !super::human_rights::installed(tx)? {
+        let admitted = match tx.source_access {
+            Some(_) => matches!(version, 14 | 15),
+            None => (6..=13).contains(&version),
+        };
+        if !admitted || !super::human_rights::installed(tx)? {
             return Err(IdentityFailureV1::MigrationRequired.into());
         }
         Ok(current)
@@ -106,14 +112,6 @@ impl Store {
         transient: &Redactor,
     ) -> anyhow::Result<HumanQuotaV1> {
         let current = self.worker_registry_read_scope(tx, scope)?;
-        let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        let admitted = match tx.source_access {
-            Some(_) => matches!(version, 14 | 15),
-            None => (6..=13).contains(&version),
-        };
-        if !admitted || !super::human_rights::installed(tx)? {
-            return Err(IdentityFailureV1::MigrationRequired.into());
-        }
         let usage = super::control::quota_usage(tx, policy)?;
         let read_receipt = self.record_human_read_checked(
             tx,
@@ -150,19 +148,42 @@ impl Store {
         limit: usize,
         transient: &Redactor,
     ) -> anyhow::Result<HumanUsageStorePageV1> {
-        anyhow::ensure!(
-            (1..=HUMAN_MAX_PAGE_ITEMS).contains(&limit),
-            "invalid human usage page"
-        );
-        if let Some(after) = after {
-            crate::control::uuid(after)?;
-        }
+        validate_usage_selection(after, limit)?;
         let mut db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         let tx = self.begin_checked(&mut db)?;
-        let current = self.usage_scope(&tx, scope)?;
+        let page = self.human_usage_checked(&tx, scope, frame, after, limit, transient)?;
+        self.commit_checked(tx)?;
+        Ok(page)
+    }
+
+    pub(crate) fn modern_human_usage(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        scope: &AuthorizedScopeV1,
+        frame: &HumanUsageFrameV1,
+        after: Option<&str>,
+        limit: usize,
+        transient: &Redactor,
+    ) -> anyhow::Result<HumanUsageStorePageV1> {
+        validate_usage_selection(after, limit)?;
+        self.with_modern_read(access, |tx| {
+            self.human_usage_checked(tx, scope, frame, after, limit, transient)
+        })
+    }
+
+    fn human_usage_checked(
+        &self,
+        tx: &CheckedTransaction<'_>,
+        scope: &AuthorizedScopeV1,
+        frame: &HumanUsageFrameV1,
+        after: Option<&str>,
+        limit: usize,
+        transient: &Redactor,
+    ) -> anyhow::Result<HumanUsageStorePageV1> {
+        let current = self.worker_registry_read_scope(tx, scope)?;
         let mut statement = tx.prepare(
             "SELECT attempt_id,payload_json FROM worker_allocations WHERE attempt_id>?1 ORDER BY attempt_id LIMIT ?2",
         )?;
@@ -188,7 +209,7 @@ impl Store {
             items.push(allocation);
         }
         let read_receipt = self.record_human_read_checked(
-            &tx,
+            tx,
             current.principal(),
             Some(&current),
             "usage",
@@ -217,7 +238,6 @@ impl Store {
             serde_json::to_vec(&page)?.len() <= HUMAN_MAX_PAGE_BYTES,
             "human usage page exceeds its byte bound"
         );
-        self.commit_checked(tx)?;
         Ok(HumanUsageStorePageV1 {
             page,
             after_attempt_id: position,

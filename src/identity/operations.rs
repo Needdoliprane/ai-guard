@@ -349,11 +349,7 @@ fn availability(operation: HumanOperationV1, facts: OperationFactsV1) -> Operati
     } else if facts.owned_profile
         && matches!(
             operation,
-            O::EventsReadContent
-                | O::EventsExport
-                | O::EventsStream
-                | O::FederationRead
-                | O::UsageRead
+            O::EventsReadContent | O::EventsExport | O::EventsStream | O::FederationRead
         )
     {
         // Owned sources serve the two registries' metadata as separate reads.

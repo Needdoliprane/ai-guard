@@ -3,7 +3,7 @@ use super::*;
 use crate::{
     audit::{
         HumanDiscoveryGeneration, HumanDiscoveryStale, HumanSourceAccess, HumanUsageFrameV1,
-        HumanWorkerFrameV1, HumanWorkerStorePageV1,
+        HumanUsageStorePageV1, HumanWorkerFrameV1, HumanWorkerStorePageV1,
     },
     control::QuotaPolicyV1,
     control_fs::PrivateFile,
@@ -430,6 +430,22 @@ impl OwnedHumanGateway {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn usage(
+        &self,
+        index: usize,
+        store: &Store,
+        scope: &AuthorizedScopeV1,
+        frame: &HumanUsageFrameV1,
+        after: Option<&str>,
+        limit: usize,
+        redactor: &Redactor,
+    ) -> ApiResult<HumanUsageStorePageV1> {
+        self.read(index, store, |access| {
+            store.modern_human_usage(access, scope, frame, after, limit, redactor)
+        })
+    }
+
     pub(super) fn memberships(
         &self,
         index: usize,
@@ -643,6 +659,7 @@ const OWNED_HUMAN_GET_PATHS: &[&str] = &[
     "/api/v1/human/admin/grants",
     "/api/v1/human/admin/memberships",
     "/api/v1/human/admin/quota",
+    "/api/v1/human/admin/usage",
     "/api/v1/human/events",
     "/api/v1/human/events/recent",
     "/api/v1/human/identity",

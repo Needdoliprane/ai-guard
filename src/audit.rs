@@ -193,7 +193,7 @@ mod human_rights;
 mod human_summary;
 pub(crate) use human_summary::HumanSummaryFrameV1;
 mod human_usage;
-pub(crate) use human_usage::HumanUsageFrameV1;
+pub(crate) use human_usage::{HumanUsageFrameV1, HumanUsageStorePageV1};
 mod human_workers;
 pub(crate) mod identity;
 pub(crate) mod identity_markers;

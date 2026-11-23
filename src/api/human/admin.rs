@@ -2,8 +2,7 @@
 //! effective configuration kinds. Each route selects one offered context,
 //! lets the Store revalidate it and record the read before any result, then
 //! re-reads credential, membership and authorization before publication. On
-//! the owned source profile, memberships, configuration and quota run in the
-//! proof's own retained source. Usage remains unavailable on that profile.
+//! the owned source profile, these reads run in the proof's own retained source.
 use super::*;
 use crate::audit::{HumanMembershipFrameV1, HumanUsageFrameV1};
 
@@ -21,12 +20,6 @@ struct KeysetKey {
     limit: usize,
 }
 
-fn refuse_owned(state: &GatewayState) -> ApiResult<()> {
-    if state.owned_human.is_some() {
-        return Err(super::super::human_sources::unavailable());
-    }
-    Ok(())
-}
 fn publish_check(
     state: &GatewayState,
     proof: &VerifiedHuman,
@@ -102,7 +95,6 @@ pub(super) async fn usage(
     headers: HeaderMap,
     query: Result<Query<KeysetQuery>, QueryRejection>,
 ) -> ApiResult<Json<HumanUsagePageV1>> {
-    refuse_owned(&state)?;
     let Query(query) = query.map_err(|_| invalid_request())?;
     let limit = page_limit(query.limit)?;
     let selected = headers.clone();
@@ -117,17 +109,23 @@ pub(super) async fn usage(
             .map_err(state_failure)?;
         let frame = HumanUsageFrameV1::new(&context.id, &context.authorization_version)
             .map_err(store_failure)?;
-        let page = tenant
-            .store
-            .sqlite_api()?
-            .human_usage(
+        let after = cursor.after_worker_id.as_deref();
+        let store = tenant.store.sqlite_api()?;
+        let page = match (&state.owned_human, &proof.source) {
+            (Some(owned), HumanProofSource::Local(source)) => owned.usage(
+                *source,
+                store,
                 &scope,
                 &frame,
-                cursor.after_worker_id.as_deref(),
+                after,
                 limit,
                 &proof.redactor,
-            )
-            .map_err(store_failure)?;
+            )?,
+            (Some(_), _) => return Err(super::super::human_sources::unavailable()),
+            (None, _) => store
+                .human_usage(&scope, &frame, after, limit, &proof.redactor)
+                .map_err(store_failure)?,
+        };
         publish_check(
             &state,
             &proof,
