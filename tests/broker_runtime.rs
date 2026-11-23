@@ -14,7 +14,7 @@ use agentsandbox::{
         service::{
             RequestedExecutionV1, SubmitV1, encode_submit,
             protocol::{
-                BrokerCommandV1, BrokerReplyV1, JobResultOutcomeV1, JobResultV1,
+                BrokerCommandV1, BrokerErrorCodeV1, BrokerReplyV1, JobResultOutcomeV1, JobResultV1,
                 RecoveryDataSourceV1, RecoveryRuntimeEvidenceV1, RecoveryStatusV1,
                 RecoveryTargetKindV1, RecoveryTargetV1, TerminalJobResultV1,
             },
@@ -76,7 +76,7 @@ enum LegacyRecoveryStage {
 }
 
 #[derive(serde::Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "stage", rename_all = "snake_case")]
 enum RunClientRecoveryStage {
     NotReached,
     ReapClock,
@@ -84,13 +84,31 @@ enum RunClientRecoveryStage {
     WorkerRead,
     StatusRead,
     TerminalWait,
-    Executor,
+    Executor {
+        central_cleanup_sample: CentralCleanupSample,
+        executor_error: BrokerErrorCodeV1,
+    },
     ResultRead,
     ResultOutcome,
     TerminalCorrelation,
     PostTerminalChecks,
     ControlShutdown,
     Complete,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CentralCleanupSample {
+    NotObserved,
+    ReportedUnconfirmed,
+    ReportedRemoved,
+}
+
+#[derive(serde::Serialize)]
+struct RunClientRecoveryReceipt {
+    state: &'static str,
+    #[serde(flatten)]
+    stage: RunClientRecoveryStage,
 }
 
 #[test]
@@ -277,7 +295,7 @@ async fn broker_run_cli_sigkill_preserves_original_deadline_without_second_start
     evidence.write("result.json", &json!({
         "runtime_test":if outcome.is_ok() { "PASS" } else { "FAIL" },
         "fault":"owned_run_cli_sigkill",
-        "run_client_recovery":{"state":state,"stage":stage},
+        "run_client_recovery":RunClientRecoveryReceipt { state, stage },
         "requested_broker_client_source":"published_selection",
         "broker_selection_input":"environment",
         "native_start":selection.native_start,
@@ -1738,7 +1756,17 @@ async fn wait_terminal(
             && !worker.quota_held
             && !status.executor_task_running
         {
-            *run_client_stage = RunClientRecoveryStage::Executor;
+            if let Some(executor_error) = status.executor_error {
+                let central_cleanup_sample = match worker.cleanup_removed {
+                    None => CentralCleanupSample::NotObserved,
+                    Some(false) => CentralCleanupSample::ReportedUnconfirmed,
+                    Some(true) => CentralCleanupSample::ReportedRemoved,
+                };
+                *run_client_stage = RunClientRecoveryStage::Executor {
+                    central_cleanup_sample,
+                    executor_error,
+                };
+            }
             ensure!(
                 status.executor_error.is_none(),
                 "reconciliation executor failed: {:?}",
