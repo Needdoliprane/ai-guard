@@ -26,7 +26,7 @@ impl std::fmt::Display for HumanDiscoveryStale {
 impl std::error::Error for HumanDiscoveryStale {}
 
 impl HumanDiscoveryGeneration {
-    pub(super) fn after_membership_change(
+    pub(super) fn after_delegated_change(
         self,
         observed: Self,
         receipt_revision: u64,
