@@ -10,9 +10,31 @@ import {
   formatMetric,
   eventSummary,
   mergeEventPage,
+  overviewEvaluator,
   periodFilters,
   parseEntityCollection,
 } from "../src/model.ts";
+
+test("la vue d’ensemble distingue les évaluateurs configurés et leur joignabilité", () => {
+  for (const [backend, reachability, name, detail] of [
+    ["typesafe", "not_checked", "Jev réel", "Joignabilité non vérifiée"],
+    ["rust_rules", "not_applicable", "Moteur Rust déterministe sans modèle", "Joignabilité sans objet"],
+    ["local_openai", "not_checked", "Petit modèle local Jev-like", "Joignabilité non vérifiée"],
+  ]) {
+    assert.deepEqual(overviewEvaluator({ jev: "configured", jev_details: { backend, reachability } }),
+      { name, state: "Configuré", detail });
+  }
+  assert.deepEqual(overviewEvaluator({ jev: "disabled", jev_details: null }),
+    { name: null, state: "Désactivé", detail: null });
+  assert.deepEqual(overviewEvaluator(undefined), { name: null, state: "Inconnu", detail: null });
+  assert.deepEqual(overviewEvaluator({ jev: "configured" }), {
+    name: null, state: "Configuré", detail: "Type et joignabilité non renseignés par le gateway",
+  });
+  assert.deepEqual(overviewEvaluator({ jev: "configured", jev_details: { backend: "future_engine" } }),
+    { name: null, state: "Configuré", detail: "Type d’évaluateur inconnu" });
+  assert.deepEqual(overviewEvaluator({ jev: "configured", jev_details: { backend: "typesafe", reachability: "future_status" } }),
+    { name: "Jev réel", state: "Configuré", detail: "Joignabilité inconnue" });
+});
 
 test("une liste d’identités invalide ne devient pas une absence de liens", () => {
   assert.deepEqual(parseEntityCollection({ items: [] }), []);
