@@ -146,6 +146,11 @@ impl Invocation {
     pub fn observed(&self, name: &str) -> Option<Vec<u8>> {
         fs::read(self.observed.join(name)).ok()
     }
+    /// The Compose interpolation variables observed by the engine fixture.
+    pub fn compose_environment(&self) -> Vec<String> {
+        let text = fs::read_to_string(self.observed.join("environment")).unwrap_or_default();
+        text.lines().map(str::to_owned).collect()
+    }
     /// Every file the build consumer read in its context: relative path, bytes.
     pub fn context_files(&self) -> BTreeMap<String, Vec<u8>> {
         let mut files = BTreeMap::new();

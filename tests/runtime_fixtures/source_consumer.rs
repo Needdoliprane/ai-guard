@@ -13,7 +13,7 @@
 //! | `plan` | test | `key=value` directives, one per line (see `Plan`) |
 //! | `started-<n>` | fixture | first action of invocation `n`: verb and PID |
 //! | `calls` | fixture | one JSON array of arguments per invocation, and `effect <target> <verb>` lines |
-//! | `observed/<n>/…` | fixture | exact bytes read at invocation `n` |
+//! | `observed/<n>/…` | fixture | exact bytes read at invocation `n`, and the Compose interpolation variables under `environment` |
 //! | `alive-<role>` | fixture | exclusive lock held for the whole life of the process |
 //! | `ready-<role>` | fixture | published after the lock and after the first real read |
 //! | `probe-<k>` / `ack-<role>-<k>` | test / fixture | liveness question and answer |
@@ -139,6 +139,23 @@ fn leader(executable: &Path, state: &Path, arguments: &[String]) {
     let observed = state.join("observed").join(invocation.to_string());
     fs::create_dir_all(&observed).expect("fixture observation directory");
     fs::write(observed.join("arguments"), json_array(arguments)).expect("fixture arguments");
+    if verb == "compose" {
+        let variables = [
+            "AGENTSANDBOX_CONFIG_DIR",
+            "AI_GUARD_DASHBOARD_PORT",
+            "AI_GUARD_GATEWAY_PORT",
+        ];
+        let environment: Vec<_> = variables
+            .into_iter()
+            .filter_map(|name| {
+                std::env::var(name)
+                    .ok()
+                    .map(|value| format!("{name}={value}"))
+            })
+            .collect();
+        fs::write(observed.join("environment"), environment.join("\n"))
+            .expect("fixture Compose variables");
+    }
     let target = arguments
         .windows(2)
         .find(|pair| pair[0] == "--host")

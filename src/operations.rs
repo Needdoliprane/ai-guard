@@ -19,6 +19,28 @@ mod broker_run;
 mod source_snapshot;
 pub use broker_run::RunCommand;
 
+const DEFAULT_STACK_NAME: &str = "agentsandbox";
+const DEFAULT_GATEWAY_PORT: u16 = 8787;
+const DEFAULT_DASHBOARD_PORT: u16 = 4000;
+
+/// A Compose project name that one stack owns: lowercase letters, digits, dashes and underscores,
+/// starting with a letter or a digit, at most 63 bytes.
+fn parse_stack_name(value: &str) -> std::result::Result<String, &'static str> {
+    let mut bytes = value.bytes();
+    if value.len() > 63
+        || !bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        || !bytes
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-_".contains(&byte))
+    {
+        return Err(
+            "use at most 63 lowercase letters, digits, dashes or underscores, starting with a letter or digit",
+        );
+    }
+    Ok(value.to_owned())
+}
+
 #[derive(Subcommand, Debug)]
 pub enum OperatorCommand {
     /// Create isolated configuration and two distinct random authentication keys.
@@ -76,6 +98,15 @@ pub enum OperatorCommand {
         source: PathBuf,
         #[arg(long, default_value = ".agentsandbox")]
         config_dir: PathBuf,
+        /// Compose project name. Give each stack its own project name and configuration directory.
+        #[arg(long, default_value = DEFAULT_STACK_NAME, value_parser = parse_stack_name)]
+        stack_name: String,
+        /// Host loopback port published for the gateway.
+        #[arg(long, default_value_t = DEFAULT_GATEWAY_PORT, value_parser = clap::value_parser!(u16).range(1..))]
+        gateway_port: u16,
+        /// Host loopback port published for the dashboard.
+        #[arg(long, default_value_t = DEFAULT_DASHBOARD_PORT, value_parser = clap::value_parser!(u16).range(1..))]
+        dashboard_port: u16,
         #[arg(long)]
         allow_rootful_runtime: bool,
     },
@@ -91,6 +122,9 @@ pub enum OperatorCommand {
         source: PathBuf,
         #[arg(long, default_value = ".agentsandbox")]
         config_dir: PathBuf,
+        /// Compose project name given when the stack was started.
+        #[arg(long, default_value = DEFAULT_STACK_NAME, value_parser = parse_stack_name)]
+        stack_name: String,
     },
     /// Ask policy permission, import a filtered copy, and execute inside a worker.
     Run(Box<RunCommand>),
@@ -478,6 +512,60 @@ fn require_successful_resume(result: &serde_json::Value) -> Result<()> {
     require_successful_run(&summary)
 }
 
+/// Waits until the gateway and the dashboard both accept the viewer key and name the same tenant.
+/// A health answer only says that a process listens; the key is what the operator will use next.
+async fn wait_for_viewer_access(
+    gateway: &str,
+    dashboard: &str,
+    viewer: &str,
+    wait: Duration,
+) -> Result<()> {
+    let gateway = runner::AuditClient::new(gateway, viewer)?;
+    let dashboard = runner::AuditClient::new(dashboard, viewer)?;
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let attempt_deadline = deadline.min(tokio::time::Instant::now() + Duration::from_secs(2));
+        let (gateway, dashboard) = tokio::join!(
+            viewer_tenant(&gateway, attempt_deadline),
+            viewer_tenant(&dashboard, attempt_deadline)
+        );
+        let error = match (gateway, dashboard) {
+            (Ok(gateway), Ok(dashboard)) if gateway == dashboard => return Ok(()),
+            (Ok(_), Ok(_)) => {
+                anyhow::anyhow!("gateway and dashboard returned different viewer tenants")
+            }
+            (Err(error), Ok(_)) => anyhow::anyhow!("gateway viewer access failed ({error})"),
+            (Ok(_), Err(error)) => anyhow::anyhow!("dashboard viewer access failed ({error})"),
+            (Err(gateway), Err(dashboard)) => anyhow::anyhow!(
+                "gateway viewer access failed ({gateway}); dashboard viewer access failed ({dashboard})"
+            ),
+        };
+        let retry = tokio::time::Instant::now() + Duration::from_millis(500);
+        tokio::time::sleep_until(deadline.min(retry)).await;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(error);
+        }
+    }
+}
+
+async fn viewer_tenant(
+    client: &runner::AuditClient,
+    deadline: tokio::time::Instant,
+) -> Result<String> {
+    let identity = tokio::time::timeout_at(deadline, client.get_json("api/v1/identity"))
+        .await
+        .context("identity request timed out")??;
+    anyhow::ensure!(
+        identity["role"] == "viewer",
+        "identity did not have the viewer role"
+    );
+    let tenant = identity["tenant_id"]
+        .as_str()
+        .context("viewer identity is missing a tenant")?;
+    crate::tenancy::validate_tenant_id(tenant)?;
+    Ok(tenant.to_owned())
+}
+
 pub async fn execute(command: OperatorCommand) -> Result<()> {
     use crate::runner::AuditClient;
     // Build, Up and Down hold a prepared source across engine commands, and
@@ -668,8 +756,20 @@ pub async fn execute(command: OperatorCommand) -> Result<()> {
             runtime_endpoint,
             source,
             config_dir,
+            stack_name,
+            gateway_port,
+            dashboard_port,
             allow_rootful_runtime,
         } => {
+            parse_stack_name(&stack_name).map_err(anyhow::Error::msg)?;
+            anyhow::ensure!(
+                gateway_port != 0 && dashboard_port != 0,
+                "gateway and dashboard ports must be nonzero"
+            );
+            anyhow::ensure!(
+                gateway_port != dashboard_port,
+                "gateway and dashboard ports must be distinct"
+            );
             let config = initialize_config_directory(&config_dir)?;
             let source = source.canonicalize()?;
             let runtime = selected_runtime(
@@ -691,39 +791,27 @@ pub async fn execute(command: OperatorCommand) -> Result<()> {
                 &runtime,
                 &source,
                 &config,
+                &stack_name,
+                (gateway_port, dashboard_port),
                 &["up", "--detach", "--force-recreate"],
             )
             .await?;
-            let http = reqwest::Client::builder()
-                .timeout(Duration::from_secs(2))
-                .no_proxy()
-                .build()?;
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
-            loop {
-                let gateway = http
-                    .get("http://127.0.0.1:8787/healthz")
-                    .send()
-                    .await
-                    .is_ok_and(|r| r.status().is_success());
-                let dashboard = http
-                    .get("http://127.0.0.1:4000/healthz")
-                    .send()
-                    .await
-                    .is_ok_and(|r| r.status().is_success());
-                if gateway && dashboard {
-                    break;
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    bail!(
-                        "stack started but readiness did not pass within 45 seconds; inspect {} compose logs",
+            let gateway = format!("http://127.0.0.1:{gateway_port}");
+            let dashboard = format!("http://127.0.0.1:{dashboard_port}");
+            let viewer_path = config.path().join("secrets/viewer");
+            config.revalidate()?;
+            let viewer = runner::read_token(&viewer_path)?;
+            wait_for_viewer_access(&gateway, &dashboard, &viewer, Duration::from_secs(45))
+                .await
+                .with_context(|| {
+                    format!(
+                        "control-plane stack {stack_name} was started, but viewer access was not confirmed within 45 seconds; inspect the {} compose logs of this stack",
                         runtime.kind
-                    );
-                }
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
+                    )
+                })?;
             println!(
-                "Gateway: http://127.0.0.1:8787\nDashboard: http://127.0.0.1:4000\nUse the viewer key from {} to sign into the dashboard.",
-                config.path().join("secrets/viewer").display()
+                "Stack: {stack_name}\nGateway: {gateway}\nDashboard: {dashboard}\nUse the viewer key from {} to sign into the dashboard.",
+                viewer_path.display()
             );
         }
         OperatorCommand::Down {
@@ -732,7 +820,9 @@ pub async fn execute(command: OperatorCommand) -> Result<()> {
             runtime_endpoint,
             source,
             config_dir,
+            stack_name,
         } => {
+            parse_stack_name(&stack_name).map_err(anyhow::Error::msg)?;
             let config = crate::control_fs::Directory::open_existing(
                 &crate::control_fs::absolute_path(&config_dir)?,
             )?;
@@ -744,8 +834,18 @@ pub async fn execute(command: OperatorCommand) -> Result<()> {
                 Some(&source),
             )
             .await?;
-            compose(&runtime, &source, &config, &["down"]).await?;
-            println!("Control-plane services stopped. Audit and session volumes retained.");
+            compose(
+                &runtime,
+                &source,
+                &config,
+                &stack_name,
+                (DEFAULT_GATEWAY_PORT, DEFAULT_DASHBOARD_PORT),
+                &["down"],
+            )
+            .await?;
+            println!(
+                "Control-plane stack {stack_name} stopped. Audit and session volumes retained."
+            );
         }
         OperatorCommand::Run(command) => command.execute().await?,
         OperatorCommand::WorkerStatus {
@@ -1275,6 +1375,8 @@ async fn compose(
     runtime: &OperatorRuntime,
     source: &Path,
     config: &crate::control_fs::Directory,
+    stack_name: &str,
+    (gateway_port, dashboard_port): (u16, u16),
     action: &[&str],
 ) -> Result<()> {
     let source = source.canonicalize()?;
@@ -1286,11 +1388,7 @@ async fn compose(
     if !file.is_file() {
         bail!("compose file is missing: {}", file.display());
     }
-    let mut args = vec![
-        "compose".into(),
-        "--project-name".into(),
-        "agentsandbox".into(),
-    ];
+    let mut args = vec!["compose".into(), "--project-name".into(), stack_name.into()];
     args.extend(action.iter().map(|s| s.to_string()));
     let prepared = source_snapshot::prepare_compose(&source, runtime.kind).await?;
     let command = prepared.compose_command(&args)?;
@@ -1298,11 +1396,22 @@ async fn compose(
         .path()
         .to_str()
         .context("configuration path must be UTF-8")?;
+    // The ports reach Compose only when they differ from the defaults of the shipped files, so that
+    // the usual command carries exactly the environment it always had.
+    let gateway_port_text = gateway_port.to_string();
+    let dashboard_port_text = dashboard_port.to_string();
+    let mut environment = vec![("AGENTSANDBOX_CONFIG_DIR", config_path)];
+    if gateway_port != DEFAULT_GATEWAY_PORT {
+        environment.push(("AI_GUARD_GATEWAY_PORT", gateway_port_text.as_str()));
+    }
+    if dashboard_port != DEFAULT_DASHBOARD_PORT {
+        environment.push(("AI_GUARD_DASHBOARD_PORT", dashboard_port_text.as_str()));
+    }
     let output = runtime
         .consume_prepared(
             command,
             Duration::from_secs(180),
-            &[("AGENTSANDBOX_CONFIG_DIR", config_path)],
+            &environment,
             Some(config),
         )
         .await?;
@@ -1331,5 +1440,130 @@ mod tests {
             serde_json::json!({"scope": "launch_only", "tool_decision_channel": false})
         );
         assert!(!status.to_string().contains("private-provider.env"));
+    }
+
+    #[test]
+    fn a_stack_name_is_a_bounded_lowercase_compose_project_name() {
+        for accepted in ["agentsandbox", "qa-1", "a_b", "0stack", &"a".repeat(63)] {
+            assert_eq!(parse_stack_name(accepted).as_deref(), Ok(accepted));
+        }
+        for refused in [
+            "",
+            "-lead",
+            "_lead",
+            "Upper",
+            "with space",
+            "dot.ted",
+            "slash/name",
+            "semi;colon",
+            "line\nbreak",
+            "accentué",
+            &"a".repeat(64),
+        ] {
+            assert!(parse_stack_name(refused).is_err(), "{refused:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    mod readiness {
+        use super::*;
+        use crate::{
+            api::{GatewayState, dashboard_router, gateway_router},
+            audit::Store,
+            policy::Policy,
+            redaction::Redactor,
+        };
+        use std::{os::unix::fs::PermissionsExt, sync::Arc};
+
+        async fn local_server(
+            servers: &mut tokio::task::JoinSet<()>,
+            router: axum::Router,
+        ) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let origin = format!("http://{}", listener.local_addr().unwrap());
+            servers.spawn(async move { axum::serve(listener, router).await.unwrap() });
+            origin
+        }
+
+        #[tokio::test]
+        async fn control_readiness_requires_viewer_access_even_when_health_checks_pass() {
+            let temp = tempfile::Builder::new()
+                .permissions(fs::Permissions::from_mode(0o700))
+                .tempdir()
+                .unwrap();
+            let viewer = "test-viewer-credential-only-for-readiness";
+            let runner = "test-runner-credential-only-for-readiness";
+            let wrong_viewer = "test-different-viewer-credential";
+            let redactor = Redactor::new(vec![runner.into(), viewer.into(), wrong_viewer.into()]);
+            let store = Arc::new(
+                Store::open(&temp.path().join("audit.sqlite"), redactor.clone(), 100).unwrap(),
+            );
+            let gateway_for = |token: &str| {
+                gateway_router(GatewayState::new(
+                    store.clone(),
+                    runner.into(),
+                    token.into(),
+                    Policy::default(),
+                    None,
+                    redactor.clone(),
+                ))
+            };
+            let mut servers = tokio::task::JoinSet::new();
+            let gateway = local_server(&mut servers, gateway_for(viewer)).await;
+            let unavailable_gateway = local_server(&mut servers, gateway_for(wrong_viewer)).await;
+            let front = temp.path().join("front");
+            let dashboard = local_server(
+                &mut servers,
+                dashboard_router(&gateway, viewer.into(), front.clone()).unwrap(),
+            )
+            .await;
+            let unavailable_dashboard = local_server(
+                &mut servers,
+                dashboard_router(&gateway, wrong_viewer.into(), front).unwrap(),
+            )
+            .await;
+
+            let http = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap();
+            for origin in [
+                &gateway,
+                &dashboard,
+                &unavailable_gateway,
+                &unavailable_dashboard,
+            ] {
+                assert!(
+                    http.get(format!("{origin}/healthz"))
+                        .send()
+                        .await
+                        .unwrap()
+                        .status()
+                        .is_success()
+                );
+            }
+            wait_for_viewer_access(&gateway, &dashboard, viewer, Duration::from_secs(2))
+                .await
+                .unwrap();
+
+            for (gateway, dashboard, blocked) in [
+                (&gateway, &unavailable_dashboard, "dashboard"),
+                (&unavailable_gateway, &dashboard, "gateway"),
+            ] {
+                let error =
+                    wait_for_viewer_access(gateway, dashboard, viewer, Duration::from_millis(500))
+                        .await
+                        .expect_err("public liveness must not imply viewer readiness");
+                let message = error.to_string();
+                assert!(
+                    message.starts_with(&format!("{blocked} viewer access failed")),
+                    "{message}"
+                );
+                assert!(message.contains("401"), "{message}");
+                assert!(!message.contains(viewer));
+            }
+            servers.shutdown().await;
+        }
     }
 }
