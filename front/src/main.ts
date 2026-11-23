@@ -32,6 +32,7 @@ import {
   isAuditEvent,
   matchesFilters,
   mergeEventPage,
+  overviewEvaluator,
   periodFilters,
   parseEntityCollection,
   projectEvents,
@@ -1455,6 +1456,7 @@ function renderEvents() {
 function renderSupport() {
   if (!sideSlot) return;
   const collector = overview?.health?.collector;
+  const evaluator = overviewEvaluator(overview?.health);
   const stateRow = (
     label: string,
     value: string | null | undefined,
@@ -1490,7 +1492,17 @@ function renderSupport() {
     stateRow("Dashboard", health),
     stateRow("Collecteur", collector),
     stateRow("Moteur de conteneurs", overview?.health?.engine),
-    stateRow("Évaluation Jev", overview?.health?.jev),
+    el(
+      "div",
+      "health-row",
+      el(
+        "div",
+        "",
+        el("span", "", evaluator.name ?? "Évaluateur de politique"),
+        evaluator.detail ? el("p", "muted", evaluator.detail) : null,
+      ),
+      badge(evaluator.state),
+    ),
     el(
       "p",
       "support-footnote",

@@ -109,6 +109,7 @@ export interface Overview {
     collector?: string | null;
     engine?: string | null;
     jev?: string | null;
+    jev_details?: unknown;
   };
   resources?: { cpu_percent?: number | null; memory_bytes?: number | null };
   coverage?: Coverage | null;

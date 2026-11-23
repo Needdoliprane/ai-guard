@@ -4,6 +4,7 @@ import type {
   AuditEvent,
   EventFilters,
   EventPeriod,
+  Overview,
   View,
 } from "./types.ts";
 import { boundedText, object, uuid } from "./human-model.ts";
@@ -248,10 +249,32 @@ export function brokerBatchResultDetails(event: AuditEvent) {
 }
 
 const evaluatorLabels = new Map([
-  ["rust_rules", "Rust déterministe"],
-  ["typesafe", "Jev TypeSafe"],
-  ["local_openai", "Modèle local"],
+  ["rust_rules", { audit: "Rust déterministe", overview: "Moteur Rust déterministe sans modèle" }],
+  ["typesafe", { audit: "Jev TypeSafe", overview: "Jev réel" }],
+  ["local_openai", { audit: "Modèle local", overview: "Petit modèle local Jev-like" }],
 ]);
+const evaluatorReachabilityLabels = new Map([
+  ["not_checked", "Joignabilité non vérifiée"],
+  ["not_applicable", "Joignabilité sans objet"],
+]);
+
+export function overviewEvaluator(health: Overview["health"]) {
+  if (health?.jev !== "configured")
+    return { name: null, state: health?.jev === "disabled" ? "Désactivé" : "Inconnu", detail: null };
+
+  const state = "Configuré";
+  const wire = health.jev_details;
+  if (wire == null)
+    return { name: null, state, detail: "Type et joignabilité non renseignés par le gateway" };
+  const details = object(wire) ? wire : null;
+  const name = typeof details?.backend === "string" ? evaluatorLabels.get(details.backend)?.overview : undefined;
+  if (!name) return { name: null, state, detail: "Type d’évaluateur inconnu" };
+
+  const reachability = details?.reachability;
+  const detail = typeof reachability === "string" ? evaluatorReachabilityLabels.get(reachability) : undefined;
+  return { name, state, detail: detail ?? "Joignabilité inconnue" };
+}
+
 const evaluationStateLabels = new Map([
   ["evaluated", "Évaluée"],
   ["skipped_local_policy", "Non sollicitée par la politique locale"],
@@ -302,7 +325,7 @@ export function decisionEvaluationDetails(event: AuditEvent) {
   const historicalStatus = legacyTypeSafeStatus(evidence, event.decision);
   const backend = historicalStatus ? "typesafe" : evidence.backend;
   const status = historicalStatus ?? evidence.status;
-  const evaluator = typeof backend === "string" ? evaluatorLabels.get(backend) : undefined;
+  const evaluator = typeof backend === "string" ? evaluatorLabels.get(backend)?.audit : undefined;
   const evaluationState = typeof status === "string" ? evaluationStateLabels.get(status) : undefined;
   if (!evaluator || !evaluationState) return null;
   const selection = evidence.selection_source;
