@@ -23,7 +23,8 @@ use agentsandbox::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use harness::{
-    A_RUNNER, B_RUNNER, Fixture, RelayAttempt, exchange, grant, relay_attempt, worker_terminal,
+    A_RUNNER, B_RUNNER, Fixture, RelayAttempt, TerminalWorkerSample, exchange, grant,
+    relay_attempt, worker_terminal,
 };
 use std::{sync::atomic::Ordering, time::Duration};
 use tokio::time::{sleep, timeout};
@@ -495,11 +496,42 @@ async fn software_broker_lost_claim_recovery_retains_history_without_exec() -> R
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn software_broker_scoped_relay_ipc_refuses_before_private_detail() -> Result<()> {
-    let fixture = Fixture::new(90).await?;
+    let mut phase = "fixture_open";
+    let mut a = TerminalWorkerSample::default();
+    let mut b = TerminalWorkerSample::default();
+    let (result, cleanup_status) = match Fixture::new(90).await {
+        Ok(fixture) => {
+            let result = verify_scoped_relay_ipc(&fixture, &mut phase, &mut a, &mut b).await;
+            let cleanup = fixture.close().await;
+            let status = if cleanup.is_ok() {
+                "confirmed"
+            } else {
+                "unconfirmed"
+            };
+            (result.and(cleanup), status)
+        }
+        Err(error) => (Err(error), "not_started"),
+    };
+    let receipt = serde_json::json!({"phase": phase, "cleanup": cleanup_status, "a": a, "b": b});
+    eprintln!("g11_relay_terminal_receipt {receipt}");
+    result
+}
+
+async fn verify_scoped_relay_ipc(
+    fixture: &Fixture,
+    phase: &mut &'static str,
+    a: &mut TerminalWorkerSample,
+    b: &mut TerminalWorkerSample,
+) -> Result<()> {
+    *phase = "submit_a";
     let a_job = fixture.submit("a", 90).await?;
+    *phase = "awaiting_a";
     let a_endpoint = fixture.wait_endpoint(a_job).await?;
+    *phase = "submit_b";
     let b_job = fixture.submit("b", 90).await?;
+    *phase = "running_b";
     let b_endpoint = fixture.wait_worker("b").await?;
+    *phase = "scoped_reads";
     let own = service::request(
         &fixture.broker_root,
         "b",
@@ -566,11 +598,20 @@ async fn software_broker_scoped_relay_ipc_refuses_before_private_detail() -> Res
         fixture.exec_count().await == 0 && fixture.committed_claims()? == 0,
         "diagnostics confer no execution authority"
     );
+    *phase = "cancel_a";
     fixture.cancel("a", a_job).await?;
+    *phase = "cancel_b";
     fixture.cancel("b", b_job).await?;
-    worker_terminal(&fixture.a, &a_endpoint).await?;
-    worker_terminal(&fixture.b, &b_endpoint).await?;
-    fixture.close().await
+    *phase = "terminal_a";
+    fixture
+        .sample_worker_terminal(&fixture.a, &a_endpoint, a, Some(a_job))
+        .await?;
+    *phase = "terminal_b";
+    fixture
+        .sample_worker_terminal(&fixture.b, &b_endpoint, b, None)
+        .await?;
+    *phase = "verified";
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

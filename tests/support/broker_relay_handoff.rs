@@ -5,11 +5,14 @@ use agentsandbox::{
     api::{GatewayState, TenantGateway, gateway_router},
     audit::Store,
     broker::{
+        checkpoint::SupervisionOperationV1,
+        lifecycle::{BrokerCheckpointV3, LocalCommandRequestV1, LocalFailurePhaseV1},
         local_ipc::{EndpointRecordV1, read_frame, write_frame},
+        outbox::{BrokerCheckpointV4, OutboxEventV1},
         service::{self, RequestedExecutionV1, SubmitV1, encode_submit, protocol::*},
     },
-    control::{WorkerMutationV1, WorkerStateV1, WorkerTransitionV1},
-    control_fs::Directory,
+    control::{RuntimeStatusV1, WorkerMutationV1, WorkerStateV1, WorkerTransitionV1, WorkerV1},
+    control_fs::{Directory, MAX_PRIVATE_FILE_BYTES},
     operations::initialize_config,
     policy::Policy,
     redaction::Redactor,
@@ -28,7 +31,10 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     io,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::{
+        fd::AsRawFd,
+        unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    },
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
@@ -165,40 +171,6 @@ fn fresh(root: &Path, tenant: &str) -> Result<Arc<Store>> {
     store.migrate_workload_v6(&root.join(format!("{tenant}-before6.sqlite")))?;
     Ok(Arc::new(store))
 }
-async fn start_fixture_enforcer(root: &Path, broker_root: &Path) -> Result<Child> {
-    let enforcer_root = private_dir(broker_root, "enforcer")?;
-    // The relay fixture retains its existing guardian configuration.
-    private_file(&enforcer_root.join("auth"), &[0x51; 32])?;
-    let mut enforcer = Command::new(BIN)
-        .args(["__broker-enforcer", "--root"])
-        .arg(&enforcer_root)
-        .args(["--max-slots", "32"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(diagnostic(&root.join("enforcer.stderr"))?)
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-        .env("HOME", root)
-        .current_dir(root)
-        .kill_on_drop(true)
-        .spawn()?;
-    timeout(Duration::from_secs(10), async {
-        loop {
-            ensure!(
-                enforcer.try_wait()?.is_none(),
-                "native fixture enforcer exited"
-            );
-            if std::fs::read_dir(enforcer_root.join("announcements"))
-                .is_ok_and(|mut entries| entries.next().is_some())
-            {
-                return Ok::<_, anyhow::Error>(());
-            }
-            sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await??;
-    Ok(enforcer)
-}
 #[path = "broker_relay_runtime.rs"]
 mod runtime;
 use runtime::{Engine, EngineFailure, engine_connection};
@@ -206,6 +178,81 @@ pub use runtime::{
     RelayAttempt, contradictory_create_flags_are_refused_before_fixture_mutation, exchange,
     relay_attempt, worker_terminal,
 };
+
+enum TerminalWorkerRead {
+    Unknown,
+    Absent,
+    Error,
+    Present {
+        state: WorkerStateV1,
+        quota_held: bool,
+        same_attempt: bool,
+        container_id: Option<String>,
+    },
+}
+
+/// Only fixed labels and the closed worker state may leave the private fixture.
+#[derive(serde::Serialize)]
+pub(super) struct TerminalWorkerSample {
+    wait: &'static str,
+    store: &'static str,
+    state: Option<WorkerStateV1>,
+    quota_held: Option<bool>,
+    same_attempt: Option<bool>,
+    witness: &'static str,
+    store_receipt: &'static str,
+    journal_head: TerminalJournalHead,
+    post_cancel_failure: PostCancelFailure,
+    executor_task_running: Option<bool>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TerminalJournalHead {
+    NotSampled,
+    Unavailable,
+    NoResult,
+    ResultWithoutObserve,
+    ObservePending,
+    ObserveAcknowledged,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PostCancelFailure {
+    NotSampled,
+    Unavailable,
+    NoRetryEvidence,
+    DecisionAfterFailure,
+    MultipleWorkerFailures,
+    DecisionAfterFailureAndMultipleWorkerFailures,
+}
+
+#[derive(serde::Deserialize)]
+struct FixtureJournalFrame {
+    version: u32,
+    operation_id: Uuid,
+    intent_hash: String,
+    revision: u64,
+    payload: Value,
+}
+
+impl Default for TerminalWorkerSample {
+    fn default() -> Self {
+        Self {
+            wait: "not_sampled",
+            store: "unknown",
+            state: None,
+            quota_held: None,
+            same_attempt: None,
+            witness: "unknown",
+            store_receipt: "not_checked",
+            journal_head: TerminalJournalHead::NotSampled,
+            post_cancel_failure: PostCancelFailure::NotSampled,
+            executor_task_running: None,
+        }
+    }
+}
 
 pub struct Fixture {
     pub root: PathBuf,
@@ -219,7 +266,6 @@ pub struct Fixture {
     registry: PathBuf,
     runner_a: PathBuf,
     broker: Option<Child>,
-    enforcer: Option<Child>,
     engine: Arc<Mutex<Engine>>,
     engine_stop: Option<oneshot::Sender<()>>,
     engine_task: JoinHandle<()>,
@@ -413,12 +459,7 @@ impl Fixture {
                 &json!({"version":2,"installation_id":Uuid::new_v4(),"root":broker_root,"max_enforcer_slots":32,"profiles":profiles,"additional_control_secret_files":[]}),
             )?,
         )?;
-        let enforcer = if admission_only {
-            // The actual broker must create and attest the new role itself.
-            None
-        } else {
-            Some(start_fixture_enforcer(root.as_path(), &broker_root).await?)
-        };
+        // Leave the role absent so the actual broker creates and attests it.
         let mut fixture = Self {
             root,
             a,
@@ -431,7 +472,6 @@ impl Fixture {
             registry,
             runner_a,
             broker: None,
-            enforcer,
             engine,
             engine_stop: Some(engine_stop),
             engine_task,
@@ -439,15 +479,12 @@ impl Fixture {
             server_task,
         };
         if let Err(error) = fixture.start_broker().await {
-            if admission_only {
-                let cleanup = fixture.close().await;
-                return Err(error.context(if cleanup.is_ok() {
-                    "admission fixture broker did not start"
-                } else {
-                    "admission fixture broker did not start and cleanup is unconfirmed"
-                }));
-            }
-            return Err(error);
+            let cleanup = fixture.close_owned(false).await;
+            return Err(error.context(if cleanup.is_ok() {
+                "fixture broker did not start"
+            } else {
+                "fixture broker did not start and cleanup is unconfirmed"
+            }));
         }
         Ok(fixture)
     }
@@ -774,6 +811,165 @@ impl Fixture {
         })
         .await?
     }
+
+    pub(super) async fn sample_worker_terminal(
+        &self,
+        store: &Store,
+        endpoint: &RelayEndpointV1,
+        sample: &mut TerminalWorkerSample,
+        journal_job_a: Option<Uuid>,
+    ) -> Result<()> {
+        // Reuse the last worker-state reading from the existing wait.
+        let mut last = TerminalWorkerRead::Unknown;
+        let result = runtime::wait_worker_terminal(store, endpoint, |read| {
+            last = match read {
+                Ok(Some(worker)) => {
+                    let same_attempt = worker.attempt.attempt_id == endpoint.attempt_id;
+                    TerminalWorkerRead::Present {
+                        state: worker.state,
+                        quota_held: worker.quota_held,
+                        same_attempt,
+                        container_id: worker
+                            .attempt
+                            .container_id
+                            .as_ref()
+                            .filter(|_| same_attempt)
+                            .cloned(),
+                    }
+                }
+                Ok(None) => TerminalWorkerRead::Absent,
+                Err(_) => TerminalWorkerRead::Error,
+            };
+        })
+        .await;
+        sample.wait = match &result {
+            Ok(_) => "completed",
+            Err(error) if error.is::<tokio::time::error::Elapsed>() => "timeout",
+            Err(_) => "read_failed",
+        };
+        let probe_job = journal_job_a.filter(|_| sample.wait == "timeout");
+        if probe_job.is_some() {
+            sample.journal_head = TerminalJournalHead::Unavailable;
+            sample.post_cancel_failure = PostCancelFailure::Unavailable;
+        }
+        match last {
+            TerminalWorkerRead::Present {
+                state,
+                quota_held,
+                same_attempt,
+                container_id,
+            } => {
+                sample.store = "present";
+                sample.state = Some(state);
+                sample.quota_held = Some(quota_held);
+                sample.same_attempt = Some(same_attempt);
+                sample.witness = self.terminal_witness_state(container_id.as_deref());
+                if let Some(container_id) = container_id.as_deref() {
+                    // The receipt is an independent, later sample from the same fixture Store.
+                    sample.store_receipt = terminal_store_receipt(store, endpoint, container_id);
+                    if let Some(job) = probe_job {
+                        // Failure to collect the diagnostic never changes the primary wait result.
+                        let _ = self
+                            .sample_terminal_journal(job, endpoint, container_id, sample)
+                            .await;
+                    }
+                }
+            }
+            TerminalWorkerRead::Absent => sample.store = "absent",
+            TerminalWorkerRead::Error => sample.store = "error",
+            TerminalWorkerRead::Unknown => {}
+        }
+        result.map(|_| ())
+    }
+
+    async fn sample_terminal_journal(
+        &self,
+        job: Uuid,
+        endpoint: &RelayEndpointV1,
+        container_id: &str,
+        sample: &mut TerminalWorkerSample,
+    ) -> Result<()> {
+        let reply = timeout(
+            Duration::from_secs(1),
+            service::request(
+                &self.broker_root,
+                "a",
+                A_RUNNER,
+                BrokerCommandV1::Status { operation_id: job },
+            ),
+        )
+        .await??;
+        let BrokerReplyV1::Status { status } = reply else {
+            bail!("fixture journal status unavailable");
+        };
+        ensure!(status.operation_id == job && status.cancel_requested);
+        let revision = status.head_revision.context("confirmed fixture head")?;
+        let namespace =
+            Directory::open_existing(&self.broker_root.join("journals/a/broker-journal-v1"))?;
+        let mut scopes = std::fs::read_dir(namespace.path())?;
+        let scope = scopes.next().context("fixture journal scope")??;
+        ensure!(scopes.next().is_none(), "ambiguous fixture journal scope");
+        namespace.revalidate()?;
+        let job_root = Directory::open_existing(&scope.path().join("jobs").join(job.to_string()))?;
+        // As in the Full3 fixture, read only the immutable frame named by Status.
+        let bytes = job_root
+            .read_private_file(format!("rev-{revision:020}.json"), MAX_PRIVATE_FILE_BYTES)?;
+        let frame: FixtureJournalFrame = serde_json::from_slice(bytes.bytes())?;
+        let domain = match frame.version {
+            3 => b"ai-guard:broker-checkpoint:v3\0",
+            4 => b"ai-guard:broker-checkpoint:v4\0",
+            _ => bail!("unsupported fixture journal head"),
+        };
+        let mut hash = Sha256::new();
+        hash.update(domain);
+        hash.update(bytes.bytes());
+        let hash = hex::encode(hash.finalize());
+        ensure!(
+            frame.operation_id == job
+                && frame.revision == revision
+                && status.head_hash.as_deref() == Some(hash.as_str())
+                && status.intent_hash.as_deref() == Some(frame.intent_hash.as_str())
+        );
+        let classify = |lifecycle: &BrokerCheckpointV3, events: &[OutboxEventV1]| {
+            let head = terminal_journal_category(lifecycle, events, endpoint, container_id)?;
+            Ok::<_, anyhow::Error>((head, post_cancel_failure(lifecycle)?))
+        };
+        let (head, failure) = if frame.version == 3 {
+            let lifecycle = serde_json::from_value(frame.payload)?;
+            classify(&lifecycle, &[])?
+        } else {
+            let checkpoint: BrokerCheckpointV4 = serde_json::from_value(frame.payload)?;
+            classify(checkpoint.lifecycle(), checkpoint.events())?
+        };
+        sample.journal_head = head;
+        sample.post_cancel_failure = failure;
+        sample.executor_task_running = Some(status.executor_task_running);
+        Ok(())
+    }
+
+    fn terminal_witness_state(&self, container_id: Option<&str>) -> &'static str {
+        let Some(container_id) = container_id else {
+            return "unknown";
+        };
+        let Ok(engine) = self.engine.try_lock() else {
+            return "unknown";
+        };
+        let Some(container) = engine.containers.get(container_id) else {
+            return "absent";
+        };
+        let state = &container.facts["State"];
+        match (
+            state["Status"].as_str(),
+            state["Running"].as_bool(),
+            *container.done.borrow(),
+        ) {
+            (Some("created"), Some(false), false) => "created",
+            (Some("running"), Some(true), false) => "running",
+            (Some("exited"), Some(false), true) => "terminal",
+            _ => "unknown",
+        }
+    }
+
     pub async fn closed(&self, job: Uuid) -> Result<()> {
         timeout(Duration::from_secs(15), async {
             loop {
@@ -898,26 +1094,25 @@ impl Fixture {
         );
         Ok(())
     }
-    pub async fn close(mut self) -> Result<()> {
-        for child in [&mut self.broker, &mut self.enforcer] {
-            if let Some(mut owned) = child.take() {
-                if owned.try_wait()?.is_none() {
-                    owned.start_kill()?;
-                    timeout(Duration::from_secs(5), owned.wait()).await??;
-                }
-            }
+    pub async fn close(self) -> Result<()> {
+        self.close_owned(true).await
+    }
+    async fn close_owned(mut self, expect_guardian: bool) -> Result<()> {
+        // Reap the broker first so its monitor cannot replace the guardian.
+        if let Some(mut broker) = self.broker.take()
+            && broker.try_wait()?.is_none()
+        {
+            broker.start_kill()?;
+            timeout(Duration::from_secs(5), broker.wait()).await??;
         }
-        let guardian = if self.faults.before_import.is_some() {
-            timeout(
-                Duration::from_secs(15),
-                close_admission_guardian(&self.broker_root),
-            )
-            .await
-            .context("admission guardian cleanup was not confirmed")
-            .and_then(|result| result)
-        } else {
-            Ok(())
-        };
+        let guardian = timeout(
+            Duration::from_secs(15),
+            close_fixture_guardian(&self.broker_root, expect_guardian),
+        )
+        .await
+        .context("fixture guardian cleanup timed out")
+        .and_then(|result| result)
+        .context("fixture guardian cleanup was not confirmed");
         if let Some(stop) = self.engine_stop.take() {
             let _ = stop.send(());
         }
@@ -940,10 +1135,128 @@ impl Fixture {
         Ok(())
     }
 }
-async fn close_admission_guardian(broker_root: &Path) -> Result<()> {
+
+fn terminal_journal_category(
+    lifecycle: &BrokerCheckpointV3,
+    events: &[OutboxEventV1],
+    endpoint: &RelayEndpointV1,
+    container_id: &str,
+) -> Result<TerminalJournalHead> {
+    let same_worker = |worker: &WorkerV1| {
+        worker.worker_id == endpoint.worker_id
+            && worker.attempt.attempt_id == endpoint.attempt_id
+            && worker.attempt.container_id.as_deref() == Some(container_id)
+    };
+    let operations = lifecycle.broker().supervision().operations();
+    ensure!(operations.iter().any(|operation| matches!(
+        operation,
+        SupervisionOperationV1::WorkerClaim { response: Some(response), .. }
+            if same_worker(&response.worker)
+    )));
+    for operation in operations.iter().rev() {
+        let SupervisionOperationV1::WorkerMutation { request, response } = operation else {
+            continue;
+        };
+        let WorkerTransitionV1::Observe { observation } = &request.transition else {
+            continue;
+        };
+        if request.worker_id == endpoint.worker_id
+            && request.attempt_id == endpoint.attempt_id
+            && matches!(
+                observation.status,
+                RuntimeStatusV1::Exited | RuntimeStatusV1::Dead
+            )
+            && observation.running == Some(false)
+        {
+            ensure!(observation.inspection.container_id == container_id);
+            return match response {
+                Some(response) => {
+                    ensure!(
+                        same_worker(&response.worker)
+                            && response.receipt.operation_id == request.operation_id
+                    );
+                    Ok(TerminalJournalHead::ObserveAcknowledged)
+                }
+                None => Ok(TerminalJournalHead::ObservePending),
+            };
+        }
+    }
+    let result = events
+        .iter()
+        .find(|entry| entry.event().kind == "broker.batch.result");
+    let Some(result) = result else {
+        return Ok(TerminalJournalHead::NoResult);
+    };
+    let data = &result.event().data;
+    ensure!(
+        data["worker_id"].as_str() == Some(endpoint.worker_id.as_str())
+            && data["attempt_id"].as_str() == Some(endpoint.attempt_id.as_str())
+            && data["observation"]["id"].as_str() == Some(container_id)
+    );
+    Ok(TerminalJournalHead::ResultWithoutObserve)
+}
+
+fn post_cancel_failure(lifecycle: &BrokerCheckpointV3) -> Result<PostCancelFailure> {
+    let commands = lifecycle.commands();
+    let cancel = commands
+        .iter()
+        .position(|command| matches!(command.request(), LocalCommandRequestV1::CancelRequested))
+        .context("fixture cancellation missing from confirmed head")?;
+    let mut prior_failure = false;
+    let mut later_decision_failure = false;
+    let mut worker_failures = 0;
+    for command in &commands[cancel + 1..] {
+        if let LocalCommandRequestV1::FailureObserved { phase, .. } = command.request() {
+            later_decision_failure |= prior_failure && *phase == LocalFailurePhaseV1::Decision;
+            worker_failures += usize::from(*phase == LocalFailurePhaseV1::Worker);
+            prior_failure = true;
+        }
+    }
+    Ok(match (later_decision_failure, worker_failures > 1) {
+        (false, false) => PostCancelFailure::NoRetryEvidence,
+        (true, false) => PostCancelFailure::DecisionAfterFailure,
+        (false, true) => PostCancelFailure::MultipleWorkerFailures,
+        (true, true) => PostCancelFailure::DecisionAfterFailureAndMultipleWorkerFailures,
+    })
+}
+
+fn terminal_store_receipt(
+    store: &Store,
+    endpoint: &RelayEndpointV1,
+    container_id: &str,
+) -> &'static str {
+    // There is one worker per fixture Store. A second row makes this sample ambiguous.
+    let Ok(allocations) = store.worker_usage_page(None, 2) else {
+        return "error";
+    };
+    let allocation = match allocations.as_slice() {
+        [] => return "absent",
+        [allocation]
+            if allocation.worker_id == endpoint.worker_id
+                && allocation.attempt_id == endpoint.attempt_id
+                && allocation.source.container_id.as_str() == container_id =>
+        {
+            allocation
+        }
+        _ => return "mismatch",
+    };
+    match store.worker_operation(&allocation.terminal_observation_id) {
+        Ok(Some(receipt))
+            if receipt.operation_id == allocation.terminal_observation_id
+                && receipt.worker_id.as_deref() == Some(endpoint.worker_id.as_str()) =>
+        {
+            "confirmed"
+        }
+        Ok(Some(_)) => "mismatch",
+        Ok(None) => "absent",
+        Err(_) => "error",
+    }
+}
+
+async fn close_fixture_guardian(broker_root: &Path, expect_guardian: bool) -> Result<()> {
     let role = broker_root.join("enforcer");
     match std::fs::symlink_metadata(&role) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound && !expect_guardian => return Ok(()),
         Err(error) => return Err(error.into()),
         Ok(_) => {}
     }
@@ -951,7 +1264,7 @@ async fn close_admission_guardian(broker_root: &Path) -> Result<()> {
     let announcements = Directory::open_existing(&role.path().join("announcements"))?;
     ensure!(
         std::fs::read_dir(announcements.path())?.count() == 1,
-        "fresh admission guardian did not publish exactly one endpoint"
+        "fresh fixture guardian did not publish exactly one endpoint"
     );
     let publication = announcements.read_private_file("e-0001.json", 4096)?;
     let record: Value = serde_json::from_slice(publication.bytes())?;
@@ -961,6 +1274,19 @@ async fn close_admission_guardian(broker_root: &Path) -> Result<()> {
     );
     let endpoint: EndpointRecordV1 = serde_json::from_value(record["endpoint"].clone())?;
     let endpoints = Directory::open_existing(&role.path().join("endpoints"))?;
+    // The listener can disappear before the guardian releases its native owners.
+    let role_lock = role.read_private_file(".owner.lock", 0)?;
+    let owner = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(role_lock.path())?;
+    let opened = owner.metadata()?;
+    let named = std::fs::symlink_metadata(role_lock.path())?;
+    ensure!(
+        (opened.dev(), opened.ino()) == (named.dev(), named.ino()),
+        "fixture guardian lock changed during preparation"
+    );
+    role_lock.revalidate()?;
     let capability = role.read_private_file("auth", 32)?;
     ensure!(
         capability.bytes().len() == 32,
@@ -1009,36 +1335,44 @@ async fn close_admission_guardian(broker_root: &Path) -> Result<()> {
     let socket = endpoints.path().join(endpoint.directory_name()).join("s");
     timeout(Duration::from_secs(5), async {
         loop {
-            match UnixStream::connect(&socket).await {
-                Ok(stream) => drop(stream),
+            let socket_closed = match UnixStream::connect(&socket).await {
+                Ok(_) => false,
                 Err(error)
                     if matches!(
                         error.kind(),
                         io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
                     ) =>
                 {
+                    true
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if socket_closed {
+                // SAFETY: Nonblocking probe using only the retained fixture lock FD.
+                if unsafe { libc::flock(owner.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
                     endpoints.revalidate()?;
                     publication.revalidate()?;
+                    role_lock.revalidate()?;
                     ensure!(
                         std::fs::read_dir(announcements.path())?.count() == 1,
                         "guardian was replaced during shutdown"
                     );
                     return Ok::<_, anyhow::Error>(());
                 }
-                Err(error) => return Err(error.into()),
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::WouldBlock {
+                    return Err(error.into());
+                }
             }
             sleep(Duration::from_millis(50)).await;
         }
     })
     .await
-    .context("guardian acknowledged shutdown but its IPC remained reachable")?
+    .context("guardian acknowledged shutdown but its endpoint and lock did not confirm closure")?
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
         if let Some(child) = self.broker.as_mut() {
-            let _ = child.start_kill();
-        }
-        if let Some(child) = self.enforcer.as_mut() {
             let _ = child.start_kill();
         }
         if let Some(stop) = self.engine_stop.take() {
