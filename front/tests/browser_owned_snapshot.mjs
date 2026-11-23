@@ -52,6 +52,7 @@ let authenticatedDashboard = false;
 let interruptionSignal = null, terminalResult = null, terminalResultFd;
 let sequence = 0, fixtureStarted = false, fixtureExit = null, interactionDeadline = 0, artifactsAdmitted = false;
 const commands = [], requests = [], wires = [], pendingWires = [], captures = [], pageErrors = [], external = [];
+const grantReadHttpStatuses = [], membershipReadHttpStatuses = [];
 const observed = {}, output = { stdout: { bytes: 0, hash: createHash("sha256") }, stderr: { bytes: 0, hash: createHash("sha256") } };
 let artifacts, control, libtest, dist, seconds, failure = null, cleanupFailure = null, closedFixture = null, receipts = null;
 let firstMembershipPost, replayedMembershipReceipt, firstGrantPost, replayedGrantReceipt;
@@ -758,6 +759,19 @@ function grantReceipt(body, operationId) {
 
 const sameGrantReceipt = (left, right) => grantReceiptFields.every((key) => same(left[key], right[key]));
 
+function recordGrantReadStatus(response) {
+  if (!grantMode || response.request().method() !== "GET") return;
+  const pathname = new URL(response.url()).pathname;
+  if (pathname === grantsPath) grantReadHttpStatuses.push(response.status());
+  if (pathname === membershipsPath) membershipReadHttpStatuses.push(response.status());
+}
+
+function observedReadStatus(statuses) {
+  if (statuses.length === 0) return 0;
+  if (statuses.length !== 1 || !Number.isInteger(statuses[0]) || statuses[0] < 100 || statuses[0] > 599) return -1;
+  return statuses[0];
+}
+
 async function readGrantReceipt(response, operationId) {
   must(response.url() === grantEndpoint() && response.status() === 200, "GRANT_REAL_BFF_SUCCESS");
   const bytes = await response.body();
@@ -922,21 +936,28 @@ async function runOwnedGrantRecovery() {
   await edit.waitFor({ timeout: remaining() });
   await edit.click({ timeout: remaining() });
 
-  stage = "owned_grant_review_existing";
+  stage = "owned_grant_review_dialog";
   const dialog = page.getByRole("dialog", { name: "Partages de la ressource", exact: true });
   await dialog.waitFor({ timeout: remaining() });
+  stage = "owned_grant_review_http";
   const grantRead = await initialGrantResponse;
+  stage = "owned_grant_review_dto";
   must(grantRead.context_id === admin.id && grantRead.authorization_version === admin.authorization_version &&
     same(grantRead.resource, ready.grant.resource) && grantRead.revision === ready.grant.revision &&
     Array.isArray(grantRead.shares) && grantRead.shares.length === 1 &&
     grantRead.shares[0].display_name === ready.grant.member_display_name &&
     same([...grantRead.shares[0].permissions].sort(), ["metadata"]), "INITIAL_GRANT_ALREADY_LINKED");
+  stage = "owned_grant_review_case_before";
   const share = dialog.locator(".dg-share").filter({ hasText: ready.grant.member_display_name });
   const content = share.getByRole("checkbox", { name: "Contenu", exact: true });
   must(await content.isChecked({ timeout: remaining() }) === false, "GRANT_CONTENT_NOT_ALREADY_SHARED");
+  stage = "owned_grant_review_case_after";
   await content.check({ timeout: remaining() });
+  stage = "owned_grant_review_confirmation";
   await dialog.getByRole("button", { name: "Vérifier le changement", exact: true }).click({ timeout: remaining() });
+  stage = "owned_grant_review_preview";
   await dialog.getByText(new RegExp(`${ready.grant.member_display_name} : ajout Contenu`, "u")).waitFor({ timeout: remaining() });
+  stage = "owned_grant_review_post_gate";
   must(postedGrantRequests().length === 0, "GRANT_POST_BEFORE_CONFIRMATION");
 
   stage = "owned_grant_lose_response";
@@ -1085,7 +1106,7 @@ try {
   page = await context.newPage(); page.setDefaultTimeout(remaining()); page.setDefaultNavigationTimeout(remaining());
   page.on("pageerror", (error) => pageErrors.push(redact(error.message)));
   page.on("request", (request) => { const url = new URL(request.url()); if (url.pathname.startsWith("/api/v1/human/")) requests.push({ method: request.method(), path: url.pathname + url.search }); });
-  page.on("response", (response) => { const capture = captureResponse(response); capture.catch(() => {}); pendingWires.push(capture); });
+  page.on("response", (response) => { recordGrantReadStatus(response); const capture = captureResponse(response); capture.catch(() => {}); pendingWires.push(capture); });
   stage = grantMode ? "login_and_grants" : membershipMode ? "login_and_membership" : usageMode ? "login_and_usage" : workersMode ? "login_and_workers" : "login_and_snapshot";
   await page.goto(ready.dashboard_url);
   if (egressMode) await runEgressJournal();
@@ -1198,6 +1219,10 @@ finally {
   }
   if (artifactsAdmitted) {
     try { await finishWireCaptures(); } catch (error) { cleanupFailure ??= redact(error.message); }
+    if (grantMode) {
+      observed.grant_get_status = observedReadStatus(grantReadHttpStatuses);
+      observed.memberships_get_status = observedReadStatus(membershipReadHttpStatuses);
+    }
     if (pageErrors.length || external.length) cleanupFailure ??= "PAGE_ERROR_OR_EXTERNAL_DESTINATION";
     const childOutput = Object.fromEntries(Object.entries(output).map(([name, value]) => [name, { bytes: value.bytes, sha256: value.hash.copy().digest("hex"), retained_payload: false, stream_closed: !fixtureStarted || fixtureExit !== null }]));
     try {
