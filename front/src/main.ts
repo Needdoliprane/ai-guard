@@ -141,6 +141,7 @@ let sandboxesError = "";
 let summaryErrors: string[] = [];
 let summaryLoading = false;
 let summaryRequest = 0;
+let publishedSummaryRequest = 0;
 let eventRequest = 0;
 let refreshedAt: string | null = null;
 let streamStatus: StreamStatus = "closed";
@@ -701,8 +702,10 @@ async function refreshSummary() {
     current.get<unknown>("/api/sandboxes").then(parseEntityCollection<Sandbox>),
     current.get<Integrity>("/api/integrity"),
   ]);
-  if (current !== client || request !== summaryRequest) return;
-  summaryLoading = false;
+  // Publish completed reads in request order, even while a newer one is pending.
+  if (current !== client || request <= publishedSummaryRequest) return;
+  publishedSummaryRequest = request;
+  summaryLoading = request !== summaryRequest;
   const [o, a, s, i] = result;
   if (o.status === "fulfilled") {
     overview = o.value;
