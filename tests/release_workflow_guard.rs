@@ -271,11 +271,11 @@ fn frontend_archive_keeps_its_vite_attribution_requirement() {
 #[test]
 fn release_listing_requires_one_directory_root_and_unique_ordinary_members() {
     let directory = "drwxr-xr-x 0/0 0 2026-11-23 00:00 release/\n";
+    let subdirectory = "drwxr-xr-x 0/0 0 2026-11-23 00:00 release/manifest/\n";
     let regular = "-rw-r--r-- 0/0 1 2026-11-23 00:00 release/README.txt\n";
     let members = concat!(
         "-rw-r--r-- 0/0 1 2026-11-23 00:00 release/BUILD-INFO\n",
         "-rw-r--r-- 0/0 1 2026-11-23 00:00 release/LICENSE\n",
-        "drwxr-xr-x 0/0 0 2026-11-23 00:00 release/manifest/\n",
         "-rw-r--r-- 0/0 1 2026-11-23 00:00 release/manifest/release-manifest.json\n",
         "-rw-r--r-- 0/0 1 2026-11-23 00:00 release/manifest/sbom.cdx.json\n",
         "-rw-r--r-- 0/0 1 2026-11-23 00:00 release/manifest/SHA256SUMS\n",
@@ -291,14 +291,15 @@ fn release_listing_requires_one_directory_root_and_unique_ordinary_members() {
             .output()
             .expect("bash")
     };
-    let valid = format!("{directory}{members}{regular}");
+    let contents = format!("{subdirectory}{members}{regular}");
+    let valid = format!("{directory}{contents}");
     assert!(check(&valid).status.success());
 
     for (case, listing) in [
-        ("missing root", members.into()),
+        ("missing root", contents.clone()),
         (
             "non-directory root",
-            format!("-rw-r--r-- 0/0 1 2026-11-23 00:00 release\n{members}"),
+            format!("-rw-r--r-- 0/0 1 2026-11-23 00:00 release\n{contents}"),
         ),
         ("duplicate root", format!("{directory}{valid}")),
         ("duplicate member", format!("{valid}{regular}")),
@@ -306,6 +307,13 @@ fn release_listing_requires_one_directory_root_and_unique_ordinary_members() {
             "unsupported member kind",
             format!("{valid}?rw-r--r-- 0/0 1 2026-11-23 00:00 release/other\n"),
         ),
+        (
+            "non-directory parent",
+            format!(
+                "{directory}-rw-r--r-- 0/0 1 2026-11-23 00:00 release/manifest\n{members}{regular}"
+            ),
+        ),
+        ("missing parent", format!("{directory}{members}{regular}")),
     ] {
         assert!(!check(&listing).status.success(), "accepted {case}");
     }
