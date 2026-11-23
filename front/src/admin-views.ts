@@ -41,7 +41,10 @@ abstract class AdminView<T> {
   start() { void this.read(); }
   /** For the host, on an explicit action of the person; a read in flight answers instead. */
   refresh() { return this.read(); }
-  protected focusRefresh() { this.#refresh.focus({ preventScroll: true }); }
+  protected focusRefresh(scroll?: ScrollIntoViewOptions) {
+    this.#refresh.focus({ preventScroll: true });
+    if (scroll) this.#refresh.scrollIntoView(scroll);
+  }
   close() { this.#closed = true; this.#controller?.abort(); this.#controller = null; this.value = null; this.element.replaceChildren(); }
   protected abstract fetch(signal: AbortSignal): Promise<T>;
   protected abstract render(value: T): HTMLElement[];
@@ -128,7 +131,7 @@ export class MembershipsView extends AdminView<MembershipRead> {
     const replacement = this.element.querySelector<HTMLElement>(`[data-membership-page="${direction}"]`) ??
       this.element.querySelector<HTMLElement>("[data-membership-page]");
     if (replacement) replacement.focus({ preventScroll: this.reading });
-    else this.focusRefresh();
+    else this.focusRefresh({ block: "center", inline: "nearest", behavior: "instant" });
   }
   protected render({ page, position: { cursor, history } }: MembershipRead) {
     const table = el("table", "ov-groups");
