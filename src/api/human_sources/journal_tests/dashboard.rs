@@ -382,9 +382,11 @@ async fn owned_dashboard_relays_the_delegated_membership_change_and_gateway_rece
                         assert_eq!(received.as_ref(), conflicting.as_slice());
                         (
                             StatusCode::CONFLICT,
-                            axum::Json(
-                                json!({"error":{"code":"conflict","retry_action":"reread"}}),
-                            ),
+                            axum::Json(json!({"error":{
+                                "code":"conflict",
+                                "message":"The membership revision changed.",
+                                "retry_action":"reread"
+                            }})),
                         )
                     }
                 }
@@ -443,7 +445,8 @@ async fn owned_dashboard_relays_the_delegated_membership_change_and_gateway_rece
         }
     }
 
-    let oversized = vec![b' '; 4097];
+    let mut oversized = body.clone();
+    oversized.resize(4097, b' ');
     let extra_field = serde_json::to_vec(&json!({
         "operation_id": OPERATION, "expected_revision": "1", "capabilities": ["read_metadata"],
         "active": false, "reason": "test annotation"

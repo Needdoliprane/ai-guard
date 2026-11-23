@@ -988,7 +988,6 @@ async fn owned_membership_post_on_format15_requires_an_admin_and_returns_the_dur
     let (bearer, membership_id) = {
         let source = bundle.owner.source_token(descriptor.source_id).unwrap();
         let store = bundle.stores.get(&descriptor.source_id).unwrap();
-        let epoch = bundle.owner.try_write_epoch().unwrap();
         let provision = |display_name: &str, capabilities: &[C]| {
             let principal = PrincipalRefV1::HumanLocal {
                 installation_id: descriptor.installation_id.to_string(),
@@ -996,6 +995,7 @@ async fn owned_membership_post_on_format15_requires_an_admin_and_returns_the_dur
             };
             let bearer = generate_local_credential().unwrap();
             let membership_id = uuid::Uuid::new_v4().to_string();
+            let epoch = bundle.owner.try_write_epoch().unwrap();
             store
                 .provision_local_human_scoped(
                     &epoch,
