@@ -5,11 +5,12 @@
 // editor offers, by those same published rules, so that a person is not invited to ask for a change the control
 // refuses. The rules are stated over capabilities (what an actor may hand over); they never open a view or a read:
 // the editors themselves are offered only from the operation catalogue (`delegationOffers`).
-import { CAPABILITIES, type Capability, type HumanContext, type Principal } from "./human-model.ts";
-import { HumanApiError } from "./human-api.ts";
+import { CAPABILITIES, type Capability, type HumanContext, type HumanIdentity, type Principal } from "./human-model.ts";
+import { HumanApiError, HumanSuperseded } from "./human-api.ts";
 import { can } from "./access-model.ts";
-import { principalKey } from "./supervision-model.ts";
-import { GRANT_SHARES_MAX, SHARE_PERMISSIONS, type GrantShare, type HumanGrant, type Membership, type SharePermission } from "./admin-model.ts";
+import { grantKey, principalKey } from "./supervision-model.ts";
+import { adminUrls, membershipChangeBody, GRANT_SHARES_MAX, SHARE_PERMISSIONS, type GrantShare, type HumanGrant, type Membership,
+  type MembershipChange, type MembershipChangeReceipt, type SharePermission } from "./admin-model.ts";
 
 /** Editors offered by the catalogue of the context: granted and served, nothing else. */
 export function delegationOffers(context: HumanContext | null) {
@@ -172,6 +173,18 @@ export function shareProblems(context: HumanContext, grant: HumanGrant, draft: S
  * change or returns its receipt.
  */
 export type ChangePhase = "ready" | "sending" | "applied" | "unknown" | "conflict" | "refused" | "invalid" | "not_found";
+function changeFailure(error: unknown): Exclude<ChangePhase, "ready" | "sending" | "applied"> {
+  const status = error instanceof HumanApiError ? error.status : null;
+  if (status === 409) return "conflict";
+  if (status === 403 || status === 401) return "refused";
+  if (status === 404) return "not_found";
+  if (status === 400) return "invalid";
+  return "unknown";
+}
+export function membershipContextLost(error: unknown): boolean {
+  return error instanceof HumanApiError && error.status === 403 &&
+    ["context_required", "context_invalid", "context_expired", "context_revoked"].includes(error.code);
+}
 export interface ChangeHooks<R> {
   applied: (receipt: R) => void;
   /** 409: the membership or grant changed since it was read. The caller reads it again. */
@@ -201,17 +214,82 @@ export class ChangeFlow<R> {
       const receipt = await send(id);
       this.#pending = null; this.receipt = receipt; this.phase = "applied"; this.#hooks.applied(receipt);
     } catch (error) {
-      const status = error instanceof HumanApiError ? error.status : null;
-      if (status === 409) { this.#pending = null; this.phase = "conflict"; this.#hooks.conflict(); }
-      else if (status === 403 || status === 401) { this.#pending = null; this.phase = "refused"; this.#hooks.refused(); }
-      else if (status === 404) { this.#pending = null; this.phase = "not_found"; this.#hooks.missing?.(); }
-      else if (status === 400) { this.#pending = null; this.phase = "invalid"; }
-      // 503, 429, a network failure, a timeout, a superseded or unreadable answer: the change may have been applied.
-      else this.phase = "unknown";
+      this.phase = changeFailure(error);
+      if (this.phase !== "unknown") this.#pending = null;
+      if (this.phase === "conflict") this.#hooks.conflict();
+      if (this.phase === "refused") this.#hooks.refused();
+      if (this.phase === "not_found") this.#hooks.missing?.();
     }
     return this.phase;
   }
 }
+
+type MembershipSender = (membershipId: string, change: MembershipChange) => Promise<MembershipChangeReceipt>;
+interface PendingMembershipChange {
+  principal: string; grant: string; membershipId: string; operationId: string; body: string;
+  phase: "sending" | "unknown"; unavailable: boolean;
+}
+
+/** The dashboard owns this request independently of the editor and the context that sent it. */
+export class MembershipChangeRecovery {
+  #pending: PendingMembershipChange | null = null;
+  #offer: Pick<HumanContext, "id" | "expires_at"> | null = null;
+
+  get phase() { return this.#pending?.phase ?? null; }
+  get operationId() { return this.#pending?.operationId ?? null; }
+  get unavailable() { return this.#pending?.unavailable ?? false; }
+  withdrawOffer() { this.#offer = null; }
+  noteUnavailable() { if (this.#pending?.phase === "unknown") this.#pending.unavailable = true; }
+  clear() { this.#pending = null; this.withdrawOffer(); }
+
+  async submit(principal: Principal, context: HumanContext, membershipId: string, change: MembershipChange, send: MembershipSender) {
+    if (this.#pending || context.mode !== "administration" || !delegationOffers(context).memberships) throw new HumanSuperseded();
+    adminUrls.membershipChange(membershipId);
+    return this.#send({ principal: principalKey(principal), grant: grantKey(context), membershipId,
+      operationId: change.operation_id, body: membershipChangeBody(change), phase: "sending", unavailable: false }, send);
+  }
+  revalidate(identity: HumanIdentity, now: number) {
+    this.withdrawOffer();
+    const pending = this.#pending;
+    if (!pending) return;
+    if (principalKey(identity.principal) !== pending.principal) { this.clear(); return; }
+    const matches = identity.contexts.filter((context) => grantKey(context) === pending.grant && delegationOffers(context).memberships);
+    if (!matches.length && identity.contexts_complete) { this.clear(); return; }
+    const current = matches.filter((context) => Date.parse(context.expires_at) > now);
+    if (pending.phase === "unknown" && current.length === 1) {
+      const { id, expires_at } = current[0]!;
+      this.#offer = { id, expires_at };
+    }
+  }
+  offer(now: number) {
+    const pending = this.#pending; const offer = this.#offer;
+    if (pending?.phase !== "unknown" || !offer || Date.parse(offer.expires_at) <= now) return null;
+    return { contextId: offer.id, expiresAt: offer.expires_at, membershipId: pending.membershipId,
+      change: JSON.parse(pending.body) as MembershipChange };
+  }
+  async retry(now: number, send: (contextId: string, membershipId: string, change: MembershipChange) => Promise<MembershipChangeReceipt>) {
+    const offer = this.offer(now);
+    if (!offer || !this.#pending) return null;
+    return this.#send({ ...this.#pending, phase: "sending" }, (id, change) => send(offer.contextId, id, change));
+  }
+  async #send(pending: PendingMembershipChange, send: MembershipSender) {
+    this.#pending = pending; this.withdrawOffer();
+    try {
+      const receipt = await send(pending.membershipId, JSON.parse(pending.body) as MembershipChange);
+      if (this.#pending === pending) this.clear();
+      return receipt;
+    } catch (error) {
+      if (this.#pending === pending) {
+        if (changeFailure(error) === "unknown" || membershipContextLost(error)) {
+          pending.phase = "unknown";
+          pending.unavailable = error instanceof HumanApiError && error.status === 503;
+        } else this.clear();
+      }
+      throw error;
+    }
+  }
+}
+
 export const CHANGE_PHASE_TEXT: Readonly<Record<Exclude<ChangePhase, "ready" | "applied">, string>> = {
   sending: "Envoi du changement au contrôle…",
   unknown: "Résultat inconnu : réessayer reprend la même opération.",
