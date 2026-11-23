@@ -39,7 +39,7 @@ fn api_profile(id: &str, path: &str) -> Value {
     })
 }
 
-async fn check(config: &Path, providers: Option<&Path>, args: &[&str]) -> Output {
+async fn check(config: &Path, providers: Option<&Path>, args: &[&str], json: bool) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_agentsandbox"));
     command
         .env_clear()
@@ -47,9 +47,12 @@ async fn check(config: &Path, providers: Option<&Path>, args: &[&str]) -> Output
         .env("XDG_CONFIG_HOME", config)
         .current_dir(config)
         .kill_on_drop(true)
-        .args(["providers", "check", "--json", "--config-dir"])
+        .args(["providers", "check", "--config-dir"])
         .arg(config)
         .args(args);
+    if json {
+        command.arg("--json");
+    }
     if let Some(providers) = providers {
         command.arg("--providers-file").arg(providers);
     }
@@ -62,6 +65,9 @@ async fn check(config: &Path, providers: Option<&Path>, args: &[&str]) -> Output
         assert!(!data.contains(PRIVATE_FILE_MARKER));
         assert!(!data.contains(CONTENT_MARKER));
         assert!(!data.contains(config.to_str().unwrap()));
+        if let Some(path) = providers {
+            assert!(!data.contains(path.to_str().unwrap()));
+        }
     }
     output
 }
@@ -102,22 +108,18 @@ async fn checks_the_selected_reference_relative_to_the_explicit_profiles_file() 
         }))
         .unwrap(),
     );
+    let selection = [
+        "--client",
+        "codex",
+        "--auth-mode",
+        "api",
+        "--client-profile",
+        "codex-api",
+        "--model",
+        "fixture-explicit-model",
+    ];
     let result = report(
-        check(
-            &config,
-            Some(&providers),
-            &[
-                "--client",
-                "codex",
-                "--auth-mode",
-                "api",
-                "--client-profile",
-                "codex-api",
-                "--model",
-                "fixture-explicit-model",
-            ],
-        )
-        .await,
+        check(&config, Some(&providers), &selection, true).await,
         "present_unverified",
     );
     assert_eq!(result["profile_id"], "codex-api");
@@ -128,6 +130,32 @@ async fn checks_the_selected_reference_relative_to_the_explicit_profiles_file() 
     assert_eq!(result["model"], "fixture-explicit-model");
     assert_eq!(result["provenance"]["model"], "cli");
     assert_eq!(result["credential_source"], "api_env_file");
+
+    let text = check(&config, Some(&providers), &selection, false).await;
+    assert!(text.status.success() && text.stderr.is_empty());
+    let stdout = String::from_utf8(text.stdout).unwrap();
+    assert!(
+        stdout.lines().any(|line| {
+            line == "Provenance client=cli auth_mode=cli profile=profile model=cli"
+        })
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line == "Credential metadata present_unverified")
+    );
+
+    let missing_profiles = profiles.join("missing-providers.json");
+    let refusal = check(&config, Some(&missing_profiles), &selection, false).await;
+    assert!(!refusal.status.success() && refusal.stdout.is_empty());
+    let stderr = String::from_utf8(refusal.stderr).unwrap();
+    assert!(
+        stderr.contains(
+            "verify or replace the --providers-file reference and preserve existing files"
+        )
+    );
+    assert!(!stderr.contains("providers init"));
+    assert!(!missing_profiles.exists() && providers.is_file());
 }
 
 #[tokio::test]
@@ -160,6 +188,7 @@ async fn automatic_selection_reports_absent_subscription_without_falling_back_to
             &config,
             None,
             &["--client", "auto", "--auth-mode", "auto", "--interactive"],
+            true,
         )
         .await,
         "absent",
@@ -180,6 +209,7 @@ async fn automatic_selection_reports_absent_subscription_without_falling_back_to
                 "claude-subscription-legacy",
                 "--interactive",
             ],
+            true,
         )
         .await,
         "absent",
@@ -212,6 +242,7 @@ async fn automatic_selection_reports_absent_subscription_without_falling_back_to
             "--client-profile",
             "claude-subscription",
         ],
+        true,
     )
     .await;
     assert!(!conflict.status.success());
@@ -261,7 +292,7 @@ async fn marks_non_private_files_and_linked_paths_as_suspect() {
     );
     for (name, _) in cases {
         let result = report(
-            check(&config, None, &["--client-profile", name]).await,
+            check(&config, None, &["--client-profile", name], true).await,
             "suspect",
         );
         assert_eq!(result["profile_id"], name);
