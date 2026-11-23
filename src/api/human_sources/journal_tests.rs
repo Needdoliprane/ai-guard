@@ -33,8 +33,6 @@ fn invalid_membership_uploads(valid: &Value) -> Vec<(&'static str, Vec<u8>)> {
     let duplicate = format!("{{\"active\":true,{}", &object[1..]);
     let mut unknown_capability = valid.clone();
     unknown_capability["capabilities"] = json!(["unrecognized"]);
-    let mut duplicate_capability = valid.clone();
-    duplicate_capability["capabilities"] = json!(["read_metadata", "read_metadata"]);
     vec![
         ("application/json; charset", object.into_bytes()),
         ("application/json", serde_json::to_vec(&positional).unwrap()),
@@ -42,10 +40,6 @@ fn invalid_membership_uploads(valid: &Value) -> Vec<(&'static str, Vec<u8>)> {
         (
             "application/json",
             serde_json::to_vec(&unknown_capability).unwrap(),
-        ),
-        (
-            "application/json",
-            serde_json::to_vec(&duplicate_capability).unwrap(),
         ),
     ]
 }
@@ -57,7 +51,11 @@ async fn require_invalid_membership_request(response: axum::response::Response) 
         .unwrap();
     let error: Value = serde_json::from_slice(&encoded).unwrap();
     assert_eq!(error["error"]["code"], "invalid_request");
-    assert_eq!(error["error"]["retry_action"], "reduce_page");
+    assert_eq!(error["error"]["retry_action"], "retry");
+    assert_eq!(
+        error["error"]["message"],
+        "Check the membership change fields, then try again."
+    );
     assert!(error.get("audit_seq").is_none());
 }
 

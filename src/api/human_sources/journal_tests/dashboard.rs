@@ -330,7 +330,7 @@ async fn owned_dashboard_relays_the_delegated_membership_change_and_gateway_rece
     let change = json!({
         "operation_id": OPERATION,
         "expected_revision": "1",
-        "capabilities": ["read_metadata"],
+        "capabilities": ["read_metadata", "read_metadata"],
         "active": false,
     });
     let receipt = json!({

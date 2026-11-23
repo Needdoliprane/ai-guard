@@ -1150,6 +1150,8 @@ async fn owned_membership_post_on_format15_requires_an_admin_and_returns_the_dur
     let mut oversized = encoded.clone();
     oversized.resize(4097, b' ');
     let target_with_query = format!("{path}?limit=1");
+    let mut revision_overflow = body.clone();
+    revision_overflow["expected_revision"] = json!(u64::MAX.to_string());
     for invalid in [
         request(&path)
             .header("content-type", "application/json")
@@ -1158,6 +1160,10 @@ async fn owned_membership_post_on_format15_requires_an_admin_and_returns_the_dur
         request(&target_with_query)
             .header("content-type", "application/json")
             .body(Body::from(encoded))
+            .unwrap(),
+        request(&path)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&revision_overflow).unwrap()))
             .unwrap(),
     ] {
         let response = router.clone().oneshot(invalid).await.unwrap();
@@ -1188,7 +1194,9 @@ async fn owned_membership_post_on_format15_requires_an_admin_and_returns_the_dur
     assert!(audit_positions().is_empty());
 
     let (gateway, dashboard, _front) = membership_dashboard(router.clone()).await;
-    let (status, receipt) = post(&dashboard, &bearer, &path, admin_id, &body).await;
+    let mut repeated_capability = body.clone();
+    repeated_capability["capabilities"] = json!(["read_metadata", "read_metadata"]);
+    let (status, receipt) = post(&dashboard, &bearer, &path, admin_id, &repeated_capability).await;
     assert_eq!(status, StatusCode::OK, "{receipt}");
     assert_eq!(receipt["operation_id"], operation_id);
     assert_eq!(receipt["membership_id"], membership_id);
