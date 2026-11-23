@@ -181,6 +181,17 @@ function changeFailure(error: unknown): Exclude<ChangePhase, "ready" | "sending"
   if (status === 400) return "invalid";
   return "unknown";
 }
+export const MEMBERSHIP_OUTCOME_UNKNOWN = "Le résultat du premier envoi reste inconnu.";
+const MEMBERSHIP_REPLAY_REFUSAL = {
+  conflict: "Le contrôle signale un conflit. Demandez à l’opérateur de vérifier la révision.",
+  refused: "Le contrôle a refusé la reprise. Faites vérifier vos droits sur ce périmètre.",
+  not_found: "L’appartenance est introuvable dans ce périmètre. Demandez à l’opérateur de vérifier l’appartenance.",
+  invalid: "Le contrôle a refusé la demande comme invalide. Demandez à l’opérateur de vérifier la demande.",
+  unknown: "La reprise n’a pas fourni de reçu. Relisez vos accès.",
+};
+export function membershipReplayRefusal(error: unknown) {
+  return `${MEMBERSHIP_REPLAY_REFUSAL[changeFailure(error)]} ${MEMBERSHIP_OUTCOME_UNKNOWN}`;
+}
 export function membershipContextLost(error: unknown): boolean {
   return error instanceof HumanApiError && error.status === 403 &&
     ["context_required", "context_invalid", "context_expired", "context_revoked"].includes(error.code);
@@ -226,7 +237,7 @@ export class ChangeFlow<R> {
 
 type MembershipSender = (membershipId: string, change: MembershipChange) => Promise<MembershipChangeReceipt>;
 interface PendingMembershipChange {
-  principal: string; grant: string; membershipId: string; operationId: string; body: string;
+  principal: string; grant: string; tenant: string; organization: string; membershipId: string; operationId: string; body: string;
   phase: "sending" | "unknown"; unavailable: boolean;
 }
 
@@ -245,16 +256,32 @@ export class MembershipChangeRecovery {
   async submit(principal: Principal, context: HumanContext, membershipId: string, change: MembershipChange, send: MembershipSender) {
     if (this.#pending || context.mode !== "administration" || !delegationOffers(context).memberships) throw new HumanSuperseded();
     adminUrls.membershipChange(membershipId);
-    return this.#send({ principal: principalKey(principal), grant: grantKey(context), membershipId,
+    return this.#send({ principal: principalKey(principal), grant: grantKey(context), tenant: context.tenant_id, organization: context.organization_scope, membershipId,
       operationId: change.operation_id, body: membershipChangeBody(change), phase: "sending", unavailable: false }, send);
+  }
+  #equivalent(pending: PendingMembershipChange, context: HumanContext) {
+    return grantKey(context) === pending.grant && delegationOffers(context).memberships;
+  }
+  selectContext(principal: Principal | undefined, context: HumanContext) {
+    const pending = this.#pending;
+    const keep = pending?.phase === "unknown" && principal !== undefined &&
+      principalKey(principal) === pending.principal && this.#equivalent(pending, context);
+    if (keep) this.withdrawOffer();
+    else this.clear();
+    return keep;
   }
   revalidate(identity: HumanIdentity, now: number) {
     this.withdrawOffer();
     const pending = this.#pending;
     if (!pending) return;
-    if (principalKey(identity.principal) !== pending.principal) { this.clear(); return; }
-    const matches = identity.contexts.filter((context) => grantKey(context) === pending.grant && delegationOffers(context).memberships);
-    if (!matches.length && identity.contexts_complete) { this.clear(); return; }
+    if (principalKey(identity.principal) !== pending.principal) { this.clear(); return "identity_changed"; }
+    const sameScope = identity.contexts.filter((context) => context.mode === "administration" &&
+      context.tenant_id === pending.tenant && context.organization_scope === pending.organization);
+    const matches = sameScope.filter((context) => this.#equivalent(pending, context));
+    if (!matches.length && (identity.contexts_complete || sameScope.length > 0)) {
+      this.clear();
+      return "withdrawn";
+    }
     const current = matches.filter((context) => Date.parse(context.expires_at) > now);
     if (pending.phase === "unknown" && current.length === 1) {
       const { id, expires_at } = current[0]!;
@@ -264,8 +291,9 @@ export class MembershipChangeRecovery {
   offer(now: number) {
     const pending = this.#pending; const offer = this.#offer;
     if (pending?.phase !== "unknown" || !offer || Date.parse(offer.expires_at) <= now) return null;
-    return { contextId: offer.id, expiresAt: offer.expires_at, membershipId: pending.membershipId,
-      change: JSON.parse(pending.body) as MembershipChange };
+    const { expected_revision, capabilities, active } = JSON.parse(pending.body) as MembershipChange;
+    return { contextId: offer.id, expiresAt: offer.expires_at, tenant: pending.tenant, organization: pending.organization,
+      expectedRevision: expected_revision, capabilities, active };
   }
   async retry(now: number, send: (contextId: string, membershipId: string, change: MembershipChange) => Promise<MembershipChangeReceipt>) {
     const offer = this.offer(now);
