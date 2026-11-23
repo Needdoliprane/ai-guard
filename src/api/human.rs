@@ -8,7 +8,7 @@ use crate::{
     audit::{HumanEventFilterV1, HumanEventPollV1, HumanStorePageV1},
     identity::*,
 };
-use axum::extract::FromRequestParts;
+use axum::extract::{FromRequest, FromRequestParts};
 use axum::http::request::Parts;
 use serde::{Deserialize, Serialize};
 mod admin;
@@ -172,6 +172,17 @@ pub(super) fn identity_change_failure(error: anyhow::Error) -> (StatusCode, Json
         _ => store_failure(error),
     }
 }
+pub(super) fn membership_change_failure(error: anyhow::Error) -> (StatusCode, Json<Value>) {
+    if matches!(
+        error.downcast_ref::<IdentityFailureV1>(),
+        Some(IdentityFailureV1::InvalidRequest)
+    ) {
+        invalid_membership_request()
+    } else {
+        identity_change_failure(error)
+    }
+}
+
 fn context_failure(code: &str) -> (StatusCode, Json<Value>) {
     failure(
         StatusCode::FORBIDDEN,
@@ -188,6 +199,50 @@ fn invalid_request() -> (StatusCode, Json<Value>) {
         "reduce_page",
     )
 }
+
+pub(super) fn invalid_membership_request() -> (StatusCode, Json<Value>) {
+    failure(
+        StatusCode::BAD_REQUEST,
+        "invalid_request",
+        "Check the membership change fields, then try again.",
+        "retry",
+    )
+}
+
+/// Read the delegated membership request on either HTTP entry point. Keep the
+/// original bytes for the dashboard relay and let the gateway use the typed body.
+pub(super) async fn membership_change_body(
+    request: Request,
+) -> ApiResult<(axum::body::Bytes, HumanMembershipChangeV1)> {
+    let (parts, body) = request.into_parts();
+    if parts.headers.get_all(header::CONTENT_TYPE).iter().count() != 1 {
+        return Err(invalid_membership_request());
+    }
+    let bytes = tokio::time::timeout(
+        Duration::from_secs(5),
+        axum::body::to_bytes(body, MEMBERSHIP_CHANGE_BODY_MAX_BYTES),
+    )
+    .await
+    .map_err(|_| invalid_membership_request())?
+    .map_err(|_| invalid_membership_request())?;
+    // Serde's struct visitor also accepts sequences. The HTTP contract is an
+    // object, with the typed parse still checking duplicate and unknown keys.
+    if bytes
+        .iter()
+        .copied()
+        .find(|byte| !byte.is_ascii_whitespace())
+        != Some(b'{')
+    {
+        return Err(invalid_membership_request());
+    }
+    let buffered = Request::from_parts(parts, Body::from(bytes.clone()));
+    let Json(change) = Json::<HumanMembershipChangeV1>::from_request(buffered, &())
+        .await
+        .map_err(|_| invalid_membership_request())?;
+    crate::control::uuid(&change.operation_id).map_err(|_| invalid_membership_request())?;
+    Ok((bytes, change))
+}
+
 fn invalid_cursor() -> (StatusCode, Json<Value>) {
     failure(
         StatusCode::BAD_REQUEST,
@@ -898,9 +953,11 @@ pub(super) fn routes() -> Router<GatewayState> {
         )
         .route(
             "/human/admin/memberships/{membership_id}",
-            post(admin::change_membership).layer(axum::extract::DefaultBodyLimit::max(
-                MEMBERSHIP_CHANGE_BODY_MAX_BYTES,
-            )),
+            post(admin::change_membership),
+        )
+        .route(
+            "/human/owned/admin/memberships/{membership_id}",
+            post(admin::change_owned_membership),
         )
         .route("/human/admin/configuration", get(admin::configuration))
         .route("/human/resources", get(resources))

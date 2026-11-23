@@ -360,6 +360,29 @@ pub(super) async fn configuration(
     .await
 }
 
+/// The dashboard relays to this owned-only route. Reject the legacy profile
+/// before authenticating or reading any part of the submission body.
+pub(super) async fn change_owned_membership(
+    State(state): State<GatewayState>,
+    request: Request,
+) -> ApiResult<Json<HumanMembershipChangeReceiptV1>> {
+    if state.owned_human.is_none() {
+        return Err(super::super::human_sources::unavailable());
+    }
+    let (mut parts, body) = request.into_parts();
+    let proof = VerifiedHuman::from_request_parts(&mut parts, &state).await?;
+    let path = Path::<String>::from_request_parts(&mut parts, &state).await;
+    let headers = parts.headers.clone();
+    change_membership(
+        proof,
+        State(state),
+        headers,
+        path,
+        Request::from_parts(parts, body),
+    )
+    .await
+}
+
 /// `POST /api/v1/human/admin/memberships/{membership_id}`: a delegated change
 /// of one existing membership of the reader's organization. The authenticated
 /// administrator is the actor; the identity mutation and its audit are durable
@@ -370,14 +393,15 @@ pub(super) async fn change_membership(
     proof: VerifiedHuman,
     State(state): State<GatewayState>,
     headers: HeaderMap,
-    axum::extract::Path(membership_id): axum::extract::Path<String>,
-    body: Result<Json<HumanMembershipChangeV1>, axum::extract::rejection::JsonRejection>,
+    path: Result<Path<String>, axum::extract::rejection::PathRejection>,
+    request: Request,
 ) -> ApiResult<Json<HumanMembershipChangeReceiptV1>> {
-    let Json(change) = body.map_err(|_| invalid_request())?;
+    let Path(membership_id) = path.map_err(|_| invalid_membership_request())?;
+    let (_, change) = membership_change_body(request).await?;
     let expected_revision: u64 = change
         .expected_revision
         .parse()
-        .map_err(|_| invalid_request())?;
+        .map_err(|_| invalid_membership_request())?;
     let selected = headers.clone();
     run_human(&state, &proof, Some(&selected), move |state, proof| {
         let (_, tenant, scope) = selected_context(&state, &proof, &headers)?;
@@ -389,7 +413,7 @@ pub(super) async fn change_membership(
             (Some(_), _) => return Err(super::super::human_sources::unavailable()),
             (None, _) => store
                 .human_change_membership(&scope, &membership_id, &change)
-                .map_err(identity_change_failure)?,
+                .map_err(membership_change_failure)?,
         };
         // The change bumped the authorization revision, so the selecting
         // context is no longer current: publication checks the credential.

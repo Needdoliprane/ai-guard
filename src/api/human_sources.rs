@@ -354,7 +354,7 @@ impl OwnedHumanGateway {
                 return Err(unavailable());
             }
             epoch.validate_source(source).map_err(|_| unavailable())?;
-            let (receipt, next) = result.map_err(human::identity_change_failure)?;
+            let (receipt, next) = result.map_err(human::membership_change_failure)?;
             self.check()?;
             if let Some(next) = next {
                 generation.store(Arc::new(next));
@@ -653,6 +653,23 @@ mod owned_policy_tests;
 pub(super) mod tests;
 
 const HUMAN_EVENT_DETAIL_PATH: &str = "/api/v1/human/events/{id}";
+pub(super) const HUMAN_MEMBERSHIP_CHANGE_PATH: &str =
+    "/api/v1/human/admin/memberships/{membership_id}";
+pub(super) const HUMAN_OWNED_MEMBERSHIP_CHANGE_PATH: &str =
+    "/api/v1/human/owned/admin/memberships/{membership_id}";
+
+pub(super) fn membership_change_id<'a>(
+    uri: &'a axum::http::Uri,
+    template: &str,
+) -> Option<&'a str> {
+    if uri.query().is_some() {
+        return None;
+    }
+    let prefix = template.strip_suffix("{membership_id}")?;
+    uri.path()
+        .strip_prefix(prefix)
+        .filter(|id| crate::control::uuid(id).is_ok())
+}
 
 const OWNED_HUMAN_GET_PATHS: &[&str] = &[
     "/api/v1/human/admin/configuration",
@@ -738,6 +755,7 @@ const REGISTERED_ROUTES: &[(&str, &[&str])] = &[
     // The S6 POST on this path still uses the existing mutation handler.
     ("/api/v1/human/admin/grants", &["GET", "HEAD"]),
     ("/api/v1/human/admin/memberships", &["GET", "HEAD"]),
+    (HUMAN_MEMBERSHIP_CHANGE_PATH, &["POST"]),
     ("/api/v1/human/admin/quota", &["GET", "HEAD"]),
     ("/api/v1/human/admin/usage", &["GET", "HEAD"]),
     ("/api/v1/human/brokers", &["GET", "HEAD"]),
@@ -747,6 +765,7 @@ const REGISTERED_ROUTES: &[(&str, &[&str])] = &[
     ("/api/v1/human/export", &["GET", "HEAD"]),
     ("/api/v1/human/federation/workers", &["GET", "HEAD"]),
     ("/api/v1/human/identity", &["GET", "HEAD"]),
+    (HUMAN_OWNED_MEMBERSHIP_CHANGE_PATH, &["POST"]),
     ("/api/v1/human/owned/brokers", &["GET", "HEAD"]),
     ("/api/v1/human/resources", &["GET", "HEAD"]),
     ("/api/v1/human/stream", &["GET", "HEAD"]),
@@ -830,6 +849,18 @@ pub(super) async fn route_gate(
     let known =
         template.and_then(|template| REGISTERED_ROUTES.iter().find(|(path, _)| *path == template));
     if !known.is_some_and(|(_, methods)| methods.contains(&request.method().as_str())) {
+        return next.run(request).await;
+    }
+    if let Some(membership_template) = template.filter(|path| {
+        request.method() == "POST"
+            && matches!(
+                *path,
+                HUMAN_MEMBERSHIP_CHANGE_PATH | HUMAN_OWNED_MEMBERSHIP_CHANGE_PATH
+            )
+    }) {
+        if membership_change_id(request.uri(), membership_template).is_none() {
+            return human::invalid_membership_request().into_response();
+        }
         return next.run(request).await;
     }
     let path = request.uri().path();

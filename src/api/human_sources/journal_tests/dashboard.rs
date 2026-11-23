@@ -2,12 +2,32 @@ use super::races::{connection, context, snapshot, state};
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 
-struct LoopbackGateway {
+pub(super) struct LoopbackGateway {
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
 }
 impl LoopbackGateway {
-    async fn close(mut self) {
+    pub(super) async fn start(router: Router) -> (Self, std::net::SocketAddr) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async {
+                    let _ = stopped.await;
+                })
+                .await
+        });
+        (
+            Self {
+                stop: Some(stop),
+                task: Some(task),
+            },
+            address,
+        )
+    }
+
+    pub(super) async fn close(mut self) {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }
@@ -38,9 +58,6 @@ async fn owned_dashboard_events_metadata_forwards_exact_get_without_identity_pro
     let fixture = Fixture::new_owned();
     let event = seed_event(&fixture, "B", "owned-dashboard-b", fixture.principal());
     let state = state(&fixture);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let (stop, stopped) = tokio::sync::oneshot::channel();
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = calls.clone();
     let router = gateway_router(state.clone()).layer(axum::middleware::from_fn(
@@ -49,17 +66,7 @@ async fn owned_dashboard_events_metadata_forwards_exact_get_without_identity_pro
             async move { next.run(request).await }
         },
     ));
-    let task = tokio::spawn(async move {
-        axum::serve(listener, router)
-            .with_graceful_shutdown(async {
-                let _ = stopped.await;
-            })
-            .await
-    });
-    let server = LoopbackGateway {
-        stop: Some(stop),
-        task: Some(task),
-    };
+    let (server, address) = LoopbackGateway::start(router).await;
     let front = tempfile::Builder::new()
         .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir()
@@ -238,20 +245,7 @@ async fn owned_read_proxy(
                 StatusCode::SERVICE_UNAVAILABLE
             }
         });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let (stop, stopped) = tokio::sync::oneshot::channel();
-    let task = tokio::spawn(async move {
-        axum::serve(listener, router)
-            .with_graceful_shutdown(async {
-                let _ = stopped.await;
-            })
-            .await
-    });
-    let server = LoopbackGateway {
-        stop: Some(stop),
-        task: Some(task),
-    };
+    let (server, address) = LoopbackGateway::start(router).await;
     let front = tempfile::Builder::new()
         .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir()
@@ -325,6 +319,227 @@ async fn owned_dashboard_quota_forwards_exact_get_context_and_gateway_refusal_wi
 async fn owned_dashboard_usage_forwards_exact_get_context_and_gateway_refusal_without_identity_probe()
  {
     require_owned_get_is_relayed("/api/v1/human/admin/usage", Some("limit=25")).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owned_dashboard_relays_the_delegated_membership_change_and_gateway_receipt() {
+    const MEMBERSHIP: &str = "a20b685f-76bb-4d65-90de-a1d2e4cbbbea";
+    const OPERATION: &str = "915e4e07-26a2-4d71-a45f-3b602a8dcf93";
+    let path = format!("/api/v1/human/admin/memberships/{MEMBERSHIP}");
+    let upstream_path = format!("/api/v1/human/owned/admin/memberships/{MEMBERSHIP}");
+    let change = json!({
+        "operation_id": OPERATION,
+        "expected_revision": "1",
+        "capabilities": ["read_metadata", "read_metadata"],
+        "active": false,
+    });
+    let receipt = json!({
+        "version": 1,
+        "operation_id": OPERATION,
+        "membership_id": MEMBERSHIP,
+        "membership_revision": "2",
+        "authorization_revision": "4",
+        "audit_seq": "12",
+    });
+    let body = format!(" \n{}", serde_json::to_string(&change).unwrap()).into_bytes();
+    let expected_body = body.clone();
+    let mut changed = change.clone();
+    changed["active"] = json!(true);
+    let conflicting = serde_json::to_vec(&changed).unwrap();
+    let conflicting_body = conflicting.clone();
+    let upstream_receipt = receipt.clone();
+    let reached = Arc::new(AtomicUsize::new(0));
+    let seen = reached.clone();
+    let unexpected = Arc::new(AtomicUsize::new(0));
+    let other = unexpected.clone();
+    let upstream = Router::new()
+        .route(
+            &upstream_path,
+            axum::routing::post(move |request: axum::extract::Request| {
+                let body = expected_body.clone();
+                let conflicting = conflicting_body.clone();
+                let receipt = upstream_receipt.clone();
+                let seen = seen.clone();
+                async move {
+                    assert!(request.uri().query().is_none());
+                    let headers = request.headers();
+                    assert_eq!(headers.get_all("authorization").iter().count(), 1);
+                    assert_eq!(
+                        headers["authorization"].to_str().unwrap(),
+                        format!("Bearer {OWNED_PROXY_BEARER}")
+                    );
+                    assert_eq!(headers.get_all("x-aiguard-context").iter().count(), 1);
+                    assert_eq!(headers["x-aiguard-context"], OWNED_PROXY_CONTEXT);
+                    assert_eq!(headers["content-type"], "application/json");
+                    assert!(!headers.contains_key("cookie"));
+                    assert!(!headers.contains_key("x-tenant-id"));
+                    let received = axum::body::to_bytes(request.into_body(), 4096)
+                        .await
+                        .unwrap();
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    if received.as_ref() == body.as_slice() {
+                        (StatusCode::OK, axum::Json(receipt))
+                    } else {
+                        assert_eq!(received.as_ref(), conflicting.as_slice());
+                        (
+                            StatusCode::CONFLICT,
+                            axum::Json(json!({"error":{
+                                "code":"conflict",
+                                "message":"The membership revision changed.",
+                                "retry_action":"reread"
+                            }})),
+                        )
+                    }
+                }
+            }),
+        )
+        .fallback(move || {
+            let other = other.clone();
+            async move {
+                other.fetch_add(1, Ordering::SeqCst);
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+        });
+    let (server, address) = LoopbackGateway::start(upstream).await;
+    let front = tempfile::tempdir().unwrap();
+    let dashboard = dashboard_router_with_human_mode(
+        &format!("http://{address}"),
+        None,
+        front.path().to_owned(),
+        None,
+        true,
+    )
+    .unwrap();
+    let request = |target: &str| {
+        axum::http::Request::post(target)
+            .header("authorization", format!("Bearer {OWNED_PROXY_BEARER}"))
+            .header("content-type", "application/json; charset=utf-8")
+    };
+    let with_context =
+        |target: &str| request(target).header("x-aiguard-context", OWNED_PROXY_CONTEXT);
+    for (expected_status, submitted) in [
+        (StatusCode::OK, &body),
+        (StatusCode::CONFLICT, &conflicting),
+    ] {
+        let response = dashboard
+            .clone()
+            .oneshot(
+                with_context(&path)
+                    .header("cookie", "unrelated=synthetic")
+                    .header("x-tenant-id", "unrelated")
+                    .body(Body::from(submitted.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected_status);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let encoded = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&encoded).unwrap();
+        if expected_status == StatusCode::OK {
+            assert_eq!(value, receipt);
+        } else {
+            assert_eq!(value["error"]["code"], "conflict");
+            assert_eq!(value["error"]["retry_action"], "reread");
+        }
+    }
+
+    let mut oversized = body.clone();
+    oversized.resize(4097, b' ');
+    let extra_field = serde_json::to_vec(&json!({
+        "operation_id": OPERATION, "expected_revision": "1", "capabilities": ["read_metadata"],
+        "active": false, "reason": "test annotation"
+    }))
+    .unwrap();
+    for (request, content, status) in [
+        (request(&path), body.clone(), StatusCode::FORBIDDEN),
+        (
+            with_context(&path).header("x-aiguard-context", OWNED_PROXY_CONTEXT),
+            body.clone(),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            with_context(&path).header("authorization", format!("Bearer {OWNED_PROXY_BEARER}")),
+            body.clone(),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (with_context(&path), oversized, StatusCode::BAD_REQUEST),
+        (with_context(&path), extra_field, StatusCode::BAD_REQUEST),
+        (
+            with_context(&format!("{path}?limit=1")),
+            body.clone(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            with_context(&format!(
+                "/api/v1/human/admin/memberships/{}",
+                MEMBERSHIP.to_uppercase()
+            )),
+            body.clone(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            with_context("/api/v1/human/admin/grants"),
+            body.clone(),
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            with_context(&upstream_path),
+            body.clone(),
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            with_context(&path.replace("/api/v1/", "/api/")),
+            body.clone(),
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            axum::http::Request::get(&path),
+            Vec::new(),
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+    ] {
+        let response = dashboard
+            .clone()
+            .oneshot(request.body(Body::from(content)).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        if status == StatusCode::BAD_REQUEST {
+            require_invalid_membership_request(response).await;
+        }
+    }
+    for (content_type, content) in invalid_membership_uploads(&change) {
+        let mut request = with_context(&path);
+        request
+            .headers_mut()
+            .unwrap()
+            .insert("content-type", HeaderValue::from_static(content_type));
+        let response = dashboard
+            .clone()
+            .oneshot(request.body(Body::from(content)).unwrap())
+            .await
+            .unwrap();
+        require_invalid_membership_request(response).await;
+    }
+    let legacy = dashboard_router_with_human_mode(
+        &format!("http://{address}"),
+        None,
+        front.path().to_owned(),
+        None,
+        false,
+    )
+    .unwrap();
+    let response = legacy
+        .oneshot(with_context(&path).body(Body::from(body)).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(reached.load(Ordering::SeqCst), 2);
+    assert_eq!(unexpected.load(Ordering::SeqCst), 0);
+    server.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

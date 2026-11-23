@@ -507,12 +507,23 @@ async fn modern_route_matrix_closes_before_body_extractors_and_store() {
             {
                 continue;
             }
+            let expected = if [
+                HUMAN_MEMBERSHIP_CHANGE_PATH,
+                "/api/v1/human/owned/admin/memberships/{membership_id}",
+            ]
+            .contains(path)
+            {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            };
             // OIDC selected in the real fixture: even OIDC status is closed.
             let path = path
                 .replace("{id}", "synthetic")
                 .replace("{create_id}", "synthetic")
                 .replace("{operation_id}", "synthetic")
-                .replace("{arm_id}", "synthetic");
+                .replace("{arm_id}", "synthetic")
+                .replace("{membership_id}", "synthetic");
             let request = axum::http::Request::builder()
                 .method(*method)
                 .uri(&path)
@@ -525,11 +536,7 @@ async fn modern_route_matrix_closes_before_body_extractors_and_store() {
                     .await
                     .unwrap()
                     .unwrap();
-            assert_eq!(
-                response.status(),
-                StatusCode::SERVICE_UNAVAILABLE,
-                "{method} {path}"
-            );
+            assert_eq!(response.status(), expected, "{method} {path}");
             assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
             if path == "/api/v1/events/batch" {
                 let body = axum::body::to_bytes(response.into_body(), 4096)

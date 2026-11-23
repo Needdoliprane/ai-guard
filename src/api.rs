@@ -1901,7 +1901,7 @@ pub fn dashboard_router_with_human_mode(
             .no_proxy()
             .build()?,
     };
-    Ok(Router::new()
+    let router = Router::new()
         .route(
             "/healthz",
             get(|| async { Json(json!({"status":"ok","service":"dashboard"})) }),
@@ -1911,7 +1911,16 @@ pub fn dashboard_router_with_human_mode(
             "/api/v1/gateway/status",
             get(dashboard_gateway_build_status),
         )
-        .route("/api/{*path}", get(dashboard_proxy))
+        .route("/api/{*path}", get(dashboard_proxy));
+    let router = if owned_sources {
+        router.route(
+            human_sources::HUMAN_MEMBERSHIP_CHANGE_PATH,
+            post(dashboard_proxy),
+        )
+    } else {
+        router
+    };
+    Ok(router
         .route("/auth/oidc/status", get(dashboard_oidc_proxy))
         .route("/auth/oidc/start", post(dashboard_oidc_proxy))
         .route("/auth/oidc/callback", get(dashboard_oidc_proxy))
@@ -2175,6 +2184,7 @@ async fn dashboard_oidc_proxy(
     }
     Ok(response)
 }
+
 async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> ApiResult<Response> {
     let path = request.uri().path();
     let canonical_path = path
@@ -2182,7 +2192,21 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
         .map(|suffix| format!("/api/{suffix}"))
         .unwrap_or_else(|| path.to_owned());
     let versioned_human = path.starts_with("/api/v1/human/");
-    if s.owned_sources {
+    // This is the only POST admitted by this proxy. Require its exact target
+    // independently of the router, before extracting any headers or body.
+    let membership_id = if s.owned_sources && request.method() == "POST" {
+        Some(
+            human_sources::membership_change_id(
+                request.uri(),
+                human_sources::HUMAN_MEMBERSHIP_CHANGE_PATH,
+            )
+            .ok_or_else(human::invalid_membership_request)?,
+        )
+    } else {
+        None
+    };
+    let membership_change = membership_id.is_some();
+    if s.owned_sources && !membership_change {
         let owned_static_path = [
             "/api/v1/human/identity",
             "/api/v1/human/resources",
@@ -2207,10 +2231,9 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
             return Err(human_sources::unavailable());
         }
     }
-    let human_path = versioned_human && human_dashboard_path(&canonical_path);
+    let human_path = membership_change || versioned_human && human_dashboard_path(&canonical_path);
     let federation_path = path == "/api/v1/federation/workers";
-    // This proxy forwards no body: a human mutation is never relayed here.
-    if human_path && request.method() != "GET" {
+    if human_path && request.method() != "GET" && !membership_change {
         return Err(human::failure(
             StatusCode::METHOD_NOT_ALLOWED,
             "method_not_allowed",
@@ -2278,8 +2301,14 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
         verify_dashboard_viewer(&s, &token).await?;
     }
     let mut url = s.upstream.clone();
-    url.set_path(request.uri().path());
-    url.set_query(request.uri().query());
+    if let Some(id) = membership_id {
+        let owned_path =
+            human_sources::HUMAN_OWNED_MEMBERSHIP_CHANGE_PATH.replace("{membership_id}", id);
+        url.set_path(&owned_path);
+    } else {
+        url.set_path(path);
+        url.set_query(request.uri().query());
+    }
     let mut call = s
         .client
         .request(request.method().clone(), url)
@@ -2294,7 +2323,18 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
         ));
         let mut contexts = request.headers().get_all("x-aiguard-context").iter();
         if let Some(context) = contexts.next() {
-            if contexts.next().is_some() || context.as_bytes().len() > 4096 {
+            if contexts.next().is_some()
+                || context.as_bytes().len() > 4096
+                || membership_change && context.to_str().ok().is_none_or(str::is_empty)
+            {
+                if membership_change {
+                    return Err(human::failure(
+                        StatusCode::FORBIDDEN,
+                        "context_invalid",
+                        "Select a current authorized context.",
+                        "select_context",
+                    ));
+                }
                 return Err(human::failure(
                     StatusCode::BAD_REQUEST,
                     "invalid_request",
@@ -2303,9 +2343,23 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
                 ));
             }
             call = call.header("x-aiguard-context", context);
+        } else if membership_change {
+            return Err(human::failure(
+                StatusCode::FORBIDDEN,
+                "context_required",
+                "Select a current authorized context.",
+                "select_context",
+            ));
         }
     }
-    if let Some(cursor) = request.headers().get("last-event-id") {
+    if membership_change {
+        let (body, _) = human::membership_change_body(request).await?;
+        // Forward the exact change and its operation ID. The gateway rechecks
+        // the bearer, selected context, stored subject and current authority.
+        call = call
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body);
+    } else if let Some(cursor) = request.headers().get("last-event-id") {
         call = call.header("last-event-id", cursor);
     }
     let upstream = call.send().await.map_err(|_| {
