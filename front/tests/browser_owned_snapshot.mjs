@@ -14,10 +14,13 @@ import { saveBrowserFailure } from "./browser_failure.mjs";
 process.umask(0o077);
 const fixtureMode = process.env.AI_GUARD_OWNED_BROWSER_FIXTURE;
 const egressMode = fixtureMode === "run-egress-v1";
+const workersMode = fixtureMode === "run-workers-v1";
 const FQN = egressMode
   ? "api::human_sources::tests::owned_browser_fixture::egress::serve_owned_egress_browser_fixture"
   : "api::human_sources::tests::owned_browser_fixture::serve_owned_browser_fixture";
 const PRIVATE_CONTENT = "owned-browser-private-content-must-not-appear-in-metadata";
+const workersPath = "/api/v1/human/workers";
+const workerReceiptKind = "control.identity.workers.access";
 const QUIET_MS = 33000; // Actual time, covers the existing30s dashboard cycle.
 const must = (condition, code) => { if (!condition) throw new Error(code); };
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -98,6 +101,7 @@ async function save(name, value) {
 function publishTerminalResult() {
   terminalResult.status = interrupted ? "FAIL_NOT_QUALIFIED" : !fixtureStarted ? "BLOCKED_NOT_RUN"
     : failure || cleanupFailure ? "FAIL_NOT_QUALIFIED"
+    : workersMode ? "PASS_OWNED_WORKER_REGISTRY"
     : egressMode ? "PASS_OWNED_EGRESS_JOURNAL" : "PASS_THREE_BOUNDED_OWNED_SCENARIOS";
   terminalResult.interrupted = interrupted;
   terminalResult.interruption = interrupted ? { code: "INTERRUPTED", signal: interruptionSignal } : null;
@@ -182,9 +186,16 @@ function validateReady(value) {
   const url = new URL(value.dashboard_url);
   must(url.protocol === "http:" && url.hostname === "127.0.0.1" && Number(url.port) > 0 && !url.username && !url.password && url.pathname === "/" && !url.search && !url.hash, "READY_LOOPBACK_URL");
   if (egressMode) return validateEgressReady(value);
-  closed(value, ["version", "dashboard_url", "bearer_b", "tenant_id", "resource", "event_ids", "budget_seconds", "commands", "acks", "command_limit"], "READY_CLOSED");
+  const fields = ["version", "dashboard_url", "bearer_b", "tenant_id", "budget_seconds", "commands", "acks", "command_limit"];
+  closed(value, [...fields, ...(workersMode ? ["mode", "worker"] : ["resource", "event_ids"])], "READY_CLOSED");
   must(value.tenant_id === "B", "READY_PROFILE");
   must(typeof value.bearer_b === "string" && /^aigh1_[0-9a-f]{64}$/.test(value.bearer_b), "READY_FIXTURE_BEARER");
+  if (workersMode) {
+    must(value.mode === "worker_registry", "READY_WORKER_MODE");
+    closed(value.worker, ["worker_id", "attempt_id", "session_id"], "READY_RESERVED_WORKER");
+    must(Object.values(value.worker).every(uuid), "READY_RESERVED_WORKER_IDS");
+    return value;
+  }
   closed(value.resource, ["kind", "resource_id"], "READY_RESOURCE");
   must(value.resource.kind === "session" && value.resource.resource_id === "owned-browser-session-b", "READY_RESOURCE_SCOPE");
   must(Array.isArray(value.event_ids) && value.event_ids.length === 2 && new Set(value.event_ids).size === 2 && value.event_ids.every((id) => typeof id === "string" && /^[0-9a-f-]{36}$/.test(id)), "READY_EVENTS");
@@ -195,6 +206,7 @@ const eventDetailPrefix = "/api/v1/human/events/";
 function pageAction(path) {
   const pathname = new URL(path, "http://fixture.invalid").pathname;
   if (pathname.startsWith(eventDetailPrefix) && uuid(pathname.slice(eventDetailPrefix.length))) return "event";
+  if (pathname === workersPath) return workerReceiptKind;
   return ({ "/api/v1/human/resources": "resources", "/api/v1/human/events": "events", "/api/v1/human/events/recent": "events" })[pathname] ?? null;
 }
 function requiredReceipt(body) {
@@ -510,9 +522,46 @@ async function runOwnedSnapshot() {
   must(pageErrors.length === 0 && external.length === 0, "PAGE_ERROR_OR_EXTERNAL_DESTINATION");
 }
 
+async function runOwnedWorkers() {
+  await page.getByLabel("Type d’accès").selectOption("human");
+  await page.getByLabel("Credential personnel local").fill(bearer);
+  const identity = await readByAction("/api/v1/human/identity", 200, () => button("Ouvrir mon espace").click());
+  await heading("Choisir un contexte.").waitFor({ timeout: remaining() });
+  must(identity.authentication?.method === "local_credential" && Array.isArray(identity.contexts) &&
+    identity.read_profiles?.worker_registry === "human_worker_registry_owned_v1" &&
+    identity.read_profiles?.federation_registry === "unavailable", "OWNED_WORKER_IDENTITY");
+  const admin = identity.contexts.find((item) => item.tenant_id === "B" && item.mode === "administration");
+  const offer = admin?.operations?.find((entry) => entry.operation === "workers_read");
+  must(offer?.permission === "granted" && offer.scope === "tenant" && offer.availability === "available", "WORKERS_ADMIN_OFFER");
+
+  stage = "owned_worker_registry";
+  const result = await readByAction(workersPath, 200, () => button("Ouvrir administration · B").click());
+  must(result.context_id === admin.id && result.authorization_version === admin.authorization_version &&
+    result.source === "tenant_worker_broker_registry" && result.consistency === "snapshot_per_page" &&
+    result.registry_status === "available" && result.runtime_inventory === "unknown" && result.has_more === false &&
+    result.next_cursor === null && Array.isArray(result.items) && result.items.length === 1, "REAL_WORKER_PAGE");
+  const item = result.items[0];
+  for (const [key, value] of Object.entries(ready.worker)) must(item[key] === value, "RESERVED_WORKER_IDENTITY");
+  must(item.state === "reserved" && item.quota_held === true && item.session_provenance === "declared" &&
+    item.last_observation === null, "RESERVATION_WITHOUT_RUNTIME_OBSERVATION");
+  const receipt = requiredReceipt(result);
+
+  await heading("Workers enregistrés du tenant.").waitFor({ timeout: remaining() });
+  const row = page.getByRole("row").filter({ has: page.getByText(item.worker_id, { exact: true }) });
+  await row.getByText("Quota réservé", { exact: true }).waitFor({ timeout: remaining() });
+  await row.getByText("Observation inconnue", { exact: true }).waitFor({ timeout: remaining() });
+  await row.getByRole("button", { name: "Détails", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Métadonnées du worker", exact: true });
+  await dialog.getByText(`Reçu durable ${receipt.audit_event_id}`, { exact: false }).waitFor({ timeout: remaining() });
+  const detail = JSON.parse(await dialog.locator("pre.code-block").textContent());
+  must(detail.worker_id === item.worker_id && detail.attempt_id === item.attempt_id && detail.state === item.state, "REAL_WORKER_DETAIL");
+  await noSecret();
+  observed.scenario1 = "owned_worker_registry_store14_dashboard_and_receipt";
+}
+
 try {
-  must(fixtureMode === "run-v1" || egressMode, "EXPLICIT_FIXTURE_GUARD_REQUIRED");
-  const admittedLinuxArch = process.arch === "arm64" || (fixtureMode === "run-v1" && process.arch === "x64");
+  must(fixtureMode === "run-v1" || egressMode || workersMode, "EXPLICIT_FIXTURE_GUARD_REQUIRED");
+  const admittedLinuxArch = process.arch === "arm64" || (!egressMode && process.arch === "x64");
   const admittedLinux = process.platform === "linux" && admittedLinuxArch && process.getuid?.() === 1000 && process.getgid?.() === 1000;
   const admittedMac = egressMode && process.platform === "darwin" && process.arch === "arm64" && process.geteuid?.() > 0;
   must(admittedLinux || admittedMac, "ADMITTED_OWNED_BROWSER_PLATFORM_REQUIRED");
@@ -570,11 +619,11 @@ try {
   stage = "browser_start";
   browser = await playwright.chromium.launch({ headless: true, chromiumSandbox: true, timeout: remaining(60000),
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined,
-    ...(egressMode ? { args: ["--no-proxy-server", "--host-resolver-rules=EXCLUDE 127.0.0.1, MAP * ~NOTFOUND"] } : {}),
+    ...(egressMode || workersMode ? { args: ["--no-proxy-server", "--host-resolver-rules=EXCLUDE 127.0.0.1, MAP * ~NOTFOUND"] } : {}),
     env: { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: process.env.HOME ?? temporary, TMPDIR: temporary } });
   observed.browser_version = browser.version();
   context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: "fr-FR", timezoneId: "UTC", colorScheme: "light",
-    ...(egressMode ? { serviceWorkers: "block" } : {}) });
+    ...(egressMode || workersMode ? { serviceWorkers: "block" } : {}) });
   await context.route("**/*", async (route) => {
     const url = new URL(route.request().url());
     if (["about:", "data:", "blob:"].includes(url.protocol) || url.origin === new URL(ready.dashboard_url).origin) return route.continue();
@@ -584,9 +633,10 @@ try {
   page.on("pageerror", (error) => pageErrors.push(redact(error.message)));
   page.on("request", (request) => { const url = new URL(request.url()); if (url.pathname.startsWith("/api/v1/human/")) requests.push({ method: request.method(), path: url.pathname + url.search }); });
   page.on("response", (response) => { const capture = captureResponse(response); capture.catch(() => {}); pendingWires.push(capture); });
-  stage = "login_and_snapshot";
+  stage = workersMode ? "login_and_workers" : "login_and_snapshot";
   await page.goto(ready.dashboard_url);
   if (egressMode) await runEgressJournal();
+  else if (workersMode) await runOwnedWorkers();
   else await runOwnedSnapshot();
 } catch (error) { failure = { stage, code: redact(error.message), name: error.name }; }
 finally {
@@ -611,7 +661,7 @@ finally {
       closed(receipts, ["version", "tenant_id", "complete", "limit", "records"], "RECEIPTS_SHAPE");
       must(receipts.version === 1 && receipts.tenant_id === (egressMode ? "A" : "B") && receipts.complete === true && receipts.limit === 1000 && Array.isArray(receipts.records) && receipts.records.length <= 1000, "RECEIPTS_INCOMPLETE");
       const byId = new Map();
-      for (const record of receipts.records) { closed(record, ["audit_event_id", "request_id", "action", "received_at"], "RECEIPT_RECORD"); must(["identity", "resources", "events", "event"].includes(record.action) && typeof record.audit_event_id === "string" && typeof record.request_id === "string" && typeof record.received_at === "string", "RECEIPT_RECORD_TYPES"); byId.set(record.audit_event_id, record); }
+      for (const record of receipts.records) { closed(record, ["audit_event_id", "request_id", "action", "received_at"], "RECEIPT_RECORD"); must(["identity", "resources", "events", "event", workerReceiptKind].includes(record.action) && typeof record.audit_event_id === "string" && typeof record.request_id === "string" && typeof record.received_at === "string", "RECEIPT_RECORD_TYPES"); byId.set(record.audit_event_id, record); }
       must(byId.size === receipts.records.length, "DUPLICATE_DURABLE_RECEIPT_ID");
       await finishWireCaptures(); let compared = 0;
       // Identity has no page receipt. Every 200 on a page or detail endpoint
@@ -624,6 +674,14 @@ finally {
       }
       observed.successful_page_responses = successfulPages.length; observed.compared_receipts = compared; observed.receipts_sha256 = exported.sha256; observed.closed_sha256 = ending.sha256;
       await save("RECEIPTS.json", receipts); await save("CLOSED.json", closedFixture);
+      if (workersMode && !failure) {
+        must(same(requests, [
+          { method: "GET", path: "/api/v1/human/identity" },
+          { method: "GET", path: `${workersPath}?limit=25` },
+        ]), "EXACT_ONE_WORKER_GET_WITHOUT_STREAM_OR_FEDERATION");
+        must(compared === 1 && successfulPages[0].path === `${workersPath}?limit=25` &&
+          receipts.records.filter((record) => record.action === workerReceiptKind).length === 1, "EXACT_ONE_DURABLE_WORKER_RECEIPT");
+      }
       const exit = await bounded(childDone, 15000, "LIBTEST_EXIT_DEADLINE"); must(exit?.code === 0 && exit.signal === null, "LIBTEST_EXIT_NOT_ZERO");
     } catch (error) { cleanupFailure ??= redact(error.message); }
     if (fixtureExit === null) {
@@ -649,5 +707,6 @@ finally {
 // No source path, bearer, response body or child diagnostic is printed.
 console.log(interrupted ? "browser_owned_snapshot FAIL INTERRUPTED" : !fixtureStarted ? "browser_owned_snapshot BLOCKED NOT_RUN"
   : failure || cleanupFailure ? "browser_owned_snapshot FAIL; private result retained"
+  : workersMode ? "browser_owned_snapshot PASS scenario=worker_registry"
   : egressMode ? "browser_owned_snapshot PASS scenario=egress_journal" : "browser_owned_snapshot PASS scenarios=3");
 process.exitCode = interrupted ? 1 : !fixtureStarted ? 2 : failure || cleanupFailure ? 1 : 0;

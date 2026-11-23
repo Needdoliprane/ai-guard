@@ -2,6 +2,7 @@
 //! No business runtime, external service, debug HTTP route or mock backend.
 #![cfg(test)]
 use super::*;
+use crate::api::human_sources::owned_control_tests::negative::reserve_workload_fixture_worker;
 use crate::control_fs::{Directory, PrivateFile};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -15,12 +16,14 @@ use tokio::{net::TcpListener, sync::watch, task::JoinHandle};
 mod egress;
 
 const ENABLE: &str = "AI_GUARD_OWNED_BROWSER_FIXTURE";
+const WORKER_MODE: &str = "run-workers-v1";
 const DIST: &str = "AI_GUARD_OWNED_BROWSER_DIST";
 const CONTROL: &str = "AI_GUARD_OWNED_BROWSER_CONTROL";
 const SECONDS: &str = "AI_GUARD_OWNED_BROWSER_SECONDS";
 const COMMAND_LIMIT: u16 = 32;
 const COMMAND_BYTES: usize = 512;
 const RECEIPT_LIMIT: usize = 1_000;
+const WORKER_RECEIPT_KIND: &str = "control.identity.workers.access";
 const OUTPUT_BYTES: usize = 512 * 1024;
 const RESOURCE: &str = "owned-browser-session-b";
 const PRIVATE_CONTENT: &str = "owned-browser-private-content-must-not-appear-in-metadata";
@@ -295,11 +298,18 @@ impl Drop for Servers {
     }
 }
 
-fn seed() -> Result<(Fixture, Vec<String>)> {
+enum FixtureSeed {
+    Journal(Vec<String>),
+    Worker {
+        worker_id: String,
+        attempt_id: String,
+        session_id: String,
+    },
+}
+
+fn seed(workers_only: bool) -> Result<(Fixture, FixtureSeed)> {
     let fixture = Fixture::new_owned();
     let store = fixture.legacy_store("B");
-    // Exercise coverage refusal independently of actual identity permissions.
-    // The owner needs Export in addition to the fixture's Metadata/Content.
     let mut membership = store
         .identity_memberships(fixture.principal())?
         .into_iter()
@@ -310,7 +320,15 @@ fn seed() -> Result<(Fixture, Vec<String>)> {
         .revision
         .checked_add(1)
         .context("synthetic membership revision overflow")?;
-    membership.capabilities.insert(HumanCapabilityV1::Export);
+    if workers_only {
+        // The administration context lands directly on its sole readable registry.
+        membership.capabilities = [HumanCapabilityV1::ReadWorkerRegistry]
+            .into_iter()
+            .collect();
+    } else {
+        // The Journal tests profile refusal even when the owner holds the right.
+        membership.capabilities.insert(HumanCapabilityV1::Export);
+    }
     store.mutate_identity(&IdentityMutationV1 {
         version: 1,
         operation_id: uuid::Uuid::new_v4().to_string(),
@@ -323,6 +341,22 @@ fn seed() -> Result<(Fixture, Vec<String>)> {
             membership,
         },
     })?;
+    if workers_only {
+        let supervision = store.supervision_state()?;
+        ensure!(
+            supervision.schema_version == 13 && supervision.active,
+            "worker fixture requires the active pre-adoption Store"
+        );
+        let worker = reserve_workload_fixture_worker(store);
+        return Ok((
+            fixture,
+            FixtureSeed::Worker {
+                worker_id: worker.worker_id,
+                attempt_id: worker.attempt.attempt_id,
+                session_id: worker.launch.session_id,
+            },
+        ));
+    }
     let mut ids = Vec::new();
     for ordinal in [1, 2] {
         let mut event = Event::new("fixture.owned-browser");
@@ -354,7 +388,7 @@ fn seed() -> Result<(Fixture, Vec<String>)> {
             },
         },
     })?;
-    Ok((fixture, ids))
+    Ok((fixture, FixtureSeed::Journal(ids)))
 }
 
 async fn control(
@@ -442,8 +476,15 @@ fn export_receipts(root: &Directory, path: &Path, tenant: &str) -> Result<()> {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
     connection.busy_timeout(Duration::ZERO)?;
-    let mut statement = connection.prepare("SELECT id,json_extract(payload,'$.data.request_id'),json_extract(payload,'$.data.action'),received_at FROM events WHERE kind='control.identity.access' ORDER BY seq LIMIT 1001")?;
-    let rows = statement.query_map([], |row| {
+    // Worker registry receipts carry their own event kind instead of data.action.
+    let mut statement = connection.prepare(
+        "SELECT id,json_extract(payload,'$.data.request_id'),
+                CASE kind WHEN ?1 THEN kind
+                ELSE json_extract(payload,'$.data.action') END,received_at
+         FROM events WHERE kind IN ('control.identity.access',?1)
+         ORDER BY seq LIMIT 1001",
+    )?;
+    let rows = statement.query_map([WORKER_RECEIPT_KIND], |row| {
         Ok(Receipt {
             audit_event_id: row.get(0)?,
             request_id: row.get(1)?,
@@ -458,7 +499,14 @@ fn export_receipts(root: &Directory, path: &Path, tenant: &str) -> Result<()> {
             row.audit_event_id.len() <= 64
                 && row.request_id.len() <= 64
                 && row.received_at.len() <= 64
-                && ["identity", "resources", "events", "event"].contains(&row.action.as_str()),
+                && [
+                    "identity",
+                    "resources",
+                    "events",
+                    "event",
+                    WORKER_RECEIPT_KIND
+                ]
+                .contains(&row.action.as_str()),
             "invalid bounded access receipt"
         );
         receipts.push(row);
@@ -477,9 +525,10 @@ fn export_receipts(root: &Directory, path: &Path, tenant: &str) -> Result<()> {
 #[ignore = "explicit owned browser QA only; requires private control root and admitted frontend dist"]
 async fn serve_owned_browser_fixture() -> Result<()> {
     let started = Instant::now();
-    let config = Config::load("run-v1")?;
+    let workers_only = std::env::var(ENABLE).is_ok_and(|mode| mode == WORKER_MODE);
+    let config = Config::load(if workers_only { WORKER_MODE } else { "run-v1" })?;
     let deadline = started + Duration::from_secs(config.seconds) - CLOSE_RESERVE;
-    let (fixture, event_ids) = seed()?;
+    let (fixture, seeded) = seed(workers_only)?;
     let (bundle, credentials, tokens) = fixture.owned_startup();
     let state = GatewayState::for_owned_human_sources(
         bundle,
@@ -489,27 +538,43 @@ async fn serve_owned_browser_fixture() -> Result<()> {
         None,
         Redactor::new(vec![]),
     )?;
-    let mut servers = Servers::new(&state)?;
-    let mut lock = OwnSqliteLock::default();
-    let database = state
+    let source = state
         .owned_human
         .as_ref()
         .context("owned source absent")?
         .sources[1]
-        .descriptor()
-        .storage_binding
-        .path();
+        .descriptor();
+    if workers_only {
+        ensure!(
+            source.tenant_id.as_deref() == Some("B") && source.required_format == 14,
+            "worker fixture requires the retained tenant B Store14"
+        );
+    }
+    let database = source.storage_binding.path();
+    let mut servers = Servers::new(&state)?;
+    let mut lock = OwnSqliteLock::default();
     let work = async {
         ensure!(Instant::now() < deadline, "fixture setup exhausted its budget");
         let gateway = servers.bind(gateway_router(state.clone())).await?;
         let dashboard = dashboard_router_with_human_mode(&format!("http://{gateway}"), None, config.dist.clone(), None, true)?;
         let dashboard = servers.bind(dashboard).await?;
         publish_bytes(&config.root, "BEARER.txt", Fixture::bearer("B").as_bytes())?;
-        publish(&config.root, "READY.json", &json!({
+        let mut ready = json!({
             "version":1,"dashboard_url":format!("http://{dashboard}"),"bearer_b":Fixture::bearer("B"),
-            "tenant_id":"B","resource":{"kind":"session","resource_id":RESOURCE},"event_ids":event_ids,
+            "tenant_id":"B",
             "budget_seconds":config.seconds,"commands":"commands","acks":"acks","command_limit":COMMAND_LIMIT
-        }))?;
+        });
+        match seeded {
+            FixtureSeed::Journal(event_ids) => {
+                ready["resource"] = json!({"kind":"session","resource_id":RESOURCE});
+                ready["event_ids"] = json!(event_ids);
+            }
+            FixtureSeed::Worker { worker_id, attempt_id, session_id } => {
+                ready["mode"] = json!("worker_registry");
+                ready["worker"] = json!({"worker_id":worker_id,"attempt_id":attempt_id,"session_id":session_id});
+            }
+        }
+        publish(&config.root, "READY.json", &ready)?;
         eprintln!("OWNED_BROWSER_READY {}", config.root.path().join("READY.json").display());
         control(&config, &database, deadline, &servers, &mut lock).await
     }.await;
