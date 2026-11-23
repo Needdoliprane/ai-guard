@@ -1,198 +1,257 @@
-name: Lot verification
+name: G12 current native Linux archive check
 
-# Verifies V1 development branches on a hosted Linux x86_64 runner so that the
-# development Mac keeps its memory for engine, browser and macOS recipes.
-# It complements ci.yaml (dev/main) and never creates tags, releases or
-# artifacts outside this run. Engine (Docker/Podman/Kubernetes) and provider
-# recipes stay out of this workflow: ignored tests are not run and are never
-# counted as passes.
+# Builds and checks one Linux x86_64 archive on a hosted runner. It does not
+# create a tag/release or publish the package; only the bounded receipt leaves the runner.
 
 on:
   push:
-    branches: ['claude/v1-**']
+    branches: ['claude/v1-g12-native-archive-current-check-20261123']
 
 permissions:
   contents: read
 
 concurrency:
-  group: lot-verify-${{ github.ref }}
-  cancel-in-progress: true
+  group: g12-native-archive-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  rust:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 180
+  native-archive:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
     env:
-      AI_GUARD_BUILD_REVISION: ${{ github.sha }}
-      # Match CI's build limit when compiling and linking the full test suite.
-      CARGO_BUILD_JOBS: '1'
+      CANDIDATE_SHA: 5d08c6cd82f8ea587e5a1975b35cd53963f127da
+      CANDIDATE_TREE_SHA: f8f85384029b77ce2768125f9e9d8e58461c2904
+      CANDIDATE_PARENT_SHA: 7a66bd77f03e02a81de5faa875f4aa3669028df9
+      EXPECTED_REF: refs/heads/claude/v1-g12-native-archive-current-check-20261123
+      RUST_TARGET: x86_64-unknown-linux-gnu
+      EXCLUDED_BINARIES: ai-guard-demo-pki
+      CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_PROFILE_TEST_DEBUG: '0'
-      RUST_MIN_STACK: '8388608'
       CARGO_TERM_COLOR: never
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
+          fetch-depth: 3
           persist-credentials: false
-      - name: Free runner disk for the test targets
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
-      - name: Fetch dependencies with the pinned Rust toolchain
-        run: |
-          rustc --version
-          cargo fetch --locked
-      - name: Check Rust formatting
-        run: cargo fmt --all -- --check
-      - name: Check all targets with MySQL enabled
-        run: cargo check --locked --offline --all-targets --features mysql-storage --keep-going
-      - name: Check all targets without default features (SQLite only)
-        run: cargo check --locked --offline --all-targets --no-default-features --keep-going
-      - name: Third-party licence guard and its unit tests
-        # `cargo test` builds examples but does not run their unit tests.
-        run: |
-          cargo test --locked --offline --example third_party_notices
-          cargo run --quiet --locked --offline --example third_party_notices -- check --allowed .github/third-party-license-expressions.txt
-      - name: Provider harness regressions
-        run: |
-          python3 -B tests/e2e/interactive_driver.py --self-test
-          python3 -B tests/e2e/test_run_provider_preflight.py ProviderPreflightTests ProviderBrowserStageTests
-          python3 -B tests/e2e/test_run_provider_broker.py BrokerRecipeTests
-      - name: Rust test suite (ignored engine and provider tests excluded)
-        if: github.ref_name != 'claude/v1-integration-regressions-20261122'
-        shell: bash
-        run: |
-          set -o pipefail
-          export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
-          cargo test --locked --offline --no-fail-fast 2>&1 | tee cargo-test.log
-      - name: Targeted SQLite library regressions
-        if: github.ref_name == 'claude/v1-integration-regressions-20261122'
+      - name: Verify source lineage and build native archive privately
         shell: bash
         run: |
           set -euo pipefail
-          export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
-          build_json="$TMPDIR/libtest.jsonl"
-          test_log="$TMPDIR/selector.log"
-          summary=cargo-test-summary.txt
-          failures=cargo-test-failed.txt
-          : > "$summary"
-          : > "$failures"
-
-          settlement=broker::service::server::retirement_settlement_tests::same_original_not_queued_final_retries_its_retained_input_before_another_q
-          selectors=(
-            audit::resource_tests::retention_confirms_the_committed_segment_after_a_filesystem_ack_failure
-            api::human_sources::journal_tests::owned_event_page_reports_the_archived_prefix_after_adoption
-            api::human_sources::tests::owned_admin_reads_refuse_head_before_authentication
-            api::human_sources::journal_tests::owned_admin_reads::owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
-            identity::operations::tests::owned_event_availability_preserves_granted_permissions
-            broker::writer::inventory_tests::completed_inventory_releases_its_permit_before_reply
-            broker::writer::inventory_tests::timed_out_inventory_keeps_one_permit_and_cannot_queue_a_series_before_cancel
-            broker::writer::status_projection_tests::coverage_only_pending_arm_does_not_taint_a_valid_last_confirmed_status
-            "$settlement"
-          )
-          expected=9
-          if (( ${#selectors[@]} != expected )); then
-            echo 'Invalid regression selector count' | tee -a "$summary"
-            exit 1
-          fi
-          printf 'Revision %s; %s exact SQLite library tests expected\n' "$GITHUB_SHA" "$expected" | tee -a "$summary"
-
-          # Keep raw Cargo and test output in the runner's private scratch directory.
-          if ! cargo test --locked --offline --no-default-features --lib --no-run \
-              --message-format=json > "$build_json" 2> "$TMPDIR/build.stderr"; then
-            echo 'SQLite library build failed; tests not run' | tee -a "$summary"
-            jq -r 'select(.reason == "compiler-message" and .message.level == "error")
-              | .message.code.code // empty | select(test("^E[0-9]{4}$"))' "$build_json" \
-              2>/dev/null | sort -u | tee -a "$summary" || true
-            exit 1
-          fi
-          if ! libtest="$(jq -ers '[.[] | select(.reason == "compiler-artifact"
-              and .target.name == "agentsandbox" and .target.kind == ["lib"]
-              and .profile.test == true and .executable != null) | .executable]
-              | unique | if length == 1 then .[0] else empty end' "$build_json")" \
-              || [[ ! -x "$libtest" ]]; then
-            echo 'Expected one SQLite library test executable; tests not run' | tee -a "$summary"
-            exit 1
-          fi
-          printf 'SQLite libtest SHA-256 %s\n' "$(sha256sum "$libtest" | awk '{print $1}')" | tee -a "$summary"
-
-          passed=0
-          for selector in "${selectors[@]}"; do
-            if "$libtest" "$selector" --exact --test-threads=1 > "$test_log" 2>&1 \
-                && grep -Fxq 'running 1 test' "$test_log" \
-                && grep -Fxq "test $selector ... ok" "$test_log" \
-                && grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$test_log"; then
-              printf 'PASS %s\n' "$selector" | tee -a "$summary"
-              ((passed += 1))
-            else
-              printf 'FAIL %s\n' "$selector" | tee -a "$summary"
-              printf '%s\n' "$selector" >> "$failures"
-              if [[ "$selector" == "$settlement" ]]; then
-                phases='bind_full3|enqueue_signal|ack_signal|load_before_retirement|begin_retirement|ack_pending|authorize_retirement|read_pending|load_before_final|pause_writer'
-                categories='InvalidInput|UnsupportedVersion|TooLarge|LimitExceeded|Busy|Conflict|Interrupted|Corrupt|UnsafeFilesystem|ControlSecret|Io'
-                grep -Eo "settlement phase=($phases) category=($categories)\b" "$test_log" \
-                  | sort -u | tee -a "$summary" || true
+          umask 077
+          RECEIPT="$RUNNER_TEMP/g12-native-receipt.txt"
+          PRIVATE_DIR="$RUNNER_TEMP/g12-native-private-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          TARGET_DIR="$GITHUB_WORKSPACE/target"
+          private_created=0
+          target_owned=0
+          phase=preflight
+          source_guard=FAIL
+          native_build=NOT_RUN
+          native_exit=unknown
+          cli_identity=NOT_RUN
+          notices=NOT_RUN
+          archive_check=NOT_RUN
+          archive_sha256=unknown
+          notices_sha256=unknown
+          license_sha256=unknown
+          archive_bytes=0
+          license_check=NOT_RUN
+          build_info_check=NOT_RUN
+          scratch_cleanup=NOT_RUN
+          native_count=0
+          native_names=unknown
+          version=unknown
+          rustc_version=unknown
+          cargo_version=unknown
+          finish() {
+            local code=$? cleanup_rc=0
+            trap - EXIT
+            set +e
+            if (( target_owned )); then
+              if [[ "$TARGET_DIR" == "$GITHUB_WORKSPACE/target" ]]; then
+                rm -rf -- "$TARGET_DIR" >/dev/null 2>&1 || cleanup_rc=1
+                [[ ! -e "$TARGET_DIR" ]] || cleanup_rc=1
+              else
+                cleanup_rc=1
               fi
             fi
-          done
-          printf 'Passed %s of %s exact selectors\n' "$passed" "$expected" | tee -a "$summary"
-          (( passed == expected ))
-      - name: Summarize test results
+            if (( private_created )); then
+              if [[ "$PRIVATE_DIR" == "$RUNNER_TEMP/g12-native-private-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" ]]; then
+                rm -rf -- "$PRIVATE_DIR" >/dev/null 2>&1 || cleanup_rc=1
+                [[ ! -e "$PRIVATE_DIR" ]] || cleanup_rc=1
+              else
+                cleanup_rc=1
+              fi
+            elif [[ -e "$PRIVATE_DIR" ]]; then
+              cleanup_rc=1
+            fi
+            if (( cleanup_rc == 0 )); then scratch_cleanup=PASS; else scratch_cleanup=FAIL; fi
+            result=FAIL
+            if [[ "$phase" == complete && "$source_guard" == PASS && "$native_build" == PASS && "$cli_identity" == PASS &&
+                  "$notices" == PASS && "$archive_check" == PASS && "$license_check" == PASS &&
+                  "$build_info_check" == PASS && "$scratch_cleanup" == PASS ]]; then result=PASS; fi
+            {
+              printf 'schema=g12-native-archive-v1\n'
+              printf 'candidate_sha=%s\ncandidate_tree_sha=%s\ncandidate_parent=%s\nworkflow_sha=%s\nworkflow_parent=%s\nworkflow_ref=%s\n' \
+                "$CANDIDATE_SHA" "$CANDIDATE_TREE_SHA" "$CANDIDATE_PARENT_SHA" "${GITHUB_SHA:-unknown}" "$CANDIDATE_SHA" "${GITHUB_REF:-unknown}"
+              printf 'target=%s\nversion=%s\nrustc_version=%s\ncargo_version=%s\n' \
+                "$RUST_TARGET" "$version" "$rustc_version" "$cargo_version"
+              printf 'phase=%s\n' "$phase"
+              printf 'source_guard=%s\nnative_build=%s\nnative_exit=%s\n' \
+                "$source_guard" "$native_build" "$native_exit"
+              printf 'native_binary_count=%s\nnative_binary_names=%s\n' "$native_count" "$native_names"
+              printf 'cli_identity=%s\nnotices=%s\narchive_check=%s\n' \
+                "$cli_identity" "$notices" "$archive_check"
+              printf 'archive_sha256=%s\narchive_bytes=%s\nnotices_sha256=%s\nlicense_sha256=%s\n' \
+                "$archive_sha256" "$archive_bytes" "$notices_sha256" "$license_sha256"
+              printf 'license_check=%s\nbuild_info_check=%s\n' "$license_check" "$build_info_check"
+              printf 'scratch_cleanup=%s\n' "$scratch_cleanup"
+              printf 'scope=native_archive_only_no_tag_release_sbom_or_publication\n'
+              printf 'result=%s\n' "$result"
+            } > "$RECEIPT"
+            chmod 600 "$RECEIPT"
+            if (( code == 0 )) && [[ "$result" != PASS ]]; then code=1; fi
+            exit "$code"
+          }
+          trap finish EXIT
+
+          mkdir -m 700 "$PRIVATE_DIR"
+          private_created=1
+          test ! -e "$TARGET_DIR"
+          test "${GITHUB_EVENT_NAME:-}" = push
+          test "${GITHUB_REF:-}" = "$EXPECTED_REF"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD^)" = "$CANDIDATE_SHA"
+          test "$(git rev-parse --is-shallow-repository)" = true
+          test "$(git rev-list --count HEAD)" = 3
+          test "$(git diff-tree --no-commit-id --name-only -r HEAD)" = .github/workflows/lot-verify.yaml
+          test -z "$(git status --porcelain)"
+          test "$(git rev-parse "$CANDIDATE_SHA^{tree}")" = "$CANDIDATE_TREE_SHA"
+          test "$(git show -s --format=%P "$CANDIDATE_SHA")" = "$CANDIDATE_PARENT_SHA"
+          test "$(git diff --name-only "$CANDIDATE_PARENT_SHA" "$CANDIDATE_SHA" | LC_ALL=C sort)" = $'front/src/delegation-views.ts\nfront/tests/grant-conflict-reread.test.mjs'
+          test "$(git rev-parse "$CANDIDATE_SHA:.github/workflows/release.yaml")" = "$(git rev-parse HEAD:.github/workflows/release.yaml)"
+          git checkout --detach "$CANDIDATE_SHA" >/dev/null 2>&1
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git rev-parse HEAD^)" = "$CANDIDATE_PARENT_SHA"
+          test "$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)" = 1.99.1
+          rustc_version=$(rustc --version | awk '{print $2}')
+          cargo_version=$(cargo --version | awk '{print $2}')
+          test "$rustc_version" = 1.99.1
+          test "$cargo_version" = 1.99.1
+          test "$(rustc -vV | sed -n 's/^host: //p')" = "$RUST_TARGET"
+          phase=metadata
+          metadata=$(cargo metadata --locked --offline --no-deps --format-version 1 2>"$PRIVATE_DIR/metadata.err")
+          version=$(jq -er '[.packages[] | select(.name == "agentsandbox")] | select(length == 1) | .[0].version' <<< "$metadata")
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]
+          jq -e --arg version "$version" '.version == $version' front/package.json >/dev/null
+          jq -e --arg version "$version" '.version == $version and .packages[""].version == $version' front/package-lock.json >/dev/null
+          native_names=$(jq -er --arg excluded "$EXCLUDED_BINARIES" '
+            [.packages[] | select(.name == "agentsandbox")] | select(length == 1)
+            | [.[0].targets[] | select(.kind | index("bin")) | .name] | sort
+            | . - ($excluded | split(" ") | map(select(length > 0)))
+            | if index("agentsandbox") != null and length == 6 and length == (unique | length) and
+                all(.[]; type == "string" and test("\\A[A-Za-z0-9_.-]+\\z") and . != "." and . != "..")
+              then join(" ") else error("Unexpected native binary target list") end
+          ' <<< "$metadata")
+          native_count=$(wc -w <<< "$native_names" | tr -d ' ')
+          test "$native_count" = 6
+          source_guard=PASS
+
+          test ! -e "$TARGET_DIR"
+          target_owned=1
+          phase=package
+          RELEASE_TAG="v$version"
+          RELEASE_SHA="$CANDIDATE_SHA"
+          RELEASE_TAG_OBJECT=not-used-no-tag-created
+          AI_GUARD_BUILD_REVISION="$CANDIDATE_SHA"
+          export RELEASE_TAG RELEASE_SHA RELEASE_TAG_OBJECT AI_GUARD_BUILD_REVISION
+          export RUST_TARGET NATIVE_BINARIES="$native_names" CARGO_BUILD_JOBS
+          export GITHUB_RUN_ID GITHUB_REPOSITORY
+          export AI_GUARD_VERSION="$version"
+          native_script="$PRIVATE_DIR/native-package.sh"
+          awk '
+            /^      - name: Build and package native binaries$/ { in_step=1; next }
+            in_step && /^        run: \|$/ { in_run=1; next }
+            in_run && /^      - name:/ { exit }
+            in_run && /^          / { print substr($0, 11); next }
+            in_run && /^$/ { print; next }
+            in_run && !/^          / { exit }
+          ' .github/workflows/release.yaml > "$native_script"
+          test -s "$native_script"
+          sed -i '/^test "$(git rev-parse "refs\/tags\/\$RELEASE_TAG")" = "\$RELEASE_TAG_OBJECT"$/d' "$native_script"
+          if RUNNER_TEMP="$PRIVATE_DIR" bash "$native_script" >"$PRIVATE_DIR/native-package.out" 2>&1; then
+            native_build=PASS
+            native_exit=0
+            cli_identity=PASS
+            notices=PASS
+          else
+            native_exit=$?
+            native_build=FAIL
+            exit 1
+          fi
+          archive="$PRIVATE_DIR/release-assets/ai-guard-$RELEASE_TAG-$RUST_TARGET.tar.gz"
+          phase=archive
+          test -s "$archive"
+          archive_bytes=$(stat -c '%s' "$archive")
+          [[ "$archive_bytes" =~ ^[1-9][0-9]*$ ]]
+          helper="$PRIVATE_DIR/archive-helper.sh"
+          awk '
+            /^          verify_archive_members\(\) \{$/ { in_fn=1 }
+            in_fn { print substr($0, 11) }
+            in_fn && /^          \}$/ { exit }
+          ' .github/workflows/release.yaml > "$helper"
+          test -s "$helper"
+          source "$helper"
+          name="ai-guard-$RELEASE_TAG-$RUST_TARGET"
+          if verify_archive_members "$archive" "$name" "$RUST_TARGET" >"$PRIVATE_DIR/archive-check.out" 2>&1; then
+            archive_check=PASS
+          else
+            exit 1
+          fi
+          tar -xOf "$archive" "$name/THIRD-PARTY-NOTICES" > "$PRIVATE_DIR/archive-notices"
+          test -s "$PRIVATE_DIR/archive-notices"
+          notices_sha256=$(sha256sum "$PRIVATE_DIR/archive-notices" | awk '{print $1}')
+          [[ "$notices_sha256" =~ ^[0-9a-f]{64}$ ]]
+          license_check=FAIL
+          phase=license
+          tar -xOf "$archive" "$name/LICENSE" > "$PRIVATE_DIR/archive-license"
+          cmp -s LICENSE "$PRIVATE_DIR/archive-license"
+          license_sha256=$(sha256sum "$PRIVATE_DIR/archive-license" | awk '{print $1}')
+          [[ "$license_sha256" =~ ^[0-9a-f]{64}$ ]]
+          license_check=PASS
+          phase=build-info
+          expected_build_info=$(printf 'tag=%s\ncommit=%s\ntarget=%s\nrun=%s\nrepository=%s\n' \
+            "$RELEASE_TAG" "$RELEASE_SHA" "$RUST_TARGET" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY")
+          actual_build_info=$(tar -xOf "$archive" "$name/BUILD-INFO")
+          test "$actual_build_info" = "$expected_build_info"
+          build_info_check=PASS
+          archive_sha256=$(sha256sum "$archive" | awk '{print $1}')
+          [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]]
+          phase=complete
+      - name: Ensure a closed receipt exists
         if: always()
         shell: bash
         run: |
-          if [ -f cargo-test.log ]; then
-            grep -E '^test result:|^     Running ' cargo-test.log > cargo-test-summary.txt || true
-            grep -E '\.\.\. FAILED$' cargo-test.log | sed 's/^test //; s/ \.\.\. FAILED$//' > cargo-test-failed.txt || true
+          RECEIPT="$RUNNER_TEMP/g12-native-receipt.txt"
+          if [[ ! -f "$RECEIPT" ]]; then
+            umask 077
             {
-              echo "### Rust test suite"
-              echo
-              echo "Failed tests: $(wc -l < cargo-test-failed.txt)"
-              echo
-              echo '```'
-              head -n 100 cargo-test-failed.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-          elif [ -f cargo-test-summary.txt ]; then
-            {
-              echo "### Targeted SQLite library tests"
-              echo '```'
-              cat cargo-test-summary.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
+              printf 'schema=g12-native-archive-v1\ncandidate_sha=%s\ncandidate_tree_sha=%s\ncandidate_parent=%s\nworkflow_sha=%s\nworkflow_parent=%s\nworkflow_ref=%s\n' \
+                "$CANDIDATE_SHA" "$CANDIDATE_TREE_SHA" "$CANDIDATE_PARENT_SHA" "${GITHUB_SHA:-unknown}" "$CANDIDATE_SHA" "${GITHUB_REF:-unknown}"
+              printf 'target=%s\nresult=FAIL\nsource_guard=NOT_RUN\nnative_build=NOT_RUN\n' "$RUST_TARGET"
+              printf 'native_exit=unknown\nnative_binary_count=0\nnative_binary_names=unknown\nversion=unknown\n'
+              printf 'rustc_version=unknown\ncargo_version=unknown\ncli_identity=NOT_RUN\nnotices=NOT_RUN\n'
+              printf 'phase=preflight\narchive_check=NOT_RUN\narchive_sha256=unknown\narchive_bytes=0\n'
+              printf 'notices_sha256=unknown\nlicense_sha256=unknown\nlicense_check=NOT_RUN\nbuild_info_check=NOT_RUN\nscratch_cleanup=NOT_RUN\n'
+              printf 'scope=native_archive_only_no_tag_release_sbom_or_publication\n'
+            } > "$RECEIPT"
           fi
-      - name: Upload test logs
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: lot-verify-rust-${{ github.sha }}
-          path: |
-            cargo-test.log
-            cargo-test-summary.txt
-            cargo-test-failed.txt
-          if-no-files-found: ignore
+          name: g12-native-verification-receipt
+          path: ${{ runner.temp }}/g12-native-receipt.txt
+          if-no-files-found: error
           retention-days: 14
-
-  frontend:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: front
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Setup Node
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '24.22.2'
-          package-manager-cache: false
-      - name: Install
-        run: npm ci --no-audit --no-fund
-      - name: Build
-        run: npm run build
-      - name: Test
-        run: npm test
