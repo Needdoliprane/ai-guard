@@ -30,7 +30,7 @@ use crate::{
     runtime::{Runtime, RuntimeKind},
 };
 pub(crate) use cancelled_recovery_tests::{
-    ColdRecoverySeed, terminal_pending_seed_for_cold_audit_test,
+    ColdRecoverySeed, terminal_cleanup_jobs_for_test, terminal_pending_seed_for_cold_audit_test,
 };
 use serde_json::{Value, json};
 use std::{

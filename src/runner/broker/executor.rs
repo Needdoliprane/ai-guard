@@ -48,7 +48,9 @@ use crate::{
 use anyhow::{Context, Result, anyhow, ensure};
 use futures_util::future::BoxFuture;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
-pub(crate) use journal::{ColdRecoverySeed, terminal_pending_seed_for_cold_audit_test};
+pub(crate) use journal::{
+    ColdRecoverySeed, terminal_cleanup_jobs_for_test, terminal_pending_seed_for_cold_audit_test,
+};
 use journal::{operation_key, same};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

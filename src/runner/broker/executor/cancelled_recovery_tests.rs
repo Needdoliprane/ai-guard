@@ -4,7 +4,81 @@ use fixture::{Case, RecoveryFixture};
 #[path = "cancelled_recovery_fixture.rs"]
 mod fixture;
 
-pub(crate) use fixture::{ColdRecoverySeed, terminal_pending_seed_for_cold_audit_test};
+pub(crate) use fixture::{
+    ColdRecoverySeed, terminal_cleanup_jobs_for_test, terminal_pending_seed_for_cold_audit_test,
+};
+
+#[test]
+fn resumed_terminal_worker_reconciles_cleanup_only_for_its_observed_container() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime should initialize");
+    let fixture = runtime.block_on(RecoveryFixture::new(Case::TerminalCleanupRecovery));
+    assert_eq!(fixture.worker().cleanup_removed, None);
+    runtime.block_on(fixture.record_fixture_cleanup(false));
+    let before = fixture.worker();
+    assert_eq!(before.state, WorkerStateV1::Terminal);
+    assert!(!before.quota_held);
+    assert!(!fixture.cancel_present());
+    assert_eq!(before.cleanup_removed, Some(false));
+    assert!(fixture.completed_cleanup_receipts().is_empty());
+    let usage = fixture.usage();
+    assert_eq!(usage.len(), 1);
+    let arm_claim = fixture.arm_claim_snapshot();
+    let publication = fixture.result_publication_snapshot();
+    assert!(publication.output_acknowledged);
+    assert_eq!(publication.stored_result_events.len(), 1);
+    let cid = before.attempt.container_id.as_deref().unwrap();
+    let inspect = format!("inspect {cid}");
+    let cleanup = format!("rm {cid}");
+
+    fixture.set_case(Case::UnknownContainer);
+    let unavailable = fixture.run_sync(&runtime);
+    assert_eq!(fixture.worker().revision, before.revision);
+    assert!(fixture.completed_cleanup_receipts().is_empty());
+    let unavailable_calls = fixture.runtime_calls();
+    assert!(!unavailable_calls.contains(&cleanup));
+
+    fixture.set_case(Case::TerminalCleanupRecovery);
+    fixture
+        .run_sync(&runtime)
+        .expect("the same observed terminal container can be removed");
+    let after = fixture.worker();
+    assert_eq!(after.cleanup_removed, Some(true));
+    assert_eq!(after.revision, before.revision + 1);
+    assert!(unavailable.is_err(), "absence does not prove cleanup");
+    assert_eq!(after.worker_id, before.worker_id);
+    assert_eq!(after.attempt.attempt_id, before.attempt.attempt_id);
+    assert_eq!(after.attempt.container_id, before.attempt.container_id);
+    assert_eq!(after.state, WorkerStateV1::Terminal);
+    assert!(!after.quota_held);
+    let receipts = fixture.completed_cleanup_receipts();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].revision, Some(after.revision));
+    assert!(receipts[0].audit_seq > 0);
+    let calls = fixture.runtime_calls();
+    assert_eq!(calls.iter().filter(|call| *call == &cleanup).count(), 1);
+    assert!(calls.iter().all(|call| {
+        call == "info" || call == "image inspect" || call == &inspect || call == &cleanup
+    }));
+    let cleanup_at = calls.iter().position(|call| call == &cleanup).unwrap();
+    assert!(calls[unavailable_calls.len()..cleanup_at].contains(&inspect));
+
+    fixture
+        .run_sync(&runtime)
+        .expect("the exact cleanup acknowledgement survives replay");
+    assert_eq!(fixture.worker().revision, after.revision);
+    assert_eq!(fixture.completed_cleanup_receipts(), receipts);
+    assert_eq!(fixture.usage(), usage);
+    assert_eq!(fixture.arm_claim_snapshot(), arm_claim);
+    assert_eq!(fixture.result_publication_snapshot(), publication);
+    assert!(
+        fixture.runtime_calls()[calls.len()..]
+            .iter()
+            .all(|call| call == "info" || call == "image inspect")
+    );
+}
 
 #[test]
 fn cancelled_running_worker_reconciles_an_exact_terminal_without_a_new_start() {
