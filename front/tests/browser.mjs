@@ -20,8 +20,12 @@ try {
   ({ chromium } = require(join(modules, "playwright")));
 }
 const root = fileURLToPath(new URL("..", import.meta.url));
+const eventFocusOnly = process.env.AI_GUARD_BROWSER_SCENARIO === "event-focus";
+const journalEvent = (seq, kind = "command.completed") => ({
+  seq, id: `journal-${seq}`, kind, timestamp: "2026-10-29T12:10:00Z", provenance: "observed",
+});
 const malicious = '<img src=x onerror="window.__xss=true">';
-const events = [
+const events = eventFocusOnly ? [journalEvent(1)] : [
   {
     seq: 14,
     id: "evt-14",
@@ -281,11 +285,11 @@ const server = createServer(async (request, response) => {
         "content-type": "text/event-stream",
         "cache-control": "no-cache",
       });
-      if (mode === "data")
+      if (!eventFocusOnly && mode === "data")
         response.write(
           `id: 15\nevent: audit\ndata: ${JSON.stringify({ ...events[0], seq: 15, id: "evt-15", kind: "agent.updated", command: null, data: { message: "Mise à jour reçue en direct" } })}\n\n`,
         );
-      if (streamCount === 1) response.end();
+      if (!eventFocusOnly && streamCount === 1) response.end();
       else {
         streams.add(response);
         response.write(": maintien\n\n");
@@ -322,8 +326,9 @@ await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 const origin = `http://127.0.0.1:${server.address().port}`;
 const browser = await chromium.launch({
   headless: true,
+  chromiumSandbox: eventFocusOnly,
   executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined,
-  args: ["--no-sandbox"],
+  args: eventFocusOnly ? [] : ["--no-sandbox"],
 });
 const context = await browser.newContext({
   viewport: { width: 1440, height: 1050 },
@@ -369,7 +374,62 @@ const assertGeometry = async (label) => {
   assert.ok(geometry.targets.every((rect) => rect.width >= 44 && rect.height >= 44), `${label} : cibles d’au moins 44 pixels`);
   assert.ok(geometry.targets.every((rect) => rect.top >= 0 && rect.bottom <= geometry.dockBottom), `${label} : commandes dans leur zone réservée`);
 };
-try {
+async function runEventFocusCheck() {
+  await context.route("**/*", (route) =>
+    new URL(route.request().url()).origin === origin ? route.continue() : route.abort(),
+  );
+  await page.goto(origin);
+  await page.getByLabel("Jeton de lecture").fill("viewer-test-token");
+  await page.getByRole("button", { name: "Ouvrir la supervision", exact: true }).click();
+  await page.getByRole("link", { name: "Actions", exact: true }).click();
+  await page.locator('[data-stream="live"]').waitFor();
+  await page.setViewportSize({ width: 390, height: 844 });
+
+  const detail = (seq) => page.locator(`.event-slot button[aria-label="Voir l’événement ${seq}"]`);
+  const scroll = page.locator(".event-slot .table-scroll");
+  const dialog = page.getByRole("dialog");
+  const append = (events) => {
+    assert.equal(streams.size, 1, "Le flux de la fixture est connecté");
+    const updates = events.map((event) =>
+      `id: ${event.seq}\nevent: audit\ndata: ${JSON.stringify(event)}\n\n`,
+    ).join("");
+    for (const stream of streams) stream.write(updates);
+  };
+  await scroll.evaluate((node) => { node.scrollLeft = node.scrollWidth; });
+  await detail(1).focus();
+  const offset = await scroll.evaluate((node) => node.scrollLeft);
+  assert.ok(offset > 0, "Le journal défile horizontalement");
+
+  append([journalEvent(2)]);
+  await detail(2).waitFor();
+  assert.equal(await detail(1).evaluate((node) => node === document.activeElement), true,
+    "Le flux conserve le focus sur le détail de la même séquence");
+  assert.equal(await scroll.evaluate((node) => node.scrollLeft), offset,
+    "Le flux conserve le défilement horizontal");
+
+  await page.keyboard.press("Enter");
+  await dialog.waitFor();
+  append([journalEvent(3)]);
+  await detail(3).waitFor({ state: "attached" });
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "hidden" });
+  await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "Voir l’événement 1");
+  assert.equal(await scroll.evaluate((node) => node.scrollLeft), offset,
+    "Échap rend le focus au détail sans déplacer le journal");
+
+  await page.keyboard.press("Enter");
+  await dialog.waitFor();
+  // Fill the live window with events projected out of Actions, so only the original detail is evicted.
+  append(Array.from({ length: 998 }, (_, index) => journalEvent(index + 4, "agent.updated")));
+  await detail(1).waitFor({ state: "detached" });
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "hidden" });
+  await page.waitForFunction(() => document.activeElement?.matches("#main-content h1"));
+  assert.deepEqual(errors, []);
+  process.stdout.write("Journal viewer : défilement, focus SSE et retour par Échap vérifiés.\n");
+}
+
+async function runBrowserChecks() {
   await page.goto(origin);
   const buildFooter = page.locator(".build-identity");
   assert.equal(await buildFooter.locator("details").evaluate((node) => node.open), false,
@@ -917,6 +977,10 @@ try {
   process.stdout.write(
     "Contrôle navigateur réussi : connexion, XSS, SSE et curseur, filtres, hiérarchie, export, mémoire seule, thèmes, mobile, vide, workers paginés/focus/100 lignes, quota, allocations exactes, états périmés/invalides, rafale 200 événements et refus 403.\n",
   );
+}
+
+try {
+  await (eventFocusOnly ? runEventFocusCheck() : runBrowserChecks());
 } catch (error) {
   await mkdir(join(root, "tests", "artifacts"), { recursive: true });
   await page.screenshot({
@@ -945,4 +1009,4 @@ try {
   await new Promise((resolve) => server.close(resolve));
 }
 
-await import("./browser_identity.mjs");
+if (!eventFocusOnly) await import("./browser_identity.mjs");
