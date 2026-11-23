@@ -27,8 +27,8 @@ use super::{OperatorCommand, OperatorRuntime};
 use crate::runtime::{
     Capture, ManagedRuntime, Runtime, RuntimeKind,
     retained_cli::{
-        Collected, Interruption, InvocationEnd, InvocationFailure, RetainedInput, STOP_OBSERVATION,
-        Stop, StopReason, UnknownEnd, signal_name,
+        COMPOSE_UP_ACTION, Collected, Interruption, InvocationEnd, InvocationFailure,
+        RetainedInput, STOP_OBSERVATION, Stop, StopReason, UnknownEnd, signal_name,
     },
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -253,7 +253,7 @@ impl PreparedSource {
             verb == "compose"
                 && flag == "--project-name"
                 && super::parse_stack_name(project).is_ok()
-                && (action == ["up", "--detach", "--force-recreate"] || action == ["down"]),
+                && (action == COMPOSE_UP_ACTION || action == ["down"]),
             "unsupported engine Compose options"
         );
         let mut arguments = vec![

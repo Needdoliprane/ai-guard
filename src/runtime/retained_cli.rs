@@ -22,6 +22,7 @@ use super::*;
 use std::{
     borrow::Cow,
     io::Read,
+    num::NonZeroU16,
     os::{fd::AsRawFd, unix::process::CommandExt},
     path::PathBuf,
     process::{Child, ChildStderr, ChildStdout, ExitStatus},
@@ -47,6 +48,11 @@ pub const INTERRUPT_GRACE: Duration = Duration::from_secs(10);
 pub const REPEAT_MIN_INTERVAL: Duration = Duration::from_secs(1);
 /// Time collection is given after SIGKILL before the end is announced unknown.
 pub const STOP_OBSERVATION: Duration = Duration::from_secs(2);
+pub(crate) const COMPOSE_UP_ACTION: [&str; 3] = ["up", "--detach", "--force-recreate"];
+pub(crate) const COMPOSE_GATEWAY_PORT_ENV: &str = "AI_GUARD_GATEWAY_PORT";
+pub(crate) const COMPOSE_DASHBOARD_PORT_ENV: &str = "AI_GUARD_DASHBOARD_PORT";
+pub(crate) const DEFAULT_GATEWAY_PORT: u16 = 8787;
+pub(crate) const DEFAULT_DASHBOARD_PORT: u16 = 4000;
 const MAX_ARGUMENTS: usize = 128;
 const MAX_ARGUMENT_BYTES: usize = 64 * 1024;
 const MAX_ENVIRONMENT_VALUE_BYTES: usize = 4096;
@@ -497,11 +503,13 @@ impl Runtime {
     /// engine command, bounded by `duration` from its spawn.
     ///
     /// Refused before anything is spawned: more than 128 arguments, more than
-    /// 64 KiB of arguments or a NUL byte; an environment other than at most one
-    /// absolute `AGENTSANDBOX_CONFIG_DIR` of at most 4096 bytes without control
-    /// characters; a zero or over-30-minute bound; a retained command already
-    /// owned by this process. Capacity is decided before a stop request is
-    /// looked at.
+    /// 64 KiB of arguments or a NUL byte; unapproved or duplicate environment
+    /// keys; a zero or over-30-minute bound; a retained command already owned
+    /// by this process. The environment may include one absolute
+    /// `AGENTSANDBOX_CONFIG_DIR` of at most 4096 bytes without control characters.
+    /// Only prepared Compose startup may also override the two loopback ports
+    /// with canonical nonzero u16 values, with distinct effective ports.
+    /// Capacity is decided before a stop request is looked at.
     pub fn cli_env_retained(
         &self,
         prefix: Vec<String>,
@@ -573,15 +581,64 @@ fn approved(argv: &[String], duration: Duration, environment: &[(&str, &str)]) -
     argv.len() <= MAX_ARGUMENTS
         && argv.iter().map(String::len).sum::<usize>() <= MAX_ARGUMENT_BYTES
         && argv.iter().all(|argument| !argument.contains('\0'))
-        && environment.len() <= 1
-        && environment.iter().all(|(key, value)| {
-            *key == "AGENTSANDBOX_CONFIG_DIR"
-                && value.len() <= MAX_ENVIRONMENT_VALUE_BYTES
-                && std::path::Path::new(value).is_absolute()
-                && !value.chars().any(char::is_control)
-        })
+        && approved_environment(argv, environment)
         && !duration.is_zero()
         && duration <= MAX_DURATION
+}
+
+fn retained_compose_up(argv: &[String]) -> bool {
+    let command = match argv {
+        [host, _, command @ ..] if host == "--host" => command,
+        _ => argv,
+    };
+    matches!(command, [verb, project, _, env_file, _, compose_file, _, action @ ..]
+        if verb == "compose" && project == "--project-name" && env_file == "--env-file"
+            && compose_file == "--file" && action == COMPOSE_UP_ACTION)
+}
+
+fn canonical_port(value: &str) -> Option<NonZeroU16> {
+    if value.len() > 5 {
+        return None;
+    }
+    value
+        .parse::<NonZeroU16>()
+        .ok()
+        .filter(|port| port.to_string() == value)
+}
+
+fn approved_environment(argv: &[String], environment: &[(&str, &str)]) -> bool {
+    if environment.len() > 3 {
+        return false;
+    }
+    let compose_up = retained_compose_up(argv);
+    let mut config_seen = false;
+    let (mut gateway, mut dashboard) = (None, None);
+    for &(key, value) in environment {
+        if key == "AGENTSANDBOX_CONFIG_DIR" {
+            if config_seen
+                || value.len() > MAX_ENVIRONMENT_VALUE_BYTES
+                || !std::path::Path::new(value).is_absolute()
+                || value.chars().any(char::is_control)
+            {
+                return false;
+            }
+            config_seen = true;
+            continue;
+        }
+        let published = match key {
+            COMPOSE_GATEWAY_PORT_ENV if compose_up => &mut gateway,
+            COMPOSE_DASHBOARD_PORT_ENV if compose_up => &mut dashboard,
+            _ => return false,
+        };
+        let Some(port) = canonical_port(value) else {
+            return false;
+        };
+        if published.replace(port).is_some() {
+            return false;
+        }
+    }
+    gateway.map_or(DEFAULT_GATEWAY_PORT, NonZeroU16::get)
+        != dashboard.map_or(DEFAULT_DASHBOARD_PORT, NonZeroU16::get)
 }
 
 /// What an owner thread shares with its observer.

@@ -4,7 +4,13 @@ use crate::{
         ProviderChoiceProvenanceV1, ProviderConfigV1, ProviderSelection,
     },
     runner,
-    runtime::RuntimeKind,
+    runtime::{
+        RuntimeKind,
+        retained_cli::{
+            COMPOSE_DASHBOARD_PORT_ENV, COMPOSE_GATEWAY_PORT_ENV, COMPOSE_UP_ACTION,
+            DEFAULT_DASHBOARD_PORT, DEFAULT_GATEWAY_PORT,
+        },
+    },
 };
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
@@ -20,8 +26,6 @@ mod source_snapshot;
 pub use broker_run::RunCommand;
 
 const DEFAULT_STACK_NAME: &str = "agentsandbox";
-const DEFAULT_GATEWAY_PORT: u16 = 8787;
-const DEFAULT_DASHBOARD_PORT: u16 = 4000;
 
 /// A Compose project name that one stack owns: lowercase letters, digits, dashes and underscores,
 /// starting with a letter or a digit, at most 63 bytes.
@@ -793,7 +797,7 @@ pub async fn execute(command: OperatorCommand) -> Result<()> {
                 &config,
                 &stack_name,
                 (gateway_port, dashboard_port),
-                &["up", "--detach", "--force-recreate"],
+                &COMPOSE_UP_ACTION,
             )
             .await?;
             let gateway = format!("http://127.0.0.1:{gateway_port}");
@@ -1402,10 +1406,10 @@ async fn compose(
     let dashboard_port_text = dashboard_port.to_string();
     let mut environment = vec![("AGENTSANDBOX_CONFIG_DIR", config_path)];
     if gateway_port != DEFAULT_GATEWAY_PORT {
-        environment.push(("AI_GUARD_GATEWAY_PORT", gateway_port_text.as_str()));
+        environment.push((COMPOSE_GATEWAY_PORT_ENV, gateway_port_text.as_str()));
     }
     if dashboard_port != DEFAULT_DASHBOARD_PORT {
-        environment.push(("AI_GUARD_DASHBOARD_PORT", dashboard_port_text.as_str()));
+        environment.push((COMPOSE_DASHBOARD_PORT_ENV, dashboard_port_text.as_str()));
     }
     let output = runtime
         .consume_prepared(
@@ -1468,7 +1472,7 @@ mod tests {
     mod readiness {
         use super::*;
         use crate::{
-            api::{GatewayState, dashboard_router, gateway_router},
+            api::{GatewayState, TenantGateway, dashboard_router, gateway_router},
             audit::Store,
             policy::Policy,
             redaction::Redactor,
@@ -1519,7 +1523,39 @@ mod tests {
             .await;
             let unavailable_dashboard = local_server(
                 &mut servers,
-                dashboard_router(&gateway, wrong_viewer.into(), front).unwrap(),
+                dashboard_router(&gateway, wrong_viewer.into(), front.clone()).unwrap(),
+            )
+            .await;
+            let other_tenant = TenantGateway {
+                tenant_id: "other-tenant".into(),
+                store: Arc::new(
+                    Store::open_for_tenant(
+                        &temp.path().join("other-audit.sqlite"),
+                        "other-tenant",
+                        redactor.clone(),
+                        100,
+                    )
+                    .unwrap(),
+                ),
+                runner_token: runner.into(),
+                viewer_token: viewer.into(),
+            };
+            let other_gateway = local_server(
+                &mut servers,
+                gateway_router(
+                    GatewayState::for_tenants(
+                        vec![other_tenant],
+                        Policy::default(),
+                        None,
+                        redactor.clone(),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .await;
+            let other_dashboard = local_server(
+                &mut servers,
+                dashboard_router(&other_gateway, viewer.into(), front).unwrap(),
             )
             .await;
 
@@ -1533,6 +1569,7 @@ mod tests {
                 &dashboard,
                 &unavailable_gateway,
                 &unavailable_dashboard,
+                &other_dashboard,
             ] {
                 assert!(
                     http.get(format!("{origin}/healthz"))
@@ -1563,6 +1600,18 @@ mod tests {
                 assert!(message.contains("401"), "{message}");
                 assert!(!message.contains(viewer));
             }
+            let error = wait_for_viewer_access(
+                &gateway,
+                &other_dashboard,
+                viewer,
+                Duration::from_millis(500),
+            )
+            .await
+            .expect_err("an accepted viewer must resolve to the same tenant at both origins");
+            assert_eq!(
+                error.to_string(),
+                "gateway and dashboard returned different viewer tenants"
+            );
             servers.shutdown().await;
         }
     }

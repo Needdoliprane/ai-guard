@@ -1325,7 +1325,7 @@ fn r18_a_build_log_beyond_its_bound_is_printed_up_to_256_kib_and_the_cut_is_anno
 fn r19_named_stack_uses_the_selected_ports_and_stops_the_same_project() {
     let scenario = Operator::prepare();
     scenario.initialize_config();
-    let original_config = tree_manifest(&scenario.config);
+    let mut original_config = tree_manifest(&scenario.config);
     let readiness = Readiness::listen(
         [0, 0],
         &scenario.tmp,
@@ -1351,6 +1351,19 @@ fn r19_named_stack_uses_the_selected_ports_and_stops_the_same_project() {
     );
     let asked = readiness.finish();
     succeed("up", &started);
+    let started_config = tree_manifest(&scenario.config);
+    // Up refreshes the mounted copies, while the private sources keep their metadata.
+    for projection in [
+        "mounted-secrets",
+        "mounted-secrets/runner",
+        "mounted-secrets/viewer",
+    ] {
+        original_config.get_mut(projection).unwrap().modified = started_config[projection].modified;
+    }
+    assert!(
+        started_config == original_config,
+        "FAIL: up changed the control configuration beyond refreshing the mounted projections"
+    );
     for line in [
         "Stack: qa-second".to_owned(),
         format!("Gateway: http://127.0.0.1:{gateway_port}"),
@@ -1405,8 +1418,8 @@ fn r19_named_stack_uses_the_selected_ports_and_stops_the_same_project() {
         [format!("AGENTSANDBOX_CONFIG_DIR={config}")]
     );
     assert!(
-        tree_manifest(&scenario.config) == original_config,
-        "FAIL: stack commands changed the configuration"
+        tree_manifest(&scenario.config) == started_config,
+        "FAIL: down changed the control configuration"
     );
 }
 

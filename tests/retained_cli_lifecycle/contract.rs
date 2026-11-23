@@ -59,6 +59,11 @@ const ENGINE: &str = r#"fn main() {
     let head: Vec<&str> = arguments.iter().take(3).map(String::as_str).collect();
     let record = format!("{} {bytes} {directory} {}", arguments.len(), head.join(" "));
     std::fs::write("spawned", record).unwrap();
+    let ports = ["AI_GUARD_GATEWAY_PORT", "AI_GUARD_DASHBOARD_PORT"]
+        .map(|name| std::env::var(name).unwrap_or_default());
+    if ports.iter().any(|port| !port.is_empty()) {
+        std::fs::write("ports", ports.join(" ")).unwrap();
+    }
     println!("ok");
 }"#;
 
@@ -486,6 +491,90 @@ async fn retained_cli_rejects_unbounded_arguments_and_unapproved_environment_bef
         Some("128 65536 4096 a a a"),
         "FAIL: the engine did not receive the approved arguments and control directory"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retained_cli_limits_port_overrides_to_canonical_compose_up() {
+    let _serial = SERIAL.lock().await;
+    let engine = Engine::compile().await;
+    let config = "AGENTSANDBOX_CONFIG_DIR";
+    let gateway = "AI_GUARD_GATEWAY_PORT";
+    let dashboard = "AI_GUARD_DASHBOARD_PORT";
+    let compose = |action: &[&str]| {
+        [
+            "compose",
+            "--project-name",
+            "qa",
+            "--env-file",
+            "/copy/empty.env",
+            "--file",
+            "/copy/compose.yaml",
+        ]
+        .into_iter()
+        .chain(action.iter().copied())
+        .map(str::to_owned)
+        .collect::<Vec<_>>()
+    };
+    let up = || compose(&["up", "--detach", "--force-recreate"]);
+    let mut refused = vec![
+        (compose(&["down"]), vec![(gateway, "9001")]),
+        (vec!["build".into()], vec![(dashboard, "9002")]),
+        (compose(&["up"]), vec![(gateway, "9001")]),
+        (up(), vec![("AGENTSANDBOX_GATEWAY_PORT", "9001")]),
+        (up(), vec![(gateway, "9001"), (gateway, "9002")]),
+        (up(), vec![(dashboard, "9001"), (dashboard, "9002")]),
+        (
+            up(),
+            vec![(config, "/first"), (gateway, "9001"), (config, "/second")],
+        ),
+        (up(), vec![(gateway, "9001"), (dashboard, "9001")]),
+        (up(), vec![(gateway, "4000")]),
+    ];
+    for invalid in ["", "0", "65536", "+9001", "09001", "9001 "] {
+        refused.push((up(), vec![(gateway, invalid)]));
+        refused.push((up(), vec![(dashboard, invalid)]));
+    }
+    for (arguments, environment) in refused {
+        let (input, _, _) = Probe::new(arguments);
+        let mut owner =
+            engine
+                .runtime
+                .cli_env_retained(vec![], Box::new(input), MINUTE, &environment, None);
+        assert_eq!(
+            refusal(end_of(&mut owner).await),
+            InvocationFailure::InvalidInput,
+            "{environment:?}"
+        );
+        assert_eq!(engine.spawned(), None);
+    }
+
+    for (prefix, environment, observed) in [
+        (
+            vec!["--host".into(), "unix:///fixture.sock".into()],
+            vec![(config, "/control"), (gateway, "1"), (dashboard, "65535")],
+            "1 65535",
+        ),
+        (
+            vec![],
+            vec![(config, "/control"), (gateway, "9100")],
+            "9100 ",
+        ),
+    ] {
+        let (input, _, _) = Probe::new(up());
+        let mut owner =
+            engine
+                .runtime
+                .cli_env_retained(prefix, Box::new(input), MINUTE, &environment, None);
+        let result = end_of(&mut owner).await;
+        let InvocationEnd::Collected(collected) = result else {
+            panic!("FAIL: the Compose startup was not collected: {result:?}");
+        };
+        assert!(collected.status.success() && collected.input_released);
+        assert_eq!(
+            std::fs::read_to_string(engine.directory.path().join("ports")).unwrap(),
+            observed
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
