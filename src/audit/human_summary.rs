@@ -469,7 +469,10 @@ fn usage(
             allocation.method_version == 1 && !allocation.billable,
             "unknown allocation method"
         );
-        let finished = chrono::DateTime::parse_from_rfc3339(&allocation.finished_at)
+        // The ledger normalizes runtime observations to UTC and can contain signed years.
+        let finished = allocation
+            .finished_at
+            .parse::<chrono::DateTime<chrono::Utc>>()
             .context("invalid allocation finish time")?;
         if from.as_ref().is_some_and(|from| &finished < from) || finished > to {
             continue;
