@@ -1,7 +1,7 @@
 // Asynchronous state of the unified supervision view. No DOM and no CSS: importable by the Node tests.
 // One store lives for one selected context. It owns every read it started and forgets them all on close.
 import { HumanApiError, HumanRecentUnavailable, HumanSuperseded } from "./human-api.ts";
-import { HumanContractError } from "./human-model.ts";
+import { OWNED_WORKER_PROFILE, HumanContractError } from "./human-model.ts";
 import { supervisionAccess } from "./supervision-model.ts";
 import type { HumanBroker, HumanBrokerPage, HumanContext, HumanEvent, HumanEventPage, HumanReadProfiles, HumanRecentEventPage, HumanFederationSelection, HumanFederationWorkerPage, HumanPage, HumanResource, HumanSelection, HumanWorker, HumanWorkerPage, ReadReceipt } from "./human-model.ts";
 import type { SourcePhase, SourceSummary, SupervisionAccess } from "./supervision-model.ts";
@@ -35,7 +35,7 @@ export interface SourceError { kind: "unreachable" | "operator" | "capacity" | "
 export interface Source<T> { phase: SourcePhase; value: T | null; loadedAt: number | null; stale: boolean; busy: boolean; error: SourceError | null }
 /** `oldestReadAt`: read time of the oldest page still in the window. Its freshness is that of this page. */
 export interface WorkerWindow { items: HumanWorker[]; pages: number; hasMore: boolean; capped: boolean; evaluatedAt: string; receipts: ReadReceipt[]; oldestReadAt: number }
-/** With several worker pages, the broker snapshot of the last page read is the one kept. */
+/** A composed traversal keeps the broker snapshot of its last page. A separate broker read has its own snapshot. */
 export interface BrokerWindow { items: HumanBroker[]; hasMore: boolean; evaluatedAt: string; receipt: ReadReceipt; profile?: HumanBrokerPage["profile"] }
 export interface ResourceWindow { items: HumanResource[]; pages: number; hasMore: boolean; capped: boolean; receipt: ReadReceipt; oldestReadAt: number }
 export interface SessionEvents { items: HumanEvent[]; has_more: boolean; read_receipt: ReadReceipt }
@@ -90,6 +90,7 @@ interface Fleet { workers: WorkerWindow | null; brokers: BrokerWindow | null; cu
 export class SupervisionStore {
   #reads: SupervisionReads; #clock: SupervisionClock; #onChange: () => void; #onAccessDoubt: () => void;
   #state: SupervisionState;
+  #separateOwnedRegistries: boolean;
   #generation = 0;
   #abort = new AbortController();
   #detailAbort = new AbortController();
@@ -106,6 +107,7 @@ export class SupervisionStore {
   constructor(reads: SupervisionReads, context: HumanContext, clock: SupervisionClock, onChange: () => void, onAccessDoubt: () => void = () => {}) {
     this.#reads = reads; this.#clock = clock; this.#onChange = onChange; this.#onAccessDoubt = onAccessDoubt;
     const access = supervisionAccess(context);
+    this.#separateOwnedRegistries = access.workers && access.brokers && reads.readProfiles?.worker_registry === OWNED_WORKER_PROFILE;
     this.#state = { access, workers: workerSource(access), brokers: source(access.brokers), resources: source(access.resources),
       session: null, cadence: CADENCES[0], autoPaused: access.workers || access.brokers ? "" : "not_granted", closed: false };
   }
@@ -128,9 +130,8 @@ export class SupervisionStore {
     for (const item of sources) { item.phase = "forbidden"; item.value = null; item.loadedAt = null; item.stale = false; item.error = null; }
   }
   /**
-   * The composed read publishes its 403 without reading the body, so that rows leave at once. The reason is
-   * therefore unknown here: a revoked or expired context as well as a refused registry. Nothing read under
-   * this context stays displayed, and the host reads the identity once to decide.
+   * Composed and owned reads publish a 403 without reading the body. The host reads the identity once to
+   * distinguish a revoked or expired context from a refused registry. Withdraw the context's data meanwhile.
    */
   #refuseFleet(sources: Source<unknown>[]) {
     this.#forbid(sources); this.#workerCursor = null; this.clearSessionEvents(false);
@@ -165,26 +166,28 @@ export class SupervisionStore {
     return false;
   }
 
-  async #fleetPage(cursor: string | null, signal: AbortSignal): Promise<{ workers: HumanWorkerPage | null; brokers: HumanBrokerPage | null }> {
-    const access = this.#state.access;
-    if (access.composed) {
+  async #workerFleetPage(cursor: string | null, signal: AbortSignal): Promise<{ workers: HumanWorkerPage; brokers: HumanBrokerPage | null }> {
+    if (this.#state.access.composed) {
       const page = await this.#reads.federationWorkers({ workerLimit: SUPERVISION_PAGE, brokerLimit: SUPERVISION_PAGE, workerCursor: cursor }, signal);
       return { workers: page.workers, brokers: page.brokers };
     }
-    if (access.workers) return { workers: await this.#reads.workers(cursor, signal, SUPERVISION_PAGE), brokers: null };
-    return { workers: null, brokers: access.brokers ? await this.#reads.brokers(null, signal, SUPERVISION_PAGE) : null };
+    return { workers: await this.#reads.workers(cursor, signal, SUPERVISION_PAGE), brokers: null };
   }
   #brokerWindow(page: HumanBrokerPage | null): BrokerWindow | null {
     return page && { items: page.items, hasMore: page.has_more, evaluatedAt: page.evaluated_at, receipt: page.read_receipt,
       ...(page.profile ? { profile: page.profile } : {}) };
   }
+  async #readBrokers(signal: AbortSignal): Promise<Fleet> {
+    const page = await this.#reads.brokers(null, signal, SUPERVISION_PAGE);
+    return { workers: null, brokers: this.#brokerWindow(page), cursor: null };
+  }
   /** Reads `pages` worker pages from the start. The result is published only as a whole. */
   async #readFleet(pages: number, signal: AbortSignal): Promise<Fleet> {
+    if (!this.#state.access.workers && !this.#state.access.composed) return this.#readBrokers(signal);
     let cursor: string | null = null; let brokers: BrokerWindow | null = null; let workers: WorkerWindow | null = null;
     for (let index = 0; index < pages; index++) {
-      const page = await this.#fleetPage(cursor, signal);
+      const page = await this.#workerFleetPage(cursor, signal);
       brokers = this.#brokerWindow(page.brokers);
-      if (!page.workers) return { workers: null, brokers, cursor: null };
       workers = this.#append(workers, page.workers);
       cursor = page.workers.next_cursor;
       if (!cursor) break;
@@ -206,19 +209,27 @@ export class SupervisionStore {
       target.phase = "ready"; target.value = value; target.loadedAt = now; target.stale = false; target.error = null;
     };
     ready(this.#state.workers, fleet.workers); ready(this.#state.brokers, fleet.brokers);
-    this.#workerCursor = fleet.cursor;
+    if (fleet.workers) this.#workerCursor = fleet.cursor;
   }
   async #loadFleet(pages: number): Promise<void> {
     const sources = this.#fleetSources();
     if (!this.#fleetReadable() || sources.some((item) => item.busy)) return;
-    const generation = this.#generation; this.#begin(sources); this.#publish();
+    const generation = this.#generation; const signal = this.#abort.signal;
+    this.#begin(sources); this.#publish();
+    if (!this.#separateOwnedRegistries) return this.#loadFleetRead(sources, generation, this.#readFleet(pages, signal));
+
+    // Each registry keeps its own freshness and receipts. The owned reads share a Store that refuses contention.
+    await this.#loadFleetRead([this.#state.workers], generation, this.#readFleet(pages, signal));
+    if (generation === this.#generation) await this.#loadFleetRead([this.#state.brokers], generation, this.#readBrokers(signal));
+  }
+  async #loadFleetRead(sources: Source<unknown>[], generation: number, read: Promise<Fleet>): Promise<void> {
     try {
-      const fleet = await this.#readFleet(pages, this.#abort.signal);
+      const fleet = await read;
       if (generation !== this.#generation || this.#state.closed) return;
       this.#publishFleet(fleet);
     } catch (error) {
       if (this.#settled(error, generation)) return;
-      if (error instanceof HumanApiError && error.status === 403) this.#refuseFleet(sources);
+      if (error instanceof HumanApiError && error.status === 403) this.#refuseFleet(this.#fleetSources());
       else this.#fail(sources, error);
     } finally {
       if (generation === this.#generation) { for (const item of sources) item.busy = false; this.#publish(); }
@@ -271,11 +282,13 @@ export class SupervisionStore {
     const fleetPages = Math.max(1, this.#state.workers.value?.pages ?? 1);
     const resourcePages = Math.max(1, this.#state.resources.value?.pages ?? 1);
     if (automatic) await this.#loadFleet(fleetPages);
-    else if (this.#reads.readBudgetStopped && this.#fleetReadable()) {
+    else if ((this.#reads.readBudgetStopped || this.#separateOwnedRegistries) && this.#fleetReadable()) {
       // After an operator intervention the client grants one attempt. The fleet takes it; the resources are
       // read only once that attempt reopened the budget, instead of failing locally beside it.
+      // Separate owned reads also run in order to avoid competing for the same Store.
+      const generation = this.#generation;
       await this.#loadFleet(fleetPages);
-      if (!this.#reads.readBudgetStopped) await this.#loadResources(resourcePages);
+      if (generation === this.#generation && !this.#reads.readBudgetStopped) await this.#loadResources(resourcePages);
     } else await Promise.all([this.#loadFleet(fleetPages), this.#loadResources(resourcePages)]);
     this.#arm();
   }
@@ -326,13 +339,14 @@ export class SupervisionStore {
 
   async loadMoreWorkers(): Promise<void> {
     const target = this.#state.workers; const loaded = target.value;
-    if (this.#state.closed || !loaded || !loaded.hasMore || loaded.capped || !this.#workerCursor || this.#fleetSources().some((item) => item.busy)) return;
-    const generation = this.#generation; const sources = this.#fleetSources();
+    const fleetSources = this.#fleetSources();
+    if (this.#state.closed || !loaded || !loaded.hasMore || loaded.capped || !this.#workerCursor || fleetSources.some((item) => item.busy)) return;
+    const generation = this.#generation; const sources = this.#separateOwnedRegistries ? [target] : fleetSources;
     for (const item of sources) item.busy = true;
     this.#publish();
     try {
-      const page = await this.#fleetPage(this.#workerCursor, this.#abort.signal);
-      if (generation !== this.#generation || this.#state.closed || !page.workers) return;
+      const page = await this.#workerFleetPage(this.#workerCursor, this.#abort.signal);
+      if (generation !== this.#generation || this.#state.closed) return;
       const now = this.#clock.now();
       // The rows already loaded keep the read time of their own page: see WorkerWindow.oldestReadAt.
       target.value = this.#append(loaded, page.workers); target.loadedAt = now; target.error = null;
@@ -341,7 +355,7 @@ export class SupervisionStore {
       this.#workerCursor = page.workers.next_cursor;
     } catch (error) {
       if (this.#settled(error, generation)) return;
-      if (error instanceof HumanApiError && error.status === 403) this.#refuseFleet(sources);
+      if (error instanceof HumanApiError && error.status === 403) this.#refuseFleet(fleetSources);
       // The loaded window is unchanged and exactly as fresh as before: only the failure is reported.
       else { const failure = sourceError(error); for (const item of sources) item.error = failure; }
     } finally {

@@ -41,8 +41,11 @@ export interface HumanIdentity {
   /** A server wire profile, independent of the permissions of each context. Omitted by legacy controls. */
   read_profiles?: HumanReadProfiles;
 }
+export const OWNED_WORKER_PROFILE = "human_worker_registry_owned_v1";
 export interface HumanReadProfiles {
-  broker_registry: "human_broker_registry_owned_v1"; worker_registry: "unavailable"; federation_registry: "unavailable";
+  broker_registry: "human_broker_registry_owned_v1";
+  worker_registry: "unavailable" | typeof OWNED_WORKER_PROFILE;
+  federation_registry: "unavailable";
 }
 export interface ResourceRef { kind: ResourceKind; resource_id: string }
 export interface HumanResource {
@@ -160,11 +163,14 @@ export function parseHumanIdentity(value: unknown): HumanIdentity {
     ["local_credential", "oidc_access_token"].includes(String(value.authentication.method)) && uuid(value.authentication.credential_id) &&
     (value.authentication.expires_at === null || timestamp(value.authentication.expires_at)) && Array.isArray(value.contexts) && value.contexts.length <= 1000 &&
     typeof value.contexts_complete === "boolean");
-  const profiles = Object.hasOwn(value, "read_profiles");
-  if (profiles) {
-    closed(value.read_profiles, ["broker_registry", "worker_registry", "federation_registry"]);
-    requireContract(value.read_profiles.broker_registry === "human_broker_registry_owned_v1" &&
-      value.read_profiles.worker_registry === "unavailable" && value.read_profiles.federation_registry === "unavailable");
+  let profiles: HumanReadProfiles | undefined;
+  if (Object.hasOwn(value, "read_profiles")) {
+    const wire = value.read_profiles;
+    closed(wire, ["broker_registry", "worker_registry", "federation_registry"]);
+    const { broker_registry, worker_registry, federation_registry } = wire;
+    requireContract(broker_registry === "human_broker_registry_owned_v1" &&
+      (worker_registry === "unavailable" || worker_registry === OWNED_WORKER_PROFILE) && federation_registry === "unavailable");
+    profiles = { broker_registry, worker_registry, federation_registry };
   }
   const seen = new Set<string>();
   const contexts = value.contexts.map((item): HumanContext => {
@@ -180,18 +186,20 @@ export function parseHumanIdentity(value: unknown): HumanIdentity {
       authorization_version: item.authorization_version, expires_at: item.expires_at, capabilities: item.capabilities as Capability[],
       operations: operations(item.operations, mode) };
   });
-  // The owned read profiles and the catalogue come from the same server fact: every context then announces the worker
-  // registry and the composition unavailable for this profile, granted or not. A disagreement is a contract break.
-  if (profiles) requireContract(contexts.every((context) => context.operations.every((entry) =>
-    !["workers_read", "federation_read"].includes(entry.operation) || entry.availability === "profile_unavailable")));
+  // These availability facts agree in every context, independently of its permissions.
+  if (profiles) {
+    const workerAvailability = profiles.worker_registry === OWNED_WORKER_PROFILE ? "available" : "profile_unavailable";
+    requireContract(contexts.every((context) => context.operations.every((entry) =>
+      (entry.operation !== "workers_read" || entry.availability === workerAvailability) &&
+      (entry.operation !== "federation_read" || entry.availability === "profile_unavailable"))));
+  }
   const authenticatedPrincipal = principal(value.principal);
   requireContract((value.authentication.method === "local_credential" && authenticatedPrincipal.kind === "human_local") ||
     (value.authentication.method === "oidc_access_token" && authenticatedPrincipal.kind === "human_oidc" && timestamp(value.authentication.expires_at)));
   return { version: 1, principal: authenticatedPrincipal, display_name: value.display_name,
     authentication: { method: value.authentication.method as HumanIdentity["authentication"]["method"], credential_id: value.authentication.credential_id, expires_at: value.authentication.expires_at as string | null },
     contexts, contexts_complete: value.contexts_complete,
-    ...(profiles ? { read_profiles: { broker_registry: "human_broker_registry_owned_v1" as const,
-      worker_registry: "unavailable" as const, federation_registry: "unavailable" as const } } : {}) };
+    ...(profiles ? { read_profiles: profiles } : {}) };
 }
 function page<T>(value: unknown, parse: (item: unknown) => T, streaming = false): HumanPage<T> {
   requireContract(object(value) && value.version === 1 && opaque(value.context_id) && authorizationVersion(value.authorization_version) &&
