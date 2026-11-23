@@ -206,30 +206,13 @@ impl Directory {
     ) -> Result<Option<PrivateEntryIdentity>> {
         let encoded = child_name(name)?;
         let inspect = || -> Result<Option<PrivateEntryIdentity>> {
-            let mut facts = std::mem::MaybeUninit::<libc::stat>::uninit();
-            // SAFETY: retained directory FD, one C component, writable stat.
-            if unsafe {
-                libc::fstatat(
-                    self.0.file.as_raw_fd(),
-                    encoded.as_ptr(),
-                    facts.as_mut_ptr(),
-                    libc::AT_SYMLINK_NOFOLLOW,
-                )
-            } != 0
-            {
-                let error = std::io::Error::last_os_error();
-                if error.raw_os_error() == Some(libc::ENOENT) {
-                    return Ok(None);
-                }
-                return Err(error).context("private database entry metadata unavailable");
-            }
-            // SAFETY: successful fstatat initialized facts.
-            let facts = unsafe { facts.assume_init() };
+            let Some(facts) = named_entry_metadata(&self.0.file, &encoded)
+                .context("private database entry metadata unavailable")?
+            else {
+                return Ok(None);
+            };
             ensure!(
-                facts.st_mode & libc::S_IFMT == libc::S_IFREG
-                    && facts.st_uid == effective_uid()
-                    && facts.st_mode & 0o7777 == 0o600
-                    && facts.st_nlink == 1,
+                is_private_regular_entry(&facts),
                 "private database entry requires a regular single-link file, effective-UID ownership and mode 0600; existing data is never repaired"
             );
             #[allow(clippy::unnecessary_cast)]
@@ -608,6 +591,62 @@ fn child_name(name: &OsStr) -> Result<CString> {
         "control child name must be a single non-traversing component"
     );
     CString::new(bytes).context("control child name contains NUL")
+}
+
+/// Observe only DAC metadata for the named entry relative to a checked parent.
+/// Absence means the parent exists and the final entry does not. The private
+/// credential handoff still checks ACLs and validates the contents separately.
+pub(crate) fn private_file_metadata_present(path: &Path) -> Result<bool> {
+    validate_absolute(path)?;
+    let parent = walk(
+        path.parent()
+            .context("private file requires a parent directory")?,
+        false,
+        false,
+    )?;
+    let name = child_name(
+        path.file_name()
+            .context("private file requires a filename")?,
+    )?;
+    let facts = named_entry_metadata(&parent.file, &name)?;
+    parent.revalidate()?;
+    if let Some(facts) = &facts {
+        ensure!(
+            is_private_regular_entry(facts),
+            "private file metadata is unsafe"
+        );
+    }
+    Ok(facts.is_some())
+}
+
+fn is_private_regular_entry(facts: &libc::stat) -> bool {
+    facts.st_mode & libc::S_IFMT == libc::S_IFREG
+        && facts.st_uid == effective_uid()
+        && facts.st_mode & 0o7777 == 0o600
+        && facts.st_nlink == 1
+}
+
+fn named_entry_metadata(file: &File, name: &CString) -> std::io::Result<Option<libc::stat>> {
+    let mut facts = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: retained directory FD, one C component and writable stat.
+    if unsafe {
+        libc::fstatat(
+            file.as_raw_fd(),
+            name.as_ptr(),
+            facts.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } == 0
+    {
+        // SAFETY: successful fstatat initialized the stat structure.
+        return Ok(Some(unsafe { facts.assume_init() }));
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ENOENT) {
+        Ok(None)
+    } else {
+        Err(error)
+    }
 }
 
 fn walk(path: &Path, create: bool, private: bool) -> Result<Anchor> {

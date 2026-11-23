@@ -1,4 +1,11 @@
-use crate::{runner, runtime::RuntimeKind};
+use crate::{
+    provider::{
+        AuthMode, AuthPreference, ClientKind, ClientTransport, CredentialSourceV1,
+        ProviderChoiceProvenanceV1, ProviderConfigV1, ProviderSelection,
+    },
+    runner,
+    runtime::RuntimeKind,
+};
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use std::{
@@ -194,6 +201,29 @@ pub enum ProviderCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Resolve one provider profile and report credential metadata without opening the file.
+    #[command(
+        after_help = "A completed check reports the credential status. Run validates the credential separately before authorization."
+    )]
+    Check {
+        #[arg(long, default_value = ".agentsandbox")]
+        config_dir: PathBuf,
+        #[arg(long)]
+        providers_file: Option<PathBuf>,
+        #[arg(long, value_parser = ["codex", "claude-code", "auto"])]
+        client: Option<String>,
+        #[arg(long, value_enum, default_value = "auto")]
+        auth_mode: AuthPreference,
+        #[arg(long)]
+        client_profile: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        interactive: bool,
+        /// Output the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 // Every value is checked by the release command itself, so that a malformed
@@ -240,9 +270,7 @@ pub enum ReleaseCommand {
 }
 
 fn initialize_provider_references(config_dir: &Path, env_file: &Path) -> Result<()> {
-    use crate::provider::{
-        AuthMode, ClientKind, CredentialSourceV1, ProviderConfigV1, ProviderProfileV1,
-    };
+    use crate::provider::ProviderProfileV1;
     let config = initialize_config_directory(config_dir)?;
     let env_file = crate::control_fs::absolute_path(env_file)?;
     let providers = ProviderConfigV1 {
@@ -285,8 +313,10 @@ fn initialize_provider_references(config_dir: &Path, env_file: &Path) -> Result<
     Ok(())
 }
 
-fn provider_status(config_dir: &Path, providers_file: Option<&Path>) -> Result<serde_json::Value> {
-    use crate::provider::CredentialSourceV1;
+fn load_provider_profiles(
+    config_dir: &Path,
+    providers_file: Option<&Path>,
+) -> Result<ProviderConfigV1> {
     let config =
         crate::control_fs::Directory::open_existing(&crate::control_fs::absolute_path(config_dir)?)
             .context("private configuration missing or unsafe; run agentsandbox init first")?;
@@ -294,9 +324,21 @@ fn provider_status(config_dir: &Path, providers_file: Option<&Path>) -> Result<s
         .map(crate::control_fs::absolute_path)
         .transpose()?
         .unwrap_or_else(|| config.path().join("providers.json"));
-    let providers = crate::provider::load_config(&path).context(
+    crate::provider::load_config(&path).context(
         "provider configuration missing or unsafe; run agentsandbox providers init --env-file PATH",
-    )?;
+    )
+}
+
+fn credential_reference(source: &CredentialSourceV1) -> (&'static str, &Path) {
+    match source {
+        CredentialSourceV1::ApiEnvFile { path, .. } => ("api_env_file", path),
+        CredentialSourceV1::CodexAuthFile { path } => ("codex_auth_file", path),
+        CredentialSourceV1::ClaudeOAuthEnvFile { path } => ("claude_oauth_env_file", path),
+    }
+}
+
+fn provider_status(config_dir: &Path, providers_file: Option<&Path>) -> Result<serde_json::Value> {
+    let providers = load_provider_profiles(config_dir, providers_file)?;
     let profiles: Vec<_> = providers
         .profiles
         .iter()
@@ -304,11 +346,7 @@ fn provider_status(config_dir: &Path, providers_file: Option<&Path>) -> Result<s
             serde_json::json!({
                 "id": profile.id, "revision": profile.revision, "client": profile.client,
                 "auth_mode": profile.auth_mode, "model": profile.model,
-                "credential_source": match &profile.credential {
-                    CredentialSourceV1::ApiEnvFile { .. } => "api_env_file",
-                    CredentialSourceV1::CodexAuthFile { .. } => "codex_auth_file",
-                    CredentialSourceV1::ClaudeOAuthEnvFile { .. } => "claude_oauth_env_file",
-                }
+                "credential_source": credential_reference(&profile.credential).0,
             })
         })
         .collect();
@@ -319,6 +357,69 @@ fn provider_status(config_dir: &Path, providers_file: Option<&Path>) -> Result<s
         "mediation": crate::runner::launch_mediation_metadata(),
         "next_action": "Select a profile explicitly for run. Credentials are validated before authorization; image client capabilities and real authentication require qualification."
     }))
+}
+
+#[derive(serde::Serialize)]
+struct ProviderCheckReport {
+    version: u32,
+    profile_id: String,
+    profile_revision: u32,
+    client: ClientKind,
+    auth_mode: AuthMode,
+    model: Option<String>,
+    transport: ClientTransport,
+    provenance: ProviderChoiceProvenanceV1,
+    credential_source: &'static str,
+    credential_status: &'static str,
+    credentials_verified: bool,
+    worker_capabilities_verified: bool,
+    next_action: &'static str,
+}
+
+fn provider_check(
+    config_dir: &Path,
+    providers_file: Option<&Path>,
+    selection: &ProviderSelection,
+) -> Result<ProviderCheckReport> {
+    let providers = load_provider_profiles(config_dir, providers_file)?;
+    let resolved = crate::provider::resolve_selection(&providers, selection)?;
+    let profile = resolved.profile;
+    let (credential_source, path) = credential_reference(&profile.credential);
+    let (credential_status, next_action) = match crate::control_fs::private_file_metadata_present(
+        path,
+    ) {
+        Ok(true) => (
+            "present_unverified",
+            "Run validates the credential through the private handoff. Client capabilities and authentication still require qualification.",
+        ),
+        Ok(false) if profile.auth_mode == AuthMode::Subscription => (
+            "absent",
+            "Prepare the credential for this subscription profile using the provider's supported sign-in mechanism.",
+        ),
+        Ok(false) => (
+            "absent",
+            "Prepare the private API credential file referenced by this profile.",
+        ),
+        Err(_) => (
+            "suspect",
+            "Check the referenced parent directories and use a regular, single-link file owned by your account with mode 0600.",
+        ),
+    };
+    Ok(ProviderCheckReport {
+        version: 1,
+        profile_id: profile.id.clone(),
+        profile_revision: profile.revision,
+        client: profile.client,
+        auth_mode: profile.auth_mode,
+        model: resolved.model,
+        transport: selection.transport,
+        provenance: resolved.provenance,
+        credential_source,
+        credential_status,
+        credentials_verified: false,
+        worker_capabilities_verified: false,
+        next_action,
+    })
 }
 
 fn require_successful_run(summary: &runner::RunSummary) -> Result<()> {
@@ -406,6 +507,57 @@ pub async fn execute(command: OperatorCommand) -> Result<()> {
                         providers_file.as_deref()
                     )?)?
                 );
+            }
+            ProviderCommand::Check {
+                config_dir,
+                providers_file,
+                client,
+                auth_mode,
+                client_profile,
+                model,
+                interactive,
+                json,
+            } => {
+                let client = match client.as_deref() {
+                    None | Some("auto") => None,
+                    Some("codex") => Some(ClientKind::Codex),
+                    Some("claude-code") => Some(ClientKind::ClaudeCode),
+                    Some(_) => bail!("unknown client selection"),
+                };
+                let report = provider_check(
+                    &config_dir,
+                    providers_file.as_deref(),
+                    &ProviderSelection {
+                        client,
+                        auth_mode,
+                        profile_id: client_profile,
+                        model,
+                        transport: if interactive {
+                            ClientTransport::InteractiveTty
+                        } else {
+                            ClientTransport::Batch
+                        },
+                    },
+                )?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    println!(
+                        "Profile {} (revision {}), {:?} / {:?}, {:?}",
+                        report.profile_id,
+                        report.profile_revision,
+                        report.client,
+                        report.auth_mode,
+                        report.transport,
+                    );
+                    if let Some(model) = &report.model {
+                        println!("Model {model}");
+                    }
+                    println!(
+                        "Credential metadata {}\n{}",
+                        report.credential_status, report.next_action,
+                    );
+                }
             }
         },
         OperatorCommand::Doctor {

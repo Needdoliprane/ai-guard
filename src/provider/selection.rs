@@ -210,27 +210,20 @@ pub(super) fn choose_profile<'a>(
     choose(config, selection)
 }
 
-pub(super) fn prepare(
-    config: &ProviderConfigV1,
+pub(crate) struct ResolvedProviderSelection<'a> {
+    pub(crate) profile: &'a ProviderProfileV1,
+    pub(crate) model: Option<String>,
+    pub(crate) provenance: ProviderChoiceProvenanceV1,
+}
+
+pub(crate) fn resolve_selection<'a>(
+    config: &'a ProviderConfigV1,
     selection: &ProviderSelection,
-    project: &Path,
-    prompt: Option<&str>,
-    binding_id: Uuid,
-) -> Result<PreparedProvider> {
-    config.validate()?;
-    validate_model(selection.model.as_deref())?;
-    let (profile, source) = choose(config, selection)?;
-    let resolution = ProviderResolutionV1 {
-        version: 1,
-        client: profile.client,
-        auth_mode: profile.auth_mode,
-        transport: selection.transport,
-        profile_id: profile.id.clone(),
-        profile_revision: profile.revision,
+) -> Result<ResolvedProviderSelection<'a>> {
+    let (profile, source) = choose_profile(config, selection)?;
+    Ok(ResolvedProviderSelection {
+        profile,
         model: selection.model.clone().or_else(|| profile.model.clone()),
-        credential_binding_id: binding_id,
-        credential_names: vec![BOOTSTRAP_ENV.into()],
-        invocation_preset_version: 1,
         provenance: ProviderChoiceProvenanceV1 {
             client: if selection.client.is_some() {
                 ChoiceSource::Cli
@@ -249,6 +242,33 @@ pub(super) fn prepare(
                 ChoiceSource::Profile
             },
         },
+    })
+}
+
+pub(super) fn prepare(
+    config: &ProviderConfigV1,
+    selection: &ProviderSelection,
+    project: &Path,
+    prompt: Option<&str>,
+    binding_id: Uuid,
+) -> Result<PreparedProvider> {
+    let ResolvedProviderSelection {
+        profile,
+        model,
+        provenance,
+    } = resolve_selection(config, selection)?;
+    let resolution = ProviderResolutionV1 {
+        version: 1,
+        client: profile.client,
+        auth_mode: profile.auth_mode,
+        transport: selection.transport,
+        profile_id: profile.id.clone(),
+        profile_revision: profile.revision,
+        model,
+        credential_binding_id: binding_id,
+        credential_names: vec![BOOTSTRAP_ENV.into()],
+        invocation_preset_version: 1,
+        provenance,
     };
     resolution.validate()?;
     let argv = bootstrap_argv(&resolution, prompt)?;

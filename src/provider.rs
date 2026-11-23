@@ -11,6 +11,7 @@ use uuid::Uuid;
 pub mod bootstrap;
 mod credentials;
 mod selection;
+pub(crate) use selection::resolve_selection;
 
 pub const BOOTSTRAP_ENV: &str = "AI_GUARD_PROVIDER_BOOTSTRAP";
 pub const BOOTSTRAP_PROGRAM: &str = "/usr/local/bin/ai-guard-provider";
