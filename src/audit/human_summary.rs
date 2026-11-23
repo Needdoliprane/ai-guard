@@ -148,7 +148,7 @@ impl Store {
             } else {
                 broker_states(tx, &evaluated_at)?
             },
-            quota: if let Some(section) = quota_usage_gate(workers, owned, registry) {
+            quota: if let Some(section) = quota_usage_gate(workers, registry) {
                 section
             } else {
                 let usage = super::control::quota_usage(tx, quota)?;
@@ -164,7 +164,7 @@ impl Store {
                     },
                 }
             },
-            usage: match quota_usage_gate(workers, owned, registry) {
+            usage: match quota_usage_gate(workers, registry) {
                 Some(section) => section,
                 None => usage(tx, from.as_deref(), &evaluated_at)?,
             },
@@ -231,13 +231,10 @@ fn unavailable<T>(code: SummaryUnavailableV1) -> SummarySectionV1<T> {
     SummarySectionV1::Unavailable { code }
 }
 
-/// Limits the separate quota and usage sections, whose protocols remain closed
-/// on the owned profile.
-fn quota_usage_gate<T>(granted: bool, owned: bool, registry: bool) -> Option<SummarySectionV1<T>> {
+/// Quota and usage require registry access in an admitted store format.
+fn quota_usage_gate<T>(granted: bool, registry: bool) -> Option<SummarySectionV1<T>> {
     if !granted {
         Some(SummarySectionV1::NotGranted)
-    } else if owned {
-        Some(unavailable(SummaryUnavailableV1::ProfileUnavailable))
     } else if !registry {
         Some(unavailable(SummaryUnavailableV1::MigrationRequired))
     } else {
