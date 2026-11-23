@@ -49,7 +49,9 @@ The local Administration context can read `GET /api/v1/human/workers` on SQLite 
 
 The local administration context can read `GET /api/v1/human/admin/quota` and `GET /api/v1/human/admin/usage` when the catalogue grants and serves their operations. **Quotas et usage** reads the configured limits and durable reservations first, then the page of observed terminal allocations. Each available section shows its own read time and receipt. Allocations carry `billable:false`. A missing terminal observation leaves the duration unknown.
 
-Event content, export and stream and administration writes through the dashboard remain required for V1.
+**Utilisateurs** offers **Modifier** for another existing membership when the Administration context grants `memberships_manage`. The dashboard sends the change to a gateway configured for owned sources. After a lost response, refresh your access and select **Reprendre la même modification**. The durable receipt confirms the outcome. [POST contract](../../api.md#changement-délégué-dappartenance--delegated-membership-change)
+
+Event content, export, stream and other administration writes through the dashboard remain required for V1.
 
 A busy mutex or SQLite writer in sourceA does not trigger SQL queries in A while authenticating and reading sourceB. A busy own source returns503. Busy is not absence or a permanent mismatch. Actual compared filesystem/configuration/marker/incarnation mismatches retain global owner invalidation. Filesystem revalidation still covers the full union: blocked filesystem calls or a shared Write epoch carry the existing availability limits. The private candidate index is bounded at65536 entries/16MiB of representation before accumulation; overflow refuses complete publication. These bounds do not measure process RAM.
 

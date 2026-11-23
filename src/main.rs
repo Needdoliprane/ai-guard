@@ -1450,7 +1450,11 @@ async fn run() -> Result<()> {
             };
             let shutdown = shutdown_signal()?;
             let listener = tokio::net::TcpListener::bind(args.listen).await?;
-            eprintln!("Dashboard {} — lecture seule", listener.local_addr()?);
+            eprintln!(
+                "Dashboard {} — profil humain {}",
+                listener.local_addr()?,
+                args.human_source_mode
+            );
             serve_http(
                 listener,
                 router,
