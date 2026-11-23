@@ -1,7 +1,7 @@
 //! Live provider activity: durable spool, collector, stdout framing, forwarder
 //! and the runner-only gateway batch route, on private temporary fixtures.
-//! No runtime, network, provider or real credential is used; the gateway is
-//! exercised in process through its router.
+//! No runtime, external network, provider or real credential is used. The
+//! gateway is exercised through its router, including one loopback HTTP test.
 mod support;
 
 use agentsandbox::{
@@ -12,14 +12,18 @@ use agentsandbox::{
     policy::Policy,
     provider_activity::{
         ActivityChannel, ActivityClient, ActivityCollector, ActivityContext, ActivityLimits,
-        ActivitySink, ActivitySpool, Admission, forward, pump, stdout_tap, stdout_tap_with_stall,
+        ActivitySink, ActivitySpool, Admission, ForwardOutcome, forward, pump, stdout_tap,
+        stdout_tap_with_stall,
     },
     redaction::Redactor,
+    runner::AuditClient,
 };
 use axum::{
     Router,
     body::Body,
     http::{Request, StatusCode},
+    middleware::{self, Next},
+    response::Response,
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -31,6 +35,7 @@ use std::{
     },
     time::Duration,
 };
+use tokio::{net::TcpListener, sync::watch, time::timeout};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -473,15 +478,18 @@ fn gateway() -> (tempfile::TempDir, Arc<Store>, Router) {
         .migrate_workload_v6(&path.with_extension("v6.backup"))
         .unwrap();
     let store = Arc::new(store);
-    let router = gateway_router(GatewayState::new(
-        store.clone(),
+    (directory, store.clone(), legacy_gateway_router(store))
+}
+
+fn legacy_gateway_router(store: Arc<Store>) -> Router {
+    gateway_router(GatewayState::new(
+        store,
         RUNNER.into(),
         VIEWER.into(),
         Policy::default(),
         None,
         Redactor::new(vec![]),
-    ));
-    (directory, store, router)
+    ))
 }
 
 async fn post_batch(router: &Router, token: &str, body: &Value) -> (StatusCode, Value) {
@@ -562,6 +570,149 @@ async fn the_batch_route_is_atomic_idempotent_and_runner_only() {
     let (status, _) = post_batch(&router, RUNNER, &json!({"events": too_many})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(store.head().unwrap(), base + 4);
+}
+
+async fn forward_batch_over_http(
+    router: Router,
+    collector: ActivityCollector,
+    withhold_receipt: bool,
+) -> (ForwardOutcome, Value) {
+    const HTTP_BOUND: Duration = Duration::from_secs(10);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = AuditClient::new(
+        &format!("http://{}", listener.local_addr().unwrap()),
+        RUNNER,
+    )
+    .unwrap();
+    let (stop_forwarder, forwarder_stop) = watch::channel(false);
+    let (stop_server, mut server_stop) = watch::channel(false);
+    let receipts = Arc::new(Mutex::new(Vec::new()));
+    let app = router.layer(middleware::from_fn({
+        let receipts = receipts.clone();
+        let receipt_release = server_stop.clone();
+        move |request: Request<Body>, next: Next| {
+            let receipts = receipts.clone();
+            let stop_forwarder = stop_forwarder.clone();
+            let mut receipt_release = receipt_release.clone();
+            async move {
+                assert_eq!(request.method(), "POST");
+                assert_eq!(request.uri().path(), "/api/v1/events/batch");
+                let (parts, body) = next.run(request).await.into_parts();
+                let bytes = axum::body::to_bytes(body, 8 * 1024).await.unwrap();
+                receipts.lock().unwrap().push((parts.status, bytes.clone()));
+                stop_forwarder.send_replace(true);
+                if withhold_receipt {
+                    // The real handler has committed. Let the forwarder reach
+                    // its drain deadline before releasing the HTTP response.
+                    let _ = receipt_release.wait_for(|stopped| *stopped).await;
+                }
+                Response::from_parts(parts, Body::from(bytes))
+            }
+        }
+    }));
+    let serve = async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = server_stop.wait_for(|stopped| *stopped).await;
+            })
+            .await
+    };
+    let deliver = async move {
+        let drain = if withhold_receipt {
+            Duration::from_millis(100)
+        } else {
+            HTTP_BOUND
+        };
+        let outcome = timeout(
+            HTTP_BOUND,
+            forward(collector, &client, forwarder_stop, drain),
+        )
+        .await;
+        drop(client);
+        stop_server.send_replace(true);
+        outcome
+    };
+    let (server, delivery) = timeout(HTTP_BOUND * 2, async { tokio::join!(serve, deliver) })
+        .await
+        .expect("close the loopback gateway within the fixture deadline");
+    server.expect("serve the loopback gateway");
+    let delivery = delivery.expect("finish forwarding within the fixture deadline");
+    let receipts = receipts.lock().unwrap();
+    let [(status, body)] = receipts.as_slice() else {
+        panic!("expected one batch request, received {}", receipts.len());
+    };
+    assert_eq!(*status, StatusCode::OK);
+    (delivery, serde_json::from_slice(body).unwrap())
+}
+
+#[tokio::test]
+async fn the_forwarder_recovers_a_lost_batch_receipt_after_reopening_spool_and_store() {
+    let (temp, store, router) = gateway();
+    let path = temp.path().join("tenant.sqlite");
+    let base = store.integrity().unwrap();
+    let base_seq = store.head().unwrap();
+    assert!(base.valid);
+    let (_spool_temp, directory) = directory();
+    let session = Uuid::new_v4();
+    let limits = ActivityLimits::default();
+    let collector = collector(&directory, session, limits);
+    for line in CLAUDE_STREAM.lines() {
+        assert_eq!(collector.stdout_line(line.as_bytes()), Admission::Recorded);
+    }
+    let events = spooled(&collector);
+    assert!(events.len() > 1);
+    let count = events.len() as u64;
+    let expected = json!({
+        "stored": events
+            .iter()
+            .enumerate()
+            .map(|(index, event)| json!({"id": event.id, "seq": base_seq + index as i64 + 1}))
+            .collect::<Vec<_>>()
+    });
+
+    let (unconfirmed, first_receipt) = forward_batch_over_http(router, collector, true).await;
+    assert_eq!(first_receipt, expected);
+    assert_eq!(unconfirmed.failed_attempts, 1);
+    assert_eq!(unconfirmed.delivered_through, 0);
+    assert_eq!(unconfirmed.undelivered, Some(count));
+    let committed = store.integrity().unwrap();
+    assert!(committed.valid);
+    assert_eq!(committed.event_count, base.event_count + count);
+    assert_ne!(committed.head_hash, base.head_hash);
+    drop(store);
+
+    let store = Arc::new(
+        Store::open_existing_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 1000).unwrap(),
+    );
+    let reopened = store.integrity().unwrap();
+    assert!(reopened.valid);
+    assert_eq!(reopened.event_count, committed.event_count);
+    assert_eq!(reopened.head_hash, committed.head_hash);
+    let (spool, recovery) = ActivitySpool::reopen(&directory, session).unwrap();
+    assert_eq!((recovery.events, recovery.delivered_through), (count, 0));
+    let collector = ActivityCollector::new(
+        spool,
+        context(session, false),
+        Redactor::new(vec![]),
+        limits,
+    )
+    .unwrap();
+
+    let (confirmed, receipt) =
+        forward_batch_over_http(legacy_gateway_router(store.clone()), collector, false).await;
+    assert_eq!(receipt, first_receipt);
+    assert_eq!(confirmed.failed_attempts, 0);
+    assert_eq!(confirmed.delivered_through, count);
+    assert_eq!(confirmed.undelivered, Some(0));
+    let replayed = store.integrity().unwrap();
+    assert!(replayed.valid);
+    assert_eq!(replayed.event_count, committed.event_count);
+    assert_eq!(replayed.head_hash, committed.head_hash);
+    let (_spool, recovery) = ActivitySpool::reopen(&directory, session).unwrap();
+    assert_eq!(
+        (recovery.events, recovery.delivered_through),
+        (count, count)
+    );
 }
 
 struct RouterSink(Router);
