@@ -77,7 +77,7 @@ pub(super) fn provision_reader(
     bearer
 }
 
-async fn read(
+pub(super) async fn read(
     router: &Router,
     bearer: &str,
     path: &str,
@@ -101,7 +101,7 @@ async fn read(
     (status, serde_json::from_slice(&bytes).unwrap())
 }
 
-fn context<'a>(identity: &'a Value, mode: &str) -> &'a Value {
+pub(super) fn context<'a>(identity: &'a Value, mode: &str) -> &'a Value {
     identity["contexts"]
         .as_array()
         .unwrap()

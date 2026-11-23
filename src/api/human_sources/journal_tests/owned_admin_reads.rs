@@ -135,36 +135,9 @@ async fn owned_sources_serve_the_summary_memberships_and_configuration() {
 }
 
 async fn owned_worker_summary_on(format: u32) {
-    use super::owned_workers::provision_reader;
+    use super::owned_workers::{context, provision_reader, read};
     use crate::api::human_sources::owned_control_tests::negative::reserve_workload_fixture_worker;
     use std::os::unix::fs::PermissionsExt;
-
-    async fn get(router: &Router, bearer: &str, path: &str, context: Option<&Value>) -> Value {
-        let mut request =
-            axum::http::Request::get(path).header("authorization", format!("Bearer {bearer}"));
-        if let Some(context) = context {
-            request = request.header("x-aiguard-context", context["id"].as_str().unwrap());
-        }
-        let response = router
-            .clone()
-            .oneshot(request.body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(response.into_body(), 262_144)
-            .await
-            .unwrap();
-        serde_json::from_slice(&bytes).unwrap()
-    }
-
-    fn context<'a>(identity: &'a Value, mode: &str) -> &'a Value {
-        identity["contexts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|candidate| candidate["tenant_id"] == "A" && candidate["mode"] == mode)
-            .expect("the selected context is offered by the gateway")
-    }
 
     let historical = tempfile::Builder::new()
         .permissions(std::fs::Permissions::from_mode(0o700))
@@ -200,9 +173,11 @@ async fn owned_worker_summary_on(format: u32) {
     let router = gateway_router(state);
     const IDENTITY: &str = "/api/v1/human/identity";
     const SUMMARY: &str = "/api/v1/human/summary?window=all";
-    let identity = get(&router, &reader, IDENTITY, None).await;
+    let (status, identity) = read(&router, &reader, IDENTITY, None).await;
+    assert_eq!(status, StatusCode::OK);
     let admin = context(&identity, "administration");
-    let summary = get(&router, &reader, SUMMARY, Some(admin)).await;
+    let (status, summary) = read(&router, &reader, SUMMARY, Some(admin)).await;
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(summary["context_id"], admin["id"]);
     assert_eq!(
         summary["authorization_version"],
@@ -262,12 +237,14 @@ async fn owned_worker_summary_on(format: u32) {
     assert_eq!(audited["data"]["result_count"], 3);
     assert_eq!(received_at, receipt["received_at"].as_str().unwrap());
 
-    let broker_identity = get(&router, &broker_admin, IDENTITY, None).await;
+    let (status, broker_identity) = read(&router, &broker_admin, IDENTITY, None).await;
+    assert_eq!(status, StatusCode::OK);
     for (bearer, selected) in [
         (&reader, context(&identity, "personal")),
         (&broker_admin, context(&broker_identity, "administration")),
     ] {
-        let summary = get(&router, bearer, SUMMARY, Some(selected)).await;
+        let (status, summary) = read(&router, bearer, SUMMARY, Some(selected)).await;
+        assert_eq!(status, StatusCode::OK);
         assert_eq!(
             summary["sections"]["workers"],
             json!({"status":"not_granted"})
