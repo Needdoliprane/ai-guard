@@ -47,7 +47,7 @@ Known unadopted human, control, workload, broker, relay and OIDC methods, includ
 
 The local Administration context can read `GET /api/v1/human/workers` on SQLite 14 and 15 with `read_worker_registry`. Identity announces `worker_registry:"human_worker_registry_owned_v1"`. Every page carries a durable receipt from the authenticated source. The dashboard shows the authorized Workers view and its read time. The federation route is unavailable on this profile. [Worker registry](../supervision/README.md#owned-broker-supervision-profile)
 
-The same local administration context can read `GET /api/v1/human/admin/quota` when the catalogue grants and serves `quota_read`. The limits and held reservations come from the retained SQLite source and have an audited quota receipt. **Quotas et usage** shows that quota and its read time. The usage section shows its own availability from the catalogue.
+The local administration context can read `GET /api/v1/human/admin/quota` and `GET /api/v1/human/admin/usage` when the catalogue grants and serves their operations. **Quotas et usage** reads the configured limits and durable reservations first, then the page of observed terminal allocations. Each available section shows its own read time and receipt. Allocations carry `billable:false`. A missing terminal observation leaves the duration unknown.
 
 Event content, export and stream and administration writes through the dashboard remain required for V1.
 

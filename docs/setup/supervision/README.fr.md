@@ -33,7 +33,7 @@ Cette annonce reste indépendante des permissions du contexte. La lecture exige 
 
 **Workers** utilise le GET paginé `/api/v1/human/workers` lorsque le contexte d’administration proposé accorde et sert `workers_read`. Chaque page possède son reçu durable. **Supervision** lit les registres autorisés des workers et brokers avec leurs reçus et leur fraîcheur propres. Un refus retire les données concernées. Les anciennes versions du gateway peuvent continuer à annoncer le profil worker `unavailable`. La section Workers de la vue 360° synthétise les états et réservations durables du contexte d’administration autorisé. L’inventaire runtime est `unknown`. **Fédération** est indisponible sur ce profil. [Contrat du registre](../../api.md#registre-workers-humain--human-worker-registry)
 
-**Quotas et usage** s’ouvre lorsque le catalogue accorde et sert la lecture du quota. Lorsque seul le quota est disponible, la vue affiche plafonds, réservations durables, heure de lecture et reçu. La section Usage explique sa disponibilité.
+**Quotas et usage** s’ouvre lorsque le catalogue accorde et sert la lecture du quota. Sur le profil de sources possédées, le dashboard lit le quota avant la page d’usage autorisée. Chacun affiche sa date de lecture et son reçu. Une panne temporaire affecte la section concernée, qui conserve sa dernière lecture datée si elle en dispose. Un refus HTTP 403 retire les sections et les contextes proposés dès sa réception. Si le budget de lecture est suspendu, l’action de reprise après intervention de l’opérateur permet de relire les contextes. Lorsque seul le quota est disponible, la section Usage explique sa disponibilité.
 
 La ligne du broker et son détail distinguent fraîcheur du heartbeat et fraîcheur du checkpoint :
 
@@ -202,7 +202,7 @@ La flotte est relue toutes les 30 s tant que l'onglet est visible ; choisissez 2
 
 ## Limites
 
-- Aucun inventaire runtime. **Vue 360°** résume en une transaction les registres du tenant, les réservations de quota et les allocations observées ; les vues d’administration des appartenances, de l’usage et de la configuration et les changements délégués d’appartenance et de partage sont décrits dans [ui.md](../../ui.md#vues-utilisateur-et-administration-unifiée--cible-à-livrer) avec leur propre état. Le profil de sources possédées ne sert pas encore la synthèse.
+- Aucun inventaire runtime. **Vue 360°** résume en une transaction les registres du tenant, les réservations de quota et les allocations observées ; les vues d’administration des appartenances, de l’usage et de la configuration et les changements délégués d’appartenance et de partage sont décrits dans [ui.md](../../ui.md#vues-utilisateur-et-administration-unifiée--cible-à-livrer) avec leur propre état. Sur le profil de sources possédées, la vue d’administration dédiée sert le quota et l’usage. Les sections correspondantes de la **Vue 360°** restent indisponibles.
 - Un tenant par contexte. Aucune vue inter-tenants.
 - Ni filtre ni tri serveur du registre des workers ; au plus 500 lignes de workers, 100 brokers et 300 ressources dans cette vue.
 - Ni hiérarchie d'agents ni vue personnelle des workers.

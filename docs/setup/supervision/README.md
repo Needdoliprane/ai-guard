@@ -33,7 +33,7 @@ This announcement is independent of context permissions. The control must curren
 
 **Workers** uses the existing paginated GET `/api/v1/human/workers` when the offered Administration context grants and serves `workers_read`. Each page has its own durable receipt. **Supervision** reads the authorized Workers and Brokers windows with their own freshness and receipts. A refusal withdraws the affected data. The `unavailable` worker profile still appears as unavailable on earlier gateways. The Workers section in the 360° view summarises durable states and reservations for the authorised administration context. Runtime inventory is `unknown`. **Fédération** is unavailable on this owned profile. [Worker registry contract](../../api.md#registre-workers-humain--human-worker-registry)
 
-**Quotas et usage** opens when the catalogue grants and serves the quota read. In the quota-only profile, the view shows the configured limits, current reservations, read time and receipt. The usage section explains its availability.
+**Quotas et usage** opens when the catalogue grants and serves the quota read. On the owned profile, the dashboard reads the quota before the authorized usage page and displays each with its own time and receipt. A temporary read error marks the affected section and keeps its last dated result when available. An HTTP 403 clears the sections and available context offers as soon as the dashboard receives the refusal. If the read budget is suspended, use the operator retry to request a fresh list of contexts. If the catalogue offers quota alone, the usage section explains its availability.
 
 The broker row and its detail distinguish heartbeat freshness from checkpoint freshness:
 
@@ -202,7 +202,7 @@ The fleet refreshes every 30 s while the tab is visible; choose 2 min or **Manue
 
 ## Limits
 
-- No runtime inventory. **Vue 360°** summarizes the tenant's registries, quota reservations and observed allocations in one transaction; the administration views of memberships, usage and configuration and the delegated membership and share changes are described in [ui.md](../../ui.md#vues-utilisateur-et-administration-unifiée--cible-à-livrer) with their own state. The owned source profile does not serve the summary yet.
+- No runtime inventory. **Vue 360°** summarizes the tenant's registries, quota reservations and observed allocations in one transaction; the administration views of memberships, usage and configuration and the delegated membership and share changes are described in [ui.md](../../ui.md#vues-utilisateur-et-administration-unifiée--cible-à-livrer) with their own state. On the owned profile, the separate administration views serve quota and usage, while the sections of those names in **Vue 360°** remain unavailable.
 - One tenant per context. No cross-tenant view.
 - No server-side filter or sort of the worker registry; at most 500 worker rows, 100 brokers and 300 resources in this view.
 - No agent hierarchy and no personal view of workers.

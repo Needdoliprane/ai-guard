@@ -47,7 +47,7 @@ Les méthodes connues non adoptées humaines, contrôle, workload, brokers, rela
 
 Le contexte d’administration local peut lire `GET /api/v1/human/workers` sur SQLite 14 et 15 avec `read_worker_registry`. L’identité annonce `worker_registry:"human_worker_registry_owned_v1"`. Chaque page porte un reçu durable de la source authentifiée. Le dashboard affiche la vue Workers autorisée et son heure de lecture. La route de fédération est indisponible sur ce profil. [Registre workers](../supervision/README.fr.md#profil-de-supervision-des-brokers-owned)
 
-Ce contexte d’administration local peut lire `GET /api/v1/human/admin/quota` lorsque le catalogue accorde et sert `quota_read`. Les plafonds et réservations retenues proviennent de la source SQLite sélectionnée et portent un reçu de lecture. **Quotas et usage** affiche ce quota et son heure de lecture. La section Usage indique sa propre disponibilité d’après le catalogue.
+Le contexte d’administration local peut lire `GET /api/v1/human/admin/quota` et `GET /api/v1/human/admin/usage` lorsque le catalogue accorde et sert leurs opérations. **Quotas et usage** lit les plafonds et réservations durables, puis la page d’allocations terminales observées. Chaque section disponible affiche son heure de lecture et son reçu. Les allocations portent `billable:false`. Sans observation terminale, la durée reste inconnue.
 
 Le contenu, l’export et le flux d’événements ainsi que les écritures d’administration via le dashboard restent exigés en V1.
 
