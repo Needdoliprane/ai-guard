@@ -173,35 +173,42 @@ export class GrantEditor extends EditorDialog {
   constructor(host: GrantEditorHost) {
     super("Partages de la ressource", `${host.resource.kind} · ${host.resource.resource_id}`, host.onClosed);
     this.#host = host;
-    this.#flow = new ChangeFlow<GrantChangeReceipt>({
-      applied: (receipt) => host.onApplied(receipt),
-      // The shares changed: read them again here and start from the new revision.
-      conflict: () => { void this.#read(true); }, missing: () => {},
-      refused: () => host.onRefused(),
-    });
+    this.#flow = this.#freshFlow();
   }
-  override open() { super.open(); void this.#read(false); }
-  async #read(afterConflict: boolean) {
+  override open() { super.open(); void this.#read(); }
+  async #read() {
     if (this.#reading || this.closed) return;
+    const afterConflict = this.#flow.phase === "conflict";
+    if (afterConflict) {
+      this.#grant = null; this.#draft = [];
+      this.#members = []; this.#membersNext = null;
+      this.#candidate = ""; this.#candidatePermissions = ["metadata"];
+      this.step = "edit";
+      this.say("Le contrôle a signalé un conflit sur les partages.");
+    }
     this.#reading = true; this.#readError = ""; this.render();
+    if (afterConflict) this.focusStep();
     try {
       const [grant, members] = await Promise.all([this.#host.read(this.abort.signal), this.#host.members(null, this.abort.signal)]);
       if (this.closed) return;
       this.#grant = grant; this.#draft = grant.shares.map((share) => ({ principal: share.principal, display_name: share.display_name, permissions: [...share.permissions] }));
       this.#members = members.items; this.#membersNext = members.next_cursor;
-      if (afterConflict) { this.#flow = this.#freshFlow(); this.step = "edit"; this.say(CHANGE_PHASE_TEXT.conflict); }
+      if (afterConflict) {
+        this.#flow = this.#freshFlow(); this.step = "edit";
+        this.say("Partages et membres relus. Vérifiez la nouvelle révision avant de confirmer.");
+      }
     } catch (error) {
       if (this.closed || error instanceof HumanSuperseded) return;
       if (error instanceof HumanApiError && error.status === 403) { this.#host.onRefused(); return; }
-      this.#readError = error instanceof Error ? error.message : "Lecture impossible.";
+      this.#readError = error instanceof Error && error.message ? error.message : "Le contrôle n’a pas fourni les données demandées.";
     } finally { this.#reading = false; if (!this.closed) { this.render(); if (afterConflict) this.focusStep(); } }
   }
   #freshFlow() {
-    return new ChangeFlow<GrantChangeReceipt>({ applied: (receipt) => this.#host.onApplied(receipt), conflict: () => { void this.#read(true); },
+    return new ChangeFlow<GrantChangeReceipt>({ applied: (receipt) => this.#host.onApplied(receipt), conflict: () => { void this.#read(); },
       missing: () => {}, refused: () => this.#host.onRefused() });
   }
   async #moreMembers() {
-    if (!this.#membersNext || this.#reading || this.closed) return;
+    if (this.step !== "edit" || !this.#membersNext || this.#reading || this.closed) return;
     this.#reading = true; this.render();
     try {
       const page = await this.#host.members(this.#membersNext, this.abort.signal);
@@ -221,9 +228,11 @@ export class GrantEditor extends EditorDialog {
   protected render() {
     const grant = this.#grant; const { context, self } = this.#host;
     if (!grant) {
-      this.paint(this.stepTitle("Partages de la ressource"),
-        this.#reading ? el("p", "muted", "Lecture des partages…") : null,
-        this.#readError ? el("div", "control-error", el("p", "", `Lecture impossible. ${this.#readError}`), this.action("Réessayer", "dg-reread", () => { void this.#read(false); })) : null,
+      const conflict = this.#flow.phase === "conflict";
+      this.paint(this.stepTitle(conflict ? "Relire les partages et les membres" : "Partages de la ressource"),
+        this.#reading ? el("p", "muted", conflict ? "Relecture des partages et des membres…" : "Lecture des partages…") : null,
+        this.#readError ? el("div", "control-error", el("p", "", `${conflict ? "Relecture impossible." : "Lecture impossible."} ${this.#readError}`),
+          this.action("Réessayer", "dg-reread", () => { void this.#read(); })) : null,
         el("div", "dg-actions", this.action("Fermer", "dg-cancel", () => this.close())));
       return;
     }
@@ -297,10 +306,13 @@ export class GrantEditor extends EditorDialog {
   }
   async #submit() {
     const grant = this.#grant;
-    if (!grant || this.#flow.phase === "sending" || this.closed) return;
+    const phase = this.#flow.phase;
+    if (!grant || this.#reading || this.step !== "confirm" || phase === "sending" || phase === "conflict" || this.closed) return;
     const shares = this.#draft.map((share) => ({ principal: share.principal, permissions: SHARE_PERMISSIONS.filter((p) => share.permissions.includes(p)) }));
     const request = this.#flow.submit(this.#key(), (operationId) => this.#host.send({ operation_id: operationId, resource: this.#host.resource,
       expected_revision: grant.revision, shares }, grant.owner, this.abort.signal));
-    this.render(); await request; if (!this.closed) this.render();
+    this.render();
+    const outcome = await request;
+    if (!this.closed && outcome !== "conflict") this.render();
   }
 }
