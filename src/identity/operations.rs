@@ -433,6 +433,65 @@ mod tests {
     }
 
     #[test]
+    fn membership_management_offers_the_organization_on_marked_owned_sources() {
+        use HumanCapabilityV1 as C;
+        use OperationAvailabilityV1 as A;
+        let capabilities = BTreeSet::from([C::ManageMemberships, C::ReadMemberships]);
+        for (owned_profile, human_rights_marker, availability) in [
+            (true, true, A::Available),
+            (true, false, A::MigrationRequired),
+            (false, true, A::NotInThisBuild),
+            (false, false, A::NotInThisBuild),
+        ] {
+            let catalogue = context_operations(
+                ContextModeV1::Administration,
+                &capabilities,
+                &capabilities,
+                OperationFactsV1 {
+                    owned_profile,
+                    human_rights_marker,
+                },
+            );
+            let offer = entry(&catalogue, HumanOperationV1::MembershipsManage);
+            assert_eq!(offer.permission, OperationPermissionV1::Granted);
+            assert_eq!(offer.scope, Some(OperationScopeV1::Organization));
+            assert_eq!(offer.availability, availability);
+        }
+    }
+
+    #[test]
+    fn membership_management_requires_both_effective_rights_in_administration() {
+        use HumanCapabilityV1 as C;
+        use OperationPermissionV1 as P;
+        let membership = BTreeSet::from([C::ManageMemberships, C::ReadMemberships]);
+        let facts = OperationFactsV1 {
+            owned_profile: true,
+            human_rights_marker: true,
+        };
+        for remaining in [C::ManageMemberships, C::ReadMemberships] {
+            let catalogue = context_operations(
+                ContextModeV1::Administration,
+                &BTreeSet::from([remaining]),
+                &membership,
+                facts,
+            );
+            let offer = entry(&catalogue, HumanOperationV1::MembershipsManage);
+            assert_eq!((offer.permission, offer.scope), (P::NotGranted, None));
+        }
+        let personal = context_operations(
+            ContextModeV1::Personal,
+            &BTreeSet::new(),
+            &membership,
+            facts,
+        );
+        let offer = entry(&personal, HumanOperationV1::MembershipsManage);
+        assert_eq!(
+            (offer.permission, offer.scope),
+            (P::RequiresAdministration, None)
+        );
+    }
+
+    #[test]
     fn owned_event_availability_preserves_granted_permissions() {
         use HumanCapabilityV1 as C;
         use HumanOperationV1 as O;
