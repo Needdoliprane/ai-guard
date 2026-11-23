@@ -655,13 +655,20 @@ pub(super) mod tests;
 const HUMAN_EVENT_DETAIL_PATH: &str = "/api/v1/human/events/{id}";
 pub(super) const HUMAN_MEMBERSHIP_CHANGE_PATH: &str =
     "/api/v1/human/admin/memberships/{membership_id}";
+pub(super) const HUMAN_OWNED_MEMBERSHIP_CHANGE_PATH: &str =
+    "/api/v1/human/owned/admin/memberships/{membership_id}";
 
-pub(super) fn owned_membership_change_target(uri: &axum::http::Uri) -> bool {
-    uri.query().is_none()
-        && uri
-            .path()
-            .strip_prefix("/api/v1/human/admin/memberships/")
-            .is_some_and(|id| crate::control::uuid(id).is_ok())
+pub(super) fn membership_change_id<'a>(
+    uri: &'a axum::http::Uri,
+    template: &str,
+) -> Option<&'a str> {
+    if uri.query().is_some() {
+        return None;
+    }
+    let prefix = template.strip_suffix("{membership_id}")?;
+    uri.path()
+        .strip_prefix(prefix)
+        .filter(|id| crate::control::uuid(id).is_ok())
 }
 
 const OWNED_HUMAN_GET_PATHS: &[&str] = &[
@@ -758,6 +765,7 @@ const REGISTERED_ROUTES: &[(&str, &[&str])] = &[
     ("/api/v1/human/export", &["GET", "HEAD"]),
     ("/api/v1/human/federation/workers", &["GET", "HEAD"]),
     ("/api/v1/human/identity", &["GET", "HEAD"]),
+    (HUMAN_OWNED_MEMBERSHIP_CHANGE_PATH, &["POST"]),
     ("/api/v1/human/owned/brokers", &["GET", "HEAD"]),
     ("/api/v1/human/resources", &["GET", "HEAD"]),
     ("/api/v1/human/stream", &["GET", "HEAD"]),
@@ -843,10 +851,17 @@ pub(super) async fn route_gate(
     if !known.is_some_and(|(_, methods)| methods.contains(&request.method().as_str())) {
         return next.run(request).await;
     }
-    let membership_change =
-        template == Some(HUMAN_MEMBERSHIP_CHANGE_PATH) && request.method() == "POST";
-    if membership_change && !owned_membership_change_target(request.uri()) {
-        return human::invalid_request().into_response();
+    if let Some(membership_template) = template.filter(|path| {
+        request.method() == "POST"
+            && matches!(
+                *path,
+                HUMAN_MEMBERSHIP_CHANGE_PATH | HUMAN_OWNED_MEMBERSHIP_CHANGE_PATH
+            )
+    }) {
+        if membership_change_id(request.uri(), membership_template).is_none() {
+            return human::invalid_request().into_response();
+        }
+        return next.run(request).await;
     }
     let path = request.uri().path();
     let allowed = (["/healthz", "/api/v1/status"].contains(&path)
@@ -855,7 +870,6 @@ pub(super) async fn route_gate(
         || super::control_transport::owned_broker_request(&request)
         || super::control_transport::owned_policy_request(&request)
         || super::control_transport::owned_policy_inspection_request(&request)
-        || membership_change
         || request.method() == "GET"
             && (OWNED_HUMAN_GET_PATHS.contains(&path) || template == Some(HUMAN_EVENT_DETAIL_PATH))
         || request.method() == "GET"

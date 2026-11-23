@@ -2194,10 +2194,18 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
     let versioned_human = path.starts_with("/api/v1/human/");
     // This is the only POST admitted by this proxy. Require its exact target
     // independently of the router, before extracting any headers or body.
-    let membership_change = s.owned_sources && request.method() == "POST";
-    if membership_change && !human_sources::owned_membership_change_target(request.uri()) {
-        return Err(human::invalid_request());
-    }
+    let membership_id = if s.owned_sources && request.method() == "POST" {
+        Some(
+            human_sources::membership_change_id(
+                request.uri(),
+                human_sources::HUMAN_MEMBERSHIP_CHANGE_PATH,
+            )
+            .ok_or_else(human::invalid_request)?,
+        )
+    } else {
+        None
+    };
+    let membership_change = membership_id.is_some();
     if s.owned_sources && !membership_change {
         let owned_static_path = [
             "/api/v1/human/identity",
@@ -2293,8 +2301,14 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
         verify_dashboard_viewer(&s, &token).await?;
     }
     let mut url = s.upstream.clone();
-    url.set_path(request.uri().path());
-    url.set_query(request.uri().query());
+    if let Some(id) = membership_id {
+        let owned_path =
+            human_sources::HUMAN_OWNED_MEMBERSHIP_CHANGE_PATH.replace("{membership_id}", id);
+        url.set_path(&owned_path);
+    } else {
+        url.set_path(path);
+        url.set_query(request.uri().query());
+    }
     let mut call = s
         .client
         .request(request.method().clone(), url)

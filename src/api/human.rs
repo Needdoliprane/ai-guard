@@ -943,6 +943,10 @@ pub(super) fn routes() -> Router<GatewayState> {
             "/human/admin/memberships/{membership_id}",
             post(admin::change_membership),
         )
+        .route(
+            "/human/owned/admin/memberships/{membership_id}",
+            post(admin::change_owned_membership),
+        )
         .route("/human/admin/configuration", get(admin::configuration))
         .route("/human/resources", get(resources))
         .route("/human/events", get(events))

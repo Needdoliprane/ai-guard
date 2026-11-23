@@ -360,6 +360,31 @@ pub(super) async fn configuration(
     .await
 }
 
+/// The dashboard relays to this owned-only route. Reject the legacy profile
+/// before authenticating or reading any part of the submission body.
+pub(super) async fn change_owned_membership(
+    State(state): State<GatewayState>,
+    request: Request,
+) -> ApiResult<Json<HumanMembershipChangeReceiptV1>> {
+    if state.owned_human.is_none() {
+        return Err(super::super::human_sources::unavailable());
+    }
+    let (mut parts, body) = request.into_parts();
+    let proof = VerifiedHuman::from_request_parts(&mut parts, &state).await?;
+    let path = Path::<String>::from_request_parts(&mut parts, &state)
+        .await
+        .map_err(|_| invalid_request())?;
+    let headers = parts.headers.clone();
+    change_membership(
+        proof,
+        State(state),
+        headers,
+        path,
+        Request::from_parts(parts, body),
+    )
+    .await
+}
+
 /// `POST /api/v1/human/admin/memberships/{membership_id}`: a delegated change
 /// of one existing membership of the reader's organization. The authenticated
 /// administrator is the actor; the identity mutation and its audit are durable
