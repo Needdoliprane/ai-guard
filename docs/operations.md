@@ -216,6 +216,9 @@ Préparer un fichier privé régulier `0600`, possédé par le compte de contrô
 agentsandbox providers init --config-dir /chemin/prive/controle \
   --env-file /chemin/projet/.env
 agentsandbox providers status --config-dir /chemin/prive/controle --json
+agentsandbox providers check --config-dir /chemin/prive/controle \
+  --client claude-code --auth-mode api --client-profile claude-api \
+  --model claude-haiku-5-5 --json
 agentsandbox run --config-dir /chemin/prive/controle --project /chemin/projet \
   --profile observe --network bridge --timeout 120 \
   --client claude-code --auth-mode api --client-profile claude-api \
@@ -229,6 +232,8 @@ Une invocation ultérieure du chemin géré Claude/API batch a passé sur l'imag
 `providers init` crée `providers.json` sans lire le fichier de credentials, sans écrasement et sans login. Il crée deux profils API : `codex-api` référence `OPENAI_API_KEY`, `claude-api` référence `ANTHROPIC_API_KEY`, avec la priorité Auto déclarée Codex puis Claude. `providers status` affiche les profils, modes et types de source, jamais leur chemin privé ni leur valeur ; `credentials_verified` et `worker_capabilities_verified` restent faux. Le défaut est `<config-dir>/providers.json` ; `providers status --providers-file` et `run --providers-file` choisissent un autre fichier privé.
 
 `--client codex|claude-code|auto`, `--auth-mode api|subscription|auto`, `--client-profile`, `--model` et `--prompt` pilotent la résolution. Un prompt est obligatoire en batch et facultatif en TTY. Le choix CLI explicite doit correspondre au profil sélectionné ; `--model` remplace le modèle du profil. Sans profil explicitement sélectionné, Auto considère les profils abonnement configurés avant les profils API, puis le défaut compatible et l'ordre `auto_priority` départagent. Une ambiguïté sans priorité est refusée. Un abonnement sélectionné manquant ou refusé ne déclenche aucune tentative API. Une variable ambiante ou un CLI hôte ne sélectionne aucun profil.
+
+`providers check` résout le même choix que `run` et relève les métadonnées de la référence sélectionnée. Lire `credential_status`. `present_unverified` atteste les métadonnées attendues, `absent` une entrée manquante sous un répertoire vérifié et `suspect` un accès ou des métadonnées à vérifier. Le contenu, l’authentification et les capacités du client demandent une validation distincte. [Diagnostic fournisseur](setup/providers/README.fr.md#diagnostiquer-les-problèmes-fournisseur)
 
 Le choix non secret est affiché avant décision ; une API est annoncée comme facturée par le fournisseur. `--client-profile` désigne un profil fournisseur, distinct de `--profile observe`. Les credentials exigent toujours observe + bridge explicites. Les options gérées ne se combinent pas avec un argv manuel, `--secret-env-file` ou un normaliseur `--provider` non générique. Voir [la configuration et les limites fournisseur](engineering/PROVIDER_AUTH.md#état-livré-et-limites--30-octobre-2026-après-revue).
 
