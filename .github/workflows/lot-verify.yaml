@@ -1,198 +1,338 @@
-name: Lot verification
-
-# Verifies V1 development branches on a hosted Linux x86_64 runner so that the
-# development Mac keeps its memory for engine, browser and macOS recipes.
-# It complements ci.yaml (dev/main) and never creates tags, releases or
-# artifacts outside this run. Engine (Docker/Podman/Kubernetes) and provider
-# recipes stay out of this workflow: ignored tests are not run and are never
-# counted as passes.
+name: G11 scoped relay journal and terminal receipt check
 
 on:
   push:
-    branches: ['claude/v1-**']
+    branches: ['claude/v1-g11-terminal-recovery-observation-check-20261123']
 
 permissions:
   contents: read
 
 concurrency:
-  group: lot-verify-${{ github.ref }}
+  group: g11-terminal-receipt-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  rust:
+  terminal-receipt:
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 45
     env:
-      AI_GUARD_BUILD_REVISION: ${{ github.sha }}
-      # Match CI's build limit when compiling and linking the full test suite.
+      AI_GUARD_BUILD_REVISION: 526d1037fcf4b723d683b263a401757727a67fa0
       CARGO_BUILD_JOBS: '1'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
-      RUST_MIN_STACK: '8388608'
       CARGO_TERM_COLOR: never
+      LC_ALL: C
     steps:
+      - name: Initialize closed G11 receipt
+        shell: bash
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/g11-terminal-receipt.txt"
+          cat > "$receipt" <<EOF
+          source_sha=526d1037fcf4b723d683b263a401757727a67fa0
+          workflow_sha=$WORKFLOW_SHA
+          workflow_parent_sha=526d1037fcf4b723d683b263a401757727a67fa0
+          feature_mode=no-default-features
+          target=broker_relay_handoff
+          selector=software_broker_scoped_relay_ipc_refuses_before_private_detail
+          source_check=NOT_RUN
+          workflow_check=NOT_RUN
+          toolchain=NOT_RUN
+          toolchain_version=unknown
+          dependency_fetch=NOT_RUN
+          build_verdict=NOT_RUN
+          build_exit=unknown
+          libtest_sha256=unknown
+          test_selected=unknown
+          test_passed=unknown
+          test_failed=unknown
+          test_ignored=unknown
+          test_exit=unknown
+          test_result=NOT_RUN
+          terminal_receipt=UNKNOWN
+          fixture_phase=unknown
+          fixture_cleanup=unknown
+          terminal_a_wait=unknown
+          terminal_a_store=unknown
+          terminal_a_state=unknown
+          terminal_a_quota_held=unknown
+          terminal_a_same_attempt=unknown
+          terminal_a_witness=unknown
+          terminal_a_store_receipt=unknown
+          terminal_a_journal_head=unknown
+          terminal_a_post_cancel_failure=unknown
+          terminal_a_executor_task_running=unknown
+          terminal_b_wait=unknown
+          terminal_b_store=unknown
+          terminal_b_state=unknown
+          terminal_b_quota_held=unknown
+          terminal_b_same_attempt=unknown
+          terminal_b_witness=unknown
+          terminal_b_store_receipt=unknown
+          terminal_b_journal_head=unknown
+          terminal_b_post_cancel_failure=unknown
+          terminal_b_executor_task_running=unknown
+          last_phase=initialized
+          EOF
+          chmod 600 "$receipt"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
+          fetch-depth: 4
           persist-credentials: false
-      - name: Free runner disk for the test targets
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
-      - name: Fetch dependencies with the pinned Rust toolchain
-        run: |
-          rustc --version
-          cargo fetch --locked
-      - name: Check Rust formatting
-        run: cargo fmt --all -- --check
-      - name: Check all targets with MySQL enabled
-        run: cargo check --locked --offline --all-targets --features mysql-storage --keep-going
-      - name: Check all targets without default features (SQLite only)
-        run: cargo check --locked --offline --all-targets --no-default-features --keep-going
-      - name: Third-party licence guard and its unit tests
-        # `cargo test` builds examples but does not run their unit tests.
-        run: |
-          cargo test --locked --offline --example third_party_notices
-          cargo run --quiet --locked --offline --example third_party_notices -- check --allowed .github/third-party-license-expressions.txt
-      - name: Provider harness regressions
-        run: |
-          python3 -B tests/e2e/interactive_driver.py --self-test
-          python3 -B tests/e2e/test_run_provider_preflight.py ProviderPreflightTests ProviderBrowserStageTests
-          python3 -B tests/e2e/test_run_provider_broker.py BrokerRecipeTests
-      - name: Rust test suite (ignored engine and provider tests excluded)
-        if: github.ref_name != 'claude/v1-integration-regressions-20261122'
-        shell: bash
-        run: |
-          set -o pipefail
-          export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
-          cargo test --locked --offline --no-fail-fast 2>&1 | tee cargo-test.log
-      - name: Targeted SQLite library regressions
-        if: github.ref_name == 'claude/v1-integration-regressions-20261122'
+
+      - name: Verify exact G11 source and workflow-only child
         shell: bash
         run: |
           set -euo pipefail
-          export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
-          build_json="$TMPDIR/libtest.jsonl"
-          test_log="$TMPDIR/selector.log"
-          summary=cargo-test-summary.txt
-          failures=cargo-test-failed.txt
-          : > "$summary"
-          : > "$failures"
-
-          settlement=broker::service::server::retirement_settlement_tests::same_original_not_queued_final_retries_its_retained_input_before_another_q
-          selectors=(
-            audit::resource_tests::retention_confirms_the_committed_segment_after_a_filesystem_ack_failure
-            api::human_sources::journal_tests::owned_event_page_reports_the_archived_prefix_after_adoption
-            api::human_sources::tests::owned_admin_reads_refuse_head_before_authentication
-            api::human_sources::journal_tests::owned_admin_reads::owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
-            identity::operations::tests::owned_event_availability_preserves_granted_permissions
-            broker::writer::inventory_tests::completed_inventory_releases_its_permit_before_reply
-            broker::writer::inventory_tests::timed_out_inventory_keeps_one_permit_and_cannot_queue_a_series_before_cancel
-            broker::writer::status_projection_tests::coverage_only_pending_arm_does_not_taint_a_valid_last_confirmed_status
-            "$settlement"
-          )
-          expected=9
-          if (( ${#selectors[@]} != expected )); then
-            echo 'Invalid regression selector count' | tee -a "$summary"
+          umask 077
+          receipt="$RUNNER_TEMP/g11-terminal-receipt.txt"
+          set_field() {
+            local key=$1 value=$2
+            awk -F= -v k="$key" -v v="$value" '$1 == k { $0 = k "=" v } { print }' "$receipt" > "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          source=526d1037fcf4b723d683b263a401757727a67fa0
+          parent=4b6ae87a712f782e28e035432967c0bed270e0fc
+          expected_paths=$'tests/broker_relay_handoff.rs\ntests/support/broker_relay_handoff.rs\ntests/support/broker_relay_runtime.rs'
+          test_source=tests/broker_relay_handoff.rs
+          support_source=tests/support/broker_relay_handoff.rs
+          if [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 &&
+                "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/claude/v1-g11-terminal-recovery-observation-check-20261123 &&
+                "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$(git rev-parse HEAD)" == "$GITHUB_SHA" &&
+                "$(git rev-parse HEAD^)" == "$source" && "$(git rev-parse "$source^")" == "$parent" &&
+                "$(git show -s --format=%P "$parent")" == "bbe39996997332a8c6aed7a8551c45258abb8100 076d69add0efcae7f9870630a47c110bc89373c2" &&
+                "$(git diff --name-only "$parent" "$source")" == "$expected_paths" &&
+                "$(git diff --name-only "$source" HEAD)" == .github/workflows/lot-verify.yaml &&
+                -z "$(git status --porcelain=v1 --untracked-files=all)" ]] &&
+             git merge-base --is-ancestor "$source" HEAD &&
+             grep -Fq 'async fn software_broker_scoped_relay_ipc_refuses_before_private_detail()' "$test_source" &&
+             grep -Fq 'let receipt = serde_json::json!({"phase": phase, "cleanup": cleanup_status, "a": a, "b": b});' "$test_source" &&
+             grep -Fq 'eprintln!("g11_relay_terminal_receipt {receipt}");' "$test_source" &&
+             grep -Fq 'Fixture::new(90).await' "$test_source" &&
+             grep -Fq 'pub(super) struct TerminalWorkerSample' "$support_source" &&
+             grep -Fq 'pub(super) async fn sample_worker_terminal' "$support_source" &&
+             grep -Fq 'fn terminal_store_receipt(' "$support_source" &&
+             grep -Fq 'Real service/Core/helper composition, software only.' "$support_source" &&
+             grep -Fq 'engine, provider, project command or privileged host action is executed.' "$support_source"; then
+            set_field source_check PASS
+            set_field workflow_check PASS
+            set_field last_phase source_verified
+          else
+            set_field source_check FAIL
+            set_field workflow_check FAIL
+            set_field last_phase source_guard_failed
             exit 1
           fi
-          printf 'Revision %s; %s exact SQLite library tests expected\n' "$GITHUB_SHA" "$expected" | tee -a "$summary"
 
-          # Keep raw Cargo and test output in the runner's private scratch directory.
-          if ! cargo test --locked --offline --no-default-features --lib --no-run \
-              --message-format=json > "$build_json" 2> "$TMPDIR/build.stderr"; then
-            echo 'SQLite library build failed; tests not run' | tee -a "$summary"
-            jq -r 'select(.reason == "compiler-message" and .message.level == "error")
-              | .message.code.code // empty | select(test("^E[0-9]{4}$"))' "$build_json" \
-              2>/dev/null | sort -u | tee -a "$summary" || true
+      - name: Install and verify the exact Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="$RUNNER_TEMP/g11-terminal-receipt.txt"
+          set_field() {
+            local key=$1 value=$2
+            awk -F= -v k="$key" -v v="$value" '$1 == k { $0 = k "=" v } { print }' "$receipt" > "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          set_field last_phase rustup_toolchain_install
+          rustup toolchain install 1.99.1 --profile minimal --no-self-update > "$RUNNER_TEMP/g11-rustup.log" 2>&1
+          version="$(rustc +1.99.1 --version | awk '{print $2}')"
+          [[ "$version" == 1.99.1 ]]
+          set_field toolchain PASS
+          set_field toolchain_version "$version"
+          set_field last_phase toolchain_verified
+
+      - name: Fetch locked dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="$RUNNER_TEMP/g11-terminal-receipt.txt"
+          set_field() {
+            local key=$1 value=$2
+            awk -F= -v k="$key" -v v="$value" '$1 == k { $0 = k "=" v } { print }' "$receipt" > "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          set_field last_phase dependency_fetch
+          if cargo +1.99.1 fetch --locked > "$RUNNER_TEMP/g11-fetch.log" 2>&1; then
+            set_field dependency_fetch PASS
+            set_field last_phase dependencies_fetched
+          else
+            rc=$?
+            set_field dependency_fetch FAIL
+            set_field last_phase dependency_fetch_failed
+            exit "$rc"
+          fi
+
+      - name: Compile the single integration libtest
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/g11-terminal-receipt.txt"
+          scratch="$RUNNER_TEMP/g11-terminal-build"
+          mkdir -m 700 "$scratch"
+          set_field() {
+            local key=$1 value=$2
+            awk -F= -v k="$key" -v v="$value" '$1 == k { $0 = k "=" v } { print }' "$receipt" > "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          set_field last_phase single_target_build
+          build_rc=0
+          timeout --kill-after=10s 20m cargo +1.99.1 test --locked --offline --no-default-features \
+            --test broker_relay_handoff --no-run --message-format=json \
+            > "$scratch/build.jsonl" 2> "$scratch/build.stderr" || build_rc=$?
+          set_field build_exit "$build_rc"
+          if (( build_rc != 0 )); then
+            set_field build_verdict FAIL
+            set_field test_result NOT_RUN
+            set_field last_phase single_target_build_failed
+            exit "$build_rc"
+          fi
+          libtest="$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "broker_relay_handoff" and .target.kind == ["test"]
+              and .profile.test == true and .features == [] and .executable != null)
+              | .executable] | unique | if length == 1 then .[0] else empty end' "$scratch/build.jsonl" 2>/dev/null || true)"
+          if [[ ! -x "$libtest" ]]; then
+            set_field build_verdict FAIL
+            set_field test_result NOT_RUN
+            set_field last_phase single_libtest_artifact_not_unique
             exit 1
           fi
-          if ! libtest="$(jq -ers '[.[] | select(.reason == "compiler-artifact"
-              and .target.name == "agentsandbox" and .target.kind == ["lib"]
-              and .profile.test == true and .executable != null) | .executable]
-              | unique | if length == 1 then .[0] else empty end' "$build_json")" \
-              || [[ ! -x "$libtest" ]]; then
-            echo 'Expected one SQLite library test executable; tests not run' | tee -a "$summary"
-            exit 1
-          fi
-          printf 'SQLite libtest SHA-256 %s\n' "$(sha256sum "$libtest" | awk '{print $1}')" | tee -a "$summary"
+          digest="$(sha256sum "$libtest" | awk '{print $1}')"
+          set_field build_verdict PASS
+          set_field libtest_sha256 "$digest"
+          set_field last_phase single_libtest_ready
+          printf 'libtest=%s\n' "$libtest" >> "$GITHUB_OUTPUT"
 
-          passed=0
-          for selector in "${selectors[@]}"; do
-            if "$libtest" "$selector" --exact --test-threads=1 > "$test_log" 2>&1 \
-                && grep -Fxq 'running 1 test' "$test_log" \
-                && grep -Fxq "test $selector ... ok" "$test_log" \
-                && grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$test_log"; then
-              printf 'PASS %s\n' "$selector" | tee -a "$summary"
-              ((passed += 1))
+      - name: Run one exact scoped relay selector and parse its closed receipt
+        if: steps.build.outputs.libtest != ''
+        shell: bash
+        env:
+          LIBTEST: ${{ steps.build.outputs.libtest }}
+        run: |
+          set -euo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/g11-terminal-receipt.txt"
+          scratch="$RUNNER_TEMP/g11-terminal-private"
+          mkdir -m 700 "$scratch"
+          set_field() {
+            local key=$1 value=$2
+            awk -F= -v k="$key" -v v="$value" '$1 == k { $0 = k "=" v } { print }' "$receipt" > "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          selector=software_broker_scoped_relay_ipc_refuses_before_private_detail
+          set_field last_phase exact_test
+          test_rc=0
+          timeout --kill-after=5s 180s "$LIBTEST" "$selector" --exact --show-output --test-threads=1 --color=never \
+            > "$scratch/test.log" 2>&1 || test_rc=$?
+
+          selected="$(grep -Fxc 'running 1 test' "$scratch/test.log" || true)"
+          counts="$(sed -nE 's/^test result: [^ ]+\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored;.*/\1 \2 \3/p' "$scratch/test.log" | tail -n 1)"
+          passed=unknown
+          failed=unknown
+          ignored=unknown
+          if [[ -n "$counts" ]]; then read -r passed failed ignored <<< "$counts"; fi
+          set_field test_selected "${selected:-0}"
+          set_field test_passed "$passed"
+          set_field test_failed "$failed"
+          set_field test_ignored "$ignored"
+          set_field test_exit "$test_rc"
+
+          if (( test_rc == 0 )) && [[ "$selected" == 1 && "$passed" == 1 && "$failed" == 0 && "$ignored" == 0 ]] \
+              && grep -Fqx "test $selector ... ok" "$scratch/test.log" \
+              && grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+([.][0-9]+)?s$' "$scratch/test.log"; then
+            set_field test_result PASS
+          else
+            set_field test_result FAIL
+          fi
+
+          marker_count="$(grep -c '^g11_relay_terminal_receipt ' "$scratch/test.log" || true)"
+          if [[ "$marker_count" == 1 ]]; then
+            marker="$(grep -E '^g11_relay_terminal_receipt \{.*\}$' "$scratch/test.log" || true)"
+            marker_bytes="$(printf '%s\n' "$marker" | wc -c | tr -d '[:space:]')"
+            payload="${marker#g11_relay_terminal_receipt }"
+            if [[ -n "$marker" && "$marker_bytes" =~ ^[0-9]+$ && "$marker_bytes" -le 1024 ]] && \
+              jq -s -e '
+                def enum($value; $allowed): ($value | type) == "string" and (($allowed | index($value)) != null);
+                def sample:
+                  type == "object" and keys == ["executor_task_running","journal_head","post_cancel_failure","quota_held","same_attempt","state","store","store_receipt","wait","witness"] and
+                  enum(.wait; ["not_sampled","completed","timeout","read_failed"]) and
+                  enum(.store; ["unknown","present","absent","error"]) and
+                  ((.state == null) or enum(.state; ["reserved","preparing","created","start_issued","running","stopping","terminal","in_doubt","cancelled"])) and
+                  ((.quota_held == null) or ((.quota_held | type) == "boolean")) and
+                  ((.same_attempt == null) or ((.same_attempt | type) == "boolean")) and
+                  enum(.witness; ["unknown","created","running","terminal","absent"]) and
+                  enum(.store_receipt; ["not_checked","confirmed","absent","mismatch","error"]) and
+                  enum(.journal_head; ["not_sampled","unavailable","no_result","result_without_observe","observe_pending","observe_acknowledged"]) and
+                  enum(.post_cancel_failure; ["not_sampled","unavailable","no_retry_evidence","decision_after_failure","multiple_worker_failures","decision_after_failure_and_multiple_worker_failures"]) and
+                  (if .post_cancel_failure == "not_sampled" or .post_cancel_failure == "unavailable"
+                   then .executor_task_running == null else (.executor_task_running | type) == "boolean" end);
+                length == 1 and
+                (.[0] |
+                  type == "object" and keys == ["a","b","cleanup","phase"] and
+                  enum(.phase; ["fixture_open","submit_a","awaiting_a","submit_b","running_b","scoped_reads","cancel_a","cancel_b","terminal_a","terminal_b","verified"]) and
+                  enum(.cleanup; ["not_started","confirmed","unconfirmed"]) and
+                  (.a | sample) and (.b | sample) and
+                  .b.journal_head == "not_sampled" and .b.post_cancel_failure == "not_sampled" and .b.executor_task_running == null)
+              ' <<< "$payload" >/dev/null; then
+              set_field terminal_receipt VALID
+              set_field fixture_phase "$(jq -r '.phase' <<< "$payload")"
+              set_field fixture_cleanup "$(jq -r '.cleanup' <<< "$payload")"
+              for tenant in a b; do
+                prefix="terminal_$tenant"
+                set_field "${prefix}_wait" "$(jq -r ".${tenant}.wait" <<< "$payload")"
+                set_field "${prefix}_store" "$(jq -r ".${tenant}.store" <<< "$payload")"
+                set_field "${prefix}_state" "$(jq -r ".${tenant}.state // \"unknown\"" <<< "$payload")"
+                set_field "${prefix}_quota_held" "$(jq -r ".${tenant}.quota_held | if . == null then \"unknown\" else tostring end" <<< "$payload")"
+                set_field "${prefix}_same_attempt" "$(jq -r ".${tenant}.same_attempt | if . == null then \"unknown\" else tostring end" <<< "$payload")"
+                set_field "${prefix}_witness" "$(jq -r ".${tenant}.witness" <<< "$payload")"
+                set_field "${prefix}_store_receipt" "$(jq -r ".${tenant}.store_receipt" <<< "$payload")"
+                set_field "${prefix}_journal_head" "$(jq -r ".${tenant}.journal_head" <<< "$payload")"
+                set_field "${prefix}_post_cancel_failure" "$(jq -r ".${tenant}.post_cancel_failure" <<< "$payload")"
+                set_field "${prefix}_executor_task_running" "$(jq -r ".${tenant}.executor_task_running | if . == null then \"unknown\" else tostring end" <<< "$payload")"
+              done
             else
-              printf 'FAIL %s\n' "$selector" | tee -a "$summary"
-              printf '%s\n' "$selector" >> "$failures"
-              if [[ "$selector" == "$settlement" ]]; then
-                phases='bind_full3|enqueue_signal|ack_signal|load_before_retirement|begin_retirement|ack_pending|authorize_retirement|read_pending|load_before_final|pause_writer'
-                categories='InvalidInput|UnsupportedVersion|TooLarge|LimitExceeded|Busy|Conflict|Interrupted|Corrupt|UnsafeFilesystem|ControlSecret|Io'
-                grep -Eo "settlement phase=($phases) category=($categories)\b" "$test_log" \
-                  | sort -u | tee -a "$summary" || true
-              fi
+              set_field terminal_receipt INVALID
             fi
-          done
-          printf 'Passed %s of %s exact selectors\n' "$passed" "$expected" | tee -a "$summary"
-          (( passed == expected ))
-      - name: Summarize test results
+          elif [[ "$marker_count" =~ ^[0-9]+$ ]] && (( marker_count > 1 )); then
+            set_field terminal_receipt DUPLICATE
+          else
+            set_field terminal_receipt UNKNOWN
+          fi
+          set_field last_phase test_and_receipt_complete
+          if [[ "$(awk -F= '$1 == "test_result" {print $2}' "$receipt")" == PASS &&
+                "$(awk -F= '$1 == "terminal_receipt" {print $2}' "$receipt")" == VALID ]]; then
+            exit 0
+          fi
+          echo 'Exact selector or its closed receipt was not confirmed; only closed counts and validated observations were retained.' >&2
+          exit 1
+
+      - name: Add the closed receipt to the run summary
         if: always()
         shell: bash
         run: |
-          if [ -f cargo-test.log ]; then
-            grep -E '^test result:|^     Running ' cargo-test.log > cargo-test-summary.txt || true
-            grep -E '\.\.\. FAILED$' cargo-test.log | sed 's/^test //; s/ \.\.\. FAILED$//' > cargo-test-failed.txt || true
+          if [[ -f "$RUNNER_TEMP/g11-terminal-receipt.txt" ]]; then
             {
-              echo "### Rust test suite"
+              echo '### G11 scoped relay terminal observation'
               echo
-              echo "Failed tests: $(wc -l < cargo-test-failed.txt)"
-              echo
-              echo '```'
-              head -n 100 cargo-test-failed.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-          elif [ -f cargo-test-summary.txt ]; then
-            {
-              echo "### Targeted SQLite library tests"
-              echo '```'
-              cat cargo-test-summary.txt
+              echo '```text'
+              cat "$RUNNER_TEMP/g11-terminal-receipt.txt"
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
           fi
-      - name: Upload test logs
+
+      - name: Upload the closed receipt only
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: lot-verify-rust-${{ github.sha }}
-          path: |
-            cargo-test.log
-            cargo-test-summary.txt
-            cargo-test-failed.txt
-          if-no-files-found: ignore
+          name: g11-terminal-receipt-${{ github.sha }}
+          path: ${{ runner.temp }}/g11-terminal-receipt.txt
+          if-no-files-found: error
           retention-days: 14
-
-  frontend:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: front
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Setup Node
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '24.22.2'
-          package-manager-cache: false
-      - name: Install
-        run: npm ci --no-audit --no-fund
-      - name: Build
-        run: npm run build
-      - name: Test
-        run: npm test
