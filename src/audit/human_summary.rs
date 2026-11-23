@@ -567,3 +567,69 @@ fn attention(
         },
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::control::{AllocationProvenanceV1, AllocationSourceV1, AllocationV1};
+
+    #[test]
+    fn usage_counts_allocations_on_both_bounds_and_excludes_adjacent_instants() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute(
+            "CREATE TABLE worker_allocations (payload_json TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+        for (id, finished_at, duration) in [
+            (1, "2026-11-01T12:00:00.122999999Z", 1),
+            (2, "2026-11-01T12:00:00.123000000Z", 2),
+            (3, "2026-11-02T12:00:00.123000000Z", 4),
+            (4, "2026-11-02T12:00:00.123000001Z", 8),
+        ] {
+            let finish = chrono::DateTime::parse_from_rfc3339(finished_at).unwrap();
+            let start = finish - chrono::Duration::nanoseconds(duration);
+            let allocation = AllocationV1 {
+                worker_id: uuid::Uuid::from_u128(id).to_string(),
+                attempt_id: uuid::Uuid::from_u128(id + 4).to_string(),
+                terminal_observation_id: uuid::Uuid::from_u128(id + 8).to_string(),
+                started_at: start.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+                finished_at: finished_at.into(),
+                duration_ns: duration.to_string(),
+                cpu_millicore_nanoseconds: (duration * 2000).to_string(),
+                memory_byte_nanoseconds: (duration * 1_073_741_824).to_string(),
+                method_version: 1,
+                billable: false,
+                source: AllocationSourceV1 {
+                    authority_id: uuid::Uuid::from_u128(13).to_string(),
+                    runtime_kind: RuntimeKindV1::Docker,
+                    container_id: "a".repeat(64),
+                    spec_hash: "b".repeat(64),
+                    provenance: AllocationProvenanceV1::Observed,
+                },
+            };
+            db.execute(
+                "INSERT INTO worker_allocations (payload_json) VALUES (?1)",
+                [serde_json::to_string(&allocation).unwrap()],
+            )
+            .unwrap();
+        }
+
+        let summary = usage(
+            &db,
+            Some("2026-11-01T12:00:00.123Z"),
+            "2026-11-02T12:00:00.123Z",
+        )
+        .unwrap();
+        let SummarySectionV1::Ready { coverage, data } = summary else {
+            panic!("a valid allocation interval must be available");
+        };
+        assert_eq!(coverage, SummaryCoverageV1::CompleteRegistry);
+        assert_eq!(data.allocations, "2");
+        assert_eq!(data.duration_ns, "6");
+        assert_eq!(data.cpu_millicore_nanoseconds, "12000");
+        assert_eq!(data.memory_byte_nanoseconds, "6442450944");
+        assert_eq!(data.method_version, 1);
+        assert!(!data.billable);
+    }
+}
