@@ -22,7 +22,9 @@ use uuid::Uuid;
 mod executor;
 pub(crate) use executor::{BatchExecutor, BatchOutcome, deliver_cancellation};
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
-pub(crate) use executor::{ColdRecoverySeed, terminal_pending_seed_for_cold_audit_test};
+pub(crate) use executor::{
+    ColdRecoverySeed, terminal_cleanup_jobs_for_test, terminal_pending_seed_for_cold_audit_test,
+};
 
 /// Live, single-use provenance from the executor's freshly acknowledged claim.
 /// There is deliberately no public constructor, Clone or serde implementation.

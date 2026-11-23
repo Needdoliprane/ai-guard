@@ -279,6 +279,68 @@ async fn full_reconciliation_acknowledges_pending_result_with_unavailable_activi
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn acknowledged_result_and_scan_leave_recovery_eligible_until_cleanup_is_confirmed() {
+    use crate::{
+        broker::checkpoint::SupervisionOperationV1,
+        control::{WorkerStateV1, WorkerTransitionV1},
+        runner::broker::terminal_cleanup_jobs_for_test,
+    };
+
+    let jobs = terminal_cleanup_jobs_for_test().await;
+    let original_worker = jobs[0].checkpoint().broker_context().worker.unwrap();
+    for (job, expected_cleanup) in jobs.iter().zip([None, Some(false), Some(true)]) {
+        assert_eq!(job.operation_id(), jobs[0].operation_id());
+        let worker = job.checkpoint().broker_context().worker.unwrap();
+        assert_eq!(worker.worker_id, original_worker.worker_id);
+        assert_eq!(
+            worker.attempt.attempt_id,
+            original_worker.attempt.attempt_id
+        );
+        assert_eq!(worker.state, WorkerStateV1::Terminal);
+        assert!(!worker.quota_held);
+        assert_eq!(worker.cleanup_removed, expected_cleanup);
+
+        let lifecycle = job.broker_checkpoint_v3().unwrap();
+        assert!(lifecycle.commands().iter().all(|command| {
+            !matches!(command.request(), LocalCommandRequestV1::CancelRequested)
+        }));
+        let operations = lifecycle.broker().supervision().operations();
+        assert!(operations.iter().all(SupervisionOperationV1::has_response));
+        let cleanup_receipt = operations
+            .iter()
+            .rev()
+            .find_map(|operation| match operation {
+                SupervisionOperationV1::WorkerMutation {
+                    request,
+                    response: Some(answer),
+                } if let WorkerTransitionV1::CleanupResult { removed, .. } =
+                    &request.transition =>
+                {
+                    assert_eq!(request.worker_id, worker.worker_id);
+                    assert_eq!(request.attempt_id, worker.attempt.attempt_id);
+                    assert_eq!(answer.worker.revision, worker.revision);
+                    assert!(answer.receipt.audit_seq > 0);
+                    Some(*removed)
+                }
+                _ => None,
+            });
+        assert_eq!(cleanup_receipt, expected_cleanup);
+
+        let events = job.broker_checkpoint_v4().unwrap().events();
+        assert!(events.iter().all(|entry| entry.audit_seq().is_some()));
+        for kind in ["broker.batch.result", "broker.batch.scan"] {
+            assert!(events.iter().any(|entry| entry.event().kind == kind));
+        }
+    }
+
+    assert_eq!(
+        jobs.each_ref().map(needs_autonomous_reconciliation),
+        [true, true, false],
+        "only the confirmed removal settles the completed worker's remaining cleanup"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn normal_shutdown_retains_a_full_deferred_run_until_its_owned_future_finishes() {
     let seed = terminal_pending_seed_for_cold_audit_test().await;
     assert!(seed.is_terminal() && seed.result_pending());
