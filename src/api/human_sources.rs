@@ -653,6 +653,16 @@ mod owned_policy_tests;
 pub(super) mod tests;
 
 const HUMAN_EVENT_DETAIL_PATH: &str = "/api/v1/human/events/{id}";
+pub(super) const HUMAN_MEMBERSHIP_CHANGE_PATH: &str =
+    "/api/v1/human/admin/memberships/{membership_id}";
+
+pub(super) fn owned_membership_change_target(uri: &axum::http::Uri) -> bool {
+    uri.query().is_none()
+        && uri
+            .path()
+            .strip_prefix("/api/v1/human/admin/memberships/")
+            .is_some_and(|id| crate::control::uuid(id).is_ok())
+}
 
 const OWNED_HUMAN_GET_PATHS: &[&str] = &[
     "/api/v1/human/admin/configuration",
@@ -738,6 +748,7 @@ const REGISTERED_ROUTES: &[(&str, &[&str])] = &[
     // The S6 POST on this path still uses the existing mutation handler.
     ("/api/v1/human/admin/grants", &["GET", "HEAD"]),
     ("/api/v1/human/admin/memberships", &["GET", "HEAD"]),
+    (HUMAN_MEMBERSHIP_CHANGE_PATH, &["POST"]),
     ("/api/v1/human/admin/quota", &["GET", "HEAD"]),
     ("/api/v1/human/admin/usage", &["GET", "HEAD"]),
     ("/api/v1/human/brokers", &["GET", "HEAD"]),
@@ -839,6 +850,9 @@ pub(super) async fn route_gate(
         || super::control_transport::owned_broker_request(&request)
         || super::control_transport::owned_policy_request(&request)
         || super::control_transport::owned_policy_inspection_request(&request)
+        || template == Some(HUMAN_MEMBERSHIP_CHANGE_PATH)
+            && request.method() == "POST"
+            && owned_membership_change_target(request.uri())
         || request.method() == "GET"
             && (OWNED_HUMAN_GET_PATHS.contains(&path) || template == Some(HUMAN_EVENT_DETAIL_PATH))
         || request.method() == "GET"
