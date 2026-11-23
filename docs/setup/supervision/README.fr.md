@@ -202,7 +202,7 @@ La flotte est relue toutes les 30 s tant que l'onglet est visible ; choisissez 2
 
 ## Limites
 
-- Aucun inventaire runtime. **Vue 360°** résume en une transaction les registres du tenant, les réservations de quota et les allocations observées ; les vues d’administration des appartenances, de l’usage et de la configuration et les changements délégués d’appartenance et de partage sont décrits dans [ui.md](../../ui.md#vues-utilisateur-et-administration-unifiée--cible-à-livrer) avec leur propre état. Sur le profil de sources possédées, la vue d’administration dédiée sert le quota et l’usage. Les sections correspondantes de la **Vue 360°** restent indisponibles.
+- Aucun inventaire runtime. **Vue 360°** résume en une transaction les registres du tenant, les réservations de quota et les allocations observées ; les vues d’administration des appartenances, de l’usage et de la configuration et les changements délégués d’appartenance et de partage sont décrits dans [ui.md](../../ui.md#vues-utilisateur-et-administration-unifiée--cible-à-livrer) avec leur propre état. Sur le profil de sources possédées, les sections quota et usage partagent le reçu de la **Vue 360°**. La vue d’administration dédiée montre un reçu distinct pour chaque GET.
 - Un tenant par contexte. Aucune vue inter-tenants.
 - Ni filtre ni tri serveur du registre des workers ; au plus 500 lignes de workers, 100 brokers et 300 ressources dans cette vue.
 - Ni hiérarchie d'agents ni vue personnelle des workers.

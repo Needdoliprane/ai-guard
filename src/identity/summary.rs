@@ -36,9 +36,10 @@ impl SummaryWindowV1 {
 #[serde(deny_unknown_fields)]
 pub struct SummaryPeriodV1 {
     pub window: SummaryWindowV1,
-    /// Inclusive lower bound on `received_at`; `null` for `all`.
+    /// Inclusive lower bound on decision `received_at` and allocation `finished_at`.
+    /// It is absent for `all`.
     pub from: Option<String>,
-    /// The evaluation instant; later events are not counted.
+    /// The evaluation instant and inclusive upper bound for the same fields.
     pub to: String,
 }
 

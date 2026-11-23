@@ -202,7 +202,7 @@ The fleet refreshes every 30 s while the tab is visible; choose 2 min or **Manue
 
 ## Limits
 
-- No runtime inventory. **Vue 360°** summarizes the tenant's registries, quota reservations and observed allocations in one transaction; the administration views of memberships, usage and configuration and the delegated membership and share changes are described in [ui.md](../../ui.md#vues-utilisateur-et-administration-unifiée--cible-à-livrer) with their own state. On the owned profile, the separate administration views serve quota and usage, while the sections of those names in **Vue 360°** remain unavailable.
+- No runtime inventory. **Vue 360°** summarizes the tenant's registries, quota reservations and observed allocations in one transaction; the administration views of memberships, usage and configuration and the delegated membership and share changes are described in [ui.md](../../ui.md#vues-utilisateur-et-administration-unifiée--cible-à-livrer) with their own state. On the owned profile, the quota and usage sections share the **Vue 360°** receipt. The dedicated administration view shows a separate receipt for each GET.
 - One tenant per context. No cross-tenant view.
 - No server-side filter or sort of the worker registry; at most 500 worker rows, 100 brokers and 300 resources in this view.
 - No agent hierarchy and no personal view of workers.
