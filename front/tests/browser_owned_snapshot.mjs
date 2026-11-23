@@ -17,6 +17,7 @@ const egressMode = fixtureMode === "run-egress-v1";
 const workersMode = fixtureMode === "run-workers-v1";
 const usageMode = fixtureMode === "run-usage-v1";
 const membershipMode = fixtureMode === "run-membership-v1";
+const grantMode = fixtureMode === "run-grants-v1";
 const FQN = egressMode
   ? "api::human_sources::tests::owned_browser_fixture::egress::serve_owned_egress_browser_fixture"
   : "api::human_sources::tests::owned_browser_fixture::serve_owned_browser_fixture";
@@ -30,6 +31,9 @@ const usagePagePath = `${usagePath}?limit=50`;
 const membershipsPath = "/api/v1/human/admin/memberships";
 const membershipPagePath = `${membershipsPath}?limit=50`;
 const membershipReceiptFields = ["version", "operation_id", "membership_id", "membership_revision", "authorization_revision", "audit_seq"];
+const grantsPath = "/api/v1/human/admin/grants";
+const grantResourcePath = (resource) => `${grantsPath}?${new URLSearchParams({ resource_kind: resource.kind, resource_id: resource.resource_id })}`;
+const grantReceiptFields = ["version", "operation_id", "resource", "grant_revision", "authorization_revision", "audit_seq"];
 const QUIET_MS = 33000; // Actual time, covers the existing30s dashboard cycle.
 const must = (condition, code) => { if (!condition) throw new Error(code); };
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -50,7 +54,7 @@ let sequence = 0, fixtureStarted = false, fixtureExit = null, interactionDeadlin
 const commands = [], requests = [], wires = [], pendingWires = [], captures = [], pageErrors = [], external = [];
 const observed = {}, output = { stdout: { bytes: 0, hash: createHash("sha256") }, stderr: { bytes: 0, hash: createHash("sha256") } };
 let artifacts, control, libtest, dist, seconds, failure = null, cleanupFailure = null, closedFixture = null, receipts = null;
-let firstMembershipPost, replayedMembershipReceipt;
+let firstMembershipPost, replayedMembershipReceipt, firstGrantPost, replayedGrantReceipt;
 const remaining = (cap = 45000) => {
   must(!interrupted, "INTERRUPTED"); const left = interactionDeadline - Date.now(); must(left > 0, "FIXTURE_INTERACTION_BUDGET"); return Math.min(cap, left);
 };
@@ -111,6 +115,7 @@ async function save(name, value) {
 function publishTerminalResult() {
   terminalResult.status = interrupted ? "FAIL_NOT_QUALIFIED" : !fixtureStarted ? "BLOCKED_NOT_RUN"
     : failure || cleanupFailure ? "FAIL_NOT_QUALIFIED"
+    : grantMode ? "PASS_OWNED_GRANT_RECOVERY"
     : membershipMode ? "PASS_OWNED_MEMBERSHIP_RECOVERY"
     : usageMode ? "PASS_OWNED_TENANT_USAGE"
     : workersMode ? "PASS_OWNED_WORKER_REGISTRY"
@@ -199,11 +204,21 @@ function validateReady(value) {
   must(url.protocol === "http:" && url.hostname === "127.0.0.1" && Number(url.port) > 0 && !url.username && !url.password && url.pathname === "/" && !url.search && !url.hash, "READY_LOOPBACK_URL");
   if (egressMode) return validateEgressReady(value);
   const fields = ["version", "dashboard_url", "bearer_b", "tenant_id", "budget_seconds", "commands", "acks", "command_limit"];
-  const scenarioFields = membershipMode ? ["mode", "membership"] : usageMode ? ["mode", "usage"]
+  const scenarioFields = grantMode ? ["mode", "grant"] : membershipMode ? ["mode", "membership"] : usageMode ? ["mode", "usage"]
     : workersMode ? ["mode", "worker"] : ["resource", "event_ids"];
   closed(value, [...fields, ...scenarioFields], "READY_CLOSED");
   must(value.tenant_id === "B", "READY_PROFILE");
   must(typeof value.bearer_b === "string" && /^aigh1_[0-9a-f]{64}$/.test(value.bearer_b), "READY_FIXTURE_BEARER");
+  if (grantMode) {
+    must(value.mode === "grant", "READY_GRANT_MODE");
+    closed(value.grant, ["resource", "revision", "member_display_name", "member_principal"], "READY_GRANT");
+    closed(value.grant.resource, ["kind", "resource_id"], "READY_GRANT_RESOURCE");
+    must(value.grant.resource.kind === "session" && value.grant.resource.resource_id === "owned-browser-session-b" &&
+      value.grant.revision === "1" && value.grant.member_display_name === "Synthetic browser member" &&
+      object(value.grant.member_principal) && value.grant.member_principal.kind === "human_local" &&
+      uuid(value.grant.member_principal.installation_id) && uuid(value.grant.member_principal.account_id), "READY_EXISTING_GRANT");
+    return value;
+  }
   if (membershipMode) {
     must(value.mode === "membership", "READY_MEMBERSHIP_MODE");
     closed(value.membership, ["membership_id", "display_name", "revision"], "READY_MEMBERSHIP");
@@ -241,6 +256,8 @@ function pageAction(path) {
   if (pathname === quotaPath) return "quota";
   if (pathname === usagePath) return "usage";
   if (membershipMode && pathname === membershipsPath) return "memberships";
+  if (grantMode && pathname === membershipsPath) return "memberships";
+  if (grantMode && pathname === grantsPath) return "grants";
   return ({ "/api/v1/human/resources": "resources", "/api/v1/human/events": "events", "/api/v1/human/events/recent": "events" })[pathname] ?? null;
 }
 function requiredReceipt(body) {
@@ -694,6 +711,64 @@ function membershipAdministrator(identity) {
   return admin;
 }
 
+function grantAdministrator(identity) {
+  must(identity.authentication?.method === "local_credential" && identity.principal?.kind === "human_local" &&
+    Array.isArray(identity.contexts), "OWNED_GRANT_LOCAL_IDENTITY");
+  const admins = identity.contexts.filter(({ mode, tenant_id }) => mode === "administration" && tenant_id === ready.tenant_id);
+  must(admins.length === 1, "EXACT_GRANT_ADMIN_CONTEXT");
+  const [admin] = admins;
+  must(typeof admin.id === "string" && admin.id.length > 0 && typeof admin.authorization_version === "string" &&
+    Array.isArray(admin.capabilities) && ["manage_grants", "read_memberships", "read_metadata", "read_content"].every((right) => admin.capabilities.includes(right)),
+    "GRANT_ADMIN_RIGHTS");
+  const manage = admin.operations?.find(({ operation }) => operation === "grants_manage");
+  must(manage?.permission === "granted" && manage.availability === "available" && manage.scope === "tenant", "GRANT_CATALOGUE_OFFER");
+  return admin;
+}
+
+const grantEndpoint = () => new URL(grantsPath, ready.dashboard_url).href;
+const postedGrantRequests = () => requests.filter(({ method, path }) => method === "POST" && path === grantsPath);
+async function grantPost(request) {
+  must(request.method() === "POST" && request.url() === grantEndpoint() && request.frame() === page.mainFrame(), "GRANT_POST_TARGET");
+  const bytes = request.postDataBuffer();
+  must(bytes && bytes.length <= 4096 && !hasPrivate(bytes), "GRANT_POST_SIZE_OR_PRIVACY");
+  const body = JSON.parse(bytes.toString("utf8"));
+  closed(body, ["operation_id", "resource", "expected_revision", "shares"], "GRANT_POST_SHAPE");
+  closed(body.resource, ["kind", "resource_id"], "GRANT_POST_RESOURCE_SHAPE");
+  must(uuid(body.operation_id) && same(body.resource, ready.grant.resource) && body.expected_revision === ready.grant.revision &&
+    Array.isArray(body.shares) && body.shares.length === 1, "EXACT_GRANT_CHANGE");
+  closed(body.shares[0], ["principal", "permissions"], "GRANT_SHARE_SHAPE");
+  must(same(body.shares[0].principal, ready.grant.member_principal) &&
+    same([...body.shares[0].permissions].sort(), ["content", "metadata"]), "EXACT_AUTHORIZED_GRANT_CHANGE");
+  return { request, bytes, operationId: body.operation_id, contextId: await request.headerValue("X-AiGuard-Context") };
+}
+
+function grantReceipt(body, operationId) {
+  closed(body, grantReceiptFields, "GRANT_MUTATION_RECEIPT_SHAPE");
+  const positive = (value) => typeof value === "string" && /^[1-9][0-9]{0,19}$/.test(value);
+  must(body.version === 1 && uuid(body.operation_id) && body.operation_id === operationId &&
+    same(body.resource, ready.grant.resource) && body.grant_revision === "2" &&
+    positive(body.authorization_revision) && positive(body.audit_seq), "GRANT_RECEIPT_CORRELATION");
+  return body;
+}
+
+const sameGrantReceipt = (left, right) => grantReceiptFields.every((key) => same(left[key], right[key]));
+
+async function readGrantReceipt(response, operationId) {
+  must(response.url() === grantEndpoint() && response.status() === 200, "GRANT_REAL_BFF_SUCCESS");
+  const bytes = await response.body();
+  must(bytes.length <= 4096 && !hasPrivate(bytes), "GRANT_RECEIPT_SIZE_OR_PRIVACY");
+  return grantReceipt(JSON.parse(bytes.toString("utf8")), operationId);
+}
+
+async function loseFirstGrantResponse(route) {
+  try {
+    const sent = await grantPost(route.request());
+    const actual = await route.fetch({ maxRedirects: 0, maxRetries: 0, timeout: remaining(12000) });
+    try { return { sent, receipt: await readGrantReceipt(actual, sent.operationId) }; }
+    finally { await actual.dispose(); }
+  } finally { await route.abort("failed"); }
+}
+
 async function membershipPost(request) {
   must(request.method() === "POST" && request.url() === membershipEndpoint() && request.frame() === page.mainFrame(), "MEMBERSHIP_POST_TARGET");
   const bytes = request.postDataBuffer();
@@ -818,8 +893,100 @@ async function runOwnedMembership() {
   observed.scenario1 = "owned_membership_response_loss_recovery";
 }
 
+async function runOwnedGrantRecovery() {
+  const identityPath = "/api/v1/human/identity";
+  await page.getByLabel("Type d’accès").selectOption("human");
+  await page.getByLabel("Credential personnel local").fill(bearer);
+  const identity = await readByAction(identityPath, 200, () => button("Ouvrir mon espace").click());
+  const admin = grantAdministrator(identity);
+  await heading("Choisir un contexte.").waitFor({ timeout: remaining() });
+  await readByAction(summaryPath, 200, () => button("Ouvrir administration · B").click());
+  await page.locator('.ov[data-state="ready"]').waitFor({ timeout: remaining() });
+
+  stage = "owned_grant_prepare";
+  const resourcePage = await readByAction("/api/v1/human/resources", 200, () => button("Ressources").click());
+  must(resourcePage.context_id === admin.id && resourcePage.authorization_version === admin.authorization_version &&
+    Array.isArray(resourcePage.items), "GRANT_RESOURCE_PAGE_SCOPE");
+  const resource = resourcePage.items.find(({ resource: ref }) => same(ref, ready.grant.resource));
+  must(resource?.owner?.kind === "human_local" && resource.permissions?.metadata === true &&
+    resource.revision === ready.grant.revision, "EXISTING_OWNED_GRANT_RESOURCE");
+  const resourceIndex = resourcePage.items.indexOf(resource);
+  const edit = page.locator(`[data-focus-key="resource-grants-${resourceIndex}"]`);
+  const initialGrantResponse = waitForRead(grantResourcePath(ready.grant.resource), 200);
+  initialGrantResponse.catch(() => {});
+  await edit.waitFor({ timeout: remaining() });
+  await edit.click({ timeout: remaining() });
+
+  stage = "owned_grant_review_existing";
+  const dialog = page.getByRole("dialog", { name: "Partages de la ressource", exact: true });
+  await dialog.waitFor({ timeout: remaining() });
+  const grantRead = await initialGrantResponse;
+  must(grantRead.context_id === admin.id && grantRead.authorization_version === admin.authorization_version &&
+    grantRead.resource.revision === ready.grant.revision && grantRead.shares.length === 1 &&
+    grantRead.shares[0].display_name === ready.grant.member_display_name &&
+    same([...grantRead.shares[0].permissions].sort(), ["metadata"]), "INITIAL_GRANT_ALREADY_LINKED");
+  const share = dialog.locator(".dg-share").filter({ hasText: ready.grant.member_display_name });
+  const content = share.getByRole("checkbox", { name: "Contenus", exact: true });
+  must(await content.isChecked({ timeout: remaining() }) === false, "GRANT_CONTENT_NOT_ALREADY_SHARED");
+  await content.check({ timeout: remaining() });
+  await dialog.getByRole("button", { name: "Vérifier le changement", exact: true }).click({ timeout: remaining() });
+  await dialog.getByText(new RegExp(`${ready.grant.member_display_name} : ajout Contenus`, "u")).waitFor({ timeout: remaining() });
+  must(postedGrantRequests().length === 0, "GRANT_POST_BEFORE_CONFIRMATION");
+
+  stage = "owned_grant_lose_response";
+  const endpoint = grantEndpoint();
+  const failed = page.waitForEvent("requestfailed", {
+    predicate: (request) => request.method() === "POST" && request.url() === endpoint, timeout: remaining(),
+  });
+  const revalidated = waitForRead(identityPath, 200);
+  failed.catch(() => {}); revalidated.catch(() => {});
+  await dialog.getByRole("button", { name: "Confirmer le changement", exact: true }).click({ timeout: remaining() });
+  const failedRequest = await failed;
+  must(firstGrantPost, "GRANT_POST_NOT_INTERCEPTED");
+  const first = await firstGrantPost;
+  must(first.sent.request === failedRequest && failedRequest.failure()?.errorText === "net::ERR_FAILED" &&
+    first.sent.contextId === admin.id, "GRANT_RESPONSE_LOST_AFTER_INITIAL_CONTEXT_POST");
+  observed.grant_responses_lost = 1;
+
+  stage = "owned_grant_revalidate_and_purge";
+  const freshIdentity = await revalidated;
+  const fresh = grantAdministrator(freshIdentity);
+  must(same(freshIdentity.principal, identity.principal) && fresh.id !== admin.id &&
+    fresh.authorization_version !== admin.authorization_version, "GRANT_RECOVERY_USES_FRESH_CONTEXT");
+  await heading("Reprise du changement de partages").waitFor({ timeout: remaining() });
+  const retry = page.getByRole("button", { name: "Réessayer la même opération · tenant B · organisation synthetic-org", exact: true });
+  await retry.waitFor({ timeout: remaining() });
+  must(await page.locator("dialog.dg-dialog").count() === 0 && await page.locator(".dg-shares").count() === 0 &&
+    await page.locator(".human-resource-panel").count() === 0, "GRANT_OLD_DIALOG_AND_RESOURCE_VIEW_PURGED");
+  const post = { method: "POST", path: grantsPath };
+  must(same(postedGrantRequests(), [post]), "GRANT_NO_AUTOMATIC_REPLAY");
+
+  stage = "owned_grant_explicit_replay";
+  const replay = page.waitForResponse((response) => response.request().method() === "POST" && response.url() === endpoint, { timeout: remaining() });
+  const confirmedIdentity = waitForRead(identityPath, 200);
+  replay.catch(() => {}); confirmedIdentity.catch(() => {});
+  await retry.click({ timeout: remaining() });
+  const response = await replay;
+  const resent = await grantPost(response.request());
+  must(resent.contextId === fresh.id && resent.operationId === first.sent.operationId && resent.bytes.equals(first.sent.bytes),
+    "GRANT_EXACT_REPLAY_ON_REVALIDATED_CONTEXT");
+  const confirmed = await readGrantReceipt(response, resent.operationId);
+  must(sameGrantReceipt(first.receipt, confirmed), "GRANT_REPLAY_RETURNS_ORIGINAL_RECEIPT");
+  const confirmation = page.getByText(/^Changement confirmé par le contrôle\./u);
+  await confirmation.waitFor({ timeout: remaining() });
+  const notice = await confirmation.textContent({ timeout: remaining() });
+  const receiptDetails = new RegExp(`Révision des partages ${confirmed.grant_revision} · position d’audit ${confirmed.audit_seq}\\.$`, "iu");
+  must(receiptDetails.test(notice ?? ""), "GRANT_DOM_CONFIRMS_DURABLE_RECEIPT");
+  const finalAdmin = grantAdministrator(await confirmedIdentity);
+  must(finalAdmin.authorization_version === fresh.authorization_version && await retry.count() === 0, "GRANT_REPLAY_KEEPS_CURRENT_REVISION_AND_CLEARS_OFFER");
+  must(same(postedGrantRequests(), [post, post]), "GRANT_EXACTLY_TWO_POSTS");
+  await noSecret();
+  replayedGrantReceipt = confirmed;
+  observed.scenario1 = "owned_grant_response_loss_recovery";
+}
+
 try {
-  must(fixtureMode === "run-v1" || egressMode || workersMode || usageMode || membershipMode, "EXPLICIT_FIXTURE_GUARD_REQUIRED");
+  must(fixtureMode === "run-v1" || egressMode || workersMode || usageMode || membershipMode || grantMode, "EXPLICIT_FIXTURE_GUARD_REQUIRED");
   const admittedLinuxArch = process.arch === "arm64" || (!egressMode && process.arch === "x64");
   const admittedLinux = process.platform === "linux" && admittedLinuxArch && process.getuid?.() === 1000 && process.getgid?.() === 1000;
   const admittedMac = egressMode && process.platform === "darwin" && process.arch === "arm64" && process.geteuid?.() > 0;
@@ -874,9 +1041,13 @@ try {
     bearer = ready.bearer_b;
     privateValues.push(bearer);
     delete observed.ready_public.bearer_b;
+    if (grantMode) {
+      observed.ready_public.grant = { ...ready.grant };
+      delete observed.ready_public.grant.member_principal;
+    }
   }
   stage = "browser_start";
-  const restrictedBrowser = egressMode || workersMode || usageMode || membershipMode;
+  const restrictedBrowser = egressMode || workersMode || usageMode || membershipMode || grantMode;
   browser = await playwright.chromium.launch({ headless: true, chromiumSandbox: true, timeout: remaining(60000),
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined,
     ...(restrictedBrowser ? { args: ["--no-proxy-server", "--host-resolver-rules=EXCLUDE 127.0.0.1, MAP * ~NOTFOUND"] } : {}),
@@ -898,18 +1069,24 @@ try {
       await firstMembershipPost.catch(() => {}); // The scenario checks the result after the request fails in the browser.
       return;
     }
+    if (grantMode && !firstGrantPost && request.method() === "POST" && request.url() === grantEndpoint()) {
+      firstGrantPost = loseFirstGrantResponse(route);
+      await firstGrantPost.catch(() => {});
+      return;
+    }
     return route.continue();
   });
   page = await context.newPage(); page.setDefaultTimeout(remaining()); page.setDefaultNavigationTimeout(remaining());
   page.on("pageerror", (error) => pageErrors.push(redact(error.message)));
   page.on("request", (request) => { const url = new URL(request.url()); if (url.pathname.startsWith("/api/v1/human/")) requests.push({ method: request.method(), path: url.pathname + url.search }); });
   page.on("response", (response) => { const capture = captureResponse(response); capture.catch(() => {}); pendingWires.push(capture); });
-  stage = membershipMode ? "login_and_membership" : usageMode ? "login_and_usage" : workersMode ? "login_and_workers" : "login_and_snapshot";
+  stage = grantMode ? "login_and_grants" : membershipMode ? "login_and_membership" : usageMode ? "login_and_usage" : workersMode ? "login_and_workers" : "login_and_snapshot";
   await page.goto(ready.dashboard_url);
   if (egressMode) await runEgressJournal();
   else if (workersMode) await runOwnedWorkers();
   else if (usageMode) await runOwnedUsage();
   else if (membershipMode) await runOwnedMembership();
+  else if (grantMode) await runOwnedGrantRecovery();
   else await runOwnedSnapshot();
 } catch (error) { failure = { stage, code: redact(error.message), name: error.name }; }
 finally {
@@ -929,7 +1106,7 @@ finally {
       const ending = await waitJson(join(control, "CLOSED.json"), 4096, Date.now() + 20000, true); closedFixture = ending.value;
       const extraField = egressMode ? "policy_receipts_verified" : "sqlite_lock_released";
       closed(closedFixture, ["version", "completed", "commands_processed", extraField, "servers_and_owner_drained", "receipts_exported", "stop_reason",
-        ...(membershipMode ? ["membership_change"] : [])], "CLOSED_SHAPE");
+        ...(membershipMode ? ["membership_change"] : []), ...(grantMode ? ["grant_change"] : [])], "CLOSED_SHAPE");
       must(closedFixture.version === 1 && closedFixture.completed === true && closedFixture.commands_processed === sequence && closedFixture[extraField] === true && closedFixture.servers_and_owner_drained === true && closedFixture.receipts_exported === true && closedFixture.stop_reason === "requested", "FIXTURE_CLOSURE_NOT_ESTABLISHED");
       const exported = await waitJson(join(control, "RECEIPTS.json"), 524288, Date.now() + 10000, true); receipts = exported.value;
       closed(receipts, ["version", "tenant_id", "complete", "limit", "records"], "RECEIPTS_SHAPE");
@@ -937,12 +1114,13 @@ finally {
       const byId = new Map();
       const receiptActions = ["identity", "resources", "events", "event", "summary", "quota", "usage", workerReceiptKind];
       if (membershipMode) receiptActions.push("memberships");
+      if (grantMode) receiptActions.push("memberships", "grants");
       for (const record of receipts.records) { closed(record, ["audit_event_id", "request_id", "action", "received_at"], "RECEIPT_RECORD"); must(receiptActions.includes(record.action) && typeof record.audit_event_id === "string" && typeof record.request_id === "string" && typeof record.received_at === "string", "RECEIPT_RECORD_TYPES"); byId.set(record.audit_event_id, record); }
       must(byId.size === receipts.records.length, "DUPLICATE_DURABLE_RECEIPT_ID");
       await finishWireCaptures(); let compared = 0;
       // Identity has no page receipt. Every 200 on a page or detail endpoint
       // requires one; malformed/missing receipts are failures, never skipped.
-      const successfulPages = wires.filter((wire) => wire.status === 200 && pageAction(wire.path) !== null);
+      const successfulPages = wires.filter((wire) => wire.method === "GET" && wire.status === 200 && pageAction(wire.path) !== null);
       for (const wire of successfulPages) {
         const receipt = requiredReceipt(wire.body), row = byId.get(receipt.audit_event_id);
         const action = pageAction(wire.path);
@@ -985,6 +1163,23 @@ finally {
         observed.membership_browser_receipts = 1;
         observed.membership_sqlite_mutations = 1;
       }
+      if (grantMode && !failure) {
+        const mutation = closedFixture.grant_change;
+        closed(mutation, ["mutation_count", "receipt"], "CLOSED_GRANT_MUTATION");
+        must(mutation.mutation_count === 1 && replayedGrantReceipt, "EXACTLY_ONE_DURABLE_GRANT_MUTATION");
+        const durable = grantReceipt(mutation.receipt, replayedGrantReceipt.operation_id);
+        must(sameGrantReceipt(durable, replayedGrantReceipt), "GRANT_RECEIPT_MATCHES_SQLITE");
+        const post = { method: "POST", path: grantsPath };
+        const received = wires.filter(({ method }) => method === "POST");
+        must(same(postedGrantRequests(), [post, post]) && received.length === 1 && received[0].path === post.path &&
+          received[0].status === 200 && sameGrantReceipt(received[0].body, durable), "GRANT_ONLY_REPLAY_RECEIPT_DELIVERED");
+        const grantReads = successfulPages.filter(({ path }) => new URL(path, "http://fixture.invalid").pathname === grantsPath);
+        must(grantReads.length === 1 && compared >= grantReads.length &&
+          receipts.records.filter(({ action }) => action === "grants").length === 1, "EXACT_DURABLE_GRANT_READ_RECEIPT");
+        observed.grant_posts = 2;
+        observed.grant_browser_receipts = 1;
+        observed.grant_sqlite_mutations = 1;
+      }
       const exit = await bounded(childDone, 15000, "LIBTEST_EXIT_DEADLINE"); must(exit?.code === 0 && exit.signal === null, "LIBTEST_EXIT_NOT_ZERO");
     } catch (error) { cleanupFailure ??= redact(error.message); }
     if (fixtureExit === null) {
@@ -1010,6 +1205,7 @@ finally {
 // No source path, bearer, response body or child diagnostic is printed.
 console.log(interrupted ? "browser_owned_snapshot FAIL INTERRUPTED" : !fixtureStarted ? "browser_owned_snapshot BLOCKED NOT_RUN"
   : failure || cleanupFailure ? "browser_owned_snapshot FAIL; private result retained"
+  : grantMode ? "browser_owned_snapshot PASS scenario=grant_recovery"
   : membershipMode ? "browser_owned_snapshot PASS scenario=membership_recovery"
   : usageMode ? "browser_owned_snapshot PASS scenario=usage"
   : workersMode ? "browser_owned_snapshot PASS scenario=worker_registry"
