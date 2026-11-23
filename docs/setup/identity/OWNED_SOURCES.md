@@ -51,6 +51,8 @@ The local administration context can read `GET /api/v1/human/admin/quota` and `G
 
 **Utilisateurs** offers **Modifier** for another existing membership when the Administration context grants `memberships_manage`. The dashboard sends the change to a gateway configured for owned sources. After a lost response, refresh your access and select **Reprendre la même modification**. The durable receipt confirms the outcome. [POST contract](../../api.md#changement-délégué-dappartenance--delegated-membership-change)
 
+**Resources** offers **Gérer les partages** (Manage shares) for a resource bound by the operator when the administration context grants and serves `grants_manage`. After an unknown outcome, refresh your access and choose **Réessayer la même opération** under an equivalent context. The receipt confirms the share revision and audit position. [Delegated shares contract](../../api.md#partages-délégués--delegated-shares)
+
 Event content, export, stream and other administration writes through the dashboard remain required for V1.
 
 A busy mutex or SQLite writer in sourceA does not trigger SQL queries in A while authenticating and reading sourceB. A busy own source returns503. Busy is not absence or a permanent mismatch. Actual compared filesystem/configuration/marker/incarnation mismatches retain global owner invalidation. Filesystem revalidation still covers the full union: blocked filesystem calls or a shared Write epoch carry the existing availability limits. The private candidate index is bounded at65536 entries/16MiB of representation before accumulation; overflow refuses complete publication. These bounds do not measure process RAM.

@@ -51,6 +51,8 @@ Le contexte d’administration local peut lire `GET /api/v1/human/admin/quota` e
 
 **Utilisateurs** propose **Modifier** pour une autre appartenance existante si l’Administration dispose de `memberships_manage`. Le dashboard remet la modification au gateway configuré en sources possédées. En cas de réponse perdue, relisez vos accès puis choisissez **Reprendre la même modification**. Le reçu durable confirme le résultat. [Contrat du POST](../../api.md#changement-délégué-dappartenance--delegated-membership-change)
 
+**Ressources** propose **Gérer les partages** pour une ressource liée par l’opérateur quand le contexte d’administration accorde et sert `grants_manage`. Après résultat inconnu, la relecture de vos accès permet de choisir **Réessayer la même opération** sous un contexte équivalent. Le reçu de la mutation confirme la révision du partage et la position d’audit. [Contrat des partages](../../api.md#partages-délégués--delegated-shares)
+
 Le contenu, l’export, le flux d’événements et les autres écritures d’administration via le dashboard restent exigés en V1.
 
 Un mutex ou writer SQLite occupé chez A ne déclenche aucun SQL chez A lors de l'authentification/lecture de B. La propre source occupée renvoie503. Busy n'est ni absence ni mismatch permanent. Un mismatch physique/configuration/marqueur/incarnation réellement comparé conserve l'invalidation globale de l'owner. La revalidation physique couvre toujours l'union entière : syscall bloqué ou epoch Write partagé gardent leurs limites de disponibilité. L'index privé de candidats est borné avant accumulation à65536 entrées/16Mio de représentation ; le dépassement refuse toute publication complète. Ces bornes ne mesurent pas la RAM du processus.

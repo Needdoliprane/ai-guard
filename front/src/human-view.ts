@@ -602,7 +602,7 @@ export class HumanDashboard {
       onRefused: () => {
         if (this.#editor !== editor) return;
         this.#closeEditor();
-        this.#message = "Le contrôle a refusé le changement des partages. Vos accès sont relus.";
+        this.#message = "Le contrôle a refusé l’opération sur les partages. Vos accès sont relus.";
         this.#render();
         if (generation === this.#generation) void this.#loadIdentity();
         if (document.visibilityState === "visible" && !this.#page?.contains(document.activeElement)) this.#focusHeading();
