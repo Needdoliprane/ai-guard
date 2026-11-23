@@ -366,6 +366,7 @@ fn terminal_failure_step_requires_one_complete_event_from_the_admitted_session()
         ("/next_cursor", json!(18)),
         ("/items/0/session_id", json!(other_session)),
         ("/items/0/provenance", json!("declared")),
+        ("/items/0/data/phase", json!("decision")),
         ("/items/0/data/broker_step", json!("failure_observed")),
         ("/items/0/data/runtime_effect", json!("observed")),
         ("/items", json!([])),

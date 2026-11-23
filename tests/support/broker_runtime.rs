@@ -933,7 +933,7 @@ pub fn terminal_failure_step(
         return None;
     }
     let marker = batch_failure_marker(page).ok()??;
-    if marker["audit_seq"].as_i64()? <= admission_seq {
+    if marker["phase"] != "worker" || marker["audit_seq"].as_i64()? <= admission_seq {
         return None;
     }
     let step = marker["broker_step"].as_str()?;

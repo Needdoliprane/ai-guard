@@ -811,6 +811,7 @@ impl<'a> Execution<'a> {
         live_activity: bool,
     ) -> BoxFuture<'_, Result<BatchOutcome>> {
         Box::pin(async move {
+            self.stage(LocalFailurePhaseV1::Worker);
             let terminal_ack = diagnostics::BrokerStep::TerminalObservationAck;
             let (_, draft) = self.load().await.context(terminal_ack)?;
             let worker = draft.worker().context(terminal_ack)?.clone();
