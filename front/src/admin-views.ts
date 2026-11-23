@@ -107,13 +107,30 @@ export interface MembershipsHost extends AdminHost {
   /** A delegated change is offered only when the context's catalogue grants and serves it. */
   change: ((membership: Membership) => void) | null;
 }
-export class MembershipsView extends AdminView<MembershipPage> {
-  #cursor: string | null = null; #history: (string | null)[] = [];
+type MembershipPosition = { cursor: string | null; history: readonly (string | null)[] };
+type MembershipRead = { page: MembershipPage; position: MembershipPosition };
+export class MembershipsView extends AdminView<MembershipRead> {
+  #requestedPosition: MembershipPosition | null = null;
   #membershipHost: MembershipsHost;
   constructor(host: MembershipsHost) { super(host, "ov-memberships"); this.#membershipHost = host; }
-  protected fetch(signal: AbortSignal) { return this.#membershipHost.read(this.#cursor, signal); }
-  protected readStamp(value: MembershipPage) { return value; }
-  protected render(page: MembershipPage) {
+  protected async fetch(signal: AbortSignal) {
+    const position = this.#requestedPosition ?? this.value?.position ?? { cursor: null, history: [] };
+    this.#requestedPosition = null;
+    // AdminView publishes the page and its position only after a successful, current read.
+    return { page: await this.#membershipHost.read(position.cursor, signal), position };
+  }
+  protected readStamp({ page }: MembershipRead) { return page; }
+  protected paint() {
+    const active = document.activeElement;
+    const direction = active instanceof HTMLElement && this.element.contains(active) ? active.dataset.membershipPage : undefined;
+    super.paint();
+    if (direction !== "previous" && direction !== "next") return;
+    const replacement = this.element.querySelector<HTMLElement>(`[data-membership-page="${direction}"]`) ??
+      this.element.querySelector<HTMLElement>("[data-membership-page]");
+    if (replacement) replacement.focus({ preventScroll: this.reading });
+    else this.focusRefresh();
+  }
+  protected render({ page, position: { cursor, history } }: MembershipRead) {
     const table = el("table", "ov-groups");
     table.append(el("caption", "", "Appartenances de l’organisation"),
       el("thead", "", el("tr", "", th("Compte"), th("Principal"), th("Capacités"), th("État"), th("Révision"), th("Action"))));
@@ -135,16 +152,22 @@ export class MembershipsView extends AdminView<MembershipPage> {
     }
     table.append(body);
     const pager = el("div", "ov-toolbar");
-    if (this.#history.length) {
-      const previous = el("button", "button button-quiet", "Page précédente"); previous.type = "button";
-      previous.addEventListener("click", () => { this.#cursor = this.#history.pop() ?? null; void this.read(); }); pager.append(previous);
-    }
-    if (page.has_more && page.next_cursor) {
-      const next = el("button", "button button-quiet", "Page suivante"); next.type = "button";
-      next.addEventListener("click", () => { this.#history.push(this.#cursor); this.#cursor = page.next_cursor; void this.read(); }); pager.append(next);
-    }
+    if (history.length) pager.append(this.#pageButton("Page précédente", "previous", { cursor: history.at(-1) ?? null, history: history.slice(0, -1) }));
+    if (page.has_more && page.next_cursor) pager.append(this.#pageButton("Page suivante", "next", { cursor: page.next_cursor, history: [...history, cursor] }));
     return [page.items.length ? el("div", "ov-scroll", table) : el("p", "", "Aucune appartenance dans cette page de l’organisation."),
       el("p", "muted", "Création de compte et d’identifiant : opérateur hors ligne. Les droits réservés au contrôle ne sont jamais accordés depuis cette vue."), pager];
+  }
+  #pageButton(label: string, direction: "previous" | "next", position: MembershipPosition) {
+    const button = el("button", "button button-quiet", label);
+    button.type = "button";
+    button.dataset.membershipPage = direction;
+    button.setAttribute("aria-disabled", String(this.reading));
+    button.addEventListener("click", () => {
+      if (this.reading) return;
+      this.#requestedPosition = position;
+      void this.read();
+    });
+    return button;
   }
 }
 
