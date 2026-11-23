@@ -12,6 +12,7 @@ import { workerIdentity, workerPage, worker, workerObservation } from "./human-f
 import { federationIdentity, federationPage, broker } from "./human-fixtures.mjs";
 import { catalogue, tenantScope } from "./human-fixtures.mjs";
 import { noCheckpoint, ownedBrokerFromLegacy, ownedBrokerPage, ownedCatalogue, ownedReadProfiles } from "./owned-brokers-fixture.mjs";
+import { membership, membershipPage, memberPrincipal } from "./admin-fixtures.mjs";
 
 const require = createRequire(import.meta.url);
 let chromium;
@@ -28,9 +29,17 @@ let brokerDisplay = "standard"; let credentialExpiresAt = null;
 let workerDenied = false; let identityDenied = false;
 let federationHeaders403 = false; let identityHeaders403 = false;
 let ownedProfile = true; let ownedHeaders403 = false;
+const membershipCursor = "memberships-next";
+let failNextMembershipRead = true;
 const unfinishedRefusals = [];
 const humanIdentity = () => {
   const value = scenario.startsWith("federation") ? federationIdentity() : scenario === "workers" ? workerIdentity() : scenario.startsWith("brokers") ? brokerIdentity(scenario === "brokers-mixed") : identity();
+  if (scenario === "memberships-pagination") {
+    const admin = value.contexts.find((context) => context.mode === "administration");
+    admin.capabilities.push("read_memberships");
+    admin.operations = admin.operations.map((entry) => entry.operation === "memberships_read" ?
+      { ...entry, permission: "granted", scope: "organization", availability: "available" } : entry);
+  }
   if (scenario === "brokers-owned") {
     value.contexts[0].capabilities = ["read_broker_registry", "read_worker_registry"];
     // The control announces the owned profile twice: as read profiles and as the availability of each operation.
@@ -90,6 +99,21 @@ const server = createServer(async (request, response) => {
     if (!String(url.pathname).startsWith("/api/v1/human/")) { response.writeHead(404); response.end(); return; }
     if (!humanIdentity().contexts.some((context) => context.id === contextId)) return error(response, 403, "context_invalid", "select_context");
     if (budgetExhausted) return error(response, 429, "audit_read_budget_exhausted", "contact_operator");
+    if (scenario === "memberships-pagination" && url.pathname === "/api/v1/human/admin/memberships") {
+      if (contextId !== "context-admin") return error(response, 403, "permission_denied", "review_permissions");
+      const cursor = url.searchParams.get("cursor");
+      if (cursor === null) return json(response, membershipPage(contextId, {
+        items: [membership({ display_name: "Première appartenance" })], has_more: true, next_cursor: membershipCursor,
+      }));
+      if (cursor !== membershipCursor) return error(response, 400, "invalid_cursor", "retry");
+      if (failNextMembershipRead) {
+        failNextMembershipRead = false;
+        return error(response, 503, "audit_unavailable", "retry");
+      }
+      return json(response, membershipPage(contextId, {
+        items: [membership({ membership_id: uuid, principal: memberPrincipal(2), display_name: "Appartenance suivante" })],
+      }));
+    }
     if (url.pathname === "/api/v1/human/federation/workers") {
       if (federationHeaders403) return refuseHeadersOnly(response);
       if (workerDenied || brokerDenied || brokerCapRemoved) return error(response, 403, "permission_denied", "review_permissions");
@@ -170,6 +194,10 @@ const server = createServer(async (request, response) => {
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 const browser = await chromium.launch({ headless: true, chromiumSandbox: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined });
 const context = await browser.newContext({ viewport: { width: 1440, height: 1050 } });
+if (scenario === "memberships-pagination") {
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  await context.route("**/*", (route) => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+}
 const page = await context.newPage(); page.setDefaultTimeout(7000);
 const errors = []; page.on("pageerror", (error) => errors.push(error.message));
 let downloadCount = 0; page.on("download", () => downloadCount++);
@@ -199,7 +227,7 @@ await page.addInitScript(() => {
   window.fetch = async (...args) => {
     window.__humanFetches.push(String(args[0]));
     const response = await nativeFetch(...args);
-    if (window.__humanHold && (String(args[0]).includes("/human/events/") || String(args[0]).includes("/human/brokers") || String(args[0]).includes("/human/owned/brokers") || String(args[0]).includes("/human/workers") || String(args[0]).includes("/human/federation/workers"))) {
+    if (window.__humanHold && (String(args[0]).includes("/human/events/") || String(args[0]).includes("/human/brokers") || String(args[0]).includes("/human/owned/brokers") || String(args[0]).includes("/human/workers") || String(args[0]).includes("/human/federation/workers") || String(args[0]).includes("/human/admin/memberships"))) {
       window.__humanHold = false; const body = await response.text();
       await new Promise((release) => window.__humanHeld.push(release));
       return new Response(body, { status: response.status, headers: response.headers });
@@ -663,6 +691,41 @@ const runRegression = async () => {
       viewerDenied = null; await loginViewer();
     }
     await tab("Se déconnecter");
+  } else if (scenario === "memberships-pagination") {
+    await loginHuman();
+    await choose("administration");
+    await tab("Utilisateurs");
+    const members = page.locator(".ov-memberships");
+    const first = members.getByText("Première appartenance", { exact: true });
+    const second = members.getByText("Appartenance suivante", { exact: true });
+    const next = members.getByRole("button", { name: "Page suivante", exact: true });
+    const previous = members.getByRole("button", { name: "Page précédente", exact: true });
+    await first.waitFor();
+    await next.focus();
+    await page.keyboard.press("Enter");
+    await members.getByText("Données périmées · dernière lecture conservée.", { exact: true }).waitFor();
+    assert.equal(await first.isVisible(), true);
+    assert.equal(await previous.count(), 0, "Un échec de Page suivante conserve la position de la première page");
+    assert.equal(await next.evaluate((node) => node === document.activeElement), true, "Le réessai conserve le focus");
+
+    await page.evaluate(() => { window.__humanHold = true; });
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => window.__humanHeld.length === 1);
+    assert.equal(await first.isVisible(), true, "La page publiée reste visible pendant la lecture");
+    assert.equal(await previous.count(), 0);
+    assert.equal(await next.getAttribute("aria-disabled"), "true");
+    assert.equal(await next.evaluate((node) => node === document.activeElement), true, "Le focus reste sur la pagination en attente");
+    await page.keyboard.press("Enter");
+    await page.evaluate(() => window.__humanRelease());
+    await second.waitFor();
+    assert.equal(await previous.evaluate((node) => node === document.activeElement), true, "La fin de liste rend le focus à la commande précédente");
+    await page.keyboard.press("Enter");
+    await first.waitFor();
+    assert.equal(await previous.count(), 0, "Un seul retour rétablit la première page");
+    const reads = requests.filter(({ path }) => path.startsWith("/api/v1/human/admin/memberships?"));
+    assert.deepEqual(reads.map(({ path }) => new URL(path, "http://localhost").searchParams.get("cursor")),
+      [null, membershipCursor, membershipCursor, null]);
+    assert.ok(reads.every(({ method, context, authorized }) => method === "GET" && context === "context-admin" && authorized));
   } else throw new Error(`Scénario inconnu : ${scenario}`);
   assert.deepEqual(errors, []);
   process.stdout.write(`Régression humaine ${scenario} PASS ; fixtures uniquement.\n`);
