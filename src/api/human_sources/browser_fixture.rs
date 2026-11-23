@@ -3,6 +3,7 @@
 #![cfg(test)]
 use super::*;
 use crate::api::human_sources::owned_control_tests::negative::reserve_workload_fixture_worker;
+use crate::audit::identity::projection::Record as IdentityAuditRecord;
 use crate::control::{QuotaPolicyV1, WorkerMutationV1, WorkerStateV1, WorkerTransitionV1};
 use crate::control_fs::{Directory, PrivateFile};
 use anyhow::{Context, Result, bail, ensure};
@@ -19,6 +20,7 @@ mod egress;
 const ENABLE: &str = "AI_GUARD_OWNED_BROWSER_FIXTURE";
 const WORKER_MODE: &str = "run-workers-v1";
 const USAGE_MODE: &str = "run-usage-v1";
+const MEMBERSHIP_MODE: &str = "run-membership-v1";
 const DIST: &str = "AI_GUARD_OWNED_BROWSER_DIST";
 const CONTROL: &str = "AI_GUARD_OWNED_BROWSER_CONTROL";
 const SECONDS: &str = "AI_GUARD_OWNED_BROWSER_SECONDS";
@@ -28,6 +30,7 @@ const RECEIPT_LIMIT: usize = 1_000;
 const WORKER_RECEIPT_KIND: &str = "control.identity.workers.access";
 const OUTPUT_BYTES: usize = 512 * 1024;
 const RESOURCE: &str = "owned-browser-session-b";
+const MEMBER_DISPLAY_NAME: &str = "Synthetic browser member";
 const PRIVATE_CONTENT: &str = "owned-browser-private-content-must-not-appear-in-metadata";
 const CLOSE_RESERVE: Duration = Duration::from_secs(20);
 
@@ -305,6 +308,7 @@ enum FixtureMode {
     Journal,
     Workers,
     Usage,
+    Membership,
 }
 
 enum FixtureSeed {
@@ -321,6 +325,75 @@ enum FixtureSeed {
         unmeasured_worker_id: String,
         unmeasured_attempt_id: String,
     },
+    Membership(Box<MembershipSeed>),
+}
+
+struct MembershipSeed {
+    member: MembershipV1,
+    baseline: IdentityReceiptV1,
+}
+
+fn fixture_identity_mutation(change: IdentityChangeV1) -> IdentityMutationV1 {
+    IdentityMutationV1 {
+        version: 1,
+        operation_id: uuid::Uuid::new_v4().to_string(),
+        actor: PrincipalRefV1::LegacyControl {
+            credential_id: "synthetic-browser-fixture-control".into(),
+            role: LegacyControlRoleV1::Runner,
+        },
+        change,
+    }
+}
+
+fn seed_membership(
+    store: &Store,
+    administrator: &PrincipalRefV1,
+    organization_scope: String,
+) -> Result<FixtureSeed> {
+    let PrincipalRefV1::HumanLocal {
+        installation_id, ..
+    } = administrator
+    else {
+        bail!("browser membership administrator is not a local identity");
+    };
+    let principal = PrincipalRefV1::HumanLocal {
+        installation_id: installation_id.clone(),
+        account_id: uuid::Uuid::new_v4().to_string(),
+    };
+    store.mutate_identity(&fixture_identity_mutation(IdentityChangeV1::Account {
+        expected_revision: 0,
+        account: HumanAccountV1 {
+            version: 1,
+            principal: principal.clone(),
+            display_name: MEMBER_DISPLAY_NAME.into(),
+            revision: 1,
+            active: true,
+        },
+    }))?;
+    let member = MembershipV1 {
+        version: 1,
+        membership_id: uuid::Uuid::new_v4().to_string(),
+        principal,
+        tenant_id: "B".into(),
+        organization_scope,
+        revision: 1,
+        active: true,
+        capabilities: [
+            HumanCapabilityV1::ReadMetadata,
+            HumanCapabilityV1::ReadContent,
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let baseline =
+        store.mutate_identity(&fixture_identity_mutation(IdentityChangeV1::Membership {
+            expected_revision: 0,
+            membership: member.clone(),
+        }))?;
+    Ok(FixtureSeed::Membership(Box::new(MembershipSeed {
+        member,
+        baseline,
+    })))
 }
 
 fn seed_usage(store: &Store) -> Result<FixtureSeed> {
@@ -369,7 +442,7 @@ fn seed_usage(store: &Store) -> Result<FixtureSeed> {
 }
 
 fn seed(mode: FixtureMode) -> Result<(Fixture, FixtureSeed)> {
-    let fixture = if mode == FixtureMode::Usage {
+    let fixture = if matches!(mode, FixtureMode::Usage | FixtureMode::Membership) {
         Fixture::new_owned_with_human_rights()
     } else {
         Fixture::new_owned()
@@ -380,32 +453,39 @@ fn seed(mode: FixtureMode) -> Result<(Fixture, FixtureSeed)> {
         .into_iter()
         .find(|member| member.tenant_id == "B" && member.organization_scope == "synthetic-org")
         .context("synthetic B membership absent")?;
+    let organization_scope = membership.organization_scope.clone();
     let expected_revision = membership.revision;
     membership.revision = membership
         .revision
         .checked_add(1)
         .context("synthetic membership revision overflow")?;
-    if mode != FixtureMode::Journal {
-        // Only the administration worker-registry capability is needed in these fixtures.
-        membership.capabilities = [HumanCapabilityV1::ReadWorkerRegistry]
+    match mode {
+        FixtureMode::Workers | FixtureMode::Usage => {
+            membership.capabilities = [HumanCapabilityV1::ReadWorkerRegistry]
+                .into_iter()
+                .collect();
+        }
+        FixtureMode::Membership => {
+            membership.capabilities = [
+                HumanCapabilityV1::ManageMemberships,
+                HumanCapabilityV1::ReadMemberships,
+            ]
             .into_iter()
             .collect();
-    } else {
-        // The Journal tests profile refusal even when the owner holds the right.
-        membership.capabilities.insert(HumanCapabilityV1::Export);
+        }
+        FixtureMode::Journal => {
+            // The Journal tests profile refusal even when the owner holds the right.
+            membership.capabilities.insert(HumanCapabilityV1::Export);
+        }
     }
-    store.mutate_identity(&IdentityMutationV1 {
-        version: 1,
-        operation_id: uuid::Uuid::new_v4().to_string(),
-        actor: PrincipalRefV1::LegacyControl {
-            credential_id: "synthetic-browser-fixture-control".into(),
-            role: LegacyControlRoleV1::Runner,
-        },
-        change: IdentityChangeV1::Membership {
-            expected_revision,
-            membership,
-        },
-    })?;
+    store.mutate_identity(&fixture_identity_mutation(IdentityChangeV1::Membership {
+        expected_revision,
+        membership,
+    }))?;
+    if mode == FixtureMode::Membership {
+        let seeded = seed_membership(store, fixture.principal(), organization_scope)?;
+        return Ok((fixture, seeded));
+    }
     if mode != FixtureMode::Journal {
         let supervision = store.supervision_state()?;
         ensure!(
@@ -431,14 +511,8 @@ fn seed(mode: FixtureMode) -> Result<(Fixture, FixtureSeed)> {
         event.data = json!({"private_content": PRIVATE_CONTENT, "ordinal": ordinal});
         ids.push(store.append(event)?.event.id);
     }
-    store.mutate_identity(&IdentityMutationV1 {
-        version: 1,
-        operation_id: uuid::Uuid::new_v4().to_string(),
-        actor: PrincipalRefV1::LegacyControl {
-            credential_id: "synthetic-browser-fixture-control".into(),
-            role: LegacyControlRoleV1::Runner,
-        },
-        change: IdentityChangeV1::ResourceGrant {
+    store.mutate_identity(&fixture_identity_mutation(
+        IdentityChangeV1::ResourceGrant {
             expected_revision: 0,
             grant: ResourceGrantV1 {
                 version: 1,
@@ -454,7 +528,7 @@ fn seed(mode: FixtureMode) -> Result<(Fixture, FixtureSeed)> {
                 shares: Vec::new(),
             },
         },
-    })?;
+    ))?;
     Ok((fixture, FixtureSeed::Journal(ids)))
 }
 
@@ -537,12 +611,97 @@ struct Receipt {
     received_at: String,
 }
 
-fn export_receipts(root: &Directory, path: &Path, tenant: &str) -> Result<()> {
+fn open_receipt_database(path: &Path) -> Result<rusqlite::Connection> {
     let connection = rusqlite::Connection::open_with_flags(
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
     connection.busy_timeout(Duration::ZERO)?;
+    Ok(connection)
+}
+
+#[derive(Serialize)]
+struct MembershipChangeProof {
+    mutation_count: u8,
+    receipt: Option<HumanMembershipChangeReceiptV1>,
+}
+
+fn membership_change_proof(
+    path: &Path,
+    seed: &MembershipSeed,
+    administrator: &PrincipalRefV1,
+) -> Result<MembershipChangeProof> {
+    let connection = open_receipt_database(path)?;
+    let mut statement = connection.prepare(
+        "SELECT seq,payload FROM events WHERE kind='control.identity.mutation' AND seq>?1
+         ORDER BY seq LIMIT 2",
+    )?;
+    let mut rows = statement.query([seed.baseline.audit_seq])?;
+    let Some(row) = rows.next()? else {
+        return Ok(MembershipChangeProof {
+            mutation_count: 0,
+            receipt: None,
+        });
+    };
+    let audit_seq: i64 = row.get(0)?;
+    let payload: String = row.get(1)?;
+    ensure!(
+        rows.next()?.is_none(),
+        "more than one identity mutation after seed"
+    );
+    ensure!(
+        payload.len() <= OUTPUT_BYTES,
+        "membership audit exceeds its bound"
+    );
+    let event: Event = serde_json::from_str(&payload)?;
+    let record = IdentityAuditRecord::decode_replay(&event.data)?;
+    let mut expected = seed.member.clone();
+    expected.revision = 2;
+    expected
+        .capabilities
+        .remove(&HumanCapabilityV1::ReadContent);
+    ensure!(
+        record.mutation.actor == *administrator
+            && record.mutation.change
+                == (IdentityChangeV1::Membership {
+                    expected_revision: 1,
+                    membership: expected.clone(),
+                })
+            && seed.baseline.authorization_revision.checked_add(1)
+                == Some(record.authorization_revision),
+        "membership audit differs from the single delegated change"
+    );
+    let indexed: (i64, String) = connection.query_row(
+        "SELECT event_seq,input_hash FROM identity_operations WHERE operation_id=?1",
+        [&record.mutation.operation_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let (projected_seq, member_json): (i64, String) = connection.query_row(
+        "SELECT event_seq,payload_json FROM identity_memberships WHERE membership_id=?1",
+        [&expected.membership_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    ensure!(
+        indexed == (audit_seq, record.input_hash)
+            && projected_seq == audit_seq
+            && serde_json::from_str::<MembershipV1>(&member_json)? == expected,
+        "membership operation index or projection differs from the audit"
+    );
+    Ok(MembershipChangeProof {
+        mutation_count: 1,
+        receipt: Some(HumanMembershipChangeReceiptV1 {
+            version: 1,
+            operation_id: record.mutation.operation_id,
+            membership_id: expected.membership_id,
+            membership_revision: expected.revision.to_string(),
+            authorization_revision: record.authorization_revision.to_string(),
+            audit_seq: audit_seq.to_string(),
+        }),
+    })
+}
+
+fn export_receipts(root: &Directory, path: &Path, tenant: &str) -> Result<()> {
+    let connection = open_receipt_database(path)?;
     // Worker registry receipts carry their own event kind instead of data.action.
     let mut statement = connection.prepare(
         "SELECT id,json_extract(payload,'$.data.request_id'),
@@ -574,6 +733,7 @@ fn export_receipts(root: &Directory, path: &Path, tenant: &str) -> Result<()> {
                     "summary",
                     "quota",
                     "usage",
+                    "memberships",
                     WORKER_RECEIPT_KIND
                 ]
                 .contains(&row.action.as_str()),
@@ -599,6 +759,7 @@ async fn serve_owned_browser_fixture() -> Result<()> {
         Ok("run-v1") => (FixtureMode::Journal, "run-v1"),
         Ok(WORKER_MODE) => (FixtureMode::Workers, WORKER_MODE),
         Ok(USAGE_MODE) => (FixtureMode::Usage, USAGE_MODE),
+        Ok(MEMBERSHIP_MODE) => (FixtureMode::Membership, MEMBERSHIP_MODE),
         _ => bail!("owned browser fixture requires its explicit opt-in"),
     };
     let config = Config::load(opt_in)?;
@@ -636,7 +797,7 @@ async fn serve_owned_browser_fixture() -> Result<()> {
     if mode != FixtureMode::Journal {
         ensure!(
             source.tenant_id.as_deref() == Some("B") && source.required_format == 14,
-            "worker fixture requires the retained tenant B Store14"
+            "administration fixture requires the retained tenant B Store14"
         );
     }
     let database = source.storage_binding.path();
@@ -653,7 +814,7 @@ async fn serve_owned_browser_fixture() -> Result<()> {
             "tenant_id":"B",
             "budget_seconds":config.seconds,"commands":"commands","acks":"acks","command_limit":COMMAND_LIMIT
         });
-        match seeded {
+        match &seeded {
             FixtureSeed::Journal(event_ids) => {
                 ready["resource"] = json!({"kind":"session","resource_id":RESOURCE});
                 ready["event_ids"] = json!(event_ids);
@@ -682,6 +843,14 @@ async fn serve_owned_browser_fixture() -> Result<()> {
                     },
                 });
             }
+            FixtureSeed::Membership(seed) => {
+                ready["mode"] = json!("membership");
+                ready["membership"] = json!({
+                    "membership_id": seed.member.membership_id,
+                    "display_name": MEMBER_DISPLAY_NAME,
+                    "revision": seed.member.revision.to_string(),
+                });
+            }
         }
         publish(&config.root, "READY.json", &ready)?;
         eprintln!("OWNED_BROWSER_READY {}", config.root.path().join("READY.json").display());
@@ -692,16 +861,24 @@ async fn serve_owned_browser_fixture() -> Result<()> {
     let unlocked = lock.release().is_ok();
     let stopped = servers.close().await;
     let receipts = export_receipts(&config.root, &database, "B");
-    publish(
-        &config.root,
-        "CLOSED.json",
-        &json!({
-            "version":1,"completed":work.is_ok() && unlocked && stopped.is_ok() && receipts.is_ok(),
-            "commands_processed":work.as_ref().ok().copied(),"sqlite_lock_released":unlocked,
-            "servers_and_owner_drained":stopped.is_ok(),"receipts_exported":receipts.is_ok(),
-            "stop_reason":if work.is_ok() {"requested"} else {"error_or_deadline"}
-        }),
-    )?;
+    let membership_change = match &seeded {
+        FixtureSeed::Membership(seed) if stopped.is_ok() => {
+            membership_change_proof(&database, seed, fixture.principal()).map(Some)
+        }
+        _ => Ok(None),
+    };
+    let receipts_exported = receipts.is_ok() && membership_change.is_ok();
+    let mut closed = json!({
+        "version":1,"completed":work.is_ok() && unlocked && stopped.is_ok() && receipts_exported,
+        "commands_processed":work.as_ref().ok().copied(),"sqlite_lock_released":unlocked,
+        "servers_and_owner_drained":stopped.is_ok(),"receipts_exported":receipts_exported,
+        "stop_reason":if work.is_ok() {"requested"} else {"error_or_deadline"}
+    });
+    if mode == FixtureMode::Membership {
+        closed["membership_change"] =
+            json!(membership_change.as_ref().ok().and_then(Option::as_ref));
+    }
+    publish(&config.root, "CLOSED.json", &closed)?;
     eprintln!(
         "OWNED_BROWSER_CLOSED {}",
         config.root.path().join("CLOSED.json").display()
@@ -710,6 +887,7 @@ async fn serve_owned_browser_fixture() -> Result<()> {
     work?;
     stopped?;
     receipts?;
+    let _ = membership_change?;
     Ok(())
 }
 
