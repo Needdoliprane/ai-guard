@@ -115,7 +115,7 @@ async fn owned_workers_on(format: u32, worker_count: usize) {
     workers.sort_unstable_by(|left, right| left.worker_id.cmp(&right.worker_id));
     let (bundle, credentials, tokens) = fixture.take_startup();
     let reader = provision_reader(&bundle, HumanCapabilityV1::ReadWorkerRegistry);
-    let other_admin = provision_reader(&bundle, HumanCapabilityV1::ReadConfiguration);
+    let other_admin = provision_reader(&bundle, HumanCapabilityV1::ReadBrokerRegistry);
     let descriptor = bundle
         .owner
         .closure()
