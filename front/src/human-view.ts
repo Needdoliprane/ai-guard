@@ -12,15 +12,15 @@ import { OverviewView, defaultOverviewPreferences } from "./overview-view.ts";
 import type { OverviewPreferences } from "./overview-view.ts";
 import { brokerAuthorityLabel, defaultFleetFilter, grantKey, landingDestination, supervisionAccess } from "./supervision-model.ts";
 import { GrantEditor, MembershipEditor } from "./delegation-views.ts";
-import { CAPABILITY_LABELS, delegationOffers, MEMBERSHIP_OUTCOME_UNKNOWN, MembershipChangeRecovery, membershipContextLost,
-  membershipReplayRefusal } from "./delegation-model.ts";
-import type { Membership, MembershipChange } from "./admin-model.ts";
+import { CAPABILITY_LABELS, DELEGATED_OUTCOME_UNKNOWN, DelegatedChangeRecovery, delegatedContextLost, delegatedReplayRefusal,
+  delegationOffers } from "./delegation-model.ts";
+import type { Membership } from "./admin-model.ts";
 import { captureIntent, deferredReadAllowed, resumeCandidate, resumeRetryDelay } from "./human-continuity.ts";
 import type { ResumeIntent } from "./human-continuity.ts";
 import "./human.css";
 import type { SupervisionPreferences } from "./supervision-view.ts";
 import type { JournalPreferences } from "./journal-view.ts";
-import type { HumanOperation, ResourceRef } from "./human-model.ts";
+import type { HumanOperation, Principal, ResourceRef } from "./human-model.ts";
 import type { HumanBroker, HumanBrokerPage, HumanWorker, HumanWorkerPage, HumanWorkerAssociation, HumanWorkerTimeStatus, HumanFederationWorkerPage, HumanContext, HumanEvent, HumanEventPage, HumanIdentity, HumanPage, HumanResource, HumanView } from "./human-model.ts";
 import { checkpointFacts, checkpointLabel, formatBrokerDate } from "./human-owned-brokers.ts";
 
@@ -51,7 +51,7 @@ const RESUME_PENDING = "Reprise confirmée. Le contrôle propose encore le conte
 /** Shown when the tab was hidden before a confirmed resume reopened the view, whatever the control proposes meanwhile: nothing reopens by itself any more. */
 const RESUME_INTERRUPTED = "Reprise interrompue : l’onglet a été masqué avant que la vue se rouvre, et rien ne se rouvre dans un onglet masqué. Vos accès sont relus à votre retour sur l’onglet ; si le contrôle propose alors un contexte de mêmes droits, la reprise vous sera proposée de nouveau et attendra votre confirmation.";
 const IDENTITY_REVALIDATION_FAILED = "Revalidation des accès impossible. ";
-const MEMBERSHIP_ACCESS_CHANGED = `Vos accès actuels ne permettent plus de reprendre ce changement. ${MEMBERSHIP_OUTCOME_UNKNOWN}`;
+const DELEGATED_ACCESS_CHANGED = `Vos accès actuels ne permettent plus de reprendre ce changement. ${DELEGATED_OUTCOME_UNKNOWN}`;
 const RESOURCE_STREAM_HIDDEN = "Flux suspendu · onglet masqué";
 function badge(label: string, tone = "neutral") { return el("span", `badge badge-${tone}`, label); }
 function action(label: string, key: string, call: () => void, disabled = false) {
@@ -112,7 +112,7 @@ export class HumanDashboard {
   #editor: MembershipEditor | GrantEditor | null = null;
   /** After a receipt: the attribution of the context the change was made in, the view to read again and the receipt to show. */
   #changeFollowUp: { key: string; destination: DashboardMode; notice: string } | null = null;
-  #membershipChange = new MembershipChangeRecovery();
+  #delegatedChange: DelegatedChangeRecovery;
   /** Restrictive coverage observed on a real page, scoped to this exact context. */
   #journalProfile: { contextId: string; authorizationVersion: string; streamMode: "snapshot_only" | null } | null = null;
   /** Set only after a context expiry or a session rotation; dropped by any other context change. */
@@ -231,9 +231,9 @@ export class HumanDashboard {
       onContextInvalidated: (error, identity) => {
         if (!this.#mounted || this.#closed) return;
         const readingIdentity = this.#identityLoading;
-        const changePending = this.#membershipChange.phase !== null && membershipContextLost(error);
-        const review = changePending && identity ? this.#membershipChange.revalidate(identity, Date.now()) : undefined;
-        const keepChange = changePending && this.#membershipChange.phase !== null;
+        const changePending = this.#delegatedChange.phase !== null && delegatedContextLost(error);
+        const review = changePending && identity ? this.#delegatedChange.revalidate(identity, Date.now()) : undefined;
+        const keepChange = changePending && this.#delegatedChange.phase !== null;
         // Captured before the purge and holding no server row: at most the view and the typed filters.
         const intent = captureIntent({ cause: error.code, principal: this.#identity?.principal ?? null, context: this.#context, view: this.#mode,
           now: Date.now(), budgetStopped: this.#api.readBudgetStopped, payload: { supervision: this.#supervisionPreferences, journal: this.#journalPreferences, overview: this.#overviewPreferences } });
@@ -242,10 +242,10 @@ export class HumanDashboard {
           this.#identity = identity;
           this.#identityOffersWithdrawn = false;
         } else if (keepChange || error.code === "permission_denied") this.#identityOffersWithdrawn = true;
-        this.#message = review === "withdrawn" ? MEMBERSHIP_ACCESS_CHANGED : keepChange ? MEMBERSHIP_OUTCOME_UNKNOWN : error.message;
+        this.#message = review === "withdrawn" ? DELEGATED_ACCESS_CHANGED : keepChange ? DELEGATED_OUTCOME_UNKNOWN : error.message;
         this.#mode = "contexts"; this.#render();
         if (changePending && document.visibilityState === "visible") this.#focusHeading();
-        if (!readingIdentity && !this.#api.readBudgetStopped && this.#membershipChange.phase !== "sending") void this.#loadIdentity();
+        if (!readingIdentity && !this.#api.readBudgetStopped && this.#delegatedChange.phase !== "sending") void this.#loadIdentity();
       },
       onReadBudgetExhausted: () => {
         this.#streamAbort.abort(); this.#exportAbort.abort(); clearTimeout(this.#refreshTimer); this.#refreshTimer = undefined;
@@ -253,6 +253,7 @@ export class HumanDashboard {
         this.#streamStatus = "Lecture automatique suspendue"; this.#supervision?.budgetStopped(); this.#render();
       },
     });
+    this.#delegatedChange = new DelegatedChangeRecovery(this.#api);
   }
   async start() {
     this.#identity = await this.#api.identity();
@@ -335,7 +336,7 @@ export class HumanDashboard {
         "Le contexte précédent n’est plus sélectionné. Choisissez un contexte.";
   }
   #acceptResume() {
-    if (document.visibilityState !== "visible" || this.#membershipChange.phase === "sending") return;
+    if (document.visibilityState !== "visible" || this.#delegatedChange.phase === "sending") return;
     const intent = this.#resume; const offer = this.#resumeOffer; if (!intent || !offer) return;
     if (Date.parse(offer.expires_at) <= Date.now()) {
       // The offered context expired while the list stayed open. This click is the explicit action: the
@@ -365,9 +366,9 @@ export class HumanDashboard {
       "Session OIDC locale fermée." : "Session personnelle fermée. Le credential local reste administré par le contrôle.");
     this.close(); this.#onLogout(detail);
   }
-  #purgeContext(keepMembershipChange = false) {
-    if (keepMembershipChange) this.#membershipChange.withdrawOffer();
-    else this.#membershipChange.clear();
+  #purgeContext(keepDelegatedChange = false) {
+    if (keepDelegatedChange) this.#delegatedChange.withdrawOffer();
+    else this.#delegatedChange.clear();
     this.#closeEditor();
     this.#generation++; this.#selectionGeneration++; this.#invalidation++;
     this.#scope.abort(); this.#scope = new AbortController();
@@ -507,7 +508,7 @@ export class HumanDashboard {
     const view: MembershipsView | UsageView | ConfigurationView = mode === "memberships" ?
       // The delegated change is offered only when the catalogue grants and serves memberships_manage.
       new MembershipsView({ ...host, read: (cursor, signal) => this.#api.memberships(cursor, signal),
-        change: delegationOffers(context).memberships && this.#membershipChange.phase === null ? (membership) => this.#editMembership(membership) : null }) :
+        change: delegationOffers(context).memberships && this.#delegatedChange.phase === null ? (membership) => this.#editMembership(membership) : null }) :
       mode === "usage" ? new UsageView({ ...host, owned: this.#api.readProfiles !== undefined,
         quota: (signal) => this.#api.quota(signal), usage: (cursor, signal) => this.#api.usage(cursor, signal) }) :
         new ConfigurationView({ ...host, read: (signal) => this.#api.configuration(signal) });
@@ -516,11 +517,12 @@ export class HumanDashboard {
   #closeEditor() { const editor = this.#editor; this.#editor = null; editor?.close(); }
   #editMembership(membership: Membership) {
     const context = this.#context;
-    if (!context || membership.own || !delegationOffers(context).memberships || this.#closed || this.#membershipChange.phase !== null) return;
+    if (!context || membership.own || !delegationOffers(context).memberships || this.#closed || this.#delegatedChange.phase !== null) return;
     this.#closeEditor();
     const generation = this.#generation;
     const editor: MembershipEditor = new MembershipEditor({ context, membership,
-      send: (change, signal) => this.#submitMembershipChange(membership.membership_id, change, signal),
+      send: (change, signal) => this.#submitDelegatedChange(change.operation_id, signal, (principal, current) =>
+        this.#delegatedChange.submitMembership(principal, current, membership.membership_id, change, signal)),
       onApplied: (receipt) => {
         if (this.#editor !== editor) return;
         void this.#followChange("memberships", `Changement enregistré : appartenance de ${membership.display_name} en révision ${receipt.membership_revision} · révision d’autorisation ${receipt.authorization_revision} · position d’audit ${receipt.audit_seq}.`);
@@ -537,65 +539,74 @@ export class HumanDashboard {
       onClosed: () => { if (this.#editor === editor) this.#editor = null; } });
     this.#editor = editor; editor.open();
   }
-  async #submitMembershipChange(id: string, change: MembershipChange, signal: AbortSignal) {
+  async #submitDelegatedChange<R>(operationId: string, signal: AbortSignal,
+    submit: (principal: Principal, context: HumanContext) => Promise<R>) {
     const context = this.#context; const principal = this.#identity?.principal;
     if (this.#closed || !context || !principal || signal.aborted) throw new HumanSuperseded();
     try {
-      return await this.#membershipChange.submit(principal, context, id, change,
-        (target, request) => this.#api.changeMembership(target, request, signal));
+      return await submit(principal, context);
     } catch (error) {
-      if (!this.#closed && this.#membershipChange.operationId === change.operation_id && this.#membershipChange.phase === "unknown")
-        this.#withdrawMembershipContext(MEMBERSHIP_OUTCOME_UNKNOWN, true);
+      if (!this.#closed && this.#delegatedChange.operationId === operationId && this.#delegatedChange.phase === "unknown")
+        this.#withdrawDelegatedContext(DELEGATED_OUTCOME_UNKNOWN, true);
       throw error;
     }
   }
-  #withdrawMembershipContext(notice: string, keepMembershipChange = false) {
+  #withdrawDelegatedContext(notice: string, keepDelegatedChange = false) {
     const readingIdentity = this.#identityLoading;
     this.#api.clearContext();
-    this.#purgeContext(keepMembershipChange);
+    this.#purgeContext(keepDelegatedChange);
     this.#identityOffersWithdrawn = true;
     this.#mode = "contexts"; this.#message = notice; this.#identityError = ""; this.#render();
-    if (!readingIdentity && !this.#api.readBudgetStopped && !this.#membershipChange.unavailable) void this.#loadIdentity();
+    if (!readingIdentity && !this.#api.readBudgetStopped && !this.#delegatedChange.unavailable) void this.#loadIdentity();
     if (document.visibilityState === "visible") this.#focusHeading();
   }
-  async #retryMembershipChange() {
+  async #retryDelegatedChange() {
     if (this.#closed || this.#mode !== "contexts" || this.#identityLoading || this.#api.readBudgetStopped) return;
-    const now = Date.now(); const offer = this.#membershipChange.offer(now);
+    const now = Date.now(); const offer = this.#delegatedChange.offer(now);
     if (!offer) { this.#render(); return; }
-    const operationId = this.#membershipChange.operationId;
+    const operationId = this.#delegatedChange.operationId;
     const generation = this.#generation; const signal = this.#scope.signal;
     try {
-      this.#message = "Envoi de la même demande d’appartenance au contrôle…";
-      const pending = this.#membershipChange.retry(now, (contextId, target, change) => {
-        this.#api.selectContext(contextId);
-        return this.#api.changeMembership(target, change, signal);
-      });
+      this.#message = offer.kind === "grant" ? "Envoi de la même demande de changement des partages au contrôle…" :
+        "Envoi de la même demande d’appartenance au contrôle…";
+      const pending = this.#delegatedChange.retry(now, signal);
       this.#render();
-      const receipt = await pending;
-      if (!receipt || this.#closed || generation !== this.#generation) return;
-      this.#withdrawMembershipContext(`Changement confirmé par le contrôle. Révision de l’appartenance ${receipt.membership_revision} · position d’audit ${receipt.audit_seq}.`);
+      const result = await pending;
+      if (!result || this.#closed || generation !== this.#generation) return;
+      const revision = result.kind === "grant" ? `Révision des partages ${result.receipt.grant_revision}` :
+        `Révision de l’appartenance ${result.receipt.membership_revision}`;
+      this.#withdrawDelegatedContext(`Changement confirmé par le contrôle. ${revision} · position d’audit ${result.receipt.audit_seq}.`);
     } catch (error) {
       if (this.#closed) return;
-      if (this.#membershipChange.operationId === operationId && this.#membershipChange.phase === "unknown")
-        this.#withdrawMembershipContext(MEMBERSHIP_OUTCOME_UNKNOWN, true);
+      if (this.#delegatedChange.operationId === operationId && this.#delegatedChange.phase === "unknown")
+        this.#withdrawDelegatedContext(DELEGATED_OUTCOME_UNKNOWN, true);
       else if (generation === this.#generation)
-        this.#withdrawMembershipContext(membershipReplayRefusal(error));
+        this.#withdrawDelegatedContext(delegatedReplayRefusal(offer.kind, error));
     }
   }
   #editGrant(resource: ResourceRef) {
     const context = this.#context; const self = this.#identity?.principal;
-    if (!context || !self || context.mode !== "administration" || !delegationOffers(context).grants || this.#closed) return;
+    if (!context || !self || context.mode !== "administration" || !delegationOffers(context).grants ||
+        this.#closed || this.#delegatedChange.phase !== null) return;
     this.#closeEditor();
     const generation = this.#generation;
     const editor: GrantEditor = new GrantEditor({ context, self, resource,
       read: (signal) => this.#api.grant(resource, signal),
       members: (cursor, signal) => this.#api.memberships(cursor, signal),
-      send: (change, owner, signal) => this.#api.changeGrant(change, owner, signal),
+      send: (change, owner, signal) => this.#submitDelegatedChange(change.operation_id, signal, (principal, current) =>
+        this.#delegatedChange.submitGrant(principal, current, change, owner, signal)),
       onApplied: (receipt) => {
         if (this.#editor !== editor) return;
         void this.#followChange("resources", `Partages enregistrés : ${resource.kind} ${resource.resource_id} en révision ${receipt.grant_revision} · révision d’autorisation ${receipt.authorization_revision} · position d’audit ${receipt.audit_seq}.`);
       },
-      onRefused: () => { if (this.#editor !== editor) return; this.#closeEditor(); if (generation === this.#generation) void this.#loadIdentity(); },
+      onRefused: () => {
+        if (this.#editor !== editor) return;
+        this.#closeEditor();
+        this.#message = "Le contrôle a refusé le changement des partages. Vos accès sont relus.";
+        this.#render();
+        if (generation === this.#generation) void this.#loadIdentity();
+        if (document.visibilityState === "visible" && !this.#page?.contains(document.activeElement)) this.#focusHeading();
+      },
       onClosed: () => { if (this.#editor === editor) this.#editor = null; } });
     this.#editor = editor; editor.open();
   }
@@ -660,7 +671,7 @@ export class HumanDashboard {
     this.#exporting = false; this.#exportMessage = ""; this.#exportPages = 0; this.#exportBytes = 0;
   }
   #openView(mode: DashboardMode) {
-    if (this.#mode === "contexts" && this.#membershipChange.phase === "sending") return;
+    if (this.#delegatedChange.phase === "sending") return;
     // One view owns server data at a time: leaving the unified view aborts its reads and drops its rows.
     if (mode !== "supervision" && this.#mode === "supervision") this.#closeSupervision();
     if (mode !== "journal" && this.#mode === "journal") this.#closeJournal();
@@ -693,9 +704,9 @@ export class HumanDashboard {
       } else void this.#supervision.refresh();
       this.#streamStatus = "Supervision · lectures ponctuelles";
     } else if (mode === "contexts") {
-      const keepChange = this.#membershipChange.phase === "unknown";
+      const keepChange = this.#delegatedChange.phase === "unknown";
       this.#api.clearContext(); this.#purgeContext(keepChange); this.#mode = mode;
-      if (keepChange) this.#message = MEMBERSHIP_OUTCOME_UNKNOWN;
+      if (keepChange) this.#message = DELEGATED_OUTCOME_UNKNOWN;
       if (!this.#api.readBudgetStopped) void this.#loadIdentity();
     } else if (mode === "federation" && this.#canFederation()) {
       if (this.#mode !== mode) {
@@ -740,7 +751,7 @@ export class HumanDashboard {
     else if (this.#mode === "events" && this.#selection && this.#canEvents()) void this.#loadEvents();
   }
   #refreshReading() {
-    return this.#identityLoading || this.#mode === "contexts" && this.#membershipChange.phase === "sending" ||
+    return this.#identityLoading || this.#delegatedChange.phase === "sending" ||
       this.#mode === "supervision" && this.#supervision?.reading === true ||
       this.#mode === "journal" && this.#journal?.reading === true || this.#mode === "overview" && this.#overview?.reading === true ||
       isAdminMode(this.#mode) && this.#admin?.view.reading === true;
@@ -773,13 +784,13 @@ export class HumanDashboard {
     this.#streamLabel!.textContent = this.#context ? this.#streamStatus : "Aucun contexte sélectionné";
     this.#notice.hidden = !this.#message;
     if (this.#notice.textContent !== this.#message) this.#notice.textContent = this.#message;
-    const replaySending = this.#mode === "contexts" && this.#membershipChange.phase === "sending";
+    const changeSending = this.#delegatedChange.phase === "sending";
     const destinations: DashboardMode[] = ["contexts", ...(this.#overviewState() ? ["overview" as const] : []), ...ADMIN_MODES.filter((mode) => this.#adminState(mode)), ...(this.#canSupervise() ? ["supervision" as const] : []), ...(this.#canJournal() ? ["journal" as const] : []), "resources", "events", ...(this.#canBrokers() ? ["brokers" as const] : []), ...(this.#canWorkers() ? ["workers" as const] : []), ...(this.#canFederation() ? ["federation" as const] : [])];
     const nav = destinations.map((mode) => {
       const label = { contexts: "Contextes", overview: this.#context?.mode === "administration" ? "Vue 360°" : "Mon espace",
         memberships: "Utilisateurs", usage: "Quotas et usage", configuration: "Configuration", supervision: "Supervision", journal: "Journal", resources: "Ressources", events: "Événements", brokers: "Brokers", workers: "Workers", federation: "Fédération" }[mode];
       const node = action(label, `human-nav-${mode}`, () => this.#openView(mode),
-        replaySending || mode === "resources" && !this.#canResources() || mode === "events" && (!this.#selection || !this.#canEvents()));
+        changeSending || mode === "resources" && !this.#canResources() || mode === "events" && (!this.#selection || !this.#canEvents()));
       node.className = "button human-tab"; if (mode === this.#mode) node.setAttribute("aria-current", "page"); return node;
     });
     // The destination row may scroll sideways: keep the user's position, bring a newly opened destination into
@@ -817,14 +828,14 @@ export class HumanDashboard {
         "Brokers, workers et ressources que ce contexte d’administration peut lire, réunis sur une page. Chaque valeur vient d’une lecture autorisée par le contrôle ; ce qui n’a pas été lu reste inconnu." :
         "Les ressources que vous possédez ou qui vous sont partagées, et ce que ce contexte personnel ne permet pas de lire. Chaque valeur vient d’une lecture autorisée par le contrôle.") : this.#mode === "federation" ? "Vue d’administration offerte par l’opération federation_read de ce contexte. Workers et brokers enregistrés restent visibles dans deux pages indépendantes du même tenant." : this.#mode === "workers" ? "Workers de tout le tenant · opération workers_read de ce contexte. États du contrôle et observations runtime restent distincts." : this.#mode === "brokers" ? "Infrastructure de tout le tenant · opération brokers_read de ce contexte. Les permissions et l’évaluation du registre proviennent du contrôle." :
         "Les permissions sont vérifiées par le serveur. Une ressource visible ne donne aucun droit implicite sur son contenu ou son export.")),
-      this.#mode !== "contexts" && this.#membershipChange.phase === "unknown" ?
-        action("Voir les contextes pour la reprise", "human-membership-recovery-contexts", () => this.#openView("contexts")) : "",
+      this.#mode !== "contexts" && this.#delegatedChange.phase === "unknown" ?
+        action("Voir les contextes pour la reprise", `human-${this.#delegatedChange.kind}-recovery-contexts`, () => this.#openView("contexts")) : "",
       ...(this.#api.readBudgetStopped ? [el("div", "control-error human-budget-stop", el("p", "", "Lecture automatique suspendue : budget durable de lecture atteint. Contactez l’opérateur ; changer de vue ou de contexte ne réinitialise pas ce budget."),
         action("Relire après intervention de l’opérateur", "human-operator-retry", () => {
-          if (this.#mode === "contexts" && this.#membershipChange.phase === "sending") return;
+          if (this.#delegatedChange.phase === "sending") return;
           this.#api.allowReadAfterOperatorAction();
           void this.#refreshAfterOperatorAction();
-        }, replaySending || this.#identityLoading || this.#brokers.loading || this.#workers.loading || this.#federation.loading || this.#resources.loading || this.#events.loading))] : []),
+        }, changeSending || this.#identityLoading || this.#brokers.loading || this.#workers.loading || this.#federation.loading || this.#resources.loading || this.#events.loading))] : []),
       this.#context ? el("div", "info-strip human-context-summary", icon("shield"), el("div", "",
         el("strong", "", `${modeName(this.#context)} · ${this.#context.tenant_id}`),
         el("p", "", `Organisation : ${this.#context.organization_scope}`),
@@ -878,14 +889,14 @@ export class HumanDashboard {
     }
     if (success !== null || this.#closed) return;
     // A refused destination must regain a current offered context before another page read.
-    this.#api.clearContext(); this.#purgeContext(this.#membershipChange.phase === "unknown");
+    this.#api.clearContext(); this.#purgeContext(this.#delegatedChange.phase === "unknown");
     this.#mode = "contexts"; this.#render();
     await this.#loadIdentity(true);
   }
   async #loadIdentity(operatorRetry = false): Promise<boolean | undefined> {
     if (this.#closed || this.#identityLoading || this.#api.readBudgetStopped && !operatorRetry ||
-        this.#mode === "contexts" && this.#membershipChange.phase === "sending") return;
-    this.#membershipChange.withdrawOffer();
+        this.#mode === "contexts" && this.#delegatedChange.phase === "sending") return;
+    this.#delegatedChange.withdrawOffer();
     this.#identityLoading = true; this.#render(); const generation = this.#generation; const read = ++this.#identitySequence;
     let abandoned = false;
     try {
@@ -894,11 +905,11 @@ export class HumanDashboard {
       if (generation !== this.#generation && this.#identityOffersWithdrawn) throw new HumanSuperseded();
       if (this.#identityError && this.#message === IDENTITY_REVALIDATION_FAILED + this.#identityError) this.#message = "";
       this.#identity = identity; this.#identityError = ""; this.#identityOffersWithdrawn = false;
-      const review = this.#membershipChange.revalidate(identity, Date.now());
-      if (review === "withdrawn") this.#message = MEMBERSHIP_ACCESS_CHANGED;
+      const review = this.#delegatedChange.revalidate(identity, Date.now());
+      if (review === "withdrawn") this.#message = DELEGATED_ACCESS_CHANGED;
       else if (review === "identity_changed") this.#message = "";
       this.#evaluateResume();
-      const offer = this.#membershipChange.offer(Date.now());
+      const offer = this.#delegatedChange.offer(Date.now());
       if (offer) {
         clearTimeout(this.#offerTimer);
         this.#offerTimer = setTimeout(() => this.#render(), Math.max(0, Date.parse(offer.expiresAt) - Date.now()) + 25);
@@ -908,7 +919,7 @@ export class HumanDashboard {
       // Losing the context aborts the reads in flight, this one included: an abort or a superseded read after a purge is not a failure to report.
       abandoned = error instanceof HumanSuperseded || generation !== this.#generation;
       if (!this.#closed && !abandoned) {
-        if (error instanceof HumanApiError && error.status === 503) this.#membershipChange.noteUnavailable();
+        if (error instanceof HumanApiError && error.status === 503) this.#delegatedChange.noteUnavailable();
         if (error instanceof HumanApiError && error.status === 403) {
           this.#api.clearContext(); this.#purgeContext(); this.#mode = "contexts";
           this.#identityError = failure(error); this.#message = "Revalidation des accès refusée. Les données du contexte ont été retirées ; relisez vos accès.";
@@ -925,38 +936,46 @@ export class HumanDashboard {
     // Abandoned: the context was lost through another read while this one was in flight. When no later
     // identity read took over and no context is selected, the list of contexts would stay empty: read once more.
     return !this.#closed && read === this.#identitySequence && !this.#context && !this.#api.readBudgetStopped &&
-      !this.#membershipChange.unavailable ? this.#loadIdentity() : false;
+      !this.#delegatedChange.unavailable ? this.#loadIdentity() : false;
   }
-  #renderMembershipRecovery() {
-    if (this.#membershipChange.phase !== "unknown") return null;
-    const offer = !this.#identityLoading && !this.#api.readBudgetStopped ? this.#membershipChange.offer(Date.now()) : null;
-    const status = el("section", "panel", el("h2", "", "Reprise du changement d’appartenance"));
+  #renderDelegatedRecovery() {
+    const kind = this.#delegatedChange.kind;
+    if (this.#delegatedChange.phase !== "unknown" || !kind) return null;
+    const offer = !this.#identityLoading && !this.#api.readBudgetStopped ? this.#delegatedChange.offer(Date.now()) : null;
+    const focusKey = `human-${kind}-recovery`;
+    const title = kind === "grant" ? "Reprise du changement de partages" : "Reprise du changement d’appartenance";
+    const status = el("section", "panel", el("h2", "", title));
     if (!offer) {
-      status.append(el("p", "", this.#membershipChange.unavailable ?
+      status.append(el("p", "", this.#delegatedChange.unavailable ?
         "Le contrôle ou son audit était indisponible. Un rafraîchissement des accès peut constater la remise en service. Si la panne persiste, contactez l’opérateur." :
         "Relisez vos accès pour vérifier si un contexte d’administration équivalent permet une reprise."));
       if (!this.#api.readBudgetStopped && !this.#identityError)
-        status.append(action("Relire les accès", "human-membership-recovery-access", () => { void this.#loadIdentity(); }, this.#identityLoading));
+        status.append(action("Relire les accès", `${focusKey}-access`, () => { void this.#loadIdentity(); }, this.#identityLoading));
       return status;
     }
-    status.append(el("p", "muted", "Votre confirmation renvoie la demande d’origine."),
-      el("p", "", `Révision attendue ${offer.expectedRevision} · `, offer.active ? "Appartenance active" : "Appartenance désactivée"),
-      el("p", "", `Capacités demandées — ${offer.capabilities.map((capability) => CAPABILITY_LABELS[capability]).join(", ") || "aucune"}`),
-      action(`Réessayer la même opération · tenant ${offer.tenant} · organisation ${offer.organization}`,
-        "human-membership-recovery", () => { void this.#retryMembershipChange(); }));
+    const revision = `Révision attendue ${offer.expectedRevision}`;
+    status.append(el("p", "muted", "Votre confirmation renvoie la demande d’origine."));
+    if (offer.kind === "grant") {
+      status.append(el("p", "", `${revision} · Partages demandés ${offer.shareCount}`));
+    } else {
+      status.append(el("p", "", `${revision} · `, offer.active ? "Appartenance active" : "Appartenance désactivée"),
+        el("p", "", `Capacités demandées — ${offer.capabilities.map((capability) => CAPABILITY_LABELS[capability]).join(", ") || "aucune"}`));
+    }
+    status.append(action(`Réessayer la même opération · tenant ${offer.tenant} · organisation ${offer.organization}`,
+      focusKey, () => { void this.#retryDelegatedChange(); }));
     return status;
   }
   #selectOfferedContext(id: string) {
-    const selected = this.#membershipChange.selectContext(this.#identity?.principal, () => this.#api.selectContext(id));
+    const selected = this.#delegatedChange.selectContext(this.#identity?.principal, () => this.#api.selectContext(id));
     if (!selected) return null;
     const { context, keepChange } = selected;
     this.#purgeContext(keepChange); this.#context = context;
-    this.#message = keepChange ? MEMBERSHIP_OUTCOME_UNKNOWN : "";
+    this.#message = keepChange ? DELEGATED_OUTCOME_UNKNOWN : "";
     return context;
   }
   #renderContexts() {
     const contexts = this.#identity?.contexts ?? [];
-    const changeSending = this.#membershipChange.phase === "sending";
+    const changeSending = this.#delegatedChange.phase === "sending";
     const contextChoiceDisabled = this.#identityLoading || changeSending;
     const complete = this.#identityOffersWithdrawn ? undefined : this.#identity?.contexts_complete;
     const partial = complete === false;
@@ -980,7 +999,7 @@ export class HumanDashboard {
         `${lost} Le contrôle ne renouvelle pas un contexte : il en propose un nouveau, de mêmes droits (${modeName(offer)} · ${offer.tenant_id}). Aucune donnée n’est relue avant votre confirmation ; vos filtres seront rétablis.`),
       confirm) : null;
     resume?.setAttribute("role", "status");
-    return el("section", "human-contexts", resume, this.#renderMembershipRecovery(),
+    return el("section", "human-contexts", resume, this.#renderDelegatedRecovery(),
       el("p", "muted", `Identité authentifiée : ${this.#identity?.display_name ?? "Inconnue"}. Les contextes personnel et administration sont proposés par le serveur selon vos appartenances.`),
       this.#identityLoading ? el("p", "control-status", "Lecture des accès…") : "",
       this.#identityError ? this.#error(this.#identityError, () => { void this.#loadIdentity(); }) : "",
@@ -1316,7 +1335,7 @@ export class HumanDashboard {
               action("Contenu", `resource-content-${index}`, () => this.#select(item, "content"), this.#snapshotOnly() || !this.#canContent() || !item.permissions.metadata || !item.permissions.content),
               badge(item.permissions.export ? this.#snapshotOnly() ? "Droit d’export accordé · indisponible pour ce profil" : "Export autorisé selon la projection" : "Export non autorisé"),
               // Delegated sharing: offered in the administration context when the catalogue grants and serves grants_manage.
-              this.#context?.mode === "administration" && delegationOffers(this.#context).grants ?
+              this.#context?.mode === "administration" && delegationOffers(this.#context).grants && this.#delegatedChange.phase === null ?
                 action("Gérer les partages", `resource-grants-${index}`, () => this.#editGrant(item.resource)) : null)))),
       this.#pagination(state, (next, previous) => { void this.#loadResources(next, previous); }));
   }

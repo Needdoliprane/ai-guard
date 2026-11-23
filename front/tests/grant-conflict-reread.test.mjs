@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { adminUrls, parseHumanGrant, parseMembershipPage } from "../src/admin-model.ts";
+import { DelegatedChangeRecovery } from "../src/delegation-model.ts";
 import { GrantEditor } from "../src/delegation-views.ts";
 import { HumanApiClient, HumanApiError } from "../src/human-api.ts";
 import { grantBody, grantReceipt, memberPrincipal, membership, membershipPage } from "./admin-fixtures.mjs";
@@ -75,6 +76,39 @@ function confirmRemoval(editor) {
   control(editor, "dg-confirm").click();
 }
 
+test("Une réponse de partage perdue retire l’ancienne confirmation", async (t) => {
+  installNodes(t);
+  let posts = 0;
+  const api = new HumanApiClient("synthetic-admin-token", { onAuthentication: () => {}, onContextInvalidated: () => {} },
+    async (path, options) => {
+      if (path === "/api/v1/human/identity") return Response.json({ ...identity(), contexts: [admin] });
+      if (path === adminUrls.grant(resource)) return Response.json(grantBody(adminId));
+      if (path === adminUrls.memberships(null)) return Response.json(membershipPage(adminId));
+      assert.equal(path, adminUrls.grantChange());
+      assert.equal(options.method, "POST");
+      posts++;
+      throw new TypeError("Réponse interrompue après enregistrement.");
+    });
+  let editor;
+  try {
+    const authorized = await api.identity();
+    const trigger = document.createElement("button");
+    document.body.append(trigger); trigger.focus();
+    editor = new GrantEditor({ context: api.selectContext(adminId), self: authorized.principal, resource,
+      read: (signal) => api.grant(resource, signal), members: (cursor, signal) => api.memberships(cursor, signal),
+      send: (change, owner, signal) => api.changeGrant(change, owner, signal),
+      onApplied: () => assert.fail("Le contrôle n’a pas envoyé de reçu."),
+      onRefused: () => assert.fail("La réponse est inconnue."), onClosed: () => {} });
+    editor.open();
+    await tick();
+    confirmRemoval(editor);
+    await tick();
+    assert.equal(posts, 1);
+    assert.equal(editor.dialog.isConnected, false);
+    assert.equal(document.activeElement, trigger);
+  } finally { editor?.close(); api.close(); }
+});
+
 test("Un 409 retire la confirmation jusqu’à la relecture des partages et des membres", async (t) => {
   installNodes(t);
   const grantHeld = Promise.withResolvers();
@@ -111,11 +145,13 @@ test("Un 409 retire la confirmation jusqu’à la relecture des partages et des 
   let editor;
   try {
     const offer = await api.identity();
+    const recovery = new DelegatedChangeRecovery(api);
+    const selected = api.selectContext(adminId);
     const trigger = document.createElement("button");
     document.body.append(trigger); trigger.focus();
-    editor = new GrantEditor({ context: api.selectContext(adminId), self: offer.principal, resource,
+    editor = new GrantEditor({ context: selected, self: offer.principal, resource,
       read: (signal) => api.grant(resource, signal), members: (cursor, signal) => api.memberships(cursor, signal),
-      send: (change, owner, signal) => api.changeGrant(change, owner, signal),
+      send: (change, owner, signal) => recovery.submitGrant(offer.principal, selected, change, owner, signal),
       onApplied: (receipt) => { applied.push(receipt); editor.close(); }, onRefused: () => editor.close(), onClosed: () => {} });
     const find = (key) => control(editor, key);
     editor.open();
@@ -125,6 +161,7 @@ test("Un 409 retire la confirmation jusqu’à la relecture des partages et des 
 
     find("dg-confirm")?.click();
     assert.equal(posts.length, 1);
+    assert.equal(recovery.operationId, null);
     assert.match(editor.dialog.textContent, /Relecture des partages et des membres/);
     assert.equal(document.activeElement.textContent, "Relire les partages et les membres");
     assert.doesNotMatch(editor.dialog.textContent, /Member Two|révision 4/);
