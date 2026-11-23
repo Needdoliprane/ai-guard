@@ -41,6 +41,7 @@ abstract class AdminView<T> {
   start() { void this.read(); }
   /** For the host, on an explicit action of the person; a read in flight answers instead. */
   refresh() { return this.read(); }
+  protected focusRefresh() { this.#refresh.focus({ preventScroll: true }); }
   close() { this.#closed = true; this.#controller?.abort(); this.#controller = null; this.value = null; this.element.replaceChildren(); }
   protected abstract fetch(signal: AbortSignal): Promise<T>;
   protected abstract render(value: T): HTMLElement[];
@@ -63,7 +64,6 @@ abstract class AdminView<T> {
       if (error instanceof HumanApiError && error.status === 403) {
         this.value = null; this.#phase = "refused"; this.#error = error.message;
         this.#announce.textContent = "Lecture refusée par le contrôle : vos accès sont relus.";
-        this.host.onAccessDoubt();
       } else {
         this.#phase = "error"; this.#error = error instanceof Error ? error.message : "Lecture impossible.";
         this.#announce.textContent = this.value ? "Nouvelle lecture en échec : la dernière lecture reste affichée, périmée." : "Lecture indisponible.";
@@ -72,6 +72,7 @@ abstract class AdminView<T> {
       if (this.#controller === controller) this.#controller = null;
       if (!this.#closed) { this.paint(); this.host.onReadStateChange(); }
     }
+    if (!this.#closed && this.#phase === "refused") this.host.onAccessDoubt();
   }
   protected paint() {
     if (this.#closed) return;
@@ -177,8 +178,7 @@ export class UsageView extends AdminView<QuotaUsageRead> {
       return { quota, usage: { value: null, error: null } };
     }
     const lastUsage = this.value?.usage.value ?? null;
-    const limitReached = this.host.budgetStopped() || (quota.error instanceof HumanApiError && quota.error.status === 429);
-    const usage = limitReached ? { value: lastUsage, error: new Error("Lecture de l’usage suspendue par la limite de lecture du contrôle.") } :
+    const usage = this.host.budgetStopped() ? { value: lastUsage, error: new Error("Lecture de l’usage suspendue par la limite de lecture du contrôle.") } :
       await this.#readPart(readUsage, lastUsage, signal);
     return { quota, usage };
   }
@@ -189,10 +189,14 @@ export class UsageView extends AdminView<QuotaUsageRead> {
       signal.throwIfAborted();
       return { value, error: null };
     } catch (error) {
-      if (signal.aborted || error instanceof HumanSuperseded || (error instanceof DOMException && error.name === "AbortError") ||
+      if (signal.aborted || error instanceof HumanSuperseded ||
           (error instanceof HumanApiError && error.status === 401)) {
         this.close();
         throw error;
+      }
+      if (error instanceof DOMException && error.name === "AbortError") {
+        this.value = null;
+        throw new Error("Lecture annulée. Vous pouvez actualiser.");
       }
       if (error instanceof HumanApiError && error.status === 403) throw error;
       return { value: previous, error: error instanceof Error ? error : new Error("Lecture impossible.") };
@@ -238,21 +242,42 @@ export class UsageView extends AdminView<QuotaUsageRead> {
     table.append(el("caption", "", "Allocations terminales observées · méthode 1 · billable=false"),
       el("thead", "", el("tr", "", th("Worker"), th("Fin observée"), th("Durée allouée"), th("milliCPU·s"), th("Mémoire (Gio·s)"), th("Autorité · runtime"))));
     const body = el("tbody");
+    const owned = this.#usageHost.owned;
+    const zeroMemory = gibibytes("0");
     for (const item of usage.items) {
       const tr = el("tr"); tr.dataset.attemptId = item.attempt_id;
+      const seconds = perSecond(item.duration_ns);
+      const duration = el("td", "mono", `${seconds} s`);
+      if (seconds === "0" && item.duration_ns !== "0") {
+        const exact = `${grouped(item.duration_ns)} ns`;
+        const short = el("span", "", "< 1 s");
+        short.setAttribute("aria-hidden", "true");
+        duration.title = exact;
+        duration.replaceChildren(short, el("span", "sr-only", `Moins d’une seconde, ${exact}.`));
+      }
+      const cpu = perSecond(item.cpu_millicore_nanoseconds);
+      const memory = gibibytes(perSecond(item.memory_byte_nanoseconds).replace(/\D/g, "") || "0");
+      const cpuAllocation = owned && cpu === "0" && item.cpu_millicore_nanoseconds !== "0" ? "< 1" : cpu;
+      const memoryAllocation = owned && memory === zeroMemory && item.memory_byte_nanoseconds !== "0" ? "< 0,1 Gio" : memory;
       tr.append(el("td", "mono", item.worker_id), el("td", "", el("time", "mono", formatDate(item.finished_at, true))),
-        el("td", "mono", `${perSecond(item.duration_ns)} s`), el("td", "mono", perSecond(item.cpu_millicore_nanoseconds)),
-        el("td", "mono", gibibytes(perSecond(item.memory_byte_nanoseconds).replace(/\D/g, "") || "0")),
+        duration, el("td", "mono", cpuAllocation), el("td", "mono", memoryAllocation),
         el("td", "", el("span", "mono", item.source.authority_id), el("span", "muted", ` · ${item.source.runtime_kind}`)));
       body.append(tr);
     }
     table.append(body);
     allocations.append(usage.items.length ? el("div", "ov-scroll", table) :
-      el("p", "", "Aucune allocation terminale dans cette page. Un worker actif n’a pas encore de durée."),
+      el("p", "", "Aucune allocation terminale dans cette page. La durée reste inconnue en l’absence d’une observation terminale complète."),
       el("p", "muted", "Ni prix, ni facture : temps d’allocation CPU/mémoire relevé à la fin observée."));
     if (usage.has_more && usage.next_cursor) {
       const button = el("button", "button button-quiet", "Allocations suivantes"); button.type = "button";
-      button.addEventListener("click", () => { this.#cursor = usage.next_cursor; void this.read(); });
+      button.disabled = this.reading;
+      button.addEventListener("click", () => {
+        if (this.reading) return;
+        const returnFocus = owned && document.activeElement === button;
+        this.#cursor = usage.next_cursor;
+        void this.read();
+        if (returnFocus) this.focusRefresh();
+      });
       allocations.append(button);
     }
     return allocations;
