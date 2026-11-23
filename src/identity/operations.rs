@@ -353,7 +353,6 @@ fn availability(operation: HumanOperationV1, facts: OperationFactsV1) -> Operati
                 | O::EventsExport
                 | O::EventsStream
                 | O::FederationRead
-                | O::QuotaRead
                 | O::UsageRead
         )
     {

@@ -39,7 +39,7 @@ pub(crate) struct HumanUsageStorePageV1 {
 }
 
 impl Store {
-    fn usage_scope(
+    fn worker_registry_read_scope(
         &self,
         tx: &CheckedTransaction<'_>,
         scope: &AuthorizedScopeV1,
@@ -51,6 +51,15 @@ impl Store {
         {
             return Err(IdentityFailureV1::PermissionDenied.into());
         }
+        Ok(current)
+    }
+
+    fn usage_scope(
+        &self,
+        tx: &CheckedTransaction<'_>,
+        scope: &AuthorizedScopeV1,
+    ) -> anyhow::Result<AuthorizedScopeV1> {
+        let current = self.worker_registry_read_scope(tx, scope)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if !(6..=13).contains(&version) || !super::human_rights::installed(tx)? {
             return Err(IdentityFailureV1::MigrationRequired.into());
@@ -70,17 +79,51 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         let tx = self.begin_checked(&mut db)?;
-        let current = self.usage_scope(&tx, scope)?;
-        let usage = super::control::quota_usage(&tx, policy)?;
+        let body = self.human_quota_checked(&tx, scope, frame, policy, transient)?;
+        self.commit_checked(tx)?;
+        Ok(body)
+    }
+
+    pub(crate) fn modern_human_quota(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        scope: &AuthorizedScopeV1,
+        frame: &HumanUsageFrameV1,
+        policy: &QuotaPolicyV1,
+        transient: &Redactor,
+    ) -> anyhow::Result<HumanQuotaV1> {
+        self.with_modern_read(access, |tx| {
+            self.human_quota_checked(tx, scope, frame, policy, transient)
+        })
+    }
+
+    fn human_quota_checked(
+        &self,
+        tx: &CheckedTransaction<'_>,
+        scope: &AuthorizedScopeV1,
+        frame: &HumanUsageFrameV1,
+        policy: &QuotaPolicyV1,
+        transient: &Redactor,
+    ) -> anyhow::Result<HumanQuotaV1> {
+        let current = self.worker_registry_read_scope(tx, scope)?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        let admitted = match tx.source_access {
+            Some(_) => matches!(version, 14 | 15),
+            None => (6..=13).contains(&version),
+        };
+        if !admitted || !super::human_rights::installed(tx)? {
+            return Err(IdentityFailureV1::MigrationRequired.into());
+        }
+        let usage = super::control::quota_usage(tx, policy)?;
         let read_receipt = self.record_human_read_checked(
-            &tx,
+            tx,
             current.principal(),
             Some(&current),
             "quota",
             1,
             transient,
         )?;
-        let body = HumanQuotaV1 {
+        Ok(HumanQuotaV1 {
             version: 1,
             context_id: frame.context_id.clone(),
             authorization_version: frame.authorization_version.clone(),
@@ -96,9 +139,7 @@ impl Store {
             },
             max_timeout_seconds: usage.policy.max_timeout_seconds.to_string(),
             read_receipt,
-        };
-        self.commit_checked(tx)?;
-        Ok(body)
+        })
     }
 
     pub(crate) fn human_usage(

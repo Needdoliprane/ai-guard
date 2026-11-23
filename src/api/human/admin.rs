@@ -2,9 +2,8 @@
 //! effective configuration kinds. Each route selects one offered context,
 //! lets the Store revalidate it and record the read before any result, then
 //! re-reads credential, membership and authorization before publication. On
-//! the owned source profile, memberships and configuration run in the proof's
-//! own retained source; quota and usage need the worker registry, which the
-//! owned profile does not serve yet.
+//! the owned source profile, memberships, configuration and quota run in the
+//! proof's own retained source. Usage remains unavailable on that profile.
 use super::*;
 use crate::audit::{HumanMembershipFrameV1, HumanUsageFrameV1};
 
@@ -64,17 +63,26 @@ pub(super) async fn quota(
     State(state): State<GatewayState>,
     headers: HeaderMap,
 ) -> ApiResult<Json<HumanQuotaV1>> {
-    refuse_owned(&state)?;
     let selected = headers.clone();
     run_human(&state, &proof, Some(&selected), move |state, proof| {
         let (context, tenant, scope) = selected_context(&state, &proof, &headers)?;
         let frame = HumanUsageFrameV1::new(&context.id, &context.authorization_version)
             .map_err(store_failure)?;
-        let body = tenant
-            .store
-            .sqlite_api()?
-            .human_quota(&scope, &frame, &tenant.worker_quota, &proof.redactor)
-            .map_err(store_failure)?;
+        let store = tenant.store.sqlite_api()?;
+        let body = match (&state.owned_human, &proof.source) {
+            (Some(owned), HumanProofSource::Local(source)) => owned.quota(
+                *source,
+                store,
+                &scope,
+                &frame,
+                &tenant.worker_quota,
+                &proof.redactor,
+            )?,
+            (Some(_), _) => return Err(super::super::human_sources::unavailable()),
+            (None, _) => store
+                .human_quota(&scope, &frame, &tenant.worker_quota, &proof.redactor)
+                .map_err(store_failure)?,
+        };
         publish_check(
             &state,
             &proof,

@@ -2,9 +2,10 @@
 use super::*;
 use crate::{
     audit::{
-        HumanDiscoveryGeneration, HumanDiscoveryStale, HumanSourceAccess, HumanWorkerFrameV1,
-        HumanWorkerStorePageV1,
+        HumanDiscoveryGeneration, HumanDiscoveryStale, HumanSourceAccess, HumanUsageFrameV1,
+        HumanWorkerFrameV1, HumanWorkerStorePageV1,
     },
+    control::QuotaPolicyV1,
     control_fs::PrivateFile,
     human_authority::{OwnedHumanSources, OwnedSourceToken, startup::HumanOwnedStartupBundle},
     identity::*,
@@ -414,6 +415,21 @@ impl OwnedHumanGateway {
             store.modern_human_summary(access, scope, frame, window, quota, redactor)
         })
     }
+
+    pub(super) fn quota(
+        &self,
+        index: usize,
+        store: &Store,
+        scope: &AuthorizedScopeV1,
+        frame: &HumanUsageFrameV1,
+        policy: &QuotaPolicyV1,
+        redactor: &Redactor,
+    ) -> ApiResult<HumanQuotaV1> {
+        self.read(index, store, |access| {
+            store.modern_human_quota(access, scope, frame, policy, redactor)
+        })
+    }
+
     pub(super) fn memberships(
         &self,
         index: usize,
@@ -626,6 +642,7 @@ const OWNED_HUMAN_GET_PATHS: &[&str] = &[
     "/api/v1/human/admin/configuration",
     "/api/v1/human/admin/grants",
     "/api/v1/human/admin/memberships",
+    "/api/v1/human/admin/quota",
     "/api/v1/human/events",
     "/api/v1/human/events/recent",
     "/api/v1/human/identity",

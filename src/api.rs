@@ -2194,6 +2194,7 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
             "/api/v1/human/admin/memberships",
             "/api/v1/human/admin/grants",
             "/api/v1/human/admin/configuration",
+            "/api/v1/human/admin/quota",
         ]
         .contains(&path);
         let allowed = request.method() == "GET"
