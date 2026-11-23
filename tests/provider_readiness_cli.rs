@@ -175,14 +175,27 @@ async fn automatic_selection_reports_absent_subscription_without_falling_back_to
         check(
             &config,
             None,
-            &["--client-profile", "claude-subscription-legacy", "--interactive"],
+            &[
+                "--client-profile",
+                "claude-subscription-legacy",
+                "--interactive",
+            ],
         )
         .await,
         "absent",
     );
     assert_eq!(legacy["profile_id"], "claude-subscription-legacy");
-    for field in ["client", "auth_mode", "transport", "model", "credential_source"] {
-        assert_eq!(legacy[field], result[field], "legacy credential changed {field}");
+    for field in [
+        "client",
+        "auth_mode",
+        "transport",
+        "model",
+        "credential_source",
+    ] {
+        assert_eq!(
+            legacy[field], result[field],
+            "legacy credential changed {field}"
+        );
     }
     let serialized = serde_json::to_value(CredentialSourceV1::ClaudeOAuthEnvFile {
         path: PathBuf::from(oauth_path),
