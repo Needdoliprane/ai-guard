@@ -1498,7 +1498,7 @@ function renderSupport() {
       el(
         "div",
         "",
-        el("span", "", evaluator.name ?? "Évaluateur de politique"),
+        el("span", "", evaluator.name ?? "Évaluateur complémentaire"),
         evaluator.detail ? el("p", "muted", evaluator.detail) : null,
       ),
       badge(evaluator.state),
