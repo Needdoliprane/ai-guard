@@ -578,47 +578,68 @@ fn attention(
 mod tests {
     use super::*;
     use crate::control::{AllocationProvenanceV1, AllocationSourceV1, AllocationV1};
+    use chrono::{DateTime, FixedOffset, SecondsFormat, Utc};
 
-    #[test]
-    fn usage_counts_allocations_on_both_bounds_and_excludes_adjacent_instants() {
+    fn allocation_ledger() -> Connection {
         let db = Connection::open_in_memory().unwrap();
         db.execute(
             "CREATE TABLE worker_allocations (payload_json TEXT NOT NULL)",
             [],
         )
         .unwrap();
+        db
+    }
+
+    fn insert_observed_allocation(
+        db: &Connection,
+        id: u128,
+        started: DateTime<FixedOffset>,
+        finished: DateTime<FixedOffset>,
+    ) -> AllocationV1 {
+        let duration = u128::try_from((finished - started).num_nanoseconds().unwrap()).unwrap();
+        let allocation = AllocationV1 {
+            worker_id: uuid::Uuid::from_u128(id).to_string(),
+            attempt_id: uuid::Uuid::from_u128(id + 4).to_string(),
+            terminal_observation_id: uuid::Uuid::from_u128(id + 8).to_string(),
+            started_at: started
+                .with_timezone(&Utc)
+                .to_rfc3339_opts(SecondsFormat::Nanos, true),
+            finished_at: finished
+                .with_timezone(&Utc)
+                .to_rfc3339_opts(SecondsFormat::Nanos, true),
+            duration_ns: duration.to_string(),
+            cpu_millicore_nanoseconds: (duration * 2000).to_string(),
+            memory_byte_nanoseconds: (duration * 1_073_741_824).to_string(),
+            method_version: 1,
+            billable: false,
+            source: AllocationSourceV1 {
+                authority_id: uuid::Uuid::from_u128(13).to_string(),
+                runtime_kind: RuntimeKindV1::Docker,
+                container_id: "a".repeat(64),
+                spec_hash: "b".repeat(64),
+                provenance: AllocationProvenanceV1::Observed,
+            },
+        };
+        db.execute(
+            "INSERT INTO worker_allocations (payload_json) VALUES (?1)",
+            [serde_json::to_string(&allocation).unwrap()],
+        )
+        .unwrap();
+        allocation
+    }
+
+    #[test]
+    fn usage_counts_allocations_on_both_bounds_and_excludes_adjacent_instants() {
+        let db = allocation_ledger();
         for (id, finished_at, duration) in [
             (1, "2026-11-01T12:00:00.122999999Z", 1),
             (2, "2026-11-01T12:00:00.123000000Z", 2),
             (3, "2026-11-02T12:00:00.123000000Z", 4),
             (4, "2026-11-02T12:00:00.123000001Z", 8),
         ] {
-            let finish = chrono::DateTime::parse_from_rfc3339(finished_at).unwrap();
-            let start = finish - chrono::Duration::nanoseconds(duration);
-            let allocation = AllocationV1 {
-                worker_id: uuid::Uuid::from_u128(id).to_string(),
-                attempt_id: uuid::Uuid::from_u128(id + 4).to_string(),
-                terminal_observation_id: uuid::Uuid::from_u128(id + 8).to_string(),
-                started_at: start.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
-                finished_at: finished_at.into(),
-                duration_ns: duration.to_string(),
-                cpu_millicore_nanoseconds: (duration * 2000).to_string(),
-                memory_byte_nanoseconds: (duration * 1_073_741_824).to_string(),
-                method_version: 1,
-                billable: false,
-                source: AllocationSourceV1 {
-                    authority_id: uuid::Uuid::from_u128(13).to_string(),
-                    runtime_kind: RuntimeKindV1::Docker,
-                    container_id: "a".repeat(64),
-                    spec_hash: "b".repeat(64),
-                    provenance: AllocationProvenanceV1::Observed,
-                },
-            };
-            db.execute(
-                "INSERT INTO worker_allocations (payload_json) VALUES (?1)",
-                [serde_json::to_string(&allocation).unwrap()],
-            )
-            .unwrap();
+            let finished = DateTime::parse_from_rfc3339(finished_at).unwrap();
+            let started = finished - chrono::Duration::nanoseconds(duration);
+            insert_observed_allocation(&db, id, started, finished);
         }
 
         let summary = usage(
@@ -635,6 +656,36 @@ mod tests {
         assert_eq!(data.duration_ns, "6");
         assert_eq!(data.cpu_millicore_nanoseconds, "12000");
         assert_eq!(data.memory_byte_nanoseconds, "6442450944");
+        assert_eq!(data.method_version, 1);
+        assert!(!data.billable);
+    }
+
+    #[test]
+    fn usage_ignores_valid_normalized_allocation_with_extended_year_outside_window() {
+        let db = allocation_ledger();
+        let started = DateTime::parse_from_rfc3339("9999-12-31T23:59:58.123456789-01:00").unwrap();
+        let finished = DateTime::parse_from_rfc3339("9999-12-31T23:59:59.123456789-01:00").unwrap();
+        let outside = insert_observed_allocation(&db, 1, started, finished);
+        assert_eq!(outside.finished_at, "+10000-01-01T00:59:59.123456789Z");
+
+        let started = DateTime::parse_from_rfc3339("2026-11-01T12:00:00.000000001Z").unwrap();
+        let finished = DateTime::parse_from_rfc3339("2026-11-01T12:00:00.000000004Z").unwrap();
+        insert_observed_allocation(&db, 2, started, finished);
+
+        let summary = usage(
+            &db,
+            Some("2026-11-01T00:00:00.000Z"),
+            "2026-11-02T00:00:00.000Z",
+        )
+        .unwrap();
+        let SummarySectionV1::Ready { coverage, data } = summary else {
+            panic!("the out-of-period allocation must leave usage available");
+        };
+        assert_eq!(coverage, SummaryCoverageV1::CompleteRegistry);
+        assert_eq!(data.allocations, "1");
+        assert_eq!(data.duration_ns, "3");
+        assert_eq!(data.cpu_millicore_nanoseconds, "6000");
+        assert_eq!(data.memory_byte_nanoseconds, "3221225472");
         assert_eq!(data.method_version, 1);
         assert!(!data.billable);
     }
