@@ -10,7 +10,10 @@ use agentsandbox::{
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
+use std::{
+    num::NonZeroU64,
+    path::{Path, PathBuf},
+};
 use uuid::Uuid;
 
 const REVISION_BYTES: u64 = 1024 * 1024;
@@ -29,6 +32,7 @@ struct CheckpointHead {
 
 #[derive(Default, Serialize)]
 pub struct TerminalCheckpointObservation {
+    head_revision: Option<NonZeroU64>,
     result_audit_at_head: OutboxDelivery,
     failure_audit_at_head: OutboxDelivery,
 }
@@ -98,12 +102,13 @@ impl TerminalCheckpointProbe {
 
     fn read_confirmed(&self) -> Option<TerminalCheckpointObservation> {
         let head = self.head.as_ref()?;
+        let head_revision = NonZeroU64::new(head.revision.revision())?;
         let directory = Directory::open_existing(&self.job_root).ok()?;
         // Like the Full3 fixture, pin the revision named by Status rather than
         // reading a moving current.json pointer or acquiring the writer lease.
         let file = directory
             .read_private_file(
-                format!("rev-{:020}.json", head.revision.revision()),
+                format!("rev-{:020}.json", head_revision.get()),
                 REVISION_BYTES,
             )
             .ok()?;
@@ -111,6 +116,7 @@ impl TerminalCheckpointProbe {
         let checkpoint = BrokerCheckpointV4::from_bytes(outbox.get().as_bytes()).ok()?;
         file.revalidate().ok()?;
         Some(TerminalCheckpointObservation {
+            head_revision: Some(head_revision),
             result_audit_at_head: outbox_delivery(
                 checkpoint.events(),
                 "broker.batch.result",
@@ -280,7 +286,16 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(TerminalCheckpointObservation::default()).unwrap(),
-            json!({"result_audit_at_head":"unknown", "failure_audit_at_head":"unknown"})
+            json!({"head_revision":null, "result_audit_at_head":"unknown", "failure_audit_at_head":"unknown"})
+        );
+        assert_eq!(
+            serde_json::to_value(TerminalCheckpointObservation {
+                head_revision: NonZeroU64::new(19),
+                result_audit_at_head: OutboxDelivery::Acknowledged,
+                failure_audit_at_head: OutboxDelivery::Pending,
+            })
+            .unwrap(),
+            json!({"head_revision":19, "result_audit_at_head":"acknowledged", "failure_audit_at_head":"pending"})
         );
     }
 }

@@ -539,6 +539,8 @@ async fn broker_run_cli_sigkill_preserves_original_deadline_without_second_start
     let outcome = run_outcome
         .context("broker-routed CLI qualification exceeded the 600-second global bound")
         .and_then(|result| result);
+    // Start this byte-bounded local read within the scenario. The qualification
+    // runner's external timeout bounds the test process, including this read.
     let terminal_checkpoint = if state == "failed"
         && matches!(&stage, RunClientRecoveryStage::Executor { .. })
         && Instant::now() < scenario_end
