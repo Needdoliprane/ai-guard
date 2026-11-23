@@ -1,7 +1,10 @@
 //! Adopted local human source bundle. Discovery proposes; Store proves.
 use super::*;
 use crate::{
-    audit::{HumanDiscoveryGeneration, HumanDiscoveryStale, HumanSourceAccess},
+    audit::{
+        HumanDiscoveryGeneration, HumanDiscoveryStale, HumanSourceAccess, HumanWorkerFrameV1,
+        HumanWorkerStorePageV1,
+    },
     control_fs::PrivateFile,
     human_authority::{OwnedHumanSources, OwnedSourceToken, startup::HumanOwnedStartupBundle},
     identity::*,
@@ -195,7 +198,7 @@ impl OwnedHumanGateway {
             .map(|generation| **generation.load())
     }
 
-    pub(super) fn read<T>(
+    fn read<T>(
         &self,
         index: usize,
         store: &Store,
@@ -293,6 +296,22 @@ impl OwnedHumanGateway {
     ) -> ApiResult<crate::audit::HumanStorePageV1<HumanResourceItemV1>> {
         self.read(index, store, |access| {
             store.modern_human_resources(access, scope, after, limit, redactor)
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn human_workers(
+        &self,
+        index: usize,
+        store: &Store,
+        scope: &AuthorizedScopeV1,
+        frame: &HumanWorkerFrameV1,
+        after: Option<&str>,
+        limit: usize,
+        redactor: &Redactor,
+    ) -> ApiResult<HumanWorkerStorePageV1> {
+        self.read(index, store, |access| {
+            store.modern_human_workers(access, scope, frame, after, limit, redactor)
         })
     }
 

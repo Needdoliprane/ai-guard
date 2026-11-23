@@ -42,9 +42,7 @@ pub(super) async fn workers(
             let HumanProofSource::Local(source) = proof.source else {
                 return Err(super::super::human_sources::unavailable());
             };
-            owned.read(source, store, |access| {
-                store.modern_human_workers(access, &scope, &frame, after, limit, &proof.redactor)
-            })?
+            owned.human_workers(source, store, &scope, &frame, after, limit, &proof.redactor)?
         } else {
             store
                 .human_workers(&scope, &frame, after, limit, &proof.redactor)

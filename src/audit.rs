@@ -237,7 +237,7 @@ pub(crate) use human::HumanProfileSnapshotV1;
 pub(crate) use human::{HumanEventFilterV1, HumanEventPollV1, HumanStorePageV1};
 pub(crate) use human_brokers::HumanBrokerFrameV1;
 pub(crate) use human_brokers::owned::{OwnedHumanBrokerPageV1, OwnedHumanBrokerStorePageV1};
-pub(crate) use human_workers::HumanWorkerFrameV1;
+pub(crate) use human_workers::{HumanWorkerFrameV1, HumanWorkerStorePageV1};
 pub(crate) use worker_transition::expected_worker_transition;
 pub(crate) use workload::owned_broker_identity::OwnedBrokerBindingStepV1;
 pub mod retention;
