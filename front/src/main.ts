@@ -138,6 +138,7 @@ let agentsLoadedAt: string | null = null;
 let sandboxesLoadedAt: string | null = null;
 let agentsError = "";
 let sandboxesError = "";
+let summaryErrors: string[] = [];
 let summaryLoading = false;
 let summaryRequest = 0;
 let eventRequest = 0;
@@ -155,8 +156,8 @@ let nextView: HTMLButtonElement;
 let journalExport: HTMLButtonElement;
 let streamPill: HTMLElement;
 let notice: HTMLElement;
-type NoticeOwner = { client: ApiClient; source: "summary" | "journal" };
-let noticeOwner: NoticeOwner | null = null;
+let journalNoticeOwner: ApiClient | null = null;
+let summaryNotice: HTMLElement | null = null;
 let eventSlot: HTMLElement | null = null;
 let historyNotice: HTMLElement | null = null;
 let statSlot: HTMLElement | null = null;
@@ -291,9 +292,9 @@ function empty(
     el("p", "", description),
   );
 }
-function setNotice(message = "", kind: "error" | "info" = "error", owner: NoticeOwner | null = null) {
+function setNotice(message = "", kind: "error" | "info" = "error", owner: ApiClient | null = null) {
   if (!notice) return;
-  noticeOwner = message ? owner : null;
+  journalNoticeOwner = message ? owner : null;
   notice.hidden = !message;
   notice.className = `notice notice-${kind}`;
   notice.replaceChildren(
@@ -310,7 +311,7 @@ function errorMessage(error: unknown): string {
 function accessRefused(error: unknown): boolean {
   return error instanceof ApiError && (error.status === 401 || error.status === 403);
 }
-function onError(error: unknown, owner: NoticeOwner | null = null) {
+function onError(error: unknown, owner: ApiClient | null = null) {
   if (accessRefused(error)) {
     disconnect("Votre session a expiré ou le jeton a été refusé.");
     return;
@@ -605,9 +606,11 @@ function disconnect(message = "") {
   sandboxesLoadedAt = null;
   agentsError = "";
   sandboxesError = "";
+  summaryErrors = [];
+  summaryNotice = null;
   summaryLoading = false;
   summaryRequest++;
-  noticeOwner = null;
+  journalNoticeOwner = null;
   dialog?.close();
   dialog?.remove();
   dialog = null;
@@ -699,6 +702,11 @@ async function refreshSummary() {
     current.get<Integrity>("/api/integrity"),
   ]);
   if (current !== client || request !== summaryRequest) return;
+  const refused = result.find((entry) => entry.status === "rejected" && accessRefused(entry.reason));
+  if (refused?.status === "rejected") {
+    onError(refused.reason);
+    return;
+  }
   summaryLoading = false;
   const [o, a, s, i] = result;
   if (o.status === "fulfilled") {
@@ -721,10 +729,16 @@ async function refreshSummary() {
     sandboxesLoadedAt = new Date().toISOString();
   }
   integrity = i.status === "fulfilled" ? i.value : null;
-  const failed = result.find((entry) => entry.status === "rejected");
-  if (failed?.status === "rejected") onError(failed.reason, { client: current, source: "summary" });
-  else if (noticeOwner?.client === current && noticeOwner.source === "summary") setNotice();
-  if (current !== client) return;
+  const errors = ([
+    ["Indicateurs et services", o.status === "rejected" ? errorMessage(o.reason) : ""],
+    ["Agents (liste)", agentsError],
+    ["Sandboxes (liste)", sandboxesError],
+    ["Intégrité de l’audit", i.status === "rejected" ? errorMessage(i.reason) : ""],
+  ] as const).flatMap(([source, message]) => message ? [`${source} — ${message}`] : []);
+  if (errors.join("\n") !== summaryErrors.join("\n")) {
+    summaryErrors = errors;
+    renderSummaryNotice();
+  }
   control?.relationshipsChanged();
   updateDetailEntityLinks();
   renderStats();
@@ -761,14 +775,14 @@ async function loadEvents(append = false) {
     );
     nextCursor =
       typeof result.next_cursor === "number" ? result.next_cursor : null;
-    if (noticeOwner?.client === current && noticeOwner.source === "journal") setNotice();
+    if (journalNoticeOwner === current) setNotice();
   } catch (error) {
     if (current === client && request === eventRequest) {
       // A failed "load older" keeps the history already read visible: only a failed first read
       // replaces the list, so an error is never shown as an empty journal.
       if (append) historyError = errorMessage(error);
       else eventsError = errorMessage(error);
-      if (!append || accessRefused(error)) onError(error, { client: current, source: "journal" });
+      if (!append || accessRefused(error)) onError(error, current);
     }
   } finally {
     if (current === client && request === eventRequest) {
@@ -807,10 +821,15 @@ function renderView() {
   );
   statSlot = null;
   sideSlot = null;
+  summaryNotice = null;
   eventSlot = null;
   historyNotice = null;
   collectionSlot = null;
   if (view === "overview" || view === "security") {
+    summaryNotice = el("div", "control-error");
+    summaryNotice.setAttribute("role", "alert");
+    page.append(summaryNotice);
+    renderSummaryNotice();
     statSlot = el("section", "stats-section");
     statSlot.setAttribute("aria-label", "Indicateurs reçus");
     page.append(statSlot);
@@ -980,6 +999,18 @@ function metricCard(
         ),
   );
 }
+function renderSummaryNotice() {
+  if (!summaryNotice) return;
+  summaryNotice.hidden = summaryErrors.length === 0;
+  summaryNotice.replaceChildren(
+    icon("alert"),
+    el("div", "",
+      el("p", "", "Lectures de synthèse indisponibles"),
+      el("ul", "", ...summaryErrors.map((error) => el("li", "", error))),
+    ),
+  );
+}
+
 function renderStats() {
   if (!statSlot) return;
   const counts = overview?.counts;
