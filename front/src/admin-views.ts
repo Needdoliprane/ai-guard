@@ -1,9 +1,10 @@
 // Administration views of the 360° dashboard: memberships, quota and usage, configuration.
-// Each view reads one Rust route with the selected context, shows its provenance and read time, keeps the last
+// Each view reads the offered Rust routes with the selected context, shows their provenance and read time, keeps the last
 // successful page dated and marked stale after a failure, and withdraws everything on a refusal or on close.
 import { el } from "./dom.ts";
 import { formatDate } from "./model.ts";
 import { HumanApiError, HumanSuperseded } from "./human-api.ts";
+import { accessExplanation, can } from "./access-model.ts";
 import type { HumanContext, Principal } from "./human-model.ts";
 import type { HumanConfiguration, HumanQuota, Membership, MembershipPage, UsagePage } from "./admin-model.ts";
 import { gibibytes, grouped, perSecond } from "./summary-model.ts";
@@ -145,16 +146,20 @@ export interface UsageHost extends AdminHost {
   quota: (signal: AbortSignal) => Promise<HumanQuota>;
   usage: (cursor: string | null, signal: AbortSignal) => Promise<UsagePage>;
 }
-export class UsageView extends AdminView<{ quota: HumanQuota; usage: UsagePage }> {
+type QuotaUsageRead = { quota: HumanQuota; usage: UsagePage | null };
+export class UsageView extends AdminView<QuotaUsageRead> {
   #usageHost: UsageHost; #cursor: string | null = null;
   constructor(host: UsageHost) { super(host, "ov-usage"); this.#usageHost = host; }
   protected async fetch(signal: AbortSignal) {
-    const [quota, usage] = await Promise.all([this.#usageHost.quota(signal), this.#usageHost.usage(this.#cursor, signal)]);
+    const [quota, usage] = await Promise.all([
+      this.#usageHost.quota(signal),
+      can(this.host.context, "usage_read") ? this.#usageHost.usage(this.#cursor, signal) : null,
+    ]);
     return { quota, usage };
   }
-  protected evaluatedAt(value: { usage: UsagePage }) { return value.usage.evaluated_at; }
-  protected receiptId(value: { usage: UsagePage }) { return value.usage.read_receipt.request_id; }
-  protected render({ quota, usage }: { quota: HumanQuota; usage: UsagePage }) {
+  protected evaluatedAt({ quota, usage }: QuotaUsageRead) { return (usage ?? quota).evaluated_at; }
+  protected receiptId({ quota, usage }: QuotaUsageRead) { return (usage ?? quota).read_receipt.request_id; }
+  protected render({ quota, usage }: QuotaUsageRead) {
     const q = quota.quota;
     const reservations = el("section", "panel ov-panel", el("h2", "", "Quota du tenant"),
       el("div", "ov-stats",
@@ -162,6 +167,8 @@ export class UsageView extends AdminView<{ quota: HumanQuota; usage: UsagePage }
         el("span", "ov-stat", el("strong", "ov-num", grouped(q.held_cpu_millis)), el("span", "ov-stat-label", `milliCPU réservés sur ${grouped(q.max_cpu_millis)}`)),
         el("span", "ov-stat", el("strong", "ov-num", gibibytes(q.held_memory_bytes)), el("span", "ov-stat-label", `mémoire réservée sur ${gibibytes(q.max_memory_bytes)}`))),
       el("p", "muted", `Réservations durables, pas une consommation mesurée. Durée maximale d’un worker : ${grouped(quota.max_timeout_seconds)} s.`));
+    if (!usage) return [reservations, el("section", "panel ov-panel", el("h2", "", "Usage observé"),
+      el("p", "muted", accessExplanation(this.host.context, "usage_read")))];
     const table = el("table", "ov-groups");
     table.append(el("caption", "", "Allocations terminales observées · méthode 1 · billable=false"),
       el("thead", "", el("tr", "", th("Worker"), th("Fin observée"), th("Durée allouée"), th("milliCPU·s"), th("Mémoire (Gio·s)"), th("Autorité · runtime"))));

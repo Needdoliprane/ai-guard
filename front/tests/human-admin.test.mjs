@@ -6,7 +6,7 @@ import { HumanApiClient, HumanApiError, HumanSuperseded } from "../src/human-api
 import { HumanContractError } from "../src/human-model.ts";
 import { ADMIN_DESTINATIONS, adminDestinationState, combinedDestinationState } from "../src/access-model.ts";
 import { catalogue, context, identity, tenantScope } from "./human-fixtures.mjs";
-import { ownedCatalogue } from "./owned-brokers-fixture.mjs";
+import { ownedCatalogue, ownedReadProfiles } from "./owned-brokers-fixture.mjs";
 import { configurationBody, membershipPage, quotaBody, usagePage } from "./admin-fixtures.mjs";
 
 const adminId = "c".repeat(64);
@@ -93,7 +93,7 @@ test("les trois destinations d’administration suivent leurs opérations : lect
   for (const destination of ["memberships", "usage", "configuration"]) {
     assert.equal(state(adminOffer(), destination), "view", destination);
     assert.equal(state(catalogue(), destination), null, `${destination}: not granted, no destination`);
-    // The owned profile serves memberships and configuration; quota and usage need its missing worker protocol.
+    // The older owned catalogue serves memberships and configuration while quota and usage are unavailable.
     assert.equal(state(ownedCatalogue(adminOffer()), destination), destination === "usage" ? "explanation" : "view",
       `${destination}: owned profile`);
     assert.equal(state(catalogue({ memberships_read: ["granted", "tenant", "migration_required"], quota_read: ["granted", "tenant", "migration_required"],
@@ -101,9 +101,10 @@ test("les trois destinations d’administration suivent leurs opérations : lect
     assert.equal(state(catalogue(Object.fromEntries(ADMIN_DESTINATIONS[destination].map((operation) => [operation, ["granted", "tenant", "not_in_this_build"]]))), destination), null,
       `${destination}: no route in this build, no destination`);
   }
-  // Quotas et usage read both: they read only when both are served, and explain as soon as one is offered.
-  assert.equal(state(adminOffer({ usage_read: ["granted", "tenant", "migration_required"] }), "usage"), "explanation");
-  assert.equal(state(catalogue({ quota_read: served }), "usage"), "explanation");
+  // Quotas et usage can open with quota alone. The usage page still requires its own offered and served operation.
+  assert.equal(state(adminOffer({ usage_read: ["granted", "tenant", "migration_required"] }), "usage"), "view");
+  assert.equal(state(catalogue({ quota_read: served }), "usage"), "view");
+  assert.equal(state(catalogue({ usage_read: served }), "usage"), "explanation");
   assert.equal(combinedDestinationState(admin(adminOffer()), []), null);
   // A personal context of the same membership never offers them: the administration context does.
   const personal = { ...context(adminId, "personal"), operations: catalogue({ memberships_read: ["requires_administration"], quota_read: ["requires_administration"],
@@ -119,4 +120,47 @@ test("le profil possédé est refusé localement pour les registres, d’après 
       await assert.rejects(read(), (error) => error.code === "read_profile_unavailable");
     assert.equal(requests.length, before, "no historical route is tried");
   } finally { api.close(); }
+});
+
+test("quota owned seul : reçu, usage indisponible et retrait du contexte après révocation", async () => {
+  let operations = ownedCatalogue(adminOffer({ workers_read: tenantScope })).map((entry) =>
+    ["workers_read", "quota_read"].includes(entry.operation) ? { ...entry, availability: "available" } : entry);
+  const read_profiles = { ...ownedReadProfiles(), worker_registry: "human_worker_registry_owned_v1" };
+  const quota = quotaBody(adminId);
+  let hold = false;
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  const { api, notifications, requests } = client(async (path) => {
+    assert.equal(path, "/api/v1/human/admin/quota");
+    if (hold) await held;
+    return Response.json(quota);
+  }, () => ({ ...offered(operations), read_profiles }));
+
+  try {
+    await api.identity();
+    assert.equal(adminDestinationState(api.selectContext(adminId), "usage"), "view");
+    const read = await api.quota();
+    assert.equal(read.source, quota.source);
+    assert.equal(read.evaluated_at, quota.evaluated_at);
+    assert.deepEqual(read.quota, quota.quota);
+    assert.deepEqual(read.read_receipt, quota.read_receipt);
+    await assert.rejects(api.usage(null), (error) => error.code === "read_profile_unavailable");
+    assert.deepEqual(requests.map(({ path }) => path), ["/api/v1/human/identity", "/api/v1/human/admin/quota"]);
+    assert.equal(requests[1].options.headers["X-AiGuard-Context"], adminId);
+    await api.identity();
+    assert.equal(api.context?.id, adminId);
+    assert.deepEqual(notifications, []);
+
+    hold = true;
+    const pending = api.quota();
+    const signal = requests.at(-1).options.signal;
+    operations = operations.map((entry) => entry.operation === "quota_read" ?
+      { operation: "quota_read", permission: "not_granted", availability: "available" } : entry);
+    await api.identity();
+    assert.equal(api.context, null);
+    assert.deepEqual(notifications, [["context", "context_revoked"]]);
+    assert.equal(signal.aborted, true);
+    release();
+    await assert.rejects(pending, HumanSuperseded);
+  } finally { release(); api.close(); }
 });

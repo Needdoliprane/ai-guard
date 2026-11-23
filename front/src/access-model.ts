@@ -127,6 +127,7 @@ export const ADMIN_DESTINATIONS = { memberships: ["memberships_read"], usage: ["
   Readonly<Record<string, readonly HumanOperation[]>>;
 export type AdminDestination = keyof typeof ADMIN_DESTINATIONS;
 export function adminDestinationState(context: HumanContext | null, destination: AdminDestination) {
+  if (destination === "usage" && can(context, "quota_read")) return "view";
   return combinedDestinationState(context, ADMIN_DESTINATIONS[destination]);
 }
 
