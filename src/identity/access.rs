@@ -56,6 +56,13 @@ pub enum HumanBrokerRegistryReadProfileV1 {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum HumanWorkerRegistryReadProfileV1 {
+    #[serde(rename = "human_worker_registry_owned_v1")]
+    OwnedV1,
+    Unavailable,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum HumanUnavailableReadProfileV1 {
     Unavailable,
 }
@@ -63,7 +70,7 @@ pub enum HumanUnavailableReadProfileV1 {
 #[serde(deny_unknown_fields)]
 pub struct HumanReadProfilesV1 {
     pub broker_registry: HumanBrokerRegistryReadProfileV1,
-    pub worker_registry: HumanUnavailableReadProfileV1,
+    pub worker_registry: HumanWorkerRegistryReadProfileV1,
     pub federation_registry: HumanUnavailableReadProfileV1,
 }
 
@@ -71,10 +78,14 @@ pub struct HumanReadProfilesV1 {
 mod read_profile_tests {
     use super::*;
     #[test]
-    fn read_profiles_are_closed_and_do_not_invent_available_worker_protocols() {
-        let value = serde_json::json!({"broker_registry":"human_broker_registry_owned_v1", "worker_registry":"unavailable", "federation_registry":"unavailable"});
+    fn read_profiles_are_closed_and_preserve_historical_values() {
+        let value = serde_json::json!({"broker_registry":"human_broker_registry_owned_v1", "worker_registry":"human_worker_registry_owned_v1", "federation_registry":"unavailable"});
         let profiles: HumanReadProfilesV1 = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(serde_json::to_value(profiles).unwrap(), value);
+        let mut historical = value.clone();
+        historical["worker_registry"] = serde_json::json!("unavailable");
+        let profiles: HumanReadProfilesV1 = serde_json::from_value(historical.clone()).unwrap();
+        assert_eq!(serde_json::to_value(profiles).unwrap(), historical);
         for field in ["broker_registry", "worker_registry", "federation_registry"] {
             let mut unknown = value.clone();
             unknown[field] = serde_json::json!("legacy");

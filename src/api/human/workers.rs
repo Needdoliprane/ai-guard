@@ -1,5 +1,6 @@
 //! Human-only registry route; no technical credentials or caller-selected tenant.
 use super::*;
+use crate::audit::HumanWorkerFrameV1;
 
 #[cfg(test)]
 #[path = "workers/federation_tests.rs"]
@@ -33,18 +34,20 @@ pub(super) async fn workers(
         let mut cursor = context
             .start_workers(&key, query.cursor.as_deref())
             .map_err(state_failure)?;
-        let page = tenant
-            .store
-            .sqlite_api()?
-            .human_workers(
-                &scope,
-                &crate::audit::HumanWorkerFrameV1::new(&context.id, &context.authorization_version)
-                    .map_err(store_failure)?,
-                cursor.after_worker_id.as_deref(),
-                limit,
-                &proof.redactor,
-            )
+        let store = tenant.store.sqlite_api()?;
+        let frame = HumanWorkerFrameV1::new(&context.id, &context.authorization_version)
             .map_err(store_failure)?;
+        let after = cursor.after_worker_id.as_deref();
+        let page = if let Some(owned) = &state.owned_human {
+            let HumanProofSource::Local(source) = proof.source else {
+                return Err(super::super::human_sources::unavailable());
+            };
+            owned.human_workers(source, store, &scope, &frame, after, limit, &proof.redactor)?
+        } else {
+            store
+                .human_workers(&scope, &frame, after, limit, &proof.redactor)
+                .map_err(store_failure)?
+        };
         #[cfg(test)]
         state.human.pause_broker_publication()?;
         // Re-read credential, OIDC admission/mapping and membership/revision
@@ -64,9 +67,7 @@ pub(super) async fn workers(
                 "human worker envelope requires redaction"
             )));
         }
-        let bytes = tenant
-            .store
-            .sqlite_api()?
+        let bytes = store
             .check_human_worker_output(&proof.redactor, &body)
             .map_err(store_failure)?;
         cursor = context.advance_workers(cursor, bytes).map_err(|error| {
@@ -85,9 +86,7 @@ pub(super) async fn workers(
         if body.has_more {
             body.next_cursor = Some(context.seal_workers(&key, &cursor).map_err(state_failure)?);
         }
-        tenant
-            .store
-            .sqlite_api()?
+        store
             .check_human_worker_output(&proof.redactor, &body)
             .map_err(store_failure)?;
         Ok(Json(body))

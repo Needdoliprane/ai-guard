@@ -23,15 +23,15 @@ Une source que le contexte n'accorde pas n'est jamais demandée. Le panneau **Ac
 
 ## Profil de supervision des brokers owned
 
-**Candidat frontend ; exécution et qualification visuelle à consigner sur la source intégrée.** Mettre à jour ensemble gateway Rust et dashboard. Sur un contrôle owned, `GET /api/v1/human/identity` annonce exactement :
+Mettre à jour ensemble le gateway Rust et le dashboard. Sur un contrôle SQLite owned 14 ou 15, `GET /api/v1/human/identity` annonce le profil suivant.
 
 ```json
-{"read_profiles":{"broker_registry":"human_broker_registry_owned_v1","worker_registry":"unavailable","federation_registry":"unavailable"}}
+{"read_profiles":{"broker_registry":"human_broker_registry_owned_v1","worker_registry":"human_worker_registry_owned_v1","federation_registry":"unavailable"}}
 ```
 
 Cette annonce reste indépendante des permissions du contexte. La lecture exige un contexte d'administration actuellement proposé par le contrôle portant `read_broker_registry`. Le dashboard choisit `GET /api/v1/human/owned/brokers` avant de demander une page : 25 lignes dans **Brokers**, 100 dans **Supervision**, au plus 100 lignes et 256 Kio par réponse. Il valide profil, version, champs fermés, contexte sélectionné, version des autorisations et reçu. La page est `live_keyset`, l'inventaire runtime est `unknown`, et `count_scope: page` désigne le compte de la page, jamais un total du tenant. Les curseurs owned appartiennent uniquement à ce profil et à la taille de page. Un 403, 404, 503 ou corps incompatible ne déclenche jamais de lecture du registre historique.
 
-Les destinations **Workers** et **Fédération** sont indisponibles pour ce profil annoncé. Supervision continue de lire indépendamment les brokers owned et les ressources autorisés. Si `read_worker_registry` est présent, **Workers · profil indisponible** explique que la route est indisponible ; aucune lecture worker n'est émise et aucune activité nulle n'est affichée. **Relire mes accès** revient à l'offre courante du contrôle. Faire vérifier les profils pris en charge par l'opérateur ; cette action n'active aucune capacité manquante. La supervision multi-hôtes complète des workers reste une exigence ouverte.
+**Workers** utilise le GET paginé `/api/v1/human/workers` lorsque le contexte d’administration proposé accorde et sert `workers_read`. Chaque page possède son reçu durable. **Supervision** lit les registres autorisés des workers et brokers avec leurs reçus et leur fraîcheur propres. Un refus retire les données concernées. Les anciennes versions du gateway peuvent continuer à annoncer le profil worker `unavailable`. **Fédération** et l’agrégat workers de la vue 360° restent indisponibles sur ce profil. [Contrat du registre](../../api.md#registre-workers-humain--human-worker-registry)
 
 La ligne du broker et son détail distinguent fraîcheur du heartbeat et fraîcheur du checkpoint :
 

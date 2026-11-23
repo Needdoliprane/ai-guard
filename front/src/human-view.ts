@@ -1069,7 +1069,8 @@ export class HumanDashboard {
   #renderBrokers(state = this.#brokers, federation = false) {
     const table = el("table", "human-broker-table");
     const caption = el("caption", "", "Registre central du tenant · métadonnées enregistrées");
-    const owned = state.value?.profile === "human_broker_registry_owned_v1" || !federation && this.#api.readProfiles?.broker_registry === "human_broker_registry_owned_v1";
+    const profiles = this.#api.readProfiles;
+    const owned = state.value?.profile === "human_broker_registry_owned_v1" || !federation && profiles?.broker_registry === "human_broker_registry_owned_v1";
     const headers = ["Broker / incarnation", "État du bail", "Autorités déclarées", "Dernière réception observée", "Expiration", ...(owned ? ["Checkpoint déclaré"] : []), ...(federation ? ["Associations de la page workers"] : []), "Détails"].map((label) => {
       const cell = el("th", "", label); cell.scope = "col"; return cell;
     });
@@ -1098,7 +1099,7 @@ export class HumanDashboard {
     return el("section", "panel human-broker-panel", el("div", "panel-heading", el("div", "", el("h2", "", "Registre des brokers"),
       el("p", "", "Source : registre central du tenant. Inventaire runtime inconnu ; aucun worker ni état de fonctionnement n’est déduit du bail."),
       el("p", "", "Lecture live paginée : les lignes peuvent changer entre deux pages. Le flux des ressources ne couvre pas ce registre."))),
-      owned ? el("div", "info-strip", badge("Couverture partielle", "amber"), el("p", "", "Profil human_broker_registry_owned_v1 annoncé par le contrôle. Heartbeats et checkpoints ont des fraîcheurs indépendantes. Registres workers et composition de fédération indisponibles pour ce profil ; activité et inventaire runtime inconnus."),
+      owned ? el("div", "info-strip", badge("Couverture partielle", "amber"), el("p", "", `Profil human_broker_registry_owned_v1 annoncé par le contrôle. Heartbeats et checkpoints ont des fraîcheurs indépendantes. ${profiles?.worker_registry === "unavailable" ? "Registre des workers indisponible. " : ""}La fédération est indisponible. L’activité et l’inventaire runtime restent inconnus dans ce registre.`),
         this.#brokerForbidden ? null : action("Relire mes accès", "human-owned-profile-access", () => this.#openView("contexts"))) : null,
       this.#status(state, formatBrokerDate), state.value ? el("p", "human-broker-evaluation muted", `Évaluation serveur : ${formatBrokerDate(state.value.evaluated_at, true)} · source tenant_broker_registry · cohérence live_keyset${owned ? " · count_scope page : aucun total du tenant" : ""}.`) : null,
       federation ? null : this.#brokerForbidden ? el("div", "control-error", el("p", "", state.error), action("Relire mes accès", "human-broker-access", () => this.#openView("contexts"))) :

@@ -503,10 +503,11 @@ integration, not to this guide.
 
 The human identity response announces optional `read_profiles` only for an
 actual owned gateway: broker_registry=`human_broker_registry_owned_v1`,
-worker_registry=`unavailable`, federation_registry=`unavailable`. Legacy omits
-this object. These closed values select protocols; ReadBrokerRegistry remains
-mandatory and revalidated. The complete worker/federation view is still an
-open product requirement; unavailable never means zero activity.
+worker_registry=`human_worker_registry_owned_v1` on SQLite 14 and 15,
+federation_registry=`unavailable`. Legacy omits this object. The control
+revalidates `read_broker_registry` for Brokers and `read_worker_registry`
+for Workers in the offered administration context. The complete federation
+view remains an open product requirement. [Supervision](../supervision/README.md)
 
 ## Qualification
 

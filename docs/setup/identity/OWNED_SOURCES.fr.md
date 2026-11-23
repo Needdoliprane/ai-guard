@@ -45,7 +45,9 @@ Utiliser **Actualiser** pour relire les événements récents. Le Journal n’ou
 
 Les méthodes connues non adoptées humaines, contrôle, workload, brokers, relais et OIDC, dont HEAD sur le détail d’événement, export et flux, renvoient 503 explicitement avant extracteurs legacy, corps ou Store. OIDC sélectionné dans le manifeste reste sélectionné et retenu, avec handlers/bearers fermés ; il n'est jamais annoncé désactivé. Les GET status/profile existants « disabled » sont admis seulement si OIDC est absent. La santé consulte la mémoire ; elle ne prouve pas la disponibilité de chaque source. Ces lectures n’activent ni approbation, ni lancement, ni permission réseau, ni contrôle egress modernes.
 
-Le contenu, l’export et le flux d’événements, le registre workers et les écritures d’administration via le dashboard restent exigés en V1.
+Le contexte d’administration local peut lire `GET /api/v1/human/workers` sur SQLite 14 et 15 avec `read_worker_registry`. L’identité annonce `worker_registry:"human_worker_registry_owned_v1"`. Chaque page porte un reçu durable de la source authentifiée. Le dashboard affiche la vue Workers autorisée et son heure de lecture. La fédération et l’agrégat workers de la synthèse restent indisponibles. [Registre workers](../supervision/README.fr.md#profil-de-supervision-des-brokers-owned)
+
+Le contenu, l’export et le flux d’événements ainsi que les écritures d’administration via le dashboard restent exigés en V1.
 
 Un mutex ou writer SQLite occupé chez A ne déclenche aucun SQL chez A lors de l'authentification/lecture de B. La propre source occupée renvoie503. Busy n'est ni absence ni mismatch permanent. Un mismatch physique/configuration/marqueur/incarnation réellement comparé conserve l'invalidation globale de l'owner. La revalidation physique couvre toujours l'union entière : syscall bloqué ou epoch Write partagé gardent leurs limites de disponibilité. L'index privé de candidats est borné avant accumulation à65536 entrées/16Mio de représentation ; le dépassement refuse toute publication complète. Ces bornes ne mesurent pas la RAM du processus.
 

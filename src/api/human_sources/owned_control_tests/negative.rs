@@ -339,7 +339,7 @@ pub(in crate::api::human_sources) fn reserve_workload_fixture_worker(store: &Sto
     let admission = SupervisedAdmissionV1 {
         version: 1,
         protocol: SupervisionProtocolV1::BrokerSupervisionV1,
-        intent_hash: "ab".repeat(32),
+        intent_hash: hex::encode(Sha256::digest(request.request_id.as_bytes())),
         admission: AdmissionV1 {
             version: 1,
             operation_id: uuid::Uuid::new_v4().to_string(),
