@@ -1255,9 +1255,15 @@ function retentionCardNote(): HTMLElement | null {
   return archived ? el("p", "support-footnote", archived) : null;
 }
 
-function eventFocusTarget(slot: HTMLElement, seq: string): HTMLElement | null {
-  return slot.querySelector<HTMLButtonElement>(`button[data-event-seq="${CSS.escape(seq)}"]`)
-    ?? page.querySelector("h1");
+function restoreEventFocus(slot: HTMLElement, seq: string) {
+  const detail = slot.querySelector<HTMLButtonElement>(`button[data-event-seq="${CSS.escape(seq)}"]`);
+  if (detail) {
+    detail.focus({ preventScroll: true });
+    return;
+  }
+  const title = page.querySelector("h1");
+  title?.focus({ preventScroll: true });
+  title?.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
 
 function renderEvents() {
@@ -1283,7 +1289,7 @@ function renderEvents() {
       ),
     );
     eventSlot.setAttribute("aria-busy", "false");
-    if (focusedSeq) eventFocusTarget(eventSlot, focusedSeq)?.focus({ preventScroll: true });
+    if (focusedSeq) restoreEventFocus(eventSlot, focusedSeq);
     return;
   }
   const visible = projectEvents(
@@ -1439,7 +1445,7 @@ function renderEvents() {
     );
   eventSlot.append(footer);
   eventSlot.setAttribute("aria-busy", String(loadingEvents));
-  if (focusedSeq) eventFocusTarget(eventSlot, focusedSeq)?.focus({ preventScroll: true });
+  if (focusedSeq) restoreEventFocus(eventSlot, focusedSeq);
   if (focusedHistory) {
     const target = focusedHistory === "more" ? more ?? summary : summary;
     const keepVisible = !loadingEvents && (wasLoadingHistory || (focusedHistory === "more" && !more));
@@ -1832,7 +1838,7 @@ function renderSandboxes() {
 function openDialog(
   title: string,
   eyebrow: string,
-  resolveTrigger?: () => HTMLElement | null,
+  restoreFocus?: () => void,
 ): { dialog: HTMLDialogElement; body: HTMLElement } {
   const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   dialog?.remove();
@@ -1857,9 +1863,12 @@ function openDialog(
   document.body.append(currentDialog);
   currentDialog.addEventListener("close", () => {
     if (dialog !== currentDialog || document.querySelector("dialog[open]") || !client) return;
-    const target = resolveTrigger ? resolveTrigger() : trigger;
+    if (restoreFocus) {
+      restoreFocus();
+      return;
+    }
     const fallback = document.querySelector<HTMLElement>("#main-content h1");
-    (target?.isConnected ? target : fallback)?.focus({ preventScroll: true });
+    (trigger?.isConnected ? trigger : fallback)?.focus({ preventScroll: true });
   }, { once: true });
   currentDialog.addEventListener("click", (event) => {
     if (event.target === currentDialog) {
@@ -2275,9 +2284,9 @@ function showEvent(event: AuditEvent) {
   const failure = brokerFailureDetails(event);
   const slot = eventSlot;
   const seq = String(event.seq);
-  const { body } = openDialog(event.kind, `ÉVÉNEMENT #${seq}`, () =>
-    slot?.isConnected && slot === eventSlot ? eventFocusTarget(slot, seq) : null,
-  );
+  const { body } = openDialog(event.kind, `ÉVÉNEMENT #${seq}`, () => {
+    if (slot?.isConnected && slot === eventSlot) restoreEventFocus(slot, seq);
+  });
   const tabs = el("div", "detail-tabs");
   tabs.setAttribute("role", "tablist");
   tabs.setAttribute("aria-label", "Détails de l’événement");
