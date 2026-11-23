@@ -917,6 +917,17 @@ fn seed_delegated_membership(fixture: &Fixture) -> MembershipV1 {
     membership
 }
 
+fn durable_identity_state(database: &rusqlite::Connection) -> (i64, i64) {
+    database
+        .query_row(
+            "SELECT authorization_revision, (SELECT COUNT(*) FROM events WHERE kind='control.identity.mutation') \
+             FROM identity_meta WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+}
+
 #[tokio::test]
 async fn owned_grant_change_format14_returns_one_durable_receipt_and_keeps_the_source_available() {
     use super::races::{connection, state};
@@ -939,17 +950,7 @@ async fn owned_grant_change_format14_returns_one_durable_receipt_and_keeps_the_s
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
     assert_eq!(format, 14);
-    let durable_revision_and_mutations = || -> (i64, i64) {
-        database
-            .query_row(
-                "SELECT authorization_revision, (SELECT COUNT(*) FROM events WHERE kind='control.identity.mutation') \
-                 FROM identity_meta WHERE singleton=1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap()
-    };
-    let (prior_revision, prior_mutations) = durable_revision_and_mutations();
+    let (prior_revision, prior_mutations) = durable_identity_state(&database);
     let router = gateway_router(state);
     let bearer = Fixture::bearer("B");
     let admin_context_id = |identity: &Value| {
@@ -988,7 +989,7 @@ async fn owned_grant_change_format14_returns_one_durable_receipt_and_keeps_the_s
     assert_eq!(receipt.grant_revision, "2");
     assert_eq!(receipt.authorization_revision, next_revision.to_string());
     assert_eq!(
-        durable_revision_and_mutations(),
+        durable_identity_state(&database),
         (next_revision, prior_mutations + 1)
     );
 
@@ -1012,7 +1013,7 @@ async fn owned_grant_change_format14_returns_one_durable_receipt_and_keeps_the_s
     assert_eq!(status, StatusCode::OK);
     assert_eq!(replay_receipt, original_receipt);
     assert_eq!(
-        durable_revision_and_mutations(),
+        durable_identity_state(&database),
         (next_revision, prior_mutations + 1)
     );
 
@@ -1074,7 +1075,7 @@ async fn owned_grant_change_format14_returns_one_durable_receipt_and_keeps_the_s
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
     assert_eq!(response["error"]["code"], "invalid_request");
     assert_eq!(
-        durable_revision_and_mutations(),
+        durable_identity_state(&database),
         (next_revision, prior_mutations + 1)
     );
     gateway.close().await;
@@ -1241,6 +1242,78 @@ async fn owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
     gateway.close().await;
 }
 
+fn provision_owned_organization(
+    bundle: &HumanOwnedStartupBundle,
+    descriptor: &crate::human_authority::HumanSourceDescriptorV1,
+    organization: &str,
+    administrator_capabilities: &[HumanCapabilityV1],
+) -> (String, PrincipalRefV1, MembershipV1) {
+    use HumanCapabilityV1 as C;
+
+    let tenant = descriptor.tenant_id.as_deref().unwrap();
+    let source = bundle.owner.source_token(descriptor.source_id).unwrap();
+    let store = bundle.stores.get(&descriptor.source_id).unwrap();
+    let provision = |display_name: &str, capabilities: &[C]| {
+        let principal = PrincipalRefV1::HumanLocal {
+            installation_id: descriptor.installation_id.to_string(),
+            account_id: uuid::Uuid::new_v4().to_string(),
+        };
+        let bearer = generate_local_credential().unwrap();
+        let membership = MembershipV1 {
+            version: 1,
+            membership_id: uuid::Uuid::new_v4().to_string(),
+            principal: principal.clone(),
+            tenant_id: tenant.into(),
+            organization_scope: organization.into(),
+            revision: 1,
+            active: true,
+            capabilities: capabilities.iter().copied().collect(),
+        };
+        let epoch = bundle.owner.try_write_epoch().unwrap();
+        store
+            .provision_local_human_scoped(
+                &epoch,
+                &source,
+                &LocalHumanProvisionV1 {
+                    version: 1,
+                    mutations: [
+                        change(IdentityChangeV1::Account {
+                            expected_revision: 0,
+                            account: HumanAccountV1 {
+                                version: 1,
+                                principal: principal.clone(),
+                                display_name: display_name.into(),
+                                revision: 1,
+                                active: true,
+                            },
+                        }),
+                        change(IdentityChangeV1::Credential {
+                            expected_revision: 0,
+                            binding: LocalCredentialV1 {
+                                version: 1,
+                                credential_id: uuid::Uuid::new_v4().to_string(),
+                                principal,
+                                sha256_digest: hex::encode(Sha256::digest(bearer.as_bytes())),
+                                revision: 1,
+                                active: true,
+                                expires_at: None,
+                            },
+                        }),
+                        change(IdentityChangeV1::Membership {
+                            expected_revision: 0,
+                            membership: membership.clone(),
+                        }),
+                    ],
+                },
+            )
+            .unwrap();
+        (bearer, membership)
+    };
+    let (bearer, administrator) = provision("Synthetic administrator", administrator_capabilities);
+    let (_, member) = provision("Synthetic member", &[C::ReadMetadata]);
+    (bearer, administrator.principal, member)
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn owned_membership_post_on_format15_requires_an_admin_and_returns_the_durable_receipt() {
     use super::owned_workers::{context, read};
@@ -1268,73 +1341,13 @@ async fn owned_membership_post_on_format15_requires_an_admin_and_returns_the_dur
         .unwrap();
     assert_eq!(descriptor.required_format, 15);
     let database_path = descriptor.storage_binding.path();
-    let (bearer, membership_id) = {
-        let source = bundle.owner.source_token(descriptor.source_id).unwrap();
-        let store = bundle.stores.get(&descriptor.source_id).unwrap();
-        let provision = |display_name: &str, capabilities: &[C]| {
-            let principal = PrincipalRefV1::HumanLocal {
-                installation_id: descriptor.installation_id.to_string(),
-                account_id: uuid::Uuid::new_v4().to_string(),
-            };
-            let bearer = generate_local_credential().unwrap();
-            let membership_id = uuid::Uuid::new_v4().to_string();
-            let epoch = bundle.owner.try_write_epoch().unwrap();
-            store
-                .provision_local_human_scoped(
-                    &epoch,
-                    &source,
-                    &LocalHumanProvisionV1 {
-                        version: 1,
-                        mutations: [
-                            change(IdentityChangeV1::Account {
-                                expected_revision: 0,
-                                account: HumanAccountV1 {
-                                    version: 1,
-                                    principal: principal.clone(),
-                                    display_name: display_name.into(),
-                                    revision: 1,
-                                    active: true,
-                                },
-                            }),
-                            change(IdentityChangeV1::Credential {
-                                expected_revision: 0,
-                                binding: LocalCredentialV1 {
-                                    version: 1,
-                                    credential_id: uuid::Uuid::new_v4().to_string(),
-                                    principal: principal.clone(),
-                                    sha256_digest: hex::encode(Sha256::digest(bearer.as_bytes())),
-                                    revision: 1,
-                                    active: true,
-                                    expires_at: None,
-                                },
-                            }),
-                            change(IdentityChangeV1::Membership {
-                                expected_revision: 0,
-                                membership: MembershipV1 {
-                                    version: 1,
-                                    membership_id: membership_id.clone(),
-                                    principal,
-                                    tenant_id: "A".into(),
-                                    organization_scope: "synthetic-membership-administration"
-                                        .into(),
-                                    revision: 1,
-                                    active: true,
-                                    capabilities: capabilities.iter().copied().collect(),
-                                },
-                            }),
-                        ],
-                    },
-                )
-                .unwrap();
-            (bearer, membership_id)
-        };
-        let (bearer, _) = provision(
-            "Synthetic administrator",
-            &[C::ReadMetadata, C::ReadMemberships, C::ManageMemberships],
-        );
-        let (_, membership_id) = provision("Synthetic member", &[C::ReadMetadata]);
-        (bearer, membership_id)
-    };
+    let (bearer, _, member) = provision_owned_organization(
+        &bundle,
+        descriptor,
+        "synthetic-membership-administration",
+        &[C::ReadMetadata, C::ReadMemberships, C::ManageMemberships],
+    );
+    let membership_id = member.membership_id;
     let router = gateway_router(
         GatewayState::for_owned_human_sources(
             bundle,
@@ -1495,6 +1508,269 @@ async fn owned_membership_post_on_format15_requires_an_admin_and_returns_the_dur
         .unwrap();
     assert_eq!(member["active"], false);
     assert_eq!(member["revision"], "2");
+    gateway.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owned_grant_format15_reads_and_replays_one_durable_admin_change_through_dashboard() {
+    use super::{
+        owned_workers::{context, read},
+        races::snapshot,
+    };
+    use crate::audit::identity::projection::Record as IdentityAuditRecord;
+    use HumanCapabilityV1 as C;
+    use ResourcePermissionV1 as P;
+    use std::os::unix::fs::PermissionsExt;
+
+    const IDENTITY: &str = "/api/v1/human/identity";
+    const GRANTS: &str = "/api/v1/human/admin/grants";
+    const ORGANIZATION: &str = "synthetic-grant-administration";
+    let resource = ResourceRefV1 {
+        kind: ResourceKindV1::Session,
+        resource_id: "owned-grant-format15-session".into(),
+    };
+    let historical = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap())
+        .unwrap();
+    let mut files = Store::owned_control_fixture_with_legacy_setup_for_test(15, |legacy| {
+        let mut event = Event::new("fixture.owned-journal");
+        event.session_id = Some(resource.resource_id.clone());
+        legacy.append(event).unwrap();
+        legacy
+            .migrate_human_rights_v2(&historical.path().join("before-rights.sqlite"))
+            .unwrap();
+    });
+    let (bundle, credentials, tokens) = files.take_startup();
+    let descriptor = bundle
+        .owner
+        .closure()
+        .sources
+        .iter()
+        .find(|source| source.tenant_id.as_deref() == Some("A"))
+        .unwrap();
+    assert_eq!(descriptor.required_format, 15);
+    let database_path = descriptor.storage_binding.path();
+    let (bearer, administrator, member) = provision_owned_organization(
+        &bundle,
+        descriptor,
+        ORGANIZATION,
+        &[
+            C::ReadMetadata,
+            C::ReadContent,
+            C::ReadMemberships,
+            C::ManageGrants,
+        ],
+    );
+    let initial_grant = ResourceGrantV1 {
+        version: 1,
+        tenant_id: member.tenant_id.clone(),
+        organization_scope: ORGANIZATION.into(),
+        resource: resource.clone(),
+        owner: administrator.clone(),
+        revision: 1,
+        active: true,
+        shares: vec![ResourceShareV1 {
+            principal: member.principal.clone(),
+            permissions: [P::Metadata].into_iter().collect(),
+        }],
+    };
+    {
+        let source = bundle.owner.source_token(descriptor.source_id).unwrap();
+        let epoch = bundle.owner.try_write_epoch().unwrap();
+        bundle
+            .stores
+            .get(&descriptor.source_id)
+            .unwrap()
+            .mutate_identity_scoped(
+                &epoch,
+                &source,
+                &change(IdentityChangeV1::ResourceGrant {
+                    expected_revision: 0,
+                    grant: initial_grant.clone(),
+                }),
+            )
+            .unwrap();
+    }
+    let database = rusqlite::Connection::open_with_flags(
+        database_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    let format: u32 = database
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(format, 15);
+    let (prior_revision, prior_mutations) = durable_identity_state(&database);
+    let verify_read = |body, context: &Value, revision: &str, prior_head| {
+        let grant: HumanGrantV1 = serde_json::from_value(body).unwrap();
+        assert_eq!(grant.context_id, context["id"].as_str().unwrap());
+        assert_eq!(
+            grant.authorization_version,
+            context["authorization_version"].as_str().unwrap()
+        );
+        assert_eq!(grant.resource, resource);
+        assert_eq!(grant.owner, administrator);
+        assert!(grant.active);
+        assert_eq!(grant.revision, revision);
+        assert_eq!(grant.shares.len(), 1);
+        assert_eq!(grant.shares[0].principal, member.principal);
+        assert_eq!(grant.shares[0].display_name, "Synthetic member");
+
+        let receipt = &grant.read_receipt;
+        let (seq, received_at, payload): (i64, String, String) = database
+            .query_row(
+                "SELECT seq,received_at,payload FROM events WHERE id=?1",
+                [&receipt.audit_event_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let event: Event = serde_json::from_str(&payload).unwrap();
+        assert_eq!(seq, prior_head + 1);
+        assert_eq!(snapshot(&database).0, seq);
+        assert_eq!(received_at, receipt.received_at);
+        assert_eq!(event.kind, "control.identity.access");
+        assert_eq!(event.data["action"], "grants");
+        assert_eq!(event.data["request_id"], receipt.request_id);
+        assert_eq!(event.data["principal"], json!(administrator));
+        assert_eq!(event.data["mode"], "administration");
+        assert_eq!(event.data["result_count"], 1);
+        grant
+    };
+    let router = gateway_router(
+        GatewayState::for_owned_human_sources(
+            bundle,
+            credentials,
+            tokens,
+            Policy::default(),
+            None,
+            Redactor::new(vec![]),
+        )
+        .unwrap(),
+    );
+    let (gateway, dashboard, _front) = membership_dashboard(router).await;
+    let (status, identity) = read(&dashboard, &bearer, IDENTITY, None).await;
+    assert_eq!(status, StatusCode::OK, "{identity}");
+    assert_eq!(identity["principal"], json!(administrator));
+    let original = context(&identity, "administration");
+    assert_eq!(original["organization_scope"], ORGANIZATION);
+    let offer = original["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["operation"] == "grants_manage")
+        .unwrap();
+    assert_eq!(offer["permission"], "granted");
+    assert_eq!(offer["availability"], "available");
+    assert_eq!(offer["scope"], "organization");
+
+    let path = format!(
+        "{GRANTS}?resource_kind=session&resource_id={}",
+        resource.resource_id
+    );
+    let prior_head = snapshot(&database).0;
+    let (status, body) = read(&dashboard, &bearer, &path, Some(original)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let grant = verify_read(body, original, "1", prior_head);
+    assert_eq!(grant.shares[0].permissions, [P::Metadata]);
+
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let body = json!({
+        "operation_id": operation_id,
+        "resource": resource,
+        "expected_revision": grant.revision,
+        "shares": [{"principal": member.principal, "permissions": ["metadata", "content"]}],
+    });
+    let (status, original_receipt) = post(
+        &dashboard,
+        &bearer,
+        GRANTS,
+        original["id"].as_str().unwrap(),
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{original_receipt}");
+    let receipt: HumanGrantChangeReceiptV1 =
+        serde_json::from_value(original_receipt.clone()).unwrap();
+    let expected_state = (prior_revision + 1, prior_mutations + 1);
+    assert_eq!(receipt.version, 1);
+    assert_eq!(receipt.operation_id, operation_id);
+    assert_eq!(receipt.resource, resource);
+    assert_eq!(receipt.grant_revision, "2");
+    assert_eq!(receipt.authorization_revision, expected_state.0.to_string());
+    assert_eq!(durable_identity_state(&database), expected_state);
+    let (status, denied) = read(&dashboard, &bearer, &path, Some(original)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    assert_eq!(denied["error"]["code"], "context_revoked");
+    let (status, refreshed) = read(&dashboard, &bearer, IDENTITY, None).await;
+    assert_eq!(status, StatusCode::OK, "{refreshed}");
+    assert_eq!(refreshed["principal"], identity["principal"]);
+    let current = context(&refreshed, "administration");
+    assert_eq!(current["organization_scope"], ORGANIZATION);
+    assert_ne!(current["id"], original["id"]);
+    assert_ne!(
+        current["authorization_version"],
+        original["authorization_version"]
+    );
+    let (status, replayed) = post(
+        &dashboard,
+        &bearer,
+        GRANTS,
+        current["id"].as_str().unwrap(),
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replayed}");
+    assert_eq!(replayed, original_receipt);
+
+    let audit_seq = receipt.audit_seq.parse::<i64>().unwrap();
+    let resource_key = resource.key().unwrap();
+    let (payload, indexed_hash, projected): (String, String, String) = database
+        .query_row(
+            "SELECT e.payload,o.input_hash,r.payload_json FROM events e
+             JOIN identity_operations o ON o.event_seq=e.seq
+             JOIN identity_resources r ON r.event_seq=e.seq
+             WHERE e.seq=?1 AND o.operation_id=?2 AND r.resource_key=?3",
+            rusqlite::params![audit_seq, operation_id, resource_key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let event: Event = serde_json::from_str(&payload).unwrap();
+    assert_eq!(event.kind, "control.identity.mutation");
+    let record = IdentityAuditRecord::decode_replay(&event.data).unwrap();
+    let expected_grant = ResourceGrantV1 {
+        revision: 2,
+        shares: vec![ResourceShareV1 {
+            principal: member.principal.clone(),
+            permissions: [P::Metadata, P::Content].into_iter().collect(),
+        }],
+        ..initial_grant
+    };
+    assert_eq!(record.mutation.operation_id, operation_id);
+    assert_eq!(record.mutation.actor, administrator);
+    assert_eq!(
+        record.authorization_revision.to_string(),
+        receipt.authorization_revision
+    );
+    assert_eq!(record.input_hash, indexed_hash);
+    assert_eq!(
+        record.mutation.change,
+        IdentityChangeV1::ResourceGrant {
+            expected_revision: 1,
+            grant: expected_grant.clone(),
+        }
+    );
+    assert_eq!(
+        serde_json::from_str::<ResourceGrantV1>(&projected).unwrap(),
+        expected_grant
+    );
+
+    let prior_head = snapshot(&database).0;
+    let (status, updated) = read(&dashboard, &bearer, &path, Some(current)).await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    let grant = verify_read(updated, current, "2", prior_head);
+    assert_eq!(grant.shares[0].permissions, [P::Metadata, P::Content]);
+    assert_eq!(durable_identity_state(&database), expected_state);
     gateway.close().await;
 }
 

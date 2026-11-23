@@ -867,6 +867,40 @@ async fn ordinary_exhaustion_keeps_control_capacity_and_control_exhaustion_keeps
 #[tokio::test]
 async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_blocks_new_effects() {
     let fixture = Fixture::new();
+    let directory = fixture._directory.path().canonicalize().unwrap();
+    let backup_to = |path: &std::path::Path| {
+        use rusqlite::{
+            Connection, OpenFlags,
+            backup::{Backup, StepResult},
+        };
+        use std::os::unix::fs::OpenOptionsExt;
+
+        // Include committed WAL pages from the quiescent fixture.
+        let source = Connection::open_with_flags(
+            directory.join("a.sqlite"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        drop(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)
+                .unwrap(),
+        );
+        let mut destination = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        let backup = Backup::new(&source, &mut destination).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while backup.step(256).unwrap() != StepResult::Done {
+            assert!(Instant::now() < deadline, "private SQLite backup timed out");
+            thread::sleep(Duration::from_millis(5));
+        }
+    };
     let admission_a = supervised(admission(&fixture.a));
     fixture.assert_envelope_excludes_control_credentials(
         &json!({"action":"admission","request":&admission_a}),
@@ -1224,6 +1258,56 @@ async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_bloc
     assert_eq!(replayed.receipt, claimed.receipt);
     worker = replayed.worker;
 
+    {
+        // A backup taken before the next runtime observation must retain the
+        // consumed claim and its held quota without restoring live supervision.
+        let claim_snapshot = fixture.a.integrity().unwrap();
+        assert!(claim_snapshot.valid);
+        assert_eq!(claim_snapshot.head_hash, claimed.receipt.audit_hash);
+        let restore_dir = support::private_tempdir();
+        let restored_path = restore_dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("in-flight.sqlite");
+        backup_to(&restored_path);
+        let restored = Store::open_existing_for_tenant(
+            &restored_path,
+            "tenant-a",
+            Redactor::new(vec![]),
+            10_000,
+        )
+        .unwrap();
+        let restored_state = restored.supervision_state().unwrap();
+        assert_eq!(restored.tenant_id(), "tenant-a");
+        assert_eq!(restored_state.schema_version, 3);
+        assert_eq!(
+            restored_state.control_namespace_uuid.as_deref(),
+            Some(worker_arm_result.receipt.control_namespace_uuid.as_str())
+        );
+        assert!(!restored_state.active);
+        let replay = restored.claim_armed_start(&claim).unwrap();
+        assert_eq!(
+            replay.disposition,
+            Some(ClaimDispositionV1::AlreadyConsumed)
+        );
+        assert_eq!(replay.receipt, claimed.receipt);
+        let retained = restored.worker(&worker.worker_id).unwrap().unwrap();
+        assert_eq!(retained.state, WorkerStateV1::StartIssued);
+        assert_eq!(retained.attempt, worker.attempt);
+        assert_eq!(retained.revision, worker.revision);
+        assert!(retained.quota_held);
+        let quota = restored.worker_quota(&Default::default()).unwrap();
+        assert_eq!(quota.held_workers, 1);
+        assert_eq!(quota.held_cpu_millis, u64::from(worker.launch.cpu_millis));
+        assert_eq!(quota.held_memory_bytes, worker.launch.memory_bytes);
+        let restored_audit = restored.integrity().unwrap();
+        assert!(restored_audit.valid);
+        assert_eq!(restored_audit.event_count, claim_snapshot.event_count);
+        assert_eq!(restored_audit.head_hash, claim_snapshot.head_hash);
+        assert_eq!(fixture.a.head().unwrap(), claimed.receipt.audit_seq);
+    }
+
     worker = transition(
         &fixture.router,
         &fixture.runner_a,
@@ -1401,41 +1485,8 @@ async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_bloc
         terminal_fact.event.data["allocation"],
         serde_json::to_value(allocation).unwrap()
     );
-    let directory = fixture._directory.path().canonicalize().unwrap();
     let restored_path = directory.join("pre-export.sqlite");
-    {
-        use rusqlite::{
-            Connection, OpenFlags,
-            backup::{Backup, StepResult},
-        };
-
-        // Both connections are owned by SQLite. This private, quiescent
-        // fixture uses the online backup API to include committed WAL pages.
-        let source = Connection::open_with_flags(
-            directory.join("a.sqlite"),
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )
-        .unwrap();
-        let mut destination_options = std::fs::OpenOptions::new();
-        destination_options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            destination_options.mode(0o600);
-        }
-        drop(destination_options.open(&restored_path).unwrap());
-        let mut destination = Connection::open_with_flags(
-            &restored_path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )
-        .unwrap();
-        let backup = Backup::new(&source, &mut destination).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while backup.step(256).unwrap() != StepResult::Done {
-            assert!(Instant::now() < deadline, "private SQLite backup timed out");
-            thread::sleep(Duration::from_millis(5));
-        }
-    }
+    backup_to(&restored_path);
     let export = ExportRequestV1 {
         version: 1,
         operation_id: Uuid::new_v4().to_string(),
