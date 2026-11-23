@@ -7,7 +7,7 @@
 // the editors themselves are offered only from the operation catalogue (`delegationOffers`).
 import { CAPABILITIES, type Capability, type HumanContext, type HumanIdentity, type Principal } from "./human-model.ts";
 import { HumanApiError, HumanSuperseded } from "./human-api.ts";
-import { can } from "./access-model.ts";
+import { access, can } from "./access-model.ts";
 import { grantKey, principalKey } from "./supervision-model.ts";
 import { adminUrls, membershipChangeBody, GRANT_SHARES_MAX, SHARE_PERMISSIONS, type GrantShare, type HumanGrant, type Membership,
   type MembershipChange, type MembershipChangeReceipt, type SharePermission } from "./admin-model.ts";
@@ -275,10 +275,12 @@ export class MembershipChangeRecovery {
     const pending = this.#pending;
     if (!pending) return;
     if (principalKey(identity.principal) !== pending.principal) { this.clear(); return "identity_changed"; }
-    const sameScope = identity.contexts.filter((context) => context.mode === "administration" &&
+    const sameScope = identity.contexts.filter((context) =>
       context.tenant_id === pending.tenant && context.organization_scope === pending.organization);
     const matches = sameScope.filter((context) => this.#equivalent(pending, context));
-    if (!matches.length && (identity.contexts_complete || sameScope.length > 0)) {
+    const managementKnown = sameScope.some((context) =>
+      context.mode === "administration" || access(context, "memberships_manage")?.permission === "not_granted");
+    if (!matches.length && (identity.contexts_complete || managementKnown)) {
       this.clear();
       return "withdrawn";
     }

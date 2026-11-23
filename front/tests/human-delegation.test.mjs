@@ -6,6 +6,7 @@ import { HumanApiClient, HumanApiError } from "../src/human-api.ts";
 import { HumanContractError } from "../src/human-model.ts";
 import { grantChangeBody, membershipChangeBody, parseGrantChangeReceipt, parseHumanGrant, parseMembershipChangeReceipt } from "../src/admin-model.ts";
 import { ChangeFlow, MembershipChangeRecovery, membershipReplayRefusal } from "../src/delegation-model.ts";
+import { captureIntent, resumeCandidate } from "../src/human-continuity.ts";
 import { catalogue, context, identity } from "./human-fixtures.mjs";
 import { grantBody, grantReceipt, memberPrincipal, membershipPage, membershipReceipt } from "./admin-fixtures.mjs";
 
@@ -14,6 +15,9 @@ const served = ["granted", "tenant", "available"];
 const offer = (overrides = {}) => catalogue({ memberships_read: served, memberships_manage: served, grants_manage: served, ...overrides });
 const offered = (operations = offer()) => ({ ...identity(), contexts: [{ ...context(adminId, "administration"),
   capabilities: ["read_metadata", "manage_memberships", "manage_grants", "read_memberships"], operations }] });
+const partialPersonal = (frame, permission) => ({ ...frame, contexts_complete: false,
+  contexts: [{ ...frame.contexts[0], id: "e".repeat(64), mode: "personal", capabilities: ["read_metadata"],
+    operations: catalogue({ memberships_manage: [permission, null, "available"] }) }] });
 const membershipId = "00000000-0000-4000-8000-0000000000c1";
 const resource = { kind: "session", resource_id: "session-a" };
 let sequence = 0;
@@ -192,6 +196,59 @@ test("Ouvrir un contexte équivalent conserve la demande et choisir un autre pé
   } finally { api.close(); }
 });
 
+test("Reprendre Supervision, Journal ou la vue 360° dans le contexte équivalent conserve la demande", async () => {
+  const recovery = new MembershipChangeRecovery();
+  const nextId = "d".repeat(64);
+  let frame = offered();
+  const { api, requests } = client(() => { throw new TypeError("Réponse interrompue."); }, () => frame);
+  try {
+    const initial = await api.identity();
+    const previous = api.selectContext(adminId);
+    const change = { operation_id: newId(), expected_revision: "3", capabilities: [], active: false };
+    await assert.rejects(recovery.submit(initial.principal, previous, membershipId, change,
+      (id, request) => api.changeMembership(id, request)), TypeError);
+    api.clearContext();
+    frame = { ...frame, contexts: [{ ...previous, id: nextId, authorization_version: "b".repeat(64) }] };
+    const fresh = await api.identity();
+    const now = Date.now();
+    for (const view of ["supervision", "journal", "overview"]) {
+      const intent = captureIntent({ cause: "context_expired", principal: initial.principal, context: previous, view,
+        now, budgetStopped: false, payload: null });
+      recovery.revalidate(fresh, now);
+      const resumed = resumeCandidate(intent, fresh, { now, visible: true, budgetStopped: false, attempts: 0, confirmed: true });
+      assert.equal(resumed.kind, "offer");
+      assert.equal(resumed.reopen, true);
+      const selected = api.selectContext(resumed.context.id);
+      assert.equal(selected.id, nextId);
+      assert.equal(recovery.selectContext(fresh.principal, selected), true);
+      assert.equal(recovery.operationId, change.operation_id);
+      assert.equal(recovery.offer(now), null);
+    }
+    assert.equal(requests.filter(({ options }) => options.method === "POST").length, 1);
+  } finally { api.close(); }
+});
+
+test("Un contexte Personnel partiel qui exige l’Administration garde la demande sans offre de reprise", async () => {
+  const recovery = new MembershipChangeRecovery();
+  let frame = offered();
+  const { api, requests } = client(() => { throw new TypeError("Réponse interrompue."); }, () => frame);
+  try {
+    const initial = await api.identity();
+    const change = { operation_id: newId(), expected_revision: "3", capabilities: [], active: false };
+    await assert.rejects(recovery.submit(initial.principal, api.selectContext(adminId), membershipId, change,
+      (id, request) => api.changeMembership(id, request)), TypeError);
+    api.clearContext();
+    frame = partialPersonal(frame, "requires_administration");
+    recovery.revalidate(await api.identity(), Date.now());
+    assert.equal(recovery.operationId, change.operation_id);
+    assert.equal(recovery.offer(Date.now()), null);
+    frame = offered();
+    recovery.revalidate(await api.identity(), Date.now());
+    assert.equal(recovery.offer(Date.now())?.contextId, adminId);
+    assert.equal(requests.filter(({ options }) => options.method === "POST").length, 1);
+  } finally { api.close(); }
+});
+
 test("La relecture du contexte rouvert livre la perte de droit dès son retrait", async () => {
   const recovery = new MembershipChangeRecovery();
   let frame = offered();
@@ -207,7 +264,7 @@ test("La relecture du contexte rouvert livre la perte de droit dès son retrait"
     identity = await api.identity();
     recovery.revalidate(identity, Date.now());
     assert.equal(recovery.selectContext(identity.principal, api.selectContext(adminId)), true);
-    frame = { ...offered(offer({ memberships_manage: ["not_granted", null, "available"] })), contexts_complete: false };
+    frame = partialPersonal(frame, "not_granted");
     await api.identity();
     assert.equal(review, "withdrawn");
     assert.deepEqual(notifications, [["context", "context_revoked"]]);

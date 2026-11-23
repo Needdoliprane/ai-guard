@@ -345,12 +345,10 @@ export class HumanDashboard {
       this.#resumeAttempts = 0; this.#resumeConfirmed = true; this.#resumeInterrupted = false; this.#readForResume();
       return;
     }
-    let selected: HumanContext;
-    // Selected before any purge: a refused selection leaves the intention in place for another attempt.
-    try { selected = this.#api.selectContext(offer.id); }
+    // The shared selector checks the offer before purging context data.
+    try { this.#selectOfferedContext(offer.id); }
     catch (error) { this.#resumeOffer = null; this.#identityError = failure(error); this.#render(); return; }
     const { view, payload } = intent;
-    this.#purgeContext(); this.#context = selected; this.#message = "";
     this.#supervisionPreferences = payload.supervision; this.#journalPreferences = payload.journal; this.#overviewPreferences = payload.overview; this.#openView(view);
   }
   /** Reads the accesses for a pending resume. A read that fails or does not start ends a confirmation already given. */
@@ -619,7 +617,7 @@ export class HumanDashboard {
     if (candidates.length !== 1) {
       this.#message = `${notice} Choisissez de nouveau un contexte : le contrôle n’en propose pas un seul de mêmes droits.`; this.#mode = "contexts"; this.#render(); return;
     }
-    try { this.#purgeContext(); this.#context = this.#api.selectContext(candidates[0]!.id); }
+    try { this.#selectOfferedContext(candidates[0]!.id); }
     catch (error) { this.#identityError = failure(error); this.#message = notice; this.#mode = "contexts"; this.#render(); return; }
     this.#message = notice; this.#openView(followUp.destination);
   }
