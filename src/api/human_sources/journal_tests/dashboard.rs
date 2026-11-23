@@ -543,6 +543,109 @@ async fn owned_dashboard_relays_the_delegated_membership_change_and_gateway_rece
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owned_dashboard_relays_the_exact_delegated_grant_change() {
+    const PATH: &str = "/api/v1/human/admin/grants";
+    const UPSTREAM_PATH: &str = "/api/v1/human/owned/admin/grants";
+    const OPERATION: &str = "915e4e07-26a2-4d71-a45f-3b602a8dcf93";
+    let resource = json!({"kind": "session", "resource_id": "existing-session"});
+    let change = json!({
+        "operation_id": OPERATION,
+        "resource": resource,
+        "expected_revision": "7",
+        "shares": [{
+            "principal": {
+                "kind": "human_local",
+                "installation_id": "fc63f922-a31a-4ec9-89b2-9eaf4abbf159",
+                "account_id": "d05b28d9-84a5-466b-aa67-cb1a331f32e0",
+            },
+            "permissions": ["metadata"],
+        }],
+    });
+    let receipt = json!({
+        "version": 1,
+        "operation_id": OPERATION,
+        "resource": resource,
+        "grant_revision": "8",
+        "authorization_revision": "4",
+        "audit_seq": "12",
+    });
+    let body = format!(" \n{}", serde_json::to_string(&change).unwrap()).into_bytes();
+    let expected_body = body.clone();
+    let expected_receipt = receipt.clone();
+    let reached = Arc::new(AtomicUsize::new(0));
+    let seen = reached.clone();
+    let unexpected = Arc::new(AtomicUsize::new(0));
+    let other = unexpected.clone();
+    let upstream = Router::new()
+        .route(
+            UPSTREAM_PATH,
+            axum::routing::post(move |request: axum::extract::Request| {
+                let body = expected_body.clone();
+                let receipt = expected_receipt.clone();
+                let seen = seen.clone();
+                async move {
+                    assert!(request.uri().query().is_none());
+                    let headers = request.headers();
+                    assert_eq!(headers.get_all("authorization").iter().count(), 1);
+                    assert_eq!(
+                        headers["authorization"].to_str().unwrap(),
+                        format!("Bearer {OWNED_PROXY_BEARER}"),
+                    );
+                    assert_eq!(headers.get_all("x-aiguard-context").iter().count(), 1);
+                    assert_eq!(headers["x-aiguard-context"], OWNED_PROXY_CONTEXT);
+                    assert_eq!(headers["content-type"], "application/json");
+                    let received = axum::body::to_bytes(
+                        request.into_body(),
+                        crate::identity::GRANT_CHANGE_BODY_MAX_BYTES,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(received.as_ref(), body.as_slice());
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(receipt)
+                }
+            }),
+        )
+        .fallback(move || {
+            let other = other.clone();
+            async move {
+                other.fetch_add(1, Ordering::SeqCst);
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+        });
+    let (server, address) = LoopbackGateway::start(upstream).await;
+    let front = tempfile::tempdir().unwrap();
+    let dashboard = dashboard_router_with_human_mode(
+        &format!("http://{address}"),
+        None,
+        front.path().to_owned(),
+        None,
+        true,
+    )
+    .unwrap();
+    let response = dashboard
+        .oneshot(
+            axum::http::Request::post(PATH)
+                .header("authorization", format!("Bearer {OWNED_PROXY_BEARER}"))
+                .header("x-aiguard-context", OWNED_PROXY_CONTEXT)
+                .header("content-type", "application/json; charset=utf-8")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let bytes = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), receipt);
+    assert_eq!(reached.load(Ordering::SeqCst), 1);
+    assert_eq!(unexpected.load(Ordering::SeqCst), 0);
+    server.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn owned_dashboard_brokers_keeps_head_mutations_legacy_and_neighbor_routes_closed() {
     let (server, dashboard, calls, unexpected, _front) =
         owned_read_proxy("/api/v1/human/owned/brokers", Some("limit=25")).await;
