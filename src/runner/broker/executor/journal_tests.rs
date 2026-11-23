@@ -5,6 +5,7 @@
 mod cancelled_recovery_tests;
 #[path = "export_retirement_tests.rs"]
 mod export_retirement_tests;
+use super::super::diagnostics::BrokerStep;
 use super::*;
 use crate::{
     api::{GatewayState, gateway_router},
@@ -716,9 +717,27 @@ async fn unknown_failure_is_durable_public_and_opaque_without_runtime_authority(
         .await
         .unwrap();
     let private = "synthetic-unknown-batch-failure-private-canary";
-    execution
-        .failure(LocalFailurePhaseV1::Worker, &anyhow!("{private}"))
-        .await;
+    let boundaries = [
+        (None, "failure_observed"),
+        (
+            Some(BrokerStep::TerminalObservationAck),
+            "terminal_observation_ack",
+        ),
+        (Some(BrokerStep::ResultAudit), "result_audit"),
+        (
+            Some(BrokerStep::CleanupConfirmation),
+            "cleanup_confirmation",
+        ),
+        (Some(BrokerStep::CleanupAck), "cleanup_ack"),
+    ];
+    for (boundary, _) in boundaries {
+        let error = anyhow!("{private}");
+        let error = match boundary {
+            Some(boundary) => error.context(boundary),
+            None => error,
+        };
+        execution.failure(LocalFailurePhaseV1::Worker, &error).await;
+    }
     let current = fixture.writer().load(operation).await.unwrap().unwrap();
     let public: Value = reqwest::Client::builder()
         .no_proxy()
@@ -746,51 +765,53 @@ async fn unknown_failure_is_durable_public_and_opaque_without_runtime_authority(
         "failure reporting must leave the native peer empty"
     );
     let draft = Draft::from_job(&current).unwrap();
-    assert_eq!(draft.commands.len(), 1);
-    assert!(matches!(
-        draft.commands[0].request(),
+    assert_eq!(draft.commands.len(), boundaries.len());
+    assert!(draft.commands.iter().all(|command| matches!(
+        command.request(),
         LocalCommandRequestV1::FailureObserved {
             phase: LocalFailurePhaseV1::Worker,
             code: LocalFailureCodeV1::Unavailable,
         }
-    ));
+    )));
     assert!(draft.operations.is_empty());
     assert!(draft.helpers.is_empty());
     assert!(draft.run.plan.managed.is_none());
     let checkpoint = current
         .broker_checkpoint_v4()
         .expect("every observed batch failure must have a durable public outbox event");
-    assert_eq!(checkpoint.events().len(), 1);
-    let pending = &checkpoint.events()[0];
-    let event = pending.event();
-    assert_eq!(event.kind, "broker.batch.failure");
-    assert_eq!(event.source, "runner");
-    assert_eq!(event.provenance, "observed");
-    assert_eq!(event.coverage, "observed");
-    assert!(event.command.is_none());
-    assert!(event.decision.is_none());
-    assert!(event.result.is_none());
-    assert_eq!(
-        event.data,
-        json!({
-            "version": 1,
-            "phase": "worker",
-            "runtime_effect": "unknown",
-            "enforcer": null,
-            "runtime": null,
-            "broker_step": "failure_observed",
-        })
-    );
-    assert_eq!(event.id, pending.event_id().to_string());
     let items = public["items"].as_array().unwrap();
-    assert_eq!(items.len(), 1);
-    let stored: crate::model::StoredEvent = serde_json::from_value(items[0].clone()).unwrap();
-    assert!(stored.seq > 0);
-    assert_eq!(pending.audit_seq(), Some(stored.seq));
-    assert_eq!(
-        serde_json::to_value(&stored.event).unwrap(),
-        serde_json::to_value(event).unwrap()
-    );
+    assert_eq!(checkpoint.events().len(), boundaries.len());
+    assert_eq!(items.len(), boundaries.len());
+    for (((_, label), pending), item) in boundaries.into_iter().zip(checkpoint.events()).zip(items)
+    {
+        let event = pending.event();
+        assert_eq!(event.kind, "broker.batch.failure");
+        assert_eq!(event.source, "runner");
+        assert_eq!(event.provenance, "observed");
+        assert_eq!(event.coverage, "observed");
+        assert!(event.command.is_none());
+        assert!(event.decision.is_none());
+        assert!(event.result.is_none());
+        assert_eq!(
+            event.data,
+            json!({
+                "version": 1,
+                "phase": "worker",
+                "runtime_effect": "unknown",
+                "enforcer": null,
+                "runtime": null,
+                "broker_step": label,
+            })
+        );
+        assert_eq!(event.id, pending.event_id().to_string());
+        let stored: crate::model::StoredEvent = serde_json::from_value(item.clone()).unwrap();
+        assert!(stored.seq > 0);
+        assert_eq!(pending.audit_seq(), Some(stored.seq));
+        assert_eq!(
+            serde_json::to_value(&stored.event).unwrap(),
+            serde_json::to_value(event).unwrap()
+        );
+    }
     assert!(!serde_json::to_string(checkpoint).unwrap().contains(private));
     assert!(!serde_json::to_string(&public).unwrap().contains(private));
 }
