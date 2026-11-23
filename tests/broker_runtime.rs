@@ -915,6 +915,7 @@ async fn run(selection: &Selection, evidence: &Evidence, lost: LostProcess) -> R
     )?;
     let mut restarted = harness::broker(selection, evidence, 2)?;
     wait_broker(evidence, &runner, operation, &mut restarted).await?;
+    evidence.write("stage.json", &json!({"stage":"restart_broker_ready"}))?;
     wait_terminal(
         evidence,
         &runner,
@@ -969,6 +970,7 @@ async fn run(selection: &Selection, evidence: &Evidence, lost: LostProcess) -> R
             && !recovered.quota_held,
         "terminal ACK did not release the real quota"
     );
+    evidence.write("stage.json", &json!({"stage":"restart_terminal_quota_released"}))?;
     // Exercise the already-durable Submit identity, then an explicit real Resume.
     ensure!(
         matches!(
@@ -1080,6 +1082,7 @@ async fn run(selection: &Selection, evidence: &Evidence, lost: LostProcess) -> R
             && fs::read_dir(evidence.root.join("source"))?.count() == 1,
         "original source changed"
     );
+    evidence.write("stage.json", &json!({"stage":"restart_replay_stable_before_cleanup"}))?;
     evidence.write("audit-after.json", &audit_after)?;
     evidence.write("recovery-after.json", &after)?;
     evidence.write("worker-after.json", &recovered)?;
@@ -1431,7 +1434,7 @@ async fn wait_broker(
         child.running()?;
         if matches!(
             ipc(evidence, runner, BrokerCommandV1::Status { operation_id }).await,
-            Ok(BrokerReplyV1::Status { .. })
+            Ok(BrokerReplyV1::Status { status }) if status.operation_id == operation_id
         ) {
             return Ok(());
         }
