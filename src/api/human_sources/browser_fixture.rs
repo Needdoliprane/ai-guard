@@ -3,6 +3,7 @@
 #![cfg(test)]
 use super::*;
 use crate::api::human_sources::owned_control_tests::negative::reserve_workload_fixture_worker;
+use crate::control::QuotaPolicyV1;
 use crate::control_fs::{Directory, PrivateFile};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,7 @@ mod egress;
 
 const ENABLE: &str = "AI_GUARD_OWNED_BROWSER_FIXTURE";
 const WORKER_MODE: &str = "run-workers-v1";
+const QUOTA_MODE: &str = "run-quota-v1";
 const DIST: &str = "AI_GUARD_OWNED_BROWSER_DIST";
 const CONTROL: &str = "AI_GUARD_OWNED_BROWSER_CONTROL";
 const SECONDS: &str = "AI_GUARD_OWNED_BROWSER_SECONDS";
@@ -298,6 +300,13 @@ impl Drop for Servers {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FixtureMode {
+    Journal,
+    Workers,
+    Quota,
+}
+
 enum FixtureSeed {
     Journal(Vec<String>),
     Worker {
@@ -305,10 +314,15 @@ enum FixtureSeed {
         attempt_id: String,
         session_id: String,
     },
+    Quota,
 }
 
-fn seed(workers_only: bool) -> Result<(Fixture, FixtureSeed)> {
-    let fixture = Fixture::new_owned();
+fn seed(mode: FixtureMode) -> Result<(Fixture, FixtureSeed)> {
+    let fixture = if mode == FixtureMode::Quota {
+        Fixture::new_owned_with_human_rights()
+    } else {
+        Fixture::new_owned()
+    };
     let store = fixture.legacy_store("B");
     let mut membership = store
         .identity_memberships(fixture.principal())?
@@ -320,8 +334,8 @@ fn seed(workers_only: bool) -> Result<(Fixture, FixtureSeed)> {
         .revision
         .checked_add(1)
         .context("synthetic membership revision overflow")?;
-    if workers_only {
-        // The administration context lands directly on its sole readable registry.
+    if mode != FixtureMode::Journal {
+        // Only the administration worker-registry capability is needed in these fixtures.
         membership.capabilities = [HumanCapabilityV1::ReadWorkerRegistry]
             .into_iter()
             .collect();
@@ -341,21 +355,23 @@ fn seed(workers_only: bool) -> Result<(Fixture, FixtureSeed)> {
             membership,
         },
     })?;
-    if workers_only {
+    if mode != FixtureMode::Journal {
         let supervision = store.supervision_state()?;
         ensure!(
             supervision.schema_version == 13 && supervision.active,
             "worker fixture requires the active pre-adoption Store"
         );
         let worker = reserve_workload_fixture_worker(store);
-        return Ok((
-            fixture,
+        let seeded = if mode == FixtureMode::Quota {
+            FixtureSeed::Quota
+        } else {
             FixtureSeed::Worker {
                 worker_id: worker.worker_id,
                 attempt_id: worker.attempt.attempt_id,
                 session_id: worker.launch.session_id,
-            },
-        ));
+            }
+        };
+        return Ok((fixture, seeded));
     }
     let mut ids = Vec::new();
     for ordinal in [1, 2] {
@@ -504,6 +520,8 @@ fn export_receipts(root: &Directory, path: &Path, tenant: &str) -> Result<()> {
                     "resources",
                     "events",
                     "event",
+                    "summary",
+                    "quota",
                     WORKER_RECEIPT_KIND
                 ]
                 .contains(&row.action.as_str()),
@@ -525,10 +543,15 @@ fn export_receipts(root: &Directory, path: &Path, tenant: &str) -> Result<()> {
 #[ignore = "explicit owned browser QA only; requires private control root and admitted frontend dist"]
 async fn serve_owned_browser_fixture() -> Result<()> {
     let started = Instant::now();
-    let workers_only = std::env::var(ENABLE).is_ok_and(|mode| mode == WORKER_MODE);
-    let config = Config::load(if workers_only { WORKER_MODE } else { "run-v1" })?;
+    let (mode, opt_in) = match std::env::var(ENABLE).as_deref() {
+        Ok("run-v1") => (FixtureMode::Journal, "run-v1"),
+        Ok(WORKER_MODE) => (FixtureMode::Workers, WORKER_MODE),
+        Ok(QUOTA_MODE) => (FixtureMode::Quota, QUOTA_MODE),
+        _ => bail!("owned browser fixture requires its explicit opt-in"),
+    };
+    let config = Config::load(opt_in)?;
     let deadline = started + Duration::from_secs(config.seconds) - CLOSE_RESERVE;
-    let (fixture, seeded) = seed(workers_only)?;
+    let (fixture, seeded) = seed(mode)?;
     let (bundle, credentials, tokens) = fixture.owned_startup();
     let state = GatewayState::for_owned_human_sources(
         bundle,
@@ -538,13 +561,27 @@ async fn serve_owned_browser_fixture() -> Result<()> {
         None,
         Redactor::new(vec![]),
     )?;
+    let state = if mode == FixtureMode::Quota {
+        state.with_worker_quotas(vec![(
+            "B".into(),
+            QuotaPolicyV1 {
+                version: 1,
+                max_active_workers: 5,
+                max_cpu_millis: 7000,
+                max_memory_bytes: 4 * 1024 * 1024 * 1024,
+                max_timeout_seconds: 7200,
+            },
+        )])?
+    } else {
+        state
+    };
     let source = state
         .owned_human
         .as_ref()
         .context("owned source absent")?
         .sources[1]
         .descriptor();
-    if workers_only {
+    if mode != FixtureMode::Journal {
         ensure!(
             source.tenant_id.as_deref() == Some("B") && source.required_format == 14,
             "worker fixture requires the retained tenant B Store14"
@@ -573,6 +610,7 @@ async fn serve_owned_browser_fixture() -> Result<()> {
                 ready["mode"] = json!("worker_registry");
                 ready["worker"] = json!({"worker_id":worker_id,"attempt_id":attempt_id,"session_id":session_id});
             }
+            FixtureSeed::Quota => ready["mode"] = json!("quota"),
         }
         publish(&config.root, "READY.json", &ready)?;
         eprintln!("OWNED_BROWSER_READY {}", config.root.path().join("READY.json").display());

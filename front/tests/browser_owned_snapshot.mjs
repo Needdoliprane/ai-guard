@@ -15,12 +15,15 @@ process.umask(0o077);
 const fixtureMode = process.env.AI_GUARD_OWNED_BROWSER_FIXTURE;
 const egressMode = fixtureMode === "run-egress-v1";
 const workersMode = fixtureMode === "run-workers-v1";
+const quotaMode = fixtureMode === "run-quota-v1";
 const FQN = egressMode
   ? "api::human_sources::tests::owned_browser_fixture::egress::serve_owned_egress_browser_fixture"
   : "api::human_sources::tests::owned_browser_fixture::serve_owned_browser_fixture";
 const PRIVATE_CONTENT = "owned-browser-private-content-must-not-appear-in-metadata";
 const workersPath = "/api/v1/human/workers";
 const workerReceiptKind = "control.identity.workers.access";
+const summaryPath = "/api/v1/human/summary";
+const quotaPath = "/api/v1/human/admin/quota";
 const QUIET_MS = 33000; // Actual time, covers the existing30s dashboard cycle.
 const must = (condition, code) => { if (!condition) throw new Error(code); };
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -101,6 +104,7 @@ async function save(name, value) {
 function publishTerminalResult() {
   terminalResult.status = interrupted ? "FAIL_NOT_QUALIFIED" : !fixtureStarted ? "BLOCKED_NOT_RUN"
     : failure || cleanupFailure ? "FAIL_NOT_QUALIFIED"
+    : quotaMode ? "PASS_OWNED_TENANT_QUOTA"
     : workersMode ? "PASS_OWNED_WORKER_REGISTRY"
     : egressMode ? "PASS_OWNED_EGRESS_JOURNAL" : "PASS_THREE_BOUNDED_OWNED_SCENARIOS";
   terminalResult.interrupted = interrupted;
@@ -187,9 +191,14 @@ function validateReady(value) {
   must(url.protocol === "http:" && url.hostname === "127.0.0.1" && Number(url.port) > 0 && !url.username && !url.password && url.pathname === "/" && !url.search && !url.hash, "READY_LOOPBACK_URL");
   if (egressMode) return validateEgressReady(value);
   const fields = ["version", "dashboard_url", "bearer_b", "tenant_id", "budget_seconds", "commands", "acks", "command_limit"];
-  closed(value, [...fields, ...(workersMode ? ["mode", "worker"] : ["resource", "event_ids"])], "READY_CLOSED");
+  const scenarioFields = quotaMode ? ["mode"] : workersMode ? ["mode", "worker"] : ["resource", "event_ids"];
+  closed(value, [...fields, ...scenarioFields], "READY_CLOSED");
   must(value.tenant_id === "B", "READY_PROFILE");
   must(typeof value.bearer_b === "string" && /^aigh1_[0-9a-f]{64}$/.test(value.bearer_b), "READY_FIXTURE_BEARER");
+  if (quotaMode) {
+    must(value.mode === "quota", "READY_QUOTA_MODE");
+    return value;
+  }
   if (workersMode) {
     must(value.mode === "worker_registry", "READY_WORKER_MODE");
     closed(value.worker, ["worker_id", "attempt_id", "session_id"], "READY_RESERVED_WORKER");
@@ -207,6 +216,7 @@ function pageAction(path) {
   const pathname = new URL(path, "http://fixture.invalid").pathname;
   if (pathname.startsWith(eventDetailPrefix) && uuid(pathname.slice(eventDetailPrefix.length))) return "event";
   if (pathname === workersPath) return workerReceiptKind;
+  if (pathname === quotaPath) return "quota";
   return ({ "/api/v1/human/resources": "resources", "/api/v1/human/events": "events", "/api/v1/human/events/recent": "events" })[pathname] ?? null;
 }
 function requiredReceipt(body) {
@@ -559,8 +569,56 @@ async function runOwnedWorkers() {
   observed.scenario1 = "owned_worker_registry_store14_dashboard_and_receipt";
 }
 
+async function runOwnedQuota() {
+  await page.getByLabel("Type d’accès").selectOption("human");
+  await page.getByLabel("Credential personnel local").fill(bearer);
+  const identity = await readByAction("/api/v1/human/identity", 200, () => button("Ouvrir mon espace").click());
+  await heading("Choisir un contexte.").waitFor({ timeout: remaining() });
+  must(identity.authentication?.method === "local_credential" && Array.isArray(identity.contexts), "OWNED_QUOTA_IDENTITY");
+  const admin = identity.contexts.find((item) => item.tenant_id === "B" && item.mode === "administration");
+  const quotaOffer = admin?.operations?.find((entry) => entry.operation === "quota_read");
+  const usageOffer = admin?.operations?.find((entry) => entry.operation === "usage_read");
+  must(quotaOffer?.permission === "granted" && quotaOffer.scope === "tenant" && quotaOffer.availability === "available" &&
+    usageOffer?.permission === "granted" && usageOffer.availability === "profile_unavailable", "OWNED_QUOTA_AND_USAGE_OFFER");
+
+  // The v2 rights marker opens the real overview first. Wait for it before requesting another read of the same Store.
+  await readByAction(summaryPath, 200, () => button("Ouvrir administration · B").click());
+  await page.locator('.ov[data-state="ready"]').waitFor({ timeout: remaining() });
+  stage = "owned_tenant_quota";
+  const result = await readByAction(quotaPath, 200, () => button("Quotas et usage").click());
+  must(result.context_id === admin.id && result.authorization_version === admin.authorization_version &&
+    result.source === "tenant_worker_reservations" && result.max_timeout_seconds === "7200", "REAL_QUOTA_SCOPE_AND_SOURCE");
+  const expected = { held_workers: "1", held_cpu_millis: "2000", held_memory_bytes: "1073741824",
+    max_active_workers: "5", max_cpu_millis: "7000", max_memory_bytes: "4294967296" };
+  closed(result.quota, Object.keys(expected), "QUOTA_COUNTS_SHAPE");
+  must(Object.entries(expected).every(([key, value]) => result.quota[key] === value), "DURABLE_QUOTA_COUNTERS_AND_CONFIGURED_LIMITS");
+  const receipt = requiredReceipt(result);
+
+  await heading("Quotas et usage du tenant.").waitFor({ timeout: remaining() });
+  const view = page.locator('.ov-usage[data-state="ready"]');
+  await view.waitFor({ timeout: remaining() });
+  const quota = view.locator("section").filter({ has: heading("Quota du tenant") });
+  const stats = await quota.locator(".ov-stat").evaluateAll((nodes) => nodes.map((node) =>
+    [node.querySelector(".ov-num")?.textContent, node.querySelector(".ov-stat-label")?.textContent]));
+  must(same(stats, [["1", "workers réservés sur 5"], ["2\u202f000", "milliCPU réservés sur 7\u202f000"],
+    ["1,0 Gio", "mémoire réservée sur 4,0 Gio"]]), "DOM_DURABLE_QUOTA_AND_LIMITS");
+  must((await quota.innerText()).includes("Durée maximale d’un worker : 7\u202f200 s."), "DOM_CONFIGURED_WORKER_TIMEOUT");
+  const evaluatedAt = await page.evaluate((date) =>
+    new Intl.DateTimeFormat("fr-FR", { dateStyle: "medium", timeStyle: "medium" }).format(new Date(date)), result.evaluated_at);
+  const provenance = view.locator(".ov-provenance");
+  must(await provenance.locator("time").textContent() === evaluatedAt &&
+    await provenance.locator("span.mono").textContent() === receipt.request_id.slice(0, 8), "DOM_QUOTA_DATE_AND_RECEIPT");
+  const usage = view.locator("section").filter({ has: heading("Usage observé") });
+  await usage.getByText(/^Opération usage_read accordée .*indisponible.*l’activité reste inconnue\.$/u).waitFor({ timeout: remaining() });
+  must(await usage.locator("table, .ov-stat").count() === 0 &&
+    await usage.getByText(/^Aucune allocation terminale/u).count() === 0 &&
+    await usage.getByRole("button", { name: "Allocations suivantes", exact: true }).count() === 0, "USAGE_REMAINS_UNKNOWN");
+  await noSecret();
+  observed.scenario1 = "owned_tenant_quota_store14_dashboard_and_receipt";
+}
+
 try {
-  must(fixtureMode === "run-v1" || egressMode || workersMode, "EXPLICIT_FIXTURE_GUARD_REQUIRED");
+  must(fixtureMode === "run-v1" || egressMode || workersMode || quotaMode, "EXPLICIT_FIXTURE_GUARD_REQUIRED");
   const admittedLinuxArch = process.arch === "arm64" || (!egressMode && process.arch === "x64");
   const admittedLinux = process.platform === "linux" && admittedLinuxArch && process.getuid?.() === 1000 && process.getgid?.() === 1000;
   const admittedMac = egressMode && process.platform === "darwin" && process.arch === "arm64" && process.geteuid?.() > 0;
@@ -619,11 +677,11 @@ try {
   stage = "browser_start";
   browser = await playwright.chromium.launch({ headless: true, chromiumSandbox: true, timeout: remaining(60000),
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined,
-    ...(egressMode || workersMode ? { args: ["--no-proxy-server", "--host-resolver-rules=EXCLUDE 127.0.0.1, MAP * ~NOTFOUND"] } : {}),
+    ...(egressMode || workersMode || quotaMode ? { args: ["--no-proxy-server", "--host-resolver-rules=EXCLUDE 127.0.0.1, MAP * ~NOTFOUND"] } : {}),
     env: { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: process.env.HOME ?? temporary, TMPDIR: temporary } });
   observed.browser_version = browser.version();
   context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: "fr-FR", timezoneId: "UTC", colorScheme: "light",
-    ...(egressMode || workersMode ? { serviceWorkers: "block" } : {}) });
+    ...(egressMode || workersMode || quotaMode ? { serviceWorkers: "block" } : {}) });
   await context.route("**/*", async (route) => {
     const url = new URL(route.request().url());
     if (["about:", "data:", "blob:"].includes(url.protocol) || url.origin === new URL(ready.dashboard_url).origin) return route.continue();
@@ -633,10 +691,11 @@ try {
   page.on("pageerror", (error) => pageErrors.push(redact(error.message)));
   page.on("request", (request) => { const url = new URL(request.url()); if (url.pathname.startsWith("/api/v1/human/")) requests.push({ method: request.method(), path: url.pathname + url.search }); });
   page.on("response", (response) => { const capture = captureResponse(response); capture.catch(() => {}); pendingWires.push(capture); });
-  stage = workersMode ? "login_and_workers" : "login_and_snapshot";
+  stage = quotaMode ? "login_and_quota" : workersMode ? "login_and_workers" : "login_and_snapshot";
   await page.goto(ready.dashboard_url);
   if (egressMode) await runEgressJournal();
   else if (workersMode) await runOwnedWorkers();
+  else if (quotaMode) await runOwnedQuota();
   else await runOwnedSnapshot();
 } catch (error) { failure = { stage, code: redact(error.message), name: error.name }; }
 finally {
@@ -661,7 +720,7 @@ finally {
       closed(receipts, ["version", "tenant_id", "complete", "limit", "records"], "RECEIPTS_SHAPE");
       must(receipts.version === 1 && receipts.tenant_id === (egressMode ? "A" : "B") && receipts.complete === true && receipts.limit === 1000 && Array.isArray(receipts.records) && receipts.records.length <= 1000, "RECEIPTS_INCOMPLETE");
       const byId = new Map();
-      for (const record of receipts.records) { closed(record, ["audit_event_id", "request_id", "action", "received_at"], "RECEIPT_RECORD"); must(["identity", "resources", "events", "event", workerReceiptKind].includes(record.action) && typeof record.audit_event_id === "string" && typeof record.request_id === "string" && typeof record.received_at === "string", "RECEIPT_RECORD_TYPES"); byId.set(record.audit_event_id, record); }
+      for (const record of receipts.records) { closed(record, ["audit_event_id", "request_id", "action", "received_at"], "RECEIPT_RECORD"); must(["identity", "resources", "events", "event", "summary", "quota", workerReceiptKind].includes(record.action) && typeof record.audit_event_id === "string" && typeof record.request_id === "string" && typeof record.received_at === "string", "RECEIPT_RECORD_TYPES"); byId.set(record.audit_event_id, record); }
       must(byId.size === receipts.records.length, "DUPLICATE_DURABLE_RECEIPT_ID");
       await finishWireCaptures(); let compared = 0;
       // Identity has no page receipt. Every 200 on a page or detail endpoint
@@ -681,6 +740,15 @@ finally {
         ]), "EXACT_ONE_WORKER_GET_WITHOUT_STREAM_OR_FEDERATION");
         must(compared === 1 && successfulPages[0].path === `${workersPath}?limit=25` &&
           receipts.records.filter((record) => record.action === workerReceiptKind).length === 1, "EXACT_ONE_DURABLE_WORKER_RECEIPT");
+      }
+      if (quotaMode && !failure) {
+        must(same(requests, [
+          { method: "GET", path: "/api/v1/human/identity" },
+          { method: "GET", path: `${summaryPath}?window=24h` },
+          { method: "GET", path: quotaPath },
+        ]), "EXACT_ONE_QUOTA_GET_WITHOUT_USAGE");
+        must(compared === 1 && successfulPages[0].path === quotaPath &&
+          receipts.records.filter((record) => record.action === "quota").length === 1, "EXACT_ONE_DURABLE_QUOTA_RECEIPT");
       }
       const exit = await bounded(childDone, 15000, "LIBTEST_EXIT_DEADLINE"); must(exit?.code === 0 && exit.signal === null, "LIBTEST_EXIT_NOT_ZERO");
     } catch (error) { cleanupFailure ??= redact(error.message); }
@@ -707,6 +775,7 @@ finally {
 // No source path, bearer, response body or child diagnostic is printed.
 console.log(interrupted ? "browser_owned_snapshot FAIL INTERRUPTED" : !fixtureStarted ? "browser_owned_snapshot BLOCKED NOT_RUN"
   : failure || cleanupFailure ? "browser_owned_snapshot FAIL; private result retained"
+  : quotaMode ? "browser_owned_snapshot PASS scenario=quota"
   : workersMode ? "browser_owned_snapshot PASS scenario=worker_registry"
   : egressMode ? "browser_owned_snapshot PASS scenario=egress_journal" : "browser_owned_snapshot PASS scenarios=3");
 process.exitCode = interrupted ? 1 : !fixtureStarted ? 2 : failure || cleanupFailure ? 1 : 0;
