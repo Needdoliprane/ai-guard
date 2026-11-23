@@ -6,7 +6,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{self, Read, Write},
     os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
@@ -490,7 +490,7 @@ impl Selection {
             cid.len() == 64 && cid.bytes().all(|b| b.is_ascii_hexdigit()),
             "require immutable full CID"
         );
-        self.docker(&["container", "inspect", "--format", r#"{"id":{{json .Id}},"image":{{json .Image}},"status":{{json .State.Status}},"running":{{json .State.Running}},"started_at":{{json .State.StartedAt}},"finished_at":{{json .State.FinishedAt}},"exit_code":{{json .State.ExitCode}},"oom_killed":{{json .State.OOMKilled}},"restarts":{{json .RestartCount}},"network":{{json .HostConfig.NetworkMode}},"privileged":{{json .HostConfig.Privileged}},"bind_count":{{len .HostConfig.Binds}},"mounts":[{{range $i, $m := .Mounts}}{{if $i}},{{end}}{"type":{{json $m.Type}},"name":{{json $m.Name}},"destination":{{json $m.Destination}},"rw":{{json $m.RW}},"driver":{{json $m.Driver}}}{{end}}]}"#, cid]).await
+        self.docker(&["container", "inspect", "--format", r#"{"id":{{json .Id}},"image":{{json .Image}},"status":{{json .State.Status}},"running":{{json .State.Running}},"started_at":{{json .State.StartedAt}},"finished_at":{{json .State.FinishedAt}},"exit_code":{{json .State.ExitCode}},"oom_killed":{{json .State.OOMKilled}},"restarts":{{json .RestartCount}},"network":{{json .HostConfig.NetworkMode}},"privileged":{{json .HostConfig.Privileged}},"bind_count":{{if eq (json .HostConfig.Binds) "null"}}0{{else}}{{len .HostConfig.Binds}}{{end}},"mounts":[{{range $i, $m := .Mounts}}{{if $i}},{{end}}{"type":{{json $m.Type}},"name":{{json $m.Name}},"destination":{{json $m.Destination}},"rw":{{json $m.RW}},"driver":{{json $m.Driver}}}{{end}}]}"#, cid]).await
     }
 }
 
@@ -606,6 +606,9 @@ impl OwnedProcess {
             "owned native process exited; inspect its private bounded stderr"
         );
         Ok(())
+    }
+    pub fn has_exited(&mut self) -> io::Result<bool> {
+        Ok(self.child.try_wait()?.is_some())
     }
     pub fn id(&self) -> u32 {
         self.child.id()
