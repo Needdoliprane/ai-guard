@@ -340,9 +340,9 @@ async fn owned_dashboard_relays_the_delegated_membership_change_and_gateway_rece
         "authorization_revision": "4",
         "audit_seq": "12",
     });
-    let body = serde_json::to_vec(&change).unwrap();
+    let body = format!(" \n{}", serde_json::to_string(&change).unwrap()).into_bytes();
     let expected_body = body.clone();
-    let mut changed = change;
+    let mut changed = change.clone();
     changed["active"] = json!(true);
     let conflicting = serde_json::to_vec(&changed).unwrap();
     let conflicting_body = conflicting.clone();
@@ -412,7 +412,7 @@ async fn owned_dashboard_relays_the_delegated_membership_change_and_gateway_rece
     let request = |target: &str| {
         axum::http::Request::post(target)
             .header("authorization", format!("Bearer {OWNED_PROXY_BEARER}"))
-            .header("content-type", "application/json")
+            .header("content-type", "application/json; charset=utf-8")
     };
     let with_context =
         |target: &str| request(target).header("x-aiguard-context", OWNED_PROXY_CONTEXT);
@@ -501,6 +501,22 @@ async fn owned_dashboard_relays_the_delegated_membership_change_and_gateway_rece
             .await
             .unwrap();
         assert_eq!(response.status(), status);
+        if status == StatusCode::BAD_REQUEST {
+            require_invalid_membership_request(response).await;
+        }
+    }
+    for (content_type, content) in invalid_membership_uploads(&change) {
+        let mut request = with_context(&path);
+        request
+            .headers_mut()
+            .unwrap()
+            .insert("content-type", HeaderValue::from_static(content_type));
+        let response = dashboard
+            .clone()
+            .oneshot(request.body(Body::from(content)).unwrap())
+            .await
+            .unwrap();
+        require_invalid_membership_request(response).await;
     }
     let legacy = dashboard_router_with_human_mode(
         &format!("http://{address}"),

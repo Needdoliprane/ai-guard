@@ -22,6 +22,45 @@ fn change(change: IdentityChangeV1) -> IdentityMutationV1 {
     }
 }
 
+fn invalid_membership_uploads(valid: &Value) -> Vec<(&'static str, Vec<u8>)> {
+    let object = serde_json::to_string(valid).unwrap();
+    let positional = json!([
+        valid["operation_id"],
+        valid["expected_revision"],
+        valid["capabilities"],
+        valid["active"],
+    ]);
+    let duplicate = format!("{{\"active\":true,{}", &object[1..]);
+    let mut unknown_capability = valid.clone();
+    unknown_capability["capabilities"] = json!(["unrecognized"]);
+    let mut duplicate_capability = valid.clone();
+    duplicate_capability["capabilities"] = json!(["read_metadata", "read_metadata"]);
+    vec![
+        ("application/json; charset", object.into_bytes()),
+        ("application/json", serde_json::to_vec(&positional).unwrap()),
+        ("application/json", duplicate.into_bytes()),
+        (
+            "application/json",
+            serde_json::to_vec(&unknown_capability).unwrap(),
+        ),
+        (
+            "application/json",
+            serde_json::to_vec(&duplicate_capability).unwrap(),
+        ),
+    ]
+}
+
+async fn require_invalid_membership_request(response: axum::response::Response) {
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let encoded = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let error: Value = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(error["error"]["code"], "invalid_request");
+    assert_eq!(error["error"]["retry_action"], "reduce_page");
+    assert!(error.get("audit_seq").is_none());
+}
+
 fn seed_event(fixture: &Fixture, tenant: &str, resource: &str, owner: &PrincipalRefV1) -> String {
     let store = fixture.legacy_store(tenant);
     let mut event = Event::new("fixture.owned-journal");

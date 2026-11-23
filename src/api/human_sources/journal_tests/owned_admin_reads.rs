@@ -750,7 +750,7 @@ async fn post(
     let request = axum::http::Request::post(path)
         .header("authorization", format!("Bearer {bearer}"))
         .header("x-aiguard-context", context)
-        .header("content-type", "application/json")
+        .header("content-type", "application/json; charset=utf-8")
         .body(Body::from(serde_json::to_vec(body).unwrap()))
         .unwrap();
     let response = router.clone().oneshot(request).await.unwrap();
@@ -1105,6 +1105,65 @@ async fn owned_membership_post_on_format15_requires_an_admin_and_returns_the_dur
     assert!(audit_positions().is_empty());
 
     let admin_id = admin["id"].as_str().unwrap();
+    let request = |target: &str| {
+        axum::http::Request::post(target)
+            .header("authorization", format!("Bearer {bearer}"))
+            .header("x-aiguard-context", admin_id)
+    };
+    for (content_type, content) in invalid_membership_uploads(&body) {
+        let response = router
+            .clone()
+            .oneshot(
+                request(&path)
+                    .header("content-type", content_type)
+                    .body(Body::from(content))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        require_invalid_membership_request(response).await;
+    }
+    let encoded = serde_json::to_vec(&body).unwrap();
+    let mut oversized = encoded.clone();
+    oversized.resize(4097, b' ');
+    let target_with_query = format!("{path}?limit=1");
+    for invalid in [
+        request(&path)
+            .header("content-type", "application/json")
+            .body(Body::from(oversized))
+            .unwrap(),
+        request(&target_with_query)
+            .header("content-type", "application/json")
+            .body(Body::from(encoded))
+            .unwrap(),
+    ] {
+        let response = router.clone().oneshot(invalid).await.unwrap();
+        require_invalid_membership_request(response).await;
+    }
+
+    let stalled = request(&path)
+        .header("content-type", "application/json")
+        .body(Body::from_stream(futures_util::stream::pending::<
+            Result<axum::body::Bytes, std::io::Error>,
+        >()))
+        .unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(8), router.clone().oneshot(stalled))
+        .await
+        .expect("the authenticated body upload must be bounded")
+        .unwrap();
+    require_invalid_membership_request(response).await;
+    let unauthenticated = axum::http::Request::post(&path)
+        .header("content-type", "application/json")
+        .body(Body::from_stream(futures_util::stream::poll_fn(
+            |_| -> std::task::Poll<Option<Result<axum::body::Bytes, std::io::Error>>> {
+                panic!("unauthenticated membership uploads must not be polled")
+            },
+        )))
+        .unwrap();
+    let response = router.clone().oneshot(unauthenticated).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(audit_positions().is_empty());
+
     let (status, receipt) = post(&router, &bearer, &path, admin_id, &body).await;
     assert_eq!(status, StatusCode::OK, "{receipt}");
     assert_eq!(receipt["operation_id"], operation_id);
