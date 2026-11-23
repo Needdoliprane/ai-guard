@@ -69,10 +69,11 @@ async fn owned_sources_serve_the_summary_memberships_and_configuration() {
         "configuration_read",
         "brokers_read",
         "workers_read",
+        "quota_read",
     ] {
         assert_eq!(availability(operation), "available", "{operation}");
     }
-    for operation in ["federation_read", "quota_read", "usage_read"] {
+    for operation in ["federation_read", "usage_read"] {
         assert_eq!(
             availability(operation),
             "profile_unavailable",
@@ -126,11 +127,11 @@ async fn owned_sources_serve_the_summary_memberships_and_configuration() {
     assert_eq!(value("source_profile"), "owned_sources");
     assert_eq!(value("human_rights_marker"), "installed");
 
-    let (status, _) = get(&router, "/api/v1/human/admin/quota", Some(id)).await;
+    let (status, _) = get(&router, "/api/v1/human/admin/usage", Some(id)).await;
     assert_eq!(
         status,
         StatusCode::SERVICE_UNAVAILABLE,
-        "quota stays unavailable on the owned profile"
+        "usage stays unavailable on the owned profile"
     );
 }
 
@@ -260,6 +261,161 @@ async fn owned_worker_summary_format14_counts_only_durable_worker_facts() {
 #[tokio::test]
 async fn owned_worker_summary_format15_counts_only_durable_worker_facts() {
     owned_worker_summary_on(15).await;
+}
+
+async fn owned_quota_on(format: u32) {
+    use super::owned_workers::{context, provision_reader, read};
+    use crate::{
+        api::human_sources::owned_control_tests::negative::reserve_workload_fixture_worker,
+        control::QuotaPolicyV1,
+    };
+    use rusqlite::OpenFlags;
+    use std::os::unix::fs::PermissionsExt;
+
+    const IDENTITY: &str = "/api/v1/human/identity";
+    const QUOTA: &str = "/api/v1/human/admin/quota";
+    const USAGE: &str = "/api/v1/human/admin/usage";
+    let historical = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap())
+        .unwrap();
+    let mut files = Store::owned_control_fixture_with_legacy_setup_for_test(format, |legacy| {
+        reserve_workload_fixture_worker(legacy);
+        legacy
+            .migrate_human_rights_v2(&historical.path().join("before-rights.sqlite"))
+            .unwrap();
+    });
+    let (bundle, credentials, tokens) = files.take_startup();
+    let reader = provision_reader(&bundle, HumanCapabilityV1::ReadWorkerRegistry);
+    let broker_admin = provision_reader(&bundle, HumanCapabilityV1::ReadBrokerRegistry);
+    let descriptor = bundle
+        .owner
+        .closure()
+        .sources
+        .iter()
+        .find(|descriptor| descriptor.tenant_id.as_deref() == Some("A"))
+        .unwrap();
+    assert_eq!(descriptor.required_format, format);
+    let source = descriptor.storage_binding.path();
+    let policy = QuotaPolicyV1 {
+        version: 1,
+        max_active_workers: 5,
+        max_cpu_millis: 7000,
+        max_memory_bytes: 4 * 1024 * 1024 * 1024,
+        max_timeout_seconds: 7200,
+    };
+    let state = GatewayState::for_owned_human_sources(
+        bundle,
+        credentials,
+        tokens,
+        Policy::default(),
+        None,
+        Redactor::new(vec![]),
+    )
+    .unwrap()
+    .with_worker_quotas(vec![("A".into(), policy)])
+    .unwrap();
+    let router = gateway_router(state);
+    let (status, identity) = read(&router, &reader, IDENTITY, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let admin = context(&identity, "administration");
+    let operations = admin["operations"].as_array().unwrap();
+    let operation = |name: &str| {
+        operations
+            .iter()
+            .find(|entry| entry["operation"] == name)
+            .unwrap()
+    };
+    assert_eq!(operation("quota_read")["permission"], "granted");
+    assert_eq!(operation("quota_read")["availability"], "available");
+    assert_eq!(
+        operation("usage_read")["availability"],
+        "profile_unavailable"
+    );
+
+    let (status, body) = read(&router, &reader, QUOTA, Some(admin)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["context_id"], admin["id"]);
+    assert_eq!(
+        body["authorization_version"],
+        admin["authorization_version"]
+    );
+    let quota: HumanQuotaV1 = serde_json::from_value(body).unwrap();
+    assert_eq!(quota.version, 1);
+    assert_eq!(quota.source, "tenant_worker_reservations");
+    assert_eq!(quota.max_timeout_seconds, "7200");
+    assert_eq!(quota.quota.max_active_workers, "5");
+    assert_eq!(quota.quota.max_cpu_millis, "7000");
+    assert_eq!(quota.quota.max_memory_bytes, "4294967296");
+    assert_eq!(quota.quota.held_workers, "1");
+    assert_eq!(quota.quota.held_cpu_millis, "2000");
+    assert_eq!(quota.quota.held_memory_bytes, "1073741824");
+
+    let database = rusqlite::Connection::open_with_flags(
+        &source,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    let receipt = &quota.read_receipt;
+    let (payload, received_at): (String, String) = database
+        .query_row(
+            "SELECT payload,received_at FROM events WHERE kind='control.identity.access' AND id=?1",
+            [&receipt.audit_event_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let audited: Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(audited["data"]["action"], "quota");
+    assert_eq!(audited["data"]["mode"], "administration");
+    assert_eq!(audited["data"]["principal"], identity["principal"]);
+    assert_eq!(audited["data"]["request_id"], receipt.request_id);
+    assert_eq!(audited["data"]["result_count"], 1);
+    assert_eq!(received_at, receipt.received_at);
+
+    let (status, broker_identity) = read(&router, &broker_admin, IDENTITY, None).await;
+    assert_eq!(status, StatusCode::OK);
+    for (bearer, selected) in [
+        (&reader, context(&identity, "personal")),
+        (&broker_admin, context(&broker_identity, "administration")),
+    ] {
+        let (status, refused) = read(&router, bearer, QUOTA, Some(selected)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(refused["error"]["code"], "permission_denied");
+        assert!(refused.get("quota").is_none() && refused.get("read_receipt").is_none());
+    }
+    let (status, _) = read(&router, &reader, USAGE, Some(admin)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+
+    if format == 14 {
+        let held = rusqlite::Connection::open_with_flags(
+            &source,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        held.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let (status, unavailable) = read(&router, &reader, QUOTA, Some(admin)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(unavailable.get("quota").is_none() && unavailable.get("read_receipt").is_none());
+        held.execute_batch("ROLLBACK").unwrap();
+    }
+    let count: i64 = database
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE kind='control.identity.access' AND json_extract(payload,'$.data.action') IN ('quota','usage')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1, "only the successful quota read leaves a receipt");
+}
+
+#[tokio::test]
+async fn owned_quota_format14_reports_configured_limits_and_durable_reservations() {
+    owned_quota_on(14).await;
+}
+
+#[tokio::test]
+async fn owned_quota_format15_reports_configured_limits_and_durable_reservations() {
+    owned_quota_on(15).await;
 }
 
 async fn post(router: &Router, path: &str, context: &str, body: &Value) -> (StatusCode, Value) {

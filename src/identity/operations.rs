@@ -401,7 +401,6 @@ mod tests {
         );
         for operation in [
             HumanOperationV1::FederationRead,
-            HumanOperationV1::QuotaRead,
             HumanOperationV1::UsageRead,
         ] {
             assert_eq!(
@@ -415,6 +414,7 @@ mod tests {
             HumanOperationV1::WorkersRead,
             HumanOperationV1::SummaryRead,
             HumanOperationV1::MembershipsRead,
+            HumanOperationV1::QuotaRead,
         ] {
             assert_eq!(
                 entry(&owned, operation).availability,

@@ -582,7 +582,7 @@ async fn owned_admin_reads_refuse_head_before_authentication() {
         ),
         ("/api/v1/human/admin/grants", StatusCode::UNAUTHORIZED),
         ("/api/v1/human/admin/memberships", StatusCode::UNAUTHORIZED),
-        ("/api/v1/human/admin/quota", StatusCode::SERVICE_UNAVAILABLE),
+        ("/api/v1/human/admin/quota", StatusCode::UNAUTHORIZED),
         ("/api/v1/human/admin/usage", StatusCode::SERVICE_UNAVAILABLE),
     ] {
         // No bearer: adopted GETs reach the extractor, while HEAD is
