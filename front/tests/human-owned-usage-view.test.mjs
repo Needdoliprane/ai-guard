@@ -5,21 +5,22 @@ import { UsageView } from "../src/admin-views.ts";
 import { HumanApiClient } from "../src/human-api.ts";
 import { formatDate } from "../src/model.ts";
 import { quotaBody, usagePage } from "./admin-fixtures.mjs";
-import { catalogue, context, errorResponse, identity, uuid } from "./human-fixtures.mjs";
+import { catalogue, context, errorResponse, identity, secondUuid, uuid } from "./human-fixtures.mjs";
 import { ownedReadProfiles } from "./owned-brokers-fixture.mjs";
 
 // Only the node operations used by UsageView. No browser or network is started.
-class Element {
+class Element extends EventTarget {
+  #attributes = new Map();
   className = "";
   dataset = {};
   children = [];
-  constructor(tag, text = "") { this.tag = tag; this.text = text; }
+  constructor(tag, text = "") { super(); this.tag = tag; this.text = text; }
   get textContent() { return this.text + this.children.map((node) => node.textContent).join(""); }
   set textContent(text) { this.text = text; this.children = []; }
   append(...nodes) { this.children.push(...nodes.map((node) => typeof node === "string" ? new Element("#text", node) : node)); }
   replaceChildren(...nodes) { this.children = []; this.append(...nodes); }
-  setAttribute() {}
-  addEventListener() {}
+  setAttribute(name, value) { this.#attributes.set(name, value); }
+  getAttribute(name) { return this.#attributes.get(name) ?? null; }
 }
 
 const adminId = "c".repeat(64);
@@ -41,7 +42,7 @@ async function mount(t, replies, { owned = true, usageAccess = () => served } = 
     t.after(() => original ? Object.defineProperty(globalThis, name, original) : Reflect.deleteProperty(globalThis, name));
   }
   const calls = [];
-  let doubts = 0;
+  const doubts = [];
   let view;
   const api = new HumanApiClient("synthetic-admin-token", {
     onAuthentication: () => view.close(),
@@ -61,8 +62,9 @@ async function mount(t, replies, { owned = true, usageAccess = () => served } = 
   await api.identity();
   view = new UsageView({ context: api.selectContext(adminId), owned: api.readProfiles !== undefined,
     quota: (signal) => api.quota(signal), usage: (cursor, signal) => api.usage(cursor, signal),
-    budgetStopped: () => api.readBudgetStopped, onReadStateChange: () => {}, onAccessDoubt: () => { doubts++; } });
-  return { view, api, calls, doubts: () => doubts };
+    budgetStopped: () => api.readBudgetStopped, onReadStateChange: () => {},
+    onAccessDoubt: () => doubts.push({ state: view.element.dataset.state, panels: panels(view).length }) });
+  return { view, api, calls, doubts };
 }
 
 const paths = (calls) => calls.map(({ path }) => path);
@@ -121,23 +123,63 @@ test("owned : le quota arrêté par le budget suspend l’usage sans afficher de
   assert.doesNotMatch(view.element.textContent, /Aucune allocation|workers réservés|reçu de lecture/);
 });
 
-for (const [path, status] of [[quotaPath, 403], [usagePath, 403], [usagePath, 401]]) {
-  test(`owned : HTTP ${status} sur ${path === quotaPath ? "le quota" : "l’usage"} retire les deux lectures`, async (t) => {
+test("owned : un 429 temporaire du quota laisse lire l’usage autorisé", async (t) => {
+  const { view, api, calls } = await mount(t, {
+    [quotaPath]: () => errorResponse(429, "capacity_exhausted"),
+    [usagePath]: () => Response.json(initialUsage),
+  });
+  await view.refresh();
+  assert.equal(api.readBudgetStopped, false);
+  assert.deepEqual(paths(calls), [quotaPath, usagePath]);
+  assert.equal(view.element.dataset.state, "partial");
+  const [quota, usage] = panels(view);
+  assert.equal(quota.dataset.state, "error");
+  assert.equal(usage.dataset.state, "ready");
+  assertStamp(usage, initialUsage);
+});
+
+for (const path of [quotaPath, usagePath]) {
+  test(`owned : les en-têtes 403 sur ${path === quotaPath ? "le quota" : "l’usage"} retirent les valeurs avant de relire les accès`, async (t) => {
     const replies = { [quotaPath]: () => Response.json(initialQuota), [usagePath]: () => Response.json(initialUsage) };
     const { view, calls, doubts } = await mount(t, replies);
     await view.refresh();
     calls.length = 0;
-    replies[path] = () => errorResponse(status, status === 401 ? "authentication_required" : "permission_denied");
-    await view.refresh();
-    assert.deepEqual(paths(calls), path === quotaPath ? [quotaPath] : [quotaPath, usagePath]);
-    if (status === 401) assert.equal(view.element.children.length, 0);
-    else {
+    const cancellation = Promise.withResolvers();
+    let controller;
+    let pulled = false;
+    let cancelled = false;
+    replies[path] = () => new Response(new ReadableStream({
+      start(stream) { controller = stream; },
+      pull() { pulled = true; },
+      cancel() { cancelled = true; return cancellation.promise; },
+    }, { highWaterMark: 0 }), { status: 403 });
+    const pending = view.refresh();
+    try {
+      await new Promise((resolve) => setImmediate(resolve));
       assert.equal(view.element.dataset.state, "refused");
       assert.equal(panels(view).length, 0);
-      assert.equal(doubts(), 1);
+      assert.deepEqual(doubts, [{ state: "refused", panels: 0 }]);
+      assert.equal(pulled, false);
+      assert.equal(cancelled, true);
+      assert.deepEqual(paths(calls), path === quotaPath ? [quotaPath] : [quotaPath, usagePath]);
+    } finally {
+      if (!cancelled) controller?.close();
+      cancellation.resolve();
+      await pending;
     }
   });
 }
+
+test("owned : un HTTP 401 sur l’usage retire les deux lectures", async (t) => {
+  const replies = { [quotaPath]: () => Response.json(initialQuota), [usagePath]: () => Response.json(initialUsage) };
+  const { view, calls } = await mount(t, replies);
+  await view.refresh();
+  calls.length = 0;
+  replies[usagePath] = () => errorResponse(401, "authentication_required");
+  await view.refresh();
+  assert.deepEqual(paths(calls), [quotaPath, usagePath]);
+  assert.equal(view.element.children.length, 0);
+});
 
 test("owned : retirer le droit d’usage annule le quota en cours et écarte sa réponse tardive", async (t) => {
   let access = served;
@@ -160,15 +202,25 @@ test("owned : retirer le droit d’usage annule le quota en cours et écarte sa 
   assert.deepEqual(paths(calls), [quotaPath]);
 });
 
-test("owned : une requête de quota annulée efface les lectures précédentes", async (t) => {
+test("owned : une requête de quota annulée efface les lectures et permet de reprendre dans le contexte actif", async (t) => {
   const replies = { [quotaPath]: () => Response.json(initialQuota), [usagePath]: () => Response.json(initialUsage) };
-  const { view, calls } = await mount(t, replies);
+  const { view, api, calls } = await mount(t, replies);
   await view.refresh();
   calls.length = 0;
   replies[quotaPath] = () => { throw new DOMException("Lecture annulée.", "AbortError"); };
   await view.refresh();
-  assert.equal(view.element.children.length, 0);
+  assert.equal(view.element.dataset.state, "error");
+  assert.equal(panels(view).length, 0);
+  assert.match(view.element.textContent, /Lecture annulée/);
+  assert.equal(api.context?.id, adminId);
   assert.deepEqual(paths(calls), [quotaPath]);
+
+  const nextQuota = quotaBody(adminId, stamp(5));
+  replies[quotaPath] = () => Response.json(nextQuota);
+  await view.refresh();
+  assert.equal(view.element.dataset.state, "ready");
+  assert.deepEqual(paths(calls), [quotaPath, quotaPath, usagePath]);
+  assertStamp(panels(view)[0], nextQuota);
 });
 
 test("owned : quota seul conserve un reçu unique et explique l’absence d’usage", async (t) => {
@@ -181,6 +233,68 @@ test("owned : quota seul conserve un reçu unique et explique l’absence d’us
   assert.match(panels(view)[1].textContent, /profil de sources/);
 });
 
+test("owned : une durée sous la seconde diffère d’un zéro observé et une page vide signale la durée inconnue", async (t) => {
+  const allocation = {
+    worker_id: uuid, started_at: "2026-11-21T11:00:00Z", method_version: 1, billable: false,
+    source: { authority_id: "authority-a", runtime_kind: "docker", container_id: "container-1", spec_hash: "f".repeat(64), provenance: "observed" },
+  };
+  const items = [
+    { ...allocation, attempt_id: uuid, terminal_observation_id: "observation-short", finished_at: "2026-11-21T11:00:00.5Z",
+      duration_ns: "500000000", cpu_millicore_nanoseconds: "500000000000", memory_byte_nanoseconds: "512000000000" },
+    { ...allocation, attempt_id: secondUuid, terminal_observation_id: "observation-zero", finished_at: allocation.started_at,
+      duration_ns: "0", cpu_millicore_nanoseconds: "0", memory_byte_nanoseconds: "0" },
+  ];
+  const replies = { [quotaPath]: () => Response.json(initialQuota), [usagePath]: () => Response.json({ ...initialUsage, items }) };
+  const { view } = await mount(t, replies);
+  await view.refresh();
+  const table = panels(view)[1].children.find((child) => child.className === "ov-scroll").children[0];
+  const [short, zero] = table.children.find((child) => child.tag === "tbody").children.map((row) => row.children[2]);
+  assert.equal(short.children[0].textContent, "< 1 s");
+  assert.equal(short.children[0].getAttribute("aria-hidden"), "true");
+  assert.equal(short.children.find((child) => child.className === "sr-only").textContent, "Moins d’une seconde, 500\u202f000\u202f000 ns.");
+  assert.equal(zero.textContent, "0 s");
+
+  replies[usagePath] = () => Response.json(initialUsage);
+  await view.refresh();
+  assert.match(panels(view)[1].textContent, /durée reste inconnue en l’absence d’une observation terminale complète/);
+});
+
+test("owned : Allocations suivantes attend la fin de l’actualisation avant de changer de page", async (t) => {
+  const cursor = "ab".repeat(16);
+  const nextPath = adminUrls.usage(cursor);
+  const nextUsage = usagePage(adminId, stamp(6));
+  const replies = {
+    [quotaPath]: () => Response.json(initialQuota),
+    [usagePath]: () => Response.json({ ...initialUsage, has_more: true, next_cursor: cursor }),
+    [nextPath]: () => Response.json(nextUsage),
+  };
+  const { view, calls } = await mount(t, replies);
+  const nextButton = () => panels(view)[1].children.find((child) => child.tag === "button" && child.textContent === "Allocations suivantes");
+  await view.refresh();
+  calls.length = 0;
+  const held = Promise.withResolvers();
+  replies[quotaPath] = () => held.promise;
+  const pending = view.refresh();
+  try {
+    const next = nextButton();
+    assert.equal(next.disabled, true);
+    next.dispatchEvent(new Event("click"));
+  } finally {
+    replies[quotaPath] = () => Response.json(initialQuota);
+    held.resolve(Response.json(initialQuota));
+  }
+  await pending;
+  await view.refresh();
+  assert.deepEqual(paths(calls), [quotaPath, usagePath, quotaPath, usagePath]);
+
+  const next = nextButton();
+  assert.equal(next.disabled, false);
+  next.dispatchEvent(new Event("click"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(paths(calls).slice(-2), [quotaPath, nextPath]);
+  assertStamp(panels(view)[1], nextUsage);
+});
+
 test("Legacy conserve ses deux lectures parallèles", async (t) => {
   const held = Promise.withResolvers();
   const { view, calls } = await mount(t, { [quotaPath]: () => held.promise, [usagePath]: () => Response.json(initialUsage) }, { owned: false });
@@ -190,4 +304,10 @@ test("Legacy conserve ses deux lectures parallèles", async (t) => {
   await pending;
   assert.equal(view.element.dataset.state, "ready");
   assertStamp(view.element.children.find((child) => child.className === "ov-status"), initialUsage);
+});
+
+test("Legacy conserve le motif structuré d’un refus sur le quota", async (t) => {
+  const { api } = await mount(t, { [quotaPath]: () => errorResponse(403, "context_revoked", "select_context") }, { owned: false });
+  await assert.rejects(api.quota(), { status: 403, code: "context_revoked" });
+  assert.equal(api.context, null);
 });
