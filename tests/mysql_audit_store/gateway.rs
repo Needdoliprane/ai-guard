@@ -1,6 +1,8 @@
 //! The real gateway process on a prepared MySQL target: startup refusals, the
 //! application path of SQL-06 over HTTP, and the control guard of the append.
 //! The external fixture prepares disposable schemas, as for the Store tests.
+mod outage;
+
 use super::super::SECRET;
 use super::*;
 use agentsandbox::{
