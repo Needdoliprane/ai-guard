@@ -4,13 +4,31 @@ use crate::api::read_execution_tests::{identity_change, local_identity_state};
 use axum::{body::to_bytes, http::Request};
 use tower::ServiceExt;
 
-struct ResumeOnDrop(Option<std::sync::mpsc::SyncSender<()>>);
+pub(in crate::api) struct ResumeOnDrop(Option<std::sync::mpsc::SyncSender<()>>);
 impl Drop for ResumeOnDrop {
     fn drop(&mut self) {
         if let Some(sender) = self.0.take() {
             let _ = sender.send(());
         }
     }
+}
+
+pub(in crate::api) fn install_registry_publication_pause(
+    state: &GatewayState,
+) -> (std::sync::mpsc::Receiver<()>, ResumeOnDrop) {
+    let (reached, receive) = std::sync::mpsc::sync_channel(1);
+    let (resume, wait) = std::sync::mpsc::sync_channel(1);
+    let previous = state
+        .human
+        .broker_publication_pause
+        .lock()
+        .unwrap()
+        .replace(BrokerPublicationPause {
+            reached,
+            resume: wait,
+        });
+    assert!(previous.is_none());
+    (receive, ResumeOnDrop(Some(resume)))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -82,13 +100,7 @@ async fn broker_membership_revoked_after_durable_read_is_rechecked_before_public
         .as_str()
         .unwrap()
         .to_owned();
-    let (reached, receive) = std::sync::mpsc::sync_channel(1);
-    let (resume, wait) = std::sync::mpsc::sync_channel(1);
-    *state.human.broker_publication_pause.lock().unwrap() = Some(BrokerPublicationPause {
-        reached,
-        resume: wait,
-    });
-    let mut release = ResumeOnDrop(Some(resume));
+    let (receive, mut release) = install_registry_publication_pause(&state);
     let before = store.head().unwrap();
     let request = Request::get("/api/v1/human/brokers")
         .header("authorization", format!("Bearer {token}"))
@@ -225,13 +237,7 @@ async fn worker_membership_revoked_after_durable_read_is_rechecked_before_public
         .as_str()
         .unwrap()
         .to_owned();
-    let (reached, receive) = std::sync::mpsc::sync_channel(1);
-    let (resume, wait) = std::sync::mpsc::sync_channel(1);
-    *state.human.broker_publication_pause.lock().unwrap() = Some(BrokerPublicationPause {
-        reached,
-        resume: wait,
-    });
-    let mut release = ResumeOnDrop(Some(resume));
+    let (receive, mut release) = install_registry_publication_pause(&state);
     let before = store.head().unwrap();
     let request = Request::get("/api/v1/human/workers")
         .header("authorization", format!("Bearer {token}"))

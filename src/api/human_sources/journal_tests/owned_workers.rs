@@ -107,12 +107,12 @@ fn context<'a>(identity: &'a Value, mode: &str) -> &'a Value {
         .expect("the gateway offers the expected fixture context")
 }
 
-async fn owned_workers_on(format: u32) {
-    let mut worker = None;
+async fn owned_workers_on(format: u32, worker_count: usize) {
+    let mut workers = Vec::new();
     let mut fixture = Store::owned_control_fixture_with_legacy_setup_for_test(format, |legacy| {
-        worker = Some(reserve_workload_fixture_worker(legacy));
+        workers.extend((0..worker_count).map(|_| reserve_workload_fixture_worker(legacy)));
     });
-    let worker = worker.unwrap();
+    workers.sort_unstable_by(|left, right| left.worker_id.cmp(&right.worker_id));
     let (bundle, credentials, tokens) = fixture.take_startup();
     let reader = provision_reader(&bundle, HumanCapabilityV1::ReadWorkerRegistry);
     let other_admin = provision_reader(&bundle, HumanCapabilityV1::ReadConfiguration);
@@ -134,12 +134,10 @@ async fn owned_workers_on(format: u32) {
         Redactor::new(vec![]),
     )
     .unwrap();
-    let router = gateway_router(state);
+    let router = gateway_router(state.clone());
     let (status, identity) = read(&router, &reader, "/api/v1/human/identity", None).await;
     assert_eq!(status, StatusCode::OK);
     let admin = context(&identity, "administration");
-    let (status, body) = read(&router, &reader, WORKERS, Some(admin)).await;
-    assert_eq!(status, StatusCode::OK);
     assert_eq!(
         identity["read_profiles"]["worker_registry"],
         "human_worker_registry_owned_v1"
@@ -160,45 +158,59 @@ async fn owned_workers_on(format: u32) {
         .find(|entry| entry["operation"] == "federation_read")
         .unwrap();
     assert_eq!(federation["availability"], "profile_unavailable");
-    assert_eq!(body["context_id"], admin["id"]);
-    assert_eq!(
-        body["authorization_version"],
-        admin["authorization_version"]
-    );
-    let page: HumanWorkerRegistryPageV1 = serde_json::from_value(body).unwrap();
-    assert_eq!(page.source, "tenant_worker_broker_registry");
-    assert_eq!(page.consistency, "snapshot_per_page");
-    assert_eq!(page.runtime_inventory, "unknown");
-    assert_eq!(page.items.len(), 1);
-    assert!(!page.has_more);
-    assert!(page.next_cursor.is_none());
-    let item = &page.items[0];
-    assert_eq!(item.worker_id, worker.worker_id);
-    assert_eq!(item.attempt_id, worker.attempt.attempt_id);
-    assert_eq!(item.session_id, worker.launch.session_id);
-    assert_eq!(item.session_provenance, "declared");
-    assert_eq!(item.state, crate::control::WorkerStateV1::Reserved);
-    assert!(item.quota_held && item.last_observation.is_none());
 
     let database = rusqlite::Connection::open_with_flags(
         source,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .unwrap();
-    let receipt = &page.read_receipt;
-    let (payload, received_at): (String, String) = database
-        .query_row(
-            "SELECT payload,received_at FROM events WHERE kind=?1 AND id=?2",
-            rusqlite::params![RECEIPT_KIND, receipt.audit_event_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    let audited: Value = serde_json::from_str(&payload).unwrap();
-    assert_eq!(audited["data"]["principal"], identity["principal"]);
-    assert_eq!(audited["data"]["mode"], "administration");
-    assert_eq!(audited["data"]["request_id"], receipt.request_id);
-    assert_eq!(audited["data"]["result_count"], 1);
-    assert_eq!(received_at, receipt.received_at);
+    let mut path = WORKERS.to_owned();
+    let mut previous_receipt_seq = 0;
+    for (index, worker) in workers.iter().enumerate() {
+        let (status, body) = read(&router, &reader, &path, Some(admin)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["context_id"], admin["id"]);
+        assert_eq!(
+            body["authorization_version"],
+            admin["authorization_version"]
+        );
+        let page: HumanWorkerRegistryPageV1 = serde_json::from_value(body).unwrap();
+        assert_eq!(page.source, "tenant_worker_broker_registry");
+        assert_eq!(page.consistency, "snapshot_per_page");
+        assert_eq!(page.runtime_inventory, "unknown");
+        assert_eq!(page.items.len(), 1);
+        let item = &page.items[0];
+        assert_eq!(item.worker_id, worker.worker_id);
+        assert_eq!(item.attempt_id, worker.attempt.attempt_id);
+        assert_eq!(item.session_id, worker.launch.session_id);
+        assert_eq!(item.session_provenance, "declared");
+        assert_eq!(item.state, crate::control::WorkerStateV1::Reserved);
+        assert!(item.quota_held && item.last_observation.is_none());
+
+        let receipt = &page.read_receipt;
+        let (seq, payload, received_at): (i64, String, String) = database
+            .query_row(
+                "SELECT seq,payload,received_at FROM events WHERE kind=?1 AND id=?2",
+                rusqlite::params![RECEIPT_KIND, receipt.audit_event_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let audited: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(audited["data"]["principal"], identity["principal"]);
+        assert_eq!(audited["data"]["mode"], "administration");
+        assert_eq!(audited["data"]["request_id"], receipt.request_id);
+        assert_eq!(audited["data"]["result_count"], 1);
+        assert_eq!(received_at, receipt.received_at);
+        assert!(seq > previous_receipt_seq, "each page has its own receipt");
+        previous_receipt_seq = seq;
+
+        assert_eq!(page.has_more, index + 1 < workers.len());
+        if page.has_more {
+            path = format!("{WORKERS}&cursor={}", page.next_cursor.as_deref().unwrap());
+        } else {
+            assert!(page.next_cursor.is_none());
+        }
+    }
 
     let (status, other_identity) =
         read(&router, &other_admin, "/api/v1/human/identity", None).await;
@@ -220,15 +232,106 @@ async fn owned_workers_on(format: u32) {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(count, 1, "refused reads must not append a receipt");
+    assert_eq!(
+        count,
+        i64::try_from(worker_count).unwrap(),
+        "refused reads must not append a receipt"
+    );
+    if format == 14 {
+        worker_credential_revoked_after_read_refuses_publication(
+            &state,
+            router,
+            &database,
+            reader,
+            admin.clone(),
+            previous_receipt_seq,
+        )
+        .await;
+    }
 }
 
-#[tokio::test]
+async fn worker_credential_revoked_after_read_refuses_publication(
+    state: &GatewayState,
+    router: Router,
+    database: &rusqlite::Connection,
+    bearer: String,
+    context: Value,
+    previous_receipt_seq: i64,
+) {
+    let digest: [u8; 32] = Sha256::digest(bearer.as_bytes()).into();
+    let (reached, release) = human::install_registry_publication_pause(state);
+    let pending =
+        tokio::spawn(async move { read(&router, &bearer, WORKERS, Some(&context)).await });
+    tokio::task::spawn_blocking(move || reached.recv_timeout(Duration::from_secs(5)))
+        .await
+        .unwrap()
+        .unwrap();
+    let (audit_id, payload): (String, String) = database
+        .query_row(
+            "SELECT id,payload FROM events WHERE kind=?1 AND seq>?2",
+            rusqlite::params![RECEIPT_KIND, previous_receipt_seq],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("the registry barrier follows a durable receipt");
+    let audited: Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(audited["data"]["result_count"], 1);
+
+    let owned = state.owned_human.as_ref().unwrap();
+    let index = state
+        .tenants
+        .iter()
+        .position(|tenant| tenant.tenant_id == "A")
+        .unwrap();
+    let source = &owned.sources[index];
+    let store = state.tenants[index].store.sqlite().unwrap();
+    let epoch = owned.owner.try_write_epoch().unwrap();
+    let access = HumanSourceAccess::write(&epoch, source).unwrap();
+    let mut binding = store
+        .local_credential_binding_scoped(&access, &digest)
+        .unwrap()
+        .unwrap();
+    let expected_revision = binding.revision;
+    binding.revision += 1;
+    binding.active = false;
+    store
+        .mutate_identity_scoped(
+            &epoch,
+            source,
+            &change(IdentityChangeV1::Credential {
+                expected_revision,
+                binding,
+            }),
+        )
+        .unwrap();
+    drop(epoch);
+    drop(release);
+
+    let (status, body) = tokio::time::timeout(Duration::from_secs(5), pending)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "identity_unavailable");
+    assert_eq!(body["error"]["retry_action"], "contact_operator");
+    assert!(body.get("items").is_none());
+    assert!(body.get("read_receipt").is_none());
+    assert!(body.get("next_cursor").is_none());
+    let retained: String = database
+        .query_row(
+            "SELECT payload FROM events WHERE id=?1",
+            [&audit_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(retained, payload, "the committed read stays in the audit");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn owned_workers_format14_returns_registered_metadata_and_durable_receipt() {
-    owned_workers_on(14).await;
+    owned_workers_on(14, 2).await;
 }
 
 #[tokio::test]
 async fn owned_workers_format15_returns_registered_metadata_and_durable_receipt() {
-    owned_workers_on(15).await;
+    owned_workers_on(15, 1).await;
 }
