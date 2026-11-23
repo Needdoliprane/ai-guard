@@ -1255,13 +1255,21 @@ function retentionCardNote(): HTMLElement | null {
   return archived ? el("p", "support-footnote", archived) : null;
 }
 
+function eventFocusTarget(slot: HTMLElement, seq: string): HTMLElement | null {
+  return slot.querySelector<HTMLButtonElement>(`button[data-event-seq="${CSS.escape(seq)}"]`)
+    ?? page.querySelector("h1");
+}
+
 function renderEvents() {
   if (!eventSlot || !historyNotice) return;
   const active = document.activeElement;
-  const focusedHistory = active instanceof HTMLElement && eventSlot.contains(active)
-    ? active.dataset.historyFocus
+  const focus = active instanceof HTMLElement && eventSlot.contains(active)
+    ? active.dataset
     : undefined;
+  const focusedSeq = focus?.eventSeq;
+  const focusedHistory = focus?.historyFocus;
   const wasLoadingHistory = focusedHistory === "more" && active?.getAttribute("aria-disabled") === "true";
+  const scrollLeft = eventSlot.querySelector<HTMLElement>(".table-scroll")?.scrollLeft ?? 0;
   const partialError = historyError ? `Historique incomplet. ${historyError}` : "";
   historyNotice.hidden = !partialError;
   if (historyNotice.textContent !== partialError) historyNotice.textContent = partialError;
@@ -1275,6 +1283,7 @@ function renderEvents() {
       ),
     );
     eventSlot.setAttribute("aria-busy", "false");
+    if (focusedSeq) eventFocusTarget(eventSlot, focusedSeq)?.focus({ preventScroll: true });
     return;
   }
   const visible = projectEvents(
@@ -1337,6 +1346,7 @@ function renderEvents() {
         "chevron",
       );
       detailButton.setAttribute("aria-label", `Voir l’événement ${event.seq}`);
+      detailButton.dataset.eventSeq = String(event.seq);
       const kind = el("span", "event-kind", event.kind);
       kind.title = event.kind;
       const summary = el(
@@ -1386,7 +1396,9 @@ function renderEvents() {
       );
     }
     table.append(body);
-    eventSlot.replaceChildren(el("div", "table-scroll", table));
+    const scroller = el("div", "table-scroll", table);
+    eventSlot.replaceChildren(scroller);
+    scroller.scrollLeft = scrollLeft;
   }
   // The live journal ends at the archived prefix: say so, never imply less activity.
   const archived = retentionNotice(parseRetentionLedger(integrity?.retention));
@@ -1427,6 +1439,7 @@ function renderEvents() {
     );
   eventSlot.append(footer);
   eventSlot.setAttribute("aria-busy", String(loadingEvents));
+  if (focusedSeq) eventFocusTarget(eventSlot, focusedSeq)?.focus({ preventScroll: true });
   if (focusedHistory) {
     const target = focusedHistory === "more" ? more ?? summary : summary;
     const keepVisible = !loadingEvents && (wasLoadingHistory || (focusedHistory === "more" && !more));
@@ -1819,6 +1832,7 @@ function renderSandboxes() {
 function openDialog(
   title: string,
   eyebrow: string,
+  resolveTrigger?: () => HTMLElement | null,
 ): { dialog: HTMLDialogElement; body: HTMLElement } {
   const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   dialog?.remove();
@@ -1842,9 +1856,10 @@ function openDialog(
   const currentDialog = dialog;
   document.body.append(currentDialog);
   currentDialog.addEventListener("close", () => {
-    if (document.querySelector("dialog[open]") || !client) return;
+    if (dialog !== currentDialog || document.querySelector("dialog[open]") || !client) return;
+    const target = resolveTrigger ? resolveTrigger() : trigger;
     const fallback = document.querySelector<HTMLElement>("#main-content h1");
-    (trigger?.isConnected ? trigger : fallback)?.focus({ preventScroll: true });
+    (target?.isConnected ? target : fallback)?.focus({ preventScroll: true });
   }, { once: true });
   currentDialog.addEventListener("click", (event) => {
     if (event.target === currentDialog) {
@@ -2258,7 +2273,11 @@ function decisionEvaluationContent(event: AuditEvent) {
 
 function showEvent(event: AuditEvent) {
   const failure = brokerFailureDetails(event);
-  const { body } = openDialog(event.kind, `ÉVÉNEMENT #${event.seq}`);
+  const slot = eventSlot;
+  const seq = String(event.seq);
+  const { body } = openDialog(event.kind, `ÉVÉNEMENT #${seq}`, () =>
+    slot?.isConnected && slot === eventSlot ? eventFocusTarget(slot, seq) : null,
+  );
   const tabs = el("div", "detail-tabs");
   tabs.setAttribute("role", "tablist");
   tabs.setAttribute("aria-label", "Détails de l’événement");
