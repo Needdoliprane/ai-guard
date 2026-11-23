@@ -29,13 +29,15 @@ let brokerDisplay = "standard"; let credentialExpiresAt = null;
 let workerDenied = false; let identityDenied = false;
 let federationHeaders403 = false; let identityHeaders403 = false;
 let ownedProfile = true; let ownedHeaders403 = false;
-const membershipCursor = "memberships-next";
+const membershipContextId = "c".repeat(64);
+const membershipCursor = "d".repeat(64);
 let failNextMembershipRead = true;
 const unfinishedRefusals = [];
 const humanIdentity = () => {
   const value = scenario.startsWith("federation") ? federationIdentity() : scenario === "workers" ? workerIdentity() : scenario.startsWith("brokers") ? brokerIdentity(scenario === "brokers-mixed") : identity();
   if (scenario === "memberships-pagination") {
     const admin = value.contexts.find((context) => context.mode === "administration");
+    admin.id = membershipContextId;
     admin.capabilities.push("read_memberships");
     admin.operations = admin.operations.map((entry) => entry.operation === "memberships_read" ?
       { ...entry, permission: "granted", scope: "organization", availability: "available" } : entry);
@@ -100,7 +102,7 @@ const server = createServer(async (request, response) => {
     if (!humanIdentity().contexts.some((context) => context.id === contextId)) return error(response, 403, "context_invalid", "select_context");
     if (budgetExhausted) return error(response, 429, "audit_read_budget_exhausted", "contact_operator");
     if (scenario === "memberships-pagination" && url.pathname === "/api/v1/human/admin/memberships") {
-      if (contextId !== "context-admin") return error(response, 403, "permission_denied", "review_permissions");
+      if (contextId !== membershipContextId) return error(response, 403, "permission_denied", "review_permissions");
       const cursor = url.searchParams.get("cursor");
       if (cursor === null) return json(response, membershipPage(contextId, {
         items: [membership({ display_name: "Première appartenance" })], has_more: true, next_cursor: membershipCursor,
@@ -725,7 +727,7 @@ const runRegression = async () => {
     const reads = requests.filter(({ path }) => path.startsWith("/api/v1/human/admin/memberships?"));
     assert.deepEqual(reads.map(({ path }) => new URL(path, "http://localhost").searchParams.get("cursor")),
       [null, membershipCursor, membershipCursor, null]);
-    assert.ok(reads.every(({ method, context, authorized }) => method === "GET" && context === "context-admin" && authorized));
+    assert.ok(reads.every(({ method, context, authorized }) => method === "GET" && context === membershipContextId && authorized));
   } else throw new Error(`Scénario inconnu : ${scenario}`);
   assert.deepEqual(errors, []);
   process.stdout.write(`Régression humaine ${scenario} PASS ; fixtures uniquement.\n`);
