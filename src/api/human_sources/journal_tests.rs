@@ -6,6 +6,7 @@ use tower::ServiceExt;
 mod dashboard;
 mod owned_admin_reads;
 mod owned_brokers_live;
+mod owned_workers;
 mod races;
 mod selection;
 
