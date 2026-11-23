@@ -31,7 +31,13 @@ let federationHeaders403 = false; let identityHeaders403 = false;
 let ownedProfile = true; let ownedHeaders403 = false;
 const membershipContextId = "c".repeat(64);
 const membershipCursor = "d".repeat(64);
+let openedMemberships = false;
 let failNextMembershipRead = true;
+const membershipRows = (firstName, offset) => Array.from({ length: 40 }, (_, index) => membership({
+  membership_id: `00000000-0000-4000-8000-${String(offset + index).padStart(12, "0")}`,
+  principal: memberPrincipal(offset + index),
+  display_name: index === 0 ? firstName : `Appartenance de fixture ${offset + index}`,
+}));
 const unfinishedRefusals = [];
 const humanIdentity = () => {
   const value = scenario.startsWith("federation") ? federationIdentity() : scenario === "workers" ? workerIdentity() : scenario.startsWith("brokers") ? brokerIdentity(scenario === "brokers-mixed") : identity();
@@ -104,16 +110,20 @@ const server = createServer(async (request, response) => {
     if (scenario === "memberships-pagination" && url.pathname === "/api/v1/human/admin/memberships") {
       if (contextId !== membershipContextId) return error(response, 403, "permission_denied", "review_permissions");
       const cursor = url.searchParams.get("cursor");
-      if (cursor === null) return json(response, membershipPage(contextId, {
-        items: [membership({ display_name: "Première appartenance" })], has_more: true, next_cursor: membershipCursor,
-      }));
+      if (cursor === null) {
+        const hasMore = !openedMemberships;
+        openedMemberships = true;
+        return json(response, membershipPage(contextId, {
+          items: membershipRows("Première appartenance", 1), has_more: hasMore, next_cursor: hasMore ? membershipCursor : null,
+        }));
+      }
       if (cursor !== membershipCursor) return error(response, 400, "invalid_cursor", "retry");
       if (failNextMembershipRead) {
         failNextMembershipRead = false;
         return error(response, 503, "audit_unavailable", "retry");
       }
       return json(response, membershipPage(contextId, {
-        items: [membership({ membership_id: uuid, principal: memberPrincipal(2), display_name: "Appartenance suivante" })],
+        items: membershipRows("Appartenance suivante", 41),
       }));
     }
     if (url.pathname === "/api/v1/human/federation/workers") {
@@ -721,13 +731,23 @@ const runRegression = async () => {
     await page.evaluate(() => window.__humanRelease());
     await second.waitFor();
     assert.equal(await previous.evaluate((node) => node === document.activeElement), true, "La fin de liste rend le focus à la commande précédente");
+    const refresh = members.getByRole("button", { name: "Actualiser", exact: true });
+    await previous.scrollIntoViewIfNeeded();
+    assert.ok(await refresh.evaluate((node) => node.getBoundingClientRect().bottom <= 0), "Actualiser est hors écran avant le retour");
     await page.keyboard.press("Enter");
     await first.waitFor();
     assert.equal(await previous.count(), 0, "Un seul retour rétablit la première page");
+    assert.equal(await next.count(), 0, "Le contrôle ne propose plus de page suivante");
     const reads = requests.filter(({ path }) => path.startsWith("/api/v1/human/admin/memberships?"));
     assert.deepEqual(reads.map(({ path }) => new URL(path, "http://localhost").searchParams.get("cursor")),
       [null, membershipCursor, membershipCursor, null]);
     assert.ok(reads.every(({ method, context, authorized }) => method === "GET" && context === membershipContextId && authorized));
+    assert.equal(await refresh.evaluate((node) => node === document.activeElement), true, "La disparition de la pagination rend le focus à Actualiser");
+    assert.ok(await refresh.evaluate((node) => {
+      const bounds = node.getBoundingClientRect();
+      const toolbar = document.querySelector(".human-toolbar").getBoundingClientRect();
+      return bounds.top >= toolbar.bottom && bounds.bottom <= innerHeight;
+    }), "Actualiser est visible sous la barre fixe après le retour");
   } else throw new Error(`Scénario inconnu : ${scenario}`);
   assert.deepEqual(errors, []);
   process.stdout.write(`Régression humaine ${scenario} PASS ; fixtures uniquement.\n`);
