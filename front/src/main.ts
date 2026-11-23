@@ -702,11 +702,6 @@ async function refreshSummary() {
     current.get<Integrity>("/api/integrity"),
   ]);
   if (current !== client || request !== summaryRequest) return;
-  const refused = result.find((entry) => entry.status === "rejected" && accessRefused(entry.reason));
-  if (refused?.status === "rejected") {
-    onError(refused.reason);
-    return;
-  }
   summaryLoading = false;
   const [o, a, s, i] = result;
   if (o.status === "fulfilled") {
