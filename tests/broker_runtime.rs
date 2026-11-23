@@ -10,6 +10,7 @@ use agentsandbox::{
     broker::{
         clock::{HostClock, NativeHostClock},
         enforcer::{EnforcerClient, SlotPhaseV1},
+        journal::JournalScopeV1,
         local_ipc::EndpointRecordV1,
         service::{
             RequestedExecutionV1, SubmitV1, encode_submit,
@@ -148,6 +149,8 @@ struct RunClientObservations {
     central_terminal_observed_within_window: bool,
     worker_deadline_evidence: WorkerDeadlineEvidence,
     terminal_failure_step: Option<&'static str>,
+    terminal_failure_read: harness::TerminalFailureRead,
+    checkpoint: Option<harness::checkpoint::TerminalCheckpointProbe>,
 }
 
 #[derive(Default, serde::Serialize)]
@@ -361,6 +364,20 @@ fn terminal_failure_step_requires_one_complete_event_from_the_admitted_session()
         harness::terminal_failure_step(&complete, session, 17),
         Some("result_audit")
     );
+    use harness::TerminalFailureRead;
+    assert_eq!(
+        harness::terminal_failure_read(&complete, session, 17),
+        (TerminalFailureRead::Observed, Some("result_audit"))
+    );
+    let empty = json!({"items":[], "next_cursor":null});
+    assert_eq!(
+        harness::terminal_failure_read(&empty, session, 17),
+        (TerminalFailureRead::Absent, None)
+    );
+    assert_eq!(
+        harness::terminal_failure_read(&json!({"items":[]}), session, 17),
+        (TerminalFailureRead::Unverified, None)
+    );
     assert!(harness::terminal_failure_step(&complete, session, 18).is_none());
     for (pointer, replacement) in [
         ("/next_cursor", json!(18)),
@@ -387,6 +404,10 @@ fn terminal_failure_step_requires_one_complete_event_from_the_admitted_session()
     unrelated["session_id"] = json!(other_session);
     ambiguous["items"].as_array_mut().unwrap().push(unrelated);
     assert!(harness::terminal_failure_step(&ambiguous, session, 17).is_none());
+    assert_eq!(
+        harness::terminal_failure_read(&ambiguous, session, 17),
+        (TerminalFailureRead::Ambiguous, None)
+    );
 }
 
 #[test]
@@ -518,6 +539,20 @@ async fn broker_run_cli_sigkill_preserves_original_deadline_without_second_start
     let outcome = run_outcome
         .context("broker-routed CLI qualification exceeded the 600-second global bound")
         .and_then(|result| result);
+    // Start this byte-bounded local read within the scenario. The qualification
+    // runner's external timeout bounds the test process, including this read.
+    let terminal_checkpoint = if state == "failed"
+        && matches!(&stage, RunClientRecoveryStage::Executor { .. })
+        && Instant::now() < scenario_end
+    {
+        observations
+            .checkpoint
+            .as_ref()
+            .map(|probe| probe.read())
+            .unwrap_or_default()
+    } else {
+        harness::checkpoint::TerminalCheckpointObservation::default()
+    };
     evidence.write("result.json", &json!({
         "runtime_test":if outcome.is_ok() { "PASS" } else { "FAIL" },
         "fault":"owned_run_cli_sigkill",
@@ -525,6 +560,8 @@ async fn broker_run_cli_sigkill_preserves_original_deadline_without_second_start
         "central_terminal_observed_within_window":observations.central_terminal_observed_within_window,
         "worker_deadline_evidence":observations.worker_deadline_evidence,
         "terminal_failure_step":observations.terminal_failure_step,
+        "terminal_failure_read":observations.terminal_failure_read,
+        "terminal_checkpoint":terminal_checkpoint,
         "requested_broker_client_source":"published_selection",
         "broker_selection_input":"environment",
         "native_start":selection.native_start,
@@ -658,15 +695,16 @@ async fn run(
         .control_namespace_uuid
         .as_deref()
         .context("new control namespace missing")?;
-    Uuid::parse_str(namespace)?;
+    let namespace_id = Uuid::parse_str(namespace)?;
     evidence.write("control-identity.json", &identity)?;
     let initial_quota: QuotaUsageV1 = harness::get(&http, &origin, &runner, "quota").await?;
     ensure!(
         initial_quota.held_workers == 0,
         "fresh control unexpectedly holds worker quota"
     );
+    let installation_id = Uuid::new_v4();
     let mut registry = json!({
-        "version":1,"installation_id":Uuid::new_v4(),"root":evidence.root.join("b"),"max_enforcer_slots":CAPACITY,
+        "version":1,"installation_id":installation_id,"root":evidence.root.join("b"),"max_enforcer_slots":CAPACITY,
         "profiles":[{"id":PROFILE,"gateway":origin,"tenant_id":"local","control_namespace_uuid":namespace,
             "config_dir":config,"runner_token_file":config.join("secrets/runner"),"runtime":"docker",
             "runtime_program":selection.program,"runtime_endpoint":selection.endpoint,"image":selection.image,
@@ -962,6 +1000,19 @@ async fn run(
         // The central terminal observation has its own window. Afterward the
         // broker can finish under the remaining scenario budget. The Result and
         // exact Docker events are still required to establish the stop and removal.
+        let observe_until = Instant::now() + Duration::from_secs(u64::from(timeout_seconds) + 35);
+        observations.checkpoint =
+            JournalScopeV1::new(installation_id, "local", &origin, namespace_id, PROFILE)
+                .ok()
+                .and_then(|scope| {
+                    harness::checkpoint::TerminalCheckpointProbe::new(
+                        &evidence.root,
+                        &scope,
+                        operation,
+                        &worker.launch.session_id,
+                    )
+                    .ok()
+                });
         let wait_result = wait_terminal(
             evidence,
             &runner,
@@ -969,8 +1020,7 @@ async fn run(
             &origin,
             (operation, &worker.worker_id),
             TerminalWaitBounds::RunClient {
-                observe_until: Instant::now()
-                    + Duration::from_secs(u64::from(timeout_seconds) + 35),
+                observe_until,
                 scenario_end,
                 attempt_id: &worker.attempt.attempt_id,
                 observations: &mut *observations,
@@ -980,28 +1030,38 @@ async fn run(
         .await;
         if wait_result.is_err()
             && matches!(&*run_client_stage, RunClientRecoveryStage::Executor { .. })
-            && let Some(admission_seq) = harness::worker_admission_seq(&audit_before, &worker)
         {
-            // Reserve the full HTTP budget inside the existing scenario. The
-            // diagnostic is optional and preserves the original error.
-            let diagnostic_end = Instant::now() + GATEWAY_HTTP_TIMEOUT;
-            if diagnostic_end < scenario_end {
-                let query = format!(
-                    "events?kind=broker.batch.failure&after={admission_seq}&limit=2&order=asc"
-                );
-                if let Ok(Ok(page)) = timeout_at(
-                    diagnostic_end,
-                    harness::get::<Value>(&http, &origin, &runner, &query),
-                )
-                .await
-                {
-                    observations.terminal_failure_step = harness::terminal_failure_step(
-                        &page,
-                        &worker.launch.session_id,
-                        admission_seq,
+            use harness::TerminalFailureRead;
+            let (read, step) = if let Some(admission_seq) =
+                harness::worker_admission_seq(&audit_before, &worker)
+            {
+                // Reserve the full HTTP budget inside the existing scenario.
+                let diagnostic_end = Instant::now() + GATEWAY_HTTP_TIMEOUT;
+                if diagnostic_end < scenario_end {
+                    let query = format!(
+                        "events?kind=broker.batch.failure&after={admission_seq}&limit=2&order=asc"
                     );
+                    match timeout_at(
+                        diagnostic_end,
+                        harness::get::<Value>(&http, &origin, &runner, &query),
+                    )
+                    .await
+                    {
+                        Ok(Ok(page)) => harness::terminal_failure_read(
+                            &page,
+                            &worker.launch.session_id,
+                            admission_seq,
+                        ),
+                        _ => (TerminalFailureRead::ReadFailed, None),
+                    }
+                } else {
+                    (TerminalFailureRead::BudgetUnavailable, None)
                 }
-            }
+            } else {
+                (TerminalFailureRead::AdmissionUnconfirmed, None)
+            };
+            observations.terminal_failure_read = read;
+            observations.terminal_failure_step = step;
         }
         wait_result?;
         *run_client_stage = RunClientRecoveryStage::ResultRead;
@@ -2132,6 +2192,11 @@ async fn wait_terminal<'a>(
             && bounds.accepts_ready_pair(now)
         {
             if let Some(executor_error) = status.executor_error {
+                if let TerminalWaitBounds::RunClient { observations, .. } = &mut bounds
+                    && let Some(checkpoint) = &mut observations.checkpoint
+                {
+                    checkpoint.record_status(status);
+                }
                 let central_cleanup_sample = match worker.cleanup_removed {
                     None => CentralCleanupSample::NotObserved,
                     Some(false) => CentralCleanupSample::ReportedUnconfirmed,

@@ -1,4 +1,7 @@
 //! Test-only process/inspection helpers. No create/start/stop/remove engine commands.
+#[path = "broker_runtime_checkpoint.rs"]
+pub mod checkpoint;
+
 use agentsandbox::broker::lifecycle::LocalFailurePhaseV1;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use chrono::{DateTime, FixedOffset};
@@ -941,6 +944,38 @@ pub fn terminal_failure_step(
         .iter()
         .copied()
         .find(|label| *label == step)
+}
+
+#[derive(Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalFailureRead {
+    #[default]
+    NotAttempted,
+    AdmissionUnconfirmed,
+    BudgetUnavailable,
+    ReadFailed,
+    Absent,
+    Ambiguous,
+    Unverified,
+    Observed,
+}
+
+pub fn terminal_failure_read(
+    page: &Value,
+    session_id: &str,
+    admission_seq: i64,
+) -> (TerminalFailureRead, Option<&'static str>) {
+    if let Some(step) = terminal_failure_step(page, session_id, admission_seq) {
+        return (TerminalFailureRead::Observed, Some(step));
+    }
+    let read = match page["items"].as_array() {
+        Some(items) if items.len() > 1 => TerminalFailureRead::Ambiguous,
+        Some(items) if items.is_empty() && page.get("next_cursor") == Some(&Value::Null) => {
+            TerminalFailureRead::Absent
+        }
+        _ => TerminalFailureRead::Unverified,
+    };
+    (read, None)
 }
 
 fn optional_failure_label<'a>(
