@@ -843,6 +843,11 @@ pub(super) async fn route_gate(
     if !known.is_some_and(|(_, methods)| methods.contains(&request.method().as_str())) {
         return next.run(request).await;
     }
+    let membership_change =
+        template == Some(HUMAN_MEMBERSHIP_CHANGE_PATH) && request.method() == "POST";
+    if membership_change && !owned_membership_change_target(request.uri()) {
+        return human::invalid_request().into_response();
+    }
     let path = request.uri().path();
     let allowed = (["/healthz", "/api/v1/status"].contains(&path)
         && (request.method() == "GET" || request.method() == "HEAD"))
@@ -850,9 +855,7 @@ pub(super) async fn route_gate(
         || super::control_transport::owned_broker_request(&request)
         || super::control_transport::owned_policy_request(&request)
         || super::control_transport::owned_policy_inspection_request(&request)
-        || template == Some(HUMAN_MEMBERSHIP_CHANGE_PATH)
-            && request.method() == "POST"
-            && owned_membership_change_target(request.uri())
+        || membership_change
         || request.method() == "GET"
             && (OWNED_HUMAN_GET_PATHS.contains(&path) || template == Some(HUMAN_EVENT_DETAIL_PATH))
         || request.method() == "GET"

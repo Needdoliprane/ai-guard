@@ -2185,15 +2185,6 @@ async fn dashboard_oidc_proxy(
     Ok(response)
 }
 
-fn invalid_dashboard_membership_change() -> (StatusCode, Json<Value>) {
-    human::failure(
-        StatusCode::BAD_REQUEST,
-        "invalid_request",
-        "The membership change request is invalid or exceeds its bounds.",
-        "none",
-    )
-}
-
 async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> ApiResult<Response> {
     let path = request.uri().path();
     let canonical_path = path
@@ -2205,7 +2196,7 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
     // independently of the router, before extracting any headers or body.
     let membership_change = s.owned_sources && request.method() == "POST";
     if membership_change && !human_sources::owned_membership_change_target(request.uri()) {
-        return Err(invalid_dashboard_membership_change());
+        return Err(human::invalid_request());
     }
     if s.owned_sources && !membership_change {
         let owned_static_path = [
@@ -2348,26 +2339,7 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
         }
     }
     if membership_change {
-        use crate::identity::{HumanMembershipChangeV1, MEMBERSHIP_CHANGE_BODY_MAX_BYTES};
-
-        let mut content_types = request.headers().get_all(header::CONTENT_TYPE).iter();
-        let is_json = content_types
-            .next()
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(';').next())
-            .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"));
-        if !is_json || content_types.next().is_some() {
-            return Err(invalid_dashboard_membership_change());
-        }
-        let body = tokio::time::timeout(
-            Duration::from_secs(5),
-            axum::body::to_bytes(request.into_body(), MEMBERSHIP_CHANGE_BODY_MAX_BYTES),
-        )
-        .await
-        .map_err(|_| invalid_dashboard_membership_change())?
-        .map_err(|_| invalid_dashboard_membership_change())?;
-        serde_json::from_slice::<HumanMembershipChangeV1>(&body)
-            .map_err(|_| invalid_dashboard_membership_change())?;
+        let (body, _) = human::membership_change_body(request).await?;
         // Forward the exact change and its operation ID. The gateway rechecks
         // the bearer, selected context, stored subject and current authority.
         call = call

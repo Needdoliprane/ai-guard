@@ -371,9 +371,9 @@ pub(super) async fn change_membership(
     State(state): State<GatewayState>,
     headers: HeaderMap,
     axum::extract::Path(membership_id): axum::extract::Path<String>,
-    body: Result<Json<HumanMembershipChangeV1>, axum::extract::rejection::JsonRejection>,
+    request: Request,
 ) -> ApiResult<Json<HumanMembershipChangeReceiptV1>> {
-    let Json(change) = body.map_err(|_| invalid_request())?;
+    let (_, change) = membership_change_body(request).await?;
     let expected_revision: u64 = change
         .expected_revision
         .parse()
