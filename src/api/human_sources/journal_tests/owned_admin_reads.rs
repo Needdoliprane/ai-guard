@@ -1,7 +1,7 @@
 //! The G08 administration reads on the owned source profile: real owned
 //! Router/Store reads over legacy stores that received the human rights
 //! marker before adoption.
-use super::*;
+use super::{dashboard::LoopbackGateway, *};
 
 fn grant(fixture: &Fixture, capabilities: &[HumanCapabilityV1]) {
     let store = fixture.legacy_store("B");
@@ -764,11 +764,8 @@ async fn post(
     )
 }
 
-#[tokio::test]
-async fn owned_sources_apply_a_delegated_membership_change_under_the_write_epoch() {
+fn seed_delegated_membership(fixture: &Fixture) -> MembershipV1 {
     use HumanCapabilityV1 as C;
-    let fixture = Fixture::new_owned_with_human_rights();
-    let bearer = Fixture::bearer("B");
     let PrincipalRefV1::HumanLocal {
         installation_id, ..
     } = fixture.principal()
@@ -812,7 +809,7 @@ async fn owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
         }))
         .unwrap();
     grant(
-        &fixture,
+        fixture,
         &[
             C::ReadMetadata,
             C::ReadTenantMetadata,
@@ -820,6 +817,30 @@ async fn owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
             C::ManageMemberships,
         ],
     );
+    membership
+}
+
+async fn membership_dashboard(gateway: Router) -> (LoopbackGateway, Router, tempfile::TempDir) {
+    let (gateway, address) = LoopbackGateway::start(gateway).await;
+    let front = tempfile::tempdir().unwrap();
+    let dashboard = dashboard_router_with_human_mode(
+        &format!("http://{address}"),
+        None,
+        front.path().to_owned(),
+        None,
+        true,
+    )
+    .unwrap();
+    (gateway, dashboard, front)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owned_sources_apply_a_delegated_membership_change_under_the_write_epoch() {
+    use HumanCapabilityV1 as C;
+    let fixture = Fixture::new_owned_with_human_rights();
+    let bearer = Fixture::bearer("B");
+    let membership = seed_delegated_membership(&fixture);
+    let store = fixture.legacy_store("B");
     let withheld = C::Export;
     let administrator = store.identity_memberships(fixture.principal()).unwrap();
     assert_eq!(administrator.len(), 1);
@@ -861,6 +882,7 @@ async fn owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
     let before = expected_generation();
     let mutations_before = count_mutations();
     let router = gateway_router(state);
+    let (gateway, dashboard, _front) = membership_dashboard(router.clone()).await;
     let (status, identity) = get(&router, "/api/v1/human/identity", None).await;
     assert_eq!(status, StatusCode::OK, "{identity}");
     let context = identity["contexts"]
@@ -882,7 +904,7 @@ async fn owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
         "capabilities": ["read_metadata"],
         "active": false,
     });
-    let (status, receipt) = post(&router, &bearer, &path, &context, &body).await;
+    let (status, receipt) = post(&dashboard, &bearer, &path, &context, &body).await;
     assert_eq!(status, StatusCode::OK, "{receipt}");
     assert_eq!(receipt["membership_revision"], "2");
     let after = expected_generation();
@@ -956,9 +978,10 @@ async fn owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
     let (status, failure) = get(&router, "/api/v1/human/identity", None).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{failure}");
     assert_eq!(owned.coverage.load(Ordering::Acquire), REBUILD_REQUIRED);
+    gateway.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn owned_membership_post_on_format15_requires_an_admin_and_returns_the_durable_receipt() {
     use super::owned_workers::{context, read};
     use HumanCapabilityV1 as C;
@@ -1164,7 +1187,8 @@ async fn owned_membership_post_on_format15_requires_an_admin_and_returns_the_dur
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert!(audit_positions().is_empty());
 
-    let (status, receipt) = post(&router, &bearer, &path, admin_id, &body).await;
+    let (gateway, dashboard, _front) = membership_dashboard(router.clone()).await;
+    let (status, receipt) = post(&dashboard, &bearer, &path, admin_id, &body).await;
     assert_eq!(status, StatusCode::OK, "{receipt}");
     assert_eq!(receipt["operation_id"], operation_id);
     assert_eq!(receipt["membership_id"], membership_id);
@@ -1203,4 +1227,65 @@ async fn owned_membership_post_on_format15_requires_an_admin_and_returns_the_dur
         .unwrap();
     assert_eq!(member["active"], false);
     assert_eq!(member["revision"], "2");
+    gateway.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owned_dashboard_refuses_legacy_gateway_without_changing_membership_or_audit() {
+    let fixture = Fixture::new_owned_with_human_rights();
+    let membership = seed_delegated_membership(&fixture);
+    let bearer = Fixture::bearer("B");
+    let state = GatewayState::new(
+        Arc::new(fixture.legacy_store("B").sibling().unwrap()),
+        "synthetic-membership-runner".into(),
+        "synthetic-membership-viewer".into(),
+        Policy::default(),
+        None,
+        Redactor::new(vec![]),
+    );
+    assert!(state.owned_human.is_none());
+    let store = state.tenants[0].store.sqlite().unwrap().clone();
+    let router = gateway_router(state);
+    let (status, identity) = get(&router, "/api/v1/human/identity", None).await;
+    assert_eq!(status, StatusCode::OK, "{identity}");
+    let context_id = identity["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|context| context["tenant_id"] == "B" && context["mode"] == "administration")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+    let path = format!(
+        "/api/v1/human/admin/memberships/{}",
+        membership.membership_id
+    );
+    let change = json!({
+        "operation_id": uuid::Uuid::new_v4().to_string(),
+        "expected_revision": "1",
+        "capabilities": ["read_metadata"],
+        "active": false,
+    });
+    let before = store.head().unwrap();
+    let observed = crate::audit::read_test_observer::observe(&store);
+    let (gateway, dashboard, _front) = membership_dashboard(router.clone()).await;
+
+    let (status, failure) = post(&dashboard, &bearer, &path, context_id, &change).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{failure}");
+    assert_eq!(failure["error"]["code"], "identity_unavailable");
+    assert!(failure.get("audit_seq").is_none());
+    assert!(
+        observed.try_recv().is_err(),
+        "legacy refused before Store access"
+    );
+    assert_eq!(store.head().unwrap(), before);
+
+    // The same authorized operation is still served by the historical route.
+    let (status, receipt) = post(&router, &bearer, &path, context_id, &change).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_eq!(receipt["operation_id"], change["operation_id"]);
+    assert_eq!(receipt["membership_id"], membership.membership_id);
+    assert_eq!(receipt["membership_revision"], "2");
+    assert_eq!(store.head().unwrap(), before + 1);
+    gateway.close().await;
 }

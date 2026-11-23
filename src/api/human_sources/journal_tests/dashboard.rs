@@ -2,12 +2,12 @@ use super::races::{connection, context, snapshot, state};
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 
-struct LoopbackGateway {
+pub(super) struct LoopbackGateway {
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
 }
 impl LoopbackGateway {
-    async fn start(router: Router) -> (Self, std::net::SocketAddr) {
+    pub(super) async fn start(router: Router) -> (Self, std::net::SocketAddr) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (stop, stopped) = tokio::sync::oneshot::channel();
@@ -27,7 +27,7 @@ impl LoopbackGateway {
         )
     }
 
-    async fn close(mut self) {
+    pub(super) async fn close(mut self) {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }
@@ -326,6 +326,7 @@ async fn owned_dashboard_relays_the_delegated_membership_change_and_gateway_rece
     const MEMBERSHIP: &str = "a20b685f-76bb-4d65-90de-a1d2e4cbbbea";
     const OPERATION: &str = "915e4e07-26a2-4d71-a45f-3b602a8dcf93";
     let path = format!("/api/v1/human/admin/memberships/{MEMBERSHIP}");
+    let upstream_path = format!("/api/v1/human/owned/admin/memberships/{MEMBERSHIP}");
     let change = json!({
         "operation_id": OPERATION,
         "expected_revision": "1",
@@ -353,7 +354,7 @@ async fn owned_dashboard_relays_the_delegated_membership_change_and_gateway_rece
     let other = unexpected.clone();
     let upstream = Router::new()
         .route(
-            &path,
+            &upstream_path,
             axum::routing::post(move |request: axum::extract::Request| {
                 let body = expected_body.clone();
                 let conflicting = conflicting_body.clone();
@@ -481,6 +482,11 @@ async fn owned_dashboard_relays_the_delegated_membership_change_and_gateway_rece
         ),
         (
             with_context("/api/v1/human/admin/grants"),
+            body.clone(),
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            with_context(&upstream_path),
             body.clone(),
             StatusCode::METHOD_NOT_ALLOWED,
         ),

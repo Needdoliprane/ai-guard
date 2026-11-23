@@ -507,7 +507,12 @@ async fn modern_route_matrix_closes_before_body_extractors_and_store() {
             {
                 continue;
             }
-            let expected = if *path == HUMAN_MEMBERSHIP_CHANGE_PATH {
+            let expected = if [
+                HUMAN_MEMBERSHIP_CHANGE_PATH,
+                "/api/v1/human/owned/admin/memberships/{membership_id}",
+            ]
+            .contains(path)
+            {
                 StatusCode::BAD_REQUEST
             } else {
                 StatusCode::SERVICE_UNAVAILABLE
