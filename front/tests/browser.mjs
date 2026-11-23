@@ -20,7 +20,10 @@ try {
   ({ chromium } = require(join(modules, "playwright")));
 }
 const root = fileURLToPath(new URL("..", import.meta.url));
-const eventFocusOnly = process.env.AI_GUARD_BROWSER_SCENARIO === "event-focus";
+const scenario = process.env.AI_GUARD_BROWSER_SCENARIO;
+const eventFocusOnly = scenario === "event-focus";
+const summaryFreshnessOnly = scenario === "summary-freshness";
+const focusedScenario = eventFocusOnly || summaryFreshnessOnly;
 const journalEvent = (seq, kind = "command.completed") => ({
   seq, id: `journal-${seq}`, kind, timestamp: "2026-10-29T12:10:00Z", provenance: "observed",
 });
@@ -102,6 +105,7 @@ const agents = [
   },
 ];
 let mode = "data";
+const failingRoutes = new Map();
 let limitNextJournalRead = false;
 let pagedJournal = false;
 let olderPageFailures = 0;
@@ -161,6 +165,12 @@ const server = createServer(async (request, response) => {
       return;
     }
     if (url.pathname === "/api/v1/identity") return json(response, { tenant_id: "local", role: "viewer" });
+    const failure = failingRoutes.get(url.pathname);
+    if (failure) {
+      response.writeHead(failure);
+      response.end();
+      return;
+    }
     if (url.pathname.startsWith("/api/v1/")) {
       if (controlReadBarrier && url.pathname === "/api/v1/federation/workers") await controlReadBarrier;
       if (controlMode === "outage" || controlMode === "forbidden") {
@@ -285,11 +295,11 @@ const server = createServer(async (request, response) => {
         "content-type": "text/event-stream",
         "cache-control": "no-cache",
       });
-      if (!eventFocusOnly && mode === "data")
+      if (!focusedScenario && mode === "data")
         response.write(
           `id: 15\nevent: audit\ndata: ${JSON.stringify({ ...events[0], seq: 15, id: "evt-15", kind: "agent.updated", command: null, data: { message: "Mise à jour reçue en direct" } })}\n\n`,
         );
-      if (!eventFocusOnly && streamCount === 1) response.end();
+      if (!focusedScenario && streamCount === 1) response.end();
       else {
         streams.add(response);
         response.write(": maintien\n\n");
@@ -326,9 +336,9 @@ await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 const origin = `http://127.0.0.1:${server.address().port}`;
 const browser = await chromium.launch({
   headless: true,
-  chromiumSandbox: eventFocusOnly,
+  chromiumSandbox: focusedScenario,
   executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined,
-  args: eventFocusOnly ? [] : ["--no-sandbox"],
+  args: focusedScenario ? [] : ["--no-sandbox"],
 });
 const context = await browser.newContext({
   viewport: { width: 1440, height: 1050 },
@@ -375,9 +385,6 @@ const assertGeometry = async (label) => {
   assert.ok(geometry.targets.every((rect) => rect.top >= 0 && rect.bottom <= geometry.dockBottom), `${label} : commandes dans leur zone réservée`);
 };
 async function runEventFocusCheck() {
-  await context.route("**/*", (route) =>
-    new URL(route.request().url()).origin === origin ? route.continue() : route.abort(),
-  );
   await page.goto(origin);
   await page.getByLabel("Jeton de lecture").fill("viewer-test-token");
   await page.getByRole("button", { name: "Ouvrir la supervision", exact: true }).click();
@@ -437,6 +444,65 @@ async function runEventFocusCheck() {
   }), "Après Échap, le titre focalisé est visible sous les commandes");
   assert.deepEqual(errors, []);
   process.stdout.write("Journal viewer : défilement, focus SSE et retour par Échap vérifiés.\n");
+}
+
+async function runSummaryFreshnessCheck() {
+  await page.goto(origin);
+  const token = page.getByLabel("Jeton de lecture");
+  const login = page.getByRole("button", { name: "Ouvrir la supervision", exact: true });
+  const refresh = page.getByRole("button", { name: "Actualiser", exact: true });
+  const exportJournal = page.getByRole("button", { name: "Exporter JSONL", exact: true });
+  const summaryAlert = page.getByRole("alert").filter({ hasText: "erreur HTTP 503" });
+  const exportConfirmation = page.getByText("Le journal complet a été exporté au format JSONL, toutes pages incluses.", { exact: true });
+  const exportRefusal = page.getByRole("alert").filter({ hasText: "erreur HTTP 429" });
+
+  await token.fill("viewer-test-token");
+  await login.click();
+  await page.getByText("Chaîne valide", { exact: true }).waitFor();
+  failingRoutes.set("/api/agents", 503);
+  failingRoutes.set("/api/integrity", 503);
+  await refresh.click();
+  await summaryAlert.waitFor();
+
+  const download = page.waitForEvent("download");
+  await exportJournal.click();
+  assert.equal(await (await download).failure(), null);
+  await exportConfirmation.waitFor();
+  assert.equal(await summaryAlert.isVisible(), true, "L’export réussi conserve l’avertissement de synthèse");
+  await summaryAlert.getByText(/Agents/).waitFor();
+  await summaryAlert.getByText(/Intégrité de l’audit/).waitFor();
+
+  failingRoutes.delete("/api/agents");
+  await refresh.click();
+  await summaryAlert.getByText(/Agents/).waitFor({ state: "hidden" });
+  assert.equal(await summaryAlert.getByText(/Intégrité de l’audit/).isVisible(), true);
+  assert.equal(await exportConfirmation.isVisible(), true, "La relecture conserve la confirmation d’export");
+
+  failingRoutes.set("/api/export", 429);
+  await exportJournal.click();
+  await exportRefusal.waitFor();
+  assert.equal(await summaryAlert.isVisible(), true, "Le refus d’export conserve l’avertissement de synthèse");
+
+  failingRoutes.delete("/api/integrity");
+  await refresh.click();
+  await page.getByText("Chaîne valide", { exact: true }).waitFor();
+  await summaryAlert.waitFor({ state: "hidden" });
+  assert.equal(await exportRefusal.isVisible(), true, "La synthèse rétablie conserve le refus d’export");
+
+  failingRoutes.set("/api/agents", 503);
+  await refresh.click();
+  await summaryAlert.waitFor();
+  failingRoutes.set("/api/export", 403);
+  await exportJournal.click();
+  await token.waitFor();
+  assert.equal(await summaryAlert.count(), 0, "Le refus de session retire la synthèse du client");
+  failingRoutes.clear();
+  await token.fill("viewer-test-token");
+  await login.click();
+  await page.getByText("Chaîne valide", { exact: true }).waitFor();
+  assert.equal(await summaryAlert.count(), 0, "La nouvelle session ne reprend pas l’alerte précédente");
+  assert.deepEqual(errors, []);
+  process.stdout.write("Synthèse viewer : alertes par source, exports indépendants et reprise vérifiés.\n");
 }
 
 async function runBrowserChecks() {
@@ -990,7 +1056,14 @@ async function runBrowserChecks() {
 }
 
 try {
-  await (eventFocusOnly ? runEventFocusCheck() : runBrowserChecks());
+  if (focusedScenario) {
+    await context.route("**/*", (route) =>
+      new URL(route.request().url()).origin === origin ? route.continue() : route.abort(),
+    );
+  }
+  if (eventFocusOnly) await runEventFocusCheck();
+  else if (summaryFreshnessOnly) await runSummaryFreshnessCheck();
+  else await runBrowserChecks();
 } catch (error) {
   await mkdir(join(root, "tests", "artifacts"), { recursive: true });
   await page.screenshot({
@@ -1019,4 +1092,4 @@ try {
   await new Promise((resolve) => server.close(resolve));
 }
 
-if (!eventFocusOnly) await import("./browser_identity.mjs");
+if (!focusedScenario) await import("./browser_identity.mjs");
