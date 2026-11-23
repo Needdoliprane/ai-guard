@@ -8,9 +8,11 @@ The trusted Rust CLI and execution broker control Docker/Podman workers. A separ
 
 Local use needs no ai-guard cloud account. You build and distribute images from the supplied Dockerfiles; no public prebuilt ai-guard image is required. The [manual index](docs/setup/README.md) covers the complete product contract; [implementation status and evidence](docs/engineering/CURRENT_STATE.md) identify what is delivered, qualified or still missing.
 
+Production qualification remains open. Consult the dated results, tested revisions and remaining gaps in the [validation register](docs/engineering/VALIDATION.md) and [production gates](docs/engineering/PRODUCTION_READINESS.md).
+
 ## Start locally
 
-You need Git, the Rust toolchain selected by [rust-toolchain.toml](rust-toolchain.toml), a running Docker engine with Compose, and a project directory to copy. Rootless is required by default. For a deliberate Docker Desktop or other rootful installation, add `--allow-rootful-runtime` to `doctor`, `build`, `up` and every `run`; this records a security downgrade. For Podman, follow the [local guide](docs/setup/local/README.md) with a rootless engine and a compatible Compose provider.
+You need Git, the Rust toolchain selected by [rust-toolchain.toml](rust-toolchain.toml), a running Docker engine with Compose, and a project directory to copy. Rootless operation is required by default. To use Docker Desktop or another engine that does not report rootless operation, pass `--allow-rootful-runtime` to `doctor`, `build`, `up` and each `run`. When the engine diagnostic reports `rootless=false`, `up` writes a warning to standard error. For a rootless Podman installation with a compatible Compose provider, see the [local guide](docs/setup/local/README.md).
 
 Run from the source distribution's root. Replace `AIGUARD_PROJECT` with an existing absolute path. Keep the private configuration outside that project and this checkout. Prepare build dependencies and images before disconnecting an offline installation.
 
@@ -121,6 +123,7 @@ Apache-2.0. Vulnerabilities are reported privately through GitHub Security Advis
 
 ## Additional guides
 
+- [End-to-end test guide for isolated stacks, provider runs and Playwright checks (French)](tests/e2e/README.md).
 - [Kubernetes V2 runtime: software mechanics, closed product effects and real-cluster qualification plan](docs/setup/kubernetes-runtime/README.md).
 - [Release metadata: offline manifest/verify, declared provenance and qualification limits](docs/setup/release/README.md).
 - [Install from a GitHub Release](docs/setup/release/install.md).

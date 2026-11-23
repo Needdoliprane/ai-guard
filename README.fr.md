@@ -8,9 +8,11 @@ La CLI et le broker Rust de confiance contrôlent les workers Docker/Podman. Un 
 
 L’usage local ne demande aucun compte cloud ai-guard. L’opérateur construit et distribue ses images depuis les Dockerfiles fournis ; aucune image publique ai-guard préconstruite n’est obligatoire. L’[index du manuel](docs/setup/README.fr.md) couvre le contrat du produit complet ; l’[état d’implémentation et les preuves](docs/engineering/CURRENT_STATE.md) distinguent ce qui est livré, qualifié ou encore manquant.
 
+La qualification pour la production reste ouverte. Consulter les résultats datés, les révisions testées et les écarts restants dans le [registre de validation](docs/engineering/VALIDATION.md) et les [gates de production](docs/engineering/PRODUCTION_READINESS.md).
+
 ## Démarrer en local
 
-Il faut Git, la toolchain Rust sélectionnée par [rust-toolchain.toml](rust-toolchain.toml), un moteur Docker démarré avec Compose et un répertoire de projet à copier. Le mode rootless est exigé par défaut. Pour une installation Docker Desktop ou rootful délibérée, ajouter `--allow-rootful-runtime` à `doctor`, `build`, `up` et chaque `run` ; ce choix trace une dégradation de sécurité. Pour Podman, suivre le [guide local](docs/setup/local/README.fr.md) avec un moteur rootless et un fournisseur Compose compatible.
+Il faut Git, la toolchain Rust sélectionnée par [rust-toolchain.toml](rust-toolchain.toml), un moteur Docker démarré avec Compose et un répertoire de projet à copier. Le mode rootless est exigé par défaut. Pour utiliser Docker Desktop ou un autre moteur qui ne déclare pas ce mode, ajouter `--allow-rootful-runtime` à `doctor`, `build`, `up` et à chaque `run`. Lorsque le diagnostic du moteur retourne `rootless=false`, `up` écrit un avertissement sur la sortie d’erreur standard. Pour installer Podman en mode rootless avec un fournisseur Compose compatible, suivre le [guide local](docs/setup/local/README.fr.md).
 
 Exécuter depuis la racine de la distribution source. Remplacer `AIGUARD_PROJECT` par un chemin absolu existant. Garder la configuration privée hors de ce projet et de ce checkout. Préparer les dépendances de construction et les images avant de déconnecter une installation hors ligne.
 
@@ -121,6 +123,7 @@ Apache-2.0. Les vulnérabilités se signalent en privé par les GitHub Security 
 
 ## Guides complémentaires
 
+- [Recettes de bout en bout pour les piles isolées, les essais fournisseurs et les contrôles Playwright](tests/e2e/README.md).
 - [Runtime Kubernetes V2 : mécanismes logiciels, effets produit fermés et plan de qualification cluster réel](docs/setup/kubernetes-runtime/README.fr.md).
 - [Métadonnées release : manifest/verify hors ligne, provenance déclarée et limites de qualification](docs/setup/release/README.fr.md).
 - [Installer depuis une release GitHub](docs/setup/release/install.fr.md).
