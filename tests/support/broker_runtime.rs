@@ -1,4 +1,7 @@
 //! Test-only process/inspection helpers. No create/start/stop/remove engine commands.
+#[path = "broker_runtime_checkpoint.rs"]
+pub mod checkpoint;
+
 use agentsandbox::broker::lifecycle::LocalFailurePhaseV1;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use chrono::{DateTime, FixedOffset};

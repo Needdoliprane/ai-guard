@@ -361,6 +361,20 @@ fn terminal_failure_step_requires_one_complete_event_from_the_admitted_session()
         harness::terminal_failure_step(&complete, session, 17),
         Some("result_audit")
     );
+    use harness::TerminalFailureRead;
+    assert_eq!(
+        harness::terminal_failure_read(&complete, session, 17),
+        (TerminalFailureRead::Observed, Some("result_audit"))
+    );
+    let empty = json!({"items":[], "next_cursor":null});
+    assert_eq!(
+        harness::terminal_failure_read(&empty, session, 17),
+        (TerminalFailureRead::Absent, None)
+    );
+    assert_eq!(
+        harness::terminal_failure_read(&json!({"items":[]}), session, 17),
+        (TerminalFailureRead::Unverified, None)
+    );
     assert!(harness::terminal_failure_step(&complete, session, 18).is_none());
     for (pointer, replacement) in [
         ("/next_cursor", json!(18)),
@@ -387,6 +401,10 @@ fn terminal_failure_step_requires_one_complete_event_from_the_admitted_session()
     unrelated["session_id"] = json!(other_session);
     ambiguous["items"].as_array_mut().unwrap().push(unrelated);
     assert!(harness::terminal_failure_step(&ambiguous, session, 17).is_none());
+    assert_eq!(
+        harness::terminal_failure_read(&ambiguous, session, 17),
+        (TerminalFailureRead::Ambiguous, None)
+    );
 }
 
 #[test]
