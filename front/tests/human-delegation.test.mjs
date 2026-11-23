@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { HumanApiClient, HumanApiError } from "../src/human-api.ts";
 import { HumanContractError } from "../src/human-model.ts";
 import { grantChangeBody, membershipChangeBody, parseGrantChangeReceipt, parseHumanGrant, parseMembershipChangeReceipt } from "../src/admin-model.ts";
-import { ChangeFlow, MembershipChangeRecovery, membershipReplayRefusal } from "../src/delegation-model.ts";
+import { ChangeFlow, DelegatedChangeRecovery, delegatedReplayRefusal } from "../src/delegation-model.ts";
 import { captureIntent, resumeCandidate } from "../src/human-continuity.ts";
 import { catalogue, context, identity } from "./human-fixtures.mjs";
 import { grantBody, grantReceipt, memberPrincipal, membershipPage, membershipReceipt } from "./admin-fixtures.mjs";
@@ -40,8 +40,78 @@ function client(handler, identityBody = () => offered(), onContextInvalidated = 
   return { api, notifications, requests };
 }
 
+test("Une réponse de partage perdue se reprend par le même POST sous un contexte courant", async () => {
+  const nextId = "d".repeat(64);
+  let frame = offered();
+  let original;
+  const { api, requests } = client((_path, _options, call) => {
+    if (!original) {
+      original = grantReceipt(call.body.operation_id, resource);
+      frame = { ...frame, contexts: [{ ...frame.contexts[0], id: nextId, authorization_version: "b".repeat(64) }] };
+      throw new TypeError("Réponse de partage interrompue après enregistrement.");
+    }
+    return json(200, original);
+  }, () => frame);
+  const recovery = new DelegatedChangeRecovery(api);
+  try {
+    const initial = await api.identity();
+    const change = { operation_id: newId(), resource: { ...resource }, expected_revision: "4",
+      shares: [{ principal: memberPrincipal(2), permissions: ["export", "metadata"] }] };
+    await assert.rejects(recovery.submitGrant(initial.principal, api.selectContext(adminId), change, grantBody(adminId).owner),
+      /Réponse de partage interrompue/);
+    assert.equal(await recovery.retry(Date.now()), null);
+    change.resource.resource_id = "changed-draft";
+    change.shares[0].permissions.length = 0;
+    change.expected_revision = "5";
+    api.clearContext();
+    const fresh = await api.identity();
+    recovery.revalidate(fresh, Date.now());
+    assert.equal(recovery.selectContext(fresh.principal, () => api.selectContext(nextId))?.keepChange, true);
+    assert.equal(await recovery.retry(Date.now()), null);
+    api.clearContext();
+    recovery.revalidate(await api.identity(), Date.now());
+    assert.deepEqual(recovery.offer(Date.now()), { kind: "grant", contextId: nextId, expiresAt: fresh.contexts[0].expires_at,
+      tenant: "tenant-a", organization: "organization-a", expectedRevision: "4", shareCount: 1 });
+    assert.equal(requests.filter(({ options }) => options.method === "POST").length, 1);
+    assert.deepEqual(await recovery.retry(Date.now()), { kind: "grant", receipt: original });
+    const [first, replay] = requests.filter(({ options }) => options.method === "POST");
+    assert.equal(first.path, "/api/v1/human/admin/grants");
+    assert.equal(replay.path, first.path);
+    assert.equal(replay.options.body, first.options.body);
+    assert.equal(first.options.headers["X-AiGuard-Context"], adminId);
+    assert.equal(replay.options.headers["X-AiGuard-Context"], nextId);
+    assert.equal(recovery.offer(Date.now()), null);
+  } finally { api.close(); }
+});
+
+test("Une reprise de partage en conflit impose une nouvelle lecture et retire la demande", async () => {
+  const change = { operation_id: newId(), resource, expected_revision: "4", shares: [] };
+  const { api, requests } = client((_path, _options, call) => requests.filter(({ options }) => options.method === "POST").length === 1 ?
+    json(200, grantReceipt(call.body.operation_id, { ...resource, resource_id: "different" })) : refusal(409, "conflict", "reread"));
+  const recovery = new DelegatedChangeRecovery(api);
+  try {
+    const initial = await api.identity();
+    await assert.rejects(recovery.submitGrant(initial.principal, api.selectContext(adminId), change, grantBody(adminId).owner), HumanContractError);
+    api.clearContext();
+    recovery.revalidate(await api.identity(), Date.now());
+    assert.equal(recovery.offer(Date.now())?.kind, "grant");
+    await assert.rejects(recovery.retry(Date.now()), (error) => {
+      assert.equal(error.status, 409);
+      const notice = delegatedReplayRefusal("grant", error);
+      assert.match(notice, /Relisez les partages et les membres/);
+      assert.match(notice, /Le résultat du premier envoi reste inconnu/);
+      return true;
+    });
+    assert.equal(recovery.operationId, null);
+    recovery.revalidate(await api.identity(), Date.now());
+    assert.equal(await recovery.retry(Date.now()), null);
+    const posts = requests.filter(({ options }) => options.method === "POST");
+    assert.equal(posts.length, 2);
+    assert.equal(posts[1].options.body, posts[0].options.body);
+  } finally { api.close(); }
+});
+
 test("Une réponse d’appartenance perdue propose le rejeu exact sous une offre Administration fraîche", async () => {
-  const recovery = new MembershipChangeRecovery();
   const nextId = "d".repeat(64);
   let frame = offered();
   let original;
@@ -58,27 +128,23 @@ test("Une réponse d’appartenance perdue propose le rejeu exact sous une offre
     }
     return json(200, original);
   }, () => frame);
+  const recovery = new DelegatedChangeRecovery(api);
   try {
     const initial = await api.identity();
     const selected = api.selectContext(adminId);
     const change = { operation_id: newId(), expected_revision: "3", capabilities: ["export", "read_metadata"], active: true };
-    const send = (id, request) => api.changeMembership(id, request);
-    await assert.rejects(recovery.submit(initial.principal, selected, membershipId, change, send), TypeError);
+    await assert.rejects(recovery.submitMembership(initial.principal, selected, membershipId, change), TypeError);
     assert.equal(recovery.offer(Date.now()), null);
-    assert.equal(await recovery.retry(Date.now(), () => assert.fail("Une ancienne offre ne peut pas servir au rejeu.")), null);
+    assert.equal(await recovery.retry(Date.now()), null);
     change.capabilities.length = 0;
     change.active = false;
     api.clearContext();
     recovery.revalidate(await api.identity(), Date.now());
     assert.equal(recovery.offer(Date.now())?.contextId, nextId);
     assert.equal(requests.filter(({ options }) => options.method === "POST").length, 1);
-    const replayIn = (contextId, id, request) => {
-      api.selectContext(contextId);
-      return send(id, request);
-    };
     for (const count of [2, 3]) {
-      const lost = assert.rejects(recovery.retry(Date.now(), replayIn), TypeError);
-      assert.equal(await recovery.retry(Date.now(), () => assert.fail("Un seul POST par confirmation.")), null);
+      const lost = assert.rejects(recovery.retry(Date.now()), TypeError);
+      assert.equal(await recovery.retry(Date.now()), null);
       await lost;
       assert.equal(recovery.operationId, change.operation_id);
       assert.equal(recovery.offer(Date.now()), null);
@@ -86,8 +152,7 @@ test("Une réponse d’appartenance perdue propose le rejeu exact sous une offre
       recovery.revalidate(await api.identity(), Date.now());
       assert.equal(requests.filter(({ options }) => options.method === "POST").length, count);
     }
-    const replay = await recovery.retry(Date.now(), replayIn);
-    assert.deepEqual(replay, original);
+    assert.deepEqual(await recovery.retry(Date.now()), { kind: "membership", receipt: original });
     const [first, ...replays] = requests.filter(({ options }) => options.method === "POST");
     assert.equal(first.options.headers["X-AiGuard-Context"], adminId);
     assert.equal(replays.length, 3);
@@ -102,17 +167,16 @@ test("Une réponse d’appartenance perdue propose le rejeu exact sous une offre
 });
 
 test("Un 503 garde l’intention jusqu’à relecture et un refus terminal ferme la reprise", async () => {
-  const recovery = new MembershipChangeRecovery();
   let attempts = 0;
   let frame = offered();
   const { api, requests } = client(() => ++attempts === 1 ?
     refusal(503, "audit_unavailable", "contact_operator") : refusal(403, "permission_denied", "review_permissions"), () => frame);
+  const recovery = new DelegatedChangeRecovery(api);
   try {
     const initial = await api.identity();
     const context = api.selectContext(adminId);
     const change = { operation_id: newId(), expected_revision: "3", capabilities: [], active: false };
-    const send = (id, request) => api.changeMembership(id, request);
-    await assert.rejects(recovery.submit(initial.principal, context, membershipId, change, send), { status: 503 });
+    await assert.rejects(recovery.submitMembership(initial.principal, context, membershipId, change), { status: 503 });
     assert.equal(recovery.unavailable, true);
     assert.equal(recovery.offer(Date.now()), null);
     assert.equal(attempts, 1);
@@ -125,58 +189,63 @@ test("Un 503 garde l’intention jusqu’à relecture et un refus terminal ferme
     frame = offered();
     recovery.revalidate(await api.identity(), Date.now());
     assert.equal(recovery.offer(Date.now())?.contextId, adminId, "Une offre relue peut garder son identifiant.");
-    await assert.rejects(recovery.retry(Date.now(), (id, target, request) => { api.selectContext(id); return send(target, request); }), { status: 403 });
+    await assert.rejects(recovery.retry(Date.now()), { status: 403 });
     assert.equal(recovery.operationId, null);
     recovery.revalidate(await api.identity(), Date.now());
     assert.equal(recovery.offer(Date.now()), null);
-    assert.equal(await recovery.retry(Date.now(), () => assert.fail("Le refus terminal a été reçu.")), null);
+    assert.equal(await recovery.retry(Date.now()), null);
     const [first, second] = requests.filter(({ options }) => options.method === "POST");
     assert.equal(first.options.body, second.options.body);
     assert.equal(attempts, 2);
   } finally { api.close(); }
 });
 
-for (const [label, substitute] of [
+const withdrawals = [
   ["d’identité", (frame) => ({ ...frame, principal: memberPrincipal(1) })],
   ["de périmètre", (frame) => ({ ...frame, contexts: [{ ...frame.contexts[0], organization_scope: "organization-b" }] })],
-  ["de droits", () => offered(offer({ memberships_manage: ["granted", "tenant", "not_in_this_build"] }))],
-  ["de droits confirmé par une identité partielle", () => ({ ...offered(offer({ memberships_manage: ["not_granted", null, "available"] })),
+  ["de droits", (_frame, operation) => offered(offer({ [operation]: ["granted", "tenant", "not_in_this_build"] }))],
+  ["de droits confirmé par une identité partielle", (_frame, operation) => ({ ...offered(offer({ [operation]: ["not_granted", null, "available"] })),
     contexts_complete: false })],
-  ["de disponibilité confirmé par une identité partielle", () => ({ ...offered(offer({ memberships_manage: ["granted", "tenant", "not_in_this_build"] })),
+  ["de disponibilité confirmé par une identité partielle", (_frame, operation) => ({ ...offered(offer({ [operation]: ["granted", "tenant", "not_in_this_build"] })),
     contexts_complete: false })],
+];
+for (const [subject, operation, submit] of [
+  ["d’appartenance", "memberships_manage", (recovery, principal, selected, operation_id) =>
+    recovery.submitMembership(principal, selected, membershipId, { operation_id, expected_revision: "3", capabilities: [], active: false })],
+  ["de partages", "grants_manage", (recovery, principal, selected, operation_id) =>
+    recovery.submitGrant(principal, selected, { operation_id, resource, expected_revision: "4", shares: [] }, grantBody(adminId).owner)],
 ]) {
-  test(`Un changement ${label} retire l’intention d’appartenance`, async () => {
-    const recovery = new MembershipChangeRecovery();
-    let frame = offered();
-    const { api, requests } = client(() => { throw new TypeError("Réponse interrompue."); }, () => frame);
-    try {
-      const initial = await api.identity();
-      const selected = api.selectContext(adminId);
-      const change = { operation_id: newId(), expected_revision: "3", capabilities: [], active: false };
-      await assert.rejects(recovery.submit(initial.principal, selected, membershipId, change, (id, request) => api.changeMembership(id, request)), TypeError);
-      api.clearContext();
-      frame = substitute(frame);
-      recovery.revalidate(await api.identity(), Date.now());
-      assert.equal(recovery.operationId, null);
-      frame = offered();
-      recovery.revalidate(await api.identity(), Date.now());
-      assert.equal(recovery.offer(Date.now()), null);
-      assert.equal(requests.filter(({ options }) => options.method === "POST").length, 1);
-    } finally { api.close(); }
-  });
+  for (const [label, substitute] of withdrawals) {
+    test(`Un changement ${label} retire l’intention ${subject}`, async () => {
+      let frame = offered();
+      const { api, requests } = client(() => { throw new TypeError("Réponse interrompue."); }, () => frame);
+      const recovery = new DelegatedChangeRecovery(api);
+      try {
+        const initial = await api.identity();
+        await assert.rejects(submit(recovery, initial.principal, api.selectContext(adminId), newId()), TypeError);
+        api.clearContext();
+        frame = substitute(frame, operation);
+        recovery.revalidate(await api.identity(), Date.now());
+        assert.equal(recovery.operationId, null);
+        frame = offered();
+        recovery.revalidate(await api.identity(), Date.now());
+        assert.equal(await recovery.retry(Date.now()), null);
+        assert.equal(requests.filter(({ options }) => options.method === "POST").length, 1);
+      } finally { api.close(); }
+    });
+  }
 }
 
 test("Ouvrir un contexte équivalent conserve la demande et choisir un autre périmètre la retire", async () => {
-  const recovery = new MembershipChangeRecovery();
   const own = offered();
   const otherId = "d".repeat(64);
   const frame = { ...own, contexts: [...own.contexts, { ...own.contexts[0], id: otherId, organization_scope: "organization-b" }] };
   const { api, requests } = client(() => { throw new TypeError("Réponse interrompue."); }, () => frame);
+  const recovery = new DelegatedChangeRecovery(api);
   try {
     let current = await api.identity();
     const change = { operation_id: newId(), expected_revision: "3", capabilities: [], active: false };
-    await assert.rejects(recovery.submit(current.principal, api.selectContext(adminId), membershipId, change,
-      (id, request) => api.changeMembership(id, request)), TypeError);
+    await assert.rejects(recovery.submitMembership(current.principal, api.selectContext(adminId), membershipId, change), TypeError);
     api.clearContext();
     current = await api.identity();
     recovery.revalidate(current, Date.now());
@@ -197,16 +266,15 @@ test("Ouvrir un contexte équivalent conserve la demande et choisir un autre pé
 });
 
 test("Reprendre Supervision, Journal ou la vue 360° dans le contexte équivalent conserve la demande", async () => {
-  const recovery = new MembershipChangeRecovery();
   const nextId = "d".repeat(64);
   let frame = offered();
   const { api, requests } = client(() => { throw new TypeError("Réponse interrompue."); }, () => frame);
+  const recovery = new DelegatedChangeRecovery(api);
   try {
     const initial = await api.identity();
     const previous = api.selectContext(adminId);
     const change = { operation_id: newId(), expected_revision: "3", capabilities: [], active: false };
-    await assert.rejects(recovery.submit(initial.principal, previous, membershipId, change,
-      (id, request) => api.changeMembership(id, request)), TypeError);
+    await assert.rejects(recovery.submitMembership(initial.principal, previous, membershipId, change), TypeError);
     api.clearContext();
     frame = { ...frame, contexts: [{ ...previous, id: nextId, authorization_version: "b".repeat(64) }] };
     const fresh = await api.identity();
@@ -229,7 +297,6 @@ test("Reprendre Supervision, Journal ou la vue 360° dans le contexte équivalen
 });
 
 test("Un clic Reprendre pendant le POST d’appartenance ne sélectionne ni ne purge le contexte", async () => {
-  const recovery = new MembershipChangeRecovery();
   const change = { operation_id: newId(), expected_revision: "3", capabilities: [], active: false };
   const receipt = membershipReceipt(change.operation_id, membershipId);
   const held = Promise.withResolvers();
@@ -239,11 +306,11 @@ test("Un clic Reprendre pendant le POST d’appartenance ne sélectionne ni ne p
     if (++sent === 1) throw new TypeError("Réponse interrompue.");
     return held.promise;
   });
+  const recovery = new DelegatedChangeRecovery(api);
   try {
     const initial = await api.identity();
     const old = api.selectContext(adminId);
-    const send = (id, request) => api.changeMembership(id, request);
-    await assert.rejects(recovery.submit(initial.principal, old, membershipId, change, send), TypeError);
+    await assert.rejects(recovery.submitMembership(initial.principal, old, membershipId, change), TypeError);
     api.clearContext();
     const fresh = await api.identity();
     const now = Date.now();
@@ -252,7 +319,7 @@ test("Un clic Reprendre pendant le POST d’appartenance ne sélectionne ni ne p
       view: "journal", now, budgetStopped: false, payload: null });
     const resume = resumeCandidate(intent, fresh, { now, visible: true, budgetStopped: false, attempts: 0 });
     assert.equal(resume.kind, "offer");
-    replay = recovery.retry(now, (id, target, request) => { api.selectContext(id); return send(target, request); });
+    replay = recovery.retry(now);
     assert.equal(recovery.phase, "sending");
     const pendingSignal = requests.at(-1).options.signal;
     let selections = 0;
@@ -264,7 +331,7 @@ test("Un clic Reprendre pendant le POST d’appartenance ne sélectionne ni ne p
     assert.equal(api.context?.id, adminId);
     assert.equal(requests.filter(({ options }) => options.method === "POST").length, 2);
     held.resolve(json(200, receipt));
-    assert.deepEqual(await replay, receipt);
+    assert.deepEqual(await replay, { kind: "membership", receipt });
     assert.equal(recovery.operationId, null);
     assert.equal(recovery.selectContext(fresh.principal, () => api.selectContext(resume.context.id))?.context.id, adminId);
   } finally {
@@ -275,14 +342,13 @@ test("Un clic Reprendre pendant le POST d’appartenance ne sélectionne ni ne p
 });
 
 test("Un contexte Personnel partiel qui exige l’Administration garde la demande sans offre de reprise", async () => {
-  const recovery = new MembershipChangeRecovery();
   let frame = offered();
   const { api, requests } = client(() => { throw new TypeError("Réponse interrompue."); }, () => frame);
+  const recovery = new DelegatedChangeRecovery(api);
   try {
     const initial = await api.identity();
     const change = { operation_id: newId(), expected_revision: "3", capabilities: [], active: false };
-    await assert.rejects(recovery.submit(initial.principal, api.selectContext(adminId), membershipId, change,
-      (id, request) => api.changeMembership(id, request)), TypeError);
+    await assert.rejects(recovery.submitMembership(initial.principal, api.selectContext(adminId), membershipId, change), TypeError);
     api.clearContext();
     frame = partialPersonal(frame, "requires_administration");
     recovery.revalidate(await api.identity(), Date.now());
@@ -296,16 +362,15 @@ test("Un contexte Personnel partiel qui exige l’Administration garde la demand
 });
 
 test("La relecture du contexte rouvert livre la perte de droit dès son retrait", async () => {
-  const recovery = new MembershipChangeRecovery();
   let frame = offered();
   let review;
   const { api, notifications } = client(() => { throw new TypeError("Réponse interrompue."); }, () => frame,
     (_error, identity) => { if (identity) review = recovery.revalidate(identity, Date.now()); });
+  const recovery = new DelegatedChangeRecovery(api);
   try {
     let identity = await api.identity();
     const change = { operation_id: newId(), expected_revision: "3", capabilities: [], active: false };
-    await assert.rejects(recovery.submit(identity.principal, api.selectContext(adminId), membershipId, change,
-      (id, request) => api.changeMembership(id, request)), TypeError);
+    await assert.rejects(recovery.submitMembership(identity.principal, api.selectContext(adminId), membershipId, change), TypeError);
     api.clearContext();
     identity = await api.identity();
     recovery.revalidate(identity, Date.now());
@@ -326,7 +391,7 @@ test("Un refus de reprise indique l’action applicable et laisse l’issue du p
     [409, "conflict", /vérifier la révision/],
     [400, "invalid_request", /vérifier la demande/],
   ]) {
-    const notice = membershipReplayRefusal(new HumanApiError(status, code, "Détail de la réponse du contrôle", "reread"));
+    const notice = delegatedReplayRefusal("membership", new HumanApiError(status, code, "Détail de la réponse du contrôle", "reread"));
     assert.match(notice, expected);
     assert.match(notice, /Le résultat du premier envoi reste inconnu/);
     assert.doesNotMatch(notice, /Détail de la réponse du contrôle/);
@@ -334,7 +399,6 @@ test("Un refus de reprise indique l’action applicable et laisse l’issue du p
 });
 
 test("Le reçu du premier envoi clôt le changement sans offre de reprise", async () => {
-  const recovery = new MembershipChangeRecovery();
   const change = { operation_id: newId(), expected_revision: "3", capabilities: [], active: false };
   const receipt = membershipReceipt(change.operation_id, membershipId);
   const { api, requests } = client(() => {
@@ -342,10 +406,11 @@ test("Le reçu du premier envoi clôt le changement sans offre de reprise", asyn
     assert.equal(recovery.phase, "sending");
     return json(200, receipt);
   });
+  const recovery = new DelegatedChangeRecovery(api);
   try {
     const initial = await api.identity();
     const context = api.selectContext(adminId);
-    assert.deepEqual(await recovery.submit(initial.principal, context, membershipId, change, (id, request) => api.changeMembership(id, request)), receipt);
+    assert.deepEqual(await recovery.submitMembership(initial.principal, context, membershipId, change), receipt);
     assert.equal(recovery.operationId, null);
     recovery.revalidate(await api.identity(), Date.now());
     assert.equal(recovery.offer(Date.now()), null);

@@ -299,7 +299,7 @@ export class GrantEditor extends EditorDialog {
       el("p", "muted", "La liste remplace celle de la révision lue. Un partage retiré quitte les vues du membre à sa prochaine lecture. Vos accès sont ensuite relus et ce contexte est choisi de nouveau."),
       this.#flow.pendingOperation ? el("p", "mono dg-operation", `Opération ${this.#flow.pendingOperation}`) : null,
       el("div", "dg-actions",
-        this.action(phase === "unknown" ? "Réessayer la même opération" : "Confirmer le changement", "dg-confirm", () => { void this.#submit(); }, settled, true),
+        this.action("Confirmer le changement", "dg-confirm", () => { void this.#submit(); }, settled, true),
         this.action("Revenir à la modification", "dg-back", () => this.goTo("edit"), sending),
         this.action("Fermer", "dg-cancel", () => this.close())));
     this.body.querySelector('[data-focus-key="dg-confirm"]')?.setAttribute("aria-disabled", String(sending));
@@ -307,12 +307,15 @@ export class GrantEditor extends EditorDialog {
   async #submit() {
     const grant = this.#grant;
     const phase = this.#flow.phase;
-    if (!grant || this.#reading || this.step !== "confirm" || phase === "sending" || phase === "conflict" || this.closed) return;
+    if (!grant || this.#reading || this.step !== "confirm" || phase === "sending" || phase === "conflict" || phase === "unknown" || this.closed) return;
     const shares = this.#draft.map((share) => ({ principal: share.principal, permissions: SHARE_PERMISSIONS.filter((p) => share.permissions.includes(p)) }));
     const request = this.#flow.submit(this.#key(), (operationId) => this.#host.send({ operation_id: operationId, resource: this.#host.resource,
       expected_revision: grant.revision, shares }, grant.owner, this.abort.signal));
     this.render();
     const outcome = await request;
-    if (!this.closed && outcome !== "conflict") this.render();
+    if (this.closed || outcome === "conflict") return;
+    // An uncertain send can only be recovered by the dashboard with a current context.
+    if (outcome === "unknown") this.close();
+    else this.render();
   }
 }
