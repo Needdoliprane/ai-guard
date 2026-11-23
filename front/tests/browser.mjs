@@ -249,12 +249,13 @@ const server = createServer(async (request, response) => {
               ],
       });
     if (url.pathname === "/api/integrity") {
-      if (integrityReadBarrier) {
-        integrityReadBarrier.started();
-        await integrityReadBarrier.release;
+      const held = integrityReadBarrier;
+      if (held) {
+        held.started();
+        await held.release;
       }
       return json(response, {
-        valid: true,
+        valid: held?.valid ?? true,
         event_count: mode === "empty" ? 0 : 14,
         head_hash: "abc123",
       });
@@ -461,10 +462,23 @@ async function runSummaryFreshnessCheck() {
   const summaryAlert = page.getByRole("alert").filter({ hasText: "erreur HTTP 503" });
   const exportConfirmation = page.getByText("Le journal complet a été exporté au format JSONL, toutes pages incluses.", { exact: true });
   const exportRefusal = page.getByRole("alert").filter({ hasText: "erreur HTTP 429" });
+  const chainValid = page.getByText("Chaîne valide", { exact: true });
+  const holdIntegrityRead = (valid = true) => {
+    const started = Promise.withResolvers();
+    const release = Promise.withResolvers();
+    const barrier = { started: started.resolve, release: release.promise, valid };
+    integrityReadBarrier = barrier;
+    const deadline = setTimeout(() => started.reject(new Error("La lecture d’intégrité n’a pas commencé")), 10000);
+    return { started: started.promise, release: () => {
+      clearTimeout(deadline);
+      if (integrityReadBarrier === barrier) integrityReadBarrier = null;
+      release.resolve();
+    } };
+  };
 
   await token.fill("viewer-test-token");
   await login.click();
-  await page.getByText("Chaîne valide", { exact: true }).waitFor();
+  await chainValid.waitFor();
   failingRoutes.set("/api/agents", 503);
   failingRoutes.set("/api/integrity", 503);
   await refresh.click();
@@ -496,10 +510,35 @@ async function runSummaryFreshnessCheck() {
   assert.equal(await summaryAlert.isVisible(), true, "Le refus d’export conserve l’avertissement de synthèse");
 
   failingRoutes.delete("/api/integrity");
-  await refresh.click();
-  await page.getByText("Chaîne valide", { exact: true }).waitFor();
-  await summaryAlert.waitFor({ state: "hidden" });
-  assert.equal(await exportRefusal.isVisible(), true, "La synthèse rétablie conserve le refus d’export");
+  const olderRead = holdIntegrityRead(false);
+  const integrityResponse = () => page.waitForResponse((response) => new URL(response.url()).pathname === "/api/integrity");
+  let recovery, nextRead;
+  try {
+    await Promise.all([refresh.click(), olderRead.started]);
+    recovery = holdIntegrityRead();
+    await Promise.all([refresh.click(), recovery.started]);
+    nextRead = holdIntegrityRead();
+    await Promise.all([refresh.click(), nextRead.started]);
+    const recoveredReply = integrityResponse();
+    recovery.release();
+    assert.equal((await (await recoveredReply).json()).valid, true);
+    await chainValid.waitFor({ timeout: 3000 }).catch((error) => {
+      if (error.name !== "TimeoutError") throw error;
+      throw new Error("Une lecture réussie doit rétablir la synthèse pendant la lecture suivante", { cause: error });
+    });
+    await summaryAlert.waitFor({ state: "hidden" });
+    assert.equal(await exportRefusal.isVisible(), true, "La synthèse rétablie conserve le refus d’export");
+
+    const olderReply = integrityResponse();
+    olderRead.release();
+    assert.equal((await (await olderReply).json()).valid, false);
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await chainValid.isVisible(), true, "Une lecture tardive plus ancienne ne remplace pas la synthèse rétablie");
+  } finally {
+    olderRead.release();
+    recovery?.release();
+    nextRead?.release();
+  }
 
   failingRoutes.set("/api/agents", 503);
   await refresh.click();
@@ -510,20 +549,13 @@ async function runSummaryFreshnessCheck() {
   assert.equal(await summaryAlert.count(), 0, "Le refus de session retire la synthèse du client");
   failingRoutes.clear();
   await token.fill("viewer-test-token");
-  const heldIntegrity = Promise.withResolvers();
-  const integrityStarted = Promise.withResolvers();
-  integrityReadBarrier = { started: integrityStarted.resolve, release: heldIntegrity.promise };
-  const readDeadline = setTimeout(() => integrityStarted.reject(new Error("La première lecture d’intégrité n’a pas commencé")), 10000);
+  const firstRead = holdIntegrityRead();
   try {
-    await Promise.all([login.click(), integrityStarted.promise]);
+    await Promise.all([login.click(), firstRead.started]);
     await page.getByText("Non vérifiée", { exact: true }).waitFor();
     assert.equal(await summaryAlert.count(), 0, "La nouvelle session ne reprend pas l’alerte avant la fin de sa première lecture");
-  } finally {
-    clearTimeout(readDeadline);
-    integrityReadBarrier = null;
-    heldIntegrity.resolve();
-  }
-  await page.getByText("Chaîne valide", { exact: true }).waitFor();
+  } finally { firstRead.release(); }
+  await chainValid.waitFor();
   assert.equal(await summaryAlert.count(), 0, "La nouvelle session ne reprend pas l’alerte précédente");
   assert.deepEqual(errors, []);
   process.stdout.write("Synthèse viewer : alertes par source, exports indépendants et reprise vérifiés.\n");
