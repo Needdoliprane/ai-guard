@@ -4,8 +4,8 @@
 //! under the read action `summary` before publication. The Store revalidates
 //! the context and decides every section from its own capabilities; the route
 //! re-reads credential, membership and authorization before publishing. On
-//! the owned source profile the read runs in the proof's own retained source;
-//! its worker sections are unavailable until an owned worker protocol exists.
+//! the owned source profile the read runs in the proof's own retained source.
+//! The worker section uses durable registry facts on SQLite formats 14 and 15.
 use super::*;
 use crate::audit::HumanSummaryFrameV1;
 
