@@ -45,7 +45,9 @@ Use **Actualiser** (Refresh) to read recent events again. The Journal opens no s
 
 Known unadopted human, control, workload, broker, relay and OIDC methods, including HEAD on the event detail route, export and stream, return explicit 503 coverage refusals before legacy extractors, body handling or Store work. OIDC selected in the manifest remains selected and retained, while its handlers/bearers are closed. It is never reported as disabled. Only when OIDC is absent are the existing disabled status/profile GETs admitted. Health reads memory state; it is not proof that every source is available. These reads enable no modern approval, launch, network permission or egress control.
 
-Event content, export and stream, the worker registry and administration writes through the dashboard remain required for V1.
+The local Administration context can read `GET /api/v1/human/workers` on SQLite 14 and 15 with `read_worker_registry`. Identity announces `worker_registry:"human_worker_registry_owned_v1"`. Every page carries a durable receipt from the authenticated source. The dashboard shows the authorized Workers view and its read time. Federation and the worker summary aggregate remain unavailable. [Worker registry](../supervision/README.md#owned-broker-supervision-profile)
+
+Event content, export and stream and administration writes through the dashboard remain required for V1.
 
 A busy mutex or SQLite writer in sourceA does not trigger SQL queries in A while authenticating and reading sourceB. A busy own source returns503. Busy is not absence or a permanent mismatch. Actual compared filesystem/configuration/marker/incarnation mismatches retain global owner invalidation. Filesystem revalidation still covers the full union: blocked filesystem calls or a shared Write epoch carry the existing availability limits. The private candidate index is bounded at65536 entries/16MiB of representation before accumulation; overflow refuses complete publication. These bounds do not measure process RAM.
 

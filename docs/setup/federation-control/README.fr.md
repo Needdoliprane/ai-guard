@@ -530,10 +530,11 @@ l'ordre d'activation relèvent de l'intégration, pas de ce guide.
 
 L'identité humaine annonce `read_profiles` seulement sur le vrai gateway
 owned : broker_registry=`human_broker_registry_owned_v1`,
-worker_registry=`unavailable`, federation_registry=`unavailable`. Objet omis
-en legacy. Ces valeurs fermées choisissent un protocole ; ReadBrokerRegistry
-reste obligatoire et revalidé. La vue complète workers/fédération reste une
-exigence produit ouverte ; indisponible ne signifie jamais zéro activité.
+worker_registry=`human_worker_registry_owned_v1` sur SQLite 14 et 15,
+federation_registry=`unavailable`. Le profil legacy omet cet objet. Le contrôle
+revalide `read_broker_registry` pour Brokers et `read_worker_registry` pour
+Workers dans le contexte d’administration proposé. La vue complète de
+fédération reste une exigence produit ouverte. [Supervision](../supervision/README.fr.md)
 
 ## Qualification
 

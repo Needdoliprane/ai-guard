@@ -23,15 +23,15 @@ A source that the context does not grant is never requested. The **Accès de ce 
 
 ## Owned broker supervision profile
 
-**Frontend candidate; execution and visual qualification must be recorded on the integrated source.** Update the Rust gateway and dashboard together. On an owned control, `GET /api/v1/human/identity` announces exactly:
+Update the Rust gateway and dashboard together. On an owned SQLite 14 or 15 control, `GET /api/v1/human/identity` announces:
 
 ```json
-{"read_profiles":{"broker_registry":"human_broker_registry_owned_v1","worker_registry":"unavailable","federation_registry":"unavailable"}}
+{"read_profiles":{"broker_registry":"human_broker_registry_owned_v1","worker_registry":"human_worker_registry_owned_v1","federation_registry":"unavailable"}}
 ```
 
 This announcement is independent of context permissions. The control must currently offer an administration context carrying `read_broker_registry`. The dashboard chooses `GET /api/v1/human/owned/brokers` before requesting a page: 25 rows in **Brokers**, 100 in **Supervision**, at most 100 rows and 256 KiB per response. It validates the profile, version, closed fields, selected context, authorization version and receipt. The page is `live_keyset`, its runtime inventory is `unknown`, and `count_scope: page` means a page count, never a tenant total. Owned cursors belong only to that profile and page size. A 403, 404, 503 or incompatible body never triggers a legacy registry request.
 
-**Workers** and **Fédération** navigation are unavailable for this announced profile. Supervision continues to read the authorized owned brokers and resources independently. If `read_worker_registry` is present, **Workers · profil indisponible** explains that the route is unavailable; no worker read is sent and no zero activity is shown. **Relire mes accès** returns to the control's current offer. Ask the operator to check supported profiles; this action does not activate a missing capability. Full multi-host worker supervision remains an open requirement.
+**Workers** uses the existing paginated GET `/api/v1/human/workers` when the offered Administration context grants and serves `workers_read`. Each page has its own durable receipt. **Supervision** reads the authorized Workers and Brokers windows with their own freshness and receipts. A refusal withdraws the affected data. The `unavailable` worker profile still appears as unavailable on earlier gateways. **Fédération** and the worker aggregate in the 360° view remain unavailable on this owned profile. [Worker registry contract](../../api.md#registre-workers-humain--human-worker-registry)
 
 The broker row and its detail distinguish heartbeat freshness from checkpoint freshness:
 
