@@ -1,5 +1,6 @@
 //! Cold, stop-only broker audit reconciliation. The gateway/SQLite fixture is
 //! real and remains at the same identity; no runtime or provider is started.
+use super::super::owned_ipc_peer::OwnedIpcPeer;
 use super::*;
 use crate::{
     audit::{EventQuery, Store},
@@ -10,9 +11,10 @@ use crate::{
             recovery::StopRecoveryReaderV1,
         },
         lifecycle::LocalCommandRequestV1,
+        service::BrokerClient,
         writer::ProfileWriterCapabilities,
     },
-    control::WorkerStateV1,
+    control::{ArmSubjectV1, QuotaPolicyV1, WorkerStateV1},
     control_fs::Directory,
     model::StoredEvent,
     redaction::Redactor,
@@ -263,6 +265,75 @@ async fn pending_result_ack(
     )
 }
 
+async fn assert_stop_recovery_status(client: &BrokerClient, seed: &ColdRecoverySeed) {
+    let BrokerReplyV1::RecoveryStatus { status } = client
+        .request(BrokerCommandV1::RecoveryStatus {
+            operation_id: seed.operation_id(),
+        })
+        .await
+        .expect("authenticated STOP recovery status request failed")
+    else {
+        panic!("the STOP service did not return its recovery status");
+    };
+    assert_eq!(status.version, 1);
+    assert_eq!(status.operation_id, seed.operation_id());
+    assert_eq!(status.tenant_id, seed.scope().tenant_id());
+    assert_eq!(status.journal_mode, JournalModeV1::StopOnly);
+    assert_eq!(status.source, RecoveryDataSourceV1::ConfirmedJournal);
+    assert_eq!(
+        status.runtime_evidence,
+        RecoveryRuntimeEvidenceV1::NotQueried
+    );
+    assert!(!status.incomplete && status.reconciliation_required);
+
+    let prior: Vec<SupervisionOperationV1> =
+        serde_json::from_value(seed.arm_claim_snapshot().clone()).unwrap();
+    let mut original = prior.iter().filter_map(|operation| match operation {
+        SupervisionOperationV1::Arm {
+            request,
+            response: Some(_),
+            ..
+        } if matches!(request.subject, ArmSubjectV1::Worker) => Some(request),
+        _ => None,
+    });
+    let arm = original.next().expect("the seed retains one worker Arm");
+    assert!(original.next().is_none());
+    let mut recovered = status
+        .known_arms
+        .iter()
+        .filter(|target| matches!(target.subject, RecoveryTargetKindV1::Worker));
+    let target = recovered.next().expect("the same worker Arm is readable");
+    assert!(recovered.next().is_none());
+    assert_eq!(target.arm_id, arm.operation_id);
+    assert_eq!(target.worker_id, seed.worker_id());
+    assert_eq!(target.attempt_id, seed.attempt_id());
+    assert_eq!(target.original_timeout_seconds, arm.timeout_seconds);
+    assert_eq!(target.original_deadline_ns_decimal, arm.deadline_ns_decimal);
+    assert_eq!(
+        canonical(&target.original_clock).unwrap(),
+        canonical(&arm.clock).unwrap()
+    );
+}
+
+async fn check_stop_result_refused(client: &BrokerClient, operation_id: Uuid) -> Result<()> {
+    let reply = client
+        .request(BrokerCommandV1::Result {
+            version: JOB_RESULT_VERSION,
+            operation_id,
+        })
+        .await?;
+    ensure!(
+        matches!(
+            reply,
+            BrokerReplyV1::Error {
+                code: BrokerErrorCodeV1::NeedsReconciliation
+            }
+        ),
+        "authenticated Result must remain fenced on the STOP service"
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn cold_stop_only_reconcile_loop_publishes_pending_v4_without_start_capability() {
     let seed = terminal_pending_seed_for_cold_audit_test().await;
@@ -282,6 +353,17 @@ async fn cold_stop_only_reconcile_loop_publishes_pending_v4_without_start_capabi
         1000,
     )
     .unwrap();
+    let worker_before = store.worker(seed.worker_id()).unwrap().unwrap();
+    assert_eq!(worker_before.state, WorkerStateV1::Terminal);
+    assert!(!worker_before.quota_held);
+    let policy = QuotaPolicyV1::default();
+    let quota_before = store.worker_quota(&policy).unwrap();
+    assert_eq!(quota_before.held_workers, 0);
+    assert_eq!(quota_before.held_cpu_millis, 0);
+    assert_eq!(quota_before.held_memory_bytes, 0);
+    let usage_before = store.worker_usage().unwrap();
+    assert_eq!(usage_before.len(), 1);
+    assert!(!usage_before[0].billable);
     let initial_result_events = store
         .events(&EventQuery {
             kind: Some("broker.batch.result".into()),
@@ -307,12 +389,31 @@ async fn cold_stop_only_reconcile_loop_publishes_pending_v4_without_start_capabi
     let capability = jobs.writer.get().unwrap();
     assert!(capability.is_stop_only());
     assert!(capability.full().is_none());
-    assert_eq!(
-        service.registry.data.profiles[0].gateway,
-        seed.scope().gateway_origin()
-    );
-
+    let profile = service.registry.profile(seed.scope().profile_id()).unwrap();
+    assert_eq!(profile.gateway, seed.scope().gateway_origin());
     eprintln!("cold_recovery_test phase=stop_only_ready");
+    let serving = Arc::clone(&service);
+    let peer = OwnedIpcPeer::start(move |stream| {
+        let serving = Arc::clone(&serving);
+        async move {
+            Box::pin(serving.connection(stream)).await;
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+    let client = BrokerClient::open(
+        peer.root.clone(),
+        seed.scope().profile_id().to_owned(),
+        &profile.runner_token_file,
+    )
+    .unwrap();
+    assert_stop_recovery_status(&client, &seed).await;
+    check_stop_result_refused(&client, seed.operation_id())
+        .await
+        .unwrap();
+    eprintln!("cold_recovery_test phase=retained_ipc_verified");
+
     let task = tokio::spawn(Arc::clone(&service).reconcile_loop());
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     let mut published_events: Option<(StoredEvent, StoredEvent)> = None;
@@ -345,11 +446,25 @@ async fn cold_stop_only_reconcile_loop_publishes_pending_v4_without_start_capabi
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+    // Join the owner that confirms the local ACKs before testing Result again.
+    // The service is still accepting IPC, so the refusal comes from STOP mode.
+    let delivery = tokio::time::timeout(Duration::from_secs(60), service.cold_owners.drain()).await;
+    let result_after = if published_events.is_some() && matches!(&delivery, Ok(Ok(()))) {
+        check_stop_result_refused(&client, seed.operation_id()).await
+    } else {
+        Ok(())
+    };
+    let peer_outcome = peer.finish().await;
     service.stopping.store(true, Ordering::SeqCst);
     tokio::time::timeout(Duration::from_secs(60), task)
         .await
         .expect("reconcile loop observes stopping and joins")
         .expect("reconcile loop task joins");
+    peer_outcome.expect("private IPC peer must drain before reopening the journal");
+    delivery
+        .expect("retained audit owner did not drain within its budget")
+        .expect("retained audit owner did not confirm delivery");
+    result_after.unwrap();
     eprintln!("cold_recovery_test phase=loop_joined");
     assert!(matches!(
         service.require_starts().await,
@@ -403,10 +518,19 @@ async fn cold_stop_only_reconcile_loop_publishes_pending_v4_without_start_capabi
     let worker = store.worker(seed.worker_id()).unwrap().unwrap();
     assert_eq!(worker.state, WorkerStateV1::Terminal);
     assert!(!worker.quota_held);
+    assert_eq!(
+        canonical(&worker).unwrap(),
+        canonical(&worker_before).unwrap()
+    );
+    assert_eq!(
+        canonical(&store.worker_quota(&policy).unwrap()).unwrap(),
+        canonical(&quota_before).unwrap()
+    );
     let allocations = store.worker_usage().unwrap();
-    assert_eq!(allocations.len(), 1);
+    assert_eq!(allocations, usage_before);
     assert_eq!(allocations[0].attempt_id, seed.attempt_id());
     assert_eq!(allocations[0].source.container_id, seed.container_id());
+    assert!(store.integrity().unwrap().valid);
 
     drop(service);
     drop(jobs);
