@@ -938,7 +938,7 @@ async fn owned_grant_change_format14_returns_one_durable_receipt_and_keeps_the_s
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
     assert_eq!(format, 14);
-    let durable_revision_and_mutations = || -> (u64, u64) {
+    let durable_revision_and_mutations = || -> (i64, i64) {
         database
             .query_row(
                 "SELECT authorization_revision, (SELECT COUNT(*) FROM events WHERE kind='control.identity.mutation') \
