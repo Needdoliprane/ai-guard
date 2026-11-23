@@ -33,6 +33,8 @@ Cette annonce reste indépendante des permissions du contexte. La lecture exige 
 
 **Workers** utilise le GET paginé `/api/v1/human/workers` lorsque le contexte d’administration proposé accorde et sert `workers_read`. Chaque page possède son reçu durable. **Supervision** lit les registres autorisés des workers et brokers avec leurs reçus et leur fraîcheur propres. Un refus retire les données concernées. Les anciennes versions du gateway peuvent continuer à annoncer le profil worker `unavailable`. La section Workers de la vue 360° synthétise les états et réservations durables du contexte d’administration autorisé. L’inventaire runtime est `unknown`. **Fédération** est indisponible sur ce profil. [Contrat du registre](../../api.md#registre-workers-humain--human-worker-registry)
 
+**Quotas et usage** s’ouvre lorsque le catalogue accorde et sert la lecture du quota. Lorsque seul le quota est disponible, la vue affiche plafonds, réservations durables, heure de lecture et reçu. La section Usage explique sa disponibilité.
+
 La ligne du broker et son détail distinguent fraîcheur du heartbeat et fraîcheur du checkpoint :
 
 | Statut du checkpoint | Sens affiché |

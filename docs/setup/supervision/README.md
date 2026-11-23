@@ -33,6 +33,8 @@ This announcement is independent of context permissions. The control must curren
 
 **Workers** uses the existing paginated GET `/api/v1/human/workers` when the offered Administration context grants and serves `workers_read`. Each page has its own durable receipt. **Supervision** reads the authorized Workers and Brokers windows with their own freshness and receipts. A refusal withdraws the affected data. The `unavailable` worker profile still appears as unavailable on earlier gateways. The Workers section in the 360° view summarises durable states and reservations for the authorised administration context. Runtime inventory is `unknown`. **Fédération** is unavailable on this owned profile. [Worker registry contract](../../api.md#registre-workers-humain--human-worker-registry)
 
+**Quotas et usage** opens when the catalogue grants and serves the quota read. In the quota-only profile, the view shows the configured limits, current reservations, read time and receipt. The usage section explains its availability.
+
 The broker row and its detail distinguish heartbeat freshness from checkpoint freshness:
 
 | Checkpoint status | Displayed meaning |

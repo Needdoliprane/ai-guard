@@ -47,6 +47,8 @@ Known unadopted human, control, workload, broker, relay and OIDC methods, includ
 
 The local Administration context can read `GET /api/v1/human/workers` on SQLite 14 and 15 with `read_worker_registry`. Identity announces `worker_registry:"human_worker_registry_owned_v1"`. Every page carries a durable receipt from the authenticated source. The dashboard shows the authorized Workers view and its read time. The federation route is unavailable on this profile. [Worker registry](../supervision/README.md#owned-broker-supervision-profile)
 
+The same local administration context can read `GET /api/v1/human/admin/quota` when the catalogue grants and serves `quota_read`. The limits and held reservations come from the retained SQLite source and have an audited quota receipt. **Quotas et usage** shows that quota and its read time. The usage section shows its own availability from the catalogue.
+
 Event content, export and stream and administration writes through the dashboard remain required for V1.
 
 A busy mutex or SQLite writer in sourceA does not trigger SQL queries in A while authenticating and reading sourceB. A busy own source returns503. Busy is not absence or a permanent mismatch. Actual compared filesystem/configuration/marker/incarnation mismatches retain global owner invalidation. Filesystem revalidation still covers the full union: blocked filesystem calls or a shared Write epoch carry the existing availability limits. The private candidate index is bounded at65536 entries/16MiB of representation before accumulation; overflow refuses complete publication. These bounds do not measure process RAM.

@@ -47,6 +47,8 @@ Les méthodes connues non adoptées humaines, contrôle, workload, brokers, rela
 
 Le contexte d’administration local peut lire `GET /api/v1/human/workers` sur SQLite 14 et 15 avec `read_worker_registry`. L’identité annonce `worker_registry:"human_worker_registry_owned_v1"`. Chaque page porte un reçu durable de la source authentifiée. Le dashboard affiche la vue Workers autorisée et son heure de lecture. La route de fédération est indisponible sur ce profil. [Registre workers](../supervision/README.fr.md#profil-de-supervision-des-brokers-owned)
 
+Ce contexte d’administration local peut lire `GET /api/v1/human/admin/quota` lorsque le catalogue accorde et sert `quota_read`. Les plafonds et réservations retenues proviennent de la source SQLite sélectionnée et portent un reçu de lecture. **Quotas et usage** affiche ce quota et son heure de lecture. La section Usage indique sa propre disponibilité d’après le catalogue.
+
 Le contenu, l’export et le flux d’événements ainsi que les écritures d’administration via le dashboard restent exigés en V1.
 
 Un mutex ou writer SQLite occupé chez A ne déclenche aucun SQL chez A lors de l'authentification/lecture de B. La propre source occupée renvoie503. Busy n'est ni absence ni mismatch permanent. Un mismatch physique/configuration/marqueur/incarnation réellement comparé conserve l'invalidation globale de l'owner. La revalidation physique couvre toujours l'union entière : syscall bloqué ou epoch Write partagé gardent leurs limites de disponibilité. L'index privé de candidats est borné avant accumulation à65536 entrées/16Mio de représentation ; le dépassement refuse toute publication complète. Ces bornes ne mesurent pas la RAM du processus.
