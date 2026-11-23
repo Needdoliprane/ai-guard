@@ -21,6 +21,7 @@ class Element extends EventTarget {
   replaceChildren(...nodes) { this.children = []; this.append(...nodes); }
   setAttribute(name, value) { this.#attributes.set(name, value); }
   getAttribute(name) { return this.#attributes.get(name) ?? null; }
+  focus() { document.activeElement = this; }
 }
 
 const adminId = "c".repeat(64);
@@ -282,14 +283,14 @@ test("owned : quota seul conserve un reçu unique et explique l’absence d’us
   assert.match(panels(view)[1].textContent, /profil de sources/);
 });
 
-test("owned : une durée sous la seconde diffère d’un zéro observé et une page vide signale la durée inconnue", async (t) => {
+test("Les allocations positives sous l’unité restent distinctes d’un zéro observé", async (t) => {
   const allocation = {
     worker_id: uuid, started_at: "2026-11-21T11:00:00Z", method_version: 1, billable: false,
     source: { authority_id: "authority-a", runtime_kind: "docker", container_id: "container-1", spec_hash: "f".repeat(64), provenance: "observed" },
   };
   const items = [
     { ...allocation, attempt_id: uuid, terminal_observation_id: "observation-short", finished_at: "2026-11-21T11:00:00.5Z",
-      duration_ns: "500000000", cpu_millicore_nanoseconds: "500000000000", memory_byte_nanoseconds: "512000000000" },
+      duration_ns: "500000000", cpu_millicore_nanoseconds: "500000000", memory_byte_nanoseconds: "512000000000" },
     { ...allocation, attempt_id: secondUuid, terminal_observation_id: "observation-zero", finished_at: allocation.started_at,
       duration_ns: "0", cpu_millicore_nanoseconds: "0", memory_byte_nanoseconds: "0" },
   ];
@@ -297,18 +298,19 @@ test("owned : une durée sous la seconde diffère d’un zéro observé et une p
   const { view } = await mount(t, replies);
   await view.refresh();
   const table = panels(view)[1].children.find((child) => child.className === "ov-scroll").children[0];
-  const [short, zero] = table.children.find((child) => child.tag === "tbody").children.map((row) => row.children[2]);
-  assert.equal(short.children[0].textContent, "< 1 s");
-  assert.equal(short.children[0].getAttribute("aria-hidden"), "true");
-  assert.equal(short.children.find((child) => child.className === "sr-only").textContent, "Moins d’une seconde, 500\u202f000\u202f000 ns.");
-  assert.equal(zero.textContent, "0 s");
+  const [short, zero] = table.children.find((child) => child.tag === "tbody").children.map((row) => row.children);
+  assert.equal(short[2].children[0].textContent, "< 1 s");
+  assert.equal(short[2].children[0].getAttribute("aria-hidden"), "true");
+  assert.equal(short[2].children.find((child) => child.className === "sr-only").textContent, "Moins d’une seconde, 500\u202f000\u202f000 ns.");
+  assert.deepEqual(short.slice(3, 5).map((cell) => cell.textContent), ["< 1", "< 0,1 Gio"]);
+  assert.deepEqual(zero.slice(2, 5).map((cell) => cell.textContent), ["0 s", "0", "0,0 Gio"]);
 
   replies[usagePath] = () => Response.json(initialUsage);
   await view.refresh();
   assert.match(panels(view)[1].textContent, /durée reste inconnue en l’absence d’une observation terminale complète/);
 });
 
-test("owned : Allocations suivantes attend la fin de l’actualisation avant de changer de page", async (t) => {
+test("Allocations suivantes attend l’actualisation et rend le focus au repère de la vue", async (t) => {
   const cursor = "ab".repeat(16);
   const nextPath = adminUrls.usage(cursor);
   const nextUsage = usagePage(adminId, stamp(6));
@@ -338,10 +340,12 @@ test("owned : Allocations suivantes attend la fin de l’actualisation avant de 
 
   const next = nextButton();
   assert.equal(next.disabled, false);
+  next.focus();
   next.dispatchEvent(new Event("click"));
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(paths(calls).slice(-2), [quotaPath, nextPath]);
   assertStamp(panels(view)[1], nextUsage);
+  assert.equal(document.activeElement?.dataset.focusKey, "ov-usage-refresh");
 });
 
 test("Legacy conserve ses deux lectures parallèles", async (t) => {

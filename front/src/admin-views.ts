@@ -41,6 +41,7 @@ abstract class AdminView<T> {
   start() { void this.read(); }
   /** For the host, on an explicit action of the person; a read in flight answers instead. */
   refresh() { return this.read(); }
+  protected focusRefresh() { this.#refresh.focus({ preventScroll: true }); }
   close() { this.#closed = true; this.#controller?.abort(); this.#controller = null; this.value = null; this.element.replaceChildren(); }
   protected abstract fetch(signal: AbortSignal): Promise<T>;
   protected abstract render(value: T): HTMLElement[];
@@ -241,6 +242,8 @@ export class UsageView extends AdminView<QuotaUsageRead> {
     table.append(el("caption", "", "Allocations terminales observées · méthode 1 · billable=false"),
       el("thead", "", el("tr", "", th("Worker"), th("Fin observée"), th("Durée allouée"), th("milliCPU·s"), th("Mémoire (Gio·s)"), th("Autorité · runtime"))));
     const body = el("tbody");
+    const owned = this.#usageHost.owned;
+    const zeroMemory = gibibytes("0");
     for (const item of usage.items) {
       const tr = el("tr"); tr.dataset.attemptId = item.attempt_id;
       const seconds = perSecond(item.duration_ns);
@@ -252,9 +255,12 @@ export class UsageView extends AdminView<QuotaUsageRead> {
         duration.title = exact;
         duration.replaceChildren(short, el("span", "sr-only", `Moins d’une seconde, ${exact}.`));
       }
+      const cpu = perSecond(item.cpu_millicore_nanoseconds);
+      const memory = gibibytes(perSecond(item.memory_byte_nanoseconds).replace(/\D/g, "") || "0");
+      const cpuAllocation = owned && cpu === "0" && item.cpu_millicore_nanoseconds !== "0" ? "< 1" : cpu;
+      const memoryAllocation = owned && memory === zeroMemory && item.memory_byte_nanoseconds !== "0" ? "< 0,1 Gio" : memory;
       tr.append(el("td", "mono", item.worker_id), el("td", "", el("time", "mono", formatDate(item.finished_at, true))),
-        duration, el("td", "mono", perSecond(item.cpu_millicore_nanoseconds)),
-        el("td", "mono", gibibytes(perSecond(item.memory_byte_nanoseconds).replace(/\D/g, "") || "0")),
+        duration, el("td", "mono", cpuAllocation), el("td", "mono", memoryAllocation),
         el("td", "", el("span", "mono", item.source.authority_id), el("span", "muted", ` · ${item.source.runtime_kind}`)));
       body.append(tr);
     }
@@ -267,8 +273,10 @@ export class UsageView extends AdminView<QuotaUsageRead> {
       button.disabled = this.reading;
       button.addEventListener("click", () => {
         if (this.reading) return;
+        const returnFocus = owned && document.activeElement === button;
         this.#cursor = usage.next_cursor;
         void this.read();
+        if (returnFocus) this.focusRefresh();
       });
       allocations.append(button);
     }
