@@ -24,6 +24,10 @@ pub(super) enum BrokerStep {
     OwnershipReload,
     CreatedInspection,
     CreatedExchange,
+    TerminalObservationAck,
+    ResultAudit,
+    CleanupConfirmation,
+    CleanupAck,
     FailureObserved,
 }
 impl fmt::Display for BrokerStep {
