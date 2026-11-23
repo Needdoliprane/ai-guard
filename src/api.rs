@@ -2200,7 +2200,7 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
                 request.uri(),
                 human_sources::HUMAN_MEMBERSHIP_CHANGE_PATH,
             )
-            .ok_or_else(human::invalid_request)?,
+            .ok_or_else(human::invalid_membership_request)?,
         )
     } else {
         None

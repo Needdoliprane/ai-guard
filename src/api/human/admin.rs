@@ -371,9 +371,7 @@ pub(super) async fn change_owned_membership(
     }
     let (mut parts, body) = request.into_parts();
     let proof = VerifiedHuman::from_request_parts(&mut parts, &state).await?;
-    let path = Path::<String>::from_request_parts(&mut parts, &state)
-        .await
-        .map_err(|_| invalid_request())?;
+    let path = Path::<String>::from_request_parts(&mut parts, &state).await;
     let headers = parts.headers.clone();
     change_membership(
         proof,
@@ -395,14 +393,15 @@ pub(super) async fn change_membership(
     proof: VerifiedHuman,
     State(state): State<GatewayState>,
     headers: HeaderMap,
-    axum::extract::Path(membership_id): axum::extract::Path<String>,
+    path: Result<Path<String>, axum::extract::rejection::PathRejection>,
     request: Request,
 ) -> ApiResult<Json<HumanMembershipChangeReceiptV1>> {
+    let Path(membership_id) = path.map_err(|_| invalid_membership_request())?;
     let (_, change) = membership_change_body(request).await?;
     let expected_revision: u64 = change
         .expected_revision
         .parse()
-        .map_err(|_| invalid_request())?;
+        .map_err(|_| invalid_membership_request())?;
     let selected = headers.clone();
     run_human(&state, &proof, Some(&selected), move |state, proof| {
         let (_, tenant, scope) = selected_context(&state, &proof, &headers)?;
@@ -414,7 +413,7 @@ pub(super) async fn change_membership(
             (Some(_), _) => return Err(super::super::human_sources::unavailable()),
             (None, _) => store
                 .human_change_membership(&scope, &membership_id, &change)
-                .map_err(identity_change_failure)?,
+                .map_err(membership_change_failure)?,
         };
         // The change bumped the authorization revision, so the selecting
         // context is no longer current: publication checks the credential.

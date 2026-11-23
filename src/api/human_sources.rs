@@ -354,7 +354,7 @@ impl OwnedHumanGateway {
                 return Err(unavailable());
             }
             epoch.validate_source(source).map_err(|_| unavailable())?;
-            let (receipt, next) = result.map_err(human::identity_change_failure)?;
+            let (receipt, next) = result.map_err(human::membership_change_failure)?;
             self.check()?;
             if let Some(next) = next {
                 generation.store(Arc::new(next));
@@ -859,7 +859,7 @@ pub(super) async fn route_gate(
             )
     }) {
         if membership_change_id(request.uri(), membership_template).is_none() {
-            return human::invalid_request().into_response();
+            return human::invalid_membership_request().into_response();
         }
         return next.run(request).await;
     }
