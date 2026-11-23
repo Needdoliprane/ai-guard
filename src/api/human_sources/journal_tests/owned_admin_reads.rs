@@ -68,15 +68,11 @@ async fn owned_sources_serve_the_summary_memberships_and_configuration() {
         "memberships_read",
         "configuration_read",
         "brokers_read",
+        "workers_read",
     ] {
         assert_eq!(availability(operation), "available", "{operation}");
     }
-    for operation in [
-        "workers_read",
-        "federation_read",
-        "quota_read",
-        "usage_read",
-    ] {
+    for operation in ["federation_read", "quota_read", "usage_read"] {
         assert_eq!(
             availability(operation),
             "profile_unavailable",
@@ -125,7 +121,7 @@ async fn owned_sources_serve_the_summary_memberships_and_configuration() {
     assert_eq!(
         status,
         StatusCode::SERVICE_UNAVAILABLE,
-        "no worker protocol on the owned profile yet"
+        "quota stays unavailable on the owned profile"
     );
 }
 

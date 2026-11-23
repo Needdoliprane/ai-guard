@@ -2189,6 +2189,7 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
             "/api/v1/human/events",
             "/api/v1/human/events/recent",
             "/api/v1/human/owned/brokers",
+            "/api/v1/human/workers",
             "/api/v1/human/summary",
             "/api/v1/human/admin/memberships",
             "/api/v1/human/admin/grants",

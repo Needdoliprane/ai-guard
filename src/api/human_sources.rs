@@ -195,7 +195,7 @@ impl OwnedHumanGateway {
             .map(|generation| **generation.load())
     }
 
-    fn read<T>(
+    pub(super) fn read<T>(
         &self,
         index: usize,
         store: &Store,
@@ -613,6 +613,7 @@ const OWNED_HUMAN_GET_PATHS: &[&str] = &[
     "/api/v1/human/owned/brokers",
     "/api/v1/human/resources",
     "/api/v1/human/summary",
+    "/api/v1/human/workers",
 ];
 
 // Exact existing route templates, reviewed in CONTRACT_W0_R2.

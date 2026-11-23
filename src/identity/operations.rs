@@ -352,13 +352,12 @@ fn availability(operation: HumanOperationV1, facts: OperationFactsV1) -> Operati
             O::EventsReadContent
                 | O::EventsExport
                 | O::EventsStream
-                | O::WorkersRead
                 | O::FederationRead
                 | O::QuotaRead
                 | O::UsageRead
         )
     {
-        // Owned sources serve metadata snapshots and lack the worker registry.
+        // Owned sources serve the two registries' metadata as separate reads.
         A::ProfileUnavailable
     } else if requires_marker(operation) && !facts.human_rights_marker {
         A::MigrationRequired
@@ -401,7 +400,6 @@ mod tests {
             },
         );
         for operation in [
-            HumanOperationV1::WorkersRead,
             HumanOperationV1::FederationRead,
             HumanOperationV1::QuotaRead,
             HumanOperationV1::UsageRead,
@@ -414,6 +412,7 @@ mod tests {
         }
         for operation in [
             HumanOperationV1::BrokersRead,
+            HumanOperationV1::WorkersRead,
             HumanOperationV1::SummaryRead,
             HumanOperationV1::MembershipsRead,
         ] {

@@ -1129,7 +1129,7 @@ fn identity_sync(
         contexts,
         read_profiles: state.owned_human.as_ref().map(|_| HumanReadProfilesV1 {
             broker_registry: HumanBrokerRegistryReadProfileV1::OwnedV1,
-            worker_registry: HumanUnavailableReadProfileV1::Unavailable,
+            worker_registry: HumanWorkerRegistryReadProfileV1::OwnedV1,
             federation_registry: HumanUnavailableReadProfileV1::Unavailable,
         }),
     };

@@ -1,4 +1,4 @@
-//! Explicit schema10 human worker metadata; one authorization/projection/audit transaction.
+//! Human worker metadata under the schema 10 marker; one authorization/projection/audit transaction.
 use super::*;
 use crate::{control::WorkerV1, identity::*};
 
@@ -140,6 +140,16 @@ impl HumanWorkerFrameV1 {
         })
     }
 }
+fn validate_page(after: Option<&str>, limit: usize) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        (1..=HUMAN_MAX_PAGE_ITEMS).contains(&limit),
+        "invalid human worker page"
+    );
+    if let Some(after) = after {
+        crate::control::uuid(after)?;
+    }
+    Ok(())
+}
 impl Store {
     pub(super) fn initialize_human_workers(&self, tx: &Transaction<'_>) -> anyhow::Result<()> {
         let (identity_genesis_seq, identity_genesis_hash): (i64, String) = tx.query_row(
@@ -181,27 +191,59 @@ impl Store {
         limit: usize,
         transient: &Redactor,
     ) -> anyhow::Result<HumanWorkerStorePageV1> {
-        anyhow::ensure!(
-            (1..=HUMAN_MAX_PAGE_ITEMS).contains(&limit),
-            "invalid human worker page"
-        );
-        if let Some(after) = after {
-            crate::control::uuid(after)?;
-        }
+        validate_page(after, limit)?;
         let mut db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         let tx = self.begin_checked(&mut db)?;
+        let page = self.human_workers_checked(&tx, scope, frame, after, limit, transient)?;
+        self.commit_checked(tx)?;
+        Ok(page)
+    }
+
+    pub(crate) fn modern_human_workers(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        scope: &AuthorizedScopeV1,
+        frame: &HumanWorkerFrameV1,
+        after: Option<&str>,
+        limit: usize,
+        transient: &Redactor,
+    ) -> anyhow::Result<HumanWorkerStorePageV1> {
+        validate_page(after, limit)?;
+        self.with_modern_read(access, |tx| {
+            self.human_workers_checked(tx, scope, frame, after, limit, transient)
+        })
+    }
+
+    fn human_workers_checked(
+        &self,
+        tx: &CheckedTransaction<'_>,
+        scope: &AuthorizedScopeV1,
+        frame: &HumanWorkerFrameV1,
+        after: Option<&str>,
+        limit: usize,
+        transient: &Redactor,
+    ) -> anyhow::Result<HumanWorkerStorePageV1> {
+        let owned = tx.source_access.is_some();
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        let current = identity::revalidate_scope(&tx, scope, &self.tenant_id)?;
+        let current = if owned {
+            identity::revalidate_scope_checked(tx, scope, &self.tenant_id)?
+        } else {
+            identity::revalidate_scope(tx, scope, &self.tenant_id)?
+        };
         if current.mode() != ContextModeV1::Administration
             || !current.has_capability(HumanCapabilityV1::ReadWorkerRegistry)
         {
             return Err(IdentityFailureV1::PermissionDenied.into());
         }
-        if !matches!(version, 10 | 11 | 12 | 13) {
-            return Err(IdentityFailureV1::MigrationRequired.into());
+        match (owned, version) {
+            (false, 10..=13) => {}
+            (true, 14 | 15) => {
+                genesis(tx)?;
+            }
+            _ => return Err(IdentityFailureV1::MigrationRequired.into()),
         }
         let redactor = self.redactor.union(transient);
         let evaluated_at = crate::broker_registry::format_time(chrono::Utc::now());
@@ -223,7 +265,7 @@ impl Store {
                     break;
                 }
                 let worker: WorkerV1 = serde_json::from_str(&row?)?;
-                let item = project(&tx, worker, &evaluated_at, &redactor)?;
+                let item = project(tx, worker, &evaluated_at, &redactor)?;
                 let size = serde_json::to_vec(&item)?
                     .len()
                     .checked_add(1)
@@ -249,7 +291,7 @@ impl Store {
             membership_id: current.membership_id().into(),
             membership_revision: current.membership_revision(),
             mode: current.mode(),
-            authorization_revision: identity::authorization_revision(&tx)?,
+            authorization_revision: identity::authorization_revision(tx)?,
             result_count: items.len(),
         };
         validate_read(&record)?;
@@ -265,7 +307,7 @@ impl Store {
             serde_json::to_value(&event)? == original,
             "human worker audit identity requires redaction"
         );
-        let stored = self.append_human_in_transaction(&tx, event, payload, current.principal())?;
+        let stored = self.append_human_in_transaction(tx, event, payload, current.principal())?;
         let receipt = HumanReadReceiptV1 {
             request_id,
             audit_event_id: stored.event.id,
@@ -288,7 +330,6 @@ impl Store {
         // Validate keys, fixed metadata, anchors, rows and receipt together with
         // the exact-size cursor placeholder before committing the read receipt.
         self.check_human_worker_output(transient, &page)?;
-        self.commit_checked(tx)?;
         Ok(HumanWorkerStorePageV1 {
             page,
             after_worker_id: position,

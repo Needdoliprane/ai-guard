@@ -17,7 +17,7 @@ async fn identity_announces_actual_owned_read_profiles_and_omits_them_on_legacy(
         body["read_profiles"],
         json!({
             "broker_registry":"human_broker_registry_owned_v1",
-            "worker_registry":"unavailable", "federation_registry":"unavailable"
+            "worker_registry":"human_worker_registry_owned_v1", "federation_registry":"unavailable"
         })
     );
     let (_legacy_files, legacy, token) = crate::api::read_execution_tests::local_identity_state();

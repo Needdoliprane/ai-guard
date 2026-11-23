@@ -181,7 +181,9 @@ const OWNED_PROXY_CONTEXT: &str = "synthetic-owned-proxy-context";
 
 /// Transport canary only. The upstream deliberately refuses the read; it is
 /// not a synthetic successful owned projection or a substitute for Store ACLs.
-async fn owned_brokers_proxy() -> (
+async fn owned_registry_proxy(
+    path: &'static str,
+) -> (
     LoopbackGateway,
     Router,
     Arc<AtomicUsize>,
@@ -194,7 +196,7 @@ async fn owned_brokers_proxy() -> (
     let other = unexpected.clone();
     let router = Router::new()
         .route(
-            "/api/v1/human/owned/brokers",
+            path,
             axum::routing::get(move |request: axum::extract::Request| {
                 let received = received.clone();
                 async move {
@@ -269,13 +271,11 @@ async fn owned_brokers_proxy() -> (
     (server, dashboard, calls, unexpected, front)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn owned_dashboard_brokers_forwards_exact_get_context_and_gateway_refusal_without_identity_probe()
- {
-    let (server, dashboard, calls, unexpected, _front) = owned_brokers_proxy().await;
+async fn require_owned_registry_get_is_relayed(path: &'static str) {
+    let (server, dashboard, calls, unexpected, _front) = owned_registry_proxy(path).await;
     let response = dashboard
         .oneshot(
-            axum::http::Request::get("/api/v1/human/owned/brokers?limit=25")
+            axum::http::Request::get(format!("{path}?limit=25"))
                 .header("authorization", format!("Bearer {OWNED_PROXY_BEARER}"))
                 .header("x-aiguard-context", OWNED_PROXY_CONTEXT)
                 .body(Body::empty())
@@ -299,8 +299,21 @@ async fn owned_dashboard_brokers_forwards_exact_get_context_and_gateway_refusal_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owned_dashboard_brokers_forwards_exact_get_context_and_gateway_refusal_without_identity_probe()
+ {
+    require_owned_registry_get_is_relayed("/api/v1/human/owned/brokers").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owned_dashboard_workers_forwards_exact_get_context_and_gateway_refusal_without_identity_probe()
+ {
+    require_owned_registry_get_is_relayed("/api/v1/human/workers").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn owned_dashboard_brokers_keeps_head_mutations_legacy_and_neighbor_routes_closed() {
-    let (server, dashboard, calls, unexpected, _front) = owned_brokers_proxy().await;
+    let (server, dashboard, calls, unexpected, _front) =
+        owned_registry_proxy("/api/v1/human/owned/brokers").await;
     let unauthenticated = dashboard
         .clone()
         .oneshot(
@@ -338,7 +351,7 @@ async fn owned_dashboard_brokers_keeps_head_mutations_legacy_and_neighbor_routes
             StatusCode::SERVICE_UNAVAILABLE,
         ),
         (
-            "GET",
+            "HEAD",
             "/api/v1/human/workers",
             StatusCode::SERVICE_UNAVAILABLE,
         ),
