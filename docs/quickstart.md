@@ -22,7 +22,7 @@ Les [parcours d'identité et leur état](sso.md#état-livré-et-parcours-disponi
 | Node **24** et npm | Développer ou tester directement `front/`. Le build Docker/Podman les fournit déjà pour compiler l'interface. | Seulement pour le développement frontend. |
 | Codex / Claude Code | Exécuter un fournisseur dans un worker avec une version explicitement installée. | Facultatif ; aucune installation hôte ni connexion fournisseur n'est reprise automatiquement. |
 
-Le contrôle nécessite Unix. Les plateformes et versions effectivement essayées figurent dans la [validation](engineering/VALIDATION.md). Les ports **127.0.0.1:4000** et **127.0.0.1:8787** doivent être libres. La pile locale n'est pas un déploiement distant avec TLS.
+Le contrôle nécessite Unix. Les plateformes et versions effectivement essayées figurent dans la [validation](engineering/VALIDATION.md). Pour les commandes ci-dessous, libérer les ports **127.0.0.1:4000** et **127.0.0.1:8787**. Pour utiliser d’autres ports loopback, suivre le [guide des piles nommées](setup/local/README.fr.md#named-stack). La pile locale n'est pas un déploiement distant avec TLS.
 
 Pour préparer des essais de certificats, le [générateur local de PKI](demo-pki.md) fournit racine, intermédiaire et chaîne serveur avec une commande Rust. Il crée un dossier privé neuf, sans modifier la confiance système ni le DNS. Le démarrage HTTP ci-dessous n'en dépend pas ; générer les fichiers ne configure pas automatiquement HTTPS.
 
@@ -60,7 +60,7 @@ Avant leurs commandes de build ou Compose, `build`, `up` et `down` remettent au 
 
 `init` crée les clés `runner` et `viewer` si elles manquent et **préserve les valeurs existantes**. Les répertoires privés sont `0700`, les clés originales `0600`. Des projections de montage séparées sont `0444` dans un parent `0700` : ne pas les déplacer dans un dossier public. Un emplacement existant non conforme est refusé sans réparation générale. Détails dans [Exploitation](operations.md).
 
-`up` attend la disponibilité des deux accès et recrée les services de contrôle, même s'ils tournent déjà. Cette opération coupe les connexions d'audit en cours : attendre la fin des sessions avant de la répéter.
+`up` recrée les services du projet Compose choisi. Attendre la fin des sessions avant de répéter la commande, car la recréation coupe les connexions d’audit en cours. Après Compose, `up` attend jusqu’à 45 secondes que les deux accès acceptent la clé viewer et retournent le même tenant. Si la vérification échoue, la pile reste démarrée. Le guide local décrit le diagnostic et l’arrêt du projet. [Consulter une pile CLI](setup/local/README.fr.md#cli-up-stack)
 
 ## 3. Ouvrir le dashboard
 
@@ -167,7 +167,7 @@ Pour arrêter les services de contrôle, après la fin des sessions :
 "$AIGUARD_BIN" down --runtime docker --config-dir "$AIGUARD_CONFIG"
 ```
 
-`down` conserve les volumes d'audit et de session et n'arrête pas les workers à votre place. Il ne prend pas `--allow-rootful-runtime`. Un prochain `up` avec la même configuration remonte l'audit conservé. Aucun `prune` ni effacement de volume n'est nécessaire à ce parcours.
+`down` conserve les volumes d'audit et de session et n'arrête pas les workers à votre place. Il ne prend pas `--allow-rootful-runtime`. Pour une pile nommée, passer son `--stack-name` et reprendre le même `--config-dir`, la même source et les mêmes options moteur. Un prochain `up` avec le même nom et la même configuration retrouve l’audit conservé. Aucun `prune` ni effacement de volume n'est nécessaire à ce parcours.
 
 Pour la sous-commande explicite `broker cancel`, encore en qualification distincte du parcours ci-dessus, conserver l'UUID de commande dès le premier appel : fournir `--command-id` avec un UUID neuf choisi, ou noter la ligne `Command: <UUID>` affichée avant l'envoi quand la CLI le génère. Passer ensuite cet UUID à `--command-id` pour un retry. Réutiliser le même identifiant retente cette annulation précise ; en choisir un nouveau exprime une nouvelle demande et peut inclure des exports plus récents. Un reçu durable ou une livraison au gardien ne prouve pas la fin du worker. Après `NeedsReconciliation`, consulter les preuves et l'état runtime avant toute conclusion sur le quota. [Portée et limites du rejeu](engineering/evidence/2026-10-31/cancel-retry/README.md).
 

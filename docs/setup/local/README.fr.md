@@ -94,9 +94,11 @@ Le CLI du moteur ne reçoit ensuite en arguments que des chemins situés dans ce
 
 ```text
 build --file <copy>/context/images/<name>.Dockerfile --tag <tag> [--build-arg <NAME>=<public-value>]… <copy>/context
-compose --project-name agentsandbox --env-file <copy>/compose-empty.env --file <copy>/context/deploy/<engine>/compose.yaml up --detach --force-recreate
-compose --project-name agentsandbox --env-file <copy>/compose-empty.env --file <copy>/context/deploy/<engine>/compose.yaml down
+compose --project-name <stack-name> --env-file <copy>/compose-empty.env --file <copy>/context/deploy/<engine>/compose.yaml up --detach --force-recreate
+compose --project-name <stack-name> --env-file <copy>/compose-empty.env --file <copy>/context/deploy/<engine>/compose.yaml down
 ```
+
+Le CLI utilise `agentsandbox` par défaut pour `<stack-name>` et reprend le nom explicite fourni par `--stack-name`.
 
 La source sélectionnée est lue sans suivre de lien, n'est jamais écrite et n'est jamais nommée dans ces arguments. Chaque préparation affiche une ligne sur la sortie d'erreur :
 
@@ -185,7 +187,7 @@ Retirer le lien ou fermer l'éditeur qui tient le verrou, réduire l'entrée, ou
 - Cela s'applique seulement aux commandes CLI `build`, `up` et `down`. Une commande directe `docker build`, `podman build` ou Compose lit les chemins que vous lui donnez.
 - La liste de build ne connaît que `.dockerignore`. `.containerignore` et `images/<name>.Dockerfile.containerignore` n'en font pas partie : ils ne sont ni copiés ni comparés, donc le moteur ne les reçoit pas par la commande CLI `build`. Le traitement de ces noms par un constructeur, et le fait qu'il applique un fichier d'ignore par Dockerfile à la place de `.dockerignore`, n'ont pas été observés sur un vrai moteur.
 - La suppression de la copie se fait par nom après un contrôle d'identité. C'est un contrôle, pas un verrou : entre la comparaison et la suppression, un processus du compte du CLI ou de root peut encore échanger le répertoire ; les autres comptes ne le peuvent pas sous la politique du répertoire temporaire. L'identité enregistrée est celle de ce que le chemin nommait juste après la création, pas celle d'un descripteur.
-- Métadonnées Compose après `up` (`NOT_RUN` sur un vrai fournisseur). `up` remet à Compose un fichier et un fichier env situés sous `<TMPDIR>/ai-guard-distribution-<random>/` et supprime ce répertoire à la fin de la commande. Un fournisseur qui enregistre ses fichiers de configuration, son répertoire de travail et son fichier env dans les labels du projet nomme alors des chemins qui n'existent plus, et, sous le `/tmp` par défaut de Linux, un autre compte local peut créer plus tard un répertoire de ce nom. ai-guard ne lit jamais ces labels : `down` prépare une nouvelle copie et s'adresse au projet par son nom, et les fichiers Compose livrés ne contiennent aucun chemin relatif. Un outil tiers ou une commande manuelle qui relirait le chemin porté par un label lirait ce qui s'y trouve ; aucun n'a été exécuté. S'adresser à la pile par `--project-name agentsandbox` ou par le fichier Compose du checkout, comme dans [suivre une pile démarrée par `up` du CLI](#cli-up-stack), jamais par le chemin d'un label, et, sur un hôte partagé avec d'autres comptes locaux, lancer `up` avec un `TMPDIR` privé (appartenant au compte, mode `0700`).
+- Métadonnées Compose après `up` (`NOT_RUN` sur un vrai fournisseur). `up` remet à Compose un fichier et un fichier env situés sous `<TMPDIR>/ai-guard-distribution-<random>/` et supprime ce répertoire à la fin de la commande. Un fournisseur qui enregistre ses fichiers de configuration, son répertoire de travail et son fichier env dans les labels du projet nomme alors des chemins qui n'existent plus, et, sous le `/tmp` par défaut de Linux, un autre compte local peut créer plus tard un répertoire de ce nom. ai-guard ne lit jamais ces labels : `down` prépare une nouvelle copie et s'adresse au projet par son nom, et les fichiers Compose livrés ne contiennent aucun chemin relatif. Un outil tiers ou une commande manuelle qui relirait le chemin porté par un label lirait ce qui s'y trouve ; aucun n'a été exécuté. Sur un hôte partagé avec d’autres comptes locaux, lancer `up` avec un `TMPDIR` privé appartenant au compte, en mode `0700`. Consulter la pile par son nom de projet Compose avec les commandes ci-dessous. [Suivre une pile démarrée par `up` du CLI](#cli-up-stack)
 - Acceptation de `--env-file` par le fournisseur Compose (`NOT_RUN`). Les commandes CLI `up` et `down` ajoutent `--env-file <empty prepared file>` à la commande Compose ; avec Podman, la commande entière est transmise au fournisseur externe. Aucun fournisseur n'a été exécuté, et la fixture qui en tient lieu accepte n'importe quel argument. Les commandes Podman directes de ce guide utilisent déjà `podman compose --env-file` : c'est la même exigence envers le fournisseur, désormais nécessaire aussi au CLI. Si un fournisseur rejette l'option, `up` et `down` échouent avec le seul message `podman command failed (<status>)` ; la sortie d'erreur du fournisseur est capturée mais [pas affichée](#engine-output).
 - Descripteurs. Exécuté sous Linux : 300 répertoires sélectionnés sont construits sous une limite de 128 descripteurs, et une chaîne sélectionnée profonde de 40 niveaux est refusée sous une limite de 64 avec le message qui nomme la limite. Calculé, non mesuré : environ 170 descripteurs pour la source acceptée la plus profonde (64 niveaux), sous la limite souple habituelle de macOS, 256.
 - Répertoires situés au-dessus de la source. Exécuté sous Linux : une source placée sous un répertoire que le compte peut seulement traverser est préparée, avec un répertoire de ce même compte. `NOT_RUN` : un répertoire appartenant à un autre compte, et macOS, où une telle source reste refusée. Sur toute plateforme, le répertoire temporaire et, pour `up` et `down`, le répertoire de configuration exigent des ancêtres lisibles (politique de répertoire privé).
@@ -224,15 +226,17 @@ podman compose --env-file "$AIGUARD_CONFIG/local.env" -f deploy/podman/compose.y
 "$AIGUARD_BIN" healthcheck --url "$AIGUARD_GATEWAY/healthz" --url "$AIGUARD_DASHBOARD/healthz"
 ```
 
-Conserver le même compte moteur, contexte/endpoint, fichier env et fichier Compose. Utiliser ce parcours Compose direct pour les ports ou noms de projet personnalisés ; le parcours CLI `up/down` possède son propre projet fixe et ses URL de disponibilité par défaut. Les commandes CLI `up` et `down` remettent à Compose une [copie privée](#prepared-source) de `deploy/<engine>/compose.yaml` et un `--env-file` vide, sans `--project-directory`, dans un environnement qui porte `AGENTSANDBOX_CONFIG_DIR` issu de `--config-dir` et aucune des variables Compose de votre shell : le répertoire de cette copie ne contient pas de `.env`, donc un `.env` placé à côté de `deploy/<engine>/compose.yaml` n'est pas lu par ces deux commandes et les valeurs par défaut du fichier Compose s'appliquent. Les commandes directes `docker compose --env-file …` et `podman compose --env-file …` ci-dessus sont inchangées. Le traitement des arguments du CLI par un vrai fournisseur Compose n'a pas été vérifié.
+Conserver le même compte moteur, contexte ou endpoint, fichier env et fichier Compose tout au long de ce parcours direct. Celui-ci permet d’utiliser un fichier Compose personnalisé et un fichier env explicite. Le CLI `up` choisit son nom de pile et ses ports hôte avec ses options et leurs valeurs par défaut. [Lancer une seconde pile](#named-stack)
 
 <a id="cli-up-stack"></a>
 
 ### Suivre une pile démarrée par `up` du CLI
 
-La commande CLI `up` crée sa pile sous le nom de projet Compose fixe `agentsandbox`, à partir d'une copie temporaire de `deploy/<engine>/compose.yaml` et d'un fichier env vide, tous deux supprimés dès la fin de la commande Compose, avant l'attente des URL de disponibilité. La seule variable qu'elle donne à Compose est `AGENTSANDBOX_CONFIG_DIR`, le chemin absolu de `--config-dir`. Pour cette pile, « la même configuration » désigne donc ce nom de projet, ce moteur et cette variable, pas un fichier qui existerait encore. Ce qui suit est écrit d'après les arguments et l'environnement que le CLI construit ; aucune de ces commandes n'a été exécutée contre Docker Compose ou un fournisseur Compose de Podman.
+Le CLI appelle Compose avec le nom fourni par `--stack-name`, ou `agentsandbox` par défaut. Chaque `up` et `down` prépare une copie privée du fichier `deploy/<engine>/compose.yaml` sélectionné et un `--env-file` vide. Lorsque la commande Compose se termine et que son résultat est récolté normalement, cette copie est libérée avant la vérification de l’accès viewer par `up`. Le CLI tire `AGENTSANDBOX_CONFIG_DIR` de `--config-dir`. Pour chaque port non standard, `up` définit `AI_GUARD_GATEWAY_PORT` ou `AI_GUARD_DASHBOARD_PORT` dans l’environnement transmis à Compose. Le CLI choisit les ports à partir de ses options et valeurs par défaut, indépendamment des variables Compose du shell et du `.env` du checkout. Pour configurer ces variables vous-même, utiliser le fichier env du parcours Compose direct. [Sources préparées de build et Compose](#prepared-source)
 
-- **Projet.** S'adresser au projet par son nom, `--project-name agentsandbox`. Un fournisseur Compose qui enregistre le fichier Compose, le répertoire de travail et le fichier env d'un projet dans les labels de ses conteneurs nomme, pour cette pile, des chemins situés sous le répertoire supprimé `<TMPDIR>/ai-guard-distribution-<random>/` : ne jamais diriger une commande ou un outil vers un tel chemin (voir la limite sur les métadonnées Compose dans [sources préparées de build et Compose](#prepared-source)). Les commandes directes ci-dessus, lancées avec `--env-file "$AIGUARD_CONFIG/local.env"`, s'adressent au projet nommé par le `COMPOSE_PROJECT_NAME` de ce fichier (`ai-guard-local` dans l'exemple), pas à celui-ci.
+Après le succès de Compose, `up` attend jusqu’à 45 secondes le résultat de requêtes authentifiées `GET /api/v1/identity` auprès du gateway et du dashboard. Les deux doivent accepter la clé configurée, identifier le rôle viewer et retourner le même tenant avant que le CLI affiche les adresses de la pile. `healthcheck` mesure l’accessibilité HTTP publique. Si la vérification viewer échoue, `up` renvoie une erreur et la pile reste démarrée. Consulter le statut et les journaux du projet nommé ci-dessous. Pour l’arrêter, exécuter `down` avec le même nom, la même configuration, la même source et les mêmes options moteur.
+
+- **Projet.** Définir `AIGUARD_STACK_NAME` avec le nom utilisé par `up` (`agentsandbox` dans les exemples) et le passer à `--project-name`. Si le fournisseur demande un fichier Compose, utiliser celui du checkout comme ci-dessous. Les labels du projet peuvent encore désigner la copie préparée supprimée. [Sources préparées de build et Compose](#prepared-source)
 - **Moteur.** Avec Docker, le CLI vise un seul endpoint, `--host <endpoint>` : la valeur de `--runtime-endpoint` lorsqu'elle a été fournie, sinon l'hôte Docker du contexte courant du compte, que le CLI lit par `docker context inspect --format '{{json .Endpoints.docker.Host}}'` dans un environnement reconstruit qui porte le répertoire personnel du compte et `DOCKER_CONFIG=<home>/.docker`, sans le `DOCKER_HOST` ni le `DOCKER_CONTEXT` de votre shell. `doctor` n'affiche pas cet endpoint. Une commande `docker` directe lancée dans un shell où ces variables sont définies peut s'adresser à un autre moteur : passer l'endpoint explicitement. Avec Podman, le CLI n'ajoute aucune option globale du moteur, et `--runtime-endpoint` est refusé pour ces commandes.
 - **Variable.** Une commande directe à laquelle on donne le fichier Compose du checkout a besoin de `AGENTSANDBOX_CONFIG_DIR`, défini sur le même répertoire de configuration : le fichier l'exige (`${AGENTSANDBOX_CONFIG_DIR:?Run agentsandbox init first}`).
 
@@ -241,25 +245,54 @@ Pour Docker, lire l'endpoint comme le fait le CLI lorsqu'aucun `--runtime-endpoi
 ```sh
 env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_CONFIG docker context inspect --format '{{json .Endpoints.docker.Host}}'
 AIGUARD_ENDPOINT="unix:///the/endpoint/printed/above"
-docker --host "$AIGUARD_ENDPOINT" compose --project-name agentsandbox ps
-docker --host "$AIGUARD_ENDPOINT" compose --project-name agentsandbox logs --tail 100 gateway dashboard ingress
+AIGUARD_STACK_NAME="agentsandbox"
+docker --host "$AIGUARD_ENDPOINT" compose --project-name "$AIGUARD_STACK_NAME" ps
+docker --host "$AIGUARD_ENDPOINT" compose --project-name "$AIGUARD_STACK_NAME" logs --tail 100 gateway dashboard ingress
 ```
 
 Pour Podman :
 
 ```sh
-podman compose --project-name agentsandbox ps
-podman compose --project-name agentsandbox logs --tail 100 gateway dashboard ingress
+AIGUARD_STACK_NAME="agentsandbox"
+podman compose --project-name "$AIGUARD_STACK_NAME" ps
+podman compose --project-name "$AIGUARD_STACK_NAME" logs --tail 100 gateway dashboard ingress
 ```
 
 Lorsqu'un fournisseur a besoin d'un fichier Compose pour trouver le projet, ajouter le fichier du checkout et la variable ; `$AIGUARD_CONFIG` représente le répertoire donné à `up` par `--config-dir` :
 
 ```sh
-AGENTSANDBOX_CONFIG_DIR="$AIGUARD_CONFIG" docker --host "$AIGUARD_ENDPOINT" compose --project-name agentsandbox --file deploy/docker/compose.yaml ps
-AGENTSANDBOX_CONFIG_DIR="$AIGUARD_CONFIG" podman compose --project-name agentsandbox --file deploy/podman/compose.yaml ps
+AGENTSANDBOX_CONFIG_DIR="$AIGUARD_CONFIG" docker --host "$AIGUARD_ENDPOINT" compose --project-name "$AIGUARD_STACK_NAME" --file deploy/docker/compose.yaml ps
+AGENTSANDBOX_CONFIG_DIR="$AIGUARD_CONFIG" podman compose --project-name "$AIGUARD_STACK_NAME" --file deploy/podman/compose.yaml ps
 ```
 
-Pour arrêter ou recréer cette pile, utiliser les commandes CLI `down` et `up` avec les mêmes `--runtime`, `--runtime-program`, `--runtime-endpoint` et `--config-dir` : chacune prépare une nouvelle copie et s'adresse au projet par son nom. Examiner les logs avant tout partage pour en exclure les secrets.
+Examiner les journaux avant tout partage pour en exclure les secrets.
+
+<a id="named-stack"></a>
+
+### Lancer une seconde pile
+
+Choisir un nom de pile libre, un répertoire de configuration privé distinct hors de la source et du projet importé, et deux ports libres et distincts sur `127.0.0.1`. Les valeurs par défaut sont `agentsandbox`, `8787` pour le gateway et `4000` pour le dashboard. Le nom comporte 1 à 63 caractères ASCII parmi les minuscules, les chiffres, les tirets et les underscores, avec une lettre ou un chiffre en premier. Les ports sont compris entre 1 et 65535. Le CLI refuse les ports invalides ou identiques avant d’initialiser la configuration. Réutiliser un nom avec `up` recrée les services de ce projet.
+
+Construire d’abord le CLI et l’image de contrôle. Depuis la racine de la distribution source, exécuter l’exemple sur un moteur Docker rootless. Pour un moteur non rootless, passer `--allow-rootful-runtime` à `up`. Définir `AIGUARD_QA_CONFIG` avec le chemin de la configuration distincte choisie. `up` y initialise la configuration si elle est absente.
+
+```sh
+AIGUARD_BIN="$PWD/target/release/agentsandbox"
+AIGUARD_QA_STACK="ai-guard-qa"
+AIGUARD_QA_CONFIG="$HOME/.ai-guard-qa"
+"$AIGUARD_BIN" up --runtime docker --source . --stack-name "$AIGUARD_QA_STACK" \
+  --config-dir "$AIGUARD_QA_CONFIG" --gateway-port 28787 --dashboard-port 24000
+```
+
+Les fichiers Compose livrés publient ces ports sur le loopback. Un fichier Compose adapté et choisi avec `--source` doit utiliser les deux variables de port pour cette publication. Si un autre processus occupe l’un des ports hôte, Compose peut échouer à le publier après avoir démarré certains services. Examiner le projet nommé, puis choisir des ports libres et reprendre avec le même nom et la même configuration, ou arrêter ce projet avec `down`. [Consulter le projet nommé](#cli-up-stack)
+
+Utiliser `--gateway http://127.0.0.1:28787` et `--config-dir "$AIGUARD_QA_CONFIG"` pour les commandes visant cette pile. Ouvrir `http://127.0.0.1:24000` avec la clé viewer de cette pile. Vérifier l’arrêt des sessions actives avant d’arrêter la pile de contrôle nommée. Reprendre les options explicites `--runtime-program` et `--runtime-endpoint` du démarrage. Le nom de pile sélectionne le projet Compose. Les volumes d’audit et de session sont conservés. [Arrêter les sessions et conserver les données](#arrêter-conserver-les-données-et-redémarrer)
+
+```sh
+"$AIGUARD_BIN" down --runtime docker --source . --stack-name "$AIGUARD_QA_STACK" \
+  --config-dir "$AIGUARD_QA_CONFIG"
+```
+
+Le registre de validation consigne les essais antérieurs de coexistence et de refus viewer avec leur périmètre. [Résultats de validation datés](../../engineering/VALIDATION.md#coexistence-des-piles-et-démarrage-vérifié)
 
 <a id="http-listener-limits"></a>
 
@@ -386,7 +419,7 @@ La copie exclut des noms sensibles connus et des répertoires de dépendances/ca
 | `build`, `up` ou `down` refuse de démarrer avec `SIGCHLD is ignored in this process` | Le programme qui a lancé le CLI ignore `SIGCHLD` ; rien n'a été préparé et aucune commande du moteur n'a été lancée. Lancer la commande avec la disposition par défaut : voir [interrompre un build ou une commande Compose, ou dépasser son délai](#interrupt-build-or-compose). |
 | `build`, `up` ou `down` interrompu ou au-delà de son délai | Le message dit ce qui a été observé du processus CLI local du moteur ; voir [interrompre un build ou une commande Compose, ou dépasser son délai](#interrupt-build-or-compose). Vérifier l'état propre du moteur, puis relancer la même commande. Un `up` interrompu peut laisser une pile partielle : relancer `up` ou lancer `down`. |
 | `termination is unknown`, un avertissement `was not removed` ou `could not be removed`, ou un répertoire `ai-guard-distribution-*` resté dans le répertoire temporaire | Suivre [reprendre après une source préparée conservée](#prepared-source-retained) avant de supprimer quoi que ce soit. ai-guard ne supprime pas ce répertoire. |
-| Pile indisponible, ou `stack started but readiness did not pass within 45 seconds; inspect docker compose logs` | Consulter Compose `ps` et `logs --tail 100 gateway dashboard ingress` avec la même configuration : le même fichier env et le même fichier Compose pour le parcours direct, ou le projet `agentsandbox` adressé par son nom pour une pile démarrée par `up` du CLI, comme dans [suivre une pile démarrée par `up` du CLI](#cli-up-stack). Vérifier collisions de ports et projections privées des credentials. Examiner les logs avant toute publication pour exclure les secrets. |
+| Pile indisponible, ou `viewer access was not confirmed within 45 seconds` | Consulter `ps` et les journaux bornés du projet Compose choisi. Vérifier les deux ports hôte et l’identité viewer retournée par chaque service. Pour arrêter la pile après un démarrage en erreur, utiliser `down` avec le même nom, la même configuration, la même source et les mêmes options moteur. [Consulter une pile CLI](#cli-up-stack) |
 | HTTP 429 via l'ingress | Distinguer les [budgets de lecture/échange](#bornes-du-relais-http) des quotas amont à l'aide du message retourné. Réduire les requêtes parallèles et réessayer une lecture lorsque la capacité est disponible. Vérifier la session enregistrée avant de répéter un lancement. |
 | HTTP 408 ou 413 pendant l'envoi d'un corps | Vérifier les délais de 5 secondes au total/2 secondes sans fragment et la limite de 256 Kio. Réduire le contenu ou corriger l'émetteur bloqué ; modifier le fichier dotenv ne relève pas ces bornes. |
 | HTTP 503 avec pénurie de descripteurs d'audit (`EMFILE`/`ENFILE`) | Conserver la session et l'identité de l'opération. Une fois les descripteurs disponibles, reprendre une lecture autorisée qui atteint la validation du Store ; consulter la [reprise des descripteurs d'audit](#reprise-des-descripteurs-daudit) avant de rejouer une mutation. |
