@@ -3018,52 +3018,45 @@ async fn real_cli_live_dashboard_readiness_two_tenants() -> Result<()> {
     policy.allowed_argv = jobs.iter().map(ParallelJob::argv).collect();
     fs::write(&policy_path, serde_json::to_vec(&policy)?)?;
     let gateway = Gateway::start_tenants(&registry, &policy_path).await?;
-    let viewers = [
-        read_token(&jobs[0].config().join("secrets/viewer"))?,
-        read_token(&jobs[2].config().join("secrets/viewer"))?,
-    ];
-    let a = AuditClient::new(&gateway.origin, &viewers[0])?;
-    let b = AuditClient::new(&gateway.origin, &viewers[1])?;
-    for (client, tenant, slots) in [(&a, "tenant-a", 2), (&b, "tenant-b", 1)] {
-        ensure!(
-            client.get_json("api/v1/identity").await?
-                == json!({"tenant_id":tenant,"role":"viewer"}),
-            "viewer identity differs from the readiness fixture tenant"
-        );
-        check_quota(client, slots, 0).await?;
-        ensure!(
-            current_workers(client, slots as usize).await?.is_empty(),
-            "readiness fixture contains a worker before browser confirmation"
-        );
-    }
-
-    let mut live = match dashboard
-        .start_live(&root, &gateway.origin, &viewers, RuntimeKindV1::Docker)
-        .await
-    {
-        Ok(live) => live,
-        Err(error) => {
-            gateway.close().await?;
-            return Err(error);
+    let outcome: Result<()> = async {
+        let viewers = [
+            read_token(&jobs[0].config().join("secrets/viewer"))?,
+            read_token(&jobs[2].config().join("secrets/viewer"))?,
+        ];
+        let a = AuditClient::new(&gateway.origin, &viewers[0])?;
+        let b = AuditClient::new(&gateway.origin, &viewers[1])?;
+        for (client, tenant, slots) in [(&a, "tenant-a", 2), (&b, "tenant-b", 1)] {
+            ensure!(
+                client.get_json("api/v1/identity").await?
+                    == json!({"tenant_id":tenant,"role":"viewer"}),
+                "viewer identity differs from the readiness fixture tenant"
+            );
+            check_quota(client, slots, 0).await?;
+            ensure!(
+                current_workers(client, slots as usize).await?.is_empty(),
+                "readiness fixture contains a worker before browser confirmation"
+            );
         }
-    };
-    let protocol = match timeout(Duration::from_secs(10), async {
-        live.send(json!({"phase":"readiness_close","workers":[]}))
+
+        let mut live = dashboard
+            .start_live(&root, &gateway.origin, &viewers, RuntimeKindV1::Docker)
             .await?;
-        require_live_browser_close(&live.receive().await?, false)
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(_) => Err(anyhow::anyhow!("readiness close frame exceeded its budget")),
-    };
-    let browser_close = live.close().await;
+        let protocol = timeout(Duration::from_secs(10), async {
+            live.send(json!({"phase":"readiness_close","workers":[]}))
+                .await?;
+            require_live_browser_close(&live.receive().await?, false)
+        })
+        .await
+        .context("readiness close frame exceeded its budget");
+        let browser_close = live.close().await;
+        protocol??;
+        ensure!(
+            browser_close?.success(),
+            "readiness browser did not close cleanly"
+        );
+        Ok(())
+    }
+    .await;
     let gateway_close = gateway.close().await;
-    protocol?;
-    ensure!(
-        browser_close?.success(),
-        "readiness browser did not close cleanly"
-    );
-    gateway_close?;
-    Ok(())
+    outcome.and(gateway_close)
 }

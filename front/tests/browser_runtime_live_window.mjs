@@ -333,8 +333,7 @@ try {
   const peak = await frame(["phase", "workers"]);
   if (peak.phase === "readiness_close") {
     assert.deepEqual(peak.workers, []);
-    stage = "complete";
-    status = "CLOSED";
+    stage = "readiness_close";
   } else {
     assert.equal(peak.phase, "peak");
     assert.ok(Array.isArray(peak.workers) && peak.workers.length === 3);
@@ -396,6 +395,11 @@ try {
   cleanup.push(...await closeBrowserResources(null, browser));
   cleanupFailed = cleanup.length > 0 || sessions.some(({ page }) => page && !page.isClosed());
   networkViolation = sessions.some(({ guard }) => guard?.violations.length);
+  if (stage === "readiness_close") {
+    const pageFailed = sessions.some(({ errors }) => errors !== 0);
+    stage = pageFailed ? "views" : "complete";
+    status = pageFailed ? "FAIL" : "CLOSED";
+  }
   if ((status === "PASS" || status === "CLOSED") && (cleanupFailed || networkViolation)) {
     stage = cleanupFailed ? "cleanup" : "network";
     status = "FAIL";
