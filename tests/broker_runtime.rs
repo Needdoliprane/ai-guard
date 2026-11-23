@@ -52,6 +52,7 @@ use uuid::Uuid;
 const PROFILE: &str = "g09";
 const NS: u128 = 1_000_000_000;
 const OBSERVATION_GRACE_NS: u128 = 3 * NS;
+const GATEWAY_HTTP_TIMEOUT: Duration = Duration::from_secs(3);
 
 enum LostProcess<'a> {
     Broker {
@@ -146,6 +147,7 @@ struct RunClientRecoveryReceipt {
 struct RunClientObservations {
     central_terminal_observed_within_window: bool,
     worker_deadline_evidence: WorkerDeadlineEvidence,
+    terminal_failure_step: Option<&'static str>,
 }
 
 #[derive(Default, serde::Serialize)]
@@ -320,6 +322,10 @@ fn batch_failure_marker_accepts_observed_failures_without_claiming_effect() {
         "ownership_reload",
         "created_inspection",
         "created_exchange",
+        "terminal_observation_ack",
+        "result_audit",
+        "cleanup_confirmation",
+        "cleanup_ack",
     ] {
         let page = json!({"items":[{
             "id":"11111111-1111-4111-8111-111111111111", "seq":17,
@@ -338,6 +344,49 @@ fn batch_failure_marker_accepts_observed_failures_without_claiming_effect() {
         assert_eq!(marker.as_object().unwrap().len(), 8);
         assert!(!serde_json::to_string(&marker).unwrap().contains(private));
     }
+}
+
+#[test]
+fn terminal_failure_step_requires_one_complete_event_from_the_admitted_session() {
+    let session = "11111111-1111-4111-8111-111111111112";
+    let other_session = "11111111-1111-4111-8111-111111111113";
+    let complete = json!({"items":[{
+        "id":"11111111-1111-4111-8111-111111111111", "seq":18,
+        "kind":"broker.batch.failure", "source":"runner",
+        "provenance":"observed", "session_id":session,
+        "data":{"version":1,"phase":"worker","runtime_effect":"unknown",
+            "broker_step":"result_audit","enforcer":null,"runtime":null}
+    }],"next_cursor":null});
+    assert_eq!(
+        harness::terminal_failure_step(&complete, session, 17),
+        Some("result_audit")
+    );
+    assert!(harness::terminal_failure_step(&complete, session, 18).is_none());
+    for (pointer, replacement) in [
+        ("/next_cursor", json!(18)),
+        ("/items/0/session_id", json!(other_session)),
+        ("/items/0/provenance", json!("declared")),
+        ("/items/0/data/phase", json!("decision")),
+        ("/items/0/data/broker_step", json!("failure_observed")),
+        ("/items/0/data/runtime_effect", json!("observed")),
+        ("/items", json!([])),
+    ] {
+        let mut invalid = complete.clone();
+        *invalid.pointer_mut(pointer).unwrap() = replacement;
+        assert!(harness::terminal_failure_step(&invalid, session, 17).is_none());
+    }
+
+    let mut incomplete = complete.clone();
+    incomplete.as_object_mut().unwrap().remove("next_cursor");
+    assert!(harness::terminal_failure_step(&incomplete, session, 17).is_none());
+
+    let mut ambiguous = complete.clone();
+    let mut unrelated = ambiguous["items"][0].clone();
+    unrelated["id"] = json!("11111111-1111-4111-8111-111111111114");
+    unrelated["seq"] = json!(19);
+    unrelated["session_id"] = json!(other_session);
+    ambiguous["items"].as_array_mut().unwrap().push(unrelated);
+    assert!(harness::terminal_failure_step(&ambiguous, session, 17).is_none());
 }
 
 #[test]
@@ -475,6 +524,7 @@ async fn broker_run_cli_sigkill_preserves_original_deadline_without_second_start
         "run_client_recovery":RunClientRecoveryReceipt { state, stage },
         "central_terminal_observed_within_window":observations.central_terminal_observed_within_window,
         "worker_deadline_evidence":observations.worker_deadline_evidence,
+        "terminal_failure_step":observations.terminal_failure_step,
         "requested_broker_client_source":"published_selection",
         "broker_selection_input":"environment",
         "native_start":selection.native_start,
@@ -593,7 +643,7 @@ async fn run(
     }
     let http = reqwest::Client::builder()
         .no_proxy()
-        .timeout(Duration::from_secs(3))
+        .timeout(GATEWAY_HTTP_TIMEOUT)
         .build()?;
     let identity: ControlProtocolV1 =
         harness::get(&http, &origin, &runner, "control/protocol").await?;
@@ -912,7 +962,7 @@ async fn run(
         // The central terminal observation has its own window. Afterward the
         // broker can finish under the remaining scenario budget. The Result and
         // exact Docker events are still required to establish the stop and removal.
-        wait_terminal(
+        let wait_result = wait_terminal(
             evidence,
             &runner,
             &http,
@@ -927,7 +977,33 @@ async fn run(
             },
             run_client_stage,
         )
-        .await?;
+        .await;
+        if wait_result.is_err()
+            && matches!(&*run_client_stage, RunClientRecoveryStage::Executor { .. })
+            && let Some(admission_seq) = harness::worker_admission_seq(&audit_before, &worker)
+        {
+            // Reserve the full HTTP budget inside the existing scenario. The
+            // diagnostic is optional and preserves the original error.
+            let diagnostic_end = Instant::now() + GATEWAY_HTTP_TIMEOUT;
+            if diagnostic_end < scenario_end {
+                let query = format!(
+                    "events?kind=broker.batch.failure&after={admission_seq}&limit=2&order=asc"
+                );
+                if let Ok(Ok(page)) = timeout_at(
+                    diagnostic_end,
+                    harness::get::<Value>(&http, &origin, &runner, &query),
+                )
+                .await
+                {
+                    observations.terminal_failure_step = harness::terminal_failure_step(
+                        &page,
+                        &worker.launch.session_id,
+                        admission_seq,
+                    );
+                }
+            }
+        }
+        wait_result?;
         *run_client_stage = RunClientRecoveryStage::ResultRead;
         let result = read_result(selection, &client_selection, operation).await?;
         *run_client_stage = RunClientRecoveryStage::ResultOutcome;

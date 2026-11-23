@@ -811,13 +811,17 @@ impl<'a> Execution<'a> {
         live_activity: bool,
     ) -> BoxFuture<'_, Result<BatchOutcome>> {
         Box::pin(async move {
-            let (_, draft) = self.load().await?;
-            let worker = draft.worker()?.clone();
+            self.stage(LocalFailurePhaseV1::Worker);
+            let terminal_ack = diagnostics::BrokerStep::TerminalObservationAck;
+            let (_, draft) = self.load().await.context(terminal_ack)?;
+            let worker = draft.worker().context(terminal_ack)?.clone();
             ensure!(
                 worker.state == WorkerStateV1::Terminal && !worker.quota_held,
-                "runtime terminal is not centrally acknowledged"
+                anyhow!("runtime terminal is not centrally acknowledged").context(terminal_ack)
             );
-            self.post_worker_result().await?;
+            self.post_worker_result()
+                .await
+                .context(diagnostics::BrokerStep::ResultAudit)?;
             if let Some(relays) = &self.executor.relays {
                 let (current, _) = self.load().await?;
                 relays
@@ -991,8 +995,11 @@ impl<'a> Execution<'a> {
             self.mutate(WorkerTransitionV1::Observe {
                 observation: managed::observation_dto(&worker, &terminal)?,
             })
-            .await?;
-            self.post_worker_result().await?;
+            .await
+            .context(diagnostics::BrokerStep::TerminalObservationAck)?;
+            self.post_worker_result()
+                .await
+                .context(diagnostics::BrokerStep::ResultAudit)?;
             if let Some(relays) = &self.executor.relays {
                 let (current, _) = self.load().await?;
                 relays
@@ -1142,16 +1149,21 @@ impl<'a> Execution<'a> {
         self.save_worker_result(&retained, activity.is_some())
             .await?;
         let (_, draft) = self.load().await?;
+        let terminal_ack = diagnostics::BrokerStep::TerminalObservationAck;
         self.mutate(WorkerTransitionV1::Observe {
             observation: managed::observation_dto(draft.worker()?, retained.terminal())?,
         })
-        .await?;
-        let (_, draft) = self.load().await?;
+        .await
+        .context(terminal_ack)?;
+        let (_, draft) = self.load().await.context(terminal_ack)?;
+        let worker = draft.worker().context(terminal_ack)?;
         ensure!(
-            draft.worker()?.state == WorkerStateV1::Terminal && !draft.worker()?.quota_held,
-            "terminal acknowledgement is uncertain"
+            worker.state == WorkerStateV1::Terminal && !worker.quota_held,
+            anyhow!("terminal acknowledgement is uncertain").context(terminal_ack)
         );
-        self.post_worker_result().await?;
+        self.post_worker_result()
+            .await
+            .context(diagnostics::BrokerStep::ResultAudit)?;
         // Enforcer registrations remain held. Cleanup is an independent fact;
         // no disarm or capacity release is inferred from this central terminal.
         let relay_joined = if let Some(relays) = &self.executor.relays {
@@ -1169,8 +1181,13 @@ impl<'a> Execution<'a> {
             removed,
             error: (!removed).then(|| "runtime cleanup was not confirmed".into()),
         })
-        .await?;
-        ensure!(removed, "worker cleanup requires reconciliation");
+        .await
+        .context(diagnostics::BrokerStep::CleanupAck)?;
+        ensure!(
+            removed,
+            anyhow!("worker cleanup requires reconciliation")
+                .context(diagnostics::BrokerStep::CleanupConfirmation)
+        );
         Ok(ControlFlow::Continue(()))
     }
 }

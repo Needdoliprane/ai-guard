@@ -437,6 +437,10 @@ test("un échec broker v1 présente sa phase et son étape sans confirmer un eff
     ["failure_observed", "Observation d’un échec"],
     ["ownership_reload", "Vérification du conteneur enregistré"],
     ["created_exchange", "Confirmation de la création"],
+    ["terminal_observation_ack", "Acquittement de l’observation terminale"],
+    ["result_audit", "Audit du résultat"],
+    ["cleanup_confirmation", "Confirmation du retrait du worker"],
+    ["cleanup_ack", "Enregistrement du résultat du retrait"],
   ]) {
     const summary = eventSummary({
       ...brokerFailureEvent,

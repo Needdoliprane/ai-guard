@@ -149,6 +149,10 @@ const failureStepLabels: ReadonlyMap<string, string> = new Map([
   ["ownership_reload", "Vérification du conteneur enregistré"],
   ["created_inspection", "Vérification de la création"],
   ["created_exchange", "Confirmation de la création"],
+  ["terminal_observation_ack", "Acquittement de l’observation terminale"],
+  ["result_audit", "Audit du résultat"],
+  ["cleanup_confirmation", "Confirmation du retrait du worker"],
+  ["cleanup_ack", "Enregistrement du résultat du retrait"],
   ["failure_observed", "Observation d’un échec"],
 ]);
 const enforcerStageLabels: ReadonlyMap<string, string> = new Map([
