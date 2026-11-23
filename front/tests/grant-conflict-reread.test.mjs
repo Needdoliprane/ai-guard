@@ -105,7 +105,7 @@ test("Un 409 retire la confirmation jusqu’à la relecture des partages et des 
       const change = JSON.parse(options.body);
       posts.push(change);
       return posts.length === 1 ? errorResponse(409, "conflict", "reread") :
-        Response.json(grantReceipt(change.operation_id, resource));
+        Response.json(grantReceipt(change.operation_id, resource, { grant_revision: "8" }));
     });
 
   let editor;
@@ -160,6 +160,9 @@ test("Un 409 retire la confirmation jusqu’à la relecture des partages et des 
     assert.notEqual(posts[1].operation_id, posts[0].operation_id);
     assert.deepEqual(posts[1].shares, [{ principal: newMember.principal, permissions: ["metadata"] }]);
     assert.equal(applied.length, 1);
+    assert.equal(applied[0].operation_id, posts[1].operation_id);
+    assert.deepEqual(applied[0].resource, posts[1].resource);
+    assert.equal(applied[0].grant_revision, "8");
     assert.equal(document.activeElement, trigger);
   } finally {
     editor?.close();
