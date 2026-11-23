@@ -5,6 +5,7 @@ import { HumanContractError, hasCanonicalEventId } from "./human-model.ts";
 import { ADMIN_DESTINATIONS, accessExplanation, adminDestinationState, can, destinationState } from "./access-model.ts";
 import type { AdminDestination } from "./access-model.ts";
 import { ConfigurationView, MembershipsView, UsageView } from "./admin-views.ts";
+import "./overview.css";
 import { RENDER_STEP, SupervisionView, defaultSupervisionPreferences } from "./supervision-view.ts";
 import { JournalView, defaultJournalPreferences } from "./journal-view.ts";
 import { OverviewView, defaultOverviewPreferences } from "./overview-view.ts";
@@ -494,7 +495,8 @@ export class HumanDashboard {
       // The delegated change is offered only when the catalogue grants and serves memberships_manage.
       new MembershipsView({ ...host, read: (cursor, signal) => this.#api.memberships(cursor, signal),
         change: delegationOffers(context).memberships ? (membership) => this.#editMembership(membership) : null }) :
-      mode === "usage" ? new UsageView({ ...host, quota: (signal) => this.#api.quota(signal), usage: (cursor, signal) => this.#api.usage(cursor, signal) }) :
+      mode === "usage" ? new UsageView({ ...host, owned: this.#api.readProfiles !== undefined,
+        quota: (signal) => this.#api.quota(signal), usage: (cursor, signal) => this.#api.usage(cursor, signal) }) :
         new ConfigurationView({ ...host, read: (signal) => this.#api.configuration(signal) });
     this.#admin = { mode, view }; view.start();
   }
