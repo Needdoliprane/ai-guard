@@ -185,6 +185,16 @@ impl Gateway {
         })
     }
 
+    async fn close(mut self) -> Result<()> {
+        if self.child.try_wait()?.is_none() {
+            self.child.start_kill()?;
+        }
+        timeout(Duration::from_secs(5), self.child.wait())
+            .await
+            .context("QA gateway shutdown exceeded its budget")??;
+        Ok(())
+    }
+
     fn command(&self, subcommand: &str, config: &Path) -> Command {
         let mut command = cli(subcommand);
         command
@@ -1455,8 +1465,8 @@ fn live_browser_failure(report: &Value) -> anyhow::Error {
     };
     let stage = match report["stage"].as_str() {
         Some(
-            stage @ ("setup" | "launch" | "ready" | "peak" | "await_native" | "logout" | "cleanup"
-            | "network"),
+            stage @ ("setup" | "launch" | "ready" | "document" | "form" | "identity" | "registry"
+            | "views" | "peak" | "await_native" | "logout" | "cleanup" | "network"),
         ) => stage,
         _ => "unknown",
     };
@@ -2963,5 +2973,97 @@ async fn parallel_worker_journey(stop_a1: bool) -> Result<()> {
             "returned_state":if stop.terminal_from_stop.is_some() { "terminal" } else { "stopping" }});
     }
     eprintln!("{report}");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the hosted dashboard browser fixture and a local loopback gateway; no workers are started"]
+async fn real_cli_live_dashboard_readiness_two_tenants() -> Result<()> {
+    ensure!(
+        std::env::var_os("AGENTSANDBOX_TEST_BROWSER_LIVE").as_deref()
+            == Some(std::ffi::OsStr::new("1")),
+        "readiness recipe requires AGENTSANDBOX_TEST_BROWSER_LIVE=1"
+    );
+    let dashboard = DashboardCheck::read()?.context("live dashboard fixture absent")?;
+    let fixture = support::private_tempdir();
+    let root = fixture.path().canonicalize()?;
+    let jobs = [
+        ("A1", "tenant-a", "20"),
+        ("A2", "tenant-a", "36"),
+        ("B1", "tenant-b", "37"),
+    ]
+    .map(|(label, tenant, seconds)| ParallelJob {
+        label,
+        tenant,
+        seconds,
+        root: root.join(label),
+        marker: Uuid::new_v4().to_string(),
+    });
+    jobs[0].prepare(None).await?;
+    jobs[1].prepare(Some(&jobs[0].config())).await?;
+    jobs[2].prepare(None).await?;
+    let registry = root.join("tenants.json");
+    let tenants = [(&jobs[0], 2), (&jobs[2], 1)].map(|(job, count)| json!({
+        "tenant_id":job.tenant,"data":root.join(format!("{}.sqlite",job.tenant)),
+        "runner_token_file":job.config().join("secrets/runner"),"viewer_token_file":job.config().join("secrets/viewer"),
+        "worker_quota":{"version":1,"max_active_workers":count,"max_cpu_millis":count*WORKER_CPU,
+            "max_memory_bytes":count*WORKER_MEMORY,"max_timeout_seconds":60}
+    }));
+    fs::write(
+        &registry,
+        serde_json::to_vec(&json!({"version":1,"tenants":tenants}))?,
+    )?;
+    let policy_path = root.join("policy.json");
+    let mut policy = Policy::default();
+    policy.allowed_argv = jobs.iter().map(ParallelJob::argv).collect();
+    fs::write(&policy_path, serde_json::to_vec(&policy)?)?;
+    let gateway = Gateway::start_tenants(&registry, &policy_path).await?;
+    let viewers = [
+        read_token(&jobs[0].config().join("secrets/viewer"))?,
+        read_token(&jobs[2].config().join("secrets/viewer"))?,
+    ];
+    let a = AuditClient::new(&gateway.origin, &viewers[0])?;
+    let b = AuditClient::new(&gateway.origin, &viewers[1])?;
+    for (client, tenant, slots) in [(&a, "tenant-a", 2), (&b, "tenant-b", 1)] {
+        ensure!(
+            client.get_json("api/v1/identity").await?
+                == json!({"tenant_id":tenant,"role":"viewer"}),
+            "viewer identity differs from the readiness fixture tenant"
+        );
+        check_quota(client, slots, 0).await?;
+        ensure!(
+            current_workers(client, slots as usize).await?.is_empty(),
+            "readiness fixture contains a worker before browser confirmation"
+        );
+    }
+
+    let mut live = match dashboard
+        .start_live(&root, &gateway.origin, &viewers, RuntimeKindV1::Docker)
+        .await
+    {
+        Ok(live) => live,
+        Err(error) => {
+            gateway.close().await?;
+            return Err(error);
+        }
+    };
+    let protocol = match timeout(Duration::from_secs(10), async {
+        live.send(json!({"phase":"readiness_close","workers":[]}))
+            .await?;
+        require_live_browser_close(&live.receive().await?, false)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(anyhow::anyhow!("readiness close frame exceeded its budget")),
+    };
+    let browser_close = live.close().await;
+    let gateway_close = gateway.close().await;
+    protocol?;
+    ensure!(
+        browser_close?.success(),
+        "readiness browser did not close cleanly"
+    );
+    gateway_close?;
     Ok(())
 }
