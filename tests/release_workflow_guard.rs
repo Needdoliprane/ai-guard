@@ -268,6 +268,49 @@ fn frontend_archive_keeps_its_vite_attribution_requirement() {
     );
 }
 
+#[test]
+fn release_listing_requires_one_directory_root_and_unique_ordinary_members() {
+    let directory = "drwxr-xr-x 0/0 0 2026-11-23 00:00 release/\n";
+    let regular = "-rw-r--r-- 0/0 1 2026-11-23 00:00 release/README.txt\n";
+    let members = concat!(
+        "-rw-r--r-- 0/0 1 2026-11-23 00:00 release/BUILD-INFO\n",
+        "-rw-r--r-- 0/0 1 2026-11-23 00:00 release/LICENSE\n",
+        "drwxr-xr-x 0/0 0 2026-11-23 00:00 release/manifest/\n",
+        "-rw-r--r-- 0/0 1 2026-11-23 00:00 release/manifest/release-manifest.json\n",
+        "-rw-r--r-- 0/0 1 2026-11-23 00:00 release/manifest/sbom.cdx.json\n",
+        "-rw-r--r-- 0/0 1 2026-11-23 00:00 release/manifest/SHA256SUMS\n",
+    );
+    // Feed the exact member verifier a listing. No filesystem member is created.
+    let script = format!(
+        "listing=\"$1\"\ntar() {{ printf '%s' \"$listing\"; }}\n{}\nverify_archive_members unused release release-metadata",
+        member_check()
+    );
+    let check = |listing: &str| {
+        Command::new("bash")
+            .args(["-c", &script, "check", listing])
+            .output()
+            .expect("bash")
+    };
+    let valid = format!("{directory}{members}{regular}");
+    assert!(check(&valid).status.success());
+
+    for (case, listing) in [
+        ("missing root", members.into()),
+        (
+            "non-directory root",
+            format!("-rw-r--r-- 0/0 1 2026-11-23 00:00 release\n{members}"),
+        ),
+        ("duplicate root", format!("{directory}{valid}")),
+        ("duplicate member", format!("{valid}{regular}")),
+        (
+            "unsupported member kind",
+            format!("{valid}?rw-r--r-- 0/0 1 2026-11-23 00:00 release/other\n"),
+        ),
+    ] {
+        assert!(!check(&listing).status.success(), "accepted {case}");
+    }
+}
+
 /// The lines of one job of a workflow (two-space `jobs:` children, as these workflows are written).
 fn job(text: &str, name: &str) -> Vec<String> {
     let header = format!("  {name}:");
