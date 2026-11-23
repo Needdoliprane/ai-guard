@@ -16,6 +16,7 @@ const fixtureMode = process.env.AI_GUARD_OWNED_BROWSER_FIXTURE;
 const egressMode = fixtureMode === "run-egress-v1";
 const workersMode = fixtureMode === "run-workers-v1";
 const usageMode = fixtureMode === "run-usage-v1";
+const membershipMode = fixtureMode === "run-membership-v1";
 const FQN = egressMode
   ? "api::human_sources::tests::owned_browser_fixture::egress::serve_owned_egress_browser_fixture"
   : "api::human_sources::tests::owned_browser_fixture::serve_owned_browser_fixture";
@@ -26,6 +27,9 @@ const summaryPath = "/api/v1/human/summary";
 const quotaPath = "/api/v1/human/admin/quota";
 const usagePath = "/api/v1/human/admin/usage";
 const usagePagePath = `${usagePath}?limit=50`;
+const membershipsPath = "/api/v1/human/admin/memberships";
+const membershipPagePath = `${membershipsPath}?limit=50`;
+const membershipReceiptFields = ["version", "operation_id", "membership_id", "membership_revision", "authorization_revision", "audit_seq"];
 const QUIET_MS = 33000; // Actual time, covers the existing30s dashboard cycle.
 const must = (condition, code) => { if (!condition) throw new Error(code); };
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -46,6 +50,7 @@ let sequence = 0, fixtureStarted = false, fixtureExit = null, interactionDeadlin
 const commands = [], requests = [], wires = [], pendingWires = [], captures = [], pageErrors = [], external = [];
 const observed = {}, output = { stdout: { bytes: 0, hash: createHash("sha256") }, stderr: { bytes: 0, hash: createHash("sha256") } };
 let artifacts, control, libtest, dist, seconds, failure = null, cleanupFailure = null, closedFixture = null, receipts = null;
+let firstMembershipPost, replayedMembershipReceipt;
 const remaining = (cap = 45000) => {
   must(!interrupted, "INTERRUPTED"); const left = interactionDeadline - Date.now(); must(left > 0, "FIXTURE_INTERACTION_BUDGET"); return Math.min(cap, left);
 };
@@ -106,6 +111,7 @@ async function save(name, value) {
 function publishTerminalResult() {
   terminalResult.status = interrupted ? "FAIL_NOT_QUALIFIED" : !fixtureStarted ? "BLOCKED_NOT_RUN"
     : failure || cleanupFailure ? "FAIL_NOT_QUALIFIED"
+    : membershipMode ? "PASS_OWNED_MEMBERSHIP_RECOVERY"
     : usageMode ? "PASS_OWNED_TENANT_USAGE"
     : workersMode ? "PASS_OWNED_WORKER_REGISTRY"
     : egressMode ? "PASS_OWNED_EGRESS_JOURNAL" : "PASS_THREE_BOUNDED_OWNED_SCENARIOS";
@@ -193,10 +199,18 @@ function validateReady(value) {
   must(url.protocol === "http:" && url.hostname === "127.0.0.1" && Number(url.port) > 0 && !url.username && !url.password && url.pathname === "/" && !url.search && !url.hash, "READY_LOOPBACK_URL");
   if (egressMode) return validateEgressReady(value);
   const fields = ["version", "dashboard_url", "bearer_b", "tenant_id", "budget_seconds", "commands", "acks", "command_limit"];
-  const scenarioFields = usageMode ? ["mode", "usage"] : workersMode ? ["mode", "worker"] : ["resource", "event_ids"];
+  const scenarioFields = membershipMode ? ["mode", "membership"] : usageMode ? ["mode", "usage"]
+    : workersMode ? ["mode", "worker"] : ["resource", "event_ids"];
   closed(value, [...fields, ...scenarioFields], "READY_CLOSED");
   must(value.tenant_id === "B", "READY_PROFILE");
   must(typeof value.bearer_b === "string" && /^aigh1_[0-9a-f]{64}$/.test(value.bearer_b), "READY_FIXTURE_BEARER");
+  if (membershipMode) {
+    must(value.mode === "membership", "READY_MEMBERSHIP_MODE");
+    closed(value.membership, ["membership_id", "display_name", "revision"], "READY_MEMBERSHIP");
+    must(uuid(value.membership.membership_id) && value.membership.display_name === "Synthetic browser member" &&
+      value.membership.revision === "1", "READY_SYNTHETIC_MEMBERSHIP");
+    return value;
+  }
   if (usageMode) {
     must(value.mode === "usage", "READY_USAGE_MODE");
     closed(value.usage, ["allocated", "unmeasured"], "READY_USAGE_ATTEMPTS");
@@ -226,6 +240,7 @@ function pageAction(path) {
   if (pathname === workersPath) return workerReceiptKind;
   if (pathname === quotaPath) return "quota";
   if (pathname === usagePath) return "usage";
+  if (membershipMode && pathname === membershipsPath) return "memberships";
   return ({ "/api/v1/human/resources": "resources", "/api/v1/human/events": "events", "/api/v1/human/events/recent": "events" })[pathname] ?? null;
 }
 function requiredReceipt(body) {
@@ -659,8 +674,152 @@ async function runOwnedUsage() {
   observed.scenario1 = "owned_tenant_usage_store14_dashboard_and_receipts";
 }
 
+const membershipChangePath = () => `${membershipsPath}/${ready.membership.membership_id}`;
+const membershipEndpoint = () => new URL(membershipChangePath(), ready.dashboard_url).href;
+const postedMembershipRequests = () => requests.filter(({ method }) => method === "POST");
+
+function membershipAdministrator(identity) {
+  must(identity.authentication?.method === "local_credential" && identity.principal?.kind === "human_local" &&
+    Array.isArray(identity.contexts), "OWNED_MEMBERSHIP_LOCAL_IDENTITY");
+  const admins = identity.contexts.filter(({ mode, tenant_id }) => mode === "administration" && tenant_id === ready.tenant_id);
+  must(admins.length === 1, "EXACT_MEMBERSHIP_ADMIN_CONTEXT");
+  const [admin] = admins;
+  must(typeof admin.id === "string" && admin.id.length > 0 && typeof admin.authorization_version === "string" &&
+    Array.isArray(admin.capabilities) && ["manage_memberships", "read_memberships"].every((right) => admin.capabilities.includes(right)),
+    "MEMBERSHIP_ADMIN_RIGHTS");
+  const read = admin.operations?.find(({ operation }) => operation === "memberships_read");
+  const manage = admin.operations?.find(({ operation }) => operation === "memberships_manage");
+  must(read?.permission === "granted" && read.availability === "available" && manage?.permission === "granted" &&
+    manage.availability === "available" && manage.scope === "organization", "MEMBERSHIP_CATALOGUE_OFFER");
+  return admin;
+}
+
+async function membershipPost(request) {
+  must(request.method() === "POST" && request.url() === membershipEndpoint() && request.frame() === page.mainFrame(), "MEMBERSHIP_POST_TARGET");
+  const bytes = request.postDataBuffer();
+  must(bytes && bytes.length <= 4096 && !hasPrivate(bytes), "MEMBERSHIP_POST_SIZE_OR_PRIVACY");
+  const body = JSON.parse(bytes.toString("utf8"));
+  closed(body, ["operation_id", "expected_revision", "capabilities", "active"], "MEMBERSHIP_POST_SHAPE");
+  must(uuid(body.operation_id) && body.expected_revision === ready.membership.revision && body.active === true &&
+    same(body.capabilities, ["read_metadata"]), "EXACT_FIXTURE_MEMBERSHIP_CHANGE");
+  return { request, bytes, operationId: body.operation_id, contextId: await request.headerValue("X-AiGuard-Context") };
+}
+
+function membershipReceipt(body, operationId) {
+  closed(body, membershipReceiptFields, "MEMBERSHIP_MUTATION_RECEIPT_SHAPE");
+  const positive = (value) => typeof value === "string" && /^[1-9][0-9]{0,19}$/.test(value);
+  must(body.version === 1 && uuid(body.operation_id) && body.operation_id === operationId &&
+    body.membership_id === ready.membership.membership_id && body.membership_revision === "2" &&
+    positive(body.authorization_revision) && positive(body.audit_seq), "MEMBERSHIP_RECEIPT_CORRELATION");
+  return body;
+}
+
+const sameMembershipReceipt = (left, right) => membershipReceiptFields.every((key) => left[key] === right[key]);
+
+async function readMembershipReceipt(response, operationId) {
+  must(response.url() === membershipEndpoint() && response.status() === 200, "MEMBERSHIP_REAL_BFF_SUCCESS");
+  const bytes = await response.body();
+  must(bytes.length <= 4096 && !hasPrivate(bytes), "MEMBERSHIP_RECEIPT_SIZE_OR_PRIVACY");
+  return membershipReceipt(JSON.parse(bytes.toString("utf8")), operationId);
+}
+
+async function loseFirstMembershipResponse(route) {
+  try {
+    const sent = await membershipPost(route.request());
+    // The original browser POST reaches the real local BFF once. The browser
+    // only gets a network failure after the server's successful receipt.
+    const actual = await route.fetch({ maxRedirects: 0, maxRetries: 0, timeout: remaining(12000) });
+    try { return { sent, receipt: await readMembershipReceipt(actual, sent.operationId) }; }
+    finally { await actual.dispose(); }
+  } finally { await route.abort("failed"); }
+}
+
+async function runOwnedMembership() {
+  const identityPath = "/api/v1/human/identity";
+  await page.getByLabel("Type d’accès").selectOption("human");
+  await page.getByLabel("Credential personnel local").fill(bearer);
+  const identity = await readByAction(identityPath, 200, () => button("Ouvrir mon espace").click());
+  const admin = membershipAdministrator(identity);
+  await heading("Choisir un contexte.").waitFor({ timeout: remaining() });
+  await readByAction(summaryPath, 200, () => button("Ouvrir administration · B").click());
+  await page.locator('.ov[data-state="ready"]').waitFor({ timeout: remaining() });
+
+  stage = "owned_membership_prepare";
+  const result = await readByAction(membershipPagePath, 200, () => button("Utilisateurs").click());
+  must(result.context_id === admin.id && result.authorization_version === admin.authorization_version &&
+    result.source === "tenant_identity_memberships" && Array.isArray(result.items), "MEMBERSHIP_PAGE_SCOPE");
+  const target = result.items.find(({ membership_id }) => membership_id === ready.membership.membership_id);
+  must(target?.display_name === ready.membership.display_name && target.revision === ready.membership.revision &&
+    target.organization_scope === admin.organization_scope && target.own === false && target.active === true &&
+    target.account_active === true && same([...target.capabilities].sort(), ["read_content", "read_metadata"]), "SYNTHETIC_MEMBERSHIP_BEFORE_CHANGE");
+  const view = page.locator(".ov-memberships");
+  const row = view.locator(`tr[data-membership-id="${target.membership_id}"]`);
+  await row.getByText(target.display_name, { exact: true }).waitFor({ timeout: remaining() });
+  await row.getByRole("button", { name: "Modifier", exact: true }).click({ timeout: remaining() });
+  const dialog = page.getByRole("dialog", { name: "Modifier l’appartenance", exact: true });
+  const content = dialog.getByRole("checkbox", { name: "Contenus", exact: true });
+  must(await content.isChecked({ timeout: remaining() }), "MEMBERSHIP_CONTENT_RIGHT_WAS_PRESENT");
+  await content.uncheck({ timeout: remaining() });
+  await dialog.getByRole("button", { name: "Vérifier le changement", exact: true }).click({ timeout: remaining() });
+  must(postedMembershipRequests().length === 0, "MEMBERSHIP_POST_BEFORE_CONFIRMATION");
+
+  stage = "owned_membership_lose_response";
+  const endpoint = membershipEndpoint();
+  const failed = page.waitForEvent("requestfailed", {
+    predicate: (request) => request.method() === "POST" && request.url() === endpoint, timeout: remaining(),
+  });
+  const revalidated = waitForRead(identityPath, 200);
+  failed.catch(() => {});
+  revalidated.catch(() => {});
+  await dialog.getByRole("button", { name: "Confirmer le changement", exact: true }).click({ timeout: remaining() });
+  const failedRequest = await failed;
+  must(firstMembershipPost, "MEMBERSHIP_POST_NOT_INTERCEPTED");
+  const first = await firstMembershipPost;
+  must(first.sent.request === failedRequest && failedRequest.failure()?.errorText === "net::ERR_FAILED" &&
+    first.sent.contextId === admin.id, "MEMBERSHIP_LOSS_AND_INITIAL_CONTEXT");
+  observed.membership_responses_lost = 1;
+
+  stage = "owned_membership_revalidate";
+  const freshIdentity = await revalidated;
+  const fresh = membershipAdministrator(freshIdentity);
+  must(same(freshIdentity.principal, identity.principal) && fresh.organization_scope === admin.organization_scope &&
+    fresh.id !== admin.id && fresh.authorization_version !== admin.authorization_version, "MEMBERSHIP_RECOVERY_USES_FRESH_CONTEXT");
+  await heading("Choisir un contexte.").waitFor({ timeout: remaining() });
+  const retry = page.getByRole("button", { name: /^Réessayer la même opération(?: ·.*)?$/u });
+  await retry.waitFor({ timeout: remaining() });
+  const recovery = page.locator("section.panel").filter({ has: retry });
+  await recovery.getByText(/Appartenance active/u).waitFor({ timeout: remaining() });
+  await recovery.getByText(/Capacités demandées — Métadonnées/u).waitFor({ timeout: remaining() });
+  must(await view.count() === 0 && await page.locator("dialog.dg-dialog").count() === 0, "MEMBERSHIP_VIEW_AND_EDITOR_PURGED");
+  const post = { method: "POST", path: membershipChangePath() };
+  must(same(postedMembershipRequests(), [post]), "MEMBERSHIP_NO_AUTOMATIC_REPLAY");
+
+  stage = "owned_membership_explicit_replay";
+  const replay = page.waitForResponse((response) => response.request().method() === "POST" && response.url() === endpoint, { timeout: remaining() });
+  const confirmedIdentity = waitForRead(identityPath, 200);
+  replay.catch(() => {});
+  confirmedIdentity.catch(() => {});
+  await retry.click({ timeout: remaining() });
+  const response = await replay;
+  const resent = await membershipPost(response.request());
+  must(resent.contextId === fresh.id && resent.operationId === first.sent.operationId && resent.bytes.equals(first.sent.bytes), "MEMBERSHIP_EXACT_REPLAY_ON_CURRENT_CONTEXT");
+  const confirmed = await readMembershipReceipt(response, resent.operationId);
+  must(sameMembershipReceipt(first.receipt, confirmed), "MEMBERSHIP_REPLAY_RETURNS_ORIGINAL_RECEIPT");
+  const confirmation = page.getByText(/^Changement confirmé par le contrôle\./u);
+  await confirmation.waitFor({ timeout: remaining() });
+  const notice = await confirmation.textContent({ timeout: remaining() });
+  const receiptDetails = new RegExp(`révision de l’appartenance ${confirmed.membership_revision} · position d’audit ${confirmed.audit_seq}\\.$`, "iu");
+  must(receiptDetails.test(notice ?? ""), "MEMBERSHIP_DOM_CONFIRMS_DURABLE_RECEIPT");
+  const finalAdmin = membershipAdministrator(await confirmedIdentity);
+  must(finalAdmin.authorization_version === fresh.authorization_version && await retry.count() === 0, "MEMBERSHIP_REPLAY_KEEPS_REVISION_AND_CLEARS_OFFER");
+  must(same(postedMembershipRequests(), [post, post]), "MEMBERSHIP_EXACTLY_TWO_POSTS");
+  await noSecret();
+  replayedMembershipReceipt = confirmed;
+  observed.scenario1 = "owned_membership_response_loss_recovery";
+}
+
 try {
-  must(fixtureMode === "run-v1" || egressMode || workersMode || usageMode, "EXPLICIT_FIXTURE_GUARD_REQUIRED");
+  must(fixtureMode === "run-v1" || egressMode || workersMode || usageMode || membershipMode, "EXPLICIT_FIXTURE_GUARD_REQUIRED");
   const admittedLinuxArch = process.arch === "arm64" || (!egressMode && process.arch === "x64");
   const admittedLinux = process.platform === "linux" && admittedLinuxArch && process.getuid?.() === 1000 && process.getgid?.() === 1000;
   const admittedMac = egressMode && process.platform === "darwin" && process.arch === "arm64" && process.geteuid?.() > 0;
@@ -717,27 +876,40 @@ try {
     delete observed.ready_public.bearer_b;
   }
   stage = "browser_start";
+  const restrictedBrowser = egressMode || workersMode || usageMode || membershipMode;
   browser = await playwright.chromium.launch({ headless: true, chromiumSandbox: true, timeout: remaining(60000),
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined,
-    ...(egressMode || workersMode || usageMode ? { args: ["--no-proxy-server", "--host-resolver-rules=EXCLUDE 127.0.0.1, MAP * ~NOTFOUND"] } : {}),
+    ...(restrictedBrowser ? { args: ["--no-proxy-server", "--host-resolver-rules=EXCLUDE 127.0.0.1, MAP * ~NOTFOUND"] } : {}),
     env: { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: process.env.HOME ?? temporary, TMPDIR: temporary } });
   observed.browser_version = browser.version();
   context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: "fr-FR", timezoneId: "UTC", colorScheme: "light",
-    ...(egressMode || workersMode || usageMode ? { serviceWorkers: "block" } : {}) });
+    ...(restrictedBrowser ? { serviceWorkers: "block" } : {}) });
+  const dashboardOrigin = new URL(ready.dashboard_url).origin;
   await context.route("**/*", async (route) => {
-    const url = new URL(route.request().url());
-    if (["about:", "data:", "blob:"].includes(url.protocol) || url.origin === new URL(ready.dashboard_url).origin) return route.continue();
-    external.push({ protocol: url.protocol, hostname: url.hostname }); await route.abort("blockedbyclient");
+    const request = route.request();
+    const url = new URL(request.url());
+    if (["about:", "data:", "blob:"].includes(url.protocol)) return route.continue();
+    if (url.origin !== dashboardOrigin) {
+      external.push({ protocol: url.protocol, hostname: url.hostname });
+      return route.abort("blockedbyclient");
+    }
+    if (membershipMode && !firstMembershipPost && request.method() === "POST" && request.url() === membershipEndpoint()) {
+      firstMembershipPost = loseFirstMembershipResponse(route);
+      await firstMembershipPost.catch(() => {}); // The scenario checks the result after the request fails in the browser.
+      return;
+    }
+    return route.continue();
   });
   page = await context.newPage(); page.setDefaultTimeout(remaining()); page.setDefaultNavigationTimeout(remaining());
   page.on("pageerror", (error) => pageErrors.push(redact(error.message)));
   page.on("request", (request) => { const url = new URL(request.url()); if (url.pathname.startsWith("/api/v1/human/")) requests.push({ method: request.method(), path: url.pathname + url.search }); });
   page.on("response", (response) => { const capture = captureResponse(response); capture.catch(() => {}); pendingWires.push(capture); });
-  stage = usageMode ? "login_and_usage" : workersMode ? "login_and_workers" : "login_and_snapshot";
+  stage = membershipMode ? "login_and_membership" : usageMode ? "login_and_usage" : workersMode ? "login_and_workers" : "login_and_snapshot";
   await page.goto(ready.dashboard_url);
   if (egressMode) await runEgressJournal();
   else if (workersMode) await runOwnedWorkers();
   else if (usageMode) await runOwnedUsage();
+  else if (membershipMode) await runOwnedMembership();
   else await runOwnedSnapshot();
 } catch (error) { failure = { stage, code: redact(error.message), name: error.name }; }
 finally {
@@ -756,13 +928,16 @@ finally {
     try {
       const ending = await waitJson(join(control, "CLOSED.json"), 4096, Date.now() + 20000, true); closedFixture = ending.value;
       const extraField = egressMode ? "policy_receipts_verified" : "sqlite_lock_released";
-      closed(closedFixture, ["version", "completed", "commands_processed", extraField, "servers_and_owner_drained", "receipts_exported", "stop_reason"], "CLOSED_SHAPE");
+      closed(closedFixture, ["version", "completed", "commands_processed", extraField, "servers_and_owner_drained", "receipts_exported", "stop_reason",
+        ...(membershipMode ? ["membership_change"] : [])], "CLOSED_SHAPE");
       must(closedFixture.version === 1 && closedFixture.completed === true && closedFixture.commands_processed === sequence && closedFixture[extraField] === true && closedFixture.servers_and_owner_drained === true && closedFixture.receipts_exported === true && closedFixture.stop_reason === "requested", "FIXTURE_CLOSURE_NOT_ESTABLISHED");
       const exported = await waitJson(join(control, "RECEIPTS.json"), 524288, Date.now() + 10000, true); receipts = exported.value;
       closed(receipts, ["version", "tenant_id", "complete", "limit", "records"], "RECEIPTS_SHAPE");
       must(receipts.version === 1 && receipts.tenant_id === (egressMode ? "A" : "B") && receipts.complete === true && receipts.limit === 1000 && Array.isArray(receipts.records) && receipts.records.length <= 1000, "RECEIPTS_INCOMPLETE");
       const byId = new Map();
-      for (const record of receipts.records) { closed(record, ["audit_event_id", "request_id", "action", "received_at"], "RECEIPT_RECORD"); must(["identity", "resources", "events", "event", "summary", "quota", "usage", workerReceiptKind].includes(record.action) && typeof record.audit_event_id === "string" && typeof record.request_id === "string" && typeof record.received_at === "string", "RECEIPT_RECORD_TYPES"); byId.set(record.audit_event_id, record); }
+      const receiptActions = ["identity", "resources", "events", "event", "summary", "quota", "usage", workerReceiptKind];
+      if (membershipMode) receiptActions.push("memberships");
+      for (const record of receipts.records) { closed(record, ["audit_event_id", "request_id", "action", "received_at"], "RECEIPT_RECORD"); must(receiptActions.includes(record.action) && typeof record.audit_event_id === "string" && typeof record.request_id === "string" && typeof record.received_at === "string", "RECEIPT_RECORD_TYPES"); byId.set(record.audit_event_id, record); }
       must(byId.size === receipts.records.length, "DUPLICATE_DURABLE_RECEIPT_ID");
       await finishWireCaptures(); let compared = 0;
       // Identity has no page receipt. Every 200 on a page or detail endpoint
@@ -794,6 +969,22 @@ finally {
         must(compared === 2 && same(successfulPages.map(({ path }) => path).sort(), [quotaPath, usagePagePath]) &&
           same(accountingActions, ["quota", "usage"]), "EXACT_DURABLE_ACCOUNTING_RECEIPTS_IN_ORDER");
       }
+      if (membershipMode && !failure) {
+        const mutation = closedFixture.membership_change;
+        closed(mutation, ["mutation_count", "receipt"], "CLOSED_MEMBERSHIP_MUTATION");
+        must(mutation.mutation_count === 1 && replayedMembershipReceipt, "EXACTLY_ONE_DURABLE_MEMBERSHIP_MUTATION");
+        const durable = membershipReceipt(mutation.receipt, replayedMembershipReceipt.operation_id);
+        must(sameMembershipReceipt(durable, replayedMembershipReceipt), "MEMBERSHIP_RECEIPT_MATCHES_SQLITE");
+        const post = { method: "POST", path: membershipChangePath() };
+        const received = wires.filter(({ method }) => method === "POST");
+        must(same(postedMembershipRequests(), [post, post]) && received.length === 1 && received[0].path === post.path &&
+          received[0].status === 200 && sameMembershipReceipt(received[0].body, durable), "MEMBERSHIP_ONLY_REPLAY_RECEIPT_DELIVERED");
+        must(compared === 1 && successfulPages[0].path === membershipPagePath &&
+          receipts.records.filter(({ action }) => action === "memberships").length === 1, "EXACT_DURABLE_MEMBERSHIP_PAGE_RECEIPT");
+        observed.membership_posts = 2;
+        observed.membership_browser_receipts = 1;
+        observed.membership_sqlite_mutations = 1;
+      }
       const exit = await bounded(childDone, 15000, "LIBTEST_EXIT_DEADLINE"); must(exit?.code === 0 && exit.signal === null, "LIBTEST_EXIT_NOT_ZERO");
     } catch (error) { cleanupFailure ??= redact(error.message); }
     if (fixtureExit === null) {
@@ -819,6 +1010,7 @@ finally {
 // No source path, bearer, response body or child diagnostic is printed.
 console.log(interrupted ? "browser_owned_snapshot FAIL INTERRUPTED" : !fixtureStarted ? "browser_owned_snapshot BLOCKED NOT_RUN"
   : failure || cleanupFailure ? "browser_owned_snapshot FAIL; private result retained"
+  : membershipMode ? "browser_owned_snapshot PASS scenario=membership_recovery"
   : usageMode ? "browser_owned_snapshot PASS scenario=usage"
   : workersMode ? "browser_owned_snapshot PASS scenario=worker_registry"
   : egressMode ? "browser_owned_snapshot PASS scenario=egress_journal" : "browser_owned_snapshot PASS scenarios=3");
