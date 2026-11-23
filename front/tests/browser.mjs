@@ -106,6 +106,7 @@ const agents = [
 ];
 let mode = "data";
 const failingRoutes = new Map();
+let integrityReadBarrier = null;
 let limitNextJournalRead = false;
 let pagedJournal = false;
 let olderPageFailures = 0;
@@ -247,12 +248,17 @@ const server = createServer(async (request, response) => {
                 },
               ],
       });
-    if (url.pathname === "/api/integrity")
+    if (url.pathname === "/api/integrity") {
+      if (integrityReadBarrier) {
+        integrityReadBarrier.started();
+        await integrityReadBarrier.release;
+      }
       return json(response, {
         valid: true,
         event_count: mode === "empty" ? 0 : 14,
         head_hash: "abc123",
       });
+    }
     if (url.pathname === "/api/events") {
       if (limitNextJournalRead) {
         limitNextJournalRead = false;
@@ -472,6 +478,12 @@ async function runSummaryFreshnessCheck() {
   await summaryAlert.getByText(/Agents/).waitFor();
   await summaryAlert.getByText(/Intégrité de l’audit/).waitFor();
 
+  await page.getByRole("link", { name: "Actions", exact: true }).click();
+  await page.getByRole("heading", { name: "Actions", exact: true }).waitFor();
+  assert.equal(await summaryAlert.count(), 0, "La vue Actions ne présente pas l’avertissement de synthèse");
+  await page.getByRole("link", { name: "Vue d’ensemble", exact: true }).click();
+  await summaryAlert.getByText(/Intégrité de l’audit/).waitFor();
+
   failingRoutes.delete("/api/agents");
   await refresh.click();
   await summaryAlert.getByText(/Agents/).waitFor({ state: "hidden" });
@@ -498,7 +510,19 @@ async function runSummaryFreshnessCheck() {
   assert.equal(await summaryAlert.count(), 0, "Le refus de session retire la synthèse du client");
   failingRoutes.clear();
   await token.fill("viewer-test-token");
-  await login.click();
+  const heldIntegrity = Promise.withResolvers();
+  const integrityStarted = Promise.withResolvers();
+  integrityReadBarrier = { started: integrityStarted.resolve, release: heldIntegrity.promise };
+  const readDeadline = setTimeout(() => integrityStarted.reject(new Error("La première lecture d’intégrité n’a pas commencé")), 10000);
+  try {
+    await Promise.all([login.click(), integrityStarted.promise]);
+    await page.getByText("Non vérifiée", { exact: true }).waitFor();
+    assert.equal(await summaryAlert.count(), 0, "La nouvelle session ne reprend pas l’alerte avant la fin de sa première lecture");
+  } finally {
+    clearTimeout(readDeadline);
+    integrityReadBarrier = null;
+    heldIntegrity.resolve();
+  }
   await page.getByText("Chaîne valide", { exact: true }).waitFor();
   assert.equal(await summaryAlert.count(), 0, "La nouvelle session ne reprend pas l’alerte précédente");
   assert.deepEqual(errors, []);
