@@ -85,10 +85,19 @@ async fn owned_sources_serve_the_summary_memberships_and_configuration() {
     assert_eq!(status, StatusCode::OK, "{summary}");
     assert_eq!(summary["sections"]["resources"]["status"], "ready");
     assert_eq!(summary["sections"]["brokers"]["status"], "ready");
-    assert_eq!(summary["sections"]["workers"]["status"], "unavailable");
     assert_eq!(
-        summary["sections"]["workers"]["code"],
-        "profile_unavailable"
+        summary["sections"]["workers"],
+        json!({
+            "status": "ready",
+            "coverage": "complete_registry",
+            "data": {
+                "by_state": {},
+                "quota_held": "0",
+                "groups": [],
+                "groups_complete": true,
+                "runtime_inventory": "unknown",
+            },
+        })
     );
     assert_eq!(summary["sections"]["quota"]["code"], "profile_unavailable");
     assert!(summary["read_receipt"]["audit_event_id"].is_string());
@@ -123,6 +132,157 @@ async fn owned_sources_serve_the_summary_memberships_and_configuration() {
         StatusCode::SERVICE_UNAVAILABLE,
         "quota stays unavailable on the owned profile"
     );
+}
+
+async fn owned_worker_summary_on(format: u32) {
+    use super::owned_workers::provision_reader;
+    use crate::api::human_sources::owned_control_tests::negative::reserve_workload_fixture_worker;
+    use std::os::unix::fs::PermissionsExt;
+
+    async fn get(router: &Router, bearer: &str, path: &str, context: Option<&Value>) -> Value {
+        let mut request =
+            axum::http::Request::get(path).header("authorization", format!("Bearer {bearer}"));
+        if let Some(context) = context {
+            request = request.header("x-aiguard-context", context["id"].as_str().unwrap());
+        }
+        let response = router
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 262_144)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn context<'a>(identity: &'a Value, mode: &str) -> &'a Value {
+        identity["contexts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|candidate| candidate["tenant_id"] == "A" && candidate["mode"] == mode)
+            .expect("the selected context is offered by the gateway")
+    }
+
+    let historical = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap())
+        .unwrap();
+    let mut files = Store::owned_control_fixture_with_legacy_setup_for_test(format, |legacy| {
+        reserve_workload_fixture_worker(legacy);
+        legacy
+            .migrate_human_rights_v2(&historical.path().join("before-rights.sqlite"))
+            .unwrap();
+    });
+    let (bundle, credentials, tokens) = files.take_startup();
+    let reader = provision_reader(&bundle, HumanCapabilityV1::ReadWorkerRegistry);
+    let broker_admin = provision_reader(&bundle, HumanCapabilityV1::ReadBrokerRegistry);
+    let descriptor = bundle
+        .owner
+        .closure()
+        .sources
+        .iter()
+        .find(|descriptor| descriptor.tenant_id.as_deref() == Some("A"))
+        .unwrap();
+    assert_eq!(descriptor.required_format, format);
+    let source = descriptor.storage_binding.path();
+    let state = GatewayState::for_owned_human_sources(
+        bundle,
+        credentials,
+        tokens,
+        Policy::default(),
+        None,
+        Redactor::new(vec![]),
+    )
+    .unwrap();
+    let router = gateway_router(state);
+    const IDENTITY: &str = "/api/v1/human/identity";
+    const SUMMARY: &str = "/api/v1/human/summary?window=all";
+    let identity = get(&router, &reader, IDENTITY, None).await;
+    let admin = context(&identity, "administration");
+    let summary = get(&router, &reader, SUMMARY, Some(admin)).await;
+    assert_eq!(summary["context_id"], admin["id"]);
+    assert_eq!(
+        summary["authorization_version"],
+        admin["authorization_version"]
+    );
+    assert_eq!(summary["consistency"], "transaction_snapshot");
+    let sections = &summary["sections"];
+    assert_eq!(
+        sections["workers"],
+        json!({
+            "status": "ready",
+            "coverage": "complete_registry",
+            "data": {
+                "by_state": {"reserved": "1"},
+                "quota_held": "1",
+                "groups": [{
+                    "association": "unregistered",
+                    "runtime_kind": "docker",
+                    "broker": null,
+                    "by_state": {"reserved": "1"},
+                    "quota_held": "1",
+                }],
+                "groups_complete": true,
+                "runtime_inventory": "unknown",
+            },
+        })
+    );
+    for section in ["quota", "usage", "attention"] {
+        assert_eq!(
+            sections[section],
+            json!({"status":"unavailable", "code":"profile_unavailable"}),
+            "{section}"
+        );
+    }
+    assert_eq!(sections["brokers"], json!({"status":"not_granted"}));
+    assert_eq!(sections["resources"]["status"], "ready");
+    assert_eq!(sections["decisions"]["status"], "ready");
+
+    let database = rusqlite::Connection::open_with_flags(
+        source,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    let receipt = &summary["read_receipt"];
+    let (payload, received_at): (String, String) = database
+        .query_row(
+            "SELECT payload,received_at FROM events WHERE kind='control.identity.access' AND id=?1",
+            [receipt["audit_event_id"].as_str().unwrap()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let audited: Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(audited["data"]["action"], "summary");
+    assert_eq!(audited["data"]["mode"], "administration");
+    assert_eq!(audited["data"]["principal"], identity["principal"]);
+    assert_eq!(audited["data"]["request_id"], receipt["request_id"]);
+    assert_eq!(audited["data"]["result_count"], 3);
+    assert_eq!(received_at, receipt["received_at"].as_str().unwrap());
+
+    let broker_identity = get(&router, &broker_admin, IDENTITY, None).await;
+    for (bearer, selected) in [
+        (&reader, context(&identity, "personal")),
+        (&broker_admin, context(&broker_identity, "administration")),
+    ] {
+        let summary = get(&router, bearer, SUMMARY, Some(selected)).await;
+        assert_eq!(
+            summary["sections"]["workers"],
+            json!({"status":"not_granted"})
+        );
+    }
+}
+
+#[tokio::test]
+async fn owned_worker_summary_format14_counts_only_durable_worker_facts() {
+    owned_worker_summary_on(14).await;
+}
+
+#[tokio::test]
+async fn owned_worker_summary_format15_counts_only_durable_worker_facts() {
+    owned_worker_summary_on(15).await;
 }
 
 async fn post(router: &Router, path: &str, context: &str, body: &Value) -> (StatusCode, Value) {

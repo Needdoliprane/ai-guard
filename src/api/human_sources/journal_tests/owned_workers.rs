@@ -6,7 +6,10 @@ use sha2::{Digest, Sha256};
 const WORKERS: &str = "/api/v1/human/workers?limit=1";
 const RECEIPT_KIND: &str = "control.identity.workers.access";
 
-fn provision_reader(bundle: &HumanOwnedStartupBundle, capability: HumanCapabilityV1) -> String {
+pub(super) fn provision_reader(
+    bundle: &HumanOwnedStartupBundle,
+    capability: HumanCapabilityV1,
+) -> String {
     let descriptor = bundle
         .owner
         .closure()
