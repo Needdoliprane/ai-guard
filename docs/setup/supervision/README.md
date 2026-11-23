@@ -77,6 +77,8 @@ Each intended change carries one operation identifier, shown as **Opération …
 | `403` | The editor is withdrawn | Your accesses are read again. |
 | `400` or `404` | The change was refused | Final: nothing was changed. |
 
+During recovery, both editors wait for the pending request to resolve. **Abandonner la reprise** (Drop this recovery) clears the local request and refreshes your access. The previous outcome stays unknown and any change already recorded by the control remains effective.
+
 A recorded change creates a new authorization revision, so the context you made it in is refused afterwards. The dashboard then reads your accesses again and selects the one context with the same attribution that the control now offers. It reads **Utilisateurs** or **Ressources** again and shows the receipt: new revision, authorization revision and audit position. If the control does not offer exactly one such context, you choose one, and the receipt stays displayed. The member's next identity no longer offers a removed right; a removed share leaves the member's views at their next read.
 
 ## Open the view

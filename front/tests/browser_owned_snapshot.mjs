@@ -1179,6 +1179,7 @@ finally {
         observed.grant_posts = 2;
         observed.grant_browser_receipts = 1;
         observed.grant_sqlite_mutations = 1;
+        observed.grant_revision = Number(durable.grant_revision);
       }
       const exit = await bounded(childDone, 15000, "LIBTEST_EXIT_DEADLINE"); must(exit?.code === 0 && exit.signal === null, "LIBTEST_EXIT_NOT_ZERO");
     } catch (error) { cleanupFailure ??= redact(error.message); }

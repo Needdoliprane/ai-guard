@@ -77,6 +77,8 @@ Chaque changement voulu porte un identifiant d’opération, affiché en **Opér
 | `403` | L’éditeur est retiré | Vos accès sont relus. |
 | `400` ou `404` | Le changement est refusé | Définitif : rien n’a été modifié. |
 
+Pendant une reprise, les deux éditeurs attendent le résultat de la demande en cours. **Abandonner la reprise** efface la demande locale puis relit les droits. Le résultat précédent reste inconnu et tout effet déjà enregistré par le contrôle est conservé.
+
 Un changement enregistré crée une nouvelle révision d’autorisation : le contexte dans lequel vous l’avez fait est ensuite refusé. Le dashboard relit alors vos accès et sélectionne l’unique contexte de même attribution que le contrôle propose désormais. Il relit **Utilisateurs** ou **Ressources** et affiche le reçu : nouvelle révision, révision d’autorisation et position d’audit. Si le contrôle ne propose pas exactement un tel contexte, vous en choisissez un, et le reçu reste affiché. L’identité suivante du membre ne propose plus un droit retiré ; un partage retiré quitte ses vues à sa prochaine lecture.
 
 ## Ouvrir la vue
