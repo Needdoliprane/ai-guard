@@ -335,7 +335,7 @@ export class HumanDashboard {
         "Le contexte précédent n’est plus sélectionné. Choisissez un contexte.";
   }
   #acceptResume() {
-    if (document.visibilityState !== "visible") return;
+    if (document.visibilityState !== "visible" || this.#membershipChange.phase === "sending") return;
     const intent = this.#resume; const offer = this.#resumeOffer; if (!intent || !offer) return;
     if (Date.parse(offer.expires_at) <= Date.now()) {
       // The offered context expired while the list stayed open. This click is the explicit action: the
@@ -346,7 +346,7 @@ export class HumanDashboard {
       return;
     }
     // The shared selector checks the offer before purging context data.
-    try { this.#selectOfferedContext(offer.id); }
+    try { if (!this.#selectOfferedContext(offer.id)) return; }
     catch (error) { this.#resumeOffer = null; this.#identityError = failure(error); this.#render(); return; }
     const { view, payload } = intent;
     this.#supervisionPreferences = payload.supervision; this.#journalPreferences = payload.journal; this.#overviewPreferences = payload.overview; this.#openView(view);
@@ -617,7 +617,7 @@ export class HumanDashboard {
     if (candidates.length !== 1) {
       this.#message = `${notice} Choisissez de nouveau un contexte : le contrôle n’en propose pas un seul de mêmes droits.`; this.#mode = "contexts"; this.#render(); return;
     }
-    try { this.#selectOfferedContext(candidates[0]!.id); }
+    try { if (!this.#selectOfferedContext(candidates[0]!.id)) return; }
     catch (error) { this.#identityError = failure(error); this.#message = notice; this.#mode = "contexts"; this.#render(); return; }
     this.#message = notice; this.#openView(followUp.destination);
   }
@@ -660,7 +660,7 @@ export class HumanDashboard {
     this.#exporting = false; this.#exportMessage = ""; this.#exportPages = 0; this.#exportBytes = 0;
   }
   #openView(mode: DashboardMode) {
-    if (mode === "contexts" && this.#mode === mode && this.#membershipChange.phase === "sending") return;
+    if (this.#mode === "contexts" && this.#membershipChange.phase === "sending") return;
     // One view owns server data at a time: leaving the unified view aborts its reads and drops its rows.
     if (mode !== "supervision" && this.#mode === "supervision") this.#closeSupervision();
     if (mode !== "journal" && this.#mode === "journal") this.#closeJournal();
@@ -773,12 +773,13 @@ export class HumanDashboard {
     this.#streamLabel!.textContent = this.#context ? this.#streamStatus : "Aucun contexte sélectionné";
     this.#notice.hidden = !this.#message;
     if (this.#notice.textContent !== this.#message) this.#notice.textContent = this.#message;
+    const replaySending = this.#mode === "contexts" && this.#membershipChange.phase === "sending";
     const destinations: DashboardMode[] = ["contexts", ...(this.#overviewState() ? ["overview" as const] : []), ...ADMIN_MODES.filter((mode) => this.#adminState(mode)), ...(this.#canSupervise() ? ["supervision" as const] : []), ...(this.#canJournal() ? ["journal" as const] : []), "resources", "events", ...(this.#canBrokers() ? ["brokers" as const] : []), ...(this.#canWorkers() ? ["workers" as const] : []), ...(this.#canFederation() ? ["federation" as const] : [])];
     const nav = destinations.map((mode) => {
       const label = { contexts: "Contextes", overview: this.#context?.mode === "administration" ? "Vue 360°" : "Mon espace",
         memberships: "Utilisateurs", usage: "Quotas et usage", configuration: "Configuration", supervision: "Supervision", journal: "Journal", resources: "Ressources", events: "Événements", brokers: "Brokers", workers: "Workers", federation: "Fédération" }[mode];
       const node = action(label, `human-nav-${mode}`, () => this.#openView(mode),
-        mode === "resources" && !this.#canResources() || mode === "events" && (!this.#selection || !this.#canEvents()));
+        replaySending || mode === "resources" && !this.#canResources() || mode === "events" && (!this.#selection || !this.#canEvents()));
       node.className = "button human-tab"; if (mode === this.#mode) node.setAttribute("aria-current", "page"); return node;
     });
     // The destination row may scroll sideways: keep the user's position, bring a newly opened destination into
@@ -820,9 +821,10 @@ export class HumanDashboard {
         action("Voir les contextes pour la reprise", "human-membership-recovery-contexts", () => this.#openView("contexts")) : "",
       ...(this.#api.readBudgetStopped ? [el("div", "control-error human-budget-stop", el("p", "", "Lecture automatique suspendue : budget durable de lecture atteint. Contactez l’opérateur ; changer de vue ou de contexte ne réinitialise pas ce budget."),
         action("Relire après intervention de l’opérateur", "human-operator-retry", () => {
+          if (this.#mode === "contexts" && this.#membershipChange.phase === "sending") return;
           this.#api.allowReadAfterOperatorAction();
           void this.#refreshAfterOperatorAction();
-        }, this.#identityLoading || this.#brokers.loading || this.#workers.loading || this.#federation.loading || this.#resources.loading || this.#events.loading))] : []),
+        }, replaySending || this.#identityLoading || this.#brokers.loading || this.#workers.loading || this.#federation.loading || this.#resources.loading || this.#events.loading))] : []),
       this.#context ? el("div", "info-strip human-context-summary", icon("shield"), el("div", "",
         el("strong", "", `${modeName(this.#context)} · ${this.#context.tenant_id}`),
         el("p", "", `Organisation : ${this.#context.organization_scope}`),
@@ -838,7 +840,7 @@ export class HumanDashboard {
       live.before(...sections);
     } else this.#page.replaceChildren(...sections, ...(live ? [live] : []));
     if (this.#focusResume) {
-      const resume = this.#page.querySelector<HTMLElement>('[data-focus-key="human-resume"]');
+      const resume = this.#page.querySelector<HTMLElement>('[data-focus-key="human-resume"]:not(:disabled)');
       if (resume) { this.#focusResume = false; resume.focus({ preventScroll: true }); return; }
     }
     if (active?.isConnected && live?.contains(active)) return;
@@ -945,15 +947,17 @@ export class HumanDashboard {
     return status;
   }
   #selectOfferedContext(id: string) {
-    const context = this.#api.selectContext(id);
-    const keepChange = this.#membershipChange.selectContext(this.#identity?.principal, context);
+    const selected = this.#membershipChange.selectContext(this.#identity?.principal, () => this.#api.selectContext(id));
+    if (!selected) return null;
+    const { context, keepChange } = selected;
     this.#purgeContext(keepChange); this.#context = context;
     this.#message = keepChange ? MEMBERSHIP_OUTCOME_UNKNOWN : "";
     return context;
   }
   #renderContexts() {
     const contexts = this.#identity?.contexts ?? [];
-    const contextChoiceDisabled = this.#identityLoading || this.#membershipChange.phase === "sending";
+    const changeSending = this.#membershipChange.phase === "sending";
+    const contextChoiceDisabled = this.#identityLoading || changeSending;
     const complete = this.#identityOffersWithdrawn ? undefined : this.#identity?.contexts_complete;
     const partial = complete === false;
     const coverage = partial ? el("div", "control-status",
@@ -965,11 +969,11 @@ export class HumanDashboard {
     // The offer names what really happened, and stays usable after the offered context has itself expired.
     const lost = this.#resume?.cause === "session_rotated" ? "Votre session a été renouvelée et les données affichées ont été retirées." :
       "Le contexte précédent a expiré et ses données ont été retirées.";
-    // The offer stays focusable while the accesses are read: announced as unavailable, it ignores activation.
+    // An identity read temporarily prevents activation without moving focus.
     const resumed = this.#resume?.view === "journal" ? "le journal" : this.#resume?.view === "overview" ? offer?.mode === "administration" ? "la vue 360°" : "mon espace" : "la supervision";
     const confirm = offer ? action(`Reprendre ${resumed} · ${modeName(offer).toLowerCase()} · ${offer.tenant_id}`, "human-resume",
-      () => { if (!this.#identityLoading) this.#acceptResume(); }) : null;
-    confirm?.setAttribute("aria-disabled", String(this.#identityLoading));
+      () => { if (!this.#identityLoading) this.#acceptResume(); }, changeSending) : null;
+    confirm?.setAttribute("aria-disabled", String(contextChoiceDisabled));
     const resume = offer ? el("div", "control-status human-resume",
       el("p", "", Date.parse(offer.expires_at) <= Date.now() ?
         `${lost} Le contexte proposé pour la reprise (${modeName(offer)} · ${offer.tenant_id}) a expiré à son tour. « Reprendre » relit d’abord vos accès, puis rouvre la vue si le contrôle propose encore un contexte de mêmes droits ; vos filtres seront rétablis.` :
@@ -988,14 +992,16 @@ export class HumanDashboard {
         el("p", "mono", `Capacités serveur : ${context.capabilities.join(", ") || "aucune"}`),
         action(`Ouvrir ${modeName(context).toLowerCase()} · ${context.tenant_id}`, `context-${index}`, () => {
           try {
-            const landing = landingDestination(this.#selectOfferedContext(context.id));
+            const selected = this.#selectOfferedContext(context.id);
+            if (!selected) return;
+            const landing = landingDestination(selected);
             if (landing) this.#openView(landing);
             else { this.#mode = "contexts"; this.#message = "Ce contexte n’offre aucune opération de consultation disponible dans ce build. Faites vérifier vos accès."; this.#render(); }
           } catch (error) { this.#identityError = failure(error); this.#render(); }
         }, contextChoiceDisabled || Date.parse(context.expires_at) <= Date.now()),
         supervisionAccess(context).any ? action(`Superviser ${modeName(context).toLowerCase()} · ${context.tenant_id}`, `context-supervise-${index}`, () => {
           try {
-            this.#selectOfferedContext(context.id); this.#openView("supervision");
+            if (this.#selectOfferedContext(context.id)) this.#openView("supervision");
           } catch (error) { this.#identityError = failure(error); this.#render(); }
         }, contextChoiceDisabled || Date.parse(context.expires_at) <= Date.now()) : null)),
       el("p", "field-help", "La vue personnelle des workers reste à raccorder à une chaîne authentifiée d’initiation et de délégation. Une référence de session déclarée ne prouve pas la propriété humaine."),

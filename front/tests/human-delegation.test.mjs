@@ -181,14 +181,14 @@ test("Ouvrir un contexte équivalent conserve la demande et choisir un autre pé
     current = await api.identity();
     recovery.revalidate(current, Date.now());
     assert.equal(recovery.offer(Date.now())?.contextId, adminId);
-    assert.equal(recovery.selectContext(current.principal, api.selectContext(adminId)), true);
+    assert.equal(recovery.selectContext(current.principal, () => api.selectContext(adminId))?.keepChange, true);
     assert.equal(recovery.operationId, change.operation_id);
     assert.equal(recovery.offer(Date.now()), null);
     current = await api.identity();
     recovery.revalidate(current, Date.now());
     assert.equal(recovery.offer(Date.now())?.organization, "organization-a");
     assert.equal(recovery.offer(Date.now())?.tenant, "tenant-a");
-    assert.equal(recovery.selectContext(current.principal, api.selectContext(otherId)), false);
+    assert.equal(recovery.selectContext(current.principal, () => api.selectContext(otherId))?.keepChange, false);
     assert.equal(recovery.operationId, null);
     recovery.revalidate(await api.identity(), Date.now());
     assert.equal(recovery.offer(Date.now()), null);
@@ -218,14 +218,60 @@ test("Reprendre Supervision, Journal ou la vue 360° dans le contexte équivalen
       const resumed = resumeCandidate(intent, fresh, { now, visible: true, budgetStopped: false, attempts: 0, confirmed: true });
       assert.equal(resumed.kind, "offer");
       assert.equal(resumed.reopen, true);
-      const selected = api.selectContext(resumed.context.id);
-      assert.equal(selected.id, nextId);
-      assert.equal(recovery.selectContext(fresh.principal, selected), true);
+      const selected = recovery.selectContext(fresh.principal, () => api.selectContext(resumed.context.id));
+      assert.equal(selected?.context.id, nextId);
+      assert.equal(selected?.keepChange, true);
       assert.equal(recovery.operationId, change.operation_id);
       assert.equal(recovery.offer(now), null);
     }
     assert.equal(requests.filter(({ options }) => options.method === "POST").length, 1);
   } finally { api.close(); }
+});
+
+test("Un clic Reprendre pendant le POST d’appartenance ne sélectionne ni ne purge le contexte", async () => {
+  const recovery = new MembershipChangeRecovery();
+  const change = { operation_id: newId(), expected_revision: "3", capabilities: [], active: false };
+  const receipt = membershipReceipt(change.operation_id, membershipId);
+  const held = Promise.withResolvers();
+  let sent = 0;
+  let replay;
+  const { api, requests } = client(() => {
+    if (++sent === 1) throw new TypeError("Réponse interrompue.");
+    return held.promise;
+  });
+  try {
+    const initial = await api.identity();
+    const old = api.selectContext(adminId);
+    const send = (id, request) => api.changeMembership(id, request);
+    await assert.rejects(recovery.submit(initial.principal, old, membershipId, change, send), TypeError);
+    api.clearContext();
+    const fresh = await api.identity();
+    const now = Date.now();
+    recovery.revalidate(fresh, now);
+    const intent = captureIntent({ cause: "context_expired", principal: fresh.principal, context: old,
+      view: "journal", now, budgetStopped: false, payload: null });
+    const resume = resumeCandidate(intent, fresh, { now, visible: true, budgetStopped: false, attempts: 0 });
+    assert.equal(resume.kind, "offer");
+    replay = recovery.retry(now, (id, target, request) => { api.selectContext(id); return send(target, request); });
+    assert.equal(recovery.phase, "sending");
+    const pendingSignal = requests.at(-1).options.signal;
+    let selections = 0;
+    const selected = recovery.selectContext(fresh.principal, () => { selections++; return api.selectContext(resume.context.id); });
+    assert.equal(recovery.operationId, change.operation_id);
+    assert.equal(selected, null);
+    assert.equal(selections, 0);
+    assert.equal(pendingSignal.aborted, false);
+    assert.equal(api.context?.id, adminId);
+    assert.equal(requests.filter(({ options }) => options.method === "POST").length, 2);
+    held.resolve(json(200, receipt));
+    assert.deepEqual(await replay, receipt);
+    assert.equal(recovery.operationId, null);
+    assert.equal(recovery.selectContext(fresh.principal, () => api.selectContext(resume.context.id))?.context.id, adminId);
+  } finally {
+    held.resolve(json(200, receipt));
+    await replay?.catch(() => {});
+    api.close();
+  }
 });
 
 test("Un contexte Personnel partiel qui exige l’Administration garde la demande sans offre de reprise", async () => {
@@ -263,7 +309,7 @@ test("La relecture du contexte rouvert livre la perte de droit dès son retrait"
     api.clearContext();
     identity = await api.identity();
     recovery.revalidate(identity, Date.now());
-    assert.equal(recovery.selectContext(identity.principal, api.selectContext(adminId)), true);
+    assert.equal(recovery.selectContext(identity.principal, () => api.selectContext(adminId))?.keepChange, true);
     frame = partialPersonal(frame, "not_granted");
     await api.identity();
     assert.equal(review, "withdrawn");

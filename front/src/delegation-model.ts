@@ -262,13 +262,15 @@ export class MembershipChangeRecovery {
   #equivalent(pending: PendingMembershipChange, context: HumanContext) {
     return grantKey(context) === pending.grant && delegationOffers(context).memberships;
   }
-  selectContext(principal: Principal | undefined, context: HumanContext) {
+  selectContext(principal: Principal | undefined, select: () => HumanContext) {
+    if (this.phase === "sending") return null;
+    const context = select();
     const pending = this.#pending;
     const keep = pending?.phase === "unknown" && principal !== undefined &&
       principalKey(principal) === pending.principal && this.#equivalent(pending, context);
     if (keep) this.withdrawOffer();
     else this.clear();
-    return keep;
+    return { context, keepChange: keep };
   }
   revalidate(identity: HumanIdentity, now: number) {
     this.withdrawOffer();
