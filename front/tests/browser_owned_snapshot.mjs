@@ -281,12 +281,13 @@ async function noSecret() {
 async function captureResponse(response) {
   const path = new URL(response.url()).pathname;
   if (!path.startsWith("/api/v1/human/") || path === "/api/v1/human/stream") return;
+  const method = response.request().method();
   const bytes = await response.body(); must(bytes.length <= 262144, "WIRE_RESPONSE_SIZE");
   must(!hasPrivate(bytes), "PRIVATE_MATERIAL_IN_WIRE");
   let body; try { body = JSON.parse(bytes.toString("utf8")); } catch { throw new Error("WIRE_RESPONSE_NOT_JSON"); }
-  wires.push({ method: response.request().method(), path: new URL(response.url()).pathname + new URL(response.url()).search,
+  wires.push({ method, path: new URL(response.url()).pathname + new URL(response.url()).search,
     status: response.status(), bytes: bytes.length, sha256: digest(bytes), body });
-  if (response.status() === 200 && pageAction(path) !== null) requiredReceipt(body);
+  if (method === "GET" && response.status() === 200 && pageAction(path) !== null) requiredReceipt(body);
 }
 async function waitForRead(path, status) {
   const actual = await page.waitForResponse((item) => {
@@ -721,7 +722,7 @@ function grantAdministrator(identity) {
     Array.isArray(admin.capabilities) && ["manage_grants", "read_memberships", "read_metadata", "read_content"].every((right) => admin.capabilities.includes(right)),
     "GRANT_ADMIN_RIGHTS");
   const manage = admin.operations?.find(({ operation }) => operation === "grants_manage");
-  must(manage?.permission === "granted" && manage.availability === "available" && manage.scope === "tenant", "GRANT_CATALOGUE_OFFER");
+  must(manage?.permission === "granted" && manage.availability === "available" && manage.scope === "organization", "GRANT_CATALOGUE_OFFER");
   return admin;
 }
 
@@ -737,7 +738,11 @@ async function grantPost(request) {
   must(uuid(body.operation_id) && same(body.resource, ready.grant.resource) && body.expected_revision === ready.grant.revision &&
     Array.isArray(body.shares) && body.shares.length === 1, "EXACT_GRANT_CHANGE");
   closed(body.shares[0], ["principal", "permissions"], "GRANT_SHARE_SHAPE");
-  must(same(body.shares[0].principal, ready.grant.member_principal) &&
+  const principal = body.shares[0].principal;
+  const expected = ready.grant.member_principal;
+  closed(principal, ["kind", "installation_id", "account_id"], "GRANT_PRINCIPAL_SHAPE");
+  must(principal.kind === expected.kind && principal.installation_id === expected.installation_id &&
+    principal.account_id === expected.account_id &&
     same([...body.shares[0].permissions].sort(), ["content", "metadata"]), "EXACT_AUTHORIZED_GRANT_CHANGE");
   return { request, bytes, operationId: body.operation_id, contextId: await request.headerValue("X-AiGuard-Context") };
 }
@@ -922,15 +927,16 @@ async function runOwnedGrantRecovery() {
   await dialog.waitFor({ timeout: remaining() });
   const grantRead = await initialGrantResponse;
   must(grantRead.context_id === admin.id && grantRead.authorization_version === admin.authorization_version &&
-    grantRead.resource.revision === ready.grant.revision && grantRead.shares.length === 1 &&
+    same(grantRead.resource, ready.grant.resource) && grantRead.revision === ready.grant.revision &&
+    Array.isArray(grantRead.shares) && grantRead.shares.length === 1 &&
     grantRead.shares[0].display_name === ready.grant.member_display_name &&
     same([...grantRead.shares[0].permissions].sort(), ["metadata"]), "INITIAL_GRANT_ALREADY_LINKED");
   const share = dialog.locator(".dg-share").filter({ hasText: ready.grant.member_display_name });
-  const content = share.getByRole("checkbox", { name: "Contenus", exact: true });
+  const content = share.getByRole("checkbox", { name: "Contenu", exact: true });
   must(await content.isChecked({ timeout: remaining() }) === false, "GRANT_CONTENT_NOT_ALREADY_SHARED");
   await content.check({ timeout: remaining() });
   await dialog.getByRole("button", { name: "Vérifier le changement", exact: true }).click({ timeout: remaining() });
-  await dialog.getByText(new RegExp(`${ready.grant.member_display_name} : ajout Contenus`, "u")).waitFor({ timeout: remaining() });
+  await dialog.getByText(new RegExp(`${ready.grant.member_display_name} : ajout Contenu`, "u")).waitFor({ timeout: remaining() });
   must(postedGrantRequests().length === 0, "GRANT_POST_BEFORE_CONFIRMATION");
 
   stage = "owned_grant_lose_response";

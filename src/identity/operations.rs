@@ -244,12 +244,15 @@ fn permission(
             (permission, scope.map(|_| S::Organization))
         }
         // The share list names organization members: a membership reader only.
-        O::GrantsManage => admin(
-            administration,
-            context,
-            &[C::ManageGrants, C::ReadMemberships],
-            elsewhere,
-        ),
+        O::GrantsManage => {
+            let (permission, scope) = admin(
+                administration,
+                context,
+                &[C::ManageGrants, C::ReadMemberships],
+                elsewhere,
+            );
+            (permission, scope.map(|_| S::Organization))
+        }
         O::EgressGrantApprove | O::EgressGrantRevoke => {
             admin(administration, context, &[C::ApproveEgress], elsewhere)
         }
