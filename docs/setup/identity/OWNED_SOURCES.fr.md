@@ -49,7 +49,9 @@ Le contexte d’administration local peut lire `GET /api/v1/human/workers` sur S
 
 Le contexte d’administration local peut lire `GET /api/v1/human/admin/quota` et `GET /api/v1/human/admin/usage` lorsque le catalogue accorde et sert leurs opérations. **Quotas et usage** lit les plafonds et réservations durables, puis la page d’allocations terminales observées. Chaque section disponible affiche son heure de lecture et son reçu. Les allocations portent `billable:false`. Sans observation terminale, la durée reste inconnue.
 
-Le contenu, l’export et le flux d’événements ainsi que les écritures d’administration via le dashboard restent exigés en V1.
+**Utilisateurs** propose **Modifier** pour une autre appartenance existante si l’Administration dispose de `memberships_manage`. Le dashboard remet la modification au gateway configuré en sources possédées. En cas de réponse perdue, relisez vos accès puis choisissez **Reprendre la même modification**. Le reçu durable confirme le résultat. [Contrat du POST](../../api.md#changement-délégué-dappartenance--delegated-membership-change)
+
+Le contenu, l’export, le flux d’événements et les autres écritures d’administration via le dashboard restent exigés en V1.
 
 Un mutex ou writer SQLite occupé chez A ne déclenche aucun SQL chez A lors de l'authentification/lecture de B. La propre source occupée renvoie503. Busy n'est ni absence ni mismatch permanent. Un mismatch physique/configuration/marqueur/incarnation réellement comparé conserve l'invalidation globale de l'owner. La revalidation physique couvre toujours l'union entière : syscall bloqué ou epoch Write partagé gardent leurs limites de disponibilité. L'index privé de candidats est borné avant accumulation à65536 entrées/16Mio de représentation ; le dépassement refuse toute publication complète. Ces bornes ne mesurent pas la RAM du processus.
 
