@@ -189,8 +189,12 @@ export class GrantEditor extends EditorDialog {
     this.#reading = true; this.#readError = ""; this.render();
     if (afterConflict) this.focusStep();
     try {
-      const [grant, members] = await Promise.all([this.#host.read(this.abort.signal), this.#host.members(null, this.abort.signal)]);
-      if (this.closed) return;
+      const signal = this.abort.signal;
+      // Both audited reads can use the same owned store, which refuses concurrent access without waiting.
+      const grant = await this.#host.read(signal);
+      if (this.closed || signal.aborted) return;
+      const members = await this.#host.members(null, signal);
+      if (this.closed || signal.aborted) return;
       this.#grant = grant; this.#draft = grant.shares.map((share) => ({ principal: share.principal, display_name: share.display_name, permissions: [...share.permissions] }));
       this.#members = members.items; this.#membersNext = members.next_cursor;
       if (afterConflict) {

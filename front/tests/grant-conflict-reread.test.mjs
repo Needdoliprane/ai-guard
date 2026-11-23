@@ -166,9 +166,13 @@ test("Un 409 retire la confirmation jusqu’à la relecture des partages et des 
     assert.equal(document.activeElement.textContent, "Relire les partages et les membres");
     assert.doesNotMatch(editor.dialog.textContent, /Member Two|révision 4/);
     assert.equal(find("dg-review"), undefined);
+    assert.equal(grantReads, 2);
+    assert.equal(memberReads, 1, "La relecture des membres attend la réponse de la relecture des partages.");
 
     grantHeld.resolve(grant("6"));
     await tick();
+    assert.equal(memberReads, 2);
+    assert.doesNotMatch(editor.dialog.textContent, /révision 6/);
     assert.equal(find("dg-review"), undefined);
     assert.equal(find("dg-confirm"), undefined);
     membersHeld.resolve(errorResponse(503, "audit_unavailable", "contact_operator"));
@@ -176,6 +180,8 @@ test("Un 409 retire la confirmation jusqu’à la relecture des partages et des 
     assert.match(editor.dialog.textContent, /Relecture impossible.*audit_unavailable/);
     assert.equal(document.activeElement.textContent, "Relire les partages et les membres");
     assert.equal(find("dg-confirm"), undefined);
+    assert.equal(grantReads, 2);
+    assert.equal(memberReads, 2);
     assert.equal(posts.length, 1);
 
     find("dg-reread").click();
@@ -209,6 +215,35 @@ test("Un 409 retire la confirmation jusqu’à la relecture des partages et des 
   }
 });
 
+test("Fermer l’éditeur pendant la lecture des partages empêche la lecture des membres", async (t) => {
+  installNodes(t);
+  const expected = { contextId: adminId, authorizationVersion: admin.authorization_version };
+  const grant = parseHumanGrant(grantBody(adminId), { ...expected, resource });
+  const members = parseMembershipPage(membershipPage(adminId), expected);
+  const trigger = document.createElement("button");
+  document.body.append(trigger); trigger.focus();
+  const held = Promise.withResolvers();
+  let readSignal;
+  let memberReads = 0;
+  const editor = new GrantEditor({ context: admin, self: identity().principal, resource,
+    read: (signal) => { readSignal = signal; return held.promise; },
+    members: async () => { memberReads++; return members; },
+    send: async () => assert.fail("La fermeture ne confirme aucun changement."),
+    onApplied: () => assert.fail("La fermeture ne fournit aucun reçu."),
+    onRefused: () => assert.fail("Une fermeture est un abandon de lecture."), onClosed: () => {} });
+  try {
+    editor.open();
+    assert.equal(readSignal.aborted, false);
+    editor.close();
+    assert.equal(readSignal.aborted, true);
+    held.resolve(grant);
+    await tick();
+    assert.equal(memberReads, 0);
+    assert.equal(editor.dialog.isConnected, false);
+    assert.equal(document.activeElement, trigger);
+  } finally { editor.close(); held.resolve(grant); }
+});
+
 test("Un refus d’accès pendant la relecture ferme l’éditeur et rend le focus", async (t) => {
   installNodes(t);
   const expected = { contextId: adminId, authorizationVersion: admin.authorization_version };
@@ -218,6 +253,7 @@ test("Un refus d’accès pendant la relecture ferme l’éditeur et rend le foc
   document.body.append(trigger); trigger.focus();
   const held = Promise.withResolvers();
   let grantReads = 0;
+  let memberReads = 0;
   let posts = 0;
   let refused = 0;
   let readSignal;
@@ -227,7 +263,7 @@ test("Un refus d’accès pendant la relecture ferme l’éditeur et rend le foc
       readSignal = signal;
       return held.promise;
     },
-    members: async () => members,
+    members: async () => { memberReads++; return members; },
     send: async () => { posts++; throw new HumanApiError(409, "conflict", "Les partages ont changé.", "reread"); },
     onApplied: () => assert.fail("Le changement a été refusé."), onRefused: () => { refused++; editor.close(); }, onClosed: () => {} });
   try {
@@ -241,6 +277,7 @@ test("Un refus d’accès pendant la relecture ferme l’éditeur et rend le foc
     assert.equal(refused, 1);
     assert.equal(editor.dialog.isConnected, false);
     assert.equal(readSignal.aborted, true);
+    assert.equal(memberReads, 1);
     assert.equal(posts, 1);
     assert.equal(document.activeElement, trigger);
   } finally {
