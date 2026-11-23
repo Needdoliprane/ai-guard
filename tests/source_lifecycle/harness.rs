@@ -765,6 +765,16 @@ impl Operator {
     /// Starts `agentsandbox <action> --runtime-program <fixture> --source
     /// <synthetic source> <further arguments>` in its own process group.
     pub fn spawn(&self, action: &str, further: &[&str], options: &Spawn) -> Running {
+        self.spawn_with_environment(action, further, options, &[])
+    }
+
+    fn spawn_with_environment(
+        &self,
+        action: &str,
+        further: &[&str],
+        options: &Spawn,
+        ambient: &[(&str, &str)],
+    ) -> Running {
         let number = self.outputs.fetch_add(1, Ordering::SeqCst) + 1;
         let base = self.source.parent().expect("source has a parent");
         let stdout = base.join(format!("command-{number}.stdout"));
@@ -778,6 +788,7 @@ impl Operator {
             .arg(&self.source)
             .args(further)
             .env("TMPDIR", &self.tmp)
+            .envs(ambient.iter().copied())
             .stdin(Stdio::null())
             .stdout(File::create(&stdout).expect("SETUP: command output file"))
             .stderr(File::create(&stderr).expect("SETUP: command output file"))
@@ -819,8 +830,19 @@ impl Operator {
     }
     /// Runs a command that is expected to end by itself.
     pub fn run(&self, action: &str, further: &[&str], options: &Spawn) -> Exit {
+        self.run_with_environment(action, further, options, &[])
+    }
+
+    /// Sets environment variables of the operator process only.
+    pub fn run_with_environment(
+        &self,
+        action: &str,
+        further: &[&str],
+        options: &Spawn,
+        ambient: &[(&str, &str)],
+    ) -> Exit {
         let window = Duration::from_secs(120);
-        let mut running = self.spawn(action, further, options);
+        let mut running = self.spawn_with_environment(action, further, options, ambient);
         running.wait(window).unwrap_or_else(|| {
             panic!(
                 "UNKNOWN: agentsandbox {action} is still pending after {window:?}; calls: {:?}; {}",

@@ -227,7 +227,15 @@ fn r9_up_hands_the_prepared_compose_file_to_the_engine_and_ends_when_the_stack_a
     );
 
     let config = scenario.config.to_string_lossy().into_owned();
-    let started = scenario.run("up", &["--config-dir", &config], &Spawn::default());
+    let started = scenario.run_with_environment(
+        "up",
+        &["--config-dir", &config],
+        &Spawn::default(),
+        &[
+            ("AI_GUARD_GATEWAY_PORT", "9487"),
+            ("AI_GUARD_DASHBOARD_PORT", "9400"),
+        ],
+    );
     let asked = readiness.finish();
     succeed("up", &started);
     for line in [
@@ -307,8 +315,7 @@ fn r9_up_hands_the_prepared_compose_file_to_the_engine_and_ends_when_the_stack_a
         scenario.state.calls()
     );
 
-    // The usual command carries exactly the environment it always had: the control
-    // directory alone, and no publication port.
+    // The host overrides do not reach Compose, so its configured defaults apply.
     assert_eq!(
         compose.compose_environment(),
         vec![format!("AGENTSANDBOX_CONFIG_DIR={config}")],
@@ -1335,7 +1342,13 @@ fn r19_named_stack_uses_the_selected_ports_and_stops_the_same_project() {
     let config = scenario.config.to_string_lossy().into_owned();
     let (gateway_port_text, dashboard_port_text) =
         (gateway_port.to_string(), dashboard_port.to_string());
-    let started = scenario.run(
+    let ambient_gateway = (gateway_port % u16::MAX + 1).to_string();
+    let ambient_dashboard = (dashboard_port % u16::MAX + 1).to_string();
+    let ambient = [
+        ("AI_GUARD_GATEWAY_PORT", ambient_gateway.as_str()),
+        ("AI_GUARD_DASHBOARD_PORT", ambient_dashboard.as_str()),
+    ];
+    let started = scenario.run_with_environment(
         "up",
         &[
             "--config-dir",
@@ -1348,6 +1361,7 @@ fn r19_named_stack_uses_the_selected_ports_and_stops_the_same_project() {
             &dashboard_port_text,
         ],
         &Spawn::default(),
+        &ambient,
     );
     let asked = readiness.finish();
     succeed("up", &started);
@@ -1397,10 +1411,11 @@ fn r19_named_stack_uses_the_selected_ports_and_stops_the_same_project() {
         );
     }
 
-    let stopped = scenario.run(
+    let stopped = scenario.run_with_environment(
         "down",
         &["--config-dir", &config, "--stack-name", "qa-second"],
         &Spawn::default(),
+        &ambient,
     );
     succeed("down", &stopped);
     assert!(
