@@ -29,7 +29,7 @@ export const HUMAN_EXPORT_LIMITS = Object.freeze({ pages: 25, bytes: 4 * 1024 * 
 interface Snapshot { generation: number; context: HumanContext | null; operatorRetry?: boolean }
 interface Handlers {
   onAuthentication: (error: HumanApiError) => void;
-  onContextInvalidated: (error: HumanApiError) => void;
+  onContextInvalidated: (error: HumanApiError, identity?: HumanIdentity) => void;
   onReadBudgetExhausted?: (error: HumanApiError) => void;
 }
 const codes = new Set(["authentication_required", "credential_invalid", "credential_expired", "identity_revoked", "context_required",
@@ -225,7 +225,7 @@ export class HumanApiClient {
       // The same context can carry a new catalogue (an operator migration changes an availability): its views were built on the old one.
       JSON.stringify(current.operations) !== JSON.stringify(selected.operations) || Date.parse(current.expires_at) <= Date.now())) {
       const error = new HumanApiError(403, "context_revoked", "Les accès ont changé. Choisissez à nouveau un contexte autorisé.", "select_context");
-      this.clearContext(); this.#handlers.onContextInvalidated(error);
+      this.clearContext(); this.#handlers.onContextInvalidated(error, identity);
     }
     if (snapshot.operatorRetry) this.#readBudgetStopped = false;
     return identity;
