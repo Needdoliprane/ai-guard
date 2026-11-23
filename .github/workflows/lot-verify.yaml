@@ -1,198 +1,255 @@
-name: Lot verification
-
-# Verifies V1 development branches on a hosted Linux x86_64 runner so that the
-# development Mac keeps its memory for engine, browser and macOS recipes.
-# It complements ci.yaml (dev/main) and never creates tags, releases or
-# artifacts outside this run. Engine (Docker/Podman/Kubernetes) and provider
-# recipes stay out of this workflow: ignored tests are not run and are never
-# counted as passes.
-
-on:
+name: G12 source metadata check
+'on':
   push:
-    branches: ['claude/v1-**']
-
+    branches:
+      - claude/v1-g12-source-metadata-c5-check-20261123
 permissions:
   contents: read
-
 concurrency:
-  group: lot-verify-${{ github.ref }}
+  group: g12-source-metadata-c5-check-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
-  rust:
+  metadata:
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 60
+    permissions:
+      contents: read
     env:
-      AI_GUARD_BUILD_REVISION: ${{ github.sha }}
-      # Match CI's build limit when compiling and linking the full test suite.
-      CARGO_BUILD_JOBS: '1'
-      CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_PROFILE_TEST_DEBUG: '0'
-      RUST_MIN_STACK: '8388608'
+      AI_GUARD_BUILD_REVISION: c5a487f77264e2e89284d9c50f5e3a9f13c70873
+      AI_GUARD_VERSION: 0.0.1
+      CARGO_BUILD_JOBS: '2'
       CARGO_TERM_COLOR: never
     steps:
+      - name: Initialize closed receipt
+        shell: bash
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if [[ ! "$GITHUB_RUN_ID" =~ ^[0-9]+$ || ! "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]; then exit 1; fi
+          receipt="$RUNNER_TEMP/g12-source-metadata-c5-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.receipt"
+          if [[ -e "$receipt" || -L "$receipt" ]]; then exit 1; fi
+          cat > "$receipt" <<EOF_RECEIPT
+          workflow_sha=$WORKFLOW_SHA
+          source_sha=c5a487f77264e2e89284d9c50f5e3a9f13c70873
+          source_parent_sha=66cd42574de11f7a33c617bc77957215820858e5
+          source_tree_sha=39d60ecdc35224112d3a9d823365712994547c12
+          source_parent_tree_sha=e00d3ea3618427c9735960aa05bc544664b894f8
+          cargo_package_version=unknown
+          cargo_lock_version=unknown
+          frontend_package_version=unknown
+          frontend_lock_version=unknown
+          api_document_version=unknown
+          declared_rust_toolchain=unknown
+          observed_rust_toolchain=unknown
+          source_guard=NOT_RUN
+          version_guard=NOT_RUN
+          cargo_metadata=NOT_RUN
+          scratch_prepare=NOT_RUN
+          cargo_fetch=NOT_RUN
+          cli_build=NOT_RUN
+          cli_identity=NOT_RUN
+          source_manifest=NOT_RUN
+          source_only_verify=NOT_RUN
+          sbom_cyclonedx_1_6=NOT_RUN
+          release_manifest_sha256=unknown
+          sbom_sha256=unknown
+          sha256sums_sha256=unknown
+          scratch_cleanup=NOT_RUN
+          probe=NOT_RUN
+          last_phase=initialized
+          EOF_RECEIPT
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
+          fetch-depth: 3
           persist-credentials: false
-      - name: Free runner disk for the test targets
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
-      - name: Fetch dependencies with the pinned Rust toolchain
-        run: |
-          rustc --version
-          cargo fetch --locked
-      - name: Check Rust formatting
-        run: cargo fmt --all -- --check
-      - name: Check all targets with MySQL enabled
-        run: cargo check --locked --offline --all-targets --features mysql-storage --keep-going
-      - name: Check all targets without default features (SQLite only)
-        run: cargo check --locked --offline --all-targets --no-default-features --keep-going
-      - name: Third-party licence guard and its unit tests
-        # `cargo test` builds examples but does not run their unit tests.
-        run: |
-          cargo test --locked --offline --example third_party_notices
-          cargo run --quiet --locked --offline --example third_party_notices -- check --allowed .github/third-party-license-expressions.txt
-      - name: Provider harness regressions
-        run: |
-          python3 -B tests/e2e/interactive_driver.py --self-test
-          python3 -B tests/e2e/test_run_provider_preflight.py ProviderPreflightTests ProviderBrowserStageTests
-          python3 -B tests/e2e/test_run_provider_broker.py BrokerRecipeTests
-      - name: Rust test suite (ignored engine and provider tests excluded)
-        if: github.ref_name != 'claude/v1-integration-regressions-20261122'
-        shell: bash
-        run: |
-          set -o pipefail
-          export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
-          cargo test --locked --offline --no-fail-fast 2>&1 | tee cargo-test.log
-      - name: Targeted SQLite library regressions
-        if: github.ref_name == 'claude/v1-integration-regressions-20261122'
+      - name: Verify exact workflow and product source
         shell: bash
         run: |
           set -euo pipefail
-          export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
-          build_json="$TMPDIR/libtest.jsonl"
-          test_log="$TMPDIR/selector.log"
-          summary=cargo-test-summary.txt
-          failures=cargo-test-failed.txt
-          : > "$summary"
-          : > "$failures"
-
-          settlement=broker::service::server::retirement_settlement_tests::same_original_not_queued_final_retries_its_retained_input_before_another_q
-          selectors=(
-            audit::resource_tests::retention_confirms_the_committed_segment_after_a_filesystem_ack_failure
-            api::human_sources::journal_tests::owned_event_page_reports_the_archived_prefix_after_adoption
-            api::human_sources::tests::owned_admin_reads_refuse_head_before_authentication
-            api::human_sources::journal_tests::owned_admin_reads::owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
-            identity::operations::tests::owned_event_availability_preserves_granted_permissions
-            broker::writer::inventory_tests::completed_inventory_releases_its_permit_before_reply
-            broker::writer::inventory_tests::timed_out_inventory_keeps_one_permit_and_cannot_queue_a_series_before_cancel
-            broker::writer::status_projection_tests::coverage_only_pending_arm_does_not_taint_a_valid_last_confirmed_status
-            "$settlement"
-          )
-          expected=9
-          if (( ${#selectors[@]} != expected )); then
-            echo 'Invalid regression selector count' | tee -a "$summary"
+          receipt="$RUNNER_TEMP/g12-source-metadata-c5-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.receipt"
+          set_field() {
+            local key=$1 value=$2
+            awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          guard_fail() {
+            set_field source_guard FAIL
+            set_field probe BLOCKED
+            set_field last_phase source_guard_failed
             exit 1
+          }
+          source=c5a487f77264e2e89284d9c50f5e3a9f13c70873
+          parent=66cd42574de11f7a33c617bc77957215820858e5
+          source_tree=39d60ecdc35224112d3a9d823365712994547c12
+          parent_tree=e00d3ea3618427c9735960aa05bc544664b894f8
+          expected_branch=refs/heads/claude/v1-g12-source-metadata-c5-check-20261123
+          if [[ "$RUNNER_ENVIRONMENT" != github-hosted || "$RUNNER_OS" != Linux || "$RUNNER_ARCH" != X64 ||
+                "$GITHUB_EVENT_NAME" != push || "$GITHUB_REF" != "$expected_branch" ||
+                ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ || "$(git rev-parse HEAD 2>/dev/null || true)" != "$GITHUB_SHA" ||
+                "$(git rev-parse HEAD^ 2>/dev/null || true)" != "$source" ||
+                "$(git rev-parse "$source^" 2>/dev/null || true)" != "$parent" ||
+                "$(git rev-parse "$source^{tree}" 2>/dev/null || true)" != "$source_tree" ||
+                "$(git rev-parse "$parent^{tree}" 2>/dev/null || true)" != "$parent_tree" ||
+                "$(git diff --name-only "$source" HEAD 2>/dev/null || true)" != .github/workflows/lot-verify.yaml ||
+                -n "$(git status --porcelain=v1 --untracked-files=all 2>/dev/null || true)" ]] ||
+             ! git cat-file -e "$parent^{commit}" 2>/dev/null ||
+             ! git merge-base --is-ancestor "$parent" "$source" 2>/dev/null; then
+            guard_fail
           fi
-          printf 'Revision %s; %s exact SQLite library tests expected\n' "$GITHUB_SHA" "$expected" | tee -a "$summary"
-
-          # Keep raw Cargo and test output in the runner's private scratch directory.
-          if ! cargo test --locked --offline --no-default-features --lib --no-run \
-              --message-format=json > "$build_json" 2> "$TMPDIR/build.stderr"; then
-            echo 'SQLite library build failed; tests not run' | tee -a "$summary"
-            jq -r 'select(.reason == "compiler-message" and .message.level == "error")
-              | .message.code.code // empty | select(test("^E[0-9]{4}$"))' "$build_json" \
-              2>/dev/null | sort -u | tee -a "$summary" || true
+          if ! git checkout --detach "$source" >/dev/null 2>&1; then guard_fail; fi
+          if [[ "$(git rev-parse HEAD 2>/dev/null || true)" != "$source" ||
+                "$(git rev-parse HEAD^{tree} 2>/dev/null || true)" != "$source_tree" ||
+                -n "$(git status --porcelain=v1 --untracked-files=all 2>/dev/null || true)" ]]; then
+            guard_fail
+          fi
+          set_field source_guard PASS
+          set_field last_phase source_verified
+      - name: Verify pinned Cargo and npm versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="$RUNNER_TEMP/g12-source-metadata-c5-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.receipt"
+          set_field() {
+            local key=$1 value=$2
+            awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          version_fail() {
+            set_field version_guard FAIL
+            set_field probe BLOCKED
+            set_field last_phase version_guard_failed
             exit 1
+          }
+          if ! metadata=$(cargo metadata --locked --offline --no-deps --format-version 1 2>/dev/null); then
+            set_field cargo_metadata FAIL
+            version_fail
           fi
-          if ! libtest="$(jq -ers '[.[] | select(.reason == "compiler-artifact"
-              and .target.name == "agentsandbox" and .target.kind == ["lib"]
-              and .profile.test == true and .executable != null) | .executable]
-              | unique | if length == 1 then .[0] else empty end' "$build_json")" \
-              || [[ ! -x "$libtest" ]]; then
-            echo 'Expected one SQLite library test executable; tests not run' | tee -a "$summary"
+          set_field cargo_metadata PASS
+          cargo_version=$(jq -er '[.packages[] | select(.name == "agentsandbox")] | select(length == 1) | .[0].version' <<< "$metadata" 2>/dev/null || true)
+          frontend_version=$(jq -er '.version' front/package.json 2>/dev/null || true)
+          lock_version=$(jq -er 'select(.version == "0.0.1" and .packages[""].version == "0.0.1") | .version' front/package-lock.json 2>/dev/null || true)
+          cargo_lock_version=$(awk '
+            /^\[\[package\]\]$/ { in_target=0 }
+            /^name = "agentsandbox"$/ { in_target=1; next }
+            in_target && /^version = "/ { sub(/^version = "/, ""); sub(/"$/, ""); print; exit }
+          ' Cargo.lock)
+          if [[ "$cargo_version" != 0.0.1 || "$frontend_version" != 0.0.1 || "$lock_version" != 0.0.1 || "$cargo_lock_version" != 0.0.1 ]] ||
+             ! grep -Fxq 'channel = "1.99.1"' rust-toolchain.toml ||
+             ! grep -Fxq '# Contrat API locale — produit 0.0.1' docs/api.md; then
+            version_fail
+          fi
+          set_field cargo_package_version "$cargo_version"
+          set_field cargo_lock_version "$cargo_lock_version"
+          set_field frontend_package_version "$frontend_version"
+          set_field frontend_lock_version "$lock_version"
+          set_field api_document_version 0.0.1
+          set_field declared_rust_toolchain 1.99.1
+          set_field version_guard PASS
+          set_field last_phase declared_versions_verified
+      - name: Build CLI and verify source metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/g12-source-metadata-c5-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.receipt"
+          private="$RUNNER_TEMP/g12-source-metadata-c5-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          set_field() {
+            local key=$1 value=$2
+            awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          fail_phase() {
+            local field=$1 phase=$2
+            set_field "$field" FAIL
+            set_field probe FAIL
+            set_field last_phase "${phase}_failed"
             exit 1
+          }
+          if [[ ! "$GITHUB_RUN_ID" =~ ^[0-9]+$ || ! "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ || -e "$private" || -L "$private" ]]; then
+            fail_phase scratch_prepare scratch_prepare
           fi
-          printf 'SQLite libtest SHA-256 %s\n' "$(sha256sum "$libtest" | awk '{print $1}')" | tee -a "$summary"
-
-          passed=0
-          for selector in "${selectors[@]}"; do
-            if "$libtest" "$selector" --exact --test-threads=1 > "$test_log" 2>&1 \
-                && grep -Fxq 'running 1 test' "$test_log" \
-                && grep -Fxq "test $selector ... ok" "$test_log" \
-                && grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$test_log"; then
-              printf 'PASS %s\n' "$selector" | tee -a "$summary"
-              ((passed += 1))
-            else
-              printf 'FAIL %s\n' "$selector" | tee -a "$summary"
-              printf '%s\n' "$selector" >> "$failures"
-              if [[ "$selector" == "$settlement" ]]; then
-                phases='bind_full3|enqueue_signal|ack_signal|load_before_retirement|begin_retirement|ack_pending|authorize_retirement|read_pending|load_before_final|pause_writer'
-                categories='InvalidInput|UnsupportedVersion|TooLarge|LimitExceeded|Busy|Conflict|Interrupted|Corrupt|UnsafeFilesystem|ControlSecret|Io'
-                grep -Eo "settlement phase=($phases) category=($categories)\b" "$test_log" \
-                  | sort -u | tee -a "$summary" || true
-              fi
-            fi
-          done
-          printf 'Passed %s of %s exact selectors\n' "$passed" "$expected" | tee -a "$summary"
-          (( passed == expected ))
-      - name: Summarize test results
+          if ! mkdir -m 700 "$private" || ! mkdir -m 700 "$private/tmp"; then fail_phase scratch_prepare scratch_prepare; fi
+          set_field scratch_prepare PASS
+          export TMPDIR="$private/tmp"
+          set_field last_phase toolchain_check
+          if ! rustc --version > "$private/rustc-version.log" 2>&1; then fail_phase observed_rust_toolchain toolchain_check; fi
+          rust_version=$(awk 'NR == 1 && $1 == "rustc" { print $2 }' "$private/rustc-version.log")
+          if [[ "$rust_version" != 1.99.1 ]]; then fail_phase observed_rust_toolchain toolchain_check; fi
+          set_field observed_rust_toolchain 1.99.1
+          set_field last_phase cargo_fetch
+          if cargo fetch --locked > "$private/cargo-fetch.log" 2>&1; then set_field cargo_fetch PASS; else fail_phase cargo_fetch cargo_fetch; fi
+          set_field last_phase cli_build
+          if cargo build --release --locked --offline --bin agentsandbox > "$private/cargo-build.log" 2>&1; then set_field cli_build PASS; else fail_phase cli_build cli_build; fi
+          cli="$PWD/target/release/agentsandbox"
+          if [[ ! -x "$cli" ]]; then fail_phase cli_build cli_build; fi
+          set_field last_phase cli_identity
+          if ! "$cli" version --json > "$private/version.json" 2> "$private/version.stderr"; then fail_phase cli_identity cli_identity; fi
+          if ! jq -es --arg version 0.0.1 --arg revision c5a487f77264e2e89284d9c50f5e3a9f13c70873 '
+              length == 1 and (.[0] |
+                .schema_version == 1 and .product == "ai-guard" and .component == "agentsandbox" and
+                .version == $version and .build.revision == $revision)
+            ' "$private/version.json" >/dev/null 2>&1; then fail_phase cli_identity cli_identity; fi
+          set_field cli_identity PASS
+          manifest="$private/fresh-manifest"
+          if [[ -e "$manifest" || -L "$manifest" ]]; then fail_phase source_manifest source_manifest; fi
+          set_field last_phase source_manifest
+          if "$cli" release manifest --source . --output "$manifest" > "$private/manifest.log" 2>&1; then set_field source_manifest PASS; else fail_phase source_manifest source_manifest; fi
+          set_field last_phase source_only_verify
+          if "$cli" release verify --source . --manifest "$manifest" --source-only > "$private/verify.log" 2>&1; then set_field source_only_verify PASS; else fail_phase source_only_verify source_only_verify; fi
+          set_field last_phase sbom_validation
+          if [[ ! -f "$manifest/release-manifest.json" || -L "$manifest/release-manifest.json" || ! -s "$manifest/release-manifest.json" ||
+                ! -f "$manifest/sbom.cdx.json" || -L "$manifest/sbom.cdx.json" || ! -s "$manifest/sbom.cdx.json" ||
+                ! -f "$manifest/SHA256SUMS" || -L "$manifest/SHA256SUMS" || ! -s "$manifest/SHA256SUMS" ]] ||
+             ! jq -e --arg version 0.0.1 '.bomFormat == "CycloneDX" and .specVersion == "1.6" and .metadata.component.version == $version' "$manifest/sbom.cdx.json" >/dev/null 2>&1; then
+            fail_phase sbom_cyclonedx_1_6 sbom_validation
+          fi
+          set_field sbom_cyclonedx_1_6 PASS
+          hash_file() {
+            local sum
+            sum=$(sha256sum < "$1" 2>/dev/null) || return 1
+            sum=${sum%% *}
+            [[ "$sum" =~ ^[0-9a-f]{64}$ ]] || return 1
+            printf '%s' "$sum"
+          }
+          set_field last_phase hashes
+          if sum=$(hash_file "$manifest/release-manifest.json"); then set_field release_manifest_sha256 "$sum"; else fail_phase probe hashes; fi
+          if sum=$(hash_file "$manifest/sbom.cdx.json"); then set_field sbom_sha256 "$sum"; else fail_phase probe hashes; fi
+          if sum=$(hash_file "$manifest/SHA256SUMS"); then set_field sha256sums_sha256 "$sum"; else fail_phase probe hashes; fi
+          set_field probe PASS
+          set_field last_phase metadata_complete
+      - name: Remove only this job's private scratch directory
         if: always()
         shell: bash
         run: |
-          if [ -f cargo-test.log ]; then
-            grep -E '^test result:|^     Running ' cargo-test.log > cargo-test-summary.txt || true
-            grep -E '\.\.\. FAILED$' cargo-test.log | sed 's/^test //; s/ \.\.\. FAILED$//' > cargo-test-failed.txt || true
-            {
-              echo "### Rust test suite"
-              echo
-              echo "Failed tests: $(wc -l < cargo-test-failed.txt)"
-              echo
-              echo '```'
-              head -n 100 cargo-test-failed.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-          elif [ -f cargo-test-summary.txt ]; then
-            {
-              echo "### Targeted SQLite library tests"
-              echo '```'
-              cat cargo-test-summary.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
+          set -uo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/g12-source-metadata-c5-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.receipt"
+          private="$RUNNER_TEMP/g12-source-metadata-c5-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          [[ -f "$receipt" ]] || exit 0
+          set_field() {
+            local key=$1 value=$2
+            awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending" && mv -- "$receipt.pending" "$receipt"
+          }
+          cleanup=PASS
+          if [[ ! "$GITHUB_RUN_ID" =~ ^[0-9]+$ || ! "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]; then
+            cleanup=UNKNOWN
+          elif [[ -e "$private" || -L "$private" ]]; then
+            if [[ -d "$private" && ! -L "$private" ]] && rm -rf -- "$private" >/dev/null 2>&1 && [[ ! -e "$private" && ! -L "$private" ]]; then
+              cleanup=PASS
+            else
+              cleanup=UNKNOWN
+            fi
           fi
-      - name: Upload test logs
+          set_field scratch_cleanup "$cleanup"
+          if [[ "$cleanup" != PASS ]]; then set_field probe FAIL; set_field last_phase cleanup_unconfirmed; fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: lot-verify-rust-${{ github.sha }}
-          path: |
-            cargo-test.log
-            cargo-test-summary.txt
-            cargo-test-failed.txt
-          if-no-files-found: ignore
-          retention-days: 14
-
-  frontend:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: front
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Setup Node
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '24.22.2'
-          package-manager-cache: false
-      - name: Install
-        run: npm ci --no-audit --no-fund
-      - name: Build
-        run: npm run build
-      - name: Test
-        run: npm test
+          name: g12-source-metadata-c5-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g12-source-metadata-c5-${{ github.run_id }}-${{ github.run_attempt }}.receipt
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
