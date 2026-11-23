@@ -302,7 +302,7 @@ impl Store {
             .map_err(|_| crate::human_authority::HumanAuthorityFailure::StorageUnavailable)?;
         let tx =
             self.begin_checked_scoped(&mut db, &access, StoreOperationClass::IdentityAuthority)?;
-        self.mutate_membership_with_discovery(tx, expected, |tx| {
+        self.mutate_delegation_with_discovery(tx, expected, |tx| {
             self.prepare_human_membership_change(tx, scope, membership_id, change)
         })
     }

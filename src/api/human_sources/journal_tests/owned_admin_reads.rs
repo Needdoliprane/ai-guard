@@ -133,6 +133,97 @@ async fn owned_sources_serve_the_summary_memberships_and_configuration() {
     assert_eq!(usage["billable"], false);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owned_grant_read_format14_returns_the_existing_grant_and_one_receipt() {
+    use super::{
+        owned_workers::read,
+        races::{connection, snapshot, state},
+    };
+    use HumanCapabilityV1 as C;
+
+    let fixture = Fixture::new_owned_with_human_rights();
+    grant(&fixture, &[C::ManageGrants, C::ReadMemberships]);
+    let resource = ResourceRefV1 {
+        kind: ResourceKindV1::Session,
+        resource_id: "owned-grant-read-session".into(),
+    };
+    seed_event(&fixture, "B", &resource.resource_id, fixture.principal());
+    let state = state(&fixture);
+    let database = connection(&state);
+    let format: u32 = database
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(format, 14);
+    let (gateway, dashboard, _front) = membership_dashboard(gateway_router(state)).await;
+    let bearer = Fixture::bearer("B");
+    let (status, identity) = read(&dashboard, &bearer, "/api/v1/human/identity", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let context = identity["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|context| {
+            context["tenant_id"] == "B"
+                && context["organization_scope"] == "synthetic-org"
+                && context["mode"] == "administration"
+        })
+        .expect("the fixture offers the matching administration context");
+
+    let resource_key = resource.key().unwrap();
+    let stored_grant = || -> String {
+        database
+            .query_row(
+                "SELECT payload_json FROM identity_resources WHERE resource_key=?1",
+                [&resource_key],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let prior_grant = stored_grant();
+    let prior_head = snapshot(&database).0;
+    let path = format!(
+        "/api/v1/human/admin/grants?resource_kind=session&resource_id={}",
+        resource.resource_id
+    );
+    let (status, body) = read(&dashboard, &bearer, &path, Some(context)).await;
+    assert_eq!(status, StatusCode::OK);
+    let body: HumanGrantV1 = serde_json::from_value(body).unwrap();
+    assert_eq!(body.version, 1);
+    assert_eq!(body.context_id, context["id"].as_str().unwrap());
+    assert_eq!(
+        body.authorization_version,
+        context["authorization_version"].as_str().unwrap()
+    );
+    assert_eq!(body.source, "tenant_identity_resources");
+    assert_eq!(body.resource, resource);
+    assert_eq!(&body.owner, fixture.principal());
+    assert_eq!(body.owner_display_name, "Synthetic local person");
+    assert!(body.active);
+    assert_eq!(body.revision, "1");
+    assert!(body.shares.is_empty());
+
+    let receipt = body.read_receipt;
+    let (sequence, received_at, payload): (i64, String, String) = database
+        .query_row(
+            "SELECT seq,received_at,payload FROM events WHERE id=?1",
+            [&receipt.audit_event_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let event: Event = serde_json::from_str(&payload).unwrap();
+    assert_eq!(sequence, prior_head + 1);
+    assert_eq!(snapshot(&database).0, sequence);
+    assert_eq!(received_at, receipt.received_at);
+    assert_eq!(event.kind, "control.identity.access");
+    assert_eq!(event.data["action"], "grants");
+    assert_eq!(event.data["request_id"], receipt.request_id);
+    assert_eq!(event.data["principal"], json!(fixture.principal()));
+    assert_eq!(event.data["mode"], "administration");
+    assert_eq!(event.data["result_count"], 0);
+    assert_eq!(stored_grant(), prior_grant);
+    gateway.close().await;
+}
+
 async fn owned_worker_summary_on(format: u32) {
     use super::owned_workers::{context, provision_reader, read};
     use crate::api::human_sources::owned_control_tests::negative::reserve_workload_fixture_worker;
@@ -764,7 +855,7 @@ async fn post(
     )
 }
 
-fn seed_delegated_membership(fixture: &Fixture) -> MembershipV1 {
+fn seed_organization_member(fixture: &Fixture) -> MembershipV1 {
     use HumanCapabilityV1 as C;
     let PrincipalRefV1::HumanLocal {
         installation_id, ..
@@ -808,6 +899,12 @@ fn seed_delegated_membership(fixture: &Fixture) -> MembershipV1 {
             membership: membership.clone(),
         }))
         .unwrap();
+    membership
+}
+
+fn seed_delegated_membership(fixture: &Fixture) -> MembershipV1 {
+    use HumanCapabilityV1 as C;
+    let membership = seed_organization_member(fixture);
     grant(
         fixture,
         &[
@@ -818,6 +915,123 @@ fn seed_delegated_membership(fixture: &Fixture) -> MembershipV1 {
         ],
     );
     membership
+}
+
+#[tokio::test]
+async fn owned_grant_change_format14_returns_one_durable_receipt_and_keeps_the_source_available() {
+    use super::races::{connection, state};
+    use HumanCapabilityV1 as C;
+
+    const IDENTITY: &str = "/api/v1/human/identity";
+    const GRANTS: &str = "/api/v1/human/admin/grants";
+    let fixture = Fixture::new_owned_with_human_rights();
+    let member = seed_organization_member(&fixture);
+    grant(&fixture, &[C::ManageGrants, C::ReadMemberships]);
+    let resource = ResourceRefV1 {
+        kind: ResourceKindV1::Session,
+        resource_id: "owned-grant-change-session".into(),
+    };
+    seed_event(&fixture, "B", &resource.resource_id, fixture.principal());
+    let state = state(&fixture);
+    let database = connection(&state);
+    let format: u32 = database
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(format, 14);
+    let durable_revision_and_mutations = || -> (i64, i64) {
+        database
+            .query_row(
+                "SELECT authorization_revision, (SELECT COUNT(*) FROM events WHERE kind='control.identity.mutation') \
+                 FROM identity_meta WHERE singleton=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    };
+    let (prior_revision, prior_mutations) = durable_revision_and_mutations();
+    let router = gateway_router(state);
+    let bearer = Fixture::bearer("B");
+    let admin_context_id = |identity: &Value| {
+        identity["contexts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|context| {
+                context["tenant_id"] == "B"
+                    && context["organization_scope"] == member.organization_scope.as_str()
+                    && context["mode"] == "administration"
+            })
+            .expect("the fixture offers the matching administration context")["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let (status, identity) = get(&router, IDENTITY, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let original_context = admin_context_id(&identity);
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let body = json!({
+        "operation_id": operation_id,
+        "resource": resource,
+        "expected_revision": "1",
+        "shares": [{"principal": member.principal, "permissions": ["metadata"]}],
+    });
+    let (status, original_receipt) = post(&router, &bearer, GRANTS, &original_context, &body).await;
+    assert_eq!(status, StatusCode::OK);
+    let receipt: HumanGrantChangeReceiptV1 =
+        serde_json::from_value(original_receipt.clone()).unwrap();
+    let next_revision = prior_revision + 1;
+    assert_eq!(receipt.version, 1);
+    assert_eq!(receipt.operation_id, operation_id);
+    assert_eq!(receipt.resource, resource);
+    assert_eq!(receipt.grant_revision, "2");
+    assert_eq!(receipt.authorization_revision, next_revision.to_string());
+    assert_eq!(
+        durable_revision_and_mutations(),
+        (next_revision, prior_mutations + 1)
+    );
+
+    let payload: String = database
+        .query_row(
+            "SELECT payload FROM events WHERE seq=?1",
+            [receipt.audit_seq.parse::<i64>().unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let event: Event = serde_json::from_str(&payload).unwrap();
+    assert_eq!(event.kind, "control.identity.mutation");
+    assert_eq!(event.data["mutation"]["operation_id"], operation_id);
+    assert_eq!(event.data["mutation"]["actor"], json!(fixture.principal()));
+
+    let (status, identity) = get(&router, IDENTITY, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let current_context = admin_context_id(&identity);
+    assert_ne!(current_context, original_context);
+    let (status, replay_receipt) = post(&router, &bearer, GRANTS, &current_context, &body).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replay_receipt, original_receipt);
+    assert_eq!(
+        durable_revision_and_mutations(),
+        (next_revision, prior_mutations + 1)
+    );
+
+    let read_path = format!(
+        "{GRANTS}?resource_kind=session&resource_id={}",
+        resource.resource_id
+    );
+    let (status, grant) = get(&router, &read_path, Some(&current_context)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(grant["resource"], body["resource"]);
+    assert_eq!(grant["owner"], json!(fixture.principal()));
+    assert_eq!(grant["revision"], "2");
+    assert_eq!(
+        grant["shares"],
+        json!([{
+            "principal": member.principal,
+            "display_name": "Synthetic member",
+            "permissions": ["metadata"],
+        }])
+    );
 }
 
 async fn membership_dashboard(gateway: Router) -> (LoopbackGateway, Router, tempfile::TempDir) {
