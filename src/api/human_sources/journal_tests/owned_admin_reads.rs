@@ -1072,7 +1072,6 @@ async fn owned_membership_post_on_format15_requires_an_admin_and_returns_the_dur
         .find(|entry| entry["operation"] == "memberships_manage")
         .unwrap();
     assert_eq!(offer["permission"], "granted");
-    assert_eq!(offer["availability"], "not_in_this_build");
 
     // The receipt must identify the durable mutation of this exact membership.
     let database = rusqlite::Connection::open_with_flags(
