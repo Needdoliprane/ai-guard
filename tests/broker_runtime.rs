@@ -53,11 +53,15 @@ const PROFILE: &str = "g09";
 const NS: u128 = 1_000_000_000;
 const OBSERVATION_GRACE_NS: u128 = 3 * NS;
 
-#[derive(Clone, Copy)]
-enum LostProcess {
-    Broker { scenario_end: Instant },
+enum LostProcess<'a> {
+    Broker {
+        scenario_end: Instant,
+    },
     LegacyRecoveryStatus,
-    RunCli,
+    RunCli {
+        scenario_end: Instant,
+        observations: &'a mut RunClientObservations,
+    },
 }
 
 #[derive(serde::Serialize)]
@@ -138,6 +142,20 @@ struct RunClientRecoveryReceipt {
     stage: RunClientRecoveryStage,
 }
 
+#[derive(Default)]
+struct RunClientObservations {
+    central_terminal_observed_within_window: bool,
+    worker_deadline_evidence: WorkerDeadlineEvidence,
+}
+
+#[derive(Default, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WorkerDeadlineEvidence {
+    #[default]
+    NotAttested,
+    Attested,
+}
+
 #[test]
 fn terminal_wait_receipt_samples_only_expired_pairs_with_closed_fields() {
     let status_reply = |running, error| BrokerReplyV1::Status {
@@ -216,6 +234,48 @@ fn terminal_wait_receipt_samples_only_expired_pairs_with_closed_fields() {
             })
         );
     }
+}
+
+#[test]
+fn run_client_terminal_observation_opens_only_the_remaining_scenario_budget() {
+    let start = Instant::now();
+    let observe_until = start + Duration::from_secs(65);
+    let scenario_end = start + Duration::from_secs(600);
+    let before_observation_limit = observe_until - Duration::from_millis(1);
+    let after_observation_limit = observe_until + Duration::from_millis(1);
+    let mut observations = RunClientObservations::default();
+    let mut bounds = TerminalWaitBounds::RunClient {
+        observe_until,
+        scenario_end,
+        attempt_id: "original-attempt",
+        observations: &mut observations,
+    };
+    bounds.observe_central_terminal(before_observation_limit, false);
+    bounds.observe_central_terminal(observe_until, true);
+    bounds.observe_central_terminal(after_observation_limit, true);
+    assert_eq!(bounds.limit(), observe_until);
+    assert!(!bounds.accepts_ready_pair(after_observation_limit));
+
+    let mut observations = RunClientObservations::default();
+    let mut bounds = TerminalWaitBounds::RunClient {
+        observe_until,
+        scenario_end,
+        attempt_id: "original-attempt",
+        observations: &mut observations,
+    };
+    bounds.observe_central_terminal(before_observation_limit, true);
+    assert_eq!(bounds.limit(), scenario_end);
+    assert!(bounds.accepts_ready_pair(after_observation_limit));
+    assert!(!bounds.accepts_ready_pair(scenario_end));
+    assert!(observations.central_terminal_observed_within_window);
+    assert_eq!(
+        serde_json::to_value(observations.worker_deadline_evidence).unwrap(),
+        json!("not_attested")
+    );
+    assert!(
+        TerminalWaitBounds::Fixed(start + Duration::from_secs(35))
+            .accepts_ready_pair(after_observation_limit)
+    );
 }
 
 #[test]
@@ -386,9 +446,19 @@ async fn broker_run_cli_sigkill_preserves_original_deadline_without_second_start
     let selection = Selection::read()?;
     let evidence = Evidence::new()?;
     let mut stage = RunClientRecoveryStage::NotReached;
-    let run_outcome = timeout(
-        Duration::from_secs(600),
-        run(&selection, &evidence, LostProcess::RunCli, &mut stage),
+    let mut observations = RunClientObservations::default();
+    let scenario_end = Instant::now() + Duration::from_secs(600);
+    let run_outcome = timeout_at(
+        scenario_end,
+        run(
+            &selection,
+            &evidence,
+            LostProcess::RunCli {
+                scenario_end,
+                observations: &mut observations,
+            },
+            &mut stage,
+        ),
     )
     .await;
     let state = match &run_outcome {
@@ -403,6 +473,8 @@ async fn broker_run_cli_sigkill_preserves_original_deadline_without_second_start
         "runtime_test":if outcome.is_ok() { "PASS" } else { "FAIL" },
         "fault":"owned_run_cli_sigkill",
         "run_client_recovery":RunClientRecoveryReceipt { state, stage },
+        "central_terminal_observed_within_window":observations.central_terminal_observed_within_window,
+        "worker_deadline_evidence":observations.worker_deadline_evidence,
         "requested_broker_client_source":"published_selection",
         "broker_selection_input":"environment",
         "native_start":selection.native_start,
@@ -453,7 +525,7 @@ async fn inspect_retained_guard_after_runtime_failure() -> Result<()> {
 async fn run(
     selection: &Selection,
     evidence: &Evidence,
-    lost: LostProcess,
+    mut lost: LostProcess<'_>,
     run_client_stage: &mut RunClientRecoveryStage,
 ) -> Result<()> {
     let timeout_seconds = selection.timeout_seconds;
@@ -516,7 +588,7 @@ async fn run(
         &config,
         &evidence.root.join("policy.json"),
     )?;
-    if matches!(lost, LostProcess::RunCli) {
+    if matches!(lost, LostProcess::RunCli { .. }) {
         gateway.require_graceful_shutdown();
     }
     let http = reqwest::Client::builder()
@@ -564,7 +636,7 @@ async fn run(
         &json!({"operation_id":operation,"profile":PROFILE}),
     )?;
     let mut broker = harness::broker(selection, evidence, 1)?;
-    if matches!(lost, LostProcess::RunCli) {
+    if matches!(lost, LostProcess::RunCli { .. }) {
         broker.require_graceful_shutdown();
     }
     wait_broker(evidence, &runner, operation, &mut broker).await?;
@@ -620,7 +692,10 @@ async fn run(
             }
             (None, live)
         }
-        LostProcess::RunCli => {
+        LostProcess::RunCli {
+            scenario_end,
+            ref mut observations,
+        } => {
             evidence.write(
                 "stage.json",
                 &json!({"stage":"prepare_broker_client_selection"}),
@@ -629,7 +704,10 @@ async fn run(
             let child =
                 harness::run_client(selection, evidence, &client_selection, operation, &argv)?;
             evidence.write("stage.json", &json!({"stage":"submit_real_worker"}))?;
-            (Some((child, client_selection)), None)
+            (
+                Some((child, client_selection, scenario_end, &mut **observations)),
+                None,
+            )
         }
     };
     let clock = NativeHostClock::new()?;
@@ -643,7 +721,7 @@ async fn run(
     let worker = loop {
         broker.running()?;
         gateway.running()?;
-        if let Some((child, _)) = &mut cli {
+        if let Some((child, ..)) = &mut cli {
             child.running()?;
         }
         let running = if let Some(worker) = harness::only_worker(&http, &origin, &runner).await? {
@@ -807,7 +885,7 @@ async fn run(
             && now.continuous_ns()? + 150_000_000 < deadline,
         "Running oracle was too late to signal the selected process before the original deadline"
     );
-    if let Some((mut run_cli, client_selection)) = cli {
+    if let Some((mut run_cli, client_selection, scenario_end, observations)) = cli {
         evidence.write("stage.json", &json!({"stage":"kill_owned_run_cli_only","kill_clock":now,"original_deadline_ns":deadline.to_string()}))?;
         let cli_pid = run_cli.id();
         let broker_pid = broker.id();
@@ -831,15 +909,22 @@ async fn run(
             "stage.json",
             &json!({"stage":"read_original_job_without_resubmit"}),
         )?;
-        // The live broker may already have removed an acknowledged terminal CID.
-        // A Result and exact Docker events independently establish the stop and removal.
+        // The central terminal observation has its own window. Afterward the
+        // broker can finish under the remaining scenario budget. The Result and
+        // exact Docker events are still required to establish the stop and removal.
         wait_terminal(
             evidence,
             &runner,
             &http,
             &origin,
             (operation, &worker.worker_id),
-            Duration::from_secs(u64::from(timeout_seconds) + 35),
+            TerminalWaitBounds::RunClient {
+                observe_until: Instant::now()
+                    + Duration::from_secs(u64::from(timeout_seconds) + 35),
+                scenario_end,
+                attempt_id: &worker.attempt.attempt_id,
+                observations: &mut *observations,
+            },
             run_client_stage,
         )
         .await?;
@@ -910,6 +995,7 @@ async fn run(
                 "observation_tolerance_ns":OBSERVATION_GRACE_NS.to_string()
             }),
         )?;
+        observations.worker_deadline_evidence = WorkerDeadlineEvidence::Attested;
         let after = recovery(evidence, &runner, operation).await?;
         let worker_arms: Vec<_> = after
             .known_arms
@@ -1875,26 +1961,99 @@ fn terminal_wait_stage(
     }
 }
 
-async fn wait_terminal(
+enum TerminalWaitBounds<'a> {
+    Fixed(Instant),
+    RunClient {
+        observe_until: Instant,
+        scenario_end: Instant,
+        attempt_id: &'a str,
+        observations: &'a mut RunClientObservations,
+    },
+}
+
+impl From<Duration> for TerminalWaitBounds<'_> {
+    fn from(budget: Duration) -> Self {
+        Self::Fixed(Instant::now() + budget)
+    }
+}
+
+impl TerminalWaitBounds<'_> {
+    fn observe_central_terminal(&mut self, observed_at: Instant, exact_terminal: bool) {
+        if let Self::RunClient {
+            observe_until,
+            scenario_end,
+            observations,
+            ..
+        } = self
+            && observed_at < (*observe_until).min(*scenario_end)
+            && exact_terminal
+        {
+            observations.central_terminal_observed_within_window = true;
+        }
+    }
+
+    fn accepts_ready_pair(&self, now: Instant) -> bool {
+        match self {
+            Self::Fixed(_) => true,
+            Self::RunClient {
+                scenario_end,
+                observations,
+                ..
+            } => observations.central_terminal_observed_within_window && now < *scenario_end,
+        }
+    }
+
+    fn limit(&self) -> Instant {
+        match self {
+            Self::Fixed(limit) => *limit,
+            Self::RunClient {
+                observe_until,
+                scenario_end,
+                observations,
+                ..
+            } => {
+                if observations.central_terminal_observed_within_window {
+                    *scenario_end
+                } else {
+                    (*observe_until).min(*scenario_end)
+                }
+            }
+        }
+    }
+}
+
+async fn wait_terminal<'a>(
     evidence: &Evidence,
     runner: &str,
     http: &reqwest::Client,
     origin: &str,
     (operation_id, worker_id): (Uuid, &str),
-    budget: Duration,
+    bounds: impl Into<TerminalWaitBounds<'a>>,
     run_client_stage: &mut RunClientRecoveryStage,
 ) -> Result<()> {
-    let limit = Instant::now() + budget;
+    let mut bounds = bounds.into();
     loop {
         *run_client_stage = RunClientRecoveryStage::WorkerRead;
         let worker: WorkerV1 =
             harness::get(http, origin, runner, &format!("workers/{worker_id}")).await?;
+        let worker_observed_at = Instant::now();
+        let terminal_quota_released = worker.state == WorkerStateV1::Terminal && !worker.quota_held;
+        let exact_terminal = match &bounds {
+            TerminalWaitBounds::Fixed(_) => terminal_quota_released,
+            TerminalWaitBounds::RunClient { attempt_id, .. } => {
+                terminal_quota_released
+                    && worker.worker_id == worker_id
+                    && worker.attempt.attempt_id == *attempt_id
+            }
+        };
+        bounds.observe_central_terminal(worker_observed_at, exact_terminal);
         *run_client_stage = RunClientRecoveryStage::StatusRead;
         let reply = ipc(evidence, runner, BrokerCommandV1::Status { operation_id }).await?;
+        let now = Instant::now();
         if let BrokerReplyV1::Status { status } = &reply
-            && worker.state == WorkerStateV1::Terminal
-            && !worker.quota_held
+            && exact_terminal
             && !status.executor_task_running
+            && bounds.accepts_ready_pair(now)
         {
             if let Some(executor_error) = status.executor_error {
                 let central_cleanup_sample = match worker.cleanup_removed {
@@ -1914,7 +2073,7 @@ async fn wait_terminal(
             );
             return Ok(());
         }
-        let within_budget = Instant::now() < limit;
+        let within_budget = now < bounds.limit();
         *run_client_stage =
             terminal_wait_stage(!within_budget, worker.state, worker.quota_held, &reply);
         ensure!(
