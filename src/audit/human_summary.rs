@@ -453,6 +453,11 @@ fn usage(
     if rows > MAX_ALLOCATION_ROWS {
         return Ok(unavailable(SummaryUnavailableV1::CapacityExceeded));
     }
+    let from = from
+        .map(chrono::DateTime::parse_from_rfc3339)
+        .transpose()
+        .context("invalid usage period start")?;
+    let to = chrono::DateTime::parse_from_rfc3339(to).context("invalid usage period end")?;
     let mut statement = tx.prepare("SELECT payload_json FROM worker_allocations")?;
     let allocations = statement
         .query_map([], |r| r.get::<_, String>(0))?
@@ -464,8 +469,9 @@ fn usage(
             allocation.method_version == 1 && !allocation.billable,
             "unknown allocation method"
         );
-        let finished = allocation.finished_at.as_str();
-        if from.is_some_and(|from| finished < from) || finished > to {
+        let finished = chrono::DateTime::parse_from_rfc3339(&allocation.finished_at)
+            .context("invalid allocation finish time")?;
+        if from.as_ref().is_some_and(|from| &finished < from) || finished > to {
             continue;
         }
         let add = |sum: u128, value: &str| -> anyhow::Result<u128> {
