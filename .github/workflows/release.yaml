@@ -398,16 +398,27 @@ jobs:
                   path = $0
                   for (i = 0; i < fields; i++) sub(/^[^[:blank:]]+[[:blank:]]+/, "", path)
                   type = substr($1, 1, 1)
-                  if (type == "l") sub(/ -> .*/, "", path)
-                  if (type == "h") sub(/ link to .*/, "", path)
+                  if (type != "d" && type != "-") {
+                    print "Expected only directories and regular files in the release archive"
+                    failed = 1
+                    next
+                  }
                   if (type == "d") sub(/\/$/, "", path)
-                  if (path == root) next
+                  if (path == root && type == "d") {
+                    root_count++
+                    next
+                  }
                   if (index(path, root "/") != 1 || path ~ /(^|\/)\.\.?($|\/)|\/\/|\/$/) {
                     print "Expected a member path under " root "/ without path aliases"
                     failed = 1
                     next
                   }
                   path = substr(path, length(root) + 2)
+                  if (++count[path] != 1) {
+                    print "Expected unique member paths in the release archive"
+                    failed = 1
+                    next
+                  }
                   if (native_archive &&
                       ((path == "bin" && type != "d") ||
                        (index(path, "bin/") == 1 && !(path in required_binaries)))) {
@@ -415,17 +426,14 @@ jobs:
                     failed = 1
                     next
                   }
-                  if (path == "BUILD-INFO" || path == "LICENSE" || (path in required_binaries) || path == "index.html" ||
-                      path == "THIRD-PARTY-NOTICES" ||
-                      (target == "release-metadata" && (path == "manifest/release-manifest.json" ||
-                        path == "manifest/sbom.cdx.json" || path == "manifest/SHA256SUMS")) ||
-                      (target == "frontend" && (path == "licenses/vite-LICENSE.md" || path ~ /^assets\/.+\.js$/))) {
-                    count[path]++
-                    nonempty_regular[path] = (type == "-" && size ~ /^[0-9]+$/ && size + 0 > 0)
-                    owner_executable[path] = (substr($1, 4, 1) ~ /[xs]/)
-                  }
+                  nonempty_regular[path] = (type == "-" && size ~ /^[0-9]+$/ && size + 0 > 0)
+                  owner_executable[path] = (substr($1, 4, 1) ~ /[xs]/)
                 }
                 END {
+                  if (root_count != 1) {
+                    print "Expected one root directory in the release archive"
+                    failed = 1
+                  }
                   check_required("BUILD-INFO", 0)
                   check_required("LICENSE", 0)
                   if (target == "release-metadata") {
