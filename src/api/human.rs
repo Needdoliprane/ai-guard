@@ -10,7 +10,7 @@ use crate::{
 };
 use axum::extract::{FromRequest, FromRequestParts};
 use axum::http::request::Parts;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 mod admin;
 mod brokers;
 /// Proposed owned (formats 14/15) human broker registry projection, served on
@@ -209,22 +209,59 @@ pub(super) fn invalid_membership_request() -> (StatusCode, Json<Value>) {
     )
 }
 
+pub(super) fn invalid_grant_request() -> (StatusCode, Json<Value>) {
+    failure(
+        StatusCode::BAD_REQUEST,
+        "invalid_request",
+        "Check the share change fields, then try again.",
+        "retry",
+    )
+}
+
 /// Read the delegated membership request on either HTTP entry point. Keep the
 /// original bytes for the dashboard relay and let the gateway use the typed body.
 pub(super) async fn membership_change_body(
     request: Request,
 ) -> ApiResult<(axum::body::Bytes, HumanMembershipChangeV1)> {
+    let (bytes, change) = delegated_change_body::<HumanMembershipChangeV1>(
+        request,
+        MEMBERSHIP_CHANGE_BODY_MAX_BYTES,
+        invalid_membership_request,
+    )
+    .await?;
+    crate::control::uuid(&change.operation_id).map_err(|_| invalid_membership_request())?;
+    Ok((bytes, change))
+}
+
+pub(super) async fn grant_change_body(
+    request: Request,
+) -> ApiResult<(axum::body::Bytes, HumanGrantChangeV1)> {
+    let (bytes, change) = delegated_change_body::<HumanGrantChangeV1>(
+        request,
+        GRANT_CHANGE_BODY_MAX_BYTES,
+        invalid_grant_request,
+    )
+    .await?;
+    crate::control::uuid(&change.operation_id).map_err(|_| invalid_grant_request())?;
+    Ok((bytes, change))
+}
+
+async fn delegated_change_body<T: DeserializeOwned>(
+    request: Request,
+    max_bytes: usize,
+    invalid: fn() -> (StatusCode, Json<Value>),
+) -> ApiResult<(axum::body::Bytes, T)> {
     let (parts, body) = request.into_parts();
     if parts.headers.get_all(header::CONTENT_TYPE).iter().count() != 1 {
-        return Err(invalid_membership_request());
+        return Err(invalid());
     }
     let bytes = tokio::time::timeout(
         Duration::from_secs(5),
-        axum::body::to_bytes(body, MEMBERSHIP_CHANGE_BODY_MAX_BYTES),
+        axum::body::to_bytes(body, max_bytes),
     )
     .await
-    .map_err(|_| invalid_membership_request())?
-    .map_err(|_| invalid_membership_request())?;
+    .map_err(|_| invalid())?
+    .map_err(|_| invalid())?;
     // Serde's struct visitor also accepts sequences. The HTTP contract is an
     // object, with the typed parse still checking duplicate and unknown keys.
     if bytes
@@ -233,13 +270,12 @@ pub(super) async fn membership_change_body(
         .find(|byte| !byte.is_ascii_whitespace())
         != Some(b'{')
     {
-        return Err(invalid_membership_request());
+        return Err(invalid());
     }
     let buffered = Request::from_parts(parts, Body::from(bytes.clone()));
-    let Json(change) = Json::<HumanMembershipChangeV1>::from_request(buffered, &())
+    let Json(change) = Json::<T>::from_request(buffered, &())
         .await
-        .map_err(|_| invalid_membership_request())?;
-    crate::control::uuid(&change.operation_id).map_err(|_| invalid_membership_request())?;
+        .map_err(|_| invalid())?;
     Ok((bytes, change))
 }
 
@@ -959,6 +995,7 @@ pub(super) fn routes() -> Router<GatewayState> {
             "/human/owned/admin/memberships/{membership_id}",
             post(admin::change_owned_membership),
         )
+        .route("/human/owned/admin/grants", post(admin::change_owned_grant))
         .route("/human/admin/configuration", get(admin::configuration))
         .route("/human/resources", get(resources))
         .route("/human/events", get(events))

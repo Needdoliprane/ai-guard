@@ -481,7 +481,7 @@ async fn owned_dashboard_relays_the_delegated_membership_change_and_gateway_rece
             StatusCode::BAD_REQUEST,
         ),
         (
-            with_context("/api/v1/human/admin/grants"),
+            with_context("/api/v1/human/admin/configuration"),
             body.clone(),
             StatusCode::METHOD_NOT_ALLOWED,
         ),
@@ -643,6 +643,15 @@ async fn owned_dashboard_relays_the_exact_delegated_grant_change() {
     assert_eq!(reached.load(Ordering::SeqCst), 1);
     assert_eq!(unexpected.load(Ordering::SeqCst), 0);
     server.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owned_dashboard_grants_get_still_relays_the_exact_read() {
+    require_owned_get_is_relayed(
+        "/api/v1/human/admin/grants",
+        Some("resource_kind=session&resource_id=existing-session"),
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

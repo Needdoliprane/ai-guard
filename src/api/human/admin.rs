@@ -480,6 +480,22 @@ pub(super) async fn grant(
     .await
 }
 
+/// Owned-only dashboard forwarding. Check the profile before authentication or
+/// body extraction, then use the same authority and receipt as the direct POST.
+pub(super) async fn change_owned_grant(
+    State(state): State<GatewayState>,
+    request: Request,
+) -> ApiResult<Json<HumanGrantChangeReceiptV1>> {
+    if state.owned_human.is_none() {
+        return Err(super::super::human_sources::unavailable());
+    }
+    let (mut parts, body) = request.into_parts();
+    let proof = VerifiedHuman::from_request_parts(&mut parts, &state).await?;
+    let headers = parts.headers.clone();
+    let (_, change) = grant_change_body(Request::from_parts(parts, body)).await?;
+    change_grant(proof, State(state), headers, Ok(Json(change))).await
+}
+
 /// `POST /api/v1/human/admin/grants`: a delegated replacement of the shares
 /// of one existing grant of the context's organization. Durable with its
 /// audit before the receipt; exact replay returns the same receipt.

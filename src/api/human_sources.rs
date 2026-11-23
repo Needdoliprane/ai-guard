@@ -670,6 +670,8 @@ mod owned_policy_tests;
 pub(super) mod tests;
 
 const HUMAN_EVENT_DETAIL_PATH: &str = "/api/v1/human/events/{id}";
+pub(super) const HUMAN_GRANT_CHANGE_PATH: &str = "/api/v1/human/admin/grants";
+pub(super) const HUMAN_OWNED_GRANT_CHANGE_PATH: &str = "/api/v1/human/owned/admin/grants";
 pub(super) const HUMAN_MEMBERSHIP_CHANGE_PATH: &str =
     "/api/v1/human/admin/memberships/{membership_id}";
 pub(super) const HUMAN_OWNED_MEMBERSHIP_CHANGE_PATH: &str =
@@ -690,7 +692,7 @@ pub(super) fn membership_change_id<'a>(
 
 const OWNED_HUMAN_GET_PATHS: &[&str] = &[
     "/api/v1/human/admin/configuration",
-    "/api/v1/human/admin/grants",
+    HUMAN_GRANT_CHANGE_PATH,
     "/api/v1/human/admin/memberships",
     "/api/v1/human/admin/quota",
     "/api/v1/human/admin/usage",
@@ -770,7 +772,7 @@ const REGISTERED_ROUTES: &[(&str, &[&str])] = &[
     ("/api/v1/federation/workers", &["GET", "HEAD"]),
     ("/api/v1/human/admin/configuration", &["GET", "HEAD"]),
     // The S6 POST on this path still uses the existing mutation handler.
-    ("/api/v1/human/admin/grants", &["GET", "HEAD"]),
+    (HUMAN_GRANT_CHANGE_PATH, &["GET", "HEAD"]),
     ("/api/v1/human/admin/memberships", &["GET", "HEAD"]),
     (HUMAN_MEMBERSHIP_CHANGE_PATH, &["POST"]),
     ("/api/v1/human/admin/quota", &["GET", "HEAD"]),
@@ -782,6 +784,7 @@ const REGISTERED_ROUTES: &[(&str, &[&str])] = &[
     ("/api/v1/human/export", &["GET", "HEAD"]),
     ("/api/v1/human/federation/workers", &["GET", "HEAD"]),
     ("/api/v1/human/identity", &["GET", "HEAD"]),
+    (HUMAN_OWNED_GRANT_CHANGE_PATH, &["POST"]),
     (HUMAN_OWNED_MEMBERSHIP_CHANGE_PATH, &["POST"]),
     ("/api/v1/human/owned/brokers", &["GET", "HEAD"]),
     ("/api/v1/human/resources", &["GET", "HEAD"]),
@@ -877,6 +880,12 @@ pub(super) async fn route_gate(
     }) {
         if membership_change_id(request.uri(), membership_template).is_none() {
             return human::invalid_membership_request().into_response();
+        }
+        return next.run(request).await;
+    }
+    if template == Some(HUMAN_OWNED_GRANT_CHANGE_PATH) && request.method() == "POST" {
+        if request.uri().query().is_some() {
+            return human::invalid_grant_request().into_response();
         }
         return next.run(request).await;
     }

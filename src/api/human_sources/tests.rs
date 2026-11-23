@@ -37,6 +37,36 @@ async fn identity_announces_actual_owned_read_profiles_and_omits_them_on_legacy(
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(body.get("read_profiles").is_none());
 }
+
+#[tokio::test]
+async fn delegated_grant_private_post_requires_an_owned_gateway() {
+    let (_files, legacy, _token) = crate::api::read_execution_tests::local_identity_state();
+    let response = gateway_router(legacy)
+        .oneshot(
+            axum::http::Request::post(HUMAN_OWNED_GRANT_CHANGE_PATH)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "operation_id": "915e4e07-26a2-4d71-a45f-3b602a8dcf93",
+                        "resource": {"kind": "session", "resource_id": "existing-session"},
+                        "expected_revision": "7",
+                        "shares": [],
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let bytes = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let error: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(error["error"]["code"], "identity_unavailable");
+}
+
 fn state_from_fixture(fixture: &Fixture) -> GatewayState {
     let (bundle, credentials, tokens) = fixture.owned_startup();
     let state = GatewayState::for_owned_human_sources(
@@ -507,7 +537,9 @@ async fn modern_route_matrix_closes_before_body_extractors_and_store() {
             {
                 continue;
             }
-            let expected = if [
+            let expected = if *path == HUMAN_OWNED_GRANT_CHANGE_PATH {
+                StatusCode::UNAUTHORIZED
+            } else if [
                 HUMAN_MEMBERSHIP_CHANGE_PATH,
                 "/api/v1/human/owned/admin/memberships/{membership_id}",
             ]

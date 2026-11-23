@@ -1913,10 +1913,15 @@ pub fn dashboard_router_with_human_mode(
         )
         .route("/api/{*path}", get(dashboard_proxy));
     let router = if owned_sources {
-        router.route(
-            human_sources::HUMAN_MEMBERSHIP_CHANGE_PATH,
-            post(dashboard_proxy),
-        )
+        router
+            .route(
+                human_sources::HUMAN_MEMBERSHIP_CHANGE_PATH,
+                post(dashboard_proxy),
+            )
+            .route(
+                human_sources::HUMAN_GRANT_CHANGE_PATH,
+                get(dashboard_proxy).post(dashboard_proxy),
+            )
     } else {
         router
     };
@@ -2185,6 +2190,12 @@ async fn dashboard_oidc_proxy(
     Ok(response)
 }
 
+#[derive(Clone, Copy)]
+enum DashboardHumanChange<'a> {
+    Membership(&'a str),
+    Grant,
+}
+
 async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> ApiResult<Response> {
     let path = request.uri().path();
     let canonical_path = path
@@ -2192,21 +2203,27 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
         .map(|suffix| format!("/api/{suffix}"))
         .unwrap_or_else(|| path.to_owned());
     let versioned_human = path.starts_with("/api/v1/human/");
-    // This is the only POST admitted by this proxy. Require its exact target
-    // independently of the router, before extracting any headers or body.
-    let membership_id = if s.owned_sources && request.method() == "POST" {
-        Some(
-            human_sources::membership_change_id(
+    // These are the only POSTs admitted here. Check the target before
+    // processing authentication, context or body.
+    let change = if s.owned_sources && request.method() == "POST" {
+        Some(if path == human_sources::HUMAN_GRANT_CHANGE_PATH {
+            if request.uri().query().is_some() {
+                return Err(human::invalid_grant_request());
+            }
+            DashboardHumanChange::Grant
+        } else {
+            let membership_id = human_sources::membership_change_id(
                 request.uri(),
                 human_sources::HUMAN_MEMBERSHIP_CHANGE_PATH,
             )
-            .ok_or_else(human::invalid_membership_request)?,
-        )
+            .ok_or_else(human::invalid_membership_request)?;
+            DashboardHumanChange::Membership(membership_id)
+        })
     } else {
         None
     };
-    let membership_change = membership_id.is_some();
-    if s.owned_sources && !membership_change {
+    let human_change = change.is_some();
+    if s.owned_sources && !human_change {
         let owned_static_path = [
             "/api/v1/human/identity",
             "/api/v1/human/resources",
@@ -2216,7 +2233,7 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
             "/api/v1/human/workers",
             "/api/v1/human/summary",
             "/api/v1/human/admin/memberships",
-            "/api/v1/human/admin/grants",
+            human_sources::HUMAN_GRANT_CHANGE_PATH,
             "/api/v1/human/admin/configuration",
             "/api/v1/human/admin/quota",
             "/api/v1/human/admin/usage",
@@ -2231,9 +2248,9 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
             return Err(human_sources::unavailable());
         }
     }
-    let human_path = membership_change || versioned_human && human_dashboard_path(&canonical_path);
+    let human_path = human_change || versioned_human && human_dashboard_path(&canonical_path);
     let federation_path = path == "/api/v1/federation/workers";
-    if human_path && request.method() != "GET" && !membership_change {
+    if human_path && request.method() != "GET" && !human_change {
         return Err(human::failure(
             StatusCode::METHOD_NOT_ALLOWED,
             "method_not_allowed",
@@ -2301,13 +2318,19 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
         verify_dashboard_viewer(&s, &token).await?;
     }
     let mut url = s.upstream.clone();
-    if let Some(id) = membership_id {
-        let owned_path =
-            human_sources::HUMAN_OWNED_MEMBERSHIP_CHANGE_PATH.replace("{membership_id}", id);
-        url.set_path(&owned_path);
-    } else {
-        url.set_path(path);
-        url.set_query(request.uri().query());
+    match change {
+        Some(DashboardHumanChange::Membership(id)) => {
+            let owned_path =
+                human_sources::HUMAN_OWNED_MEMBERSHIP_CHANGE_PATH.replace("{membership_id}", id);
+            url.set_path(&owned_path);
+        }
+        Some(DashboardHumanChange::Grant) => {
+            url.set_path(human_sources::HUMAN_OWNED_GRANT_CHANGE_PATH)
+        }
+        None => {
+            url.set_path(path);
+            url.set_query(request.uri().query());
+        }
     }
     let mut call = s
         .client
@@ -2325,9 +2348,9 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
         if let Some(context) = contexts.next() {
             if contexts.next().is_some()
                 || context.as_bytes().len() > 4096
-                || membership_change && context.to_str().ok().is_none_or(str::is_empty)
+                || human_change && context.to_str().ok().is_none_or(str::is_empty)
             {
-                if membership_change {
+                if human_change {
                     return Err(human::failure(
                         StatusCode::FORBIDDEN,
                         "context_invalid",
@@ -2343,7 +2366,7 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
                 ));
             }
             call = call.header("x-aiguard-context", context);
-        } else if membership_change {
+        } else if human_change {
             return Err(human::failure(
                 StatusCode::FORBIDDEN,
                 "context_required",
@@ -2352,8 +2375,11 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
             ));
         }
     }
-    if membership_change {
-        let (body, _) = human::membership_change_body(request).await?;
+    if let Some(change) = change {
+        let body = match change {
+            DashboardHumanChange::Membership(_) => human::membership_change_body(request).await?.0,
+            DashboardHumanChange::Grant => human::grant_change_body(request).await?.0,
+        };
         // Forward the exact change and its operation ID. The gateway rechecks
         // the bearer, selected context, stored subject and current authority.
         call = call
