@@ -25,7 +25,7 @@ jobs:
         source_parent_shas=bbe39996997332a8c6aed7a8551c45258abb8100+076d69add0efcae7f9870630a47c110bc89373c2
         workflow_sha=$WORKFLOW_SHA
         expected_parent_sha=4b6ae87a712f782e28e035432967c0bed270e0fc
-        expected_workflow_parent_sha=71905cf20c3f119a26dfcf368503c374b48d357c
+        expected_workflow_parent_sha=b33a5c16a15dc7b6e9677a78cc9d73df908d6d65
         source_guard=NOT_RUN
         runner_platform=unknown
         cgroup_mode=unknown
@@ -74,7 +74,7 @@ jobs:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
         ref: ${{ github.sha }}
-        fetch-depth: 5
+        fetch-depth: 6
         persist-credentials: false
     - name: Verify exact merged source and workflow-only commit
       shell: bash
@@ -87,20 +87,23 @@ jobs:
           mv -- "$receipt.pending" "$receipt"
         }
         source=4b6ae87a712f782e28e035432967c0bed270e0fc
-        recipe_base=71905cf20c3f119a26dfcf368503c374b48d357c
-        previous_recipe_base=25f0e296882313a8a27d100280b53446cb071384
+        recipe_base=b33a5c16a15dc7b6e9677a78cc9d73df908d6d65
+        previous_recipe_base=71905cf20c3f119a26dfcf368503c374b48d357c
+        older_recipe_base=25f0e296882313a8a27d100280b53446cb071384
         expected_parents='bbe39996997332a8c6aed7a8551c45258abb8100 076d69add0efcae7f9870630a47c110bc89373c2'
         if [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 &&
-              "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/claude/v1-g03-rootless-parent-outcome-20261123 &&
+              "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/claude/v1-g03-rootless-parent-version-check-20261123 &&
               "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$(git rev-parse HEAD)" == "$GITHUB_SHA" &&
               "$(git rev-parse HEAD^)" == "$recipe_base" && "$(git rev-parse "$recipe_base^")" == "$previous_recipe_base" &&
-              "$(git rev-parse "$previous_recipe_base^")" == "$source" &&
+              "$(git rev-parse "$previous_recipe_base^")" == "$older_recipe_base" &&
+              "$(git rev-parse "$older_recipe_base^")" == "$source" &&
               "$(git show -s --format=%P "$source")" == "$expected_parents" &&
               "$(git diff --name-only "$recipe_base" HEAD)" == .github/workflows/lot-verify.yaml &&
               -z "$(git status --porcelain=v1 --untracked-files=all)" ]] &&
            git merge-base --is-ancestor "$source" HEAD &&
            git cat-file -e "$recipe_base^{commit}" &&
            git cat-file -e "$previous_recipe_base^{commit}" &&
+           git cat-file -e "$older_recipe_base^{commit}" &&
            git cat-file -e bbe39996997332a8c6aed7a8551c45258abb8100^{commit} &&
            git cat-file -e 076d69add0efcae7f9870630a47c110bc89373c2^{commit}; then
           set_field source_guard PASS
@@ -618,7 +621,7 @@ jobs:
           esac
         }
         capture_before_stop() {
-          local prop value key journal_file journal_rc selected selected_path canonical module_version version_class observed_marker
+          local prop value key journal_file journal_rc selected selected_path canonical version_output module_version version_class observed_marker
           journal_file="$expected_private/unit-journal.txt"
           if [[ -d "$expected_private" && ! -L "$expected_private" && -n "${G03_UNIT:-}" && "$G03_UNIT" == "$unit_expected" ]]; then
             if (ulimit -f 128; timeout --signal=TERM --kill-after=1s 3s env \
@@ -698,17 +701,32 @@ jobs:
             elif [[ "$canonical" == /usr/bin/rootlesskit ]]; then set_field canonical_matches_profile true
             else set_field canonical_matches_profile false
             fi
-            if module_version=$(timeout --signal=TERM --kill-after=1s 3s go version -m "$selected_path" 2>/dev/null | awk '$1 == "mod" && $2 == "github.com/rootless-containers/rootlesskit" { count++; version=$3 } END { if (count == 1) print version }'); then
-              if [[ "$module_version" == v2.3.4 ]]; then
-                version_class=v2.3.4
-                set_field rootlesskit_version v2.3.4
-              elif [[ "$module_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$ ]]; then
-                version_class=other
-                set_field rootlesskit_version other
-              else
-                version_class=unknown
-                set_field rootlesskit_version unknown
+            module_version=unknown
+            if [[ "$canonical" == /usr/bin/rootlesskit && -x /usr/bin/rootlesskit ]] &&
+               version_output=$(timeout --signal=KILL 2s /usr/bin/rootlesskit --version </dev/null 2>/dev/null); then
+              module_version=$(printf '%s\n' "$version_output" | awk '
+                NR == 1 {
+                  if (NF == 1) version = $1
+                  else {
+                    command = $1
+                    sub(/^.*\//, "", command)
+                    if (command == "rootlesskit" && NF == 2) version = $2
+                    if (command == "rootlesskit" && NF == 3 && $2 == "version") version = $3
+                  }
+                  sub(/^v/, "", version)
+                  if (version != "") print version
+                }
+              ')
+            fi
+            numeric='(0|[1-9][0-9]*)'
+            prerelease_id="($numeric|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+            build_id='[0-9A-Za-z-]+'
+            semver_re="^$numeric\\.$numeric\\.$numeric(-$prerelease_id(\\.$prerelease_id)*)?(\\+$build_id(\\.$build_id)*)?$"
+            if [[ "$module_version" =~ $semver_re ]]; then
+              if [[ "$module_version" == 2.3.4 ]]; then version_class=v2.3.4
+              else version_class=other
               fi
+              set_field rootlesskit_version "$module_version"
             else
               version_class=unknown
               set_field rootlesskit_version unknown
@@ -811,4 +829,4 @@ jobs:
 'on':
   push:
     branches:
-    - claude/v1-g03-rootless-parent-outcome-20261123
+    - claude/v1-g03-rootless-parent-version-check-20261123
