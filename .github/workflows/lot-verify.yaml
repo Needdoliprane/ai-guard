@@ -1,198 +1,687 @@
-name: Lot verification
-
-# Verifies V1 development branches on a hosted Linux x86_64 runner so that the
-# development Mac keeps its memory for engine, browser and macOS recipes.
-# It complements ci.yaml (dev/main) and never creates tags, releases or
-# artifacts outside this run. Engine (Docker/Podman/Kubernetes) and provider
-# recipes stay out of this workflow: ignored tests are not run and are never
-# counted as passes.
-
-on:
-  push:
-    branches: ['claude/v1-**']
-
+name: G03 Linux rootless systemd startup diagnostic
 permissions:
   contents: read
-
 concurrency:
-  group: lot-verify-${{ github.ref }}
+  group: g03-linux-rootless-systemd-start-diagnostic-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
-  rust:
+  rootless-start-diagnostic:
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 150
     env:
-      AI_GUARD_BUILD_REVISION: ${{ github.sha }}
-      # Match CI's build limit when compiling and linking the full test suite.
-      CARGO_BUILD_JOBS: '1'
-      CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_PROFILE_TEST_DEBUG: '0'
-      RUST_MIN_STACK: '8388608'
-      CARGO_TERM_COLOR: never
+      AI_GUARD_BUILD_REVISION: 4b6ae87a712f782e28e035432967c0bed270e0fc
+      LC_ALL: C
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Free runner disk for the test targets
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
-      - name: Fetch dependencies with the pinned Rust toolchain
-        run: |
-          rustc --version
-          cargo fetch --locked
-      - name: Check Rust formatting
-        run: cargo fmt --all -- --check
-      - name: Check all targets with MySQL enabled
-        run: cargo check --locked --offline --all-targets --features mysql-storage --keep-going
-      - name: Check all targets without default features (SQLite only)
-        run: cargo check --locked --offline --all-targets --no-default-features --keep-going
-      - name: Third-party licence guard and its unit tests
-        # `cargo test` builds examples but does not run their unit tests.
-        run: |
-          cargo test --locked --offline --example third_party_notices
-          cargo run --quiet --locked --offline --example third_party_notices -- check --allowed .github/third-party-license-expressions.txt
-      - name: Provider harness regressions
-        run: |
-          python3 -B tests/e2e/interactive_driver.py --self-test
-          python3 -B tests/e2e/test_run_provider_preflight.py ProviderPreflightTests ProviderBrowserStageTests
-          python3 -B tests/e2e/test_run_provider_broker.py BrokerRecipeTests
-      - name: Rust test suite (ignored engine and provider tests excluded)
-        if: github.ref_name != 'claude/v1-integration-regressions-20261122'
-        shell: bash
-        run: |
-          set -o pipefail
-          export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
-          cargo test --locked --offline --no-fail-fast 2>&1 | tee cargo-test.log
-      - name: Targeted SQLite library regressions
-        if: github.ref_name == 'claude/v1-integration-regressions-20261122'
-        shell: bash
-        run: |
-          set -euo pipefail
-          export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
-          build_json="$TMPDIR/libtest.jsonl"
-          test_log="$TMPDIR/selector.log"
-          summary=cargo-test-summary.txt
-          failures=cargo-test-failed.txt
-          : > "$summary"
-          : > "$failures"
+    - name: Initialize a closed rootless receipt
+      shell: bash
+      env:
+        WORKFLOW_SHA: ${{ github.sha }}
+      run: |-
+        set -euo pipefail
+        umask 077
+        receipt="$RUNNER_TEMP/g03-rootless-start-receipt.txt"
+        cat > "$receipt" <<EOF_RECEIPT
+        source_sha=4b6ae87a712f782e28e035432967c0bed270e0fc
+        source_parent_shas=bbe39996997332a8c6aed7a8551c45258abb8100+076d69add0efcae7f9870630a47c110bc89373c2
+        workflow_sha=$WORKFLOW_SHA
+        expected_parent_sha=4b6ae87a712f782e28e035432967c0bed270e0fc
+        source_guard=NOT_RUN
+        runner_platform=unknown
+        cgroup_mode=unknown
+        user_bus_socket=NOT_CHECKED
+        user_manager_access=NOT_CHECKED
+        delegate_cpu=NOT_CHECKED
+        delegate_memory=NOT_CHECKED
+        delegate_pids=NOT_CHECKED
+        controller_cpu=NOT_CHECKED
+        controller_memory=NOT_CHECKED
+        controller_pids=NOT_CHECKED
+        preflight=NOT_RUN
+        blocked_reason=not_checked
+        prerequisite=NOT_RUN
+        apparmor_profile=NOT_RUN
+        apparmor_restrict=NOT_RUN
+        unit_start=NOT_STARTED
+        systemd_run_exit=unknown
+        unit_load_state=unknown
+        unit_active_state=unknown
+        unit_sub_state=unknown
+        unit_result=unknown
+        unit_main_code=unknown
+        unit_main_status=unknown
+        rootless_socket=NOT_CHECKED
+        rootless_mode=unknown
+        cgroup_driver=unknown
+        cgroup_version=unknown
+        unit_cleanup=NOT_STARTED
+        private_cleanup=NOT_STARTED
+        apparmor_cleanup=NOT_STARTED
+        last_phase=initialized
+        EOF_RECEIPT
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: ${{ github.sha }}
+        fetch-depth: 5
+        persist-credentials: false
+    - name: Verify exact merged source and workflow-only commit
+      shell: bash
+      run: |-
+        set -euo pipefail
+        receipt="$RUNNER_TEMP/g03-rootless-start-receipt.txt"
+        set_field() {
+          local key=$1 value=$2
+          awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+          mv -- "$receipt.pending" "$receipt"
+        }
+        source=4b6ae87a712f782e28e035432967c0bed270e0fc
+        expected_parents='bbe39996997332a8c6aed7a8551c45258abb8100 076d69add0efcae7f9870630a47c110bc89373c2'
+        if [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 &&
+              "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/claude/v1-g03-rootless-systemd-start-diagnostic-20261122 &&
+              "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$(git rev-parse HEAD)" == "$GITHUB_SHA" &&
+              "$(git rev-parse HEAD^)" == "$source" && "$(git show -s --format=%P "$source")" == "$expected_parents" &&
+              "$(git diff --name-only "$source" HEAD)" == .github/workflows/lot-verify.yaml &&
+              -z "$(git status --porcelain=v1 --untracked-files=all)" ]] &&
+           git merge-base --is-ancestor "$source" HEAD &&
+           git cat-file -e bbe39996997332a8c6aed7a8551c45258abb8100^{commit} &&
+           git cat-file -e 076d69add0efcae7f9870630a47c110bc89373c2^{commit}; then
+          set_field source_guard PASS
+          set_field runner_platform ubuntu-24.04-x64-hosted
+          set_field last_phase source_verified
+        else
+          set_field source_guard FAIL
+          set_field preflight BLOCKED
+          set_field blocked_reason source_or_runner_guard_failed
+          set_field last_phase source_guard_failed
+          exit 1
+        fi
+      timeout-minutes: 2
+    - name: Read systemd user manager and cgroup delegation
+      id: systemd-preflight
+      shell: bash
+      run: |
+        set -euo pipefail
+        umask 077
+        receipt="$RUNNER_TEMP/g03-rootless-start-receipt.txt"
+        set_field() {
+          local key=$1 value=$2
+          awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+          mv -- "$receipt.pending" "$receipt"
+        }
+        set_field phase systemd_read_only_preflight
+        cgroup_root=$(realpath -e /sys/fs/cgroup 2>/dev/null || true)
+        fs_type=$(stat -fc '%T' /sys/fs/cgroup 2>/dev/null || true)
+        if [[ "$fs_type" == cgroup2fs ]]; then set_field cgroup_mode v2
+        elif [[ -n "$fs_type" ]]; then set_field cgroup_mode other
+        else set_field cgroup_mode unknown
+        fi
 
-          settlement=broker::service::server::retirement_settlement_tests::same_original_not_queued_final_retries_its_retained_input_before_another_q
-          selectors=(
-            audit::resource_tests::retention_confirms_the_committed_segment_after_a_filesystem_ack_failure
-            api::human_sources::journal_tests::owned_event_page_reports_the_archived_prefix_after_adoption
-            api::human_sources::tests::owned_admin_reads_refuse_head_before_authentication
-            api::human_sources::journal_tests::owned_admin_reads::owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
-            identity::operations::tests::owned_event_availability_preserves_granted_permissions
-            broker::writer::inventory_tests::completed_inventory_releases_its_permit_before_reply
-            broker::writer::inventory_tests::timed_out_inventory_keeps_one_permit_and_cannot_queue_a_series_before_cancel
-            broker::writer::status_projection_tests::coverage_only_pending_arm_does_not_taint_a_valid_last_confirmed_status
-            "$settlement"
-          )
-          expected=9
-          if (( ${#selectors[@]} != expected )); then
-            echo 'Invalid regression selector count' | tee -a "$summary"
-            exit 1
+        uid=$(id -u)
+        user_runtime_dir="/run/user/$uid"
+        if [[ -S "$user_runtime_dir/bus" ]]; then
+          set_field user_bus_socket PRESENT
+          if timeout --signal=TERM --kill-after=1s 3s env \
+              XDG_RUNTIME_DIR="$user_runtime_dir" \
+              DBUS_SESSION_BUS_ADDRESS="unix:path=$user_runtime_dir/bus" \
+              systemctl --user show-environment >/dev/null 2>&1; then
+            set_field user_manager_access PASS
+          else
+            set_field user_manager_access UNAVAILABLE
           fi
-          printf 'Revision %s; %s exact SQLite library tests expected\n' "$GITHUB_SHA" "$expected" | tee -a "$summary"
+        elif [[ -e "$user_runtime_dir/bus" ]]; then
+          set_field user_bus_socket NOT_SOCKET
+          set_field user_manager_access NOT_CHECKED
+        else
+          set_field user_bus_socket ABSENT
+          set_field user_manager_access NOT_CHECKED
+        fi
 
-          # Keep raw Cargo and test output in the runner's private scratch directory.
-          if ! cargo test --locked --offline --no-default-features --lib --no-run \
-              --message-format=json > "$build_json" 2> "$TMPDIR/build.stderr"; then
-            echo 'SQLite library build failed; tests not run' | tee -a "$summary"
-            jq -r 'select(.reason == "compiler-message" and .message.level == "error")
-              | .message.code.code // empty | select(test("^E[0-9]{4}$"))' "$build_json" \
-              2>/dev/null | sort -u | tee -a "$summary" || true
-            exit 1
-          fi
-          if ! libtest="$(jq -ers '[.[] | select(.reason == "compiler-artifact"
-              and .target.name == "agentsandbox" and .target.kind == ["lib"]
-              and .profile.test == true and .executable != null) | .executable]
-              | unique | if length == 1 then .[0] else empty end' "$build_json")" \
-              || [[ ! -x "$libtest" ]]; then
-            echo 'Expected one SQLite library test executable; tests not run' | tee -a "$summary"
-            exit 1
-          fi
-          printf 'SQLite libtest SHA-256 %s\n' "$(sha256sum "$libtest" | awk '{print $1}')" | tee -a "$summary"
-
-          passed=0
-          for selector in "${selectors[@]}"; do
-            if "$libtest" "$selector" --exact --test-threads=1 > "$test_log" 2>&1 \
-                && grep -Fxq 'running 1 test' "$test_log" \
-                && grep -Fxq "test $selector ... ok" "$test_log" \
-                && grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$test_log"; then
-              printf 'PASS %s\n' "$selector" | tee -a "$summary"
-              ((passed += 1))
-            else
-              printf 'FAIL %s\n' "$selector" | tee -a "$summary"
-              printf '%s\n' "$selector" >> "$failures"
-              if [[ "$selector" == "$settlement" ]]; then
-                phases='bind_full3|enqueue_signal|ack_signal|load_before_retirement|begin_retirement|ack_pending|authorize_retirement|read_pending|load_before_final|pause_writer'
-                categories='InvalidInput|UnsupportedVersion|TooLarge|LimitExceeded|Busy|Conflict|Interrupted|Corrupt|UnsafeFilesystem|ControlSecret|Io'
-                grep -Eo "settlement phase=($phases) category=($categories)\b" "$test_log" \
-                  | sort -u | tee -a "$summary" || true
+        control_group=''
+        delegate_value=''
+        if control_group=$(timeout --signal=TERM --kill-after=1s 3s systemctl show "user@${uid}.service" --property=ControlGroup --value 2>/dev/null) &&
+           [[ "$control_group" =~ ^/user\.slice/user-[0-9]+\.slice/user@[0-9]+\.service(/[^/]*)*$ ]]; then
+          resolved_group=$(realpath -e -- "$cgroup_root$control_group" 2>/dev/null || true)
+          if [[ -n "$cgroup_root" && -n "$resolved_group" && "$resolved_group" == "$cgroup_root"/* && -d "$resolved_group" ]]; then
+            set_field control_group_verified PASS
+            if delegate_value=$(timeout --signal=TERM --kill-after=1s 3s systemctl show "user@${uid}.service" --property=Delegate --value 2>/dev/null); then :; else delegate_value=''; fi
+            case "$delegate_value" in
+              yes|true)
+                set_field delegate_cpu PASS
+                set_field delegate_memory PASS
+                set_field delegate_pids PASS
+                ;;
+              no|false)
+                set_field delegate_cpu FAIL
+                set_field delegate_memory FAIL
+                set_field delegate_pids FAIL
+                ;;
+              *)
+                for controller in cpu memory pids; do
+                  if [[ " $delegate_value " == *" $controller "* ]]; then set_field "delegate_$controller" PASS
+                  else set_field "delegate_$controller" FAIL
+                  fi
+                done
+                ;;
+            esac
+            available=''
+            subtree=''
+            if [[ -r "$resolved_group/cgroup.controllers" ]]; then available=$(<"$resolved_group/cgroup.controllers"); fi
+            if [[ -r "$resolved_group/cgroup.subtree_control" ]]; then subtree=$(<"$resolved_group/cgroup.subtree_control"); fi
+            for controller in cpu memory pids; do
+              if [[ " $available " == *" $controller "* ]]; then set_field "controller_$controller" PASS
+              else set_field "controller_$controller" FAIL
               fi
-            fi
-          done
-          printf 'Passed %s of %s exact selectors\n' "$passed" "$expected" | tee -a "$summary"
-          (( passed == expected ))
-      - name: Summarize test results
-        if: always()
-        shell: bash
-        run: |
-          if [ -f cargo-test.log ]; then
-            grep -E '^test result:|^     Running ' cargo-test.log > cargo-test-summary.txt || true
-            grep -E '\.\.\. FAILED$' cargo-test.log | sed 's/^test //; s/ \.\.\. FAILED$//' > cargo-test-failed.txt || true
-            {
-              echo "### Rust test suite"
-              echo
-              echo "Failed tests: $(wc -l < cargo-test-failed.txt)"
-              echo
-              echo '```'
-              head -n 100 cargo-test-failed.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-          elif [ -f cargo-test-summary.txt ]; then
-            {
-              echo "### Targeted SQLite library tests"
-              echo '```'
-              cat cargo-test-summary.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
+              if [[ " $subtree " == *" +$controller "* || " $subtree " == *" $controller "* ]]; then
+                set_field "subtree_$controller" enabled
+              elif [[ -r "$resolved_group/cgroup.subtree_control" ]]; then
+                set_field "subtree_$controller" disabled
+              else
+                set_field "subtree_$controller" unavailable
+              fi
+            done
+          else
+            set_field control_group_verified FAIL
           fi
-      - name: Upload test logs
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: lot-verify-rust-${{ github.sha }}
-          path: |
-            cargo-test.log
-            cargo-test-summary.txt
-            cargo-test-failed.txt
-          if-no-files-found: ignore
-          retention-days: 14
+        else
+          set_field control_group_verified FAIL
+        fi
 
-  frontend:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: front
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Setup Node
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '24.22.2'
-          package-manager-cache: false
-      - name: Install
-        run: npm ci --no-audit --no-fund
-      - name: Build
-        run: npm run build
-      - name: Test
-        run: npm test
+        reason=none
+        if [[ "$fs_type" != cgroup2fs ]]; then reason=unified_cgroup_v2_unavailable
+        elif grep -Fxq user_bus_socket=ABSENT "$receipt"; then reason=user_systemd_bus_socket_absent
+        elif grep -Fxq user_bus_socket=NOT_SOCKET "$receipt"; then reason=user_systemd_bus_socket_invalid
+        elif ! grep -Fxq user_manager_access=PASS "$receipt"; then reason=user_systemd_manager_unreachable
+        elif ! grep -Fxq control_group_verified=PASS "$receipt"; then reason=user_control_group_unavailable_or_unverified
+        elif grep -Eq '^(delegate|controller)_(cpu|memory|pids)=FAIL$' "$receipt"; then reason=required_controller_not_delegated_or_available
+        elif grep -Eq '^(delegate|controller)_(cpu|memory|pids)=NOT_RUN$' "$receipt"; then reason=delegation_evidence_incomplete
+        fi
+        if [[ "$reason" == none ]]; then
+          set_field preflight READY_FOR_NEXT_GATE
+          set_field blocked_reason none
+          set_field phase read_only_systemd_preflight_complete
+        else
+          set_field preflight BLOCKED
+          set_field blocked_reason "$reason"
+          set_field phase read_only_systemd_preflight_blocked
+          exit 1
+        fi
+      timeout-minutes: 2
+    - name: Prepare private rootless job paths
+      shell: bash
+      run: |-
+        set -euo pipefail
+        umask 077
+        receipt="$RUNNER_TEMP/g03-rootless-start-receipt.txt"
+        set_field() {
+          local key=$1 value=$2
+          awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+          mv -- "$receipt.pending" "$receipt"
+        }
+        if [[ ! "$GITHUB_RUN_ID" =~ ^[0-9]+$ || ! "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]; then
+          set_field preflight BLOCKED
+          set_field blocked_reason invalid_job_identity
+          exit 1
+        fi
+        uid=$(id -u)
+        user_runtime="/run/user/$uid"
+        private="$RUNNER_TEMP/g03-rootless-systemd-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        runtime="$user_runtime/ai-guard-g03-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        mkdir -m 700 "$private"
+        mkdir -m 700 "$private/tmp" "$private/data" "$private/execroot"
+        mkdir -m 700 "$runtime"
+        printf 'G03_PRIVATE=%s\nG03_USER_RUNTIME_DIR=%s\nG03_RUNTIME_DIR=%s\nG03_SOCKET=%s/docker.sock\nG03_SOCKET_URI=unix://%s/docker.sock\nG03_UNIT=aig-g03-%s-%s.service\nG03_TMPDIR=%s/tmp\nTMPDIR=%s/tmp\n' \
+          "$private" "$user_runtime" "$runtime" "$runtime" "$runtime" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$private" "$private" >> "$GITHUB_ENV"
+        set_field unit_start NOT_STARTED
+        set_field last_phase private_paths_prepared
+      timeout-minutes: 2
+    - name: Install matched rootless Docker prerequisites
+      shell: bash
+      run: |
+        set -euo pipefail
+        receipt="$RUNNER_TEMP/g03-rootless-start-receipt.txt"
+        set_field() {
+          local key=$1 value=$2
+          awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+          mv -- "$receipt.pending" "$receipt"
+        }
+        rootless_result=BLOCKED
+        rootless_source=unavailable
+        rootless_reason=preflight_not_complete
+        rootless_exit=0
+        engine_version=unknown
+        required_extras_version=unknown
+        extras_version=unknown
+        tools_present=false
+        finish_prerequisite_receipt() {
+          rc=$?
+          if [[ "$rootless_result" != PASS && "$rc" != 0 ]]; then rootless_exit=$rc; fi
+          set_field rootless_prerequisite "$rootless_result"
+          set_field prerequisite_source "$rootless_source"
+          set_field engine_package_version "$engine_version"
+          set_field required_extras_version "$required_extras_version"
+          set_field extras_package_version "$extras_version"
+          if [[ "$tools_present" == true ]]; then set_field tools_present PASS; else set_field tools_present FAIL; fi
+          set_field apparmor_scope rootlesskit
+          set_field prerequisite_reason "$rootless_reason"
+          set_field prerequisite_exit "$rootless_exit"
+          set_field last_phase rootless_prerequisites
+          if [[ "$rootless_result" != PASS ]]; then
+            set_field preflight BLOCKED
+            set_field blocked_reason "$rootless_reason"
+          fi
+        }
+        trap finish_prerequisite_receipt EXIT
+
+        . /etc/os-release
+        architecture=$(dpkg --print-architecture)
+        if [[ "$ID" != ubuntu || "$VERSION_ID" != 24.04 || "$VERSION_CODENAME" != noble || "$architecture" != amd64 ]]; then
+          rootless_reason=unsupported_ubuntu_platform
+          exit 1
+        fi
+        set_field runner_platform ubuntu/24.04/noble/amd64
+        engine_status=$(dpkg-query -W -f='${db:Status-Abbrev}\t${Version}' docker-ce 2>/dev/null || true)
+        observed_engine_version=unknown
+        if [[ "$engine_status" =~ ^ii[[:space:]]+([^[:space:]]+)$ ]]; then
+          candidate_engine_version=${BASH_REMATCH[1]}
+          if [[ "$candidate_engine_version" =~ ^5:[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.~+_-]+~ubuntu\.24\.04~noble$ ]]; then
+            observed_engine_version=$candidate_engine_version
+            engine_version=$candidate_engine_version
+          fi
+        fi
+        if [[ "$engine_version" == unknown ]]; then
+          rootless_reason=compatible_docker_ce_package_absent
+          exit 1
+        fi
+        required_extras_version="$engine_version"
+        extras_status=$(dpkg-query -W -f='${db:Status-Abbrev}\t${Version}' docker-ce-rootless-extras 2>/dev/null || true)
+        if [[ "$extras_status" =~ ^ii[[:space:]]+([^[:space:]]+)$ ]]; then
+          candidate_extras_version=${BASH_REMATCH[1]}
+          if [[ "$candidate_extras_version" =~ ^5:[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.~+_-]+~ubuntu\.24\.04~noble$ ]]; then
+            extras_version=$candidate_extras_version
+          fi
+        fi
+        rootless_tools=(/usr/bin/dockerd-rootless.sh /usr/bin/dockerd-rootless-setuptool.sh /usr/bin/rootlesskit)
+        tools_present=true
+        for tool in "${rootless_tools[@]}"; do [[ -x "$tool" ]] || tools_present=false; done
+        if [[ "$extras_version" == "$required_extras_version" && "$tools_present" == true ]]; then
+          rootless_source=runner-preinstalled
+          rootless_reason=runner_package_matches_installed_engine
+          if ! sudo apt-get update > "$RUNNER_TEMP/g03-rootless-prerequisites.log" 2>&1; then
+            rootless_reason=ubuntu_package_index_update_failed
+            exit 1
+          fi
+          if ! sudo apt-get install --yes --no-install-recommends --no-upgrade \
+            uidmap dbus-user-session slirp4netns fuse-overlayfs apparmor >> "$RUNNER_TEMP/g03-rootless-prerequisites.log" 2>&1; then
+            rootless_reason=base_prerequisites_install_failed
+            exit 1
+          fi
+        elif [[ "$extras_version" != unknown ]]; then
+          rootless_reason=installed_rootless_extras_version_mismatch
+          exit 1
+        else
+          rootless_source=official-signed-apt
+          rootless_reason=checking_signed_candidate
+          if ! sudo apt-get update > "$RUNNER_TEMP/g03-rootless-apt.log" 2>&1; then
+            rootless_reason=ubuntu_package_index_update_failed
+            exit 1
+          fi
+          if ! sudo apt-get install --yes --no-install-recommends --no-upgrade \
+            uidmap dbus-user-session slirp4netns fuse-overlayfs apparmor ca-certificates curl gnupg \
+            > "$RUNNER_TEMP/g03-rootless-apt-install.log" 2>&1; then
+            rootless_reason=base_prerequisites_install_failed
+            exit 1
+          fi
+          key="$RUNNER_TEMP/docker-g03.asc"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            https://download.docker.com/linux/ubuntu/gpg --output "$key" 2>> "$RUNNER_TEMP/g03-rootless-apt.log"
+          test -s "$key"
+          gpg --show-keys --with-colons "$key" > "$RUNNER_TEMP/docker-g03-key-metadata" 2>/dev/null
+          test "$(grep -c '^pub:' "$RUNNER_TEMP/docker-g03-key-metadata")" = 1
+          sudo install -m 0755 -d /etc/apt/keyrings
+          sudo install -m 0644 "$key" /etc/apt/keyrings/docker-g03.asc
+          sudo tee /etc/apt/sources.list.d/docker-g03.sources >/dev/null <<'EOF'
+        Types: deb
+        URIs: https://download.docker.com/linux/ubuntu
+        Suites: noble
+        Components: stable
+        Architectures: amd64
+        Signed-By: /etc/apt/keyrings/docker-g03.asc
+        EOF
+          if ! sudo apt-get update >> "$RUNNER_TEMP/g03-rootless-apt.log" 2>&1; then
+            rootless_reason=signed_docker_repository_metadata_failed
+            exit 1
+          fi
+          apt-cache madison docker-ce-rootless-extras > "$RUNNER_TEMP/g03-rootless-candidates"
+          awk -v version="$required_extras_version" \
+            '$3 == version && $5 == "https://download.docker.com/linux/ubuntu" { found=1 } END { exit !found }' \
+            "$RUNNER_TEMP/g03-rootless-candidates" || {
+              rootless_reason=signed_candidate_matching_engine_unavailable
+              exit 1
+            }
+          plan="$RUNNER_TEMP/g03-rootless-install-plan"
+          if ! sudo apt-get --simulate install --yes --no-install-recommends --no-upgrade \
+            "docker-ce-rootless-extras=$required_extras_version" > "$plan" 2>&1; then
+            rootless_reason=apt_plan_failed
+            exit 1
+          fi
+          if grep -Eq '^(Inst|Remv) (docker-ce|docker-ce-cli|containerd.io)([[:space:]]|$)' "$plan"; then
+            rootless_reason=apt_plan_would_change_existing_engine
+            exit 1
+          fi
+          if ! sudo apt-get install --yes --no-install-recommends --no-upgrade \
+            "docker-ce-rootless-extras=$required_extras_version" >> "$RUNNER_TEMP/g03-rootless-apt.log" 2>&1; then
+            rootless_reason=matching_extras_install_failed
+            exit 1
+          fi
+          extras_status=$(dpkg-query -W -f='${db:Status-Abbrev}\t${Version}' docker-ce-rootless-extras 2>/dev/null || true)
+          if [[ "$extras_status" =~ ^ii[[:space:]]+([^[:space:]]+)$ ]]; then
+            candidate_extras_version=${BASH_REMATCH[1]}
+            if [[ "$candidate_extras_version" =~ ^5:[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.~+_-]+~ubuntu\.24\.04~noble$ ]]; then
+              extras_version=$candidate_extras_version
+            fi
+          fi
+          current_engine_status=$(dpkg-query -W -f='${db:Status-Abbrev}\t${Version}' docker-ce 2>/dev/null || true)
+          current_engine_version=unknown
+          if [[ "$current_engine_status" =~ ^ii[[:space:]]+([^[:space:]]+)$ ]]; then current_engine_version=${BASH_REMATCH[1]}; fi
+          tools_present=true
+          for tool in "${rootless_tools[@]}"; do [[ -x "$tool" ]] || tools_present=false; done
+          if [[ "$extras_version" != "$required_extras_version" || "$current_engine_version" != "$engine_version" || "$tools_present" != true ]]; then
+            rootless_reason=installed_package_engine_or_tools_verification_failed
+            exit 1
+          fi
+          rootless_reason=matching_official_package_installed
+        fi
+        if ! command -v apparmor_parser >/dev/null 2>&1; then
+          rootless_reason=apparmor_parser_unavailable
+          exit 1
+        fi
+        user=$(id -un)
+        range_ok() {
+          local file=$1
+          awk -F: -v user="$user" '$1 == user && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $3 >= 65536 {found=1} END {exit !found}' "$file"
+        }
+        if ! range_ok /etc/subuid || ! range_ok /etc/subgid; then
+          rootless_reason=preflight_subid_range_changed
+          exit 1
+        fi
+        rootless_result=PASS
+        tools_present=true
+      timeout-minutes: 15
+    - name: Allow user namespaces only for rootlesskit
+      shell: bash
+      run: |-
+        set -euo pipefail
+        umask 077
+        receipt="$RUNNER_TEMP/g03-rootless-export-receipt.txt"
+        set_field() {
+          local key=$1 value=$2
+          awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+          mv -- "$receipt.pending" "$receipt"
+        }
+        result=BLOCKED
+        finish_apparmor_receipt() {
+          rc=$?
+          if [[ "$result" == PASS ]]; then return; fi
+          if grep -Fxq apparmor_profile=NOT_RUN "$receipt"; then set_field apparmor_profile FAIL; fi
+          if grep -Fxq apparmor_restrict=NOT_RUN "$receipt"; then set_field apparmor_restrict FAIL; fi
+          set_field preflight BLOCKED
+          if grep -Fxq apparmor_profile=FAIL "$receipt"; then set_field blocked_reason apparmor_profile_install_failed
+          else set_field blocked_reason apparmor_userns_restriction_unverified
+          fi
+          set_field last_phase apparmor_rootlesskit_profile_failed
+          [[ "$rc" == 0 ]] || true
+        }
+        trap finish_apparmor_receipt EXIT
+        set_field last_phase apparmor_rootlesskit_profile
+        profile=qa-g03-rootlesskit
+        profile_file="/etc/apparmor.d/$profile"
+        if [[ -e "$profile_file" ]]; then exit 1; fi
+        {
+          echo 'abi <abi/4.0>,'
+          echo 'include <tunables/global>'
+          echo 'profile qa-g03-rootlesskit /usr/bin/rootlesskit flags=(unconfined) {'
+          echo '  userns,'
+          echo '}'
+        } | sudo tee "$profile_file" >/dev/null
+        set_field apparmor_file_created PASS
+        sudo apparmor_parser -r "$profile_file"
+        set_field apparmor_profile PASS
+        sysctl_value=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>> "$G03_PRIVATE/apparmor.log" || true)
+        test "$sysctl_value" = 1
+        set_field apparmor_restrict PASS
+        result=PASS
+        trap - EXIT
+      timeout-minutes: 2
+    - name: Attempt one transient rootless systemd unit
+      shell: bash
+      run: |-
+        set -uo pipefail
+        umask 077
+        receipt="$RUNNER_TEMP/g03-rootless-start-receipt.txt"
+        set_field() {
+          local key=$1 value=$2
+          awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+          mv -- "$receipt.pending" "$receipt"
+        }
+        userctl() {
+          timeout --signal=TERM --kill-after=1s 3s env \
+            XDG_RUNTIME_DIR="$G03_USER_RUNTIME_DIR" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=$G03_USER_RUNTIME_DIR/bus" \
+            systemctl --user "$@"
+        }
+        safe_state() {
+          case "$1" in
+            active|reloading|inactive|failed|activating|deactivating|maintenance|refreshing) printf '%s' "$1" ;;
+            *) printf unknown ;;
+          esac
+        }
+        safe_substate() {
+          case "$1" in
+            dead|start-pre|start|start-post|running|exited|reload|stop|stop-watchdog|stop-sigterm|stop-sigkill|stop-post|auto-restart|failed|final-sigterm|final-sigkill|cleanup|condition|assert|start-chown) printf '%s' "$1" ;;
+            *) printf unknown ;;
+          esac
+        }
+        safe_result() {
+          case "$1" in
+            success|protocol|timeout|exit-code|signal|core-dump|watchdog|start-limit-hit|resources|oom-kill|exec-condition|condition|assert|unsupported|invalid-argument) printf '%s' "$1" ;;
+            *) printf unknown ;;
+          esac
+        }
+        safe_main_code() {
+          case "$1" in exited|killed|dumped) printf '%s' "$1" ;; *) printf unknown ;; esac
+        }
+        safe_status() {
+          if [[ "$1" =~ ^(0|[1-9][0-9]{0,2})$ ]] && (( 10#$1 <= 255 )); then printf '%s' "$1"; else printf unknown; fi
+        }
+        capture_unit() {
+          local load active sub result code status
+          load=$(userctl show "$G03_UNIT" --property=LoadState --value 2>/dev/null || true)
+          case "$load" in loaded|not-found) set_field unit_load_state "$load" ;; *) set_field unit_load_state unknown ;; esac
+          active=$(userctl show "$G03_UNIT" --property=ActiveState --value 2>/dev/null || true)
+          sub=$(userctl show "$G03_UNIT" --property=SubState --value 2>/dev/null || true)
+          result=$(userctl show "$G03_UNIT" --property=Result --value 2>/dev/null || true)
+          code=$(userctl show "$G03_UNIT" --property=ExecMainCode --value 2>/dev/null || true)
+          status=$(userctl show "$G03_UNIT" --property=ExecMainStatus --value 2>/dev/null || true)
+          set_field unit_active_state "$(safe_state "$active")"
+          set_field unit_sub_state "$(safe_substate "$sub")"
+          set_field unit_result "$(safe_result "$result")"
+          set_field unit_main_code "$(safe_main_code "$code")"
+          set_field unit_main_status "$(safe_status "$status")"
+          if [[ -S "$G03_SOCKET" ]]; then set_field rootless_socket PRESENT; else set_field rootless_socket ABSENT; fi
+        }
+        set_field last_phase transient_rootless_unit_start
+        if [[ ! -d "$G03_RUNTIME_DIR" || ! -d "$G03_PRIVATE/data" || ! -S "$G03_USER_RUNTIME_DIR/bus" ]]; then
+          set_field preflight BLOCKED
+          set_field blocked_reason private_runtime_or_user_bus_unavailable
+          exit 1
+        fi
+        if timeout --signal=TERM --kill-after=2s 10s env \
+            XDG_RUNTIME_DIR="$G03_USER_RUNTIME_DIR" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=$G03_USER_RUNTIME_DIR/bus" \
+            systemd-run --user --no-block --unit="$G03_UNIT" \
+              --property='Delegate=cpu memory pids' \
+              --property=Type=exec \
+              --property=KillMode=control-group \
+              --property=TimeoutStopSec=10s \
+              --property=RuntimeMaxSec=15min \
+              --setenv="HOME=$HOME" \
+              --setenv="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+              --setenv="XDG_RUNTIME_DIR=$G03_RUNTIME_DIR" \
+              --setenv="DBUS_SESSION_BUS_ADDRESS=unix:path=$G03_USER_RUNTIME_DIR/bus" \
+              --setenv="TMPDIR=$G03_TMPDIR" \
+              --setenv="DOCKERD_ROOTLESS_ROOTLESSKIT_STATE_DIR=$G03_RUNTIME_DIR/rootlesskit" \
+              /usr/bin/dockerd-rootless.sh \
+              --host="unix://$G03_SOCKET" \
+              --data-root="$G03_PRIVATE/data" \
+              --exec-root="$G03_PRIVATE/execroot" \
+              --pidfile="$G03_PRIVATE/dockerd.pid" \
+              >"$G03_PRIVATE/systemd-run.log" 2>&1; then
+          set_field systemd_run_exit 0
+          set_field unit_start REQUESTED
+        else
+          request_rc=$?
+          if (( request_rc <= 255 )); then set_field systemd_run_exit "$request_rc"; else set_field systemd_run_exit unknown; fi
+          set_field unit_start REQUEST_FAILED
+        fi
+        for _ in $(seq 1 45); do
+          capture_unit
+          active=$(awk -F= '$1=="unit_active_state" {print $2}' "$receipt")
+          if [[ "$active" == failed || "$active" == inactive || "$active" == unknown ]]; then break; fi
+          if [[ -S "$G03_SOCKET" ]]; then
+            info=$(timeout --signal=TERM --kill-after=1s 3s env DOCKER_HOST="$G03_SOCKET_URI" /usr/bin/docker info \
+              --format '{{.SecurityOptions}}|{{.CgroupDriver}}|{{.CgroupVersion}}' 2>/dev/null || true)
+            if [[ -n "$info" ]]; then
+              IFS='|' read -r options driver version <<< "$info"
+              if [[ "$options" == *rootless* ]]; then set_field rootless_mode OBSERVED; else set_field rootless_mode NOT_OBSERVED; fi
+              case "$driver" in systemd|cgroupfs) set_field cgroup_driver "$driver" ;; *) set_field cgroup_driver unknown ;; esac
+              case "$version" in 1|2) set_field cgroup_version "$version" ;; *) set_field cgroup_version unknown ;; esac
+              break
+            fi
+          fi
+          sleep 2
+        done
+        capture_unit
+        set_field last_phase unit_observation_complete
+        if [[ "$(awk -F= '$1=="rootless_socket" {print $2}' "$receipt")" == PRESENT ]]; then
+          exit 0
+        fi
+        exit 1
+      timeout-minutes: 3
+    - name: Record unit outcome, then close only this transient unit
+      if: always()
+      shell: bash
+      run: |-
+        set -uo pipefail
+        umask 077
+        receipt="$RUNNER_TEMP/g03-rootless-start-receipt.txt"
+        [[ -f "$receipt" ]] || exit 0
+        set_field() {
+          local key=$1 value=$2
+          awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+          mv -- "$receipt.pending" "$receipt"
+        }
+        expected_private="$RUNNER_TEMP/g03-rootless-systemd-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        expected_runtime="/run/user/$(id -u)/ai-guard-g03-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        unit_expected="aig-g03-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.service"
+        userctl() {
+          timeout --signal=TERM --kill-after=1s 3s env \
+            XDG_RUNTIME_DIR="/run/user/$(id -u)" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus" \
+            systemctl --user "$@"
+        }
+        safe_value() {
+          case "$1" in
+            loaded|not-found) printf '%s' "$1" ;;
+            active|reloading|inactive|failed|activating|deactivating|maintenance|refreshing) printf '%s' "$1" ;;
+            dead|start-pre|start|start-post|running|exited|reload|stop|stop-watchdog|stop-sigterm|stop-sigkill|stop-post|auto-restart|final-sigterm|final-sigkill|cleanup|condition|assert|start-chown) printf '%s' "$1" ;;
+            success|protocol|timeout|exit-code|signal|core-dump|watchdog|start-limit-hit|resources|oom-kill|exec-condition|condition|assert|unsupported|invalid-argument) printf '%s' "$1" ;;
+            exited|killed|dumped) printf '%s' "$1" ;;
+            *) printf unknown ;;
+          esac
+        }
+        capture_before_stop() {
+          local prop value key
+          for pair in 'LoadState:unit_load_state' 'ActiveState:unit_active_state' 'SubState:unit_sub_state' 'Result:unit_result' 'ExecMainCode:unit_main_code'; do
+            prop=${pair%%:*}; key=${pair#*:}
+            value=$(userctl show "$unit_expected" --property="$prop" --value 2>/dev/null || true)
+            set_field "$key" "$(safe_value "$value")"
+          done
+          value=$(userctl show "$unit_expected" --property=ExecMainStatus --value 2>/dev/null || true)
+          if [[ "$value" =~ ^(0|[1-9][0-9]{0,2})$ ]] && (( 10#$value <= 255 )); then set_field unit_main_status "$value"; else set_field unit_main_status unknown; fi
+          if [[ -S "$expected_runtime/docker.sock" ]]; then set_field rootless_socket PRESENT; else set_field rootless_socket ABSENT; fi
+        }
+        unit_cleanup=NOT_STARTED
+        private_cleanup=NOT_STARTED
+        if [[ "$(awk -F= '$1=="unit_start" {print $2}' "$receipt")" == REQUESTED ||
+              "$(awk -F= '$1=="unit_start" {print $2}' "$receipt")" == REQUEST_FAILED ]]; then
+          capture_before_stop
+          load=$(awk -F= '$1=="unit_load_state" {print $2}' "$receipt")
+          if [[ "$load" == not-found ]]; then
+            unit_cleanup=CONFIRMED
+          elif [[ "${G03_UNIT:-$unit_expected}" == "$unit_expected" ]]; then
+            if userctl stop "$unit_expected" >/dev/null 2>&1; then
+              unit_cleanup=UNKNOWN
+              for _ in $(seq 1 12); do
+                active=$(userctl show "$unit_expected" --property=ActiveState --value 2>/dev/null || true)
+                main_pid=$(userctl show "$unit_expected" --property=MainPID --value 2>/dev/null || true)
+                current_load=$(userctl show "$unit_expected" --property=LoadState --value 2>/dev/null || true)
+                if [[ "$current_load" == not-found ]]; then
+                  unit_cleanup=CONFIRMED
+                  break
+                fi
+                if [[ "$active" == inactive || "$active" == failed ]]; then
+                  if [[ "$main_pid" == 0 ]] && userctl reset-failed "$unit_expected" >/dev/null 2>&1; then
+                    unit_cleanup=CONFIRMED
+                    break
+                  fi
+                fi
+                sleep 1
+              done
+            else
+              unit_cleanup=UNKNOWN
+            fi
+          else
+            unit_cleanup=UNKNOWN
+          fi
+        elif [[ "$(awk -F= '$1=="unit_start" {print $2}' "$receipt")" == NOT_STARTED ]]; then
+          unit_cleanup=NOT_STARTED
+        fi
+        set_field unit_cleanup "$unit_cleanup"
+        if [[ "$unit_cleanup" == CONFIRMED || "$unit_cleanup" == NOT_STARTED ]]; then
+          private_cleanup=CONFIRMED
+          if [[ -d "$expected_runtime" ]]; then rm -rf -- "$expected_runtime"; [[ ! -e "$expected_runtime" ]] || private_cleanup=UNKNOWN; fi
+          if [[ -d "$expected_private" ]]; then rm -rf -- "$expected_private"; [[ ! -e "$expected_private" ]] || private_cleanup=UNKNOWN; fi
+        else
+          private_cleanup=UNKNOWN
+        fi
+        set_field private_cleanup "$private_cleanup"
+        apparmor_cleanup=NOT_STARTED
+        if grep -Fxq apparmor_file_created=PASS "$receipt"; then
+          apparmor_cleanup=UNKNOWN
+          if [[ "$unit_cleanup" == CONFIRMED || "$unit_cleanup" == NOT_STARTED ]]; then
+            profile_file=/etc/apparmor.d/qa-g03-rootlesskit
+            if [[ -f "$profile_file" && ! -L "$profile_file" ]] &&
+               sudo apparmor_parser -R "$profile_file" >/dev/null 2>&1 &&
+               sudo rm -- "$profile_file" && [[ ! -e "$profile_file" ]]; then
+              apparmor_cleanup=CONFIRMED
+            fi
+          fi
+        fi
+        set_field apparmor_cleanup "$apparmor_cleanup"
+        if [[ "$unit_cleanup" == UNKNOWN || "$private_cleanup" == UNKNOWN || "$apparmor_cleanup" == UNKNOWN ]]; then
+          set_field last_phase cleanup_unconfirmed
+        else
+          set_field last_phase cleanup_complete
+        fi
+      timeout-minutes: 3
+    - name: Upload the closed receipt only
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: g03-rootless-systemd-start-${{ github.run_id }}
+        path: ${{ runner.temp }}/g03-rootless-start-receipt.txt
+        if-no-files-found: error
+        retention-days: 14
+'on':
+  push:
+    branches:
+    - claude/v1-g03-rootless-systemd-start-diagnostic-20261122
