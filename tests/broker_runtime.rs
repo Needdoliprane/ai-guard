@@ -393,7 +393,9 @@ async fn run(selection: &Selection, evidence: &Evidence, lost: LostProcess) -> R
                     replayed: false,
                     operation_id,
                     ..
-                } if operation_id == operation => {}
+                } if operation_id == operation => {
+                    evidence.write("submit-accepted.json", &json!({"stage":"submit_accepted"}))?;
+                }
                 BrokerReplyV1::Error { code } => {
                     bail!("real submission refused before Running: {code}")
                 }
