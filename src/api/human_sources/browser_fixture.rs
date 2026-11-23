@@ -3,7 +3,7 @@
 #![cfg(test)]
 use super::*;
 use crate::api::human_sources::owned_control_tests::negative::reserve_workload_fixture_worker;
-use crate::control::QuotaPolicyV1;
+use crate::control::{QuotaPolicyV1, WorkerMutationV1, WorkerStateV1, WorkerTransitionV1};
 use crate::control_fs::{Directory, PrivateFile};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -18,7 +18,7 @@ mod egress;
 
 const ENABLE: &str = "AI_GUARD_OWNED_BROWSER_FIXTURE";
 const WORKER_MODE: &str = "run-workers-v1";
-const QUOTA_MODE: &str = "run-quota-v1";
+const USAGE_MODE: &str = "run-usage-v1";
 const DIST: &str = "AI_GUARD_OWNED_BROWSER_DIST";
 const CONTROL: &str = "AI_GUARD_OWNED_BROWSER_CONTROL";
 const SECONDS: &str = "AI_GUARD_OWNED_BROWSER_SECONDS";
@@ -304,7 +304,7 @@ impl Drop for Servers {
 enum FixtureMode {
     Journal,
     Workers,
-    Quota,
+    Usage,
 }
 
 enum FixtureSeed {
@@ -314,11 +314,62 @@ enum FixtureSeed {
         attempt_id: String,
         session_id: String,
     },
-    Quota,
+    Usage {
+        worker_id: String,
+        attempt_id: String,
+        terminal_observation_id: String,
+        unmeasured_worker_id: String,
+        unmeasured_attempt_id: String,
+    },
+}
+
+fn seed_usage(store: &Store) -> Result<FixtureSeed> {
+    // Supply the missing terminal time through the same Store transition.
+    // Runtime observations here belong only to the software fixture.
+    let worker = store.finish_usage_worker_for_test(None).worker;
+    let mut observation = worker
+        .last_observation
+        .context("usage fixture observation absent")?;
+    let started = chrono::DateTime::parse_from_rfc3339(
+        observation
+            .started_at
+            .as_deref()
+            .context("usage fixture start absent")?,
+    )?;
+    observation.finished_at = Some(
+        (started + chrono::Duration::nanoseconds(250_000))
+            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+    );
+    observation.observed_at = chrono::Utc::now().to_rfc3339();
+    let terminal = store.mutate_worker(&WorkerMutationV1 {
+        version: 1,
+        operation_id: uuid::Uuid::new_v4().to_string(),
+        worker_id: worker.worker_id,
+        attempt_id: worker.attempt.attempt_id,
+        expected_revision: worker.revision,
+        transition: WorkerTransitionV1::Observe { observation },
+    })?;
+    ensure!(
+        terminal.worker.state == WorkerStateV1::Terminal && !terminal.worker.quota_held,
+        "usage fixture did not record a terminal allocation"
+    );
+
+    let unmeasured = store.finish_usage_worker_for_test(None).worker;
+    ensure!(
+        unmeasured.state == WorkerStateV1::InDoubt && unmeasured.quota_held,
+        "usage fixture unmeasured attempt did not retain its reservation"
+    );
+    Ok(FixtureSeed::Usage {
+        worker_id: terminal.worker.worker_id,
+        attempt_id: terminal.worker.attempt.attempt_id,
+        terminal_observation_id: terminal.receipt.operation_id,
+        unmeasured_worker_id: unmeasured.worker_id,
+        unmeasured_attempt_id: unmeasured.attempt.attempt_id,
+    })
 }
 
 fn seed(mode: FixtureMode) -> Result<(Fixture, FixtureSeed)> {
-    let fixture = if mode == FixtureMode::Quota {
+    let fixture = if mode == FixtureMode::Usage {
         Fixture::new_owned_with_human_rights()
     } else {
         Fixture::new_owned()
@@ -361,10 +412,10 @@ fn seed(mode: FixtureMode) -> Result<(Fixture, FixtureSeed)> {
             supervision.schema_version == 13 && supervision.active,
             "worker fixture requires the active pre-adoption Store"
         );
-        let worker = reserve_workload_fixture_worker(store);
-        let seeded = if mode == FixtureMode::Quota {
-            FixtureSeed::Quota
+        let seeded = if mode == FixtureMode::Usage {
+            seed_usage(store)?
         } else {
+            let worker = reserve_workload_fixture_worker(store);
             FixtureSeed::Worker {
                 worker_id: worker.worker_id,
                 attempt_id: worker.attempt.attempt_id,
@@ -522,6 +573,7 @@ fn export_receipts(root: &Directory, path: &Path, tenant: &str) -> Result<()> {
                     "event",
                     "summary",
                     "quota",
+                    "usage",
                     WORKER_RECEIPT_KIND
                 ]
                 .contains(&row.action.as_str()),
@@ -546,7 +598,7 @@ async fn serve_owned_browser_fixture() -> Result<()> {
     let (mode, opt_in) = match std::env::var(ENABLE).as_deref() {
         Ok("run-v1") => (FixtureMode::Journal, "run-v1"),
         Ok(WORKER_MODE) => (FixtureMode::Workers, WORKER_MODE),
-        Ok(QUOTA_MODE) => (FixtureMode::Quota, QUOTA_MODE),
+        Ok(USAGE_MODE) => (FixtureMode::Usage, USAGE_MODE),
         _ => bail!("owned browser fixture requires its explicit opt-in"),
     };
     let config = Config::load(opt_in)?;
@@ -561,7 +613,7 @@ async fn serve_owned_browser_fixture() -> Result<()> {
         None,
         Redactor::new(vec![]),
     )?;
-    let state = if mode == FixtureMode::Quota {
+    let state = if mode == FixtureMode::Usage {
         state.with_worker_quotas(vec![(
             "B".into(),
             QuotaPolicyV1 {
@@ -610,7 +662,26 @@ async fn serve_owned_browser_fixture() -> Result<()> {
                 ready["mode"] = json!("worker_registry");
                 ready["worker"] = json!({"worker_id":worker_id,"attempt_id":attempt_id,"session_id":session_id});
             }
-            FixtureSeed::Quota => ready["mode"] = json!("quota"),
+            FixtureSeed::Usage {
+                worker_id,
+                attempt_id,
+                terminal_observation_id,
+                unmeasured_worker_id,
+                unmeasured_attempt_id,
+            } => {
+                ready["mode"] = json!("usage");
+                ready["usage"] = json!({
+                    "allocated": {
+                        "worker_id": worker_id,
+                        "attempt_id": attempt_id,
+                        "terminal_observation_id": terminal_observation_id,
+                    },
+                    "unmeasured": {
+                        "worker_id": unmeasured_worker_id,
+                        "attempt_id": unmeasured_attempt_id,
+                    },
+                });
+            }
         }
         publish(&config.root, "READY.json", &ready)?;
         eprintln!("OWNED_BROWSER_READY {}", config.root.path().join("READY.json").display());
