@@ -20,6 +20,7 @@ concurrency:
 
 jobs:
   rust:
+    if: github.ref_name != 'claude/v1-g01-g09-stack-coexistence-check-20261123'
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
@@ -175,7 +176,304 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  stack-coexistence:
+    if: github.ref_name == 'claude/v1-g01-g09-stack-coexistence-check-20261123'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify the exact shallow source and workflow-only child
+        id: exact_source
+        shell: bash
+        env:
+          EXPECTED_BRANCH: claude/v1-g01-g09-stack-coexistence-check-20261123
+          SOURCE_SHA: e0bbc5355ae18bb9ab76ffff7d38efcd2b82b1f6
+          SOURCE_TREE: f711ad24f76a2c9f0a83b8dadb2115baee66a335
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_NAME" != "$EXPECTED_BRANCH" ]]; then
+            echo 'Unexpected workflow branch' >&2; exit 1
+          fi
+          if [[ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]]; then
+            echo 'Checked-out revision does not match the workflow revision' >&2; exit 1
+          fi
+          if [[ "$(git rev-parse "$GITHUB_SHA^")" != "$SOURCE_SHA" ]]; then
+            echo 'Workflow commit is not a direct child of the exact source' >&2; exit 1
+          fi
+          if [[ "$(git rev-parse "$SOURCE_SHA^{tree}")" != "$SOURCE_TREE" ]]; then
+            echo 'Source tree does not match the expected candidate' >&2; exit 1
+          fi
+          changed="$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA")"
+          if [[ "$changed" != .github/workflows/lot-verify.yaml ]]; then
+            echo 'Workflow commit changed an unexpected file set' >&2; exit 1
+          fi
+          printf 'Source %s; workflow-only child verified\n' "$SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify Docker runner and prepare private scratch
+        id: preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          endpoint="$(docker context inspect "$(docker context show)" --format '{{.Endpoints.docker.Host}}')"
+          [[ "$endpoint" == unix:///var/run/docker.sock && -S /var/run/docker.sock ]]
+          server="$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}|{{.Server.Version}}')"
+          [[ "$server" =~ ^linux/amd64\|[0-9]+\.[0-9]+\.[0-9]+ ]]
+          security="$(docker info --format '{{json .SecurityOptions}}')"
+          if jq -e 'any(.[]; ascii_downcase | contains("rootless"))' <<<"$security" >/dev/null; then
+            echo 'Rootless Docker is outside this recipe' >&2; exit 1
+          fi
+          compose="$(docker compose version --short)"
+          [[ "$compose" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]
+          scratch="$(mktemp -d /tmp/ai-guard-stack.XXXXXX)"
+          chmod 700 "$scratch"
+          printf 'scratch=%s\nendpoint=%s\nserver=%s\ncompose=%s\n' "$scratch" "$endpoint" "$server" "$compose" >> "$GITHUB_OUTPUT"
+      - name: Build the pinned local control image
+        id: image
+        shell: bash
+        env:
+          SOURCE_SHA: e0bbc5355ae18bb9ab76ffff7d38efcd2b82b1f6
+        run: |
+          set -euo pipefail
+          image=agentsandbox-control:local
+          if docker image inspect "$image" >/dev/null 2>&1; then
+            echo 'The runner image tag already exists; preserving it and refusing reuse' >&2; exit 1
+          fi
+          image_id=""
+          container="aigqa-cli-extract-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          built=0
+          container_created=0
+          cleanup_image_build() {
+            rc=$?
+            trap - EXIT
+            set +e
+            if (( container_created )); then docker rm -f "$container" >/dev/null 2>&1; fi
+            if (( rc != 0 && built )) && [[ "$(docker image inspect "$image" --format '{{.Id}}' 2>/dev/null)" == "$image_id" ]]; then
+              docker image rm "$image" >/dev/null 2>&1
+            fi
+            exit "$rc"
+          }
+          trap cleanup_image_build EXIT
+          docker build --file images/control.Dockerfile --tag "$image" \
+            --build-arg AI_GUARD_BUILD_REVISION="$SOURCE_SHA" . \
+            > "${{ steps.preflight.outputs.scratch }}/image-build.log" 2>&1
+          built=1
+          image_id="$(docker image inspect "$image" --format '{{.Id}}')"
+          [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+          if docker container inspect "$container" >/dev/null 2>&1; then exit 1; fi
+          docker create --name "$container" "$image" >/dev/null
+          container_created=1
+          docker cp "$container:/usr/local/bin/agentsandbox" "${{ steps.preflight.outputs.scratch }}/agentsandbox" >/dev/null
+          docker rm "$container" >/dev/null
+          chmod 700 "${{ steps.preflight.outputs.scratch }}/agentsandbox"
+          "${{ steps.preflight.outputs.scratch }}/agentsandbox" --version >/dev/null
+          printf 'image_id=%s\nimage_tag=%s\n' "$image_id" "$image" >> "$GITHUB_OUTPUT"
+      - name: Exercise default and named stacks with authenticated viewers
+        id: exercise
+        shell: bash
+        env:
+          SCRATCH: ${{ steps.preflight.outputs.scratch }}
+          DOCKER_ENDPOINT: ${{ steps.preflight.outputs.endpoint }}
+          DOCKER_SERVER: ${{ steps.preflight.outputs.server }}
+          COMPOSE_VERSION: ${{ steps.preflight.outputs.compose }}
+          IMAGE_ID: ${{ steps.image.outputs.image_id }}
+          CLI: ${{ steps.preflight.outputs.scratch }}/agentsandbox
+          SOURCE_SHA: e0bbc5355ae18bb9ab76ffff7d38efcd2b82b1f6
+          RUN_NAME: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -Eeuo pipefail
+          report="$GITHUB_WORKSPACE/control-stack-coexistence-result.json"
+          stage=preflight
+          default_started=0
+          named_started=0
+          owns_default=0
+          owns_named=0
+          default_up=NOT_RUN
+          named_up=NOT_RUN
+          viewer_identity=NOT_RUN
+          named_down=NOT_RUN
+          default_preserved=NOT_RUN
+          loopback_bindings=NOT_RUN
+          default_down=NOT_RUN
+          default_cfg="$SCRATCH/default-config"
+          named_cfg="$SCRATCH/named-config"
+          default_project=agentsandbox
+          named_project="aigqa-${RUN_NAME}"
+          named_gateway=28787
+          named_dashboard=24000
+          cleanup_status=PASS
+          write_report() {
+            status="$1"
+            jq -n --arg status "$status" --arg stage "$stage" --arg source "$SOURCE_SHA" \
+              --arg server "$DOCKER_SERVER" --arg compose "$COMPOSE_VERSION" \
+              --arg default "$default_project" --arg named "$named_project" \
+              --arg cleanup "$cleanup_status" --arg default_up "$default_up" \
+              --arg named_up "$named_up" --arg viewer_identity "$viewer_identity" \
+              --arg named_down "$named_down" --arg preserved "$default_preserved" \
+              --arg default_down "$default_down" --arg loopback "$loopback_bindings" \
+              '{status:$status,stage:$stage,source:$source,test_count:1,preflight:"PASS",image_build:"PASS",scenario:"default_and_named_stack_coexistence",runtime:{mode:"docker-rootful",server:$server,compose_command:"docker compose",compose_version:$compose},stacks:{default:{project:$default,up:$default_up,down:$default_down},named:{project:$named,up:$named_up,down:$named_down}},loopback_bindings:$loopback,viewer_identity:{gateway_dashboard_same_tenant:$viewer_identity},named_down_preserved_default:$preserved,cleanup:$cleanup}' > "$report"
+          }
+          cleanup() {
+            rc=$?
+            trap - EXIT
+            set +e
+            if (( named_started )); then
+              "$CLI" down --runtime docker --runtime-program "$(command -v docker)" --runtime-endpoint "$DOCKER_ENDPOINT" --source "$GITHUB_WORKSPACE" --config-dir "$named_cfg" --stack-name "$named_project" > "$SCRATCH/named-cleanup.log" 2>&1
+              [[ $? == 0 ]] || cleanup_status=UNKNOWN
+            fi
+            if (( default_started )); then
+              "$CLI" down --runtime docker --runtime-program "$(command -v docker)" --runtime-endpoint "$DOCKER_ENDPOINT" --source "$GITHUB_WORKSPACE" --config-dir "$default_cfg" > "$SCRATCH/default-cleanup.log" 2>&1
+              [[ $? == 0 ]] || cleanup_status=UNKNOWN
+            fi
+            for project in "$named_project" "$default_project"; do
+              if [[ "$project" == "$named_project" && "$owns_named" != 1 ]] || [[ "$project" == "$default_project" && "$owns_default" != 1 ]]; then
+                continue
+              fi
+              mapfile -t volumes < <(docker volume ls --quiet --filter "label=com.docker.compose.project=$project")
+              if (( ${#volumes[@]} > 1 )); then cleanup_status=UNKNOWN; continue; fi
+              if (( ${#volumes[@]} == 1 )); then
+                labels="$(docker volume inspect "${volumes[0]}" --format '{{json .Labels}}')"
+                if [[ "$(jq -r '.["com.docker.compose.project"] // ""' <<<"$labels")" == "$project" && "$(jq -r '.["com.docker.compose.volume"] // ""' <<<"$labels")" == audit_data ]]; then
+                  docker volume rm "${volumes[0]}" >/dev/null || cleanup_status=UNKNOWN
+                else cleanup_status=UNKNOWN; fi
+              fi
+              containers="$(docker container ls --all --quiet --filter "label=com.docker.compose.project=$project")"
+              networks="$(docker network ls --quiet --filter "label=com.docker.compose.project=$project")"
+              [[ -z "$containers" && -z "$networks" ]] || cleanup_status=UNKNOWN
+            done
+            if [[ -n "${IMAGE_ID:-}" ]] && [[ "$(docker image inspect agentsandbox-control:local --format '{{.Id}}' 2>/dev/null)" == "$IMAGE_ID" ]]; then
+              docker image rm agentsandbox-control:local >/dev/null || cleanup_status=UNKNOWN
+            else cleanup_status=UNKNOWN; fi
+            if [[ "$SCRATCH" == /tmp/ai-guard-stack.* && -d "$SCRATCH" && ! -L "$SCRATCH" ]]; then
+              rm -rf -- "$SCRATCH" || cleanup_status=UNKNOWN
+            else cleanup_status=UNKNOWN; fi
+            final_rc="$rc"
+            if (( rc == 0 )) && [[ "$cleanup_status" == PASS ]]; then write_report PASS; else write_report FAIL; final_rc=1; fi
+            exit "$final_rc"
+          }
+          trap cleanup EXIT
+          for project in "$default_project" "$named_project"; do
+            [[ -z "$(docker container ls --all --quiet --filter "label=com.docker.compose.project=$project")" ]]
+            [[ -z "$(docker volume ls --quiet --filter "label=com.docker.compose.project=$project")" ]]
+            [[ -z "$(docker network ls --quiet --filter "label=com.docker.compose.project=$project")" ]]
+            if [[ "$project" == "$default_project" ]]; then owns_default=1; else owns_named=1; fi
+          done
+          if ss -H -ltn | awk '{print $4}' | grep -Eq ':(8787|4000|28787|24000)$'; then
+            echo 'A fixture port is already occupied' >&2; exit 1
+          fi
+          stage=initialize
+          mkdir -m 700 "$default_cfg" "$named_cfg"
+          "$CLI" init --config-dir "$default_cfg" > "$SCRATCH/default-init.log" 2>&1
+          "$CLI" init --config-dir "$named_cfg" > "$SCRATCH/named-init.log" 2>&1
+          common=(--runtime docker --runtime-program "$(command -v docker)" --runtime-endpoint "$DOCKER_ENDPOINT" --source "$GITHUB_WORKSPACE")
+          stage=default_up
+          default_started=1
+          "$CLI" up "${common[@]}" --config-dir "$default_cfg" --allow-rootful-runtime > "$SCRATCH/default-up.log" 2>&1
+          default_up=PASS
+          stage=named_up
+          named_started=1
+          "$CLI" up "${common[@]}" --config-dir "$named_cfg" --stack-name "$named_project" --gateway-port "$named_gateway" --dashboard-port "$named_dashboard" --allow-rootful-runtime > "$SCRATCH/named-up.log" 2>&1
+          named_up=PASS
+          identity() {
+            config="$1"; url="$2"; label="$3"
+            token="$(cat "$config/secrets/viewer")"
+            auth_file="$SCRATCH/$label.curl"
+            response_file="$SCRATCH/$label.json"
+            (umask 077; printf 'header = "Authorization: Bearer %s"\n' "$token" > "$auth_file")
+            curl --silent --show-error --fail --max-time 10 --config "$auth_file" --output "$response_file" "$url/api/v1/identity"
+            role="$(jq -er '.role | select(. == "viewer")' "$response_file")"
+            tenant="$(jq -er '.tenant_id | select(type == "string" and length > 0)' "$response_file")"
+            [[ "$role" == viewer && -n "$tenant" ]]
+            printf '%s' "$tenant"
+          }
+          check_loopback_bindings() {
+            project="$1"; gateway_port="$2"; dashboard_port="$3"
+            mapfile -t ingress_ids < <(docker container ls --all --quiet \
+              --filter "label=com.docker.compose.project=$project" \
+              --filter 'label=com.docker.compose.service=ingress')
+            [[ ${#ingress_ids[@]} == 1 ]]
+            bindings="$(docker inspect "${ingress_ids[0]}" --format '{{json .NetworkSettings.Ports}}')"
+            jq -e --arg gateway "$gateway_port" --arg dashboard "$dashboard_port" \
+              '.["8787/tcp"] == [{"HostIp":"127.0.0.1","HostPort":$gateway}] and .["4000/tcp"] == [{"HostIp":"127.0.0.1","HostPort":$dashboard}]' \
+              <<<"$bindings" >/dev/null
+          }
+          stage=verify_loopback_ports
+          check_loopback_bindings "$default_project" 8787 4000
+          check_loopback_bindings "$named_project" "$named_gateway" "$named_dashboard"
+          loopback_bindings=PASS
+          stage=verify_viewers
+          default_gw="$(identity "$default_cfg" http://127.0.0.1:8787 default-gateway-before)"
+          default_ui="$(identity "$default_cfg" http://127.0.0.1:4000 default-dashboard-before)"
+          named_gw="$(identity "$named_cfg" http://127.0.0.1:$named_gateway named-gateway)"
+          named_ui="$(identity "$named_cfg" http://127.0.0.1:$named_dashboard named-dashboard)"
+          [[ "$default_gw" == "$default_ui" && "$named_gw" == "$named_ui" ]]
+          [[ "$default_gw" == "$named_gw" ]]
+          viewer_identity=PASS
+          stage=named_down
+          "$CLI" down "${common[@]}" --config-dir "$named_cfg" --stack-name "$named_project" > "$SCRATCH/named-down.log" 2>&1
+          named_started=0
+          named_down=PASS
+          [[ -z "$(docker container ls --all --quiet --filter "label=com.docker.compose.project=$named_project")" ]]
+          [[ -z "$(docker network ls --quiet --filter "label=com.docker.compose.project=$named_project")" ]]
+          mapfile -t default_containers < <(docker container ls --all --quiet --filter "label=com.docker.compose.project=$default_project")
+          [[ ${#default_containers[@]} == 3 ]]
+          stage=default_survives_named_down
+          default_gw_after="$(identity "$default_cfg" http://127.0.0.1:8787 default-gateway-after)"
+          default_ui_after="$(identity "$default_cfg" http://127.0.0.1:4000 default-dashboard-after)"
+          [[ "$default_gw_after" == "$default_gw" && "$default_ui_after" == "$default_gw" ]]
+          default_preserved=PASS
+          "$CLI" verify-audit --config-dir "$default_cfg" --gateway http://127.0.0.1:8787 > "$SCRATCH/default-audit.log" 2>&1
+          stage=default_down
+          "$CLI" down "${common[@]}" --config-dir "$default_cfg" > "$SCRATCH/default-down.log" 2>&1
+          default_started=0
+          default_down=PASS
+          stage=complete
+          write_report PASS
+          echo 'Control stack coexistence PASS' >> "$GITHUB_STEP_SUMMARY"
+      - name: Record a closed result if setup stops the scenario
+        if: always()
+        shell: bash
+        env:
+          SOURCE_SHA: e0bbc5355ae18bb9ab76ffff7d38efcd2b82b1f6
+          SOURCE_CHECK: ${{ steps.exact_source.outcome }}
+          PREFLIGHT: ${{ steps.preflight.outcome }}
+          IMAGE_BUILD: ${{ steps.image.outcome }}
+        run: |
+          set -euo pipefail
+          umask 077
+          report="$GITHUB_WORKSPACE/control-stack-coexistence-result.json"
+          if [[ -s "$report" ]]; then exit 0; fi
+          stage=source_check
+          preflight=NOT_RUN
+          image_build=NOT_RUN
+          if [[ "$SOURCE_CHECK" == success ]]; then
+            stage=preflight
+            if [[ "$PREFLIGHT" == success ]]; then
+              preflight=PASS
+              stage=image_build
+              if [[ "$IMAGE_BUILD" == success ]]; then
+                image_build=PASS
+                stage=scenario_receipt
+              elif [[ "$IMAGE_BUILD" == failure ]]; then image_build=FAIL; fi
+            elif [[ "$PREFLIGHT" == failure ]]; then preflight=FAIL; fi
+          fi
+          jq -n --arg source "$SOURCE_SHA" --arg stage "$stage" \
+            --arg preflight "$preflight" --arg image_build "$image_build" \
+            '{status:"FAIL",source:$source,stage:$stage,preflight:$preflight,image_build:$image_build,test_count:0}' > "$report"
+      - name: Publish the closed result
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: control-stack-coexistence-${{ github.sha }}
+          path: control-stack-coexistence-result.json
+          if-no-files-found: error
+          retention-days: 7
+
   frontend:
+    if: github.ref_name != 'claude/v1-g01-g09-stack-coexistence-check-20261123'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
