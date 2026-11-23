@@ -320,6 +320,10 @@ fn batch_failure_marker_accepts_observed_failures_without_claiming_effect() {
         "ownership_reload",
         "created_inspection",
         "created_exchange",
+        "terminal_observation_ack",
+        "result_audit",
+        "cleanup_confirmation",
+        "cleanup_ack",
     ] {
         let page = json!({"items":[{
             "id":"11111111-1111-4111-8111-111111111111", "seq":17,
@@ -338,6 +342,46 @@ fn batch_failure_marker_accepts_observed_failures_without_claiming_effect() {
         assert_eq!(marker.as_object().unwrap().len(), 8);
         assert!(!serde_json::to_string(&marker).unwrap().contains(private));
     }
+}
+
+#[test]
+fn terminal_failure_step_requires_one_complete_event_from_the_admitted_session() {
+    let session = "11111111-1111-4111-8111-111111111112";
+    let other_session = "11111111-1111-4111-8111-111111111113";
+    let complete = json!({"items":[{
+        "id":"11111111-1111-4111-8111-111111111111", "seq":18,
+        "kind":"broker.batch.failure", "source":"runner",
+        "provenance":"observed", "session_id":session,
+        "data":{"version":1,"phase":"worker","runtime_effect":"unknown",
+            "broker_step":"result_audit","enforcer":null,"runtime":null}
+    }],"next_cursor":null});
+    assert_eq!(
+        harness::terminal_failure_step(&complete, session, 17),
+        Some("result_audit")
+    );
+    assert!(harness::terminal_failure_step(&complete, session, 18).is_none());
+    for (pointer, replacement) in [
+        ("/next_cursor", json!(18)),
+        ("/items/0/session_id", json!(other_session)),
+        ("/items/0/provenance", json!("declared")),
+        ("/items/0/data/broker_step", json!("failure_observed")),
+        ("/items/0/data/runtime_effect", json!("observed")),
+        ("/items", json!([])),
+    ] {
+        let mut invalid = complete.clone();
+        *invalid.pointer_mut(pointer).unwrap() = replacement;
+        assert!(harness::terminal_failure_step(&invalid, session, 17).is_none());
+    }
+
+    let mut incomplete = complete.clone();
+    incomplete.as_object_mut().unwrap().remove("next_cursor");
+    assert!(harness::terminal_failure_step(&incomplete, session, 17).is_none());
+
+    let mut ambiguous = complete.clone();
+    let mut unrelated = ambiguous["items"][0].clone();
+    unrelated["session_id"] = json!(other_session);
+    ambiguous["items"].as_array_mut().unwrap().push(unrelated);
+    assert!(harness::terminal_failure_step(&ambiguous, session, 17).is_none());
 }
 
 #[test]
