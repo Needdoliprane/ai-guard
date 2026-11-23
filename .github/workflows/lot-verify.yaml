@@ -1,198 +1,733 @@
-name: Lot verification
+name: G09 terminal checkpoint observation
 
-# Verifies V1 development branches on a hosted Linux x86_64 runner so that the
-# development Mac keeps its memory for engine, browser and macOS recipes.
-# It complements ci.yaml (dev/main) and never creates tags, releases or
-# artifacts outside this run. Engine (Docker/Podman/Kubernetes) and provider
-# recipes stay out of this workflow: ignored tests are not run and are never
-# counted as passes.
-
+# Three pure Rust contract oracles precede one ignored Linux integration selector.
+# The test SIGKILLs only its own run-client process; the workload has no network
+# or provider. Docker inventory is read-only and fixture resources are retained.
 on:
   push:
-    branches: ['claude/v1-**']
+    branches:
+      - claude/v1-g09-terminal-checkpoint-observation-check-20261123
 
 permissions:
   contents: read
 
 concurrency:
-  group: lot-verify-${{ github.ref }}
-  cancel-in-progress: true
+  group: g09-terminal-audit-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  rust:
+  terminal-audit:
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 75
+    permissions:
+      contents: read
     env:
-      AI_GUARD_BUILD_REVISION: ${{ github.sha }}
-      # Match CI's build limit when compiling and linking the full test suite.
+      SOURCE_SHA: 2a97c68d407707bac649977e825a359331a2e9dd
+      SOURCE_TREE: abe38c7699ffd650b5cc12b293b94592803ec870
+      SOURCE_PARENT_SHA: 6771f3da49df72504a25361bf9d0ba770cfab9cc
+      SOURCE_PARENT_TREE: a859490b270307ca0b6b94d114112308b378043a
+      SOURCE_GRANDPARENT_SHA: c617aa7506a87128da4a8a7fa17240d44c3c6f6a
+      SOURCE_GRANDPARENT_TREE: 428cafaee0b008dbad5d915208abffa6c6fef8e9
+      SOURCE_GREAT_GRANDPARENT_SHA: a2b70dfdb64f593893fcc731f91abaabac0e16ad
+      SOURCE_GREAT_GRANDPARENT_TREE: 818b74ea130d28fc810b62ce0453a4e93db1f9d7
+      EXPECTED_TEST_BLOB: 78f56b31967aff0064b68d60a5076a57486aa963
+      EXPECTED_SUPPORT_BLOB: 33a0562c091ae97b0f4aecd5046f5e69e5c1a575
+      EXPECTED_CHECKPOINT_BLOB: 5ad5ee66a1f01937d023633f0063d98a35bdc9dd
+      LOCK_SHA: 05847a300405860df8f860d5dc1c39ca423dfa0d
+      EXPECTED_BRANCH: claude/v1-g09-terminal-checkpoint-observation-check-20261123
+      SELECTOR: broker_run_cli_sigkill_preserves_original_deadline_without_second_start
+      SOFTWARE_SELECTOR_ONE: harness::checkpoint::tests::checkpoint_outbox_view_refuses_unconfirmed_frames
+      SOFTWARE_SELECTOR_TWO: harness::checkpoint::tests::checkpoint_outbox_delivery_distinguishes_absence_pending_ack_and_unknown
+      SOFTWARE_SELECTOR_THREE: terminal_failure_step_requires_one_complete_event_from_the_admitted_session
+      AI_GUARD_BUILD_REVISION: 2a97c68d407707bac649977e825a359331a2e9dd
       CARGO_BUILD_JOBS: '1'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
-      RUST_MIN_STACK: '8388608'
       CARGO_TERM_COLOR: never
+      DOCKER_HOST: unix:///var/run/docker.sock
+      LC_ALL: C
     steps:
+      - name: Initialize closed run-client receipt
+        shell: bash
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/g09-terminal-audit-receipt.txt"
+          cat > "$receipt" <<EOF
+          source_sha=$SOURCE_SHA
+          source_tree=$SOURCE_TREE
+          source_parent=$SOURCE_PARENT_SHA
+          workflow_sha=$WORKFLOW_SHA
+          workflow_parent_sha=unknown
+          source_guard=NOT_RUN
+          rootful_preflight=NOT_RUN
+          worker_image_build=NOT_RUN
+          worker_image_uid=NOT_RUN
+          worker_image_arch=NOT_RUN
+          provider_cli_versions=NONE_SELECTED
+          worker_network=none
+          dependency_fetch=NOT_RUN
+          build_no_run=NOT_RUN
+          build_exit=unknown
+          broker_runtime_test_sha256=unknown
+          build_error_codes=none
+          test_selector=$SELECTOR
+          software_selector_one=$SOFTWARE_SELECTOR_ONE
+          software_selector_one_verdict=NOT_RUN
+          software_selector_two=$SOFTWARE_SELECTOR_TWO
+          software_selector_two_verdict=NOT_RUN
+          software_selector_three=$SOFTWARE_SELECTOR_THREE
+          software_selector_three_verdict=NOT_RUN
+          pure_witnesses=RUN_EXACTLY_ONCE_BELOW
+          test_selected=unknown
+          test_passed=unknown
+          test_failed=unknown
+          test_ignored=unknown
+          test_exit=unknown
+          test_verdict=NOT_RUN
+          evidence_root=NOT_VERIFIED
+          result_file=NOT_READ
+          run_client_state=NOT_READ
+          run_client_stage=NOT_READ
+          central_terminal_observed_within_window=unknown
+          worker_deadline_evidence=unknown
+          terminal_wait_sample_worker_write_state=NOT_READ
+          terminal_wait_sample_status_write_state=NOT_READ
+          terminal_wait_sample_projection=NOT_READ
+          terminal_failure_step=NOT_READ_CONDITION_UNMET
+          terminal_failure_read=unverified
+          terminal_checkpoint.head_revision=unknown
+          terminal_checkpoint.result_audit_at_head=unknown
+          terminal_checkpoint.failure_audit_at_head=unknown
+          outcome_diagnosis=NOT_RUN
+          fixture_retention=TEST_DECLARED_PRIVATE
+          containers_before=unknown
+          containers_after=unknown
+          containers_new=unknown
+          volumes_before=unknown
+          volumes_after=unknown
+          volumes_new=unknown
+          images_before=unknown
+          images_after=unknown
+          images_new=unknown
+          engine_cleanup=NOT_PERFORMED
+          receipt_closed=NO
+          last_phase=initialized
+          EOF
+          chmod 600 "$receipt"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
+          fetch-depth: 5
           persist-credentials: false
-      - name: Free runner disk for the test targets
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
-      - name: Fetch dependencies with the pinned Rust toolchain
-        run: |
-          rustc --version
-          cargo fetch --locked
-      - name: Check Rust formatting
-        run: cargo fmt --all -- --check
-      - name: Check all targets with MySQL enabled
-        run: cargo check --locked --offline --all-targets --features mysql-storage --keep-going
-      - name: Check all targets without default features (SQLite only)
-        run: cargo check --locked --offline --all-targets --no-default-features --keep-going
-      - name: Third-party licence guard and its unit tests
-        # `cargo test` builds examples but does not run their unit tests.
-        run: |
-          cargo test --locked --offline --example third_party_notices
-          cargo run --quiet --locked --offline --example third_party_notices -- check --allowed .github/third-party-license-expressions.txt
-      - name: Provider harness regressions
-        run: |
-          python3 -B tests/e2e/interactive_driver.py --self-test
-          python3 -B tests/e2e/test_run_provider_preflight.py ProviderPreflightTests ProviderBrowserStageTests
-          python3 -B tests/e2e/test_run_provider_broker.py BrokerRecipeTests
-      - name: Rust test suite (ignored engine and provider tests excluded)
-        if: github.ref_name != 'claude/v1-integration-regressions-20261122'
-        shell: bash
-        run: |
-          set -o pipefail
-          export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
-          cargo test --locked --offline --no-fail-fast 2>&1 | tee cargo-test.log
-      - name: Targeted SQLite library regressions
-        if: github.ref_name == 'claude/v1-integration-regressions-20261122'
+
+      - name: Verify exact G09 test-only source and workflow child
         shell: bash
         run: |
           set -euo pipefail
-          export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
-          build_json="$TMPDIR/libtest.jsonl"
-          test_log="$TMPDIR/selector.log"
-          summary=cargo-test-summary.txt
-          failures=cargo-test-failed.txt
-          : > "$summary"
-          : > "$failures"
-
-          settlement=broker::service::server::retirement_settlement_tests::same_original_not_queued_final_retries_its_retained_input_before_another_q
-          selectors=(
-            audit::resource_tests::retention_confirms_the_committed_segment_after_a_filesystem_ack_failure
-            api::human_sources::journal_tests::owned_event_page_reports_the_archived_prefix_after_adoption
-            api::human_sources::tests::owned_admin_reads_refuse_head_before_authentication
-            api::human_sources::journal_tests::owned_admin_reads::owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
-            identity::operations::tests::owned_event_availability_preserves_granted_permissions
-            broker::writer::inventory_tests::completed_inventory_releases_its_permit_before_reply
-            broker::writer::inventory_tests::timed_out_inventory_keeps_one_permit_and_cannot_queue_a_series_before_cancel
-            broker::writer::status_projection_tests::coverage_only_pending_arm_does_not_taint_a_valid_last_confirmed_status
-            "$settlement"
-          )
-          expected=9
-          if (( ${#selectors[@]} != expected )); then
-            echo 'Invalid regression selector count' | tee -a "$summary"
+          receipt="$RUNNER_TEMP/g09-terminal-audit-receipt.txt"
+          set_field() {
+            local key=$1 value=$2
+            awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          source_parent=$SOURCE_PARENT_SHA
+          source_grandparent=$SOURCE_GRANDPARENT_SHA
+          source_great_grandparent=$SOURCE_GREAT_GRANDPARENT_SHA
+          delta_parent=$'tests/broker_runtime.rs\ntests/support/broker_runtime_checkpoint.rs'
+          delta_base=$'tests/broker_runtime.rs\ntests/support/broker_runtime.rs\ntests/support/broker_runtime_checkpoint.rs'
+          if [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 &&
+                "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == "refs/heads/$EXPECTED_BRANCH" &&
+                "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$(git rev-parse HEAD)" == "$GITHUB_SHA" &&
+                "$(git show -s --format=%P HEAD)" == "$SOURCE_SHA" &&
+                "$(git rev-parse "$SOURCE_SHA^{tree}")" == "$SOURCE_TREE" &&
+                "$(git show -s --format=%P "$SOURCE_SHA")" == "$source_parent" &&
+                "$(git rev-parse "$source_parent^{tree}")" == "$SOURCE_PARENT_TREE" &&
+                "$(git show -s --format=%P "$source_parent")" == "$source_grandparent" &&
+                "$(git rev-parse "$source_grandparent^{tree}")" == "$SOURCE_GRANDPARENT_TREE" &&
+                "$(git show -s --format=%P "$source_grandparent")" == "$source_great_grandparent" &&
+                "$(git rev-parse "$source_great_grandparent^{tree}")" == "$SOURCE_GREAT_GRANDPARENT_TREE" &&
+                "$(git rev-parse "$SOURCE_SHA:Cargo.lock")" == "$LOCK_SHA" &&
+                "$(git diff --name-only "$source_parent" "$SOURCE_SHA")" == "$delta_parent" &&
+                "$(git diff --name-only "$source_grandparent" "$SOURCE_SHA")" == "$delta_base" &&
+                "$(git rev-parse "$SOURCE_SHA:tests/broker_runtime.rs")" == "$EXPECTED_TEST_BLOB" &&
+                "$(git rev-parse "$SOURCE_SHA:tests/support/broker_runtime.rs")" == "$EXPECTED_SUPPORT_BLOB" &&
+                "$(git rev-parse "$SOURCE_SHA:tests/support/broker_runtime_checkpoint.rs")" == "$EXPECTED_CHECKPOINT_BLOB" &&
+                "$(git diff --name-only "$SOURCE_SHA" HEAD)" == .github/workflows/lot-verify.yaml &&
+                "$(git rev-parse --is-shallow-repository)" == true &&
+                -z "$(git status --porcelain=v1 --untracked-files=all)" ]] &&
+             grep -Fq "async fn $SELECTOR() -> Result<()>" tests/broker_runtime.rs &&
+             grep -Fq 'let killed_status = run_cli.kill_owned()?;' tests/broker_runtime.rs &&
+             grep -Fq '"network":"none"' tests/broker_runtime.rs &&
+             grep -Fq 'retain enforcer, workspace and evidence' tests/broker_runtime.rs &&
+             grep -Fq 'fn checkpoint_outbox_view_refuses_unconfirmed_frames()' tests/support/broker_runtime_checkpoint.rs &&
+             grep -Fq 'fn checkpoint_outbox_delivery_distinguishes_absence_pending_ack_and_unknown()' tests/support/broker_runtime_checkpoint.rs &&
+             grep -Fq "fn $SOFTWARE_SELECTOR_THREE()" tests/broker_runtime.rs &&
+             grep -Fq '"terminal_checkpoint":terminal_checkpoint' tests/broker_runtime.rs &&
+             grep -Fq '"terminal_failure_read":observations.terminal_failure_read' tests/broker_runtime.rs &&
+             grep -Fq 'head_revision: Option<NonZeroU64>' tests/support/broker_runtime_checkpoint.rs &&
+             grep -Fq 'Directory::open_existing(&self.job_root)' tests/support/broker_runtime_checkpoint.rs &&
+             grep -Fq 'file.revalidate().ok()?' tests/support/broker_runtime_checkpoint.rs; then
+            set_field workflow_parent_sha "$SOURCE_SHA"
+            set_field source_guard PASS
+            set_field last_phase source_verified
+          else
+            set_field source_guard FAIL
+            set_field last_phase source_guard_failed
             exit 1
           fi
-          printf 'Revision %s; %s exact SQLite library tests expected\n' "$GITHUB_SHA" "$expected" | tee -a "$summary"
 
-          # Keep raw Cargo and test output in the runner's private scratch directory.
-          if ! cargo test --locked --offline --no-default-features --lib --no-run \
-              --message-format=json > "$build_json" 2> "$TMPDIR/build.stderr"; then
-            echo 'SQLite library build failed; tests not run' | tee -a "$summary"
-            jq -r 'select(.reason == "compiler-message" and .message.level == "error")
-              | .message.code.code // empty | select(test("^E[0-9]{4}$"))' "$build_json" \
-              2>/dev/null | sort -u | tee -a "$summary" || true
-            exit 1
-          fi
-          if ! libtest="$(jq -ers '[.[] | select(.reason == "compiler-artifact"
-              and .target.name == "agentsandbox" and .target.kind == ["lib"]
-              and .profile.test == true and .executable != null) | .executable]
-              | unique | if length == 1 then .[0] else empty end' "$build_json")" \
-              || [[ ! -x "$libtest" ]]; then
-            echo 'Expected one SQLite library test executable; tests not run' | tee -a "$summary"
-            exit 1
-          fi
-          printf 'SQLite libtest SHA-256 %s\n' "$(sha256sum "$libtest" | awk '{print $1}')" | tee -a "$summary"
+      - name: Prepare private Cargo scratch
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/g09-terminal-audit-receipt.txt"
+          sed -i 's/^last_phase=.*/last_phase=private_scratch_prepare/' "$receipt"
+          private="$RUNNER_TEMP/g9-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -m 700 "$private"
+          canonical="$(realpath -- "$private")"
+          [[ "$canonical" == "$private" && "$(stat -c '%a' "$private")" == 700 ]]
+          mkdir -m 700 "$private/target" "$private/tmp"
+          [[ "$(realpath -- "$private/target")" == "$private/target" && "$(stat -c '%a' "$private/target")" == 700 ]]
+          [[ "$(realpath -- "$private/tmp")" == "$private/tmp" && "$(stat -c '%a' "$private/tmp")" == 700 ]]
+          printf 'G09_PRIVATE=%s\nTMPDIR=%s\nCARGO_TARGET_DIR=%s/target\n' "$private" "$private/tmp" "$private" >> "$GITHUB_ENV"
+          sed -i 's/^last_phase=.*/last_phase=private_scratch_ready/' "$receipt"
 
-          passed=0
-          for selector in "${selectors[@]}"; do
-            if "$libtest" "$selector" --exact --test-threads=1 > "$test_log" 2>&1 \
-                && grep -Fxq 'running 1 test' "$test_log" \
-                && grep -Fxq "test $selector ... ok" "$test_log" \
-                && grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$test_log"; then
-              printf 'PASS %s\n' "$selector" | tee -a "$summary"
-              ((passed += 1))
+      - name: Fetch locked Rust dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="$RUNNER_TEMP/g09-terminal-audit-receipt.txt"
+          sed -i 's/^last_phase=.*/last_phase=dependency_fetch/' "$receipt"
+          if cargo fetch --locked > "$G09_PRIVATE/fetch.log" 2>&1; then
+            sed -i 's/^dependency_fetch=NOT_RUN$/dependency_fetch=PASS/' "$receipt" || true
+            sed -i 's/^last_phase=.*/last_phase=dependencies_fetched/' "$receipt"
+          else
+            rc=$?
+            sed -i 's/^dependency_fetch=NOT_RUN$/dependency_fetch=FAIL/' "$receipt" || true
+            sed -i "s/^last_phase=.*/last_phase=dependency_fetch_failed_exit_${rc}/" "$receipt"
+            exit "$rc"
+          fi
+
+      - name: Compile the broker runtime test executable once
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="$RUNNER_TEMP/g09-terminal-audit-receipt.txt"
+          set_field() {
+            local key=$1 value=$2
+            awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          set_field last_phase broker_runtime_no_run
+          if cargo test --locked --offline --test broker_runtime --no-run --message-format=json > "$G09_PRIVATE/build.jsonl" 2> "$G09_PRIVATE/build.stderr"; then
+            broker_test="$(jq -ers '[.[] | select(.reason == "compiler-artifact" and .target.name == "broker_runtime" and .target.kind == ["test"] and .profile.test == true and .executable != null) | .executable] | unique | if length == 1 then .[0] else empty end' "$G09_PRIVATE/build.jsonl" 2>/dev/null || true)"
+            [[ -n "$broker_test" && -x "$broker_test" ]]
+            set_field broker_runtime_test_sha256 "$(sha256sum "$broker_test" | awk '{print $1}')"
+            set_field build_no_run PASS
+            set_field build_exit 0
+            printf '%s\n' "$broker_test" > "$G09_PRIVATE/broker-runtime-test.path"
+            set_field last_phase broker_runtime_compiled_no_run
+          else
+            rc=$?
+            set_field build_no_run FAIL
+            set_field build_exit "$rc"
+            jq -r 'select(.reason == "compiler-message" and .message.level == "error") | .message.code.code // empty | select(test("^E[0-9]{4}$"))' "$G09_PRIVATE/build.jsonl" 2>/dev/null | sort -u > "$G09_PRIVATE/build.codes" || true
+            set_field build_error_codes "$(paste -sd, "$G09_PRIVATE/build.codes" | sed 's/^$/none/')"
+            set_field last_phase broker_runtime_no_run_failed
+            exit "$rc"
+          fi
+
+      - name: Run the three exact checkpoint and failure-read oracles
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="$RUNNER_TEMP/g09-terminal-audit-receipt.txt"
+          set_field() {
+            local key=$1 value=$2
+            awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          broker_test="$(<"$G09_PRIVATE/broker-runtime-test.path")"
+          [[ -x "$broker_test" && "$(sha256sum "$broker_test" | awk '{print $1}')" == "$(grep '^broker_runtime_test_sha256=' "$receipt" | cut -d= -f2)" ]]
+          pure_failed=0
+          run_pure_selector() {
+            local selector=$1 key=$2 log="$G09_PRIVATE/pure-$2.log" rc selected=0 passed=0 summary=0
+            set_field last_phase "pure_$key"
+            if timeout --signal=TERM --kill-after=5s 60s "$broker_test" "$selector" --exact --test-threads=1 > "$log" 2>&1; then rc=0; else rc=$?; fi
+            grep -Fxq 'running 1 test' "$log" && selected=1 || true
+            grep -Fxq "test $selector ... ok" "$log" && passed=1 || true
+            grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; [0-9]+ measured; [0-9]+ filtered out; finished in [0-9]+(\.[0-9]+)?s$' "$log" && summary=1 || true
+            if [[ "$rc" == 0 && "$selected" == 1 && "$passed" == 1 && "$summary" == 1 ]]; then
+              set_field "$key"_verdict PASS_1_0_0
+              set_field last_phase "$key"_passed
             else
-              printf 'FAIL %s\n' "$selector" | tee -a "$summary"
-              printf '%s\n' "$selector" >> "$failures"
-              if [[ "$selector" == "$settlement" ]]; then
-                phases='bind_full3|enqueue_signal|ack_signal|load_before_retirement|begin_retirement|ack_pending|authorize_retirement|read_pending|load_before_final|pause_writer'
-                categories='InvalidInput|UnsupportedVersion|TooLarge|LimitExceeded|Busy|Conflict|Interrupted|Corrupt|UnsafeFilesystem|ControlSecret|Io'
-                grep -Eo "settlement phase=($phases) category=($categories)\b" "$test_log" \
-                  | sort -u | tee -a "$summary" || true
-              fi
+              set_field "$key"_verdict FAIL_OR_NOT_SELECTED
+              set_field last_phase "$key"_failed_or_not_selected
+              pure_failed=1
             fi
-          done
-          printf 'Passed %s of %s exact selectors\n' "$passed" "$expected" | tee -a "$summary"
-          (( passed == expected ))
-      - name: Summarize test results
+          }
+          run_pure_selector "$SOFTWARE_SELECTOR_ONE" checkpoint_head_payload
+          run_pure_selector "$SOFTWARE_SELECTOR_TWO" checkpoint_delivery_state
+          run_pure_selector "$SOFTWARE_SELECTOR_THREE" terminal_failure_read
+          if [[ "$pure_failed" == 0 ]]; then
+            set_field pure_witnesses PASS_3_OF_3_SAME_BUILD
+            set_field last_phase pure_checkpoint_oracles_complete
+          else
+            set_field pure_witnesses FAIL_OR_NOT_SELECTED
+            exit 1
+          fi
+
+      - name: Verify rootful Docker and inventory existing resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="$RUNNER_TEMP/g09-terminal-audit-receipt.txt"
+          set_field() {
+            local key=$1 value=$2
+            awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          set_field last_phase rootful_preflight
+          endpoint="$(docker context inspect --format '{{.Endpoints.docker.Host}}' default)"
+          security="$(docker info --format '{{json .SecurityOptions}}')"
+          platform="$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')"
+          if [[ -S /var/run/docker.sock && "$endpoint" == unix:///var/run/docker.sock && "$platform" == linux/amd64 ]] &&
+             jq -e 'all(.[]; (ascii_downcase | contains("rootless")) | not)' <<< "$security" >/dev/null; then
+            docker container ls -aq --no-trunc | LC_ALL=C sort -u > "$G09_PRIVATE/containers.before"
+            docker volume ls -q | LC_ALL=C sort -u > "$G09_PRIVATE/volumes.before"
+            docker image ls -q --no-trunc | LC_ALL=C sort -u > "$G09_PRIVATE/images.before"
+            set_field containers_before "$(wc -l < "$G09_PRIVATE/containers.before" | tr -d ' ')"
+            set_field volumes_before "$(wc -l < "$G09_PRIVATE/volumes.before" | tr -d ' ')"
+            set_field images_before "$(wc -l < "$G09_PRIVATE/images.before" | tr -d ' ')"
+            set_field rootful_preflight PASS
+            set_field last_phase rootful_preflight_complete
+          else
+            set_field rootful_preflight FAIL
+            set_field last_phase rootful_preflight_failed
+            exit 1
+          fi
+
+      - name: Build the private UID 1000 worker image without provider clients
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/g09-terminal-audit-receipt.txt"
+          set_field() {
+            local key=$1 value=$2
+            awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          tag="ai-guard-g09-run-client:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          set_field last_phase worker_image_build
+          if docker build --file images/worker.Dockerfile --build-arg CODEX_VERSION= --build-arg CLAUDE_CODE_VERSION= --tag "$tag" . > "$G09_PRIVATE/worker-build.log" 2>&1; then
+            image_id="$(docker image inspect --format '{{.Id}}' "$tag")"
+            [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ "$(docker image inspect --format '{{.Config.User}}' "$image_id")" == 1000:1000 ]]
+            [[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image_id")" == linux/amd64 ]]
+            printf '%s\n' "$image_id" > "$G09_PRIVATE/image.id"
+            printf 'AGENTSANDBOX_TEST_RUNTIME=docker\nAGENTSANDBOX_TEST_ALLOW_ROOTFUL=1\nAGENTSANDBOX_TEST_RETAIN_ENFORCER=1\nAGENTSANDBOX_TEST_RUNTIME_PROGRAM=/usr/bin/docker\nAGENTSANDBOX_TEST_RUNTIME_ENDPOINT=unix:///var/run/docker.sock\nAGENTSANDBOX_TEST_IMAGE=%s\nAGENTSANDBOX_TEST_BROKER_NATIVE_START=1\nAGENTSANDBOX_TEST_BROKER_TIMEOUT_SECONDS=30\n' "$image_id" >> "$GITHUB_ENV"
+            set_field worker_image_build PASS
+            set_field worker_image_uid 1000:1000
+            set_field worker_image_arch linux/amd64
+            set_field provider_cli_versions NONE_SELECTED
+            set_field last_phase worker_image_verified
+          else
+            set_field worker_image_build FAIL
+            set_field last_phase worker_image_build_failed
+            exit 1
+          fi
+
+      - name: Run the single client-disappearance Docker selector and classify its result
+        shell: bash
+        env:
+          AGENTSANDBOX_TEST_RUNTIME: docker
+          AGENTSANDBOX_TEST_ALLOW_ROOTFUL: '1'
+          AGENTSANDBOX_TEST_RETAIN_ENFORCER: '1'
+          AGENTSANDBOX_TEST_RUNTIME_PROGRAM: /usr/bin/docker
+          AGENTSANDBOX_TEST_RUNTIME_ENDPOINT: unix:///var/run/docker.sock
+          AGENTSANDBOX_TEST_BROKER_NATIVE_START: '1'
+          AGENTSANDBOX_TEST_BROKER_TIMEOUT_SECONDS: '30'
+        run: |
+          set -euo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/g09-terminal-audit-receipt.txt"
+          set_field() {
+            local key=$1 value=$2
+            awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          selector="$SELECTOR"
+          log="$G09_PRIVATE/test.log"
+          set_field last_phase targeted_terminal_audit_recovery
+          broker_test="$(<"$G09_PRIVATE/broker-runtime-test.path")"
+          if timeout --signal=TERM --kill-after=30s 660s "$broker_test" "$selector" --ignored --exact --test-threads=1 --nocapture > "$log" 2>&1; then rc=0; else rc=$?; fi
+          selected=0 passed=0 failed=0 ignored=0 summary_ok=0
+          [[ "$(grep -Fxc 'running 1 test' "$log" || true)" == 1 ]] && selected=1 || true
+          if grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; [0-9]+ measured; [0-9]+ filtered out; finished in [0-9]+(\.[0-9]+)?s$' "$log"; then
+            passed=1
+            summary_ok=1
+          elif grep -Eq '^test result: FAILED\. [0-9]+ passed; [1-9][0-9]* failed; [0-9]+ ignored; [0-9]+ measured; [0-9]+ filtered out; finished in [0-9]+(\.[0-9]+)?s$' "$log"; then
+            failed=1
+          fi
+          grep -Fxc "test $selector ... FAILED" "$log" >/dev/null 2>&1 && failed=1 || true
+          set_field test_selected "$selected"
+          set_field test_passed "$passed"
+          set_field test_failed "$failed"
+          set_field test_ignored "$ignored"
+          set_field test_exit "$rc"
+          if [[ "$(grep -Fxc 'running 1 test' "$log" || true)" != 1 ]]; then
+            set_field selected_test_status SELECTOR_NOT_ATTESTED
+            set_field run_client_state NOT_ATTESTED
+            set_field run_client_stage NOT_ATTESTED
+            set_field outcome_diagnosis SELECTOR_NOT_ATTESTED
+            set_field test_verdict FAIL
+            exit 1
+          fi
+          evidence_root="$(sed -nE "s|^test $selector \.\.\. retained broker runtime evidence: (/tmp/br-[[:alnum:]]{6})$|\1|p; s|^retained broker runtime evidence: (/tmp/br-[[:alnum:]]{6})$|\1|p" "$log" | LC_ALL=C sort -u)"
+          if [[ "$(printf '%s\n' "$evidence_root" | sed '/^$/d' | wc -l | tr -d ' ')" != 1 ||
+                ! "$evidence_root" =~ ^/tmp/br-[[:alnum:]]{6}$ || ! -d "$evidence_root" || -L "$evidence_root" ||
+                "$(realpath -- "$evidence_root")" != "$evidence_root" ||
+                "$(stat -c '%u %a' "$evidence_root")" != "$(id -u) 700" ]]; then
+            set_field evidence_root PRIVATE_ROOT_NOT_VERIFIED
+            set_field run_client_state NOT_READ
+            set_field run_client_stage NOT_READ
+            set_field outcome_diagnosis PRIVATE_ROOT_NOT_VERIFIED
+            set_field test_verdict FAIL
+            exit 1
+          fi
+          set_field evidence_root VERIFIED_PRIVATE
+          set_field result_file PRIVATE_VERIFIED
+          read_result_field() {
+            local pointer=$1
+            [[ -f "$evidence_root/result.json" && ! -L "$evidence_root/result.json" &&
+               "$(realpath -- "$evidence_root/result.json")" == "$evidence_root/result.json" &&
+               "$(stat -c '%u %a' "$evidence_root/result.json")" == "$(id -u) 600" ]] || return 1
+            jq -ers --arg pointer "$pointer" '
+              if length == 1 and (.[0] | type == "object") and
+                 (.[0].run_client_recovery | type == "object") then
+                .[0].run_client_recovery | .[$pointer] | select(type == "string")
+              else empty end' "$evidence_root/result.json" 2>/dev/null
+          }
+          read_terminal_wait_sample_field() {
+            local field=$1
+            [[ "$field" == worker || "$field" == status ]] || return 1
+            [[ -f "$evidence_root/result.json" && ! -L "$evidence_root/result.json" &&
+               "$(realpath -- "$evidence_root/result.json")" == "$evidence_root/result.json" &&
+               "$(stat -c '%u %a' "$evidence_root/result.json")" == "$(id -u) 600" ]] || return 1
+            jq -ers --arg field "$field" '
+              if length == 1 and (.[0] | type == "object") and
+                 (.[0].run_client_recovery | type == "object") then
+                .[0].run_client_recovery
+                | select(.state == "failed" and .stage == "terminal_wait")
+                | .terminal_wait_sample
+                | select(type == "object")
+                | .[$field]
+                | select(type == "string")
+              else empty end' "$evidence_root/result.json" 2>/dev/null
+          }
+          read_central_terminal_observation() {
+            [[ -f "$evidence_root/result.json" && ! -L "$evidence_root/result.json" &&
+               "$(realpath -- "$evidence_root/result.json")" == "$evidence_root/result.json" &&
+               "$(stat -c '%u %a' "$evidence_root/result.json")" == "$(id -u) 600" ]] || return 1
+            jq -rs '
+              if length == 1 and (.[0] | type == "object") and
+                 (.[0].central_terminal_observed_within_window | type == "boolean") then
+                .[0].central_terminal_observed_within_window | tostring
+              else empty end' "$evidence_root/result.json" 2>/dev/null
+          }
+          read_worker_deadline_evidence() {
+            [[ -f "$evidence_root/result.json" && ! -L "$evidence_root/result.json" &&
+               "$(realpath -- "$evidence_root/result.json")" == "$evidence_root/result.json" &&
+               "$(stat -c '%u %a' "$evidence_root/result.json")" == "$(id -u) 600" ]] || return 1
+            jq -rs '
+              if length == 1 and (.[0] | type == "object") then
+                .[0].worker_deadline_evidence
+                | select(. == "attested" or . == "not_attested")
+              else empty end' "$evidence_root/result.json" 2>/dev/null
+          }
+          read_terminal_checkpoint_field() {
+            local field=$1
+            [[ "$field" == result_audit_at_head || "$field" == failure_audit_at_head ]] || return 1
+            [[ -f "$evidence_root/result.json" && ! -L "$evidence_root/result.json" &&
+               "$(realpath -- "$evidence_root/result.json")" == "$evidence_root/result.json" &&
+               "$(stat -c '%u %a' "$evidence_root/result.json")" == "$(id -u) 600" ]] || return 1
+            jq -ers --arg field "$field" '
+              if length == 1 and (.[0] | type == "object") and
+                 (.[0].terminal_checkpoint | type == "object") and
+                 (.[0].terminal_checkpoint | keys == ["failure_audit_at_head", "head_revision", "result_audit_at_head"]) then
+                .[0].terminal_checkpoint[$field] as $value
+                | select(($value | type) == "string" and
+                  (["unknown", "absent", "pending", "acknowledged"] | index($value)) != null)
+                | $value
+              else empty end' "$evidence_root/result.json" 2>/dev/null
+          }
+          read_terminal_checkpoint_head_revision() {
+            [[ -f "$evidence_root/result.json" && ! -L "$evidence_root/result.json" &&
+               "$(realpath -- "$evidence_root/result.json")" == "$evidence_root/result.json" &&
+               "$(stat -c '%u %a' "$evidence_root/result.json")" == "$(id -u) 600" ]] || return 1
+            jq -ers '
+              if length == 1 and (.[0] | type == "object") and
+                 (.[0].terminal_checkpoint | type == "object") and
+                 (.[0].terminal_checkpoint | has("head_revision")) then
+                .[0].terminal_checkpoint.head_revision
+                | if . == null then "unknown"
+                  elif type == "number" and floor == . and . >= 1 then tostring
+                  else empty end
+              else empty end' "$evidence_root/result.json" 2>/dev/null
+          }
+          read_terminal_failure_read() {
+            [[ -f "$evidence_root/result.json" && ! -L "$evidence_root/result.json" &&
+               "$(realpath -- "$evidence_root/result.json")" == "$evidence_root/result.json" &&
+               "$(stat -c '%u %a' "$evidence_root/result.json")" == "$(id -u) 600" ]] || return 1
+            jq -ers '
+              if length == 1 and (.[0] | type == "object") then
+                .[0].terminal_failure_read as $value
+                | select(($value | type) == "string" and
+                  (["not_attempted", "admission_unconfirmed", "budget_unavailable", "read_failed",
+                    "absent", "ambiguous", "unverified", "observed"] | index($value)) != null)
+                | $value
+              else empty end' "$evidence_root/result.json" 2>/dev/null
+          }
+          read_terminal_failure_step() {
+            [[ -f "$evidence_root/result.json" && ! -L "$evidence_root/result.json" &&
+               "$(realpath -- "$evidence_root/result.json")" == "$evidence_root/result.json" &&
+               "$(stat -c '%u %a' "$evidence_root/result.json")" == "$(id -u) 600" ]] || return 1
+            jq -csr '
+              if length == 1 and (.[0] | type == "object") then
+                .[0] as $root
+                | if ($root | has("terminal_failure_step")) then
+                    $root.terminal_failure_step as $step
+                    | if $step == null then "not_observed"
+                      elif ($step | type) == "string" and
+                        (["terminal_observation_ack","result_audit","cleanup_confirmation","cleanup_ack"] | index($step)) != null
+                      then $step
+                      else "unrecognized" end
+                  else "not_observed" end
+              else "unrecognized" end' "$evidence_root/result.json" 2>/dev/null
+          }
+          state="$(read_result_field state || true)"
+          stage="$(read_result_field stage || true)"
+          central_terminal="$(read_central_terminal_observation || true)"
+          deadline_evidence="$(read_worker_deadline_evidence || true)"
+          checkpoint_revision="$(read_terminal_checkpoint_head_revision || true)"
+          checkpoint_result="$(read_terminal_checkpoint_field result_audit_at_head || true)"
+          checkpoint_failure="$(read_terminal_checkpoint_field failure_audit_at_head || true)"
+          terminal_failure_read="$(read_terminal_failure_read || true)"
+          if [[ "$checkpoint_revision" =~ ^[1-9][0-9]*$ ]]; then
+            set_field terminal_checkpoint.head_revision "$checkpoint_revision"
+          else
+            checkpoint_revision=unknown
+            set_field terminal_checkpoint.head_revision unknown
+          fi
+          case "$checkpoint_result" in unknown|absent|pending|acknowledged) ;; *) checkpoint_result=unknown ;; esac
+          case "$checkpoint_failure" in unknown|absent|pending|acknowledged) ;; *) checkpoint_failure=unknown ;; esac
+          case "$terminal_failure_read" in
+            not_attempted|admission_unconfirmed|budget_unavailable|read_failed|absent|ambiguous|unverified|observed) ;;
+            *) terminal_failure_read=unverified ;;
+          esac
+          set_field terminal_checkpoint.result_audit_at_head "$checkpoint_result"
+          set_field terminal_checkpoint.failure_audit_at_head "$checkpoint_failure"
+          set_field terminal_failure_read "$terminal_failure_read"
+          case "$state" in passed|failed|timed_out) ;; *) state=UNRECOGNIZED ;; esac
+          case "$stage" in
+            not_reached|reap_clock|broker_liveness|worker_read|status_read|terminal_wait|executor|result_read|result_outcome|terminal_correlation|post_terminal_checks|control_shutdown|complete) ;;
+            *) stage=UNRECOGNIZED ;;
+          esac
+          set_field run_client_state "$state"
+          set_field run_client_stage "$stage"
+          case "$central_terminal" in
+            true|false) set_field central_terminal_observed_within_window "$central_terminal" ;;
+            *) central_terminal=unknown; set_field central_terminal_observed_within_window unknown ;;
+          esac
+          case "$deadline_evidence" in
+            attested|not_attested) set_field worker_deadline_evidence "$deadline_evidence" ;;
+            *) deadline_evidence=unknown; set_field worker_deadline_evidence unknown ;;
+          esac
+          set_field terminal_wait_sample_worker_write_state NOT_READ_CONDITION_UNMET
+          set_field terminal_wait_sample_status_write_state NOT_READ_CONDITION_UNMET
+          set_field terminal_wait_sample_projection NOT_READ_CONDITION_UNMET
+          if [[ "$state" == failed && "$stage" == terminal_wait ]]; then
+            worker_sample="$(read_terminal_wait_sample_field worker || true)"
+            status_sample="$(read_terminal_wait_sample_field status || true)"
+            case "$worker_sample" in
+              not_terminal|terminal_quota_held|terminal_quota_released) worker_write=PRESENT_WHITELISTED ;;
+              "") worker_write=ABSENT_OR_NONSTRING ;;
+              *) worker_write=UNRECOGNIZED_REJECTED ;;
+            esac
+            case "$status_sample" in
+              executor_running|executor_stopped|executor_stopped_with_error|broker_error|other_reply) status_write=PRESENT_WHITELISTED ;;
+              "") status_write=ABSENT_OR_NONSTRING ;;
+              *) status_write=UNRECOGNIZED_REJECTED ;;
+            esac
+            set_field terminal_wait_sample_worker_write_state "$worker_write"
+            set_field terminal_wait_sample_status_write_state "$status_write"
+            if [[ "$worker_write" == PRESENT_WHITELISTED && "$status_write" == PRESENT_WHITELISTED ]]; then
+              set_field terminal_wait_sample_projection EMITTED_WHITELISTED_PAIR
+              set_field 'terminal_wait_sample.worker' "$worker_sample"
+              set_field 'terminal_wait_sample.status' "$status_sample"
+              set_field outcome_diagnosis TERMINAL_WAIT_SAMPLE_CLASSIFIED
+              set_field test_verdict FAIL_TERMINAL_WAIT
+              set_field last_phase run_client_terminal_wait_expired
+            else
+              set_field terminal_wait_sample_projection PAIR_ABSENT_OR_REJECTED_NOT_EMITTED
+              set_field outcome_diagnosis TERMINAL_WAIT_SAMPLE_ABSENT_OR_REJECTED
+              set_field test_verdict FAIL_TERMINAL_WAIT_SAMPLE_UNATTESTED
+              set_field last_phase run_client_terminal_wait_sample_rejected
+            fi
+            exit 1
+          elif [[ "$state" == failed && "$stage" == executor ]]; then
+            terminal_failure_step="$(read_terminal_failure_step || true)"
+            case "$terminal_failure_step" in
+              not_observed|terminal_observation_ack|result_audit|cleanup_confirmation|cleanup_ack) ;;
+              *) terminal_failure_step=unrecognized ;;
+            esac
+            set_field terminal_failure_step "$terminal_failure_step"
+            cleanup_sample="$(read_result_field central_cleanup_sample || true)"
+            executor_error="$(read_result_field executor_error || true)"
+            case "$cleanup_sample" in
+              not_observed|reported_unconfirmed|reported_removed) ;;
+              *)
+                set_field outcome_diagnosis UNRECOGNIZED_EXECUTOR_METADATA
+                set_field test_verdict FAIL_UNRECOGNIZED_EXECUTOR_METADATA
+                set_field last_phase run_client_executor_metadata_rejected
+                exit 1
+                ;;
+            esac
+            case "$executor_error" in
+              unauthorized|forbidden|unavailable|incompatible_control|busy|invalid_input|conflict|interrupted|limit_exceeded|needs_reconciliation) ;;
+              *)
+                set_field outcome_diagnosis UNRECOGNIZED_EXECUTOR_METADATA
+                set_field test_verdict FAIL_UNRECOGNIZED_EXECUTOR_METADATA
+                set_field last_phase run_client_executor_metadata_rejected
+                exit 1
+                ;;
+            esac
+            set_field central_cleanup_sample "$cleanup_sample"
+            set_field executor_error "$executor_error"
+            case "$terminal_failure_step" in
+              not_observed|terminal_observation_ack|result_audit|cleanup_confirmation|cleanup_ack)
+                set_field outcome_diagnosis EXECUTOR_FAILURE_CLASSIFIED
+                set_field test_verdict FAIL_EXECUTOR
+                ;;
+              unrecognized)
+                set_field outcome_diagnosis UNRECOGNIZED_TERMINAL_FAILURE_STEP
+                set_field test_verdict FAIL_UNRECOGNIZED_TERMINAL_FAILURE_STEP
+                ;;
+            esac
+            set_field last_phase run_client_executor_failure
+            exit 1
+          elif [[ "$rc" == 0 && "$selected" == 1 && "$passed" == 1 && "$failed" == 0 &&
+                  "$summary_ok" == 1 && "$state" == passed && "$stage" == complete &&
+                  ( "$central_terminal" == true || "$central_terminal" == false ) &&
+                  "$deadline_evidence" == attested ]]; then
+            set_field outcome_diagnosis PASS_PASSED_COMPLETE
+            set_field test_verdict PASS_1_0_0
+            set_field last_phase targeted_test_complete
+          else
+            set_field outcome_diagnosis "${state}_${stage}_exit_${rc}"
+            set_field test_verdict FAIL_OR_INCOMPLETE
+            set_field last_phase run_client_recovery_incomplete
+            exit 1
+          fi
+
+      - name: Record read-only Docker inventory and close receipt
         if: always()
         shell: bash
         run: |
-          if [ -f cargo-test.log ]; then
-            grep -E '^test result:|^     Running ' cargo-test.log > cargo-test-summary.txt || true
-            grep -E '\.\.\. FAILED$' cargo-test.log | sed 's/^test //; s/ \.\.\. FAILED$//' > cargo-test-failed.txt || true
-            {
-              echo "### Rust test suite"
-              echo
-              echo "Failed tests: $(wc -l < cargo-test-failed.txt)"
-              echo
-              echo '```'
-              head -n 100 cargo-test-failed.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-          elif [ -f cargo-test-summary.txt ]; then
-            {
-              echo "### Targeted SQLite library tests"
-              echo '```'
-              cat cargo-test-summary.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          receipt="$RUNNER_TEMP/g09-terminal-audit-receipt.txt"
+          set_field() {
+            local key=$1 value=$2
+            awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          private="$RUNNER_TEMP/g9-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if [[ -d "$private" && -f "$private/containers.before" && -f "$private/volumes.before" && -f "$private/images.before" ]] && docker info >/dev/null 2>&1; then
+            if docker container ls -aq --no-trunc | LC_ALL=C sort -u > "$private/containers.after" &&
+               docker volume ls -q | LC_ALL=C sort -u > "$private/volumes.after" &&
+               docker image ls -q --no-trunc | LC_ALL=C sort -u > "$private/images.after" &&
+               comm -13 "$private/containers.before" "$private/containers.after" > "$private/containers.new" &&
+               comm -13 "$private/volumes.before" "$private/volumes.after" > "$private/volumes.new" &&
+               comm -13 "$private/images.before" "$private/images.after" > "$private/images.new"; then
+              set_field containers_after "$(wc -l < "$private/containers.after" | tr -d ' ')"
+              set_field containers_new "$(wc -l < "$private/containers.new" | tr -d ' ')"
+              set_field volumes_after "$(wc -l < "$private/volumes.after" | tr -d ' ')"
+              set_field volumes_new "$(wc -l < "$private/volumes.new" | tr -d ' ')"
+              set_field images_after "$(wc -l < "$private/images.after" | tr -d ' ')"
+              set_field images_new "$(wc -l < "$private/images.new" | tr -d ' ')"
+            else
+              set_field containers_after unknown
+              set_field containers_new unknown
+              set_field volumes_after unknown
+              set_field volumes_new unknown
+              set_field images_after unknown
+              set_field images_new unknown
+            fi
+          else
+            set_field containers_after unknown
+            set_field containers_new unknown
+            set_field volumes_after unknown
+            set_field volumes_new unknown
+            set_field images_after unknown
+            set_field images_new unknown
           fi
-      - name: Upload test logs
+          set_field engine_cleanup NOT_PERFORMED
+          set_field receipt_closed YES
+          {
+            printf 'G09 terminal checkpoint outcome=%s source=%s\n' \
+              "$(grep '^test_verdict=' "$receipt" | cut -d= -f2)" "$SOURCE_SHA"
+            printf 'pure_witnesses=%s checkpoint=%s/%s failure_read=%s\n' \
+              "$(grep '^pure_witnesses=' "$receipt" | cut -d= -f2)" \
+              "$(grep '^checkpoint_head_payload_verdict=' "$receipt" | cut -d= -f2)" \
+              "$(grep '^checkpoint_delivery_state_verdict=' "$receipt" | cut -d= -f2)" \
+              "$(grep '^terminal_failure_read_verdict=' "$receipt" | cut -d= -f2)"
+            printf 'selected=%s passed=%s failed=%s ignored=%s exit=%s state=%s stage=%s diagnosis=%s\n' \
+              "$(grep '^test_selected=' "$receipt" | cut -d= -f2)" \
+              "$(grep '^test_passed=' "$receipt" | cut -d= -f2)" \
+              "$(grep '^test_failed=' "$receipt" | cut -d= -f2)" \
+              "$(grep '^test_ignored=' "$receipt" | cut -d= -f2)" \
+              "$(grep '^test_exit=' "$receipt" | cut -d= -f2)" \
+              "$(grep '^run_client_state=' "$receipt" | cut -d= -f2)" \
+              "$(grep '^run_client_stage=' "$receipt" | cut -d= -f2)" \
+              "$(grep '^outcome_diagnosis=' "$receipt" | cut -d= -f2)"
+            printf 'central_terminal_observed_within_window=%s worker_deadline_evidence=%s\n' \
+              "$(grep '^central_terminal_observed_within_window=' "$receipt" | cut -d= -f2)" \
+              "$(grep '^worker_deadline_evidence=' "$receipt" | cut -d= -f2)"
+            printf 'terminal_checkpoint.head_revision=%s terminal_checkpoint.result_audit_at_head=%s terminal_checkpoint.failure_audit_at_head=%s terminal_failure_read=%s\n' \
+              "$(grep '^terminal_checkpoint.head_revision=' "$receipt" | cut -d= -f2)" \
+              "$(grep '^terminal_checkpoint.result_audit_at_head=' "$receipt" | cut -d= -f2)" \
+              "$(grep '^terminal_checkpoint.failure_audit_at_head=' "$receipt" | cut -d= -f2)" \
+              "$(grep '^terminal_failure_read=' "$receipt" | cut -d= -f2)"
+            printf 'terminal_sample_write_states=%s/%s projection=%s\n' \
+              "$(grep '^terminal_wait_sample_worker_write_state=' "$receipt" | cut -d= -f2)" \
+              "$(grep '^terminal_wait_sample_status_write_state=' "$receipt" | cut -d= -f2)" \
+              "$(grep '^terminal_wait_sample_projection=' "$receipt" | cut -d= -f2)"
+            if [[ "$(grep '^outcome_diagnosis=' "$receipt" | cut -d= -f2)" == TERMINAL_WAIT_SAMPLE_CLASSIFIED ]]; then
+              printf 'terminal_wait_sample.worker=%s terminal_wait_sample.status=%s\n' \
+                "$(grep '^terminal_wait_sample[.]worker=' "$receipt" | cut -d= -f2)" \
+                "$(grep '^terminal_wait_sample[.]status=' "$receipt" | cut -d= -f2)"
+            fi
+            if [[ "$(grep '^outcome_diagnosis=' "$receipt" | cut -d= -f2)" == EXECUTOR_FAILURE_CLASSIFIED ||
+                  "$(grep '^outcome_diagnosis=' "$receipt" | cut -d= -f2)" == UNRECOGNIZED_TERMINAL_FAILURE_STEP ]]; then
+              printf 'central_cleanup_sample=%s executor_error=%s terminal_failure_step=%s\n' \
+                "$(grep '^central_cleanup_sample=' "$receipt" | cut -d= -f2)" \
+                "$(grep '^executor_error=' "$receipt" | cut -d= -f2)" \
+                "$(grep '^terminal_failure_step=' "$receipt" | cut -d= -f2)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the closed receipt only
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: lot-verify-rust-${{ github.sha }}
-          path: |
-            cargo-test.log
-            cargo-test-summary.txt
-            cargo-test-failed.txt
-          if-no-files-found: ignore
+          name: g09-terminal-audit-receipt-${{ github.run_id }}
+          path: ${{ runner.temp }}/g09-terminal-audit-receipt.txt
+          if-no-files-found: error
           retention-days: 14
-
-  frontend:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: front
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Setup Node
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '24.22.2'
-          package-manager-cache: false
-      - name: Install
-        run: npm ci --no-audit --no-fund
-      - name: Build
-        run: npm run build
-      - name: Test
-        run: npm test
