@@ -14,8 +14,9 @@ use agentsandbox::{
         service::{
             RequestedExecutionV1, SubmitV1, encode_submit,
             protocol::{
-                BrokerCommandV1, BrokerReplyV1, JobResultOutcomeV1, JobResultV1, RecoveryStatusV1,
-                RecoveryTargetKindV1, TerminalJobResultV1,
+                BrokerCommandV1, BrokerReplyV1, JobResultOutcomeV1, JobResultV1,
+                RecoveryDataSourceV1, RecoveryRuntimeEvidenceV1, RecoveryStatusV1,
+                RecoveryTargetKindV1, RecoveryTargetV1, TerminalJobResultV1,
             },
             request,
         },
@@ -55,7 +56,23 @@ const OBSERVATION_GRACE_NS: u128 = 3 * NS;
 #[derive(Clone, Copy)]
 enum LostProcess {
     Broker { scenario_end: Instant },
+    LegacyRecoveryStatus,
     RunCli,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum LegacyRecoveryStage {
+    NotReached,
+    SpawnFailed,
+    Spawned,
+    ChildExited,
+    ChildWaitFailed,
+    AvailabilityTimedOut,
+    StatusRefused,
+    UnexpectedReply,
+    OriginalArmMismatch,
+    RecoveryAttested,
 }
 
 #[test]
@@ -178,6 +195,35 @@ async fn broker_sigkill_preserves_original_deadline_without_second_start() -> Re
         "cleanup":"NOT_RUN: nonempty guard and exact resources retained; D5 unqualified",
         "scope":"one native control host / selected Docker engine; no Podman, cloud, SIGSTOP or provider qualification"
     }))?;
+    outcome
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires explicit Docker program/Unix endpoint/image/rootful opt-in; retains the Legacy enforcer and QA state"]
+async fn broker_sigkill_legacy_recovery_status_attests_original_worker_arm() -> Result<()> {
+    let selection = Selection::read()?;
+    let evidence = Evidence::new()?;
+    evidence.write(
+        "legacy-recovery-stage.json",
+        &LegacyRecoveryStage::NotReached,
+    )?;
+    let outcome = timeout(
+        Duration::from_secs(600),
+        run(&selection, &evidence, LostProcess::LegacyRecoveryStatus),
+    )
+    .await
+    .context("Legacy recovery status fixture exceeded the 600-second global bound")
+    .and_then(|result| result);
+    evidence.write(
+        "result.json",
+        &json!({
+            "runtime_test": if outcome.is_ok() {"PASS"} else {"FAIL"},
+            "scope": "legacy_recovery_status_original_worker_arm",
+            "result_after_restart": "NOT_RUN",
+            "central_quota_after_restart": "NOT_RUN",
+            "retained_fixture_state": true
+        }),
+    )?;
     outcome
 }
 
@@ -368,18 +414,23 @@ async fn run(selection: &Selection, evidence: &Evidence, lost: LostProcess) -> R
         capture_output: false,
     })?;
     let (mut cli, live_events) = match lost {
-        LostProcess::Broker { scenario_end } => {
-            let live = selection
-                .open_worker_event_stream(
-                    docker_events_since,
-                    daemon_sample_before.into_std(),
-                    scenario_end.into_std(),
-                )
-                .await?;
-            evidence.write(
-                "docker-worker-stream-open.json",
-                &json!({"http_status":200,"framing":"http1_chunked","since":docker_events_since,"until":live.until}),
-            )?;
+        LostProcess::Broker { .. } | LostProcess::LegacyRecoveryStatus => {
+            let live = if let LostProcess::Broker { scenario_end } = lost {
+                let live = selection
+                    .open_worker_event_stream(
+                        docker_events_since,
+                        daemon_sample_before.into_std(),
+                        scenario_end.into_std(),
+                    )
+                    .await?;
+                evidence.write(
+                    "docker-worker-stream-open.json",
+                    &json!({"http_status":200,"framing":"http1_chunked","since":docker_events_since,"until":live.until}),
+                )?;
+                Some(live)
+            } else {
+                None
+            };
             match ipc(
                 evidence,
                 &runner,
@@ -401,7 +452,7 @@ async fn run(selection: &Selection, evidence: &Evidence, lost: LostProcess) -> R
                 }
                 _ => bail!("real submission did not produce fresh Accepted"),
             }
-            (None, Some(live))
+            (None, live)
         }
         LostProcess::RunCli => {
             evidence.write(
@@ -913,6 +964,18 @@ async fn run(selection: &Selection, evidence: &Evidence, lost: LostProcess) -> R
         "stage.json",
         &json!({"stage":"restart_same_broker_and_registry"}),
     )?;
+    if matches!(lost, LostProcess::LegacyRecoveryStatus) {
+        return verify_legacy_recovery(
+            selection,
+            evidence,
+            &runner,
+            operation,
+            &recovery_before,
+            target,
+            &mut gateway,
+        )
+        .await;
+    }
     let mut restarted = harness::broker(selection, evidence, 2)?;
     wait_broker(evidence, &runner, operation, &mut restarted).await?;
     evidence.write("stage.json", &json!({"stage":"restart_broker_ready"}))?;
@@ -970,7 +1033,10 @@ async fn run(selection: &Selection, evidence: &Evidence, lost: LostProcess) -> R
             && !recovered.quota_held,
         "terminal ACK did not release the real quota"
     );
-    evidence.write("stage.json", &json!({"stage":"restart_terminal_quota_released"}))?;
+    evidence.write(
+        "stage.json",
+        &json!({"stage":"restart_terminal_quota_released"}),
+    )?;
     // Exercise the already-durable Submit identity, then an explicit real Resume.
     ensure!(
         matches!(
@@ -1082,7 +1148,10 @@ async fn run(selection: &Selection, evidence: &Evidence, lost: LostProcess) -> R
             && fs::read_dir(evidence.root.join("source"))?.count() == 1,
         "original source changed"
     );
-    evidence.write("stage.json", &json!({"stage":"restart_replay_stable_before_cleanup"}))?;
+    evidence.write(
+        "stage.json",
+        &json!({"stage":"restart_replay_stable_before_cleanup"}),
+    )?;
     evidence.write("audit-after.json", &audit_after)?;
     evidence.write("recovery-after.json", &after)?;
     evidence.write("worker-after.json", &recovered)?;
@@ -1423,6 +1492,132 @@ async fn recovery(
         _ => bail!("unexpected recovery reply"),
     }
 }
+
+async fn verify_legacy_recovery(
+    selection: &Selection,
+    evidence: &Evidence,
+    runner: &str,
+    operation: Uuid,
+    before: &RecoveryStatusV1,
+    original: &RecoveryTargetV1,
+    gateway: &mut harness::OwnedProcess,
+) -> Result<()> {
+    gateway.require_graceful_shutdown();
+    let mut restarted = harness::broker(selection, evidence, 2).ok();
+    let stage = if let Some(child) = &mut restarted {
+        child.require_graceful_shutdown();
+        evidence.write("legacy-recovery-stage.json", &LegacyRecoveryStage::Spawned)?;
+        match wait_legacy_recovery(evidence, runner, operation, child).await {
+            Ok(after) => legacy_recovery_stage(before, &after, operation, original),
+            Err(stage) => stage,
+        }
+    } else {
+        LegacyRecoveryStage::SpawnFailed
+    };
+    let proof = evidence.write("legacy-recovery-stage.json", &stage);
+    let broker_closure = restarted.as_mut().map_or("not_spawned", close_legacy_child);
+    let gateway_closure = close_legacy_child(gateway);
+    let closure = evidence.write(
+        "legacy-recovery-closure.json",
+        &json!({"broker": broker_closure, "gateway": gateway_closure, "guardian_shutdown": "not_requested"}),
+    );
+    proof?;
+    ensure!(
+        matches!(stage, LegacyRecoveryStage::RecoveryAttested),
+        "Legacy restart did not attest the original Arm"
+    );
+    closure
+}
+
+async fn wait_legacy_recovery(
+    evidence: &Evidence,
+    runner: &str,
+    operation_id: Uuid,
+    child: &mut harness::OwnedProcess,
+) -> std::result::Result<RecoveryStatusV1, LegacyRecoveryStage> {
+    let limit = Instant::now() + Duration::from_secs(20);
+    let mut unavailable = LegacyRecoveryStage::AvailabilityTimedOut;
+    loop {
+        if child
+            .has_exited()
+            .map_err(|_| LegacyRecoveryStage::ChildWaitFailed)?
+        {
+            return Err(LegacyRecoveryStage::ChildExited);
+        }
+        if Instant::now() >= limit {
+            return Err(unavailable);
+        }
+        if let Ok(Ok(reply)) = timeout_at(
+            limit,
+            ipc(
+                evidence,
+                runner,
+                BrokerCommandV1::RecoveryStatus { operation_id },
+            ),
+        )
+        .await
+        {
+            match reply {
+                BrokerReplyV1::RecoveryStatus { status } => return Ok(status),
+                BrokerReplyV1::Error { .. } => unavailable = LegacyRecoveryStage::StatusRefused,
+                _ => return Err(LegacyRecoveryStage::UnexpectedReply),
+            }
+        }
+        sleep_until(limit.min(Instant::now() + Duration::from_millis(50))).await;
+    }
+}
+
+fn legacy_recovery_stage(
+    before: &RecoveryStatusV1,
+    after: &RecoveryStatusV1,
+    operation: Uuid,
+    original: &RecoveryTargetV1,
+) -> LegacyRecoveryStage {
+    let mut worker_arms = after
+        .known_arms
+        .iter()
+        .filter(|arm| matches!(arm.subject, RecoveryTargetKindV1::Worker));
+    let Some(arm) = worker_arms.next() else {
+        return LegacyRecoveryStage::OriginalArmMismatch;
+    };
+    let clock = &arm.original_clock;
+    let original_clock = &original.original_clock;
+    let same_clock = clock.version == original_clock.version
+        && clock.method == original_clock.method
+        && clock.boot_id == original_clock.boot_id
+        && clock.continuous_ns_decimal == original_clock.continuous_ns_decimal
+        && clock.observed_utc == original_clock.observed_utc;
+    if after.version == 1
+        && before.operation_id == operation
+        && after.operation_id == operation
+        && after.tenant_id == before.tenant_id
+        && after.source == RecoveryDataSourceV1::ConfirmedJournal
+        && after.runtime_evidence == RecoveryRuntimeEvidenceV1::NotQueried
+        && !after.incomplete
+        && after.head_revision >= before.head_revision
+        && (after.head_revision > before.head_revision || after.head_hash == before.head_hash)
+        && worker_arms.next().is_none()
+        && arm.arm_id == original.arm_id
+        && arm.worker_id == original.worker_id
+        && arm.attempt_id == original.attempt_id
+        && arm.original_timeout_seconds == original.original_timeout_seconds
+        && arm.original_deadline_ns_decimal == original.original_deadline_ns_decimal
+        && same_clock
+    {
+        LegacyRecoveryStage::RecoveryAttested
+    } else {
+        LegacyRecoveryStage::OriginalArmMismatch
+    }
+}
+
+fn close_legacy_child(child: &mut harness::OwnedProcess) -> &'static str {
+    match child.has_exited() {
+        Ok(true) => "already_exited",
+        Ok(false) if child.terminate_owned().is_ok_and(|status| status.success()) => "confirmed",
+        _ => "unconfirmed",
+    }
+}
+
 async fn wait_broker(
     evidence: &Evidence,
     runner: &str,

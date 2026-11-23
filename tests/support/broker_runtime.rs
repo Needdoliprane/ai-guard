@@ -6,7 +6,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{self, Read, Write},
     os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
@@ -606,6 +606,9 @@ impl OwnedProcess {
             "owned native process exited; inspect its private bounded stderr"
         );
         Ok(())
+    }
+    pub fn has_exited(&mut self) -> io::Result<bool> {
+        Ok(self.child.try_wait()?.is_some())
     }
     pub fn id(&self) -> u32 {
         self.child.id()
