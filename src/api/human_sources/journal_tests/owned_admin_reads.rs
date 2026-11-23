@@ -70,16 +70,11 @@ async fn owned_sources_serve_the_summary_memberships_and_configuration() {
         "brokers_read",
         "workers_read",
         "quota_read",
+        "usage_read",
     ] {
         assert_eq!(availability(operation), "available", "{operation}");
     }
-    for operation in ["federation_read", "usage_read"] {
-        assert_eq!(
-            availability(operation),
-            "profile_unavailable",
-            "{operation}"
-        );
-    }
+    assert_eq!(availability("federation_read"), "profile_unavailable");
     let id = context["id"].as_str().unwrap();
 
     let (status, summary) = get(&router, "/api/v1/human/summary?window=all", Some(id)).await;
@@ -127,12 +122,14 @@ async fn owned_sources_serve_the_summary_memberships_and_configuration() {
     assert_eq!(value("source_profile"), "owned_sources");
     assert_eq!(value("human_rights_marker"), "installed");
 
-    let (status, _) = get(&router, "/api/v1/human/admin/usage", Some(id)).await;
+    let (status, usage) = get(&router, "/api/v1/human/admin/usage", Some(id)).await;
     assert_eq!(
         status,
-        StatusCode::SERVICE_UNAVAILABLE,
-        "usage stays unavailable on the owned profile"
+        StatusCode::OK,
+        "the available usage projection may have no allocation"
     );
+    assert!(usage["items"].as_array().unwrap().is_empty());
+    assert_eq!(usage["billable"], false);
 }
 
 async fn owned_worker_summary_on(format: u32) {
@@ -274,7 +271,6 @@ async fn owned_quota_on(format: u32) {
 
     const IDENTITY: &str = "/api/v1/human/identity";
     const QUOTA: &str = "/api/v1/human/admin/quota";
-    const USAGE: &str = "/api/v1/human/admin/usage";
     let historical = tempfile::Builder::new()
         .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap())
@@ -328,10 +324,6 @@ async fn owned_quota_on(format: u32) {
     };
     assert_eq!(operation("quota_read")["permission"], "granted");
     assert_eq!(operation("quota_read")["availability"], "available");
-    assert_eq!(
-        operation("usage_read")["availability"],
-        "profile_unavailable"
-    );
 
     let (status, body) = read(&router, &reader, QUOTA, Some(admin)).await;
     assert_eq!(status, StatusCode::OK);
@@ -383,9 +375,6 @@ async fn owned_quota_on(format: u32) {
         assert_eq!(refused["error"]["code"], "permission_denied");
         assert!(refused.get("quota").is_none() && refused.get("read_receipt").is_none());
     }
-    let (status, _) = read(&router, &reader, USAGE, Some(admin)).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-
     if format == 14 {
         let held = rusqlite::Connection::open_with_flags(
             &source,
@@ -416,6 +405,180 @@ async fn owned_quota_format14_reports_configured_limits_and_durable_reservations
 #[tokio::test]
 async fn owned_quota_format15_reports_configured_limits_and_durable_reservations() {
     owned_quota_on(15).await;
+}
+
+async fn owned_usage_on(format: u32, intervals: &[i64]) {
+    use super::owned_workers::{context, provision_reader, read};
+    use crate::control::{AllocationProvenanceV1, WorkerStateV1};
+    use std::os::unix::fs::PermissionsExt;
+
+    const IDENTITY: &str = "/api/v1/human/identity";
+    const USAGE: &str = "/api/v1/human/admin/usage?limit=1";
+    let historical = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap())
+        .unwrap();
+    let mut expected = Vec::new();
+    let mut unknown_attempt = None;
+    let mut files = Store::owned_control_fixture_with_legacy_setup_for_test(format, |legacy| {
+        for &seconds in intervals {
+            let result = legacy.finish_usage_worker_for_test(Some(seconds));
+            assert_eq!(result.worker.state, WorkerStateV1::Terminal);
+            assert!(!result.worker.quota_held);
+            expected.push((result, seconds));
+        }
+        let unknown = legacy.finish_usage_worker_for_test(None);
+        assert_eq!(unknown.worker.state, WorkerStateV1::InDoubt);
+        assert!(unknown.worker.quota_held);
+        unknown_attempt = Some(unknown.worker.attempt.attempt_id);
+        legacy
+            .migrate_human_rights_v2(&historical.path().join("before-rights.sqlite"))
+            .unwrap();
+    });
+    let unknown_attempt = unknown_attempt.unwrap();
+    expected.sort_unstable_by(|left, right| {
+        left.0
+            .worker
+            .attempt
+            .attempt_id
+            .cmp(&right.0.worker.attempt.attempt_id)
+    });
+    let (bundle, credentials, tokens) = files.take_startup();
+    let reader = provision_reader(&bundle, HumanCapabilityV1::ReadWorkerRegistry);
+    let broker_admin = provision_reader(&bundle, HumanCapabilityV1::ReadBrokerRegistry);
+    let descriptor = bundle
+        .owner
+        .closure()
+        .sources
+        .iter()
+        .find(|source| source.tenant_id.as_deref() == Some("A"))
+        .unwrap();
+    assert_eq!(descriptor.required_format, format);
+    let source = descriptor.storage_binding.path();
+    let router = gateway_router(
+        GatewayState::for_owned_human_sources(
+            bundle,
+            credentials,
+            tokens,
+            Policy::default(),
+            None,
+            Redactor::new(vec![]),
+        )
+        .unwrap(),
+    );
+    let (status, identity) = read(&router, &reader, IDENTITY, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let admin = context(&identity, "administration");
+    let usage = admin["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["operation"] == "usage_read")
+        .unwrap();
+    assert_eq!(usage["permission"], "granted");
+    assert_eq!(usage["availability"], "available");
+
+    let database = rusqlite::Connection::open_with_flags(
+        source,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    let mut path = USAGE.to_owned();
+    let mut previous_receipt_seq = 0;
+    for (index, (terminal, seconds)) in expected.iter().enumerate() {
+        let (status, body) = read(&router, &reader, &path, Some(admin)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["context_id"], admin["id"]);
+        assert_eq!(
+            body["authorization_version"],
+            admin["authorization_version"]
+        );
+        let page: HumanUsagePageV1 = serde_json::from_value(body).unwrap();
+        assert_eq!(page.version, 1);
+        assert_eq!(page.source, "tenant_terminal_allocations");
+        assert_eq!(page.method_version, 1);
+        assert!(!page.billable);
+        assert_eq!(page.items.len(), 1);
+        let item = &page.items[0];
+        assert_ne!(item.attempt_id, unknown_attempt);
+        assert_eq!(item.attempt_id, terminal.worker.attempt.attempt_id);
+        assert_eq!(item.worker_id, terminal.worker.worker_id);
+        assert_eq!(item.terminal_observation_id, terminal.receipt.operation_id);
+        let duration = u128::try_from(*seconds).unwrap() * 1_000_000_000;
+        assert_eq!(item.duration_ns, duration.to_string());
+        assert_eq!(
+            item.cpu_millicore_nanoseconds,
+            (2000 * duration).to_string()
+        );
+        assert_eq!(
+            item.memory_byte_nanoseconds,
+            (1_073_741_824 * duration).to_string()
+        );
+        assert_eq!(item.method_version, 1);
+        assert!(!item.billable);
+        assert_eq!(item.source.provenance, AllocationProvenanceV1::Observed);
+
+        let receipt = &page.read_receipt;
+        let (seq, payload, received_at): (i64, String, String) = database
+            .query_row(
+                "SELECT seq,payload,received_at FROM events WHERE kind='control.identity.access' AND id=?1",
+                [&receipt.audit_event_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let audited: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(audited["data"]["action"], "usage");
+        assert_eq!(audited["data"]["mode"], "administration");
+        assert_eq!(audited["data"]["principal"], identity["principal"]);
+        assert_eq!(audited["data"]["request_id"], receipt.request_id);
+        assert_eq!(audited["data"]["result_count"], 1);
+        assert_eq!(received_at, receipt.received_at);
+        assert!(seq > previous_receipt_seq);
+        previous_receipt_seq = seq;
+
+        assert_eq!(page.has_more, index + 1 < expected.len());
+        if page.has_more {
+            let cursor = page.next_cursor.as_deref().unwrap();
+            let wrong_query = format!("/api/v1/human/admin/usage?limit=2&cursor={cursor}");
+            let (status, error) = read(&router, &reader, &wrong_query, Some(admin)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(error["error"]["code"], "invalid_cursor");
+            assert!(error.get("items").is_none() && error.get("read_receipt").is_none());
+            path = format!("{USAGE}&cursor={cursor}");
+        } else {
+            assert!(page.next_cursor.is_none());
+        }
+    }
+
+    let (status, broker_identity) = read(&router, &broker_admin, IDENTITY, None).await;
+    assert_eq!(status, StatusCode::OK);
+    for (bearer, selected) in [
+        (&reader, context(&identity, "personal")),
+        (&broker_admin, context(&broker_identity, "administration")),
+    ] {
+        let (status, error) = read(&router, bearer, USAGE, Some(selected)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(error["error"]["code"], "permission_denied");
+        assert!(error.get("items").is_none() && error.get("read_receipt").is_none());
+    }
+    let count: i64 = database
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE kind='control.identity.access' AND json_extract(payload,'$.data.action')='usage'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, i64::try_from(expected.len()).unwrap());
+}
+
+#[tokio::test]
+async fn owned_usage_format14_pages_observed_allocations_and_omits_unknown_duration() {
+    owned_usage_on(14, &[0, 1]).await;
+}
+
+#[tokio::test]
+async fn owned_usage_format15_keeps_terminal_facts_and_audits_the_read() {
+    owned_usage_on(15, &[1]).await;
 }
 
 async fn post(router: &Router, path: &str, context: &str, body: &Value) -> (StatusCode, Value) {

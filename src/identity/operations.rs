@@ -398,22 +398,17 @@ mod tests {
                 human_rights_marker: true,
             },
         );
-        for operation in [
-            HumanOperationV1::FederationRead,
-            HumanOperationV1::UsageRead,
-        ] {
-            assert_eq!(
-                entry(&owned, operation).availability,
-                OperationAvailabilityV1::ProfileUnavailable,
-                "{operation:?} on the owned profile"
-            );
-        }
+        assert_eq!(
+            entry(&owned, HumanOperationV1::FederationRead).availability,
+            OperationAvailabilityV1::ProfileUnavailable
+        );
         for operation in [
             HumanOperationV1::BrokersRead,
             HumanOperationV1::WorkersRead,
             HumanOperationV1::SummaryRead,
             HumanOperationV1::MembershipsRead,
             HumanOperationV1::QuotaRead,
+            HumanOperationV1::UsageRead,
         ] {
             assert_eq!(
                 entry(&owned, operation).availability,

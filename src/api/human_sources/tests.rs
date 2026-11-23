@@ -583,7 +583,7 @@ async fn owned_admin_reads_refuse_head_before_authentication() {
         ("/api/v1/human/admin/grants", StatusCode::UNAUTHORIZED),
         ("/api/v1/human/admin/memberships", StatusCode::UNAUTHORIZED),
         ("/api/v1/human/admin/quota", StatusCode::UNAUTHORIZED),
-        ("/api/v1/human/admin/usage", StatusCode::SERVICE_UNAVAILABLE),
+        ("/api/v1/human/admin/usage", StatusCode::UNAUTHORIZED),
     ] {
         // No bearer: adopted GETs reach the extractor, while HEAD is
         // refused by the gate even when Axum registered it implicitly.

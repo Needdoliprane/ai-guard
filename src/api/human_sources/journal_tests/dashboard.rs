@@ -322,6 +322,12 @@ async fn owned_dashboard_quota_forwards_exact_get_context_and_gateway_refusal_wi
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owned_dashboard_usage_forwards_exact_get_context_and_gateway_refusal_without_identity_probe()
+ {
+    require_owned_get_is_relayed("/api/v1/human/admin/usage", Some("limit=25")).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn owned_dashboard_brokers_keeps_head_mutations_legacy_and_neighbor_routes_closed() {
     let (server, dashboard, calls, unexpected, _front) =
         owned_read_proxy("/api/v1/human/owned/brokers", Some("limit=25")).await;
@@ -372,7 +378,7 @@ async fn owned_dashboard_brokers_keeps_head_mutations_legacy_and_neighbor_routes
             StatusCode::SERVICE_UNAVAILABLE,
         ),
         (
-            "GET",
+            "HEAD",
             "/api/v1/human/admin/usage",
             StatusCode::SERVICE_UNAVAILABLE,
         ),

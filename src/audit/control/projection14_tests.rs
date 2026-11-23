@@ -39,6 +39,30 @@ use uuid::Uuid;
 #[path = "../../../tests/support/relay_admission_fixture.rs"]
 mod relay_fixture;
 
+impl Store {
+    pub(crate) fn finish_usage_worker_for_test(&self, seconds: Option<i64>) -> MutationResultV1 {
+        let worker = relay_fixture::running_now(self);
+        let started_at = worker.observed_started_at.as_deref().unwrap();
+        let started = chrono::DateTime::parse_from_rfc3339(started_at).unwrap();
+        let finished_at =
+            seconds.map(|seconds| (started + chrono::Duration::seconds(seconds)).to_rfc3339());
+        let mut observation = relay_fixture::parent_observation(
+            &worker,
+            RuntimeStatusV1::Exited,
+            false,
+            finished_at.as_deref(),
+            Some(0),
+        );
+        observation.started_at = Some(started_at.to_owned());
+        observation.observed_at = chrono::Utc::now().to_rfc3339();
+        self.mutate_worker(&relay_fixture::mutation(
+            &worker,
+            WorkerTransitionV1::Observe { observation },
+        ))
+        .unwrap()
+    }
+}
+
 const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const HASH_C: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
