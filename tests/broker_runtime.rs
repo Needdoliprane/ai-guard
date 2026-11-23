@@ -75,6 +75,24 @@ enum LegacyRecoveryStage {
     RecoveryAttested,
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RunClientRecoveryStage {
+    NotReached,
+    ReapClock,
+    BrokerLiveness,
+    WorkerRead,
+    StatusRead,
+    TerminalWait,
+    Executor,
+    ResultRead,
+    ResultOutcome,
+    TerminalCorrelation,
+    PostTerminalChecks,
+    ControlShutdown,
+    Complete,
+}
+
 #[test]
 fn batch_failure_marker_keeps_only_validated_metadata() {
     let private = "synthetic-private-audit-body-do-not-persist";
@@ -180,7 +198,12 @@ async fn broker_sigkill_preserves_original_deadline_without_second_start() -> Re
     let scenario_end = Instant::now() + Duration::from_secs(600);
     let outcome = timeout_at(
         scenario_end,
-        run(&selection, &evidence, LostProcess::Broker { scenario_end }),
+        run(
+            &selection,
+            &evidence,
+            LostProcess::Broker { scenario_end },
+            &mut RunClientRecoveryStage::NotReached,
+        ),
     )
     .await
     .context("broker runtime qualification exceeded the 600-second global bound")
@@ -209,7 +232,12 @@ async fn broker_sigkill_legacy_recovery_status_attests_original_worker_arm() -> 
     )?;
     let outcome = timeout(
         Duration::from_secs(600),
-        run(&selection, &evidence, LostProcess::LegacyRecoveryStatus),
+        run(
+            &selection,
+            &evidence,
+            LostProcess::LegacyRecoveryStatus,
+            &mut RunClientRecoveryStage::NotReached,
+        ),
     )
     .await
     .context("Legacy recovery status fixture exceeded the 600-second global bound")
@@ -232,16 +260,24 @@ async fn broker_sigkill_legacy_recovery_status_attests_original_worker_arm() -> 
 async fn broker_run_cli_sigkill_preserves_original_deadline_without_second_start() -> Result<()> {
     let selection = Selection::read()?;
     let evidence = Evidence::new()?;
-    let outcome = timeout(
+    let mut stage = RunClientRecoveryStage::NotReached;
+    let run_outcome = timeout(
         Duration::from_secs(600),
-        run(&selection, &evidence, LostProcess::RunCli),
+        run(&selection, &evidence, LostProcess::RunCli, &mut stage),
     )
-    .await
-    .context("broker-routed CLI qualification exceeded the 600-second global bound")
-    .and_then(|result| result);
+    .await;
+    let state = match &run_outcome {
+        Ok(Ok(())) => "passed",
+        Ok(Err(_)) => "failed",
+        Err(_) => "timed_out",
+    };
+    let outcome = run_outcome
+        .context("broker-routed CLI qualification exceeded the 600-second global bound")
+        .and_then(|result| result);
     evidence.write("result.json", &json!({
         "runtime_test":if outcome.is_ok() { "PASS" } else { "FAIL" },
         "fault":"owned_run_cli_sigkill",
+        "run_client_recovery":{"state":state,"stage":stage},
         "requested_broker_client_source":"published_selection",
         "broker_selection_input":"environment",
         "native_start":selection.native_start,
@@ -289,7 +325,12 @@ async fn inspect_retained_guard_after_runtime_failure() -> Result<()> {
     Ok(())
 }
 
-async fn run(selection: &Selection, evidence: &Evidence, lost: LostProcess) -> Result<()> {
+async fn run(
+    selection: &Selection,
+    evidence: &Evidence,
+    lost: LostProcess,
+    run_client_stage: &mut RunClientRecoveryStage,
+) -> Result<()> {
     let timeout_seconds = selection.timeout_seconds;
     let sleep_seconds = timeout_seconds + 15;
     let argv = vec!["/bin/sleep".into(), sleep_seconds.to_string()];
@@ -645,6 +686,7 @@ async fn run(selection: &Selection, evidence: &Evidence, lost: LostProcess) -> R
         evidence.write("stage.json", &json!({"stage":"kill_owned_run_cli_only","kill_clock":now,"original_deadline_ns":deadline.to_string()}))?;
         let cli_pid = run_cli.id();
         let broker_pid = broker.id();
+        *run_client_stage = RunClientRecoveryStage::ReapClock;
         let killed_status = run_cli.kill_owned()?;
         let killed = clock.sample()?;
         evidence.write("run-cli-killed.json", &json!({"clock_before":now,"clock_after_reap":killed,"original_deadline_ns":deadline.to_string(),"cli_pid":cli_pid,"broker_pid":broker_pid,"signal":killed_status.signal()}))?;
@@ -655,7 +697,9 @@ async fn run(selection: &Selection, evidence: &Evidence, lost: LostProcess) -> R
                 && killed.continuous_ns()? < deadline,
             "owned CLI death/reap before the original Arm deadline was not established"
         );
+        *run_client_stage = RunClientRecoveryStage::BrokerLiveness;
         broker.running()?;
+        *run_client_stage = RunClientRecoveryStage::TerminalWait;
         evidence.write(
             "stage.json",
             &json!({"stage":"read_original_job_without_resubmit"}),
@@ -667,12 +711,14 @@ async fn run(selection: &Selection, evidence: &Evidence, lost: LostProcess) -> R
             &runner,
             &http,
             &origin,
-            operation,
-            &worker.worker_id,
+            (operation, &worker.worker_id),
             Duration::from_secs(u64::from(timeout_seconds) + 35),
+            run_client_stage,
         )
         .await?;
+        *run_client_stage = RunClientRecoveryStage::ResultRead;
         let result = read_result(selection, &client_selection, operation).await?;
+        *run_client_stage = RunClientRecoveryStage::ResultOutcome;
         ensure!(
             !result.cancel_requested,
             "run CLI loss unexpectedly requested cancellation"
@@ -681,6 +727,7 @@ async fn run(selection: &Selection, evidence: &Evidence, lost: LostProcess) -> R
             evidence.write("cli-result-nonterminal.json", &result)?;
             bail!("original job has no durable terminal result after the CLI died")
         };
+        *run_client_stage = RunClientRecoveryStage::TerminalCorrelation;
         let reconciled = harness::only_worker(&http, &origin, &runner)
             .await?
             .context("original worker missing after CLI loss")?;
@@ -715,6 +762,7 @@ async fn run(selection: &Selection, evidence: &Evidence, lost: LostProcess) -> R
                 && !terminal.output_captured,
             "central observation and durable Result do not establish the original worker's clean non-OOM deadline stop"
         );
+        *run_client_stage = RunClientRecoveryStage::PostTerminalChecks;
         verify_cli_docker_terminal(
             selection,
             evidence,
@@ -803,6 +851,7 @@ async fn run(selection: &Selection, evidence: &Evidence, lost: LostProcess) -> R
         evidence.write("cli-job-result.json", &result)?;
         evidence.write("guard-after-stop.json", &slot_after)?;
         evidence.write("reconciled.json", &json!({"broker_pid":broker_pid,"broker_live_after_result_replay":true,"enforcer_epoch":epoch,"quota":quota,"allocation":allocation,"integrity":integrity,"source_sha256":hex::encode(original),"original_cid":cid,"deadline_ns":deadline.to_string()}))?;
+        *run_client_stage = RunClientRecoveryStage::ControlShutdown;
         let broker_exit = broker.terminate_owned()?;
         ensure!(
             broker_exit.success(),
@@ -812,6 +861,7 @@ async fn run(selection: &Selection, evidence: &Evidence, lost: LostProcess) -> R
             gateway.terminate_owned()?.success(),
             "gateway did not exit gracefully after evidence collection"
         );
+        *run_client_stage = RunClientRecoveryStage::Complete;
         return Ok(());
     }
     evidence.write("stage.json", &json!({"stage":"kill_owned_broker_only","kill_clock":now,"original_deadline_ns":deadline.to_string()}))?;
@@ -984,9 +1034,9 @@ async fn run(selection: &Selection, evidence: &Evidence, lost: LostProcess) -> R
         &runner,
         &http,
         &origin,
-        operation,
-        &worker.worker_id,
+        (operation, &worker.worker_id),
         Duration::from_secs(35),
+        run_client_stage,
     )
     .await?;
     let after = recovery(evidence, &runner, operation).await?;
@@ -1067,9 +1117,9 @@ async fn run(selection: &Selection, evidence: &Evidence, lost: LostProcess) -> R
         &runner,
         &http,
         &origin,
-        operation,
-        &worker.worker_id,
+        (operation, &worker.worker_id),
         Duration::from_secs(35),
+        run_client_stage,
     )
     .await?;
     let usage_after: Value = harness::get(&http, &origin, &runner, "usage?limit=100").await?;
@@ -1672,20 +1722,23 @@ async fn wait_terminal(
     runner: &str,
     http: &reqwest::Client,
     origin: &str,
-    operation_id: Uuid,
-    worker_id: &str,
+    (operation_id, worker_id): (Uuid, &str),
     budget: Duration,
+    run_client_stage: &mut RunClientRecoveryStage,
 ) -> Result<()> {
     let limit = Instant::now() + budget;
     loop {
+        *run_client_stage = RunClientRecoveryStage::WorkerRead;
         let worker: WorkerV1 =
             harness::get(http, origin, runner, &format!("workers/{worker_id}")).await?;
+        *run_client_stage = RunClientRecoveryStage::StatusRead;
         if let BrokerReplyV1::Status { status } =
             ipc(evidence, runner, BrokerCommandV1::Status { operation_id }).await?
             && worker.state == WorkerStateV1::Terminal
             && !worker.quota_held
             && !status.executor_task_running
         {
+            *run_client_stage = RunClientRecoveryStage::Executor;
             ensure!(
                 status.executor_error.is_none(),
                 "reconciliation executor failed: {:?}",
@@ -1693,6 +1746,7 @@ async fn wait_terminal(
             );
             return Ok(());
         }
+        *run_client_stage = RunClientRecoveryStage::TerminalWait;
         ensure!(
             Instant::now() < limit,
             "terminal central ACK/reconciliation did not complete"
