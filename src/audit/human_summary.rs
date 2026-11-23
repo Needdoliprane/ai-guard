@@ -78,8 +78,7 @@ impl Store {
         self.commit_checked(tx)?;
         Ok(summary)
     }
-    /// The same summary on an owned 14/15 source. The owned profile has no
-    /// worker registry protocol yet, so its worker sections are unavailable.
+    /// The same summary in the business read epoch of the retained 14/15 source.
     pub(crate) fn modern_human_summary(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -135,9 +134,12 @@ impl Store {
             } else {
                 SummarySectionV1::NotGranted
             },
-            workers: match worker_gate(workers, owned, registry) {
-                Some(section) => section,
-                None => worker_groups(tx, &evaluated_at)?,
+            workers: if !workers {
+                SummarySectionV1::NotGranted
+            } else if !registry {
+                unavailable(SummaryUnavailableV1::MigrationRequired)
+            } else {
+                worker_groups(tx, &evaluated_at)?
             },
             brokers: if !brokers {
                 SummarySectionV1::NotGranted
@@ -229,9 +231,8 @@ fn unavailable<T>(code: SummaryUnavailableV1) -> SummarySectionV1<T> {
     SummarySectionV1::Unavailable { code }
 }
 
-/// The section a worker-registry read takes when it is not computed here:
-/// not granted, unavailable on the owned profile (no worker protocol yet), or
-/// waiting for the registry format.
+/// Limits the separate quota and usage sections, whose protocols remain closed
+/// on the owned profile.
 fn worker_gate<T>(granted: bool, owned: bool, registry: bool) -> Option<SummarySectionV1<T>> {
     if !granted {
         Some(SummarySectionV1::NotGranted)
