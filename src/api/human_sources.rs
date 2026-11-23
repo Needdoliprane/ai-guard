@@ -352,7 +352,7 @@ impl OwnedHumanGateway {
     ) -> ApiResult<IdentityReceiptV1> {
         self.change_delegated_identity(
             index,
-            human::identity_change_failure,
+            human::grant_change_failure,
             |epoch, source, expected| {
                 store.modern_human_change_grant(epoch, source, scope, change, expected)
             },

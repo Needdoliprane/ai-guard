@@ -505,11 +505,11 @@ pub(super) async fn change_grant(
     headers: HeaderMap,
     body: Result<Json<HumanGrantChangeV1>, axum::extract::rejection::JsonRejection>,
 ) -> ApiResult<Json<HumanGrantChangeReceiptV1>> {
-    let Json(change) = body.map_err(|_| invalid_request())?;
+    let Json(change) = body.map_err(|_| invalid_grant_request())?;
     let expected_revision: u64 = change
         .expected_revision
         .parse()
-        .map_err(|_| invalid_request())?;
+        .map_err(|_| invalid_grant_request())?;
     let selected = headers.clone();
     run_human(&state, &proof, Some(&selected), move |state, proof| {
         let (_, tenant, scope) = selected_context(&state, &proof, &headers)?;
@@ -521,7 +521,7 @@ pub(super) async fn change_grant(
             (Some(_), _) => return Err(super::super::human_sources::unavailable()),
             (None, _) => store
                 .human_change_grant(&scope, &change)
-                .map_err(identity_change_failure)?,
+                .map_err(grant_change_failure)?,
         };
         reauthenticate(&state, &proof)?;
         Ok(Json(HumanGrantChangeReceiptV1 {

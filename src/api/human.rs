@@ -155,32 +155,39 @@ pub(super) fn store_failure(error: anyhow::Error) -> (StatusCode, Json<Value>) {
 /// Failures of a delegated identity change. A conflict (stale revision, or
 /// an operation identifier reused for another change) asks for a re-read; a
 /// refusal names the change, not a read. Everything else maps like a read.
-pub(super) fn identity_change_failure(error: anyhow::Error) -> (StatusCode, Json<Value>) {
+fn identity_change_failure(
+    error: anyhow::Error,
+    conflict: &str,
+    invalid: fn() -> (StatusCode, Json<Value>),
+) -> (StatusCode, Json<Value>) {
     match error.downcast_ref::<IdentityFailureV1>() {
-        Some(IdentityFailureV1::Conflict) => failure(
-            StatusCode::CONFLICT,
-            "conflict",
-            "The membership changed since it was read, or this operation identifier was used for another change. Re-read it before deciding again.",
-            "reread",
-        ),
+        Some(IdentityFailureV1::Conflict) => {
+            failure(StatusCode::CONFLICT, "conflict", conflict, "reread")
+        }
         Some(IdentityFailureV1::PermissionDenied) => failure(
             StatusCode::FORBIDDEN,
             "permission_denied",
             "This context does not permit this change.",
             "review_permissions",
         ),
+        Some(IdentityFailureV1::InvalidRequest) => invalid(),
         _ => store_failure(error),
     }
 }
 pub(super) fn membership_change_failure(error: anyhow::Error) -> (StatusCode, Json<Value>) {
-    if matches!(
-        error.downcast_ref::<IdentityFailureV1>(),
-        Some(IdentityFailureV1::InvalidRequest)
-    ) {
-        invalid_membership_request()
-    } else {
-        identity_change_failure(error)
-    }
+    identity_change_failure(
+        error,
+        "The membership changed since it was read, or this operation identifier was used for another change. Re-read it before deciding again.",
+        invalid_membership_request,
+    )
+}
+
+pub(super) fn grant_change_failure(error: anyhow::Error) -> (StatusCode, Json<Value>) {
+    identity_change_failure(
+        error,
+        "The shares changed since they were read, or this operation identifier was used for another change. Re-read the shares before deciding again.",
+        invalid_grant_request,
+    )
 }
 
 fn context_failure(code: &str) -> (StatusCode, Json<Value>) {

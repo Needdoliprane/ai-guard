@@ -623,23 +623,39 @@ async fn owned_dashboard_relays_the_exact_delegated_grant_change() {
         true,
     )
     .unwrap();
-    let response = dashboard
-        .oneshot(
-            axum::http::Request::post(PATH)
-                .header("authorization", format!("Bearer {OWNED_PROXY_BEARER}"))
-                .header("x-aiguard-context", OWNED_PROXY_CONTEXT)
-                .header("content-type", "application/json; charset=utf-8")
-                .body(Body::from(body))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let request = |target: &str| {
+        axum::http::Request::post(target)
+            .header("authorization", format!("Bearer {OWNED_PROXY_BEARER}"))
+            .header("x-aiguard-context", OWNED_PROXY_CONTEXT)
+            .header("content-type", "application/json; charset=utf-8")
+            .body(Body::from(body.clone()))
+            .unwrap()
+    };
+    let response = dashboard.clone().oneshot(request(PATH)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["cache-control"], "no-store");
     let bytes = axum::body::to_bytes(response.into_body(), 4096)
         .await
         .unwrap();
     assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), receipt);
+    assert_eq!(reached.load(Ordering::SeqCst), 1);
+    assert_eq!(unexpected.load(Ordering::SeqCst), 0);
+
+    let response = dashboard
+        .oneshot(request(&format!("{PATH}?resource_kind=session")))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let legacy = dashboard_router_with_human_mode(
+        &format!("http://{address}"),
+        None,
+        front.path().to_owned(),
+        None,
+        false,
+    )
+    .unwrap();
+    let response = legacy.oneshot(request(PATH)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
     assert_eq!(reached.load(Ordering::SeqCst), 1);
     assert_eq!(unexpected.load(Ordering::SeqCst), 0);
     server.close().await;

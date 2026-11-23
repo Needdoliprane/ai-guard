@@ -924,6 +924,7 @@ async fn owned_grant_change_format14_returns_one_durable_receipt_and_keeps_the_s
 
     const IDENTITY: &str = "/api/v1/human/identity";
     const GRANTS: &str = "/api/v1/human/admin/grants";
+    const OWNED_GRANTS: &str = "/api/v1/human/owned/admin/grants";
     let fixture = Fixture::new_owned_with_human_rights();
     let member = seed_organization_member(&fixture);
     grant(&fixture, &[C::ManageGrants, C::ReadMemberships]);
@@ -1032,6 +1033,51 @@ async fn owned_grant_change_format14_returns_one_durable_receipt_and_keeps_the_s
             "permissions": ["metadata"],
         }])
     );
+
+    let mut stale = body.clone();
+    stale["operation_id"] = json!(uuid::Uuid::new_v4().to_string());
+    let mut invalid = stale.clone();
+    invalid["shares"][0]["permissions"] = json!([]);
+    let (gateway, dashboard, _front) = membership_dashboard(router.clone()).await;
+    for (target, path) in [
+        (&router, GRANTS),
+        (&router, OWNED_GRANTS),
+        (&dashboard, GRANTS),
+    ] {
+        let (status, response) = post(target, &bearer, path, &current_context, &stale).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{path}: {response}");
+        assert_eq!(response["error"]["code"], "conflict");
+        assert_eq!(response["error"]["retry_action"], "reread");
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("The shares changed")
+        );
+        let (status, response) = post(target, &bearer, path, &current_context, &invalid).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {response}");
+        assert_eq!(response["error"]["code"], "invalid_request");
+        assert_eq!(response["error"]["retry_action"], "retry");
+        assert_eq!(
+            response["error"]["message"],
+            "Check the share change fields, then try again."
+        );
+    }
+    let (status, response) = post(
+        &router,
+        &bearer,
+        &format!("{OWNED_GRANTS}?resource_kind=session"),
+        &current_context,
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert_eq!(response["error"]["code"], "invalid_request");
+    assert_eq!(
+        durable_revision_and_mutations(),
+        (next_revision, prior_mutations + 1)
+    );
+    gateway.close().await;
 }
 
 async fn membership_dashboard(gateway: Router) -> (LoopbackGateway, Router, tempfile::TempDir) {
