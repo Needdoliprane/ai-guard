@@ -133,6 +133,97 @@ async fn owned_sources_serve_the_summary_memberships_and_configuration() {
     assert_eq!(usage["billable"], false);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owned_grant_read_format14_returns_the_existing_grant_and_one_receipt() {
+    use super::{
+        owned_workers::read,
+        races::{connection, snapshot, state},
+    };
+    use HumanCapabilityV1 as C;
+
+    let fixture = Fixture::new_owned_with_human_rights();
+    grant(&fixture, &[C::ManageGrants, C::ReadMemberships]);
+    let resource = ResourceRefV1 {
+        kind: ResourceKindV1::Session,
+        resource_id: "owned-grant-read-session".into(),
+    };
+    seed_event(&fixture, "B", &resource.resource_id, fixture.principal());
+    let state = state(&fixture);
+    let database = connection(&state);
+    let format: u32 = database
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(format, 14);
+    let (gateway, dashboard, _front) = membership_dashboard(gateway_router(state)).await;
+    let bearer = Fixture::bearer("B");
+    let (status, identity) = read(&dashboard, &bearer, "/api/v1/human/identity", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let context = identity["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|context| {
+            context["tenant_id"] == "B"
+                && context["organization_scope"] == "synthetic-org"
+                && context["mode"] == "administration"
+        })
+        .expect("the fixture offers the matching administration context");
+
+    let resource_key = resource.key().unwrap();
+    let stored_grant = || -> String {
+        database
+            .query_row(
+                "SELECT payload_json FROM identity_resources WHERE resource_key=?1",
+                [&resource_key],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let prior_grant = stored_grant();
+    let prior_head = snapshot(&database).0;
+    let path = format!(
+        "/api/v1/human/admin/grants?resource_kind=session&resource_id={}",
+        resource.resource_id
+    );
+    let (status, body) = read(&dashboard, &bearer, &path, Some(context)).await;
+    assert_eq!(status, StatusCode::OK);
+    let body: HumanGrantV1 = serde_json::from_value(body).unwrap();
+    assert_eq!(body.version, 1);
+    assert_eq!(body.context_id, context["id"].as_str().unwrap());
+    assert_eq!(
+        body.authorization_version,
+        context["authorization_version"].as_str().unwrap()
+    );
+    assert_eq!(body.source, "tenant_identity_resources");
+    assert_eq!(body.resource, resource);
+    assert_eq!(&body.owner, fixture.principal());
+    assert_eq!(body.owner_display_name, "Synthetic local person");
+    assert!(body.active);
+    assert_eq!(body.revision, "1");
+    assert!(body.shares.is_empty());
+
+    let receipt = body.read_receipt;
+    let (sequence, received_at, payload): (i64, String, String) = database
+        .query_row(
+            "SELECT seq,received_at,payload FROM events WHERE id=?1",
+            [&receipt.audit_event_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let event: Event = serde_json::from_str(&payload).unwrap();
+    assert_eq!(sequence, prior_head + 1);
+    assert_eq!(snapshot(&database).0, sequence);
+    assert_eq!(received_at, receipt.received_at);
+    assert_eq!(event.kind, "control.identity.access");
+    assert_eq!(event.data["action"], "grants");
+    assert_eq!(event.data["request_id"], receipt.request_id);
+    assert_eq!(event.data["principal"], json!(fixture.principal()));
+    assert_eq!(event.data["mode"], "administration");
+    assert_eq!(event.data["result_count"], 0);
+    assert_eq!(stored_grant(), prior_grant);
+    gateway.close().await;
+}
+
 async fn owned_worker_summary_on(format: u32) {
     use super::owned_workers::{context, provision_reader, read};
     use crate::api::human_sources::owned_control_tests::negative::reserve_workload_fixture_worker;
