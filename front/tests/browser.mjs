@@ -422,9 +422,19 @@ async function runEventFocusCheck() {
   // Fill the live window with events projected out of Actions, so only the original detail is evicted.
   append(Array.from({ length: 998 }, (_, index) => journalEvent(index + 4, "agent.updated")));
   await detail(1).waitFor({ state: "detached" });
+  await page.setViewportSize({ width: 390, height: 390 });
+  await page.evaluate(() => window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "instant" }));
+  const title = page.locator("#main-content h1");
+  assert.ok(await title.evaluate((node) => node.getBoundingClientRect().bottom <= 0),
+    "Le titre est hors écran avant Échap");
   await page.keyboard.press("Escape");
   await dialog.waitFor({ state: "hidden" });
   await page.waitForFunction(() => document.activeElement?.matches("#main-content h1"));
+  assert.ok(await title.evaluate((node) => {
+    const bounds = node.getBoundingClientRect();
+    const dockBottom = document.querySelector(".control-dock").getBoundingClientRect().bottom;
+    return bounds.top >= dockBottom && bounds.bottom <= innerHeight;
+  }), "Après Échap, le titre focalisé est visible sous les commandes");
   assert.deepEqual(errors, []);
   process.stdout.write("Journal viewer : défilement, focus SSE et retour par Échap vérifiés.\n");
 }
