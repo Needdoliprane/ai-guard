@@ -144,6 +144,7 @@ export class HumanDashboard {
   #identityError = "";
   #identityLoading = false;
   #identitySequence = 0;
+  #identityOffersWithdrawn = false;
   #exporting = false;
   #exportMessage = "";
   #exportPages = 0;
@@ -230,7 +231,9 @@ export class HumanDashboard {
         // Captured before the purge and holding no server row: at most the view and the typed filters.
         const intent = captureIntent({ cause: error.code, principal: this.#identity?.principal ?? null, context: this.#context, view: this.#mode,
           now: Date.now(), budgetStopped: this.#api.readBudgetStopped, payload: { supervision: this.#supervisionPreferences, journal: this.#journalPreferences, overview: this.#overviewPreferences } });
-        this.#purgeContext(); this.#resume = intent; this.#message = error.message; this.#mode = "contexts"; this.#render();
+        this.#purgeContext(); this.#resume = intent;
+        if (error.code === "permission_denied") this.#identityOffersWithdrawn = true;
+        this.#message = error.message; this.#mode = "contexts"; this.#render();
         if (!readingIdentity && !this.#api.readBudgetStopped) void this.#loadIdentity();
       },
       onReadBudgetExhausted: () => {
@@ -813,8 +816,9 @@ export class HumanDashboard {
     try {
       const identity = await this.#api.identity();
       if (this.#closed || generation !== this.#generation && this.#context) return;
+      if (generation !== this.#generation && this.#identityOffersWithdrawn) throw new HumanSuperseded();
       if (this.#identityError && this.#message === IDENTITY_REVALIDATION_FAILED + this.#identityError) this.#message = "";
-      this.#identity = identity; this.#identityError = "";
+      this.#identity = identity; this.#identityError = ""; this.#identityOffersWithdrawn = false;
       this.#evaluateResume();
       return true;
     } catch (error) {
@@ -840,7 +844,8 @@ export class HumanDashboard {
   }
   #renderContexts() {
     const contexts = this.#identity?.contexts ?? [];
-    const partial = this.#identity?.contexts_complete === false;
+    const complete = this.#identityOffersWithdrawn ? undefined : this.#identity?.contexts_complete;
+    const partial = complete === false;
     const coverage = partial ? el("div", "control-status",
       badge("Liste des contextes partielle", "amber"),
       el("p", "", "Certaines sources ne peuvent pas être consultées. D’autres contextes peuvent manquer. Réessayez pour actualiser la liste."),
@@ -866,7 +871,7 @@ export class HumanDashboard {
       this.#identityLoading ? el("p", "control-status", "Lecture des accès…") : "",
       this.#identityError ? this.#error(this.#identityError, () => { void this.#loadIdentity(); }) : "",
       coverage,
-      !this.#context && !contexts.length && this.#identity?.contexts_complete === true && !this.#identityLoading && !this.#identityError ? empty("Aucun contexte autorisé", "Votre compte est authentifié mais aucun contexte actif n’est proposé. Faites vérifier vos appartenances par l’opérateur.") : "",
+      !this.#context && !contexts.length && complete === true && !this.#identityLoading && !this.#identityError ? empty("Aucun contexte autorisé", "Votre compte est authentifié mais aucun contexte actif n’est proposé. Faites vérifier vos appartenances par l’opérateur.") : "",
       ...contexts.map((context, index) => el("article", "panel human-context-card",
         el("h2", "", `${modeName(context)} · ${context.tenant_id}`), el("p", "muted", `Organisation : ${context.organization_scope}`),
         el("p", "muted", `Valable jusqu’au ${formatDate(context.expires_at, true)}`),

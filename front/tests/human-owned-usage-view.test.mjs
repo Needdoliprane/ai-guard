@@ -34,7 +34,7 @@ const stamp = (number) => {
 const initialQuota = quotaBody(adminId, stamp(1));
 const initialUsage = usagePage(adminId, stamp(2));
 
-async function mount(t, replies, { owned = true, usageAccess = () => served } = {}) {
+async function mount(t, replies, { owned = true, usageAccess = () => served, offeredId = () => adminId } = {}) {
   const globals = { Node: Element, document: { createElement: (tag) => new Element(tag), createTextNode: (text) => new Element("#text", text) } };
   for (const [name, value] of Object.entries(globals)) {
     const original = Object.getOwnPropertyDescriptor(globalThis, name);
@@ -42,29 +42,34 @@ async function mount(t, replies, { owned = true, usageAccess = () => served } = 
     t.after(() => original ? Object.defineProperty(globalThis, name, original) : Reflect.deleteProperty(globalThis, name));
   }
   const calls = [];
-  const doubts = [];
+  const invalidations = [];
+  let doubts = 0;
+  let identityReads = 0;
   let view;
   const api = new HumanApiClient("synthetic-admin-token", {
     onAuthentication: () => view.close(),
-    onContextInvalidated: () => view.close(),
+    onContextInvalidated: ({ status, code }) => { view.close(); invalidations.push({ status, code }); },
   }, async (path, { signal, headers }) => {
     if (path === "/api/v1/human/identity") {
+      identityReads++;
       const operations = catalogue({ quota_read: served, usage_read: usageAccess(),
         ...(owned ? { federation_read: ["not_granted", null, "profile_unavailable"] } : {}) });
-      return Response.json({ ...identity(), contexts: [{ ...context(adminId, "administration"), operations }],
+      return Response.json({ ...identity(), contexts: [{ ...context(offeredId(), "administration"), operations }],
         ...(owned ? { read_profiles: { ...ownedReadProfiles(), worker_registry: "human_worker_registry_owned_v1" } } : {}) });
     }
-    assert.equal(headers["X-AiGuard-Context"], adminId);
+    assert.equal(headers["X-AiGuard-Context"], api.context?.id);
     calls.push({ path, signal });
     return replies[path]();
   });
   t.after(() => { view?.close(); api.close(); });
+  const openView = (id) => {
+    view = new UsageView({ context: api.selectContext(id), owned: api.readProfiles !== undefined,
+      quota: (signal) => api.quota(signal), usage: (cursor, signal) => api.usage(cursor, signal),
+      budgetStopped: () => api.readBudgetStopped, onReadStateChange: () => {}, onAccessDoubt: () => { doubts++; } });
+    return view;
+  };
   await api.identity();
-  view = new UsageView({ context: api.selectContext(adminId), owned: api.readProfiles !== undefined,
-    quota: (signal) => api.quota(signal), usage: (cursor, signal) => api.usage(cursor, signal),
-    budgetStopped: () => api.readBudgetStopped, onReadStateChange: () => {},
-    onAccessDoubt: () => doubts.push({ state: view.element.dataset.state, panels: panels(view).length }) });
-  return { view, api, calls, doubts };
+  return { view: openView(adminId), api, calls, openView, invalidations, doubts: () => doubts, identityReads: () => identityReads };
 }
 
 const paths = (calls) => calls.map(({ path }) => path);
@@ -139,9 +144,9 @@ test("owned : un 429 temporaire du quota laisse lire l’usage autorisé", async
 });
 
 for (const path of [quotaPath, usagePath]) {
-  test(`owned : les en-têtes 403 sur ${path === quotaPath ? "le quota" : "l’usage"} retirent les valeurs avant de relire les accès`, async (t) => {
+  test(`Les en-têtes 403 sur ${path === quotaPath ? "le quota" : "l’usage"} owned retirent le contexte et les données`, async (t) => {
     const replies = { [quotaPath]: () => Response.json(initialQuota), [usagePath]: () => Response.json(initialUsage) };
-    const { view, calls, doubts } = await mount(t, replies);
+    const { view, api, calls, invalidations, doubts } = await mount(t, replies);
     await view.refresh();
     calls.length = 0;
     const cancellation = Promise.withResolvers();
@@ -156,9 +161,11 @@ for (const path of [quotaPath, usagePath]) {
     const pending = view.refresh();
     try {
       await new Promise((resolve) => setImmediate(resolve));
-      assert.equal(view.element.dataset.state, "refused");
-      assert.equal(panels(view).length, 0);
-      assert.deepEqual(doubts, [{ state: "refused", panels: 0 }]);
+      assert.equal(api.context, null);
+      assert.throws(() => api.selectContext(adminId), { code: "context_invalid" });
+      assert.equal(view.element.children.length, 0);
+      assert.deepEqual(invalidations, [{ status: 403, code: "permission_denied" }]);
+      assert.equal(doubts(), 0);
       assert.equal(pulled, false);
       assert.equal(cancelled, true);
       assert.deepEqual(paths(calls), path === quotaPath ? [quotaPath] : [quotaPath, usagePath]);
@@ -169,6 +176,48 @@ for (const path of [quotaPath, usagePath]) {
     }
   });
 }
+
+test("Un 403 à l’essai opérateur retire l’offre et laisse le budget suspendu jusqu’à une identité fraîche", async (t) => {
+  let offered = adminId;
+  const replies = { [quotaPath]: () => Response.json(initialQuota), [usagePath]: () => Response.json(initialUsage) };
+  const { view, api, calls, invalidations, openView, identityReads } = await mount(t, replies, { offeredId: () => offered });
+  await view.refresh();
+  replies[quotaPath] = () => errorResponse(429, "audit_read_budget_exhausted", "contact_operator");
+  await view.refresh();
+  assert.equal(api.readBudgetStopped, true);
+  assertStamp(panels(view)[0], initialQuota);
+
+  calls.length = 0;
+  replies[quotaPath] = () => errorResponse(403, "context_revoked", "select_context");
+  api.allowReadAfterOperatorAction();
+  await view.refresh();
+  assert.equal(api.readBudgetStopped, true);
+  assert.deepEqual(paths(calls), [quotaPath]);
+  assert.deepEqual(invalidations, [{ status: 403, code: "permission_denied" }]);
+  assert.equal(api.context, null);
+  assert.equal(view.element.children.length, 0);
+  assert.throws(() => api.selectContext(adminId), { code: "context_invalid" });
+  await assert.rejects(api.identity(), { code: "audit_read_budget_exhausted" });
+  assert.equal(identityReads(), 1);
+
+  offered = "d".repeat(64);
+  api.allowReadAfterOperatorAction();
+  const renewed = await api.identity();
+  assert.deepEqual(renewed.contexts.map(({ id }) => id), [offered]);
+  assert.equal(identityReads(), 2);
+  assert.equal(api.readBudgetStopped, false);
+  assert.equal(api.context, null);
+  assert.throws(() => api.selectContext(adminId), { code: "context_invalid" });
+  const newQuota = quotaBody(offered, stamp(7));
+  const newUsage = usagePage(offered, stamp(8));
+  replies[quotaPath] = () => Response.json(newQuota);
+  replies[usagePath] = () => Response.json(newUsage);
+  const renewedView = openView(offered);
+  await renewedView.refresh();
+  assert.equal(renewedView.element.dataset.state, "ready");
+  assertStamp(panels(renewedView)[0], newQuota);
+  assertStamp(panels(renewedView)[1], newUsage);
+});
 
 test("owned : un HTTP 401 sur l’usage retire les deux lectures", async (t) => {
   const replies = { [quotaPath]: () => Response.json(initialQuota), [usagePath]: () => Response.json(initialUsage) };

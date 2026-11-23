@@ -81,12 +81,16 @@ export class HumanApiClient {
     return !!this.#token && !this.#lifetime.signal.aborted && snapshot.generation === this.#generation && snapshot.context?.id === this.#context?.id;
   }
   #assert(snapshot: Snapshot) { if (!this.#current(snapshot)) throw new HumanSuperseded(); }
-  #reject(error: HumanApiError): never {
+  #reject(error: HumanApiError, withdrawOffers = false): never {
     if (error.status === 429 && error.code === "audit_read_budget_exhausted" && error.retryAction === "contact_operator") {
       this.#readBudgetStopped = true; this.#operatorReadAllowed = false; this.#handlers.onReadBudgetExhausted?.(error);
     }
     if (error.status === 401) { this.close(); this.#handlers.onAuthentication(error); }
-    else if (["context_required", "context_invalid", "context_expired", "context_revoked"].includes(error.code)) {
+    else if (withdrawOffers || ["context_required", "context_invalid", "context_expired", "context_revoked"].includes(error.code)) {
+      if (withdrawOffers) {
+        if (this.#identity) this.#identity = { ...this.#identity, contexts: [] };
+        this.#operatorReadAllowed = false;
+      }
       this.clearContext(); this.#handlers.onContextInvalidated(error);
     }
     throw error;
@@ -168,7 +172,7 @@ export class HumanApiClient {
       // Other routes keep their existing structured context and stream errors.
       const error = new HumanApiError(403, "permission_denied",
         "Consultation refusée par le contrôle (HTTP 403). Le motif détaillé n’a pas été lu. Relisez vos accès ou faites vérifier vos permissions.", "review_permissions");
-      void response.body?.cancel().catch(() => {}); this.#reject(error);
+      void response.body?.cancel().catch(() => {}); this.#reject(error, ownedQuotaUsage);
     }
     if (!response.ok) {
       let value: unknown = null;
