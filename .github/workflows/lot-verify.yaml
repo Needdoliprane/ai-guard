@@ -1,198 +1,333 @@
-name: Lot verification
+name: G08 owned membership transport
 
-# Verifies V1 development branches on a hosted Linux x86_64 runner so that the
-# development Mac keeps its memory for engine, browser and macOS recipes.
-# It complements ci.yaml (dev/main) and never creates tags, releases or
-# artifacts outside this run. Engine (Docker/Podman/Kubernetes) and provider
-# recipes stay out of this workflow: ignored tests are not run and are never
-# counted as passes.
-
+# The RED pass is a local synthetic regression oracle against the source just
+# before the BFF POST was added. The GREEN pass verifies the composed source.
+# No provider, engine, external service, or real tenant is used.
 on:
   push:
-    branches: ['claude/v1-**']
+    branches:
+      - claude/v1-g08-owned-membership-transport-check-20261123
 
 permissions:
   contents: read
 
 concurrency:
-  group: lot-verify-${{ github.ref }}
+  group: g08-owned-membership-transport-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  rust:
+  owned-membership-transport:
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 120
+    permissions:
+      contents: read
     env:
-      AI_GUARD_BUILD_REVISION: ${{ github.sha }}
-      # Match CI's build limit when compiling and linking the full test suite.
+      SOURCE_SHA: 2edb3211d143a6729ca3cfbe07369602bf3f89ff
+      SOURCE_TREE: ffb15cb3d7608545734671bab8426fdbf207dd3b
+      SOURCE_PARENT: d0a2cbed1c46a7c550bbb3e978be9a8983162e4f
+      SOURCE_PARENT_TREE: 0a08888593b2f3be95485159df3deddb05fd6d0c
+      SOURCE_REVIEW_TEST_SHA: d969f6333ad6a4400e0ee5ae7a138c624dcea049
+      SOURCE_REVIEW_TEST_TREE: 996783b1993fa5c79af633743381eec6cdcae2b5
+      SOURCE_PROFILE_TEST_SHA: 9043f80b0e83119d0cbe2f983146e22705a5535a
+      SOURCE_BODY_IMPL_SHA: 9524c67bffc4d203f2d362ea82fd53151eebe7f4
+      SOURCE_BODY_TEST_SHA: 6ee930ccceabf10ca82a9afe4f55f14bc14c6605
+      SOURCE_PREVIOUS_GREEN_SHA: 2820359d6fe9330baad820e39439045c21b37e1e
+      SOURCE_PREVIOUS_GREEN_TREE: 5bc37fc250ab48712872f9526f4e2e2bb70681a6
+      SOURCE_PRODUCT_SHA: 928ff1387946b83a45da80d63914a658ed14b463
+      SOURCE_PRODUCT_TREE: d1f450d9c80eee464c48c4b0a36e093df9478a3d
+      SOURCE_RED_SHA: aa4d3dc5bef2d54492767b99ffafc5ec17b276c1
+      SOURCE_RED_TREE: 291acea0b3f6676e8522a98b1b8bf5ca7301eb64
+      SOURCE_RED_PARENT: de4abcdeb5677729a072df479939543e9a4dcfc3
+      SOURCE_RED_PARENT_TREE: 2d3d42755f760acdac512810e4bf7d85be8811c6
+      SOURCE_BASE_SHA: 881c7da73dc438d978beb01049cfe1e7464abd00
+      SOURCE_BASE_TREE: 76f98d4740fe7aa8c91943e760ed9ea701c68d52
+      LOCK_SHA: 05847a300405860df8f860d5dc1c39ca423dfa0d
+      EXPECTED_BRANCH: claude/v1-g08-owned-membership-transport-check-20261123
       CARGO_BUILD_JOBS: '1'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
-      RUST_MIN_STACK: '8388608'
       CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
     steps:
+      - name: Initialize closed transport receipt
+        shell: bash
+        run: |
+          umask 077
+          receipt="$RUNNER_TEMP/g08-owned-membership-transport.txt"
+          cat > "$receipt" <<'EOF'
+          green_source_sha=2edb3211d143a6729ca3cfbe07369602bf3f89ff
+          green_source_tree=ffb15cb3d7608545734671bab8426fdbf207dd3b
+          source_parent=d0a2cbed1c46a7c550bbb3e978be9a8983162e4f
+          source_parent_tree=0a08888593b2f3be95485159df3deddb05fd6d0c
+          source_profile_test=d969f6333ad6a4400e0ee5ae7a138c624dcea049
+          profile_review_parent=9043f80b0e83119d0cbe2f983146e22705a5535a
+          source_body_impl=9524c67bffc4d203f2d362ea82fd53151eebe7f4
+          source_body_test=6ee930ccceabf10ca82a9afe4f55f14bc14c6605
+          red_oracle_sha=aa4d3dc5bef2d54492767b99ffafc5ec17b276c1
+          red_oracle_tree=291acea0b3f6676e8522a98b1b8bf5ca7301eb64
+          workflow_sha=NOT_RUN
+          source_guard=NOT_RUN
+          checkout_shallow=NOT_RUN
+          toolchain=NOT_RUN
+          dependency_fetch=NOT_RUN
+          red_build=NOT_RUN
+          red_selector=NOT_RUN
+          red_selected=0
+          red_actual_status=unknown
+          red_expected_status=unknown
+          green_build=NOT_RUN
+          green_libtest_sha256=unknown
+          selector_1=NOT_RUN
+          selector_2=NOT_RUN
+          selector_3=NOT_RUN
+          selector_4=NOT_RUN
+          selector_5=NOT_RUN
+          selected=0
+          passed=0
+          failed=0
+          ignored=0
+          private_cleanup=NOT_RUN
+          last_phase=NOT_RUN
+          result=NOT_RUN
+          scope=one pre-fix synthetic BFF HTTP 405 discriminator and five exact SQLite/loopback GREEN library tests; no provider, engine, external service, or real tenant
+          EOF
+          chmod 600 "$receipt"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Free runner disk for the test targets
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
-      - name: Fetch dependencies with the pinned Rust toolchain
-        run: |
-          rustc --version
-          cargo fetch --locked
-      - name: Check Rust formatting
-        run: cargo fmt --all -- --check
-      - name: Check all targets with MySQL enabled
-        run: cargo check --locked --offline --all-targets --features mysql-storage --keep-going
-      - name: Check all targets without default features (SQLite only)
-        run: cargo check --locked --offline --all-targets --no-default-features --keep-going
-      - name: Third-party licence guard and its unit tests
-        # `cargo test` builds examples but does not run their unit tests.
-        run: |
-          cargo test --locked --offline --example third_party_notices
-          cargo run --quiet --locked --offline --example third_party_notices -- check --allowed .github/third-party-license-expressions.txt
-      - name: Provider harness regressions
-        run: |
-          python3 -B tests/e2e/interactive_driver.py --self-test
-          python3 -B tests/e2e/test_run_provider_preflight.py ProviderPreflightTests ProviderBrowserStageTests
-          python3 -B tests/e2e/test_run_provider_broker.py BrokerRecipeTests
-      - name: Rust test suite (ignored engine and provider tests excluded)
-        if: github.ref_name != 'claude/v1-integration-regressions-20261122'
+          fetch-depth: 12
+
+      - name: Check source lineage, discriminator, and run exact tests
+        id: verify
         shell: bash
         run: |
-          set -o pipefail
-          export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
-          cargo test --locked --offline --no-fail-fast 2>&1 | tee cargo-test.log
-      - name: Targeted SQLite library regressions
-        if: github.ref_name == 'claude/v1-integration-regressions-20261122'
-        shell: bash
-        run: |
+          set +x
           set -euo pipefail
-          export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
-          build_json="$TMPDIR/libtest.jsonl"
-          test_log="$TMPDIR/selector.log"
-          summary=cargo-test-summary.txt
-          failures=cargo-test-failed.txt
-          : > "$summary"
-          : > "$failures"
+          umask 077
+          receipt="$RUNNER_TEMP/g08-owned-membership-transport.txt"
+          private_root=
+          phase=source_guard
+          result=FAIL
+          selected_count=0
+          passed_count=0
+          failed_count=0
+          ignored_count=0
+          set_receipt() {
+            awk -F= -v key="$1" -v value="$2" '$1 == key { $0 = key "=" value } { print }' "$receipt" > "$receipt.tmp"
+            chmod 600 "$receipt.tmp"
+            mv -- "$receipt.tmp" "$receipt"
+          }
+          finish() {
+            local code=$? cleanup_rc=0 final_phase
+            trap - EXIT
+            set +e
+            if [[ -n "$private_root" && "$private_root" == /tmp/g08om.* ]]; then
+              rm -rf -- "$private_root" >/dev/null 2>&1 || cleanup_rc=1
+              [[ ! -e "$private_root" ]] || cleanup_rc=1
+            fi
+            case "$phase" in
+              source_guard|toolchain|scratch_setup|dependency_fetch|red_compile|red_selector|green_compile|green_selectors|complete)
+                final_phase="$phase" ;;
+              *) final_phase=unknown ;;
+            esac
+            if (( cleanup_rc != 0 )); then final_phase=private_cleanup; fi
+            if (( cleanup_rc == 0 )); then set_receipt private_cleanup PASS; else set_receipt private_cleanup FAIL; fi
+            if (( code == 0 && cleanup_rc == 0 )); then result=PASS; else result=FAIL; fi
+            set_receipt last_phase "$final_phase"
+            set_receipt result "$result"
+            {
+              printf 'G08 owned membership transport=%s source=%s\n' "$result" "$SOURCE_SHA"
+              printf 'RED discriminator=%s actual=%s expected=%s; GREEN exact tests selected=%s passed=%s failed=%s ignored=%s; cleanup=%s phase=%s\n' \
+                "$(awk -F= '$1=="red_selector"{print $2}' "$receipt")" \
+                "$(awk -F= '$1=="red_actual_status"{print $2}' "$receipt")" \
+                "$(awk -F= '$1=="red_expected_status"{print $2}' "$receipt")" \
+                "$selected_count" "$passed_count" "$failed_count" "$ignored_count" \
+                "$(awk -F= '$1=="private_cleanup"{print $2}' "$receipt")" "$final_phase"
+            } >> "$GITHUB_STEP_SUMMARY"
+            if (( code == 0 && cleanup_rc != 0 )); then code=1; fi
+            exit "$code"
+          }
+          trap finish EXIT
 
-          settlement=broker::service::server::retirement_settlement_tests::same_original_not_queued_final_retries_its_retained_input_before_another_q
-          selectors=(
-            audit::resource_tests::retention_confirms_the_committed_segment_after_a_filesystem_ack_failure
-            api::human_sources::journal_tests::owned_event_page_reports_the_archived_prefix_after_adoption
-            api::human_sources::tests::owned_admin_reads_refuse_head_before_authentication
-            api::human_sources::journal_tests::owned_admin_reads::owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
-            identity::operations::tests::owned_event_availability_preserves_granted_permissions
-            broker::writer::inventory_tests::completed_inventory_releases_its_permit_before_reply
-            broker::writer::inventory_tests::timed_out_inventory_keeps_one_permit_and_cannot_queue_a_series_before_cancel
-            broker::writer::status_projection_tests::coverage_only_pending_arm_does_not_taint_a_valid_last_confirmed_status
-            "$settlement"
-          )
-          expected=9
-          if (( ${#selectors[@]} != expected )); then
-            echo 'Invalid regression selector count' | tee -a "$summary"
+          set_receipt workflow_sha "$GITHUB_SHA"
+          red_paths_expected=$'src/api/human_sources/journal_tests/dashboard.rs\nsrc/api/human_sources/journal_tests/owned_admin_reads.rs'
+          source_paths_expected=$'src/api.rs\nsrc/api/human.rs\nsrc/api/human/admin.rs\nsrc/api/human_sources.rs\nsrc/api/human_sources/journal_tests.rs\nsrc/api/human_sources/journal_tests/dashboard.rs\nsrc/api/human_sources/journal_tests/owned_admin_reads.rs\nsrc/api/human_sources/tests.rs'
+          red_paths_actual="$(git diff --name-only "$SOURCE_RED_PARENT" "$SOURCE_RED_SHA" 2>/dev/null | sort)"
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 &&
+             "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == "refs/heads/$EXPECTED_BRANCH" &&
+             "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$(git rev-parse HEAD 2>/dev/null)" == "$GITHUB_SHA" &&
+             "$(git show -s --format=%P HEAD 2>/dev/null)" == "$SOURCE_SHA" &&
+             "$(git rev-parse --is-shallow-repository 2>/dev/null)" == true &&
+             "$(git rev-parse "$SOURCE_SHA^{tree}" 2>/dev/null)" == "$SOURCE_TREE" &&
+             "$(git show -s --format=%P "$SOURCE_SHA" 2>/dev/null)" == "$SOURCE_PARENT" &&
+             "$(git rev-parse "$SOURCE_PARENT^{tree}" 2>/dev/null)" == "$SOURCE_PARENT_TREE" &&
+             "$(git show -s --format=%P "$SOURCE_PARENT" 2>/dev/null)" == "$SOURCE_REVIEW_TEST_SHA" &&
+             "$(git rev-parse "$SOURCE_REVIEW_TEST_SHA^{tree}" 2>/dev/null)" == "$SOURCE_REVIEW_TEST_TREE" &&
+             "$(git show -s --format=%P "$SOURCE_REVIEW_TEST_SHA" 2>/dev/null)" == "$SOURCE_PROFILE_TEST_SHA" &&
+             "$(git show -s --format=%P "$SOURCE_PROFILE_TEST_SHA" 2>/dev/null)" == "$SOURCE_BODY_IMPL_SHA" &&
+             "$(git show -s --format=%P "$SOURCE_BODY_IMPL_SHA" 2>/dev/null)" == "$SOURCE_BODY_TEST_SHA" &&
+             "$(git show -s --format=%P "$SOURCE_BODY_TEST_SHA" 2>/dev/null)" == "$SOURCE_PREVIOUS_GREEN_SHA" &&
+             "$(git rev-parse "$SOURCE_PREVIOUS_GREEN_SHA^{tree}" 2>/dev/null)" == "$SOURCE_PREVIOUS_GREEN_TREE" &&
+             "$(git show -s --format=%P "$SOURCE_PREVIOUS_GREEN_SHA" 2>/dev/null)" == "$SOURCE_PRODUCT_SHA" &&
+             "$(git rev-parse "$SOURCE_PRODUCT_SHA^{tree}" 2>/dev/null)" == "$SOURCE_PRODUCT_TREE" &&
+             "$(git show -s --format=%P "$SOURCE_PRODUCT_SHA" 2>/dev/null)" == "$SOURCE_RED_SHA" &&
+             "$(git rev-parse "$SOURCE_RED_SHA^{tree}" 2>/dev/null)" == "$SOURCE_RED_TREE" &&
+             "$(git show -s --format=%P "$SOURCE_RED_SHA" 2>/dev/null)" == "$SOURCE_RED_PARENT" &&
+             "$(git rev-parse "$SOURCE_RED_PARENT^{tree}" 2>/dev/null)" == "$SOURCE_RED_PARENT_TREE" &&
+             "$(git show -s --format=%P "$SOURCE_RED_PARENT" 2>/dev/null)" == "$SOURCE_BASE_SHA" &&
+             "$(git rev-parse "$SOURCE_BASE_SHA^{tree}" 2>/dev/null)" == "$SOURCE_BASE_TREE" &&
+             "$(git diff --name-only "$SOURCE_PREVIOUS_GREEN_SHA" "$SOURCE_SHA" 2>/dev/null | sort)" == "$source_paths_expected" &&
+             "$(git rev-parse "$SOURCE_RED_SHA:Cargo.lock" 2>/dev/null)" == "$LOCK_SHA" &&
+             "$(git rev-parse "$SOURCE_SHA:Cargo.lock" 2>/dev/null)" == "$LOCK_SHA" &&
+             "$(git diff --name-only "$SOURCE_RED_SHA" "$SOURCE_PRODUCT_SHA" 2>/dev/null | sort)" == $'src/api.rs\nsrc/api/human_sources.rs' &&
+             "$red_paths_actual" == "$red_paths_expected" &&
+             "$(git diff --name-only "$SOURCE_SHA" HEAD 2>/dev/null)" == .github/workflows/lot-verify.yaml &&
+             "$(git status --porcelain=v1 --untracked-files=all 2>/dev/null)" == "" ]] || {
+            set_receipt source_guard FAIL
+            echo 'G08 lineage/ref guard failed; details omitted.' >&2
+            exit 1
+          }
+          set_receipt source_guard PASS
+          set_receipt checkout_shallow PASS
+
+          phase=toolchain
+          rustc_line="$(rustc --version 2>/dev/null || true)"
+          [[ "$rustc_line" =~ ^rustc\ 1\.99\.1($|[[:space:]]) ]] || { set_receipt toolchain MISMATCH; exit 1; }
+          set_receipt toolchain 1.99.1
+
+          phase=scratch_setup
+          private_root="$(mktemp -d /tmp/g08om.XXXXXX)" || exit 1
+          private_root="$(realpath -e "$private_root")" || exit 1
+          chmod 700 "$private_root"
+          mkdir -m 700 "$private_root/target" "$private_root/tmp"
+          export TMPDIR="$private_root/tmp" CARGO_TARGET_DIR="$private_root/target"
+
+          phase=dependency_fetch
+          if cargo fetch --locked > "$private_root/fetch.log" 2>&1; then
+            set_receipt dependency_fetch PASS
+          else
+            set_receipt dependency_fetch FAIL
             exit 1
           fi
-          printf 'Revision %s; %s exact SQLite library tests expected\n' "$GITHUB_SHA" "$expected" | tee -a "$summary"
 
-          # Keep raw Cargo and test output in the runner's private scratch directory.
-          if ! cargo test --locked --offline --no-default-features --lib --no-run \
-              --message-format=json > "$build_json" 2> "$TMPDIR/build.stderr"; then
-            echo 'SQLite library build failed; tests not run' | tee -a "$summary"
-            jq -r 'select(.reason == "compiler-message" and .message.level == "error")
-              | .message.code.code // empty | select(test("^E[0-9]{4}$"))' "$build_json" \
-              2>/dev/null | sort -u | tee -a "$summary" || true
-            exit 1
-          fi
-          if ! libtest="$(jq -ers '[.[] | select(.reason == "compiler-artifact"
-              and .target.name == "agentsandbox" and .target.kind == ["lib"]
-              and .profile.test == true and .executable != null) | .executable]
-              | unique | if length == 1 then .[0] else empty end' "$build_json")" \
-              || [[ ! -x "$libtest" ]]; then
-            echo 'Expected one SQLite library test executable; tests not run' | tee -a "$summary"
-            exit 1
-          fi
-          printf 'SQLite libtest SHA-256 %s\n' "$(sha256sum "$libtest" | awk '{print $1}')" | tee -a "$summary"
-
-          passed=0
-          for selector in "${selectors[@]}"; do
-            if "$libtest" "$selector" --exact --test-threads=1 > "$test_log" 2>&1 \
-                && grep -Fxq 'running 1 test' "$test_log" \
-                && grep -Fxq "test $selector ... ok" "$test_log" \
-                && grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$test_log"; then
-              printf 'PASS %s\n' "$selector" | tee -a "$summary"
-              ((passed += 1))
-            else
-              printf 'FAIL %s\n' "$selector" | tee -a "$summary"
-              printf '%s\n' "$selector" >> "$failures"
-              if [[ "$selector" == "$settlement" ]]; then
-                phases='bind_full3|enqueue_signal|ack_signal|load_before_retirement|begin_retirement|ack_pending|authorize_retirement|read_pending|load_before_final|pause_writer'
-                categories='InvalidInput|UnsupportedVersion|TooLarge|LimitExceeded|Busy|Conflict|Interrupted|Corrupt|UnsafeFilesystem|ControlSecret|Io'
-                grep -Eo "settlement phase=($phases) category=($categories)\b" "$test_log" \
-                  | sort -u | tee -a "$summary" || true
+          phase=red_compile
+          if git switch --detach "$SOURCE_RED_SHA" >/dev/null 2>&1 &&
+             AI_GUARD_BUILD_REVISION="$SOURCE_RED_SHA" timeout --kill-after=15s 45m \
+               cargo test --locked --offline --no-default-features --lib --no-run --message-format=json \
+               > "$private_root/red-build.jsonl" 2> "$private_root/red-build.stderr"; then
+            red_libtest="$(jq -ers '[.[] | select(.reason == "compiler-artifact" and .target.name == "agentsandbox" and .target.kind == ["lib"] and .profile.test == true and .features == [] and .executable != null) | .executable] | unique | if length == 1 then .[0] else empty end' "$private_root/red-build.jsonl" 2>/dev/null || true)"
+            if [[ -n "$red_libtest" && -x "$red_libtest" ]]; then
+              set_receipt red_build PASS
+              phase=red_selector
+              red_selector=api::human_sources::journal_tests::dashboard::owned_dashboard_relays_the_delegated_membership_change_and_gateway_receipt
+              red_rc=0
+              timeout --kill-after=5s 300s "$red_libtest" "$red_selector" --exact --test-threads=1 \
+                > "$private_root/red-test.log" 2>&1 || red_rc=$?
+              red_selected=0
+              [[ "$(grep -Fxc 'running 1 test' "$private_root/red-test.log" || true)" == 1 ]] && red_selected=1 || true
+              set_receipt red_selected "$red_selected"
+              red_summary="$(grep -E '^test result: ' "$private_root/red-test.log" | tail -n 1 || true)"
+              red_has_405=0
+              red_has_200=0
+              grep -Eq 'left: 405 Method Not Allowed$' "$private_root/red-test.log" && red_has_405=1 || true
+              grep -Eq 'right: 200 OK$' "$private_root/red-test.log" && red_has_200=1 || true
+              if [[ "$red_rc" != 0 && "$red_selected" == 1 && "$red_has_405" == 1 && "$red_has_200" == 1 &&
+                    "$red_summary" =~ ^test\ result:\ FAILED\.\ 0\ passed\;\ 1\ failed\;\ 0\ ignored\; ]]; then
+                set_receipt red_selector EXPECTED_PRE_FIX_405
+                set_receipt red_actual_status 405
+                set_receipt red_expected_status 200
+              elif [[ "$red_rc" == 0 && "$red_selected" == 1 && "$red_summary" =~ ^test\ result:\ ok\.\ 1\ passed\;\ 0\ failed\;\ 0\ ignored\; ]]; then
+                set_receipt red_selector NOT_DISCRIMINATING
+                set_receipt red_actual_status 200
+                set_receipt red_expected_status 200
+              else
+                set_receipt red_selector INCONCLUSIVE
               fi
+            else
+              set_receipt red_build ARTIFACT_MISMATCH
+              set_receipt red_selector NOT_RUN
+            fi
+          else
+            set_receipt red_build INCONCLUSIVE
+            set_receipt red_selector NOT_RUN
+          fi
+
+          phase=green_compile
+          if ! git switch --detach "$SOURCE_SHA" >/dev/null 2>&1; then
+            set_receipt green_build CHECKOUT_FAIL
+            exit 1
+          fi
+          if AI_GUARD_BUILD_REVISION="$SOURCE_SHA" timeout --kill-after=15s 45m \
+              cargo test --locked --offline --no-default-features --lib --no-run --message-format=json \
+              > "$private_root/green-build.jsonl" 2> "$private_root/green-build.stderr"; then
+            green_libtest="$(jq -ers '[.[] | select(.reason == "compiler-artifact" and .target.name == "agentsandbox" and .target.kind == ["lib"] and .profile.test == true and .features == [] and .executable != null) | .executable] | unique | if length == 1 then .[0] else empty end' "$private_root/green-build.jsonl" 2>/dev/null || true)"
+            [[ -n "$green_libtest" && -x "$green_libtest" ]] || { set_receipt green_build ARTIFACT_MISMATCH; exit 1; }
+            set_receipt green_build PASS
+            set_receipt green_libtest_sha256 "$(sha256sum "$green_libtest" | awk '{print $1}')"
+          else
+            set_receipt green_build FAIL
+            exit 1
+          fi
+
+          phase=green_selectors
+          selectors=(
+            api::human_sources::journal_tests::dashboard::owned_dashboard_relays_the_delegated_membership_change_and_gateway_receipt
+            api::human_sources::journal_tests::owned_admin_reads::owned_membership_post_on_format15_requires_an_admin_and_returns_the_durable_receipt
+            api::human_sources::journal_tests::owned_admin_reads::owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
+            api::human_sources::tests::modern_route_matrix_closes_before_body_extractors_and_store
+            api::human_sources::journal_tests::owned_admin_reads::owned_dashboard_refuses_legacy_gateway_without_changing_membership_or_audit
+          )
+          [[ "${#selectors[@]}" == 5 ]] || { set_receipt green_build INVALID_SELECTOR_TABLE; exit 1; }
+          run_failed=0
+          index=0
+          for selector in "${selectors[@]}"; do
+            ((index += 1))
+            test_log="$private_root/green-${index}.log"
+            test_rc=0
+            timeout --kill-after=5s 300s "$green_libtest" "$selector" --exact --test-threads=1 \
+              > "$test_log" 2>&1 || test_rc=$?
+            selected_here=0
+            [[ "$(grep -Fxc 'running 1 test' "$test_log" || true)" == 1 ]] && selected_here=1 || true
+            summary_line="$(grep -E '^test result: ' "$test_log" | tail -n 1 || true)"
+            summary_state=UNKNOWN
+            summary_passed=0
+            summary_failed=0
+            summary_ignored=0
+            if [[ "$summary_line" =~ ^test\ result:\ (ok|FAILED)\.\ ([0-9]+)\ passed\;\ ([0-9]+)\ failed\;\ ([0-9]+)\ ignored\; ]]; then
+              summary_state="${BASH_REMATCH[1]}"
+              summary_passed="${BASH_REMATCH[2]}"
+              summary_failed="${BASH_REMATCH[3]}"
+              summary_ignored="${BASH_REMATCH[4]}"
+            fi
+            selected_count=$((selected_count + selected_here))
+            passed_count=$((passed_count + summary_passed))
+            failed_count=$((failed_count + summary_failed))
+            ignored_count=$((ignored_count + summary_ignored))
+            if [[ "$test_rc" == 0 && "$selected_here" == 1 && "$summary_state" == ok &&
+                  "$summary_passed" == 1 && "$summary_failed" == 0 && "$summary_ignored" == 0 &&
+                  "$(grep -Fxc "test $selector ... ok" "$test_log" || true)" == 1 ]]; then
+              set_receipt "selector_$index" PASS_1_0_0
+            else
+              set_receipt "selector_$index" FAIL
+              run_failed=1
             fi
           done
-          printf 'Passed %s of %s exact selectors\n' "$passed" "$expected" | tee -a "$summary"
-          (( passed == expected ))
-      - name: Summarize test results
-        if: always()
-        shell: bash
-        run: |
-          if [ -f cargo-test.log ]; then
-            grep -E '^test result:|^     Running ' cargo-test.log > cargo-test-summary.txt || true
-            grep -E '\.\.\. FAILED$' cargo-test.log | sed 's/^test //; s/ \.\.\. FAILED$//' > cargo-test-failed.txt || true
-            {
-              echo "### Rust test suite"
-              echo
-              echo "Failed tests: $(wc -l < cargo-test-failed.txt)"
-              echo
-              echo '```'
-              head -n 100 cargo-test-failed.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-          elif [ -f cargo-test-summary.txt ]; then
-            {
-              echo "### Targeted SQLite library tests"
-              echo '```'
-              cat cargo-test-summary.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
-      - name: Upload test logs
+          set_receipt selected "$selected_count"
+          set_receipt passed "$passed_count"
+          set_receipt failed "$failed_count"
+          set_receipt ignored "$ignored_count"
+          [[ "$run_failed" == 0 && "$selected_count" -ge 5 && "$passed_count" -ge 5 &&
+             "$failed_count" == 0 && "$ignored_count" == 0 ]] || exit 1
+          phase=complete
+
+      - name: Upload only the closed transport receipt
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: lot-verify-rust-${{ github.sha }}
-          path: |
-            cargo-test.log
-            cargo-test-summary.txt
-            cargo-test-failed.txt
-          if-no-files-found: ignore
+          name: g08-owned-membership-transport-${{ github.sha }}
+          path: ${{ runner.temp }}/g08-owned-membership-transport.txt
+          if-no-files-found: error
           retention-days: 14
-
-  frontend:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: front
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Setup Node
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '24.22.2'
-          package-manager-cache: false
-      - name: Install
-        run: npm ci --no-audit --no-fund
-      - name: Build
-        run: npm run build
-      - name: Test
-        run: npm test
