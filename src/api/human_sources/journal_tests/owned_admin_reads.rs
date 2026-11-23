@@ -740,9 +740,15 @@ async fn owned_usage_format15_keeps_terminal_facts_and_audits_the_read() {
     owned_usage_on(15, &[1]).await;
 }
 
-async fn post(router: &Router, path: &str, context: &str, body: &Value) -> (StatusCode, Value) {
+async fn post(
+    router: &Router,
+    bearer: &str,
+    path: &str,
+    context: &str,
+    body: &Value,
+) -> (StatusCode, Value) {
     let request = axum::http::Request::post(path)
-        .header("authorization", format!("Bearer {}", Fixture::bearer("B")))
+        .header("authorization", format!("Bearer {bearer}"))
         .header("x-aiguard-context", context)
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(body).unwrap()))
@@ -762,6 +768,7 @@ async fn post(router: &Router, path: &str, context: &str, body: &Value) -> (Stat
 async fn owned_sources_apply_a_delegated_membership_change_under_the_write_epoch() {
     use HumanCapabilityV1 as C;
     let fixture = Fixture::new_owned_with_human_rights();
+    let bearer = Fixture::bearer("B");
     let PrincipalRefV1::HumanLocal {
         installation_id, ..
     } = fixture.principal()
@@ -875,7 +882,7 @@ async fn owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
         "capabilities": ["read_metadata"],
         "active": false,
     });
-    let (status, receipt) = post(&router, &path, &context, &body).await;
+    let (status, receipt) = post(&router, &bearer, &path, &context, &body).await;
     assert_eq!(status, StatusCode::OK, "{receipt}");
     assert_eq!(receipt["membership_revision"], "2");
     let after = expected_generation();
@@ -896,7 +903,7 @@ async fn owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
         .as_str()
         .unwrap()
         .to_owned();
-    let (status, replayed) = post(&router, &path, &context, &body).await;
+    let (status, replayed) = post(&router, &bearer, &path, &context, &body).await;
     assert_eq!(status, StatusCode::OK, "{replayed}");
     assert_eq!(replayed, receipt);
     assert!(expected_generation() == after);
@@ -910,7 +917,7 @@ async fn owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
         "active": true,
     });
     let audit_before_refusal = super::races::snapshot(&database);
-    let (status, refusal) = post(&router, &path, &context, &escalation).await;
+    let (status, refusal) = post(&router, &bearer, &path, &context, &escalation).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{refusal}");
     assert_eq!(refusal["error"]["code"], "permission_denied");
     assert_eq!(super::races::snapshot(&database), audit_before_refusal);
@@ -937,7 +944,7 @@ async fn owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
         "capabilities": ["read_metadata"],
         "active": true,
     });
-    let (status, failure) = post(&router, &path, &context, &reactivate).await;
+    let (status, failure) = post(&router, &bearer, &path, &context, &reactivate).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{failure}");
     assert!(failure.get("audit_seq").is_none());
     assert!(
@@ -949,4 +956,193 @@ async fn owned_sources_apply_a_delegated_membership_change_under_the_write_epoch
     let (status, failure) = get(&router, "/api/v1/human/identity", None).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{failure}");
     assert_eq!(owned.coverage.load(Ordering::Acquire), REBUILD_REQUIRED);
+}
+
+#[tokio::test]
+async fn owned_membership_post_on_format15_requires_an_admin_and_returns_the_durable_receipt() {
+    use super::owned_workers::{context, read};
+    use HumanCapabilityV1 as C;
+    use std::os::unix::fs::PermissionsExt;
+
+    const IDENTITY: &str = "/api/v1/human/identity";
+    const MEMBERSHIPS: &str = "/api/v1/human/admin/memberships";
+    let historical = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap())
+        .unwrap();
+    let mut files = Store::owned_control_fixture_with_legacy_setup_for_test(15, |legacy| {
+        legacy
+            .migrate_human_rights_v2(&historical.path().join("before-rights.sqlite"))
+            .unwrap();
+    });
+    let (bundle, credentials, tokens) = files.take_startup();
+    let descriptor = bundle
+        .owner
+        .closure()
+        .sources
+        .iter()
+        .find(|source| source.tenant_id.as_deref() == Some("A"))
+        .unwrap();
+    assert_eq!(descriptor.required_format, 15);
+    let database_path = descriptor.storage_binding.path();
+    let (bearer, membership_id) = {
+        let source = bundle.owner.source_token(descriptor.source_id).unwrap();
+        let store = bundle.stores.get(&descriptor.source_id).unwrap();
+        let epoch = bundle.owner.try_write_epoch().unwrap();
+        let provision = |display_name: &str, capabilities: &[C]| {
+            let principal = PrincipalRefV1::HumanLocal {
+                installation_id: descriptor.installation_id.to_string(),
+                account_id: uuid::Uuid::new_v4().to_string(),
+            };
+            let bearer = generate_local_credential().unwrap();
+            let membership_id = uuid::Uuid::new_v4().to_string();
+            store
+                .provision_local_human_scoped(
+                    &epoch,
+                    &source,
+                    &LocalHumanProvisionV1 {
+                        version: 1,
+                        mutations: [
+                            change(IdentityChangeV1::Account {
+                                expected_revision: 0,
+                                account: HumanAccountV1 {
+                                    version: 1,
+                                    principal: principal.clone(),
+                                    display_name: display_name.into(),
+                                    revision: 1,
+                                    active: true,
+                                },
+                            }),
+                            change(IdentityChangeV1::Credential {
+                                expected_revision: 0,
+                                binding: LocalCredentialV1 {
+                                    version: 1,
+                                    credential_id: uuid::Uuid::new_v4().to_string(),
+                                    principal: principal.clone(),
+                                    sha256_digest: hex::encode(Sha256::digest(bearer.as_bytes())),
+                                    revision: 1,
+                                    active: true,
+                                    expires_at: None,
+                                },
+                            }),
+                            change(IdentityChangeV1::Membership {
+                                expected_revision: 0,
+                                membership: MembershipV1 {
+                                    version: 1,
+                                    membership_id: membership_id.clone(),
+                                    principal,
+                                    tenant_id: "A".into(),
+                                    organization_scope: "synthetic-membership-administration"
+                                        .into(),
+                                    revision: 1,
+                                    active: true,
+                                    capabilities: capabilities.iter().copied().collect(),
+                                },
+                            }),
+                        ],
+                    },
+                )
+                .unwrap();
+            (bearer, membership_id)
+        };
+        let (bearer, _) = provision(
+            "Synthetic administrator",
+            &[C::ReadMetadata, C::ReadMemberships, C::ManageMemberships],
+        );
+        let (_, membership_id) = provision("Synthetic member", &[C::ReadMetadata]);
+        (bearer, membership_id)
+    };
+    let router = gateway_router(
+        GatewayState::for_owned_human_sources(
+            bundle,
+            credentials,
+            tokens,
+            Policy::default(),
+            None,
+            Redactor::new(vec![]),
+        )
+        .unwrap(),
+    );
+    let (status, identity) = read(&router, &bearer, IDENTITY, None).await;
+    assert_eq!(status, StatusCode::OK, "{identity}");
+    let admin = context(&identity, "administration");
+    let catalogue = admin["operations"].as_array().unwrap();
+    let offer = catalogue
+        .iter()
+        .find(|entry| entry["operation"] == "memberships_manage")
+        .unwrap();
+    assert_eq!(offer["permission"], "granted");
+    assert_eq!(offer["availability"], "not_in_this_build");
+
+    // The receipt must identify the durable mutation of this exact membership.
+    let database = rusqlite::Connection::open_with_flags(
+        database_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let audit_positions = || {
+        let mut statement = database
+            .prepare("SELECT seq FROM events WHERE kind='control.identity.mutation' AND json_extract(payload,'$.data.mutation.operation_id')=?1")
+            .unwrap();
+        statement
+            .query_map([&operation_id], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    let path = format!("{MEMBERSHIPS}/{membership_id}");
+    let body = json!({
+        "operation_id": operation_id,
+        "expected_revision": "1",
+        "capabilities": ["read_metadata"],
+        "active": false,
+    });
+    let personal = context(&identity, "personal")["id"].as_str().unwrap();
+    let (status, response) = post(&router, &bearer, &path, personal, &body).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{response}");
+    assert_eq!(response["error"]["code"], "permission_denied");
+    assert!(response.get("audit_seq").is_none());
+    assert!(audit_positions().is_empty());
+
+    let admin_id = admin["id"].as_str().unwrap();
+    let (status, receipt) = post(&router, &bearer, &path, admin_id, &body).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_eq!(receipt["operation_id"], operation_id);
+    assert_eq!(receipt["membership_id"], membership_id);
+    assert_eq!(receipt["membership_revision"], "2");
+    let audit_seq = receipt["audit_seq"]
+        .as_str()
+        .unwrap()
+        .parse::<i64>()
+        .unwrap();
+    assert_eq!(audit_positions(), [audit_seq]);
+
+    let (status, denied) = read(&router, &bearer, MEMBERSHIPS, Some(admin)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(denied["error"]["code"], "context_revoked");
+    let (status, current_identity) = read(&router, &bearer, IDENTITY, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let current = context(&current_identity, "administration");
+    let (status, replayed) = post(
+        &router,
+        &bearer,
+        &path,
+        current["id"].as_str().unwrap(),
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replayed}");
+    assert_eq!(replayed, receipt);
+    assert_eq!(audit_positions(), [audit_seq]);
+    let (status, page) = read(&router, &bearer, MEMBERSHIPS, Some(current)).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let member = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["membership_id"] == membership_id)
+        .unwrap();
+    assert_eq!(member["active"], false);
+    assert_eq!(member["revision"], "2");
 }

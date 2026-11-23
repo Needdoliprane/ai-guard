@@ -512,7 +512,8 @@ async fn modern_route_matrix_closes_before_body_extractors_and_store() {
                 .replace("{id}", "synthetic")
                 .replace("{create_id}", "synthetic")
                 .replace("{operation_id}", "synthetic")
-                .replace("{arm_id}", "synthetic");
+                .replace("{arm_id}", "synthetic")
+                .replace("{membership_id}", "synthetic");
             let request = axum::http::Request::builder()
                 .method(*method)
                 .uri(&path)
