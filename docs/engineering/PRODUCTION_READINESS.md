@@ -232,6 +232,17 @@ le raccord du canal au superviseur et l’arbitrage E3 de G05. Le profil
 réseau `none` et la médiation approuvée sont exigés sur le moteur choisi.
 Ce témoin n’a pas été lancé sur `5a6cd5c3`.
 
+**G08 — navigateur et workers Docker actifs.** Sur `dddc7613`, le
+[parcours](../../tests/runtime_user_journey.rs) passe en 56,14 s sous
+Docker Desktop ARM64 avec le dashboard Rust. Chromium rend deux lignes
+pour A et une pour B. L’inspection après rendu confirme que les trois
+conteneurs tournent avec le réseau coupé. Les deux déconnexions
+navigateur, trois refus hors tenant et trois exports sont attestés.
+Les inventaires moteur reviennent à leur état initial. Reçu
+`g08-live-docker-dddc7613/run.log`, SHA-256
+`0eb2da220c20d88ed7914d9d8b17fe39601b5655b2225e824cd509df7e316794`.
+Le scénario utilise un moteur et un broker logique par tenant.
+
 **G08 — réponses HTTP Rust et décodeurs frontend.** Sur `2a0d7054`,
 le [conducteur](../../front/tests/run_rust_wire.mjs) passe 11 tests Rust
 et 8 tests Node sur les réponses HTTP capturées, avec SQLite synthétique
