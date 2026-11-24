@@ -106,6 +106,14 @@ du harnais envoyait encore `id` et a reçu `deny`, avant correction
 du choix de commande et rejeu sur une base neuve.
 [Reçu gateway SmolLM2](evidence/2026-11-24/g07-smollm2-direct.json).
 
+Chromium relit ce reçu via le dashboard et le gateway Rust sur une
+copie SQLite, sans appel modèle. Le détail Sécurité montre l’avis
+« Autoriser », son caractère consultatif et la décision « Refusé » sous
+`local_openai_review_fail_closed`. L’onglet Données brutes conserve la
+normalisation `review` et l’empreinte de l’événement correspond à
+SQLite. Aucun appel navigateur hors loopback ni erreur de page.
+[Reçu Chromium](evidence/2026-11-24/g07-smollm2-direct.json).
+
 ## 24 novembre 2026 — Jev TypeSafe depuis l’archive macOS
 
 **PASS ciblé G07.** Le CLI ARM64 extrait de l’archive `e2796ac1` lance
