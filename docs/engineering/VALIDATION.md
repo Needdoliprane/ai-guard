@@ -15,7 +15,10 @@ Chromium relit les deux copies SQLite via le CLI et le frontend de
 l’archive `84971de6`. Sous l’identité de A, le détail Actions restitue
 l’événement terminal d’A1 avec le code 137 et `timed_out=false`. Les
 données brutes du détail concordent avec la réponse et le reçu.
-La déconnexion efface la vue de supervision et le dialogue.
+La déconnexion efface la vue de supervision et le dialogue. Une
+connexion comme B dans le même onglet exclut la session et le terminal
+d’A1 du sélecteur et de la réponse filtrée. Le terminal normal de B1
+correspond à son propre reçu, jusque dans les données brutes.
 [Reçu de l’arrêt A1 et de sa relecture](evidence/2026-11-24/g09-podman-stop-a1.json).
 
 ## 24 novembre 2026 — trois workers G10 sur Podman rootless

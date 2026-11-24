@@ -34,5 +34,15 @@
     "cli_and_frontend_revision": "84971de6",
     "source": "SQLite backups of both tenants",
     "worker_launch_requested": false
+  },
+  "same_tab_tenant_switch": {
+    "status": "PASS",
+    "same_tab": true,
+    "after_switch": "tenant-b",
+    "tenant_a_session_absent": true,
+    "tenant_a_event_absent": true,
+    "tenant_b_terminal_kind": "command.completed",
+    "tenant_b_terminal_seq": 17,
+    "terminal_receipts_matched": 2
   }
 }
