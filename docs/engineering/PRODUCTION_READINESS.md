@@ -21,7 +21,7 @@ La [reprise de l’audit fonctionnel du 18 novembre](VALIDATION.md#18-novembre-2
 
 Le TTY générique Docker Desktop ARM64 atteint sa borne d'exécution avec le CLI lié de la candidate. Le test rapproche l'arrêt acquitté, la sortie du worker, le quota libéré et le terminal restauré. Chromium relit le même événement observé depuis la copie de la base et le dashboard Rust correspondant. Cette preuve G07/G08 couvre la sonde générique sur ce moteur. [Rejeu du CLI et de Chromium](evidence/2026-11-19/functional/native17-and-local-workers.md#rejeu-docker-de-léchéance-tty-sur-le-cli-lié-de-la-candidate)
 
-Le scénario Chromium général passe sur le bundle de la candidate avec la fixture HTTP locale. Le contrôle d'identité confirme douze réponses ou événements du tenant précédent et deux refus tardifs après la connexion du suivant. La suite Node passe 255 cas avec seize réponses de backends Rust archivés. G08 reste ouvert pour les captures filaires du backend courant, les parcours d'administration et la composition finale. [Bascule viewer et suite Node](evidence/2026-11-19/functional/native17-and-local-workers.md#bascule-viewer-avec-réponses-tardives-sous-chromium)
+Le scénario Chromium général passe sur le bundle de la candidate avec la fixture HTTP locale. Le contrôle d'identité confirme douze réponses ou événements du tenant précédent et deux refus tardifs après la connexion du suivant. La suite Node passe 255 cas avec seize réponses de backends Rust archivés. Les captures HTTP du backend courant sont détaillées ci-dessous. Les parcours d’administration et la composition sur plusieurs brokers réels restent ouverts. [Bascule viewer et suite Node](evidence/2026-11-19/functional/native17-and-local-workers.md#bascule-viewer-avec-réponses-tardives-sous-chromium)
 
 Le scénario local de garde des archives natives G12 confirme la présence et le type des six binaires Cargo de la candidate. Les 36 cas de brouillon simulé couvrent notamment le refus des archives incomplètes et la reprise d'un dépôt partiel. Les archives de livraison restent à qualifier. [Garde des compagnons](evidence/2026-11-19/functional/native17-and-local-workers.md#contrôle-des-compagnons-dans-les-archives-de-release)
 
@@ -231,6 +231,18 @@ connexion, puis le terminal et la libération du quota. La recette attend
 le raccord du canal au superviseur et l’arbitrage E3 de G05. Le profil
 réseau `none` et la médiation approuvée sont exigés sur le moteur choisi.
 Ce témoin n’a pas été lancé sur `5a6cd5c3`.
+
+**G08 — réponses HTTP Rust et décodeurs frontend.** Sur `2a0d7054`,
+le [conducteur](../../front/tests/run_rust_wire.mjs) passe 11 tests Rust
+et 8 tests Node sur les réponses HTTP capturées, avec SQLite synthétique
+sur loopback. Il couvre la fédération et la séparation des tenants, la
+pagination de 120 workers synthétiques, les droits par ressource, un
+registre vide lu avec succès, les contrats historiques du registre
+et la pagination du Journal. Reçu privé `g08-wire-2a0d7054/wire.log`,
+SHA-256 `8795ed222deeb1c544c8f17c3f96fa72c6105ee175f76e773d8f4a46b9adcc10`.
+La composition navigateur avec plusieurs brokers réels, la
+contre-pression TCP réelle et la coupure abrupte sur le chemin déployé
+restent à qualifier.
 
 **G08 — composition du registre.** Sur `26e19e84`, le
 [test d’agrégation du gateway](../../tests/supervision_stack_api.rs) passe
