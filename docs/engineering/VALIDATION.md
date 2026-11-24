@@ -22,7 +22,15 @@ La seconde désactive les symboles et les incréments de compilation
 du seul paquet `agentsandbox`. Son manifeste vérifié
 `334d93d52c4a5cfab6aa96698f581865ff5d8cbdae49edfb9a8b72846c137ac7`
 se trouve sous `g07-created-pending-7f9eceef-package-nodebug`.
-Le lecteur d’intégration complet reste `NOT_RUN` sur cette source.
+Le prévol de ce lot laisse le lecteur d’intégration `NOT_RUN`.
+Après retrait d’un incrément inactif, une exécution distincte
+sur `7f9eceef` donne **PASS 1/1** au lecteur strict
+`batch_failure_marker_accepts_observed_failures_without_claiming_effect`.
+Le lecteur accepte les codes fermés, conserve l’effet inconnu
+et écarte le texte privé. Manifeste vérifié
+`ba2e92040b2f6c9ab825fdd090da1b75b07f7c94c14a31f5deab40c0ce14efa5`,
+sous `g07-created-decoder-7f9eceef-package-nodebug`.
+
 La sélection du mode par un RPC Created neuf, son ACK, le rejeu et
 la recette Full3 restent à vérifier sur leurs parcours respectifs.
 
