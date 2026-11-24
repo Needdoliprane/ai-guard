@@ -22,3 +22,9 @@ Tester une réservation Legacy fresh à travers la réponse de sa tentative, ave
 | STOP déjà verrouillé avec une horloge valide au contrôle avant ACK | Motif statique distinct, code `not_ready`, aucune réservation accordée |
 
 Une cellule peut rester retenue après allocation sans qu'un grant ait été remis. Vérifier aussi le succès nominal et le refus Legacy historique avec des pairs de versions différentes. La projection doit exposer uniquement les codes fermés. Conserver l'ordre des contrôles, leurs délais, les refus, le verrou STOP et les conditions de l'ACK.
+
+## Proposition de compatibilité à arbitrer
+
+Négocier la prise en charge du motif avant la réservation, pour le même pair IPC authentifié et la même incarnation. Réutiliser l'admission existante et porter le motif fermé sur la réponse de cette tentative. La requête Legacy conserve sa réponse historique. Une réponse de réservation perdue, inconnue ou incomplète ne déclenche aucun renvoi ni repli.
+
+Vérifier hors moteur les deux combinaisons ancien/nouveau avec une seule réservation et une réponse Legacy exacte. Avec deux pairs compatibles, vérifier que deux refus concurrents restent attribués à leurs tentatives respectives. Après perte de réponse, le motif reste indisponible et le nombre d'envois reste à un. Aucun grant, Arm, lancement ou effet additionnel ne provient du diagnostic.
