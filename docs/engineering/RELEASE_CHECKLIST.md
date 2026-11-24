@@ -25,7 +25,7 @@ Le [programme V1](V1_DELIVERY.md) regroupe les travaux, les matrices et les vér
 | G07 | Fournisseurs versionnés et sessions réelles, sous-agents réellement exposés, provenance et limites de médiation visibles. |
 | G08 | API et dashboard réels, permissions/clients, sécurité HTTP/SSE, export, états d'erreur et accessibilité. |
 | G09 | Pannes/reprises gateway, dashboard, broker et moteur ; réconciliation sans perte silencieuse ni suppression de preuves. |
-| G10 | Ressources, débit, latence et saturation mesurés ; charge 100 workers réels distincte de la recette trois workers et du synthétique. |
+| G10 | 100 réservations durables chez A, refus de la 101e, persistance après redémarrage et quota indépendant chez B. Recette sur moteur avec A1/A2 chez A et B1 chez B. |
 | G11 | Infrastructure et transports applicables, identités de workload, TLS/mTLS et réseau cloud effectivement appliqués ; documentation conforme au [guide PKI](INFRASTRUCTURE_PKI.md) incluant procédure d'intervention et rollback. |
 | G12 | Licence, notices, redistribution, maintenance, contribution/support, canal privé de signalement des vulnérabilités, dépendances/SBOM/provenance et procédures install/upgrade/rollback. |
 
