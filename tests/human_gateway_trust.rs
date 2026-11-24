@@ -529,11 +529,11 @@ async fn export_resume_binds_exact_gateway_ca_bytes_and_accepts_the_same_snapsho
 
 async fn read_one_session_frame(
     response: &mut reqwest::Response,
+    pending: &mut Vec<u8>,
 ) -> anyhow::Result<(String, String)> {
     use anyhow::{Context, ensure};
     const MAX_FRAME: usize = 64 * 1024;
     tokio::time::timeout(Duration::from_secs(5), async {
-        let mut pending = Vec::new();
         loop {
             if let Some(end) = pending.windows(2).position(|bytes| bytes == b"\n\n") {
                 let frame: Vec<_> = pending.drain(..end + 2).collect();
@@ -707,7 +707,8 @@ async fn authenticated_sse_resumes_after_disconnect_over_loopback_tls() -> anyho
             Ok::<_, anyhow::Error>(response)
         };
         let mut first = open(stream()).await?;
-        let (cursor, received) = read_one_session_frame(&mut first).await?;
+        let mut pending = Vec::new();
+        let (cursor, received) = read_one_session_frame(&mut first, &mut pending).await?;
         ensure!(received == initial, "wrong first audit event");
         ensure!(
             bodies.available_permits() == 0,
@@ -721,11 +722,18 @@ async fn authenticated_sse_resumes_after_disconnect_over_loopback_tls() -> anyho
         );
 
         let expected = publish()?;
+        let sentinel = publish()?;
         let mut resumed = open(stream().query(&[("cursor", &cursor)])).await?;
-        let (next, received) = read_one_session_frame(&mut resumed).await?;
+        let mut pending = Vec::new();
+        let (next, received) = read_one_session_frame(&mut resumed, &mut pending).await?;
         ensure!(
             received == expected && next != cursor,
             "resume did not deliver exactly the next event"
+        );
+        let (after_sentinel, received) = read_one_session_frame(&mut resumed, &mut pending).await?;
+        ensure!(
+            received == sentinel && after_sentinel != next && after_sentinel != cursor,
+            "resume did not deliver the sentinel immediately after the next event"
         );
         drop(resumed);
         drop(
