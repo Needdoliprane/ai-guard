@@ -28,15 +28,11 @@ gardent leurs propres verdicts. [Contrat SQL-05](GATEWAY_FIXTURE.md#sql-05-after
    encadrer le refus sans certificat par deux connexions réussies avec
    certificat. Un serveur indisponible interrompt le passage.
 4. Préparer la source avec `prepare_gateway_fixture witness` et ses six DDL.
-   Noter le chemin de son JSON privé. Réutiliser pour la cible le bloc de
-   préparation de cette même recette, avec les paramètres Compose et les
-   fichiers TLS de la cible. Reprendre le champ `namespace` du JSON source
-   à la place de l'appel à `uuidgen`, puis dériver les mêmes noms de schéma
-   et de comptes. Garder `CREATE DATABASE` et les droits du rôle
-   `witness`, retirer le `USE` et l'inclusion des six DDL. Régénérer les
-   deux mots de passe et produire le JSON avec le port et les fichiers
-   privés de la cible. Vérifier que le schéma de destination contient zéro
-   table avant import. [Préparation de fixture](GATEWAY_FIXTURE.md#create-a-fresh-target--créer-une-cible-neuve)
+   Noter le chemin de son JSON privé. Avec les paramètres Compose et les
+   fichiers TLS de la cible, appeler `prepare_gateway_fixture witness "$namespace"`,
+   où `namespace` vient du JSON source. Le helper prépare un schéma vide,
+   deux nouveaux mots de passe et un JSON privé lié à la cible. Vérifier que
+   le schéma contient zéro table avant import. [Préparation de fixture](GATEWAY_FIXTURE.md#create-a-fresh-target--créer-une-cible-neuve)
 
 ## Commit, sauvegarde, import et rejeu
 

@@ -28,7 +28,13 @@ prepare_gateway_fixture() (
 
   qa_base=$(cd "${QA_MYSQL_PRIVATE_DIR:?}" && pwd -P)
   qa_target=$(mktemp -d "$qa_base/gateway-${qa_role}.XXXXXX")
+  restore_namespace=${2:-}
+  if test -n "$restore_namespace"; then
+    test "$qa_role" = witness
+    printf '%s\n' "$restore_namespace" | grep -Eq '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+  fi
   qa_namespace=$(uuidgen | tr '[:upper:]' '[:lower:]')
+  qa_namespace=${restore_namespace:-$qa_namespace}
   qa_hex=$(printf '%s' "$qa_namespace" | tr -d '-')
   qa_tag=$(printf '%s' "$qa_hex" | cut -c1-24)
   qa_db="qa_audit_$qa_hex"
@@ -48,10 +54,13 @@ prepare_gateway_fixture() (
   fi
 
   {
-    printf 'CREATE DATABASE `%s`;\nUSE `%s`;\n' "$qa_db" "$qa_db"
-    cat schema/mysql/audit-v1.sql schema/mysql/decisions-v1.sql \
-      schema/mysql/workers-v1.sql schema/mysql/worker-lifecycle-v1.sql \
-      schema/mysql/supervision-v1.sql schema/mysql/worker-supervision-v1.sql
+    printf 'CREATE DATABASE `%s`;\n' "$qa_db"
+    if test -z "$restore_namespace"; then
+      printf 'USE `%s`;\n' "$qa_db"
+      cat schema/mysql/audit-v1.sql schema/mysql/decisions-v1.sql \
+        schema/mysql/workers-v1.sql schema/mysql/worker-lifecycle-v1.sql \
+        schema/mysql/supervision-v1.sql schema/mysql/worker-supervision-v1.sql
+    fi
     IFS= read -r qa_service_password < "$qa_target/service.password"
     IFS= read -r qa_maintenance_password < "$qa_target/maintenance.password"
     printf "CREATE USER '%s'@'%%' IDENTIFIED BY '%s' REQUIRE %s;\n" \
