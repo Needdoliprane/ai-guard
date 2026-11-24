@@ -1,5 +1,20 @@
 # Validation courante
 
+## 24 novembre 2026 — reprise SSE via l’ingress Compose Docker
+
+**PASS ciblé G08.** Un lecteur HTTP traverse l’ingress Rust de la pile
+Compose sur Docker Desktop ARM64. Le gateway dédié est arrêté par
+SIGKILL après le reçu de séquence 3. Le premier contrôle du harnais
+lisait encore le séparateur SSE et a été corrigé pour lire jusqu’à la
+fermeture. Au rejeu, le flux est coupé. Après redémarrage du même
+gateway, deux événements synthétiques sont publiés. La reconnexion
+avec `Last-Event-ID: 3` reçoit les séquences 4 et 5 dans l’ordre et
+avec les empreintes attendues. L’audit reste valide. Le test utilise
+un override de recette pour les sous-réseaux et le redémarrage manuel.
+SQLite est sauvegardée et les ressources Compose sont retirées.
+La contre-pression TCP sous un lecteur lent reste à qualifier.
+[Reçu SSE Docker](evidence/2026-11-24/g08-compose-sse-abrupt-cut.json).
+
 ## 24 novembre 2026 — arrêt explicite d’A1 sur Podman rootless
 
 **PASS ciblé G09/G10.** Sur `6ab68631`, l’arrêt explicite d’A1

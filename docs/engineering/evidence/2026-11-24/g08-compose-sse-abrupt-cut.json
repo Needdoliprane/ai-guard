@@ -1,0 +1,21 @@
+{
+  "signal": "SIGKILL",
+  "old_stream_closed": true,
+  "first_seq": 3,
+  "resume_last_event_id": 3,
+  "resumed_sequences": [
+    4,
+    5
+  ],
+  "resumed_hashes_match": true,
+  "integrity": true,
+  "external_calls": false,
+  "worker_launch_requested": false,
+  "control_image_source": "e5c0e4b7",
+  "platform": "Docker Desktop ARM64",
+  "topology": "Docker Compose ingress + gateway, loopback published port",
+  "qa_network_ipam_override": true,
+  "qa_gateway_auto_restart_disabled": true,
+  "sqlite_backup_retained": true,
+  "cleanup_verified": true
+}
