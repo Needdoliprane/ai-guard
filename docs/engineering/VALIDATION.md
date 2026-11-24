@@ -90,6 +90,25 @@ CLI le signale. Le cas Legacy exige une adoption explicite pour
 l’arrêt. Aucun démarrage n’est rejoué. Cette validation logicielle
 ne modifie pas le verdict du pilote Docker Linux sur `c7f6c966`.
 
+### Reprise Legacy sur Docker Desktop ARM64
+
+Le pilote sur `cf4b35cf` observe le terminal du conteneur d’origine
+0,50 s après l’échéance, dans la tolérance de 3 s. Le redémarrage
+échoue à l’oracle métier `Status`. Sur `06fa9968`, le reçu distingue
+ce refus de l’ouverture du socket IPC. Le second broker répond
+`unavailable` à la dernière des 228 sondes. La fermeture de la
+projection métier pendant la reprise Legacy est cohérente avec ce
+code.
+
+**PASS ciblé sur `06fa9968`.** Le pilote physique dédié
+`broker_sigkill_legacy_recovery_status_attests_original_worker_arm`
+retrouve l’Arm, le worker, la tentative, l’horloge et l’échéance
+d’origine via `RecoveryStatus` après redémarrage. Le broker et
+le gateway de test confirment leur fermeture, et le gardien et les
+ressources restent conservés. Le résultat métier et le quota après
+redémarrage ne sont pas établis par ce témoin. G09 conserve le
+verdict FAIL du pilote Linux x86-64.
+
 ## 24 novembre 2026 — redémarrage OIDC après migration de l’audit vers V4
 
 **PASS ciblé G04/G06** avec le paquet macOS `84971de6`. Le
