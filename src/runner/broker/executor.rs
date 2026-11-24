@@ -830,10 +830,7 @@ impl<'a> Execution<'a> {
             self.post_worker_result()
                 .await
                 .context(diagnostics::BrokerStep::ResultAudit)?;
-            if worker.cleanup_removed != Some(true) {
-                boxed_execution_phase(|| self.resume_terminal_cleanup(&prepared.runtime.runtime))
-                    .await?;
-            } else if let Some(relays) = &self.executor.relays {
+            if let Some(relays) = &self.executor.relays {
                 let (current, _) = self.load().await?;
                 relays
                     .retire(self.context, current, self.executor.clock.clone())
@@ -843,6 +840,11 @@ impl<'a> Execution<'a> {
                 boxed_execution_phase(|| self.final_scan(&prepared.runtime.runtime)).await?
             {
                 return Ok(BatchOutcome::AbandonedBeforeClaim(abandoned));
+            }
+            if worker.cleanup_removed != Some(true) {
+                self.stage(LocalFailurePhaseV1::Worker);
+                boxed_execution_phase(|| self.resume_terminal_cleanup(&prepared.runtime.runtime))
+                    .await?;
             }
             if !live_activity
                 && boxed_execution_phase(|| self.replay_terminal_activity(&draft))
@@ -924,7 +926,7 @@ impl<'a> Execution<'a> {
 
     async fn resume_terminal_cleanup(&self, runtime: &ManagedRuntime) -> Result<()> {
         let confirmation = diagnostics::BrokerStep::CleanupConfirmation;
-        let (job, draft) = self.load().await.context(confirmation)?;
+        let (_, draft) = self.load().await.context(confirmation)?;
         let worker = draft.worker().context(confirmation)?;
         ensure!(
             !draft.cancelled()
@@ -972,12 +974,6 @@ impl<'a> Execution<'a> {
             &current == committed,
             anyhow!("runtime terminal differs from acknowledgement").context(confirmation)
         );
-        if let Some(relays) = &self.executor.relays {
-            relays
-                .retire(self.context, job, self.executor.clock.clone())
-                .await
-                .context(confirmation)?;
-        }
         self.generation_current().context(confirmation)?;
         runtime
             .cleanup_terminal(handle, &observed)
@@ -1253,6 +1249,11 @@ impl<'a> Execution<'a> {
         } else {
             true
         };
+        if relay_joined {
+            // Keep the scan durable if the process dies after the worker removal.
+            continue_step!(boxed_execution_phase(|| self.final_scan(runtime)).await?);
+            self.stage(LocalFailurePhaseV1::Worker);
+        }
         let removed = relay_joined
             && runtime
                 .cleanup_terminal(retained.handle(), retained.terminal())

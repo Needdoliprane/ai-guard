@@ -329,7 +329,9 @@ impl Execution<'_> {
                 if entry.event().kind == "broker.batch.scan" {
                     let facts: ScanFactsV1 = serde_json::from_value(entry.event().data.clone())?;
                     ensure!(
-                        facts.version == 1 && facts.worker_id == draft.worker()?.worker_id,
+                        entry.audit_seq().is_some()
+                            && facts.version == 1
+                            && facts.worker_id == draft.worker()?.worker_id,
                         "scan result context differs"
                     );
                     return Ok(ControlFlow::Continue(facts.changed_files));
