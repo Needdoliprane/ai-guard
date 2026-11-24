@@ -1,5 +1,26 @@
 # Validation courante
 
+## 24 novembre 2026 — arrêt d’A1 avec le worker produit Podman rootless
+
+**PASS ciblé G03/G09.** Sur `fd2149e3` et Podman 6.1.4 rootless
+ARM64, A1 et A2 chez A et B1 chez B exécutent trois sessions avec
+[l’image worker native `e61e61f18373`](#24-novembre-2026--image-worker-native-et-export-audité-sur-podman-rootless).
+Le CLI debug et le binaire de test sont ceux de l’export audité,
+vérifiés par SHA-256 avant le rejeu.
+
+Au pic, A occupe deux places et B une. L’arrêt explicite d’A1
+ramène A à une place pendant que B reste à une. A2 et B1 terminent
+normalement. Les deux quotas reviennent à zéro et les trois
+exports correspondent à leurs sources. Après vérification de leur
+attribution, les trois volumes de travail et les trois marqueurs
+d’autorité sont retirés. Les inventaires du moteur retrouvent leur
+état initial. Le test ciblé passe en 93,18 s.
+
+Reçu privé `g09-product-podman-stop-fd2149e3`, manifeste SHA-256
+`48ecb42e8323e392af7227137162dfd326a9726769b10e64180390802a4b3f22`.
+La reprise après perte du broker reste ouverte. Cette recette
+utilise les trois workers du scénario V1.
+
 ## 24 novembre 2026 — découverte Keycloak Web et CLI sur Podman rootless
 
 **PASS ciblé G04/G08** sur macOS ARM64 et Podman 6.1.4 rootless.

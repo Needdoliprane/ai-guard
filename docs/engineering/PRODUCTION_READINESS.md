@@ -76,6 +76,12 @@ SHA-256 `a81ac54e82130e02b503fe585b07ef9d13730f8e0b418421c15288b78fd9e94a`.
 Le rendu en direct pendant l’arrêt et l’arrêt automatique à échéance
 restent ouverts.
 
+Avec l’image worker produit `e61e61f18373`, Podman rootless ARM64
+passe le même arrêt sélectif, les trois exports et le retour des deux
+quotas à zéro. Les six volumes attribués sont retirés et l’inventaire
+du moteur est restauré.
+[Reçu Podman](VALIDATION.md#24-novembre-2026--arrêt-da1-avec-le-worker-produit-podman-rootless).
+
 **G09 — résumé du CLI après arrêt à échéance.** Sur `18640fdf`,
 Docker Desktop et Podman rootless émettent le résumé JSON après
 l’arrêt confirmé à l’échéance originale. La commande conserve son
