@@ -54,6 +54,35 @@ async fn native_s1_reservation_precedes_arm_and_status_shutdown_count_it() {
 }
 
 #[tokio::test]
+async fn fresh_reservation_rejects_other_boot_without_grant_or_native_slot() {
+    let fixture = LegacyIpcFixture::start(1, 0).await;
+    let client = connect(&fixture, 1, 0).await;
+    let mut registration = registration(fixture.root().path());
+    let other_boot = Uuid::from_u128(1).to_string();
+    registration.arm.clock.boot_id = if registration.arm.clock.boot_id == other_boot {
+        Uuid::from_u128(2).to_string()
+    } else {
+        other_boot
+    };
+    registration.receipt.input_hash = registration.arm.input_hash().unwrap();
+    let target = registration.prospective().unwrap();
+
+    assert_eq!(
+        client
+            .legacy_reserve_prospective(target, CancelGeneration::new(), false)
+            .await,
+        Err(EnforcerError::NotReady)
+    );
+    let observed = client.legacy_capabilities().await.unwrap();
+    assert!(observed.recovery_generation.is_none());
+    assert_eq!(observed.known_stop_slots, 0);
+    assert_eq!(observed.owned_active, Some(0));
+
+    drop(client);
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn receipt_only_generic_register_adapter_is_restrictive_before_wire() {
     let fixture = LegacyIpcFixture::start(1, 0).await;
     let client = connect(&fixture, 1, 0).await;
