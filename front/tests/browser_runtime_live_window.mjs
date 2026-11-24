@@ -324,47 +324,53 @@ try {
   stage = "ready";
   for (const [index, tenant] of ["tenant-a", "tenant-b"].entries()) await openViewer(tenant, secrets[index]);
   process.stdout.write(JSON.stringify({ status: "READY", tenants: 2 }) + "\n");
-  stage = "peak";
-  const peak = await frame(["phase", "workers"]);
-  assert.equal(peak.phase, "peak");
-  assert.ok(Array.isArray(peak.workers) && peak.workers.length === 3);
-  const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
-  for (const worker of peak.workers) {
-    assert.deepEqual(Object.keys(worker).sort(), ["attempt_id", "container_id", "image_id", "session_id", "stable_name", "started_at", "worker_id"]);
-    assert.ok([worker.worker_id, worker.session_id, worker.attempt_id].every((id) => typeof id === "string" && uuid.test(id)));
-    assert.match(worker.container_id, /^[0-9a-f]{64}$/);
-    assert.match(worker.image_id, /^sha256:[0-9a-f]{64}$/);
-    assert.ok(typeof worker.started_at === "string" && Number.isFinite(Date.parse(worker.started_at)));
-  }
-  for (const field of ["worker_id", "session_id", "attempt_id", "container_id"])
-    assert.equal(new Set(peak.workers.map((worker) => worker[field])).size, 3);
-  const projected = await Promise.allSettled([
-    readPeak(sessions[0], peak.workers.slice(0, 2), runtimeKind),
-    readPeak(sessions[1], peak.workers.slice(2), runtimeKind),
-  ]);
-  peakReads.push(...projected.map((result, index) => ({
-    tenant: ["A", "B"][index],
-    ...(result.status === "fulfilled" ? result.value.report : { code: "unexpected" }),
-  })));
-  assert.ok(projected.every((result) => result.status === "fulfilled" && result.value.view));
-  for (const { guard, errors } of sessions) { assert.equal(guard.violations.length, 0); assert.equal(errors, 0); }
-  process.stdout.write(JSON.stringify({ status: "DISPLAYED", rows: [2, 1], views: projected.map(({ value }) => value.view) }) + "\n");
   stage = "await_native";
-  // Remain open until the Rust parent has performed its native inspection.
-  const { phase } = await frame(["phase"]);
-  assert.ok(phase === "logout_close" || phase === "close");
-  if (phase === "logout_close") {
-    stage = "logout";
-    const results = await Promise.allSettled([
-      logoutViewer(sessions[0], peak.workers.slice(0, 2)),
-      logoutViewer(sessions[1], peak.workers.slice(2)),
+  const peak = await frame(["phase", "workers"]);
+  if (peak.phase === "readiness_close") {
+    assert.deepEqual(peak.workers, []);
+    stage = "readiness_close";
+  } else {
+    stage = "peak";
+    assert.equal(peak.phase, "peak");
+    assert.ok(Array.isArray(peak.workers) && peak.workers.length === 3);
+    const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+    for (const worker of peak.workers) {
+      assert.deepEqual(Object.keys(worker).sort(), ["attempt_id", "container_id", "image_id", "session_id", "stable_name", "started_at", "worker_id"]);
+      assert.ok([worker.worker_id, worker.session_id, worker.attempt_id].every((id) => typeof id === "string" && uuid.test(id)));
+      assert.match(worker.container_id, /^[0-9a-f]{64}$/);
+      assert.match(worker.image_id, /^sha256:[0-9a-f]{64}$/);
+      assert.ok(typeof worker.started_at === "string" && Number.isFinite(Date.parse(worker.started_at)));
+    }
+    for (const field of ["worker_id", "session_id", "attempt_id", "container_id"])
+      assert.equal(new Set(peak.workers.map((worker) => worker[field])).size, 3);
+    const projected = await Promise.allSettled([
+      readPeak(sessions[0], peak.workers.slice(0, 2), runtimeKind),
+      readPeak(sessions[1], peak.workers.slice(2), runtimeKind),
     ]);
-    logoutChecks.push(...results.map((result) => result.status === "fulfilled" ? result.value : "unexpected"));
-    assert.deepEqual(logoutChecks, ["verified", "verified"]);
-    process.stdout.write(JSON.stringify({ status: "LOGGED_OUT", tenants: 2 }) + "\n");
+    peakReads.push(...projected.map((result, index) => ({
+      tenant: ["A", "B"][index],
+      ...(result.status === "fulfilled" ? result.value.report : { code: "unexpected" }),
+    })));
+    assert.ok(projected.every((result) => result.status === "fulfilled" && result.value.view));
+    for (const { guard, errors } of sessions) { assert.equal(guard.violations.length, 0); assert.equal(errors, 0); }
+    process.stdout.write(JSON.stringify({ status: "DISPLAYED", rows: [2, 1], views: projected.map(({ value }) => value.view) }) + "\n");
+    stage = "await_native";
+    // Remain open until the Rust parent has performed its native inspection.
+    const { phase } = await frame(["phase"]);
+    assert.ok(phase === "logout_close" || phase === "close");
+    if (phase === "logout_close") {
+      stage = "logout";
+      const results = await Promise.allSettled([
+        logoutViewer(sessions[0], peak.workers.slice(0, 2)),
+        logoutViewer(sessions[1], peak.workers.slice(2)),
+      ]);
+      logoutChecks.push(...results.map((result) => result.status === "fulfilled" ? result.value : "unexpected"));
+      assert.deepEqual(logoutChecks, ["verified", "verified"]);
+      process.stdout.write(JSON.stringify({ status: "LOGGED_OUT", tenants: 2 }) + "\n");
+    }
+    stage = "complete";
+    status = phase === "logout_close" ? "PASS" : "CLOSED";
   }
-  stage = "complete";
-  status = phase === "logout_close" ? "PASS" : "CLOSED";
 } catch {
   if (stage === "launch") status = "BLOCKED";
   // Never capture a login form or turn a native/shutdown failure into a stale UI artifact.
@@ -384,6 +390,11 @@ try {
   cleanup.push(...await closeBrowserResources(null, browser));
   cleanupFailed = cleanup.length > 0 || sessions.some(({ page }) => page && !page.isClosed());
   networkViolation = sessions.some(({ guard }) => guard?.violations.length);
+  if (stage === "readiness_close") {
+    const pageFailed = sessions.some(({ errors }) => errors !== 0);
+    stage = pageFailed ? "views" : "complete";
+    status = pageFailed ? "FAIL" : "CLOSED";
+  }
   if ((status === "PASS" || status === "CLOSED") && (cleanupFailed || networkViolation)) {
     stage = cleanupFailed ? "cleanup" : "network";
     status = "FAIL";
