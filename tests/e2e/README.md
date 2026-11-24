@@ -254,7 +254,11 @@ cargo test --locked --offline --test runtime_user_journey \
   --ignored --exact --test-threads=1 --nocapture
 ```
 
-Le test rapproche le quota avant et après un lot d’inspections Docker par CID complet, l’état et le mode réseau `none`, les sessions et l’intersection stricte des intervalles natifs. Il laisse les CLI terminer leur retrait ciblé même si l’oracle du pic échoue. En cas de succès, il vérifie l’absence de chaque CID sur le moteur, les états terminaux, le retour à zéro du quota et l’intégrité de l’audit. Le répertoire privé affiché et les volumes de travail restent disponibles pour examiner ou reprendre les sessions. Aucune purge globale.
+Le test rapproche les lectures du quota qui encadrent le lot d’inspections Docker par CID complet. Il vérifie le mode réseau `none` rapporté par Docker et l’intersection stricte des intervalles natifs du même CID sans redémarrage. Les commandes `sleep` n’exercent aucun échange réseau.
+
+Le harnais attend les trois CLI même si l’observation du pic échoue. Avant de fermer le gateway, il vérifie le retour du quota à zéro et l’absence des CID relevés pendant le suivi ou dans l’inventaire final. Il conserve l’erreur initiale et signale les échecs de ces vérifications. Un CID absent des deux sources reste hors de ce contrôle. Les vérifications Docker sont en lecture seule. Le dossier privé affiché est conservé pour le diagnostic et la reprise. La liaison aux noms de volumes est comparée entre le CLI et le registre, et la présence des volumes après exécution reste à vérifier.
+
+Un verdict réussi exige aussi trois états terminaux cohérents et une chaîne d’audit valide. Le pilote ne vérifie pas la présence de chaque événement attendu pour chaque session.
 
 Le profil géré impose 2 vCPU, 1 Gio et 256 PID par worker, avec un profil fixe pour les auxiliaires d’import. Le pilote borne donc la concurrence à trois avec 6 vCPU et 3 Gio de plafonds cumulés pour les workers. Une campagne légère à 100 exige de rendre les plafonds inférieurs configurables et liés au lancement autorisé, de borner la concurrence des auxiliaires et de valider la pagination ou une lecture complète du registre à l’échelle du tenant. À 100, les seuls plafonds actuels des workers totaliseraient 200 vCPU et 100 Gio. Le test hors moteur de l’intersection utilise 100 intervalles synthétiques. La mesure de 100 workers physiques reste `NOT_RUN`.
 

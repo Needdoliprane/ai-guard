@@ -67,79 +67,96 @@ async fn real_docker_same_tenant_capacity_pilot() -> Result<()> {
             "capacity fixture must start with an empty inventory"
         );
         // A failed observation must allow all owned CLI runs to complete cleanup.
+        let mut observed_cids = BTreeSet::new();
         let (first, second, third, peak) = tokio::join!(
             jobs[0].run(&gateway, &selection),
             jobs[1].run(&gateway, &selection),
             jobs[2].run(&gateway, &selection),
-            timeout(Duration::from_secs(45), observe_peak(&viewer, &selection)),
+            timeout(
+                Duration::from_secs(45),
+                observe_peak(&viewer, &selection, &mut observed_cids),
+            ),
         );
-        let runs = [first?, second?, third?];
-        let peak = peak.context("capacity peak observation timed out")??;
-        check_quota(&viewer, PILOT_WORKERS, 0).await?;
-        let records = current_workers(&viewer, PILOT_WORKERS as usize).await?;
-        ensure!(
-            records.len() == runs.len(),
-            "terminal inventory is incomplete"
-        );
-        let mut intervals = Vec::new();
-        for fact in &peak {
-            let worker = records
-                .iter()
-                .find(|worker| worker.attempt.container_id.as_deref() == Some(&fact.id))
-                .context("observed CID absent from terminal inventory")?;
-            let run = runs
-                .iter()
-                .find(|run| run.session_id.to_string() == fact.session)
-                .context("observed session absent from CLI results")?;
-            let terminal = worker
-                .last_observation
-                .as_ref()
-                .context("missing terminal inspection")?;
-            let started = terminal
-                .started_at
-                .as_deref()
-                .context("missing terminal StartedAt")?;
-            let finished = terminal
-                .finished_at
-                .as_deref()
-                .context("missing terminal FinishedAt")?;
+        let peak = peak
+            .context("capacity peak observation timed out")
+            .and_then(|result| result);
+        let records = current_workers(&viewer, PILOT_WORKERS as usize).await;
+        let cleanup = check_cleanup(&viewer, &selection, &observed_cids, &records).await;
+        let evidence = async {
+            let runs = [first?, second?, third?];
+            let peak = peak?;
+            let records = records?;
             ensure!(
-                worker.state == WorkerStateV1::Terminal
-                    && !worker.quota_held
-                    && worker.cleanup_removed == Some(true)
-                    && worker.launch.session_id == fact.session
-                    && worker.attempt.volume_name == run.volume
-                    && terminal.inspection.container_id == fact.id
-                    && terminal.running == Some(false)
-                    && terminal.exit_code == Some(0)
-                    && terminal.oom_killed == Some(false)
-                    && terminal.restart_count == Some(0)
-                    && same_started_at(started, &fact.started_at),
-                "terminal state differs from the observed sleeper"
+                records.len() == runs.len(),
+                "terminal inventory is incomplete"
             );
-            intervals.push((
-                DateTime::parse_from_rfc3339(started)?,
-                DateTime::parse_from_rfc3339(finished)?,
-            ));
-            require_removed(&selection, &fact.id).await?;
+            let mut intervals = Vec::new();
+            for fact in &peak {
+                let worker = records
+                    .iter()
+                    .find(|worker| worker.attempt.container_id.as_deref() == Some(&fact.id))
+                    .context("observed CID absent from terminal inventory")?;
+                let run = runs
+                    .iter()
+                    .find(|run| run.session_id.to_string() == fact.session)
+                    .context("observed session absent from CLI results")?;
+                let terminal = worker
+                    .last_observation
+                    .as_ref()
+                    .context("missing terminal inspection")?;
+                let started = terminal
+                    .started_at
+                    .as_deref()
+                    .context("missing terminal StartedAt")?;
+                let finished = terminal
+                    .finished_at
+                    .as_deref()
+                    .context("missing terminal FinishedAt")?;
+                ensure!(
+                    worker.state == WorkerStateV1::Terminal
+                        && !worker.quota_held
+                        && worker.cleanup_removed == Some(true)
+                        && worker.launch.session_id == fact.session
+                        && worker.attempt.volume_name == run.volume
+                        && terminal.inspection.container_id == fact.id
+                        && terminal.running == Some(false)
+                        && terminal.exit_code == Some(0)
+                        && terminal.oom_killed == Some(false)
+                        && terminal.restart_count == Some(0)
+                        && same_started_at(started, &fact.started_at),
+                    "terminal state differs from the observed sleeper"
+                );
+                intervals.push((
+                    DateTime::parse_from_rfc3339(started)?,
+                    DateTime::parse_from_rfc3339(finished)?,
+                ));
+            }
+            let (start, end) =
+                common_window(&intervals).context("no common native running interval")?;
+            ensure!(
+                viewer.get_json("api/v1/integrity").await?["valid"] == true,
+                "invalid fixture audit"
+            );
+            Ok(json!({
+                "status":"PASS","scope":"same_tenant_capacity_pilot","observed":peak,
+                "held_at_peak":PILOT_WORKERS,"held_after":0,
+                "overlap_start":start.to_rfc3339(),"overlap_end":end.to_rfc3339(),
+                "worker_containers_removed":true,"private_fixture_retained":true,
+                "audit_chain_valid":true
+            }))
         }
-        let (start, end) =
-            common_window(&intervals).context("no common native running interval")?;
-        ensure!(
-            viewer.get_json("api/v1/integrity").await?["valid"] == true,
-            "invalid fixture audit"
-        );
-        Ok(json!({
-            "status":"PASS","scope":"same_tenant_capacity_pilot","observed":peak,
-            "held_at_peak":PILOT_WORKERS,"held_after":0,
-            "overlap_start":start.to_rfc3339(),"overlap_end":end.to_rfc3339(),
-            "worker_containers_removed":true,"workspaces_retained":true
-        }))
+        .await;
+        preserve_error(evidence, cleanup)
     }
     .await;
-    let closed = timeout(Duration::from_secs(5), gateway.child.kill()).await;
-    let report = result?;
-    closed??;
+    let closed = async {
+        timeout(Duration::from_secs(5), gateway.child.kill())
+            .await
+            .context("capacity gateway shutdown timed out")?
+            .context("capacity gateway shutdown failed")
+    }
+    .await;
+    let report = preserve_error(result, closed)?;
     eprintln!("{report}");
     Ok(())
 }
@@ -147,9 +164,15 @@ async fn real_docker_same_tenant_capacity_pilot() -> Result<()> {
 async fn observe_peak(
     viewer: &AuditClient,
     selection: &RuntimeSelection,
+    observed_cids: &mut BTreeSet<String>,
 ) -> Result<Vec<LiveDockerSnapshot>> {
     loop {
         let workers = current_workers(viewer, PILOT_WORKERS as usize).await?;
+        observed_cids.extend(
+            workers
+                .iter()
+                .filter_map(|worker| worker.attempt.container_id.clone()),
+        );
         if workers.len() == PILOT_WORKERS as usize
             && workers
                 .iter()
@@ -185,7 +208,58 @@ async fn observe_peak(
     }
 }
 
+// Keep the original error chain when an independent check also fails.
+fn preserve_error<T>(primary: Result<T>, check: Result<()>) -> Result<T> {
+    match (primary, check) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(error)) | (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(check)) => Err(error.context(format!("additional failure: {check:#}"))),
+    }
+}
+
+async fn check_cleanup(
+    viewer: &AuditClient,
+    selection: &RuntimeSelection,
+    observed_cids: &BTreeSet<String>,
+    records: &Result<Vec<WorkerV1>>,
+) -> Result<()> {
+    let mut failures = Vec::new();
+    let mut cids: BTreeSet<_> = observed_cids.iter().map(String::as_str).collect();
+    match records {
+        Ok(workers) => {
+            for worker in workers {
+                if let Some(cid) = worker.attempt.container_id.as_deref() {
+                    cids.insert(cid);
+                }
+            }
+        }
+        Err(error) => failures.push(format!("terminal inventory unavailable: {error:#}")),
+    }
+    if let Err(error) = check_quota(viewer, PILOT_WORKERS, 0).await {
+        failures.push(format!("final quota: {error:#}"));
+    }
+    let known_cids = cids.len();
+    for cid in cids {
+        if let Err(error) = require_removed(selection, cid).await {
+            failures.push(format!("fixture container {cid}: {error:#}"));
+        }
+    }
+    ensure!(
+        failures.is_empty(),
+        "cleanup checks: {}",
+        failures.join("; ")
+    );
+    Ok(())
+}
+
 async fn require_removed(selection: &RuntimeSelection, cid: &str) -> Result<()> {
+    ensure!(
+        cid.len() == 64
+            && cid
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "cleanup check requires a full Docker CID"
+    );
     let mut command = Command::new(&selection.program);
     command
         .args([
@@ -233,4 +307,13 @@ fn capacity_window_requires_a_strict_overlap_across_all_hundred_intervals() {
     assert_eq!(common_window(&intervals), Some((instant(99), instant(110))));
     intervals[0].1 = instant(99);
     assert_eq!(common_window(&intervals), None);
+}
+
+#[test]
+fn capacity_error_keeps_original_cause_and_reports_failed_checks() {
+    let evidence: Result<()> = Err(anyhow::anyhow!("peak timed out"));
+    let cleanup = Err(anyhow::anyhow!("fixture container still present"));
+    let error = preserve_error(evidence, cleanup).unwrap_err();
+    assert_eq!(error.root_cause().to_string(), "peak timed out");
+    assert!(format!("{error:#}").contains("fixture container still present"));
 }
