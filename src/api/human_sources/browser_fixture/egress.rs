@@ -5,12 +5,16 @@ use super::{
 use crate::{
     api::{GatewayState, dashboard_router_with_human_mode, gateway_router},
     audit::Store,
+    control::egress_decision::{EgressBindingV1, EgressObservationV1, EgressObserveRequestV1},
     control::egress_policy::{
         EgressPolicyExpectedScopeV1, EgressPolicyInputV1, EgressPolicyReceiptV1,
         EgressPolicySelectorV1, EgressPolicyStateV1, EgressPolicyTenantCeilingV1,
         EgressReplacePolicyRequestV1, EgressRevokePolicyRequestV1,
     },
-    egress::{Authority, EgressTransport, PolicyLimits},
+    egress::{
+        Authority, EgressTransport, PolicyLimits,
+        ids::{DigestV1, IdV1},
+    },
     human_authority::startup::HumanOwnedStartupBundle,
     identity::{
         HumanAccountV1, HumanCapabilityV1, IdentityChangeV1, IdentityMutationV1,
@@ -356,6 +360,8 @@ async fn serve_owned_egress_browser_fixture() -> Result<()> {
         kind: ResourceKindV1::Session,
         resource_id: Uuid::new_v4().to_string(),
     };
+    // Synthetic observation for the browser oracle. No relay or channel is opened.
+    let synthetic_closure_id = IdV1::random();
     let mut files = Store::owned_control_fixture_with_legacy_setup_for_test(15, |store| {
         // The normal resource grant needs a preceding event for its exact
         // Session. This declares the synthetic resource, never a connection.
@@ -367,6 +373,24 @@ async fn serve_owned_egress_browser_fixture() -> Result<()> {
         store
             .append(event)
             .expect("append synthetic Session declaration");
+        store
+            .egress_observe(&EgressObserveRequestV1 {
+                version: 1,
+                observation_id: synthetic_closure_id.clone(),
+                observation: EgressObservationV1::ChannelClosed {
+                    binding: EgressBindingV1 {
+                        session_id: resource.resource_id.clone(),
+                        worker_id: Uuid::new_v4().to_string(),
+                        attempt_id: Uuid::new_v4().to_string(),
+                        channel_id: IdV1::random(),
+                        epoch: 1,
+                        context_digest: DigestV1::of(b"synthetic E4 browser fixture"),
+                    },
+                    reason: "owner_exit".into(),
+                    observations_lost: 0,
+                },
+            })
+            .expect("record synthetic egress closure");
     });
     let (bundle, credentials, tokens) = files.take_startup();
     let (owner_bearer, reader_bearer) = provision_humans(&bundle, &resource)?;
@@ -409,6 +433,7 @@ async fn serve_owned_egress_browser_fixture() -> Result<()> {
             "resource":resource,"owner":{"display_name":OWNER_NAME,"bearer":owner_bearer},
             "reader":{"display_name":READER_NAME,"bearer":reader_bearer},
             "tenant_policy":receipt_summary(&policy_receipts[0]),"session_policy":receipt_summary(&policy_receipts[1]),
+            "synthetic_closure_id":synthetic_closure_id.as_str(),
             "budget_seconds":config.seconds,"commands":"commands","acks":"acks","command_limit":COMMAND_LIMIT
         }))?;
         control(&config, deadline, &servers, &client, revoke, &mut policy_receipts).await

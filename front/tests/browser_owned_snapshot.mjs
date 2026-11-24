@@ -183,7 +183,7 @@ function policyReceipt(value, state) {
   return value;
 }
 function validateEgressReady(value) {
-  closed(value, ["version", "mode", "dashboard_url", "tenant_id", "resource", "owner", "reader", "tenant_policy", "session_policy", "budget_seconds", "commands", "acks", "command_limit"], "READY_CLOSED");
+  closed(value, ["version", "mode", "dashboard_url", "tenant_id", "resource", "owner", "reader", "tenant_policy", "session_policy", "synthetic_closure_id", "budget_seconds", "commands", "acks", "command_limit"], "READY_CLOSED");
   must(value.mode === "egress_journal" && value.tenant_id === "A", "READY_EGRESS_MODE");
   closed(value.resource, ["kind", "resource_id"], "READY_RESOURCE");
   must(value.resource.kind === "session" && typeof value.resource.resource_id === "string"
@@ -195,6 +195,8 @@ function validateEgressReady(value) {
   must(value.owner.bearer !== value.reader.bearer, "READY_DISTINCT_BEARERS");
   policyReceipt(value.tenant_policy, "active");
   policyReceipt(value.session_policy, "active");
+  must(uuid(value.synthetic_closure_id) && value.synthetic_closure_id !== value.session_policy.event_id
+    && value.synthetic_closure_id !== value.tenant_policy.event_id, "READY_SYNTHETIC_CLOSURE_ID");
   must(value.tenant_policy.event_seq < value.session_policy.event_seq && value.tenant_policy.event_id !== value.session_policy.event_id, "READY_POLICY_ORDER");
   return value;
 }
@@ -390,6 +392,28 @@ async function egressSnapshot(body, entries) {
   await noSecret();
 }
 
+async function assertSyntheticClosure(body) {
+  const id = ready.synthetic_closure_id;
+  const kind = "egress.channel.closed";
+  const matches = body.items.filter((item) => item.metadata.kind === kind);
+  must(matches.length === 1, "EGRESS_CLOSURE_WIRE_UNIQUE");
+  const [{ metadata: meta, content }] = matches;
+  closed(meta, ["id", "timestamp", "received_at", "kind", "source", "provenance", "coverage", "resource", "decision"], "EGRESS_CLOSURE_METADATA_CLOSED");
+  must(meta.id === id && meta.source === "gateway" && meta.provenance === "observed"
+    && meta.coverage === "partial" && meta.decision === null && content === null
+    && meta.resource.kind === ready.resource.kind
+    && meta.resource.resource_id === ready.resource.resource_id, "EGRESS_CLOSURE_WIRE_IDENTITY");
+
+  const row = journal().locator(`tbody tr[data-event-id="${id}"]`);
+  must(await row.count() === 1, "EGRESS_CLOSURE_DOM_UNIQUE");
+  await row.locator('[data-label="Type"] strong').getByText("Fermeture du canal egress enregistrée", { exact: true })
+    .waitFor({ timeout: remaining() });
+  await row.locator('[data-label="Type"] code').getByText(kind, { exact: true }).waitFor({ timeout: remaining() });
+  await row.locator('[data-label="Provenance"]').getByText("observed · couverture partielle", { exact: true }).waitFor({ timeout: remaining() });
+  await row.locator('[data-label="Décision"]').getByText("Motif non fourni dans les métadonnées", { exact: true }).waitFor({ timeout: remaining() });
+  await row.locator('[data-label="Ressource"]').getByText(ready.resource.resource_id, { exact: true }).waitFor({ timeout: remaining() });
+}
+
 async function runEgressJournal() {
   const replacement = {
     receipt: ready.session_policy, kind: "control.egress_policy.replaced", label: "Politique réseau remplacée",
@@ -411,6 +435,13 @@ async function runEgressJournal() {
     { receipt, kind: "control.egress_policy.revoke_requested", label: "Révocation de politique réseau demandée" },
     replacement,
   ]);
+  stage = "egress_synthetic_closure";
+  for (const [width, theme] of [[1440, "light"], [390, "dark"]]) {
+    await screenshot(width, theme, [page.getByLabel("Credential personnel local")]);
+    must(await page.locator("html").getAttribute("data-theme") === theme
+      && page.viewportSize()?.width === width, "EGRESS_CLOSURE_VIEWPORT_THEME");
+    await assertSyntheticClosure(body);
+  }
   must(streamRequests(journalStart).length === 0, "EGRESS_UNEXPECTED_STREAM");
 
   stage = "egress_reader_without_share";
@@ -424,6 +455,11 @@ async function runEgressJournal() {
   must(!body.items.some((item) => item.metadata.resource.resource_id === ready.resource.resource_id)
     && await journal().locator(`tr[data-event-id="${receipt.event_id}"], tr[data-event-id="${replacement.receipt.event_id}"]`).count() === 0
     && countRecent(readerStart) === 1 && streamRequests(readerStart).length === 0, "EGRESS_PRIVATE_POLICY_VISIBLE");
+  must(!body.items.some(({ metadata }) => metadata.id === ready.synthetic_closure_id)
+    && await journal().locator(`tr[data-event-id="${ready.synthetic_closure_id}"]`).count() === 0,
+    "EGRESS_PRIVATE_CLOSURE_VISIBLE");
+  observed.synthetic_closure = { event_id: ready.synthetic_closure_id, reader_access: "absent" };
+
   observed.policy = { replacement: replacement.receipt, revocation_requested: receipt, reader_access: "absent" };
   must(pageErrors.length === 0 && external.length === 0, "PAGE_ERROR_OR_EXTERNAL_DESTINATION");
 }
@@ -481,7 +517,7 @@ async function currentNavigationContrast(width, theme) {
     must(Number.isFinite(ratio) && ratio >= 4.5, "CURRENT_NAVIGATION_TEXT_CONTRAST_BELOW_4_5");
   }
 }
-async function screenshot(width, theme) {
+async function screenshot(width, theme, mask = []) {
   await page.setViewportSize({ width, height: 1000 });
   if (await page.locator("html").getAttribute("data-theme") !== theme) await button(theme === "dark" ? "Activer le thème sombre" : "Activer le thème clair").click();
   await page.evaluate(() => window.scrollTo(0, 0)); await settle(); await noSecret();
@@ -497,7 +533,7 @@ async function screenshot(width, theme) {
   });
   must(geometry.document <= width + 1 && geometry.body <= width + 1 && geometry.headingTop >= geometry.dockBottom - 1 && geometry.currentVisible && geometry.tablesFit, "OWNED_VIEW_GEOMETRY");
   const name = `owned-snapshot-${width}-${theme}.png`;
-  await page.screenshot({ path: join(artifacts, name), timeout: remaining() }); await chmod(join(artifacts, name), 0o600);
+  await page.screenshot({ path: join(artifacts, name), timeout: remaining(), mask }); await chmod(join(artifacts, name), 0o600);
   captures.push({ name, width, theme, geometry, sha256: await shaFile(join(artifacts, name)) });
 }
 
