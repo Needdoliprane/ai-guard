@@ -1,5 +1,19 @@
 # Validation courante
 
+## 24 novembre 2026 — rendu et déconnexion Chrome avec trois workers
+
+**PASS ciblé G08/G10** sur `adceee90`, avec Docker Desktop ARM64,
+Chrome local et le frontend archivé `84971de6`. A1 et A2 chez A
+et B1 chez B ont été actifs ensemble pendant 19,95 s. Le navigateur
+a affiché deux lignes chez A et une chez B. L’inspection native après
+affichage a retrouvé les trois instances. Le harnais a confirmé les
+deux déconnexions et la continuité des instances dans le relevé terminal.
+Les trois exports correspondent aux sources, les quotas reviennent à
+zéro et les trois conteneurs sont retirés. Les trois volumes de travail
+ont été retirés après rapprochement des labels avec le reçu. Les
+inventaires préexistants de conteneurs, volumes et images sont identiques
+avant et après. Cette recette porte sur un moteur local et un gateway.
+
 ## 24 novembre 2026 — ancre d’audit protégée au niveau du processus
 
 **PASS ciblé G06** avec `ai-guard-audit-checkpoint` du paquet macOS
