@@ -19,10 +19,18 @@ const V1: i64 = 1_000_001;
 const PRIVATE_MARKER: &str = "synthetic-private-marker-never-print";
 
 fn configuration() -> Value {
-    serde_json::from_str(include_str!(
+    // The published example uses a capacity plan. These tests exercise the
+    // historical configuration needed for migration targets 2 and 3.
+    let mut config: Value = serde_json::from_str(include_str!(
         "../docs/setup/sso/examples/gateway.https.json"
     ))
-    .unwrap()
+    .unwrap();
+    config["version"] = json!(1);
+    config["authentication_audit"]
+        .as_object_mut()
+        .unwrap()
+        .remove("capacity_plan");
+    config
 }
 
 fn private_write(path: &Path, bytes: &[u8]) {
