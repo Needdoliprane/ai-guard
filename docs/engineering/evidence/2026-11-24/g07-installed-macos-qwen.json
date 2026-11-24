@@ -127,29 +127,35 @@
         "argv": [
           "/usr/bin/id"
         ],
-        "expected_advice": "allow",
-        "observed_advice": "deny",
         "effective_decision": "deny",
-        "audit_seq": 2
+        "audit_seq": 2,
+        "expected_provider_outcome": "allow",
+        "provider_outcome": "deny",
+        "normalized_advice": "deny",
+        "effective_rule": "local_openai_deny"
       },
       {
         "argv": [
           "/bin/echo",
           "sandbox-ok"
         ],
-        "expected_advice": "allow",
-        "observed_advice": "deny",
         "effective_decision": "deny",
-        "audit_seq": 3
+        "audit_seq": 3,
+        "expected_provider_outcome": "allow",
+        "provider_outcome": "deny",
+        "normalized_advice": "deny",
+        "effective_rule": "local_openai_deny"
       },
       {
         "argv": [
           "/bin/pwd"
         ],
-        "expected_advice": "allow",
-        "observed_advice": "deny",
         "effective_decision": "deny",
-        "audit_seq": 4
+        "audit_seq": 4,
+        "expected_provider_outcome": "allow",
+        "provider_outcome": "deny",
+        "normalized_advice": "deny",
+        "effective_rule": "local_openai_deny"
       },
       {
         "argv": [
@@ -157,10 +163,12 @@
           "%s",
           "sandbox-ok"
         ],
-        "expected_advice": "allow",
-        "observed_advice": "deny",
         "effective_decision": "deny",
-        "audit_seq": 5
+        "audit_seq": 5,
+        "expected_provider_outcome": "allow",
+        "provider_outcome": "deny",
+        "normalized_advice": "deny",
+        "effective_rule": "local_openai_deny"
       }
     ],
     "audit_match": true,
