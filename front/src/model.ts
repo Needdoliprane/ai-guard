@@ -138,6 +138,10 @@ const failurePhaseLabels: ReadonlyMap<string, string> = new Map([
 const failureStepLabels: ReadonlyMap<string, string> = new Map([
   ["activity_spool", "Collecte d’activité fournisseur indisponible"],
   ["arm_exchange", "Armement de l’arrêt automatique"],
+  ["full3_binding_publication", "Enregistrement de la liaison au gardien"],
+  ["preclaim_choice", "Vérification du droit de poursuivre le démarrage"],
+  ["native_claim_reserve", "Réservation du démarrage auprès du gardien"],
+  ["native_claim_consume", "Contrôle de la réservation auprès du gardien"],
   ["registration", "Connexion au gardien d’arrêt"],
   ["readiness_before_claim", "Vérification avant démarrage"],
   ["load_after_registration", "Vérification avant démarrage"],

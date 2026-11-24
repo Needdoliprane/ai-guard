@@ -434,6 +434,10 @@ test("le résultat broker invalide laisse inconnus les champs et borne le texte 
 test("un échec broker v1 présente sa phase et son étape sans confirmer un effet d’exécution", () => {
   for (const [step, label] of [
     ["activity_spool", "Collecte d’activité fournisseur indisponible"],
+    ["full3_binding_publication", "Enregistrement de la liaison au gardien"],
+    ["preclaim_choice", "Vérification du droit de poursuivre le démarrage"],
+    ["native_claim_reserve", "Réservation du démarrage auprès du gardien"],
+    ["native_claim_consume", "Contrôle de la réservation auprès du gardien"],
     ["failure_observed", "Observation d’un échec"],
     ["ownership_reload", "Vérification du conteneur enregistré"],
     ["created_exchange", "Confirmation de la création"],
