@@ -69,5 +69,29 @@
     "cli_nonzero": true,
     "quota_released": true,
     "inventories_restored": true
+  },
+  "installed_nominal_runtime_export": {
+    "docker": {
+      "status": "PASS",
+      "worker": "docker",
+      "network": "none",
+      "audit_decision_backend": "rust_rules",
+      "terminal_after_decision": true,
+      "export_matches_source": true,
+      "private_fixture_excluded": true,
+      "quota_released": true,
+      "inventories_restored": true
+    },
+    "podman_rootless": {
+      "status": "PASS",
+      "worker": "podman-rootless",
+      "network": "none",
+      "audit_decision_backend": "rust_rules",
+      "terminal_after_decision": true,
+      "export_matches_source": true,
+      "private_fixture_excluded": true,
+      "quota_released": true,
+      "inventories_restored": true
+    }
   }
 }

@@ -95,6 +95,10 @@ Sur Docker Desktop ARM64, le même CLI passe le rejeu de l’échéance
 avec stdout fermé dès l’entrée. Le diagnostic initial reste lisible sur
 stderr et le code est non nul. L’audit confirme le terminal après la
 décision, la libération du quota et la restauration des inventaires.
+Enfin le CLI extrait passe G01 sur Docker Desktop et Podman rootless.
+Le lancement nominal sans réseau est audité, l’export neuf correspond
+à la source et exclut le `.env` synthétique. Les sources sont intactes,
+les quotas libérés et les inventaires des deux moteurs restaurés.
 [Reçu macOS, Docker et Podman](evidence/2026-11-24/g12-macos-84971de6.json).
 
 ## 24 novembre 2026 — profil TLS local à volumes neufs
