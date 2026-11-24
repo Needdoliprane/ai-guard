@@ -27,6 +27,19 @@ Le scénario local de garde des archives natives G12 confirme la présence et le
 
 Un statut porte uniquement sur la preuve nommée. Un lot logiciel réussi ne clôture pas les gates d'effets runtime. La publication production exige tous les gates applicables PASS, ou NOT_APPLICABLE justifié avant essais. Les quatre combinaisons Docker/Podman × Linux x86_64/macOS ARM64 restent exigées ; Kubernetes reste une cible complète distincte.
 
+**G01 — harnais d’export avec un CLI installé.** Sur `c16ca486`, le
+[témoin nominal](../../tests/runtime_user_journey.rs) passe sur Docker
+Desktop ARM64 et Podman rootless avec le même CLI extrait de l’archive
+macOS `99cb885e`. L’empreinte du CLI est vérifiée avant le prévol.
+Le parcours confirme l’audit, les reprises et l’export en destination
+neuve. Les volumes attribués aux recettes sont retirés et les deux
+inventaires retrouvent leur état initial. Reçus de test
+`g01-harness-macos-c16ca486/run.log` et
+`g01-harness-podman-c16ca486/run.log`, SHA-256 respectifs
+`d59636a9552c4d11cfbb0413ee6f1a3e10c772ddd5278cd378a3082667640266`
+et `f1b96120b44724d43c1905a7c76bd0844356bcee1d844016e5b008aa5b3bb4e2`.
+L’exécution du harnais avec l’archive Linux x86-64 reste à qualifier.
+
 **G02 — montage racine observé dans le worker.** Avec le CLI macOS archivé
 `99cb885e` sur Podman 6.1.4 rootless ARM64, la commande auditée
 `findmnt --noheadings --output OPTIONS --target /` lit le jeton `ro` pour
