@@ -13,6 +13,14 @@ Docker Desktop ARM64 répond en v1.36.1 et expose la classe
 `ai-guard-rwop` avec `hostpath.csi.k8s.io`. Ce relevé ne qualifie
 pas l’exclusivité entre deux pods. La recette sur cluster reste ouverte.
 
+Le CLI macOS livré `84971de6` refuse le transport HTTPS vers
+l’API locale avec une AC de recette étrangère au cluster et une
+empreinte de configuration cohérente avec cette AC. OpenSSL
+confirme sur le même endpoint que la chaîne et le SAN IP passent
+avec l’AC attendue et échouent avec l’AC étrangère. Aucun résultat
+de prévol ni pod n’est produit. Ce passage couvre le refus TLS
+du CLI et ne valide pas le prévol authentifié sur le cluster.
+
 ## 24 novembre 2026 — reprise de lecture et d’annulation du broker
 
 **PASS ciblé G09** sur `74927852`. Les 21 tests `broker_run_cli`
