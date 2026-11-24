@@ -106,6 +106,11 @@ initialisé par `init` donne `credential_unsafe` tant que le fichier
 de profils manque. La fixture dédiée ne contient que des entrées
 synthétiques. Les comptes et les capacités du worker restent non
 vérifiés, sans appel fournisseur.
+Sur les deux moteurs, une autre exécution audite `findmnt` dans le
+worker sans réseau. Le montage racine est `ro` et ne contient pas
+l’option `rw`. Les quotas reviennent à zéro et les inventaires
+conteneurs et volumes retrouvent leur état initial. Cette recette
+porte sur la racine.
 [Reçu macOS, Docker et Podman](evidence/2026-11-24/g12-macos-84971de6.json).
 
 ## 24 novembre 2026 — profil TLS local à volumes neufs

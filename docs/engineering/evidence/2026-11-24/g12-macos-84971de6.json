@@ -181,5 +181,23 @@
         "worker_capabilities_verified": false
       }
     ]
+  },
+  "installed_worker_rootfs": {
+    "docker": {
+      "worker_root_mount": "/",
+      "kernel_reports_read_only": true,
+      "network": "none",
+      "audit_valid": true,
+      "held_workers": 0,
+      "container_and_volume_inventories_restored": true
+    },
+    "podman_rootless": {
+      "worker_root_mount": "/",
+      "kernel_reports_read_only": true,
+      "network": "none",
+      "audit_valid": true,
+      "held_workers": 0,
+      "container_and_volume_inventories_restored": true
+    }
   }
 }
