@@ -81,6 +81,15 @@ reconnexion. Le motif du refus `not_ready` du scan final reste
 indéterminé sur la recette physique `c7f6c966`.
 [Diagnostic Legacy](G09_LEGACY_RESERVATION_DIAGNOSTIC.md).
 
+Sur `93e8e699`, les 17 tests `runner_recovery` passent avec une
+fixture moteur Rust et le vrai CLI. Après interruption, la première
+reprise arrête le CID d’origine et conserve le quota. La reprise
+authentifiée réconcilie le terminal, libère le quota et enregistre
+une seule allocation. La capture déclarée reste indisponible et le
+CLI le signale. Le cas Legacy exige une adoption explicite pour
+l’arrêt. Aucun démarrage n’est rejoué. Cette validation logicielle
+ne modifie pas le verdict du pilote Docker Linux sur `c7f6c966`.
+
 ## 24 novembre 2026 — redémarrage OIDC après migration de l’audit vers V4
 
 **PASS ciblé G04/G06** avec le paquet macOS `84971de6`. Le
