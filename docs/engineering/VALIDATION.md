@@ -6,15 +6,22 @@
 La compilation verrouillée hors ligne passe. La fixture observe les
 reçus d’import et de vérification, la création du worker synthétique et
 trois réponses d’armement. Le premier `WorkerClaim` n’arrive pas au
-gateway de recette avant l’échéance de 180 s. Son état dans le
-journal durable reste à établir.
+gateway de recette avant l’échéance de 180 s. La relecture hors ligne
+relie par empreinte les 40 révisions jusqu’à la tête locale 39. L’Arm
+du worker y est acquitté et lié à son enregistrement Full3. La chaîne
+ne contient aucun `WorkerClaim`. L’écart reste à localiser entre cet
+armement et la première écriture du claim.
 
 Le runtime de recette et le gateway rejoignent leurs tâches. Le test
 signale aussi une fermeture non confirmée du gardien et la conservation
-du broker pour la garde. Verdict code 101 en 191,54 s. Reçu privé
+du broker pour la garde. Le contrôle ultérieur ne retrouve plus de
+processus associé ni de fichier ouvert. Verdict code 101 en 191,54 s. Reçu privé
 `g07-first-full3-claim-250048dd`, journal SHA-256
 `eba42802010e3c92a39447700307307ae94eef5bf834dac0bd0086c9970bf616`.
-La branche de test reste disponible pour isoler ce palier.
+Le manifeste SHA-256
+`58239bee2c1e7d03a8b1c59b2e82fd3c88bf7f866b7bf5a063d9ec5ddf051847`
+lie le diagnostic, les binaires et l’archive de la fixture. La branche
+de test reste disponible pour isoler ce palier.
 
 ## 24 novembre 2026 — écritures d’administration sur une source possédée
 
