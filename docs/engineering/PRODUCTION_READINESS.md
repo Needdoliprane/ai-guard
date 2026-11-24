@@ -102,6 +102,19 @@ FAIL sur `c7f6c966` reste le dernier résultat physique.
 Reçu `g09-terminal-oracle-905e79db.log`, SHA-256
 `9aca0a3a7a318f2a7e0f9fd4844b66531acd9c06cd417cd0f9ab85bc81e0c8be`.
 
+**G01/G09/G12 — CLI macOS ARM64 installé du gel `e2796ac1`.**
+L’archive locale comporte six binaires vérifiés. Le CLI installé
+déclare la révision exacte et vérifie les quatre artefacts du manifeste
+local. Le parcours copie, worker strict sans réseau, audit et export
+passe sous Docker Desktop et Podman rootless avec ce même CLI.
+Le parcours d’échéance directe passe aussi sur les deux moteurs.
+Sur Docker, stdout fermé conserve le diagnostic et le code non nul.
+Les quotas sont libérés et les inventaires moteur reviennent à leur
+état initial. Reçus privés `g12-macos-e2796ac1`, archive SHA-256
+`b8b325a556ee707f796bb4a137e9a5d315c32571f92709878b8043ef56843b7c`.
+La matrice Linux x86-64, la reprise après crash du broker et la
+publication restent à qualifier.
+
 **G01/G12 — archive macOS ARM64 du gel `7e1f9cb1`.** Le build local
 release verrouillé hors ligne produit une archive contenant les six
 binaires ARM64 attendus, LICENSE, les notices et BUILD-INFO. Le CLI
