@@ -398,9 +398,13 @@ pagination de 120 workers synthétiques, les droits par ressource, un
 registre vide lu avec succès, les contrats historiques du registre
 et la pagination du Journal. Reçu privé `g08-wire-2a0d7054/wire.log`,
 SHA-256 `8795ed222deeb1c544c8f17c3f96fa72c6105ee175f76e773d8f4a46b9adcc10`.
-La composition navigateur avec plusieurs brokers réels, la
-contre-pression TCP réelle et la coupure abrupte sur le chemin déployé
-restent à qualifier.
+La composition navigateur avec plusieurs brokers réels reste à
+qualifier. Une recette distincte traverse l’ingress Compose Docker
+après SIGKILL du gateway et reprend les deux événements attendus.
+Les essais Docker Desktop et Podman rootless avec un lecteur SSE
+suspendu mesurent une contre-pression TCP tout en préservant la
+lecture indépendante et l’intégrité. Portée locale, un lecteur lent
+par moteur. [Reçus Compose SSE](evidence/2026-11-24/g08-compose-sse-abrupt-cut.json).
 
 **G08 — composition du registre.** Sur `26e19e84`, le
 [test d’agrégation du gateway](../../tests/supervision_stack_api.rs) passe

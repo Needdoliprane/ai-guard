@@ -18,7 +18,11 @@ séparés de 600 ms indiquent chacun 2 384 923 octets en file TCP.
 Un lecteur indépendant reçoit les trois derniers événements dans
 l’ordre et avec les empreintes attendues, et l’audit reste valide.
 La base est sauvegardée et les ressources sont retirées. Ce test
-couvre un seul lecteur lent sur Docker Desktop loopback.
+couvre un seul lecteur lent sur Docker Desktop loopback. Sur
+Podman rootless, le même corpus et la même image donnent 835 557
+octets en file d’envoi sur deux relevés séparés de 600 ms. Le second
+lecteur et le contrôle d’intégrité passent également, et la base est
+sauvegardée avant le retrait des ressources.
 [Reçu SSE Docker](evidence/2026-11-24/g08-compose-sse-abrupt-cut.json).
 
 ## 24 novembre 2026 — arrêt explicite d’A1 sur Podman rootless

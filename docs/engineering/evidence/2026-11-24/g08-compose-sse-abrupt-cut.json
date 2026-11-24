@@ -46,5 +46,33 @@
     "slow_only_sample_separation_seconds": 0.6,
     "sqlite_backup_retained": true,
     "cleanup_verified": true
+  },
+  "podman_rootless_bounded_slow_reader": {
+    "events_committed": 192,
+    "baseline_ingress_send_queue_bytes": 0,
+    "sampled_ingress_send_queue_bytes": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      572415
+    ],
+    "slow_only_send_queue_bytes": [
+      835557,
+      835557
+    ],
+    "independent_reader_resumed_sequences": [
+      192,
+      193,
+      194
+    ],
+    "independent_reader_hashes_match": true,
+    "integrity": true,
+    "source": "Podman rootless Compose loopback",
+    "requested_client_receive_buffer_bytes": 4096,
+    "slow_only_sample_separation_seconds": 0.6,
+    "sqlite_backup_retained": true,
+    "cleanup_verified": true
   }
 }
