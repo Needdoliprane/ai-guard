@@ -1,5 +1,23 @@
 # Validation courante
 
+## 24 novembre 2026 — activation de l’archive Linux x86-64 sous émulation
+
+**PASS ciblé G12** pour les commandes des guides `bb3ed779` avec
+l’archive native `1c9e8e01` et Docker Desktop ARM64 en mode
+`linux/amd64`. Le conteneur Debian épinglé rapporte `x86_64`.
+La recette s’exécute avec un compte non privilégié, sans réseau.
+L’archive vérifiée est montée en lecture seule et les deux
+installations de la même version restent sur un volume temporaire.
+
+Les cinq appels à `agentsandbox version --json` rendent la version
+0.0.1 et la révision attendue. L’installation refuse un dossier
+existant sans modifier la somme du binaire. Le lien passe de la
+première installation à la seconde, puis revient à la première.
+Une cible absente est refusée et le lien reste sur la première.
+Cette preuve porte sur le binaire distribué dans un environnement
+émulé et sur la bascule du lien. L’essai sur hôte Linux x86-64 natif
+et la remise en service avec des données migrées restent ouverts.
+
 ## 24 novembre 2026 — structure des archives natives de release
 
 **PASS ciblé G12** avec le vérificateur macOS `84971de6`.
