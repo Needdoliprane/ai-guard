@@ -73,6 +73,16 @@ manifeste SHA-256
 projection `Created` SHA-256
 `85567d786aea6160ccfc648a0198cbbe1435a2f3b8847ffe2a317a9703a53e63`.
 
+Le correctif de diagnostic `b41ce64f` reprend les fichiers validés
+sur `631d3331`. Le test ciblé du lecteur de diagnostics passe. Il
+accepte les quatre nouveaux codes, conserve `runtime_effect=unknown`
+et exclut le texte privé. Les codes distinguent publication de la
+liaison Full3, choix préclaim, réservation native et consommation
+de la garde. Manifeste
+`fa5fd490ba39d6a237f14f9b2cba6d066a05631d5982958d7a8abc224d936d89`
+sous `g07-broker-step-decoder-631d3331`. Le comportement Full3
+de bout en bout reste à corriger.
+
 ## 24 novembre 2026 — écritures d’administration sur une source possédée
 
 **PASS ciblé G08**, deux tests SQLite au format 15 sur macOS ARM64,
