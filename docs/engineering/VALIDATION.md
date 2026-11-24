@@ -13,6 +13,12 @@ sur ces rapports un fonctionnement hors réseau et aucune lecture
 du contenu des credentials. Les services et le moteur restent
 parmi les vérifications non exécutées par ce diagnostic.
 
+Le paquet Linux x86-64 `1c9e8e01` passe les mêmes vérifications sous
+émulation dans Debian amd64 épinglé sur Docker Desktop ARM64. Les
+quatre codes sont 3, 0, 3, 0. Le conteneur fonctionne sans réseau
+avec un compte non privilégié et des données temporaires. La preuve
+concerne le diagnostic hors ligne sous émulation.
+
 ## 24 novembre 2026 — restauration de la sauvegarde avant migration SQLite
 
 **PASS ciblé G06/G12** avec deux binaires macOS ARM64 distribués.
