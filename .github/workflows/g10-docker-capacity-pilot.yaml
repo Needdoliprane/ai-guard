@@ -1,0 +1,547 @@
+name: G10 Docker same-tenant capacity pilot
+
+# One hosted rootful Docker pilot with three workers on a single tenant.
+# No provider client/version, provider credential, host-project mount, or worker network is used.
+on:
+  push:
+    branches:
+      - codex/v1-g10-docker-capacity-pilot-ci-20261124
+
+permissions:
+  contents: read
+
+concurrency:
+  group: g10-docker-capacity-pilot-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docker-capacity-pilot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      SOURCE_SHA: 4fc2eae39b523a9f6c4ca4182a1b9b273cecb3b1
+      SOURCE_TREE: f93b72c4d6986eb7b86a8fc22dfb047f0063cb2e
+      SOURCE_PARENT: 45020e7a5d8fb76782f25250ec298b77a6eb991b
+      EXPECTED_BRANCH: codex/v1-g10-docker-capacity-pilot-ci-20261124
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_BACKTRACE: '0'
+      LC_ALL: C
+      DOCKER_HOST: unix:///var/run/docker.sock
+    steps:
+      - name: Initialize closed three-worker receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/g10-docker-capacity-pilot-receipt.txt"
+          cat > "$receipt" <<'EOF'
+          source_sha=4fc2eae39b523a9f6c4ca4182a1b9b273cecb3b1
+          source_tree=f93b72c4d6986eb7b86a8fc22dfb047f0063cb2e
+          source_parent=45020e7a5d8fb76782f25250ec298b77a6eb991b
+          selector=same_tenant_capacity::real_docker_same_tenant_capacity_pilot
+          workflow_sha=NOT_RUN
+          source_guard=NOT_RUN
+          rootful_preflight=NOT_RUN
+          docker_endpoint=unix:///var/run/docker.sock
+          rustc=NOT_RUN
+          cargo=NOT_RUN
+          cargo_fetch=NOT_RUN
+          worker_image_build=NOT_RUN
+          worker_image_uid=NOT_RUN
+          worker_image_workdir=NOT_RUN
+          provider_versions=EMPTY
+          worker_image_id_sha256=unknown
+          runner_containers_before=unknown
+          runner_volumes_before=unknown
+          test_containers_before=unknown
+          test_volumes_before=unknown
+          test_containers_after=unknown
+          test_volumes_after=unknown
+          new_containers=unknown
+          new_volumes=unknown
+          missing_containers=unknown
+          missing_volumes=unknown
+          test_running_one=unknown
+          test_selected=unknown
+          test_passed=unknown
+          test_failed=unknown
+          test_ignored=unknown
+          test_exit=NOT_RUN
+          test_verdict=NOT_RUN
+          workers_overlap=NOT_ATTESTED
+          overlap_workers=unknown
+          quota_peak=NOT_ATTESTED
+          quota_peak_tenants=unknown
+          quota_peak_workers=unknown
+          quota_terminal_release=NOT_ATTESTED
+          distinct_worker_identities=NOT_ATTESTED
+          tenant_audit_integrity=NOT_ATTESTED
+          overlap_start=unknown
+          overlap_end=unknown
+          worker_cpu_limit_millis_at_peak=unknown
+          worker_memory_limit_bytes_at_peak=unknown
+          worker_pid_limit_at_peak=unknown
+          docker_version=unknown
+          docker_cpus=unknown
+          docker_memory_bytes=unknown
+          container_inventory_status=NOT_RUN
+          volume_inventory_status=NOT_RUN
+          worker_cleanup_by_test=NOT_ATTESTED
+          image_cleanup=NOT_PERFORMED
+          private_fixture_cleanup=NOT_STARTED
+          workflow_engine_cleanup=NOT_PERFORMED
+          runner_disposal=EXPECTED
+          last_phase=initialized
+          finalization=NOT_RUN
+          result=NOT_RUN
+          scope=one exact ignored capacity pilot; 3 workers; 1 tenant; rootful local Docker; UID 1000; provider versions empty; worker network none
+          EOF
+          chmod 600 "$receipt"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 2
+
+      - name: Verify the exact candidate and three-worker fixture contract
+        shell: bash
+        run: |
+          set +x
+          set -euo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/g10-docker-capacity-pilot-receipt.txt"
+          set_field() {
+            local key=$1 value=$2
+            awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+            chmod 600 "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          set_field workflow_sha "$GITHUB_SHA"
+          selector=same_tenant_capacity::real_docker_same_tenant_capacity_pilot
+          if [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 &&
+                "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == "refs/heads/$EXPECTED_BRANCH" &&
+                "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$(git rev-parse HEAD 2>/dev/null)" == "$GITHUB_SHA" &&
+                "$(git show -s --format=%P HEAD 2>/dev/null)" == "$SOURCE_SHA" &&
+                "$(git rev-parse --is-shallow-repository 2>/dev/null)" == true &&
+                "$(git rev-parse "$SOURCE_SHA^{tree}" 2>/dev/null)" == "$SOURCE_TREE" &&
+                "$(git cat-file commit "$SOURCE_SHA" 2>/dev/null | awk '$1 == "parent" { parent[++n] = $2 } END { if (n == 1) print parent[1] }')" == "$SOURCE_PARENT" &&
+                "$(git diff --name-only "$SOURCE_SHA" HEAD 2>/dev/null)" == .github/workflows/g10-docker-capacity-pilot.yaml &&
+                -z "$(git status --porcelain=v1 --untracked-files=all 2>/dev/null)" &&
+                "$(grep -Fxc "async fn ${selector##*::}() -> Result<()> {" tests/runtime_user_journey/same_tenant_capacity.rs || true)" == 1 &&
+                "$(grep -Fxc 'const PILOT_WORKERS: u32 = 3;' tests/runtime_user_journey/same_tenant_capacity.rs || true)" == 1 &&
+                "$(grep -Fxc '            format!("type=volume,source={},target=/workspace", self.volume()),' src/runtime.rs || true)" == 1 &&
+                "$(grep -Fxc '            "--user".into(),' src/runtime.rs || true)" == 1 &&
+                "$(grep -Fxc '            "1000:1000".into(),' src/runtime.rs || true)" == 1 &&
+                "$(grep -Fxc 'USER 1000:1000' images/worker.Dockerfile || true)" == 1 &&
+                "$(grep -Fxc '    && chown 1000:1000 /workspace /home/agent' images/worker.Dockerfile || true)" == 1 ]]; then
+            set_field source_guard PASS
+            set_field last_phase source_verified
+          else
+            set_field source_guard FAIL
+            set_field test_verdict NOT_RUN
+            set_field last_phase source_guard_failed
+            echo 'G10 source/ref/fixture guard failed; details omitted.' >&2
+            exit 1
+          fi
+
+      - name: Prepare a private job directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/g10-docker-capacity-pilot-receipt.txt"
+          set_field() {
+            local key=$1 value=$2
+            awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+            chmod 600 "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          private="$RUNNER_TEMP/g10-docker-capacity-pilot"
+          if [[ -e "$private" || -L "$private" ]]; then
+            set_field last_phase private_fixture_path_preexisting
+            set_field result FAIL
+            exit 1
+          fi
+          mkdir -m 700 "$private"
+          printf 'G10_PRIVATE=%s\n' "$private" >> "$GITHUB_ENV"
+          mkdir -m 700 "$private/tmp" "$private/cargo-target"
+          printf 'TMPDIR=%s/tmp\nCARGO_TARGET_DIR=%s/cargo-target\n' "$private" "$private" >> "$GITHUB_ENV"
+          set_field last_phase private_fixture_prepared
+
+      - name: Verify the hosted local rootful Docker engine
+        shell: bash
+        run: |
+          set +x
+          set -euo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/g10-docker-capacity-pilot-receipt.txt"
+          private="$RUNNER_TEMP/g10-docker-capacity-pilot"
+          set_field() {
+            local key=$1 value=$2
+            awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+            chmod 600 "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          set_field last_phase rootful_preflight
+          endpoint="$(docker context inspect --format '{{.Endpoints.docker.Host}}' default 2>/dev/null || true)"
+          security="$(docker info --format '{{json .SecurityOptions}}' 2>/dev/null || true)"
+          server_platform="$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}' 2>/dev/null || true)"
+          if [[ -S /var/run/docker.sock && "$endpoint" == unix:///var/run/docker.sock && "$server_platform" == linux/amd64 ]] &&
+             jq -e 'type == "array" and all(.[]; (ascii_downcase | contains("rootless")) | not)' <<<"$security" >/dev/null; then
+            docker container ls -aq --no-trunc 2>"$private/preflight.stderr" | LC_ALL=C sort -u > "$private/runner-containers.before" || {
+              set_field rootful_preflight FAIL; set_field last_phase rootful_inventory_failed; exit 1;
+            }
+            docker volume ls -q 2>>"$private/preflight.stderr" | LC_ALL=C sort -u > "$private/runner-volumes.before" || {
+              set_field rootful_preflight FAIL; set_field last_phase rootful_inventory_failed; exit 1;
+            }
+            count="$(wc -l < "$private/runner-containers.before" | tr -d ' ')"
+            set_field runner_containers_before "$count"
+            count="$(wc -l < "$private/runner-volumes.before" | tr -d ' ')"
+            set_field runner_volumes_before "$count"
+            version="$(docker version --format '{{.Server.Version}}')"
+            cpus="$(docker info --format '{{.NCPU}}')"
+            memory="$(docker info --format '{{.MemTotal}}')"
+            if [[ ! "$version" =~ ^[[:alnum:].+_-]+$ || ! "$cpus" =~ ^[1-9][0-9]*$ || ! "$memory" =~ ^[1-9][0-9]*$ ]]; then
+              set_field rootful_preflight FAIL
+              exit 1
+            fi
+            set_field docker_version "$version"
+            set_field docker_cpus "$cpus"
+            set_field docker_memory_bytes "$memory"
+            set_field rootful_preflight PASS
+            set_field last_phase rootful_preflight_complete
+          else
+            set_field rootful_preflight FAIL
+            set_field last_phase rootful_mode_verification
+            echo 'G10 rootful Docker preflight failed; details omitted.' >&2
+            exit 1
+          fi
+
+      - name: Build immutable UID 1000 worker image without provider clients
+        shell: bash
+        run: |
+          set +x
+          set -euo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/g10-docker-capacity-pilot-receipt.txt"
+          private="$G10_PRIVATE"
+          set_field() {
+            local key=$1 value=$2
+            awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+            chmod 600 "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          tag="ai-guard-g10-worker:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          set_field last_phase worker_image_build
+          if docker image inspect "$tag" >/dev/null 2>&1; then
+            set_field worker_image_build PREEXISTING_TAG
+            set_field last_phase worker_image_tag_collision
+            exit 1
+          fi
+          printf '%s\n' "$tag" > "$private/image.tag"
+          if docker build --file images/worker.Dockerfile \
+              --build-arg CODEX_VERSION= --build-arg CLAUDE_CODE_VERSION= --build-arg CLAUDE_ACTIVITY_PROFILE= \
+              --tag "$tag" . > "$private/worker-build.log" 2>&1; then
+            worker_id="$(docker image inspect --format '{{.Id}}' "$tag" 2>/dev/null || true)"
+            worker_user="$(docker image inspect --format '{{.Config.User}}' "$tag" 2>/dev/null || true)"
+            worker_workdir="$(docker image inspect --format '{{.Config.WorkingDir}}' "$tag" 2>/dev/null || true)"
+            labels="$(docker image inspect --format '{{json .Config.Labels}}' "$tag" 2>/dev/null || true)"
+            if [[ "$worker_id" =~ ^sha256:[0-9a-f]{64}$ && "$worker_user" == 1000:1000 && "$worker_workdir" == /workspace ]] &&
+               jq -e 'type == "object" and .["ai-guard.provider.codex.requested-version"] == "" and .["ai-guard.provider.claude-code.requested-version"] == ""' <<<"$labels" >/dev/null; then
+              printf '%s\n' "$worker_id" > "$private/image.id"
+              chmod 600 "$private/image.tag" "$private/image.id"
+              printf 'AGENTSANDBOX_TEST_RUNTIME=docker\nAGENTSANDBOX_TEST_ALLOW_ROOTFUL=1\nAGENTSANDBOX_TEST_RUNTIME_PROGRAM=/usr/bin/docker\nAGENTSANDBOX_TEST_RUNTIME_ENDPOINT=unix:///var/run/docker.sock\nAGENTSANDBOX_TEST_IMAGE=%s\n' "$worker_id" >> "$GITHUB_ENV"
+              set_field worker_image_build PASS
+              set_field worker_image_uid PASS_1000_1000
+              set_field worker_image_workdir PASS_WORKSPACE
+              set_field provider_versions EMPTY
+              set_field worker_image_id_sha256 "${worker_id#sha256:}"
+              set_field last_phase worker_image_verified
+            else
+              set_field worker_image_build VERIFY_FAILED
+              set_field worker_image_uid FAIL
+              set_field last_phase worker_image_verification_failed
+              exit 1
+            fi
+          else
+            set_field worker_image_build FAIL
+            set_field last_phase worker_image_build_failed
+            exit 1
+          fi
+
+      - name: Record the test-owned resource baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="$RUNNER_TEMP/g10-docker-capacity-pilot-receipt.txt"
+          private="$G10_PRIVATE"
+          set_field() {
+            local key=$1 value=$2
+            awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+            chmod 600 "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          docker container ls -aq --no-trunc 2>"$private/baseline.stderr" | LC_ALL=C sort -u > "$private/test-containers.before" || {
+            set_field container_inventory_status NOT_ATTESTED; set_field last_phase test_baseline_failed; exit 1;
+          }
+          docker volume ls -q 2>>"$private/baseline.stderr" | LC_ALL=C sort -u > "$private/test-volumes.before" || {
+            set_field volume_inventory_status NOT_ATTESTED; set_field last_phase test_baseline_failed; exit 1;
+          }
+          set_field test_containers_before "$(wc -l < "$private/test-containers.before" | tr -d ' ')"
+          set_field test_volumes_before "$(wc -l < "$private/test-volumes.before" | tr -d ' ')"
+          set_field last_phase test_resource_baseline_recorded
+
+      - name: Fetch locked Rust dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="$RUNNER_TEMP/g10-docker-capacity-pilot-receipt.txt"
+          private="$G10_PRIVATE"
+          set_field() {
+            local key=$1 value=$2
+            awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+            chmod 600 "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          set_field last_phase toolchain_check
+          rustc_line="$(rustc --version 2>/dev/null || true)"
+          cargo_line="$(cargo --version 2>/dev/null || true)"
+          if [[ "$rustc_line" =~ ^rustc\ 1\.99\.1($|[[:space:]]) ]]; then set_field rustc 1.99.1; else set_field rustc MISMATCH; set_field last_phase rustc_mismatch; exit 1; fi
+          if [[ "$cargo_line" =~ ^cargo\ 1\.99\.1($|[[:space:]]) ]]; then set_field cargo 1.99.1; else set_field cargo MISMATCH; set_field last_phase cargo_mismatch; exit 1; fi
+          set_field last_phase dependency_fetch
+          if cargo fetch --locked > "$private/cargo-fetch.log" 2>&1; then
+            set_field cargo_fetch PASS
+            set_field last_phase dependencies_fetched
+          else
+            set_field cargo_fetch FAIL
+            set_field last_phase dependency_fetch_failed
+            exit 1
+          fi
+
+      - name: Run exactly the same-tenant rootful Docker pilot
+        shell: bash
+        run: |
+          set +x
+          set -euo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/g10-docker-capacity-pilot-receipt.txt"
+          private="$G10_PRIVATE"
+          selector=same_tenant_capacity::real_docker_same_tenant_capacity_pilot
+          log="$private/three-worker-test.log"
+          set_field() {
+            local key=$1 value=$2
+            awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+            chmod 600 "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          export AGENTSANDBOX_TEST_CAPACITY_PILOT=1
+          set_field last_phase targeted_capacity_pilot
+          test_rc=0
+          timeout --signal=TERM --kill-after=15s 30m \
+            cargo test --locked --offline --test runtime_user_journey -- \
+              --ignored --exact --test-threads=1 --show-output "$selector" > "$log" 2>&1 || test_rc=$?
+          set_field test_exit "$test_rc"
+          running_count="$(grep -Fxc 'running 1 test' "$log" || true)"
+          pass_line_count="$(grep -Fxc "test $selector ... ok" "$log" || true)"
+          fail_line_count="$(grep -Fxc "test $selector ... FAILED" "$log" || true)"
+          selected=0
+          [[ "$running_count" == 1 && "$(( pass_line_count + fail_line_count ))" == 1 ]] && selected=1 || true
+          set_field test_running_one "$([[ "$running_count" == 1 ]] && echo PASS || echo FAIL)"
+          set_field test_selected "$selected"
+          summary="$(grep -E '^test result: ' "$log" | tail -n 1 || true)"
+          passed=unknown; failed=unknown; ignored=unknown; summary_state=UNKNOWN
+          if [[ "$summary" =~ ^test\ result:\ (ok|FAILED)\.\ ([0-9]+)\ passed\;\ ([0-9]+)\ failed\;\ ([0-9]+)\ ignored\;\ [0-9]+\ measured\;\ [0-9]+\ filtered\ out\;\ finished\ in\ [0-9]+(\.[0-9]+)?s$ ]]; then
+            summary_state="${BASH_REMATCH[1]}"
+            passed="${BASH_REMATCH[2]}"
+            failed="${BASH_REMATCH[3]}"
+            ignored="${BASH_REMATCH[4]}"
+          fi
+          set_field test_passed "$passed"
+          set_field test_failed "$failed"
+          set_field test_ignored "$ignored"
+          overlap="$(awk '/^\{.*"scope":"same_tenant_capacity_pilot"/ {print}' "$log" | jq -ers '
+            def timestamp: type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.+Z-]+$");
+            select(length == 1) | .[0]
+            | select(.status == "PASS" and .scope == "same_tenant_capacity_pilot"
+                and .held_at_peak == 3 and .held_after == 0 and .audit_chain_valid == true
+                and .worker_containers_removed == true and .private_fixture_retained == true)
+            | select((.observed | length) == 3 and ([.observed[].id] | unique | length) == 3
+                and ([.observed[].session] | unique | length) == 3)
+            | select(all(.observed[]; (.id | test("^[0-9a-f]{64}$")) and .network == "none"))
+            | select((.overlap_start | timestamp) and (.overlap_end | timestamp))
+            | [.overlap_start, .overlap_end] | @tsv' 2>/dev/null)" || overlap=""
+          verdict=INCONCLUSIVE
+          if [[ "$test_rc" == 0 && "$selected" == 1 && "$running_count" == 1 && "$pass_line_count" == 1 &&
+                "$summary_state" == ok && "$passed" == 1 && "$failed" == 0 && "$ignored" == 0 && -n "$overlap" ]]; then
+            verdict=PASS
+            set_field workers_overlap PASS_3
+            set_field overlap_workers 3
+            IFS=$'\t' read -r overlap_start overlap_end <<< "$overlap"
+            set_field overlap_start "$overlap_start"
+            set_field overlap_end "$overlap_end"
+            set_field worker_cpu_limit_millis_at_peak 6000
+            set_field worker_memory_limit_bytes_at_peak 3221225472
+            set_field worker_pid_limit_at_peak 768
+            set_field quota_peak PASS
+            set_field quota_peak_tenants 1
+            set_field quota_peak_workers 3
+            set_field quota_terminal_release PASS_0_HELD
+            set_field distinct_worker_identities PASS_3
+            set_field tenant_audit_integrity PASS_1
+            set_field worker_cleanup_by_test PASS
+          elif [[ "$fail_line_count" == 1 || "$summary_state" == FAILED ]]; then
+            verdict=FAIL
+          fi
+          set_field test_verdict "$verdict"
+          if [[ "$verdict" == PASS ]]; then set_field last_phase targeted_pilot_passed; else set_field last_phase targeted_pilot_failed_or_inconclusive; fi
+          printf 'Test verdict=%s selected=%s passed=%s failed=%s ignored=%s exit=%s\n' "$verdict" "$selected" "$passed" "$failed" "$ignored" "$test_rc" >> "$GITHUB_STEP_SUMMARY"
+          [[ "$verdict" == PASS ]]
+
+      - name: Record read-only Docker inventories and close private scratch
+        if: always()
+        shell: bash
+        run: |
+          set +x
+          set -uo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/g10-docker-capacity-pilot-receipt.txt"
+          private="$RUNNER_TEMP/g10-docker-capacity-pilot"
+          set_field() {
+            local key=$1 value=$2
+            awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending" || return 1
+            chmod 600 "$receipt.pending" || return 1
+            mv -- "$receipt.pending" "$receipt" || return 1
+          }
+          inventory_unknown=0
+          if [[ "${G10_PRIVATE:-}" != "$private" || ! -d "$private" || -L "$private" ]]; then
+            set_field container_inventory_status NOT_ATTESTED || true
+            set_field volume_inventory_status NOT_ATTESTED || true
+            set_field worker_cleanup_by_test NOT_ATTESTED || true
+            set_field private_fixture_cleanup NOT_CREATED || true
+            set_field workflow_engine_cleanup NOT_PERFORMED || true
+            set_field finalization INVENTORY_NOT_ATTESTED || true
+            set_field result FAIL || true
+            exit 1
+          fi
+          if [[ -f "$private/test-containers.before" ]] && docker info >/dev/null 2>&1; then
+            if docker container ls -aq --no-trunc > "$private/test-containers.after" 2>"$private/inventory.stderr" &&
+               LC_ALL=C sort -u "$private/test-containers.after" -o "$private/test-containers.after" &&
+               comm -13 "$private/test-containers.before" "$private/test-containers.after" > "$private/test-containers.new" &&
+               comm -23 "$private/test-containers.before" "$private/test-containers.after" > "$private/test-containers.missing"; then
+              count="$(wc -l < "$private/test-containers.after" | tr -d ' ')"
+              added="$(wc -l < "$private/test-containers.new" | tr -d ' ')"
+              set_field test_containers_after "$count" || inventory_unknown=1
+              set_field new_containers "$added" || inventory_unknown=1
+              missing="$(wc -l < "$private/test-containers.missing" | tr -d ' ')"
+              set_field missing_containers "$missing" || inventory_unknown=1
+              if [[ "$missing" != 0 ]]; then inventory_unknown=1; fi
+              if [[ "$added" =~ ^[0-9]+$ ]] && (( added <= 32 )); then
+                if [[ "$added" == 0 ]]; then set_field container_inventory_status UNCHANGED || inventory_unknown=1; else set_field container_inventory_status ADDITIONS_OBSERVED || inventory_unknown=1; fi
+              else
+                set_field container_inventory_status OVER_LIMIT || inventory_unknown=1
+                inventory_unknown=1
+              fi
+            else
+              set_field container_inventory_status UNKNOWN || inventory_unknown=1
+              inventory_unknown=1
+            fi
+          else
+            set_field container_inventory_status UNKNOWN || inventory_unknown=1
+            inventory_unknown=1
+          fi
+          if [[ -f "$private/test-volumes.before" ]] && docker info >/dev/null 2>&1; then
+            if docker volume ls -q > "$private/test-volumes.after" 2>>"$private/inventory.stderr" &&
+               LC_ALL=C sort -u "$private/test-volumes.after" -o "$private/test-volumes.after" &&
+               comm -13 "$private/test-volumes.before" "$private/test-volumes.after" > "$private/test-volumes.new" &&
+               comm -23 "$private/test-volumes.before" "$private/test-volumes.after" > "$private/test-volumes.missing"; then
+              count="$(wc -l < "$private/test-volumes.after" | tr -d ' ')"
+              added="$(wc -l < "$private/test-volumes.new" | tr -d ' ')"
+              set_field test_volumes_after "$count" || inventory_unknown=1
+              set_field new_volumes "$added" || inventory_unknown=1
+              missing="$(wc -l < "$private/test-volumes.missing" | tr -d ' ')"
+              set_field missing_volumes "$missing" || inventory_unknown=1
+              if [[ "$missing" != 0 ]]; then inventory_unknown=1; fi
+              if [[ "$added" =~ ^[0-9]+$ ]] && (( added <= 32 )); then
+                if [[ "$added" == 0 ]]; then set_field volume_inventory_status UNCHANGED || inventory_unknown=1; else set_field volume_inventory_status ADDITIONS_OBSERVED || inventory_unknown=1; fi
+              else
+                set_field volume_inventory_status OVER_LIMIT || inventory_unknown=1
+                inventory_unknown=1
+              fi
+            else
+              set_field volume_inventory_status UNKNOWN || inventory_unknown=1
+              inventory_unknown=1
+            fi
+          else
+            set_field volume_inventory_status UNKNOWN || inventory_unknown=1
+            inventory_unknown=1
+          fi
+          test_verdict="$(awk -F= '$1=="test_verdict"{print $2}' "$receipt")"
+          if [[ "$test_verdict" != PASS ]]; then set_field worker_cleanup_by_test NOT_ATTESTED || inventory_unknown=1; fi
+          set_field workflow_engine_cleanup NOT_PERFORMED || inventory_unknown=1
+          set_field image_cleanup NOT_PERFORMED || inventory_unknown=1
+          if [[ -d "$private" && ! -L "$private" && "$private" == "$RUNNER_TEMP/g10-docker-capacity-pilot" ]]; then
+            /bin/rm -rf -- "$private" >/dev/null 2>&1 || inventory_unknown=1
+            if [[ ! -e "$private" ]]; then set_field private_fixture_cleanup PASS || inventory_unknown=1; else set_field private_fixture_cleanup FAIL || inventory_unknown=1; fi
+          else
+            set_field private_fixture_cleanup NOT_ATTESTED || inventory_unknown=1
+            inventory_unknown=1
+          fi
+          container_status="$(awk -F= '$1=="container_inventory_status"{print $2}' "$receipt")"
+          volume_status="$(awk -F= '$1=="volume_inventory_status"{print $2}' "$receipt")"
+          scratch_status="$(awk -F= '$1=="private_fixture_cleanup"{print $2}' "$receipt")"
+          new_volumes="$(awk -F= '$1=="new_volumes"{print $2}' "$receipt")"
+          if [[ "$test_verdict" == PASS && "$container_status" == UNCHANGED &&
+                "$volume_status" == ADDITIONS_OBSERVED && "$new_volumes" == 3 &&
+                "$scratch_status" == PASS && "$inventory_unknown" == 0 ]]; then
+            set_field result PASS || inventory_unknown=1
+          elif [[ "$test_verdict" == FAIL || "$container_status" == ADDITIONS_OBSERVED ]]; then
+            set_field result FAIL || inventory_unknown=1
+          else
+            set_field result INCONCLUSIVE || inventory_unknown=1
+          fi
+          set_field finalization READ_ONLY_INVENTORY_COMPLETE || inventory_unknown=1
+          {
+            printf 'G10 same-tenant Docker pilot result=%s source=%s\n' "$(awk -F= '$1=="result"{print $2}' "$receipt")" "$SOURCE_SHA"
+            printf 'Test=%s selected=%s passed=%s failed=%s ignored=%s exit=%s\n' \
+              "$(awk -F= '$1=="test_verdict"{print $2}' "$receipt")" \
+              "$(awk -F= '$1=="test_selected"{print $2}' "$receipt")" \
+              "$(awk -F= '$1=="test_passed"{print $2}' "$receipt")" \
+              "$(awk -F= '$1=="test_failed"{print $2}' "$receipt")" \
+              "$(awk -F= '$1=="test_ignored"{print $2}' "$receipt")" \
+              "$(awk -F= '$1=="test_exit"{print $2}' "$receipt")"
+            printf 'Overlap=%s/%s quota_peak=%s container_inventory=%s/%s volume_inventory=%s/%s workflow_engine_cleanup=%s phase=%s\n' \
+              "$(awk -F= '$1=="workers_overlap"{print $2}' "$receipt")" \
+              "$(awk -F= '$1=="overlap_workers"{print $2}' "$receipt")" \
+              "$(awk -F= '$1=="quota_peak"{print $2}' "$receipt")" \
+              "$container_status" "$(awk -F= '$1=="new_containers"{print $2}' "$receipt")" \
+              "$volume_status" "$(awk -F= '$1=="new_volumes"{print $2}' "$receipt")" \
+              "$(awk -F= '$1=="workflow_engine_cleanup"{print $2}' "$receipt")" \
+              "$(awk -F= '$1=="last_phase"{print $2}' "$receipt")"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$inventory_unknown" != 0 || "$(awk -F= '$1=="result"{print $2}' "$receipt")" != PASS ]]; then exit 1; fi
+
+      - name: Hash the closed G10 receipt
+        if: always()
+        shell: bash
+        working-directory: ${{ runner.temp }}
+        run: |
+          umask 077
+          sha256sum g10-docker-capacity-pilot-receipt.txt > g10-docker-capacity-pilot-receipt.sha256
+
+      - name: Upload only the closed G10 receipt and checksum
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: g10-docker-capacity-pilot-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/g10-docker-capacity-pilot-receipt.txt
+            ${{ runner.temp }}/g10-docker-capacity-pilot-receipt.sha256
+          if-no-files-found: error
+          retention-days: 14
