@@ -24,8 +24,13 @@ avec les mêmes images, passe sur Podman rootless via le fournisseur
 Docker Compose 5.0.2. Le relais est sain sur loopback, le modèle est
 isolé sur le réseau interne et le pic cgroup atteint 318 668 800 octets
 sans swap ni OOM. La décision, le reçu et l’intégrité donnent le même
-résultat. Les ressources de la recette sont retirées. Ces essais
-couvrent le profil HTTP local. La qualité du modèle et les autres
+résultat. Les ressources de la recette sont retirées. Sur une
+sauvegarde SQLite de cette recette Podman, le gateway redémarré
+restaure le reçu de séquence 2, sans événement supplémentaire, alors
+que le relais et le modèle sont arrêtés. Une nouvelle demande reçoit
+`deny` avec le moteur `local_openai` marqué `unavailable_or_invalid`.
+Le refus est persisté en séquence 3 et l’intégrité reste valide. Ces
+essais couvrent le profil HTTP local. La qualité du modèle et les autres
 profils de déploiement restent à qualifier.
 [Reçu Qwen](evidence/2026-11-24/g07-installed-macos-qwen.json).
 

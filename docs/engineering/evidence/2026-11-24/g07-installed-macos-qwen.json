@@ -101,5 +101,23 @@
       "integrity": true
     },
     "compose_provider": "Docker Compose 5.0.2 via podman compose"
+  },
+  "podman_compose_replay_after_model_stop": {
+    "replay_http": 200,
+    "replay_seq": 2,
+    "replay_preserved": true,
+    "fresh_http": 200,
+    "fresh_outcome": "deny",
+    "fresh_status": "unavailable_or_invalid",
+    "fresh_backend": "local_openai",
+    "fresh_seq": 3,
+    "fresh_audit_match": true,
+    "integrity": true,
+    "model_socket_listening": false,
+    "database": "SQLite backup of Podman rootless Compose receipt",
+    "gateway_restarted": true,
+    "events_added_by_replay": 0,
+    "events_added_by_fresh_request": 1,
+    "worker_launch_requested": false
   }
 }
