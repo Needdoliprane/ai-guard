@@ -480,6 +480,54 @@ fn executor_failure_projection_preserves_ambiguity_and_incomplete_pages() {
 }
 
 #[test]
+fn executor_failure_projection_keeps_only_closed_registration_evidence() {
+    let session = "synthetic-session";
+    let mut event = json!({
+        "id":"11111111-1111-4111-8111-111111111111", "seq":18,
+        "kind":"broker.batch.failure", "source":"runner",
+        "provenance":"observed", "session_id":session,
+        "data":{"version":1,"phase":"final_scan","runtime_effect":"unknown",
+            "broker_step":"registration"}
+    });
+    for (evidence, expected) in [
+        (Value::Null, Value::Null),
+        (
+            json!({"stage":"reserve_prospective","arm_state":"pending","detail":"synthetic-private"}),
+            json!({"stage":"reserve_prospective","arm_state":"pending"}),
+        ),
+        (
+            json!({"stage":"restore_assigned","arm_state":"acknowledged"}),
+            json!({"stage":"restore_assigned","arm_state":"acknowledged"}),
+        ),
+        (
+            json!({"stage":"synthetic-private","arm_state":"pending"}),
+            Value::Null,
+        ),
+        (
+            json!({"stage":"begin_exchange","arm_state":"acknowledged"}),
+            Value::Null,
+        ),
+    ] {
+        event["data"]["registration"] = evidence;
+        let page = json!({"items":[event.clone()], "next_cursor":null});
+        let projection =
+            serde_json::to_value(harness::executor_failure_page(&page, session, 17)).unwrap();
+        let row = &projection["rows"][0];
+        assert_eq!(row["broker_step"], "registration");
+        if expected.is_null() {
+            assert!(row.get("registration").is_none());
+        } else {
+            assert_eq!(row["registration"], expected);
+        }
+        assert!(!projection.to_string().contains("synthetic-private"));
+        assert_eq!(
+            harness::terminal_failure_read(&page, session, 17),
+            (harness::TerminalFailureRead::Unverified, None)
+        );
+    }
+}
+
+#[test]
 fn batch_failure_marker_rejects_invalid_public_metadata() {
     let private = "synthetic-private-invalid-label-do-not-print";
     let valid = json!({"items":[{

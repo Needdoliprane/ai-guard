@@ -998,6 +998,8 @@ pub(super) struct ExecutorFailureRow {
     after_admission: bool,
     phase: Option<LocalFailurePhaseV1>,
     broker_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registration: Option<Value>,
     #[serde(skip)]
     pub(super) audit_key: Option<(Uuid, i64)>,
 }
@@ -1045,12 +1047,28 @@ pub fn executor_failure_page(
                         broker_step: marker
                             .as_ref()
                             .and_then(|marker| marker["broker_step"].as_str().map(str::to_owned)),
+                        registration: audit_key
+                            .filter(|_| event["data"]["broker_step"] == "registration")
+                            .and_then(|_| project_registration(&event["data"]["registration"])),
                         audit_key,
                     }
                 })
                 .collect()
         });
     ExecutorFailurePage { cursor, rows }
+}
+
+fn project_registration(value: &Value) -> Option<Value> {
+    let stage = value["stage"].as_str()?;
+    let arm_state = value["arm_state"].as_str()?;
+    match (stage, arm_state) {
+        ("reserve_prospective" | "begin_exchange", "pending")
+        | (
+            "build_registration" | "bind_prospective" | "restore_assigned" | "register_legacy",
+            "acknowledged",
+        ) => Some(json!({"stage":stage,"arm_state":arm_state})),
+        _ => None,
+    }
 }
 
 fn optional_failure_label<'a>(

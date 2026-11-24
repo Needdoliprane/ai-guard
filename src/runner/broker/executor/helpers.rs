@@ -233,7 +233,7 @@ impl Execution<'_> {
                     !newly_requested_arm,
                 )
                 .await
-                .context(diagnostics::BrokerStep::Registration)?;
+                .context(diagnostics::RegistrationStage::ReserveProspective)?;
             if let Err(error) = self.generation_current() {
                 if let ExecutionEnforcerV1::Legacy(client) = enforcer {
                     if let Err(cancel) = client
@@ -251,7 +251,7 @@ impl Execution<'_> {
             let exchange = enforcer
                 .begin_prospective_arm_exchange(&target, self.context.cancel_generation())
                 .await
-                .context(diagnostics::BrokerStep::Registration)?;
+                .context(diagnostics::RegistrationStage::BeginExchange)?;
             if let Err(error) = self.generation_current() {
                 if let ExecutionEnforcerV1::Legacy(client) = enforcer {
                     if let Err(cancel) = client
@@ -315,43 +315,53 @@ impl Execution<'_> {
             binding.clone(),
             arm_owned,
         )
-        .context(diagnostics::BrokerStep::Registration)?;
-        let slot = if !acknowledged_arm {
-            self.executor
-                .enforcer
-                .bind_prospective(
-                    registration,
-                    self.context.cancel_generation().clone(),
-                    prospective_exchange
-                        .take()
-                        .context("native Arm exchange phase is unavailable")?,
-                )
-                .await
-                .map_err(anyhow::Error::from)
+        .context(diagnostics::RegistrationStage::BuildRegistration)?;
+        let (slot, stage) = if !acknowledged_arm {
+            (
+                self.executor
+                    .enforcer
+                    .bind_prospective(
+                        registration,
+                        self.context.cancel_generation().clone(),
+                        prospective_exchange
+                            .take()
+                            .context("native Arm exchange phase is unavailable")?,
+                    )
+                    .await
+                    .map_err(anyhow::Error::from),
+                diagnostics::RegistrationStage::BindProspective,
+            )
         } else if self.executor.enforcer.full3().is_some() {
-            self.restore_assigned_slot(registration).await
+            (
+                self.restore_assigned_slot(registration).await,
+                diagnostics::RegistrationStage::RestoreAssigned,
+            )
         } else {
-            self.executor
-                .enforcer
-                .register(registration, self.context.cancel_generation().clone())
-                .await
-                .map_err(anyhow::Error::from)
-        }
-        .map_err(|code| -> anyhow::Error {
-            let Some(code) = code
-                .downcast_ref::<crate::broker::enforcer::EnforcerError>()
-                .copied()
-            else {
-                return code;
-            };
-            match crate::broker::enforcer::EnforcerStageFailure::registration_failure(
-                &request, code,
-            ) {
-                Some(failure) => failure.into(),
-                None => code.into(),
-            }
-        })
-        .context(diagnostics::BrokerStep::Registration)?;
+            (
+                self.executor
+                    .enforcer
+                    .register(registration, self.context.cancel_generation().clone())
+                    .await
+                    .map_err(anyhow::Error::from),
+                diagnostics::RegistrationStage::RegisterLegacy,
+            )
+        };
+        let slot = slot
+            .map_err(|code| -> anyhow::Error {
+                let Some(code) = code
+                    .downcast_ref::<crate::broker::enforcer::EnforcerError>()
+                    .copied()
+                else {
+                    return code;
+                };
+                match crate::broker::enforcer::EnforcerStageFailure::registration_failure(
+                    &request, code,
+                ) {
+                    Some(failure) => failure.into(),
+                    None => code.into(),
+                }
+            })
+            .context(stage)?;
         if !acknowledged_arm && !fresh_original {
             // A replayed pending Arm can obtain its exact receipt and STOP
             // binding, but cannot reconstruct the original fresh permission.
