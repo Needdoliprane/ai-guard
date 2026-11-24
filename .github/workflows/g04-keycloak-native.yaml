@@ -1,0 +1,465 @@
+name: G04 Keycloak native CLI check
+
+on:
+  push:
+    branches: [codex/g04-native-keycloak-ca3c161b]
+
+permissions:
+  contents: read
+
+jobs:
+  discovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    env:
+      SOURCE_SHA: ca3c161b7ce791d9648e97285ab74806c9fc7b8c
+      DOCKER_HOST: unix:///var/run/docker.sock
+      G04_IDP_PROJECT: g04-idp-${{ github.run_id }}-${{ github.run_attempt }}
+      G04_CONTROL_PROJECT: g04-control-${{ github.run_id }}-${{ github.run_attempt }}
+      AI_GUARD_TEST_GATEWAY: http://127.0.0.1:8787
+      AI_GUARD_TEST_DASHBOARD: http://127.0.0.1:4000
+      AI_GUARD_TEST_OIDC_ISSUER: http://keycloak.ai-guard.test:18080/realms/ai-guard-demo
+      PLAYWRIGHT_CHROMIUM_EXECUTABLE: /opt/google/chrome/chrome
+      PLAYWRIGHT_VERSION: '1.65.1'
+    steps:
+      - name: Require the GitHub-hosted runner
+        id: hosted_runner
+        shell: bash
+        run: |
+          [[ "${RUNNER_ENVIRONMENT:-}" == github-hosted && "${RUNNER_OS:-}" == Linux && "${RUNNER_ARCH:-}" == X64 &&
+            "${GITHUB_EVENT_NAME:-}" == push && "${GITHUB_REF:-}" == refs/heads/codex/g04-native-keycloak-ca3c161b &&
+            "$(id -u)" =~ ^[1-9][0-9]*$ ]] || exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.22.2'
+          package-manager-cache: false
+
+      - name: Verify sandboxed Web and native CLI discovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          G04_PRIVATE="$RUNNER_TEMP/g04-keycloak-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir "$G04_PRIVATE" "$G04_PRIVATE/receipt"
+          receipt="$G04_PRIVATE/receipt"
+          phase=source
+          status=FAIL
+          cleanup=NOT_RUN
+          idp_started=false
+          control_started=false
+          images_owned=false
+          hosts_changed=false
+          host_marker="ai-guard-g04-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+
+          remove_project() {
+            local project="$1" file="$2"
+            shift 2
+            local containers networks volumes
+            timeout -k 5s 70s "${compose[@]}" -p "$project" -f "$file" "$@" \
+              down --volumes --remove-orphans --timeout 8 > /dev/null 2>&1 || return 1
+            containers="$(timeout -k 5s 10s docker ps -aq --filter "label=com.docker.compose.project=$project")" || return 1
+            networks="$(timeout -k 5s 10s docker network ls -q --filter "label=com.docker.compose.project=$project")" || return 1
+            volumes="$(timeout -k 5s 10s docker volume ls -q --filter "label=com.docker.compose.project=$project")" || return 1
+            [[ -z "$containers$networks$volumes" ]]
+          }
+
+          remove_image_tag() {
+            local ids
+            ids="$(timeout -k 5s 10s docker image ls -q "$1")" || return 1
+            if [[ -n "$ids" ]]; then
+              timeout -k 5s 20s docker image rm "$1" >/dev/null 2>&1 || return 1
+            fi
+            ids="$(timeout -k 5s 10s docker image ls -q "$1")" || return 1
+            [[ -z "$ids" ]]
+          }
+
+          record_control_build_failure() {
+            local diagnosis category=unknown step=unknown cargo_category=unknown rust_error_lines=null rust_codes=
+            # BuildKit can report more than one failure. Emit only unique matches.
+            if diagnosis="$(tail -c 262144 "$G04_PRIVATE/control-build.log" 2>/dev/null | LC_ALL=C awk '
+              function unique(values, count, key, result) {
+                for (key in values) {
+                  count++
+                  result = key
+                }
+                return count == 1 ? result : "unknown"
+              }
+              { line = tolower($0) }
+              line ~ /^#[0-9]+ \[rust-build [0-9]+\/[0-9]+\] run cargo build / { cargo_runs[$1] = 1 }
+              /^#[0-9]+ [0-9]+(\.[0-9]+)?[[:space:]]/ {
+                message = $0
+                sub(/^#[0-9]+ [0-9]+(\.[0-9]+)?[[:space:]]+/, "", message)
+                sampled[$1] = 1
+                lower = tolower(message)
+                if (message ~ /^error\[E[0-9][0-9][0-9][0-9]\]:/) {
+                  codes[$1, substr(message, 7, 5)] = 1
+                  rust_lines[$1]++
+                  compiler[$1] = 1
+                } else if (lower ~ /^error: (component download failed|could not download (file|nonexistent rust version)|toolchain .* (is not installed|is not installable)|no default toolchain|rustup could not choose|rustc .* is not supported|failed to (download component|install component|parse override toolchain file))/) {
+                  toolchain[$1] = 1
+                } else if (lower ~ /^(error: )?(failed to (download (from|crate|any data)|fetch |query (replaced )?source registry)|unable to update registry|download of .* failed)/) {
+                  fetch[$1] = 1
+                } else if (lower ~ /^error: (could not compile |failed to run custom build command |linking with |couldn.t read )/) {
+                  compiler[$1] = 1
+                }
+              }
+              line ~ /^(error:|#[0-9]+ error:)/ &&
+                line ~ /(failed to resolve source metadata for .*\/library\/(node|rust|debian):|no match for platform in manifest|no matching manifest for linux\/amd64)/ {
+                category["base_or_platform"] = 1
+                step["base_image"] = 1
+              }
+              line ~ /^(error:|#[0-9]+ error:)/ && line ~ /failed to (compute cache key|calculate checksum)/ && line ~ /not found/ &&
+                line ~ /"\/(front\/package(-lock)?\.json|cargo\.(toml|lock)|rust-toolchain\.toml|src|policies|license|build\/front\/dist|build\/target\/release\/(agentsandbox|ai-guard-audit-checkpoint|ai-guard-diagnose))"/ {
+                category["package_artifact"] = 1
+                step["artifact_copy"] = 1
+              }
+              line ~ /npm (err!|error).*can only install.*(package(-lock)?\.json|npm-shrinkwrap\.json)|cannot find module .*@rollup\/rollup-linux-x64-(gnu|musl)/ {
+                category["package_artifact"] = 1
+              }
+              line ~ /error: ((failed to (parse|load)|could not parse) manifest|manifest path .* does not exist|cannot update the lock file .*cargo\.lock)/ {
+                category["cargo_manifest"] = 1
+                step["cargo_build"] = 1
+              }
+              line ~ /^(error:|#[0-9]+ error:).*process .*\/bin\/sh -c .*did not complete successfully/ {
+                if (line ~ /\/bin\/sh -c npm ci"/) step["npm_ci"] = 1
+                if (line ~ /\/bin\/sh -c npm run build"/) step["frontend_build"] = 1
+                if (line ~ /\/bin\/sh -c cargo build /) {
+                  step["cargo_build"] = 1
+                  if ($1 ~ /^#[0-9]+$/) {
+                    cargo_failures[$1] = 1
+                    has_cargo_failure = 1
+                  }
+                }
+                if (line ~ /\/bin\/sh -c apt-get update /) step["runtime_packages"] = 1
+              }
+              END {
+                build_step = unique(step)
+                vertex = has_cargo_failure ? unique(cargo_failures) : unique(cargo_runs)
+                printf "%s %s", unique(category), build_step
+                if (build_step != "cargo_build" || vertex == "unknown" || !sampled[vertex]) {
+                  print " unknown null"
+                } else {
+                  kind = toolchain[vertex] ? "toolchain" : (fetch[vertex] ? "fetch" : "compile")
+                  if (toolchain[vertex] + fetch[vertex] + compiler[vertex] != 1) kind = "unknown"
+                  printf " %s %d", kind, rust_lines[vertex]
+                  for (i = 0; i < 10000 && emitted < 16; i++) {
+                    code = sprintf("E%04d", i)
+                    if ((vertex, code) in codes) {
+                      printf " %s", code
+                      emitted++
+                    }
+                  }
+                  printf "\n"
+                }
+              }
+            ' 2>/dev/null)"; then
+              read -r category step cargo_category rust_error_lines rust_codes <<< "$diagnosis"
+            fi
+            jq -n --arg category "$category" --arg step "$step" --argjson exit_code "$1" --argjson elapsed_seconds "$2" \
+              --arg cargo_category "$cargo_category" --argjson rust_error_lines "$rust_error_lines" --arg rust_codes "$rust_codes" \
+              '{category:$category,step:$step,exit_code:$exit_code,elapsed_seconds:$elapsed_seconds}
+                + (if $step == "cargo_build" then {
+                    cargo_category:$cargo_category,
+                    rust_error_lines:$rust_error_lines,
+                    rust_error_codes:($rust_codes | split(" ") | map(select(length > 0)))
+                  } else {} end)' \
+              > "$receipt/control-build.json"
+          }
+
+          finish() {
+            local code=$? ports
+            trap - EXIT
+            if [[ "$idp_started" == true || "$control_started" == true || "$hosts_changed" == true || "$images_owned" == true ]]; then
+              cleanup=PASS
+              if [[ "$control_started" == true ]] && ! remove_project "$G04_CONTROL_PROJECT" "$source_tree/deploy/docker/compose.sso.yaml" --profile sso-prepare; then cleanup=FAIL; fi
+              if [[ "$idp_started" == true ]] && ! remove_project "$G04_IDP_PROJECT" "$source_tree/deploy/keycloak-demo/compose.yaml" --profile keycloak-demo-http; then cleanup=FAIL; fi
+              if [[ "$hosts_changed" == true ]]; then
+                if ! timeout -k 2s 10s sudo -n sed -i "/ # $host_marker\$/d" /etc/hosts ||
+                   ! cmp -s "$G04_PRIVATE/hosts.before" /etc/hosts; then
+                  cleanup=FAIL
+                fi
+              fi
+              if [[ "$images_owned" == true ]]; then
+                remove_image_tag "$AI_GUARD_DEMO_IDP_IMAGE" || cleanup=FAIL
+                remove_image_tag "$AI_GUARD_CONTROL_IMAGE" || cleanup=FAIL
+              fi
+              if ! ports="$(ss -H -ltn "$port_filter")" || [[ -n "$ports" ]]; then cleanup=FAIL; fi
+            fi
+            # Keep only the allowlisted receipt in the runner's private directory.
+            if ! find "$G04_PRIVATE" -mindepth 1 -maxdepth 1 ! -name receipt -exec rm -rf -- {} +; then
+              cleanup=FAIL
+            fi
+            if [[ "$cleanup" == FAIL && "$code" == 0 ]]; then
+              phase=cleanup
+              status=FAIL
+              code=1
+            fi
+            if [[ "$status" == PASS && "$code" != 0 ]]; then status=FAIL; fi
+            jq -n --arg source "$SOURCE_SHA" --arg workflow "$GITHUB_SHA" \
+              --arg phase "$phase" --arg status "$status" --arg cleanup "$cleanup" \
+              '{source_sha:$source,workflow_sha:$workflow,phase:$phase,status:$status,cleanup:$cleanup}' \
+              > "$receipt/result.json"
+            printf 'G04 Keycloak native CLI %s (%s), cleanup %s\n' "$status" "$phase" "$cleanup"
+            exit "$code"
+          }
+          trap finish EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
+          [[ "$(git show -s --format=%P HEAD)" == "$SOURCE_SHA" ]] || exit 1
+          [[ "$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA")" == .github/workflows/g04-keycloak-native.yaml ]] || exit 1
+          source_tree="$G04_PRIVATE/source"
+          mkdir "$source_tree"
+          git archive --format=tar "$SOURCE_SHA" | tar -xf - -C "$source_tree"
+
+          phase=chromium_executable
+          if [[ ! -x "$PLAYWRIGHT_CHROMIUM_EXECUTABLE" ]]; then
+            status=BLOCKED
+            exit 1
+          fi
+          chrome="$(timeout -k 5s 10s "$PLAYWRIGHT_CHROMIUM_EXECUTABLE" --product-version 2>"$G04_PRIVATE/chrome.err")"
+          [[ "$chrome" =~ ^[0-9]+(\.[0-9]+){3}$ ]] || exit 1
+          jq -n --arg chrome "$chrome" --arg playwright "$PLAYWRIGHT_VERSION" \
+            '{chrome:$chrome,playwright:$playwright}' > "$receipt/browser.json"
+
+          phase=playwright_install
+          mkdir "$G04_PRIVATE/browser"
+          timeout -k 5s 2m npm install --prefix "$G04_PRIVATE/browser" --ignore-scripts --no-audit --no-fund \
+            --save-exact "playwright@$PLAYWRIGHT_VERSION" > "$G04_PRIVATE/npm.log" 2>&1
+          export CODEX_PRIMARY_RUNTIME_NODE_MODULES="$G04_PRIVATE/browser/node_modules"
+          unset DEBUG PWDEBUG NODE_DEBUG AI_GUARD_TEST_ARTIFACT_DIR AI_GUARD_TEST_OIDC_ALLOW_TLS
+          export AI_GUARD_TEST_OIDC_ACCOUNTS=admin-ai-guard,user-1,user-2,admin
+
+          phase=loopback_preflight
+          if timeout -k 5s 90s node "$source_tree/front/tests/browser_oidc_live.mjs" --check-transport \
+            > "$G04_PRIVATE/transport.json" 2> "$G04_PRIVATE/transport.err"; then
+            jq -es '
+              select(length == 1) | .[0] |
+              select(.mode == "keycloak_discovery_transport_preflight" and .status == "PASS"
+                and .scope == "loopback_http_only"
+                and ([.checks[].host] | sort) == ["127.0.0.1","[::1]","localhost"]
+                and all(.checks[]; .allowed_http == 200 and .disallowed_requests_reaching_server == 0)) |
+              {status,checks:[.checks[] | {host,allowed_http,disallowed_requests_reaching_server}]}
+            ' "$G04_PRIVATE/transport.json" > "$receipt/transport.json"
+          else
+            browser_code=$?
+            if [[ "$browser_code" == 1 ]] && jq -es '
+              length == 1 and (.[0] |
+                .mode == "keycloak_discovery_transport_preflight" and .status == "FAIL"
+                and .stage == "prévol loopback" and (.reason as $reason |
+                  any(("127.0.0.1", "[::1]", "localhost");
+                    "Prévol \(.) interrompu à l’étape « démarrage Chromium »." == $reason)))
+            ' "$G04_PRIVATE/transport.err" >/dev/null 2>&1; then
+              phase=chromium_launch
+              status=BLOCKED
+            fi
+            exit 1
+          fi
+
+          phase=compose_preflight
+          unset DOCKER_CONTEXT DOCKER_TLS DOCKER_TLS_VERIFY DOCKER_CERT_PATH DOCKER_DEFAULT_PLATFORM DOCKER_AUTH_CONFIG
+          unset BUILDX_BUILDER BUILDKIT_HOST COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_ENV_FILES
+          [[ "${DOCKER_HOST:-}" == unix:///var/run/docker.sock ]] || exit 1
+          [[ -S /var/run/docker.sock ]] || exit 1
+          export DOCKER_CONFIG="$G04_PRIVATE/docker"
+          mkdir "$DOCKER_CONFIG"
+          unset AI_GUARD_DEMO_IDP_HOST AI_GUARD_DEMO_IDP_PORT AI_GUARD_DEMO_WEB_ORIGIN
+          unset AI_GUARD_GATEWAY_PORT AI_GUARD_DASHBOARD_PORT
+          port_filter='( sport = :4000 or sport = :8787 or sport = :18080 )'
+          free_ports="$(ss -H -ltn "$port_filter")"
+          [[ -z "$free_ports" ]] || exit 1
+          for project in "$G04_IDP_PROJECT" "$G04_CONTROL_PROJECT"; do
+            containers="$(docker ps -aq --filter "label=com.docker.compose.project=$project")"
+            networks="$(docker network ls -q --filter "label=com.docker.compose.project=$project")"
+            volumes="$(docker volume ls -q --filter "label=com.docker.compose.project=$project")"
+            [[ -z "$containers$networks$volumes" ]] || exit 1
+          done
+          cp "$source_tree/.env.exemple.local-keycloak-sso" "$G04_PRIVATE/compose.env"
+          export AI_GUARD_CONTROL_IMAGE="agentsandbox-control:$G04_CONTROL_PROJECT"
+          export AI_GUARD_DEMO_CONTROL_IMAGE="$AI_GUARD_CONTROL_IMAGE"
+          export AI_GUARD_DEMO_IDP_IMAGE="ai-guard-keycloak-demo:$G04_IDP_PROJECT"
+          old_control="$(docker image ls -q "$AI_GUARD_CONTROL_IMAGE")"
+          old_idp="$(docker image ls -q "$AI_GUARD_DEMO_IDP_IMAGE")"
+          [[ -z "$old_control$old_idp" ]] || exit 1
+          compose=(docker compose --env-file "$G04_PRIVATE/compose.env")
+          idp=("${compose[@]}" -p "$G04_IDP_PROJECT" -f "$source_tree/deploy/keycloak-demo/compose.yaml" --profile keycloak-demo-http)
+          control=("${compose[@]}" -p "$G04_CONTROL_PROJECT" -f "$source_tree/deploy/docker/compose.sso.yaml")
+
+          # All names were checked absent before this recipe acquired them.
+          images_owned=true
+          phase=native_tools_preflight
+          [[ "$(sqlite3 -batch -bail :memory: "SELECT json_extract('{\"ok\":1}', '$.ok');")" == 1 ]] || exit 1
+
+          phase=native_dns_preflight
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]] || exit 1
+          [[ -z "$(getent ahostsv4 keycloak.ai-guard.test || :)" ]] || exit 1
+          cp /etc/hosts "$G04_PRIVATE/hosts.before"
+          [[ "$(tail -c 1 /etc/hosts | wc -l)" -eq 1 ]] || exit 1
+          # The exact host entry is required by the native harness. Use the disposable hosted runner only.
+          hosts_changed=true
+          printf '127.0.0.1 keycloak.ai-guard.test # %s\n' "$host_marker" |
+            timeout -k 2s 10s sudo -n tee -a /etc/hosts > /dev/null
+          getent ahostsv4 keycloak.ai-guard.test |
+            awk '$1 != "127.0.0.1" {bad=1} END {exit (NR==0 || bad)}'
+
+          phase=control_image
+          build_started=$SECONDS
+          BUILDKIT_PROGRESS=plain timeout -k 5s 35m docker build --build-arg AI_GUARD_BUILD_REVISION="$SOURCE_SHA" \
+            -f "$source_tree/images/control.Dockerfile" -t "$AI_GUARD_CONTROL_IMAGE" "$source_tree" \
+            > "$G04_PRIVATE/control-build.log" 2>&1 || {
+            build_exit=$?
+            record_control_build_failure "$build_exit" "$((SECONDS - build_started))" ||
+              printf '%s\n' 'Control build summary unavailable.'
+            exit "$build_exit"
+          }
+          phase=keycloak_image
+          timeout -k 5s 10m docker build -f "$source_tree/deploy/keycloak-demo/Dockerfile" -t "$AI_GUARD_DEMO_IDP_IMAGE" \
+            "$source_tree/deploy/keycloak-demo" > "$G04_PRIVATE/idp-build.log" 2>&1
+          control_image="$(docker image inspect --format '{{.Id}}' "$AI_GUARD_CONTROL_IMAGE")"
+          idp_image="$(docker image inspect --format '{{.Id}}' "$AI_GUARD_DEMO_IDP_IMAGE")"
+          image_pattern='^sha256:[a-f0-9]{64}$'
+          [[ "$control_image" =~ $image_pattern && "$idp_image" =~ $image_pattern ]] || exit 1
+          jq -n --arg control "$control_image" --arg keycloak "$idp_image" \
+            '{control:$control,keycloak:$keycloak}' > "$receipt/images.json"
+
+          phase=keycloak_start
+          "${idp[@]}" config --quiet
+          idp_started=true
+          timeout -k 5s 90s "${idp[@]}" up -d --no-build --pull never keycloak-demo keycloak-demo-ingress \
+            > "$G04_PRIVATE/idp-start.log" 2>&1
+          [[ "$("${idp[@]}" port keycloak-demo-ingress 18080)" == 127.0.0.1:18080 ]] || exit 1
+          phase=keycloak_discovery
+          timeout -k 5s 100s curl --noproxy '*' --resolve keycloak.ai-guard.test:18080:127.0.0.1 \
+            --fail --silent --show-error --max-time 5 --retry 30 --retry-connrefused --retry-delay 2 --retry-max-time 90 \
+            "$AI_GUARD_TEST_OIDC_ISSUER/.well-known/openid-configuration" \
+            > "$G04_PRIVATE/discovery.json" 2> "$G04_PRIVATE/discovery.err"
+          jq -e --arg issuer "$AI_GUARD_TEST_OIDC_ISSUER" '
+            .issuer == $issuer and (.code_challenge_methods_supported | index("S256") != null)
+            and (.response_types_supported | index("code") != null)
+          ' "$G04_PRIVATE/discovery.json" > /dev/null
+          identity_id="$(docker network ls -q --filter "label=com.docker.compose.project=$G04_IDP_PROJECT" \
+            --filter label=com.docker.compose.network=identity_demo)"
+          [[ "$identity_id" =~ ^[a-f0-9]+$ ]] || exit 1
+          identity_network="$(docker network inspect --format '{{.Internal}} {{.Name}}' "$identity_id")"
+          read -r internal network_name <<< "$identity_network"
+          [[ "$internal" == true && "$network_name" =~ ^[a-z0-9_-]+$ ]] || exit 1
+          export AI_GUARD_SSO_IDENTITY_NETWORK="$network_name"
+
+          phase=control_prepare
+          "${control[@]}" config --quiet
+          control_started=true
+          timeout -k 5s 90s "${control[@]}" --profile sso-prepare run --no-deps --pull never -T \
+            setup setup prepare --input - --output-dir /data/installation --demo-defaults \
+            < "$source_tree/docs/setup/sso/examples/local-demo.json" > "$G04_PRIVATE/setup.json" 2> "$G04_PRIVATE/setup.err"
+          jq -es 'length == 1 and .[0].status == "prepared"' "$G04_PRIVATE/setup.json" > /dev/null
+
+          phase=control_start
+          timeout -k 5s 125s "${control[@]}" up -d --wait --wait-timeout 110 --no-build --pull never gateway dashboard ingress \
+            > "$G04_PRIVATE/control-start.log" 2>&1
+          [[ "$("${control[@]}" port ingress 8787)" == 127.0.0.1:8787 ]] || exit 1
+          [[ "$("${control[@]}" port ingress 4000)" == 127.0.0.1:4000 ]] || exit 1
+
+          phase=web_flow
+          timeout -k 5s 3m node "$source_tree/front/tests/browser_oidc_live.mjs" > "$G04_PRIVATE/web.json" 2> "$G04_PRIVATE/web.err"
+          jq -es '
+            select(length == 1) | .[0] |
+            select(.mode == "keycloak_discovery_oidc_web" and .status == "PASS"
+              and ([.checks[].account] | sort) == ["admin","admin-ai-guard","user-1","user-2"]
+              and all(.checks[]; .status == "PASS" and
+                (if .account == "admin" then .evidence == "realm_demo_login_refused"
+                 else .evidence == "oidc_identity_and_authorized_read"
+                   and .context == (if .account == "admin-ai-guard" then "administration" else "personnel" end)
+                   and .local_logout == "closed" and .logout_audit == "recorded"
+                 end))) |
+            {mode,status,tenant:"ai-guard-demo",checks:[.checks[] |
+              if .account == "admin" then {account,status,evidence}
+              else {account,status,evidence,context,local_logout,logout_audit} end]}
+          ' "$G04_PRIVATE/web.json" > "$receipt/web.json"
+          phase=native_cli_preflight
+          gateway_id="$("${control[@]}" ps --status running -q gateway)"
+          [[ "$gateway_id" =~ ^[a-f0-9]{64}$ ]] || exit 1
+          [[ "$(docker inspect --format '{{.Image}}' "$gateway_id")" == "$control_image" ]] || exit 1
+          export AI_GUARD_TEST_CLI="$G04_PRIVATE/agentsandbox"
+          timeout -k 2s 15s docker cp "$gateway_id:/usr/local/bin/agentsandbox" "$AI_GUARD_TEST_CLI"
+          timeout -k 2s 10s "$AI_GUARD_TEST_CLI" version --json > "$G04_PRIVATE/cli-version.json" 2> "$G04_PRIVATE/cli-version.err"
+          jq -es --arg source "$SOURCE_SHA" '
+            length == 1 and .[0].component == "agentsandbox" and .[0].build.revision == $source
+          ' "$G04_PRIVATE/cli-version.json" > /dev/null
+          read -r cli_sha _ < <(sha256sum "$AI_GUARD_TEST_CLI")
+          [[ "$cli_sha" =~ ^[a-f0-9]{64}$ ]] || exit 1
+
+          phase=native_cli
+          timeout -k 5s 3m node "$source_tree/front/tests/browser_oidc_native_live.mjs" \
+            > "$G04_PRIVATE/native.json" 2> "$G04_PRIVATE/native.err"
+          jq -es '
+            length == 1 and (.[0] |
+              .mode == "native_cli_keycloak_demo" and .status == "PASS" and .stage == "complete"
+              and .account == "user-1" and .callback_http == 200 and .generations == [1,2]
+              and .local_session == "closed" and .logout_audit == "recorded"
+              and .provider_logout == "accepted" and .control_provider_logout == "not_attempted"
+              and .credential_files_created == false
+              and (.resource_count | type == "number" and . >= 0 and . <= 5 and floor == .)
+              and (.read_receipt_audit_event_id | test("^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$")))
+          ' "$G04_PRIVATE/native.json" > /dev/null
+          audit_event_id="$(jq -er '.read_receipt_audit_event_id' "$G04_PRIVATE/native.json")"
+          resource_count="$(jq -er '.resource_count' "$G04_PRIVATE/native.json")"
+
+          phase=audit_integrity
+          tenant_dir=/data/installation/tenants/ai-guard-demo
+          # The viewer file stays in the gateway. The command emits only the integrity verdict privately.
+          timeout -k 3s 20s "${control[@]}" exec -T gateway agentsandbox verify-audit \
+            --gateway http://127.0.0.1:8787 --viewer-token-file "$tenant_dir/viewer" \
+            > "$G04_PRIVATE/integrity.json" 2> "$G04_PRIVATE/integrity.err"
+          jq -es 'length == 1 and .[0].valid == true' "$G04_PRIVATE/integrity.json" > /dev/null
+
+          phase=audit_receipt
+          demo_subject="$(jq -er '
+            [.users[] | select(.username == "user-1") | .id] |
+            select(length == 1) | .[0] |
+            select(test("^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$"))
+          ' "$source_tree/deploy/keycloak-demo/ai-guard-demo-realm.json")"
+          timeout -k 5s 30s "${control[@]}" stop --timeout 10 gateway > /dev/null 2>&1
+          [[ "$(docker inspect --format '{{.State.Running}}' "$gateway_id")" == false ]] || exit 1
+          # Preserve SQLite sidecars together while the sole writer is stopped. The private copy is never uploaded.
+          timeout -k 2s 15s docker cp "$gateway_id:$tenant_dir" "$G04_PRIVATE/tenant" \
+            > /dev/null 2> "$G04_PRIVATE/audit-copy.err"
+          audit_seq="$(sqlite3 -batch -readonly -bail "$G04_PRIVATE/tenant/audit.sqlite" "
+            SELECT seq FROM events
+            WHERE id = '$audit_event_id'
+              AND kind = 'control.identity.access'
+              AND json_extract(payload, '$.source') = 'gateway'
+              AND json_extract(payload, '$.provenance') = 'observed'
+              AND json_extract(payload, '$.data.action') = 'resources'
+              AND json_extract(payload, '$.data.mode') = 'personal'
+              AND json_extract(payload, '$.data.principal.kind') = 'human_oidc'
+              AND json_extract(payload, '$.data.principal.issuer') = '$AI_GUARD_TEST_OIDC_ISSUER'
+              AND json_extract(payload, '$.data.principal.subject') = '$demo_subject'
+              AND json_extract(payload, '$.data.result_count') = $resource_count;
+          " 2> "$G04_PRIVATE/audit-query.err")"
+          [[ "$audit_seq" =~ ^[1-9][0-9]*$ ]] || exit 1
+          jq -e --argjson seq "$audit_seq" '.event_count >= $seq' "$G04_PRIVATE/integrity.json" > /dev/null
+
+          jq -n --arg cli_sha "$cli_sha" --argjson audit_seq "$audit_seq" \
+            --slurpfile native "$G04_PRIVATE/native.json" '
+            $native[0] | {mode,status,account,callback_http,generations,resource_count,local_session,
+              logout_audit,provider_logout,credential_files_created}
+              + {cli_sha256:$cli_sha,audit_chain_valid:true,read_receipt_persisted:true,audit_sequence:$audit_seq}
+          ' > "$receipt/native.json"
+          phase=complete
+          status=PASS
+
+      - name: Upload the allowlisted receipt
+        if: always() && steps.hosted_runner.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: g04-keycloak-native
+          path: ${{ runner.temp }}/g04-keycloak-${{ github.run_id }}-${{ github.run_attempt }}/receipt/*.json
+          if-no-files-found: error
+          retention-days: 7
