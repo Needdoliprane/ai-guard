@@ -1,5 +1,17 @@
 # Validation courante
 
+## 24 novembre 2026 — révocation des droits avec Chrome connecté
+
+**PASS ciblé G08** sur `242ebe39`, avec le scénario `revoked`, le
+même exemple Rust compilé hors ligne et le bundle `84971de6`.
+La réduction des droits retire le Journal et ses lignes pendant
+le direct. Le SSE se ferme et les événements ajoutés ensuite ne
+s’affichent pas. La révocation du credential personnel pendant une
+seconde session ferme également le flux et ramène au formulaire
+de connexion. Chrome 158 et le gateway utilisent une fixture
+SQLite de 24 workers et 60 événements. Le conducteur sort avec le
+code 0.
+
 ## 24 novembre 2026 — retrait des données A/B dans Chrome
 
 **PASS interactif G08** sur `42f93bb7`. Le scénario `isolation`
