@@ -13,7 +13,7 @@ Please read the [architecture contract](docs/engineering/ARCHITECTURE_CONTRACT.m
 3.  Ensure your changes comply with the project's [production readiness gates](docs/engineering/PRODUCTION_READINESS.md).
 4.  Run the tests locally:
     *   Rust: `cargo test --locked`
-    *   Frontend: `cd front && npm test`
+    *   Frontend: run `(cd front && npm ci && npm test)` from the repository root. Use the Node.js version pinned in the [CI workflow](.github/workflows/ci.yaml) to match CI.
 5.  Submit a pull request.
 
 ## Supply Chain Security
