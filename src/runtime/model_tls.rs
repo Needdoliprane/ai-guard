@@ -164,6 +164,17 @@ pub(crate) fn image_id(value: &str) -> bool {
     value.strip_prefix("sha256:").is_some_and(hex_id)
 }
 
+fn matches_runtime_image(kind: RuntimeKind, observed: &Value, expected: &str) -> bool {
+    let Some(digest) = expected
+        .strip_prefix("sha256:")
+        .filter(|digest| hex_id(digest))
+    else {
+        return false;
+    };
+    let observed = observed.as_str();
+    observed == Some(expected) || (kind == RuntimeKind::Podman && observed == Some(digest))
+}
+
 async fn run(
     mut command: Command,
     args: &[String],
@@ -404,7 +415,7 @@ impl ProvisionRuntime {
             )
             .await?;
         let value: Value = serde_json::from_slice(&bytes).map_err(|_| Failure::Runtime)?;
-        if value.get("Id").and_then(Value::as_str) != Some(image) {
+        if !matches_runtime_image(self.runtime.kind, &value["Id"], image) {
             return Err(Failure::Runtime);
         }
         Ok(())
@@ -519,7 +530,7 @@ impl ProvisionRuntime {
             .query(&["inspect", "--format", "{{json .}}", target], 32768)
             .await?;
         let value: Value = serde_json::from_slice(&bytes).map_err(|_| Failure::Runtime)?;
-        if value["Image"] != image
+        if !matches_runtime_image(self.runtime.kind, &value["Image"], image)
             || value["Config"]["Labels"]["ai-guard.model-tls.generation"] != attempt.generation
             || value["Config"]["Labels"]["ai-guard.model-tls.role"] != "preparer"
             || value["Config"]["User"] != "1000:1000"
@@ -640,7 +651,7 @@ impl ProvisionRuntime {
         ];
         let bytes = self.query_owned(&inspect, None, 32768, &cleanup).await?;
         let value: Value = serde_json::from_slice(&bytes).map_err(|_| Failure::Runtime)?;
-        if value["Image"] != image
+        if !matches_runtime_image(self.runtime.kind, &value["Image"], image)
             || value["Config"]["Labels"]["ai-guard.model-tls.generation"] != attempt.generation
             || value["Config"]["Labels"]["ai-guard.model-tls.role"] != "preparer"
         {
