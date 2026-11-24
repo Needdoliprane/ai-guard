@@ -292,5 +292,14 @@
       "initial_export_passed": true,
       "integrity_and_inventories_verified": true
     }
+  },
+  "altered_frontend_manifest_refusal": {
+    "source_revision": "84971de6",
+    "artifact": "ai-guard-v0.0.1-frontend.tar.gz",
+    "changed_copy": "one appended byte",
+    "refusal": "DIVERGENT artifact-changed",
+    "exit_code": 1,
+    "original_verified_artifacts_after": 4,
+    "temporary_worktree_removed": true
   }
 }
