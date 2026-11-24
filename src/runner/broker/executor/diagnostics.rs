@@ -89,8 +89,8 @@ impl fmt::Display for Full3BindingStage {
 
 impl std::error::Error for Full3BindingStage {}
 
-#[derive(Serialize)]
-struct Full3BindingDiagnostic {
+#[derive(Debug, Serialize)]
+pub(super) struct Full3BindingDiagnostic {
     stage: Full3BindingStage,
     #[serde(skip_serializing_if = "Option::is_none")]
     enforcer_code: Option<EnforcerError>,
@@ -108,7 +108,8 @@ impl Full3BindingStage {
             Self::ReloadJournal | Self::AdvanceWriter => error
                 .downcast_ref::<JournalError>()
                 .map(journal_failure_code),
-            _ => None,
+            Self::RetryLimit => Some(journal_failure_code(&JournalError::Conflict)),
+            Self::ReadNativeBinding => None,
         };
         Full3BindingDiagnostic {
             stage: self,
@@ -239,8 +240,8 @@ pub(super) struct BatchFailureDiagnosticV1 {
 }
 
 impl BatchFailureDiagnosticV1 {
-    pub(super) fn full3_binding_stage(&self) -> Option<Full3BindingStage> {
-        self.full3_binding.as_ref().map(|binding| binding.stage)
+    pub(super) fn full3_binding(&self) -> Option<&Full3BindingDiagnostic> {
+        self.full3_binding.as_ref()
     }
 
     pub(super) fn created_exchange_step(&self) -> Option<BrokerStep> {
@@ -375,7 +376,7 @@ mod tests {
             ),
             (
                 anyhow::anyhow!("{private}").context(Full3BindingStage::RetryLimit),
-                json!({"stage":"retry_limit"}),
+                json!({"stage":"retry_limit","journal_code":"conflict"}),
             ),
         ] {
             let diagnostic = failure_report(LocalFailurePhaseV1::Worker, &error);

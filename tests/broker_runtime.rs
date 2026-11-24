@@ -312,21 +312,39 @@ fn batch_failure_marker_keeps_only_validated_metadata() {
 }
 
 #[test]
-fn batch_failure_marker_projects_only_the_closed_full3_binding_stage() {
+fn batch_failure_marker_projects_only_closed_full3_binding_evidence() {
     let mut page = json!({ "items": [{
         "id": "11111111-1111-4111-8111-111111111111", "seq": 17,
-        "kind": "broker.batch.failure", "source": "runner",
+        "kind": "broker.batch.failure", "source": "runner", "provenance": "observed",
+        "session_id": "owner-session",
         "data": {
             "version": 1, "phase": "worker", "runtime_effect": "unknown",
             "broker_step": "full3_binding_publication",
-            "full3_binding": {"stage":"advance_writer","private":"synthetic-private-detail"}
+            "full3_binding": {
+                "stage":"advance_writer", "journal_code":"io", "private":"synthetic-private-detail"
+            }
         }
     }], "next_cursor": 17 });
     let marker = harness::batch_failure_marker(&page).unwrap().unwrap();
-    assert_eq!(marker["full3_binding_stage"], "advance_writer");
+    assert_eq!(
+        marker["full3_binding"],
+        json!({"stage":"advance_writer","journal_code":"io"})
+    );
     assert_eq!(marker["runtime_effect"], "unknown");
     assert!(!marker.to_string().contains("synthetic-private-detail"));
+    let projected =
+        serde_json::to_value(harness::executor_failure_page(&page, "owner-session", 16)).unwrap();
+    assert_eq!(
+        projected["rows"][0]["full3_binding"],
+        marker["full3_binding"]
+    );
+    let other_session =
+        serde_json::to_value(harness::executor_failure_page(&page, "other-session", 16)).unwrap();
+    assert!(other_session["rows"][0].get("full3_binding").is_none());
 
+    page["items"][0]["data"]["full3_binding"]["journal_code"] = json!("synthetic-private-detail");
+    assert!(harness::batch_failure_marker(&page).is_err());
+    page["items"][0]["data"]["full3_binding"]["journal_code"] = json!("io");
     page["items"][0]["data"]["broker_step"] = json!("arm_exchange");
     assert!(harness::batch_failure_marker(&page).is_err());
     page["items"][0]["data"]["broker_step"] = json!("full3_binding_publication");

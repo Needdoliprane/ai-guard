@@ -923,17 +923,9 @@ fn project_batch_failure_event(event: &Value) -> Result<Value> {
         broker_step.is_some() || enforcer_stage.is_some() || runtime_stage.is_some(),
         "missing coded diagnostic origin"
     );
-    let full3_binding_stage = nested_failure_stage(
-        data.get("full3_binding"),
-        &[
-            "read_native_binding",
-            "reload_journal",
-            "advance_writer",
-            "retry_limit",
-        ],
-    )?;
+    let full3_binding = project_full3_binding(data.get("full3_binding"))?;
     ensure!(
-        full3_binding_stage.is_none() || broker_step == Some("full3_binding_publication"),
+        full3_binding.is_none() || broker_step == Some("full3_binding_publication"),
         "invalid Full3 binding diagnostic origin"
     );
     // Only this projection is persisted. Neither arbitrary data nor any error
@@ -943,10 +935,69 @@ fn project_batch_failure_event(event: &Value) -> Result<Value> {
         "phase":phase,"broker_step":broker_step,"enforcer_stage":enforcer_stage,
         "runtime_stage":runtime_stage,"runtime_effect":"unknown"
     });
-    if let Some(stage) = full3_binding_stage {
-        marker["full3_binding_stage"] = json!(stage);
+    if let Some(binding) = full3_binding {
+        marker["full3_binding"] = binding;
     }
     Ok(marker)
+}
+
+fn project_full3_binding(value: Option<&Value>) -> Result<Option<Value>> {
+    let Some(stage) = nested_failure_stage(
+        value,
+        &[
+            "read_native_binding",
+            "reload_journal",
+            "advance_writer",
+            "retry_limit",
+        ],
+    )?
+    else {
+        return Ok(None);
+    };
+    let fields = value
+        .and_then(Value::as_object)
+        .context("missing Full3 binding diagnostic")?;
+    let journal_code = optional_failure_label(
+        fields.get("journal_code"),
+        &[
+            "invalid_input",
+            "unsupported_version",
+            "too_large",
+            "limit_exceeded",
+            "busy",
+            "conflict",
+            "interrupted",
+            "corrupt",
+            "unsafe_filesystem",
+            "control_secret",
+            "io",
+        ],
+    )?;
+    let enforcer_code = fields
+        .get("enforcer_code")
+        .filter(|code| !code.is_null())
+        .map(|code| {
+            serde_json::from_value::<agentsandbox::broker::enforcer::EnforcerError>(code.clone())
+                .map_err(|_| anyhow!("invalid Full3 binding enforcer code"))
+        })
+        .transpose()?;
+    ensure!(
+        match stage {
+            "read_native_binding" => journal_code.is_none(),
+            "reload_journal" | "advance_writer" => enforcer_code.is_none(),
+            "retry_limit" => enforcer_code.is_none() && journal_code == Some("conflict"),
+            _ => false,
+        },
+        "invalid Full3 binding diagnostic code for stage"
+    );
+    let mut projected = json!({"stage":stage});
+    if let Some(code) = journal_code {
+        projected["journal_code"] = json!(code);
+    }
+    if let Some(code) = enforcer_code {
+        projected["enforcer_code"] = json!(code);
+    }
+    Ok(Some(projected))
 }
 
 pub fn terminal_failure_step(
@@ -1024,6 +1075,8 @@ pub(super) struct ExecutorFailureRow {
     broker_step: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     registration: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    full3_binding: Option<Value>,
     #[serde(skip)]
     pub(super) audit_key: Option<(Uuid, i64)>,
 }
@@ -1074,6 +1127,8 @@ pub fn executor_failure_page(
                         registration: audit_key
                             .filter(|_| event["data"]["broker_step"] == "registration")
                             .and_then(|_| project_registration(&event["data"]["registration"])),
+                        full3_binding: audit_key
+                            .and_then(|_| marker.as_ref()?.get("full3_binding").cloned()),
                         audit_key,
                     }
                 })

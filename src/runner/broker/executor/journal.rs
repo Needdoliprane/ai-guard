@@ -314,8 +314,8 @@ impl<'a> Execution<'a> {
             // underlying error (which may carry a provider's private text).
             if let Some(step) = diagnostic.created_exchange_step() {
                 eprintln!("broker batch diagnostic delivery incomplete at {step:?}");
-            } else if let Some(stage) = diagnostic.full3_binding_stage() {
-                eprintln!("broker batch Full3 binding diagnostic delivery incomplete at {stage:?}");
+            } else if let Some(binding) = diagnostic.full3_binding() {
+                eprintln!("broker batch Full3 binding diagnostic delivery incomplete: {binding:?}");
             } else {
                 eprintln!(
                     "broker batch diagnostic delivery incomplete; inspect pending journal events"
