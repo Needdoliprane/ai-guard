@@ -2668,6 +2668,22 @@ async fn settle_managed_launch(
     Ok(summary)
 }
 
+pub(super) fn confirmed_deadline_summary(error: &anyhow::Error) -> Option<&RunSummary> {
+    let rejected = error.downcast_ref::<control_monitor::RejectedLaunch>()?;
+    if rejected.audit_error.is_some() || rejected.finalization_error.is_some() {
+        return None;
+    }
+    let summary = rejected.summary.as_ref()?;
+    let observed = rejected
+        .cause
+        .downcast_ref::<control_monitor::ControlFailure>()?
+        .deadline_observation()?;
+    (observed.deadline == ControlDeadlineKind::OriginalExecutionDeadline
+        && observed.stop == ControlStopObservation::EngineAcknowledged
+        && summary.control_deadline == Some(observed))
+    .then_some(summary)
+}
+
 // A later observer failure does not erase a fully qualified native terminal.
 // Finalization uses the existing durable ACK/usage/cleanup protocol exactly
 // once; the result, primary cause and any subsequent refusal remain returned.

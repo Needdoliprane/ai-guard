@@ -2077,6 +2077,28 @@ fn validate_new_runtime_target(options: &RunOptions) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug)]
+struct ConfirmedDeadlineFailure {
+    diagnostic: String,
+    summary: RunSummary,
+}
+
+impl std::fmt::Display for ConfirmedDeadlineFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.diagnostic)
+    }
+}
+
+impl std::error::Error for ConfirmedDeadlineFailure {}
+
+/// Return the persisted terminal summary for a confirmed original deadline stop.
+/// The caller must still report the original run error.
+pub fn confirmed_deadline_summary(error: &anyhow::Error) -> Option<&RunSummary> {
+    error
+        .downcast_ref::<ConfirmedDeadlineFailure>()
+        .map(|failure| &failure.summary)
+}
+
 pub async fn run(options: RunOptions) -> Result<RunSummary> {
     validate_new_runtime_target(&options)?;
     let supplied_approval = options.approve_hash.clone();
@@ -2115,10 +2137,15 @@ pub async fn run(options: RunOptions) -> Result<RunSummary> {
     managed::execute_plan(plan, credential_file, client, supplied_approval, config)
         .await
         .map_err(|error| {
-            anyhow::anyhow!(crate::redaction::clip(
-                &redacted_error(&redactor, &error),
-                8192
-            ))
+            let diagnostic = crate::redaction::clip(&redacted_error(&redactor, &error), 8192);
+            match managed::confirmed_deadline_summary(&error) {
+                Some(summary) => ConfirmedDeadlineFailure {
+                    diagnostic,
+                    summary: summary.clone(),
+                }
+                .into(),
+                None => anyhow::anyhow!(diagnostic),
+            }
         })
 }
 

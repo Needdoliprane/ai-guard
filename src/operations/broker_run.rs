@@ -12,7 +12,7 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::{ArgGroup, Args};
-use std::{path::PathBuf, time::Duration};
+use std::{io::Write, path::PathBuf, time::Duration};
 use tokio::{
     signal::unix::{SignalKind, signal},
     time::{Instant, MissedTickBehavior, interval, sleep_until, timeout_at},
@@ -70,7 +70,19 @@ impl RunCommand {
             && self.broker_config.is_none()
             && self.broker_selection.is_none()
         {
-            let summary = Box::pin(runner::run(self.run)).await?;
+            let summary = match Box::pin(runner::run(self.run)).await {
+                Ok(summary) => summary,
+                Err(error) => {
+                    if let Some(summary) = runner::confirmed_deadline_summary(&error) {
+                        if let Ok(json) = serde_json::to_string_pretty(summary) {
+                            // Reporting is best-effort here. A closed stdout must preserve
+                            // the original execution failure.
+                            let _ = writeln!(std::io::stdout().lock(), "{json}");
+                        }
+                    }
+                    return Err(error);
+                }
+            };
             println!("{}", serde_json::to_string_pretty(&summary)?);
             return require_successful_run(&summary);
         }
