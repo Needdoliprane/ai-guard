@@ -74,6 +74,18 @@ sur `chrono` reste ouvert. L’audit npm du lockfile frontend inchangé
 ne signale aucun avis au relevé du 24 novembre 2026.
 [Source RustSec](https://rustsec.org/advisories/RUSTSEC-2023-0071.html)
 
+
+Le 24 novembre, `openidconnect 4.1.0` et la tête amont
+`e20ddbb01ca68356f2979bc125f5613ab45b4e7e` déclarent encore la
+contrainte RSA 0.9. Le graphe normal toutes fonctionnalités de
+`eb456941` attribue `rsa 0.9.10` à ce seul parent. Une mise à
+niveau compatible jusqu’à RSA 0.10 reste à obtenir de l’amont.
+Une décision de release sur cet avis doit s’appuyer sur la revue
+de portée du client public et de la vérification RS256, avec mandat
+explicite pour toute exception. Un changement de bibliothèque ou
+un fork requiert une décision séparée et le rejeu des parcours OIDC.
+[Manifeste amont](https://github.com/ramosbugs/openidconnect-rs/blob/e20ddbb01ca68356f2979bc125f5613ab45b4e7e/Cargo.toml)
+
 **Paquets système de l’image de contrôle.** Le rapprochement du 24
 novembre 2026 couvre 65 paquets source Debian Bookworm installés dans
 l’image ARM64 de `7e3a6166`. Pour les entrées résolues avec version
