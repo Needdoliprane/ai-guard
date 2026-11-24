@@ -1,5 +1,31 @@
 # Validation courante
 
+## 25 novembre 2026 — diagnostic de l’échange Created dans G07
+
+**PASS logiciel ciblé, 2/2** sur `7f9eceef`, macOS ARM64,
+Rust 1.99.1 et fonctionnalités par défaut. Le test du vrai writer
+distingue préparation, avancement et relecture stricte après un
+refus. Après restauration du binding de fixture, la tête concorde
+avec la tête initiale. Le compteur gateway reste à zéro dans ce
+test du checkpoint. Le test de classification confirme les trois
+codes fermés, le masquage du texte privé et l’effet runtime inconnu.
+
+Le code `created_exchange_advance_pending` situe l’échec pendant
+l’avancement du writer. La publication éventuelle reste inconnue.
+Si l’événement de diagnostic échoue à son tour, stderr expose
+seulement l’étape fermée. Le dashboard du candidat `1bede064`
+affiche les sept nouveaux codes préclaim et Created, avec test
+de rendu ciblé et build TypeScript/Vite réussis.
+
+La première compilation s’arrête avant exécution à la garde disque.
+La seconde désactive les symboles et les incréments de compilation
+du seul paquet `agentsandbox`. Son manifeste vérifié
+`334d93d52c4a5cfab6aa96698f581865ff5d8cbdae49edfb9a8b72846c137ac7`
+se trouve sous `g07-created-pending-7f9eceef-package-nodebug`.
+Le lecteur d’intégration complet reste `NOT_RUN` sur cette source.
+La sélection du mode par un RPC Created neuf, son ACK, le rejeu et
+la recette Full3 restent à vérifier sur leurs parcours respectifs.
+
 ## 25 novembre 2026 — fermeture des lectures de reprise G09
 
 **PASS logiciel ciblé, 2/2**, macOS ARM64. Une lecture de résultat
