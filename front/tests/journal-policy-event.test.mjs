@@ -45,3 +45,19 @@ test("le Journal nomme les traces egress et indique les champs absents des méta
   assert.equal(present("egress.decision", { decision: "allow" }), null);
   assert.throws(() => present("egress.connection", { connected: true }));
 });
+
+test("le Journal distingue la fermeture observée du canal egress sans en déduire le motif", () => {
+  const present = (provenance) => journalEgressEventPresentation(
+    parseHumanEvent(eventOf(1, session, {
+      kind: "egress.channel.closed",
+      coverage: "partial",
+      provenance,
+    }), "metadata").metadata
+  );
+
+  assert.equal(present("declared"), null);
+  assert.deepEqual(present("observed"), {
+    label: "Fermeture du canal egress enregistrée",
+    unknown: "Motif non fourni dans les métadonnées",
+  });
+});

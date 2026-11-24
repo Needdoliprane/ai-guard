@@ -21,6 +21,8 @@ export function journalEgressEventPresentation(metadata: HumanEvent["metadata"])
       return { label: "Décision egress enregistrée", unknown: "Verdict non fourni dans les métadonnées" };
     case "egress.connection":
       return { label: "Résultat de connexion egress enregistré", unknown: "Résultat non fourni dans les métadonnées" };
+    case "egress.channel.closed":
+      return { label: "Fermeture du canal egress enregistrée", unknown: "Motif non fourni dans les métadonnées" };
     default: return null;
   }
 }
