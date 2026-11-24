@@ -1,5 +1,19 @@
 # Validation courante
 
+## 24 novembre 2026 — reprise de lecture et d’annulation du broker
+
+**PASS ciblé G09** sur `74927852`. Les 21 tests `broker_run_cli`
+passent avec le vrai CLI et une fixture IPC locale. Le scénario de
+perte du client après acceptation retrouve la même opération via
+`broker result`. Il vérifie que la fermeture du client ne soumet
+pas une seconde opération et ne demande pas son annulation.
+
+Le test du service après perte du gateway passe séparément. Après
+une annulation acquittée, la lecture indique l’indisponibilité
+pendant la coupure, puis retrouve le même résultat et le même reçu
+après réouverture. Aucun worker n’est lancé dans ces deux témoins.
+La reprise physique du broker reste à qualifier.
+
 ## 24 novembre 2026 — redémarrage OIDC après migration de l’audit vers V4
 
 **PASS ciblé G04/G06** avec le paquet macOS `84971de6`. Le
