@@ -2634,7 +2634,7 @@ fn validate_configuration(spec: &ContainerSpec, bytes: &[u8], kind: RuntimeKind)
     Ok(())
 }
 
-fn podman_reports_empty_capability_sets(bytes: &[u8]) -> bool {
+pub(super) fn podman_reports_empty_capability_sets(bytes: &[u8]) -> bool {
     #[derive(Deserialize)]
     #[serde(rename_all = "PascalCase")]
     struct CapabilitySets {

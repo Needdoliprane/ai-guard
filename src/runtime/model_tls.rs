@@ -1,6 +1,6 @@
 //! Dedicated short-lived TLS preparer transport. No worker/session authority,
 //! shell, inherited environment, payload logging or detached IO collectors.
-use super::{Runtime, RuntimeKind, capture_stream};
+use super::{Runtime, RuntimeKind, capture_stream, managed::podman_reports_empty_capability_sets};
 use crate::model_tls::{Failure, VolumeSelection};
 use serde::Serialize;
 use serde_json::Value;
@@ -542,12 +542,33 @@ impl ProvisionRuntime {
         }
         let host = &value["HostConfig"];
         let empty = |field: &Value| field.is_null() || field.as_array().is_some_and(Vec::is_empty);
-        let caps = host["CapDrop"].as_array().is_some_and(|caps| {
-            caps.len() == 1
-                && caps[0]
-                    .as_str()
-                    .is_some_and(|cap| cap.eq_ignore_ascii_case("ALL"))
-        });
+        let caps = match self.runtime.kind {
+            RuntimeKind::Docker => host["CapDrop"].as_array().is_some_and(|caps| {
+                caps.len() == 1
+                    && caps[0]
+                        .as_str()
+                        .is_some_and(|cap| cap.eq_ignore_ascii_case("ALL"))
+            }),
+            RuntimeKind::Podman => podman_reports_empty_capability_sets(&bytes),
+        };
+        // Podman also projects named volumes into Binds. Require the two
+        // authorized descriptors and corroborate their kinds in Mounts below.
+        let named_volumes = [
+            (&attempt.volumes.ca, "/data"),
+            (&attempt.volumes.identity, "/run/secrets"),
+        ];
+        let no_host_binds = empty(&host["Binds"])
+            || (self.runtime.kind == RuntimeKind::Podman
+                && host["Binds"].as_array().is_some_and(|binds| {
+                    binds.len() == named_volumes.len()
+                        && named_volumes.iter().all(|(name, destination)| {
+                            let expected =
+                                format!("{name}:{destination}:rprivate,nosuid,nodev,rbind");
+                            binds
+                                .iter()
+                                .any(|bind| bind.as_str() == Some(expected.as_str()))
+                        })
+                }));
         let nnp = host["SecurityOpt"].as_array().is_some_and(|options| {
             options.len() == 1
                 && options[0].as_str().is_some_and(|value| {
@@ -563,7 +584,7 @@ impl ProvisionRuntime {
             || !nnp
             || !cpu
             || !empty(&host["CapAdd"])
-            || !empty(&host["Binds"])
+            || !no_host_binds
             || host["Memory"] != 192_u64 * 1024 * 1024
             || host["MemorySwap"] != 192_u64 * 1024 * 1024
             || host["PidsLimit"] != 64
@@ -577,10 +598,7 @@ impl ProvisionRuntime {
         if mounts.len() != 2 {
             return Err(Failure::Runtime);
         }
-        for (name, destination) in [
-            (&attempt.volumes.ca, "/data"),
-            (&attempt.volumes.identity, "/run/secrets"),
-        ] {
+        for (name, destination) in named_volumes {
             if !mounts.iter().any(|mount| {
                 mount["Type"] == "volume"
                     && mount["Name"] == *name
