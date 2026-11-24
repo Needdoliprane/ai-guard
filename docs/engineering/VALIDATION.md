@@ -26,9 +26,18 @@ et `e42c8300`. Le HTML correspond à l’archive, la lecture
 authentifiée de l’identité via le dashboard correspond à la
 réponse directe du gateway et l’accès anonyme reçoit HTTP 401.
 Les deux endpoints de statut renvoient la révision archivée et
-les deux ports sont fermés en fin de recette. Le build CI Node.js
-24.22.2, la composition conteneurisée exacte et la publication
-restent à qualifier séparément.
+les deux ports sont fermés en fin de recette.
+
+Le couple dashboard–gateway passe également en deux conteneurs
+Docker Desktop sur l’image contrôle antérieure `c4b8cf3796a5`.
+Le gateway initialise une base SQLite temporaire. Le dashboard
+sert le HTML exact, relaie la même identité viewer et renvoie
+HTTP 401 à une requête anonyme. Les ports sont publiés sur
+loopback. Le premier montage en réseau interne ne publiait pas
+de port sur Docker Desktop. Le passage concluant utilise un
+pont dédié et retire les deux conteneurs et le réseau.
+Le build CI Node.js 24.22.2 et la composition Compose avec
+une image du candidat exact restent à qualifier.
 
 ## 24 novembre 2026 — prévol Kubernetes du candidat
 
