@@ -47,6 +47,59 @@ enum OutboxDelivery {
     Acknowledged,
 }
 
+#[derive(Default, Serialize)]
+pub struct ExecutorFailureOutbox {
+    pending: usize,
+    acknowledged: usize,
+    unexpected_identity: usize,
+    // Aligned with the projected central page. Null means the central row
+    // did not provide a validated correlation key for the admitted session.
+    central_ack_matches: Option<Vec<Option<usize>>>,
+}
+
+pub(in super::super) fn executor_failure_outbox(
+    entries: &[OutboxEventV1],
+    session: &str,
+    central: Option<&super::ExecutorFailurePage>,
+) -> ExecutorFailureOutbox {
+    let mut summary = ExecutorFailureOutbox {
+        central_ack_matches: central
+            .and_then(|page| page.rows.as_ref())
+            .map(|rows| rows.iter().map(|row| row.audit_key.map(|_| 0)).collect()),
+        ..ExecutorFailureOutbox::default()
+    };
+    for entry in entries
+        .iter()
+        .filter(|entry| entry.event().kind == "broker.batch.failure")
+    {
+        let event = entry.event();
+        if event.session_id.as_deref() != Some(session)
+            || event.source != "runner"
+            || event.provenance != "observed"
+        {
+            summary.unexpected_identity += 1;
+        } else if let Some(seq) = entry.audit_seq() {
+            summary.acknowledged += 1;
+            if let Some(rows) = central.and_then(|page| page.rows.as_ref())
+                && let Some(matches) = &mut summary.central_ack_matches
+            {
+                for (row, count) in rows.iter().zip(matches) {
+                    if let Some((id, central_seq)) = row.audit_key
+                        && central_seq == seq
+                        && entry.event_id() == id
+                        && let Some(count) = count
+                    {
+                        *count += 1;
+                    }
+                }
+            }
+        } else {
+            summary.pending += 1;
+        }
+    }
+    summary
+}
+
 impl TerminalCheckpointProbe {
     pub fn new(
         fixture_root: &Path,
@@ -96,11 +149,17 @@ impl TerminalCheckpointProbe {
         })();
     }
 
-    pub fn read(&self) -> TerminalCheckpointObservation {
-        self.read_confirmed().unwrap_or_default()
+    pub fn read(
+        &self,
+        central: Option<&super::ExecutorFailurePage>,
+    ) -> (TerminalCheckpointObservation, Option<ExecutorFailureOutbox>) {
+        self.read_confirmed(central).unwrap_or_default()
     }
 
-    fn read_confirmed(&self) -> Option<TerminalCheckpointObservation> {
+    fn read_confirmed(
+        &self,
+        central: Option<&super::ExecutorFailurePage>,
+    ) -> Option<(TerminalCheckpointObservation, Option<ExecutorFailureOutbox>)> {
         let head = self.head.as_ref()?;
         let head_revision = NonZeroU64::new(head.revision.revision())?;
         let directory = Directory::open_existing(&self.job_root).ok()?;
@@ -115,7 +174,7 @@ impl TerminalCheckpointProbe {
         let outbox = confirmed_outbox_payload(file.bytes(), self.operation, head)?;
         let checkpoint = BrokerCheckpointV4::from_bytes(outbox.get().as_bytes()).ok()?;
         file.revalidate().ok()?;
-        Some(TerminalCheckpointObservation {
+        let observation = TerminalCheckpointObservation {
             head_revision: Some(head_revision),
             result_audit_at_head: outbox_delivery(
                 checkpoint.events(),
@@ -127,7 +186,9 @@ impl TerminalCheckpointProbe {
                 "broker.batch.failure",
                 &self.session,
             ),
-        })
+        };
+        let diagnostics = executor_failure_outbox(checkpoint.events(), &self.session, central);
+        Some((observation, Some(diagnostics)))
     }
 }
 

@@ -845,6 +845,10 @@ pub fn batch_failure_marker(page: &Value) -> Result<Option<Value>> {
     let Some(event) = items.first() else {
         return Ok(None);
     };
+    project_batch_failure_event(event).map(Some)
+}
+
+fn project_batch_failure_event(event: &Value) -> Result<Value> {
     ensure!(
         event["kind"] == "broker.batch.failure" && event["source"] == "runner",
         "unexpected diagnostic event identity"
@@ -914,11 +918,11 @@ pub fn batch_failure_marker(page: &Value) -> Result<Option<Value>> {
     );
     // Only this projection is persisted. Neither arbitrary data nor any error
     // body/argv is copied. An outer exchange label is not evidence of an ACK.
-    Ok(Some(json!({
+    Ok(json!({
         "event_id":event_id,"audit_seq":audit_seq,"kind":"broker.batch.failure",
         "phase":phase,"broker_step":broker_step,"enforcer_stage":enforcer_stage,
         "runtime_stage":runtime_stage,"runtime_effect":"unknown"
-    })))
+    }))
 }
 
 pub fn terminal_failure_step(
@@ -976,6 +980,77 @@ pub fn terminal_failure_read(
         _ => TerminalFailureRead::Unverified,
     };
     (read, None)
+}
+
+/// Diagnostic only. Page completeness and event identity do not change the
+/// existing single-event authority check.
+#[derive(serde::Serialize)]
+pub struct ExecutorFailurePage {
+    cursor: &'static str,
+    pub(super) rows: Option<Vec<ExecutorFailureRow>>,
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct ExecutorFailureRow {
+    session_matches: bool,
+    runner_source: bool,
+    observed_provenance: bool,
+    after_admission: bool,
+    phase: Option<LocalFailurePhaseV1>,
+    broker_step: Option<String>,
+    #[serde(skip)]
+    pub(super) audit_key: Option<(Uuid, i64)>,
+}
+
+pub fn executor_failure_page(
+    page: &Value,
+    session: &str,
+    admission_seq: i64,
+) -> ExecutorFailurePage {
+    let cursor = match page.get("next_cursor") {
+        None => "unknown",
+        Some(Value::Null) => "complete",
+        Some(_) => "present",
+    };
+    let rows = page["items"]
+        .as_array()
+        .filter(|items| items.len() <= 2)
+        .map(|items| {
+            items
+                .iter()
+                .map(|event| {
+                    let session_matches = event["session_id"].as_str() == Some(session);
+                    let runner_source = event["source"] == "runner";
+                    let observed_provenance = event["provenance"] == "observed";
+                    let after_admission =
+                        event["seq"].as_i64().is_some_and(|seq| seq > admission_seq);
+                    let marker = project_batch_failure_event(event).ok();
+                    let audit_key = marker
+                        .as_ref()
+                        .filter(|_| session_matches && observed_provenance && after_admission)
+                        .and_then(|marker| {
+                            Some((
+                                Uuid::parse_str(marker["event_id"].as_str()?).ok()?,
+                                marker["audit_seq"].as_i64()?,
+                            ))
+                        });
+                    ExecutorFailureRow {
+                        session_matches,
+                        runner_source,
+                        observed_provenance,
+                        after_admission,
+                        phase: marker.as_ref().and_then(|marker| {
+                            serde_json::from_value(marker["phase"].clone()).ok()
+                        }),
+                        broker_step: marker
+                            .as_ref()
+                            .and_then(|marker| marker["broker_step"].as_str().map(str::to_owned)),
+                        audit_key,
+                    }
+                })
+                .collect()
+        });
+    ExecutorFailurePage { cursor, rows }
 }
 
 fn optional_failure_label<'a>(

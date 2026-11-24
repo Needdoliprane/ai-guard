@@ -150,6 +150,7 @@ struct RunClientObservations {
     worker_deadline_evidence: WorkerDeadlineEvidence,
     terminal_failure_step: Option<&'static str>,
     terminal_failure_read: harness::TerminalFailureRead,
+    executor_failure_page: Option<harness::ExecutorFailurePage>,
     checkpoint: Option<harness::checkpoint::TerminalCheckpointProbe>,
 }
 
@@ -411,6 +412,74 @@ fn terminal_failure_step_requires_one_complete_event_from_the_admitted_session()
 }
 
 #[test]
+fn executor_failure_projection_preserves_ambiguity_and_incomplete_pages() {
+    use harness::TerminalFailureRead;
+
+    let session = "synthetic-private-session";
+    let event = json!({
+        "id":"11111111-1111-4111-8111-111111111111", "seq":18,
+        "kind":"broker.batch.failure", "source":"runner",
+        "provenance":"observed", "session_id":session,
+        "data":{"version":1,"phase":"worker","runtime_effect":"unknown",
+            "broker_step":"cleanup_confirmation","detail":"synthetic-private-detail"}
+    });
+    let mut other = event.clone();
+    other["session_id"] = json!("synthetic-private-other");
+    other["data"]["broker_step"] = json!("synthetic-private-label");
+    let page = json!({"items":[event.clone(), other], "next_cursor":"synthetic-private-cursor"});
+    assert_eq!(
+        harness::terminal_failure_read(&page, session, 17),
+        (TerminalFailureRead::Ambiguous, None)
+    );
+    let central = harness::executor_failure_page(&page, session, 17);
+    let projection = serde_json::to_value(&central).unwrap();
+    assert_eq!(projection["cursor"], "present");
+    assert_eq!(projection["rows"].as_array().unwrap().len(), 2);
+    assert_eq!(projection["rows"][0]["session_matches"], true);
+    assert_eq!(projection["rows"][0]["phase"], "worker");
+    assert_eq!(projection["rows"][0]["broker_step"], "cleanup_confirmation");
+    assert_eq!(projection["rows"][1]["session_matches"], false);
+    assert!(projection["rows"][1]["broker_step"].is_null());
+    let serialized = projection.to_string();
+    assert!(!serialized.contains("synthetic-private"));
+    assert!(!serialized.contains("11111111"));
+
+    use agentsandbox::{broker::outbox::OutboxEventV1, model::Event};
+    let mut local = Event::new("broker.batch.failure");
+    local.id = event["id"].as_str().unwrap().to_owned();
+    local.session_id = Some(session.to_owned());
+    local.source = "runner".to_owned();
+    local.data = event["data"].clone();
+    let pending = OutboxEventV1::new(Uuid::from_u128(1), &"a".repeat(64), local).unwrap();
+    let acknowledged = pending.acknowledged(18).unwrap();
+    let different_sequence = pending.acknowledged(19).unwrap();
+    assert_eq!(
+        serde_json::to_value(harness::checkpoint::executor_failure_outbox(
+            &[pending, acknowledged, different_sequence],
+            session,
+            Some(&central),
+        ))
+        .unwrap(),
+        json!({"pending":1,"acknowledged":2,"unexpected_identity":0,"central_ack_matches":[1,null]})
+    );
+
+    let oversized =
+        json!({"items":[event.clone(), event.clone(), event.clone()],"next_cursor":null});
+    let projection =
+        serde_json::to_value(harness::executor_failure_page(&oversized, session, 17)).unwrap();
+    assert!(projection["rows"].is_null());
+
+    let incomplete = json!({"items":[event]});
+    assert_eq!(
+        harness::terminal_failure_read(&incomplete, session, 17),
+        (TerminalFailureRead::Unverified, None)
+    );
+    let projection =
+        serde_json::to_value(harness::executor_failure_page(&incomplete, session, 17)).unwrap();
+    assert_eq!(projection["cursor"], "unknown");
+}
+
+#[test]
 fn batch_failure_marker_rejects_invalid_public_metadata() {
     let private = "synthetic-private-invalid-label-do-not-print";
     let valid = json!({"items":[{
@@ -541,17 +610,17 @@ async fn broker_run_cli_sigkill_preserves_original_deadline_without_second_start
         .and_then(|result| result);
     // Start this byte-bounded local read within the scenario. The qualification
     // runner's external timeout bounds the test process, including this read.
-    let terminal_checkpoint = if state == "failed"
+    let (terminal_checkpoint, executor_failure_outbox) = if state == "failed"
         && matches!(&stage, RunClientRecoveryStage::Executor { .. })
         && Instant::now() < scenario_end
     {
         observations
             .checkpoint
             .as_ref()
-            .map(|probe| probe.read())
+            .map(|probe| probe.read(observations.executor_failure_page.as_ref()))
             .unwrap_or_default()
     } else {
-        harness::checkpoint::TerminalCheckpointObservation::default()
+        Default::default()
     };
     evidence.write("result.json", &json!({
         "runtime_test":if outcome.is_ok() { "PASS" } else { "FAIL" },
@@ -562,6 +631,8 @@ async fn broker_run_cli_sigkill_preserves_original_deadline_without_second_start
         "terminal_failure_step":observations.terminal_failure_step,
         "terminal_failure_read":observations.terminal_failure_read,
         "terminal_checkpoint":terminal_checkpoint,
+        "executor_failure_page":observations.executor_failure_page,
+        "executor_failure_outbox":executor_failure_outbox,
         "requested_broker_client_source":"published_selection",
         "broker_selection_input":"environment",
         "native_start":selection.native_start,
@@ -1047,11 +1118,19 @@ async fn run(
                     )
                     .await
                     {
-                        Ok(Ok(page)) => harness::terminal_failure_read(
-                            &page,
-                            &worker.launch.session_id,
-                            admission_seq,
-                        ),
+                        Ok(Ok(page)) => {
+                            observations.executor_failure_page =
+                                Some(harness::executor_failure_page(
+                                    &page,
+                                    &worker.launch.session_id,
+                                    admission_seq,
+                                ));
+                            harness::terminal_failure_read(
+                                &page,
+                                &worker.launch.session_id,
+                                admission_seq,
+                            )
+                        }
                         _ => (TerminalFailureRead::ReadFailed, None),
                     }
                 } else {
