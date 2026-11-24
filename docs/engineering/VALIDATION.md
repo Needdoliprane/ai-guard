@@ -62,6 +62,15 @@ d’autorisation restent en vigueur. Les ressources de la recette sont
 retirées.
 [Prompts et résultats](evidence/2026-11-24/g07-installed-macos-qwen.json).
 
+Le rejeu différentiel étend cette comparaison à `echo`, `pwd`,
+`printf` et un exécutable fictif aux effets inconnus. Le nouveau prompt
+donne `allow` aux trois premiers cas comme attendu, puis donne aussi
+`allow` pour l’exécutable inconnu, servi avec une justification de
+lecture seule sans élément qui la prouve. L’attendu est `review` dans
+ce cas. La variante est écartée. Les huit appels directs restent
+isolés, sans décision gateway ni lancement. Les ressources sont
+retirées. [Résultats par cas](evidence/2026-11-24/g07-installed-macos-qwen.json).
+
 ## 24 novembre 2026 — Jev TypeSafe depuis l’archive macOS
 
 **PASS ciblé G07.** Le CLI ARM64 extrait de l’archive `e2796ac1` lance
