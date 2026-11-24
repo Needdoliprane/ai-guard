@@ -104,6 +104,18 @@ FAIL sur `c7f6c966` reste le dernier résultat physique.
 Reçu `g09-terminal-oracle-905e79db.log`, SHA-256
 `9aca0a3a7a318f2a7e0f9fd4844b66531acd9c06cd417cd0f9ab85bc81e0c8be`.
 
+**G12 — images corrigées et audit des dépendances.** Le contrôle
+`fdf780c3` est construit sous Docker ARM64 et son image démarre sur
+Docker et Podman rootless. Le worker `7e45828f` est construit sous
+Docker ARM64 sans client fournisseur et passe l’export audité.
+Le transfert de ce worker vers Podman a été interrompu faute
+d’espace. Son parcours Podman reste à exécuter. Les mises à
+niveau `url` et `jsonwebtoken` retirent deux avis RustSec du
+graphe. L’avis `rsa 0.9.10`, le suivi de maintenance de `chrono`
+et la qualification des artefacts publiables restent ouverts.
+[Validation des images](VALIDATION.md#24-novembre-2026--image-worker-docker-arm64-7e45828f)
+· [Checklist de publication](RELEASE_CHECKLIST.md).
+
 **G01/G09/G12 — CLI macOS ARM64 installé du gel `e2796ac1`.**
 L’archive locale comporte six binaires vérifiés. Le CLI installé
 déclare la révision exacte et vérifie les quatre artefacts du manifeste
