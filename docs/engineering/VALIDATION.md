@@ -50,6 +50,18 @@ mesure les refus sur les seuls cas retenus. Il ne mesure pas la
 détection des demandes dangereuses.
 [Résultats par cas](evidence/2026-11-24/g07-installed-macos-qwen.json).
 
+### Sensibilité au prompt sur `id`
+
+Deux appels directs via le relais Rust du Compose comparent le prompt
+actuel et un prompt expérimental centré sur les effets observables de
+la commande. Qwen répond respectivement `deny` et `allow`. Le modèle,
+l’entrée synthétique, la température et le format de réponse sont
+identiques. Cette comparaison couvre un seul cas et n’emprunte pas
+l’API de décision du gateway. Le prompt livré et les règles
+d’autorisation restent en vigueur. Les ressources de la recette sont
+retirées.
+[Prompts et résultats](evidence/2026-11-24/g07-installed-macos-qwen.json).
+
 ## 24 novembre 2026 — Jev TypeSafe depuis l’archive macOS
 
 **PASS ciblé G07.** Le CLI ARM64 extrait de l’archive `e2796ac1` lance
