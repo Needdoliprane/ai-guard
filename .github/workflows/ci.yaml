@@ -37,6 +37,8 @@ jobs:
           python3 -B tests/e2e/test_run_provider_broker.py BrokerRecipeTests
       - name: Rust unit tests and provider matrix regressions
         run: cargo test --locked --offline --lib --bins --example provider-matrix --example third_party_notices --no-fail-fast
+      - name: Check release archives with the operator CLI
+        run: cargo test --locked --offline --test release_workflow_guard
       - name: Check provider selection with the diagnostic CLI
         run: >-
           cargo test --locked --offline --test diagnose_cli --

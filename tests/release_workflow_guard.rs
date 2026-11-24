@@ -1,8 +1,5 @@
 //! Guards on release archive contents and on the workflow wiring for tagging and drafts.
-//! No GitHub call is made and nothing is built.
-
-#[path = "../src/operations/source_snapshot/release_archive.rs"]
-mod release_archive;
+//! No GitHub call is made.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -51,10 +48,23 @@ fn archive(parent: &Path, root: &str, members: &[Member]) -> PathBuf {
 }
 
 fn check(archive: &Path, root: &str, target: &str) -> (bool, String) {
-    match release_archive::verify(archive, root, target, "agentsandbox ai-guard-provider") {
-        Ok(()) => (true, String::new()),
-        Err(error) => (false, format!("{error:#}")),
-    }
+    let output = Command::new(env!("CARGO_BIN_EXE_agentsandbox"))
+        .args(["release", "verify-archive", "--archive"])
+        .arg(archive)
+        .args([
+            "--root",
+            root,
+            "--target",
+            target,
+            "--native-binaries",
+            "agentsandbox ai-guard-provider",
+        ])
+        .output()
+        .expect("run agentsandbox release verify-archive");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
 }
 
 fn native(notices: Option<&str>) -> Vec<Member<'_>> {
