@@ -1,5 +1,18 @@
 # Validation courante
 
+## 24 novembre 2026 — rétention SQLite par le vrai CLI
+
+**PASS ciblé G06** sur `3ba14691`. Les deux tests de
+`audit_retention_cli` passent avec le binaire compilé hors ligne.
+Ils exercent l’installation du profil, la vérification et l’export
+d’une archive de recette, ainsi que le refus du plan et de
+l’application sur un historique trop récent.
+
+La recette physique de perte d’accusé après commit garde son
+propre seuil d’éligibilité. L’archive de la fixture `7e1f9cb1` a
+été vérifiée par SHA-256. Le premier instant prévu pour l’appliquer
+reste le 25 novembre 2026 à 12 h 53 UTC.
+
 ## 24 novembre 2026 — identité locale et export nominatif interrompu
 
 **PASS ciblé G04.** Le CLI macOS archivé `84971de6` provisionne un
