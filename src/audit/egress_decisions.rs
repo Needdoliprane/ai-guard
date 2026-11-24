@@ -318,6 +318,26 @@ impl Store {
             self.commit_checked(tx)?;
             return Ok(receipt(&existing));
         }
+        // Validate fresh connections against the decision at the time of
+        // admission. The worker can have stopped by the time we record the fact.
+        if let EgressObservationV1::Connection {
+            decision_id,
+            flow_id,
+            ..
+        } = &request.observation
+        {
+            let stored = by_id(&tx, decision_id)?
+                .filter(|event| event.event.kind == DECISION_KIND)
+                .ok_or(EgressJournalError::Invalid)?;
+            let (decided_request, decision) = stored_decision(&stored)?;
+            anyhow::ensure!(
+                decided_request.decision_id == *decision_id
+                    && decided_request.binding == *binding
+                    && decided_request.flow_id == *flow_id
+                    && decision.allows(&decided_request),
+                EgressJournalError::Invalid
+            );
+        }
         // A fresh channel opening requires the exact durable Running worker.
         // A replay above still returns the same historical receipt.
         if matches!(
