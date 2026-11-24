@@ -12,7 +12,16 @@ Les trois exports correspondent aux sources, les quotas reviennent à
 zéro et les trois conteneurs sont retirés. Les trois volumes de travail
 ont été retirés après rapprochement des labels avec le reçu. Les
 inventaires préexistants de conteneurs, volumes et images sont identiques
-avant et après. Cette recette porte sur un moteur local et un gateway.
+avant et après.
+
+Sur `219a1755`, le même sélecteur passe en 58,66 s sous Podman
+rootless ARM64. Les trois workers se chevauchent pendant 19,87 s.
+Chrome affiche deux lignes chez A et une chez B, les trois instances
+sont confirmées après affichage et les deux déconnexions passent.
+Après les trois exports et la libération du quota, les trois volumes
+de travail et les trois marqueurs d’autorité sont rapprochés des reçus
+et retirés. Les inventaires Podman retrouvent leur état initial.
+Chaque passage couvre un moteur local et un gateway.
 
 ## 24 novembre 2026 — ancre d’audit protégée au niveau du processus
 
