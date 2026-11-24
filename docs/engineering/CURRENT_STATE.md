@@ -33,7 +33,7 @@ Le commun Native17 R5 `a3e9ca09…` passe check toutes cibles et build libtest, 
 
 La faute tardive Managed jusqu’au finalizer Store/quota est désormais couverte logiciellement par les quatre CLI/Gateway/SQLite inclus dans les douze PASS du 17 novembre. Le vrai TTY interactif, les moteurs réels et les garanties d’abandon/reprise froide restent ouverts ; les unités Managed et PTY ne les qualifient pas. Les résultats Native17 privés restent séparés ; heartbeat/self ne remplace pas le checkpoint **Full**, son installation/profil, la reprise ou la supersession.
 
-La cible conserve les parcours complets, le contrôle réseau Rust, l’audit, l’arrêt/reprise, la restauration et les qualifications réelles : A1/A2/B1, Codex CLI et Claude Code chacun par API et abonnement, Docker/Podman/Kubernetes, TLS et 100 workers. Les preuves partielles ne les qualifient pas. [Mandat](../../AGENTS.md), [contrat d’architecture](ARCHITECTURE_CONTRACT.md), [identité et configuration](../sso.md), [gates](PRODUCTION_READINESS.md).
+La cible V1 conserve les parcours complets, le contrôle réseau Rust, l’audit, l’arrêt/reprise, la restauration, les quatre parcours Codex CLI et Claude Code, Docker/Podman/Kubernetes et TLS. Pour G10, la recette A1/A2 chez A et B1 chez B et les 100 réservations durables chez A sont attestées sur `48f81d20`. La capacité physique à 100 reste une cible de dimensionnement. [Mandat](../../AGENTS.md), [contrat d’architecture](ARCHITECTURE_CONTRACT.md), [identité et configuration](../sso.md), [gates](PRODUCTION_READINESS.md), [CI G10](https://github.com/Needdoliprane/ai-guard/actions/runs/45344259411).
 
 ## Priorités de qualification
 
