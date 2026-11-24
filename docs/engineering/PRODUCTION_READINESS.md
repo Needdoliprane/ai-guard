@@ -349,7 +349,9 @@ Rust sur loopback restitue un avis Qwen `deny` et la décision effective
 cgroup atteignent respectivement 707 788 800 et 318 668 800 octets,
 sans swap ni OOM, sous la même limite effective de 999 997 440 octets.
 [Reçu Qwen](evidence/2026-11-24/g07-installed-macos-qwen.json).
-La qualité du modèle et la qualification globale G07 restent ouvertes.
+Le corpus ciblé de quatre invocations bénignes admises par la politique
+locale donne quatre avis `deny`. L’utilité de ce modèle sur ce corpus
+et la qualification globale G07 restent ouvertes.
 
 **G07 — moteur Rust déterministe sur Docker Desktop et Podman rootless.** Le CLI macOS
 installé `7e1f9cb1` sélectionne `rust-rules` et audite l’autorisation
