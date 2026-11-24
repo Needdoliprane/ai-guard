@@ -1511,6 +1511,28 @@ async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_bloc
     assert_eq!(granted.event_count, before_export.event_count + 1);
     assert_eq!(granted.head_hash, export_receipt.audit_hash);
 
+    // Capture the committed grant before any subsequent maintenance requests.
+    let post_export_path = directory.join("post-export.sqlite");
+    backup_to(&post_export_path);
+    let audit_exports = [directory.join("post-export-audit")];
+    fixture
+        .a
+        .export_audit_archive(&audit_exports[0], Some(1), Some(export_receipt.audit_seq))
+        .unwrap();
+    let verify_export = |store: &Store| {
+        let report = store.verify_audit_archives(&audit_exports).unwrap();
+        assert_eq!(report.verdict, "verified", "{:?}", report.failure);
+        assert_eq!(report.exports_verified, 1);
+        assert_eq!(report.tenant_id, "tenant-a");
+        assert_eq!(report.live_head_seq, export_receipt.audit_seq);
+        assert_eq!(report.live_head_hash, export_receipt.audit_hash);
+        assert_eq!(
+            report.stored_events,
+            i64::try_from(granted.event_count).unwrap()
+        );
+    };
+    verify_export(&fixture.a);
+
     // An independent open is maintenance-only. Reads and exact consumed
     // replay remain available, while fresh operations are refused atomically.
     let reopened = Arc::new(
@@ -1716,6 +1738,49 @@ async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_bloc
     assert!(after_restore.valid);
     assert_eq!(after_restore.event_count, before_export.event_count);
     assert_eq!(after_restore.head_hash, before_export.head_hash);
+
+    let post_export = Arc::new(
+        Store::open_existing_for_tenant(
+            &post_export_path,
+            "tenant-a",
+            Redactor::new(vec![]),
+            10_000,
+        )
+        .unwrap(),
+    );
+    let post_export_state = post_export.supervision_state().unwrap();
+    assert!(!post_export_state.active);
+    assert_eq!(
+        post_export_state.control_namespace_uuid.as_deref(),
+        Some(namespace.as_str())
+    );
+    assert_eq!(
+        post_export_state.schema_version,
+        restored_state.schema_version
+    );
+    verify_export(&post_export);
+
+    let post_export_router = maintenance_router(&post_export);
+    let replay = json_request(
+        &post_export_router,
+        Method::POST,
+        &export_path,
+        Some(&fixture.runner_a),
+        &export,
+    )
+    .await;
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(
+        response_json::<MutationReceiptV1>(replay).await,
+        export_receipt
+    );
+    verify_export(&post_export);
+    assert_eq!(post_export.audit_retention_ledger().unwrap(), ledger);
+    assert_eq!(accounting(&post_export), before_accounting);
+    assert_eq!(
+        serde_json::to_value(post_export.worker(&worker.worker_id).unwrap().unwrap()).unwrap(),
+        serde_json::to_value(&pending_worker).unwrap()
+    );
 
     // This separate reservation fixture writes its own decision before testing
     // the maintenance refusal. Keep it outside the export audit comparison.
