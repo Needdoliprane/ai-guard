@@ -54,6 +54,7 @@ const PROFILE: &str = "g09";
 const NS: u128 = 1_000_000_000;
 const OBSERVATION_GRACE_NS: u128 = 3 * NS;
 const GATEWAY_HTTP_TIMEOUT: Duration = Duration::from_secs(3);
+const EARLY_TERMINAL_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 enum LostProcess<'a> {
     Broker {
@@ -148,6 +149,7 @@ struct RunClientRecoveryReceipt {
 struct RunClientObservations {
     central_terminal_observed_within_window: bool,
     worker_deadline_evidence: WorkerDeadlineEvidence,
+    early_worker_deadline_evidence: WorkerDeadlineEvidence,
     terminal_failure_step: Option<&'static str>,
     terminal_failure_read: harness::TerminalFailureRead,
     executor_failure_page: Option<harness::ExecutorFailurePage>,
@@ -254,6 +256,7 @@ fn run_client_terminal_observation_opens_only_the_remaining_scenario_budget() {
         observe_until,
         scenario_end,
         attempt_id: "original-attempt",
+        early_probe: None,
         observations: &mut observations,
     };
     bounds.observe_central_terminal(before_observation_limit, false);
@@ -267,6 +270,7 @@ fn run_client_terminal_observation_opens_only_the_remaining_scenario_budget() {
         observe_until,
         scenario_end,
         attempt_id: "original-attempt",
+        early_probe: None,
         observations: &mut observations,
     };
     bounds.observe_central_terminal(before_observation_limit, true);
@@ -699,6 +703,7 @@ async fn broker_run_cli_sigkill_preserves_original_deadline_without_second_start
         "run_client_recovery":RunClientRecoveryReceipt { state, stage },
         "central_terminal_observed_within_window":observations.central_terminal_observed_within_window,
         "worker_deadline_evidence":observations.worker_deadline_evidence,
+        "early_worker_deadline_evidence":observations.early_worker_deadline_evidence,
         "terminal_failure_step":observations.terminal_failure_step,
         "terminal_failure_read":observations.terminal_failure_read,
         "terminal_checkpoint":terminal_checkpoint,
@@ -1140,8 +1145,9 @@ async fn run(
             &json!({"stage":"read_original_job_without_resubmit"}),
         )?;
         // The central terminal observation has its own window. Afterward the
-        // broker can finish under the remaining scenario budget. The Result and
-        // exact Docker events are still required to establish the stop and removal.
+        // broker can finish under the remaining scenario budget. Sample the
+        // terminal before consuming executor status or Result; the physical
+        // scan can already run concurrently in the broker.
         let observe_until = Instant::now() + Duration::from_secs(u64::from(timeout_seconds) + 35);
         observations.checkpoint =
             JournalScopeV1::new(installation_id, "local", &origin, namespace_id, PROFILE)
@@ -1155,6 +1161,15 @@ async fn run(
                     )
                     .ok()
                 });
+        let terminal_probe = CliDockerTerminalProbe {
+            selection,
+            clock: &clock,
+            since: docker_events_since,
+            arm: &arm,
+            session: Uuid::parse_str(&worker.launch.session_id)?,
+            cid: &cid,
+            started: docker_started,
+        };
         let wait_result = wait_terminal(
             evidence,
             &runner,
@@ -1165,6 +1180,7 @@ async fn run(
                 observe_until,
                 scenario_end,
                 attempt_id: &worker.attempt.attempt_id,
+                early_probe: Some(&terminal_probe),
                 observations: &mut *observations,
             },
             run_client_stage,
@@ -1261,16 +1277,7 @@ async fn run(
             "central observation and durable Result do not establish the original worker's clean non-OOM deadline stop"
         );
         *run_client_stage = RunClientRecoveryStage::PostTerminalChecks;
-        verify_cli_docker_terminal(
-            selection,
-            evidence,
-            &clock,
-            docker_events_since,
-            &arm,
-            terminal,
-            (docker_started, finished),
-        )
-        .await?;
+        terminal_probe.verify(evidence, finished, true).await?;
         let actual_run_ns = observed_process_duration_ns(docker_started, finished, sleep_seconds)?;
         evidence.write(
             "deadline-observation.json",
@@ -1838,86 +1845,208 @@ fn observed_process_duration_ns(
     Ok(duration)
 }
 
-async fn verify_cli_docker_terminal(
-    selection: &Selection,
-    evidence: &Evidence,
-    clock: &NativeHostClock,
+struct CliDockerTerminalProbe<'a> {
+    selection: &'a Selection,
+    clock: &'a NativeHostClock,
     since: DateTime<FixedOffset>,
-    arm: &ArmResultV1,
-    terminal: &TerminalJobResultV1,
-    (started, finished): (DateTime<FixedOffset>, DateTime<FixedOffset>),
-) -> Result<()> {
-    // This projection assumes Docker's wall clock stays continuous between the events and this sample.
-    let before = clock.sample()?;
-    let docker_now = selection.docker_clock().await?;
-    let after = clock.sample()?;
-    ensure!(
-        [&before, &after]
-            .iter()
-            .all(|sample| sample.boot_id == arm.arm.clock.boot_id
-                && sample.method == arm.arm.clock.method),
-        "Docker event projection does not use the original host clock boot/method"
-    );
-    let events = selection
-        .session_worker_events(terminal.session_id, since, started, docker_now)
-        .await?;
-    evidence.write("docker-cli-worker-events.json", &events)?;
-    // Event history corroborates the unique start for this CID. Physical duration uses inspect timestamps.
-    let start = exactly_one_worker_start(&events, &terminal.container_id)?;
-    let kill = exactly_one_docker_event(&events, "kill")?;
-    let die = exactly_one_docker_event(&events, "die")?;
-    let destroy = exactly_one_docker_event(&events, "destroy")?;
-    let finished_wall = finished
-        .timestamp_nanos_opt()
-        .context("unrepresentable Docker FinishedAt")?;
-    ensure!(
-        kill.signal == "9"
-            && die.exit_code == "137"
-            && start.wall_ns < kill.wall_ns
-            && kill.wall_ns <= die.wall_ns
-            && die.wall_ns <= destroy.wall_ns
-            && start.wall_ns < finished_wall
-            && finished_wall <= die.wall_ns
-            && !events
+    arm: &'a ArmResultV1,
+    session: Uuid,
+    cid: &'a str,
+    started: DateTime<FixedOffset>,
+}
+
+impl CliDockerTerminalProbe<'_> {
+    async fn attest_early(&self, evidence: &Evidence, worker: &WorkerV1) -> Result<()> {
+        let actual = worker
+            .last_observation
+            .as_ref()
+            .context("terminal worker observation missing")?;
+        ensure!(
+            worker.launch.session_id == self.session.to_string()
+                && worker.launch.authority_id == self.arm.arm.inspection.authority_id
+                && actual.inspection == self.arm.arm.inspection
+                && actual.inspection.container_id == self.cid
+                && actual.running == Some(false)
+                && actual.restart_count == Some(0)
+                && actual.exit_code == Some(137)
+                && actual.oom_killed == Some(false),
+            "early terminal observation does not prove the armed CID"
+        );
+        let started = DateTime::parse_from_rfc3339(
+            worker
+                .observed_started_at
+                .as_deref()
+                .context("original StartedAt missing")?,
+        )?;
+        ensure!(started == self.started, "early terminal StartedAt changed");
+        let finished = DateTime::parse_from_rfc3339(
+            actual
+                .finished_at
+                .as_deref()
+                .context("terminal FinishedAt missing")?,
+        )?;
+        let duration = observed_process_duration_ns(
+            self.started,
+            finished,
+            self.selection.timeout_seconds + 15,
+        )?;
+        self.verify(evidence, finished, false).await?;
+        evidence.write(
+            "early-worker-deadline-observation.json",
+            &json!({
+                "session_id":self.session, "worker_id":worker.worker_id,
+                "attempt_id":worker.attempt.attempt_id, "container_id":self.cid,
+                "original_arm":self.arm, "docker_started_at":self.started,
+                "docker_finished_at":finished, "observed_process_duration_ns":duration.to_string(),
+                "observation_tolerance_ns":OBSERVATION_GRACE_NS.to_string()
+            }),
+        )
+    }
+
+    async fn verify(
+        &self,
+        evidence: &Evidence,
+        finished: DateTime<FixedOffset>,
+        require_removal: bool,
+    ) -> Result<()> {
+        let Self {
+            selection,
+            clock,
+            since,
+            arm,
+            session,
+            cid,
+            started,
+        } = self;
+        let (history_file, clock_file) = if require_removal {
+            (
+                "docker-cli-worker-events.json",
+                "terminal-clock-projection.json",
+            )
+        } else {
+            (
+                "early-docker-worker-events.json",
+                "early-terminal-clock-projection.json",
+            )
+        };
+        // This projection assumes Docker's wall clock stays continuous between the events and this sample.
+        let before = clock.sample()?;
+        let docker_now = selection.docker_clock().await?;
+        let after = clock.sample()?;
+        ensure!(
+            [&before, &after]
                 .iter()
-                .any(|event| matches!(event.action.as_str(), "oom" | "restart")),
-        "Docker history does not prove one start followed by SIGKILL, terminal and removal of the exact CID"
-    );
-    let to_host_bounds = |wall_ns: i64| -> Result<(u128, u128)> {
-        let event_time = DateTime::from_timestamp_nanos(wall_ns);
-        let elapsed = docker_now
-            .signed_duration_since(event_time)
-            .num_nanoseconds()
-            .context("Docker event clock delta not representable")?;
-        let elapsed =
-            u128::try_from(elapsed).context("Docker event is later than its clock sample")?;
-        Ok((
-            before
-                .continuous_ns()?
-                .checked_sub(elapsed)
-                .context("earliest host event time underflow")?,
-            after
-                .continuous_ns()?
-                .checked_sub(elapsed)
-                .context("latest host event time underflow")?,
-        ))
-    };
-    let (earliest_kill, _) = to_host_bounds(kill.wall_ns)?;
-    let (earliest_finish, latest_finish) = to_host_bounds(finished_wall)?;
-    let deadline = arm.arm.deadline_ns_decimal.parse::<u128>()?;
-    evidence.write("terminal-clock-projection.json", &json!({
+                .all(|sample| sample.boot_id == arm.arm.clock.boot_id
+                    && sample.method == arm.arm.clock.method),
+            "Docker event projection does not use the original host clock boot/method"
+        );
+        let events = selection
+            .session_worker_events(*session, *since, *started, docker_now)
+            .await?;
+        evidence.write(history_file, &events)?;
+        // Event history corroborates the unique start for this CID. Physical duration uses inspect timestamps.
+        let finished_wall = finished
+            .timestamp_nanos_opt()
+            .context("unrepresentable Docker FinishedAt")?;
+        let kill = docker_terminal_kill(&events, cid, finished_wall, require_removal)?;
+        let to_host_bounds = |wall_ns: i64| -> Result<(u128, u128)> {
+            let event_time = DateTime::from_timestamp_nanos(wall_ns);
+            let elapsed = docker_now
+                .signed_duration_since(event_time)
+                .num_nanoseconds()
+                .context("Docker event clock delta not representable")?;
+            let elapsed =
+                u128::try_from(elapsed).context("Docker event is later than its clock sample")?;
+            Ok((
+                before
+                    .continuous_ns()?
+                    .checked_sub(elapsed)
+                    .context("earliest host event time underflow")?,
+                after
+                    .continuous_ns()?
+                    .checked_sub(elapsed)
+                    .context("latest host event time underflow")?,
+            ))
+        };
+        let (earliest_kill, _) = to_host_bounds(kill.wall_ns)?;
+        let (earliest_finish, latest_finish) = to_host_bounds(finished_wall)?;
+        let deadline = arm.arm.deadline_ns_decimal.parse::<u128>()?;
+        evidence.write(clock_file, &json!({
         "host_before":before,"host_after":after,"docker_wall_sample":docker_now,"docker_finished_at":finished,
         "earliest_kill_ns":earliest_kill.to_string(),"earliest_finish_ns":earliest_finish.to_string(),
         "latest_finish_ns":latest_finish.to_string(),"original_deadline_ns":deadline.to_string(),
         "observation_tolerance_ns":OBSERVATION_GRACE_NS.to_string(),"projection_method":"single_post_fault_wall_sample"
     }))?;
+        ensure!(
+            earliest_kill >= deadline
+                && earliest_finish >= deadline
+                && latest_finish <= deadline + OBSERVATION_GRACE_NS,
+            "Docker terminal is not established between the original deadline and its three-second allowance"
+        );
+        Ok(())
+    }
+}
+
+fn docker_terminal_kill<'a>(
+    events: &'a [harness::ContainerEvent],
+    cid: &str,
+    finished_wall: i64,
+    require_removal: bool,
+) -> Result<&'a harness::ContainerEvent> {
+    let start = exactly_one_worker_start(events, cid)?;
+    let kill = exactly_one_docker_event(events, "kill")?;
+    let die = exactly_one_docker_event(events, "die")?;
+    if require_removal {
+        let destroy = exactly_one_docker_event(events, "destroy")?;
+        ensure!(
+            die.wall_ns <= destroy.wall_ns,
+            "Docker removal preceded terminal"
+        );
+    }
     ensure!(
-        earliest_kill >= deadline
-            && earliest_finish >= deadline
-            && latest_finish <= deadline + OBSERVATION_GRACE_NS,
-        "Docker terminal is not established between the original deadline and its three-second allowance"
+        kill.signal == "9"
+            && die.exit_code == "137"
+            && start.wall_ns < kill.wall_ns
+            && kill.wall_ns <= die.wall_ns
+            && start.wall_ns < finished_wall
+            && finished_wall <= die.wall_ns
+            && !events
+                .iter()
+                .any(|event| matches!(event.action.as_str(), "oom" | "restart")),
+        "Docker history does not prove one start followed by SIGKILL and terminal of the exact CID"
     );
-    Ok(())
+    Ok(kill)
+}
+
+#[test]
+fn docker_terminal_oracle_attests_original_cid_before_removal() {
+    let cid = "a".repeat(64);
+    let event = |action: &str, wall_ns, exit_code: &str, signal: &str| harness::ContainerEvent {
+        action: action.into(),
+        id: cid.clone(),
+        session: Uuid::from_u128(1).to_string(),
+        purpose: "run".into(),
+        wall_ns,
+        exit_code: exit_code.into(),
+        signal: signal.into(),
+    };
+    let mut events = vec![
+        event("start", 10, "", ""),
+        event("kill", 20, "", "9"),
+        event("die", 22, "137", ""),
+    ];
+    assert_eq!(
+        docker_terminal_kill(&events, &cid, 21, false)
+            .unwrap()
+            .wall_ns,
+        20
+    );
+    assert!(docker_terminal_kill(&events, &cid, 21, true).is_err());
+    assert!(docker_terminal_kill(&events, &"b".repeat(64), 21, false).is_err());
+    events.push(event("destroy", 25, "", ""));
+    assert!(docker_terminal_kill(&events, &cid, 21, true).is_ok());
+    events.push(event("start", 26, "", ""));
+    assert!(docker_terminal_kill(&events, &cid, 21, false).is_err());
 }
 
 fn exactly_one_worker_start<'a>(
@@ -2253,6 +2382,7 @@ enum TerminalWaitBounds<'a> {
         observe_until: Instant,
         scenario_end: Instant,
         attempt_id: &'a str,
+        early_probe: Option<&'a CliDockerTerminalProbe<'a>>,
         observations: &'a mut RunClientObservations,
     },
 }
@@ -2333,6 +2463,24 @@ async fn wait_terminal<'a>(
             }
         };
         bounds.observe_central_terminal(worker_observed_at, exact_terminal);
+        if let TerminalWaitBounds::RunClient {
+            scenario_end,
+            early_probe,
+            observations,
+            ..
+        } = &mut bounds
+            && observations.central_terminal_observed_within_window
+            && let Some(probe) = early_probe.take()
+        {
+            let limit = (*scenario_end).min(worker_observed_at + EARLY_TERMINAL_PROBE_TIMEOUT);
+            if Instant::now() < limit
+                && timeout_at(limit, probe.attest_early(evidence, &worker))
+                    .await
+                    .is_ok_and(|result| result.is_ok())
+            {
+                observations.early_worker_deadline_evidence = WorkerDeadlineEvidence::Attested;
+            }
+        }
         *run_client_stage = RunClientRecoveryStage::StatusRead;
         let reply = ipc(evidence, runner, BrokerCommandV1::Status { operation_id }).await?;
         let now = Instant::now();
