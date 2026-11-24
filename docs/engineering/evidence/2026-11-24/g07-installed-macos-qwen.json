@@ -22,5 +22,29 @@
     "audit_seq": 2,
     "audit_match": true,
     "integrity": true
+  },
+  "podman_rootless": {
+    "platform": "macOS ARM64 / Podman rootless",
+    "cgroups": "v2",
+    "model_image_id": "sha256:1f1ffa7951531eb52bf05235e752f36dc0d5ec3a25bc53a77f5c87969b712663",
+    "transport": "dedicated internal Podman network via loopback Envoy TCP relay",
+    "memory_limit_bytes": 999997440,
+    "memory_peak_bytes": 378777600,
+    "swap_limit_bytes": 0,
+    "oom": 0,
+    "oom_kill": 0,
+    "cleanup_verified": true,
+    "result": {
+      "http": 200,
+      "backend": "local_openai",
+      "status": "evaluated",
+      "requested_model": "qwen2.5-0.5b-q4km",
+      "returned_model": "qwen2.5-0.5b-q4km",
+      "advice": "deny",
+      "effective_decision": "deny",
+      "audit_seq": 2,
+      "audit_match": true,
+      "integrity": true
+    }
   }
 }

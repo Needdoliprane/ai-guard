@@ -9,8 +9,13 @@ passe. Le modèle Docker est sur un réseau interne, joint via un relais
 TCP Envoy publié sur loopback pour cette recette. Le cgroup atteint
 325 754 880 octets sur une limite effective de 999 997 440, sans swap
 ni OOM. Aucun worker n’est demandé. Le modèle, le relais et le réseau
-de recette sont retirés après mesure. Ce cas couvre un verdict et laisse
-ouverts la qualité du modèle, Podman et le parcours Compose livré.
+de recette sont retirés après mesure. Sur Podman rootless avec le même
+CLI et la même image, le rejeu rend aussi `deny` avec événement SQLite
+concordant et intégrité valide. Le pic atteint 378 777 600 octets sous
+la même limite effective, sans swap ni OOM. Le nettoyage des deux
+conteneurs et du réseau est vérifié. Ces recettes couvrent un verdict
+par moteur. La qualité du modèle et le parcours Compose livré restent
+à qualifier.
 [Reçu Qwen](evidence/2026-11-24/g07-installed-macos-qwen.json).
 
 ## 24 novembre 2026 — Jev TypeSafe depuis l’archive macOS
