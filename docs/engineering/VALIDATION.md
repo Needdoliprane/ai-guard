@@ -17,9 +17,18 @@ seule. Le HTML, le CSS, le JavaScript et le favicon reçus par HTTP
 sont identiques aux fichiers du paquet. Le conteneur s’exécute
 en UID/GID 1000, avec une racine en lecture seule et un port publié
 sur loopback. Le conteneur est retiré à la fin. L’image contrôle
-provient d’une recette antérieure. Le build CI Node.js 24.22.2,
-la composition avec le gateway courant et la publication restent
-à qualifier séparément.
+provient d’une recette antérieure.
+
+Le paquet est aussi servi sur loopback par le dashboard macOS
+`84971de6`, avec le gateway du même paquet et SQLite de recette.
+Les sources Rust et le verrou Cargo concordent entre `84971de6`
+et `e42c8300`. Le HTML correspond à l’archive, la lecture
+authentifiée de l’identité via le dashboard correspond à la
+réponse directe du gateway et l’accès anonyme reçoit HTTP 401.
+Les deux endpoints de statut renvoient la révision archivée et
+les deux ports sont fermés en fin de recette. Le build CI Node.js
+24.22.2, la composition conteneurisée exacte et la publication
+restent à qualifier séparément.
 
 ## 24 novembre 2026 — prévol Kubernetes du candidat
 
