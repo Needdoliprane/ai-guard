@@ -542,6 +542,30 @@ native Podman sur la VM locale à 3814 et 7168 Mio. Dans les deux cas,
 le noyau confirme un manque de mémoire pendant la compilation Rust.
 [Reçu image de contrôle](evidence/2026-11-24/g12-control-image-7e3a6166.md).
 
+## 24 novembre 2026 — image worker Docker ARM64 `7e45828f`
+
+**PASS ciblé G01/G12.** Le build Docker depuis un contexte Git
+archivé, sans option fournisseur, produit l’image
+`sha256:153d0b24ebd6f09a31d1645c41ea5482c78ae07f87481cba2c47d0aef113e266`.
+Les trois binaires embarqués annoncent `7e45828f`. Le contrôle de
+démarrage confirme l’UID 1000, le workspace, la licence et l’absence
+des clients fournisseurs en lecture seule et sans réseau.
+
+Le test `real_cli_copies_a_project_and_exports_after_one_audited_worker`
+passe en 56,15 s sur Docker Desktop ARM64. Il utilise le CLI debug
+compilé depuis les mêmes entrées produit, lié par SHA-256, avec une
+révision embarquée inconnue. Le worker exécute `/usr/bin/id`, atteint
+le terminal avec quota libéré et allocation unique. L’export est neuf,
+l’audit est valide et le retrait du volume rétablit l’inventaire.
+Le premier prévol avait échoué avant le lancement, faute de politique
+copiée dans le répertoire de compilation du harnais.
+
+Le rapprochement Debian couvre 102 paquets source. Il relève 1 389
+avis ouverts et 5 indéterminés, dont 1 044 entrées du paquet source
+`linux` lié à `linux-libc-dev`. Aucune version installée n’est sous
+la borne corrective d’une entrée résolue comparée. La portée reste
+celle de cette image Docker ARM64 et de ce relevé de paquets.
+
 ## 24 novembre 2026 — profil TLS local à volumes neufs
 
 **PASS ciblé G07.** Sur Docker Desktop ARM64, le CLI `e2796ac1`
