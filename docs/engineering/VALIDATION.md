@@ -22,7 +22,11 @@ décision Rust atteint un terminal audité. La CLI restitue le résumé
 durable avec un code non nul. Le quota est libéré et les inventaires
 moteur sont restaurés. Cette recette couvre une échéance directe
 avec le CLI présent.
-[Reçu macOS et Podman](evidence/2026-11-24/g12-macos-84971de6.json).
+Sur Docker Desktop ARM64, le même CLI passe le rejeu de l’échéance
+avec stdout fermé dès l’entrée. Le diagnostic initial reste lisible sur
+stderr et le code est non nul. L’audit confirme le terminal après la
+décision, la libération du quota et la restauration des inventaires.
+[Reçu macOS, Docker et Podman](evidence/2026-11-24/g12-macos-84971de6.json).
 
 ## 24 novembre 2026 — profil TLS local à volumes neufs
 

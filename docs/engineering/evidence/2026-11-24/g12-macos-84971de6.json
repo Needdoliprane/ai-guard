@@ -55,5 +55,19 @@
     "cli_nonzero": true,
     "quota_released": true,
     "inventories_restored": true
+  },
+  "docker_direct_deadline_closed_stdout": {
+    "status": "PASS",
+    "worker": "docker",
+    "network": "none",
+    "audit_decision_backend": "rust_rules",
+    "terminal_after_decision": true,
+    "deadline_seconds": 4,
+    "transport_timed_out": true,
+    "closed_stdout": true,
+    "original_diagnostic_preserved": true,
+    "cli_nonzero": true,
+    "quota_released": true,
+    "inventories_restored": true
   }
 }
