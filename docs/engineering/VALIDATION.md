@@ -21,6 +21,8 @@ exports correspondent à leurs sources. Trois accès de détail hors
 tenant rendent 404 et les deux quotas finaux reviennent à zéro.
 Les trois conteneurs sont absents à la clôture et les trois volumes
 de travail sont retirés après vérification de leur attribution.
+Les trois marqueurs d’autorité sont ensuite retirés après rapprochement
+avec les liaisons locales et vérification de l’absence de consommateurs.
 Le bilan d’inventaire porte sur le nettoyage ciblé, avec les exports
 et audits conservés. [Reçu Podman](evidence/2026-11-24/g10-podman-three.json).
 

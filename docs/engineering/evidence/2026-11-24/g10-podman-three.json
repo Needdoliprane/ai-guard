@@ -18,5 +18,7 @@
   "final_held_slots": {
     "tenant-a": 0,
     "tenant-b": 0
-  }
+  },
+  "owned_authority_markers_removed": 3,
+  "other_inventory_entries_unchanged_during_cleanup": true
 }
