@@ -490,6 +490,125 @@ fn cli_store15_refuses_restored_physical_copy_without_effects() {
     fs::rename(&original, source).unwrap();
 }
 
+#[tokio::test]
+async fn cli_store14_refuses_restored_physical_copy_without_effects() {
+    use rusqlite::{Connection, OpenFlags, backup::Backup};
+    use std::{
+        collections::BTreeSet,
+        os::unix::fs::{MetadataExt, OpenOptionsExt},
+        path::Path,
+    };
+
+    let f = Fixture::new(false);
+    successful(f.prepare());
+    successful(f.step("apply", true));
+    let activation_path = f.preparation.join("activation.json");
+    let activation: Value = serde_json::from_slice(&fs::read(&activation_path).unwrap()).unwrap();
+    let manifest = std::path::PathBuf::from(activation["manifest"].as_str().unwrap());
+    let seal = f.preparation.join("activation-complete.json");
+    let envelope = f.preparation.join("technical-credentials.json");
+    let source = &f.sources[0];
+    let copied = source.with_file_name("store14-restored.sqlite");
+    {
+        let original = Connection::open_with_flags(
+            source,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        assert_eq!(
+            original
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            14
+        );
+        let _file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&copied)
+            .unwrap();
+        let mut restored = Connection::open_with_flags(
+            &copied,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        let backup = Backup::new(&original, &mut restored).unwrap();
+        assert_eq!(backup.step(-1).unwrap(), rusqlite::backup::StepResult::Done);
+    }
+
+    // Substitute only the synthetic path retained in the old closure.
+    let original = source.with_file_name("store14-original.sqlite");
+    fs::rename(source, &original).unwrap();
+    fs::rename(copied, source).unwrap();
+    let identity = |path: &Path| {
+        let metadata = fs::metadata(path).unwrap();
+        (metadata.dev(), metadata.ino())
+    };
+    assert_ne!(identity(&original), identity(source));
+    let watched = [
+        original.as_path(),
+        source.as_path(),
+        f.sources[1].as_path(),
+        activation_path.as_path(),
+        manifest.as_path(),
+        seal.as_path(),
+        envelope.as_path(),
+    ];
+    let before = watched.map(|path| (identity(path), fs::read(path).unwrap()));
+    let directories = [
+        f.root.as_path(),
+        f.preparation.as_path(),
+        source.parent().unwrap(),
+    ];
+    let entries = |path: &Path| {
+        fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>()
+    };
+    let before_entries = directories.map(entries);
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_agentsandbox"))
+            .env_clear()
+            .args(["gateway", "--human-sources-activation"])
+            .arg(&activation_path)
+            .args([
+                "--listen",
+                "127.0.0.1:0",
+                "--jev-backend",
+                "rust-rules",
+                "--policy",
+            ])
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/policies/default.json"
+            ))
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("Store14 refusal deadline")
+    .unwrap();
+    assert!(
+        !output.status.success(),
+        "the original activation must refuse the restored file"
+    );
+    assert!(output.stdout.is_empty(), "refusal emitted a gateway report");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("human_sources_activation_refused"),
+        "unexpected closed Store14 refusal category"
+    );
+    for (path, (file_identity, bytes)) in watched.into_iter().zip(before) {
+        assert_eq!(identity(path), file_identity);
+        assert!(
+            fs::read(path).unwrap() == bytes,
+            "durable file changed after refusal"
+        );
+    }
+    assert_eq!(directories.map(entries), before_entries);
+}
+
 #[test]
 fn changed_token_before_envelope_and_truncated_publications_are_preserved() {
     let f = Fixture::new(false);
