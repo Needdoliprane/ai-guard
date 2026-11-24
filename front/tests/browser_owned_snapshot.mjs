@@ -437,7 +437,8 @@ async function runEgressJournal() {
   ]);
   stage = "egress_synthetic_closure";
   for (const [width, theme] of [[1440, "light"], [390, "dark"]]) {
-    await screenshot(width, theme, [page.getByLabel("Credential personnel local")]);
+    await screenshot(width, theme, [page.getByLabel("Credential personnel local")],
+      journal().locator(`tr[data-event-id="${ready.synthetic_closure_id}"]`));
     must(await page.locator("html").getAttribute("data-theme") === theme
       && page.viewportSize()?.width === width, "EGRESS_CLOSURE_VIEWPORT_THEME");
     await assertSyntheticClosure(body);
@@ -517,7 +518,7 @@ async function currentNavigationContrast(width, theme) {
     must(Number.isFinite(ratio) && ratio >= 4.5, "CURRENT_NAVIGATION_TEXT_CONTRAST_BELOW_4_5");
   }
 }
-async function screenshot(width, theme, mask = []) {
+async function screenshot(width, theme, mask = [], focus) {
   await page.setViewportSize({ width, height: 1000 });
   if (await page.locator("html").getAttribute("data-theme") !== theme) await button(theme === "dark" ? "Activer le thème sombre" : "Activer le thème clair").click();
   await page.evaluate(() => window.scrollTo(0, 0)); await settle(); await noSecret();
@@ -533,6 +534,7 @@ async function screenshot(width, theme, mask = []) {
   });
   must(geometry.document <= width + 1 && geometry.body <= width + 1 && geometry.headingTop >= geometry.dockBottom - 1 && geometry.currentVisible && geometry.tablesFit, "OWNED_VIEW_GEOMETRY");
   const name = `owned-snapshot-${width}-${theme}.png`;
+  if (focus) await focus.scrollIntoViewIfNeeded({ timeout: remaining() });
   await page.screenshot({ path: join(artifacts, name), timeout: remaining(), mask }); await chmod(join(artifacts, name), 0o600);
   captures.push({ name, width, theme, geometry, sha256: await shaFile(join(artifacts, name)) });
 }
