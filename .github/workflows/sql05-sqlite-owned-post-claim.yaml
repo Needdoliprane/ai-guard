@@ -1,0 +1,158 @@
+name: SQL-05 SQLite owned post-claim adoption
+
+on:
+  push:
+    branches: [codex/g06-owned-restore-adoption-check-20261124]
+
+permissions:
+  contents: read
+
+jobs:
+  sqlite-owned-post-claim:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    env:
+      EXPECTED_BRANCH: codex/g06-owned-restore-adoption-check-20261124
+      SOURCE_SHA: aa4b5c287de65f11782069e633d8cf05e93aac61
+      SOURCE_TREE_SHA: 126dbd3ca02e017b385ef71d04fe9f993dda1f58
+      SOURCE_PARENT_SHA: bd2c46d82a03690e4446ae5dd106731819508f87
+      WORKFLOW_PATH: .github/workflows/sql05-sqlite-owned-post-claim.yaml
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+      RUST_BACKTRACE: '0'
+      LC_ALL: C
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Verify both backup oracles from a single SQLite libtest build
+        shell: bash
+        run: |
+          set +x
+          set -euo pipefail
+          umask 077
+
+          receipt="$RUNNER_TEMP/sql05-sqlite-owned-post-claim-receipt.txt"
+          selector14=audit::control::supervision::scoped_tests::owned_format14_readopted_post_claim_replays_without_emission
+          selector15=audit::control::supervision::scoped_tests::owned_format15_readopted_post_claim_replays_without_emission
+          printf '%s\n' \
+            "source_sha=$SOURCE_SHA" "source_tree_sha=$SOURCE_TREE_SHA" \
+            "source_parent_sha=$SOURCE_PARENT_SHA" "workflow_sha=$GITHUB_SHA" \
+            "owned14_selector=$selector14" "owned15_selector=$selector15" \
+            profile=sqlite_only scope=fixture_owned_post_claim_adoption \
+            source_guard=NOT_RUN rust=NOT_RUN locked_dependencies=NOT_RUN \
+            build=NOT_RUN build_exit=NOT_RUN rust_error_codes=NOT_RUN libtest_sha256=NOT_RUN \
+            owned14=NOT_RUN owned15=NOT_RUN selected=0 passed=0 \
+            runtime=NOT_RUN operator_restore_authority=NOT_RUN scratch_cleanup=NOT_NEEDED \
+            result=NOT_RUN > "$receipt"
+
+          set_field() {
+            local key=$1 value=$2
+            awk -F= -v key="$key" -v value="$value" '$1==key{$0=key "=" value} {print}' "$receipt" > "$receipt.next"
+            mv -- "$receipt.next" "$receipt"
+          }
+          scratch=
+          finish() {
+            local rc=$?
+            trap - EXIT
+            set +e
+            if [[ -n "$scratch" ]]; then
+              if [[ "$scratch" =~ ^/tmp/ag06-owned\.[a-zA-Z0-9]{6}$ && -d "$scratch" && ! -L "$scratch" &&
+                    "$(realpath -e -- "$scratch")" == "$scratch" &&
+                    "$(stat -c '%u %a' -- "$scratch")" == "$(id -u) 700" ]] &&
+                 rm -rf -- "$scratch" && [[ ! -e "$scratch" && ! -L "$scratch" ]]; then
+                set_field scratch_cleanup PASS
+              else
+                set_field scratch_cleanup FAIL
+                rc=1
+              fi
+            fi
+            if (( rc == 0 )); then set_field result PASS; else set_field result FAIL; fi
+            cat "$receipt" >> "$GITHUB_STEP_SUMMARY"
+            exit "$rc"
+          }
+          trap finish EXIT
+
+          set_field source_guard FAIL
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 &&
+             "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == "refs/heads/$EXPECTED_BRANCH" &&
+             "$(git rev-parse HEAD)" == "$GITHUB_SHA" &&
+             "$(git show -s --format=%P HEAD)" == "$SOURCE_SHA" &&
+             "$(git rev-parse "$SOURCE_SHA^{tree}")" == "$SOURCE_TREE_SHA" &&
+             "$(git show -s --format=%P "$SOURCE_SHA")" == "$SOURCE_PARENT_SHA" &&
+             "$(git diff --name-only "$SOURCE_SHA" HEAD)" == "$WORKFLOW_PATH" &&
+             -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
+          git switch --detach "$SOURCE_SHA"
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" &&
+             -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
+          set_field source_guard PASS
+
+          set_field rust MISMATCH
+          version="$(rustc --version)"
+          [[ "$version" =~ ^rustc\ 1\.99\.1($|[[:space:]]) ]]
+          set_field rust 1.99.1
+
+          scratch="$(mktemp -d /tmp/ag06-owned.XXXXXX)"
+          [[ "$(realpath -e -- "$scratch")" == "$scratch" &&
+             "$(stat -c '%u %a' -- "$scratch")" == "$(id -u) 700" ]]
+          mkdir -m 700 "$scratch/tmp" "$scratch/target"
+          export TMPDIR="$scratch/tmp" CARGO_TARGET_DIR="$scratch/target"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+
+          set_field locked_dependencies FAIL
+          timeout --kill-after=5s 15m cargo fetch --locked > "$scratch/fetch.log" 2>&1
+          set_field locked_dependencies PASS
+
+          set_field build FAIL
+          build_exit=0
+          timeout --kill-after=10s 45m cargo test --locked --offline --no-default-features \
+            --lib --no-run --message-format=json > "$scratch/build.jsonl" 2> "$scratch/build.stderr" || build_exit=$?
+          set_field build_exit "$build_exit"
+          codes="$(jq -r 'select(.reason == "compiler-message") | (.message.code.code // "") | select(test("^E[0-9]{4}$"))' "$scratch/build.jsonl" | sort -u | paste -sd, -)"
+          set_field rust_error_codes "${codes:-none}"
+          [[ "$build_exit" == 0 ]]
+          binary="$(jq -ers '
+            [.[] | select(.reason == "compiler-artifact" and .target.name == "agentsandbox"
+              and .target.kind == ["lib"] and .profile.test == true and .executable != null)
+              | .executable]
+            | unique | if length == 1 then .[0] else error("expected one libtest binary") end
+          ' "$scratch/build.jsonl")"
+          [[ "$binary" == "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* && -f "$binary" && -x "$binary" && ! -L "$binary" ]]
+          digest="$(sha256sum -- "$binary")"
+          set_field libtest_sha256 "${digest%% *}"
+          set_field build PASS
+
+          selected=0
+          passed=0
+          run_witness() {
+            local key=$1 selector=$2 output="$scratch/$1.test.log" rc=0
+            timeout --kill-after=5s 180s "$binary" "$selector" --exact --test-threads=1 > "$output" 2>&1 || rc=$?
+            if [[ "$(grep -Fxc 'running 1 test' "$output" || true)" == 1 ]]; then
+              selected=$((selected + 1))
+            fi
+            if [[ "$rc" == 0 && "$(grep -Fxc 'running 1 test' "$output" || true)" == 1 &&
+                  "$(grep -Fxc "test $selector ... ok" "$output" || true)" == 1 ]] &&
+               grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; ' "$output"; then
+              set_field "$key" PASS_1_0_0
+              passed=$((passed + 1))
+            else
+              set_field "$key" "FAIL_OR_NOT_SELECTED_EXIT_$rc"
+            fi
+          }
+          run_witness owned14 "$selector14"
+          run_witness owned15 "$selector15"
+          set_field selected "$selected"
+          set_field passed "$passed"
+          [[ "$selected" == 2 && "$passed" == 2 ]]
+      - name: Upload the redacted SQL-05 receipt
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sql05-sqlite-owned-post-claim-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sql05-sqlite-owned-post-claim-receipt.txt
+          if-no-files-found: error
+          retention-days: 7
