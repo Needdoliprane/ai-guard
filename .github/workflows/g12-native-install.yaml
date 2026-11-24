@@ -1,0 +1,125 @@
+name: G12 native archive installation
+
+on:
+  push:
+    branches: ['codex/v1-g12-native-install-45344993418']
+
+permissions:
+  actions: read
+
+env:
+  TRANSFER_RUN: '45344993418'
+  TRANSFER_SHA: 221b5d6a02129a8c746162454a8d93f1caabf2ed
+  SOURCE_SHA: 1c9e8e016bc8f1dca24147958858e9997cd0794e
+  ARCHIVE_LABEL: v0.0.1
+
+jobs:
+  verify-transfer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require the successful transfer run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$TRANSFER_RUN" |
+            jq -e --arg run "$TRANSFER_RUN" --arg sha "$TRANSFER_SHA" '
+              (.id | tostring) == $run and .head_sha == $sha and
+              .path == ".github/workflows/g12-transfer.yaml" and
+              .status == "completed" and .conclusion == "success"
+            ' >/dev/null
+
+  install-native:
+    needs: verify-transfer
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            host: Linux/x86_64
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            host: Darwin/arm64
+    env:
+      NATIVE_TARGET: ${{ matrix.target }}
+      EXPECTED_HOST: ${{ matrix.host }}
+    steps:
+      - name: Download the transfer receipt
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: g12-transfer-receipt
+          run-id: ${{ env.TRANSFER_RUN }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/g12-transfer-receipt
+
+      - name: Verify transfer source and manifest
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/g12-transfer-receipt"
+          grep -Fx 'status=PASS' result.txt
+          grep -Fx "source=$SOURCE_SHA" result.txt
+          grep -Fx "conductor=$TRANSFER_SHA" result.txt
+          grep -Fx "run=$TRANSFER_RUN" result.txt
+          grep -Fx "repository=$GITHUB_REPOSITORY" result.txt
+          grep -Fx "label=$ARCHIVE_LABEL" result.txt
+          digest=$(shasum -a 256 SHA256SUMS)
+          grep -Fx "assets_sha256=${digest%% *}" result.txt
+
+      - name: Download the native archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-${{ matrix.target }}
+          run-id: ${{ env.TRANSFER_RUN }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/g12-native-assets
+
+      - name: Verify and install in a temporary directory
+        shell: bash
+        run: |
+          host="$(uname -s)/$(uname -m)"
+          test "$host" = "$EXPECTED_HOST"
+          name="ai-guard-$ARCHIVE_LABEL-$NATIVE_TARGET"
+          archive="$name.tar.gz"
+          cd "$RUNNER_TEMP/g12-native-assets"
+          digest=$(shasum -a 256 "$archive")
+          grep -Fx "$digest" "$RUNNER_TEMP/g12-transfer-receipt/SHA256SUMS"
+
+          # The successful transfer validated the members of these exact bytes.
+          tar -xOzf "$archive" "$name/BUILD-INFO" |
+            cmp -s - <(
+              printf 'tag=%s\ncommit=%s\ntarget=%s\nrun=%s\nrepository=%s\n' \
+                "$ARCHIVE_LABEL" "$SOURCE_SHA" "$NATIVE_TARGET" "$TRANSFER_RUN" "$GITHUB_REPOSITORY"
+            )
+
+          root=$(mktemp -d "$RUNNER_TEMP/g12-native-install.XXXXXXXX")
+          trap 'rm -rf -- "$root"' EXIT
+          tar -xzf "$archive" -C "$root"
+          ln -s "$root/$name" "$root/current"
+
+          cli="$root/current/bin/agentsandbox"
+          "$cli" --help >/dev/null
+          "$cli" version --json > "$root/version.json"
+          jq -es --arg version "${ARCHIVE_LABEL#v}" --arg revision "$SOURCE_SHA" '
+            length == 1 and (.[0] |
+              .schema_version == 1 and .product == "ai-guard" and .component == "agentsandbox" and
+              .version == $version and .build.revision == $revision)
+          ' "$root/version.json" >/dev/null
+
+          receipt="$RUNNER_TEMP/g12-native-install-receipt"
+          install -d "$receipt"
+          install -m 0644 "$root/version.json" "$receipt/"
+          printf 'status=PASS\nsource=%s\ntransfer_run=%s\ntransfer_sha=%s\narchive_sha256=%s\ntarget=%s\nhost=%s\n' \
+            "$SOURCE_SHA" "$TRANSFER_RUN" "$TRANSFER_SHA" "${digest%% *}" "$NATIVE_TARGET" "$host" \
+            > "$receipt/result.txt"
+
+      - name: Upload the installation receipt
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: g12-native-install-${{ matrix.target }}
+          path: ${{ runner.temp }}/g12-native-install-receipt/
+          if-no-files-found: error
+          retention-days: 7
