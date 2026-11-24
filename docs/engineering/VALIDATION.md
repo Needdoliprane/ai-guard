@@ -601,6 +601,40 @@ native Podman sur la VM locale à 3814 et 7168 Mio. Dans les deux cas,
 le noyau confirme un manque de mémoire pendant la compilation Rust.
 [Reçu image de contrôle](evidence/2026-11-24/g12-control-image-7e3a6166.md).
 
+## 24 novembre 2026 — image worker native et export audité sur Podman rootless
+
+**PASS ciblé G01/G03/G12** sur macOS ARM64 et Podman 6.1.4 rootless.
+La construction native depuis l’archive Git `df835eea` produit
+`sha256:e61e61f183736416948a9155f6490ac2e6a2e67081308a0e779aeed6691f3714`.
+La copie de la recette limite Cargo à un job. Elle conserve le
+profil release, les bases épinglées et l’absence de clients
+fournisseurs. Les trois binaires embarqués annoncent `df835eea`.
+Le démarrage confirme UID/GID 1000, licence lisible, permissions
+des helpers et loopback seul en lecture seule.
+
+Le test `real_cli_copies_a_project_and_exports_after_one_audited_worker`
+passe en 64,18 s avec le CLI debug lié par SHA-256. Sa révision
+embarquée est inconnue. Les sources Rust, manifestes Cargo et
+entrées du harnais de compilation concordent avec `df835eea`.
+Le worker exécute `/usr/bin/id` avec le réseau coupé et atteint
+l’état terminal. Le test retrouve une seule allocation, le quota
+libéré, le journal valide et l’export vers une destination neuve.
+La source reste intacte et le fichier `.env` de recette est exclu.
+Le retrait du volume de travail et du marqueur d’autorité est vérifié
+après attribution par labels. Les inventaires de conteneurs et de
+volumes retrouvent leur état initial.
+
+La VM de 3,52 Gio utilise temporairement deux périphériques de swap
+compressé de 2 Gio et 1 Gio et un fichier de swap de 2 Gio. Ces
+trois ressources sont retirées après le build. Le seuil hôte de
+3 Gio reste respecté. Le trim du disque virtuel restitue 10,3 Gio
+mesurés côté hôte. Reçu privé `g12-native-worker-podman-df835eea`,
+manifeste SHA-256
+`ca73321fcfd569eb2f31b185498f4a0969010d396fe22a39d56aa34e2e5d1f45`.
+Ce résultat couvre le worker générique ARM64. La construction native
+de l’image de contrôle, les autres plateformes et la qualification
+des artefacts de release restent ouvertes.
+
 ## 24 novembre 2026 — image worker Docker ARM64 `7e45828f`
 
 **PASS ciblé G01/G12.** Le build Docker depuis un contexte Git
