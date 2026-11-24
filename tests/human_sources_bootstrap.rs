@@ -377,6 +377,120 @@ fn cli_store15_reuses_exact_closure_and_leaves_the_neighbor_unchanged() {
 }
 
 #[test]
+fn cli_store15_refuses_restored_physical_copy_without_effects() {
+    use std::os::unix::fs::MetadataExt;
+    use uuid::Uuid;
+
+    let f = Fixture::new(false);
+    successful(f.prepare());
+    successful(f.step("apply", true));
+
+    let activation_path = f.preparation.join("activation.json");
+    let activation_before = fs::read(&activation_path).unwrap();
+    let activation: Value = serde_json::from_slice(&activation_before).unwrap();
+    let manifest_path = std::path::PathBuf::from(activation["manifest"].as_str().unwrap());
+    let manifest_before = fs::read(&manifest_path).unwrap();
+    let credentials_path = f.preparation.join("technical-credentials.json");
+    let credentials_before = fs::read(&credentials_path).unwrap();
+    let source = &f.sources[0];
+    let original = f.root.join("tenant-a-original.sqlite");
+    let source_before = fs::read(source).unwrap();
+    let source_identity = fs::metadata(source).unwrap();
+
+    fs::rename(source, &original).unwrap();
+    fs::copy(&original, source).unwrap();
+    let restored_identity = fs::metadata(source).unwrap();
+    assert_ne!(
+        (source_identity.dev(), source_identity.ino()),
+        (restored_identity.dev(), restored_identity.ino()),
+        "the restoration fixture must have a distinct physical identity"
+    );
+    let restored_bytes = fs::read(source).unwrap();
+    let preparation_entries = fs::read_dir(&f.preparation)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<std::collections::BTreeSet<_>>();
+    let source_parent_entries = fs::read_dir(source.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<std::collections::BTreeSet<_>>();
+    let fixture_root_entries = fs::read_dir(&f.root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<std::collections::BTreeSet<_>>();
+    let destination = f.root.join("store15-after-restore");
+    let operation_id = Uuid::new_v4().to_string();
+    let output = Command::new(env!("CARGO_BIN_EXE_agentsandbox"))
+        .env_clear()
+        .args([
+            "human-sources",
+            "upgrade-egress",
+            "--human-sources-activation",
+        ])
+        .arg(&activation_path)
+        .args(["--tenant", "tenant-a", "--operation-id"])
+        .arg(operation_id)
+        .arg("--output-dir")
+        .arg(&destination)
+        .arg("--confirm-control-stopped")
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "the original activation must refuse the restored file"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let refusal_code = [
+        "human_sources_activation_refused",
+        "store15_prior_closure_refused",
+        "store15_preparation_refused",
+        "store15_control_active",
+        "store15_output_protected",
+        "store15_output_not_fresh",
+        "store15_preparation_publication_unconfirmed",
+        "store15_transition_unconfirmed",
+    ]
+    .into_iter()
+    .find(|code| stderr.contains(code));
+    assert_eq!(
+        refusal_code,
+        Some("store15_prior_closure_refused"),
+        "unexpected closed refusal category"
+    );
+    assert_eq!(fs::read(source).unwrap(), restored_bytes);
+    assert_eq!(fs::read(&original).unwrap(), source_before);
+    assert_eq!(fs::read(&activation_path).unwrap(), activation_before);
+    assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
+    assert_eq!(fs::read(&credentials_path).unwrap(), credentials_before);
+    assert_eq!(
+        fs::read_dir(source.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>(),
+        source_parent_entries
+    );
+    assert_eq!(
+        fs::read_dir(&f.root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>(),
+        fixture_root_entries
+    );
+    assert_eq!(
+        fs::read_dir(&f.preparation)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>(),
+        preparation_entries
+    );
+    assert!(!destination.exists(), "no successor closure is published");
+
+    fs::remove_file(source).unwrap();
+    fs::rename(&original, source).unwrap();
+}
+
+#[test]
 fn changed_token_before_envelope_and_truncated_publications_are_preserved() {
     let f = Fixture::new(false);
     successful(f.prepare());
