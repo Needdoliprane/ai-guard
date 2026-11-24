@@ -73,6 +73,18 @@ sont valides et les inventaires reviennent à leur état initial. Reçus
 respectifs `51c458b1efe32d2856baafb41cc13d0a8ec381900ddd966b6bb3a4b51ba6aaed`
 et `b9a52f4baf2547ff048dd5d12bf513733e208803ddb36739f4156d3f5aa5ff78`.
 
+Une lecture auditée des tables réseau des workers en mode `none` sur
+`99cb885e` observe zéro route IPv4 et zéro route IPv6 via une interface
+autre que loopback sur les deux moteurs. Le premier oracle Docker exigeait
+aussi l’absence d’autres interfaces et a échoué sur neuf interfaces de
+tunnel. La relecture hors ligne de la même sortie confirme le résultat
+sur les routes et conserve l’échec initial. Le témoin Podman ne voit que
+loopback. Aucun trafic émis. Audits valides, quotas libérés et inventaires
+inchangés. Reçus de relecture `g02-docker-netnone-route-recheck-99cb885e.txt`
+et `g02-podman-netnone-route-recheck-99cb885e.txt`, SHA-256 respectifs
+`50cc7243f0164fa46fc82901bcb3fa3b649571f16aa46085d4b090a33ad009d0`
+et `7a59d6ffdbc0434b4bf55efbe7f037885252a4f71e71fa288c9840f0fb292967`.
+
 **G08 — composition du registre.** Sur `26e19e84`, le
 [test d’agrégation du gateway](../../tests/supervision_stack_api.rs) passe
 1/1 en 21,09 s avec SQLite. Le parcours restitue les 120 lignes synthétiques
