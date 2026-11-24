@@ -238,7 +238,6 @@ async fn check_cleanup(
     if let Err(error) = check_quota(viewer, PILOT_WORKERS, 0).await {
         failures.push(format!("final quota: {error:#}"));
     }
-    let known_cids = cids.len();
     for cid in cids {
         if let Err(error) = require_removed(selection, cid).await {
             failures.push(format!("fixture container {cid}: {error:#}"));
