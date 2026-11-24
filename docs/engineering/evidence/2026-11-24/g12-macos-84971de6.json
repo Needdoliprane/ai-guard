@@ -1,0 +1,32 @@
+{
+  "build_revision": "84971de6bd5bf86149f6d5778e4b710419bd1e64",
+  "target": "aarch64-apple-darwin",
+  "build": "local offline",
+  "release_tag": null,
+  "binaries": [
+    "agentsandbox",
+    "ai-guard-activity",
+    "ai-guard-audit-checkpoint",
+    "ai-guard-diagnose",
+    "ai-guard-provider",
+    "ai-guard-relay"
+  ],
+  "installed_cli_sha256": "360540a9e32284b12e42b686115cc7ddf4d11c90e09c1b5d08745d79300588b5",
+  "source_tree_sha256": "b248f39585cbc1c6a8da3f6dd6aebda1fb5bc122bb9e7ed7e68b54b69da850d1",
+  "frontend_node": "25.6.1",
+  "artifacts": {
+    "ai-guard-v0.0.1-aarch64-apple-darwin.tar.gz": "0d7afdd0f394aec972d79d3075687230ab141fe17bca2a5733c0bf67e527923f",
+    "ai-guard-v0.0.1-frontend.tar.gz": "15266eebe2c52b9840db523be5f888f49053f7e6a5678814250943cfd6aed4a0",
+    "ai-guard-v0.0.1-release-metadata.tar.gz": "df44f139ce4bfbb97aaff4a7aec64a6e8fbfe5481183006116f6ffd208ebb231",
+    "ai-guard-v0.0.1-sbom.cdx.json": "15a081170016701e48a8123a6c8f75d76659b401e0dbd4a1ebd5f262d6c48b4a"
+  },
+  "verified_artifacts": 4,
+  "podman_rootless_provision": {
+    "source": "84971de6",
+    "cli_sha256": "360540a9e32284b12e42b686115cc7ddf4d11c90e09c1b5d08745d79300588b5",
+    "platform": "macOS ARM64 Podman rootless",
+    "published_selector": true,
+    "preparer_exit": 0,
+    "cleanup_verified": true
+  }
+}

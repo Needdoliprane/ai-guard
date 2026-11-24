@@ -1,5 +1,19 @@
 # Validation courante
 
+## 24 novembre 2026 — archive macOS du candidat `84971de6`
+
+**PASS ciblé G12 et G07.** Le build release hors ligne produit six
+binaires ARM64. L’archive vérifiée est extraite et la révision du CLI
+installé correspond au candidat. Le manifeste associe et vérifie
+quatre artefacts locaux, l’archive native, le frontend construit avec
+Node 25.6.1, les métadonnées et le SBOM détaché. Le CLI extrait passe
+`model-tls provision` sur Podman rootless, publie le sélecteur puis
+la recette retire le préparateur et les deux volumes neufs. Ce rejeu
+couvre le provisionnement. La décision HTTPS du gateway est attestée
+séparément. Aucun tag ni publication. Archive Linux native hors de
+ce lot.
+[Reçu macOS et Podman](evidence/2026-11-24/g12-macos-84971de6.json).
+
 ## 24 novembre 2026 — profil TLS local à volumes neufs
 
 **PASS ciblé G07.** Sur Docker Desktop ARM64, le CLI `e2796ac1`
