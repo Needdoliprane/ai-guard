@@ -30,6 +30,7 @@ async fn parked(scope: &NativeControlScope, root: &Path) -> Io {
                 "--nocapture".into(),
             ],
             &[("AI_GUARD_NATIVE_CONTROL_CHILD_DIR", root.to_str().unwrap())],
+            None,
         )
         .await
         .unwrap()
@@ -228,7 +229,12 @@ async fn lost_io_task_keeps_actual_child_and_pipes_and_refuses_reuse() {
     let identity = io.lock().await.retained_control_identity_for_test().await;
     let phase = call.phase();
     let reuse_refused = scope
-        .spawn(scope.0.runtime.command().unwrap(), &["--help".into()], &[])
+        .spawn(
+            scope.0.runtime.command().unwrap(),
+            &["--help".into()],
+            &[],
+            None,
+        )
         .await
         .is_err();
     // Another independent native context still performs and collects its own
