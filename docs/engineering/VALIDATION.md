@@ -1,5 +1,22 @@
 # Validation courante
 
+## 24 novembre 2026 — décisions, expiration et révocation du canal egress
+
+**PASS logiciel ciblé G05** sur `8b7ff9b5`, macOS ARM64.
+Huit tests de canal exécutent le propriétaire broker et le helper
+sur un duplex de recette, avec TCP loopback. Ils couvrent le commit
+SQLite avant connexion, le refus de destination inconnue, la panne
+d’audit, l’expiration du permis et la fermeture lors de la révocation.
+Quatre tests distincts couvrent le refus par défaut, les reçus du SDK
+et les parcours CLI du registre. Le rejeu après perte de l’accusé
+récupère le même reçu et enregistre la demande de révocation.
+
+Les douze sélecteurs passent. Le libtest et le CLI debug sont liés
+par SHA-256. Reçu privé `g05-egress-channel-cli-8b7ff9b5`, manifeste
+SHA-256 `835337cb6a5d433f0be58de6c2a61580a7e59a134c74cb61f21c27465a32ab3f`.
+Le raccord au bootstrap du vrai worker reste à arbitrer et à qualifier.
+[Proposition E3](G05_E3_BOOTSTRAP_PROPOSAL.md).
+
 ## 24 novembre 2026 — refus HTTP par NetworkPolicy sur Kubernetes local
 
 **PASS ciblé G05/G11** sur Docker Desktop ARM64, Kubernetes
