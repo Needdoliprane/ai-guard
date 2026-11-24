@@ -198,6 +198,19 @@ fn egress_store_connection_correlates_with_its_durable_decision() {
     assert_eq!(store.egress_observe(&observation).unwrap(), observed);
     assert_eq!(store.head().unwrap(), head);
 
+    let mut different_flow = observation.clone();
+    different_flow.observation_id = IdV1::random();
+    let EgressObservationV1::Connection { flow_id, .. } = &mut different_flow.observation else {
+        unreachable!("fixture is a connection observation");
+    };
+    *flow_id = IdV1::random();
+    let error = store.egress_observe(&different_flow).unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<EgressJournalError>(),
+        Some(&EgressJournalError::Invalid)
+    );
+    assert_eq!(store.head().unwrap(), head);
+
     let events = store
         .egress_session_events(&request.binding.session_id, 10)
         .unwrap();
