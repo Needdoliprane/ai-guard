@@ -14,6 +14,13 @@ pendant la coupure, puis retrouve le même résultat et le même reçu
 après réouverture. Aucun worker n’est lancé dans ces deux témoins.
 La reprise physique du broker reste à qualifier.
 
+Les huit tests du client Legacy de l’enforcer passent sur
+`652fbabe`. Les oracles couvrent le refus sur un autre boot et
+l’absence de nouvelle autorisation après perte de réponse ou
+reconnexion. Le motif du refus `not_ready` du scan final reste
+indéterminé sur la recette physique `c7f6c966`.
+[Diagnostic Legacy](G09_LEGACY_RESERVATION_DIAGNOSTIC.md).
+
 ## 24 novembre 2026 — redémarrage OIDC après migration de l’audit vers V4
 
 **PASS ciblé G04/G06** avec le paquet macOS `84971de6`. Le
