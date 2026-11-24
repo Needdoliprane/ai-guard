@@ -138,7 +138,7 @@ jobs:
           install -m 0644 LICENSE "$package/"
           printf 'tag=%s\ncommit=%s\nrun=%s\nrepository=%s\n' \
             "$RELEASE_TAG" "$RELEASE_SHA" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY" > "$package/BUILD-INFO"
-          tar -C "$RUNNER_TEMP/package" -czf "$assets/$name.tar.gz" "$name"
+          COPYFILE_DISABLE=1 tar -C "$RUNNER_TEMP/package" -czf "$assets/$name.tar.gz" "$name"
           tar -tzf "$assets/$name.tar.gz" >/dev/null
           install -m 0644 "$package/manifest/sbom.cdx.json" "$assets/ai-guard-$RELEASE_TAG-sbom.cdx.json"
           cd "$assets"
@@ -152,6 +152,14 @@ jobs:
         with:
           name: release-metadata
           path: ${{ runner.temp }}/release-assets/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: archive-verifier
+          path: target/release/agentsandbox
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
@@ -285,7 +293,7 @@ jobs:
             echo "::error::Packaged CLI identity does not match the release tag and commit"
             exit 1
           fi
-          tar -C "$RUNNER_TEMP/package" -czf "$assets/$name.tar.gz" "$name"
+          COPYFILE_DISABLE=1 tar -C "$RUNNER_TEMP/package" -czf "$assets/$name.tar.gz" "$name"
           tar -tzf "$assets/$name.tar.gz" >/dev/null
 
       - name: Setup Node for the frontend bundle
@@ -312,7 +320,7 @@ jobs:
           install -m 0644 node_modules/vite/LICENSE.md "$package/licenses/vite-LICENSE.md"
           printf 'tag=%s\ncommit=%s\nrun=%s\nrepository=%s\n' \
             "$RELEASE_TAG" "$RELEASE_SHA" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY" > "$package/BUILD-INFO"
-          tar -C "$RUNNER_TEMP/package" -czf "$RUNNER_TEMP/release-assets/$name.tar.gz" "$name"
+          COPYFILE_DISABLE=1 tar -C "$RUNNER_TEMP/package" -czf "$RUNNER_TEMP/release-assets/$name.tar.gz" "$name"
 
       - name: Record archive checksums
         shell: bash
@@ -331,8 +339,52 @@ jobs:
           retention-days: 7
           compression-level: 0
 
+  archive_checks:
+    needs: [verify, metadata, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      assets_sha256: ${{ steps.members.outputs.assets_sha256 }}
+    env:
+      RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+      NATIVE_BINARIES: ${{ needs.verify.outputs.native_binaries }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: archive-verifier
+          path: ${{ runner.temp }}/archive-verifier
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          path: ${{ runner.temp }}/release-download
+          merge-multiple: true
+      - name: Verify release archive members and bind the checked bytes
+        id: members
+        shell: bash
+        run: |
+          cli="$RUNNER_TEMP/archive-verifier/agentsandbox"
+          chmod 0700 "$cli"
+          cd "$RUNNER_TEMP/release-download"
+          archives=()
+          for target in x86_64-unknown-linux-gnu aarch64-apple-darwin frontend release-metadata; do
+            name="ai-guard-$RELEASE_TAG-$target"
+            archive="$name.tar.gz"
+            test -s "$archive"
+            test "$(wc -c < "$archive")" -lt 2147483648
+            "$cli" release verify-archive --archive "$archive" --root "$name" \
+              --target "$target" --native-binaries "$NATIVE_BINARIES"
+            archives+=("$archive")
+          done
+          sbom="ai-guard-$RELEASE_TAG-sbom.cdx.json"
+          checksums="$RUNNER_TEMP/verified-release-SHA256SUMS"
+          shasum -a 256 "${archives[@]}" "$sbom" > "$checksums"
+          digest=$(shasum -a 256 "$checksums")
+          printf 'assets_sha256=%s\n' "${digest%% *}" >> "$GITHUB_OUTPUT"
+
   draft:
-    needs: [verify, tag, metadata, build]
+    needs: [verify, tag, metadata, build, archive_checks]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -342,7 +394,7 @@ jobs:
       RELEASE_SHA: ${{ needs.verify.outputs.sha }}
       RELEASE_TAG_OBJECT: ${{ needs.tag.outputs.object_sha }}
       CI_URL: ${{ needs.verify.outputs.ci_url }}
-      NATIVE_BINARIES: ${{ needs.verify.outputs.native_binaries }}
+      VERIFIED_ASSETS_SHA256: ${{ needs.archive_checks.outputs.assets_sha256 }}
       LICENSE_SHA256: ${{ needs.verify.outputs.license_sha256 }}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -363,98 +415,6 @@ jobs:
             ' <<< "$ref" >/dev/null
           }
 
-          verify_archive_members() {
-            local archive=$1 name=$2 target=$3
-            LC_ALL=C tar --numeric-owner -tvzf "$archive" |
-              LC_ALL=C awk -v root="$name" -v target="$target" -v native_bins="$NATIVE_BINARIES" '
-                function check_required(path, needs_execute) {
-                  if (count[path] != 1 || !nonempty_regular[path] || (needs_execute && !owner_executable[path])) {
-                    print "Expected one nonempty " (needs_execute ? "owner-executable " : "") "regular member: " path
-                    failed = 1
-                  }
-                }
-                BEGIN {
-                  native_archive = (target != "frontend" && target != "release-metadata")
-                  if (native_archive) {
-                    n = split(native_bins, programs, " ")
-                    for (i = 1; i <= n; i++) {
-                      path = "bin/" programs[i]
-                      if (programs[i] !~ /^[A-Za-z0-9_.-]+$/ || programs[i] == "." || programs[i] == ".." ||
-                          (path in required_binaries)) failed = 1
-                      required_binaries[path] = 1
-                    }
-                    if (failed || !("bin/agentsandbox" in required_binaries)) {
-                      print "Missing or invalid verified native binary list"
-                      failed = 1
-                      exit 1
-                    }
-                  }
-                }
-                {
-                  # GNU tar lists one uid/gid field. BSD tar lists link count, uid, and gid separately.
-                  gnu = ($2 ~ /^[0-9]+\/[0-9]+$/)
-                  size = gnu ? $3 : $5
-                  fields = gnu ? 5 : 8
-                  path = $0
-                  for (i = 0; i < fields; i++) sub(/^[^[:blank:]]+[[:blank:]]+/, "", path)
-                  type = substr($1, 1, 1)
-                  if (type == "l") sub(/ -> .*/, "", path)
-                  if (type == "h") sub(/ link to .*/, "", path)
-                  if (type == "d") sub(/\/$/, "", path)
-                  if (path == root) next
-                  if (index(path, root "/") != 1 || path ~ /(^|\/)\.\.?($|\/)|\/\/|\/$/) {
-                    print "Expected a member path under " root "/ without path aliases"
-                    failed = 1
-                    next
-                  }
-                  path = substr(path, length(root) + 2)
-                  if (native_archive &&
-                      ((path == "bin" && type != "d") ||
-                       (index(path, "bin/") == 1 && !(path in required_binaries)))) {
-                    print "Unexpected native bin member " path
-                    failed = 1
-                    next
-                  }
-                  if (path == "BUILD-INFO" || path == "LICENSE" || (path in required_binaries) || path == "index.html" ||
-                      path == "THIRD-PARTY-NOTICES" ||
-                      (target == "release-metadata" && (path == "manifest/release-manifest.json" ||
-                        path == "manifest/sbom.cdx.json" || path == "manifest/SHA256SUMS")) ||
-                      (target == "frontend" && (path == "licenses/vite-LICENSE.md" || path ~ /^assets\/.+\.js$/))) {
-                    count[path]++
-                    nonempty_regular[path] = (type == "-" && size ~ /^[0-9]+$/ && size + 0 > 0)
-                    owner_executable[path] = (substr($1, 4, 1) ~ /[xs]/)
-                  }
-                }
-                END {
-                  check_required("BUILD-INFO", 0)
-                  check_required("LICENSE", 0)
-                  if (target == "release-metadata") {
-                    check_required("manifest/release-manifest.json", 0)
-                    check_required("manifest/sbom.cdx.json", 0)
-                    check_required("manifest/SHA256SUMS", 0)
-                    if (count["index.html"] || count["THIRD-PARTY-NOTICES"]) {
-                      print "Unexpected frontend or notices member in the metadata archive"
-                      failed = 1
-                    }
-                  } else if (target == "frontend") {
-                    check_required("index.html", 0)
-                    check_required("licenses/vite-LICENSE.md", 0)
-                    for (path in count) {
-                      if (path ~ /^assets\/.+\.js$/ && count[path] == 1 && nonempty_regular[path]) has_script = 1
-                    }
-                    if (!has_script) {
-                      print "Expected at least one nonempty regular JavaScript asset under assets/"
-                      failed = 1
-                    }
-                  } else {
-                    check_required("THIRD-PARTY-NOTICES", 0)
-                    for (path in required_binaries) check_required(path, 1)
-                  }
-                  exit failed
-                }
-              '
-          }
-
           cd "$RUNNER_TEMP/release-download"
           archives=(
             "ai-guard-$RELEASE_TAG-x86_64-unknown-linux-gnu.tar.gz"
@@ -467,16 +427,19 @@ jobs:
             echo "::error::Missing or invalid LICENSE digest from the selected commit"
             exit 1
           fi
+          shasum -a 256 "${archives[@]}" "$sbom" > SHA256SUMS
+          digest=$(shasum -a 256 SHA256SUMS)
+          if [[ ! "$VERIFIED_ASSETS_SHA256" =~ ^[0-9a-f]{64}$ ||
+                ${digest%% *} != "$VERIFIED_ASSETS_SHA256" ]]; then
+            echo "::error::Release assets differ from the bytes checked by the archive verifier"
+            exit 1
+          fi
           for archive in "${archives[@]}"; do
             test -s "$archive"
             test "$(wc -c < "$archive")" -lt 2147483648
             test "$(shasum -a 256 "$archive")" = "$(cat "$archive.sha256")"
             name=${archive%.tar.gz}
             target=${name#"ai-guard-$RELEASE_TAG-"}
-            if ! verify_archive_members "$archive" "$name" "$target"; then
-              echo "::error::$archive is missing required release content or contains invalid members"
-              exit 1
-            fi
             if ! license_sum=$(tar -xOzf "$archive" -- "$name/LICENSE" | shasum -a 256) ||
               [[ ${license_sum%% *} != "$LICENSE_SHA256" ]]; then
               echo "::error::$archive LICENSE does not match the selected commit"
@@ -507,7 +470,6 @@ jobs:
             echo "::error::The SBOM is not a nonempty CycloneDX 1.6 document for the release version"
             exit 1
           fi
-          shasum -a 256 "${archives[@]}" "$sbom" > SHA256SUMS
           files=("${archives[@]}" "$sbom" SHA256SUMS)
           expected=$(
             for file in "${files[@]}"; do

@@ -305,6 +305,18 @@ pub enum ReleaseCommand {
         #[arg(long)]
         source_only: bool,
     },
+    /// Validate the directory tree and required members of a release tar.gz without extracting.
+    VerifyArchive {
+        #[arg(long)]
+        archive: PathBuf,
+        #[arg(long)]
+        root: String,
+        #[arg(long)]
+        target: String,
+        /// Space-separated names of the native binaries selected from Cargo metadata.
+        #[arg(long, default_value = "")]
+        native_binaries: String,
+    },
 }
 
 fn initialize_provider_references(config_dir: &Path, env_file: &Path) -> Result<()> {

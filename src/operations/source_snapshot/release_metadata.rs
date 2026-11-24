@@ -195,6 +195,17 @@ pub(super) async fn execute(command: ReleaseCommand) -> Result<()> {
             };
             verify(request, interruption.as_ref()).await
         }
+        ReleaseCommand::VerifyArchive {
+            archive,
+            root,
+            target,
+            native_binaries,
+        } => {
+            tokio::task::spawn_blocking(move || {
+                super::release_archive::verify(&archive, &root, &target, &native_binaries)
+            })
+            .await?
+        }
     };
     drop(hold);
     result

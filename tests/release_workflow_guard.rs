@@ -1,7 +1,5 @@
-//! Guards on the release workflow: the archive-member check of the draft job is extracted from
-//! `.github/workflows/release.yaml` and replayed on synthetic archives (red and green), and the
-//! job wiring that keeps a failed metadata step from tagging is asserted on the workflow text.
-//! No GitHub call is made and nothing is built.
+//! Guards on release archive contents and on the workflow wiring for tagging and drafts.
+//! No GitHub call is made.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -17,29 +15,6 @@ fn workflow(name: &str) -> String {
             .join(name),
     )
     .unwrap_or_else(|error| panic!("{name}: {error}"))
-}
-
-/// The shell function `verify_archive_members` exactly as the draft job defines it.
-fn member_check() -> String {
-    let text = workflow("release.yaml");
-    let mut lines = text.lines();
-    let mut function = Vec::new();
-    let mut indent = None;
-    for line in lines.by_ref() {
-        if line.trim() == "verify_archive_members() {" {
-            indent = Some(line.len() - line.trim_start().len());
-            function.push(line);
-            break;
-        }
-    }
-    let indent = indent.expect("verify_archive_members is defined in release.yaml");
-    for line in lines {
-        function.push(line);
-        if line.len() == indent + 1 && line.trim() == "}" {
-            return function.join("\n");
-        }
-    }
-    panic!("verify_archive_members is not closed");
 }
 
 struct Member<'a> {
@@ -59,6 +34,7 @@ fn archive(parent: &Path, root: &str, members: &[Member]) -> PathBuf {
     }
     let file = parent.join(format!("{root}.tar.gz"));
     let status = Command::new("tar")
+        .env("COPYFILE_DISABLE", "1")
         .arg("-C")
         .arg(parent)
         .arg("-czf")
@@ -72,25 +48,22 @@ fn archive(parent: &Path, root: &str, members: &[Member]) -> PathBuf {
 }
 
 fn check(archive: &Path, root: &str, target: &str) -> (bool, String) {
-    let script = format!(
-        "{}\nverify_archive_members \"$1\" \"$2\" \"$3\"",
-        member_check()
-    );
-    let output = Command::new("bash")
-        .args(["-c", &script, "check"])
+    let output = Command::new(env!("CARGO_BIN_EXE_agentsandbox"))
+        .args(["release", "verify-archive", "--archive"])
         .arg(archive)
-        .arg(root)
-        .arg(target)
-        .env("NATIVE_BINARIES", "agentsandbox ai-guard-provider")
+        .args([
+            "--root",
+            root,
+            "--target",
+            target,
+            "--native-binaries",
+            "agentsandbox ai-guard-provider",
+        ])
         .output()
-        .expect("bash");
+        .expect("run agentsandbox release verify-archive");
     (
         output.status.success(),
-        format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        ),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
     )
 }
 
@@ -169,6 +142,15 @@ fn native_archive_needs_a_nonempty_third_party_notices_member() {
     let green = archive(&dir.path().join("green"), &root, &native(Some("notices\n")));
     let (ok, output) = check(&green, &root, &target);
     assert!(ok, "green native archive refused: {output}");
+    let apple_target = "aarch64-apple-darwin";
+    let apple_root = format!("ai-guard-{TAG}-{apple_target}");
+    let apple = archive(
+        &dir.path().join("apple"),
+        &apple_root,
+        &native(Some("notices\n")),
+    );
+    let (ok, output) = check(&apple, &apple_root, apple_target);
+    assert!(ok, "green Apple native archive refused: {output}");
 
     let missing = archive(&dir.path().join("missing"), &root, &native(None));
     let (ok, output) = check(&missing, &root, &target);
@@ -268,6 +250,67 @@ fn frontend_archive_keeps_its_vite_attribution_requirement() {
     );
 }
 
+#[test]
+fn release_archive_requires_one_directory_root_and_unique_ordinary_members() {
+    use flate2::{Compression, write::GzEncoder};
+    use tar::{Builder, EntryType, Header};
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("release.tar.gz");
+    let directory = EntryType::Directory;
+    let regular = EntryType::Regular;
+    let contents = [
+        ("release/BUILD-INFO", regular),
+        ("release/LICENSE", regular),
+        ("release/manifest/release-manifest.json", regular),
+        ("release/manifest/sbom.cdx.json", regular),
+        ("release/manifest/SHA256SUMS", regular),
+        ("release/README.txt", regular),
+    ];
+    let root = ("release/", directory);
+    let parent = ("release/manifest/", directory);
+    let check_tree = |prefix: &[(&str, EntryType)]| {
+        let writer = GzEncoder::new(fs::File::create(&file).unwrap(), Compression::fast());
+        let mut archive = Builder::new(writer);
+        for &(path, kind) in prefix.iter().chain(&contents) {
+            let bytes: &[u8] = if kind.is_file() { b"x" } else { b"" };
+            let mut header = Header::new_ustar();
+            header.set_entry_type(kind);
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o755);
+            archive.append_data(&mut header, path, bytes).unwrap();
+        }
+        archive.into_inner().unwrap().finish().unwrap();
+        check(&file, "release", "release-metadata")
+    };
+    let (ok, output) = check_tree(&[root, parent]);
+    assert!(ok, "{output}");
+    for (prefix, reason) in [
+        (vec![parent], "missing root directory"),
+        (
+            vec![("release", regular), parent],
+            "root must be a directory",
+        ),
+        (vec![root, root, parent], "duplicate root directory"),
+        (vec![root, parent, contents[5]], "duplicate member"),
+        (
+            vec![root, parent, ("release/other", EntryType::Fifo)],
+            "unsupported member type",
+        ),
+        (
+            vec![root, ("release/manifest", regular)],
+            "parent is not a declared directory",
+        ),
+        (vec![root], "parent is not a declared directory"),
+    ] {
+        let (ok, output) = check_tree(&prefix);
+        assert!(
+            !ok && output.contains(reason),
+            "expected {reason}: {output}"
+        );
+    }
+}
+
 /// The lines of one job of a workflow (two-space `jobs:` children, as these workflows are written).
 fn job(text: &str, name: &str) -> Vec<String> {
     let header = format!("  {name}:");
@@ -346,7 +389,15 @@ fn no_tag_can_exist_before_the_metadata_job_succeeds() {
     assert_eq!(needs(&job(&release, "build")), names(&["verify", "tag"]));
     assert_eq!(
         needs(&job(&release, "draft")),
-        names(&["verify", "tag", "metadata", "build"])
+        names(&["verify", "tag", "metadata", "build", "archive_checks"])
+    );
+    let checks = job(&release, "archive_checks");
+    assert_eq!(needs(&checks), names(&["verify", "metadata", "build"]));
+    assert!(checks.iter().any(|line| line.trim() == "contents: read"));
+    assert!(
+        run_blocks(&checks)
+            .join("\n")
+            .contains("release verify-archive")
     );
     let metadata = run_blocks(&job(&release, "metadata")).join("\n");
     assert!(metadata.contains("release manifest") && metadata.contains("release verify"));
@@ -372,6 +423,7 @@ fn draft_publishes_and_digest_checks_the_metadata_assets() {
         "files=(\"${archives[@]}\" \"$sbom\" SHA256SUMS)",
         "shasum -a 256 \"${archives[@]}\" \"$sbom\" > SHA256SUMS",
         "run=%s\\nrepository=%s",
+        "!= \"$VERIFIED_ASSETS_SHA256\"",
         ".metadata.component.version == $version",
     ] {
         assert!(
@@ -381,6 +433,7 @@ fn draft_publishes_and_digest_checks_the_metadata_assets() {
     }
     let build = run_blocks(&job(&release, "build")).join("\n");
     assert!(build.contains("run=%s\\nrepository=%s") && build.contains("THIRD-PARTY-NOTICES"));
+    assert!(build.contains("COPYFILE_DISABLE=1 tar -C"));
 }
 
 #[test]
