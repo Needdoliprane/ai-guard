@@ -19,8 +19,14 @@ l’image de contrôle ARM64 construite depuis `e5c0e4b7`. Le relais Rust
 est sain et publié sur loopback. Le modèle reste sur le réseau interne,
 sans port publié. Le verdict `deny`, l’audit et l’intégrité concordent.
 Le pic cgroup atteint 707 788 800 octets, sans swap ni OOM. Les
-conteneurs et réseaux du projet sont retirés. La qualité du modèle et
-les autres profils de déploiement restent à qualifier.
+conteneurs et réseaux du projet sont retirés. Le même Compose HTTP,
+avec les mêmes images, passe sur Podman rootless via le fournisseur
+Docker Compose 5.0.2. Le relais est sain sur loopback, le modèle est
+isolé sur le réseau interne et le pic cgroup atteint 318 668 800 octets
+sans swap ni OOM. La décision, le reçu et l’intégrité donnent le même
+résultat. Les ressources de la recette sont retirées. Ces essais
+couvrent le profil HTTP local. La qualité du modèle et les autres
+profils de déploiement restent à qualifier.
 [Reçu Qwen](evidence/2026-11-24/g07-installed-macos-qwen.json).
 
 ## 24 novembre 2026 — Jev TypeSafe depuis l’archive macOS

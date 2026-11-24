@@ -342,6 +342,15 @@ La recette s’arrête à la décision, sans lancement de worker. La
 qualification de bout en bout reste ouverte.
 [Reçu Jev TypeSafe](evidence/2026-11-24/g07-installed-macos-typesafe.json).
 
+**G07 — Compose HTTP du moteur local.** Le 24 novembre, avec les mêmes
+images épinglées sur Docker Desktop ARM64 et Podman rootless, le relais
+Rust sur loopback restitue un avis Qwen `deny` et la décision effective
+`deny`. La chaîne SQLite est vérifiée sur les deux moteurs. Les pics
+cgroup atteignent respectivement 707 788 800 et 318 668 800 octets,
+sans swap ni OOM, sous la même limite effective de 999 997 440 octets.
+[Reçu Qwen](evidence/2026-11-24/g07-installed-macos-qwen.json).
+La qualité du modèle et la qualification globale G07 restent ouvertes.
+
 **G07 — moteur Rust déterministe sur Docker Desktop et Podman rootless.** Le CLI macOS
 installé `7e1f9cb1` sélectionne `rust-rules` et audite l’autorisation
 d’une invocation connue avant le terminal d’un worker strict sans
