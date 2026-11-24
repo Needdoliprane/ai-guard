@@ -4,7 +4,7 @@
 import { button, el, icon } from "./dom.ts";
 import { announce, place, replaceIfChanged, setText, signatureOf, syncRows } from "./dom-sync.ts";
 import { formatDate } from "./model.ts";
-import { journalPolicyEventLabel } from "./journal-policy-event.ts";
+import { journalEgressEventPresentation, journalPolicyEventLabel } from "./journal-policy-event.ts";
 import { JOURNAL_MAX_EVENTS, JournalStore, journalAnnouncement } from "./journal-store.ts";
 import { FILTER_ANNOUNCE_MS, SEARCH_MAX_LENGTH, defaultEventFilter, filterEvents, resourceKindLabel, shownOfLoaded } from "./supervision-model.ts";
 import "./supervision.css";
@@ -284,18 +284,19 @@ export class JournalView {
     const meta = item.metadata; const cell = (label: string, ...children: (Node | string | null)[]) => { const node = el("td", "", ...children); node.dataset.label = label; node.setAttribute("role", "cell"); return node; };
     const received = formatDate(meta.received_at, true); const stamped = formatDate(meta.timestamp, true);
     const policyLabel = journalPolicyEventLabel(meta);
-    const typeSource = policyLabel
-      ? el("p", "muted", `Registre des politiques · Source ${meta.source} · `, el("code", "mono", meta.kind))
+    const egress = journalEgressEventPresentation(meta);
+    const typeSource = policyLabel || egress
+      ? el("p", "muted", `${policyLabel ? "Registre des politiques · " : ""}Source ${meta.source} · `, el("code", "mono", meta.kind))
       : el("p", "muted", `Source ${meta.source}`);
     const decision = meta.decision
       ? badge(decisionLabel[meta.decision], meta.decision === "allow" ? "teal" : meta.decision === "deny" ? "red" : "amber")
-      : el("p", "muted", policyLabel ? "Aucune décision de connexion" : "Non fournie");
+      : el("p", "muted", policyLabel ? "Aucune décision de connexion" : egress?.unknown ?? "Non fournie");
     // Compact controls with their full purpose as accessible name: a dense journal stays two lines per event.
     const compact = (label: string, purpose: string, key: string, call: () => void) => { const node = action(label, key, call); node.setAttribute("aria-label", purpose); node.title = purpose; return node; };
     const tr = el("tr", "", cell("Reçu le", el("p", "mono", received), stamped === received ? null : el("p", "muted", `Source : ${stamped}`)),
-      cell("Type", el("p", "", el("strong", "", policyLabel ?? meta.kind)), typeSource),
+      cell("Type", el("p", "", el("strong", "", policyLabel ?? egress?.label ?? meta.kind)), typeSource),
       cell("Ressource", el("p", "", resourceKindLabel[meta.resource.kind]), el("p", "mono sv-id", meta.resource.resource_id)),
-      cell("Provenance", el("p", "muted", `${meta.provenance} · couverture ${meta.coverage}${policyLabel ? " du registre" : ""}`)),
+      cell("Provenance", el("p", "muted", `${meta.provenance} · couverture ${egress ? "partielle" : meta.coverage}${policyLabel ? " du registre" : ""}`)),
       cell("Décision", decision),
       cell("Action", el("div", "sv-row-actions",
         limited ? null : compact("Limiter", "Limiter à cette ressource", `jr-limit-${meta.id}`, () => this.#limitTo({ kind: meta.resource.kind, resource_id: meta.resource.resource_id })),

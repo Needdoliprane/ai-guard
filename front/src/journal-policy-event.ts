@@ -11,3 +11,16 @@ export function journalPolicyEventLabel(metadata: HumanEvent["metadata"]): strin
     default: return null;
   }
 }
+
+export function journalEgressEventPresentation(metadata: HumanEvent["metadata"]): { label: string; unknown: string } | null {
+  if (metadata.source !== "gateway" || metadata.provenance !== "observed" ||
+    metadata.coverage !== "partial" || metadata.resource.kind !== "session" || metadata.decision !== null) return null;
+
+  switch (metadata.kind) {
+    case "egress.decision":
+      return { label: "Décision egress enregistrée", unknown: "Verdict non fourni dans les métadonnées" };
+    case "egress.connection":
+      return { label: "Résultat de connexion egress enregistré", unknown: "Résultat non fourni dans les métadonnées" };
+    default: return null;
+  }
+}
