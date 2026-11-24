@@ -1,5 +1,13 @@
 # P1 — contrôle et supervision des sorties réseau
 
+## État de la verticale `broker_proxy_v1` au 24 novembre 2026
+
+Le lot Claude du 22 novembre a introduit le frontal Rust loopback du worker, le protocole de canal et le propriétaire du canal dans le broker. Le contrat de lancement permet de sélectionner ce profil avec un worker en réseau `none`. Le broker inscrit l’ouverture du canal et la décision dans le journal du tenant avant de connecter le flux autorisé. La destination résolue est contrôlée avant la connexion. Le bail et la révocation bornent la durée du flux. [Contrat du canal](../../src/egress/channel_protocol.rs), [propriétaire du canal](../../src/broker/egress_owner/channel.rs).
+
+La suite de la verticale ajoute la lecture des décisions, des observations et de la fermeture du canal dans le Journal, ainsi que des opérations de politique dans le CLI. Les douze sélecteurs du candidat `8b7ff9b5` passent sur un canal de fixture en boucle locale et sur des tests de politique et de CLI. [Validation du 24 novembre](VALIDATION.md#24-novembre-2026--décisions-expiration-et-révocation-du-canal-egress), [gate G05](PRODUCTION_READINESS.md).
+
+Le choix par défaut reste le réseau coupé. Le profil `bridge` est un choix explicite hors médiation. Le raccord E3 au runtime et au superviseur, l’observation indépendante des tentatives directes et les recettes sur workers réels restent ouverts. Les preuves de cette tranche laissent G05, G07 et G11 ouverts. [Proposition E3](G05_E3_BOOTSTRAP_PROPOSAL.md).
+
 ## Tranche logicielle du 13 novembre — noyau et protocole vérifiés
 
 Une première tranche Rust est intégrée : politique pure tenant∩session, validation de candidats IP, parseur CONNECT et registre/payloads de flux bornés. [Contrat logiciel FR](EGRESS_SOFTWARE.fr.md), [EN](EGRESS_SOFTWARE.md) et [preuves des 34 parents/toutes cibles](evidence/2026-11-13/egress-core-protocol/README.md) décrivent exactement cette portée. Les valeurs acceptées restent descriptives ; elles ne créent ni autorité, ni socket.
