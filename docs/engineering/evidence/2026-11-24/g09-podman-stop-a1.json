@@ -44,5 +44,23 @@
     "tenant_b_terminal_kind": "command.completed",
     "tenant_b_terminal_seq": 17,
     "terminal_receipts_matched": 2
+  },
+  "gateway_abrupt_cut_chromium": {
+    "status": "PASS",
+    "tenant": "tenant-a",
+    "seq": 32,
+    "kind": "command.failed",
+    "code": 137,
+    "timed_out": false,
+    "raw_dom_matches_wire": true,
+    "logout": true,
+    "gateway_sigkill": true,
+    "retrying_visible": true,
+    "terminal_preserved_while_offline": true,
+    "stream_reconnected": true,
+    "terminal_identical_after_reconnect": true,
+    "source": "SQLite backups of both tenants",
+    "cli_and_frontend_revision": "84971de6",
+    "worker_launch_requested": false
   }
 }

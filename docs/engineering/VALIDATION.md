@@ -19,6 +19,12 @@ La déconnexion efface la vue de supervision et le dialogue. Une
 connexion comme B dans le même onglet exclut la session et le terminal
 d’A1 du sélecteur et de la réponse filtrée. Le terminal normal de B1
 correspond à son propre reçu, jusque dans les données brutes.
+Un autre rejeu arrête par SIGKILL le gateway dédié pendant la lecture
+Chromium. Le dashboard passe en reconnexion et conserve le terminal
+déjà chargé. Après redémarrage du gateway sur le même port et les mêmes
+copies SQLite, le flux se reconnecte et le détail reste identique au
+reçu. Cette vérification porte sur la coupure et la reprise du flux
+en loopback.
 [Reçu de l’arrêt A1 et de sa relecture](evidence/2026-11-24/g09-podman-stop-a1.json).
 
 ## 24 novembre 2026 — trois workers G10 sur Podman rootless
