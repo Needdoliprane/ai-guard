@@ -1,6 +1,9 @@
 //! Coded control failures, without formatting an arbitrary error chain.
 use crate::{
-    broker::{enforcer::EnforcerStageFailure, lifecycle::LocalFailurePhaseV1},
+    broker::{
+        enforcer::{EnforcerError, EnforcerStageFailure},
+        lifecycle::LocalFailurePhaseV1,
+    },
     runtime::RuntimePrestartStageFailure,
 };
 use serde::Serialize;
@@ -63,10 +66,39 @@ enum RegistrationArmState {
     Acknowledged,
 }
 
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ReservationMode {
+    Fresh,
+    Replay,
+}
+
+impl ReservationMode {
+    pub(super) fn from_replay_only(replay_only: bool) -> Self {
+        if replay_only {
+            Self::Replay
+        } else {
+            Self::Fresh
+        }
+    }
+}
+
+impl fmt::Display for ReservationMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&RegistrationStage::ReserveProspective, f)
+    }
+}
+
+impl std::error::Error for ReservationMode {}
+
 #[derive(Serialize)]
 struct RegistrationDiagnostic {
     stage: RegistrationStage,
     arm_state: RegistrationArmState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reservation_mode: Option<ReservationMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enforcer_code: Option<EnforcerError>,
 }
 
 impl RegistrationStage {
@@ -83,6 +115,8 @@ impl RegistrationStage {
         RegistrationDiagnostic {
             stage: self,
             arm_state,
+            reservation_mode: None,
+            enforcer_code: None,
         }
     }
 }
@@ -114,9 +148,18 @@ pub(super) fn classify(
 ) -> Option<BatchFailureDiagnosticV1> {
     let enforcer = error.downcast_ref::<EnforcerStageFailure>().cloned();
     let runtime = error.downcast_ref::<RuntimePrestartStageFailure>().cloned();
-    let registration = error
-        .downcast_ref::<RegistrationStage>()
-        .map(|stage| stage.diagnostic());
+    let registration = if let Some(mode) = error.downcast_ref::<ReservationMode>() {
+        Some(RegistrationDiagnostic {
+            reservation_mode: Some(*mode),
+            // The code can originate locally or from the enforcer reply.
+            enforcer_code: error.downcast_ref::<EnforcerError>().copied(),
+            ..RegistrationStage::ReserveProspective.diagnostic()
+        })
+    } else {
+        error
+            .downcast_ref::<RegistrationStage>()
+            .map(|stage| stage.diagnostic())
+    };
     let broker_step = error
         .downcast_ref::<BrokerStep>()
         .copied()
@@ -210,6 +253,47 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn prospective_reservation_reports_mode_and_typed_code_only() {
+        for (replay_only, code, mode, label) in [
+            (false, EnforcerError::Capacity, "fresh", "capacity"),
+            (true, EnforcerError::Conflict, "replay", "conflict"),
+        ] {
+            let error = anyhow::Error::new(code)
+                .context(ReservationMode::from_replay_only(replay_only))
+                .context("synthetic private outer context");
+            let report =
+                serde_json::to_value(failure_report(LocalFailurePhaseV1::FinalScan, &error))
+                    .unwrap();
+            assert_eq!(
+                report,
+                json!({
+                    "version": 1,
+                    "phase": "final_scan",
+                    "runtime_effect": "unknown",
+                    "enforcer": null,
+                    "runtime": null,
+                    "broker_step": "registration",
+                    "registration": {
+                        "stage": "reserve_prospective",
+                        "arm_state": "pending",
+                        "reservation_mode": mode,
+                        "enforcer_code": label,
+                    },
+                })
+            );
+        }
+        let error = anyhow::anyhow!("synthetic private detail")
+            .context(ReservationMode::from_replay_only(false));
+        let report =
+            serde_json::to_value(failure_report(LocalFailurePhaseV1::FinalScan, &error)).unwrap();
+        assert_eq!(
+            report["registration"],
+            json!({"stage": "reserve_prospective", "arm_state": "pending",
+                "reservation_mode": "fresh"})
+        );
     }
 
     #[test]
