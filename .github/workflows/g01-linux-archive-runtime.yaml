@@ -111,7 +111,9 @@ jobs:
           else
             test "$(id -u)" -ne 0
             "$program" info --format '{{.Host.Security.Rootless}}' | grep -Fx true
+            phase=podman_uid_mapping
             "$program" unshare true
+            phase=podman_service_start
             endpoint="unix://$d/podman.sock"
             "$program" system service --time=0 "$endpoint" >"$d/podman.log" 2>&1 &
             service_pid=$!
@@ -120,20 +122,22 @@ jobs:
               kill -0 "$service_pid"
               sleep 0.1
             done
+            phase=podman_socket_ready
             test -S "$d/podman.sock"
             engine() { "$program" --url "$endpoint" "$@"; }
+            phase=podman_socket_rootless
             engine info --format '{{.Host.Security.Rootless}}' | grep -Fx true
             export AGENTSANDBOX_TEST_PODMAN_MODE=rootless
           fi
           printf 'engine_preflight=PASS\n' >>"$receipt"
+          engine ps -aq --no-trunc | sort >"$d/containers.before"
+          engine volume ls -q | sort >"$d/volumes.before"
           phase=build_fixture
           tag="localhost/ai-guard-g01-qa:$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           engine build --file images/worker.Dockerfile --build-arg CODEX_VERSION=             --build-arg CLAUDE_CODE_VERSION= --tag "$tag" . >"$d/build.log" 2>&1
           image=$(engine image inspect --format '{{.Id}}' "$tag")
           image="sha256:${image#sha256:}"
           [[ "$image" =~ ^sha256:[0-9a-f]{64}$ ]]
-          engine ps -aq --no-trunc | sort >"$d/containers.before"
-          engine volume ls -q | sort >"$d/volumes.before"
           phase=audited_export
           export AGENTSANDBOX_TEST_RUNTIME="$ENGINE" AGENTSANDBOX_TEST_RUNTIME_PROGRAM="$program"
           export AGENTSANDBOX_TEST_RUNTIME_ENDPOINT="$endpoint" AGENTSANDBOX_TEST_IMAGE="$image"
@@ -151,7 +155,8 @@ jobs:
           authority=$(jq -er '.authority_id' <<<"$row")
           volume=$(jq -er '.work_volume' <<<"$row")
           [[ "$volume" =~ ^aig-[0-9a-f]+-[0-9a-f]+-work$ ]]
-          test -z "$(engine ps -aq --filter "volume=$volume")"
+          attached=$(engine ps -aq --filter "volume=$volume")
+          test -z "$attached"
           ! grep -Fxq -- "$volume" "$d/volumes.before"
           engine volume inspect "$volume" --format '{{json .Labels}}' |
             jq -e --arg worker "$worker" --arg authority "$authority" '
@@ -169,7 +174,8 @@ jobs:
             ' "${records[0]}")
             nonce=$(jq -er '.binding.podman.nonce' "${records[0]}")
             [[ "$marker" =~ ^aig-authority-[0-9a-f]+-[0-9a-f]+$ ]]
-            test -z "$(engine ps -aq --filter "volume=$marker")"
+            attached=$(engine ps -aq --filter "volume=$marker")
+            test -z "$attached"
             ! grep -Fxq -- "$marker" "$d/volumes.before"
             engine volume inspect "$marker" --format '{{json .Labels}}' |
               jq -e --arg authority "$authority" --arg nonce "$nonce" '
@@ -183,7 +189,7 @@ jobs:
           phase=engine_inventory
           engine ps -aq --no-trunc | sort | diff - "$d/containers.before"
           engine volume ls -q | sort | diff - "$d/volumes.before"
-          printf 'engine_inventory=PASS\n' >>"$receipt"
+          printf 'container_volume_inventory=PASS\nimage_inventory=NOT_RUN\n' >>"$receipt"
           phase=complete
 
       - name: Upload the engine receipt
