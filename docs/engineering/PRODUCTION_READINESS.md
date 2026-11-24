@@ -110,6 +110,11 @@ FAIL sur `c7f6c966` reste le dernier résultat physique.
 Reçu `g09-terminal-oracle-905e79db.log`, SHA-256
 `9aca0a3a7a318f2a7e0f9fd4844b66531acd9c06cd417cd0f9ab85bc81e0c8be`.
 
+**G05/G11 — politique réseau Kubernetes locale.** Sur Kindnet ARM64,
+un appel HTTP entre deux pods réussit avant la politique, puis échoue
+trois fois après le refus ingress/egress, serveur toujours sain.
+[Reçu HTTP](VALIDATION.md#24-novembre-2026--refus-http-par-networkpolicy-sur-kubernetes-local).
+
 **G11 — montage RWOP local.** Sur Kubernetes Docker Desktop ARM64,
 un second pod est bloqué pendant le montage du premier. Le même pod
 peut lire la sentinelle après libération du PVC. Le namespace et le PV

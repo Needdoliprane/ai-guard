@@ -1,5 +1,23 @@
 # Validation courante
 
+## 24 novembre 2026 — refus HTTP par NetworkPolicy sur Kubernetes local
+
+**PASS ciblé G05/G11** sur Docker Desktop ARM64, Kubernetes
+v1.36.1 et Kindnet `v20260528-9350166c`. Deux pods non privilégiés
+sur le même nœud, dans un namespace de recette `restricted`,
+utilisent le digest BusyBox déjà disponible. Avant la politique,
+le client obtient la sentinelle HTTP du serveur par son IP de pod.
+Après création de la NetworkPolicy `deny-all` en ingress et egress,
+trois requêtes ordinaires indépendantes échouent. Le serveur répond
+toujours sur son loopback et les deux pods restent en cours
+d’exécution. Le namespace de recette a disparu à la clôture.
+
+Reçu privé `g11-networkpolicy-http-20261124`, manifeste SHA-256
+`da2bdd38a299615083ec914b314c0a31b186ce252a58a857141b568467c9ec00`.
+Ce résultat observe le refus combiné entre deux pods sur un nœud.
+Le lancement d’un worker par ai-guard, les autorisations réseau
+temporaires et le raccordement Source17 restent ouverts.
+
 ## 24 novembre 2026 — montage RWOP exclusif sur Kubernetes local
 
 **PASS ciblé G11** sur Docker Desktop, Kubernetes v1.36.1 et
