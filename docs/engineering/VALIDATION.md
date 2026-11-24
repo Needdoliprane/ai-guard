@@ -1,5 +1,22 @@
 # Validation courante
 
+## 24 novembre 2026 — restauration de la sauvegarde avant migration SQLite
+
+**PASS ciblé G06/G12** avec deux binaires macOS ARM64 distribués.
+Le CLI `84971de6` migre une base Legacy de recette du schéma 1
+au schéma 2 et crée une sauvegarde au schéma 1. L’empreinte du
+premier événement est identique dans la base migrée et la sauvegarde.
+
+Une copie neuve de la sauvegarde est ouverte par le gateway
+`1c9e8e01` sur loopback. Son CLI vérifie le seul événement et
+retrouve l’empreinte de tête initiale. Le port est fermé à la fin,
+la copie reste au schéma 1 et la base migrée reste au schéma 2.
+Le premier prévol a utilisé la sélection mono-tenant locale avec
+une base liée à `tenant-a`. Le rejeu utilise un registre qui nomme
+le tenant. La validation du reçu compare le nombre d’événements et
+l’empreinte de tête. La remise en service de sources owned et des
+workers après migration reste à qualifier.
+
 ## 24 novembre 2026 — activation de l’archive Linux x86-64 sous émulation
 
 **PASS ciblé G12** pour les commandes des guides `bb3ed779` avec
