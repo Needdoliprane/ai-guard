@@ -18,25 +18,42 @@ mod seed;
 
 #[test]
 fn owned_format14_post_claim_backup_preserves_durable_facts() {
-    assert_owned_post_claim_backup(14, false);
+    assert_owned_claim_backup(14, ClaimBackupCase::InspectConsumed);
 }
 
 #[test]
 fn owned_format15_post_claim_backup_preserves_durable_facts() {
-    assert_owned_post_claim_backup(15, false);
+    assert_owned_claim_backup(15, ClaimBackupCase::InspectConsumed);
 }
 
 #[test]
 fn owned_format14_readopted_post_claim_replays_without_emission() {
-    assert_owned_post_claim_backup(14, true);
+    assert_owned_claim_backup(14, ClaimBackupCase::ReplayConsumed);
 }
 
 #[test]
 fn owned_format15_readopted_post_claim_replays_without_emission() {
-    assert_owned_post_claim_backup(15, true);
+    assert_owned_claim_backup(15, ClaimBackupCase::ReplayConsumed);
 }
 
-fn assert_owned_post_claim_backup(format: u32, readopt: bool) {
+#[test]
+fn owned_format14_readopted_pre_claim_refuses_start() {
+    assert_owned_claim_backup(14, ClaimBackupCase::RefuseUnconsumed);
+}
+
+#[test]
+fn owned_format15_readopted_pre_claim_refuses_start() {
+    assert_owned_claim_backup(15, ClaimBackupCase::RefuseUnconsumed);
+}
+
+#[derive(Clone, Copy)]
+enum ClaimBackupCase {
+    InspectConsumed,
+    ReplayConsumed,
+    RefuseUnconsumed,
+}
+
+fn assert_owned_claim_backup(format: u32, case: ClaimBackupCase) {
     use crate::{
         audit::OwnedRetainedSourceFacts,
         control_fs::{MAX_PRIVATE_FILE_BYTES, PrivateFile},
@@ -47,20 +64,46 @@ fn assert_owned_post_claim_backup(format: u32, readopt: bool) {
         time::{Duration, Instant},
     };
 
-    let mut committed = None;
+    let mut seeded = None;
     let mut fixture = Store::owned_control_fixture_with_legacy_setup_for_test(format, |legacy| {
-        let (claim, worker, _) = seed::claimed_from(legacy, seed::decision_admission(legacy));
-        assert_eq!(worker.state, WorkerStateV1::StartIssued);
+        let admission = seed::decision_admission(legacy);
+        let (claim, worker, claim_receipt) = match case {
+            ClaimBackupCase::RefuseUnconsumed => {
+                let (claim, worker, _) = seed::armed_from(legacy, admission);
+                assert_eq!(worker.state, WorkerStateV1::Created);
+                assert_eq!(worker.revision, claim.expected_revision);
+                assert!(worker.attempt.start_operation_id.is_none());
+                assert!(
+                    legacy
+                        .worker_operation(&claim.operation_id)
+                        .unwrap()
+                        .is_none()
+                );
+                (claim, worker, None)
+            }
+            ClaimBackupCase::InspectConsumed | ClaimBackupCase::ReplayConsumed => {
+                let (claim, worker, _) = seed::claimed_from(legacy, admission);
+                assert_eq!(worker.state, WorkerStateV1::StartIssued);
+                assert_eq!(
+                    worker.attempt.start_operation_id.as_deref(),
+                    Some(claim.operation_id.as_str())
+                );
+                let receipt = legacy
+                    .worker_operation(&claim.operation_id)
+                    .unwrap()
+                    .unwrap();
+                (claim, worker, Some(receipt))
+            }
+        };
         assert!(worker.quota_held);
         let receipts = [
             worker.admission_operation_id.as_str(),
             claim.arm_receipt.arm_id.as_str(),
-            claim.operation_id.as_str(),
         ]
         .map(|id| legacy.worker_operation(id).unwrap().unwrap());
-        committed = Some((claim, worker, receipts));
+        seeded = Some((claim, worker, receipts, claim_receipt));
     });
-    let (claim, worker, receipts) = committed.unwrap();
+    let (claim, worker, receipts, claim_receipt) = seeded.unwrap();
     let (bundle, _, _) = fixture.take_startup();
     let source_id = bundle
         .owner
@@ -85,7 +128,7 @@ fn assert_owned_post_claim_backup(format: u32, readopt: bool) {
         .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir_in(std::env::temp_dir().canonicalize().unwrap())
         .unwrap();
-    let path = directory.path().join("post-claim.sqlite");
+    let path = directory.path().join("claim-backup.sqlite");
     let (backing, initialization) = storage::StoreStorage::create_new(&path).unwrap();
     let (source_head, source_integrity) = {
         let source = store.db.lock().unwrap();
@@ -148,18 +191,20 @@ fn assert_owned_post_claim_backup(format: u32, readopt: bool) {
         .unwrap()
         .unwrap();
     assert_eq!(json!(copied_arm.receipt), json!(claim.arm_receipt));
-    let (_, record) = load_record(&copy, &claim.operation_id).unwrap().unwrap();
-    let Input::WorkerClaim(saved_claim) = record.input else {
-        panic!("copied operation must be a worker claim");
-    };
-    assert_eq!(json!(saved_claim), json!(claim));
-    let restored = load_worker(&copy, &worker.worker_id).unwrap().unwrap();
-    assert_eq!(restored.state, WorkerStateV1::StartIssued);
-    assert_eq!(restored.attempt, worker.attempt);
     assert_eq!(
-        restored.attempt.start_operation_id.as_deref(),
-        Some(claim.operation_id.as_str())
+        operation_receipt(&copy, &claim.operation_id).unwrap(),
+        claim_receipt
     );
+    if claim_receipt.is_some() {
+        let (_, record) = load_record(&copy, &claim.operation_id).unwrap().unwrap();
+        let Input::WorkerClaim(saved_claim) = record.input else {
+            panic!("copied operation must be a worker claim");
+        };
+        assert_eq!(json!(saved_claim), json!(claim));
+    }
+    let restored = load_worker(&copy, &worker.worker_id).unwrap().unwrap();
+    assert_eq!(restored.state, worker.state);
+    assert_eq!(restored.attempt, worker.attempt);
     assert_eq!(restored.revision, worker.revision);
     assert!(restored.quota_held);
     let quota = quota_usage(&copy, &QuotaPolicyV1::default()).unwrap();
@@ -167,7 +212,7 @@ fn assert_owned_post_claim_backup(format: u32, readopt: bool) {
     assert_eq!(quota.held_cpu_millis, u64::from(worker.launch.cpu_millis));
     assert_eq!(quota.held_memory_bytes, worker.launch.memory_bytes);
 
-    if !readopt {
+    if matches!(case, ClaimBackupCase::InspectConsumed) {
         return;
     }
 
@@ -177,7 +222,7 @@ fn assert_owned_post_claim_backup(format: u32, readopt: bool) {
     copy.close().unwrap();
     drop(backup_file);
     drop(initialization);
-    let bundle = fixture.reopen_post_claim_copy(bundle, source_id, &path);
+    let bundle = fixture.reopen_claim_copy(bundle, source_id, &path);
     let store = &bundle.stores[&source_id];
     let token = bundle.owner.source_token(source_id).unwrap();
     assert_ne!(token.incarnation(), previous_incarnation);
@@ -211,15 +256,31 @@ fn assert_owned_post_claim_backup(format: u32, readopt: bool) {
         head
     };
 
-    let replay = store.claim_armed_start_scoped(&access, &claim).unwrap();
-    assert_eq!(
-        replay.disposition,
-        Some(ClaimDispositionV1::AlreadyConsumed)
-    );
-    assert_eq!(replay.receipt, receipts[2]);
-    assert_eq!(json!(replay.worker), json!(worker));
+    let result = store.claim_armed_start_scoped(&access, &claim);
+    match claim_receipt.as_ref() {
+        Some(receipt) => {
+            let replay = result.unwrap();
+            assert_eq!(
+                replay.disposition,
+                Some(ClaimDispositionV1::AlreadyConsumed)
+            );
+            assert_eq!(&replay.receipt, receipt);
+            assert_eq!(json!(replay.worker), json!(worker));
+        }
+        None => {
+            let error = result.unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<ControlFailure>(),
+                Some(&ControlFailure::SupervisionInactive)
+            );
+        }
+    }
     let db = store.db.lock().unwrap();
     assert_eq!(audit_head(&db).unwrap(), before);
+    assert_eq!(
+        operation_receipt(&db, &claim.operation_id).unwrap(),
+        claim_receipt
+    );
     let retained = load_worker(&db, &worker.worker_id).unwrap().unwrap();
     assert_eq!(json!(retained), json!(worker));
     let held = quota_usage(&db, &QuotaPolicyV1::default()).unwrap();

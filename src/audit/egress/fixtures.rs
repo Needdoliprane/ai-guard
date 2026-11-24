@@ -2491,7 +2491,7 @@ impl OwnedControlFixture {
         )
     }
 
-    pub(crate) fn reopen_post_claim_copy(
+    pub(crate) fn reopen_claim_copy(
         &self,
         original: crate::human_authority::startup::HumanOwnedStartupBundle,
         source_id: Uuid,
@@ -2521,10 +2521,7 @@ impl OwnedControlFixture {
         let config =
             Directory::open_existing(self.base.plan_file.path().parent().unwrap()).unwrap();
         let manifest = config
-            .persistent_create(
-                "post-claim-copy.json",
-                &serde_json::to_vec(&closure).unwrap(),
-            )
+            .persistent_create("claim-copy.json", &serde_json::to_vec(&closure).unwrap())
             .unwrap();
         HumanOwnedStartupBundle::open(owned_control_startup_request(
             &self.base,

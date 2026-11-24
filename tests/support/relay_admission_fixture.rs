@@ -347,6 +347,15 @@ pub(super) fn claimed_from(
     store: &Store,
     admission: AdmissionV1,
 ) -> (ArmedStartClaimV1, WorkerV1, chrono::DateTime<chrono::Utc>) {
+    let (claim, _, now) = armed_from(store, admission);
+    let result = store.claim_armed_start(&claim).unwrap();
+    (claim, result.worker, now)
+}
+
+pub(super) fn armed_from(
+    store: &Store,
+    admission: AdmissionV1,
+) -> (ArmedStartClaimV1, WorkerV1, chrono::DateTime<chrono::Utc>) {
     let request = supervised_request(admission);
     let admitted = admit_supervised(store, &request);
     let mut worker = admitted.worker.unwrap();
@@ -438,8 +447,7 @@ pub(super) fn claimed_from(
         arm_receipt: armed.receipt,
         clock_check: host_clock(100_000_000_001),
     };
-    let result = store.claim_armed_start(&claim).unwrap();
-    (claim, result.worker, now)
+    (claim, worker, now)
 }
 
 pub(super) fn request(
