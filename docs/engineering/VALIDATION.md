@@ -1,5 +1,21 @@
 # Validation courante
 
+## 24 novembre 2026 — structure des archives natives de release
+
+**PASS ciblé G12** avec le vérificateur macOS `84971de6`.
+Les archives natives originales macOS ARM64 (`84971de6`) et Linux
+x86-64 (`1c9e8e01`) passent le contrôle de structure. Le CLI
+dans le paquet Linux est ELF x86-64. L’archive Linux est vérifiée
+en lecture seule sur macOS.
+
+Une copie du paquet macOS contient les mêmes 11 membres et les
+mêmes octets de fichiers. Le mode de `bin/agentsandbox` passe de
+0755 à 0655. Le vérificateur refuse la copie au code 1 et nomme
+le membre dont le propriétaire a perdu le droit d’exécution.
+SHA-256 de la copie
+`82d9ce97b04f302fc8e89c1ddafebb6ba8fc4121f9af94b88ac1a5f512560582`.
+La bascule avec un binaire distribué sur Linux x86-64 reste à qualifier.
+
 ## 24 novembre 2026 — navigation compacte après redimensionnement
 
 **PASS ciblé G08** sur `c9704ca8`. Sous Chrome 158, les scénarios
