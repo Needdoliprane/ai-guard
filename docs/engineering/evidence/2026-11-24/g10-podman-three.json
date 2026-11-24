@@ -1,0 +1,22 @@
+{
+  "source": "d665e5fa",
+  "platform": "macOS ARM64 / Podman 6.1.4 rootless",
+  "peak_slots": {
+    "tenant-a": 2,
+    "tenant-b": 1
+  },
+  "overlap_seconds": 20.010534,
+  "foreign_worker_detail": {
+    "checked": 3,
+    "http_status": 404
+  },
+  "exports_matching_source": 3,
+  "owned_containers_absent": 3,
+  "owned_work_volumes_removed": 3,
+  "other_resources_unchanged_during_cleanup": true,
+  "full_run_inventory_baseline_available": false,
+  "final_held_slots": {
+    "tenant-a": 0,
+    "tenant-b": 0
+  }
+}

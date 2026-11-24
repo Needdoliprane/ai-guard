@@ -1,5 +1,16 @@
 # Validation courante
 
+## 24 novembre 2026 — trois workers G10 sur Podman rootless
+
+**PASS ciblé.** Sur `d665e5fa`, Podman 6.1.4 rootless exécute A1 et A2
+chez A et B1 chez B, avec 20,01 secondes de chevauchement. Les trois
+exports correspondent à leurs sources. Trois accès de détail hors
+tenant rendent 404 et les deux quotas finaux reviennent à zéro.
+Les trois conteneurs sont absents à la clôture et les trois volumes
+de travail sont retirés après vérification de leur attribution.
+Le bilan d’inventaire porte sur le nettoyage ciblé, avec les exports
+et audits conservés. [Reçu Podman](evidence/2026-11-24/g10-podman-three.json).
+
 ## 24 novembre 2026 — archive macOS du candidat `84971de6`
 
 **PASS ciblé G12 et G07.** Le build release hors ligne produit six
