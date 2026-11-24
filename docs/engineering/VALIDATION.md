@@ -123,6 +123,11 @@ synthétique pour `/usr/bin/id` reçoit HTTP 200 et `allow`. La provenance
 modèle retourné `jev-1.14.0` concordent entre la réponse et l’événement
 SQLite de séquence 2. Le contrôle d’intégrité est valide. Aucun lancement
 de worker n’est demandé.
+Sur une copie de la base SQLite, Chromium confirme dans le détail
+Sécurité l’évaluateur Jev TypeSafe, la sélection par ligne de commande,
+l’alias demandé, le modèle retourné, l’avis et la décision effective.
+L’empreinte lue dans les données brutes correspond à SQLite. Aucun
+appel TypeSafe, accès navigateur externe ni erreur de page sur ce rejeu.
 [Reçu et empreinte du CLI](evidence/2026-11-24/g07-installed-macos-typesafe.json).
 
 ## 18 novembre 2026 — reprise de l’audit fonctionnel

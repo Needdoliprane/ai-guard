@@ -15,5 +15,25 @@
     "evaluated": true,
     "http": 200,
     "integrity": true
+  },
+  "browser_replay": {
+    "seq": 2,
+    "hash": "ee001649cb4b8b27baad17ef1f6bd3a043aac0eac3a28994b0953e2ae879a266",
+    "model": "jev-1.14.0",
+    "visible_model_advice": "Autoriser",
+    "visible_effective_decision": "Autorisé",
+    "visible_rule": "exact_allowlist",
+    "requested_model": "jev-latest",
+    "selection_source": "cli",
+    "external_requests": 0,
+    "page_errors": 0,
+    "source": "SQLite backup of the installed CLI TypeSafe probe",
+    "frontend_sha256": {
+      "assets/index-B18zsVM9.js": "4f22c46772b3a906fbf51b2bcdca7ac55e14875dda3df659bd93ab717279623a",
+      "assets/index-Bx1Iwo7b.css": "bad4d35f5a132e85484697387b31d06b532b0c1dc7c258e53ec26cbcd62d481b",
+      "favicon.svg": "51a233c71906900b8589ebef7537429dbb42cc4bcb631f942658dc8601893853",
+      "index.html": "bfe4ca9b61b31f29e18a3d577c5bce14b63cff98e5c78743f5577ba85d844683"
+    },
+    "model_invoked": false
   }
 }
