@@ -93,5 +93,93 @@
       "quota_released": true,
       "inventories_restored": true
     }
+  },
+  "installed_provider_readiness": {
+    "config_missing_refusal": "credential_unsafe",
+    "host_environment_isolated": true,
+    "synthetic_reference_content": true,
+    "provider_calls": 0,
+    "cases": [
+      {
+        "client": "codex",
+        "profile_id": "codex-api",
+        "auth_mode": "api",
+        "model": null,
+        "transport": "batch",
+        "credential_status": "absent",
+        "credentials_verified": false,
+        "worker_capabilities_verified": false
+      },
+      {
+        "client": "codex",
+        "profile_id": "codex-api",
+        "auth_mode": "api",
+        "model": null,
+        "transport": "batch",
+        "credential_status": "present_unverified",
+        "credentials_verified": false,
+        "worker_capabilities_verified": false
+      },
+      {
+        "client": "codex",
+        "profile_id": "codex-subscription",
+        "auth_mode": "subscription",
+        "model": null,
+        "transport": "interactive_tty",
+        "credential_status": "absent",
+        "credentials_verified": false,
+        "worker_capabilities_verified": false
+      },
+      {
+        "client": "codex",
+        "profile_id": "codex-subscription",
+        "auth_mode": "subscription",
+        "model": null,
+        "transport": "interactive_tty",
+        "credential_status": "present_unverified",
+        "credentials_verified": false,
+        "worker_capabilities_verified": false
+      },
+      {
+        "client": "claude_code",
+        "profile_id": "claude-code-api",
+        "auth_mode": "api",
+        "model": "claude-haiku-5-5",
+        "transport": "batch",
+        "credential_status": "absent",
+        "credentials_verified": false,
+        "worker_capabilities_verified": false
+      },
+      {
+        "client": "claude_code",
+        "profile_id": "claude-code-api",
+        "auth_mode": "api",
+        "model": "claude-haiku-5-5",
+        "transport": "batch",
+        "credential_status": "present_unverified",
+        "credentials_verified": false,
+        "worker_capabilities_verified": false
+      },
+      {
+        "client": "claude_code",
+        "profile_id": "claude-code-subscription",
+        "auth_mode": "subscription",
+        "model": "claude-haiku-5-5",
+        "transport": "interactive_tty",
+        "credential_status": "absent",
+        "credentials_verified": false,
+        "worker_capabilities_verified": false
+      },
+      {
+        "client": "claude_code",
+        "profile_id": "claude-code-subscription",
+        "auth_mode": "subscription",
+        "model": "claude-haiku-5-5",
+        "transport": "interactive_tty",
+        "credential_status": "present_unverified",
+        "credentials_verified": false,
+        "worker_capabilities_verified": false
+      }
+    ]
   }
 }

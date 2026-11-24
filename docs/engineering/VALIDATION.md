@@ -99,6 +99,13 @@ Enfin le CLI extrait passe G01 sur Docker Desktop et Podman rootless.
 Le lancement nominal sans réseau est audité, l’export neuf correspond
 à la source et exclut le `.env` synthétique. Les sources sont intactes,
 les quotas libérés et les inventaires des deux moteurs restaurés.
+Le prévol fournisseur du même CLI passe les huit cas de métadonnées,
+Codex et Claude Code en API et abonnement, chacun avec référence
+absente puis présente mais non vérifiée. Un répertoire seulement
+initialisé par `init` donne `credential_unsafe` tant que le fichier
+de profils manque. La fixture dédiée ne contient que des entrées
+synthétiques. Les comptes et les capacités du worker restent non
+vérifiés, sans appel fournisseur.
 [Reçu macOS, Docker et Podman](evidence/2026-11-24/g12-macos-84971de6.json).
 
 ## 24 novembre 2026 — profil TLS local à volumes neufs
