@@ -3750,8 +3750,16 @@ fn needs_autonomous_reconciliation(job: &AcceptedJobV1) -> bool {
             .iter()
             .any(|event| event.event().kind == "broker.batch.scan")
     });
+    let cancelled = job.broker_checkpoint_v3().is_some_and(|checkpoint| {
+        checkpoint
+            .commands()
+            .iter()
+            .any(|command| matches!(command.request(), LocalCommandRequestV1::CancelRequested))
+    });
     context.worker.is_none_or(|worker| {
-        worker.state != crate::control::WorkerStateV1::Terminal || worker.quota_held
+        worker.state != crate::control::WorkerStateV1::Terminal
+            || worker.quota_held
+            || (!cancelled && worker.cleanup_removed != Some(true))
     }) || pending_rpc
         || pending_event
         || !scan_done
