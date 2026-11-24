@@ -58,6 +58,18 @@ Podman SHA-256 respectifs
 et `3faeb01dc79a507064711988c7b3bc488106e6ce2c88d3f1e28ee451c36c9ea0`.
 La matrice Linux x86-64 et le lot de release complet restent ouverts.
 
+**G12 — manifeste local du gel `7e1f9cb1`.** Le CLI issu de
+l’archive macOS vérifie les membres de trois archives, macOS ARM64,
+frontend et métadonnées. Depuis les métadonnées extraites, il vérifie
+l’inventaire de source et les deux lockfiles. Le SBOM détaché correspond
+octet pour octet au SBOM embarqué. Un second manifeste lie les trois
+archives et le SBOM détaché à la source et rend `MATCH`, 4/4 artefacts.
+Reçu privé `g12-metadata-7e1f9cb1/verify.log`, SHA-256
+`e451b070e01bece451cdd4f936e529b713071836e1cce8ff56cccb0fbab7b30d`.
+Le frontend a été compilé hors ligne sur macOS avec Node 25.6.1. Le
+job Linux avec Node 24.22.2, l’archive Linux x86-64 et la publication
+restent à qualifier pour ce gel.
+
 **G12 — contrôle local du lot historique.** Le bloc local de vérification
 du brouillon sur `6456e7cc` passe avec les octets du transfert
 `1c9e8e01`. Le CLI macOS archivé `99cb885e` vérifie les membres des
