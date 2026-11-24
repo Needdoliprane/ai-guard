@@ -455,4 +455,4 @@ impl Store {
 
 #[cfg(test)]
 #[path = "egress_decisions_tests.rs"]
-mod tests;
+pub(crate) mod tests;

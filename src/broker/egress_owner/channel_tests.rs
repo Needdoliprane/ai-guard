@@ -267,20 +267,29 @@ fn fixture_resolver(upstream_port: u16, lookup: Arc<NoLookup>) -> Arc<Resolver> 
     )
 }
 
-async fn harness(gateway: Arc<Gateway>, upstream_port: u16) -> Harness {
+async fn start_channel(
+    control: Arc<dyn EgressControl>,
+    binding: EgressBindingV1,
+    upstream_port: u16,
+) -> (
+    u16,
+    Arc<NoLookup>,
+    tokio::task::JoinHandle<ChannelTermination>,
+    tokio::task::JoinHandle<Result<(), channel_helper::CommonEgressHelperError>>,
+    ChannelStop,
+) {
     let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let helper_port = probe.local_addr().unwrap().port();
     drop(probe);
     let (broker_end, helper_end) = tokio::io::duplex(256 * 1024);
     let (helper_input, helper_output) = tokio::io::split(helper_end);
-    tokio::spawn(channel_helper::serve(
+    let helper = tokio::spawn(channel_helper::serve(
         LoopbackConfig::new(helper_port).unwrap(),
         helper_input,
         helper_output,
     ));
     let lookups = Arc::new(NoLookup(AtomicUsize::new(0)));
     let resolver = fixture_resolver(upstream_port, lookups.clone());
-    let binding = fixture_binding();
     let times = ChannelTimes {
         lease: Duration::from_millis(1_500),
         renew_every: Duration::from_millis(200),
@@ -288,8 +297,13 @@ async fn harness(gateway: Arc<Gateway>, upstream_port: u16) -> Harness {
         connect_attempt: Duration::from_secs(2),
     };
     let (stop, stopped) = ChannelStop::new();
-    let control: Arc<dyn EgressControl> = gateway.clone();
     let owner = tokio::spawn(run(broker_end, binding, control, resolver, times, stopped));
+    (helper_port, lookups, owner, helper, stop)
+}
+
+async fn harness(gateway: Arc<Gateway>, upstream_port: u16) -> Harness {
+    let (helper_port, lookups, owner, _helper, stop) =
+        start_channel(gateway.clone(), fixture_binding(), upstream_port).await;
     Harness {
         gateway,
         lookups,
@@ -2037,6 +2051,192 @@ async fn egress_broker_allowed_destination_is_decided_durably_before_one_pinned_
             if *peer == format!("127.0.0.1:{}", upstream.port) && resolver == "internal_service")));
     harness.stop.stop();
     assert_eq!(harness.owner.await.unwrap().cause, ChannelExit::Stopped);
+}
+
+#[tokio::test]
+async fn egress_broker_committed_sqlite_decision_precedes_one_loopback_connection() {
+    use crate::{
+        api::{GatewayState, TenantGateway, gateway_router},
+        audit::egress_decisions::tests::loopback_store_fixture,
+        model::Event,
+        policy::Policy,
+        redaction::Redactor,
+        runner::{AuditClient, egress_control::GatewayEgressControl},
+    };
+    use axum::{
+        extract::Request,
+        middleware::{self, Next},
+    };
+
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = upstream.local_addr().unwrap().port();
+    let authority = format!("{FIXTURE}:{port}");
+    let (directory, store, binding) = loopback_store_fixture(&authority);
+    // This reader has its own SQLite connection and never calls the gateway's Store.
+    let reader = rusqlite::Connection::open_with_flags(
+        directory.path().join("tenant-a.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    let read_events = || {
+        let mut query = reader
+            .prepare(
+                "SELECT seq,payload FROM events WHERE kind LIKE 'egress.%' \
+                 AND json_extract(payload,'$.session_id')=?1 ORDER BY seq LIMIT 16",
+            )
+            .unwrap();
+        query
+            .query_map([&binding.session_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .map(|row| {
+                let (seq, payload) = row.unwrap();
+                (seq, serde_json::from_str::<Event>(&payload).unwrap())
+            })
+            .collect::<Vec<_>>()
+    };
+    let token = IdV1::random().as_str().to_owned();
+    let state = GatewayState::for_tenants(
+        vec![TenantGateway {
+            tenant_id: "tenant-a".into(),
+            store: store.clone(),
+            runner_token: token.clone(),
+            viewer_token: IdV1::random().as_str().to_owned(),
+        }],
+        Policy::default(),
+        None,
+        Redactor::new(vec![]),
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let committed = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let router = gateway_router(state).layer(middleware::from_fn({
+        let committed = committed.clone();
+        let release = release.clone();
+        move |request: Request, next: Next| {
+            let committed = committed.clone();
+            let release = release.clone();
+            async move {
+                let decision = request.uri().path() == "/api/v1/egress/decisions";
+                let response = next.run(request).await;
+                if decision {
+                    committed.notify_one();
+                    release.notified().await;
+                }
+                response
+            }
+        }
+    }));
+    let gateway = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let control = Arc::new(GatewayEgressControl::new(
+        AuditClient::new(&origin, &token).unwrap(),
+    ));
+    let (helper_port, lookups, owner, helper, stop) =
+        start_channel(control, binding.clone(), port).await;
+    let request_authority = authority.clone();
+    let client = tokio::spawn(async move { connect(helper_port, &request_authority).await });
+
+    timeout_at(
+        Instant::now() + Duration::from_secs(3),
+        committed.notified(),
+    )
+    .await
+    .unwrap();
+    let events = read_events();
+    let decisions: Vec<_> = events
+        .iter()
+        .filter(|(_, event)| event.kind == "egress.decision")
+        .collect();
+    assert_eq!(decisions.len(), 1);
+    let (decision_seq, decision) = decisions[0];
+    let request: EgressDecideRequestV1 =
+        serde_json::from_value(decision.data["request"].clone()).unwrap();
+    assert_eq!(request.binding, binding);
+    assert_eq!(request.authority, authority);
+    assert_eq!(decision.id, request.decision_id.as_str());
+    assert_eq!(decision.data["decision"]["outcome"], "allow");
+    assert!(
+        timeout_at(
+            Instant::now() + Duration::from_millis(100),
+            upstream.accept()
+        )
+        .await
+        .is_err(),
+        "the listener accepted a connection while the committed reply was held"
+    );
+    release.notify_one();
+
+    let (mut socket, _) = timeout_at(Instant::now() + Duration::from_secs(3), upstream.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    let (mut client, response) = client.await.unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"));
+    timeout_at(Instant::now() + Duration::from_secs(2), async {
+        client.write_all(b"ping").await.unwrap();
+        let mut bytes = [0; 4];
+        socket.read_exact(&mut bytes).await.unwrap();
+        assert_eq!(&bytes, b"ping");
+        socket.write_all(&bytes).await.unwrap();
+        client.read_exact(&mut bytes).await.unwrap();
+        assert_eq!(&bytes, b"ping");
+    })
+    .await
+    .unwrap();
+    stop.stop();
+    let terminal = timeout_at(Instant::now() + Duration::from_secs(7), owner)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(terminal.cause, ChannelExit::Stopped);
+    assert_eq!(terminal.local_quiescence, LocalQuiescence::Confirmed);
+    assert_eq!(
+        terminal.audit,
+        ChannelAuditClosure::Acknowledged {
+            observations_lost: 0
+        }
+    );
+    timeout_at(Instant::now() + Duration::from_secs(2), helper)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    let events = read_events();
+    let connections: Vec<_> = events
+        .iter()
+        .filter(|(_, event)| event.kind == "egress.connection")
+        .collect();
+    assert_eq!(connections.len(), 1);
+    let (connection_seq, connection) = connections[0];
+    assert!(connection_seq > decision_seq);
+    assert_eq!(connection.data["decision_id"], request.decision_id.as_str());
+    assert_eq!(connection.data["connected"], true);
+    assert_eq!(connection.data["flow_id"], request.flow_id);
+    assert_eq!(connection.data["peer"], format!("127.0.0.1:{port}"));
+    let (closed_seq, closed) = events.last().unwrap();
+    assert!(*closed_seq > *connection_seq && closed.kind == "egress.channel.closed");
+    assert_eq!(closed.data["observations_lost"], 0);
+    assert_eq!(
+        closed.data["binding"],
+        serde_json::to_value(&binding).unwrap()
+    );
+    assert!(store.integrity().unwrap().valid);
+    assert_eq!(lookups.0.load(Ordering::SeqCst), 0);
+    assert!(
+        timeout_at(
+            Instant::now() + Duration::from_millis(100),
+            upstream.accept()
+        )
+        .await
+        .is_err(),
+        "a second upstream socket was connected"
+    );
+    gateway.abort();
+    assert!(gateway.await.unwrap_err().is_cancelled());
 }
 
 #[tokio::test]

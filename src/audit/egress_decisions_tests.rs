@@ -112,6 +112,19 @@ fn private_directory() -> tempfile::TempDir {
         .unwrap()
 }
 
+pub(crate) fn loopback_store_fixture(
+    authority: &str,
+) -> (tempfile::TempDir, std::sync::Arc<Store>, EgressBindingV1) {
+    let directory = private_directory();
+    let mut policy = configured_policy();
+    policy.allow = vec![authority.into()];
+    let store = store(directory.path(), "tenant-a")
+        .with_egress_policy(&policy)
+        .unwrap();
+    let worker = software_workers::running_from(&store, egress_admission(&store));
+    (directory, std::sync::Arc::new(store), binding(&worker))
+}
+
 #[test]
 fn sqlite_sibling_keeps_egress_policy_when_gateway_expands_redaction() {
     let directory = private_directory();
