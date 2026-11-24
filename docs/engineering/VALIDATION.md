@@ -1,5 +1,24 @@
 # Validation courante
 
+## 24 novembre 2026 — collecte Claude Code dans l’image worker
+
+**PASS logiciel ciblé G07** sur `31a7e3dd`, macOS ARM64. Le libtest
+exécute 21 tests du canal d’activité, sept du bootstrap et un de sélection
+du profil de hooks selon la version. Deux processus auxiliaires de
+fixture sont ignorés comme tests autonomes. Les cas couvrent les reçus
+du canal, les pertes déclarées, les délais et le refus d’un hook bloquant
+privé de reçu.
+
+Les deux fichiers de configuration embarqués dans l’image worker
+`e61e61f18373` concordent octet pour octet avec les fichiers du candidat.
+La lecture de l’image se fait en réseau coupé et l’inventaire des
+conteneurs de recette est vide au retour. Reçu privé
+`g07-claude-hooks-31a7e3dd`, manifeste SHA-256
+`8d8eec1aa2b6ceb9f4222b521e98f5ec646e9ca79f8ff798886ba2a24a5944cb`.
+Les essais Claude Code API et abonnement avec dialogue TTY, et le relevé
+du modèle servi avec `claude-haiku-5-5`, gardent leurs preuves distinctes.
+[Dossier fournisseur](PROVIDER_AUTH.md).
+
 ## 24 novembre 2026 — décisions, expiration et révocation du canal egress
 
 **PASS logiciel ciblé G05** sur `8b7ff9b5`, macOS ARM64.
