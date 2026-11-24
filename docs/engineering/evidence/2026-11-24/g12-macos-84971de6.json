@@ -199,5 +199,23 @@
       "held_workers": 0,
       "container_and_volume_inventories_restored": true
     }
+  },
+  "installed_worker_workspace_mount": {
+    "docker": {
+      "worker_mount": "/workspace",
+      "kernel_reports_read_write": true,
+      "network": "none",
+      "audit_valid": true,
+      "held_workers": 0,
+      "container_and_volume_inventories_restored": true
+    },
+    "podman_rootless": {
+      "worker_mount": "/workspace",
+      "kernel_reports_read_write": true,
+      "network": "none",
+      "audit_valid": true,
+      "held_workers": 0,
+      "container_and_volume_inventories_restored": true
+    }
   }
 }

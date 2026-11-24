@@ -109,8 +109,10 @@ vérifiés, sans appel fournisseur.
 Sur les deux moteurs, une autre exécution audite `findmnt` dans le
 worker sans réseau. Le montage racine est `ro` et ne contient pas
 l’option `rw`. Les quotas reviennent à zéro et les inventaires
-conteneurs et volumes retrouvent leur état initial. Cette recette
-porte sur la racine.
+conteneurs et volumes retrouvent leur état initial. Une exécution
+distincte avec le même CLI sur chaque moteur observe `/workspace`
+en `rw` sans `ro`. Les deux montages ont leurs propres reçus,
+avec audit valide, quota libéré et inventaires restaurés.
 [Reçu macOS, Docker et Podman](evidence/2026-11-24/g12-macos-84971de6.json).
 
 ## 24 novembre 2026 — profil TLS local à volumes neufs
