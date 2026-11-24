@@ -64,6 +64,15 @@ restent à qualifier. Reçus `g02-docker-cgroup-99cb885e.txt` et
 `0e8d57a5db996096552b5535c3f3589a57f6cd8d21dd4e51132c7b72e79d1e18`
 et `ac11c2ccc1097d297a7021aa9f8b9040137f072ec91e8f80811e2a856c21a02c`.
 
+Sur les mêmes deux moteurs et le même CLI, une commande auditée lit
+`/proc/self/status` dans un worker strict sans réseau. Les quatre
+valeurs UID et GID sont à 1000, les cinq masques de capacités sont nuls,
+`NoNewPrivs=1` et seccomp est en mode filtre (`Seccomp=2`). Les audits
+sont valides et les inventaires reviennent à leur état initial. Reçus
+`g02-docker-proc-99cb885e.txt` et `g02-podman-proc-99cb885e.txt`, SHA-256
+respectifs `51c458b1efe32d2856baafb41cc13d0a8ec381900ddd966b6bb3a4b51ba6aaed`
+et `b9a52f4baf2547ff048dd5d12bf513733e208803ddb36739f4156d3f5aa5ff78`.
+
 **G08 — composition du registre.** Sur `26e19e84`, le
 [test d’agrégation du gateway](../../tests/supervision_stack_api.rs) passe
 1/1 en 21,09 s avec SQLite. Le parcours restitue les 120 lignes synthétiques
