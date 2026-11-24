@@ -108,13 +108,15 @@ async fn commit_patch_with(
                     .await;
             }
             Err(error) => {
-                return mode.at_created(Err(error.into()), CreatedExchangeStage::PublishPending);
+                // The actor can fail before or after writing a checkpoint.
+                // This boundary carries no proof of publication.
+                return mode.at_created(Err(error.into()), CreatedExchangeStage::AdvancePending);
             }
         }
     }
     mode.at_created(
         Err(anyhow!("journal contention requires reconciliation")),
-        CreatedExchangeStage::PublishPending,
+        CreatedExchangeStage::AdvancePending,
     )
 }
 
@@ -310,9 +312,13 @@ impl<'a> Execution<'a> {
             // Enqueue may already be durable when HTTP/ACK delivery fails.
             // Do not claim that it is absent, retry the start, or print the
             // underlying error (which may carry a provider's private text).
-            eprintln!(
-                "broker batch diagnostic delivery incomplete; inspect pending journal events"
-            );
+            if let Some(step) = diagnostic.created_exchange_step() {
+                eprintln!("broker batch diagnostic delivery incomplete at {step:?}");
+            } else {
+                eprintln!(
+                    "broker batch diagnostic delivery incomplete; inspect pending journal events"
+                );
+            }
         }
     }
 

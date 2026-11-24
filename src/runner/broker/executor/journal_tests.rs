@@ -693,6 +693,94 @@ async fn committed_rpc_replay_is_not_fresh_and_binding_loss_blocks_http() {
 }
 
 #[tokio::test]
+async fn created_pending_checkpoint_reports_three_local_failure_boundaries() {
+    let fixture = Fixture::new().await;
+    let operation = Uuid::new_v4();
+    let accepted = fixture.accept(operation, true);
+    let binding = accepted.binding_source().unwrap().path().to_owned();
+    let mode = PublicationMode::CreatedPending;
+    let step = |error: anyhow::Error| {
+        let failure = error.context(BrokerStep::CreatedExchange);
+        let diagnostic = diagnostics::failure_report(LocalFailurePhaseV1::Worker, &failure);
+        serde_json::to_value(diagnostic).unwrap()
+    };
+
+    let preparation = commit_patch_with(
+        fixture.writer(),
+        operation,
+        &fixture.scope,
+        |_| Err(anyhow!("synthetic private preparation fault")),
+        mode,
+    )
+    .await
+    .err()
+    .expect("the failed preparation cannot return a committed checkpoint");
+    assert_eq!(
+        step(preparation)["broker_step"],
+        "created_exchange_prepare_pending"
+    );
+    assert_eq!(
+        fixture
+            .writer()
+            .load(operation)
+            .await
+            .unwrap()
+            .unwrap()
+            .head(),
+        accepted.head()
+    );
+
+    let preserved = fixture.root.path().join("created-pending-binding.bin");
+    MOVE_BINDING_ONCE.with(|slot| {
+        assert!(
+            slot.borrow_mut()
+                .replace((binding.clone(), preserved.clone()))
+                .is_none()
+        );
+    });
+    let advance = commit_patch_with(
+        fixture.writer(),
+        operation,
+        &fixture.scope,
+        |_| Ok(()),
+        mode,
+    )
+    .await
+    .err()
+    .expect("the writer must fail closed when the binding disappears before advance");
+    assert!(advance.downcast_ref::<JournalError>().is_some());
+    assert_eq!(
+        step(advance)["broker_step"],
+        "created_exchange_advance_pending"
+    );
+
+    let reload = commit_patch_with(
+        fixture.writer(),
+        operation,
+        &fixture.scope,
+        |_| panic!("the draft must not be prepared after a failed strict reload"),
+        mode,
+    )
+    .await
+    .err()
+    .expect("strict reload must reject the missing binding");
+    assert_eq!(step(reload)["broker_step"], "created_exchange_reload");
+
+    fs::rename(preserved, binding).unwrap();
+    assert_eq!(
+        fixture
+            .writer()
+            .load(operation)
+            .await
+            .unwrap()
+            .unwrap()
+            .head(),
+        accepted.head()
+    );
+    assert_eq!(fixture.requests.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn unknown_failure_is_durable_public_and_opaque_without_runtime_authority() {
     let fixture = Fixture::new().await;
     let peer = NativePeer::empty(&fixture).await;

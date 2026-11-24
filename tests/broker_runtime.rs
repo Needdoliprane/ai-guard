@@ -332,7 +332,7 @@ fn batch_failure_marker_accepts_observed_failures_without_claiming_effect() {
         "created_exchange",
         "created_exchange_reload",
         "created_exchange_prepare_pending",
-        "created_exchange_publish_pending",
+        "created_exchange_advance_pending",
         "full3_binding_publication",
         "preclaim_choice",
         "native_claim_reserve",

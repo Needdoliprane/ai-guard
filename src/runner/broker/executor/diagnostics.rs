@@ -33,7 +33,7 @@ pub(super) enum BrokerStep {
     CreatedExchange,
     CreatedExchangeReload,
     CreatedExchangePreparePending,
-    CreatedExchangePublishPending,
+    CreatedExchangeAdvancePending,
     TerminalObservationAck,
     ResultAudit,
     CleanupConfirmation,
@@ -51,7 +51,7 @@ impl std::error::Error for BrokerStep {}
 pub(super) enum CreatedExchangeStage {
     Reload,
     PreparePending,
-    PublishPending,
+    AdvancePending,
 }
 
 impl CreatedExchangeStage {
@@ -59,7 +59,7 @@ impl CreatedExchangeStage {
         match self {
             Self::Reload => BrokerStep::CreatedExchangeReload,
             Self::PreparePending => BrokerStep::CreatedExchangePreparePending,
-            Self::PublishPending => BrokerStep::CreatedExchangePublishPending,
+            Self::AdvancePending => BrokerStep::CreatedExchangeAdvancePending,
         }
     }
 }
@@ -173,6 +173,19 @@ pub(super) struct BatchFailureDiagnosticV1 {
     registration: Option<RegistrationDiagnostic>,
 }
 
+impl BatchFailureDiagnosticV1 {
+    pub(super) fn created_exchange_step(&self) -> Option<BrokerStep> {
+        self.broker_step.filter(|step| {
+            matches!(
+                step,
+                BrokerStep::CreatedExchangeReload
+                    | BrokerStep::CreatedExchangePreparePending
+                    | BrokerStep::CreatedExchangeAdvancePending
+            )
+        })
+    }
+}
+
 pub(super) fn classify(
     phase: LocalFailurePhaseV1,
     error: &anyhow::Error,
@@ -247,8 +260,8 @@ mod tests {
                 "created_exchange_prepare_pending",
             ),
             (
-                CreatedExchangeStage::PublishPending,
-                "created_exchange_publish_pending",
+                CreatedExchangeStage::AdvancePending,
+                "created_exchange_advance_pending",
             ),
         ] {
             let error = anyhow::anyhow!("{private}")
