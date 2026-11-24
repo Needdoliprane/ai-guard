@@ -262,6 +262,7 @@ impl NativeControlScope {
         mut command: Command,
         args: &[String],
         environment: &[(&str, &str)],
+        cleanup_guard: Option<CleanupSpawnGuard>,
     ) -> Result<(Io, Instant)> {
         {
             let mut state = self.state();
@@ -293,20 +294,43 @@ impl NativeControlScope {
                 scope.state().settled = true;
                 return Err(error);
             }
-            let trace = if args.first().map(String::as_str) == Some("kill") && args.len() == 2 { runtime.trace_target(&args[1]) } else { None };
+            let trace = if args.first().map(String::as_str) == Some("kill") && args.len() == 2 {
+                runtime.trace_target(&args[1])
+            } else {
+                None
+            };
             observation::record(&trace, observation::Phase::StopSpawnRequested);
-            let child = match command.args(args).envs(environment).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+            command
+                .args(args)
+                .envs(environment)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let child = match spawn_capture_child(&mut command, runtime.kind, cleanup_guard) {
                 Ok(child) => child,
                 Err(error) => {
                     scope.state().settled = true;
-                    return Err(anyhow::Error::new(error).context(format!("{} is unavailable; install and start a container runtime. No local fallback exists", runtime.kind)));
+                    return Err(error);
                 }
             };
             let armed = Instant::now();
-            { let mut state = scope.state(); state.child = Some(child); state.emitted = true; }
+            {
+                let mut state = scope.state();
+                state.child = Some(child);
+                state.emitted = true;
+            }
             observation::record(&trace, observation::Phase::StopSpawnReturned);
-            let child = scope.state().child.take().ok_or_else(|| anyhow::anyhow!("native spawned child custody is unavailable"))?;
-            let io = Arc::new(tokio::sync::Mutex::new(batch_io::OwnedBatchIo::own_cli_retained_observed(child, 256 * 1024, 64 * 1024, trace)));
+            let child =
+                scope.state().child.take().ok_or_else(|| {
+                    anyhow::anyhow!("native spawned child custody is unavailable")
+                })?;
+            let io = Arc::new(tokio::sync::Mutex::new(
+                batch_io::OwnedBatchIo::own_cli_retained_observed(
+                    child,
+                    256 * 1024,
+                    64 * 1024,
+                    trace,
+                ),
+            ));
             scope.state().io = Some(io);
             Ok(armed)
         });

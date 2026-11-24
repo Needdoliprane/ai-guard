@@ -1,3 +1,4 @@
+use crate::broker::enforcer::CancelGeneration;
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::{future::Future, process::Stdio, time::Duration};
@@ -884,6 +885,30 @@ fn record_cli_exit(trace: &Option<observation::Scope>, status: Option<std::proce
     }
 }
 
+struct CleanupSpawnGuard {
+    generation: CancelGeneration,
+    expected: u64,
+}
+
+fn spawn_capture_child(
+    command: &mut Command,
+    kind: RuntimeKind,
+    cleanup_guard: Option<CleanupSpawnGuard>,
+) -> Result<tokio::process::Child> {
+    let child = match cleanup_guard {
+        Some(guard) => guard
+            .generation
+            .with_current_generation(guard.expected, || command.spawn())
+            .context("terminal cleanup spawn refused by the cancellation gate")?,
+        None => command.spawn(),
+    };
+    child.with_context(|| {
+        format!(
+            "{kind} is unavailable; install and start a container runtime. No local fallback exists"
+        )
+    })
+}
+
 impl Runtime {
     pub fn new(kind: RuntimeKind) -> Result<Self> {
         Self::from_invocation(kind, InvocationBindingV1::factory(kind)?)
@@ -940,6 +965,7 @@ impl Runtime {
         mut command: Command,
         args: &[String],
         environment: &[(&str, &str)],
+        cleanup_guard: Option<CleanupSpawnGuard>,
     ) -> Result<(batch_io::OwnedBatchIo, Instant)> {
         let runtime = self.clone();
         let args = args.to_vec();
@@ -952,15 +978,26 @@ impl Runtime {
             // scheduler-resumption gap is inserted after the final check.
             runtime.anchor.verify(&runtime.invocation, runtime.kind)?;
             let stop = args.first().map(String::as_str) == Some("kill") && args.len() == 2;
-            let trace = if stop { runtime.trace_target(&args[1]) } else { None };
+            let trace = if stop {
+                runtime.trace_target(&args[1])
+            } else {
+                None
+            };
             observation::record(&trace, observation::Phase::StopSpawnRequested);
-            let child = command.args(args).envs(environment)
-                .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
-                .with_context(|| format!("{} is unavailable; install and start a container runtime. No local fallback exists", runtime.kind))?;
+            command
+                .args(args)
+                .envs(environment)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let child = spawn_capture_child(&mut command, runtime.kind, cleanup_guard)?;
             let armed = Instant::now();
             observation::record(&trace, observation::Phase::StopSpawnReturned);
-            Ok((batch_io::OwnedBatchIo::own_cli_observed(child, 256 * 1024, 64 * 1024, trace), armed))
-        }).await
+            Ok((
+                batch_io::OwnedBatchIo::own_cli_observed(child, 256 * 1024, 64 * 1024, trace),
+                armed,
+            ))
+        })
+        .await
     }
     pub async fn cli(&self, args: &[String], duration: Duration) -> Result<Capture> {
         self.cli_env(args, duration, &[]).await
@@ -981,6 +1018,18 @@ impl Runtime {
         duration: Duration,
         environment: &[(&str, &str)],
     ) -> Result<Capture> {
+        self.capture_cli_with_cleanup_guard(command, args, duration, environment, None)
+            .await
+    }
+
+    async fn capture_cli_with_cleanup_guard(
+        &self,
+        command: Command,
+        args: &[String],
+        duration: Duration,
+        environment: &[(&str, &str)],
+        cleanup_guard: Option<CleanupSpawnGuard>,
+    ) -> Result<Capture> {
         let stop = args.first().map(String::as_str) == Some("kill") && args.len() == 2;
         let trace = if stop {
             self.trace_target(&args[1])
@@ -989,7 +1038,7 @@ impl Runtime {
         };
         observation::record(&trace, observation::Phase::StopInvocationRequested);
         let result = self
-            .capture_cli_inner(command, args, duration, environment)
+            .capture_cli_inner(command, args, duration, environment, cleanup_guard)
             .await;
         observation::record(
             &trace,
@@ -1007,6 +1056,7 @@ impl Runtime {
         args: &[String],
         duration: Duration,
         environment: &[(&str, &str)],
+        cleanup_guard: Option<CleanupSpawnGuard>,
     ) -> Result<Capture> {
         ensure!(
             environment
@@ -1017,7 +1067,9 @@ impl Runtime {
             "runtime environment override is not an approved absolute control configuration directory"
         );
         if let Some(scope) = &self.native_control {
-            let (io, armed) = scope.spawn(command, args, environment).await?;
+            let (io, armed) = scope
+                .spawn(command, args, environment, cleanup_guard)
+                .await?;
             let mut owned = io.lock().await;
             let result = self.collect_cli_capture(&mut owned, armed, duration).await;
             if owned.is_collected() {
@@ -1028,7 +1080,7 @@ impl Runtime {
             return result;
         }
         let (mut owned, armed) = self
-            .spawn_capture_command(command, args, environment)
+            .spawn_capture_command(command, args, environment, cleanup_guard)
             .await?;
         self.collect_cli_capture(&mut owned, armed, duration).await
     }

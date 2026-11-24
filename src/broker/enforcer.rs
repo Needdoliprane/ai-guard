@@ -158,6 +158,20 @@ impl CancelGeneration {
     pub fn current(&self) -> u64 {
         self.0.value.load(Ordering::SeqCst)
     }
+    /// Order a synchronous submission with generation invalidation.
+    /// The caller must keep all preparation and collection outside the gate.
+    pub(crate) fn with_current_generation<T>(
+        &self,
+        expected: u64,
+        submit: impl FnOnce() -> T,
+    ) -> EnforcerResult<T> {
+        let _gate = self.0.gate.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        if expected == u64::MAX || self.current() != expected {
+            return Err(EnforcerError::NotReady);
+        }
+        Ok(submit())
+    }
+
     /// Retain an observed recovery generation without granting a new start.
     /// The same gate orders this monotone seed, cancellation and final guards.
     pub fn advance_to(&self, observed: u64) -> u64 {

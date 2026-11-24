@@ -976,7 +976,12 @@ impl<'a> Execution<'a> {
         );
         self.generation_current().context(confirmation)?;
         runtime
-            .cleanup_terminal(handle, &observed)
+            .cleanup_terminal_for_generation(
+                handle,
+                &observed,
+                self.context.cancel_generation(),
+                self.generation,
+            )
             .await
             .context(confirmation)?;
         self.mutate(WorkerTransitionV1::CleanupResult {
@@ -1256,7 +1261,12 @@ impl<'a> Execution<'a> {
         }
         let removed = relay_joined
             && runtime
-                .cleanup_terminal(retained.handle(), retained.terminal())
+                .cleanup_terminal_for_generation(
+                    retained.handle(),
+                    retained.terminal(),
+                    self.context.cancel_generation(),
+                    self.generation,
+                )
                 .await
                 .is_ok();
         self.mutate(WorkerTransitionV1::CleanupResult {
