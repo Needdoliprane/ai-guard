@@ -12,6 +12,8 @@ gateway --human-sources-activation /control/human-preparation/activation.json
 
 Retain the installation's actual HTTP binding, server TLS and decision settings. Do not combine activation with direct source, registry, credential, revision, capacity, initialization or OIDC options. The gateway reconstructs and replays the real source union on every startup; the activation files alone do not prove source readiness. Stop all consumers before preparation or migration: `--confirm-control-stopped` is a manual attestation, without legacy-process fencing. Preserve sources, private preparation, journal, backups and matching configuration in place after interruption, then use the matching resume step in the adoption guide. `check` validates files/metadata only, without checking SQLite, authentication or readiness.
 
+For recovery from a backup, keep the restored SQLite copy isolated and retain the original activation, journal and backup evidence. The existing maintenance commands cannot publish an activation for a restored Store14 or Store15 copy. An activation for the original file remains bound to that file. Keep the copy out of service until its storage binding and pending claims can be reconciled through an operator procedure.
+
 The direct options below remain available for an installation whose retained manifest/envelope were produced through the real owned migration protocol. Use them as an alternative to activation, retaining its actual policy, data mounts, event limit and other options:
 
 ```text

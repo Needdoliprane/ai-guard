@@ -12,6 +12,8 @@ gateway --human-sources-activation /control/human-preparation/activation.json
 
 Conserver bind HTTP, TLS serveur et réglages de décision réels de l'installation. Ne pas combiner activation avec les options directes de sources, registre, credentials, révisions, capacité, initialisation ou OIDC. Le gateway reconstruit et rejoue la vraie union à chaque démarrage ; les fichiers d'activation seuls ne prouvent pas la disponibilité des sources. Arrêter tous les consommateurs avant préparation ou migration : `--confirm-control-stopped` est une attestation manuelle, sans fencing des anciens processus. Après interruption, conserver sur place sources, préparation privée, journal, sauvegardes et configuration concordante, puis employer l'étape de reprise correspondante du guide. `check` valide seulement fichiers/métadonnées, sans vérifier SQLite, authentification ou disponibilité.
 
+En cas de restauration, garder la copie SQLite isolée et conserver l’activation originale, le journal et les preuves de sauvegarde. Les commandes de maintenance actuelles ne publient pas d’activation pour une copie restaurée de Store14 ou Store15. L’activation du fichier original reste liée à ce fichier. Garder la copie hors service jusqu’à ce qu’une procédure opérateur permette de réconcilier sa liaison de stockage et les claims en attente.
+
 Les options directes ci-dessous restent disponibles pour une installation dont manifeste/enveloppe retenus proviennent du vrai protocole de migration owned. Les employer comme alternative à l'activation, en conservant politique, montages, plafond d'événements et autres options réels :
 
 ```text
