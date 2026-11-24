@@ -278,6 +278,15 @@ le raccord du canal au superviseur et l’arbitrage E3 de G05. Le profil
 réseau `none` et la médiation approuvée sont exigés sur le moteur choisi.
 Ce témoin n’a pas été lancé sur `5a6cd5c3`.
 
+**G07 — provenance et transport des moteurs de décision.** Sur
+`6256c967`, les [tests backend](../../tests/jev_backends.rs) et
+[diagnostics](../../tests/jev_diagnostics.rs) passent 11/11 en loopback.
+Ils vérifient la provenance enregistrée dans l’audit, la limite au
+point d’accès configuré en cas d’erreur et la distinction des phases
+de transport observées. Reçu privé `g07-jev-6256c967/jev-tests.log`,
+SHA-256 `b01cd6734309728966c3c5b2cde4c7599db85a540e0925636272c0f76ea098b0`.
+L’exécution des moteurs réels reste à qualifier.
+
 **G08 — navigateur et workers Docker actifs.** Sur `dddc7613`, le
 [parcours](../../tests/runtime_user_journey.rs) passe en 56,14 s sous
 Docker Desktop ARM64 avec le dashboard Rust. Chromium rend deux lignes
