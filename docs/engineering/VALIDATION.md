@@ -13,7 +13,18 @@ contrôle avec la confiance par défaut qui échoue. Le diagnostic du
 refus reste générique. Les conteneurs, réseaux et deux volumes de
 recette sont retirés après vérification. Aucun appel d’inférence ni
 raccord au gateway de décision dans cet essai.
-[Reçu de provisionnement et de santé TLS](evidence/2026-11-24/g07-local-tls-volumes-health.json).
+Une seconde recette raccorde le gateway conteneurisé avec l’override
+TLS livré. Le premier démarrage du contrôle échoue faute de sous-réseaux
+disponibles dans les pools automatiques Docker. Deux sous-réseaux
+privés explicites dans un override de recette permettent le démarrage
+sans toucher aux réseaux existants. Le gateway monte l’AC publique,
+le relais monte l’AC et l’identité, et le modèle n’a aucun montage TLS.
+Le relais utilise un délai de huit secondes. Une demande synthétique
+`id` reçoit un verdict Qwen `deny` sur HTTPS. La décision effective est
+`deny`, le reçu correspond à l’événement SQLite extrait et l’intégrité
+est valide. Aucun worker n’est demandé. Les ressources des deux projets
+et les volumes neufs sont retirés après sauvegarde du reçu.
+[Reçu de santé et de décision TLS](evidence/2026-11-24/g07-local-tls-volumes-health.json).
 
 ## 24 novembre 2026 — avis Qwen local depuis l’archive macOS
 
