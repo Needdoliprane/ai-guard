@@ -249,6 +249,16 @@ utilise un duplex de recette. Le raccord E3 et les effets en worker
 sur moteur restent ouverts. Reçu `g05-e2-1c03e01f.log`, SHA-256
 `a917e619afbd7c54c9ebd3741d797ab7ddb35f6fe075282040165bc833b6ef8d`.
 
+**G05 — Journal Chromium et reçus SQLite.** Sur `01bdcdc9`,
+le [parcours egress owned](../../front/tests/browser_owned_snapshot.mjs)
+passe sous Chromium en sandbox, avec le gateway Rust sur loopback.
+Le Journal affiche le remplacement de politique et la demande de
+révocation. Cinq réponses HTTP concordent avec cinq reçus SQLite.
+Le navigateur ne constate aucune destination externe ni erreur de page.
+Reçu privé `g05-browser-egress-01bdcdc9/summary.json`, SHA-256
+`e0bba373d73ef18b73a936ccba4212b71f067cabedfbcde17ee0e18aa38e5452`.
+L’application de la politique aux connexions d’un worker réel reste ouverte.
+
 **G05 — décision durable sur le candidat intégré.** Sur `94cc224f`,
 deux [tests SQLite](../../src/audit/egress_decisions_tests.rs) passent.
 Ils vérifient la liaison de l’autorisation au worker en cours, la
