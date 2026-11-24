@@ -17,6 +17,8 @@ const ENGINE: &str = "cancel-recovery-synthetic-engine";
 pub(super) enum Case {
     TerminalAfterCancel,
     TerminalCreatedOwned,
+    TerminalCleanupRecovery,
+    TerminalCleanupWithoutScan,
     StillRunning,
     UnknownContainer,
     ChangedCid,
@@ -299,7 +301,12 @@ impl RecoveryFixture {
             .block_on(managed_runtime.observe(&container_handle))
             .unwrap();
         assert!(observed.configuration_fingerprint.is_some());
-        if matches!(case, Case::TerminalCreatedOwned) {
+        if matches!(
+            case,
+            Case::TerminalCreatedOwned
+                | Case::TerminalCleanupRecovery
+                | Case::TerminalCleanupWithoutScan
+        ) {
             // Production retains the initial Created snapshot. The later
             // Running transition below still supplies central StartedAt proof.
             observed.process.status = Some("created".into());
@@ -376,16 +383,59 @@ impl RecoveryFixture {
         assert!(running.quota_held);
         eprintln!("cancelled_recovery_fixture phase=running_ready");
         let cancel = Uuid::new_v4();
-        handle
-            .block_on(base.writer().append_command(
-                operation,
-                cancel,
-                LocalCommandRequestV1::CancelRequested,
-            ))
-            .unwrap();
-        eprintln!("cancelled_recovery_fixture phase=cancel_ready");
+        write_observation_fixture(base.root.path(), &inspect, case);
+        if matches!(
+            case,
+            Case::TerminalCleanupRecovery | Case::TerminalCleanupWithoutScan
+        ) {
+            let terminal = handle
+                .block_on(boxed_execution_phase(|| {
+                    managed_runtime.resume_terminal(&owned.handle)
+                }))
+                .unwrap();
+            handle
+                .block_on(boxed_execution_phase(|| {
+                    execution.save_observed_result(&terminal)
+                }))
+                .unwrap();
+            let observation = managed::observation_dto(&running, &terminal).unwrap();
+            handle
+                .block_on(boxed_execution_phase(|| {
+                    execution.mutate(WorkerTransitionV1::Observe { observation })
+                }))
+                .unwrap();
+            handle
+                .block_on(boxed_execution_phase(|| execution.post_worker_result()))
+                .unwrap();
+            if matches!(case, Case::TerminalCleanupRecovery) {
+                // Represent a previously published scan to isolate recovery of
+                // the worker cleanup without starting a scan helper.
+                handle
+                    .block_on(execution.fact_event(
+                        "broker.batch.scan",
+                        &json!({
+                            "version": 1, "worker_id": running.worker_id,
+                            "helper_id": Uuid::new_v4(), "manifest_digest": "a".repeat(64),
+                            "changed_files": 0, "truncated": false, "changes": []
+                        }),
+                    ))
+                    .unwrap();
+            }
+            fs::write(base.root.path().join("allow-fixture-cleanup"), b"").unwrap();
+        } else {
+            handle
+                .block_on(base.writer().append_command(
+                    operation,
+                    cancel,
+                    LocalCommandRequestV1::CancelRequested,
+                ))
+                .unwrap();
+            eprintln!("cancelled_recovery_fixture phase=cancel_ready");
+            assert!(base.store.worker_usage().unwrap().is_empty());
+        }
         drop(execution);
-        let fixture = Self {
+        fs::write(base.root.path().join("calls"), b"").unwrap();
+        Self {
             base,
             _peer: peer,
             executor,
@@ -394,11 +444,7 @@ impl RecoveryFixture {
             cancel,
             worker_id: worker.worker_id,
             inspect,
-        };
-        fixture.set_case(case);
-        fs::write(fixture.base.root.path().join("calls"), b"").unwrap();
-        assert!(fixture.usage().is_empty());
-        fixture
+        }
     }
 
     pub(super) fn run_sync(
@@ -419,14 +465,7 @@ impl RecoveryFixture {
 
     async fn run_fresh(&self) -> std::result::Result<(), BatchFailure> {
         // A new authenticated context and Execution; no old execution survives.
-        let context = AuthenticatedBatchContext::for_executor_test(
-            self.base.client.clone(),
-            self.base.scope.clone(),
-            self.base.config.clone(),
-            self.runtime.clone(),
-        )
-        .await
-        .map_err(|_| BatchFailure)?;
+        let context = self.context().await.map_err(|_| BatchFailure)?;
         eprintln!("cancelled_recovery_run phase=context_ready");
         eprintln!("cancelled_recovery_run phase=executor_enter");
         let result = Box::pin(self.executor.run(self.operation, &context))
@@ -434,6 +473,59 @@ impl RecoveryFixture {
             .map(|_| ());
         eprintln!("cancelled_recovery_run phase=executor_complete");
         result
+    }
+    pub(super) async fn run_invalidated_during_cleanup_authority(
+        &self,
+    ) -> std::result::Result<(), BatchFailure> {
+        let context = self.context().await.unwrap();
+        let root = self.base.root.path();
+        let pause = root.join("pause-cleanup-authority");
+        let ready = root.join("cleanup-authority-ready");
+        fs::write(&pause, b"").unwrap();
+        let run = Box::pin(self.executor.run(self.operation, &context));
+        let invalidate = async {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while !ready.is_file() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("fixture did not reach final cleanup authority check");
+            assert_eq!(
+                context.cancel_generation().invalidate(),
+                context.expected_generation() + 1
+            );
+            fs::remove_file(&pause).unwrap();
+        };
+        let (result, ()) = tokio::join!(run, invalidate);
+        result.map(|_| ())
+    }
+
+    async fn context(&self) -> Result<AuthenticatedBatchContext> {
+        AuthenticatedBatchContext::for_executor_test(
+            self.base.client.clone(),
+            self.base.scope.clone(),
+            self.base.config.clone(),
+            self.runtime.clone(),
+        )
+        .await
+    }
+    pub(super) async fn record_fixture_cleanup(&self, removed: bool) {
+        let context = self.context().await.unwrap();
+        let execution = Execution::open(&self.executor, self.operation, &context)
+            .await
+            .unwrap();
+        boxed_execution_phase(|| {
+            execution.mutate(WorkerTransitionV1::CleanupResult {
+                removed,
+                error: (!removed).then(|| "fixture cleanup was not confirmed".into()),
+            })
+        })
+        .await
+        .unwrap();
+    }
+    fn job(&self) -> AcceptedJobV1 {
+        self.base.journal().load(self.operation).unwrap().unwrap()
     }
     pub(super) fn worker(&self) -> WorkerV1 {
         self.base.store.worker(&self.worker_id).unwrap().unwrap()
@@ -466,6 +558,34 @@ impl RecoveryFixture {
             })
             .collect::<Vec<_>>();
         serde_json::to_value(operations).unwrap()
+    }
+    pub(super) fn completed_cleanup_receipts(&self) -> Vec<MutationReceiptV1> {
+        let job = self.job();
+        let worker = self.worker();
+        job.broker_checkpoint_v2()
+            .unwrap()
+            .supervision()
+            .operations()
+            .iter()
+            .filter_map(|operation| match operation {
+                Operation::WorkerMutation {
+                    request,
+                    response: Some(response),
+                } if request.worker_id == worker.worker_id
+                    && request.attempt_id == worker.attempt.attempt_id
+                    && matches!(
+                        request.transition,
+                        WorkerTransitionV1::CleanupResult {
+                            removed: true,
+                            error: None
+                        }
+                    ) =>
+                {
+                    Some(response.receipt.clone())
+                }
+                _ => None,
+            })
+            .collect()
     }
     pub(super) fn cancel_id(&self) -> Uuid {
         self.cancel
@@ -612,46 +732,57 @@ impl RecoveryFixture {
         );
     }
     pub(super) fn set_case(&self, case: Case) {
-        let mut inspect = self.inspect.clone();
-        let missing = matches!(case, Case::UnknownContainer);
-        if !matches!(case, Case::StillRunning) {
-            inspect["State"]["Status"] = json!("exited");
-            inspect["State"]["Running"] = json!(false);
-            inspect["State"]["FinishedAt"] = json!(FINISHED);
-            inspect["State"]["ExitCode"] = json!(0);
-        }
-        if matches!(case, Case::ChangedCid) {
-            inspect["Id"] = json!("f".repeat(64));
-        }
-        if matches!(case, Case::ChangedImage) {
-            inspect["Image"] = json!(format!("sha256:{}", "e".repeat(64)));
-        }
-        if matches!(case, Case::ChangedConfiguration) {
-            inspect["HostConfig"]["ReadonlyRootfs"] = json!(false);
-        }
-        if matches!(case, Case::Restarted) {
-            inspect["RestartCount"] = json!(1);
-        }
-        if matches!(case, Case::ChangedStartedAt) {
-            inspect["State"]["StartedAt"] = json!("2026-10-30T12:00:01Z");
-        }
-        if matches!(case, Case::MissingStartedAt) {
-            inspect["State"]
-                .as_object_mut()
-                .unwrap()
-                .remove("StartedAt");
-        }
-        fs::write(
-            self.base.root.path().join("missing"),
-            if missing { "yes" } else { "no" },
-        )
-        .unwrap();
-        fs::write(
-            self.base.root.path().join("inspect.json"),
-            serde_json::to_vec(&inspect).unwrap(),
-        )
-        .unwrap();
+        write_observation_fixture(self.base.root.path(), &self.inspect, case);
     }
+}
+
+/// Store-acknowledged inputs for service projection only. No cleanup command
+/// or further runtime observation is issued for these two recorded outcomes.
+pub(crate) async fn terminal_cleanup_jobs_for_test() -> [AcceptedJobV1; 3] {
+    let fixture = RecoveryFixture::new(Case::TerminalCleanupRecovery).await;
+    let absent = fixture.job();
+    fixture.record_fixture_cleanup(false).await;
+    let unconfirmed = fixture.job();
+    fixture.record_fixture_cleanup(true).await;
+    [absent, unconfirmed, fixture.job()]
+}
+
+fn write_observation_fixture(root: &Path, initial: &Value, case: Case) {
+    let mut inspect = initial.clone();
+    let missing = matches!(case, Case::UnknownContainer);
+    if !matches!(case, Case::StillRunning) {
+        inspect["State"]["Status"] = json!("exited");
+        inspect["State"]["Running"] = json!(false);
+        inspect["State"]["FinishedAt"] = json!(FINISHED);
+        inspect["State"]["ExitCode"] = json!(0);
+    }
+    if matches!(case, Case::ChangedCid) {
+        inspect["Id"] = json!("f".repeat(64));
+    }
+    if matches!(case, Case::ChangedImage) {
+        inspect["Image"] = json!(format!("sha256:{}", "e".repeat(64)));
+    }
+    if matches!(case, Case::ChangedConfiguration) {
+        inspect["HostConfig"]["ReadonlyRootfs"] = json!(false);
+    }
+    if matches!(case, Case::Restarted) {
+        inspect["RestartCount"] = json!(1);
+    }
+    if matches!(case, Case::ChangedStartedAt) {
+        inspect["State"]["StartedAt"] = json!("2026-10-30T12:00:01Z");
+    }
+    if matches!(case, Case::MissingStartedAt) {
+        inspect["State"]
+            .as_object_mut()
+            .unwrap()
+            .remove("StartedAt");
+    }
+    fs::write(root.join("missing"), if missing { "yes" } else { "no" }).unwrap();
+    fs::write(
+        root.join("inspect.json"),
+        serde_json::to_vec(&inspect).unwrap(),
+    )
+    .unwrap();
 }
 
 /// Opaque descriptor for the real committed-terminal/pending-V4 fixture. It
@@ -1202,18 +1333,44 @@ use std::{fs, io::Write};
 fn main() {
     let root = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_owned();
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let start = args.iter().position(|arg| arg == "info" || arg == "inspect").unwrap_or(0);
+    let start = if args.first().map(String::as_str) == Some("--host")
+        && args.get(1).map(String::as_str) == Some("unix:///cancel-recovery-fixture.sock")
+    { 2 } else { 0 };
     let args = &args[start..];
     let mut calls = fs::OpenOptions::new().append(true).create(true).open(root.join("calls")).unwrap();
     match args.first().map(String::as_str) {
         Some("info") => {
             writeln!(calls,"info").unwrap();
-            println!("{{\"ID\":\"cancel-recovery-synthetic-engine\"}}");
+            let pause = root.join("pause-cleanup-authority");
+            if pause.is_file() && fs::read_to_string(root.join("calls")).unwrap()
+                .lines().filter(|line| line.starts_with("inspect ")).count() == 2
+            {
+                fs::write(root.join("cleanup-authority-ready"), b"").unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while pause.is_file() {
+                    if std::time::Instant::now() >= deadline {
+                        std::process::exit(125);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+            println!("{{\"ID\":\"cancel-recovery-synthetic-engine\",\"SecurityOptions\":[\"name=rootless\"]}}");
+        }
+        Some("image") if args.len() == 5 && args[1..4] == ["inspect", "--format", "{{.Id}}"]
+            && args[4] == format!("sha256:{}", "a".repeat(64)) => {
+            writeln!(calls,"image inspect").unwrap();
+            println!("{}", args[4]);
         }
         Some("inspect") => {
             writeln!(calls,"inspect {}",args.last().unwrap()).unwrap();
             if fs::read_to_string(root.join("missing")).is_ok_and(|v| v == "yes") {std::process::exit(125)}
             print!("{}",fs::read_to_string(root.join("inspect.json")).unwrap());
+        }
+        Some("rm") if args.len() == 2 && args[1] == "d".repeat(64)
+            && root.join("allow-fixture-cleanup").is_file() => {
+            writeln!(calls,"rm {}",args[1]).unwrap();
+            if fs::read_to_string(root.join("missing")).is_ok_and(|v| v == "yes") {std::process::exit(125)}
+            fs::write(root.join("missing"), "yes").unwrap();
         }
         _ => { writeln!(calls,"{}",args.join(" ")).unwrap(); std::process::exit(125); }
     }

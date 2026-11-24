@@ -291,11 +291,7 @@ impl CancelGeneration {
         expected: u64,
         action: impl FnOnce() -> EnforcerResult<T>,
     ) -> EnforcerResult<T> {
-        let _gate = self.0.gate.lock().map_err(|_| EnforcerError::Unhealthy)?;
-        if expected == u64::MAX || self.current() != expected {
-            return Err(EnforcerError::NotReady);
-        }
-        action()
+        self.with_current_generation(expected, action)?
     }
 }
 

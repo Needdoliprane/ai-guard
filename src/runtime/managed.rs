@@ -752,6 +752,7 @@ impl ManagedRuntime {
                 ],
                 Duration::from_secs(20),
                 &[marker.marker_volume.clone(), marker.nonce.to_string()],
+                None,
             )
             .await?;
         ensure!(
@@ -1071,20 +1072,27 @@ impl ManagedRuntime {
         super::deadline_supervision::checked_blocking(move || runtime.command()).await
     }
     async fn cli(&self, args: &[String], duration: Duration) -> Result<Capture> {
-        self.cli_sensitive(args, duration, &[]).await
+        self.cli_sensitive(args, duration, &[], None).await
     }
     async fn cli_sensitive(
         &self,
         args: &[String],
         duration: Duration,
         extra: &[String],
+        cleanup_guard: Option<CleanupSpawnGuard>,
     ) -> Result<Capture> {
         let mut private_redactions = extra.to_vec();
         if let Some(binding) = &self.binding.podman {
             private_redactions.extend([binding.marker_volume.clone(), binding.nonce.to_string()]);
         }
         self.runtime
-            .capture_cli(self.command_async().await?, args, duration, &[])
+            .capture_cli_with_cleanup_guard(
+                self.command_async().await?,
+                args,
+                duration,
+                &[],
+                cleanup_guard,
+            )
             .await
             .map_err(|mut error| {
                 // Keep original bytes and capture metadata until the caller can
@@ -2045,12 +2053,41 @@ impl ManagedRuntime {
         handle: &ContainerHandle,
         committed: &ContainerObservation,
     ) -> Result<()> {
+        self.cleanup_terminal_inner(handle, committed, None).await
+    }
+
+    pub(crate) async fn cleanup_terminal_for_generation(
+        &self,
+        handle: &ContainerHandle,
+        committed: &ContainerObservation,
+        generation: &CancelGeneration,
+        expected: u64,
+    ) -> Result<()> {
+        self.cleanup_terminal_inner(
+            handle,
+            committed,
+            Some(CleanupSpawnGuard {
+                generation: generation.clone(),
+                expected,
+            }),
+        )
+        .await
+    }
+
+    async fn cleanup_terminal_inner(
+        &self,
+        handle: &ContainerHandle,
+        committed: &ContainerObservation,
+        cleanup_guard: Option<CleanupSpawnGuard>,
+    ) -> Result<()> {
         self.validate_handle(handle)?;
         let mut scoped = self.clone();
         scoped.runtime = self.runtime.observed_operation(handle.operation_id());
         let trace = scoped.runtime.trace_target(handle.id());
         super::observation::record(&trace, super::observation::Phase::CleanupRequested);
-        let result = scoped.cleanup_terminal_observed(handle, committed).await;
+        let result = scoped
+            .cleanup_terminal_observed(handle, committed, cleanup_guard)
+            .await;
         super::observation::record(
             &trace,
             if result.is_ok() {
@@ -2065,6 +2102,7 @@ impl ManagedRuntime {
         &self,
         handle: &ContainerHandle,
         committed: &ContainerObservation,
+        cleanup_guard: Option<CleanupSpawnGuard>,
     ) -> Result<()> {
         let now = self.observe(handle).await?;
         now.validate_terminal(self.binding.kind, committed)?;
@@ -2075,8 +2113,13 @@ impl ManagedRuntime {
             "runtime terminal process changed after acknowledgement"
         );
         self.verify_authority().await?;
-        self.cli(&["rm".into(), handle.id.clone()], Duration::from_secs(20))
-            .await?;
+        self.cli_sensitive(
+            &["rm".into(), handle.id.clone()],
+            Duration::from_secs(20),
+            &[],
+            cleanup_guard,
+        )
+        .await?;
         Ok(())
     }
 }

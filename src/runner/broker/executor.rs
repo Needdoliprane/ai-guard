@@ -48,7 +48,9 @@ use crate::{
 use anyhow::{Context, Result, anyhow, ensure};
 use futures_util::future::BoxFuture;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
-pub(crate) use journal::{ColdRecoverySeed, terminal_pending_seed_for_cold_audit_test};
+pub(crate) use journal::{
+    ColdRecoverySeed, terminal_cleanup_jobs_for_test, terminal_pending_seed_for_cold_audit_test,
+};
 use journal::{operation_key, same};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -719,6 +721,12 @@ impl<'a> Execution<'a> {
                 .managed
                 .as_ref()
                 .context("managed preparation is missing")?;
+            ensure!(
+                !checkpoint.worker.as_ref().is_some_and(|worker| {
+                    worker.state == WorkerStateV1::Terminal && worker.cleanup_removed != Some(true)
+                }) || checkpoint.binding.is_some(),
+                "terminal cleanup requires a retained runtime authority"
+            );
             let runtime = managed::broker_runtime(
                 checkpoint,
                 self.context.runtime(),
@@ -833,6 +841,11 @@ impl<'a> Execution<'a> {
             {
                 return Ok(BatchOutcome::AbandonedBeforeClaim(abandoned));
             }
+            if worker.cleanup_removed != Some(true) {
+                self.stage(LocalFailurePhaseV1::Worker);
+                boxed_execution_phase(|| self.resume_terminal_cleanup(&prepared.runtime.runtime))
+                    .await?;
+            }
             if !live_activity
                 && boxed_execution_phase(|| self.replay_terminal_activity(&draft))
                     .await
@@ -909,6 +922,75 @@ impl<'a> Execution<'a> {
             .await?
         );
         Ok(ControlFlow::Continue(()))
+    }
+
+    async fn resume_terminal_cleanup(&self, runtime: &ManagedRuntime) -> Result<()> {
+        let confirmation = diagnostics::BrokerStep::CleanupConfirmation;
+        let (_, draft) = self.load().await.context(confirmation)?;
+        let worker = draft.worker().context(confirmation)?;
+        ensure!(
+            !draft.cancelled()
+                && worker.state == WorkerStateV1::Terminal
+                && !worker.quota_held
+                && !worker.allocation_inconsistent,
+            anyhow!("worker is not eligible for terminal cleanup").context(confirmation)
+        );
+        if worker.cleanup_removed == Some(true) {
+            return Ok(());
+        }
+        let committed = worker
+            .last_observation
+            .as_ref()
+            .context("acknowledged terminal observation is missing")
+            .context(confirmation)?;
+        let owned = draft
+            .run
+            .plan
+            .managed
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.owned.as_ref())
+            .context("retained worker ownership is missing")
+            .context(confirmation)?;
+        let handle = &owned.handle;
+        ensure!(
+            handle.operation_id() == self.operation
+                && handle.session_id() == draft.run.session()
+                && worker.attempt.container_id.as_deref() == Some(handle.id())
+                && runtime.binding().authority_id.to_string() == worker.launch.authority_id,
+            anyhow!("retained worker authority or ownership changed").context(confirmation)
+        );
+        self.generation_current().context(confirmation)?;
+        let observed = runtime
+            .resume_terminal(handle)
+            .await
+            .context(confirmation)?;
+        observed
+            .validate_terminal(runtime.binding().kind, &owned.observation)
+            .context(confirmation)?;
+        let mut current = managed::observation_dto(worker, &observed).context(confirmation)?;
+        // Fresh inspection has its own timestamp. The terminal facts must agree.
+        current.observed_at.clone_from(&committed.observed_at);
+        ensure!(
+            &current == committed,
+            anyhow!("runtime terminal differs from acknowledgement").context(confirmation)
+        );
+        self.generation_current().context(confirmation)?;
+        runtime
+            .cleanup_terminal_for_generation(
+                handle,
+                &observed,
+                self.context.cancel_generation(),
+                self.generation,
+            )
+            .await
+            .context(confirmation)?;
+        self.mutate(WorkerTransitionV1::CleanupResult {
+            removed: true,
+            error: None,
+        })
+        .await
+        .context(diagnostics::BrokerStep::CleanupAck)?;
+        Ok(())
     }
 
     async fn execute_worker(
@@ -1172,9 +1254,19 @@ impl<'a> Execution<'a> {
         } else {
             true
         };
+        if relay_joined {
+            // Keep the scan durable if the process dies after the worker removal.
+            continue_step!(boxed_execution_phase(|| self.final_scan(runtime)).await?);
+            self.stage(LocalFailurePhaseV1::Worker);
+        }
         let removed = relay_joined
             && runtime
-                .cleanup_terminal(retained.handle(), retained.terminal())
+                .cleanup_terminal_for_generation(
+                    retained.handle(),
+                    retained.terminal(),
+                    self.context.cancel_generation(),
+                    self.generation,
+                )
                 .await
                 .is_ok();
         self.mutate(WorkerTransitionV1::CleanupResult {
