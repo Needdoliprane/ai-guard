@@ -1,5 +1,6 @@
 //! Private batch journal operations.
 use super::*;
+use diagnostics::CreatedExchangeStage;
 use std::future::Future;
 
 async fn load_draft(
@@ -17,14 +18,34 @@ async fn load_draft(
     Ok((job, draft))
 }
 
-/// What a lost writer reply means for one commit. The actor is FIFO: a later
-/// load of the same job is served after the advance whose reply was lost.
+/// How to report a failed commit. The actor is FIFO: a later load of the
+/// same job is served after an advance whose reply was lost.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum UncertainPublication {
+enum PublicationMode {
     /// Report the unknown outcome; reconciliation re-reads it later.
     FailClosed,
+    /// Same fail-closed outcome, with the local stage of a Created request.
+    CreatedPending,
     /// Accept the outcome only if the durable head is exactly this checkpoint.
     ConfirmExactHead,
+}
+
+impl PublicationMode {
+    fn for_transition(transition: &WorkerTransitionV1) -> Self {
+        if matches!(transition, WorkerTransitionV1::Created { .. }) {
+            Self::CreatedPending
+        } else {
+            Self::FailClosed
+        }
+    }
+
+    fn at_created<T>(self, result: Result<T>, stage: CreatedExchangeStage) -> Result<T> {
+        if self == Self::CreatedPending {
+            result.context(stage)
+        } else {
+            result
+        }
+    }
 }
 
 fn commit_patch(
@@ -38,7 +59,7 @@ fn commit_patch(
         operation,
         scope,
         change,
-        UncertainPublication::FailClosed,
+        PublicationMode::FailClosed,
     )
 }
 
@@ -47,15 +68,21 @@ async fn commit_patch_with(
     operation: Uuid,
     scope: &JournalScopeV1,
     change: impl Fn(&mut Draft) -> Result<()>,
-    uncertain: UncertainPublication,
+    mode: PublicationMode,
 ) -> Result<Box<CommittedDraftAtHead>> {
     for _ in 0..16 {
-        let (job, mut draft) = load_draft(writer, operation, scope).await?;
-        change(&mut draft)?;
-        let next = draft.checkpoint(scope.control_namespace_uuid())?;
+        let (job, mut draft) = mode.at_created(
+            load_draft(writer, operation, scope).await,
+            CreatedExchangeStage::Reload,
+        )?;
+        mode.at_created(change(&mut draft), CreatedExchangeStage::PreparePending)?;
+        let next = mode.at_created(
+            draft.checkpoint(scope.control_namespace_uuid()),
+            CreatedExchangeStage::PreparePending,
+        )?;
         #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
         tests::before_commit()?;
-        let proposed = (uncertain == UncertainPublication::ConfirmExactHead).then(|| next.clone());
+        let proposed = (mode == PublicationMode::ConfirmExactHead).then(|| next.clone());
         match writer
             .advance_lifecycle(operation, job.head().clone(), next)
             .await
@@ -80,10 +107,15 @@ async fn commit_patch_with(
                 return confirm_exact_head(writer, operation, scope, job.head(), &proposed, draft)
                     .await;
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                return mode.at_created(Err(error.into()), CreatedExchangeStage::PublishPending);
+            }
         }
     }
-    Err(anyhow!("journal contention requires reconciliation"))
+    mode.at_created(
+        Err(anyhow!("journal contention requires reconciliation")),
+        CreatedExchangeStage::PublishPending,
+    )
 }
 
 /// A reply timeout after the actor accepted this advance is an unknown
@@ -238,19 +270,18 @@ impl<'a> Execution<'a> {
         )
     }
 
-    async fn patch_committed_with(
+    fn patch_committed_with(
         &self,
         change: impl Fn(&mut Draft) -> Result<()>,
-        uncertain: UncertainPublication,
-    ) -> Result<Box<CommittedDraftAtHead>> {
+        mode: PublicationMode,
+    ) -> impl Future<Output = Result<Box<CommittedDraftAtHead>>> {
         commit_patch_with(
             &self.executor.writer,
             self.operation,
             self.context.scope(),
             change,
-            uncertain,
+            mode,
         )
-        .await
     }
 
     pub(super) async fn failure(&self, phase: LocalFailurePhaseV1, error: &anyhow::Error) {
@@ -304,7 +335,14 @@ impl<'a> Execution<'a> {
         ready: Option<&EnforcedSlot>,
     ) -> Result<(Operation, bool, Box<CommittedDraftAtHead>)> {
         let key = operation_key(&pending);
-        let (job, draft) = self.load().await?;
+        let pending_mode = match &pending {
+            Operation::WorkerMutation { request, .. } => {
+                PublicationMode::for_transition(&request.transition)
+            }
+            _ => PublicationMode::FailClosed,
+        };
+        let (job, draft) =
+            pending_mode.at_created(self.load().await, CreatedExchangeStage::Reload)?;
         let existing = draft
             .operations
             .iter()
@@ -336,19 +374,22 @@ impl<'a> Execution<'a> {
             // The Created callback already holds the worker and Arm frames
             // while polling a fresh claim.
             boxed_execution_phase(|| {
-                self.patch_committed(|draft| {
-                    if let Some(existing) =
-                        draft.operations.iter().find(|op| operation_key(op) == key)
-                    {
-                        ensure!(
-                            same(&without_response(existing), &pending)?,
-                            "pending operation conflicts"
-                        );
-                        return Ok(());
-                    }
-                    draft.operations.push(pending.clone());
-                    Ok(())
-                })
+                self.patch_committed_with(
+                    |draft| {
+                        if let Some(existing) =
+                            draft.operations.iter().find(|op| operation_key(op) == key)
+                        {
+                            ensure!(
+                                same(&without_response(existing), &pending)?,
+                                "pending operation conflicts"
+                            );
+                            return Ok(());
+                        }
+                        draft.operations.push(pending.clone());
+                        Ok(())
+                    },
+                    pending_mode,
+                )
             })
             .await?;
             pending
@@ -365,9 +406,9 @@ impl<'a> Execution<'a> {
         // writer reply: it still holds the in-memory start permission. Every
         // other unknown publication, and any replayed claim, fails closed.
         let uncertain = if fresh && emits_once(&completed) {
-            UncertainPublication::ConfirmExactHead
+            PublicationMode::ConfirmExactHead
         } else {
-            UncertainPublication::FailClosed
+            PublicationMode::FailClosed
         };
         let committed = self
             .patch_committed_with(
@@ -560,8 +601,9 @@ impl<'a> Execution<'a> {
         ) {
             self.generation_current()?;
         }
-        let (_, draft) = self.load().await?;
-        let worker = draft.worker()?;
+        let mode = PublicationMode::for_transition(&transition);
+        let (_, draft) = mode.at_created(self.load().await, CreatedExchangeStage::Reload)?;
+        let worker = mode.at_created(draft.worker(), CreatedExchangeStage::PreparePending)?;
         let request = WorkerMutationV1 {
             version: 1,
             operation_id: Uuid::new_v4().to_string(),

@@ -31,6 +31,9 @@ pub(super) enum BrokerStep {
     OwnershipReload,
     CreatedInspection,
     CreatedExchange,
+    CreatedExchangeReload,
+    CreatedExchangePreparePending,
+    CreatedExchangePublishPending,
     TerminalObservationAck,
     ResultAudit,
     CleanupConfirmation,
@@ -43,6 +46,30 @@ impl fmt::Display for BrokerStep {
     }
 }
 impl std::error::Error for BrokerStep {}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) enum CreatedExchangeStage {
+    Reload,
+    PreparePending,
+    PublishPending,
+}
+
+impl CreatedExchangeStage {
+    fn step(self) -> BrokerStep {
+        match self {
+            Self::Reload => BrokerStep::CreatedExchangeReload,
+            Self::PreparePending => BrokerStep::CreatedExchangePreparePending,
+            Self::PublishPending => BrokerStep::CreatedExchangePublishPending,
+        }
+    }
+}
+
+impl fmt::Display for CreatedExchangeStage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&BrokerStep::CreatedExchange, f)
+    }
+}
+impl std::error::Error for CreatedExchangeStage {}
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -164,10 +191,14 @@ pub(super) fn classify(
             .downcast_ref::<RegistrationStage>()
             .map(|stage| stage.diagnostic())
     };
-    let broker_step = error
-        .downcast_ref::<BrokerStep>()
-        .copied()
-        .or_else(|| registration.as_ref().map(|_| BrokerStep::Registration));
+    let broker_step = match error.downcast_ref::<BrokerStep>().copied() {
+        Some(BrokerStep::CreatedExchange) => Some(
+            error
+                .downcast_ref::<CreatedExchangeStage>()
+                .map_or(BrokerStep::CreatedExchange, |stage| stage.step()),
+        ),
+        step => step.or_else(|| registration.as_ref().map(|_| BrokerStep::Registration)),
+    };
     if enforcer.is_none() && runtime.is_none() && broker_step.is_none() {
         return None;
     }
@@ -205,6 +236,31 @@ mod tests {
     use super::*;
     use crate::runtime::RuntimePrestartStage;
     use serde_json::json;
+
+    #[test]
+    fn created_exchange_reports_the_local_stage_without_claiming_publication() {
+        let private = "synthetic-private-created-error";
+        for (stage, label) in [
+            (CreatedExchangeStage::Reload, "created_exchange_reload"),
+            (
+                CreatedExchangeStage::PreparePending,
+                "created_exchange_prepare_pending",
+            ),
+            (
+                CreatedExchangeStage::PublishPending,
+                "created_exchange_publish_pending",
+            ),
+        ] {
+            let error = anyhow::anyhow!("{private}")
+                .context(stage)
+                .context(BrokerStep::CreatedExchange);
+            let report =
+                serde_json::to_value(failure_report(LocalFailurePhaseV1::Worker, &error)).unwrap();
+            assert_eq!(report["broker_step"], label);
+            assert_eq!(report["runtime_effect"], "unknown");
+            assert!(!report.to_string().contains(private));
+        }
+    }
 
     #[test]
     fn registration_failure_reports_only_the_coded_boundary_and_arm_state() {
