@@ -14,8 +14,8 @@ Dockerfile et le même realm que `c78784eb`.
 Chrome 158.0.8127.88 vérifie la lecture OIDC en contexte administration
 pour `admin-ai-guard` et personnel pour `user-1` et `user-2`, avec
 déconnexion locale et réponse d’API indiquant l’enregistrement de
-l’audit pour les trois. Le contrôle refuse le compte d’administration
-du realm `admin`. La recette Web vérifie les contextes et les lectures
+l’audit pour les trois. Keycloak refuse le compte `admin` dans le
+realm DEMO avant le callback. La recette Web vérifie les contextes et les lectures
 autorisées. La vérification durable du reçu est celle du CLI ci-dessous.
 
 Une seconde installation sert le CLI macOS ARM64 provenant de l’archive
@@ -33,6 +33,31 @@ volumes à zéro. Reçus privés
 La recette utilise des binaires de révisions identifiées. Le lancement
 d’un worker attribué à l’identité humaine et le raccordement entreprise
 restent à qualifier.
+
+## 24 novembre 2026 — refus de contexte et audit durable Keycloak Web
+
+**PASS ciblé G04/G08** avec les Compose `7cef20c1`, l’image de
+contrôle `3e11af808048` et Keycloak DEMO `1f41a1687516` sur
+Podman 6.1.4 rootless ARM64. Dans trois sessions Chrome séparées,
+`user-1` et `user-2` effectuent chacun une lecture personnelle
+autorisée. Le contrôle répond HTTP 403 `context_invalid` à leurs
+lectures avec le contexte actif d’`admin-ai-guard`. La session
+administrateur relit les ressources avec le même contexte après les
+deux refus et reçoit HTTP 200. Keycloak refuse le compte `admin` à
+l’étape d’authentification du realm, avant le callback.
+
+Après l’arrêt du gateway, le contrôle hors ligne de la copie SQLite
+recalcule les 14 empreintes du journal d’authentification et vérifie
+leurs liens. Les trois déconnexions réussies sont attribuées aux
+sujets OIDC du realm, au client Web et à la session correspondante.
+Chaque résultat renvoie à l’empreinte de son intention. Le CLI
+`verify-audit` confirme aussi la chaîne du tenant avant l’arrêt.
+
+Les inventaires des deux projets sont vides après la recette.
+Reçu privé `g04-keycloak-live-context-audit-7cef20c1`, manifeste
+SHA-256 `cacbfe73232054855a77669d586e47c8a95d2f9900efd9071dfdb33ba3932399`.
+Le lancement attribué à une identité humaine et le raccordement
+entreprise restent à qualifier.
 
 ## 24 novembre 2026 — archive frontend du candidat
 

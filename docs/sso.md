@@ -110,8 +110,8 @@ bootstrap complet et le raccordement entreprise.
 [Recette CI](https://github.com/Needdoliprane/ai-guard/actions/runs/45346854856)
 
 La recette Web du profil DEMO vérifie les quatre comptes sur Podman
-rootless ARM64 avec les Compose `c78784eb`. Le contrôle refuse le
-compte `admin` du realm. Le CLI macOS archivé renouvelle
+rootless ARM64 avec les Compose `c78784eb`. Keycloak refuse le compte
+`admin` dans le realm DEMO avant le callback. Le CLI macOS archivé renouvelle
 la session de `user-1` et le reçu de lecture est vérifié dans SQLite
 après arrêt du gateway.
 [Recette Podman](engineering/VALIDATION.md#24-novembre-2026--découverte-keycloak-web-et-cli-sur-podman-rootless)
