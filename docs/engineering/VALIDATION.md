@@ -1,5 +1,21 @@
 # Validation courante
 
+## 24 novembre 2026 — restauration MySQL Legacy après claim commité
+
+**PASS ciblé G06/G12.** Sur `5c3ecae5`, la recette SQL-05 restaure un
+schéma Legacy sur une instance MySQL 8.4.13 distincte pour chacun des
+profils TLS et mTLS. La cible ne contient aucune table avant l’import.
+Après contrôle SHA-256 du dump, import et arrêt de la source, la cible
+restitue le même reçu `AlreadyConsumed`, conserve la tête d’audit, la
+tentative, sa révision et le quota, puis refuse une admission distincte
+par saturation. Les témoins de transport évaluent le nom et l’AC sur
+chaque serveur et le certificat client en mTLS. Ces sondes utilisent le
+loopback du conteneur et le libtest Rust utilise les ports hôte
+publiés en loopback. Les ressources Compose de recette sont retirées.
+Le résultat couvre le Store Legacy, les formats owned et la remise en
+service complète du gateway restent ouverts.
+[Reçu SQL-05](evidence/2026-11-24/g06-mysql-legacy-restore.json).
+
 ## 24 novembre 2026 — ajout et rejeu MySQL Legacy sur le candidat
 
 **PASS ciblé G06.** Sur `c5c233b8`, le gateway compilé avec

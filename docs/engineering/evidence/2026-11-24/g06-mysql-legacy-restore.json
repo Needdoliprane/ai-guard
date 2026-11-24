@@ -1,0 +1,72 @@
+{
+  "source_commit": "5c3ecae5f48d91af564272f8a6630e9d771c97d8",
+  "source_tree": "3f90ab695212d77e283f3fe543b6c9c31c157cf9",
+  "libtest_sha256": "f65c6d3535c17d473eb550fbced296ea68d18c36e8fd96fed00049695e64787e",
+  "selector": "worker_lifecycle::restored_mysql_legacy_claim_retains_receipt_and_quota",
+  "runtime": "Docker Desktop linux/arm64",
+  "mysql_version": "8.4.13",
+  "mysql_manifest": "sha256:f4539b86c82f2c168fc95b439448bde3b9f48e8460344ce41e39081867d2b58e",
+  "source_host_endpoint": "127.0.0.1:13306",
+  "target_host_endpoint": "127.0.0.1:13307",
+  "transport_probe_path": "MySQL process loopback via probe sharing server network namespace",
+  "store_path": "Published host loopback endpoints",
+  "profiles": {
+    "mysql-password": {
+      "source_uuid": "eb1aab48-e81c-11f1-bb12-66c85fac58e6",
+      "target_uuid": "ee85e1a4-e81c-11f1-a097-8a4a407be43e",
+      "transport_per_server": {
+        "verified": "TLSv1.3",
+        "wrong_ca_mysql_errno": 2026,
+        "wrong_name_mysql_errno": 2026,
+        "verified_again": "TLSv1.3"
+      },
+      "target_tables_before_import": 0,
+      "prepare": {
+        "passed": 1,
+        "failed": 0,
+        "seconds": 0.22
+      },
+      "dump_exit": 0,
+      "dump_sha256_verified": true,
+      "import_exit": 0,
+      "source_exited_before_verify": true,
+      "source_port_closed_before_verify": true,
+      "verify": {
+        "passed": 1,
+        "failed": 0,
+        "seconds": 0.16
+      },
+      "cleanup": "No labeled containers, volumes, networks or listeners remained for either fixture"
+    },
+    "mysql-mtls": {
+      "source_uuid": "e0d14067-e81c-11f1-98bb-3a274d7c734a",
+      "target_uuid": "e512d499-e81c-11f1-9a87-521bf081c26b",
+      "transport_per_server": {
+        "verified": "TLSv1.3",
+        "wrong_ca_mysql_errno": 2026,
+        "wrong_name_mysql_errno": 2026,
+        "verified_again": "TLSv1.3",
+        "missing_client_certificate_mysql_errno": 1045
+      },
+      "target_tables_before_import": 0,
+      "prepare": {
+        "passed": 1,
+        "failed": 0,
+        "seconds": 0.23
+      },
+      "dump_exit": 0,
+      "dump_sha256_verified": true,
+      "import_exit": 0,
+      "source_exited_before_verify": true,
+      "source_port_closed_before_verify": true,
+      "verify": {
+        "passed": 1,
+        "failed": 0,
+        "seconds": 0.19
+      },
+      "cleanup": "No labeled containers, volumes, networks or listeners remained for either fixture"
+    }
+  },
+  "scope": "Logical restore of a committed Legacy claim, not owned formats, physical fencing, gateway cutover or restart",
+  "initial_attempts": "TLS restore passed before negative transport witnesses were added. First mTLS fixture stopped before claim due to missing QA client certificate. Both profiles were then replayed on fresh pairs with transport witnesses."
+}
