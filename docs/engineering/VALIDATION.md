@@ -787,6 +787,22 @@ Ce résultat couvre le worker générique ARM64. La construction native
 de l’image de contrôle, les autres plateformes et la qualification
 des artefacts de release restent ouvertes.
 
+### Rejeu Docker du worker construit sous Podman
+
+L’image worker native `e61e61f18373` construite sur `df835eea` a
+été transférée en flux vers Docker Desktop 29.9.3 ARM64. Son
+identifiant de configuration est identique sur les deux moteurs.
+Sur le checkout `cd8343d2`, le même CLI debug et le même test
+d’export, vérifiés par SHA-256, passent en 55,09 s. Le worker retourne
+à l’état terminal, le quota est libéré et le volume attribué est retiré.
+La source est intacte et l’export neuf. Les inventaires Docker
+retrouvent leur état initial.
+
+Reçu privé `g12-native-worker-docker-replay-df835eea`, manifeste
+SHA-256 `0919e96bf63044d6c6338c9c984bfaa25f30010afb17da00d888b17b01ee8195`.
+Le résultat couvre le worker générique ARM64 et la même image sur les
+deux moteurs. Le CLI debug de recette ne porte pas de révision embarquée.
+
 ### Inventaire Debian du worker Podman
 
 Le relevé `dpkg-query` de l’image `e61e61f18373` compte 187
