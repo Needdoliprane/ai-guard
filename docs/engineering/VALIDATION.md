@@ -1,5 +1,16 @@
 # Validation courante
 
+## 24 novembre 2026 — Jev TypeSafe depuis l’archive macOS
+
+**PASS ciblé G07.** Le CLI ARM64 extrait de l’archive `e2796ac1` lance
+un gateway sur loopback avec SQLite dédiée. Une demande de décision
+synthétique pour `/usr/bin/id` reçoit HTTP 200 et `allow`. La provenance
+`typesafe` sélectionnée par CLI, le modèle demandé `jev-latest` et le
+modèle retourné `jev-1.14.0` concordent entre la réponse et l’événement
+SQLite de séquence 2. Le contrôle d’intégrité est valide. Aucun lancement
+de worker n’est demandé.
+[Reçu et empreinte du CLI](evidence/2026-11-24/g07-installed-macos-typesafe.json).
+
 ## 18 novembre 2026 — reprise de l’audit fonctionnel
 
 Checkout principal `c4c4d2a7` avec modifications locales préexistantes. Les résultats ci-dessous concernent ce checkout et les correctifs de cette passe. Le contrôle Docker repose sur une pile Compose dédiée, des ports loopback distincts et des identités techniques neuves. Les sources de la branche d’intégration `9629b928` ont également été comparées en lecture seule.

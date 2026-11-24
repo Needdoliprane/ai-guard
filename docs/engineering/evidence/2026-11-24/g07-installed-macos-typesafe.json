@@ -1,0 +1,19 @@
+{
+  "source_revision": "e2796ac1",
+  "platform": "macOS ARM64",
+  "cli_sha256": "c7a0790ab62d3ecee106b2c55caffc2e156d317bd82cc867c66524de85cdee46",
+  "configured_backend": "typesafe",
+  "selection_source": "cli",
+  "requested_model": "jev-latest",
+  "decision_requests": 1,
+  "worker_launch_requested": false,
+  "sqlite_audit_seq": 2,
+  "result": {
+    "actual_model": "jev-1.14.0",
+    "audit_match": true,
+    "decision": "allow",
+    "evaluated": true,
+    "http": 200,
+    "integrity": true
+  }
+}

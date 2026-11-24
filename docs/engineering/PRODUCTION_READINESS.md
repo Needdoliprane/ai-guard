@@ -334,7 +334,13 @@ Ils vérifient la provenance enregistrée dans l’audit, la limite au
 point d’accès configuré en cas d’erreur et la distinction des phases
 de transport observées. Reçu privé `g07-jev-6256c967/jev-tests.log`,
 SHA-256 `b01cd6734309728966c3c5b2cde4c7599db85a540e0925636272c0f76ea098b0`.
-L’exécution des moteurs réels reste à qualifier.
+Le 24 novembre, le CLI macOS ARM64 installé depuis l’archive
+`e2796ac1` soumet une demande synthétique au service TypeSafe. Le modèle
+demandé `jev-latest` répond avec `jev-1.14.0` et une décision `allow`.
+L’événement SQLite correspond à la réponse et la chaîne est valide.
+La recette s’arrête à la décision, sans lancement de worker. La
+qualification de bout en bout reste ouverte.
+[Reçu Jev TypeSafe](evidence/2026-11-24/g07-installed-macos-typesafe.json).
 
 **G07 — moteur Rust déterministe sur Docker Desktop et Podman rootless.** Le CLI macOS
 installé `7e1f9cb1` sélectionne `rust-rules` et audite l’autorisation
