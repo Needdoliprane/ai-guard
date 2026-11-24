@@ -62,5 +62,17 @@ figurent dans leurs blocs attribués et les deux choix MIT pour
 `r-efi` sont explicites. Le reçu de contenu ne couvre pas la revue
 des droits de redistribution.
 
+
+**Paquets système de l’image de contrôle.** Le rapprochement du 24
+novembre 2026 couvre 65 paquets source Debian Bookworm installés dans
+l’image ARM64 de `7e3a6166`. Pour les entrées résolues avec version
+corrective, aucune version installée n’est inférieure à cette version
+selon `dpkg --compare-versions`. Le relevé contient 126 entrées
+ouvertes et une indéterminée à examiner pour les binaires embarqués.
+Les bases épinglées et les paquets résolus par APT au build sont des
+entrées distinctes. Refaire le relevé sur les images finales par rôle
+et architecture pour un gel de release.
+[Debian Security Tracker](https://security-tracker.debian.org/tracker/)
+
 - **Recette Linux x86_64 manuelle.** Le workflow [linux-qualification](../../.github/workflows/linux-qualification.yaml) lance, sur des runners GitHub `ubuntu-24.04`, les sélecteurs ignorés de la recette trois workers A1/A2/B1, de l’arrêt explicite, de l’export (Docker), du confinement (Docker) et de la persistance du terminal, avec Docker rootless et Podman rootless séparés. Pour l’AppArmor d’Ubuntu 24.04 il charge d’abord un profil `userns` limité aux binaires du moteur et ne bascule sur le sysctl `kernel.apparmor_restrict_unprivileged_userns=0` qu’en cas d’échec, en consignant avant/après. Il téléverse uniquement une liste blanche de fichiers (inventaire du moteur, reçus JSON nommés, journaux, `status.json` avec `sysctl_fallback_used`), après un balayage qui refuse tout motif de jeton ou de clé ; jamais l’arborescence des fixtures. L’entrée facultative `release_tag` n’accepte qu’une release **publiée** (un brouillon n’est pas visible du jeton en lecture), validée par la même expression que le workflow de release, et refuse de s’exécuter si le tag ne pointe pas sur le commit lancé. Non couvert : confinement Podman (marqueur d’autorité à admettre séparément), fournisseurs, MySQL, Kubernetes, macOS. Aucune exécution n’a eu lieu à la date de cette modification ; un run vert ne vaut preuve que pour sa révision, son runner et ses versions consignées.
 - Si le build ou le dépôt d’archives échoue après création du tag, relancer les jobs échoués du même run dans le délai de rétention de sept jours. Un nouveau lancement refuse le tag existant. Pour le brouillon de ce run, la reprise vérifie le tag, le commit et le marqueur du run, compare les fichiers déjà présents aux artefacts vérifiés, puis joint les fichiers absents à l’ID exact du brouillon sur `uploads.github.com`. Publier après la fin du run. Une publication manuelle du même brouillon pendant une requête de dépôt peut la devancer et sera détectée au contrôle suivant. Un brouillon étranger, une release déjà publiée lors du contrôle, un dépôt incomplet portant déjà le nom attendu ou un fichier divergent bloque la reprise. Dans ces cas, conserver le brouillon et les preuves du run pour inspection.
