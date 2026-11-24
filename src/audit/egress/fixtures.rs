@@ -2424,11 +2424,56 @@ pub(super) fn assert_stopped_consumer_maintenance_refusal_is_typed_and_effect_fr
 // A0 test-only adapter: reuse the existing real E1 migrations and the W0
 // startup; never construct an actor proof or a diagnostic DTO from metadata.
 pub(crate) struct OwnedControlFixture {
-    _base: BaseFixture,
+    base: BaseFixture,
     bundle: Option<crate::human_authority::startup::HumanOwnedStartupBundle>,
     credentials: PrivateFile,
     tokens: Vec<(String, String, String)>,
 }
+
+fn owned_control_startup_request(
+    base: &BaseFixture,
+    closure: &HumanAuthorityClosureV1,
+    manifest: PrivateFile,
+    tokens: &[(String, String, String)],
+) -> crate::human_authority::startup::HumanOwnedStartupRequest {
+    use crate::human_authority::startup::{HumanOwnedSourceOptions, HumanOwnedStartupRequest};
+
+    let redactor = Redactor::new(
+        tokens
+            .iter()
+            .flat_map(|(_, runner, viewer)| [runner.clone(), viewer.clone()])
+            .collect(),
+    );
+    let configuration = HumanSourcesConfigurationV1::new(
+        closure.sources.clone(),
+        closure.configuration.clone(),
+        base.configuration_files.clone(),
+    )
+    .unwrap();
+    let sources = closure
+        .sources
+        .iter()
+        .map(|source| {
+            let capacity = AuditCapacityPolicyV1::resolved(10_000);
+            (
+                source.source_id,
+                HumanOwnedSourceOptions::TenantStore {
+                    redactor: redactor.clone(),
+                    max_events: 10_000,
+                    workload: WorkloadAuditPolicyV1::resolved(10_000, &capacity),
+                    capacity,
+                    retention: crate::relay::RelayRetentionPolicyV1::default(),
+                },
+            )
+        })
+        .collect();
+    HumanOwnedStartupRequest {
+        manifest,
+        configuration,
+        sources,
+    }
+}
+
 impl OwnedControlFixture {
     pub(crate) fn take_startup(
         &mut self,
@@ -2445,6 +2490,50 @@ impl OwnedControlFixture {
             self.tokens.clone(),
         )
     }
+
+    pub(crate) fn reopen_post_claim_copy(
+        &self,
+        original: crate::human_authority::startup::HumanOwnedStartupBundle,
+        source_id: Uuid,
+        copy: &std::path::Path,
+    ) -> crate::human_authority::startup::HumanOwnedStartupBundle {
+        use crate::human_authority::startup::{
+            HumanOwnedStartupBundle, observe_human_storage_binding,
+        };
+
+        let mut closure = original.owner.closure().clone();
+        drop(original);
+        let descriptor = closure
+            .sources
+            .iter_mut()
+            .find(|source| source.source_id == source_id)
+            .unwrap();
+        let copied_binding = observe_human_storage_binding(copy).unwrap();
+        assert_ne!(
+            copied_binding.source_identity(),
+            descriptor.storage_binding.source_identity()
+        );
+        descriptor.storage_binding = copied_binding;
+        closure.closure_revision += 1;
+        closure.closure_digest = closure.compute_digest().unwrap();
+        // Only a fixture publishes this manifest. Startup must validate the
+        // preserved anchor against the new physical binding itself.
+        let config =
+            Directory::open_existing(self.base.plan_file.path().parent().unwrap()).unwrap();
+        let manifest = config
+            .persistent_create(
+                "post-claim-copy.json",
+                &serde_json::to_vec(&closure).unwrap(),
+            )
+            .unwrap();
+        HumanOwnedStartupBundle::open(owned_control_startup_request(
+            &self.base,
+            &closure,
+            manifest,
+            &self.tokens,
+        ))
+        .unwrap()
+    }
 }
 impl Store {
     pub(crate) fn owned_control_fixture_for_test(format: u32) -> OwnedControlFixture {
@@ -2455,9 +2544,7 @@ impl Store {
         format: u32,
         setup: impl FnOnce(&Store),
     ) -> OwnedControlFixture {
-        use crate::human_authority::startup::{
-            HumanOwnedSourceOptions, HumanOwnedStartupBundle, HumanOwnedStartupRequest,
-        };
+        use crate::human_authority::startup::HumanOwnedStartupBundle;
         assert!(matches!(format, 14 | 15));
         let base = BaseFixture::new(&["A", "B"]);
         // Test-only causal setup on the actual live legacy A Store, before
@@ -2489,45 +2576,14 @@ impl Store {
                 )
             })
             .collect::<Vec<_>>();
-        let redactor = Redactor::new(
-            tokens
-                .iter()
-                .flat_map(|(_, runner, viewer)| [runner.clone(), viewer.clone()])
-                .collect(),
-        );
-        let configuration = HumanSourcesConfigurationV1::new(
-            closure.sources.clone(),
-            closure.configuration.clone(),
-            base.configuration_files.clone(),
-        )
-        .unwrap();
-        let sources = closure
-            .sources
-            .iter()
-            .map(|source| {
-                let capacity = AuditCapacityPolicyV1::resolved(10_000);
-                (
-                    source.source_id,
-                    HumanOwnedSourceOptions::TenantStore {
-                        redactor: redactor.clone(),
-                        max_events: 10_000,
-                        workload: WorkloadAuditPolicyV1::resolved(10_000, &capacity),
-                        capacity,
-                        retention: crate::relay::RelayRetentionPolicyV1::default(),
-                    },
-                )
-            })
-            .collect();
         let manifest = PrivateFile::open(
             &base.root.path().join("configuration/a0-active.json"),
             1024 * 1024,
         )
         .unwrap();
-        let bundle = HumanOwnedStartupBundle::open(HumanOwnedStartupRequest {
-            manifest,
-            configuration,
-            sources,
-        })
+        let bundle = HumanOwnedStartupBundle::open(owned_control_startup_request(
+            &base, &closure, manifest, &tokens,
+        ))
         .unwrap();
         let source = bundle
             .owner
@@ -2592,7 +2648,7 @@ impl Store {
                 .unwrap();
         }
         OwnedControlFixture {
-            _base: base,
+            base,
             bundle: Some(bundle),
             credentials,
             tokens,

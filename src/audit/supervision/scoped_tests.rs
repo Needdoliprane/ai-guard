@@ -18,15 +18,25 @@ mod seed;
 
 #[test]
 fn owned_format14_post_claim_backup_preserves_durable_facts() {
-    assert_owned_post_claim_backup(14);
+    assert_owned_post_claim_backup(14, false);
 }
 
 #[test]
 fn owned_format15_post_claim_backup_preserves_durable_facts() {
-    assert_owned_post_claim_backup(15);
+    assert_owned_post_claim_backup(15, false);
 }
 
-fn assert_owned_post_claim_backup(format: u32) {
+#[test]
+fn owned_format14_readopted_post_claim_replays_without_emission() {
+    assert_owned_post_claim_backup(14, true);
+}
+
+#[test]
+fn owned_format15_readopted_post_claim_replays_without_emission() {
+    assert_owned_post_claim_backup(15, true);
+}
+
+fn assert_owned_post_claim_backup(format: u32, readopt: bool) {
     use crate::{
         audit::OwnedRetainedSourceFacts,
         control_fs::{MAX_PRIVATE_FILE_BYTES, PrivateFile},
@@ -63,9 +73,11 @@ fn assert_owned_post_claim_backup(format: u32) {
     let store = &bundle.stores[&source_id];
     let token = bundle.owner.source_token(source_id).unwrap();
     let facts = OwnedRetainedSourceFacts::from_token(&token).unwrap();
-    let epoch = bundle.owner.try_read_epoch().unwrap();
-    let access = HumanSourceAccess::read(&epoch, &token).unwrap();
-    let source_state = store.supervision_state_scoped(&access).unwrap();
+    let source_state = {
+        let epoch = bundle.owner.try_read_epoch().unwrap();
+        let access = HumanSourceAccess::read(&epoch, &token).unwrap();
+        store.supervision_state_scoped(&access).unwrap()
+    };
     assert_eq!(source_state.schema_version, format);
     assert!(!source_state.active);
 
@@ -114,8 +126,7 @@ fn assert_owned_post_claim_backup(format: u32) {
     assert_eq!(inspection.head_seq(), source_head.0);
     assert_eq!(inspection.head_hash(), source_head.1);
 
-    // The copy is only evidence. The source token stays bound to the original
-    // Store, and this connection performs no Store open, adoption or replay.
+    // Inspect the copied facts before any fixture adoption changes its head.
     let copy = Connection::open_with_flags(
         &path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
@@ -125,9 +136,11 @@ fn assert_owned_post_claim_backup(format: u32) {
     assert!(integrity.valid);
     assert_eq!(integrity.event_count, source_integrity.event_count);
     assert_eq!(integrity.head_hash, source_integrity.head_hash);
-    for receipt in receipts {
+    for receipt in &receipts {
         assert_eq!(
-            operation_receipt(&copy, &receipt.operation_id).unwrap(),
+            operation_receipt(&copy, &receipt.operation_id)
+                .unwrap()
+                .as_ref(),
             Some(receipt)
         );
     }
@@ -153,6 +166,63 @@ fn assert_owned_post_claim_backup(format: u32) {
     assert_eq!(quota.held_workers, 1);
     assert_eq!(quota.held_cpu_millis, u64::from(worker.launch.cpu_millis));
     assert_eq!(quota.held_memory_bytes, worker.launch.memory_bytes);
+
+    if !readopt {
+        return;
+    }
+
+    let previous_incarnation = token.incarnation();
+    let original_binding = token.descriptor().storage_binding.clone();
+    drop(token);
+    copy.close().unwrap();
+    drop(backup_file);
+    drop(initialization);
+    let bundle = fixture.reopen_post_claim_copy(bundle, source_id, &path);
+    let store = &bundle.stores[&source_id];
+    let token = bundle.owner.source_token(source_id).unwrap();
+    assert_ne!(token.incarnation(), previous_incarnation);
+    assert_ne!(token.descriptor().storage_binding, original_binding);
+    assert_eq!(token.descriptor().storage_binding.path(), path);
+    let epoch = bundle.owner.try_read_epoch().unwrap();
+    let access = HumanSourceAccess::read(&epoch, &token).unwrap();
+    let state = store.supervision_state_scoped(&access).unwrap();
+    assert_eq!(state.schema_version, format);
+    assert_eq!(
+        state.control_namespace_uuid,
+        source_state.control_namespace_uuid
+    );
+    assert!(!state.active);
+    let before = {
+        let db = store.db.lock().unwrap();
+        let head = audit_head(&db).unwrap();
+        let (kind, previous_hash): (String, String) = db
+            .query_row(
+                "SELECT kind,prev_hash FROM events WHERE seq=?1",
+                [head.0],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(head.0, source_head.0 + 1);
+        assert_eq!(kind, crate::audit::review_authority::INCARNATION_KIND);
+        assert_eq!(previous_hash, source_head.1);
+        head
+    };
+
+    let replay = store.claim_armed_start_scoped(&access, &claim).unwrap();
+    assert_eq!(
+        replay.disposition,
+        Some(ClaimDispositionV1::AlreadyConsumed)
+    );
+    assert_eq!(replay.receipt, receipts[2]);
+    assert_eq!(json!(replay.worker), json!(worker));
+    let db = store.db.lock().unwrap();
+    assert_eq!(audit_head(&db).unwrap(), before);
+    let retained = load_worker(&db, &worker.worker_id).unwrap().unwrap();
+    assert_eq!(json!(retained), json!(worker));
+    let held = quota_usage(&db, &QuotaPolicyV1::default()).unwrap();
+    assert_eq!(held.held_workers, quota.held_workers);
+    assert_eq!(held.held_cpu_millis, quota.held_cpu_millis);
+    assert_eq!(held.held_memory_bytes, quota.held_memory_bytes);
 }
 
 #[test]
