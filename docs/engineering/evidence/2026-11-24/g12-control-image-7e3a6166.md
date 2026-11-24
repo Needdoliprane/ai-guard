@@ -38,3 +38,20 @@ a retrouvé son allocation initiale et son API rootless était joignable.
 Ces reçus couvrent la construction Docker et le démarrage de cette image
 sur deux moteurs ARM64. La construction native Podman et la publication
 GitHub restent ouvertes.
+
+## Rejeu après les corrections de dépendances
+
+**PASS ciblé** sur `fdf780c3419db12d6f2e9d63d54004c5cacc4108`,
+qui inclut les mises à jour de `url` et `jsonwebtoken`. Docker ARM64 a
+reconstruit la recette depuis le contexte Git archivé. Le CLI embarqué
+annonce cette révision. L’image Linux ARM64, UID/GID 1000, a pour
+identifiant
+`sha256:3e11af80804846aed58dda3b209ed86ddf9d9c1807e250991882b75d1127640e`.
+
+Après transfert, Podman rootless conserve cet identifiant. Les trois
+services Compose sont sains sur chaque moteur. Les quatre fichiers
+frontend servis correspondent aux fichiers embarqués. Les conteneurs,
+réseaux, volumes et credentials des deux recettes ont été retirés.
+Les 65 paquets source Debian ont les mêmes versions sur les deux
+moteurs et dans le relevé antérieur de `7e3a6166`. Le verdict de
+construction native Podman et le statut de publication restent ouverts.
