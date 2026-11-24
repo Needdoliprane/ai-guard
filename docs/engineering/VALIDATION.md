@@ -11,7 +11,15 @@ du CLI macOS `84971de6`.
 
 L’archive porte un `BUILD-INFO` de recette avec `run=0`.
 SHA-256 `af67bf914570ecb5c5ef0c15b574f3e6e2c0f14b02ff18a3ffac37863ff7f6e5`.
-Le build CI Node.js 24.22.2 et la publication restent distincts.
+Le dashboard Rust de l’image contrôle locale ARM64 `c4b8cf3796a5`
+sert une extraction de cette archive depuis un montage en lecture
+seule. Le HTML, le CSS, le JavaScript et le favicon reçus par HTTP
+sont identiques aux fichiers du paquet. Le conteneur s’exécute
+en UID/GID 1000, avec une racine en lecture seule et un port publié
+sur loopback. Le conteneur est retiré à la fin. L’image contrôle
+provient d’une recette antérieure. Le build CI Node.js 24.22.2,
+la composition avec le gateway courant et la publication restent
+à qualifier séparément.
 
 ## 24 novembre 2026 — prévol Kubernetes du candidat
 
