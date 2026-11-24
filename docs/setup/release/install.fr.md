@@ -124,7 +124,13 @@ Les migrations sont des commandes explicites, une étape à la fois ; la version
 
 ## Revenir en arrière
 
-Reprenez la commande d’activation avec `RELEASE` réglé sur le dossier précédent, puis restaurez la sauvegarde faite avant la mise à jour dans une nouvelle destination. **Ne rétrogradez jamais une base déjà migrée**, ne modifiez pas son `user_version` et ne la rouvrez pas avec un binaire plus ancien : restaurez la sauvegarde cohérente. Sans sauvegarde, ne devinez pas ; conservez les données et passez par les canaux du [guide de contribution](../../../CONTRIBUTING.md).
+1. Arrêtez les services de contrôle concernés et leurs redémarrages automatiques. Conservez la base migrée et la sauvegarde prise avant la mise à jour.
+2. Restaurez la sauvegarde dans une nouvelle destination. Reprenez la commande d’activation avec `RELEASE` réglé sur le dossier précédent.
+3. Configurez le déploiement précédent pour ouvrir la copie restaurée. Conservez le rattachement au tenant dans la configuration. Démarrez dans un environnement de reprise restreint, vérifiez la version du binaire, la chaîne d’audit et la tête attendue, puis suivez la [procédure de reprise entreprise](../enterprise/README.fr.md#exploiter-et-reprendre) avant de rouvrir les admissions.
+
+**Ne rétrogradez jamais une base migrée**, ne modifiez pas son `user_version` et ne la rouvrez pas avec un binaire plus ancien. Sans sauvegarde, conservez les données et utilisez les canaux du [guide de contribution](../../../CONTRIBUTING.md).
+
+La recette Legacy sous macOS vérifie le démarrage et l’ajout d’un événement d’audit sur une copie neuve après migration de l’original du schéma 1 au schéma 2. [Reçu de validation](../../engineering/VALIDATION.md#24-novembre-2026--restauration-de-la-sauvegarde-avant-migration-sqlite)
 
 ## Signaler un problème de release
 

@@ -124,7 +124,13 @@ Migrations are explicit commands, one step at a time; version 0.0.1 applies none
 
 ## Roll back
 
-Use the same activation command with `RELEASE` set to the previous directory and restore the backup you took before the upgrade into a new destination. **Never downgrade a database that has been migrated**, edit its `user_version` or reuse it with an older binary: restore the coherent backup instead. If no backup exists, do not guess; keep the data and ask through the channels in [the contribution guide](../../../CONTRIBUTING.md).
+1. Stop the affected control services and automatic restarts. Keep the migrated database and the pre-upgrade backup.
+2. Restore the backup into a new destination. Use the same activation command with `RELEASE` set to the previous directory.
+3. Point the previous control deployment at the restored copy. Preserve the tenant binding in its configuration. Start in a restricted recovery environment, verify the binary version, the audit chain and the expected head, then follow the [enterprise recovery procedure](../enterprise/README.md#operate-and-recover) before reopening admissions.
+
+**Never downgrade a migrated database**, edit its `user_version` or open it with an older binary. If no backup exists, keep the data and use the channels in [the contribution guide](../../../CONTRIBUTING.md).
+
+The macOS Legacy exercise verifies startup and an audit append on a new copy after a schema 1 → 2 migration of the original. [Validation receipt](../../engineering/VALIDATION.md#24-novembre-2026--restauration-de-la-sauvegarde-avant-migration-sqlite)
 
 ## Report a problem with a release
 
