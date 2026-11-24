@@ -1,5 +1,19 @@
 # Validation courante
 
+## 24 novembre 2026 — points de contrôle signés de l’audit
+
+**PASS ciblé G06** sur `50ace40c` sous macOS ARM64. Les trois suites
+`audit_signed_checkpoint`, `audit_signed_checkpoint_cli` et
+`audit_signed_checkpoint_verify_audit` passent hors ligne, avec
+67 tests réussis. Les fixtures SQLite et les vrais binaires exercent
+la signature, l’avancement de l’ancre, l’export et la vérification,
+dont le rendu du verdict signé par le CLI en option.
+
+La qualification opérateur demande une ancre avancée conservée avant
+incident hors du périmètre d’écriture du contrôle. Cette même ancre
+doit confirmer les positions signées sur la restauration et faire
+refuser une copie antérieure. [Guide opérateur](../setup/audit-signatures/README.fr.md).
+
 ## 24 novembre 2026 — publication concurrente et volume APFS saturé
 
 **PASS ciblé G03** sur `b736444a`. Deux exports simultanés vers la
