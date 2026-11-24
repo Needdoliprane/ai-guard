@@ -27,6 +27,16 @@ Le scénario local de garde des archives natives G12 confirme la présence et le
 
 Un statut porte uniquement sur la preuve nommée. Un lot logiciel réussi ne clôture pas les gates d'effets runtime. La publication production exige tous les gates applicables PASS, ou NOT_APPLICABLE justifié avant essais. Les quatre combinaisons Docker/Podman × Linux x86_64/macOS ARM64 restent exigées ; Kubernetes reste une cible complète distincte.
 
+**G08 — composition du registre.** Sur `26e19e84`, le
+[test d’agrégation du gateway](../../tests/supervision_stack_api.rs) passe
+1/1 en 21,09 s avec SQLite. Le parcours restitue les 120 lignes synthétiques
+du tenant A sur plusieurs pages sans doublon, montre ses trois brokers
+(`current`, `revoked`, `unseen`) et exclut les lignes de B. La couverture
+reste `partial` et l’inventaire runtime `unknown`. Aucun broker ou worker
+réel n’est lancé. L’agrégation de plusieurs brokers actifs reste à qualifier.
+Reçu archivé `g08-aggregation-26e19e84.log`, SHA-256
+`75b57c868e93320aa414f7fe355238aa434de494b4d886497e32a69a07b00e9f`.
+
 Compléments explicites du mainteneur,30octobre : G07 exige Codex CLI et Claude Code, chacun avec abonnement et clé API, sélection dynamique annoncée, aucun repli silencieux vers une API facturée et aucun cache OAuth extrait implicitement. G08 exige une vue Web unique de tous les agents/workers du tenant sur ses brokers/hôtes/runtimes, avec provenance, fraîcheur et états partiels ; pas un dashboard par worker. G04/G06/G10 couvrent quotas et comptage globaux du tenant et capacité100mesurée. Aucun de ces compléments n'est clôturé par sa seule inscription ou par le `.env` local créé.
 
 Le gateway distingue désormais API TypeSafe, règles Rust et modèle local consultatif. Un premier essai historique Qwen 0,5B a renvoyé `allow` pour une suppression, ce qui maintient le candidat hors qualification pour autoriser une exécution. Le parcours actuel évalue un avis via Rust, maintient le veto impératif et permet une relecture durable après arrêt du modèle. Cette preuve couvre un gateway natif avec modèle Docker Desktop. Une seconde recette vérifie une décision Qwen avec gateway et relais TLS conteneurisés ainsi que son reçu et son export dans Chromium. Le corpus modèle, Podman, Kubernetes et le déploiement Compose complet relèvent de G04/G07/G10. [Essai historique](evidence/2026-10-30/local-judge/README.md) · [Essai intégré](evidence/2026-11-18/functional/qwen-local-gateway.json)
