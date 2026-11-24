@@ -14,7 +14,7 @@ L'architecture est validée : Rust hors frontend ; frontend TypeScript statique 
 - Chaque worker non privilégié appartient à un seul client et utilise un volume de copie filtrée, jamais le projet original. Réseau coupé par défaut, capacités supprimées, racine en lecture seule et ressources bornées doivent être inspectés et testés par leurs effets.
 - Le rôle worker n'accède qu'au relais autorisé. Chaque échange nécessite un grant dirigé source/destination/canal, révocable ; les échanges inter-clients sont refusés.
 
-La cible est de 0 à 100 workers actifs par client. La recette locale standard utilise A1/A2 chez A et B1 chez B, en plus du contrôle. Ni ce scénario ni la charge 100 ne sont déduits d'une fixture. Voir [identité et stockage](engineering/CLOUD_TENANCY.md) et [recette locale](engineering/LOCAL_CLOUD_TESTS.md).
+G10 exige 100 réservations durables pour un client. La recette sur moteur réel utilise A1/A2 chez A et B1 chez B, en plus du contrôle. Le dimensionnement à 100 workers actifs est suivi séparément. Voir [identité et stockage](engineering/CLOUD_TENANCY.md) et [recette locale](engineering/LOCAL_CLOUD_TESTS.md).
 
 ## Parcours et expérience attendus
 

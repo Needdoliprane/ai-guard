@@ -43,7 +43,7 @@ Chaque session travaille dans un volume alimenté par copie filtrée ; le projet
 
 Le client est choisi par l'identité authentifiée, jamais par un header libre, une querystring, un corps JSON ou un label worker. `runner` appartient au contrôle ; `viewer` consulte son client ; `worker` n'utilise que son relais autorisé, sans accès au registre, aux métriques globales ni aux secrets du contrôle. Chaque worker appartient exclusivement à un client.
 
-La cible est de 0 à 100 workers actifs par client. La recette locale standard reste trois workers : A1/A2 chez A et B1 chez B, plus les services de contrôle. La charge 100 est une qualification séparée. Un même client ne donne pas de droit implicite de communication : le relais exige `source → destination + canal`, avec révocation et durée si configurée ; les échanges entre clients sont refusés.
+G10 vérifie 100 réservations durables pour un client. La recette locale sur moteur utilise trois workers, A1/A2 chez A et B1 chez B, plus les services de contrôle. Les mesures à 100 workers actifs relèvent du dimensionnement. Un même client ne donne pas de droit implicite de communication : le relais exige `source → destination + canal`, avec révocation et durée si configurée ; les échanges entre clients sont refusés.
 
 Sources internes : `docs/engineering/CLOUD_TENANCY.md`, `docs/engineering/LOCAL_CLOUD_TESTS.md` et `docs/engineering/USAGE_METERING.md`.
 
