@@ -14,8 +14,13 @@ CLI et la même image, le rejeu rend aussi `deny` avec événement SQLite
 concordant et intégrité valide. Le pic atteint 378 777 600 octets sous
 la même limite effective, sans swap ni OOM. Le nettoyage des deux
 conteneurs et du réseau est vérifié. Ces recettes couvrent un verdict
-par moteur. La qualité du modèle et le parcours Compose livré restent
-à qualifier.
+par moteur. Le Compose HTTP livré passe aussi sur Docker Desktop avec
+l’image de contrôle ARM64 construite depuis `e5c0e4b7`. Le relais Rust
+est sain et publié sur loopback. Le modèle reste sur le réseau interne,
+sans port publié. Le verdict `deny`, l’audit et l’intégrité concordent.
+Le pic cgroup atteint 707 788 800 octets, sans swap ni OOM. Les
+conteneurs et réseaux du projet sont retirés. La qualité du modèle et
+les autres profils de déploiement restent à qualifier.
 [Reçu Qwen](evidence/2026-11-24/g07-installed-macos-qwen.json).
 
 ## 24 novembre 2026 — Jev TypeSafe depuis l’archive macOS

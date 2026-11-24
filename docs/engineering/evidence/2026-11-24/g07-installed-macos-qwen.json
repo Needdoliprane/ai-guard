@@ -46,5 +46,32 @@
       "audit_match": true,
       "integrity": true
     }
+  },
+  "docker_compose": {
+    "control_source_revision": "e5c0e4b7",
+    "control_image_id": "sha256:c4b8cf3796a5e394520825aeccb52cb8da3c06c0adb60b8b8193cad0e6f00497",
+    "compose_file": "deploy/local-ai/compose.yaml",
+    "relay": "agentsandbox http-relay",
+    "relay_binding": "loopback",
+    "model_network_internal": true,
+    "model_port_published": false,
+    "memory_limit_bytes": 999997440,
+    "memory_peak_bytes": 707788800,
+    "swap_limit_bytes": 0,
+    "oom": 0,
+    "oom_kill": 0,
+    "cleanup_verified": true,
+    "result": {
+      "http": 200,
+      "backend": "local_openai",
+      "status": "evaluated",
+      "requested_model": "qwen2.5-0.5b-q4km",
+      "returned_model": "qwen2.5-0.5b-q4km",
+      "advice": "deny",
+      "effective_decision": "deny",
+      "audit_seq": 2,
+      "audit_match": true,
+      "integrity": true
+    }
   }
 }
