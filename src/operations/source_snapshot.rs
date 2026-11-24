@@ -297,11 +297,12 @@ impl OperatorRuntime {
     /// that was opened.
     pub(super) async fn consume_prepared(
         &self,
-        command: PreparedCommand,
+        mut command: PreparedCommand,
         duration: Duration,
         environment: &[(&str, &str)],
         directory: Option<&crate::control_fs::Directory>,
     ) -> Result<Capture> {
+        inject_podman_build_ignorefile(self.approved.kind, &mut command)?;
         let mut prefix = Vec::new();
         if let Some(runtime) = &self.docker {
             // The same read-only identity check as managed recovery. The check
@@ -316,6 +317,30 @@ impl OperatorRuntime {
         }
         consume(&self.approved, prefix, command, duration, environment).await
     }
+}
+
+fn inject_podman_build_ignorefile(
+    runtime: RuntimeKind,
+    command: &mut PreparedCommand,
+) -> Result<()> {
+    if runtime == RuntimeKind::Podman && command.verb == "build" {
+        let ignore = command
+            .snapshot
+            .build_ignore_override()
+            .context("prepared build has no private Podman ignore file")?;
+        ignore.revalidate()?;
+        let path = utf8(ignore.path())?.to_owned();
+        let context_position = command
+            .arguments
+            .len()
+            .checked_sub(1)
+            .context("prepared build has no context argument")?;
+        command.arguments.splice(
+            context_position..context_position,
+            ["--ignorefile".to_owned(), path],
+        );
+    }
+    Ok(())
 }
 
 /// Runs one prepared command to its end and says what was observed: the wait

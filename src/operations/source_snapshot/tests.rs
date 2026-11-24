@@ -659,6 +659,72 @@ fn verify_rejects_altered_missing_and_extra_entries_of_the_copy() {
 }
 
 #[test]
+fn podman_build_uses_a_verified_private_ignore_file_outside_the_context() {
+    let fixture = Fixture::new();
+    let snapshot = fixture.prepare(Scope::Build);
+    let ignore = snapshot
+        .build_ignore_override()
+        .expect("build snapshot retains the Podman ignore file");
+    assert_eq!(ignore.bytes(), b".dockerignore\n");
+    assert_eq!(
+        fs::metadata(ignore.path()).unwrap().mode() & 0o777,
+        0o600,
+        "the engine ignore file is private"
+    );
+    assert!(!ignore.path().starts_with(snapshot.context()));
+    let ignore_path = ignore.path().to_str().unwrap().to_owned();
+    let manifest = fs::read_to_string(snapshot.root().join("manifest.json")).unwrap();
+    assert!(!manifest.contains("podman-build-ignore"));
+    snapshot.verify().expect("prepared ignore file verifies");
+
+    let mut command = super::PreparedSource {
+        snapshot: Arc::new(snapshot),
+    }
+    .build_command(
+        "images/control.Dockerfile",
+        &["build".into(), "--tag".into(), "control:test".into()],
+    )
+    .unwrap();
+    let docker_arguments = command.arguments.clone();
+    super::inject_podman_build_ignorefile(RuntimeKind::Docker, &mut command).unwrap();
+    assert_eq!(
+        command.arguments, docker_arguments,
+        "Docker build is unchanged"
+    );
+    super::inject_podman_build_ignorefile(RuntimeKind::Podman, &mut command).unwrap();
+    let ignorefile_position = command.arguments.len() - 3;
+    assert_eq!(
+        command.arguments[ignorefile_position].as_str(),
+        "--ignorefile"
+    );
+    assert_eq!(command.arguments[ignorefile_position + 1], ignore_path);
+
+    let compose_snapshot = fixture.prepare(Scope::Compose(RuntimeKind::Docker));
+    let mut compose = super::PreparedSource {
+        snapshot: Arc::new(compose_snapshot),
+    }
+    .compose_command(&[
+        "compose".into(),
+        "--project-name".into(),
+        "agentsandbox".into(),
+        "down".into(),
+    ])
+    .unwrap();
+    let compose_arguments = compose.arguments.clone();
+    super::inject_podman_build_ignorefile(RuntimeKind::Podman, &mut compose).unwrap();
+    assert_eq!(compose.arguments, compose_arguments, "Compose is unchanged");
+}
+
+#[test]
+fn prepared_podman_ignore_file_modification_is_rejected() {
+    let fixture = Fixture::new();
+    let snapshot = fixture.prepare(Scope::Build);
+    let path = snapshot.build_ignore_override().unwrap().path().to_owned();
+    fs::write(&path, b"\n").unwrap();
+    assert!(refusal(snapshot.verify()).contains("prepared Podman ignore file changed"));
+}
+
+#[test]
 fn compose_scope_captures_exactly_one_file_and_an_empty_environment_file() {
     let fixture = Fixture::new();
     let snapshot = fixture.prepare(Scope::Compose(RuntimeKind::Docker));

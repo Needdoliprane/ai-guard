@@ -70,6 +70,8 @@ const _: () = {
 };
 const MANIFEST: &str = "manifest.json";
 const COMPOSE_ENV_FILE: &str = "compose-empty.env";
+const BUILD_IGNORE_OVERRIDE: &str = "podman-build-ignore";
+const BUILD_IGNORE_OVERRIDE_BYTES: &[u8] = b".dockerignore\n";
 pub(super) const UNKNOWN_MARKER: &str = "RETAINED-UNKNOWN.json";
 
 /// The ignore file the build allowlist of `Scope::selects_file` mirrors.
@@ -994,6 +996,16 @@ impl Captured {
                 Some(private.path().join(COMPOSE_ENV_FILE))
             }
         };
+        let build_ignore_override = if scope == Scope::Build {
+            let mut output = private.create_private_entry(OsStr::new(BUILD_IGNORE_OVERRIDE))?;
+            output.write_all(BUILD_IGNORE_OVERRIDE_BYTES)?;
+            Some(PrivateFile::open(
+                &private.path().join(BUILD_IGNORE_OVERRIDE),
+                BUILD_IGNORE_OVERRIDE_BYTES.len() as u64,
+            )?)
+        } else {
+            None
+        };
         let snapshot = Snapshot {
             scope,
             private,
@@ -1006,6 +1018,7 @@ impl Captured {
             source_device,
             source_inode,
             env_file,
+            build_ignore_override,
             _storage: storage,
         };
         snapshot.write_manifest()?;
@@ -1081,7 +1094,8 @@ struct UnknownMarker<'a> {
 /// ```text
 /// <root>/context/…              engine-visible tree, directories 0700, files 0600
 /// <root>/compose-empty.env      Compose scope only
-/// <root>/manifest.json          provenance: path, bytes and SHA-256 per file
+/// <root>/manifest.json          provenance for selected source entries only
+/// <root>/podman-build-ignore    generated private engine rule, not source input
 /// <root>/RETAINED-UNKNOWN.json  written only when a termination is unknown
 /// ```
 pub(super) struct Snapshot {
@@ -1097,6 +1111,9 @@ pub(super) struct Snapshot {
     source_device: u64,
     source_inode: u64,
     env_file: Option<PathBuf>,
+    /// Private Podman override; outside the engine-visible context and absent
+    /// from the source manifest and its digest.
+    build_ignore_override: Option<PrivateFile>,
     // Declared last: the directory handles above are closed before the tree
     // is removed.
     _storage: Storage,
@@ -1120,6 +1137,10 @@ impl Snapshot {
 
     pub(super) fn env_file(&self) -> Option<&Path> {
         self.env_file.as_deref()
+    }
+
+    pub(super) fn build_ignore_override(&self) -> Option<&PrivateFile> {
+        self.build_ignore_override.as_ref()
     }
 
     /// `relative` is one of the captured files.
@@ -1307,6 +1328,33 @@ impl Snapshot {
             ensure!(
                 file.bytes().is_empty(),
                 "prepared Compose environment file changed"
+            );
+        }
+        if self.scope == Scope::Build {
+            let expected = BUILD_IGNORE_OVERRIDE_BYTES;
+            let file = self
+                .build_ignore_override
+                .as_ref()
+                .context("prepared Podman ignore file is missing")?;
+            file.revalidate()
+                .context("prepared Podman ignore file changed")?;
+            ensure!(
+                file.bytes() == expected,
+                "prepared Podman ignore file changed"
+            );
+            let reopened = PrivateFile::open(
+                &self.private.path().join(BUILD_IGNORE_OVERRIDE),
+                expected.len() as u64,
+            )
+            .context("prepared Podman ignore file changed")?;
+            ensure!(
+                reopened.bytes() == expected,
+                "prepared Podman ignore file changed"
+            );
+        } else {
+            ensure!(
+                self.build_ignore_override.is_none(),
+                "unexpected prepared Podman ignore file"
             );
         }
         self.context.revalidate()
