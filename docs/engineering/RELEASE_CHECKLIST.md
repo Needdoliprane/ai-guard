@@ -63,6 +63,17 @@ figurent dans leurs blocs attribués et les deux choix MIT pour
 des droits de redistribution.
 
 
+**Dépendances Rust et frontend.** Le garde de licence de `26743398`
+accepte les expressions et textes des 337 crates liées et produit
+les notices natives. Le manifeste source et son SBOM reflètent
+`jsonwebtoken 12.0.0` et `crypto-bigint 0.7.11`. Sur la base RustSec
+`1d328b6b`, `RUSTSEC-2023-0071` reste signalé pour `rsa 0.9.10` via
+`openidconnect`. La revue du chemin OIDC a identifié la vérification
+par clé publique et le client public. L’avertissement de maintenance
+sur `chrono` reste ouvert. L’audit npm du lockfile frontend inchangé
+ne signale aucun avis au relevé du 24 novembre 2026.
+[Source RustSec](https://rustsec.org/advisories/RUSTSEC-2023-0071.html)
+
 **Paquets système de l’image de contrôle.** Le rapprochement du 24
 novembre 2026 couvre 65 paquets source Debian Bookworm installés dans
 l’image ARM64 de `7e3a6166`. Pour les entrées résolues avec version
