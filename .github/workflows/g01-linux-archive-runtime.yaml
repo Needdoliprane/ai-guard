@@ -23,13 +23,23 @@ jobs:
       ARCHIVE_SHA: '9541a0e9bf181d33723fabfa135d868774a7ca9bcb8c780e5979c487469549db'
       CLI_SHA: 'f12de162a464215fc3380f04ae8d5f00138f44f4de7da7890e6063bca27fbdeb'
     steps:
+      - name: Record the qualification attempt
+        run: |
+          umask 077
+          printf 'engine=%s\nsource=%s\ntransfer_run=%s\narchive_sha256=%s\ncli_sha256=%s\nharness_sha=%s\n' \
+            "$ENGINE" "$SOURCE_SHA" "$TRANSFER_RUN" "$ARCHIVE_SHA" "$CLI_SHA" "$GITHUB_SHA" \
+            >"$RUNNER_TEMP/g01-runtime-receipt.txt"
+
       - name: Verify the transfer run
         env:
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          printf 'transfer_run_check=started\n' >>"$RUNNER_TEMP/g01-runtime-receipt.txt"
           gh api "repos/$GH_REPO/actions/runs/$TRANSFER_RUN" |
             jq -e --arg sha "$TRANSFER_SHA"               '.head_sha == $sha and .status == "completed" and .conclusion == "success" and .path == ".github/workflows/g12-transfer.yaml"' >/dev/null
+          printf 'transfer_run_check=PASS\n' >>"$RUNNER_TEMP/g01-runtime-receipt.txt"
 
       - name: Check out the test harness
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -78,7 +88,7 @@ jobs:
             exit "$rc"
           }
           trap finish EXIT
-          printf 'engine=%s\nsource=%s\ntransfer_run=%s\narchive_sha256=%s\ncli_sha256=%s\nharness_sha=%s\n'             "$ENGINE" "$SOURCE_SHA" "$TRANSFER_RUN" "$ARCHIVE_SHA" "$CLI_SHA" "$(git rev-parse HEAD)" >"$receipt"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(uname -s)/$(uname -m)" = Linux/x86_64
           name=ai-guard-v0.0.1-x86_64-unknown-linux-gnu
           archive="$RUNNER_TEMP/g01-archive/$name.tar.gz"
