@@ -38,6 +38,26 @@ FAIL sur `c7f6c966` reste le dernier résultat physique.
 Reçu `g09-terminal-oracle-905e79db.log`, SHA-256
 `9aca0a3a7a318f2a7e0f9fd4844b66531acd9c06cd417cd0f9ab85bc81e0c8be`.
 
+**G01/G12 — archive macOS ARM64 du gel `7e1f9cb1`.** Le build local
+release verrouillé hors ligne produit une archive contenant les six
+binaires ARM64 attendus, LICENSE, les notices et BUILD-INFO. Le CLI
+vérifie les membres de l’archive. L’installation en destination neuve
+conserve les octets et le CLI installé déclare la version `0.0.1` et la
+révision complète attendue. Archive privée
+`g12-macos-7e1f9cb1`, SHA-256
+`18a0ea20ad0b55c768e36f0f2c62acdba1648f85fc46bcb6b8c20cd9f7a5db4b`.
+
+Le [parcours nominal](../../tests/runtime_user_journey.rs) vérifie
+l’empreinte du CLI installé, puis lance un worker par moteur pour
+contrôler l’audit, la copie et l’export. Docker Desktop 29.9.3 passe en
+11,55 s et Podman 6.1.4 rootless en 15,27 s. Les inventaires des
+conteneurs, volumes et images reviennent à leur état initial sur
+chaque moteur. Reçus privés `g01-macos-7e1f9cb1`, journaux Docker et
+Podman SHA-256 respectifs
+`2680439c7c51c9ce04e8bda1fd1e35afd60c9c3bc7c96363e0c06c430eef3a6f`
+et `3faeb01dc79a507064711988c7b3bc488106e6ce2c88d3f1e28ee451c36c9ea0`.
+La matrice Linux x86-64 et le lot de release complet restent ouverts.
+
 **G12 — contrôle local du lot historique.** Le bloc local de vérification
 du brouillon sur `6456e7cc` passe avec les octets du transfert
 `1c9e8e01`. Le CLI macOS archivé `99cb885e` vérifie les membres des
