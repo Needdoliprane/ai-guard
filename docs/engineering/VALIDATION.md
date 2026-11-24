@@ -31,8 +31,30 @@ et écarte le texte privé. Manifeste vérifié
 `ba2e92040b2f6c9ab825fdd090da1b75b07f7c94c14a31f5deab40c0ce14efa5`,
 sous `g07-created-decoder-7f9eceef-package-nodebug`.
 
-La sélection du mode par un RPC Created neuf, son ACK, le rejeu et
-la recette Full3 restent à vérifier sur leurs parcours respectifs.
+La sélection du mode lors d’une faute sur un RPC Created neuf,
+ainsi que la classification de l’ACK et du rejeu, restent à vérifier
+sur leurs parcours respectifs.
+
+**FAIL Full3 sur `7f9eceef`**, moteur synthétique local, code 101 en
+191,05 s. Les 39 révisions vérifiées confirment `Created` et
+l’acquittement de l’Arm du worker en révision 35. L’outbox conserve
+`worker/full3_binding_publication` en 37 et son acquittement en 38.
+SQLite restitue le même diagnostic, l’état `created` et le quota
+retenu. Aucune liaison Full3 du worker, aucune demande de claim
+en attente, aucun reçu de claim et aucun démarrage enregistré.
+L’effet runtime demeure inconnu. La frontière observée couvre
+encore la lecture de la liaison native, le rechargement strict de
+la tête et la confirmation de son écriture par le writer.
+
+Le runtime synthétique et le gateway ont rejoint leurs tâches,
+puis les seuls broker et gardien de recette sont sortis après
+fermeture ciblée du broker. Les 83 fichiers de fixture concordent
+avant et après stockage privé. La retraite de l’autorité reste
+non attestée. Manifeste d’exécution
+`aa8866485e90517a274525950f83317b82527504cff490d7b1d1a2470ed8cbdc`
+et manifeste de fermeture
+`d7c255ffc6334d4ae16e3b4f7ac769079b188acad8c5e89b01834b027422678e`
+sous `g07-first-full3-claim-7f9eceef-package-nodebug`.
 
 ## 25 novembre 2026 — fermeture des lectures de reprise G09
 
