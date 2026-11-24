@@ -245,3 +245,42 @@ fn provenance_records_only_bounded_local_authority_and_distinguishes_endpoints()
         .is_err()
     );
 }
+
+#[test]
+fn podman_bare_image_id_still_requires_the_exact_authorized_digest() {
+    let digest = "a".repeat(64);
+    let expected = format!("sha256:{digest}");
+    let prefixed = Value::String(expected.clone());
+    let bare = Value::String(digest.clone());
+
+    assert!(matches_runtime_image(
+        RuntimeKind::Docker,
+        &prefixed,
+        &expected
+    ));
+    assert!(!matches_runtime_image(
+        RuntimeKind::Docker,
+        &bare,
+        &expected
+    ));
+    assert!(matches_runtime_image(
+        RuntimeKind::Podman,
+        &prefixed,
+        &expected
+    ));
+    assert!(matches_runtime_image(RuntimeKind::Podman, &bare, &expected));
+
+    for observed in [
+        Value::Null,
+        Value::String("b".repeat(64)),
+        Value::String(format!("sha256:{}", "b".repeat(64))),
+        Value::String(digest[..63].to_owned()),
+    ] {
+        assert!(!matches_runtime_image(
+            RuntimeKind::Podman,
+            &observed,
+            &expected
+        ));
+    }
+    assert!(!matches_runtime_image(RuntimeKind::Podman, &bare, &digest));
+}
