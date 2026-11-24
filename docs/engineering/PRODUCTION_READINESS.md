@@ -27,6 +27,17 @@ Le scénario local de garde des archives natives G12 confirme la présence et le
 
 Un statut porte uniquement sur la preuve nommée. Un lot logiciel réussi ne clôture pas les gates d'effets runtime. La publication production exige tous les gates applicables PASS, ou NOT_APPLICABLE justifié avant essais. Les quatre combinaisons Docker/Podman × Linux x86_64/macOS ARM64 restent exigées ; Kubernetes reste une cible complète distincte.
 
+**G04 — CLI local nominatif.** Sur `689583f6`, deux tests passent
+avec le gateway Rust sur loopback et SQLite. Le
+[témoin schéma v6](../../tests/human_cli_workload_schema.rs) contrôle
+la mise en service, la reprise et la révocation de l’identité locale.
+Le [témoin opérateur](../../tests/human_cli.rs) contrôle le contexte
+autorisé, l’export privé et la prise en compte de la révocation.
+Reçus privés `g04-human-cli-689583f6`, manifeste SHA-256
+`2eb4b9a7c80716196b8fa8a2ef728fb8e43b9aeafb8bfd8fb50b7e1fa465cb21`.
+Le premier lancement de worker attribué à l’identité nominative
+reste à qualifier.
+
 **G03/G10 — recette physique A1/A2/B1 et réservations durables.**
 Sur `886d5667`, le [parcours CLI](../../tests/runtime_user_journey.rs)
 passe sur Docker Desktop 29.9.3 ARM64. Il observe deux workers du
