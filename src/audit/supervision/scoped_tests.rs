@@ -27,7 +27,10 @@ fn owned_format15_post_claim_backup_preserves_durable_facts() {
 }
 
 fn assert_owned_post_claim_backup(format: u32) {
-    use crate::{audit::OwnedRetainedSourceFacts, control_fs::PrivateFile};
+    use crate::{
+        audit::OwnedRetainedSourceFacts,
+        control_fs::{MAX_PRIVATE_FILE_BYTES, PrivateFile},
+    };
     use rusqlite::backup::{Backup, StepResult};
     use std::{
         os::unix::fs::PermissionsExt,
@@ -104,7 +107,7 @@ fn assert_owned_post_claim_backup(format: u32) {
         (head, integrity)
     };
 
-    let backup_file = PrivateFile::open(&path, 64 * 1024 * 1024).unwrap();
+    let backup_file = PrivateFile::open(&path, MAX_PRIVATE_FILE_BYTES).unwrap();
     let inspection = store
         .owned_inspect_backup(&facts, &path, backup_file.digest())
         .unwrap();
@@ -131,7 +134,7 @@ fn assert_owned_post_claim_backup(format: u32) {
     let copied_arm = arm_entry(&copy, &claim.arm_receipt.arm_id)
         .unwrap()
         .unwrap();
-    assert_eq!(copied_arm.receipt, claim.arm_receipt);
+    assert_eq!(json!(copied_arm.receipt), json!(claim.arm_receipt));
     let (_, record) = load_record(&copy, &claim.operation_id).unwrap().unwrap();
     let Input::WorkerClaim(saved_claim) = record.input else {
         panic!("copied operation must be a worker claim");
