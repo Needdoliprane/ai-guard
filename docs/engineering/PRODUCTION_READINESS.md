@@ -27,6 +27,23 @@ Le scénario local de garde des archives natives G12 confirme la présence et le
 
 Un statut porte uniquement sur la preuve nommée. Un lot logiciel réussi ne clôture pas les gates d'effets runtime. La publication production exige tous les gates applicables PASS, ou NOT_APPLICABLE justifié avant essais. Les quatre combinaisons Docker/Podman × Linux x86_64/macOS ARM64 restent exigées ; Kubernetes reste une cible complète distincte.
 
+**G03/G10 — recette physique A1/A2/B1 et réservations durables.**
+Sur `886d5667`, le [parcours CLI](../../tests/runtime_user_journey.rs)
+passe sur Docker Desktop 29.9.3 ARM64. Il observe deux workers du
+tenant A et un du tenant B simultanément pendant 20,05 s, trois refus
+HTTP 404 hors tenant, trois exports, l’audit des deux tenants et le
+quota final nul. Le nettoyage retire les trois volumes attribués. Les
+inventaires de conteneurs, volumes et images reviennent à leur état
+initial. Reçu privé `g03-docker-886d5667/run.log`, SHA-256
+`7c028e0cf0eca47ead022d2dd414620c3b502bd458ac9b167acee064428f02b2`.
+
+Sur le gel distinct `35690caa`, le
+[test de réservation](../../tests/gateway_tenancy.rs) confirme la
+persistance des 100 réservations de A après redémarrage du gateway,
+le refus par quota de la 101e et l’indépendance du quota de B. Le test
+ne démarre aucun worker. Reçu privé `g10-sqlite-35690caa/run.log`,
+SHA-256 `26eebf9e606d0d696b0bfdc6b5fd65069a35f03e32e141c6dac64405a8b33df9`.
+
 **G09 — témoin d’échéance avant lecture du résultat.** Sur `905e79db`,
 le [harnais Docker](../../tests/broker_runtime.rs) cherche les événements
 de démarrage, de signal et de terminal du CID d’origine dès l’observation
