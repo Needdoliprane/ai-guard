@@ -81,6 +81,29 @@ fn resumed_terminal_worker_reconciles_cleanup_only_for_its_observed_container() 
 }
 
 #[test]
+fn resumed_terminal_worker_keeps_container_when_cancel_wins_after_inspection() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime should initialize");
+    let fixture = runtime.block_on(RecoveryFixture::new(Case::TerminalCleanupRecovery));
+    let before = fixture.worker();
+    assert_eq!(before.state, WorkerStateV1::Terminal);
+    assert_eq!(before.cleanup_removed, None);
+    let cleanup = format!("rm {}", before.attempt.container_id.as_deref().unwrap());
+
+    let result = runtime.block_on(fixture.run_invalidated_during_cleanup_authority());
+    assert!(
+        !fixture.runtime_calls().contains(&cleanup),
+        "rm spawned after the execution generation was invalidated"
+    );
+    assert!(result.is_err());
+    assert_eq!(fixture.worker().revision, before.revision);
+    assert_eq!(fixture.worker().cleanup_removed, None);
+    assert!(fixture.completed_cleanup_receipts().is_empty());
+}
+
+#[test]
 fn resumed_terminal_worker_keeps_container_when_final_scan_fails() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

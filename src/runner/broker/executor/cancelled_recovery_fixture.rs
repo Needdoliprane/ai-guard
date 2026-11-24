@@ -474,6 +474,33 @@ impl RecoveryFixture {
         eprintln!("cancelled_recovery_run phase=executor_complete");
         result
     }
+    pub(super) async fn run_invalidated_during_cleanup_authority(
+        &self,
+    ) -> std::result::Result<(), BatchFailure> {
+        let context = self.context().await.unwrap();
+        let root = self.base.root.path();
+        let pause = root.join("pause-cleanup-authority");
+        let ready = root.join("cleanup-authority-ready");
+        fs::write(&pause, b"").unwrap();
+        let run = Box::pin(self.executor.run(self.operation, &context));
+        let invalidate = async {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while !ready.is_file() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("fixture did not reach final cleanup authority check");
+            assert_eq!(
+                context.cancel_generation().invalidate(),
+                context.expected_generation() + 1
+            );
+            fs::remove_file(&pause).unwrap();
+        };
+        let (result, ()) = tokio::join!(run, invalidate);
+        result.map(|_| ())
+    }
+
     async fn context(&self) -> Result<AuthenticatedBatchContext> {
         AuthenticatedBatchContext::for_executor_test(
             self.base.client.clone(),
@@ -1314,6 +1341,19 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("info") => {
             writeln!(calls,"info").unwrap();
+            let pause = root.join("pause-cleanup-authority");
+            if pause.is_file() && fs::read_to_string(root.join("calls")).unwrap()
+                .lines().filter(|line| line.starts_with("inspect ")).count() == 2
+            {
+                fs::write(root.join("cleanup-authority-ready"), b"").unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while pause.is_file() {
+                    if std::time::Instant::now() >= deadline {
+                        std::process::exit(125);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
             println!("{{\"ID\":\"cancel-recovery-synthetic-engine\",\"SecurityOptions\":[\"name=rootless\"]}}");
         }
         Some("image") if args.len() == 5 && args[1..4] == ["inspect", "--format", "{{.Id}}"]
