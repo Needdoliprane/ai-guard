@@ -1,5 +1,26 @@
 # Validation courante
 
+## 24 novembre 2026 — montage RWOP exclusif sur Kubernetes local
+
+**PASS ciblé G11** sur Docker Desktop, Kubernetes v1.36.1 et
+nœud ARM64. Les deux pods utilisent une image BusyBox épinglée
+par digest et un PVC `ReadWriteOncePod` sur `ai-guard-rwop`.
+La politique `IfNotPresent` permet le chargement du digest
+absent du nœud. Le namespace jetable applique le profil
+`restricted`. Le prévol d’admission et le provisionnement passent.
+
+A écrit et relit une sentinelle avec UID 1000. Tant qu’A
+tourne, B reste `Pending` sans nœud et le scheduler indique
+que le PVC RWOP est déjà utilisé. Après l’arrêt et le retrait
+d’A, B avec le même UID lit cette sentinelle et termine avec
+le code 0. Le namespace, le PVC et le PV associé ont disparu
+après la recette. L’image BusyBox peut rester en cache sur le nœud.
+
+Reçu privé `g11-rwop-exclusive-local-20261124`, manifeste SHA-256
+`8854fe119ea0aa2a76f423e7742c2774c8c54ea04abbef9d550c0bf16fcecd7f`.
+Le lancement par ai-guard, le raccordement Source17 et les
+contrôles CNI restent à qualifier.
+
 ## 24 novembre 2026 — image de contrôle native sous Podman rootless
 
 **PASS ciblé G12** sur Podman 6.1.4 ARM64. Le contexte est une
