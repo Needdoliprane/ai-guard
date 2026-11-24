@@ -1,5 +1,22 @@
 # Validation courante
 
+## 25 novembre 2026 — fermeture des lectures de reprise G09
+
+**PASS logiciel ciblé, 2/2**, macOS ARM64. Une lecture de résultat
+mise en file avant la mise en garde est refusée après la mise en garde
+`fenced` (0,69 s). La lecture de snapshot devient inconnue après mise
+en garde, arrêt, perte du propriétaire, données incomplètes ou
+invalidation du cache (1,44 s).
+
+Le libtest archivé de `cf754fc0` est vérifié par SHA-256 et réutilisé
+sans recompilation. Le rapprochement avec `7d71b4d0` confirme
+l’identité des sources de ces oracles dans `src/broker`, du stockage
+privé et de `Cargo.lock`. Reçu privé
+`g09-projection-fence-cf754fc0-20261125`, manifeste SHA-256
+`64bffff1d9c18616d0e4067a43a22b9f1033d2f06c53b04f6eb4011c6d2a37b8`.
+La première écriture du terminal après redémarrage et la fermeture du
+pilote physique restent ouvertes dans [G09](PRODUCTION_READINESS.md).
+
 ## 24 novembre 2026 — clôture du conducteur d’installation G12
 
 **PASS local sur fixture**, conducteur `eeb6e0d3`, macOS ARM64 et Bash
