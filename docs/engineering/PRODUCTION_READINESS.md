@@ -118,6 +118,10 @@ Le transfert a été interrompu faute d’espace. Une construction
 native distincte du worker `df835eea` passe sous Podman rootless
 ARM64 avec l’export audité et le retrait des volumes de recette.
 [Recette Podman](VALIDATION.md#24-novembre-2026--image-worker-native-et-export-audité-sur-podman-rootless)
+Le relevé Debian du worker Podman retrouve les mêmes 102 couples
+source/version et les mêmes avis que le relevé Docker de référence.
+Leur applicabilité reste à examiner.
+[Inventaire Debian](VALIDATION.md#inventaire-debian-du-worker-podman)
 Les mises à niveau `url` et `jsonwebtoken` retirent deux avis RustSec du
 graphe. L’avis `rsa 0.9.10`, le suivi de maintenance de `chrono`
 et la qualification des artefacts publiables restent ouverts.

@@ -656,6 +656,28 @@ Ce résultat couvre le worker générique ARM64. La construction native
 de l’image de contrôle, les autres plateformes et la qualification
 des artefacts de release restent ouvertes.
 
+### Inventaire Debian du worker Podman
+
+Le relevé `dpkg-query` de l’image `e61e61f18373` compte 187
+paquets binaires. Les 102 couples source/version concordent avec
+le relevé du worker Docker `153d0b24ebd6`. Le même instantané
+du [Debian Security Tracker](https://security-tracker.debian.org/tracker/),
+utilisé le 24 novembre, a été réexécuté sous la suite Bookworm.
+La comparaison `dpkg --compare-versions` dans l’image Podman
+retrouve les mêmes 1 389 entrées ouvertes et 5 indéterminées.
+Aucune version installée ne précède la borne corrective d’une
+entrée résolue comparée. Parmi les entrées ouvertes ou
+indéterminées, 1 044 sont rattachées à la source `linux` via
+`linux-libc-dev`. Leur applicabilité au worker reste à établir.
+
+Les inventaires de conteneurs et de volumes concordent avant et
+après le relevé en lecture seule et sans réseau. Le reçu privé
+`g12-debian-worker-podman-df835eea` conserve l’instantané compressé,
+les inventaires et les comparaisons. SHA-256 de l’instantané décompressé
+`866568c7f85edf42beed258b60b8ffcb41b93664433cf2e164f321e02e55b707`.
+SHA-256 du manifeste du reçu
+`58f28e797b0911b3e1d549537eb657cf3d4db562f5a464bf44f0c83f129996cd`.
+
 ## 24 novembre 2026 — image worker Docker ARM64 `7e45828f`
 
 **PASS ciblé G01/G12.** Le build Docker depuis un contexte Git
