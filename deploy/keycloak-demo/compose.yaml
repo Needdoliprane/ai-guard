@@ -37,7 +37,7 @@ services:
         aliases: ["${AI_GUARD_DEMO_IDP_HOST:-keycloak.ai-guard.test}"]
     restart: "no"
     logging:
-      driver: local
+      driver: json-file
       options: {max-size: "5m", max-file: "2"}
   keycloak-demo-ingress:
     profiles: [keycloak-demo-http]
@@ -62,7 +62,7 @@ services:
     depends_on: [keycloak-demo]
     restart: "no"
     logging:
-      driver: local
+      driver: json-file
       options: {max-size: "5m", max-file: "2"}
 networks:
   identity_demo:
