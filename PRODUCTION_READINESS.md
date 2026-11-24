@@ -70,7 +70,7 @@ Linux ARM64, macOS Intel, Windows/WSL et d'autres distributions restent **à dé
 | Kubernetes local de qualification | Même scénario avec l'adaptateur cloud, API/RBAC et CNI capable d'appliquer les NetworkPolicy ; versions exactes du cluster/runtime/CNI enregistrées | `BLOCKED` — adaptateur et environnement non fournis |
 | Cloud de production | Même contrat ; TLS/mTLS, stockage, CNI, quotas, ledger et reprise sur la plateforme choisie ; charge réelle selon le plafond annoncé | `BLOCKED` — plateforme et capacité à qualifier, aucun déploiement demandé ici |
 
-Trois conteneurs locaux ne prouvent pas une NetworkPolicy Kubernetes. Cent demandes logiques synthétiques ne prouvent ni cent workers concurrents ni leur coût. Le scénario minimal A1/A2/B1 est commun aux implémentations, sans substituer leurs preuves runtime respectives. Les décisions détaillées sont dans [LOCAL_CLOUD_TESTS.md](LOCAL_CLOUD_TESTS.md).
+Le scénario A1/A2/B1 est commun aux implémentations et chaque moteur apporte sa propre preuve de confinement. La capacité de réservation par tenant est vérifiée séparément dans G10. [Recettes local/cloud](docs/engineering/LOCAL_CLOUD_TESTS.md)
 
 ### Fournisseurs
 
@@ -161,9 +161,9 @@ En cloud, la reprise du contrôleur doit réconcilier identité exclusive, quota
 
 **Bloquant :** budgets mesurés pour les profils publiés : CPU/RAM/disque, ingestion, requêtes de projection, SSE, export et jobs simultanés. Tester les bornes et la dégradation contrôlée, y compris près des plafonds d'audit, avec fichiers volumineux et lecteurs lents. Les volumes de session conservés n'ont pas de quota disque global fourni par les arguments actuels ; définir et éprouver la maîtrise de leur croissance. `healthz` prouve la vie HTTP, pas la capacité d'audit ni la disponibilité du moteur.
 
-**Preuve :** charge reproductible, percentiles, pics et tendances mémoire/disque, plafonds atteints et résultats de reprise. Les valeurs proposées dans [TEST_STRATEGY.md](TEST_STRATEGY.md) sont des hypothèses, pas des mesures. **État : `NOT_RUN`**.
+**Preuve attendue pour la V1.** Réserver durablement 100 workers pour un tenant, refuser la 101e réservation et vérifier la conservation des quotas après redémarrage ainsi que l’indépendance du quota de B. La recette moteur utilise trois workers, A1 et A2 chez A et B1 chez B, et vérifie les exports et le retour des quotas à zéro.
 
-La cible de 100 workers/client est une **capacité demandée, non prouvée**. Le test fonctionnel local A1/A2/B1, un test de 100 requêtes logiques et un essai de 100 workers réels ont des objectifs distincts. Fixer séparément quota logique, plafond réellement pris en charge, ressources par worker et capacité physique totale ; la limite annoncée ne dépasse jamais celle qualifiée.
+**PASS au périmètre V1 sur `48f81d20`.** Les jobs SQLite et Docker attestent ces deux volets. Pour les budgets mesurés et les limites de chaque recette, consulter la grille détaillée. [Reçu CI](https://github.com/Needdoliprane/ai-guard/actions/runs/45344259411) · [Grille de qualification](docs/engineering/PRODUCTION_READINESS.md)
 
 ### G11 — Infrastructure, transport et PKI conditionnels
 
