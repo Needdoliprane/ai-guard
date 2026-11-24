@@ -226,14 +226,15 @@ impl Execution<'_> {
                 };
                 return Err(error.context(context));
             }
+            let replay_only = !newly_requested_arm;
             enforcer
                 .reserve_prospective(
                     target.clone(),
                     self.context.cancel_generation().clone(),
-                    !newly_requested_arm,
+                    replay_only,
                 )
                 .await
-                .context(diagnostics::RegistrationStage::ReserveProspective)?;
+                .with_context(|| diagnostics::ReservationMode::from_replay_only(replay_only))?;
             if let Err(error) = self.generation_current() {
                 if let ExecutionEnforcerV1::Legacy(client) = enforcer {
                     if let Err(cancel) = client

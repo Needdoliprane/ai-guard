@@ -496,7 +496,25 @@ fn executor_failure_projection_keeps_only_closed_registration_evidence() {
             json!({"stage":"reserve_prospective","arm_state":"pending"}),
         ),
         (
-            json!({"stage":"restore_assigned","arm_state":"acknowledged"}),
+            json!({"stage":"reserve_prospective","arm_state":"pending",
+                "reservation_mode":"fresh","enforcer_code":"capacity","detail":"synthetic-private"}),
+            json!({"stage":"reserve_prospective","arm_state":"pending",
+                "reservation_mode":"fresh","enforcer_code":"capacity"}),
+        ),
+        (
+            json!({"stage":"reserve_prospective","arm_state":"pending",
+                "reservation_mode":"replay","enforcer_code":"conflict"}),
+            json!({"stage":"reserve_prospective","arm_state":"pending",
+                "reservation_mode":"replay","enforcer_code":"conflict"}),
+        ),
+        (
+            json!({"stage":"reserve_prospective","arm_state":"pending",
+                "reservation_mode":"synthetic-private","enforcer_code":"synthetic-private"}),
+            json!({"stage":"reserve_prospective","arm_state":"pending"}),
+        ),
+        (
+            json!({"stage":"restore_assigned","arm_state":"acknowledged",
+                "reservation_mode":"fresh","enforcer_code":"capacity"}),
             json!({"stage":"restore_assigned","arm_state":"acknowledged"}),
         ),
         (

@@ -2,10 +2,10 @@
 #[path = "broker_runtime_checkpoint.rs"]
 pub mod checkpoint;
 
-use agentsandbox::broker::lifecycle::LocalFailurePhaseV1;
+use agentsandbox::broker::{enforcer::EnforcerError, lifecycle::LocalFailurePhaseV1};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use chrono::{DateTime, FixedOffset};
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
     fs::{self, File, OpenOptions},
@@ -1062,7 +1062,17 @@ fn project_registration(value: &Value) -> Option<Value> {
     let stage = value["stage"].as_str()?;
     let arm_state = value["arm_state"].as_str()?;
     match (stage, arm_state) {
-        ("reserve_prospective" | "begin_exchange", "pending")
+        ("reserve_prospective", "pending") => {
+            let mut projected = json!({"stage":stage,"arm_state":arm_state});
+            if let Some(mode @ ("fresh" | "replay")) = value["reservation_mode"].as_str() {
+                projected["reservation_mode"] = json!(mode);
+            }
+            if let Ok(code) = EnforcerError::deserialize(&value["enforcer_code"]) {
+                projected["enforcer_code"] = json!(code);
+            }
+            Some(projected)
+        }
+        ("begin_exchange", "pending")
         | (
             "build_registration" | "bind_prospective" | "restore_assigned" | "register_legacy",
             "acknowledged",
