@@ -1,5 +1,18 @@
 # Validation courante
 
+## 24 novembre 2026 — arrêt explicite d’A1 sur Podman rootless
+
+**PASS ciblé G09/G10.** Sur `6ab68631`, l’arrêt explicite d’A1
+fait passer le quota tenu de A de deux à un pendant qu’A2 et B1
+continuent. B reste à un jusqu’à sa fin normale. Les deux quotas
+finaux sont à zéro et les trois exports concordent. Les trois volumes
+de travail et les trois marqueurs d’autorité sont attribués au reçu
+et aux liaisons locales, puis retirés. Les inventaires exacts des
+conteneurs, volumes et images retrouvent leur état d’avant recette.
+Le premier contrôle de fermeture omettait les marqueurs d’autorité.
+La comparaison a été corrigée sans relancer les workers.
+[Reçu de l’arrêt A1](evidence/2026-11-24/g09-podman-stop-a1.json).
+
 ## 24 novembre 2026 — trois workers G10 sur Podman rootless
 
 **PASS ciblé.** Sur `d665e5fa`, Podman 6.1.4 rootless exécute A1 et A2

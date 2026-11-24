@@ -1,0 +1,25 @@
+{
+  "source": "6ab68631",
+  "platform": "macOS ARM64 / Podman rootless",
+  "states": {
+    "A1": "explicit_stop",
+    "A2": "normal",
+    "B1": "normal"
+  },
+  "peak_slots": {
+    "tenant-a": 2,
+    "tenant-b": 1
+  },
+  "after_a1": {
+    "tenant-a": 1,
+    "tenant-b": 1
+  },
+  "final_held_slots": {
+    "tenant-a": 0,
+    "tenant-b": 0
+  },
+  "exports_matching_source": 3,
+  "owned_work_volumes_removed": 3,
+  "owned_authority_markers_removed": 3,
+  "full_run_containers_volumes_images_restored": true
+}
