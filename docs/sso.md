@@ -99,7 +99,17 @@ La résolution du profil est versionnée et liée à l'autorisation : URL, modè
 
 ## Profil Keycloak de découverte
 
-Le [profil distribué](../deploy/keycloak-demo/README.md) fournit un Compose explicitement activé, une version de Keycloak épinglée et l'import du realm initial. Les guides [anglais](setup/keycloak/README.md) et [français](setup/keycloak/README.fr.md) fixent ses fichiers, ports, commandes et contraintes de reprise. Keycloak est un service tiers de démonstration, sans ajout de logique métier ai-guard dans un autre langage. Le connecteur applicatif candidat existe ; le bootstrap complet des memberships et du raccordement réseau reste à livrer, et le parcours d'acceptation ci-dessous reste NOT_RUN. Les comptes et clients du realm ne constituent pas à eux seuls des identités autorisées par le contrôle ai-guard.
+**Preuve du 24 novembre 2026.** La recette Linux de découverte
+exécute Keycloak DEMO avec le produit `ca3c161b`. La connexion Web
+vérifie les rôles applicatifs. La connexion CLI de `user-1` renouvelle
+la session, retrouve son reçu de lecture dans l’audit durable et
+enregistre la déconnexion. Le conducteur CI `3a0d166c` ajoute
+uniquement le workflow à cette source. Le lancement de bout en bout
+attribué à un utilisateur humain reste à qualifier, de même que le
+bootstrap complet et le raccordement entreprise.
+[Recette CI](https://github.com/Needdoliprane/ai-guard/actions/runs/45346854856)
+
+Le [profil distribué](../deploy/keycloak-demo/README.md) fournit un Compose explicitement activé, une version de Keycloak épinglée et l'import du realm initial. Les guides [anglais](setup/keycloak/README.md) et [français](setup/keycloak/README.fr.md) fixent ses fichiers, ports, commandes et contraintes de reprise. Keycloak est un service tiers de démonstration, sans ajout de logique métier ai-guard dans un autre langage. Le connecteur applicatif candidat existe ; le bootstrap complet des memberships et du raccordement réseau reste à livrer, et le parcours d’acceptation complet ci-dessous reste à exécuter. Les comptes et clients du realm ne constituent pas à eux seuls des identités autorisées par le contrôle ai-guard.
 
 | Compte préconfiguré | Identifiants publics de démonstration | Usage |
 |---|---|---|
