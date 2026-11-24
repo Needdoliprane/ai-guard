@@ -84,6 +84,13 @@ quota est libéré et les inventaires moteur sont restaurés. Le champ
 `e095abc4d8d489b4a0eaa22e3ee9af5656124472be251b61baa6c2c68ac1881a`.
 Ce parcours CLI direct laisse ouverte la reprise après crash du broker.
 
+Sur le candidat intégré `94cc224f`, les deux
+[tests du pilote d’échéance](../../src/runtime/deadline_driver_tests.rs)
+passent. Le test parent démarre sa fixture enfant. La progression de
+l’arrêt et la conservation des causes tardives sont vérifiées hors
+moteur. Reçu `g09-deadline-driver-94cc224f/test.log`, SHA-256
+`8423da0c7e31dcd8af0425e3827b609cec34aee8a4b46521678f4904069a6fd7`.
+
 **G09 — témoin d’échéance avant lecture du résultat.** Sur `905e79db`,
 le [harnais Docker](../../tests/broker_runtime.rs) cherche les événements
 de démarrage, de signal et de terminal du CID d’origine dès l’observation
@@ -228,6 +235,15 @@ la décision et la clôture d’audit est acquittée sans perte. Le canal
 utilise un duplex de recette. Le raccord E3 et les effets en worker
 sur moteur restent ouverts. Reçu `g05-e2-1c03e01f.log`, SHA-256
 `a917e619afbd7c54c9ebd3741d797ab7ddb35f6fe075282040165bc833b6ef8d`.
+
+**G05 — décision durable sur le candidat intégré.** Sur `94cc224f`,
+deux [tests SQLite](../../src/audit/egress_decisions_tests.rs) passent.
+Ils vérifient la liaison de l’autorisation au worker en cours, la
+relecture idempotente et la revue durable d’une destination inconnue
+sans autorisation. Aucun socket n’est ouvert. Reçu
+`g05-egress-decisions-94cc224f/test.log`, SHA-256
+`2935609a0e8ae5e84402a5c03b7cb4b1a278f9f6c3c8120647d6cd4d455925bd`.
+Le raccord au lancement et les effets sur moteur restent à qualifier.
 
 **G06 — rejeu d’un reçu de rétention.** Sur `4c05dd6b`, les dix
 [tests de rétention SQLite](../../tests/audit_retention.rs) passent. Le
