@@ -53,7 +53,14 @@ terminent normalement, puis les deux quotas reviennent à zéro. Les
 trois volumes attribués sont retirés et les inventaires moteur reviennent
 à leur état initial. Reçu `g09-a1-stop-57144fcc/run.log`, SHA-256
 `847f343abf50c15e2c1caf4f7fbd73f6393626e2d0ebefb62a376754ea551746`.
-Le rendu dashboard lors de cet arrêt et l’arrêt automatique à échéance
+Après l’arrêt, Chromium relit le journal via un gateway et un dashboard
+Rust issus du CLI macOS `7e1f9cb1`, avec le bundle `2a0d7054` et des
+copies SQLite. Le rendu brut de l’événement `command.failed` concorde
+avec la réponse HTTP à la séquence 32, dont la sortie 137 et
+`timed_out=false`. Les têtes d’audit des copies et des originaux
+concordent après la relecture. Reçu `g09-a1-browser-replay/run.log`,
+SHA-256 `a81ac54e82130e02b503fe585b07ef9d13730f8e0b418421c15288b78fd9e94a`.
+Le rendu en direct pendant l’arrêt et l’arrêt automatique à échéance
 restent ouverts.
 
 **G09 — témoin d’échéance avant lecture du résultat.** Sur `905e79db`,
