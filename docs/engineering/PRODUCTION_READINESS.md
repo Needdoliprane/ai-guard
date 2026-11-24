@@ -33,8 +33,8 @@ Un statut porte uniquement sur la preuve nommée. Un lot logiciel réussi ne cl�
 la racine du worker strict, sans jeton `rw`. Le processus sort avec le
 code 0, l’audit est valide, le quota est libéré et l’inventaire moteur
 retrouve ses trois conteneurs et 26 volumes préexistants. Le témoin traite
-le montage racine de ce worker, sans tentative d’écriture. Les options de
-`/workspace` et la qualification complète du confinement restent ouvertes.
+le montage racine de ce worker, sans tentative d’écriture. La qualification
+complète du confinement reste ouverte.
 Reçu `g02-podman-findmnt-99cb885e.txt`, SHA-256
 `d07bdd9ae43449212272f5ad7c62fa7b0cf6c3547bb7944904e72b19c11498d1`.
 
@@ -44,6 +44,15 @@ ARM64 avec l’exception rootful explicite. La commande auditée lit le jeton
 et les inventaires avant et après sont identiques (aucun conteneur, trois
 volumes préexistants). Reçu `g02-docker-findmnt-99cb885e.txt`, SHA-256
 `beffec4f888c2b9d6356da1bed16385673fbc473733f70069ea8821de8de4c39`.
+
+Deux exécutions distinctes sur le même CLI et la même image lisent le
+jeton `rw` sans `ro` pour `/workspace` sur Docker Desktop et Podman
+rootless, sans écriture de sonde. Les audits sont valides, les quotas
+sont libérés et les inventaires de chaque moteur retrouvent leur état
+initial. Reçus `g02-docker-workspace-99cb885e.txt` et
+`g02-podman-workspace-99cb885e.txt`, SHA-256 respectifs
+`0e6a2d8e07fdeb556ae16bfb27cb8f6c6da7be5beac6f2654fce683e2ef13f69`
+et `dc78dbc22b6b4178103bb0b6a8369c77e2a6617418bf9d730a42f980fd0ecbe0`.
 
 **G08 — composition du registre.** Sur `26e19e84`, le
 [test d’agrégation du gateway](../../tests/supervision_stack_api.rs) passe
