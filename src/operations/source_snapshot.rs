@@ -19,6 +19,7 @@
 mod build_identity;
 mod capture;
 mod interrupt;
+mod release_archive;
 mod release_metadata;
 #[cfg(test)]
 mod tests;
