@@ -1,5 +1,18 @@
 # Validation courante
 
+## 24 novembre 2026 — avis Qwen local depuis l’archive macOS
+
+**PASS ciblé G07.** Avec le CLI `e2796ac1`, Qwen2.5 0,5B Q4_K_M
+rend un avis `deny` sur une demande synthétique et la décision effective
+est `deny`. La réponse correspond à SQLite et le contrôle d’intégrité
+passe. Le modèle Docker est sur un réseau interne, joint via un relais
+TCP Envoy publié sur loopback pour cette recette. Le cgroup atteint
+325 754 880 octets sur une limite effective de 999 997 440, sans swap
+ni OOM. Aucun worker n’est demandé. Le modèle, le relais et le réseau
+de recette sont retirés après mesure. Ce cas couvre un verdict et laisse
+ouverts la qualité du modèle, Podman et le parcours Compose livré.
+[Reçu Qwen](evidence/2026-11-24/g07-installed-macos-qwen.json).
+
 ## 24 novembre 2026 — Jev TypeSafe depuis l’archive macOS
 
 **PASS ciblé G07.** Le CLI ARM64 extrait de l’archive `e2796ac1` lance
