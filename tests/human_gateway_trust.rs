@@ -575,7 +575,17 @@ async fn read_one_session_frame(
 
 #[tokio::test]
 async fn authenticated_sse_resumes_after_disconnect_over_loopback_tls() -> anyhow::Result<()> {
-    use agentsandbox::{model::Event, runner::read_token};
+    exercise_authenticated_sse_over_loopback_tls(false).await
+}
+
+#[tokio::test]
+async fn authenticated_sse_resumes_after_disconnect_through_loopback_tls_ingress()
+-> anyhow::Result<()> {
+    exercise_authenticated_sse_over_loopback_tls(true).await
+}
+
+async fn exercise_authenticated_sse_over_loopback_tls(through_ingress: bool) -> anyhow::Result<()> {
+    use agentsandbox::{ingress::ingress_router, model::Event, runner::read_token};
     use anyhow::{Context, ensure};
     use axum::{
         body::Body,
@@ -584,7 +594,7 @@ async fn authenticated_sse_resumes_after_disconnect_over_loopback_tls() -> anyho
         middleware::{self, Next},
         response::Response,
     };
-    use futures_util::StreamExt as _;
+    use futures_util::{FutureExt as _, StreamExt as _};
     use tokio::{
         sync::{Semaphore, oneshot},
         time::timeout,
@@ -616,7 +626,7 @@ async fn authenticated_sse_resumes_after_disconnect_over_loopback_tls() -> anyho
 
     // Hold a test permit for the lifetime of the real server-side SSE body.
     let bodies = Arc::new(Semaphore::new(1));
-    let router = gateway_router(GatewayState::new(
+    let gateway = gateway_router(GatewayState::new(
         audit.clone(),
         "runner-human-sse-tls-fixture".into(),
         "viewer-human-sse-tls-fixture".into(),
@@ -655,10 +665,35 @@ async fn authenticated_sse_resumes_after_disconnect_over_loopback_tls() -> anyho
     let origin = format!("https://{}", listener.local_addr()?);
     let identity =
         ServerIdentity::from_files(&pki.join("server-chain.pem"), &pki.join("server.key"))?;
+    let (router, upstream) = if through_ingress {
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let origin = format!("http://{}", upstream.local_addr()?);
+        (ingress_router(&origin)?, Some((upstream, gateway)))
+    } else {
+        (gateway, None)
+    };
     let (shutdown, stopped) = oneshot::channel();
-    let mut server = tokio::spawn(serve(listener, router, identity, async {
+    let stopped = async {
         let _ = stopped.await;
-    }));
+    }
+    .shared();
+    let serve_upstream = {
+        let stopped = stopped.clone();
+        async move {
+            if let Some((listener, router)) = upstream {
+                axum::serve(listener, router)
+                    .with_graceful_shutdown(stopped)
+                    .await?;
+            }
+            Ok::<_, std::io::Error>(())
+        }
+    };
+    let mut server = tokio::spawn(async move {
+        let (downstream, upstream) =
+            tokio::join!(serve(listener, router, identity, stopped), serve_upstream,);
+        downstream.context("TLS listener")?;
+        upstream.context("gateway listener")
+    });
     let outcome: anyhow::Result<()> = async {
         let identity: Value = timeout(Duration::from_secs(5), async {
             client
@@ -747,12 +782,12 @@ async fn authenticated_sse_resumes_after_disconnect_over_loopback_tls() -> anyho
     let _ = shutdown.send(());
     let closure = match timeout(Duration::from_secs(7), &mut server).await {
         Ok(result) => result
-            .context("TLS server join")?
-            .context("TLS server shutdown"),
+            .context("SSE fixture server join")?
+            .context("SSE fixture server shutdown"),
         Err(_) => {
             server.abort();
             let _ = server.await;
-            anyhow::bail!("TLS server did not close within its deadline");
+            anyhow::bail!("SSE fixture listeners did not close within their deadline");
         }
     };
     outcome?;
