@@ -494,6 +494,13 @@ L’export existant et la source gardent leurs octets. Le refus rend
 le code 1, l’intégrité reste valide et les inventaires sont restaurés.
 [Reçu macOS, Docker et Podman](evidence/2026-11-24/g12-macos-84971de6.json).
 
+Une vérification indépendante du SBOM de cette archive rapproche les
+360 crates Cargo et les 65 paquets npm des deux lockfiles, identiques
+jusqu’à `86856f57`. Les noms, versions et empreintes concordent. Le
+SBOM détaché est identique à celui de l’archive de métadonnées. Les
+références de composants sont uniques et les liens de dépendance
+résolus. La révision du binaire reste `84971de6`.
+
 ## 24 novembre 2026 — image de contrôle locale du candidat `7e3a6166`
 
 **PASS ciblé G12** pour la construction Docker ARM64 et le démarrage
