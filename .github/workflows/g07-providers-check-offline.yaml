@@ -1,0 +1,135 @@
+name: G07 offline providers check
+
+on:
+  push:
+    branches: [codex/g07-providers-check-offline-ci]
+
+permissions:
+  contents: read
+
+jobs:
+  providers-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    env:
+      SOURCE_SHA: 70668b058a917ac6264ce049d17111e07656e579
+      SOURCE_TREE: 15b54edde5dbdef44a60fdafc656538ec154f5b5
+      WORKFLOW_PATH: .github/workflows/g07-providers-check-offline.yaml
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      LC_ALL: C
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Build once and run both exact fixture selectors
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+
+          receipt="$RUNNER_TEMP/g07-providers-check-receipt.txt"
+          codex_selector=checks_explicit_codex_subscription_reference_without_api_fallback
+          claude_selector=checks_explicit_claude_api_reference
+          phase=preflight
+          rust_version=NOT_RUN
+          build=NOT_RUN
+          binary_sha256=NOT_RUN
+          codex=NOT_RUN
+          claude=NOT_RUN
+          finish() {
+            local rc=$? result=FAIL
+            if (( rc == 0 )); then result=PASS; fi
+            printf '%s\n' schema=g07-providers-check-v1 \
+              "source_sha=$SOURCE_SHA" "source_tree=$SOURCE_TREE" "workflow_sha=$GITHUB_SHA" \
+              "run_id=$GITHUB_RUN_ID" "run_attempt=$GITHUB_RUN_ATTEMPT" \
+              "phase=$phase" "rust_version=$rust_version" "build=$build" "binary_sha256=$binary_sha256" \
+              "codex_selector=$codex_selector" "codex_result=$codex" \
+              "claude_selector=$claude_selector" "claude_result=$claude" \
+              scope=offline_metadata_fixtures "result=$result" > "$receipt"
+          }
+          trap finish EXIT
+
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 &&
+             "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/codex/g07-providers-check-offline-ci &&
+             "$(git rev-parse HEAD)" == "$GITHUB_SHA" &&
+             "$(git show -s --format=%P HEAD)" == "$SOURCE_SHA" &&
+             "$(git rev-parse "$SOURCE_SHA^{tree}")" == "$SOURCE_TREE" &&
+             "$(git diff --name-status "$SOURCE_SHA" HEAD)" == $'A\t'"$WORKFLOW_PATH" &&
+             -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
+          git switch --detach "$SOURCE_SHA"
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" &&
+             -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
+
+          scratch="$(mktemp -d /tmp/g07-providers.XXXXXX)"
+          mkdir "$scratch/tmp"
+          export TMPDIR="$scratch/tmp" CARGO_TARGET_DIR="$scratch/target"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+          phase=toolchain
+          rust_version="$(rustc --version | awk '{print $2}')"
+          [[ "$rust_version" == 1.99.1 ]]
+          phase=dependency_fetch
+          timeout --kill-after=5s 12m cargo fetch --locked > "$scratch/fetch.log" 2>&1
+          export CARGO_NET_OFFLINE=true
+
+          phase=build
+          build=FAIL
+          timeout --kill-after=10s 42m cargo test --locked --offline \
+            --test provider_readiness_cli --no-run --message-format=json \
+            > "$scratch/build.jsonl" 2> "$scratch/build.stderr"
+          binary="$(jq -ers '
+            [.[] | select(.reason == "compiler-artifact" and .target.name == "provider_readiness_cli"
+              and .target.kind == ["test"] and .profile.test == true and .executable != null)
+              | .executable]
+            | unique | if length == 1 then .[0] else error("expected one test executable") end
+          ' "$scratch/build.jsonl")"
+          [[ "$binary" == "$CARGO_TARGET_DIR"/debug/deps/provider_readiness_cli-* &&
+             -f "$binary" && -x "$binary" && ! -L "$binary" ]]
+          digest="$(sha256sum -- "$binary")"
+          binary_sha256="${digest%% *}"
+          build=PASS
+
+          run_exact() {
+            local selector=$1 output="$scratch/$1.log" rc=0
+            timeout --kill-after=5s 90s "$binary" "$selector" --exact --test-threads=1 \
+              > "$output" 2>&1 || rc=$?
+            if [[ "$rc" == 0 &&
+                  "$(grep -Fxc 'running 1 test' "$output" || true)" == 1 &&
+                  "$(grep -Fxc "test $selector ... ok" "$output" || true)" == 1 ]] &&
+               grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; ' "$output"; then
+              printf '%s\n' PASS_1_0_0
+            else
+              printf 'FAIL_OR_NOT_SELECTED_EXIT_%s\n' "$rc"
+            fi
+          }
+          phase=selectors
+          codex="$(run_exact "$codex_selector")"
+          claude="$(run_exact "$claude_selector")"
+          [[ "$codex" == PASS_1_0_0 && "$claude" == PASS_1_0_0 ]]
+          phase=complete
+
+      - name: Summarize the receipt
+        if: always()
+        shell: bash
+        run: |
+          receipt="$RUNNER_TEMP/g07-providers-check-receipt.txt"
+          if [[ ! -s "$receipt" ]]; then
+            printf '%s\n' schema=g07-providers-check-v1 "source_sha=$SOURCE_SHA" \
+              "workflow_sha=$GITHUB_SHA" "run_id=$GITHUB_RUN_ID" "run_attempt=$GITHUB_RUN_ATTEMPT" \
+              phase=before_receipt build=NOT_RUN codex_result=NOT_RUN claude_result=NOT_RUN \
+              result=FAIL > "$receipt"
+          fi
+          cat "$receipt" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload only the receipt
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: g07-providers-check-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g07-providers-check-receipt.txt
+          if-no-files-found: error
+          retention-days: 7
