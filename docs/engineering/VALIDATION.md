@@ -1,5 +1,27 @@
 # Validation courante
 
+## 24 novembre 2026 — filtrage du contexte de construction Podman
+
+**FAIL ciblé G12** sur `5bb86e4f` avec Podman 6.1.4 rootless ARM64.
+L’archive Git contient les sources de `ai-guard-audit-checkpoint`
+et `ai-guard-diagnose`. Le build contrôle qui applique le
+`.dockerignore` livré s’arrête tout de même avec Cargo 101,
+`no bin target named ai-guard-audit-checkpoint`.
+
+Un build minimal avec le même fichier d’exclusion copie les
+sources Rust et TypeScript à la racine de leurs arborescences.
+Les sources imbriquées sous `src/bin` et `front/src/test`
+sont absentes. Le retour des sources imbriquées après ajout d’une
+exception sur les sous-répertoires s’accompagne de la copie de
+fichiers privés synthétiques. Cette variante échoue au contrôle
+d’exclusion et reste hors de la recette livrée.
+
+Reçu privé `g12-podman-context-filter-5bb86e4f`, manifeste SHA-256
+`46088e43aacd5adce23d52d2dada9f1fe33dd9b6af02f345e563e48cbdcf1ae8`.
+Le défaut du contexte standard reste ouvert. Une construction sur
+des entrées Git sélectionnées en amont peut qualifier l’image pour
+ce périmètre précis.
+
 ## 24 novembre 2026 — arrêt d’A1 avec le worker produit Podman rootless
 
 **PASS ciblé G03/G09.** Sur `fd2149e3` et Podman 6.1.4 rootless
