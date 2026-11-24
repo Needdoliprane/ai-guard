@@ -732,7 +732,7 @@ fn one_event<'a>(events: &'a [Value], kind: &str) -> Result<&'a Value> {
 }
 
 #[tokio::test]
-#[ignore = "requires a real explicitly selected local Docker socket, an approved control account, and a prepared local QA image"]
+#[ignore = "requires an explicitly selected local Docker or rootless Podman socket, an approved control account, and a prepared local QA image"]
 async fn real_cli_copies_a_project_and_exports_after_one_audited_worker() -> Result<()> {
     let cli_path = std::env::var_os(AUDITED_EXPORT_CLI);
     let expected_sha256 = std::env::var_os(AUDITED_EXPORT_CLI_SHA256);
@@ -748,7 +748,17 @@ async fn real_cli_copies_a_project_and_exports_after_one_audited_worker() -> Res
             })
         );
     }
-    let selection = RuntimeSelection::read_docker()?;
+    let selection = match std::env::var("AGENTSANDBOX_TEST_RUNTIME").as_deref() {
+        Ok("podman") => {
+            ensure!(
+                std::env::var("AGENTSANDBOX_TEST_PODMAN_MODE").as_deref() == Ok("rootless"),
+                "audited export requires AGENTSANDBOX_TEST_PODMAN_MODE=rootless for Podman"
+            );
+            RuntimeSelection::read(RuntimeKind::Podman, Some(true))?
+        }
+        _ => RuntimeSelection::read_docker()?,
+    };
+    let runtime = selection.runtime.to_string();
     let rootless = selection.preflight_with_cli(&binary).await?.rootless;
     let program = &selection.program;
     let image = selection.image.as_str();
@@ -796,7 +806,7 @@ async fn real_cli_copies_a_project_and_exports_after_one_audited_worker() -> Res
     assert_eq!(worker["quota_held"], false);
     assert_eq!(worker["cleanup_removed"], true);
     assert_eq!(worker["launch"]["command"]["argv"], json!(["/usr/bin/id"]));
-    assert_eq!(worker["launch"]["runtime_kind"], "docker");
+    assert_eq!(worker["launch"]["runtime_kind"], runtime);
     assert_eq!(worker["launch"]["network"], "none");
     assert_eq!(worker["launch"]["image_id"], image);
     assert_eq!(worker["attempt"]["volume_name"], run.volume);
@@ -822,6 +832,9 @@ async fn real_cli_copies_a_project_and_exports_after_one_audited_worker() -> Res
         worker["attempt"]["container_id"]
     );
     assert_eq!(allocation[0]["source"]["spec_hash"], worker["spec_hash"]);
+    if selection.runtime == RuntimeKind::Podman {
+        assert_eq!(allocation[0]["source"]["runtime_kind"], runtime);
+    }
     assert_eq!(allocation[0]["source"]["provenance"], "observed");
     assert_eq!(allocation[0]["billable"], false);
     assert!(
@@ -915,8 +928,14 @@ async fn real_cli_copies_a_project_and_exports_after_one_audited_worker() -> Res
     timeout(Duration::from_secs(5), gateway.child.kill()).await??;
     eprintln!(
         "{}",
-        json!({"status":"PASS", "runtime":"docker", "rootless":rootless, "image_id":image,
-        "session_id":session, "worker_id":worker_id, "audit_head":verified["head_hash"]})
+        json!({
+            "status":"PASS", "runtime":runtime, "rootless":rootless, "image_id":image,
+            "session_id":session, "worker_id":worker_id, "audit_head":verified["head_hash"],
+            "attempt_id":worker["attempt"]["attempt_id"],
+            "container_id":worker["attempt"]["container_id"],
+            "work_volume":worker["attempt"]["volume_name"],
+            "authority_id":worker["launch"]["authority_id"],
+        })
     );
     Ok(())
 }
