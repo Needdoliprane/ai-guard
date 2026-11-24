@@ -1,0 +1,233 @@
+name: G03 Linux rootful Docker export check
+
+on:
+  push:
+    branches: ['codex/g03-rootful-export-ca3c161b']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: g03-linux-rootful-docker-export-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      AI_GUARD_BUILD_REVISION: ca3c161b7ce791d9648e97285ab74806c9fc7b8c
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      LC_ALL: C
+      DOCKER_HOST: unix:///var/run/docker.sock
+    steps:
+      - name: Initialize a closed receipt
+        shell: bash
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/g03-rootful-docker-export-receipt.txt"
+          printf 'source_sha=ca3c161b7ce791d9648e97285ab74806c9fc7b8c\nselector=real_cli_copies_a_project_and_exports_after_one_audited_worker\nworkflow_sha=%s\nworkflow_parent_sha=unknown\nmode=linux-x86_64-rootful-docker-unix:///var/run/docker.sock\nsource_check=NOT_RUN\nworkflow_check=NOT_RUN\nrootful_preflight=NOT_RUN\nworker_image_uid=NOT_RUN\nworker_image_id_sha256=unknown\nlibtest=NOT_RUN\ntest_selected=unknown\ntest_passed=unknown\ntest_failed=unknown\ntest_ignored=unknown\ntest_exit=unknown\nengine_cleanup=NOT_STARTED\nlast_phase=initialized\n' "$WORKFLOW_SHA" > "$receipt"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 3
+          persist-credentials: false
+
+      - name: Verify candidate and exact single-test witness
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/g03-rootful-docker-export-receipt.txt"
+          set_field() {
+            local key=$1 value=$2
+            awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          source=ca3c161b7ce791d9648e97285ab74806c9fc7b8c
+          source_parent=ecba5656bf173af2294cef804a0647aa22d30f02
+          selector=real_cli_copies_a_project_and_exports_after_one_audited_worker
+          if [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 &&
+                "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/codex/g03-rootful-export-ca3c161b &&
+                "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$(git rev-parse HEAD)" == "$GITHUB_SHA" &&
+                "$(git rev-parse HEAD^)" == "$source" && "$(git rev-parse "$source^")" == "$source_parent" &&
+                "$(git diff --name-only "$source" HEAD)" == .github/workflows/g03-rootful-docker-export.yaml &&
+                -z "$(git status --porcelain=v1 --untracked-files=all)" ]] &&
+             git merge-base --is-ancestor "$source" HEAD &&
+             grep -Fq 'async fn real_cli_copies_a_project_and_exports_after_one_audited_worker()' tests/runtime_user_journey.rs &&
+             grep -Fq 'run.args(["--", "/usr/bin/id"]);' tests/runtime_user_journey.rs &&
+             grep -Fq 'assert_eq!(worker["launch"]["network"], "none");' tests/runtime_user_journey.rs &&
+             grep -Fq 'assert_eq!(worker["launch"]["image_id"], image);' tests/runtime_user_journey.rs &&
+             grep -Fq 'stdout.contains("uid=1000")' tests/runtime_user_journey.rs &&
+             grep -Fq 'USER 1000:1000' images/worker.Dockerfile &&
+             grep -Fq '"--network",' tests/runtime_user_journey.rs; then
+            set_field workflow_parent_sha "$source"
+            set_field source_check PASS
+            set_field workflow_check PASS
+            set_field last_phase source_verified
+          else
+            set_field source_check FAIL
+            set_field workflow_check FAIL
+            set_field last_phase source_guard_failed
+            exit 1
+          fi
+
+      - name: Prepare private fixture and owned-resource inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/g03-rootful-docker-export-receipt.txt"
+          sed -i 's/^last_phase=.*/last_phase=private_fixture_prepare/' "$receipt"
+          private="$RUNNER_TEMP/g03-rootful-docker-export"
+          mkdir -m 700 "$private" "$private/tmp"
+          printf 'G03_PRIVATE=%s\nTMPDIR=%s\n' "$private" "$private/tmp" >> "$GITHUB_ENV"
+
+      - name: Verify hosted local rootful Docker socket
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="$RUNNER_TEMP/g03-rootful-docker-export-receipt.txt"
+          set_field() {
+            local key=$1 value=$2
+            awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          set_field last_phase rootful_docker_preflight
+          endpoint=$(docker context inspect --format '{{.Endpoints.docker.Host}}' default)
+          security=$(docker info --format '{{json .SecurityOptions}}')
+          server_platform=$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')
+          if test -S /var/run/docker.sock &&
+             [[ "$endpoint" == unix:///var/run/docker.sock && "$server_platform" == linux/amd64 ]] &&
+             jq -e 'all(.[]; (ascii_downcase | contains("rootless")) | not)' <<< "$security" >/dev/null; then
+            docker container ls -aq --no-trunc | LC_ALL=C sort -u > "$G03_PRIVATE/containers.before"
+            set_field rootful_preflight PASS
+            set_field last_phase rootful_preflight_complete
+          else
+            set_field rootful_preflight FAIL
+            set_field last_phase rootful_mode_verification
+            exit 1
+          fi
+
+      - name: Build immutable UID 1000 worker image
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="$RUNNER_TEMP/g03-rootful-docker-export-receipt.txt"
+          set_field() {
+            local key=$1 value=$2
+            awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          tag="ai-guard-g03-worker:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          printf '%s\n' "$tag" > "$G03_PRIVATE/image.tag"
+          set_field last_phase worker_image_build
+          if docker build --file images/worker.Dockerfile --build-arg CODEX_VERSION= --build-arg CLAUDE_CODE_VERSION= --tag "$tag" . > "$G03_PRIVATE/worker-build.log" 2>&1; then
+            worker_id=$(docker image inspect --format '{{.Id}}' "$tag")
+            [[ "$worker_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ "$(docker image inspect --format '{{.Config.User}}' "$worker_id")" == 1000:1000 ]]
+            printf 'AGENTSANDBOX_TEST_RUNTIME=docker\nAGENTSANDBOX_TEST_ALLOW_ROOTFUL=1\nAGENTSANDBOX_TEST_RUNTIME_PROGRAM=/usr/bin/docker\nAGENTSANDBOX_TEST_RUNTIME_ENDPOINT=unix:///var/run/docker.sock\nAGENTSANDBOX_TEST_IMAGE=%s\nG03_WORKER_IMAGE_ID=%s\n' "$worker_id" "$worker_id" >> "$GITHUB_ENV"
+            printf '%s\n' "$worker_id" > "$G03_PRIVATE/image.id"
+            set_field worker_image_uid PASS
+            set_field worker_image_id_sha256 "${worker_id#sha256:}"
+            set_field last_phase worker_image_verified
+          else
+            set_field worker_image_uid FAIL
+            set_field last_phase worker_image_build_failed
+            exit 1
+          fi
+
+      - name: Fetch locked dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="$RUNNER_TEMP/g03-rootful-docker-export-receipt.txt"
+          sed -i 's/^last_phase=.*/last_phase=dependency_fetch/' "$receipt"
+          if cargo fetch --locked > "$G03_PRIVATE/fetch.log" 2>&1; then
+            sed -i 's/^last_phase=.*/last_phase=dependencies_fetched/' "$receipt"
+          else
+            rc=$?
+            sed -i "s/^last_phase=.*/last_phase=dependency_fetch_failed_exit_${rc}/" "$receipt"
+            exit "$rc"
+          fi
+
+      - name: Run exactly one audited export journey
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="$RUNNER_TEMP/g03-rootful-docker-export-receipt.txt"
+          set_field() {
+            local key=$1 value=$2
+            awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          selector=real_cli_copies_a_project_and_exports_after_one_audited_worker
+          log="$G03_PRIVATE/test.log"
+          set_field last_phase targeted_libtest
+          if timeout --signal=TERM --kill-after=15s 20m cargo test --locked --offline --test runtime_user_journey -- --ignored --exact --test-threads=1 "$selector" > "$log" 2>&1; then
+            rc=0
+          else
+            rc=$?
+          fi
+          selected=0; passed=0; failed=0; ignored=0
+          grep -Fqx "test $selector ... ok" "$log" && { selected=1; passed=1; } || true
+          grep -Fqx "test $selector ... FAILED" "$log" && { selected=1; failed=1; } || true
+          summary=$(grep -E '^test result:' "$log" | tail -n 1 | sed -E 's/^test result:.* ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored;.*/\1 \2 \3/' || true)
+          if [[ "$summary" =~ ^[0-9]+\ [0-9]+\ [0-9]+$ ]]; then read -r passed failed ignored <<< "$summary"; fi
+          if [[ "$rc" == 0 && "$selected" == 1 && "$passed" == 1 && "$failed" == 0 && "$ignored" == 0 ]]; then verdict=PASS; phase=export_journey_complete; else verdict=FAIL; phase=targeted_libtest_failed_or_unconfirmed; fi
+          set_field libtest "$verdict"
+          set_field test_selected "$selected"
+          set_field test_passed "$passed"
+          set_field test_failed "$failed"
+          set_field test_ignored "$ignored"
+          set_field test_exit "$rc"
+          set_field last_phase "$phase"
+          [[ "$verdict" == PASS ]]
+
+      - name: Close only resources created by this job
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="$RUNNER_TEMP/g03-rootful-docker-export-receipt.txt"
+          [[ -f "$receipt" ]] || exit 0
+          set_field() {
+            local key=$1 value=$2
+            awk -v p="$key=" -v r="$key=$value" 'index($0,p)==1 {print r; found=1; next} {print} END {if (!found) print r}' "$receipt" > "$receipt.pending"
+            mv -- "$receipt.pending" "$receipt"
+          }
+          cleanup=CONFIRMED
+          private="$RUNNER_TEMP/g03-rootful-docker-export"
+          inventory="$private/containers.before"
+          if [[ -f "$inventory" ]] && docker info >/dev/null 2>&1; then
+            docker container ls -aq --no-trunc | LC_ALL=C sort -u > "$private/containers.after" || cleanup=UNKNOWN
+            comm -13 "$inventory" "$private/containers.after" > "$private/containers.new" || cleanup=UNKNOWN
+            [[ ! -s "$private/containers.new" ]] || cleanup=UNKNOWN
+          elif [[ -f "$inventory" ]]; then cleanup=UNKNOWN; fi
+          if [[ -f "$private/image.id" && -f "$private/image.tag" ]] && docker info >/dev/null 2>&1; then
+            image_id=$(<"$private/image.id")
+            image_tag=$(<"$private/image.tag")
+            if [[ "$(docker image inspect --format '{{.Id}}' "$image_tag" 2>/dev/null || true)" == "$image_id" ]]; then
+              docker image rm "$image_tag" >/dev/null 2>&1 || cleanup=UNKNOWN
+            else cleanup=UNKNOWN; fi
+          elif [[ -f "$private/image.id" || -f "$private/image.tag" ]]; then cleanup=UNKNOWN; fi
+          if [[ -d "$private/tmp" ]]; then rm -rf -- "$private/tmp" || cleanup=UNKNOWN; fi
+          set_field engine_cleanup "$cleanup"
+          [[ "$cleanup" == CONFIRMED ]]
+
+      - name: Upload the closed receipt only
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: g03-linux-rootful-docker-export-${{ github.run_id }}
+          path: ${{ runner.temp }}/g03-rootful-docker-export-receipt.txt
+          if-no-files-found: error
+          retention-days: 14
