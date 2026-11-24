@@ -203,7 +203,7 @@ fn egress_store_connection_correlates_with_its_durable_decision() {
     let EgressObservationV1::Connection { flow_id, .. } = &mut different_flow.observation else {
         unreachable!("fixture is a connection observation");
     };
-    *flow_id = IdV1::random();
+    *flow_id = request.flow_id + 1;
     let error = store.egress_observe(&different_flow).unwrap_err();
     assert_eq!(
         error.downcast_ref::<EgressJournalError>(),
