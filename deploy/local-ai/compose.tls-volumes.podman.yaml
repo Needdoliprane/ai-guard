@@ -1,0 +1,4 @@
+# Apply only with compose.tls-volumes.yaml on rootless Podman.
+services:
+  local-ai-ingress:
+    userns_mode: "keep-id:uid=1000,gid=1000"

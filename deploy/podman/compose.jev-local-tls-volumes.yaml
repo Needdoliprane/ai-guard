@@ -1,0 +1,4 @@
+# Apply after the shared TLS volumes override on rootless Podman.
+services:
+  gateway:
+    userns_mode: "keep-id:uid=1000,gid=1000"

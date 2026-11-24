@@ -59,5 +59,25 @@
     "plain_hex_image_id": true,
     "digest_matches": true,
     "source_comparison": "src/runtime/model_tls.rs:395"
+  },
+  "podman_rootless_compose_gateway_decision": {
+    "provision_fix_revision": "ddca3808",
+    "rootless": true,
+    "compose_provider": "Docker Compose 5.0.2 via podman compose",
+    "userns_mode": "keep-id:uid=1000,gid=1000",
+    "relay_timeout_seconds": 8,
+    "gateway_mounts_ca_only_for_judge": true,
+    "worker_launch_requested": false,
+    "cleanup_verified": true,
+    "result": {
+      "audit_seq": 2,
+      "audit_match": true,
+      "model": "qwen2.5-0.5b-q4km",
+      "provider_outcome": "deny",
+      "normalized_advice": "deny",
+      "decision": "deny",
+      "rule": "local_openai_deny",
+      "integrity": true
+    }
   }
 }

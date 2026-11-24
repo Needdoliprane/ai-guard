@@ -31,6 +31,15 @@ identique, l’inspection Docker rapporte un identifiant préfixé par
 Le prévol compare la chaîne telle quelle à l’identifiant canonique
 préfixé. Le sélecteur est absent et aucun service TLS n’a été lancé
 sur Podman. Le profil TLS Podman reste ouvert.
+Après correction du provisionneur sur `ddca3808`, Podman rootless
+publie le sélecteur. Sans le mappage du préparateur, l’UID 1000 ne peut
+pas traverser le volume d’identité vu comme `0:0` en mode 0700. Le
+mappage `keep-id:uid=1000,gid=1000` rend le répertoire et la clé
+accessibles au bon UID sans changer leurs modes. Avec les deux
+overrides Podman livrés, la pile reçoit le verdict Qwen `deny` via
+HTTPS, le persiste et vérifie la chaîne SQLite. Les conteneurs et
+réseaux sont retirés ainsi que les volumes de la génération réussie
+après sauvegarde SQLite. Aucun worker n’est lancé.
 [Reçu de santé et de décision TLS](evidence/2026-11-24/g07-local-tls-volumes-health.json).
 
 ## 24 novembre 2026 — avis Qwen local depuis l’archive macOS
