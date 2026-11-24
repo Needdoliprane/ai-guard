@@ -303,6 +303,11 @@ pub struct GatewayState {
     owned_control_hook: Arc<auth::owned_control::test_hook::Hook>,
 }
 impl GatewayState {
+    #[cfg(test)]
+    pub(crate) fn fixture_stream_slots(&self) -> Arc<tokio::sync::Semaphore> {
+        Arc::clone(&self.tenants[0].streams)
+    }
+
     fn scoped(&self, scope: Arc<store_io::Scope>) -> Self {
         let mut state = self.clone();
         state.io_scope = scope;

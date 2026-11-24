@@ -9,7 +9,8 @@ use crate::{
     gateway_server::GatewayServer,
     identity::{
         HumanAccountV1, HumanCapabilityV1, IdentityChangeV1, IdentityMutationV1, LocalCredentialV1,
-        LocalHumanProvisionV1, MembershipV1, PrincipalRefV1, generate_local_credential,
+        LocalHumanProvisionV1, MembershipV1, PrincipalRefV1, ResourceGrantV1, ResourceKindV1,
+        ResourceRefV1, generate_local_credential,
     },
     model::{Event, StoredEvent},
     policy::Policy,
@@ -77,6 +78,7 @@ impl BodyBarrier {
     }
 }
 struct Reader {
+    principal: PrincipalRefV1,
     tenant: String,
     token: String,
     context: String,
@@ -136,7 +138,7 @@ fn reader(store: &Store) -> Result<Reader> {
                 membership: MembershipV1 {
                     version: 1,
                     membership_id: Uuid::new_v4().to_string(),
-                    principal,
+                    principal: principal.clone(),
                     tenant_id: store.tenant_id().into(),
                     organization_scope: "d3-fixture-organization".into(),
                     revision: 1,
@@ -147,6 +149,7 @@ fn reader(store: &Store) -> Result<Reader> {
         ],
     })?;
     Ok(Reader {
+        principal,
         tenant: store.tenant_id().into(),
         token,
         context: String::new(),
@@ -700,4 +703,228 @@ async fn parked_authenticated_human_bodies_leave_unary_ingress_available_and_rec
     ingress_cleanup.unwrap();
     gateway_cleanup.unwrap();
     outcome.unwrap();
+}
+
+async fn next_audit_frame(
+    response: &mut reqwest::Response,
+    pending: &mut Vec<u8>,
+) -> Result<(String, Vec<String>)> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(end) = pending.windows(2).position(|bytes| bytes == b"\n\n") {
+                let frame: Vec<_> = pending.drain(..end + 2).collect();
+                let frame = std::str::from_utf8(&frame)?;
+                if frame.starts_with(':') {
+                    continue;
+                }
+                ensure!(
+                    frame.lines().any(|line| line == "event: human_audit"),
+                    "unexpected human SSE frame"
+                );
+                let field = |prefix| {
+                    frame
+                        .lines()
+                        .find_map(|line| line.strip_prefix(prefix))
+                        .ok_or_else(|| anyhow!("missing SSE field {prefix}"))
+                };
+                let page: serde_json::Value = serde_json::from_str(field("data: ")?)?;
+                let ids = page["items"]
+                    .as_array()
+                    .ok_or_else(|| anyhow!("missing audit items"))?
+                    .iter()
+                    .map(|item| {
+                        item["metadata"]["id"]
+                            .as_str()
+                            .map(str::to_owned)
+                            .ok_or_else(|| anyhow!("missing audit event ID"))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                return Ok((field("id: ")?.to_owned(), ids));
+            }
+            let chunk = response
+                .chunk()
+                .await?
+                .ok_or_else(|| anyhow!("SSE ended before audit frame"))?;
+            ensure!(
+                chunk.len() <= JSON_LIMIT.saturating_sub(pending.len()),
+                "SSE fixture frame exceeds bound"
+            );
+            pending.extend_from_slice(&chunk);
+        }
+    })
+    .await
+    .map_err(|_| anyhow!("audit frame deadline elapsed"))?
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn human_sse_reader_releases_permits_and_resumes_from_last_read_cursor() -> Result<()> {
+    let files = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()?;
+    let path = files.path().join("reader.sqlite");
+    let store = Arc::new(Store::open_for_tenant(
+        &path,
+        "tenant-a",
+        Redactor::new(vec![]),
+        2048,
+    )?);
+    store.migrate_control_v3(&path.with_extension("before3"))?;
+    store.migrate_identity_v4(&path.with_extension("before4"))?;
+    store.migrate_human_access_v5(&path.with_extension("before5"))?;
+    let mut reader = reader(&store)?;
+    let session = Uuid::new_v4().to_string();
+    let publish = || -> Result<String> {
+        let mut event = Event::new("observer.coverage");
+        event.session_id = Some(session.clone());
+        Ok(store.append(event)?.event.id)
+    };
+    let initial = publish()?;
+    store.mutate_identity(&mutation(IdentityChangeV1::ResourceGrant {
+        expected_revision: 0,
+        grant: ResourceGrantV1 {
+            version: 1,
+            tenant_id: reader.tenant.clone(),
+            organization_scope: "d3-fixture-organization".into(),
+            resource: ResourceRefV1 {
+                kind: ResourceKindV1::Session,
+                resource_id: session.clone(),
+            },
+            owner: reader.principal.clone(),
+            revision: 1,
+            active: true,
+            shares: Vec::new(),
+        },
+    }))?;
+    let gateway_state = GatewayState::for_tenants(
+        vec![TenantGateway {
+            tenant_id: reader.tenant.clone(),
+            store: Arc::clone(&store),
+            runner_token: "local-sse-fixture-runner-token".into(),
+            viewer_token: "local-sse-fixture-viewer-token".into(),
+        }],
+        Policy::default(),
+        None,
+        Redactor::new(vec![]),
+    )?;
+    let gateway_slots = gateway_state.fixture_stream_slots();
+    let baseline = gateway_slots.available_permits();
+    let (produced, mut observed) = watch::channel(0usize);
+    let public = gateway_router(gateway_state).layer(axum::middleware::from_fn(
+        move |request: Request, next: axum::middleware::Next| {
+            let produced = produced.clone();
+            async move {
+                let stream = request.uri().path() == "/api/v1/human/stream";
+                let response = next.run(request).await;
+                if !stream || response.status() != StatusCode::OK {
+                    return response;
+                }
+                let (parts, body) = response.into_parts();
+                let body = body.into_data_stream().inspect(move |chunk| {
+                    if chunk
+                        .as_ref()
+                        .is_ok_and(|bytes| bytes.starts_with(b"event: human_audit\n"))
+                    {
+                        produced.send_modify(|count| *count += 1);
+                    }
+                });
+                Response::from_parts(parts, Body::from_stream(body))
+            }
+        },
+    ));
+    let gateway = OwnedIngress::start(public).await?;
+    let upstream = Ingress {
+        origin: upstream_origin(&gateway.url)?,
+        client: reqwest::Client::builder().no_proxy().build()?,
+        uploads: Arc::new(tokio::sync::Semaphore::new(MAX_UPLOADS)),
+        concurrency: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT)),
+        streams: Arc::new(tokio::sync::Semaphore::new(MAX_SSE_EXCHANGES)),
+        timeouts: Timeouts::default(),
+    };
+    let ingress = OwnedIngress::start(
+        Router::new()
+            .fallback(any(forward))
+            .with_state(upstream.clone()),
+    )
+    .await?;
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .http1_only()
+        .pool_max_idle_per_host(0)
+        .build()?;
+    let outcome: Result<()> = async {
+        context(&client, &ingress.url, &mut reader).await?;
+        let get = |path: &str| {
+            client
+                .get(format!("{}{path}", ingress.url))
+                .bearer_auth(&reader.token)
+                .header(CONTEXT_HEADER, &reader.context)
+        };
+        let stream = || {
+            get("/api/v1/human/stream").query(&[
+                ("view", "metadata"),
+                ("limit", "1"),
+                ("resource_kind", "session"),
+                ("resource_id", &session),
+            ])
+        };
+        let mut response = request(stream()).await?;
+        ensure!(response.status() == StatusCode::OK, "initial SSE refused");
+        let (cursor, ids) = next_audit_frame(&mut response, &mut Vec::new()).await?;
+        ensure!(ids == [initial], "unexpected initial events");
+        ensure!(
+            upstream.concurrency.available_permits() == MAX_CONCURRENT - 1
+                && upstream.streams.available_permits() == MAX_SSE_EXCHANGES - 1
+                && gateway_slots.available_permits() == baseline - 1,
+            "stream did not own all expected permits"
+        );
+
+        // Stop reading this response while ordinary events are committed and a unary read completes.
+        let expected = [publish()?, publish()?, publish()?];
+        let unary = request(get("/api/v1/human/resources")).await?;
+        ensure!(
+            unary.status() == StatusCode::OK,
+            "ordinary read failed during pause"
+        );
+        bounded_json(unary).await?;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            observed.wait_for(|count| *count >= 2),
+        )
+        .await
+        .map_err(|_| anyhow!("gateway did not produce a frame during the pause"))??;
+        drop(response);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while upstream.concurrency.available_permits() != MAX_CONCURRENT
+                || upstream.streams.available_permits() != MAX_SSE_EXCHANGES
+                || gateway_slots.available_permits() != baseline
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .map_err(|_| anyhow!("closing the client transport did not free the stream permits"))?;
+
+        let sentinel = publish()?;
+        let mut resumed = request(stream().query(&[("cursor", cursor)])).await?;
+        ensure!(resumed.status() == StatusCode::OK, "resumed SSE refused");
+        let mut pending = Vec::new();
+        let mut actual = Vec::new();
+        let expected: Vec<_> = expected.into_iter().chain([sentinel]).collect();
+        while actual.len() < expected.len() {
+            let (_, ids) = next_audit_frame(&mut resumed, &mut pending).await?;
+            ensure!(!ids.is_empty(), "empty audit frame after resume");
+            actual.extend(ids);
+        }
+        ensure!(
+            actual == expected,
+            "resumed events have a gap, duplicate or ordering error"
+        );
+        Ok(())
+    }
+    .await;
+    let ingress_cleanup = ingress.finish().await;
+    let gateway_cleanup = gateway.finish().await;
+    outcome?;
+    ingress_cleanup?;
+    gateway_cleanup
 }
