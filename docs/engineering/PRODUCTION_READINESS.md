@@ -172,6 +172,17 @@ utilise un duplex de recette. Le raccord E3 et les effets en worker
 sur moteur restent ouverts. Reçu `g05-e2-1c03e01f.log`, SHA-256
 `a917e619afbd7c54c9ebd3741d797ab7ddb35f6fe075282040165bc833b6ef8d`.
 
+**G06/G08 — témoins de migration et de démarrage local.** Le
+[harnais de migration](../../tests/broker_registry_migration.rs)
+compare deux bases SQLite v5 à capacité égale. Une place disponible de
+plus permet la migration v6. Au seuil suivant, le refus d’audit laisse
+la sauvegarde vérifiable et le schéma et la tête d’origine intacts.
+Le [test de démarrage](../../tests/broker_registry_cli_config.rs) vérifie
+la première ligne `Gateway`, les deux diagnostics d’audit et l’empreinte
+de la politique workload résolue. Après arrêt du CLI, le schéma v5 et
+la tête sont inchangés. Ces témoins de recette s’exécutent localement
+sur des bases privées temporaires.
+
 **G06 — refus d’une copie SQLite Store14.** Sur `fc8dba50`, le
 [témoin CLI](../../tests/human_sources_bootstrap.rs) lit le tenant A avec
 la base originale et ferme le gateway. Après une sauvegarde SQLite Online

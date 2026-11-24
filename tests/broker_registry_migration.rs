@@ -20,17 +20,30 @@ fn v5(path: &std::path::Path, capacity: u64) -> Store {
     store
 }
 
+fn v5_at_migration_budget(path: &std::path::Path, head: i64) -> Store {
+    let store = v5(path, 16);
+    let mut capacity = store.capacity_policy().clone();
+    capacity.control_reserve.events = 1;
+    capacity.identity_reserve.events = 6;
+    let store = store.with_capacity_policy(capacity).unwrap();
+    while store.head().unwrap() < head {
+        store.append(Event::new("test.fill")).unwrap();
+    }
+    store
+}
+
 #[test]
 fn workload_migration_preserves_exact_backup_and_does_not_reactivate_reopened_origin() {
     let directory = support::private_tempdir();
     let path = directory.path().join("tenant.sqlite");
-    let store = v5(&path, 1000);
-    store.append(Event::new("test.preserved")).unwrap();
+    let store = v5_at_migration_budget(&path, 8);
     let before = store.integrity().unwrap();
     assert!(store.supervision_state().unwrap().active);
     let backup = directory.path().join("workload-v5.bak");
     let report = store.migrate_workload_v6(&backup).unwrap();
     assert_eq!((report.from_version, report.to_version), (5, 6));
+    assert_eq!(report.genesis_seq, 9);
+    assert_eq!(store.head().unwrap(), 10);
     assert_eq!(store.supervision_state().unwrap().schema_version, 6);
     assert!(store.supervision_state().unwrap().active);
     let backed =
@@ -59,14 +72,7 @@ fn workload_migration_preserves_exact_backup_and_does_not_reactivate_reopened_or
 fn late_migration_audit_failure_rolls_back_ddl_version_and_head_but_retains_backup() {
     let directory = support::private_tempdir();
     let path = directory.path().join("tenant.sqlite");
-    let store = v5(&path, 16);
-    let mut capacity = store.capacity_policy().clone();
-    capacity.control_reserve.events = 1;
-    capacity.identity_reserve.events = 6;
-    let store = store.with_capacity_policy(capacity).unwrap();
-    while store.head().unwrap() < 9 {
-        store.append(Event::new("test.fill")).unwrap();
-    }
+    let store = v5_at_migration_budget(&path, 9);
     let before = store.integrity().unwrap();
     // With six slots reserved for identity, one control write fits at head 9.
     // The second genesis must fail and roll back both the first genesis and DDL.
