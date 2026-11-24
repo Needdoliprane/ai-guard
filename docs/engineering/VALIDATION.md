@@ -494,6 +494,16 @@ L’export existant et la source gardent leurs octets. Le refus rend
 le code 1, l’intégrité reste valide et les inventaires sont restaurés.
 [Reçu macOS, Docker et Podman](evidence/2026-11-24/g12-macos-84971de6.json).
 
+## 24 novembre 2026 — image de contrôle locale du candidat `7e3a6166`
+
+**PASS ciblé G12** pour la construction Docker ARM64 et le démarrage
+de la même image sur Docker et Podman rootless. Les trois services
+étaient sains sur chaque moteur et les quatre fichiers frontend servis
+correspondaient aux fichiers embarqués. **FAIL** pour la construction
+native Podman sur la VM locale à 3814 et 7168 Mio. Dans les deux cas,
+le noyau confirme un manque de mémoire pendant la compilation Rust.
+[Reçu image de contrôle](evidence/2026-11-24/g12-control-image-7e3a6166.md).
+
 ## 24 novembre 2026 — profil TLS local à volumes neufs
 
 **PASS ciblé G07.** Sur Docker Desktop ARM64, le CLI `e2796ac1`
