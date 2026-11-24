@@ -1,5 +1,39 @@
 # Validation courante
 
+## 24 novembre 2026 — découverte Keycloak Web et CLI sur Podman rootless
+
+**PASS ciblé G04/G08** sur macOS ARM64 et Podman 6.1.4 rootless.
+Les deux recettes utilisent une préparation neuve depuis le manifeste
+DEMO, les Compose du commit `c78784eb` et uniquement des publications
+loopback. L’image de contrôle `3e11af808048` correspond au build
+`fdf780c3`. Ses sources Rust, son frontend, ses lockfiles et son
+Dockerfile sont identiques entre les deux révisions. L’image Keycloak
+26.8.1 `1f41a1687516` a été construite sur `c949cf31` avec le même
+Dockerfile et le même realm que `c78784eb`.
+
+Chrome 158.0.8127.88 vérifie la lecture OIDC en contexte administration
+pour `admin-ai-guard` et personnel pour `user-1` et `user-2`, avec
+déconnexion locale et réponse d’API indiquant l’enregistrement de
+l’audit pour les trois. Le contrôle refuse le compte d’administration
+du realm `admin`. La recette Web vérifie les contextes et les lectures
+autorisées. La vérification durable du reçu est celle du CLI ci-dessous.
+
+Une seconde installation sert le CLI macOS ARM64 provenant de l’archive
+`84971de6`. Le callback de `user-1` répond HTTP 200, le renouvellement
+fait passer la session de 1 à 2, la déconnexion est auditée et aucun
+fichier de credential utilisateur n’est créé. La commande
+`verify-audit` confirme l’intégrité. Après arrêt du gateway, la copie
+SQLite confirme le reçu personnel de lecture à la séquence 14, attribué
+au sujet OIDC attendu avec une provenance observée.
+
+Les deux projets rendent leurs inventaires de conteneurs, réseaux et
+volumes à zéro. Reçus privés
+`g04-keycloak-web-native-podman-c78784eb`, manifeste SHA-256
+`61737e6ff2e8ca8a61c696621cd30dd92d98967e6a849d4eb4bf102a22bd363a`.
+La recette utilise des binaires de révisions identifiées. Le lancement
+d’un worker attribué à l’identité humaine et le raccordement entreprise
+restent à qualifier.
+
 ## 24 novembre 2026 — archive frontend du candidat
 
 **PASS ciblé G12** sur `c7f01051`. Le frontend est construit hors
