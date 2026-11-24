@@ -1,0 +1,310 @@
+name: SQL-05 MySQL logical restore
+
+on:
+  push:
+    branches: ['codex/v1-g06-sql05-restore-actions-20261124']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sql05-restore
+  cancel-in-progress: false
+
+jobs:
+  restore:
+    if: github.ref == 'refs/heads/codex/v1-g06-sql05-restore-actions-20261124'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      # Linux AMD64 manifest and checkout pin reused from 2de1511b.
+      QA_MYSQL_IMAGE_DIGEST: 72c368d898861f3b3a07af0e6d690400f44f048799ed46822783d9224cc2c86d
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      RUST_MIN_STACK: '8388608'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Restore one claim per transport profile
+        shell: bash
+        run: |
+          set +x
+          set -euo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/sql05-restore-receipt.txt"
+          report() { printf '%s\n' "$*" | tee -a "$receipt" >> "$GITHUB_STEP_SUMMARY"; }
+          stage=preflight
+          root=
+          backup_log=
+          : > "$receipt"
+          projects=()
+          directories=()
+          ports=()
+          profiles=()
+          docker() { timeout --kill-after=5s 60s docker "$@"; }
+          compose_qa() {
+            docker --context desktop-linux compose --env-file /dev/null \
+              -f tests/e2e/mysql/compose.yaml --profile "$QA_MYSQL_PROFILE" "$@"
+          }
+          select_qa() {
+            local i=$1
+            export QA_MYSQL_PROJECT="${projects[i]}" QA_MYSQL_PRIVATE_DIR="${directories[i]}"
+            export QA_MYSQL_PORT="${ports[i]}" QA_MYSQL_PROFILE="${profiles[i]}"
+            qa=$QA_MYSQL_PRIVATE_DIR
+            container="$QA_MYSQL_PROJECT-$QA_MYSQL_PROFILE-1"
+          }
+          absence() {
+            local matches
+            if ! matches=$("$@"); then
+              printf unknown
+            elif [[ -n $matches ]]; then
+              printf present
+            else
+              printf absent
+            fi
+          }
+          cleanup() {
+            select_qa "$1"
+            local label="com.docker.compose.project=$QA_MYSQL_PROJECT"
+            local down_exit=0 probe_exit=0 probe containers volumes networks listeners
+            if probe=$(docker --context desktop-linux ps -aq --filter "label=$label" \
+                --filter "label=ai-guard.qa.role=restore-probe"); then
+              if [[ -n $probe ]]; then
+                docker --context desktop-linux rm -f "$probe" >> "$root/cleanup.log" 2>&1 || probe_exit=$?
+              fi
+            else
+              probe_exit=1
+            fi
+            compose_qa down --volumes --timeout 10 >> "$root/cleanup.log" 2>&1 || down_exit=$?
+            containers=$(absence docker --context desktop-linux ps -aq --filter "label=$label")
+            volumes=$(absence docker --context desktop-linux volume ls -q --filter "label=$label")
+            networks=$(absence docker --context desktop-linux network ls -q --filter "label=$label")
+            listeners=$(absence ss -H -ltn "sport = :$QA_MYSQL_PORT")
+            report "cleanup profile=$QA_MYSQL_PROFILE project=$QA_MYSQL_PROJECT port=$QA_MYSQL_PORT down_exit=$down_exit probe_exit=$probe_exit containers=$containers volumes=$volumes networks=$networks listeners=$listeners" || return 1
+            [[ $down_exit == 0 && $probe_exit == 0 && $containers == absent && $volumes == absent &&
+               $networks == absent && $listeners == absent ]]
+          }
+          finish() {
+            local original_exit=$? final_exit cleanup_exit=0 scratch=not_created i
+            trap - EXIT
+            final_exit=$original_exit
+            if [[ -n $backup_log && -f $backup_log ]]; then
+              report_backup || cleanup_exit=1
+            fi
+            for i in "${!projects[@]}"; do
+              stage_cleanup "$i" || cleanup_exit=1
+            done
+            if [[ -n $root ]]; then
+              scratch=unconfirmed
+              if [[ $root =~ ^/tmp/aig-sql05-restore\.[A-Za-z0-9]{6}$ ]] &&
+                 rm -rf -- "$root" && [[ ! -e $root ]]; then
+                scratch=removed
+              else
+                cleanup_exit=1
+              fi
+            fi
+            if [[ $final_exit == 0 ]]; then final_exit=$cleanup_exit; fi
+            report "final_stage=$stage original_exit=$original_exit cleanup_exit=$cleanup_exit scratch=$scratch exit=$final_exit" || {
+              if [[ $final_exit == 0 ]]; then final_exit=1; fi
+            }
+            exit "$final_exit"
+          }
+          stage_cleanup() {
+            cleanup "$1" || return 1
+            unset "projects[$1]"
+          }
+          report_backup() {
+            local milestone
+            while IFS= read -r milestone; do
+              case "$milestone" in
+                dump_exit=0|import_exit=0) report "profile=$profile $milestone" || return 1 ;;
+                'backup.sql: OK') report "profile=$profile dump_sha256_verified=yes" || return 1 ;;
+                *) return 1 ;;
+              esac
+            done < "$backup_log"
+          }
+          trap finish EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          report "workflow_sha=$GITHUB_SHA run_id=$GITHUB_RUN_ID run_attempt=$GITHUB_RUN_ATTEMPT"
+          [[ $RUNNER_ENVIRONMENT == github-hosted && $RUNNER_ARCH == X64 ]]
+          [[ $(git rev-parse HEAD) == "$GITHUB_SHA" ]]
+          [[ $(git rev-parse HEAD^) == decb2d34570d58499a361523226a8b8bf051bd78 ]]
+          [[ $(git diff --name-only HEAD^ HEAD) == $'.github/workflows/sql05-restore.yaml\ntests/e2e/mysql/GATEWAY_FIXTURE.md' ]]
+          report "source_sha=$(git rev-parse HEAD^) source_tree=$(git rev-parse 'HEAD^^{tree}') workflow_tree=$(git rev-parse 'HEAD^{tree}')"
+          stage=setup
+          root=$(mktemp -d /tmp/aig-sql05-restore.XXXXXX)
+          exec > "$root/diagnostics.log" 2>&1
+          unset DOCKER_HOST DOCKER_CONTEXT DOCKER_TLS DOCKER_TLS_VERIFY DOCKER_CERT_PATH DOCKER_DEFAULT_PLATFORM
+          unset COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_ENV_FILES MYSQL_PWD
+          export DOCKER_CONFIG="$root/docker" CARGO_TARGET_DIR="$root/cargo"
+          mkdir "$DOCKER_CONFIG"
+          docker context create desktop-linux --docker 'host=unix:///var/run/docker.sock'
+          [[ $(docker --context desktop-linux version --format '{{.Server.Os}}/{{.Server.Arch}}') == linux/amd64 ]]
+          image="mysql:8.4@sha256:$QA_MYSQL_IMAGE_DIGEST"
+          timeout --kill-after=10s 300s docker --context desktop-linux pull --platform linux/amd64 "$image"
+          image_id=$(docker --context desktop-linux image inspect --format '{{.Id}}' "$image")
+
+          stage=recipe
+          copy_recipe() {
+            awk -v start="$1" -v end="$2" '
+              $0 == start { copying = 1 }
+              copying { print }
+              copying && $0 == end { found = 1; exit }
+              END { if (!found) exit 1 }
+            ' "$3"
+          }
+          recipe=tests/e2e/mysql/README.md
+          restore=tests/e2e/mysql/SQL05_RESTORE.md
+          {
+            copy_recipe 'make_ca() {' '}' "$recipe"
+            copy_recipe 'issue_leaf() {' '}' "$recipe"
+            copy_recipe 'mysql_case() (' ')' "$recipe"
+            copy_recipe 'wait_mysql_ready() {' '}' "$recipe"
+            copy_recipe 'prepare_gateway_fixture() (' ')' tests/e2e/mysql/GATEWAY_FIXTURE.md
+            copy_recipe 'run_phase() {' '}' "$restore"
+            copy_recipe 'fixture_sql() {' '}' "$restore"
+            copy_recipe 'backup_restore() (' ')' "$restore"
+          } > "$root/recipe.sh"
+          bash -n "$root/recipe.sh"
+          source "$root/recipe.sh"
+          uuidgen() { cat /proc/sys/kernel/random/uuid; }
+          mysql() {
+            timeout --kill-after=3s 12s docker --context desktop-linux run --rm --pull never \
+              --network host --read-only --cap-drop ALL --security-opt no-new-privileges \
+              --name "$QA_MYSQL_PROJECT-restore-probe" --label "com.docker.compose.project=$QA_MYSQL_PROJECT" \
+              --label ai-guard.qa.role=restore-probe \
+              --user "$(id -u):$(id -g)" --entrypoint mysql \
+              --mount "type=bind,src=$qa/client,dst=$qa/client,readonly" \
+              --mount "type=bind,src=$qa/ca/ca.pem,dst=$qa/ca/ca.pem,readonly" \
+              --mount "type=bind,src=$qa/other-ca/ca.pem,dst=$qa/other-ca/ca.pem,readonly" "$image" "$@"
+          }
+
+          stage=compile
+          cargo fetch --locked
+          cargo test --locked --offline --no-default-features --features mysql-storage \
+            --test mysql_audit_store --no-run --message-format=json > "$root/cargo.jsonl"
+          libtest=$(jq -rs '
+            [.[] | select(.reason == "compiler-artifact" and .target.name == "mysql_audit_store"
+              and .target.kind == ["test"] and .profile.test and .executable != null) | .executable]
+            | if length == 1 then .[0] else error("expected one binary") end' "$root/cargo.jsonl")
+          [[ $libtest == "$CARGO_TARGET_DIR"/debug/deps/mysql_audit_store-* && -x $libtest ]]
+          # The documented phase helper uses the macOS PATH, which includes /usr/bin and /bin on Linux.
+          "$libtest" --list | grep -Fx 'worker_lifecycle::restored_mysql_legacy_claim_retains_receipt_and_quota: test'
+          report "image_digest=$QA_MYSQL_IMAGE_DIGEST libtest_sha256=$(sha256sum "$libtest" | cut -d ' ' -f1)"
+
+          start_qa() {
+            local i=$1 profile=$2 port=$3 dir=$4 project label listeners containers volumes networks
+            project="aig-sql05-$(openssl rand -hex 12)"
+            label="com.docker.compose.project=$project"
+            listeners=$(ss -H -ltn "sport = :$port")
+            containers=$(docker --context desktop-linux ps -aq --filter "label=$label")
+            volumes=$(docker --context desktop-linux volume ls -q --filter "label=$label")
+            networks=$(docker --context desktop-linux network ls -q --filter "label=$label")
+            [[ -z $listeners$containers$volumes$networks ]]
+            mkdir -p "$dir"/{ca,other-ca,password,mtls,client}
+            projects[i]=$project directories[i]=$dir ports[i]=$port profiles[i]="mysql-$profile"
+            select_qa "$i"
+            printf '[req]\ndistinguished_name=dn\n[dn]\n' > "$qa/req.cnf"
+            make_ca ca 'SQL-05 ephemeral QA'
+            make_ca other-ca 'SQL-05 alternate QA'
+            issue_leaf "$profile/server" "$QA_MYSQL_PROFILE" ca serverAuth 'DNS:localhost'
+            openssl rand -hex 24 > "$qa/$profile/root.password"
+            openssl rand -hex 24 > "$qa/$profile/probe.password"
+            chmod 0444 "$qa/ca/ca.pem" "$qa/$profile/"{server.pem,server.key,root.password,probe.password}
+            local -a tls=(--ssl-ca="$qa/ca/ca.pem")
+            if [[ $profile == mtls ]]; then
+              issue_leaf client/probe qa-probe ca clientAuth
+              tls+=(--ssl-cert="$qa/client/probe.pem" --ssl-key="$qa/client/probe.key")
+            fi
+            compose_qa config --quiet
+            compose_qa up -d --pull never "$QA_MYSQL_PROFILE"
+            [[ $(docker --context desktop-linux port "$container" 3306/tcp) == "127.0.0.1:$port" ]]
+            [[ $(docker --context desktop-linux inspect --format '{{.Image}} {{.State.Running}}' "$container") == "$image_id true" ]]
+            report "profile=$profile instance=$i project=$project published=127.0.0.1:$port"
+            export QA_MYSQL_HOST=localhost QA_MYSQL_CLIENT_PORT="$port"
+            local secret="$qa/$profile/probe.password" proof
+            proof=$(wait_mysql_ready verified ok "$secret" VERIFY_IDENTITY "${tls[@]}")
+            [[ $proof =~ ^verified\ PASS\ 8\.4\.13\ TLSv1\.[23]$ ]]
+            report "transport profile=$profile instance=$i port=$port $proof"
+            transport_case wrong-ca server-tls "$secret" VERIFY_IDENTITY "${tls[@]:1}" --ssl-ca="$qa/other-ca/ca.pem"
+            QA_MYSQL_HOST=127.0.0.1 transport_case wrong-name server-tls "$secret" VERIFY_IDENTITY "${tls[@]}"
+            if [[ $profile == mtls ]]; then
+              transport_case missing-cert credentials "$secret" VERIFY_IDENTITY "${tls[0]}"
+            fi
+            transport_case verified-again ok "$secret" VERIFY_IDENTITY "${tls[@]}"
+          }
+          transport_case() {
+            local proof status=0
+            proof=$(mysql_case "$@") || status=$?
+            if [[ $status == 0 ]]; then
+              report "transport profile=$profile instance=$i port=$port $proof"
+            else
+              report "transport profile=$profile instance=$i port=$port case=$1 exit=$status" || true
+              return "$status"
+            fi
+          }
+
+          for profile in password mtls; do
+            stage="$profile:source"
+            run_dir="$root/$profile"
+            mkdir "$run_dir"
+            start_qa 0 "$profile" 13306 "$run_dir/source"
+            source_container=$container
+            source_json=$(prepare_gateway_fixture witness)
+            namespace=$(jq -er '.namespace' "$source_json")
+            stage="$profile:target"
+            start_qa 1 "$profile" 13307 "$run_dir/target"
+            target_container=$container
+            target_json=$(prepare_gateway_fixture witness "$namespace")
+            db=$(jq -er '.database | select(test("^qa_audit_[0-9a-f]{32}$"))' "$target_json")
+            target_tables=$(fixture_sql "$target_container" mysql -BN --execute \
+              "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$db'" </dev/null)
+            [[ $target_tables == 0 ]]
+            source_uuid=$(fixture_sql "$source_container" mysql -BN --execute 'SELECT @@server_uuid' </dev/null)
+            target_uuid=$(fixture_sql "$target_container" mysql -BN --execute 'SELECT @@server_uuid' </dev/null)
+            uuid_pattern='^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+            [[ $source_uuid =~ $uuid_pattern && $target_uuid =~ $uuid_pattern && $source_uuid != "$target_uuid" ]]
+            report "profile=$profile target_tables=$target_tables source_uuid=$source_uuid target_uuid=$target_uuid"
+            stage="$profile:prepare"
+            run_phase prepare "$source_json" > "$run_dir/prepare.log" 2>&1
+            grep -Fx SQL05_SOURCE_CLAIM_PREPARED "$run_dir/prepare.log"
+            grep -F '1 passed; 0 failed; 0 ignored' "$run_dir/prepare.log"
+            report "profile=$profile prepare_exit=0 tests_passed=1 marker=SQL05_SOURCE_CLAIM_PREPARED"
+            stage="$profile:dump-import"
+            backup_log="$run_dir/backup-checkpoints.log"
+            backup_restore > "$backup_log"
+            report_backup
+            backup_log=
+            stage="$profile:source-stop"
+            select_qa 0
+            compose_qa stop --timeout 10 "$QA_MYSQL_PROFILE"
+            [[ $(docker --context desktop-linux inspect --format '{{.State.Status}}' "$source_container") == exited ]]
+            listeners=$(ss -H -ltn "sport = :$QA_MYSQL_PORT")
+            [[ -z $listeners ]]
+            connect_exit=0
+            timeout 3s bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1"' bash "$QA_MYSQL_PORT" || connect_exit=$?
+            [[ $connect_exit == 1 ]]
+            report "profile=$profile source_state=exited source_port=$QA_MYSQL_PORT listener=absent tcp_connect_exit=$connect_exit"
+            stage="$profile:verify"
+            run_phase verify "$target_json" > "$run_dir/verify.log" 2>&1
+            grep -Fx SQL05_RESTORED_LEGACY_CLAIM_VERIFIED "$run_dir/verify.log"
+            grep -F '1 passed; 0 failed; 0 ignored' "$run_dir/verify.log"
+            report "profile=$profile verify_exit=0 tests_passed=1 marker=SQL05_RESTORED_LEGACY_CLAIM_VERIFIED"
+            stage="$profile:cleanup"
+            stage_cleanup 0
+            stage_cleanup 1
+            report "profile=mysql-$profile restore=PASS cleanup=confirmed"
+          done
+          stage=complete
+      - name: Archive the redacted restore receipt
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: sql05-restore-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sql05-restore-receipt.txt
+          if-no-files-found: error
+          retention-days: 7
