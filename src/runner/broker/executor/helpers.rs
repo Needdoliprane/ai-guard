@@ -369,13 +369,14 @@ impl Execution<'_> {
             return Ok(PrearmedStartDirective::ObserveOnly);
         }
         if self.executor.enforcer.full3().is_some() && fresh_original {
-            let binding = slot.full3_registration_binding()?;
+            let step = diagnostics::BrokerStep::Full3BindingPublication;
+            let binding = slot.full3_registration_binding().context(step)?;
             let mut confirmed = false;
             for _ in 0..16 {
                 // An authenticated abandon signal or Cancel can advance the
                 // head while native Register is in flight. Keep this exact
                 // original slot/binding; merge only through the writer CAS.
-                let (latest, _) = self.load().await?;
+                let (latest, _) = self.load().await.context(step)?;
                 match self
                     .executor
                     .writer
@@ -387,13 +388,14 @@ impl Execution<'_> {
                         break;
                     }
                     Err(JournalError::Conflict) => continue,
-                    Err(error) => return Err(error.into()),
+                    Err(error) => return Err(anyhow::Error::new(error).context(step)),
                 }
             }
-            ensure!(
-                confirmed,
-                "Full3 assignment publication requires reconciliation"
-            );
+            if !confirmed {
+                return Err(
+                    anyhow!("Full3 assignment publication requires reconciliation").context(step),
+                );
+            }
         }
         // Later mutations still reload and use the writer's strict CAS.
         if current.operations.iter().any(|op| match op {
@@ -414,29 +416,38 @@ impl Execution<'_> {
         slot.check_ready_for_claim_diagnosed(self.generation)
             .context(diagnostics::BrokerStep::ReadinessBeforeClaim)?;
         if let Some(full) = self.executor.enforcer.full3() {
-            let arm_id = Uuid::parse_str(&request.operation_id)?;
-            self.context.preclaim().mark_original_unclaimed(
-                arm_id,
-                full.epoch(),
-                self.generation,
-            )?;
+            let step = diagnostics::BrokerStep::PreclaimChoice;
+            let arm_id = Uuid::parse_str(&request.operation_id).context(step)?;
+            self.context
+                .preclaim()
+                .mark_original_unclaimed(arm_id, full.epoch(), self.generation)
+                .context(step)?;
             match self
                 .context
                 .preclaim()
                 .choose_claim(arm_id, full.epoch(), self.generation)
             {
-                Ok(reservation) => reservation.consume()?,
+                Ok(reservation) => reservation.consume().context(step)?,
                 Err(crate::broker::service::protocol::BrokerErrorCodeV1::Conflict) => {
                     let signal = self
                         .context
                         .preclaim()
-                        .signal_for_arm(arm_id, full.epoch(), self.generation)?
-                        .context("preclaim reservation is unavailable")?;
+                        .signal_for_arm(arm_id, full.epoch(), self.generation)
+                        .context(step)?
+                        .context("preclaim reservation is unavailable")
+                        .context(step)?;
                     return self
                         .retire_unused_before_claim(slot, &request, signal)
-                        .await;
+                        .await
+                        .map_err(|error| {
+                            if diagnostics::classify(self.phase(), &error).is_some() {
+                                error
+                            } else {
+                                error.context(step)
+                            }
+                        });
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(anyhow::Error::new(error).context(step)),
             }
         }
         let operation_id = Uuid::new_v4().to_string();
@@ -473,7 +484,9 @@ impl Execution<'_> {
                 response: None,
             }
         };
-        let reservation = slot.reserve_claim(self.generation)?;
+        let reservation = slot
+            .reserve_claim(self.generation)
+            .context(diagnostics::BrokerStep::NativeClaimReserve)?;
         let claim_arm_id = match &claim {
             Operation::WorkerClaim { request, .. } => &request.arm_receipt.arm_id,
             Operation::HelperClaim { request, .. } => &request.arm_receipt.arm_id,
@@ -483,7 +496,8 @@ impl Execution<'_> {
             claim_arm_id == &request.operation_id,
             "claim selected a different Arm"
         );
-        slot.consume_claim_reservation(reservation, &request, self.generation)?;
+        slot.consume_claim_reservation(reservation, &request, self.generation)
+            .context(diagnostics::BrokerStep::NativeClaimConsume)?;
         let (acknowledged, fresh) = self
             .rpc_checked(claim, Some(&slot))
             .await
