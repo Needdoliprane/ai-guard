@@ -57,6 +57,22 @@ Les binaires et la fixture sont conservés sous
 `g07-first-full3-claim-4bb0015e/closure-final`, manifeste SHA-256
 `b052cf709f60cc2b6c67c450ffc2da0905de3d098fb188a919baadda5808d2e5`.
 
+Le rejeu `631d3331` compile puis échoue en 190,94 s, code 101.
+Le gateway acquitte cette fois `worker/created_exchange`, avec
+effet runtime inconnu. Les 37 révisions locales et SQLite vérifiés
+ne contiennent aucune transition `Created`. Le contrôle conserve le
+worker en `preparing`, quota retenu. L’échec précède l’Arm et
+le claim dans cet essai. Les quatre nouveaux codes préclaim
+ne sont pas exercés par ce rejeu.
+
+Le broker et le gardien de recette ne sont plus présents après la
+fermeture ciblée du broker. La retraite de l’autorité reste non
+confirmée. Reçus sous `g07-first-full3-claim-631d3331/closure-final`,
+manifeste SHA-256
+`c1d648c6251030c1aab6a6cc732bb153364cc73aceb125972f62ac11403a8e70`,
+projection `Created` SHA-256
+`85567d786aea6160ccfc648a0198cbbe1435a2f3b8847ffe2a317a9703a53e63`.
+
 ## 24 novembre 2026 — écritures d’administration sur une source possédée
 
 **PASS ciblé G08**, deux tests SQLite au format 15 sur macOS ARM64,
