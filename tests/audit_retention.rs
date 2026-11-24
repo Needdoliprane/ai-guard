@@ -202,6 +202,95 @@ fn apply_reissues_the_durable_receipt_when_its_acknowledgement_was_lost() {
     assert_eq!(reopened.audit_retention_ledger().unwrap().segments, 1);
 }
 
+#[cfg(unix)]
+#[test]
+fn retention_replays_after_process_is_killed_after_commit() {
+    use std::{
+        fs,
+        process::{Command, Stdio},
+        thread,
+        time::{Duration, Instant},
+    };
+
+    const CHILD_DIR: &str = "AI_GUARD_RETENTION_CRASH_TEST_DIR";
+    const EXPECTED_PLAN: &str = "AI_GUARD_RETENTION_CRASH_TEST_PLAN";
+    if let Some(root) = std::env::var_os(CHILD_DIR) {
+        let root = PathBuf::from(root);
+        let store = reopen(&root.join("tenant-a.sqlite")).unwrap();
+        let planned = store
+            .audit_retention_plan(&policy(), later(), None, &BTreeSet::new())
+            .unwrap();
+        assert_eq!(planned.plan_sha256, std::env::var(EXPECTED_PLAN).unwrap());
+        let receipt = apply(&store, &planned, &root.join("segment")).unwrap();
+        // Private test witness only. No receipt is returned to the caller.
+        fs::write(
+            root.join("witness.tmp"),
+            serde_json::to_vec(&receipt).unwrap(),
+        )
+        .unwrap();
+        fs::rename(root.join("witness.tmp"), root.join("committed")).unwrap();
+        thread::sleep(Duration::from_secs(30));
+        panic!("parent did not interrupt the committed child");
+    }
+
+    let directory = support::private_tempdir();
+    let root = directory.path();
+    let (data, store) = store13(root);
+    store
+        .install_audit_retention(&root.join("pre-retention.sqlite"))
+        .unwrap();
+    for index in 0..18 {
+        activity(&store, index).unwrap();
+    }
+    let planned = store
+        .audit_retention_plan(&policy(), later(), None, &BTreeSet::new())
+        .unwrap();
+    drop(store);
+
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "retention_replays_after_process_is_killed_after_commit",
+        ])
+        .env_clear()
+        .env(CHILD_DIR, root)
+        .env(EXPECTED_PLAN, &planned.plan_sha256)
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let witness = root.join("committed");
+    while !witness.is_file() && Instant::now() < deadline {
+        if child.try_wait().unwrap().is_some() {
+            panic!("child exited before establishing commit");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let delivered = witness.is_file();
+    let killed = child.kill();
+    let status = child.wait().unwrap();
+    killed.unwrap();
+    assert!(
+        delivered,
+        "child did not establish commit before the deadline"
+    );
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(status.signal(), Some(libc::SIGKILL));
+    let receipt: Value = serde_json::from_slice(&fs::read(witness).unwrap()).unwrap();
+
+    let reopened = reopen(&data).unwrap();
+    let head = reopened.head().unwrap();
+    let replay = apply(&reopened, &planned, &root.join("segment")).unwrap();
+    assert_eq!(serde_json::to_value(replay).unwrap(), receipt);
+    assert_eq!(reopened.head().unwrap(), head);
+    assert_eq!(reopened.audit_retention_ledger().unwrap().segments, 1);
+    let verified = reopened
+        .verify_audit_archives(&[root.join("segment")])
+        .unwrap();
+    assert_eq!(verified.verdict, "verified");
+    assert_eq!(verified.segments_verified, 1);
+}
+
 #[test]
 fn retention_and_kubernetes_effects_preserve_both_capabilities_on_reopen() {
     let dir = support::private_tempdir();
