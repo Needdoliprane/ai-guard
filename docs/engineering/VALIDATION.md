@@ -1,5 +1,18 @@
 # Validation courante
 
+## 24 novembre 2026 — archive frontend du candidat
+
+**PASS ciblé G12** sur `c7f01051`. Le frontend est construit hors
+ligne avec Node.js 24.22.3 à partir d’un export Git neuf. Les
+fichiers compilés sont identiques à ceux du bundle vérifié dans
+Chrome pour les scénarios `partial` et `keyboard`. L’archive locale
+contient la licence Vite verrouillée et passe `release verify-archive`
+du CLI macOS `84971de6`.
+
+L’archive porte un `BUILD-INFO` de recette avec `run=0`.
+SHA-256 `af67bf914570ecb5c5ef0c15b574f3e6e2c0f14b02ff18a3ffac37863ff7f6e5`.
+Le build CI Node.js 24.22.2 et la publication restent distincts.
+
 ## 24 novembre 2026 — prévol Kubernetes du candidat
 
 **PASS ciblé G11** sur `116eaf11`. Les deux suites de prévol
