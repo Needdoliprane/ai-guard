@@ -98,6 +98,17 @@ et `g02-podman-netnone-route-recheck-99cb885e.txt`, SHA-256 respectifs
 `50cc7243f0164fa46fc82901bcb3fa3b649571f16aa46085d4b090a33ad009d0`
 et `7a59d6ffdbc0434b4bf55efbe7f037885252a4f71e71fa288c9840f0fb292967`.
 
+**G06 — refus d’une copie SQLite Store14.** Sur `fc8dba50`, le
+[témoin CLI](../../tests/human_sources_bootstrap.rs) lit le tenant A avec
+la base originale et ferme le gateway. Après une sauvegarde SQLite Online
+Backup en destination neuve et substitution au chemin attendu, la même
+commande refuse la copie d’identité physique différente. Les deux bases
+et les fichiers d’activation surveillés restent intacts. Le test ciblé
+passe en 8,86 s et deux régressions des fonctions communes passent. La remise
+en service d’une copie restaurée reste ouverte. Reçu
+`g06-store14-fc8dba50/store14.log`, SHA-256
+`a24c79d8d9defcefc3020083075950404e2f5cc6c773298ec663d0395b723c30`.
+
 **G08 — composition du registre.** Sur `26e19e84`, le
 [test d’agrégation du gateway](../../tests/supervision_stack_api.rs) passe
 1/1 en 21,09 s avec SQLite. Le parcours restitue les 120 lignes synthétiques
