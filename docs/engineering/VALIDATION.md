@@ -1,5 +1,22 @@
 # Validation courante
 
+## 24 novembre 2026 — clôture du conducteur d’installation G12
+
+**PASS local sur fixture**, conducteur `eeb6e0d3`, macOS ARM64 et Bash
+3.2. Le bloc Bash du workflow émet `PASS` après disparition vérifiée
+du répertoire temporaire d’installation. Les sept cas couvrent le
+succès, l’échec d’installation, l’échec du nettoyage, un résidu, un
+lien pendant, l’échec combiné et l’échec de création du répertoire.
+L’échec primaire reste prioritaire et les sentinelles voisines
+restent intactes.
+
+Le manifeste SHA-256
+`9875aa4355cf22288fd20c84d00af1494acd51dea032a031bc3a0a754d5778a9`
+vérifie les reçus et le harnais sous
+`g12-native-install-closure-eeb6e0d3`. L’archive et le CLI de cette
+matrice viennent de la fixture. Les jobs Linux et macOS et leur
+téléversement restent à jouer avec le transfert exact du gel visé.
+
 ## 24 novembre 2026 — premier claim Full3 et fermeture de la fixture
 
 **FAIL ciblé G07**, source de test `250048dd`, macOS ARM64.
