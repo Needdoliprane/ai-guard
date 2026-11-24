@@ -27,6 +27,15 @@ Le scénario local de garde des archives natives G12 confirme la présence et le
 
 Un statut porte uniquement sur la preuve nommée. Un lot logiciel réussi ne clôture pas les gates d'effets runtime. La publication production exige tous les gates applicables PASS, ou NOT_APPLICABLE justifié avant essais. Les quatre combinaisons Docker/Podman × Linux x86_64/macOS ARM64 restent exigées ; Kubernetes reste une cible complète distincte.
 
+**G12 — contrôle local du lot historique.** Le bloc local de vérification
+du brouillon sur `6456e7cc` passe avec les octets du transfert
+`1c9e8e01`. Le CLI macOS archivé `99cb885e` vérifie les membres des
+quatre archives. Le bloc compare la licence, le BUILD-INFO, les
+empreintes, le SBOM CycloneDX détaché et le SBOM embarqué. Les fichiers
+et le reçu sont archivés dans `g12-bundle-1c9e8e01`. Reçu SHA-256
+`4f8a8cc7fc7a5ee6d671acc955626e14e6c22c040aed503bd83513204f9a3da6`.
+Aucun brouillon n’est créé. Le contrôle du lot de la candidate reste ouvert.
+
 **G01 — harnais d’export avec un CLI installé.** Sur `c16ca486`, le
 [témoin nominal](../../tests/runtime_user_journey.rs) passe sur Docker
 Desktop ARM64 et Podman rootless avec le même CLI extrait de l’archive
