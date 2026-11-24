@@ -1,0 +1,223 @@
+name: G01 Linux archived CLI runtime qualification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [docker, podman]
+    env:
+      ENGINE: ${{ matrix.engine }}
+      TRANSFER_RUN: '45344993418'
+      TRANSFER_SHA: '221b5d6a02129a8c746162454a8d93f1caabf2ed'
+      SOURCE_SHA: '1c9e8e016bc8f1dca24147958858e9997cd0794e'
+      ARCHIVE_SHA: '9541a0e9bf181d33723fabfa135d868774a7ca9bcb8c780e5979c487469549db'
+      CLI_SHA: 'f12de162a464215fc3380f04ae8d5f00138f44f4de7da7890e6063bca27fbdeb'
+    steps:
+      - name: Record the qualification attempt
+        run: |
+          umask 077
+          printf 'engine=%s\nsource=%s\ntransfer_run=%s\narchive_sha256=%s\ncli_sha256=%s\nharness_sha=%s\n' \
+            "$ENGINE" "$SOURCE_SHA" "$TRANSFER_RUN" "$ARCHIVE_SHA" "$CLI_SHA" "$GITHUB_SHA" \
+            >"$RUNNER_TEMP/g01-runtime-receipt.txt"
+
+      - name: Verify the transfer run
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf 'transfer_run_check=started\n' >>"$RUNNER_TEMP/g01-runtime-receipt.txt"
+          gh api "repos/$GH_REPO/actions/runs/$TRANSFER_RUN" |
+            jq -e --arg sha "$TRANSFER_SHA"               '.head_sha == $sha and .status == "completed" and .conclusion == "success" and .path == ".github/workflows/g12-transfer.yaml"' >/dev/null
+          printf 'transfer_run_check=PASS\n' >>"$RUNNER_TEMP/g01-runtime-receipt.txt"
+
+      - name: Check out the test harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the transferred archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-x86_64-unknown-linux-gnu
+          run-id: ${{ env.TRANSFER_RUN }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/g01-archive
+
+      - name: Run the verified CLI on the selected engine
+        run: |
+          set -euo pipefail
+          umask 077
+          d=$(mktemp -d "$RUNNER_TEMP/g01.XXXXXXXX")
+          receipt="$RUNNER_TEMP/g01-runtime-receipt.txt"
+          phase=archive
+          service_pid=
+          finish() {
+            local rc=$?
+            trap - EXIT
+            local service=not_started
+            if [[ -n "$service_pid" ]]; then
+              service=still_running
+              kill "$service_pid" 2>/dev/null || true
+              for attempt in {1..50}; do
+                if ! kill -0 "$service_pid" 2>/dev/null; then
+                  wait "$service_pid" 2>/dev/null || true
+                  service=closed
+                  break
+                fi
+                sleep 0.1
+              done
+              if [[ "$service" != closed ]]; then
+                rc=1
+              fi
+            fi
+            printf 'phase=%s\nexit=%s\nservice=%s\n' "$phase" "$rc" "$service" >>"$receipt"
+            if [[ "$phase" == complete && "$rc" == 0 ]]; then
+              printf 'result=PASS\n' >>"$receipt"
+            fi
+            exit "$rc"
+          }
+          trap finish EXIT
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(uname -s)/$(uname -m)" = Linux/x86_64
+          name=ai-guard-v0.0.1-x86_64-unknown-linux-gnu
+          archive="$RUNNER_TEMP/g01-archive/$name.tar.gz"
+          printf '%s  %s\n' "$ARCHIVE_SHA" "$archive" | sha256sum --check --status
+          tar -xOzf "$archive" "$name/BUILD-INFO" |
+            cmp -s - <(printf 'tag=v0.0.1\ncommit=%s\ntarget=x86_64-unknown-linux-gnu\nrun=%s\nrepository=%s\n'               "$SOURCE_SHA" "$TRANSFER_RUN" "$GITHUB_REPOSITORY")
+          tar -xzf "$archive" -C "$d"
+          cli=$(realpath "$d/$name/bin/agentsandbox")
+          printf '%s  %s\n' "$CLI_SHA" "$cli" | sha256sum --check --status
+          "$cli" version --json | jq -e --arg sha "$SOURCE_SHA" '.build.revision == $sha' >/dev/null
+          phase=engine_preflight
+          program=$(realpath "$(command -v "$ENGINE")")
+          if [[ "$ENGINE" == docker ]]; then
+            endpoint=unix:///var/run/docker.sock
+            engine() { "$program" --host "$endpoint" "$@"; }
+            test "$(engine version --format '{{.Server.Os}}/{{.Server.Arch}}')" = linux/amd64
+            engine info --format '{{json .SecurityOptions}}' |
+              jq -e 'type == "array" and length > 0 and all(.[]; (contains("rootless") | not))' >/dev/null
+            export AGENTSANDBOX_TEST_ALLOW_ROOTFUL=1
+          else
+            test "$(id -u)" -ne 0
+            "$program" info --format '{{.Host.Security.Rootless}}' | grep -Fx true
+            phase=podman_uid_mapping
+            "$program" unshare true
+            phase=podman_service_start
+            endpoint="unix://$d/podman.sock"
+            "$program" system service --time=0 "$endpoint" >"$d/podman.log" 2>&1 &
+            service_pid=$!
+            for attempt in {1..100}; do
+              test ! -S "$d/podman.sock" || break
+              kill -0 "$service_pid"
+              sleep 0.1
+            done
+            phase=podman_socket_ready
+            test -S "$d/podman.sock"
+            engine() { "$program" --url "$endpoint" "$@"; }
+            phase=podman_socket_rootless
+            engine info --format '{{.Host.Security.Rootless}}' | grep -Fx true
+            export AGENTSANDBOX_TEST_PODMAN_MODE=rootless
+          fi
+          printf 'engine_preflight=PASS\n' >>"$receipt"
+          engine ps -aq --no-trunc | sort >"$d/containers.before"
+          engine volume ls -q | sort >"$d/volumes.before"
+          engine image ls -aq --no-trunc | sort -u >"$d/images.before"
+          phase=build_fixture
+          tag="localhost/ai-guard-g01-qa:$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if engine image inspect "$tag" >/dev/null 2>&1; then
+            exit 1
+          fi
+          engine build --file images/worker.Dockerfile --build-arg CODEX_VERSION=             --build-arg CLAUDE_CODE_VERSION= --tag "$tag" . >"$d/build.log" 2>&1
+          image=$(engine image inspect --format '{{.Id}}' "$tag")
+          image="sha256:${image#sha256:}"
+          [[ "$image" =~ ^sha256:[0-9a-f]{64}$ ]]
+          phase=audited_export
+          export AGENTSANDBOX_TEST_RUNTIME="$ENGINE" AGENTSANDBOX_TEST_RUNTIME_PROGRAM="$program"
+          export AGENTSANDBOX_TEST_RUNTIME_ENDPOINT="$endpoint" AGENTSANDBOX_TEST_IMAGE="$image"
+          export AGENTSANDBOX_TEST_AUDITED_EXPORT_CLI="$cli" AGENTSANDBOX_TEST_AUDITED_EXPORT_CLI_SHA256="$CLI_SHA"
+          timeout --signal=TERM --kill-after=15s 20m cargo test --locked --test runtime_user_journey --             --ignored --exact --nocapture real_cli_copies_a_project_and_exports_after_one_audited_worker >"$d/runtime.log" 2>&1
+          jq -Rs -e --arg engine "$ENGINE" --arg cli_sha "$CLI_SHA" '
+            [split("\n")[] | fromjson?] as $rows |
+            ([$rows[] | select(.stage == "cli_selection" and .sha256 == $cli_sha)] | length) == 1 and
+            ([$rows[] | select(.status == "PASS" and .runtime == $engine)] | length) == 1
+          ' "$d/runtime.log" >/dev/null
+          printf 'audited_export=PASS\n' >>"$receipt"
+          phase=owned_volume_cleanup
+          row=$(jq -Rce 'fromjson? | select(.status == "PASS")' "$d/runtime.log")
+          worker=$(jq -er '.worker_id' <<<"$row")
+          authority=$(jq -er '.authority_id' <<<"$row")
+          volume=$(jq -er '.work_volume' <<<"$row")
+          [[ "$volume" =~ ^aig-[0-9a-f]+-[0-9a-f]+-work$ ]]
+          attached=$(engine ps -aq --filter "volume=$volume")
+          test -z "$attached"
+          ! grep -Fxq -- "$volume" "$d/volumes.before"
+          engine volume inspect "$volume" --format '{{json .Labels}}' |
+            jq -e --arg worker "$worker" --arg authority "$authority" '
+              .["agentsandbox.worker"] == $worker and .["agentsandbox.authority"] == $authority
+            ' >/dev/null
+          volumes=("$volume")
+          if [[ "$ENGINE" == podman ]]; then
+            fixture=$(sed -n 's/^Retained runtime CLI fixture //p' "$d/runtime.log")
+            [[ "$fixture" == /* && -d "$fixture/control/authorities" ]]
+            mapfile -t records < <(find "$fixture/control/authorities" -maxdepth 1 -type f -name '*.json')
+            test "${#records[@]}" -eq 1
+            marker=$(jq -er --arg authority "$authority" '
+              select(.authority_id == $authority and .binding.authority_id == $authority) |
+              .binding.podman.marker_volume
+            ' "${records[0]}")
+            [[ "$marker" =~ ^aig-authority-[0-9a-f]+-[0-9a-f]+$ ]]
+            attached=$(engine ps -aq --filter "volume=$marker")
+            test -z "$attached"
+            ! grep -Fxq -- "$marker" "$d/volumes.before"
+            engine volume inspect "$marker" --format '{{json .Labels}}' |
+              jq -e --arg authority "$authority" --slurpfile record "${records[0]}" '
+                ($record[0].binding.podman.nonce | type == "string" and length > 0) and
+                .["agentsandbox.authority"] == $authority and
+                .["agentsandbox.binding"] == $record[0].binding.podman.nonce
+              ' >/dev/null
+            volumes+=("$marker")
+          fi
+          engine volume ls -q | sort >"$d/volumes.after"
+          printf '%s\n' "${volumes[@]}" | sort | diff - <(comm -13 "$d/volumes.before" "$d/volumes.after")
+          engine volume rm "${volumes[@]}" >/dev/null
+          phase=engine_inventory
+          engine ps -aq --no-trunc | sort >"$d/containers.final"
+          engine volume ls -q | sort >"$d/volumes.final"
+          cmp "$d/containers.before" "$d/containers.final"
+          cmp "$d/volumes.before" "$d/volumes.final"
+          printf 'container_volume_inventory=PASS\n' >>"$receipt"
+          phase=qa_image_cleanup
+          observed_image=$(engine image inspect --format '{{.Id}}' "$tag")
+          test "sha256:${observed_image#sha256:}" = "$image"
+          engine image rm "$tag" >/dev/null
+          engine image ls -aq --no-trunc | sort -u >"$d/images.final"
+          # Base images may be pulled during the build. Record their count
+          # without removing images outside the exact QA tag.
+          missing_images=$(comm -23 "$d/images.before" "$d/images.final" | wc -l)
+          extra_images=$(comm -13 "$d/images.before" "$d/images.final" | wc -l)
+          printf 'qa_image_tag_removed=true\nimages_missing=%d\nimages_added=%d\n' \
+            "$missing_images" "$extra_images" >>"$receipt"
+          test "$missing_images" -eq 0
+          jq -c '{worker_id,attempt_id,container_id,authority_id,work_volume}' <<<"$row" >>"$receipt"
+          (cd "$d" && sha256sum containers.before containers.final volumes.before volumes.final) >>"$receipt"
+          phase=complete
+
+      - name: Upload the engine receipt
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: g01-archive-runtime-${{ matrix.engine }}
+          path: ${{ runner.temp }}/g01-runtime-receipt.txt
+          if-no-files-found: error
+          retention-days: 7
