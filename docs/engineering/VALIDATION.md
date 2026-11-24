@@ -1,5 +1,33 @@
 # Validation courante
 
+## 24 novembre 2026 — image de contrôle native sous Podman rootless
+
+**PASS ciblé G12** sur Podman 6.1.4 ARM64. Le contexte est une
+sélection de fichiers réguliers de l’archive Git `5bb86e4f`.
+Cargo compile avec un seul job et conserve le profil release.
+L’image produite est
+`sha256:aa7a294831e2249ecb036da0134dd3dcd5f4d64f0f91e49d76f95667bf3bf97c`.
+Le swap temporaire a été retiré et les inventaires du build
+concordent avant et après.
+
+Compose démarre gateway, dashboard et ingress avec cette même
+image. Les trois services sont sains et les trois binaires
+annoncent la révision source. Les quatre fichiers frontend
+servis sont identiques aux fichiers embarqués. Le gateway et le
+dashboard identifient le viewer, le dashboard anonyme renvoie
+401 et le contrôle accepte le runner (200) et refuse le viewer
+(403). Le diagnostic public reste accessible au viewer.
+Les conteneurs, réseaux, volumes et clés jetables de la recette
+sont retirés.
+
+Le premier rejeu Compose s’arrête après la santé des services
+sur un argument de version réservé au CLI principal. Le rejeu
+avec `--version` pour les deux utilitaires passe intégralement.
+Reçu privé `g12-native-control-podman-5bb86e4f`, manifeste SHA-256
+`d2e60c6c84148905cb2179dff58b2daf1af0ef1807c07397e7ddc0596526ee21`.
+La construction concerne l’archive filtrée `5bb86e4f`. Le
+parcours de contexte du CLI corrigé a sa propre recette ci-dessous.
+
 ## 24 novembre 2026 — filtrage du contexte de construction Podman
 
 **FAIL ciblé G12** sur `5bb86e4f` avec Podman 6.1.4 rootless ARM64.
@@ -36,7 +64,8 @@ Les deux régressions Podman font partie des 38 tests
 `source_snapshot` qui passent sur macOS ARM64. Le premier passage
 complet échoue dans une fixture préexistante qui dépasse la limite
 de longueur de chemin de macOS, avant l’assertion sur le diagnostic.
-Le rejeu exclut ce seul cas. Reçus privés
+Le premier rejeu exclut ce seul cas. Après correction de la
+fixture, les 39 tests du module passent sur macOS ARM64. Reçus privés
 `g12-podman-prepared-ignore-rust-7529ac0c` et
 `g12-podman-prepared-ignore-cli-7529ac0c`. Manifeste SHA-256 du
 rejeu moteur
