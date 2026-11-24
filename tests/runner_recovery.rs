@@ -980,11 +980,7 @@ async fn lost_start_claim_ack_keeps_unknown_quota_and_never_starts() {
     scenario.invariant();
 }
 
-#[tokio::test]
-async fn broker_crash_recovery_observes_then_stops_the_same_running_instance() {
-    let temporary = support::private_tempdir();
-    let bin = fixture_binary(temporary.path());
-    let scenario = Scenario::new(temporary.path(), &bin, "broker-crash-running").await;
+async fn interrupt_running_broker(scenario: &Scenario) -> String {
     let mut broker = scenario
         .command("run")
         .stdout(std::process::Stdio::null())
@@ -992,24 +988,36 @@ async fn broker_crash_recovery_observes_then_stops_the_same_running_instance() {
         .spawn()
         .unwrap();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        if fs::read_to_string(scenario.root.join("run_id"))
-            .ok()
-            .is_some_and(|id| {
-                fs::read_to_string(scenario.root.join("containers").join(id).join("state"))
-                    .is_ok_and(|state| state == "running")
+    let instance = loop {
+        if let Ok(id) = fs::read_to_string(scenario.root.join("run_id"))
+            && fs::read_to_string(scenario.root.join("containers").join(&id).join("state"))
+                .is_ok_and(|state| state == "running")
+            && scenario.store.workers().unwrap().iter().any(|worker| {
+                worker.attempt.container_id.as_deref() == Some(id.as_str())
+                    && worker.attempt.start_operation_id.is_some()
+                    && worker.quota_held
             })
         {
-            break;
+            break id;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
             "broker never reached running"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    };
     broker.kill().await.unwrap();
-    let _ = broker.wait().await.unwrap();
+    assert!(!broker.wait().await.unwrap().success());
+    instance
+}
+
+#[tokio::test]
+async fn broker_crash_resume_stops_the_same_running_instance() {
+    let temporary = support::private_tempdir();
+    let bin = fixture_binary(temporary.path());
+    let scenario = Scenario::new(temporary.path(), &bin, "broker-crash-running").await;
+    let instance = interrupt_running_broker(&scenario).await;
+    assert!(scenario.store.worker_usage().unwrap().is_empty());
     scenario.legacy_workspace_exclusion();
     let relocated = scenario.root.join("relocated-original");
     fs::rename(&scenario.project, &relocated).unwrap();
@@ -1021,8 +1029,41 @@ async fn broker_crash_recovery_observes_then_stops_the_same_running_instance() {
     );
     let value: Value = serde_json::from_slice(&resumed.stdout).unwrap();
     assert_eq!(value["outputs"], "unknown_after_broker_interruption");
-    assert_eq!(value["runtime_observation"]["process"]["running"], true);
+    assert_eq!(value["runtime_observation"]["process"]["running"], false);
+    assert!(
+        value["message"]
+            .as_str()
+            .unwrap()
+            .contains("quota remain unreconciled")
+    );
+    let worker = &scenario.store.workers().unwrap()[0];
+    assert_eq!(worker.state, WorkerStateV1::StartIssued);
+    assert!(worker.quota_held);
     assert!(scenario.store.worker_usage().unwrap().is_empty());
+    let again = scenario.invoke("worker-resume").await;
+    assert_interrupted_capture_unavailable(&again);
+    let worker = &scenario.store.workers().unwrap()[0];
+    assert_eq!(worker.state, WorkerStateV1::Terminal);
+    assert!(!worker.quota_held);
+    assert_eq!(scenario.count("create", "run"), 1);
+    assert_eq!(scenario.count("start", "run"), 1);
+    let calls = scenario.calls();
+    let kills: Vec<_> = calls
+        .lines()
+        .filter(|line| line.starts_with("kill "))
+        .collect();
+    assert_eq!(kills, [format!("kill {instance}")]);
+    assert_eq!(scenario.store.worker_usage().unwrap().len(), 1);
+    fs::rename(relocated, &scenario.project).unwrap();
+    scenario.invariant();
+}
+
+#[tokio::test]
+async fn broker_crash_legacy_stop_requires_explicit_runtime_adoption() {
+    let temporary = support::private_tempdir();
+    let bin = fixture_binary(temporary.path());
+    let scenario = Scenario::new(temporary.path(), &bin, "broker-crash-running").await;
+    let instance = interrupt_running_broker(&scenario).await;
     scenario.legacy_invocation();
     let before = scenario.calls();
     let rejected = scenario.invoke("worker-stop").await;
@@ -1033,28 +1074,39 @@ async fn broker_crash_recovery_observes_then_stops_the_same_running_instance() {
         before,
         "unbound stop emitted an engine effect"
     );
+    assert!(scenario.store.workers().unwrap()[0].quota_held);
+    assert!(scenario.store.worker_usage().unwrap().is_empty());
     let stopped = scenario
         .command("worker-stop")
         .arg("--adopt-runtime-program")
         .output()
         .await
         .unwrap();
-    assert!(
-        stopped.status.success(),
-        "{}",
-        String::from_utf8_lossy(&stopped.stderr)
-    );
+    assert_interrupted_capture_unavailable(&stopped);
     let worker = &scenario.store.workers().unwrap()[0];
     assert_eq!(worker.state, WorkerStateV1::Terminal);
     assert!(!worker.quota_held);
     assert_eq!(scenario.count("create", "run"), 1);
     assert_eq!(scenario.count("start", "run"), 1);
     assert_eq!(scenario.store.worker_usage().unwrap().len(), 1);
-    let again = scenario.invoke("worker-resume").await;
-    assert!(again.status.success());
-    assert_eq!(scenario.count("start", "run"), 1);
-    fs::rename(relocated, &scenario.project).unwrap();
+    let calls = scenario.calls();
+    let kills: Vec<_> = calls
+        .lines()
+        .filter(|line| line.starts_with("kill "))
+        .collect();
+    assert_eq!(kills, [format!("kill {instance}")]);
     scenario.invariant();
+}
+
+fn assert_interrupted_capture_unavailable(output: &std::process::Output) {
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains(
+            "postprocessing recovery incomplete: legacy declared capture is unavailable; delivery counts remain unknown"
+        ),
+        "{error}"
+    );
 }
 
 #[tokio::test]
