@@ -1,0 +1,31 @@
+{
+  "cli_source_revision": "e2796ac1",
+  "control_image_id": "sha256:c4b8cf3796a5e394520825aeccb52cb8da3c06c0adb60b8b8193cad0e6f00497",
+  "model_image_id": "sha256:1f1ffa7951531eb52bf05235e752f36dc0d5ec3a25bc53a77f5c87969b712663",
+  "profile": "deploy/local-ai/compose.tls-volumes.yaml",
+  "platform": "Docker Desktop ARM64",
+  "test_ca_only": true,
+  "provision_exit": 0,
+  "relay_healthy": true,
+  "judge_network_internal": true,
+  "host_ports_published": false,
+  "relay_read_only_volume_roles": [
+    "ca",
+    "identity"
+  ],
+  "model_tls_mounts": 0,
+  "health_probe_trust": [
+    "explicit_ca",
+    "default_trust",
+    "explicit_ca"
+  ],
+  "health_probe_exit_codes": [
+    0,
+    1,
+    0
+  ],
+  "missing_ca_diagnostic": "Connexion healthcheck échouée",
+  "gateway_decision_requested": false,
+  "worker_launch_requested": false,
+  "cleanup_verified": true
+}

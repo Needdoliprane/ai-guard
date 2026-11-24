@@ -1,5 +1,20 @@
 # Validation courante
 
+## 24 novembre 2026 — profil TLS local à volumes neufs
+
+**PASS ciblé G07.** Sur Docker Desktop ARM64, le CLI `e2796ac1`
+provisionne les deux volumes depuis une chaîne de test locale neuve.
+Le Compose TLS livré démarre Qwen et le relais Rust. Tous deux sont
+sans port publié. Le réseau du juge est interne, seuls les volumes CA
+et identité sont montés en lecture seule par le relais de cette recette.
+Le modèle n’a aucun montage TLS. Sur le même endpoint HTTPS, deux
+contrôles de santé avec l’AC explicite passent, avant et après un
+contrôle avec la confiance par défaut qui échoue. Le diagnostic du
+refus reste générique. Les conteneurs, réseaux et deux volumes de
+recette sont retirés après vérification. Aucun appel d’inférence ni
+raccord au gateway de décision dans cet essai.
+[Reçu de provisionnement et de santé TLS](evidence/2026-11-24/g07-local-tls-volumes-health.json).
+
 ## 24 novembre 2026 — avis Qwen local depuis l’archive macOS
 
 **PASS ciblé G07.** Avec le CLI `e2796ac1`, Qwen2.5 0,5B Q4_K_M
