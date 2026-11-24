@@ -7,6 +7,11 @@ même destination neuve produisent un seul résultat intégral. Une
 tentative d’export sur un volume APFS borné reçoit réellement
 `ENOSPC`. Dans les deux cas, l’original est intact et aucun staging
 ne reste. Les deux régressions de rejeu du journal passent aussi.
+Sur `936165d2`, les cinq tests des barrières d’écriture passent.
+Le harnais vérifie l’ordre des opérations et injecte les erreurs aux
+points de contrôle après les appels disque. La réponse à une erreur
+native de synchronisation et la reprise après coupure électrique
+restent à qualifier.
 [Reçu G03](evidence/2026-11-24/g03-local-export-filesystem.md).
 
 ## 24 novembre 2026 — restauration MySQL Legacy après claim commité
