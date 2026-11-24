@@ -1,5 +1,26 @@
 # Validation courante
 
+## 24 novembre 2026 — ancre d’audit protégée au niveau du processus
+
+**PASS ciblé G06** avec `ai-guard-audit-checkpoint` du paquet macOS
+ARM64 `84971de6` et un Store SQLite de recette compilé à partir
+de `b736444a`. Le confinement macOS des processus de contrôle
+bloque l’accès au répertoire qui contient l’ancre. Le témoin
+confirme le refus en lecture et en écriture et la possibilité
+d’écrire dans le répertoire du contrôle.
+
+Après arrêt des écrivains et contrôle du WAL, la même ancre
+avancée à l’index 2 vérifie une copie récente. Elle refuse la
+copie ancienne et son ancien journal (`log_rolled_back`,
+`database_truncated`), puis la copie ancienne associée au journal
+récent (`database_truncated`). L’empreinte de l’ancre reste identique.
+
+Les processus utilisent le même UID et le vérificateur signale
+`same_filesystem_device`. La séparation administrative et la
+remise en service du gateway restent à qualifier.
+SHA-256 du binaire de vérification
+`99e3010cfee819eaf07cd862aa7bff7ca6e6531d0f65797891e007087a0dc65d`.
+
 ## 24 novembre 2026 — points de contrôle signés de l’audit
 
 **PASS ciblé G06** sur `50ace40c` sous macOS ARM64. Les trois suites
