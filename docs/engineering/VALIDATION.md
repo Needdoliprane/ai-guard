@@ -1,5 +1,18 @@
 # Validation courante
 
+## 24 novembre 2026 — ajout et rejeu MySQL Legacy sur le candidat
+
+**PASS ciblé G06.** Sur `c5c233b8`, le gateway compilé avec
+`mysql-storage` passe le même scénario sur deux serveurs MySQL 8.4
+jetables démarrés séparément, TLS avec mot de passe puis mTLS avec
+mot de passe. Un viewer ne peut rien écrire. Le runner ajoute un
+événement en A, et son rejeu après redémarrage retrouve le même
+reçu sans nouvelle ligne. L’historique initial de A et le témoin B
+restent intacts. Chaque service est publié uniquement sur loopback.
+Les conteneurs, volumes et réseaux de recette sont retirés.
+La restauration et les formats owned restent distincts.
+[Reçu des deux profils MySQL](evidence/2026-11-24/g06-mysql-current-tls.json).
+
 ## 24 novembre 2026 — reprise SSE via l’ingress Compose Docker
 
 **PASS ciblé G08.** Un lecteur HTTP traverse l’ingress Rust de la pile

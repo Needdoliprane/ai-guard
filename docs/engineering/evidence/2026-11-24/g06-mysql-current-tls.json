@@ -1,0 +1,28 @@
+{
+  "source_revision": "c5c233b8",
+  "mysql_image_digest": "sha256:f4539b86c82f2c168fc95b439448bde3b9f48e8460344ce41e39081867d2b58e",
+  "platform": "Docker Desktop ARM64",
+  "storage_format": "Legacy",
+  "endpoint_scope": "loopback",
+  "oracle": "identity::gateway::gateway_appends_to_the_prepared_target_and_replays_after_restart",
+  "checks": [
+    "viewer cannot write",
+    "append extends A only",
+    "same receipt after gateway restart",
+    "A prefix unchanged",
+    "B witness unchanged"
+  ],
+  "profiles": {
+    "mysql-password": {
+      "result": "PASS",
+      "duration_seconds": 3.49,
+      "log_sha256": "b153135187e0aa45e1bbba3c0c30430436e1174ee474c53e16dbd52d03642c3e"
+    },
+    "mysql-mtls": {
+      "result": "PASS",
+      "duration_seconds": 3.46,
+      "log_sha256": "452839b2b702c6afeb1b8fb704dcb9f5ceacbef94991bf74ec08ca8f4883185c"
+    }
+  },
+  "cleanup_verified": true
+}
