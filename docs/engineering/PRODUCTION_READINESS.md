@@ -54,6 +54,16 @@ initial. Reçus `g02-docker-workspace-99cb885e.txt` et
 `0e6a2d8e07fdeb556ae16bfb27cb8f6c6da7be5beac6f2654fce683e2ef13f69`
 et `dc78dbc22b6b4178103bb0b6a8369c77e2a6617418bf9d730a42f980fd0ecbe0`.
 
+Sur les deux moteurs, un worker rejoue la lecture auditée des fichiers
+cgroup v2 et observe `memory.max=1073741824`, `pids.max=256` et
+`cpu.max=200000 100000`. Les audits sont valides, les quotas reviennent
+à zéro et les inventaires retrouvent leur état initial. Ces lectures
+établissent les limites exposées au worker. Les effets à saturation
+restent à qualifier. Reçus `g02-docker-cgroup-99cb885e.txt` et
+`g02-podman-cgroup-99cb885e.txt`, SHA-256 respectifs
+`0e8d57a5db996096552b5535c3f3589a57f6cd8d21dd4e51132c7b72e79d1e18`
+et `ac11c2ccc1097d297a7021aa9f8b9040137f072ec91e8f80811e2a856c21a02c`.
+
 **G08 — composition du registre.** Sur `26e19e84`, le
 [test d’agrégation du gateway](../../tests/supervision_stack_api.rs) passe
 1/1 en 21,09 s avec SQLite. Le parcours restitue les 120 lignes synthétiques
