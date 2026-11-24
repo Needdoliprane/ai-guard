@@ -14,8 +14,13 @@ la copie reste au schéma 1 et la base migrée reste au schéma 2.
 Le premier prévol a utilisé la sélection mono-tenant locale avec
 une base liée à `tenant-a`. Le rejeu utilise un registre qui nomme
 le tenant. La validation du reçu compare le nombre d’événements et
-l’empreinte de tête. La remise en service de sources owned et des
-workers après migration reste à qualifier.
+l’empreinte de tête. Dans une seconde destination neuve, le même
+gateway accepte ensuite un événement Legacy par HTTP (200).
+L’intégrité sur deux événements passe et le lien de hachage
+rejoint exactement la tête sauvegardée. La copie reste au schéma 1,
+les sommes de la sauvegarde et de la base migrée restent identiques,
+puis le port du gateway est fermé. La remise en service de sources
+owned et des workers après migration reste à qualifier.
 
 ## 24 novembre 2026 — activation de l’archive Linux x86-64 sous émulation
 
