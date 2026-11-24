@@ -132,8 +132,12 @@ jobs:
           printf 'engine_preflight=PASS\n' >>"$receipt"
           engine ps -aq --no-trunc | sort >"$d/containers.before"
           engine volume ls -q | sort >"$d/volumes.before"
+          engine image ls -aq --no-trunc | sort -u >"$d/images.before"
           phase=build_fixture
           tag="localhost/ai-guard-g01-qa:$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if engine image inspect "$tag" >/dev/null 2>&1; then
+            exit 1
+          fi
           engine build --file images/worker.Dockerfile --build-arg CODEX_VERSION=             --build-arg CLAUDE_CODE_VERSION= --tag "$tag" . >"$d/build.log" 2>&1
           image=$(engine image inspect --format '{{.Id}}' "$tag")
           image="sha256:${image#sha256:}"
@@ -172,14 +176,15 @@ jobs:
               select(.authority_id == $authority and .binding.authority_id == $authority) |
               .binding.podman.marker_volume
             ' "${records[0]}")
-            nonce=$(jq -er '.binding.podman.nonce' "${records[0]}")
             [[ "$marker" =~ ^aig-authority-[0-9a-f]+-[0-9a-f]+$ ]]
             attached=$(engine ps -aq --filter "volume=$marker")
             test -z "$attached"
             ! grep -Fxq -- "$marker" "$d/volumes.before"
             engine volume inspect "$marker" --format '{{json .Labels}}' |
-              jq -e --arg authority "$authority" --arg nonce "$nonce" '
-                .["agentsandbox.authority"] == $authority and .["agentsandbox.binding"] == $nonce
+              jq -e --arg authority "$authority" --slurpfile record "${records[0]}" '
+                ($record[0].binding.podman.nonce | type == "string" and length > 0) and
+                .["agentsandbox.authority"] == $authority and
+                .["agentsandbox.binding"] == $record[0].binding.podman.nonce
               ' >/dev/null
             volumes+=("$marker")
           fi
@@ -187,9 +192,25 @@ jobs:
           printf '%s\n' "${volumes[@]}" | sort | diff - <(comm -13 "$d/volumes.before" "$d/volumes.after")
           engine volume rm "${volumes[@]}" >/dev/null
           phase=engine_inventory
-          engine ps -aq --no-trunc | sort | diff - "$d/containers.before"
-          engine volume ls -q | sort | diff - "$d/volumes.before"
-          printf 'container_volume_inventory=PASS\nimage_inventory=NOT_RUN\n' >>"$receipt"
+          engine ps -aq --no-trunc | sort >"$d/containers.final"
+          engine volume ls -q | sort >"$d/volumes.final"
+          cmp "$d/containers.before" "$d/containers.final"
+          cmp "$d/volumes.before" "$d/volumes.final"
+          printf 'container_volume_inventory=PASS\n' >>"$receipt"
+          phase=qa_image_cleanup
+          observed_image=$(engine image inspect --format '{{.Id}}' "$tag")
+          test "sha256:${observed_image#sha256:}" = "$image"
+          engine image rm "$tag" >/dev/null
+          engine image ls -aq --no-trunc | sort -u >"$d/images.final"
+          # Base images may be pulled during the build. Record their count
+          # without removing images outside the exact QA tag.
+          missing_images=$(comm -23 "$d/images.before" "$d/images.final" | wc -l)
+          extra_images=$(comm -13 "$d/images.before" "$d/images.final" | wc -l)
+          printf 'qa_image_tag_removed=true\nimages_missing=%d\nimages_added=%d\n' \
+            "$missing_images" "$extra_images" >>"$receipt"
+          test "$missing_images" -eq 0
+          jq -c '{worker_id,attempt_id,container_id,authority_id,work_volume}' <<<"$row" >>"$receipt"
+          (cd "$d" && sha256sum containers.before containers.final volumes.before volumes.final) >>"$receipt"
           phase=complete
 
       - name: Upload the engine receipt
