@@ -95,6 +95,17 @@ n’est demandé. L’image de recette est conservée, ses conteneurs et
 réseaux sont retirés. Le modèle n’est pas qualifié sur ce corpus.
 [Reçu SmolLM2](evidence/2026-11-24/g07-smollm2-direct.json).
 
+Avec le gateway du CLI macOS archivé `e2796ac1`, la demande synthétique
+`echo` via le même relais Rust reçoit un verdict brut SmolLM2 `allow`.
+Le gateway le normalise en `review`, applique
+`local_openai_review_fail_closed` et persiste la décision `deny`.
+La réponse correspond à l’événement SQLite et l’intégrité est valide.
+Aucun worker n’est lancé. Le pic cgroup atteint 443 809 792 octets
+sans OOM, puis les conteneurs et réseaux sont retirés. Le premier essai
+du harnais envoyait encore `id` et a reçu `deny`, avant correction
+du choix de commande et rejeu sur une base neuve.
+[Reçu gateway SmolLM2](evidence/2026-11-24/g07-smollm2-direct.json).
+
 ## 24 novembre 2026 — Jev TypeSafe depuis l’archive macOS
 
 **PASS ciblé G07.** Le CLI ARM64 extrait de l’archive `e2796ac1` lance

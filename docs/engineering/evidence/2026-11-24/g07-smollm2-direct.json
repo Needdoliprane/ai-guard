@@ -72,5 +72,31 @@
   ],
   "gateway_decision_requested": false,
   "worker_launch_requested": false,
-  "cleanup_verified": true
+  "cleanup_verified": true,
+  "gateway_advisory_probe": {
+    "cli_source_revision": "e2796ac1",
+    "argv": [
+      "/bin/echo",
+      "sandbox-ok"
+    ],
+    "result": {
+      "http": 200,
+      "backend": "local_openai",
+      "status": "evaluated",
+      "requested_model": "smollm2-360m-instruct-q8",
+      "returned_model": "smollm2-360m-instruct-q8",
+      "advice": "review",
+      "effective_decision": "deny",
+      "audit_seq": 2,
+      "audit_match": true,
+      "integrity": true,
+      "provider_outcome": "allow",
+      "effective_rule": "local_openai_review_fail_closed"
+    },
+    "worker_launch_requested": false,
+    "memory_peak_bytes": 443809792,
+    "memory_limit_bytes": 999997440,
+    "oom": 0,
+    "cleanup_verified": true
+  }
 }
