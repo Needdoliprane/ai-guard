@@ -42,5 +42,18 @@
       "inventory_unchanged": true,
       "diagnostic": "Error: invalid TLS material, server name or packet"
     }
+  },
+  "podman_rootless_direct_deadline": {
+    "status": "PASS",
+    "worker": "podman-rootless",
+    "network": "none",
+    "audit_decision_backend": "rust_rules",
+    "terminal_after_decision": true,
+    "deadline_seconds": 4,
+    "transport_timed_out": true,
+    "cli_summary": true,
+    "cli_nonzero": true,
+    "quota_released": true,
+    "inventories_restored": true
   }
 }

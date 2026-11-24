@@ -16,6 +16,12 @@ Avec ce même CLI, un nom absent du certificat de test est refusé
 sur Docker Desktop et Podman rootless avant publication du sélecteur.
 Les inventaires des préparateurs et volumes TLS restent identiques.
 Le diagnostic regroupe les erreurs de matériau, de nom et de paquet.
+Le même CLI extrait passe le rejeu G09 d’une échéance de quatre
+secondes sur Podman rootless. Un worker lancé sans réseau après
+décision Rust atteint un terminal audité. La CLI restitue le résumé
+durable avec un code non nul. Le quota est libéré et les inventaires
+moteur sont restaurés. Cette recette couvre une échéance directe
+avec le CLI présent.
 [Reçu macOS et Podman](evidence/2026-11-24/g12-macos-84971de6.json).
 
 ## 24 novembre 2026 — profil TLS local à volumes neufs
