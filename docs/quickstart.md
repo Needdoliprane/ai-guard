@@ -159,6 +159,10 @@ Avec l'UUID concerné, depuis le contrôle de confiance :
 
 Le résultat terminal peut inclure `control_deadline`. Le champ `deadline` indique l'échéance d'exécution initiale (`original_execution_deadline`) ou l'expiration de la fenêtre d'observation (`observation_window`). Le champ `stop` indique que le contrôleur n'avait aucun worker à arrêter (`no_owned_worker`), que le worker était déjà arrêté (`already_stopped`), que le moteur a acquitté la demande et qu'une inspection a confirmé l'arrêt (`engine_acknowledged`), ou que la demande reste sans confirmation (`unconfirmed`). Le code de sortie observé, le timeout de transport et la cause de la sortie gardent chacun leur propre provenance.
 
+Lors d’un arrêt confirmé à l’échéance originale, le CLI direct peut écrire
+le résumé terminal JSON et sortir avec un code non nul. Le diagnostic
+de supervision reste sur stderr.
+
 Ctrl-C et le timeout demandent l'arrêt de la session concernée. **La surveillance de durée ne survit pas encore à la mort brutale du broker** ; la reprise manuelle n'est pas une supervision autonome. Si le moteur est indisponible, le nettoyage peut rester non confirmé. Conserver configuration, preuves et volume, rétablir le même moteur/gateway, puis suivre [arrêt et reprise](operations.md#consulter-arrêter-et-reprendre-un-worker). Une mise à jour du programme moteur peut exiger son adoption explicite ; ne pas modifier les checkpoints.
 
 Pour arrêter les services de contrôle, après la fin des sessions :

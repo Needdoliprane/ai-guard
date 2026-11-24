@@ -74,6 +74,16 @@ SHA-256 `a81ac54e82130e02b503fe585b07ef9d13730f8e0b418421c15288b78fd9e94a`.
 Le rendu en direct pendant l’arrêt et l’arrêt automatique à échéance
 restent ouverts.
 
+**G09 — résumé du CLI après arrêt à échéance.** Sur `18640fdf`,
+Docker Desktop et Podman rootless émettent le résumé JSON après
+l’arrêt confirmé à l’échéance originale. La commande conserve son
+diagnostic et son code non nul. L’audit et le résumé concordent, le
+quota est libéré et les inventaires moteur sont restaurés. Le champ
+`timed_out` garde la provenance du transport, distincte de
+`control_deadline`. Reçus `g09-direct-summary-fix`, manifeste SHA-256
+`e095abc4d8d489b4a0eaa22e3ee9af5656124472be251b61baa6c2c68ac1881a`.
+Ce parcours CLI direct laisse ouverte la reprise après crash du broker.
+
 **G09 — témoin d’échéance avant lecture du résultat.** Sur `905e79db`,
 le [harnais Docker](../../tests/broker_runtime.rs) cherche les événements
 de démarrage, de signal et de terminal du CID d’origine dès l’observation
