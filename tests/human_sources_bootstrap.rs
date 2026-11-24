@@ -490,6 +490,132 @@ fn cli_store15_refuses_restored_physical_copy_without_effects() {
     fs::rename(&original, source).unwrap();
 }
 
+#[tokio::test]
+async fn cli_store14_refuses_restored_physical_copy_without_effects() {
+    use rusqlite::{Connection, OpenFlags, backup::Backup};
+    use std::{
+        collections::BTreeSet,
+        os::unix::fs::{MetadataExt, OpenOptionsExt},
+        path::Path,
+    };
+
+    let f = Fixture::new(false);
+    successful(f.prepare());
+    successful(f.step("apply", true));
+    let activation_path = f.preparation.join("activation.json");
+    let activation: Value = serde_json::from_slice(&fs::read(&activation_path).unwrap()).unwrap();
+    let manifest = std::path::PathBuf::from(activation["manifest"].as_str().unwrap());
+    let seal = f.preparation.join("activation-complete.json");
+    let envelope = f.preparation.join("technical-credentials.json");
+    let address = available_loopback_address();
+    let mut gateway = activation_gateway(&activation_path, address)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let origin = format!("http://{address}");
+    let identity = wait_for_human_identity(&f, &mut gateway, &client, &origin).await;
+    assert!(
+        identity["contexts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|context| { context["tenant_id"] == "tenant-a" })
+    );
+    stop_activation_gateway(&mut gateway).await;
+
+    // Take the backup and all refusal baselines after the positive gateway drains.
+    let source = &f.sources[0];
+    let copied = source.with_file_name("store14-restored.sqlite");
+    {
+        let original = Connection::open_with_flags(
+            source,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        assert_eq!(
+            original
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            14
+        );
+        let _file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&copied)
+            .unwrap();
+        let mut restored = Connection::open_with_flags(
+            &copied,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        let backup = Backup::new(&original, &mut restored).unwrap();
+        assert_eq!(backup.step(-1).unwrap(), rusqlite::backup::StepResult::Done);
+    }
+
+    // Substitute only the synthetic path retained in the old closure.
+    let original = source.with_file_name("store14-original.sqlite");
+    fs::rename(source, &original).unwrap();
+    fs::rename(copied, source).unwrap();
+    let identity = |path: &Path| {
+        let metadata = fs::metadata(path).unwrap();
+        (metadata.dev(), metadata.ino())
+    };
+    assert_ne!(identity(&original), identity(source));
+    let watched = [
+        original.as_path(),
+        source.as_path(),
+        f.sources[1].as_path(),
+        activation_path.as_path(),
+        manifest.as_path(),
+        seal.as_path(),
+        envelope.as_path(),
+    ];
+    let before = watched.map(|path| (identity(path), fs::read(path).unwrap()));
+    let directories = [
+        f.root.as_path(),
+        f.preparation.as_path(),
+        source.parent().unwrap(),
+    ];
+    let entries = |path: &Path| {
+        fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>()
+    };
+    let before_entries = directories.map(entries);
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        activation_gateway(&activation_path, address).output(),
+    )
+    .await
+    .expect("Store14 refusal deadline")
+    .unwrap();
+    assert!(
+        !output.status.success(),
+        "the original activation must refuse the restored file"
+    );
+    assert!(output.stdout.is_empty(), "refusal emitted a gateway report");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("human_sources_activation_refused"),
+        "unexpected closed Store14 refusal category"
+    );
+    for (path, (file_identity, bytes)) in watched.into_iter().zip(before) {
+        assert_eq!(identity(path), file_identity);
+        assert!(
+            fs::read(path).unwrap() == bytes,
+            "durable file changed after refusal"
+        );
+    }
+    assert_eq!(directories.map(entries), before_entries);
+}
+
 #[test]
 fn changed_token_before_envelope_and_truncated_publications_are_preserved() {
     let f = Fixture::new(false);
@@ -610,17 +736,22 @@ fn valid_same_inode_legacy_change_after_prepare_is_examined_at_apply_without_a_p
     );
 }
 
-async fn complete_and_read(oidc: bool) {
-    let f = Fixture::new(oidc);
-    successful(f.prepare());
-    successful(f.step("apply", true));
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-    drop(listener);
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_agentsandbox"))
+fn available_loopback_address() -> std::net::SocketAddr {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+}
+
+fn activation_gateway(
+    activation: &std::path::Path,
+    address: std::net::SocketAddr,
+) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_agentsandbox"));
+    command
         .env_clear()
         .args(["gateway", "--human-sources-activation"])
-        .arg(f.preparation.join("activation.json"))
+        .arg(activation)
         .arg("--listen")
         .arg(address.to_string())
         .args(["--jev-backend", "rust-rules", "--policy"])
@@ -628,17 +759,17 @@ async fn complete_and_read(oidc: bool) {
             env!("CARGO_MANIFEST_DIR"),
             "/policies/default.json"
         ))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap();
-    let origin = format!("http://{address}");
-    let identity = tokio::time::timeout(Duration::from_secs(30), async {
+        .kill_on_drop(true);
+    command
+}
+
+async fn wait_for_human_identity(
+    f: &Fixture,
+    child: &mut tokio::process::Child,
+    client: &reqwest::Client,
+    origin: &str,
+) -> Value {
+    tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             assert!(
                 child.try_wait().unwrap().is_none(),
@@ -658,7 +789,42 @@ async fn complete_and_read(oidc: bool) {
         }
     })
     .await
-    .unwrap();
+    .unwrap()
+}
+
+async fn stop_activation_gateway(child: &mut tokio::process::Child) {
+    // Signal only this test's owned child; wait for the actual gateway cleanup.
+    // SAFETY: child.id() is the still-owned gateway process spawned above;
+    // SIGINT requests its normal registered shutdown and no other PID is used.
+    unsafe {
+        assert_eq!(libc::kill(child.id().unwrap() as i32, libc::SIGINT), 0);
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_secs(20), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+}
+
+async fn complete_and_read(oidc: bool) {
+    let f = Fixture::new(oidc);
+    successful(f.prepare());
+    successful(f.step("apply", true));
+    let address = available_loopback_address();
+    let mut child = activation_gateway(&f.preparation.join("activation.json"), address)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let origin = format!("http://{address}");
+    let identity = wait_for_human_identity(&f, &mut child, &client, &origin).await;
     assert_eq!(identity["contexts_complete"], false);
     let contexts = identity["contexts"].as_array().unwrap();
     assert!(!contexts.is_empty());
@@ -699,19 +865,7 @@ async fn complete_and_read(oidc: bool) {
                 .is_success()
         );
     }
-    // Signal only this test's owned child; wait for the actual gateway cleanup.
-    // SAFETY: child.id() is the still-owned gateway process spawned above;
-    // SIGINT requests its normal registered shutdown and no other PID is used.
-    unsafe {
-        libc::kill(child.id().unwrap() as i32, libc::SIGINT);
-    }
-    assert!(
-        tokio::time::timeout(Duration::from_secs(20), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .success()
-    );
+    stop_activation_gateway(&mut child).await;
 }
 
 #[tokio::test]
