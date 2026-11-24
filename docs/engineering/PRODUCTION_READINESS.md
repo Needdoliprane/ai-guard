@@ -287,6 +287,16 @@ de transport observées. Reçu privé `g07-jev-6256c967/jev-tests.log`,
 SHA-256 `b01cd6734309728966c3c5b2cde4c7599db85a540e0925636272c0f76ea098b0`.
 L’exécution des moteurs réels reste à qualifier.
 
+**G07 — moteur Rust déterministe sur Docker Desktop.** Le CLI macOS
+installé `7e1f9cb1` sélectionne `rust-rules` et audite l’autorisation
+d’une invocation connue avant le terminal d’un worker strict sans
+réseau. Le quota est libéré et les inventaires moteur sont restaurés.
+Une invocation admise par la politique générale mais inconnue du
+catalogue donne un avis `review` et un refus effectif audité. Le registre
+reste vide, le quota nul et les inventaires inchangés.
+Reçus privés `g07-rust-rules-runtime-7e1f9cb1` et
+`g07-rust-rules-deny-7e1f9cb1`. La couverture du catalogue est bornée.
+
 **G08 — navigateur et workers Docker actifs.** Sur `dddc7613`, le
 [parcours](../../tests/runtime_user_journey.rs) passe en 56,14 s sous
 Docker Desktop ARM64 avec le dashboard Rust. Chromium rend deux lignes
