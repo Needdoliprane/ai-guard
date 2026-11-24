@@ -454,6 +454,49 @@ async fn exercise(mode: &str, parent: &Directory) {
         server.abort();
         return;
     }
+    if mode == "clock_before_reserve_ack" {
+        let mut expiring = first;
+        let clock = native.clock.sample().unwrap();
+        let deadline = checked_deadline(clock.continuous_ns().unwrap(), 2).unwrap();
+        expiring.arm.deadline_ns_decimal = deadline.to_string();
+        expiring.arm.clock = clock;
+        expiring.arm.timeout_seconds = 2;
+        expiring.receipt.input_hash = expiring.arm.input_hash().unwrap();
+        let target = expiring.prospective().unwrap();
+
+        PAUSE_RESERVE_ACK.store(true, Ordering::SeqCst);
+        let request_root = root.clone();
+        let reserve_request = tokio::spawn(async move {
+            rpc(
+                &request_root,
+                Request::ReserveProspective {
+                    prospective: Box::new(target),
+                    generation: 0,
+                    replay_only: false,
+                },
+            )
+            .await
+        });
+        wait_for(|| native.owned_active().unwrap() == Some(1)).await;
+        let pending = native.prospective.lock().unwrap()[expiring.arm_id()].clone();
+        expiring
+            .arm
+            .validate_clock_check(&native.clock.sample().unwrap())
+            .expect("native installation observed before the deadline");
+
+        // Prevent the native loop from publishing its own deadline STOP
+        // until the reservation has answered. Otherwise either guard could
+        // explain NotReady. The child watchdog bounds a blocked reply.
+        let pending_state = pending.state.lock().unwrap();
+        assert!(!pending_state.stop_reserved);
+        wait_for(|| native.clock.sample().unwrap().continuous_ns().unwrap() >= deadline).await;
+        assert!(!reserve_request.is_finished());
+        PAUSE_RESERVE_ACK.store(false, Ordering::SeqCst);
+        expect_error(reserve_request.await.unwrap(), EnforcerError::NotReady);
+        drop(pending_state);
+        server.abort();
+        return;
+    }
     if mode == "deadline" {
         let mut expiring = first;
         let clock = native.clock.sample().unwrap();
@@ -911,6 +954,10 @@ fn recovery_gate_commits_stop_cohort_and_refuses_original_ports() {
 #[test]
 fn recovery_races_native_ready_and_vetoes_reserve_ack() {
     run_child("fence_race");
+}
+#[test]
+fn fresh_reservation_rechecks_clock_after_installation_before_ack() {
+    run_child("clock_before_reserve_ack");
 }
 #[test]
 fn retained_deadline_proceeds_with_writer_unavailable_and_no_waiter() {
