@@ -503,7 +503,7 @@ async fn access_requires_rs256_and_the_exact_api_profile() {
     let hmac = jsonwebtoken::encode(
         &Header::new(Algorithm::HS256),
         &valid,
-        &EncodingKey::from_secret(b"not-an-rsa-key"),
+        &EncodingKey::from_secret(b"not-an-rsa-key").unwrap(),
     )
     .unwrap();
     assert!(provider.verify_access(&hmac).await.is_err());
