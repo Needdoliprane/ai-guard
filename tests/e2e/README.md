@@ -239,6 +239,29 @@ cargo test --locked --offline --test gateway_tenancy \
   configured_worker_quota_at_hundred_survives_gateway_restart -- --exact --test-threads=1 --nocapture
 ```
 
+### Pilote G10 de capacité Docker sur un seul tenant
+
+Le sélecteur ignoré par défaut lance trois `/bin/sleep 35` sur le même tenant, via les parcours CLI et gateway habituels. Il exige une image QA déjà présente avec `/bin/sleep` et `/bin/tar`, un endpoint Docker Unix local explicite et l’opt-in ci-dessous. L’opt-in rootful existant s’applique si le moteur sélectionné l’exige.
+
+```sh
+AGENTSANDBOX_TEST_CAPACITY_PILOT=1 \
+AGENTSANDBOX_TEST_RUNTIME=docker \
+AGENTSANDBOX_TEST_RUNTIME_PROGRAM="$QA_DOCKER_PROGRAM" \
+AGENTSANDBOX_TEST_RUNTIME_ENDPOINT="$QA_DOCKER_UNIX_ENDPOINT" \
+AGENTSANDBOX_TEST_IMAGE="$QA_WORKER_IMAGE_ID" \
+cargo test --locked --offline --test runtime_user_journey \
+  same_tenant_capacity::real_docker_same_tenant_capacity_pilot -- \
+  --ignored --exact --test-threads=1 --nocapture
+```
+
+Le test rapproche les lectures du quota qui encadrent le lot d’inspections Docker par CID complet. Il vérifie le mode réseau `none` rapporté par Docker et l’intersection stricte des intervalles natifs du même CID sans redémarrage. Les commandes `sleep` n’exercent aucun échange réseau.
+
+Le harnais attend les trois CLI même si l’observation du pic échoue. Avant de fermer le gateway, il vérifie le retour du quota à zéro et l’absence des CID relevés pendant le suivi ou dans l’inventaire final. Il conserve l’erreur initiale et signale les échecs de ces vérifications. Un CID absent des deux sources reste hors de ce contrôle. Les vérifications Docker sont en lecture seule. Le dossier privé affiché est conservé pour le diagnostic et la reprise. La liaison aux noms de volumes est comparée entre le CLI et le registre, et la présence des volumes après exécution reste à vérifier.
+
+Un verdict réussi exige aussi trois états terminaux cohérents et une chaîne d’audit valide. Le pilote ne vérifie pas la présence de chaque événement attendu pour chaque session.
+
+Le profil géré impose 2 vCPU, 1 Gio et 256 PID par worker, avec un profil fixe pour les auxiliaires d’import. Le pilote borne donc la concurrence à trois avec 6 vCPU et 3 Gio de plafonds cumulés pour les workers. Une campagne légère à 100 exige de rendre les plafonds inférieurs configurables et liés au lancement autorisé, de borner la concurrence des auxiliaires et de valider la pagination ou une lecture complète du registre à l’échelle du tenant. À 100, les seuls plafonds actuels des workers totaliseraient 200 vCPU et 100 Gio. Le test hors moteur de l’intersection utilise 100 intervalles synthétiques. La mesure de 100 workers physiques reste `NOT_RUN`.
+
 ## Dialogue TTY hors ligne
 
 ```sh

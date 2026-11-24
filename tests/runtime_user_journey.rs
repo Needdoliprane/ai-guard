@@ -3,6 +3,8 @@
 
 #[path = "runtime_user_journey/podman_live.rs"]
 mod podman_live;
+#[path = "runtime_user_journey/same_tenant_capacity.rs"]
+mod same_tenant_capacity;
 mod support;
 
 use agentsandbox::{
@@ -275,6 +277,7 @@ struct LiveDockerSnapshot {
     image: String,
     session: String,
     purpose: String,
+    network: String,
     running: bool,
     paused: bool,
     restarting: bool,
@@ -464,21 +467,21 @@ impl RuntimeSelection {
     ) -> Result<Vec<LiveDockerSnapshot>> {
         ensure!(
             self.runtime == RuntimeKind::Docker,
-            "live browser inspection requires Docker"
+            "live container inspection requires Docker"
         );
         ensure!(
-            workers.len() == 3
+            (1..=100).contains(&workers.len())
                 && workers
                     .iter()
                     .map(|worker| &worker.container_id)
                     .collect::<BTreeSet<_>>()
                     .len()
-                    == 3,
-            "Docker inspection requires the three distinct fixture CIDs"
+                    == workers.len(),
+            "Docker inspection requires 1 to 100 distinct fixture CIDs"
         );
         // Same narrow field projection and Unix endpoint pattern as broker_runtime::inspect.
         // Avoid full inspect output, which can include container environment values.
-        let format = r#"{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Image}},"session":{{json (index .Config.Labels "agentsandbox.session")}},"purpose":{{json (index .Config.Labels "agentsandbox.purpose")}},"running":{{json .State.Running}},"paused":{{json .State.Paused}},"restarting":{{json .State.Restarting}},"status":{{json .State.Status}},"started_at":{{json .State.StartedAt}},"restart_count":{{json .RestartCount}}}"#;
+        let format = r#"{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Image}},"session":{{json (index .Config.Labels "agentsandbox.session")}},"purpose":{{json (index .Config.Labels "agentsandbox.purpose")}},"network":{{json .HostConfig.NetworkMode}},"running":{{json .State.Running}},"paused":{{json .State.Paused}},"restarting":{{json .State.Restarting}},"status":{{json .State.Status}},"started_at":{{json .State.StartedAt}},"restart_count":{{json .RestartCount}}}"#;
         let mut child = Command::new(&self.program)
             .args([
                 "--host",
@@ -496,16 +499,17 @@ impl RuntimeSelection {
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()?;
+        let limit = 2048 * workers.len();
         let mut stdout = child
             .stdout
             .take()
             .context("Docker inspection output not available")?
-            .take(4097);
+            .take((limit + 1) as u64);
         let mut bytes = Vec::new();
         let result = timeout(Duration::from_secs(3), async {
             stdout.read_to_end(&mut bytes).await?;
             ensure!(
-                bytes.len() <= 4096,
+                bytes.len() <= limit,
                 "Docker inspection output exceeded its bound"
             );
             Ok::<_, anyhow::Error>(child.wait().await?)
@@ -527,8 +531,8 @@ impl RuntimeSelection {
             .into_iter()
             .collect::<std::result::Result<_, _>>()?;
         ensure!(
-            facts.len() == 3,
-            "Docker inspection did not return exactly three containers"
+            facts.len() == workers.len(),
+            "Docker inspection did not return the exact number of fixture containers"
         );
         for worker in workers {
             let matching: Vec<_> = facts
@@ -544,13 +548,14 @@ impl RuntimeSelection {
                     && fact.image == self.image
                     && fact.session == worker.session_id
                     && fact.purpose == "run"
+                    && fact.network == "none"
                     && fact.running
                     && !fact.paused
                     && !fact.restarting
                     && fact.status == "running"
                     && fact.restart_count == 0
                     && same_started_at(&fact.started_at, &worker.started_at),
-                "Docker did not attest the same running fixture container after the DOM witness"
+                "Docker did not attest the same running fixture container"
             );
         }
         Ok(facts)
