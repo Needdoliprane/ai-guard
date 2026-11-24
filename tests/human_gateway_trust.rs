@@ -103,6 +103,42 @@ async fn provision(parent: &Path) -> (Arc<Store>, PathBuf) {
     )
 }
 
+fn grant_fixture_session(parent: &Path, audit: &Store, session: &str) {
+    use agentsandbox::identity::*;
+
+    let recovery: Value =
+        serde_json::from_slice(&std::fs::read(parent.join("alice/recovery.json")).unwrap())
+            .unwrap();
+    let provision: LocalHumanProvisionV1 =
+        serde_json::from_value(recovery["provision"].clone()).unwrap();
+    let IdentityChangeV1::Account { account, .. } = &provision.mutations[0].change else {
+        panic!("typed account fixture")
+    };
+    audit
+        .mutate_identity(&IdentityMutationV1 {
+            version: 1,
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            actor: provision.mutations[0].actor.clone(),
+            change: IdentityChangeV1::ResourceGrant {
+                expected_revision: 0,
+                grant: ResourceGrantV1 {
+                    version: 1,
+                    tenant_id: "tenant-human-tls".into(),
+                    organization_scope: "organization-human-tls".into(),
+                    resource: ResourceRefV1 {
+                        kind: ResourceKindV1::Session,
+                        resource_id: session.into(),
+                    },
+                    owner: account.principal.clone(),
+                    revision: 1,
+                    active: true,
+                    shares: vec![],
+                },
+            },
+        })
+        .unwrap();
+}
+
 fn identity_command(origin: &str, credential: &Path, ca: Option<&Path>) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_agentsandbox"));
     command
@@ -394,46 +430,16 @@ async fn gateway_san_and_validity_are_checked_before_authenticated_http() {
 
 #[tokio::test]
 async fn export_resume_binds_exact_gateway_ca_bytes_and_accepts_the_same_snapshot() {
-    use agentsandbox::{identity::*, model::Event};
+    use agentsandbox::model::Event;
     use axum::response::IntoResponse;
     use serde_json::json;
     let temp = support::private_tempdir();
     let pki = certificates(temp.path()).await;
     let (audit, credential) = provision(temp.path()).await;
-    let recovery: Value =
-        serde_json::from_slice(&std::fs::read(temp.path().join("alice/recovery.json")).unwrap())
-            .unwrap();
-    let provision: LocalHumanProvisionV1 =
-        serde_json::from_value(recovery["provision"].clone()).unwrap();
-    let IdentityChangeV1::Account { account, .. } = &provision.mutations[0].change else {
-        panic!("typed account fixture")
-    };
     let mut event = Event::new("session.observed");
     event.session_id = Some("export-tls-session".into());
     audit.append(event).unwrap();
-    audit
-        .mutate_identity(&IdentityMutationV1 {
-            version: 1,
-            operation_id: uuid::Uuid::new_v4().to_string(),
-            actor: provision.mutations[0].actor.clone(),
-            change: IdentityChangeV1::ResourceGrant {
-                expected_revision: 0,
-                grant: ResourceGrantV1 {
-                    version: 1,
-                    tenant_id: "tenant-human-tls".into(),
-                    organization_scope: "organization-human-tls".into(),
-                    resource: ResourceRefV1 {
-                        kind: ResourceKindV1::Session,
-                        resource_id: "export-tls-session".into(),
-                    },
-                    owner: account.principal.clone(),
-                    revision: 1,
-                    active: true,
-                    shares: vec![],
-                },
-            },
-        })
-        .unwrap();
+    grant_fixture_session(temp.path(), &audit, "export-tls-session");
     let exports = Arc::new(AtomicUsize::new(0));
     let observed = exports.clone();
     let router = gateway_router(GatewayState::new(audit, "runner-export-tls-fixture".into(), "viewer-export-tls-fixture".into(), Policy::default(), None, Redactor::new(vec![])))
@@ -519,4 +525,228 @@ async fn export_resume_binds_exact_gateway_ca_bytes_and_accepts_the_same_snapsho
         "same CA bytes at another checked path must resume"
     );
     assert!(destination.join("completion.json").exists());
+}
+
+async fn read_one_session_frame(
+    response: &mut reqwest::Response,
+) -> anyhow::Result<(String, String)> {
+    use anyhow::{Context, ensure};
+    const MAX_FRAME: usize = 64 * 1024;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut pending = Vec::new();
+        loop {
+            if let Some(end) = pending.windows(2).position(|bytes| bytes == b"\n\n") {
+                let frame: Vec<_> = pending.drain(..end + 2).collect();
+                let frame = std::str::from_utf8(&frame)?;
+                if frame.starts_with(':') {
+                    continue;
+                }
+                ensure!(
+                    frame.lines().any(|line| line == "event: human_audit"),
+                    "expected human audit SSE frame"
+                );
+                let field = |prefix| frame.lines().find_map(|line| line.strip_prefix(prefix));
+                let cursor = field("id: ")
+                    .filter(|value| !value.is_empty())
+                    .context("missing SSE cursor")?;
+                let page: Value =
+                    serde_json::from_str(field("data: ").context("missing SSE data")?)?;
+                let items = page["items"].as_array().context("missing SSE items")?;
+                ensure!(items.len() == 1, "expected exactly one audit item");
+                let id = items[0]["metadata"]["id"]
+                    .as_str()
+                    .context("missing audit event ID")?;
+                return Ok((cursor.to_owned(), id.to_owned()));
+            }
+            let chunk = response
+                .chunk()
+                .await?
+                .context("stream ended before audit frame")?;
+            ensure!(
+                chunk.len() <= MAX_FRAME.saturating_sub(pending.len()),
+                "SSE frame exceeded fixture bound"
+            );
+            pending.extend_from_slice(&chunk);
+        }
+    })
+    .await
+    .context("audit frame deadline")?
+}
+
+#[tokio::test]
+async fn authenticated_sse_resumes_after_disconnect_over_loopback_tls() -> anyhow::Result<()> {
+    use agentsandbox::{model::Event, runner::read_token};
+    use anyhow::{Context, ensure};
+    use axum::{
+        body::Body,
+        extract::Request,
+        http::StatusCode,
+        middleware::{self, Next},
+        response::Response,
+    };
+    use futures_util::StreamExt as _;
+    use tokio::{
+        sync::{Semaphore, oneshot},
+        time::timeout,
+    };
+
+    let temp = support::private_tempdir();
+    let pki = certificates(temp.path()).await;
+    let (audit, credential) = provision(temp.path()).await;
+    let session = "human-sse-tls-session";
+    let publish = || -> anyhow::Result<String> {
+        let mut event = Event::new("observer.coverage");
+        event.session_id = Some(session.into());
+        Ok(audit.append(event)?.event.id)
+    };
+    let initial = publish()?;
+    grant_fixture_session(temp.path(), &audit, session);
+    let token = read_token(&credential)?;
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .http1_only()
+        .pool_max_idle_per_host(0)
+        .redirect(reqwest::redirect::Policy::none())
+        .tls_built_in_root_certs(false)
+        .add_root_certificate(reqwest::Certificate::from_pem(&std::fs::read(
+            pki.join("root-ca.pem"),
+        )?)?)
+        .connect_timeout(Duration::from_secs(5))
+        .build()?;
+
+    // Hold a test permit for the lifetime of the real server-side SSE body.
+    let bodies = Arc::new(Semaphore::new(1));
+    let router = gateway_router(GatewayState::new(
+        audit.clone(),
+        "runner-human-sse-tls-fixture".into(),
+        "viewer-human-sse-tls-fixture".into(),
+        Policy::default(),
+        None,
+        Redactor::new(vec![]),
+    ))
+    .layer(middleware::from_fn({
+        let bodies = bodies.clone();
+        move |request: Request, next: Next| {
+            let bodies = bodies.clone();
+            async move {
+                let stream = request.uri().path() == "/api/v1/human/stream";
+                let response = next.run(request).await;
+                if !stream || response.status() != StatusCode::OK {
+                    return response;
+                }
+                let Ok(permit) = bodies.try_acquire_owned() else {
+                    return Response::builder()
+                        .status(StatusCode::CONFLICT)
+                        .body(Body::empty())
+                        .unwrap();
+                };
+                let (parts, body) = response.into_parts();
+                Response::from_parts(
+                    parts,
+                    Body::from_stream(body.into_data_stream().map(move |chunk| {
+                        let _held = &permit;
+                        chunk
+                    })),
+                )
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let origin = format!("https://{}", listener.local_addr()?);
+    let identity =
+        ServerIdentity::from_files(&pki.join("server-chain.pem"), &pki.join("server.key"))?;
+    let (shutdown, stopped) = oneshot::channel();
+    let mut server = tokio::spawn(serve(listener, router, identity, async {
+        let _ = stopped.await;
+    }));
+    let outcome: anyhow::Result<()> = async {
+        let identity: Value = timeout(Duration::from_secs(5), async {
+            client
+                .get(format!("{origin}/api/v1/human/identity"))
+                .bearer_auth(&token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await
+        })
+        .await
+        .context("human identity deadline")??;
+        let contexts = identity["contexts"]
+            .as_array()
+            .context("missing identity contexts")?;
+        ensure!(
+            contexts.len() == 1 && contexts[0]["tenant_id"] == "tenant-human-tls",
+            "unexpected human reader context"
+        );
+        let context = contexts[0]["id"].as_str().context("missing context ID")?;
+        let stream = || {
+            client
+                .get(format!("{origin}/api/v1/human/stream"))
+                .bearer_auth(&token)
+                .header("X-AiGuard-Context", context)
+                .query(&[
+                    ("view", "metadata"),
+                    ("limit", "1"),
+                    ("resource_kind", "session"),
+                    ("resource_id", session),
+                ])
+        };
+        let open = |request: reqwest::RequestBuilder| async {
+            let response = timeout(Duration::from_secs(5), request.send())
+                .await
+                .context("SSE response deadline")??
+                .error_for_status()?;
+            ensure!(
+                response
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .is_some_and(|value| value == "text/event-stream"),
+                "expected an SSE response"
+            );
+            Ok::<_, anyhow::Error>(response)
+        };
+        let mut first = open(stream()).await?;
+        let (cursor, received) = read_one_session_frame(&mut first).await?;
+        ensure!(received == initial, "wrong first audit event");
+        ensure!(
+            bodies.available_permits() == 0,
+            "first SSE body was not held"
+        );
+        drop(first);
+        drop(
+            timeout(Duration::from_secs(5), bodies.acquire())
+                .await
+                .context("first SSE body remained held")??,
+        );
+
+        let expected = publish()?;
+        let mut resumed = open(stream().query(&[("cursor", &cursor)])).await?;
+        let (next, received) = read_one_session_frame(&mut resumed).await?;
+        ensure!(
+            received == expected && next != cursor,
+            "resume did not deliver exactly the next event"
+        );
+        drop(resumed);
+        drop(
+            timeout(Duration::from_secs(5), bodies.acquire())
+                .await
+                .context("resumed SSE body remained held")??,
+        );
+        Ok(())
+    }
+    .await;
+    let _ = shutdown.send(());
+    let closure = match timeout(Duration::from_secs(7), &mut server).await {
+        Ok(result) => result
+            .context("TLS server join")?
+            .context("TLS server shutdown"),
+        Err(_) => {
+            server.abort();
+            let _ = server.await;
+            anyhow::bail!("TLS server did not close within its deadline");
+        }
+    };
+    outcome?;
+    closure
 }
