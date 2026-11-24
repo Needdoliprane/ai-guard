@@ -23,7 +23,8 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const scenario = process.env.AI_GUARD_BROWSER_SCENARIO;
 const eventFocusOnly = scenario === "event-focus";
 const summaryFreshnessOnly = scenario === "summary-freshness";
-const focusedScenario = eventFocusOnly || summaryFreshnessOnly;
+const journalOlderOnly = scenario === "journal-older-boundaries";
+const focusedScenario = eventFocusOnly || summaryFreshnessOnly || journalOlderOnly;
 const journalEvent = (seq, kind = "command.completed") => ({
   seq, id: `journal-${seq}`, kind, timestamp: "2026-10-29T12:10:00Z", provenance: "observed",
 });
@@ -110,6 +111,8 @@ let integrityReadBarrier = null;
 let limitNextJournalRead = false;
 let pagedJournal = false;
 let olderPageFailures = 0;
+let journalOlderMode = "forbidden";
+let heldOlderPage;
 const olderEvent = { seq: 11, id: "evt-11", timestamp: "2026-10-29T12:07:00Z", kind: "workspace.diff", provenance: "observed", data: { path: "older.txt" } };
 let controlMode = "data";
 let controlReadBarrier = null;
@@ -267,6 +270,31 @@ const server = createServer(async (request, response) => {
         response.end();
         return;
       }
+      if (journalOlderOnly) {
+        const before = url.searchParams.get("before");
+        if (journalOlderMode === "forbidden") {
+          if (before === "12") {
+            response.writeHead(403);
+            response.end();
+            return;
+          }
+          if (before === null) return json(response, { items: events, next_cursor: 12 });
+        } else {
+          if (before === null) {
+            return json(response, { items: [2002, 2001, 2000].map((seq) => journalEvent(seq)), next_cursor: 2000 });
+          }
+          if (before === "2000") {
+            await heldOlderPage;
+            return json(response, { items: [journalEvent(1999)], next_cursor: null });
+          }
+          if (before === "2001") {
+            return json(response, { items: [journalEvent(2000), journalEvent(1999)], next_cursor: null });
+          }
+        }
+        response.writeHead(400);
+        response.end();
+        return;
+      }
       if (pagedJournal && url.searchParams.has("before")) {
         if (olderPageFailures > 0) {
           olderPageFailures--;
@@ -391,6 +419,77 @@ const assertGeometry = async (label) => {
   assert.ok(geometry.targets.every((rect) => rect.width >= 44 && rect.height >= 44), `${label} : cibles d’au moins 44 pixels`);
   assert.ok(geometry.targets.every((rect) => rect.top >= 0 && rect.bottom <= geometry.dockBottom), `${label} : commandes dans leur zone réservée`);
 };
+async function runJournalOlderBoundariesCheck() {
+  const token = page.getByLabel("Jeton de lecture");
+  const login = async () => {
+    await token.fill("viewer-test-token");
+    await page.getByRole("button", { name: "Ouvrir la supervision", exact: true }).click();
+  };
+  const journal = page.locator(".event-slot");
+  const row = (seq) => journal.getByRole("button", { name: `Voir l’événement ${seq}`, exact: true });
+  const more = page.getByRole("button", { name: "Charger les précédents", exact: true });
+  const olderRequest = (before) => (request) => {
+    const url = new URL(request.url());
+    return url.pathname === "/api/events" && url.searchParams.get("before") === String(before);
+  };
+  const olderResponse = (before) => page.waitForResponse((response) => olderRequest(before)(response.request()));
+
+  await page.goto(origin);
+  await login();
+  await row(14).waitFor();
+  const refusedPage = olderResponse(12);
+  await more.click();
+  assert.equal((await refusedPage).status(), 403);
+  await token.waitFor();
+  assert.equal(await page.locator(".app-shell").count(), 0, "Un refus de pagination retire les données du client courant");
+
+  journalOlderMode = "retention";
+  await login();
+  await row(2000).waitFor();
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
+  await page.locator('[data-stream="live"]').waitFor();
+  const appendLive = (sequences) => {
+    assert.equal(streams.size, 1, "Un seul flux de la session courante");
+    const batch = sequences.map((seq) =>
+      `id: ${seq}\nevent: audit\ndata: ${JSON.stringify(journalEvent(seq, "agent.updated"))}\n\n`,
+    ).join("");
+    for (const stream of streams) stream.write(batch);
+  };
+  const afterBurst = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/overview");
+  appendLive(Array.from({ length: 997 }, (_, index) => 2003 + index));
+  await afterBurst;
+  await page.getByRole("link", { name: "Vue d’ensemble", exact: true }).click();
+  await row(2999).waitFor();
+  assert.equal(await journal.locator("tbody tr").count(), 1000);
+
+  let releaseOlderPage;
+  heldOlderPage = new Promise((resolve) => { releaseOlderPage = resolve; });
+  const outdatedPage = olderResponse(2000);
+  try {
+    const requested = page.waitForRequest(olderRequest(2000));
+    await more.click();
+    await requested;
+    appendLive([3000]);
+    await row(3000).waitFor();
+    assert.equal(await row(2000).count(), 0, "Le direct déplace la limite pendant la lecture");
+  } finally {
+    releaseOlderPage();
+  }
+  assert.equal((await outdatedPage).status(), 200);
+  const alert = page.getByRole("alert").filter({ hasText: "Historique incomplet" });
+  await alert.waitFor();
+  assert.equal(await row(1999).count(), 0, "La réponse obsolète ne crée pas de trou");
+
+  const currentPage = olderResponse(2001);
+  await page.getByRole("button", { name: "Réessayer de charger les précédents", exact: true }).click();
+  assert.equal((await currentPage).status(), 200);
+  await row(2000).waitFor();
+  await row(1999).waitFor();
+  await alert.waitFor({ state: "hidden" });
+  assert.deepEqual(errors, []);
+  console.log("PASS Chromium · refus de la page précédente et reprise après déplacement du curseur par SSE");
+}
+
 async function runEventFocusCheck() {
   await page.goto(origin);
   await page.getByLabel("Jeton de lecture").fill("viewer-test-token");
@@ -1119,6 +1218,7 @@ try {
   }
   if (eventFocusOnly) await runEventFocusCheck();
   else if (summaryFreshnessOnly) await runSummaryFreshnessCheck();
+  else if (journalOlderOnly) await runJournalOlderBoundariesCheck();
   else await runBrowserChecks();
 } catch (error) {
   await mkdir(join(root, "tests", "artifacts"), { recursive: true });
