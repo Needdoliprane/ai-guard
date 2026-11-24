@@ -28,6 +28,21 @@ Reçu privé `g12-native-control-podman-5bb86e4f`, manifeste SHA-256
 La construction concerne l’archive filtrée `5bb86e4f`. Le
 parcours de contexte du CLI corrigé a sa propre recette ci-dessous.
 
+### Rejeu de l’image native sur Docker Desktop
+
+L’image native Podman `aa7a294831e2` a été transférée vers Docker
+Desktop 29.9.3 ARM64. L’identifiant de configuration reste identique.
+Sous le Compose Docker standard, gateway, dashboard et ingress
+sont sains. Les quatre empreintes des fichiers servis concordent
+entre Docker et Podman, ainsi que les six statuts HTTP de la recette
+viewer, anonyme et runner. Les inventaires de conteneurs et de volumes
+Docker retrouvent leur état initial. L’image transférée reste disponible
+pour les rejeux locaux.
+
+Reçu privé `g12-native-control-docker-replay-5bb86e4f`, manifeste
+SHA-256 `b97b6dd40010d0ec8cf704e852f747152b01d6f919eb477a0349be45dc2c43a8`.
+Ce résultat couvre l’image déjà construite à partir du contexte filtré.
+
 ## 24 novembre 2026 — filtrage du contexte de construction Podman
 
 **FAIL ciblé G12** sur `5bb86e4f` avec Podman 6.1.4 rootless ARM64.
