@@ -21,5 +21,18 @@
   "exports_matching_source": 3,
   "owned_work_volumes_removed": 3,
   "owned_authority_markers_removed": 3,
-  "full_run_containers_volumes_images_restored": true
+  "full_run_containers_volumes_images_restored": true,
+  "browser_replay": {
+    "status": "PASS",
+    "tenant": "tenant-a",
+    "seq": 32,
+    "kind": "command.failed",
+    "code": 137,
+    "timed_out": false,
+    "raw_dom_matches_wire": true,
+    "logout": true,
+    "cli_and_frontend_revision": "84971de6",
+    "source": "SQLite backups of both tenants",
+    "worker_launch_requested": false
+  }
 }

@@ -11,7 +11,12 @@ et aux liaisons locales, puis retirés. Les inventaires exacts des
 conteneurs, volumes et images retrouvent leur état d’avant recette.
 Le premier contrôle de fermeture omettait les marqueurs d’autorité.
 La comparaison a été corrigée sans relancer les workers.
-[Reçu de l’arrêt A1](evidence/2026-11-24/g09-podman-stop-a1.json).
+Chromium relit les deux copies SQLite via le CLI et le frontend de
+l’archive `84971de6`. Sous l’identité de A, le détail Actions restitue
+l’événement terminal d’A1 avec le code 137 et `timed_out=false`. Les
+données brutes du détail concordent avec la réponse et le reçu.
+La déconnexion efface la vue de supervision et le dialogue.
+[Reçu de l’arrêt A1 et de sa relecture](evidence/2026-11-24/g09-podman-stop-a1.json).
 
 ## 24 novembre 2026 — trois workers G10 sur Podman rootless
 
