@@ -132,6 +132,14 @@ Les connexions et conversations réelles restent à qualifier. Reçus
 SHA-256 respectifs `bcaac8ceb80871fca69fc70b281a3d4c30319667a56d639388d5b4625d75a1e3`
 et `3f39a706000723482cd4643197d5e23c660ed55b30ddf231b6a396063887e8cf`.
 
+Le prochain témoin Codex API vise une soumission batch supervisée bornée.
+Le résultat doit lier, pour la même tentative, l’autorisation durable,
+l’admission, le démarrage inspecté, la décision réseau précédant la
+connexion, puis le terminal et la libération du quota. La recette attend
+le raccord du canal au superviseur et l’arbitrage E3 de G05. Le profil
+réseau `none` et la médiation approuvée sont exigés sur le moteur choisi.
+Ce témoin n’a pas été lancé sur `5a6cd5c3`.
+
 **G08 — composition du registre.** Sur `26e19e84`, le
 [test d’agrégation du gateway](../../tests/supervision_stack_api.rs) passe
 1/1 en 21,09 s avec SQLite. Le parcours restitue les 120 lignes synthétiques
