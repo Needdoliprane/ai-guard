@@ -44,6 +44,18 @@ le refus par quota de la 101e et l’indépendance du quota de B. Le test
 ne démarre aucun worker. Reçu privé `g10-sqlite-35690caa/run.log`,
 SHA-256 `26eebf9e606d0d696b0bfdc6b5fd65069a35f03e32e141c6dac64405a8b33df9`.
 
+**G09 — arrêt explicite d’A1.** Sur `57144fcc`, le
+[parcours CLI](../../tests/runtime_user_journey.rs) passe en 55,26 s
+sur Docker Desktop ARM64. Le CLI reçoit `stopping` pour A1, puis le
+journal atteste son état terminal et la libération de sa réservation.
+Le quota passe de deux à un pour A tandis que B reste à un. A2 et B1
+terminent normalement, puis les deux quotas reviennent à zéro. Les
+trois volumes attribués sont retirés et les inventaires moteur reviennent
+à leur état initial. Reçu `g09-a1-stop-57144fcc/run.log`, SHA-256
+`847f343abf50c15e2c1caf4f7fbd73f6393626e2d0ebefb62a376754ea551746`.
+Le rendu dashboard lors de cet arrêt et l’arrêt automatique à échéance
+restent ouverts.
+
 **G09 — témoin d’échéance avant lecture du résultat.** Sur `905e79db`,
 le [harnais Docker](../../tests/broker_runtime.rs) cherche les événements
 de démarrage, de signal et de terminal du CID d’origine dès l’observation
