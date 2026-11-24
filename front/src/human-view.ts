@@ -216,7 +216,25 @@ export class HumanDashboard {
     if (document.visibilityState !== "visible") return;
     this.#supervision?.resume(); this.#journal?.resume();
   }
-  #navigationResize = () => this.#markNavigation();
+  #navigationResize = () => {
+    const row = this.#navigation?.querySelector<HTMLElement>(".human-nav");
+    if (row && row.scrollWidth > row.clientWidth) {
+      const focused = row.querySelector<HTMLElement>(".human-tab:focus");
+      const destination = focused ?? row.querySelector<HTMLElement>('[aria-current="page"]');
+      if (destination) {
+        const bounds = row.getBoundingClientRect();
+        const visible = destination.getBoundingClientRect();
+        const style = getComputedStyle(row);
+        const canScrollLeft = row.scrollLeft > 1;
+        const canScrollRight = row.scrollLeft + row.clientWidth < row.scrollWidth - 1;
+        const left = visible.left - bounds.left - (canScrollLeft ? parseFloat(style.scrollPaddingLeft) || 0 : 0);
+        const right = visible.right - bounds.right + (canScrollRight ? parseFloat(style.scrollPaddingRight) || 0 : 0);
+        if (left < -1) row.scrollLeft += left;
+        else if (right > 1) row.scrollLeft += right;
+      }
+    }
+    this.#markNavigation();
+  };
   /** Says on which side the destination row has more to scroll to; CSS fades that edge. */
   #markNavigation() {
     const row = this.#navigation?.querySelector<HTMLElement>(".human-nav"); if (!row) return;
