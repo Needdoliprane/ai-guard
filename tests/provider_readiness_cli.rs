@@ -250,6 +250,101 @@ async fn automatic_selection_reports_absent_subscription_without_falling_back_to
     assert!(String::from_utf8_lossy(&conflict.stderr).contains("ambiguous_configuration"));
 }
 
+async fn assert_explicit_reference(
+    profile: Value,
+    default_profile: Value,
+    client_option: &str,
+    expected_selection: Value,
+    recovery_hint: &str,
+) {
+    let root = tempfile::tempdir().unwrap();
+    let config = private_dir(&root.path().canonicalize().unwrap().join("control"));
+    let default_reference = default_profile["credential"]["path"].as_str().unwrap();
+    private_file(&config.join(default_reference), b"");
+    private_file(
+        &config.join("providers.json"),
+        &serde_json::to_vec(&json!({
+            "version": 1,
+            "default_profile": default_profile["id"],
+            "profiles": [default_profile, profile],
+        }))
+        .unwrap(),
+    );
+
+    let selection = [
+        "--client",
+        client_option,
+        "--auth-mode",
+        expected_selection["auth_mode"].as_str().unwrap(),
+        "--client-profile",
+        expected_selection["profile_id"].as_str().unwrap(),
+    ];
+    let absent = report(check(&config, None, &selection, true).await, "absent");
+    assert!(
+        absent["next_action"]
+            .as_str()
+            .unwrap()
+            .contains(recovery_hint)
+    );
+
+    private_file(&config.join(PRIVATE_FILE_MARKER), b"");
+    let present = report(
+        check(&config, None, &selection, true).await,
+        "present_unverified",
+    );
+    for result in [absent, present] {
+        for (field, expected) in expected_selection.as_object().unwrap() {
+            assert_eq!(result[field.as_str()], *expected, "unexpected {field}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn checks_explicit_codex_subscription_reference_without_api_fallback() {
+    assert_explicit_reference(
+        json!({
+            "id": "codex-subscription", "revision": 1, "client": "codex",
+            "auth_mode": "subscription",
+            "credential": {"kind": "codex_auth_file", "path": PRIVATE_FILE_MARKER}
+        }),
+        api_profile("codex-api", &format!("{PRIVATE_FILE_MARKER}-default")),
+        "codex",
+        json!({
+            "profile_id": "codex-subscription", "client": "codex",
+            "auth_mode": "subscription", "credential_source": "codex_auth_file"
+        }),
+        "supported sign-in mechanism",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn checks_explicit_claude_api_reference() {
+    assert_explicit_reference(
+        json!({
+            "id": "claude-api", "revision": 1, "client": "claude_code",
+            "auth_mode": "api",
+            "credential": {
+                "kind": "api_env_file", "path": PRIVATE_FILE_MARKER, "key": "ANTHROPIC_API_KEY"
+            }
+        }),
+        json!({
+            "id": "claude-subscription", "revision": 1, "client": "claude_code",
+            "auth_mode": "subscription",
+            "credential": {
+                "kind": "claude_oauth_env_file", "path": format!("{PRIVATE_FILE_MARKER}-default")
+            }
+        }),
+        "claude-code",
+        json!({
+            "profile_id": "claude-api", "client": "claude_code",
+            "auth_mode": "api", "credential_source": "api_env_file"
+        }),
+        "private API credential file",
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn marks_non_private_files_and_linked_paths_as_suspect() {
     let root = tempfile::tempdir().unwrap();
