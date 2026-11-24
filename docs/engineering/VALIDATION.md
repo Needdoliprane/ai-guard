@@ -1,5 +1,22 @@
 # Validation courante
 
+## 24 novembre 2026 — identité locale et export nominatif interrompu
+
+**PASS ciblé G04.** Le CLI macOS archivé `84971de6` provisionne un
+compte local nominatif dans une copie SQLite Legacy de recette au
+schéma 5. Il ouvre le contexte personnel par le vrai gateway
+loopback, lit la liste vide des ressources autorisées et retrouve
+dans SQLite l’événement qui porte le reçu de lecture. Le CLI
+confirme l’intégrité de la chaîne.
+
+Sur `c8d6d225`, le test
+`export_revocation_between_batches_preserves_prefix_without_publication`
+passe avec le vrai CLI et une fixture Rust loopback. La révocation
+entre deux lots conserve le premier lot privé, empêche la publication
+de la destination et bloque la reprise. La fixture orchestre la
+révocation. Le lancement d’un worker attribué à une identité humaine
+reste à qualifier.
+
 ## 24 novembre 2026 — premier diagnostic avec le paquet macOS
 
 **PASS ciblé G01** avec les binaires distribués `84971de6`.
