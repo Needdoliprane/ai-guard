@@ -113,6 +113,12 @@ conteneurs et volumes retrouvent leur état initial. Une exécution
 distincte avec le même CLI sur chaque moteur observe `/workspace`
 en `rw` sans `ro`. Les deux montages ont leurs propres reçus,
 avec audit valide, quota libéré et inventaires restaurés.
+Un retour arrière local entre les archives macOS de version 0.0.1
+bascule le lien de recette `e2796ac1` → `84971de6` → `e2796ac1`.
+À chaque démarrage, le gateway relit en loopback les copies SQLite
+de la recette Podman. Les deux tenants conservent leurs propres
+têtes d’audit et compteurs. Le test couvre la lecture Legacy lors
+d’un changement de binaire, sans migration ni nouvelle exécution.
 [Reçu macOS, Docker et Podman](evidence/2026-11-24/g12-macos-84971de6.json).
 
 ## 24 novembre 2026 — profil TLS local à volumes neufs

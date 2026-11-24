@@ -217,5 +217,64 @@
       "held_workers": 0,
       "container_and_volume_inventories_restored": true
     }
+  },
+  "legacy_two_tenant_binary_rollback": {
+    "version": "0.0.1",
+    "source": "online SQLite backups of Podman A1/A2/B1 audit",
+    "read_only_gateway_requests": true,
+    "separate_heads_preserved": true,
+    "steps": [
+      {
+        "step": "initial",
+        "revision": "e2796ac1",
+        "tenants": {
+          "tenant-a": {
+            "event_count": 62,
+            "head_hash": "041e6edc337b33c69f5e63637b6c5cd80fbae0e86290faaa4d2351034ec8d220",
+            "valid": true
+          },
+          "tenant-b": {
+            "event_count": 31,
+            "head_hash": "746cf2cdada077350baa9f3544a061c0fa5ed2e419628b6a7a97f59a2dedee9f",
+            "valid": true
+          }
+        },
+        "cli_sha256": "c7a0790ab62d3ecee106b2c55caffc2e156d317bd82cc867c66524de85cdee46"
+      },
+      {
+        "step": "upgrade",
+        "revision": "84971de6",
+        "tenants": {
+          "tenant-a": {
+            "event_count": 62,
+            "head_hash": "041e6edc337b33c69f5e63637b6c5cd80fbae0e86290faaa4d2351034ec8d220",
+            "valid": true
+          },
+          "tenant-b": {
+            "event_count": 31,
+            "head_hash": "746cf2cdada077350baa9f3544a061c0fa5ed2e419628b6a7a97f59a2dedee9f",
+            "valid": true
+          }
+        },
+        "cli_sha256": "360540a9e32284b12e42b686115cc7ddf4d11c90e09c1b5d08745d79300588b5"
+      },
+      {
+        "step": "rollback",
+        "revision": "e2796ac1",
+        "tenants": {
+          "tenant-a": {
+            "event_count": 62,
+            "head_hash": "041e6edc337b33c69f5e63637b6c5cd80fbae0e86290faaa4d2351034ec8d220",
+            "valid": true
+          },
+          "tenant-b": {
+            "event_count": 31,
+            "head_hash": "746cf2cdada077350baa9f3544a061c0fa5ed2e419628b6a7a97f59a2dedee9f",
+            "valid": true
+          }
+        },
+        "cli_sha256": "c7a0790ab62d3ecee106b2c55caffc2e156d317bd82cc867c66524de85cdee46"
+      }
+    ]
   }
 }
