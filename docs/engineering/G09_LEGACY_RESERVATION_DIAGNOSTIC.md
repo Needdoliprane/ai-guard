@@ -28,3 +28,33 @@ Une cellule peut rester retenue après allocation sans qu'un grant ait été rem
 Négocier la prise en charge du motif avant la réservation, pour le même pair IPC authentifié et la même incarnation. Réutiliser l'admission existante et porter le motif fermé sur la réponse de cette tentative. La requête Legacy conserve sa réponse historique. Une réponse de réservation perdue, inconnue ou incomplète ne déclenche aucun renvoi ni repli.
 
 Vérifier hors moteur les deux combinaisons ancien/nouveau avec une seule réservation et une réponse Legacy exacte. Avec deux pairs compatibles, vérifier que deux refus concurrents restent attribués à leurs tentatives respectives. Après perte de réponse, le motif reste indisponible et le nombre d'envois reste à un. Aucun grant, Arm, lancement ou effet additionnel ne provient du diagnostic.
+
+
+## Réconciliation du terminal après redémarrage Legacy
+
+Ce parcours est distinct du refus de réservation du pilote Linux.
+Sur Docker Desktop ARM64, le conteneur d’origine est sorti et
+`RecoveryStatus` retrouve l’Arm après redémarrage. Les trois registres
+de recette conservent un worker `running`, son quota et zéro allocation
+terminale. [Résultats ARM64](VALIDATION.md#reprise-legacy-sur-docker-desktop-arm64).
+
+Le [rejeu d’audit retenu](../../src/broker/service/retained_audit.rs)
+part d’un registre central déjà terminal et d’événements d’audit
+préparés. La [validation des faits](../../src/broker/cold_terminal.rs)
+exige notamment que le quota ait été libéré. Ce chemin ne peut donc
+pas servir de premier enregistrement du terminal dans cette recette.
+
+Soumettre à décision un parcours authentifié de réconciliation de
+l’instance détenue, sous admission fermée. Il doit obtenir une
+observation terminale qualifiée du même moteur et la rapprocher du
+tenant, de la tentative, du CID et du claim durable. La transition
+centrale existante doit être rejouable sur la même identité, avec
+audit obligatoire. Conserver le quota pendant l’incertitude.
+Le retrait de l’instance et du volume requiert son propre reçu.
+L’absence de capture ou de résultat métier reste explicite.
+
+La recette doit vérifier la perte de l’accusé de terminal, un second
+rejeu sans allocation supplémentaire, l’absence de nouveau démarrage,
+le refus d’un CID divergent, le maintien du quota si l’audit est
+indisponible et le retrait attesté après acquittement. L’Arm retrouvé
+et la projection de journal conservent leur portée actuelle.
