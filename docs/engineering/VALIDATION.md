@@ -15,7 +15,14 @@ copie ancienne et son ancien journal (`log_rolled_back`,
 `database_truncated`), puis la copie ancienne associée au journal
 récent (`database_truncated`). L’empreinte de l’ancre reste identique.
 
-Les processus utilisent le même UID et le vérificateur signale
+Un rejeu sur la même fixture place une copie à l’identique de
+l’ancre avancée sur un volume APFS distinct après sauvegarde.
+Les accès du contrôle restent refusés. La copie récente est
+vérifiée et la copie antérieure est refusée pour `database_truncated`.
+Le vérificateur ne signale plus `same_filesystem_device`. Le volume
+de recette est détaché et son image est retirée.
+
+Les processus utilisent le même UID. Sur le premier passage, le vérificateur signale
 `same_filesystem_device`. La séparation administrative et la
 remise en service du gateway restent à qualifier.
 SHA-256 du binaire de vérification
