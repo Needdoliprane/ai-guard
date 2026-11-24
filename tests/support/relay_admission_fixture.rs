@@ -330,6 +330,23 @@ pub(super) fn running_now(store: &Store) -> WorkerV1 {
 
 /// Drive a caller-built admission through the real typed transitions to Running.
 pub(super) fn running_from(store: &Store, admission: AdmissionV1) -> WorkerV1 {
+    let (_, worker, now) = claimed_from(store, admission);
+    let mut observation = parent_observation(&worker, RuntimeStatusV1::Running, true, None, None);
+    observation.observed_at = now.to_rfc3339();
+    observation.started_at = Some((now - chrono::Duration::seconds(1)).to_rfc3339());
+    store
+        .mutate_worker(&mutation(
+            &worker,
+            WorkerTransitionV1::Observe { observation },
+        ))
+        .unwrap()
+        .worker
+}
+
+pub(super) fn claimed_from(
+    store: &Store,
+    admission: AdmissionV1,
+) -> (ArmedStartClaimV1, WorkerV1, chrono::DateTime<chrono::Utc>) {
     let request = supervised_request(admission);
     let admitted = admit_supervised(store, &request);
     let mut worker = admitted.worker.unwrap();
@@ -411,29 +428,18 @@ pub(super) fn running_from(store: &Store, admission: AdmissionV1) -> WorkerV1 {
     let now = chrono::Utc::now();
     arm.clock.observed_utc = Some((now - chrono::Duration::seconds(2)).to_rfc3339());
     let armed = store.arm_execution(&arm).unwrap();
-    worker = store
-        .claim_armed_start(&ArmedStartClaimV1 {
-            version: 1,
-            operation_id: Uuid::new_v4().to_string(),
-            worker_id: worker.worker_id.clone(),
-            attempt_id: worker.attempt.attempt_id.clone(),
-            expected_revision: worker.revision,
-            emitter_id: Uuid::new_v4().to_string(),
-            arm_receipt: armed.receipt,
-            clock_check: host_clock(100_000_000_001),
-        })
-        .unwrap()
-        .worker;
-    let mut observation = parent_observation(&worker, RuntimeStatusV1::Running, true, None, None);
-    observation.observed_at = now.to_rfc3339();
-    observation.started_at = Some((now - chrono::Duration::seconds(1)).to_rfc3339());
-    store
-        .mutate_worker(&mutation(
-            &worker,
-            WorkerTransitionV1::Observe { observation },
-        ))
-        .unwrap()
-        .worker
+    let claim = ArmedStartClaimV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        worker_id: worker.worker_id.clone(),
+        attempt_id: worker.attempt.attempt_id.clone(),
+        expected_revision: worker.revision,
+        emitter_id: Uuid::new_v4().to_string(),
+        arm_receipt: armed.receipt,
+        clock_check: host_clock(100_000_000_001),
+    };
+    let result = store.claim_armed_start(&claim).unwrap();
+    (claim, result.worker, now)
 }
 
 pub(super) fn request(
