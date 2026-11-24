@@ -22,6 +22,32 @@ Le défaut du contexte standard reste ouvert. Une construction sur
 des entrées Git sélectionnées en amont peut qualifier l’image pour
 ce périmètre précis.
 
+### Correctif du contexte préparé par le CLI
+
+Sur `7529ac0c`, le vrai `agentsandbox build --runtime podman`
+passe deux constructions sentinelles sur Podman distant 6.1.4
+rootless ARM64. Les deux Dockerfiles vérifient la présence des
+sources Rust et TypeScript imbriquées, l’absence des fichiers
+privés synthétiques et l’exclusion du fichier d’exclusion généré
+par le CLI. Les deux tags étaient libres avant le test et les
+images de recette ont été retirées après attribution.
+
+Les deux régressions Podman font partie des 38 tests
+`source_snapshot` qui passent sur macOS ARM64. Le premier passage
+complet échoue dans une fixture préexistante qui dépasse la limite
+de longueur de chemin de macOS, avant l’assertion sur le diagnostic.
+Le rejeu exclut ce seul cas. Reçus privés
+`g12-podman-prepared-ignore-rust-7529ac0c` et
+`g12-podman-prepared-ignore-cli-7529ac0c`. Manifeste SHA-256 du
+rejeu moteur
+`d0fab5929b790155bb76fbda90c407c92401b21172c9a1d1bf96510d10c438c9`.
+
+Le premier essai moteur avait réutilisé pour le second Dockerfile
+la couche du premier. Le rejeu utilise des couches distinctes.
+Le résultat porte sur le contexte généré par le CLI et deux recettes
+de test. Le build direct avec `.dockerignore` reste en échec sur le
+moteur testé.
+
 ## 24 novembre 2026 — arrêt d’A1 avec le worker produit Podman rootless
 
 **PASS ciblé G03/G09.** Sur `fd2149e3` et Podman 6.1.4 rootless
