@@ -26,6 +26,20 @@ Le manifeste SHA-256
 lie le diagnostic, les binaires et l’archive de la fixture. La branche
 de test reste disponible pour isoler ce palier.
 
+Le rejeu instrumenté `4bb0015e` échoue en 190,32 s, code 101.
+À l’échéance, le broker renvoie une réponse autre que `Status` en
+56 ms. La chaîne locale vérifiée de 39 révisions acquitte l’Arm du worker
+et le diagnostic générique, avec effet runtime inconnu. Elle ne contient
+ni liaison Full3 du worker, ni claim. Les deux essais situent donc l’écart
+autour de la publication de la liaison ou de la préparation du claim.
+Au retour du test, le runtime et le gateway de fixture sont fermés.
+Le broker resté en garde et le gardien zombie ne sont plus présents
+après la fermeture manuelle du seul broker de recette par le chemin
+SIGTERM documenté. La retraite de l’autorité n’a pas été confirmée.
+Les binaires et la fixture sont conservés sous
+`g07-first-full3-claim-4bb0015e/closure-final`, manifeste SHA-256
+`b052cf709f60cc2b6c67c450ffc2da0905de3d098fb188a919baadda5808d2e5`.
+
 ## 24 novembre 2026 — écritures d’administration sur une source possédée
 
 **PASS ciblé G08**, deux tests SQLite au format 15 sur macOS ARM64,
