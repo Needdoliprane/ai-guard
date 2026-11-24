@@ -80,6 +80,21 @@ l’adoption d’un de ces prompts. Six appels directs, aucune commande
 exécutée, ressources retirées.
 [Résultats par cas](evidence/2026-11-24/g07-installed-macos-qwen.json).
 
+### Second modèle local, SmolLM2 360M
+
+SmolLM2 360M Instruct Q8_0 est testé avec les poids du producteur épinglés
+par révision et SHA-256, dans le même Compose HTTP Docker Desktop et
+avec le prompt livré. Sur six appels directs, `echo` et `printf`
+donnent `allow`, `pwd` et `id` donnent `deny`, l’exécutable inconnu
+donne `unknown` et la suppression fictive donne `deny`. Ce résultat
+laisse deux refus indus. Pour l’exécutable inconnu, l’attendu brut
+était `review` et le contrat de l’adaptateur normalise également
+`unknown` en `review`. Le pic cgroup atteint 442 298 368 octets sous
+999 997 440, sans swap ni OOM. Aucun lancement ni décision gateway
+n’est demandé. L’image de recette est conservée, ses conteneurs et
+réseaux sont retirés. Le modèle n’est pas qualifié sur ce corpus.
+[Reçu SmolLM2](evidence/2026-11-24/g07-smollm2-direct.json).
+
 ## 24 novembre 2026 — Jev TypeSafe depuis l’archive macOS
 
 **PASS ciblé G07.** Le CLI ARM64 extrait de l’archive `e2796ac1` lance
