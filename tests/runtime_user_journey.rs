@@ -22,11 +22,13 @@ use agentsandbox::{
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
+    ffi::OsStr,
     fs,
     io::Write,
-    os::unix::fs::{FileTypeExt, OpenOptionsExt},
+    os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt},
     path::{Component, Path, PathBuf},
     process::{Output, Stdio},
     time::Duration,
@@ -38,17 +40,135 @@ use tokio::{
 };
 use uuid::Uuid;
 
+const CARGO_CLI: &str = env!("CARGO_BIN_EXE_agentsandbox");
+const AUDITED_EXPORT_CLI: &str = "AGENTSANDBOX_TEST_AUDITED_EXPORT_CLI";
+const AUDITED_EXPORT_CLI_SHA256: &str = "AGENTSANDBOX_TEST_AUDITED_EXPORT_CLI_SHA256";
+
 const CLI_TIMEOUT: Duration = Duration::from_secs(45);
 const RUN_TIMEOUT: Duration = Duration::from_secs(240);
 
 fn cli(subcommand: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_agentsandbox"));
+    cli_at(Path::new(CARGO_CLI), subcommand)
+}
+
+fn cli_at(binary: &Path, subcommand: &str) -> Command {
+    let mut command = Command::new(binary);
     command
         .env_clear()
         .stdin(Stdio::null())
         .kill_on_drop(true)
         .arg(subcommand);
     command
+}
+
+#[test]
+fn audited_export_cli_selection_checks_path_and_expected_sha256_offline() -> Result<()> {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    assert_eq!(
+        audited_export_cli(None, None)?.0,
+        Path::new(env!("CARGO_BIN_EXE_agentsandbox")),
+    );
+    let root = support::private_tempdir();
+    let root_path = root.path().canonicalize()?;
+    let executable = root_path.join("cli");
+    fs::write(&executable, b"abc")?;
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))?;
+    let digest =
+        std::ffi::OsStr::new("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    let alias = root_path.join("alias");
+    symlink(&executable, &alias)?;
+    let missing = root_path.join("missing");
+    let invalid = std::ffi::OsStr::new("not-a-digest");
+    let different = "0".repeat(64);
+    for (path, expected, message) in [
+        (
+            Some(Path::new("relative")),
+            Some(digest),
+            "must be absolute",
+        ),
+        (Some(missing.as_path()), Some(digest), "does not exist"),
+        (Some(alias.as_path()), Some(digest), "must be canonical"),
+        (
+            Some(executable.as_path()),
+            Some(invalid),
+            "64 lowercase hex digits",
+        ),
+        (
+            Some(executable.as_path()),
+            Some(different.as_ref()),
+            "SHA-256 mismatch",
+        ),
+        (Some(executable.as_path()), None, "must be set together"),
+        (None, Some(digest), "must be set together"),
+    ] {
+        let Err(error) = audited_export_cli(path, expected) else {
+            bail!("expected refusal: {message}");
+        };
+        assert!(
+            error.to_string().contains(message),
+            "unexpected refusal: {error}"
+        );
+    }
+    assert_eq!(
+        audited_export_cli(Some(&executable), Some(digest))?,
+        (executable, Some(digest.to_str().unwrap().to_owned())),
+    );
+    Ok(())
+}
+
+fn audited_export_cli(
+    path: Option<&Path>,
+    expected: Option<&OsStr>,
+) -> Result<(PathBuf, Option<String>)> {
+    let (path, expected) = match (path, expected) {
+        (None, None) => return Ok((PathBuf::from(CARGO_CLI), None)),
+        (Some(path), Some(expected)) => (path, expected),
+        _ => bail!("{AUDITED_EXPORT_CLI} and {AUDITED_EXPORT_CLI_SHA256} must be set together"),
+    };
+    ensure!(
+        path.is_absolute(),
+        "audited export CLI path must be absolute"
+    );
+    let canonical = path.canonicalize().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            anyhow::anyhow!("audited export CLI does not exist")
+        } else {
+            anyhow::Error::new(error).context("canonicalize the audited export CLI")
+        }
+    })?;
+    ensure!(
+        canonical.as_os_str() == path.as_os_str(),
+        "audited export CLI path must be canonical"
+    );
+    let expected = expected
+        .to_str()
+        .filter(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .context("audited export CLI SHA-256 must be 64 lowercase hex digits")?;
+    let is_executable =
+        |metadata: &fs::Metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0;
+    ensure!(
+        is_executable(&fs::symlink_metadata(&canonical)?),
+        "audited export CLI must be an executable regular file"
+    );
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&canonical)?;
+    ensure!(
+        is_executable(&file.metadata()?),
+        "audited export CLI must be an executable regular file"
+    );
+    let mut hash = Sha256::new();
+    std::io::copy(&mut file, &mut hash)?;
+    let observed = hex::encode(hash.finalize());
+    ensure!(observed == expected, "audited export CLI SHA-256 mismatch");
+    Ok((canonical, Some(observed)))
 }
 
 async fn output(mut command: Command, phase: &str, budget: Duration) -> Result<Output> {
@@ -74,12 +194,13 @@ struct RuntimeDoctor {
 }
 
 async fn doctor(
+    binary: &Path,
     runtime: RuntimeKind,
     program: &Path,
     endpoint: &str,
     allow_rootful: bool,
 ) -> Result<RuntimeDoctor> {
-    let mut command = cli("doctor");
+    let mut command = cli_at(binary, "doctor");
     command
         .arg("--runtime")
         .arg(runtime.to_string())
@@ -136,14 +257,15 @@ async fn doctor(
 }
 
 struct Gateway {
+    binary: PathBuf,
     child: Child,
     _stderr: BufReader<ChildStderr>,
     origin: String,
 }
 
 impl Gateway {
-    async fn start(config: &Path) -> Result<Self> {
-        let mut command = cli("gateway");
+    async fn start(config: &Path, binary: &Path) -> Result<Self> {
+        let mut command = cli_at(binary, "gateway");
         command
             .args(["--listen", "127.0.0.1:0", "--data"])
             .arg(config.join("audit.sqlite"))
@@ -167,6 +289,7 @@ impl Gateway {
     }
 
     async fn start_command(mut command: Command) -> Result<Self> {
+        let binary = PathBuf::from(command.as_std().get_program());
         let mut child = command
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -181,6 +304,7 @@ impl Gateway {
             .parse()?;
         ensure!(address.ip().is_loopback(), "QA gateway must use loopback");
         Ok(Self {
+            binary,
             child,
             _stderr: stderr,
             origin: format!("http://{address}"),
@@ -188,7 +312,7 @@ impl Gateway {
     }
 
     fn command(&self, subcommand: &str, config: &Path) -> Command {
-        let mut command = cli(subcommand);
+        let mut command = cli_at(&self.binary, subcommand);
         command
             .arg("--config-dir")
             .arg(config)
@@ -384,7 +508,12 @@ impl RuntimeSelection {
     }
 
     async fn preflight(&self) -> Result<RuntimeDoctor> {
+        self.preflight_with_cli(Path::new(CARGO_CLI)).await
+    }
+
+    async fn preflight_with_cli(&self, binary: &Path) -> Result<RuntimeDoctor> {
         let diagnostic = doctor(
+            binary,
             self.runtime,
             &self.program,
             &self.endpoint,
@@ -605,8 +734,22 @@ fn one_event<'a>(events: &'a [Value], kind: &str) -> Result<&'a Value> {
 #[tokio::test]
 #[ignore = "requires a real explicitly selected local Docker socket, an approved control account, and a prepared local QA image"]
 async fn real_cli_copies_a_project_and_exports_after_one_audited_worker() -> Result<()> {
+    let cli_path = std::env::var_os(AUDITED_EXPORT_CLI);
+    let expected_sha256 = std::env::var_os(AUDITED_EXPORT_CLI_SHA256);
+    let (binary, sha256) = audited_export_cli(
+        cli_path.as_deref().map(Path::new),
+        expected_sha256.as_deref(),
+    )?;
+    if let Some(sha256) = &sha256 {
+        eprintln!(
+            "{}",
+            json!({
+                "stage":"cli_selection", "canonical_path":binary, "sha256":sha256,
+            })
+        );
+    }
     let selection = RuntimeSelection::read_docker()?;
-    let rootless = selection.preflight().await?.rootless;
+    let rootless = selection.preflight_with_cli(&binary).await?.rootless;
     let program = &selection.program;
     let image = selection.image.as_str();
 
@@ -623,10 +766,10 @@ async fn real_cli_copies_a_project_and_exports_after_one_audited_worker() -> Res
     fs::create_dir(&source)?;
     fs::write(source.join("original.txt"), original)?;
     fs::write(source.join(".env"), &dotenv)?;
-    let mut init = cli("init");
+    let mut init = cli_at(&binary, "init");
     init.arg("--config-dir").arg(&config);
     checked_output(init, "init", CLI_TIMEOUT).await?;
-    let mut gateway = Gateway::start(&config).await?;
+    let mut gateway = Gateway::start(&config, &binary).await?;
     let viewer = read_token(&config.join("secrets/viewer"))?;
     let audit = AuditClient::new(&gateway.origin, &viewer)?;
     let integrity_before = audit.get_json("api/v1/integrity").await?;
