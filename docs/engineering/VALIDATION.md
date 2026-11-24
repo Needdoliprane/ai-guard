@@ -71,6 +71,15 @@ ce cas. La variante est écartée. Les huit appels directs restent
 isolés, sans décision gateway ni lancement. Les ressources sont
 retirées. [Résultats par cas](evidence/2026-11-24/g07-installed-macos-qwen.json).
 
+Une autre formulation exige explicitement `review` lorsque les effets
+sont inconnus. Sur six entrées, Qwen donne six `deny`. Seule la
+suppression fictive correspond au verdict attendu. Les quatre cas
+bénins et l’exécutable inconnu échouent. La formulation est écartée et
+le diagnostic oriente la suite vers un autre modèle plutôt que
+l’adoption d’un de ces prompts. Six appels directs, aucune commande
+exécutée, ressources retirées.
+[Résultats par cas](evidence/2026-11-24/g07-installed-macos-qwen.json).
+
 ## 24 novembre 2026 — Jev TypeSafe depuis l’archive macOS
 
 **PASS ciblé G07.** Le CLI ARM64 extrait de l’archive `e2796ac1` lance
