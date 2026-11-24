@@ -1665,9 +1665,9 @@ Cette séquence décrit les dépendances du chantier global. Les sous-lots déj�
 1. Corriger les autres P0/P1 reproduits par les audits (audit, autorisations, import/export, lancement).
 2. Compléter le registre durable, les quotas/réservations et transitions atomiques avec audit ; intégration broker, supervision et réconciliation qualifiées.
 3. Relais Rust authentifié avec grants dirigés/révocation, limites/durée/rétention, ledger d'allocation `billable=false` idempotent.
-4. Recette réelle trois workers, reprises/pannes et visibilité dashboard ; qualification séparée Docker/Podman par plateforme.
+4. Recette réelle A1/A2 chez A et B1 chez B, reprises, pannes et visibilité dashboard. Qualification Docker/Podman par plateforme et preuve séparée de 100 réservations durables chez A.
 5. Versionnement API et schéma, migrations admises, sauvegarde/restauration, exploitation et chaîne de livraison.
-6. Adaptateur Kubernetes et identité/réseau/stockage cloud, charge 100 workers réellement mesurée et intégrations fournisseurs natives selon leurs canaux démontrés.
+6. Adaptateur Kubernetes, identité/réseau/stockage cloud et intégrations fournisseurs natives selon leurs canaux démontrés. La mesure physique à 100 workers relève du dimensionnement hors critères de livraison V1.
 7. Revue de release G01–G12, licence/canal privé décidés, matrice complète et aucun blocage obligatoire ouvert.
 
 Chaque lot précise avant édition : fichiers propriétaires, besoin, risques, tests et critère d'acceptation. Des dépendances externes manquantes bloquent leurs preuves, sans interrompre les travaux indépendants.
