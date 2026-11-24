@@ -1,5 +1,26 @@
 # Validation courante
 
+## 24 novembre 2026 — retrait des données A/B dans Chrome
+
+**PASS interactif G08** sur `42f93bb7`. Le scénario `isolation`
+documenté passe avec Chrome 158.0.8127.88, le vrai exemple Rust
+`supervision_stack` compilé hors ligne et le bundle `84971de6`.
+Les sources du frontend concordent. Les 24 workers et 60 événements
+sont des données SQLite de recette.
+
+Le passage du contexte administration au contexte personnel retire
+les lignes de supervision. Au retour, les lignes et le filtre sont
+réinitialisés. Le gateway répond 200 à une lecture de A dont le
+navigateur retient la réponse. La déconnexion annule cette requête.
+La connexion suivante affiche uniquement le worker de B dans un
+contexte distinct. La garde réseau du navigateur reste active.
+Le conducteur sort avec le code 0.
+
+Le conducteur historique avec Seatbelt et attestation du groupe
+de processus conserve son verdict d’échec au démarrage de Chrome.
+Cette exécution couvre l’oracle produit avec le conducteur documenté
+et sa propre procédure de fermeture.
+
 ## 24 novembre 2026 — rendu et déconnexion Chrome avec trois workers
 
 **PASS ciblé G08/G10** sur `adceee90`, avec Docker Desktop ARM64,
