@@ -18,6 +18,7 @@ pub(super) enum Case {
     TerminalAfterCancel,
     TerminalCreatedOwned,
     TerminalCleanupRecovery,
+    TerminalCleanupWithoutScan,
     StillRunning,
     UnknownContainer,
     ChangedCid,
@@ -302,7 +303,9 @@ impl RecoveryFixture {
         assert!(observed.configuration_fingerprint.is_some());
         if matches!(
             case,
-            Case::TerminalCreatedOwned | Case::TerminalCleanupRecovery
+            Case::TerminalCreatedOwned
+                | Case::TerminalCleanupRecovery
+                | Case::TerminalCleanupWithoutScan
         ) {
             // Production retains the initial Created snapshot. The later
             // Running transition below still supplies central StartedAt proof.
@@ -381,7 +384,10 @@ impl RecoveryFixture {
         eprintln!("cancelled_recovery_fixture phase=running_ready");
         let cancel = Uuid::new_v4();
         write_observation_fixture(base.root.path(), &inspect, case);
-        if matches!(case, Case::TerminalCleanupRecovery) {
+        if matches!(
+            case,
+            Case::TerminalCleanupRecovery | Case::TerminalCleanupWithoutScan
+        ) {
             let terminal = handle
                 .block_on(boxed_execution_phase(|| {
                     managed_runtime.resume_terminal(&owned.handle)
@@ -401,18 +407,20 @@ impl RecoveryFixture {
             handle
                 .block_on(boxed_execution_phase(|| execution.post_worker_result()))
                 .unwrap();
-            // Represent a previously published scan to isolate recovery of
-            // the worker cleanup without starting a scan helper.
-            handle
-                .block_on(execution.fact_event(
-                    "broker.batch.scan",
-                    &json!({
-                        "version": 1, "worker_id": running.worker_id,
-                        "helper_id": Uuid::new_v4(), "manifest_digest": "a".repeat(64),
-                        "changed_files": 0, "truncated": false, "changes": []
-                    }),
-                ))
-                .unwrap();
+            if matches!(case, Case::TerminalCleanupRecovery) {
+                // Represent a previously published scan to isolate recovery of
+                // the worker cleanup without starting a scan helper.
+                handle
+                    .block_on(execution.fact_event(
+                        "broker.batch.scan",
+                        &json!({
+                            "version": 1, "worker_id": running.worker_id,
+                            "helper_id": Uuid::new_v4(), "manifest_digest": "a".repeat(64),
+                            "changed_files": 0, "truncated": false, "changes": []
+                        }),
+                    ))
+                    .unwrap();
+            }
             fs::write(base.root.path().join("allow-fixture-cleanup"), b"").unwrap();
         } else {
             handle

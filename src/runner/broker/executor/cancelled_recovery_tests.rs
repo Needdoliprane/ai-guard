@@ -81,6 +81,28 @@ fn resumed_terminal_worker_reconciles_cleanup_only_for_its_observed_container() 
 }
 
 #[test]
+fn resumed_terminal_worker_keeps_container_when_final_scan_fails() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime should initialize");
+    let fixture = runtime.block_on(RecoveryFixture::new(Case::TerminalCleanupWithoutScan));
+    let before = fixture.worker();
+    assert_eq!(before.state, WorkerStateV1::Terminal);
+    assert_eq!(before.cleanup_removed, None);
+    let cleanup = format!("rm {}", before.attempt.container_id.as_deref().unwrap());
+
+    // The synthetic engine rejects the final scan's helper inventory.
+    assert!(fixture.run_sync(&runtime).is_err());
+    let calls = fixture.runtime_calls();
+    assert!(calls.iter().any(|call| call.starts_with("ps ")));
+    assert!(!calls.contains(&cleanup), "rm must wait for the scan ACK");
+    assert_eq!(fixture.worker().revision, before.revision);
+    assert_eq!(fixture.worker().cleanup_removed, None);
+    assert!(fixture.completed_cleanup_receipts().is_empty());
+}
+
+#[test]
 fn cancelled_running_worker_reconciles_an_exact_terminal_without_a_new_start() {
     assert_exact_terminal_reconciliation(Case::TerminalAfterCancel);
 }
