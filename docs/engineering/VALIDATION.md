@@ -1,5 +1,21 @@
 # Validation courante
 
+## 24 novembre 2026 — premier claim Full3 et fermeture de la fixture
+
+**FAIL ciblé G07**, source de test `250048dd`, macOS ARM64.
+La compilation verrouillée hors ligne passe. La fixture observe les
+reçus d’import et de vérification, la création du worker synthétique et
+trois réponses d’armement. Le premier `WorkerClaim` n’arrive pas au
+gateway de recette avant l’échéance de 180 s. Son état dans le
+journal durable reste à établir.
+
+Le runtime de recette et le gateway rejoignent leurs tâches. Le test
+signale aussi une fermeture non confirmée du gardien et la conservation
+du broker pour la garde. Verdict code 101 en 191,54 s. Reçu privé
+`g07-first-full3-claim-250048dd`, journal SHA-256
+`eba42802010e3c92a39447700307307ae94eef5bf834dac0bd0086c9970bf616`.
+La branche de test reste disponible pour isoler ce palier.
+
 ## 24 novembre 2026 — écritures d’administration sur une source possédée
 
 **PASS ciblé G08**, deux tests SQLite au format 15 sur macOS ARM64,
