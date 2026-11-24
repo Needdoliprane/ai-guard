@@ -144,7 +144,7 @@ Le mainteneur demande des essais économes : Luna pour l'orchestration des tests
 
 ## Vue cloud unifiée par client
 
-Un **dashboard unique par client** regroupe tous ses agents, sous-agents, workers et sandboxes, même répartis sur plusieurs brokers, hôtes ou runtimes. Aucun dashboard par worker à consulter. La cible reste au moins 100 workers par client, à mesurer réellement. L'identité authentifiée sélectionne le tenant : A voit tout A selon son rôle, B tout B, sans exposition inter-client.
+Un **dashboard unique par client** regroupe tous ses agents, sous-agents, workers et sandboxes, même répartis sur plusieurs brokers, hôtes ou runtimes. Aucun dashboard par worker à consulter. La V1 doit prouver 100 réservations durables pour un même client. La recette sur moteur emploie A1/A2 chez A et B1 chez B. L'identité authentifiée sélectionne le tenant : A voit tout A selon son rôle, B tout B, sans exposition inter-client.
 
 Le control plane rassemble registre, événements, décisions, quotas et usage du client ; l'UI utilise ses API autorisées et son flux temps réel, sans moteur ni secrets runner. Afficher autorité d'exécution, provenance, fraîcheur et dernier état connu. Un broker déconnecté ou une collecte partielle n'est jamais présenté comme une vue complète ou zéro activité. Quotas et comptage restent cohérents au niveau du tenant.
 
@@ -180,7 +180,7 @@ Quel que soit ce moteur, les autorisations centrales, refus d'audit, isolation t
 - Réservation/quota, état du worker, autorisation du relais, message et mesure terminale s'appuient sur des transactions durables avec audit obligatoire. Les reprises sont idempotentes ; une divergence de contenu pour la même identité est un conflit.
 - Les messages du relais sont des données métier stockées dans la base du client ; l'audit ne duplique pas leur corps. Ne jamais y envoyer des secrets sans un mécanisme de protection explicite.
 - Le relevé actuel est du temps d'allocation CPU/RAM, pas une mesure de CPU réellement consommé, pas un prix et pas une facture. Il porte `billable=false`. Ne pas inventer une durée ou déclarer zéro lorsqu'une observation runtime manque.
-- La recette locale standard emploie **3 workers**, A1/A2 chez A et B1 chez B, plus les services de contrôle. Les tests de charge 100 sont distincts ; ne pas imposer 100 conteneurs à un développeur.
+- La recette locale standard emploie **3 workers**, A1/A2 chez A et B1 chez B, plus les services de contrôle. La capacité de réservation est vérifiée séparément sur 100 réservations durables pour un client, sans lancement de conteneurs.
 
 Lire `docs/engineering/CLOUD_TENANCY.md`, `docs/engineering/LOCAL_CLOUD_TESTS.md` et `docs/engineering/USAGE_METERING.md` pour tout changement touchant ces contrats.
 

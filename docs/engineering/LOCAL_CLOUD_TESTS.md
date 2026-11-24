@@ -1,6 +1,6 @@
 # Recette trois workers — état et cible
 
-La recette obligatoire sur le poste du mainteneur lance trois vrais workers en parallèle, A1/A2 chez A et B1 chez B, avec contrôle séparé. Trois à cinq workers suffisent à la validation fonctionnelle locale. La mesure de capacité à 100 workers actifs par tenant relève d’un environnement dimensionné pour cette charge. [Critères de la recette](TEST_STRATEGY.md)
+La recette obligatoire sur le poste du mainteneur lance trois vrais workers en parallèle, A1/A2 chez A et B1 chez B, avec contrôle séparé. La preuve de capacité V1 vérifie séparément 100 réservations durables pour un même tenant, sans lancement de conteneurs. [Critères de la recette](TEST_STRATEGY.md)
 
 Observer les trois workers actifs pendant une même période, avec leur identifiant d’exécution, un volume de travail propre et un résultat distinct pour chacun. Arrêter A1 pendant que A2 et B1 poursuivent leur exécution, puis vérifier leurs résultats et la portée des traces côté CLI et dashboard. Conserver les vérifications de rôles, de refus inter-tenant et du relais A1→A2 soumis à autorisation.
 
