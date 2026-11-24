@@ -83,6 +83,25 @@ de la garde. Manifeste
 sous `g07-broker-step-decoder-631d3331`. Le comportement Full3
 de bout en bout reste à corriger.
 
+La comparaison des trois chaînes place la possession durable du
+worker en révision 31 dans chaque essai. En 32, les deux premiers
+publient `Created` en attente et le troisième enregistre l’échec.
+La publication ultérieure du diagnostic dans ce troisième essai
+établit la disponibilité du writer à ce moment. Le refus local
+et l’indisponibilité transitoire au moment de `Created` restent
+à départager.
+
+La mesure manuelle `measure_durable_journal_cost_without_runtime`
+passe en 9,47 s avec le libtest macOS ARM64 vérifié de `cf754fc0`.
+Les sources Journal, Writer et stockage de fichiers correspondent
+au candidat. Sur les 11 échantillons conservés, le maximum observé
+côté appelant est de 470,12 ms pour une lecture de statut. Le premier
+échantillon de lecture de la révision 0 manque dans la capture.
+La fixture atteint la révision 18 et laisse inconnue la latence
+pendant les lancements Full3. Reçu privé
+`g07-durable-journal-cost-20261124`, manifeste SHA-256
+`39a0dc5bd001e4d932d6791ca4be7b2c3d9a03c7b6f7fec087701a4bacdbb3c1`.
+
 ## 24 novembre 2026 — écritures d’administration sur une source possédée
 
 **PASS ciblé G08**, deux tests SQLite au format 15 sur macOS ARM64,
