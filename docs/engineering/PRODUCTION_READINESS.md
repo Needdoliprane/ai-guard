@@ -108,6 +108,18 @@ et `g02-podman-netnone-route-recheck-99cb885e.txt`, SHA-256 respectifs
 `50cc7243f0164fa46fc82901bcb3fa3b649571f16aa46085d4b090a33ad009d0`
 et `7a59d6ffdbc0434b4bf55efbe7f037885252a4f71e71fa288c9840f0fb292967`.
 
+**G05 — ordre de décision et de connexion E2.** Sur `1c03e01f`, le
+[témoin E2](../../src/broker/egress_owner/channel_tests.rs) passe 1/1
+en 0,61 s avec le gateway Rust, SQLite et une destination TCP loopback.
+Une seconde connexion SQLite en lecture seule voit la décision durable
+pour la même tentative pendant que la réponse du gateway est retenue.
+Le listener accepte zéro connexion avant la libération de la réponse,
+puis une seule. Après jonction des tâches, l’observation est corrélée à
+la décision et la clôture d’audit est acquittée sans perte. Le canal
+utilise un duplex de recette. Le raccord E3 et les effets en worker
+sur moteur restent ouverts. Reçu `g05-e2-1c03e01f.log`, SHA-256
+`a917e619afbd7c54c9ebd3741d797ab7ddb35f6fe075282040165bc833b6ef8d`.
+
 **G06 — refus d’une copie SQLite Store14.** Sur `fc8dba50`, le
 [témoin CLI](../../tests/human_sources_bootstrap.rs) lit le tenant A avec
 la base originale et ferme le gateway. Après une sauvegarde SQLite Online
