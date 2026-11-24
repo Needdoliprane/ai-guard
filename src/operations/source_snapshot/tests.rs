@@ -1794,20 +1794,12 @@ fn a_refusal_never_prints_a_control_character_of_a_source_name() {
         "source input must not be a symbolic link: src/a\\\\nb"
     );
 
-    // A name longer than a message shows is cut, and the cut is marked.
-    let long = Fixture::new();
-    let directory = long
-        .source
-        .join("src")
-        .join(format!("{}/", "n".repeat(200)).repeat(6));
-    fs::create_dir_all(&directory).unwrap();
-    symlink("main.rs", directory.join("link")).unwrap();
-    let message = refusal(long.capture(Scope::Build, Limits::default()));
-    let shown = message
-        .strip_prefix("source input must not be a symbolic link: src/nnn")
-        .unwrap_or_else(|| panic!("{message:?}"));
-    assert!(shown.ends_with("nnn…"), "{message:?}");
-    assert_eq!(shown.chars().count() + "src/nnn".len(), 1025, "{message:?}");
+    // The display bound can exceed the host filesystem's path limit.
+    let long = Path::new("src").join(format!("{}/", "n".repeat(200)).repeat(6));
+    let rendered = super::capture::shown(&long.join("link"));
+    assert!(rendered.starts_with("src/nnn"), "{rendered:?}");
+    assert!(rendered.ends_with("nnn…"), "{rendered:?}");
+    assert_eq!(rendered.chars().count(), 1025, "{rendered:?}");
 
     // APFS refuses such a name when it is created.
     #[cfg(target_os = "linux")]
