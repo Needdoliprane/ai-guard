@@ -1,5 +1,17 @@
 # Validation courante
 
+## 24 novembre 2026 — navigation compacte après redimensionnement
+
+**PASS ciblé G08** sur `c9704ca8`. Sous Chrome 158, les scénarios
+`partial` et `keyboard` échouaient à 320 px sur `b46e1cae`.
+Les mesures montraient un onglet courant hors du rectangle de la
+barre. Le correctif maintient visible la destination au focus, ou
+la destination active si la barre ne détient pas le focus.
+Les deux scénarios passent avec le nouveau bundle et le vrai
+gateway de recette. Les captures à 320 px couvrent les thèmes
+clair et sombre. Le build TypeScript/Vite passe. La suite frontend
+sous Node.js 25.6.1 compte 363 réussites, 8 tests ignorés et zéro échec.
+
 ## 24 novembre 2026 — révocation des droits avec Chrome connecté
 
 **PASS ciblé G08** sur `242ebe39`, avec le scénario `revoked`, le
