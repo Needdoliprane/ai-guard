@@ -874,7 +874,14 @@ async fn run(
     if matches!(lost, LostProcess::RunCli { .. }) {
         broker.require_graceful_shutdown();
     }
-    wait_broker(evidence, &runner, operation, &mut broker).await?;
+    wait_broker(
+        evidence,
+        &runner,
+        operation,
+        &mut broker,
+        "broker-1-readiness.json",
+    )
+    .await?;
     let daemon_sample_before = Instant::now();
     let docker_events_since = selection.docker_clock().await?;
     evidence.write("stage.json", &json!({"stage":"submit_real_worker"}))?;
@@ -1533,7 +1540,14 @@ async fn run(
         .await;
     }
     let mut restarted = harness::broker(selection, evidence, 2)?;
-    wait_broker(evidence, &runner, operation, &mut restarted).await?;
+    wait_broker(
+        evidence,
+        &runner,
+        operation,
+        &mut restarted,
+        "broker-2-readiness.json",
+    )
+    .await?;
     evidence.write("stage.json", &json!({"stage":"restart_broker_ready"}))?;
     wait_terminal(
         evidence,
@@ -2296,28 +2310,95 @@ fn close_legacy_child(child: &mut harness::OwnedProcess) -> &'static str {
     }
 }
 
+#[derive(serde::Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+enum BrokerReadiness {
+    Ready,
+    ChildUnavailable,
+    Deadline,
+    DiscoveryUnavailable,
+    ConnectionUnavailable,
+    RequestOutcomeUnknown,
+    ReplyUnavailable,
+    IpcTimeout,
+    IpcFailure,
+    StatusRefused { code: BrokerErrorCodeV1 },
+    OperationMismatch,
+    UnexpectedReply,
+}
+
 async fn wait_broker(
     evidence: &Evidence,
     runner: &str,
     operation_id: Uuid,
     child: &mut harness::OwnedProcess,
+    report: &str,
 ) -> Result<()> {
     let limit = Instant::now() + Duration::from_secs(20);
+    let mut attempts = 0;
+    let mut observed = BrokerReadiness::Deadline;
     loop {
-        child.running()?;
-        if matches!(
-            ipc(evidence, runner, BrokerCommandV1::Status { operation_id }).await,
-            Ok(BrokerReplyV1::Status { status }) if status.operation_id == operation_id
-        ) {
+        if let Err(error) = child.running() {
+            evidence.write(
+                report,
+                &json!({"attempts":attempts,"last":BrokerReadiness::ChildUnavailable}),
+            )?;
+            return Err(error);
+        }
+        if Instant::now() >= limit {
+            break;
+        }
+        attempts += 1;
+        observed = match timeout_at(
+            limit,
+            ipc(evidence, runner, BrokerCommandV1::Status { operation_id }),
+        )
+        .await
+        {
+            Ok(Ok(BrokerReplyV1::Status { status })) if status.operation_id == operation_id => {
+                BrokerReadiness::Ready
+            }
+            Ok(Ok(BrokerReplyV1::Status { .. })) => BrokerReadiness::OperationMismatch,
+            Ok(Ok(BrokerReplyV1::Error { code })) => BrokerReadiness::StatusRefused { code },
+            Ok(Ok(_)) => BrokerReadiness::UnexpectedReply,
+            Ok(Err(error)) => broker_readiness_ipc_failure(&error),
+            Err(_) => BrokerReadiness::Deadline,
+        };
+        if matches!(observed, BrokerReadiness::Ready) {
+            evidence.write(report, &json!({"attempts":attempts,"last":observed}))?;
             return Ok(());
         }
-        ensure!(
-            Instant::now() < limit,
-            "broker did not become available; inspect private stderr"
-        );
-        sleep(Duration::from_millis(50)).await;
+        sleep_until(limit.min(Instant::now() + Duration::from_millis(50))).await;
+    }
+    evidence.write(report, &json!({"attempts":attempts,"last":observed}))?;
+    bail!("broker did not become available; inspect {report} and private stderr")
+}
+
+fn broker_readiness_ipc_failure(error: &anyhow::Error) -> BrokerReadiness {
+    if error
+        .downcast_ref::<tokio::time::error::Elapsed>()
+        .is_some()
+    {
+        return BrokerReadiness::IpcTimeout;
+    }
+    // Project only known static client messages. A receipt never carries raw IPC errors.
+    match error.to_string().as_str() {
+        "broker is not running; start broker serve explicitly"
+        | "private broker discovery is unavailable or unsafe"
+        | "private broker discovery is unsafe"
+        | "private broker endpoint is unavailable"
+        | "private broker endpoint is unsafe" => BrokerReadiness::DiscoveryUnavailable,
+        "broker is unavailable; request was not sent" => BrokerReadiness::ConnectionUnavailable,
+        "broker request outcome is unknown; inspect or retry the same operation identity" => {
+            BrokerReadiness::RequestOutcomeUnknown
+        }
+        "broker reply is unavailable or invalid; inspect or retry the same operation identity" => {
+            BrokerReadiness::ReplyUnavailable
+        }
+        _ => BrokerReadiness::IpcFailure,
     }
 }
+
 async fn observe_existing_guard(evidence: &Evidence) -> Result<EnforcerClient> {
     let root = Directory::open_existing(&evidence.root.join("b/enforcer"))?;
     let auth = root.read_private_file("auth", 32)?;
