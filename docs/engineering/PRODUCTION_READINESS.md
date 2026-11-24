@@ -109,6 +109,19 @@ en service d’une copie restaurée reste ouverte. Reçu
 `g06-store14-fc8dba50/store14.log`, SHA-256
 `a24c79d8d9defcefc3020083075950404e2f5cc6c773298ec663d0395b723c30`.
 
+**G07 — sélection et préparation hors ligne.** Sur `5063391f`, le
+[prévol de recette](../../tests/e2e/test_run_provider_preflight.py) passe
+13 tests dont 16 sous-cas du compagnon de diagnostic macOS installé
+`99cb885e` (quatre couples client/mode, deux transports, référence
+synthétique présente ou absente). Le
+[test Rust de préparation](../../tests/provider_bootstrap.rs) passe 1/1
+et couvre les huit plans, les répertoires privés et le choix exclusif du
+mode d’authentification. Aucun fournisseur ou terminal réel n’est lancé.
+Les connexions et conversations réelles restent à qualifier. Reçus
+`g07-provider-preflight-5063391f.log` et `g07-bootstrap-5063391f.log`,
+SHA-256 respectifs `bcaac8ceb80871fca69fc70b281a3d4c30319667a56d639388d5b4625d75a1e3`
+et `3f39a706000723482cd4643197d5e23c660ed55b30ddf231b6a396063887e8cf`.
+
 **G08 — composition du registre.** Sur `26e19e84`, le
 [test d’agrégation du gateway](../../tests/supervision_stack_api.rs) passe
 1/1 en 21,09 s avec SQLite. Le parcours restitue les 120 lignes synthétiques
