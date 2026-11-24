@@ -105,9 +105,12 @@ code.
 retrouve l’Arm, le worker, la tentative, l’horloge et l’échéance
 d’origine via `RecoveryStatus` après redémarrage. Le broker et
 le gateway de test confirment leur fermeture, et le gardien et les
-ressources restent conservés. Le résultat métier et le quota après
-redémarrage ne sont pas établis par ce témoin. G09 conserve le
-verdict FAIL du pilote Linux x86-64.
+ressources restent conservés. Une lecture des copies SQLite de
+ces trois recettes confirme un worker encore `running` dans chaque
+registre, avec quota retenu, une observation et aucune allocation
+terminale, alors que Docker indique `exited` pour les trois
+conteneurs. Ce contrôle décrit l’état au terme de ces recettes.
+G09 conserve le verdict FAIL du pilote Linux x86-64.
 
 ## 24 novembre 2026 — redémarrage OIDC après migration de l’audit vers V4
 
