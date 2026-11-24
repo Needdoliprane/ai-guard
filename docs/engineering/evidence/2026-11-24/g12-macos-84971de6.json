@@ -276,5 +276,21 @@
         "cli_sha256": "c7a0790ab62d3ecee106b2c55caffc2e156d317bd82cc867c66524de85cdee46"
       }
     ]
+  },
+  "existing_workspace_export_destination": {
+    "docker": {
+      "occupied_destination_refused": true,
+      "source_and_destination_unchanged": true,
+      "exit_code": 1,
+      "initial_export_passed": true,
+      "integrity_and_inventories_verified": true
+    },
+    "podman_rootless": {
+      "occupied_destination_refused": true,
+      "source_and_destination_unchanged": true,
+      "exit_code": 1,
+      "initial_export_passed": true,
+      "integrity_and_inventories_verified": true
+    }
   }
 }

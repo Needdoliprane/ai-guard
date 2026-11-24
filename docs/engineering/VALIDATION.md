@@ -119,6 +119,10 @@ bascule le lien de recette `e2796ac1` → `84971de6` → `e2796ac1`.
 de la recette Podman. Les deux tenants conservent leurs propres
 têtes d’audit et compteurs. Le test couvre la lecture Legacy lors
 d’un changement de binaire, sans migration ni nouvelle exécution.
+Pour G03, le même CLI publie un premier export neuf sur les deux
+moteurs, puis refuse sa réutilisation après ajout d’un fichier témoin.
+L’export existant et la source gardent leurs octets. Le refus rend
+le code 1, l’intégrité reste valide et les inventaires sont restaurés.
 [Reçu macOS, Docker et Podman](evidence/2026-11-24/g12-macos-84971de6.json).
 
 ## 24 novembre 2026 — profil TLS local à volumes neufs
