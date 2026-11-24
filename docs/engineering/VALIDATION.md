@@ -12,7 +12,13 @@ avec `Last-Event-ID: 3` reçoit les séquences 4 et 5 dans l’ordre et
 avec les empreintes attendues. L’audit reste valide. Le test utilise
 un override de recette pour les sous-réseaux et le redémarrage manuel.
 SQLite est sauvegardée et les ressources Compose sont retirées.
-La contre-pression TCP sous un lecteur lent reste à qualifier.
+Une seconde recette suspend les lectures d’un client SSE pendant
+l’insertion de 192 événements synthétiques. Deux relevés côté ingress
+séparés de 600 ms indiquent chacun 2 384 923 octets en file TCP.
+Un lecteur indépendant reçoit les trois derniers événements dans
+l’ordre et avec les empreintes attendues, et l’audit reste valide.
+La base est sauvegardée et les ressources sont retirées. Ce test
+couvre un seul lecteur lent sur Docker Desktop loopback.
 [Reçu SSE Docker](evidence/2026-11-24/g08-compose-sse-abrupt-cut.json).
 
 ## 24 novembre 2026 — arrêt explicite d’A1 sur Podman rootless

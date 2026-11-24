@@ -17,5 +17,34 @@
   "qa_network_ipam_override": true,
   "qa_gateway_auto_restart_disabled": true,
   "sqlite_backup_retained": true,
-  "cleanup_verified": true
+  "cleanup_verified": true,
+  "bounded_slow_reader": {
+    "events_committed": 192,
+    "baseline_ingress_send_queue_bytes": 0,
+    "sampled_ingress_send_queue_bytes": [
+      0,
+      0,
+      208,
+      546958,
+      546958,
+      546958
+    ],
+    "slow_only_send_queue_bytes": [
+      2384923,
+      2384923
+    ],
+    "independent_reader_resumed_sequences": [
+      192,
+      193,
+      194
+    ],
+    "independent_reader_hashes_match": true,
+    "integrity": true,
+    "source": "Docker Compose loopback",
+    "requested_client_receive_buffer_bytes": 4096,
+    "server_measurement": "ingress container /proc/net/tcp established server-side sockets",
+    "slow_only_sample_separation_seconds": 0.6,
+    "sqlite_backup_retained": true,
+    "cleanup_verified": true
+  }
 }
