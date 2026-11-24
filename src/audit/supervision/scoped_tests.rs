@@ -172,7 +172,7 @@ fn assert_owned_post_claim_backup(format: u32, readopt: bool) {
     }
 
     let previous_incarnation = token.incarnation();
-    let original_binding = token.descriptor().storage_binding.clone();
+    let original_identity = token.descriptor().storage_binding.source_identity();
     drop(token);
     copy.close().unwrap();
     drop(backup_file);
@@ -181,7 +181,10 @@ fn assert_owned_post_claim_backup(format: u32, readopt: bool) {
     let store = &bundle.stores[&source_id];
     let token = bundle.owner.source_token(source_id).unwrap();
     assert_ne!(token.incarnation(), previous_incarnation);
-    assert_ne!(token.descriptor().storage_binding, original_binding);
+    assert_ne!(
+        token.descriptor().storage_binding.source_identity(),
+        original_identity
+    );
     assert_eq!(token.descriptor().storage_binding.path(), path);
     let epoch = bundle.owner.try_read_epoch().unwrap();
     let access = HumanSourceAccess::read(&epoch, &token).unwrap();
