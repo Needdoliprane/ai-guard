@@ -4,14 +4,17 @@
 
 mod support;
 
+#[path = "support/supervision_seed.rs"]
+mod supervision_seed;
+
 use agentsandbox::{
     api::{GatewayState, TenantGateway, gateway_router},
     audit::Store,
-    broker::enforcer::EnforcerClient,
     broker::service::{
         self,
         protocol::{BrokerCommandV1, BrokerErrorCodeV1, BrokerReplyV1},
     },
+    broker::{enforcer::EnforcerClient, local_ipc::EndpointRecordV1},
     broker_registry::{BrokerAuthorityV1, BrokerGrantMutationV1, BrokerRuntimeKindV1},
     control::QuotaPolicyV1,
     control_fs::Directory,
@@ -19,6 +22,7 @@ use agentsandbox::{
     redaction::Redactor,
     workload::{WorkloadBindingIssueV1, WorkloadSubjectV1},
 };
+use anyhow::{Context, ensure};
 use axum::{
     body::{Body, to_bytes},
     http::{Request, Response},
@@ -56,6 +60,24 @@ const CREDENTIAL_ID: &str = "44444444-4444-4444-8444-444444444444";
 const AUTHORITY_ID: &str = "declared-presence-cli-authority";
 const BROKER_TOKEN: &str = "broker-presence-cli-token-aaaaaaaaaaaaaaaa";
 const RUNNER_TOKEN: &str = "runner-presence-cli-token-bbbbbbbbbbbbbbbb";
+
+struct BrokerFixture<'a> {
+    installation_id: &'a str,
+    broker_id: &'a str,
+    incarnation_id: &'a str,
+    credential_id: &'a str,
+    authority_id: &'a str,
+    token: &'a str,
+}
+
+const DEFAULT_BROKER: BrokerFixture<'static> = BrokerFixture {
+    installation_id: "11111111-1111-4111-8111-111111111111",
+    broker_id: BROKER_ID,
+    incarnation_id: INCARNATION_ID,
+    credential_id: CREDENTIAL_ID,
+    authority_id: AUTHORITY_ID,
+    token: BROKER_TOKEN,
+};
 
 struct Gateway {
     url: String,
@@ -153,36 +175,7 @@ fn start_gateway_with_refusals(
     )
     .expect("schema6 control namespace is a canonical UUID");
 
-    store
-        .issue_workload_binding(&WorkloadBindingIssueV1 {
-            version: 1,
-            operation_id: Uuid::new_v4().to_string(),
-            credential_id: CREDENTIAL_ID.into(),
-            expected_revision: 0,
-            subject: WorkloadSubjectV1::Broker {
-                broker_id: BROKER_ID.into(),
-                incarnation_id: INCARNATION_ID.into(),
-            },
-            sha256_digest: hex::encode(Sha256::digest(BROKER_TOKEN.as_bytes())),
-            expires_at: "2100-01-01T00:00:00.000Z".into(),
-        })
-        .unwrap();
-    store
-        .mutate_broker_grant(&BrokerGrantMutationV1 {
-            version: 1,
-            operation_id: Uuid::new_v4().to_string(),
-            broker_id: BROKER_ID.into(),
-            expected_revision: None,
-            credential_id: CREDENTIAL_ID.into(),
-            incarnation_id: INCARNATION_ID.into(),
-            authorities: vec![BrokerAuthorityV1 {
-                authority_id: AUTHORITY_ID.into(),
-                runtime_kind: BrokerRuntimeKindV1::Docker,
-            }],
-            lease_seconds: 30,
-            not_after: "2100-01-01T00:00:00.000Z".into(),
-        })
-        .unwrap();
+    grant_broker(&store, &DEFAULT_BROKER).unwrap();
 
     let state = GatewayState::for_tenants(
         vec![TenantGateway {
@@ -216,7 +209,47 @@ fn start_gateway_with_refusals(
     )
 }
 
+fn grant_broker(store: &Store, broker: &BrokerFixture<'_>) -> anyhow::Result<()> {
+    store.issue_workload_binding(&WorkloadBindingIssueV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        credential_id: broker.credential_id.into(),
+        expected_revision: 0,
+        subject: WorkloadSubjectV1::Broker {
+            broker_id: broker.broker_id.into(),
+            incarnation_id: broker.incarnation_id.into(),
+        },
+        sha256_digest: hex::encode(Sha256::digest(broker.token.as_bytes())),
+        expires_at: "2100-01-01T00:00:00.000Z".into(),
+    })?;
+    store.mutate_broker_grant(&BrokerGrantMutationV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        broker_id: broker.broker_id.into(),
+        expected_revision: None,
+        credential_id: broker.credential_id.into(),
+        incarnation_id: broker.incarnation_id.into(),
+        authorities: vec![BrokerAuthorityV1 {
+            authority_id: broker.authority_id.into(),
+            runtime_kind: BrokerRuntimeKindV1::Docker,
+        }],
+        lease_seconds: 30,
+        not_after: "2100-01-01T00:00:00.000Z".into(),
+    })?;
+
+    Ok(())
+}
+
 fn create_registry(root: &Path, gateway: &str, namespace: Uuid) -> (PathBuf, PathBuf) {
+    create_broker_registry(root, gateway, namespace, &DEFAULT_BROKER)
+}
+
+fn create_broker_registry(
+    root: &Path,
+    gateway: &str,
+    namespace: Uuid,
+    broker: &BrokerFixture<'_>,
+) -> (PathBuf, PathBuf) {
     let broker_root = root.join("broker-state");
     let config_dir = root.join("config");
     let source = root.join("source");
@@ -230,17 +263,17 @@ fn create_registry(root: &Path, gateway: &str, namespace: Uuid) -> (PathBuf, Pat
     fs::set_permissions(&credentials, fs::Permissions::from_mode(0o700)).unwrap();
     let broker_token = credentials.join("broker-token");
     let runner_token = credentials.join("runner-token");
-    private_write(&broker_token, BROKER_TOKEN.as_bytes());
+    private_write(&broker_token, broker.token.as_bytes());
     private_write(&runner_token, RUNNER_TOKEN.as_bytes());
     let presence = config_dir.join("presence.json");
     private_write(
         &presence,
         &serde_json::to_vec(&json!({
             "version": 1,
-            "broker_id": BROKER_ID,
-            "credential_id": CREDENTIAL_ID,
-            "incarnation_id": INCARNATION_ID,
-            "authority_id": AUTHORITY_ID,
+            "broker_id": broker.broker_id,
+            "credential_id": broker.credential_id,
+            "incarnation_id": broker.incarnation_id,
+            "authority_id": broker.authority_id,
             "broker_token_file": broker_token,
             "ca_bundle_file": null,
             "state_dir": config_dir.join("presence-state"),
@@ -260,7 +293,7 @@ fn create_registry(root: &Path, gateway: &str, namespace: Uuid) -> (PathBuf, Pat
     let registry = config_dir.join("registry.json");
     let value = json!({
         "version": 2,
-        "installation_id": "11111111-1111-4111-8111-111111111111",
+        "installation_id": broker.installation_id,
         "root": broker_root,
         "max_enforcer_slots": 8,
         "profiles": [{
@@ -521,10 +554,15 @@ async fn drain_bounded<R: tokio::io::AsyncRead + Unpin>(mut stream: R) -> Draine
     }
 }
 
-async fn wait_for_heartbeat(store: &Store, child: &mut Child, timeout: Duration) -> Option<u64> {
+async fn wait_for_heartbeat(
+    store: &Store,
+    broker_id: &str,
+    child: &mut Child,
+    timeout: Duration,
+) -> Option<u64> {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Ok(Some(view)) = store.broker(BROKER_ID) {
+        if let Ok(Some(view)) = store.broker(broker_id) {
             if let Some(receipt) = view.broker.last_heartbeat {
                 return Some(receipt.sequence);
             }
@@ -648,6 +686,7 @@ async fn exercise_real_broker_presence(temporary_refusals: usize) {
     let publication_watchdog = if temporary_refusals == 0 { 90 } else { 30 };
     let sequence = wait_for_heartbeat(
         &store,
+        BROKER_ID,
         &mut child,
         Duration::from_secs(publication_watchdog),
     )
@@ -779,6 +818,279 @@ async fn exercise_real_broker_presence(temporary_refusals: usize) {
 }
 
 #[tokio::test]
+async fn human_federation_reads_two_live_broker_presences_without_workers() -> anyhow::Result<()> {
+    use agentsandbox::identity::HumanCapabilityV1;
+
+    // Nested per-broker roots must fit Darwin's Unix socket path limit.
+    let fixture = tempfile::Builder::new()
+        .prefix("g08-")
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir_in(if cfg!(target_os = "macos") {
+            "/private/tmp"
+        } else {
+            "/tmp"
+        })?;
+    let root = fixture.path().canonicalize()?;
+    let db = root.join("tenant.sqlite");
+    let store = Arc::new(Store::open_for_tenant(
+        &db,
+        TENANT,
+        Redactor::new(vec![]),
+        10_000,
+    )?);
+    supervision_seed::migrate(&store, &db)?;
+    let namespace = Uuid::parse_str(
+        &store
+            .supervision_state()?
+            .control_namespace_uuid
+            .context("control namespace")?,
+    )?;
+    let account = supervision_seed::provision(
+        &store,
+        "broker presence administrator",
+        supervision_seed::ORGANIZATION,
+        &[
+            HumanCapabilityV1::ReadMetadata,
+            HumanCapabilityV1::ReadTenantMetadata,
+            HumanCapabilityV1::ReadBrokerRegistry,
+            HumanCapabilityV1::ReadWorkerRegistry,
+        ],
+    )?;
+    let ids: [String; 5] = std::array::from_fn(|_| Uuid::new_v4().to_string());
+    let brokers = [
+        DEFAULT_BROKER,
+        BrokerFixture {
+            installation_id: &ids[0],
+            broker_id: &ids[1],
+            incarnation_id: &ids[2],
+            credential_id: &ids[3],
+            authority_id: &ids[4],
+            token: "broker-presence-cli-token-second-fixture",
+        },
+    ];
+    let state = GatewayState::for_tenants(
+        vec![TenantGateway {
+            tenant_id: TENANT.into(),
+            store: Arc::clone(&store),
+            runner_token: RUNNER_TOKEN.into(),
+            viewer_token: "viewer-presence-cli-token-cccccccccccccccc".into(),
+        }],
+        Policy::default(),
+        None,
+        Redactor::new(
+            brokers
+                .iter()
+                .map(|broker| broker.token.to_owned())
+                .chain([RUNNER_TOKEN.to_owned(), account.token.clone()])
+                .collect(),
+        ),
+    )?;
+    let front = root.join("front");
+    fs::create_dir(&front)?;
+    fs::write(
+        front.join("index.html"),
+        "<title>Broker presence test</title>",
+    )?;
+    let served = supervision_seed::serve_state(state, front).await?;
+    let mut configurations = Vec::new();
+    for (index, broker) in brokers.iter().enumerate() {
+        grant_broker(&store, broker)?;
+        ensure!(
+            store
+                .broker(broker.broker_id)?
+                .context("broker grant")?
+                .broker
+                .last_heartbeat
+                .is_none(),
+            "broker starts without heartbeat"
+        );
+        let child_root = root.join(format!("broker-{index}"));
+        fs::create_dir(&child_root)?;
+        fs::set_permissions(&child_root, fs::Permissions::from_mode(0o700))?;
+        let (registry, broker_root) =
+            create_broker_registry(&child_root, &served.gateway, namespace, broker);
+        configurations.push((child_root, registry, broker_root));
+    }
+
+    let mut children = Vec::new();
+    let mut guards = Vec::new();
+    let result: anyhow::Result<()> = async {
+        for (child_root, registry, _) in &configurations {
+            children.push(
+                command(child_root, registry)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()?,
+            );
+        }
+        let deadline = Instant::now() + Duration::from_secs(90);
+        for ((broker, child), (_, _, broker_root)) in
+            brokers.iter().zip(&mut children).zip(&configurations)
+        {
+            let sequence = wait_for_heartbeat(
+                &store,
+                broker.broker_id,
+                child,
+                deadline.saturating_duration_since(Instant::now()),
+            )
+            .await;
+            ensure!(
+                sequence.is_some_and(|sequence| sequence > 0),
+                "durable heartbeat missing"
+            );
+            guards.push(observe_presence_guard(broker_root).await?);
+        }
+
+        let identity: Value = served
+            .client
+            .get(format!("{}/api/v1/human/identity", served.dashboard))
+            .bearer_auth(&account.token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let context = identity["contexts"]
+            .as_array()
+            .context("human contexts")?
+            .iter()
+            .find(|context| context["mode"] == "administration")
+            .and_then(|context| context["id"].as_str())
+            .context("administration context")?;
+        let fleet: Value = served
+            .client
+            .get(format!(
+                "{}/api/v1/human/federation/workers?worker_limit=100&broker_limit=100",
+                served.dashboard
+            ))
+            .bearer_auth(&account.token)
+            .header("X-AiGuard-Context", context)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        ensure!(
+            fleet["source"] == "tenant_federation_registry"
+                && fleet["coverage"] == "partial"
+                && fleet["runtime_inventory"] == "unknown",
+            "federation provenance or coverage differs"
+        );
+        let rows = fleet["brokers"]["items"]
+            .as_array()
+            .context("broker rows")?;
+        ensure!(
+            rows.len() == brokers.len() && fleet["brokers"]["has_more"] == false,
+            "broker count differs"
+        );
+        for broker in &brokers {
+            ensure!(
+                rows.iter().any(|row| row["broker_id"] == broker.broker_id
+                    && row["incarnation_id"] == broker.incarnation_id
+                    && row["state"] == "current"),
+                "expected broker incarnation is not current"
+            );
+        }
+        ensure!(
+            fleet["workers"]["items"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
+                && fleet["workers"]["has_more"] == false
+                && store.worker_usage()?.is_empty()
+                && store.worker_quota(&QuotaPolicyV1::default())?.held_workers == 0,
+            "fixture unexpectedly has workers"
+        );
+        for child in &mut children {
+            ensure!(
+                child.try_wait()?.is_none(),
+                "broker exited before the composed read completed"
+            );
+        }
+        Ok(())
+    }
+    .await;
+
+    let mut clean = true;
+    let mut guards = guards.into_iter();
+    for (child, (_, _, broker_root)) in children.iter_mut().zip(&configurations) {
+        clean &= shutdown_presence_child(child, broker_root, guards.next()).await;
+    }
+    if result.is_err() || !clean {
+        let preserved = fixture.keep();
+        result.with_context(|| {
+            format!("presence oracle failed; cleanup complete={clean}; private fixture retained at {preserved:?}")
+        })?;
+        ensure!(
+            clean,
+            "owned broker cleanup incomplete; private fixture retained at {preserved:?}"
+        );
+    }
+    Ok(())
+}
+
+async fn observe_presence_guard(broker_root: &Path) -> anyhow::Result<EnforcerClient> {
+    let root = Directory::open_existing(&broker_root.join("enforcer"))?;
+    let announcements = Directory::open_existing(&root.path().join("announcements"))?;
+    let record = announcements.read_private_file("e-0001.json", 4096)?;
+    let wire: Value = serde_json::from_slice(record.bytes())?;
+    let endpoint: EndpointRecordV1 = serde_json::from_value(wire["endpoint"].clone())?;
+    // As in broker_runtime, an absent executable prevents replacement,
+    // including when the announced endpoint disappears during connection.
+    let absent = broker_root.join("observer-must-not-spawn");
+    ensure!(
+        !absent.try_exists()?,
+        "observer sentinel unexpectedly exists"
+    );
+    let client = tokio::time::timeout(
+        Duration::from_secs(10),
+        EnforcerClient::connect_or_spawn(&root, &absent, 8),
+    )
+    .await??;
+    ensure!(
+        client.status().await?.epoch() == endpoint.epoch(),
+        "guard differs from the originally announced incarnation"
+    );
+    record.revalidate()?;
+    Ok(client)
+}
+
+async fn shutdown_presence_child(
+    child: &mut Child,
+    broker_root: &Path,
+    enforcer: Option<EnforcerClient>,
+) -> bool {
+    let signalled = child.try_wait().is_ok_and(|status| status.is_none())
+        && child.id().is_some_and(|pid| {
+            // SAFETY: only the directly owned, unreaped child is signalled.
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGINT) == 0 }
+        });
+    let exited = wait_child(child, Duration::from_secs(45)).await;
+    if exited.is_none() {
+        let _ = child.start_kill();
+        let _ = wait_child(child, Duration::from_secs(5)).await;
+    }
+    let guard_root = broker_root.join("enforcer");
+    let enforcer = match enforcer {
+        Some(client) => Some(client),
+        None => observe_presence_guard(broker_root).await.ok(),
+    };
+    let helper_stopped = match enforcer {
+        Some(enforcer) => {
+            tokio::time::timeout(Duration::from_secs(10), enforcer.shutdown_if_idle())
+                .await
+                .is_ok_and(|result| result.is_ok())
+        }
+        None => {
+            matches!(guard_root.try_exists(), Ok(false))
+                || role_lease_available(&guard_root).is_ok_and(|available| available)
+        }
+    };
+    let lease_released = matches!(guard_root.try_exists(), Ok(false))
+        || wait_for_role_lease_release(&guard_root, Duration::from_secs(5)).await;
+    signalled && exited.is_some_and(|status| status.success()) && helper_stopped && lease_released
+}
+
+#[tokio::test]
 async fn recovery_serve_answers_authenticated_rpc_without_opening_missing_presence() {
     let fixture: TempDir = support::private_tempdir();
     let root = fixture.path().canonicalize().unwrap();
@@ -793,7 +1105,8 @@ async fn recovery_serve_answers_authenticated_rpc_without_opening_missing_presen
         .expect("spawn Full broker CLI");
     let full_stdout = tokio::spawn(drain_bounded(full.stdout.take().unwrap()));
     let full_stderr = tokio::spawn(drain_bounded(full.stderr.take().unwrap()));
-    let first_sequence = wait_for_heartbeat(&store, &mut full, Duration::from_secs(90)).await;
+    let first_sequence =
+        wait_for_heartbeat(&store, BROKER_ID, &mut full, Duration::from_secs(90)).await;
     let full_ready = first_sequence.is_some();
 
     let enforcer_root_path = broker_root.join("enforcer");

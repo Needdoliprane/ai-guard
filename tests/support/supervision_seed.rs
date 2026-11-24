@@ -123,7 +123,7 @@ fn open(path: &Path, tenant: &str) -> anyhow::Result<Store> {
     Store::open_for_tenant(path, tenant, Redactor::new(vec![]), MAX_EVENTS)
         .with_context(|| format!("open the {tenant} test store"))
 }
-fn migrate(store: &Store, path: &Path) -> anyhow::Result<()> {
+pub fn migrate(store: &Store, path: &Path) -> anyhow::Result<()> {
     store.migrate_control_v3(&path.with_extension("before3"))?;
     store.migrate_identity_v4(&path.with_extension("before4"))?;
     store.migrate_human_access_v5(&path.with_extension("before5"))?;
@@ -338,7 +338,7 @@ fn observe(
     step(store, worker, WorkerTransitionV1::Observe { observation })
 }
 
-fn provision(
+pub fn provision(
     store: &Store,
     name: &str,
     organization: &str,
@@ -997,9 +997,13 @@ impl Drop for Served {
 }
 
 pub async fn serve(seed: &Seed, front: std::path::PathBuf) -> anyhow::Result<Served> {
+    serve_state(seed.gateway_state()?, front).await
+}
+
+pub async fn serve_state(state: GatewayState, front: std::path::PathBuf) -> anyhow::Result<Served> {
     let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let gateway = format!("http://{}", gateway_listener.local_addr()?);
-    let router = agentsandbox::api::gateway_router(seed.gateway_state()?);
+    let router = agentsandbox::api::gateway_router(state);
     let gateway_task = tokio::spawn(async move {
         let _ = axum::serve(gateway_listener, router).await;
     });
