@@ -1,5 +1,21 @@
 # Validation courante
 
+## 24 novembre 2026 — redémarrage OIDC après migration de l’audit vers V4
+
+**PASS ciblé G04/G06** avec le paquet macOS `84971de6`. Le
+gateway crée un audit V3 sur une fixture neuve et s’arrête.
+La configuration V2 est refusée tant que l’audit reste en V3.
+La maintenance, lancée après contrôle de fermeture du port,
+produit une sauvegarde V3 et une base V4. Le gateway redémarre
+avec le plan exact et refuse le même fichier de configuration
+avec un plafond de plan différent. Les deux ports de recette sont
+fermés à la fin de chaque démarrage.
+
+Le premier conducteur avait suivi le PID de son enveloppe shell.
+Le passage retenu suit directement le processus lancé et vérifie
+la fermeture du port avant maintenance. Le réseau du gateway est
+limité au loopback et aucune authentification OIDC réelle n’est jouée.
+
 ## 24 novembre 2026 — rétention SQLite par le vrai CLI
 
 **PASS ciblé G06** sur `3ba14691`. Les deux tests de
