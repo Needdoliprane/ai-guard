@@ -171,6 +171,47 @@ fn egress_store_allow_is_durable_bound_to_the_running_egress_worker_and_idempote
 }
 
 #[test]
+fn egress_store_connection_correlates_with_its_durable_decision() {
+    let directory = private_directory();
+    let store = store(directory.path(), "tenant-a");
+    let worker = software_workers::running_from(&store, egress_admission(&store));
+    let request = request(&binding(&worker), "fixture.egress.test:8443");
+    let decision = store.egress_decide(&request, &policy(), NOW).unwrap();
+    assert!(decision.allows(&request));
+
+    let observation = EgressObserveRequestV1 {
+        version: 1,
+        observation_id: IdV1::random(),
+        observation: EgressObservationV1::Connection {
+            binding: request.binding.clone(),
+            decision_id: decision.decision_id.clone(),
+            flow_id: request.flow_id,
+            connected: true,
+            failure: None,
+            peer: Some("192.0.2.1:8443".into()),
+            resolver: "fixture".into(),
+        },
+    };
+    let observed = store.egress_observe(&observation).unwrap();
+    assert!(observed.audit_seq > decision.receipt.audit_seq);
+    let head = store.head().unwrap();
+    assert_eq!(store.egress_observe(&observation).unwrap(), observed);
+    assert_eq!(store.head().unwrap(), head);
+
+    let events = store
+        .egress_session_events(&request.binding.session_id, 10)
+        .unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(receipt(&events[0]), decision.receipt);
+    assert_eq!(receipt(&events[1]), observed);
+    assert_eq!(events[1].event.kind, "egress.connection");
+    assert_eq!(
+        events[1].event.data,
+        serde_json::to_value(&observation.observation).unwrap()
+    );
+}
+
+#[test]
 fn egress_store_retention_preserves_decision_and_channel_receipts() {
     use crate::audit::retention::{
         AuditRetentionPolicyV1, ReclaimClassV1, RetentionApplyRequest, verify_archive_chain,
