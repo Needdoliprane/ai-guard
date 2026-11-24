@@ -30,7 +30,7 @@ identique, l’inspection Docker rapporte un identifiant préfixé par
 `sha256:` tandis que Podman rapporte le même digest en hexadécimal nu.
 Le prévol compare la chaîne telle quelle à l’identifiant canonique
 préfixé. Le sélecteur est absent et aucun service TLS n’a été lancé
-sur Podman. Le profil TLS Podman reste ouvert.
+sur Podman lors de ce premier essai.
 Après correction du provisionneur sur `ddca3808`, Podman rootless
 publie le sélecteur. Sans le mappage du préparateur, l’UID 1000 ne peut
 pas traverser le volume d’identité vu comme `0:0` en mode 0700. Le
@@ -40,6 +40,12 @@ overrides Podman livrés, la pile reçoit le verdict Qwen `deny` via
 HTTPS, le persiste et vérifie la chaîne SQLite. Les conteneurs et
 réseaux sont retirés ainsi que les volumes de la génération réussie
 après sauvegarde SQLite. Aucun worker n’est lancé.
+Le même binaire corrigé `ddca3808` publie également une nouvelle
+sélection sur Docker Desktop ARM64. L’inspection confirme le retrait
+de toutes les capacités et exactement deux volumes nommés, sans bind
+hôte. Le préparateur et les deux volumes de cette vérification sont
+retirés. Le rejeu couvre le provisionnement ; la preuve de décision
+Docker ci-dessus reste liée à sa propre recette.
 [Reçu de santé et de décision TLS](evidence/2026-11-24/g07-local-tls-volumes-health.json).
 
 ## 24 novembre 2026 — avis Qwen local depuis l’archive macOS

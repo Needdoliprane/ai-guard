@@ -79,5 +79,15 @@
       "rule": "local_openai_deny",
       "integrity": true
     }
+  },
+  "docker_provision_after_podman_fix": {
+    "source_revision": "ddca3808",
+    "rootful_runtime_explicitly_allowed": true,
+    "preparer_exit_code": 0,
+    "cap_drop_all": true,
+    "host_binds": false,
+    "mounted_named_volumes": 2,
+    "selector_published": true,
+    "cleanup_verified": true
   }
 }

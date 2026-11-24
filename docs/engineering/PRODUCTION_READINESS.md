@@ -353,6 +353,14 @@ Le corpus ciblé de quatre invocations bénignes admises par la politique
 locale donne quatre avis `deny`. L’utilité de ce modèle sur ce corpus
 et la qualification globale G07 restent ouvertes.
 
+**G07 — Compose TLS du moteur local.** Le profil à volumes neufs
+exerce un verdict Qwen sur Docker Desktop ARM64 et Podman rootless
+avec validation HTTPS, décision effective et vérification SQLite.
+Les deux overrides Podman alignent les consommateurs de volumes
+avec le mappage du préparateur. Le binaire corrigé est aussi rejoué
+sur Docker pour le provisionnement. [Reçus TLS](evidence/2026-11-24/g07-local-tls-volumes-health.json).
+La preuve est locale et couvre une demande synthétique par moteur.
+
 **G07 — moteur Rust déterministe sur Docker Desktop et Podman rootless.** Le CLI macOS
 installé `7e1f9cb1` sélectionne `rust-rules` et audite l’autorisation
 d’une invocation connue avant le terminal d’un worker strict sans
