@@ -1,5 +1,18 @@
 # Validation courante
 
+## 24 novembre 2026 — écritures d’administration sur une source possédée
+
+**PASS ciblé G08**, deux tests SQLite au format 15 sur macOS ARM64,
+avec les sources de `e41d81a4`. Le premier vérifie le rôle
+d’administration et le reçu durable du changement d’appartenance.
+Le second vérifie lecture, mutation et rejeu du partage depuis le proxy
+dashboard. Le libtest de `cf754fc0` a été réutilisé après vérification
+de l’empreinte et comparaison des entrées de compilation.
+
+Reçu privé `g08-owned-admin-after-cleanup-e41d81a4`, manifeste SHA-256
+`c65b31ac6ac4352445031e51be10dca5e384b94ea540014eac5b778f5114dc81`.
+Le résultat porte sur le profil SQLite testé.
+
 ## 24 novembre 2026 — révocation du statut conservé par le broker
 
 **PASS ciblé G09**, 1 test en 0,86 s sur macOS ARM64. Le lecteur de
