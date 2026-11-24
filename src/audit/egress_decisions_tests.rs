@@ -472,7 +472,19 @@ fn egress_store_stopping_revokes_renewal_and_preserves_the_opening_receipt() {
     let worker = software_workers::running_from(&store, egress_admission(&store));
     let binding = binding(&worker);
     let opening = channel_open(&binding);
-    let receipt = store.egress_observe(&opening).unwrap();
+    assert!(
+        store
+            .egress_session_events(&binding.session_id, 10)
+            .unwrap()
+            .is_empty()
+    );
+    let opening_receipt = store.egress_observe(&opening).unwrap();
+    let events = store
+        .egress_session_events(&binding.session_id, 10)
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event.kind, "egress.channel.opened");
+    assert_eq!(receipt(&events[0]), opening_receipt);
     let policy = policy();
     let decision_request = request(&binding, "fixture.egress.test:8443");
     let decision = store
@@ -496,7 +508,11 @@ fn egress_store_stopping_revokes_renewal_and_preserves_the_opening_receipt() {
         .worker;
     assert_eq!(stopped.state, WorkerStateV1::Stopping);
     let head = store.head().unwrap();
-    assert_eq!(store.egress_observe(&opening).unwrap(), receipt);
+    let before = store
+        .egress_session_events(&binding.session_id, 10)
+        .unwrap();
+    assert_eq!(before.len(), 2);
+    assert_eq!(store.egress_observe(&opening).unwrap(), opening_receipt);
     let closed = store.egress_renew(&renew, &policy, NOW + 2).unwrap();
     assert_eq!(closed.revoked, [decision.decision_id]);
     assert!(closed.expired.is_empty());
@@ -506,6 +522,11 @@ fn egress_store_stopping_revokes_renewal_and_preserves_the_opening_receipt() {
         Some(&EgressJournalError::Invalid)
     );
     assert_eq!(store.head().unwrap(), head);
+    let after = store
+        .egress_session_events(&binding.session_id, 10)
+        .unwrap();
+    assert_eq!(after.len(), before.len());
+    assert_eq!(receipt(&after[0]), opening_receipt);
     let terminal = EgressObserveRequestV1 {
         version: 1,
         observation_id: IdV1::random(),
