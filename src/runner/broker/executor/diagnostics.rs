@@ -37,6 +37,56 @@ impl fmt::Display for BrokerStep {
 }
 impl std::error::Error for BrokerStep {}
 
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum RegistrationStage {
+    ReserveProspective,
+    BeginExchange,
+    BuildRegistration,
+    BindProspective,
+    RestoreAssigned,
+    RegisterLegacy,
+}
+
+impl fmt::Display for RegistrationStage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&BrokerStep::Registration, f)
+    }
+}
+
+impl std::error::Error for RegistrationStage {}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RegistrationArmState {
+    Pending,
+    Acknowledged,
+}
+
+#[derive(Serialize)]
+struct RegistrationDiagnostic {
+    stage: RegistrationStage,
+    arm_state: RegistrationArmState,
+}
+
+impl RegistrationStage {
+    fn diagnostic(self) -> RegistrationDiagnostic {
+        // These stages are on either side of the validated Arm response at
+        // the confirmed journal head. The state describes that local view.
+        let arm_state = match self {
+            Self::ReserveProspective | Self::BeginExchange => RegistrationArmState::Pending,
+            Self::BuildRegistration
+            | Self::BindProspective
+            | Self::RestoreAssigned
+            | Self::RegisterLegacy => RegistrationArmState::Acknowledged,
+        };
+        RegistrationDiagnostic {
+            stage: self,
+            arm_state,
+        }
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 enum EffectEvidence {
@@ -54,6 +104,8 @@ pub(super) struct BatchFailureDiagnosticV1 {
     runtime: Option<RuntimePrestartStageFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
     broker_step: Option<BrokerStep>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registration: Option<RegistrationDiagnostic>,
 }
 
 pub(super) fn classify(
@@ -62,7 +114,13 @@ pub(super) fn classify(
 ) -> Option<BatchFailureDiagnosticV1> {
     let enforcer = error.downcast_ref::<EnforcerStageFailure>().cloned();
     let runtime = error.downcast_ref::<RuntimePrestartStageFailure>().cloned();
-    let broker_step = error.downcast_ref::<BrokerStep>().copied();
+    let registration = error
+        .downcast_ref::<RegistrationStage>()
+        .map(|stage| stage.diagnostic());
+    let broker_step = error
+        .downcast_ref::<BrokerStep>()
+        .copied()
+        .or_else(|| registration.as_ref().map(|_| BrokerStep::Registration));
     if enforcer.is_none() && runtime.is_none() && broker_step.is_none() {
         return None;
     }
@@ -73,6 +131,7 @@ pub(super) fn classify(
         enforcer,
         runtime,
         broker_step,
+        registration,
     })
 }
 
@@ -90,6 +149,7 @@ pub(super) fn failure_report(
         enforcer: None,
         runtime: None,
         broker_step: Some(BrokerStep::FailureObserved),
+        registration: None,
     })
 }
 
@@ -98,6 +158,59 @@ mod tests {
     use super::*;
     use crate::runtime::RuntimePrestartStage;
     use serde_json::json;
+
+    #[test]
+    fn registration_failure_reports_only_the_coded_boundary_and_arm_state() {
+        for (stage, label, state) in [
+            (
+                RegistrationStage::ReserveProspective,
+                "reserve_prospective",
+                "pending",
+            ),
+            (
+                RegistrationStage::BeginExchange,
+                "begin_exchange",
+                "pending",
+            ),
+            (
+                RegistrationStage::BuildRegistration,
+                "build_registration",
+                "acknowledged",
+            ),
+            (
+                RegistrationStage::BindProspective,
+                "bind_prospective",
+                "acknowledged",
+            ),
+            (
+                RegistrationStage::RestoreAssigned,
+                "restore_assigned",
+                "acknowledged",
+            ),
+            (
+                RegistrationStage::RegisterLegacy,
+                "register_legacy",
+                "acknowledged",
+            ),
+        ] {
+            let error = anyhow::anyhow!("synthetic-private-detail").context(stage);
+            let report =
+                serde_json::to_value(failure_report(LocalFailurePhaseV1::FinalScan, &error))
+                    .unwrap();
+            assert_eq!(
+                report,
+                json!({
+                    "version": 1,
+                    "phase": "final_scan",
+                    "runtime_effect": "unknown",
+                    "enforcer": null,
+                    "runtime": null,
+                    "broker_step": "registration",
+                    "registration": {"stage": label, "arm_state": state},
+                })
+            );
+        }
+    }
 
     #[test]
     fn arbitrary_error_does_not_become_a_start_diagnostic() {
