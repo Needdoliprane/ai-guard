@@ -40,6 +40,16 @@ inventaires retrouvent leur état initial. Reçus de test
 et `f1b96120b44724d43c1905a7c76bd0844356bcee1d844016e5b008aa5b3bb4e2`.
 L’exécution du harnais avec l’archive Linux x86-64 reste à qualifier.
 
+Le [workflow Linux x86-64](../../.github/workflows/g01-linux-archive-runtime.yaml)
+est intégré localement depuis `5063391f`. Il sélectionne le même binaire
+extrait de l’archive `1c9e8e01` pour Docker rootful et Podman rootless,
+puis vérifie le retour des inventaires de conteneurs et volumes. Il
+atteste séparément le retrait de l’étiquette d’image QA et relève le
+nombre d’images de base ajoutées. Les contrôles locaux de syntaxe et de
+projection des reçus passent. Aucun job Linux de ce workflow n’a été
+exécuté. Le prévol Podman doit confirmer le mode rootless sur un runner
+compatible avant tout lancement.
+
 **G02 — montage racine observé dans le worker.** Avec le CLI macOS archivé
 `99cb885e` sur Podman 6.1.4 rootless ARM64, la commande auditée
 `findmnt --noheadings --output OPTIONS --target /` lit le jeton `ro` pour
