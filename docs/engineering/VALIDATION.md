@@ -23,7 +23,11 @@ Podman rootless, le même corpus et la même image donnent 835 557
 octets en file d’envoi sur deux relevés séparés de 600 ms. Le second
 lecteur et le contrôle d’intégrité passent également, et la base est
 sauvegardée avant le retrait des ressources.
-[Reçu SSE Docker](evidence/2026-11-24/g08-compose-sse-abrupt-cut.json).
+Le rejeu de coupure sur Podman rootless ferme aussi le flux initial.
+Sur cette base neuve, le curseur 2 restitue les séquences 3 et 4
+avec leurs empreintes dans l’ordre. L’audit est sauvegardé et les
+ressources sont retirées.
+[Reçus SSE Docker et Podman](evidence/2026-11-24/g08-compose-sse-abrupt-cut.json).
 
 ## 24 novembre 2026 — arrêt explicite d’A1 sur Podman rootless
 

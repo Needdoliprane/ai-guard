@@ -74,5 +74,24 @@
     "slow_only_sample_separation_seconds": 0.6,
     "sqlite_backup_retained": true,
     "cleanup_verified": true
+  },
+  "podman_rootless_abrupt_cut": {
+    "signal": "SIGKILL",
+    "old_stream_closed": true,
+    "first_seq": 2,
+    "resume_last_event_id": 2,
+    "resumed_sequences": [
+      3,
+      4
+    ],
+    "resumed_hashes_match": true,
+    "integrity": true,
+    "external_calls": false,
+    "worker_launch_requested": false,
+    "platform": "Podman rootless Compose on macOS ARM64",
+    "control_image_source": "e5c0e4b7",
+    "qa_gateway_auto_restart_disabled": true,
+    "sqlite_backup_retained": true,
+    "cleanup_verified": true
   }
 }
