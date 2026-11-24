@@ -82,13 +82,36 @@ Files fetched with `gh` or `curl` normally carry no flag. Do not disable Gatekee
 Extract each version into its own directory and point a link at the one in use, so that going back is a link change:
 
 ```sh
-sudo install -d /opt/ai-guard
-sudo tar -xzf "$FILE" -C /opt/ai-guard
-sudo ln -sfn "/opt/ai-guard/${FILE%.tar.gz}" /opt/ai-guard/current
-/opt/ai-guard/current/bin/agentsandbox version --json
+PREFIX=/opt/ai-guard
+RELEASE="$PREFIX/${FILE%.tar.gz}"
+sudo install -d "$PREFIX" &&
+  sudo mkdir "$RELEASE" &&
+  sudo tar -xzf "$FILE" -C "$RELEASE" --strip-components 1 &&
+  "$RELEASE/bin/agentsandbox" version --json
 ```
 
-Use a directory you own if you do not use `sudo`. Nothing is installed as a service and no updater is included.
+After checking the version, activate the release with the following command. It prepares a link under the same installation prefix and replaces `current` with one rename. Run only one install or switch at a time. If the release directory already exists, choose a new destination and inspect the existing one before retrying.
+
+```sh
+sudo sh -eu -c '
+  prefix=$1
+  release=$2
+  current="$prefix/current"
+  test -x "$release/bin/agentsandbox"
+  test ! -e "$current" || test -L "$current"
+  swap=$(mktemp -d "$prefix/.current.XXXXXX")
+  ln -s "$release" "$swap/link"
+  case "$(uname -s)" in
+    Darwin) mv -fh "$swap/link" "$current" ;;
+    Linux)  mv -fT "$swap/link" "$current" ;;
+    *)      exit 1 ;;
+  esac
+  rmdir "$swap"
+' sh "$PREFIX" "$RELEASE" &&
+  "$PREFIX/current/bin/agentsandbox" version --json
+```
+
+Use a directory you own and omit `sudo` for a user installation. Nothing is installed as a service and no updater is included.
 
 ## Upgrade
 
@@ -101,7 +124,7 @@ Migrations are explicit commands, one step at a time; version 0.0.1 applies none
 
 ## Roll back
 
-Switch the link back to the previous directory and restore the backup you took before the upgrade into a new destination. **Never downgrade a database that has been migrated**, edit its `user_version` or reuse it with an older binary: restore the coherent backup instead. If no backup exists, do not guess; keep the data and ask through the channels in [the contribution guide](../../../CONTRIBUTING.md).
+Use the same activation command with `RELEASE` set to the previous directory and restore the backup you took before the upgrade into a new destination. **Never downgrade a database that has been migrated**, edit its `user_version` or reuse it with an older binary: restore the coherent backup instead. If no backup exists, do not guess; keep the data and ask through the channels in [the contribution guide](../../../CONTRIBUTING.md).
 
 ## Report a problem with a release
 

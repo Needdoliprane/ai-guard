@@ -82,13 +82,36 @@ Les fichiers récupérés avec `gh` ou `curl` ne portent normalement pas cet ind
 Extrayez chaque version dans son propre dossier et faites pointer un lien vers celle en service : revenir en arrière revient alors à changer le lien.
 
 ```sh
-sudo install -d /opt/ai-guard
-sudo tar -xzf "$FILE" -C /opt/ai-guard
-sudo ln -sfn "/opt/ai-guard/${FILE%.tar.gz}" /opt/ai-guard/current
-/opt/ai-guard/current/bin/agentsandbox version --json
+PREFIX=/opt/ai-guard
+RELEASE="$PREFIX/${FILE%.tar.gz}"
+sudo install -d "$PREFIX" &&
+  sudo mkdir "$RELEASE" &&
+  sudo tar -xzf "$FILE" -C "$RELEASE" --strip-components 1 &&
+  "$RELEASE/bin/agentsandbox" version --json
 ```
 
-Utilisez un dossier qui vous appartient si vous n'employez pas `sudo`. Rien n'est installé comme service et aucun outil de mise à jour n'est fourni.
+Après vérification de la version, activez la release avec la commande suivante. Elle prépare le lien sous le même préfixe d’installation et remplace `current` en un seul renommage. Exécutez une seule installation ou activation à la fois. Si le dossier de release existe déjà, choisissez une nouvelle destination et inspectez le dossier existant avant de réessayer.
+
+```sh
+sudo sh -eu -c '
+  prefix=$1
+  release=$2
+  current="$prefix/current"
+  test -x "$release/bin/agentsandbox"
+  test ! -e "$current" || test -L "$current"
+  swap=$(mktemp -d "$prefix/.current.XXXXXX")
+  ln -s "$release" "$swap/link"
+  case "$(uname -s)" in
+    Darwin) mv -fh "$swap/link" "$current" ;;
+    Linux)  mv -fT "$swap/link" "$current" ;;
+    *)      exit 1 ;;
+  esac
+  rmdir "$swap"
+' sh "$PREFIX" "$RELEASE" &&
+  "$PREFIX/current/bin/agentsandbox" version --json
+```
+
+Pour une installation utilisateur, choisissez un dossier qui vous appartient et omettez `sudo`. Aucun service ni outil de mise à jour n’est installé.
 
 ## Mettre à jour
 
@@ -101,7 +124,7 @@ Les migrations sont des commandes explicites, une étape à la fois ; la version
 
 ## Revenir en arrière
 
-Remettez le lien sur le dossier précédent et restaurez, dans une nouvelle destination, la sauvegarde faite avant la mise à jour. **Ne rétrogradez jamais une base déjà migrée**, ne modifiez pas son `user_version` et ne la rouvrez pas avec un binaire plus ancien : restaurez la sauvegarde cohérente. Sans sauvegarde, ne devinez pas ; conservez les données et passez par les canaux du [guide de contribution](../../../CONTRIBUTING.md).
+Reprenez la commande d’activation avec `RELEASE` réglé sur le dossier précédent, puis restaurez la sauvegarde faite avant la mise à jour dans une nouvelle destination. **Ne rétrogradez jamais une base déjà migrée**, ne modifiez pas son `user_version` et ne la rouvrez pas avec un binaire plus ancien : restaurez la sauvegarde cohérente. Sans sauvegarde, ne devinez pas ; conservez les données et passez par les canaux du [guide de contribution](../../../CONTRIBUTING.md).
 
 ## Signaler un problème de release
 
