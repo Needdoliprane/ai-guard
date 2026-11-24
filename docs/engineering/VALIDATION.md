@@ -1,5 +1,14 @@
 # Validation courante
 
+## 24 novembre 2026 — publication concurrente et volume APFS saturé
+
+**PASS ciblé G03** sur `b736444a`. Deux exports simultanés vers la
+même destination neuve produisent un seul résultat intégral. Une
+tentative d’export sur un volume APFS borné reçoit réellement
+`ENOSPC`. Dans les deux cas, l’original est intact et aucun staging
+ne reste. Les deux régressions de rejeu du journal passent aussi.
+[Reçu G03](evidence/2026-11-24/g03-local-export-filesystem.md).
+
 ## 24 novembre 2026 — restauration MySQL Legacy après claim commité
 
 **PASS ciblé G06/G12.** Sur `5c3ecae5`, la recette SQL-05 restaure un
