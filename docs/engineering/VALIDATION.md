@@ -16,6 +16,13 @@ Le passage retenu suit directement le processus lancé et vérifie
 la fermeture du port avant maintenance. Le réseau du gateway est
 limité au loopback et aucune authentification OIDC réelle n’est jouée.
 
+Le retour arrière est également vérifié. Le gateway macOS précédent
+`1c9e8e01` démarre avec la configuration V1 et une copie neuve de
+la sauvegarde V3. Le CLI confirme l’intégrité de l’audit du tenant.
+Après arrêt, le schéma, les séquences et les hachages de l’audit
+d’authentification sont identiques sur la copie. La sauvegarde et
+la base V4 conservent leurs empreintes. Le port est fermé.
+
 ## 24 novembre 2026 — rétention SQLite par le vrai CLI
 
 **PASS ciblé G06** sur `3ba14691`. Les deux tests de
