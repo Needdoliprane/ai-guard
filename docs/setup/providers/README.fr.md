@@ -230,6 +230,8 @@ Avant de lancer, reprendre les mêmes sélecteurs de client, de mode d’authent
   --model claude-haiku-5-5 --json
 ```
 
+Si `check` s’arrête avant de produire un rapport, lire la première ligne d’erreur. Pour le fichier `providers.json` par défaut, utiliser `providers init` pour créer les profils API manquants, ou vérifier le propriétaire et les permissions si le fichier existe. Avec `--providers-file`, vérifier le fichier sélectionné et préserver les profils existants. Une fois le rapport produit, `credential_status` décrit la référence de credential du profil résolu.
+
 Le rapport affiche le choix résolu et `credential_status`. `present_unverified` indique un fichier régulier à lien unique, possédé par votre compte et de mode `0600`. `absent` indique une entrée manquante sous un répertoire vérifié. Pour `suspect`, vérifier la chaîne de répertoires, le propriétaire, le mode et les liens. Ce contrôle hors ligne examine uniquement les métadonnées de la référence. L’accès au compte, le contenu du credential et les capacités du client dans le worker restent à vérifier.
 
 | Résultat | Action |

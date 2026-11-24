@@ -230,6 +230,8 @@ Before launching, use the same client, authentication mode, profile and model se
   --model claude-haiku-5-5 --json
 ```
 
+If `check` exits before it emits a report, read the first error line. For the default `providers.json`, use `providers init` to create missing API profiles, or check ownership and permissions if the file exists. With `--providers-file`, verify the selected file and preserve existing profiles. Once a report is emitted, `credential_status` describes the credential reference for the resolved profile.
+
 The report shows the resolved choice and `credential_status`. `present_unverified` reports a regular, single-link file owned by your account with mode `0600`. `absent` means the entry is missing under a checked parent. For `suspect`, check the referenced directory chain, ownership, mode and links. This offline check reads only reference metadata. Account access, credential contents and worker client capabilities still need verification.
 
 | Result | Next action |
