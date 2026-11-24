@@ -28,5 +28,19 @@
     "published_selector": true,
     "preparer_exit": 0,
     "cleanup_verified": true
+  },
+  "tls_provision_wrong_server_identity": {
+    "docker": {
+      "exit_code": 1,
+      "selector_published": false,
+      "inventory_unchanged": true,
+      "diagnostic": "Error: invalid TLS material, server name or packet"
+    },
+    "podman_rootless": {
+      "exit_code": 1,
+      "selector_published": false,
+      "inventory_unchanged": true,
+      "diagnostic": "Error: invalid TLS material, server name or packet"
+    }
   }
 }

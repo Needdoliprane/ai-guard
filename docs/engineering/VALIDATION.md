@@ -12,6 +12,10 @@ la recette retire le préparateur et les deux volumes neufs. Ce rejeu
 couvre le provisionnement. La décision HTTPS du gateway est attestée
 séparément. Aucun tag ni publication. Archive Linux native hors de
 ce lot.
+Avec ce même CLI, un nom absent du certificat de test est refusé
+sur Docker Desktop et Podman rootless avant publication du sélecteur.
+Les inventaires des préparateurs et volumes TLS restent identiques.
+Le diagnostic regroupe les erreurs de matériau, de nom et de paquet.
 [Reçu macOS et Podman](evidence/2026-11-24/g12-macos-84971de6.json).
 
 ## 24 novembre 2026 — profil TLS local à volumes neufs
