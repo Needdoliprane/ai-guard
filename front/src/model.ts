@@ -162,6 +162,12 @@ const failureStepLabels: ReadonlyMap<string, string> = new Map([
   ["cleanup_ack", "Enregistrement du résultat du retrait"],
   ["failure_observed", "Observation d’un échec"],
 ]);
+const full3BindingStageLabels: ReadonlyMap<string, string> = new Map([
+  ["read_native_binding", "Lecture de la liaison au gardien"],
+  ["reload_journal", "Relecture du journal avant publication de la liaison"],
+  ["advance_writer", "Publication de la liaison dans le journal"],
+  ["retry_limit", "Conflits répétés à la publication de la liaison"],
+]);
 const enforcerStageLabels: ReadonlyMap<string, string> = new Map([
   ["register", "Connexion au gardien d’arrêt"],
   ["before_claim", "Vérification avant démarrage"],
@@ -189,10 +195,15 @@ export function brokerFailureDetails(event: AuditEvent) {
     value && typeof value === "object" && !Array.isArray(value)
       ? (value as Record<string, unknown>).stage
       : undefined;
+  const brokerStep = event.data?.broker_step;
+  const full3BindingStep = brokerStep === "full3_binding_publication"
+    ? label(full3BindingStageLabels, stage(event.data?.full3_binding))
+    : undefined;
   return {
     phase: label(failurePhaseLabels, event.data?.phase) ?? "Inconnue",
     step:
-      label(failureStepLabels, event.data?.broker_step) ??
+      full3BindingStep ??
+      label(failureStepLabels, brokerStep) ??
       label(enforcerStageLabels, stage(event.data?.enforcer)) ??
       label(runtimeStageLabels, stage(event.data?.runtime)) ??
       "Inconnue",

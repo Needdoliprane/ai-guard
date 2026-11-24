@@ -369,14 +369,19 @@ impl Execution<'_> {
             return Ok(PrearmedStartDirective::ObserveOnly);
         }
         if self.executor.enforcer.full3().is_some() && fresh_original {
-            let step = diagnostics::BrokerStep::Full3BindingPublication;
-            let binding = slot.full3_registration_binding().context(step)?;
+            use diagnostics::Full3BindingStage;
+            let binding = slot
+                .full3_registration_binding()
+                .context(Full3BindingStage::ReadNativeBinding)?;
             let mut confirmed = false;
             for _ in 0..16 {
                 // An authenticated abandon signal or Cancel can advance the
                 // head while native Register is in flight. Keep this exact
                 // original slot/binding; merge only through the writer CAS.
-                let (latest, _) = self.load().await.context(step)?;
+                let (latest, _) = self
+                    .load()
+                    .await
+                    .context(Full3BindingStage::ReloadJournal)?;
                 match self
                     .executor
                     .writer
@@ -388,12 +393,17 @@ impl Execution<'_> {
                         break;
                     }
                     Err(JournalError::Conflict) => continue,
-                    Err(error) => return Err(anyhow::Error::new(error).context(step)),
+                    Err(error) => {
+                        return Err(
+                            anyhow::Error::new(error).context(Full3BindingStage::AdvanceWriter)
+                        );
+                    }
                 }
             }
             if !confirmed {
                 return Err(
-                    anyhow!("Full3 assignment publication requires reconciliation").context(step),
+                    anyhow!("Full3 assignment publication requires reconciliation")
+                        .context(Full3BindingStage::RetryLimit),
                 );
             }
         }

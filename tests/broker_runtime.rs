@@ -312,6 +312,29 @@ fn batch_failure_marker_keeps_only_validated_metadata() {
 }
 
 #[test]
+fn batch_failure_marker_projects_only_the_closed_full3_binding_stage() {
+    let mut page = json!({ "items": [{
+        "id": "11111111-1111-4111-8111-111111111111", "seq": 17,
+        "kind": "broker.batch.failure", "source": "runner",
+        "data": {
+            "version": 1, "phase": "worker", "runtime_effect": "unknown",
+            "broker_step": "full3_binding_publication",
+            "full3_binding": {"stage":"advance_writer","private":"synthetic-private-detail"}
+        }
+    }], "next_cursor": 17 });
+    let marker = harness::batch_failure_marker(&page).unwrap().unwrap();
+    assert_eq!(marker["full3_binding_stage"], "advance_writer");
+    assert_eq!(marker["runtime_effect"], "unknown");
+    assert!(!marker.to_string().contains("synthetic-private-detail"));
+
+    page["items"][0]["data"]["broker_step"] = json!("arm_exchange");
+    assert!(harness::batch_failure_marker(&page).is_err());
+    page["items"][0]["data"]["broker_step"] = json!("full3_binding_publication");
+    page["items"][0]["data"]["full3_binding"]["stage"] = json!("synthetic-private-detail");
+    assert!(harness::batch_failure_marker(&page).is_err());
+}
+
+#[test]
 fn batch_failure_marker_empty_page_is_not_a_failure() {
     assert!(
         harness::batch_failure_marker(&json!({"items":[],"next_cursor":null}))

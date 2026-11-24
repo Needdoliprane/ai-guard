@@ -460,6 +460,28 @@ test("un échec broker v1 présente sa phase et son étape sans confirmer un eff
   }
 });
 
+test("un échec de liaison Full3 affiche un libellé fermé et préserve les anciens reçus", () => {
+  for (const [stage, label] of [
+    ["read_native_binding", "Lecture de la liaison au gardien"],
+    ["reload_journal", "Relecture du journal avant publication de la liaison"],
+    ["advance_writer", "Publication de la liaison dans le journal"],
+    ["retry_limit", "Conflits répétés à la publication de la liaison"],
+    ["synthetic-private-stage", "Enregistrement de la liaison au gardien"],
+  ]) {
+    const summary = eventSummary({
+      ...brokerFailureEvent,
+      data: {
+        ...brokerFailureEvent.data,
+        broker_step: "full3_binding_publication",
+        full3_binding: { stage },
+      },
+    });
+    assert.ok(summary.includes(`Étape : ${label}`));
+    assert.ok(summary.includes("Effet sur l’exécution : non confirmé"));
+    assert.ok(!summary.includes("synthetic-private-stage"));
+  }
+});
+
 test("un échec broker sans commande reste dans Actions sans devenir un incident de sécurité", () => {
   const events = [
     brokerFailureEvent,

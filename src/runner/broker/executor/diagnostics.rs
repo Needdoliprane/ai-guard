@@ -2,6 +2,7 @@
 use crate::{
     broker::{
         enforcer::{EnforcerError, EnforcerStageFailure},
+        journal::JournalError,
         lifecycle::LocalFailurePhaseV1,
     },
     runtime::RuntimePrestartStageFailure,
@@ -70,6 +71,68 @@ impl fmt::Display for CreatedExchangeStage {
     }
 }
 impl std::error::Error for CreatedExchangeStage {}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum Full3BindingStage {
+    ReadNativeBinding,
+    ReloadJournal,
+    AdvanceWriter,
+    RetryLimit,
+}
+
+impl fmt::Display for Full3BindingStage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&BrokerStep::Full3BindingPublication, f)
+    }
+}
+
+impl std::error::Error for Full3BindingStage {}
+
+#[derive(Serialize)]
+struct Full3BindingDiagnostic {
+    stage: Full3BindingStage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enforcer_code: Option<EnforcerError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    journal_code: Option<&'static str>,
+}
+
+impl Full3BindingStage {
+    fn diagnostic(self, error: &anyhow::Error) -> Full3BindingDiagnostic {
+        let enforcer_code = match self {
+            Self::ReadNativeBinding => error.downcast_ref::<EnforcerError>().copied(),
+            _ => None,
+        };
+        let journal_code = match self {
+            Self::ReloadJournal | Self::AdvanceWriter => error
+                .downcast_ref::<JournalError>()
+                .map(journal_failure_code),
+            _ => None,
+        };
+        Full3BindingDiagnostic {
+            stage: self,
+            enforcer_code,
+            journal_code,
+        }
+    }
+}
+
+fn journal_failure_code(error: &JournalError) -> &'static str {
+    match error {
+        JournalError::InvalidInput => "invalid_input",
+        JournalError::UnsupportedVersion => "unsupported_version",
+        JournalError::TooLarge => "too_large",
+        JournalError::LimitExceeded => "limit_exceeded",
+        JournalError::Busy => "busy",
+        JournalError::Conflict => "conflict",
+        JournalError::Interrupted => "interrupted",
+        JournalError::Corrupt => "corrupt",
+        JournalError::UnsafeFilesystem => "unsafe_filesystem",
+        JournalError::ControlSecret => "control_secret",
+        JournalError::Io => "io",
+    }
+}
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -171,9 +234,15 @@ pub(super) struct BatchFailureDiagnosticV1 {
     broker_step: Option<BrokerStep>,
     #[serde(skip_serializing_if = "Option::is_none")]
     registration: Option<RegistrationDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    full3_binding: Option<Full3BindingDiagnostic>,
 }
 
 impl BatchFailureDiagnosticV1 {
+    pub(super) fn full3_binding_stage(&self) -> Option<Full3BindingStage> {
+        self.full3_binding.as_ref().map(|binding| binding.stage)
+    }
+
     pub(super) fn created_exchange_step(&self) -> Option<BrokerStep> {
         self.broker_step.filter(|step| {
             matches!(
@@ -204,13 +273,22 @@ pub(super) fn classify(
             .downcast_ref::<RegistrationStage>()
             .map(|stage| stage.diagnostic())
     };
+    let full3_stage = error.downcast_ref::<Full3BindingStage>().copied();
     let broker_step = match error.downcast_ref::<BrokerStep>().copied() {
         Some(BrokerStep::CreatedExchange) => Some(
             error
                 .downcast_ref::<CreatedExchangeStage>()
                 .map_or(BrokerStep::CreatedExchange, |stage| stage.step()),
         ),
-        step => step.or_else(|| registration.as_ref().map(|_| BrokerStep::Registration)),
+        step => step
+            .or_else(|| full3_stage.map(|_| BrokerStep::Full3BindingPublication))
+            .or_else(|| registration.as_ref().map(|_| BrokerStep::Registration)),
+    };
+    let full3_binding = match broker_step {
+        Some(BrokerStep::Full3BindingPublication) => {
+            full3_stage.map(|stage| stage.diagnostic(error))
+        }
+        _ => None,
     };
     if enforcer.is_none() && runtime.is_none() && broker_step.is_none() {
         return None;
@@ -223,6 +301,7 @@ pub(super) fn classify(
         runtime,
         broker_step,
         registration,
+        full3_binding,
     })
 }
 
@@ -241,6 +320,7 @@ pub(super) fn failure_report(
         runtime: None,
         broker_step: Some(BrokerStep::FailureObserved),
         registration: None,
+        full3_binding: None,
     })
 }
 
@@ -270,6 +350,38 @@ mod tests {
             let report =
                 serde_json::to_value(failure_report(LocalFailurePhaseV1::Worker, &error)).unwrap();
             assert_eq!(report["broker_step"], label);
+            assert_eq!(report["runtime_effect"], "unknown");
+            assert!(!report.to_string().contains(private));
+        }
+    }
+
+    #[test]
+    fn full3_binding_reports_boundary_and_typed_error_without_claiming_effect() {
+        let private = "synthetic-private-full3-binding-error";
+        for (error, expected) in [
+            (
+                anyhow::Error::new(EnforcerError::NotReady)
+                    .context(Full3BindingStage::ReadNativeBinding),
+                json!({"stage":"read_native_binding","enforcer_code":"not_ready"}),
+            ),
+            (
+                anyhow::Error::new(JournalError::UnsafeFilesystem)
+                    .context(Full3BindingStage::ReloadJournal),
+                json!({"stage":"reload_journal","journal_code":"unsafe_filesystem"}),
+            ),
+            (
+                anyhow::Error::new(JournalError::Io).context(Full3BindingStage::AdvanceWriter),
+                json!({"stage":"advance_writer","journal_code":"io"}),
+            ),
+            (
+                anyhow::anyhow!("{private}").context(Full3BindingStage::RetryLimit),
+                json!({"stage":"retry_limit"}),
+            ),
+        ] {
+            let diagnostic = failure_report(LocalFailurePhaseV1::Worker, &error);
+            let report = serde_json::to_value(&diagnostic).unwrap();
+            assert_eq!(report["broker_step"], "full3_binding_publication");
+            assert_eq!(report["full3_binding"], expected);
             assert_eq!(report["runtime_effect"], "unknown");
             assert!(!report.to_string().contains(private));
         }

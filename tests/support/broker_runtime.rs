@@ -923,13 +923,30 @@ fn project_batch_failure_event(event: &Value) -> Result<Value> {
         broker_step.is_some() || enforcer_stage.is_some() || runtime_stage.is_some(),
         "missing coded diagnostic origin"
     );
+    let full3_binding_stage = nested_failure_stage(
+        data.get("full3_binding"),
+        &[
+            "read_native_binding",
+            "reload_journal",
+            "advance_writer",
+            "retry_limit",
+        ],
+    )?;
+    ensure!(
+        full3_binding_stage.is_none() || broker_step == Some("full3_binding_publication"),
+        "invalid Full3 binding diagnostic origin"
+    );
     // Only this projection is persisted. Neither arbitrary data nor any error
     // body/argv is copied. An outer exchange label is not evidence of an ACK.
-    Ok(json!({
+    let mut marker = json!({
         "event_id":event_id,"audit_seq":audit_seq,"kind":"broker.batch.failure",
         "phase":phase,"broker_step":broker_step,"enforcer_stage":enforcer_stage,
         "runtime_stage":runtime_stage,"runtime_effect":"unknown"
-    }))
+    });
+    if let Some(stage) = full3_binding_stage {
+        marker["full3_binding_stage"] = json!(stage);
+    }
+    Ok(marker)
 }
 
 pub fn terminal_failure_step(
