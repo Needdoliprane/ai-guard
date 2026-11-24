@@ -19,6 +19,13 @@ quatre codes sont 3, 0, 3, 0. Le conteneur fonctionne sans réseau
 avec un compte non privilégié et des données temporaires. La preuve
 concerne le diagnostic hors ligne sous émulation.
 
+Les mêmes paquets passent aussi `setup prepare` depuis le manifeste
+public de découverte, puis `ai-guard-diagnose --installation-dir`.
+La préparation ne contacte aucun fournisseur d’identité. Le diagnostic
+retourne 0, signale le transport SSO de démonstration et indique
+n’avoir lu aucun contenu de credential. Le test n’ouvre aucune
+session OIDC et ne lance aucun service.
+
 ## 24 novembre 2026 — restauration de la sauvegarde avant migration SQLite
 
 **PASS ciblé G06/G12** avec deux binaires macOS ARM64 distribués.
