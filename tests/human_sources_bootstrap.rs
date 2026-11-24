@@ -507,6 +507,29 @@ async fn cli_store14_refuses_restored_physical_copy_without_effects() {
     let manifest = std::path::PathBuf::from(activation["manifest"].as_str().unwrap());
     let seal = f.preparation.join("activation-complete.json");
     let envelope = f.preparation.join("technical-credentials.json");
+    let address = available_loopback_address();
+    let mut gateway = activation_gateway(&activation_path, address)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let origin = format!("http://{address}");
+    let identity = wait_for_human_identity(&f, &mut gateway, &client, &origin).await;
+    assert!(
+        identity["contexts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|context| { context["tenant_id"] == "tenant-a" })
+    );
+    stop_activation_gateway(&mut gateway).await;
+
+    // Take the backup and all refusal baselines after the positive gateway drains.
     let source = &f.sources[0];
     let copied = source.with_file_name("store14-restored.sqlite");
     {
@@ -569,23 +592,7 @@ async fn cli_store14_refuses_restored_physical_copy_without_effects() {
     let before_entries = directories.map(entries);
     let output = tokio::time::timeout(
         Duration::from_secs(10),
-        tokio::process::Command::new(env!("CARGO_BIN_EXE_agentsandbox"))
-            .env_clear()
-            .args(["gateway", "--human-sources-activation"])
-            .arg(&activation_path)
-            .args([
-                "--listen",
-                "127.0.0.1:0",
-                "--jev-backend",
-                "rust-rules",
-                "--policy",
-            ])
-            .arg(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/policies/default.json"
-            ))
-            .kill_on_drop(true)
-            .output(),
+        activation_gateway(&activation_path, address).output(),
     )
     .await
     .expect("Store14 refusal deadline")
@@ -729,17 +736,22 @@ fn valid_same_inode_legacy_change_after_prepare_is_examined_at_apply_without_a_p
     );
 }
 
-async fn complete_and_read(oidc: bool) {
-    let f = Fixture::new(oidc);
-    successful(f.prepare());
-    successful(f.step("apply", true));
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-    drop(listener);
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_agentsandbox"))
+fn available_loopback_address() -> std::net::SocketAddr {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+}
+
+fn activation_gateway(
+    activation: &std::path::Path,
+    address: std::net::SocketAddr,
+) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_agentsandbox"));
+    command
         .env_clear()
         .args(["gateway", "--human-sources-activation"])
-        .arg(f.preparation.join("activation.json"))
+        .arg(activation)
         .arg("--listen")
         .arg(address.to_string())
         .args(["--jev-backend", "rust-rules", "--policy"])
@@ -747,17 +759,17 @@ async fn complete_and_read(oidc: bool) {
             env!("CARGO_MANIFEST_DIR"),
             "/policies/default.json"
         ))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap();
-    let origin = format!("http://{address}");
-    let identity = tokio::time::timeout(Duration::from_secs(30), async {
+        .kill_on_drop(true);
+    command
+}
+
+async fn wait_for_human_identity(
+    f: &Fixture,
+    child: &mut tokio::process::Child,
+    client: &reqwest::Client,
+    origin: &str,
+) -> Value {
+    tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             assert!(
                 child.try_wait().unwrap().is_none(),
@@ -777,7 +789,42 @@ async fn complete_and_read(oidc: bool) {
         }
     })
     .await
-    .unwrap();
+    .unwrap()
+}
+
+async fn stop_activation_gateway(child: &mut tokio::process::Child) {
+    // Signal only this test's owned child; wait for the actual gateway cleanup.
+    // SAFETY: child.id() is the still-owned gateway process spawned above;
+    // SIGINT requests its normal registered shutdown and no other PID is used.
+    unsafe {
+        assert_eq!(libc::kill(child.id().unwrap() as i32, libc::SIGINT), 0);
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_secs(20), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+}
+
+async fn complete_and_read(oidc: bool) {
+    let f = Fixture::new(oidc);
+    successful(f.prepare());
+    successful(f.step("apply", true));
+    let address = available_loopback_address();
+    let mut child = activation_gateway(&f.preparation.join("activation.json"), address)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let origin = format!("http://{address}");
+    let identity = wait_for_human_identity(&f, &mut child, &client, &origin).await;
     assert_eq!(identity["contexts_complete"], false);
     let contexts = identity["contexts"].as_array().unwrap();
     assert!(!contexts.is_empty());
@@ -818,19 +865,7 @@ async fn complete_and_read(oidc: bool) {
                 .is_success()
         );
     }
-    // Signal only this test's owned child; wait for the actual gateway cleanup.
-    // SAFETY: child.id() is the still-owned gateway process spawned above;
-    // SIGINT requests its normal registered shutdown and no other PID is used.
-    unsafe {
-        libc::kill(child.id().unwrap() as i32, libc::SIGINT);
-    }
-    assert!(
-        tokio::time::timeout(Duration::from_secs(20), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .success()
-    );
+    stop_activation_gateway(&mut child).await;
 }
 
 #[tokio::test]
