@@ -208,6 +208,16 @@ utilise un duplex de recette. Le raccord E3 et les effets en worker
 sur moteur restent ouverts. Reçu `g05-e2-1c03e01f.log`, SHA-256
 `a917e619afbd7c54c9ebd3741d797ab7ddb35f6fe075282040165bc833b6ef8d`.
 
+**G06 — rejeu d’un reçu de rétention.** Sur `4c05dd6b`, les dix
+[tests de rétention SQLite](../../tests/audit_retention.rs) passent. Le
+témoin simule la perte du premier reçu après commit, ferme proprement
+le Store, puis rejoue le même plan. Le résultat JSON est identique,
+la tête reste inchangée et le registre ne contient qu’un segment.
+Reçu privé `g06-retention-4c05dd6b/run.log`, SHA-256
+`aa3dbaa5f73d8b2ccc0b292c5520b899780ff74a46217a7bb3a9302e74a1f051`.
+La reprise après interruption du processus entre commit et remise du
+reçu et les pannes physiques restent à qualifier.
+
 **G06/G08 — témoins de migration et de démarrage local.** Le
 [harnais de migration](../../tests/broker_registry_migration.rs)
 compare deux bases SQLite v5 à capacité égale. Une place disponible de
