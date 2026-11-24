@@ -18,13 +18,16 @@ const NAMESPACE: Uuid = Uuid::from_u128(0x22222222222242228222222222222222);
 const V1: i64 = 1_000_001;
 const PRIVATE_MARKER: &str = "synthetic-private-marker-never-print";
 
-fn configuration() -> Value {
-    // The published example uses a capacity plan. These tests exercise the
-    // historical configuration needed for migration targets 2 and 3.
-    let mut config: Value = serde_json::from_str(include_str!(
+fn documented_configuration() -> Value {
+    serde_json::from_str(include_str!(
         "../docs/setup/sso/examples/gateway.https.json"
     ))
-    .unwrap();
+    .unwrap()
+}
+
+fn configuration() -> Value {
+    // Migration targets 2 and 3 require historical configuration version 1.
+    let mut config = documented_configuration();
     config["version"] = json!(1);
     config["authentication_audit"]
         .as_object_mut()
@@ -313,7 +316,7 @@ fn existing_backup_is_preserved_and_legacy_source_remains_v1() {
 // Missing dispatch or silently choosing V1→V2 must fail this real maintenance
 // path; expected versions/history come from the independent historical fixture.
 #[test]
-fn explicit_native_logout_v3_migration_preserves_v2_history_and_new_backup() {
+fn explicit_v3_and_v4_migrations_preserve_history_and_each_backup() {
     let files = support::private_tempdir();
     let data = files.path().join("authentication.sqlite");
     let expected = legacy_v1(&data);
@@ -361,4 +364,75 @@ fn explicit_native_logout_v3_migration_preserves_v2_history_and_new_backup() {
         0o600
     );
     assert_eq!(schema(&before_v2), V1, "previous backup must remain V1");
+
+    let documented = documented_configuration();
+    let capacity_config = files.path().join("oidc-v2.json");
+    private_write(&capacity_config, &serde_json::to_vec(&documented).unwrap());
+    let before_v4 = files.path().join("before-v4.backup");
+    let migrate_v4 = |config: &Path| {
+        Command::new(env!("CARGO_BIN_EXE_agentsandbox"))
+            .args([
+                "migrate-authentication",
+                "--target-version",
+                "4",
+                "--oidc-config",
+            ])
+            .arg(config)
+            .arg("--backup")
+            .arg(&before_v4)
+            .arg("--confirm-control-stopped")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+
+    let refused = migrate_v4(&path);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("target4 requires configuration version2")
+    );
+    assert!(!before_v4.exists());
+    assert_eq!(schema(&data), 1_000_003);
+    assert_eq!(open(&data).verify().unwrap(), expected);
+
+    let output = migrate_v4(&capacity_config);
+    assert!(
+        output.status.success(),
+        "explicit V3→V4 maintenance failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["migration"], "tenant_capacity_v4");
+    assert_eq!(schema(&data), 1_000_004);
+    assert_eq!(schema(&before_v4), 1_000_003);
+    assert_eq!(open(&before_v4).verify().unwrap(), expected);
+    assert_eq!(
+        fs::metadata(&before_v4).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let migrated = open(&data);
+    let verified = migrated.verify().unwrap();
+    assert_eq!(verified.namespace_id, expected.namespace_id);
+    assert_eq!(verified.records, expected.records + 1);
+    assert_eq!(verified.head.sequence, expected.head.sequence + 1);
+    assert_eq!(
+        report["head"],
+        serde_json::to_value(&verified.head).unwrap()
+    );
+    let db = Connection::open_with_flags(&data, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let previous: String = db
+        .query_row(
+            "SELECT prev_hash FROM authentication_entries WHERE seq = ?1",
+            [i64::try_from(verified.head.sequence).unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(previous, expected.head.hash);
+    assert_eq!(
+        serde_json::to_value(migrated.capacity_plan().unwrap().unwrap()).unwrap(),
+        documented["authentication_audit"]["capacity_plan"]
+    );
+    assert_eq!(schema(&before_v2), V1);
+    assert_eq!(schema(&before_v3), 1_000_002);
 }
