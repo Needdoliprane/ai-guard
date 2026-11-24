@@ -239,6 +239,25 @@ cargo test --locked --offline --test gateway_tenancy \
   configured_worker_quota_at_hundred_survives_gateway_restart -- --exact --test-threads=1 --nocapture
 ```
 
+### Pilote G10 de capacité Docker sur un seul tenant
+
+Le sélecteur ignoré par défaut lance trois `/bin/sleep 35` sur le même tenant, via les parcours CLI et gateway habituels. Il exige une image QA déjà présente avec `/bin/sleep` et `/bin/tar`, un endpoint Docker Unix local explicite et l’opt-in ci-dessous. L’opt-in rootful existant s’applique si le moteur sélectionné l’exige.
+
+```sh
+AGENTSANDBOX_TEST_CAPACITY_PILOT=1 \
+AGENTSANDBOX_TEST_RUNTIME=docker \
+AGENTSANDBOX_TEST_RUNTIME_PROGRAM="$QA_DOCKER_PROGRAM" \
+AGENTSANDBOX_TEST_RUNTIME_ENDPOINT="$QA_DOCKER_UNIX_ENDPOINT" \
+AGENTSANDBOX_TEST_IMAGE="$QA_WORKER_IMAGE_ID" \
+cargo test --locked --offline --test runtime_user_journey \
+  same_tenant_capacity::real_docker_same_tenant_capacity_pilot -- \
+  --ignored --exact --test-threads=1 --nocapture
+```
+
+Le test rapproche le quota avant et après un lot d’inspections Docker par CID complet, l’état et le mode réseau `none`, les sessions et l’intersection stricte des intervalles natifs. Il laisse les CLI terminer leur retrait ciblé même si l’oracle du pic échoue. En cas de succès, il vérifie l’absence de chaque CID sur le moteur, les états terminaux, le retour à zéro du quota et l’intégrité de l’audit. Le répertoire privé affiché et les volumes de travail restent disponibles pour examiner ou reprendre les sessions. Aucune purge globale.
+
+Le profil géré impose 2 vCPU, 1 Gio et 256 PID par worker, avec un profil fixe pour les auxiliaires d’import. Le pilote borne donc la concurrence à trois avec 6 vCPU et 3 Gio de plafonds cumulés pour les workers. Une campagne légère à 100 exige de rendre les plafonds inférieurs configurables et liés au lancement autorisé, de borner la concurrence des auxiliaires et de valider la pagination ou une lecture complète du registre à l’échelle du tenant. À 100, les seuls plafonds actuels des workers totaliseraient 200 vCPU et 100 Gio. Le test hors moteur de l’intersection utilise 100 intervalles synthétiques. La mesure de 100 workers physiques reste `NOT_RUN`.
+
 ## Dialogue TTY hors ligne
 
 ```sh
