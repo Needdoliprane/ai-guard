@@ -24,6 +24,13 @@ Le relais utilise un délai de huit secondes. Une demande synthétique
 `deny`, le reçu correspond à l’événement SQLite extrait et l’intégrité
 est valide. Aucun worker n’est demandé. Les ressources des deux projets
 et les volumes neufs sont retirés après sauvegarde du reçu.
+Le même CLI refuse le provisionnement sur Podman rootless avant la
+création des volumes ou du préparateur. Pour l’image de contrôle
+identique, l’inspection Docker rapporte un identifiant préfixé par
+`sha256:` tandis que Podman rapporte le même digest en hexadécimal nu.
+Le prévol compare la chaîne telle quelle à l’identifiant canonique
+préfixé. Le sélecteur est absent et aucun service TLS n’a été lancé
+sur Podman. Le profil TLS Podman reste ouvert.
 [Reçu de santé et de décision TLS](evidence/2026-11-24/g07-local-tls-volumes-health.json).
 
 ## 24 novembre 2026 — avis Qwen local depuis l’archive macOS

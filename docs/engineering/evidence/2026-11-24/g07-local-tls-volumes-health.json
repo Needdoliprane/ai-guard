@@ -49,5 +49,15 @@
       "rule": "local_openai_deny",
       "integrity": true
     }
+  },
+  "podman_rootless_provision": {
+    "cli_source_revision": "e2796ac1",
+    "exit_code": 1,
+    "published_selector": false,
+    "preparer_created": false,
+    "matching_volumes_observed": 0,
+    "plain_hex_image_id": true,
+    "digest_matches": true,
+    "source_comparison": "src/runtime/model_tls.rs:395"
   }
 }
