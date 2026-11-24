@@ -27,6 +27,17 @@ Le scénario local de garde des archives natives G12 confirme la présence et le
 
 Un statut porte uniquement sur la preuve nommée. Un lot logiciel réussi ne clôture pas les gates d'effets runtime. La publication production exige tous les gates applicables PASS, ou NOT_APPLICABLE justifié avant essais. Les quatre combinaisons Docker/Podman × Linux x86_64/macOS ARM64 restent exigées ; Kubernetes reste une cible complète distincte.
 
+**G09 — témoin d’échéance avant lecture du résultat.** Sur `905e79db`,
+le [harnais Docker](../../tests/broker_runtime.rs) cherche les événements
+de démarrage, de signal et de terminal du CID d’origine dès l’observation
+centrale, avant la lecture du statut de l’exécuteur et du résultat.
+La sonde peut prendre jusqu’à cinq secondes dans la borne globale.
+Le retrait est vérifié séparément. L’oracle d’événements et le test de
+budget passent sur fixture. La recette moteur reste à rejouer et le
+FAIL sur `c7f6c966` reste le dernier résultat physique.
+Reçu `g09-terminal-oracle-905e79db.log`, SHA-256
+`9aca0a3a7a318f2a7e0f9fd4844b66531acd9c06cd417cd0f9ab85bc81e0c8be`.
+
 **G12 — contrôle local du lot historique.** Le bloc local de vérification
 du brouillon sur `6456e7cc` passe avec les octets du transfert
 `1c9e8e01`. Le CLI macOS archivé `99cb885e` vérifie les membres des
