@@ -56,6 +56,25 @@ et manifeste de fermeture
 `d7c255ffc6334d4ae16e3b4f7ac769079b188acad8c5e89b01834b027422678e`
 sous `g07-first-full3-claim-7f9eceef-package-nodebug`.
 
+## 25 novembre 2026 — réconciliation terminale du relais G11
+
+**FAIL ciblé, code 101**, sur la source `526d1037` avec le conducteur
+`7d6c811e`, fixture synthétique Linux. Le témoin de la tentative A
+observe un terminal. À l’échéance, SQLite conserve `running` et
+le quota, avec reçu terminal absent. La tête indique `no_result` et
+le relevé ponctuel montre l’exécuteur inactif. B reste non échantillonné
+et la fermeture non confirmée. [Run exact](https://github.com/Needdoliprane/ai-guard/actions/runs/45122271906)
+
+Le reçu primaire `14794247846` et son conducteur concordent avec
+le manifeste privé SHA-256
+`1ca93d605c3f196977d888d9b1b2689c3f6833128fcf910c38a9dbe267b14d61`.
+Le prochain relevé doit distinguer l’admission du balayage, le
+chargement strict et l’entrée en reprise sur le même job et la même
+tentative, via le lecteur confirmé jusqu’au checkpoint V5. Le critère
+reste le reçu terminal durable et la libération du quota sur cette
+tentative sans seconde émission. La preuve Kubernetes suit son
+propre contrat sur l’UID exact. [Contrat G11 Source17](G11_SOURCE17_KUBERNETES_PROPOSAL.md)
+
 ## 25 novembre 2026 — fermeture des lectures de reprise G09
 
 **PASS logiciel ciblé, 2/2**, macOS ARM64. Une lecture de résultat
