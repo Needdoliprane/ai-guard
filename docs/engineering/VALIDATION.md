@@ -1,5 +1,18 @@
 # Validation courante
 
+## 24 novembre 2026 — prévol Kubernetes du candidat
+
+**PASS ciblé G11** sur `116eaf11`. Les deux suites de prévol
+exécutent 11 tests avec zéro échec et une recette réelle ignorée.
+Les fixtures HTTPS loopback vérifient l’audit durable avant
+transmission et avant succès, le refus en cas de divergence et le
+verdict indéterminé si l’effet ne peut pas être confirmé.
+
+Un relevé séparé en lecture seule confirme que le cluster local
+Docker Desktop ARM64 répond en v1.36.1 et expose la classe
+`ai-guard-rwop` avec `hostpath.csi.k8s.io`. Ce relevé ne qualifie
+pas l’exclusivité entre deux pods. La recette sur cluster reste ouverte.
+
 ## 24 novembre 2026 — reprise de lecture et d’annulation du broker
 
 **PASS ciblé G09** sur `74927852`. Les 21 tests `broker_run_cli`
