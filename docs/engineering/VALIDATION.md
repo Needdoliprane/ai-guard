@@ -1,5 +1,18 @@
 # Validation courante
 
+## 24 novembre 2026 — premier diagnostic avec le paquet macOS
+
+**PASS ciblé G01** avec les binaires distribués `84971de6`.
+Le diagnostic d’un dossier absent retourne le code 3 et
+`layout.target_absent`, sans le créer. Après `agentsandbox init`,
+le diagnostic retourne 0 et les sommes des fichiers de configuration
+sont identiques avant et après. Un fichier runner de recette avec
+le mode 0640 est refusé avec `reference.private_rule_violated`.
+Le diagnostic redevient OK après remise du mode 0600. Il signale
+sur ces rapports un fonctionnement hors réseau et aucune lecture
+du contenu des credentials. Les services et le moteur restent
+parmi les vérifications non exécutées par ce diagnostic.
+
 ## 24 novembre 2026 — restauration de la sauvegarde avant migration SQLite
 
 **PASS ciblé G06/G12** avec deux binaires macOS ARM64 distribués.
