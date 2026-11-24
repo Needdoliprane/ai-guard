@@ -55,6 +55,8 @@ le refus par quota de la 101e et l’indépendance du quota de B. Le test
 ne démarre aucun worker. Reçu privé `g10-sqlite-35690caa/run.log`,
 SHA-256 `26eebf9e606d0d696b0bfdc6b5fd65069a35f03e32e141c6dac64405a8b33df9`.
 
+Le test HTTP `configured_worker_quota_at_hundred_survives_gateway_restart` passe aussi sur le candidat `d3e9acf9` (macOS ARM64, 1 test, 12,16 s). Il vérifie la pagination des 100 réservations, la tête de chaîne après arrêt du gateway et une réservation indépendante de B. Aucun worker n’est démarré.
+
 **G09 — arrêt explicite d’A1.** Sur `57144fcc`, le
 [parcours CLI](../../tests/runtime_user_journey.rs) passe en 55,26 s
 sur Docker Desktop ARM64. Le CLI reçoit `stopping` pour A1, puis le
