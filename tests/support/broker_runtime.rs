@@ -1067,7 +1067,9 @@ fn project_registration(value: &Value) -> Option<Value> {
             if let Some(mode @ ("fresh" | "replay")) = value["reservation_mode"].as_str() {
                 projected["reservation_mode"] = json!(mode);
             }
-            if let Ok(code) = EnforcerError::deserialize(&value["enforcer_code"]) {
+            if value["enforcer_code"].is_string()
+                && let Ok(code) = EnforcerError::deserialize(&value["enforcer_code"])
+            {
                 projected["enforcer_code"] = json!(code);
             }
             Some(projected)

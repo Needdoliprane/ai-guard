@@ -513,6 +513,11 @@ fn executor_failure_projection_keeps_only_closed_registration_evidence() {
             json!({"stage":"reserve_prospective","arm_state":"pending"}),
         ),
         (
+            json!({"stage":"reserve_prospective","arm_state":"pending",
+                "enforcer_code":{"capacity":null}}),
+            json!({"stage":"reserve_prospective","arm_state":"pending"}),
+        ),
+        (
             json!({"stage":"restore_assigned","arm_state":"acknowledged",
                 "reservation_mode":"fresh","enforcer_code":"capacity"}),
             json!({"stage":"restore_assigned","arm_state":"acknowledged"}),
