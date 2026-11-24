@@ -193,6 +193,14 @@ L’ingress déployé et la pression réseau restent à qualifier. Reçu
 `g08-sse-tls-987315fd/suite.log`, SHA-256
 `83df2f8fa2b3859c054a1cbbca9872fa79395f28643afd33bca87dcd8a9db1f1`.
 
+Sur `69fe6d28`, le même oracle passe avec une terminaison TLS de recette
+devant le routeur ingress Rust et un amont gateway HTTP loopback. Le
+lecteur reprend au dernier curseur, lit les deux événements dans l’ordre
+et les deux listeners se ferment. Le témoin TLS direct passe sur le même
+binaire. Le déploiement et la contre-pression restent à qualifier.
+Reçu `g08-ingress-tls-sse-69fe6d28/ingress.log`, SHA-256
+`0f92593ec3056a5184b93f1a88bb630f20a30bb030a4481d081e93ee17169ce6`.
+
 Compléments explicites du mainteneur,30octobre : G07 exige Codex CLI et Claude Code, chacun avec abonnement et clé API, sélection dynamique annoncée, aucun repli silencieux vers une API facturée et aucun cache OAuth extrait implicitement. G08 exige une vue Web unique de tous les agents/workers du tenant sur ses brokers/hôtes/runtimes, avec provenance, fraîcheur et états partiels ; pas un dashboard par worker. G04/G06/G10 couvrent les quotas et le comptage globaux du tenant. Pour G10, l’arbitrage du 24 novembre porte sur 100 réservations durables chez A et une recette sur moteur avec A1/A2 chez A et B1 chez B. Aucun de ces compléments n'est clôturé par sa seule inscription ou par le `.env` local créé.
 
 Le gateway distingue désormais API TypeSafe, règles Rust et modèle local consultatif. Un premier essai historique Qwen 0,5B a renvoyé `allow` pour une suppression, ce qui maintient le candidat hors qualification pour autoriser une exécution. Le parcours actuel évalue un avis via Rust, maintient le veto impératif et permet une relecture durable après arrêt du modèle. Cette preuve couvre un gateway natif avec modèle Docker Desktop. Une seconde recette vérifie une décision Qwen avec gateway et relais TLS conteneurisés ainsi que son reçu et son export dans Chromium. Le corpus modèle, Podman, Kubernetes et le déploiement Compose complet relèvent de G04/G07/G10. [Essai historique](evidence/2026-10-30/local-judge/README.md) · [Essai intégré](evidence/2026-11-18/functional/qwen-local-gateway.json)
