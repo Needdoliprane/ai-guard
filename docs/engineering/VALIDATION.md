@@ -1,5 +1,19 @@
 # Validation courante
 
+## 24 novembre 2026 — révocation du statut conservé par le broker
+
+**PASS ciblé G09**, 1 test en 0,86 s sur macOS ARM64. Le lecteur de
+statut retrouve d’abord la projection, puis refuse de la lire après mise
+en garde, arrêt du service ou disparition de son propriétaire. Le libtest
+construit avec les sources de `cf754fc0` a été réutilisé après
+vérification de son empreinte et de l’écart uniquement documentaire
+jusqu’à `9ae0d187`.
+
+Reçu privé `g09-status-projection-31a7e3dd`, journal SHA-256
+`9f1a75c9f3fdf950cb46e9e341144f29e4e039a9385c4f1dac2eea2db173e9b2`.
+Le pilote de reprise après crash et la réconciliation du quota terminal
+restent ouverts dans [G09](PRODUCTION_READINESS.md).
+
 ## 24 novembre 2026 — collecte Claude Code dans l’image worker
 
 **PASS logiciel ciblé G07** sur `31a7e3dd`, macOS ARM64. Le libtest
