@@ -215,8 +215,14 @@ le Store, puis rejoue le même plan. Le résultat JSON est identique,
 la tête reste inchangée et le registre ne contient qu’un segment.
 Reçu privé `g06-retention-4c05dd6b/run.log`, SHA-256
 `aa3dbaa5f73d8b2ccc0b292c5520b899780ff74a46217a7bb3a9302e74a1f051`.
-La reprise après interruption du processus entre commit et remise du
-reçu et les pannes physiques restent à qualifier.
+Sur `362dc8e0`, les 11 tests passent. Le témoin supplémentaire
+interrompt par SIGKILL le seul processus enfant après le commit du
+Store. La réouverture retrouve le même reçu, une tête inchangée et
+un seul segment. La chaîne de la base et de l’archive se vérifie.
+Reçu `g06-retention-process-stop/run.log`, SHA-256
+`b9e75a59ecc152400709e2a327f65655529c0afd4d67e9429ef78bbc57e1e715`.
+L’interruption du CLI lors de la remise du reçu et les pannes physiques
+restent à qualifier.
 
 **G06/G08 — témoins de migration et de démarrage local.** Le
 [harnais de migration](../../tests/broker_registry_migration.rs)
