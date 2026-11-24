@@ -55,3 +55,13 @@ réseaux, volumes et credentials des deux recettes ont été retirés.
 Les 65 paquets source Debian ont les mêmes versions sur les deux
 moteurs et dans le relevé antérieur de `7e3a6166`. Le verdict de
 construction native Podman et le statut de publication restent ouverts.
+
+### Identités techniques derrière l’ingress Podman
+
+Un projet Compose Podman rootless neuf utilisant l’image `fdf780c3`
+a renvoyé la même identité viewer sur le gateway et le dashboard
+(HTTP 200). Le dashboard a refusé une requête anonyme (401). Le
+protocole authentifié sur `/control/api/v1/control/protocol` a
+identifié le runner (200) et refusé le viewer (403). Le même viewer
+a pu lire le diagnostic public (200). Aucun worker n’a été lancé.
+Le projet et ses identifiants de recette ont été retirés.
