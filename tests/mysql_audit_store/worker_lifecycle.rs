@@ -1,15 +1,267 @@
 use agentsandbox::{
     control::{
-        AllocationProvenanceV1, AllocationSourceV1, AllocationV1, ClaimDispositionV1,
-        ControlFailure, MutationResultV1, QuotaPolicyV1, RuntimeInspectionV1, RuntimeObservationV1,
-        RuntimeStatusV1, WorkerMutationV1, WorkerStateV1, WorkerTransitionV1, WorkerV1,
+        AdmissionRefusalV1, AllocationProvenanceV1, AllocationSourceV1, AllocationV1,
+        ClaimDispositionV1, ControlFailure, MutationReceiptV1, MutationResultV1, QuotaPolicyV1,
+        RuntimeInspectionV1, RuntimeObservationV1, RuntimeStatusV1, WorkerMutationV1,
+        WorkerStateV1, WorkerTransitionV1, WorkerV1,
     },
+    control_fs::Directory,
     mysql_storage::{MysqlProbeError, audit::MysqlAuditStore},
     policy::{self, Policy},
 };
-use anyhow::Context;
+use anyhow::{Context, ensure};
 use mysql_async::{Conn, prelude::Queryable};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt, path::PathBuf, time::Duration};
+
+const RESTORE_TENANT: &str = "tenant-qa-sql05";
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestoreWitness {
+    source_server: uuid::Uuid,
+    source_port: u16,
+    namespace: uuid::Uuid,
+    mtls: bool,
+    claim: WorkerMutationV1,
+    receipt: MutationReceiptV1,
+    worker: WorkerV1,
+    payload_bytes: u64,
+}
+
+#[tokio::test]
+#[ignore = "requires two isolated MySQL 8.4 QA servers and an operator-prepared backup restore"]
+async fn restored_mysql_legacy_claim_retains_receipt_and_quota() -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(120), Box::pin(restore_phase()))
+        .await
+        .context("SQL-05 restore phase timed out")?
+}
+
+async fn restore_phase() -> anyhow::Result<()> {
+    let prepare = match std::env::var("AI_GUARD_MYSQL_RESTORE_PHASE")?.as_str() {
+        "prepare" => true,
+        "verify" => false,
+        _ => anyhow::bail!("SQL-05 restore phase must be prepare or verify"),
+    };
+    let path = PathBuf::from(
+        std::env::var_os("AI_GUARD_MYSQL_RESTORE_WITNESS")
+            .context("SQL-05 private witness path is required")?,
+    );
+    let parent = Directory::open_existing(path.parent().context("witness parent is missing")?)?;
+    ensure!(path.file_name().is_some(), "witness filename is missing");
+    let expected = if prepare {
+        ensure!(
+            path.symlink_metadata()
+                .is_err_and(|err| err.kind() == std::io::ErrorKind::NotFound),
+            "SQL-05 witness path must be new"
+        );
+        None
+    } else {
+        Some(serde_json::from_slice::<RestoreWitness>(
+            super::load(&path, 16_384)?.bytes(),
+        )?)
+    };
+    let fixture = super::identity::FixtureFiles::open_gateway("AI_GUARD_MYSQL_RESTORE_CONFIG")?;
+    let namespace = fixture.target.namespace;
+    let mtls = fixture.target.client_cert_file.is_some();
+    let mut connection = fixture.maintenance().await?;
+    let (server, database, account) = connection
+        .query_first::<(String, String, String), _>(
+            "SELECT @@server_uuid, DATABASE(), CURRENT_USER()",
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("cannot verify the SQL-05 maintenance session"))?
+        .context("SQL-05 maintenance session is missing")?;
+    let server = uuid::Uuid::parse_str(&server)?;
+    ensure!(
+        !server.is_nil()
+            && database == fixture.target.database
+            && account.rsplit_once('@').map(|(user, _)| user)
+                == Some(fixture.target.maintenance_username.as_str()),
+        "SQL-05 maintenance session uses a different server identity, database or account"
+    );
+    let store = fixture.target.open(
+        &fixture.target.maintenance_username,
+        fixture.credentials(&fixture.maintenance_password)?,
+        RESTORE_TENANT,
+        namespace,
+        128,
+    )?;
+    let policy = Policy::default();
+    let quota = QuotaPolicyV1 {
+        max_active_workers: 1,
+        ..Default::default()
+    };
+    if let Some(expected) = expected {
+        ensure!(
+            server != expected.source_server
+                && fixture.target.port != expected.source_port
+                && namespace == expected.namespace
+                && mtls == expected.mtls,
+            "SQL-05 requires a separate restored server with the original namespace and profile"
+        );
+        connection.disconnect().await?;
+        check_restored_claim(&store, &quota, &expected).await?;
+        let (next, _) = super::worker::admission(&store, &policy).await?;
+        let refused = store
+            .admit_worker(
+                &next,
+                &policy,
+                policy::evaluate(&policy, &next.decision_request),
+                json!(null),
+                &quota,
+            )
+            .await?;
+        ensure!(
+            !refused.accepted
+                && refused.refusal == Some(AdmissionRefusalV1::Quota)
+                && refused.worker.is_none(),
+            "restored reservation did not prevent a second admission"
+        );
+        check_held_quota(&store, &quota, &expected.worker).await?;
+        println!("SQL05_RESTORED_LEGACY_CLAIM_VERIFIED");
+    } else {
+        super::identity::require_fresh(&mut connection).await?;
+        connection.disconnect().await?;
+        store.initialize().await?;
+        let (claim, committed) = prepare_restore_claim(&store, &policy, &quota).await?;
+        let head = store.verify().await?;
+        ensure!(
+            head.seq == committed.receipt.audit_seq && head.hash == committed.receipt.audit_hash,
+            "the consumed claim must be the source audit head"
+        );
+        check_held_quota(&store, &quota, &committed.worker).await?;
+        let witness = RestoreWitness {
+            source_server: server,
+            source_port: fixture.target.port,
+            namespace,
+            mtls,
+            claim,
+            receipt: committed.receipt,
+            worker: committed.worker,
+            payload_bytes: head.payload_bytes,
+        };
+        parent.revalidate()?;
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?;
+        serde_json::to_writer(&file, &witness)?;
+        file.sync_all()?;
+        println!("SQL05_SOURCE_CLAIM_PREPARED");
+    }
+    Ok(())
+}
+
+async fn prepare_restore_claim(
+    store: &MysqlAuditStore,
+    policy: &Policy,
+    quota: &QuotaPolicyV1,
+) -> anyhow::Result<(WorkerMutationV1, MutationResultV1)> {
+    let (admission, _) = super::worker::admission(store, policy).await?;
+    let admitted = store
+        .admit_worker(
+            &admission,
+            policy,
+            policy::evaluate(policy, &admission.decision_request),
+            json!(null),
+            quota,
+        )
+        .await?;
+    let reserved = admitted
+        .worker
+        .context("SQL-05 worker admission was refused")?;
+    let preparing = mutate(store, &reserved, WorkerTransitionV1::Prepare)
+        .await?
+        .worker;
+    let issued = mutate(store, &preparing, WorkerTransitionV1::CreateIssued)
+        .await?
+        .worker;
+    let created = mutate(
+        store,
+        &issued,
+        WorkerTransitionV1::Created {
+            inspection: inspection(&issued),
+        },
+    )
+    .await?
+    .worker;
+    let claim = mutation(
+        &created,
+        WorkerTransitionV1::StartClaim {
+            emitter_id: uuid::Uuid::new_v4().to_string(),
+        },
+    );
+    let committed = store.mutate_worker(&claim).await?;
+    ensure!(
+        committed.disposition == Some(ClaimDispositionV1::EmitOnce)
+            && committed.worker.state == WorkerStateV1::StartIssued,
+        "source did not commit exactly one start claim"
+    );
+    Ok((claim, committed))
+}
+
+async fn check_restored_claim(
+    store: &MysqlAuditStore,
+    quota: &QuotaPolicyV1,
+    expected: &RestoreWitness,
+) -> anyhow::Result<()> {
+    let before = store.verify().await?;
+    ensure!(
+        before.seq == expected.receipt.audit_seq
+            && before.hash == expected.receipt.audit_hash
+            && before.payload_bytes == expected.payload_bytes,
+        "restored audit differs from the claim-point witness"
+    );
+    ensure!(
+        store
+            .worker_operation(&expected.claim.operation_id)
+            .await?
+            .as_ref()
+            == Some(&expected.receipt),
+        "the original claim receipt must exist before replay"
+    );
+    let replay = store.mutate_worker(&expected.claim).await?;
+    ensure!(
+        replay.disposition == Some(ClaimDispositionV1::AlreadyConsumed)
+            && replay.receipt == expected.receipt,
+        "restored claim did not replay the consumed receipt"
+    );
+    let worker = store
+        .worker(&expected.claim.worker_id)
+        .await?
+        .context("restored worker is missing")?;
+    ensure!(
+        worker.state == WorkerStateV1::StartIssued
+            && worker.attempt == expected.worker.attempt
+            && worker.revision == expected.worker.revision,
+        "restored worker lost its original attempt or revision"
+    );
+    check_held_quota(store, quota, &expected.worker).await?;
+    ensure!(
+        worker.quota_held && store.verify().await? == before,
+        "claim replay changed quota ownership or audit"
+    );
+    Ok(())
+}
+
+async fn check_held_quota(
+    store: &MysqlAuditStore,
+    quota: &QuotaPolicyV1,
+    worker: &WorkerV1,
+) -> anyhow::Result<()> {
+    let held = store.worker_quota(quota).await?;
+    ensure!(
+        worker.quota_held
+            && held.held_workers == 1
+            && held.held_cpu_millis == u64::from(worker.launch.cpu_millis)
+            && held.held_memory_bytes == worker.launch.memory_bytes,
+        "SQL-05 did not retain the original reservation"
+    );
+    Ok(())
+}
 
 pub(super) async fn exercise(
     store: &MysqlAuditStore,

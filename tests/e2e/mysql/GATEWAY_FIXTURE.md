@@ -135,3 +135,91 @@ AI_GUARD_MYSQL_REGISTRY_QA_BIN="$PWD/target/debug/examples/mysql_storage_probe" 
   --ignored --exact identity::prepared_registry_probe_verifies_owned_origin_and_preserves_audits \
   --test-threads=1
 ```
+
+## SQL-05 after a committed Legacy claim · SQL-05 après commit d’un claim Legacy
+
+Run one pair of disposable MySQL 8.4.13 servers per transport profile, using the
+same pinned image and private TLS or mTLS recipe as the outage verification. Use
+distinct projects, fresh volumes, different loopback ports and distinct MySQL
+server UUIDs. Verify the server name and chain and, for mTLS, confirm refusal
+without the client certificate. Use the fixture above to prepare the source
+schema, with its six DDL inputs. The oracle writes through the schema-scoped
+maintenance account and keeps all configuration and witness files in a private
+canonical directory. Keep the witness path unused before preparation.
+
+Pour chaque profil TLS ou mTLS, utiliser deux serveurs MySQL 8.4.13 jetables issus
+de l’image épinglée de la recette de coupure. Les projets, volumes neufs, ports
+loopback et UUID serveur sont distincts. Vérifier le nom et la chaîne du serveur
+et, en mTLS, le refus sans certificat client. Préparer le schéma source avec les
+six DDL de la fixture ci-dessus. L’oracle écrit avec le compte de maintenance
+limité à ce schéma. Placer les configurations et le témoin dans un répertoire
+privé canonique. Le chemin du témoin doit être neuf.
+
+Set `AI_GUARD_MYSQL_RESTORE_CONFIG` to the private fixture JSON for the active
+phase and `AI_GUARD_MYSQL_RESTORE_WITNESS` to the absolute path of the same
+private witness across phases. Run the exact selector twice, first with
+`AI_GUARD_MYSQL_RESTORE_PHASE=prepare` and then with
+`AI_GUARD_MYSQL_RESTORE_PHASE=verify` after the external restore.
+
+Renseigner `AI_GUARD_MYSQL_RESTORE_CONFIG` avec le JSON privé de la phase et
+`AI_GUARD_MYSQL_RESTORE_WITNESS` avec le chemin absolu du même témoin privé
+pour les deux phases. Jouer le sélecteur exact avec
+`AI_GUARD_MYSQL_RESTORE_PHASE=prepare`, puis avec
+`AI_GUARD_MYSQL_RESTORE_PHASE=verify` après la restauration externe.
+
+```sh
+cargo test --locked --no-default-features --features mysql-storage --test mysql_audit_store -- \
+  --ignored --exact --test-threads=1 --show-output \
+  worker_lifecycle::restored_mysql_legacy_claim_retains_receipt_and_quota
+```
+
+1. `prepare` commits a Legacy `StartClaim` and writes the witness at
+   `StartIssued` before any runtime observation. Require one passing selector
+   and `SQL05_SOURCE_CLAIM_PREPARED`. Quiesce the source writers. Take a
+   consistent logical backup of its fixture schema, including DDL and all data.
+2. Import the actual backup into the fresh destination instance under the same
+   schema name. Recreate the namespace-bound fixture accounts with fresh private
+   credentials and the same schema-local grants and SSL/X509 requirements.
+   Keep the original namespace in the destination JSON. Never import global
+   MySQL users, server identity or TLS keys. Keep backup/restore exit statuses
+   and the private backup digest, then stop the source and verify that its port
+   is unreachable before starting `verify`. Provide only destination access
+   to that process.
+3. Require one passing selector and `SQL05_RESTORED_LEGACY_CLAIM_VERIFIED`.
+   The restored original receipt must already exist. Exact replay returns
+   `AlreadyConsumed` with an identical receipt and preserves the verified audit
+   head, attempt, revision and held worker/CPU/memory. A distinct admission must
+   then be refused for quota saturation. Collect a separate receipt per profile
+   with the backup/restore evidence and fixture cleanup outcome.
+
+1. `prepare` commite le claim au point `StartIssued` avant toute observation
+   runtime. Exiger un test réussi et `SQL05_SOURCE_CLAIM_PREPARED`. Arrêter les
+   écritures puis capturer une sauvegarde logique cohérente du DDL et des
+   données du seul schéma de recette.
+2. Importer cette sauvegarde sur le serveur neuf sous le même nom de schéma.
+   Recréer les comptes de fixture avec des credentials neufs et les mêmes
+   privilèges et contraintes SSL/X509. Conserver le namespace dans le JSON
+   cible. Exclure comptes globaux, identité serveur et clés TLS du transfert.
+   Conserver les statuts de sauvegarde et de restauration et l’empreinte privée
+   du dump, puis arrêter la source et vérifier que son port est inaccessible
+   avant `verify`. Donner à ce processus les seuls accès de la cible.
+3. Exiger un test réussi et `SQL05_RESTORED_LEGACY_CLAIM_VERIFIED`. Le reçu
+   original doit préexister au rejeu. Le rejeu exact rend `AlreadyConsumed`
+   avec le même reçu, préserve la tête d’audit vérifiée, la tentative, sa
+   révision et le quota worker/CPU/mémoire. Une admission distincte est ensuite
+   refusée pour saturation. Conserver un reçu par profil avec les preuves de
+   sauvegarde/restauration et le résultat du nettoyage.
+
+The restore selector checks database state. A restoration result also requires
+the external backup and import evidence. Preparation, SQL seeding of the
+destination or a reopening of the source cannot establish a restoration PASS.
+This slice covers Legacy after a claim, with synthetic runtime observations
+limited to creation metadata. Pre-claim backups, physical fencing and
+`owned_sources` remain separate.
+
+Le sélecteur vérifie l’état de la base. Un PASS de restauration exige aussi
+les preuves externes de sauvegarde et d’import. La préparation, l’amorçage
+SQL de la destination ou la réouverture de la source ne produisent aucun PASS
+de restauration. Cette tranche couvre Legacy après claim, avec des observations
+runtime synthétiques limitées aux métadonnées de création. Les sauvegardes
+antérieures au claim, le fencing physique et `owned_sources` restent distincts.
