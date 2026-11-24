@@ -9,8 +9,11 @@ trois réponses d’armement. Le premier `WorkerClaim` n’arrive pas au
 gateway de recette avant l’échéance de 180 s. La relecture hors ligne
 relie par empreinte les 40 révisions jusqu’à la tête locale 39. L’Arm
 du worker y est acquitté et lié à son enregistrement Full3. La chaîne
-ne contient aucun `WorkerClaim`. L’écart reste à localiser entre cet
-armement et la première écriture du claim.
+ne contient aucun `WorkerClaim`. La révision 35 acquitte l’Arm du worker,
+la 36 enregistre sa liaison Full3 et la 37 conserve l’échec local
+`worker/unavailable`. Le gateway acquitte le diagnostic correspondant
+en révision 39, avec effet runtime inconnu. Il reste à identifier
+l’étape interne qui échoue après la liaison et avant l’écriture du claim.
 
 Le runtime de recette et le gateway rejoignent leurs tâches. Le test
 signale aussi une fermeture non confirmée du gardien et la conservation
