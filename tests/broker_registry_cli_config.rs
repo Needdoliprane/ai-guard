@@ -274,7 +274,8 @@ async fn v5_gateway_keeps_first_readiness_line_and_reports_resolved_private_work
     let mut stderr = BufReader::new(child.stderr.take().unwrap());
     let lines = tokio::time::timeout(Duration::from_secs(30), async {
         let mut lines = Vec::new();
-        for _ in 0..3 {
+        // The startup block includes egress and relay before the two audit lines.
+        for _ in 0..5 {
             let mut line = String::new();
             assert!(stderr.read_line(&mut line).await.unwrap() > 0);
             lines.push(line);
@@ -286,11 +287,23 @@ async fn v5_gateway_keeps_first_readiness_line_and_reports_resolved_private_work
     let _ = child.wait().await;
     let lines = lines.expect("gateway never reached readiness diagnostics");
     assert!(lines[0].starts_with("Gateway "), "{}", lines[0]);
-    assert!(lines[1].starts_with("Audit capacity "));
-    assert!(lines[2].contains(
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.starts_with("Audit capacity "))
+            .count(),
+        1
+    );
+    let workload_diagnostics: Vec<_> = lines
+        .iter()
+        .filter(|line| line.starts_with("Workload audit capacity "))
+        .collect();
+    assert_eq!(workload_diagnostics.len(), 1);
+    let workload_line = workload_diagnostics[0];
+    assert!(workload_line.starts_with(
         "Workload audit capacity tenant=local source=private_policy_file admission_budget=enabled"
     ));
-    assert!(lines[2].contains(&workload().fingerprint().unwrap()));
+    assert!(workload_line.contains(&workload().fingerprint().unwrap()));
     for line in lines {
         assert!(!line.contains(&"r".repeat(48)) && !line.contains(&"v".repeat(48)));
     }

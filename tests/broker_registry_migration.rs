@@ -1,6 +1,10 @@
 mod support;
 
-use agentsandbox::{audit::Store, model::Event, redaction::Redactor};
+use agentsandbox::{
+    audit::{AuditCapacityFailureV1, Store},
+    model::Event,
+    redaction::Redactor,
+};
 
 fn v5(path: &std::path::Path, capacity: u64) -> Store {
     let store = Store::open_for_tenant(path, "tenant-a", Redactor::new(vec![]), capacity).unwrap();
@@ -56,14 +60,22 @@ fn late_migration_audit_failure_rolls_back_ddl_version_and_head_but_retains_back
     let directory = support::private_tempdir();
     let path = directory.path().join("tenant.sqlite");
     let store = v5(&path, 16);
-    while store.head().unwrap() < 13 {
+    let mut capacity = store.capacity_policy().clone();
+    capacity.control_reserve.events = 1;
+    capacity.identity_reserve.events = 6;
+    let store = store.with_capacity_policy(capacity).unwrap();
+    while store.head().unwrap() < 9 {
         store.append(Event::new("test.fill")).unwrap();
     }
     let before = store.integrity().unwrap();
-    // v5 ordinary lane has14 event slots; workload genesis fits, then broker
-    // genesis fails. No schema6 table or genesis may survive that transaction.
+    // With six slots reserved for identity, one control write fits at head 9.
+    // The second genesis must fail and roll back both the first genesis and DDL.
     let backup = directory.path().join("workload-v5.bak");
-    assert!(store.migrate_workload_v6(&backup).is_err());
+    let error = store.migrate_workload_v6(&backup).unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<AuditCapacityFailureV1>(),
+        Some(&AuditCapacityFailureV1::OrdinaryWriteBudgetExhausted)
+    );
     assert!(backup.exists());
     assert!(store.healthy());
     assert_eq!(store.integrity().unwrap().head_hash, before.head_hash);
