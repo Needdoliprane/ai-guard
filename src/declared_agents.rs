@@ -58,6 +58,9 @@ struct DeclaredAgent {
     provider_agent_id: String,
     provider_parent_agent_id: Option<String>,
     parent_warning: Option<String>,
+    // The durable checkpoint predates the distinction between null and omission.
+    #[serde(skip)]
+    explicit_root: bool,
     provider: Option<String>,
     name: String,
     model: Option<String>,
@@ -78,14 +81,12 @@ enum ParentUpdate {
 /// Evidence collected only from the authorized read's live event suffix.
 pub(crate) struct ClaudeReadParents {
     join: Option<ClaudeJoin>,
-    explicit_roots: BTreeSet<String>,
 }
 
 impl Default for ClaudeReadParents {
     fn default() -> Self {
         Self {
             join: Some(ClaudeJoin::default()),
-            explicit_roots: BTreeSet::new(),
         }
     }
 }
@@ -109,20 +110,16 @@ struct DelegationClaims {
 
 impl ClaudeReadParents {
     fn observe_parent(&mut self, id: &str, first_declaration: bool, update: &ParentUpdate) {
-        if matches!(update, ParentUpdate::Unspecified) {
-            if first_declaration && let Some(join) = &mut self.join {
+        let Some(join) = &mut self.join else { return };
+        match update {
+            ParentUpdate::Unspecified if first_declaration => {
                 // A checkpoint child does not distinguish omission from null.
                 join.candidates.insert(id.into());
             }
-            return;
-        }
-        if let Some(join) = &mut self.join {
-            join.candidates.remove(id);
-        }
-        if matches!(update, ParentUpdate::Root) {
-            self.explicit_roots.insert(id.into());
-        } else {
-            self.explicit_roots.remove(id);
+            ParentUpdate::Unspecified => {}
+            _ => {
+                join.candidates.remove(id);
+            }
         }
     }
 
@@ -232,6 +229,7 @@ impl DeclaredAgentProjection {
         };
         let id = stable_id(&namespace, &provider_agent_id);
         let parent = parent_update(data);
+        let is_claude_read = read.is_some();
         if let Some(read) = read {
             read.observe_evidence(event, data);
             read.observe_parent(&id, !self.agents.contains_key(&id), &parent);
@@ -243,6 +241,7 @@ impl DeclaredAgentProjection {
             provider_agent_id,
             provider_parent_agent_id: None,
             parent_warning: None,
+            explicit_root: false,
             provider: None,
             model: None,
             task: None,
@@ -257,15 +256,18 @@ impl DeclaredAgentProjection {
             ParentUpdate::Root => {
                 agent.provider_parent_agent_id = None;
                 agent.parent_warning = None;
+                agent.explicit_root = is_claude_read;
             }
             ParentUpdate::Link(parent) => {
                 agent.provider_parent_agent_id = Some(parent);
                 agent.parent_warning = None;
+                agent.explicit_root = false;
             }
             ParentUpdate::Invalid => {
                 agent.provider_parent_agent_id = None;
                 agent.parent_warning =
                     Some("Identifiant parent invalide ou contradictoire.".into());
+                agent.explicit_root = false;
             }
         }
 
@@ -408,9 +410,7 @@ impl DeclaredAgentProjection {
                         "last_activity": "declared"
                     }
                 });
-                if let Some(read) = &read
-                    && agent.namespace.source == CLAUDE_SOURCE
-                {
+                if read.is_some() && agent.namespace.source == CLAUDE_SOURCE {
                     item["parent_link"] = json!(parent_id.map(|_| {
                         if inferred_edge {
                             "inferred"
@@ -421,7 +421,7 @@ impl DeclaredAgentProjection {
                     if parent_id.is_some() && inferred_edge {
                         item["field_provenance"]["parent_id"] = json!("inferred");
                     } else if agent.provider_parent_agent_id.is_none()
-                        && !read.explicit_roots.contains(&id)
+                        && !agent.explicit_root
                         && let Some(fields) = item["field_provenance"].as_object_mut()
                     {
                         fields.remove("parent_id");

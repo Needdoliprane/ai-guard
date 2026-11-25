@@ -625,6 +625,31 @@ fn sqlite_claude_join_budget_discards_inference_and_keeps_explicit_parents() {
         node(&after, "parent")["field_provenance"]["parent_id"],
         "declared"
     );
+
+    store
+        .append_batch(vec![
+            claude_fact(
+                "agent.declared",
+                json!({"provider_agent_id":"late-root","provider_parent_agent_id":null}),
+            ),
+            claude_fact("agent.declared", json!({"provider_agent_id":"late-root"})),
+        ])
+        .unwrap();
+    let with_late_root = store.entities(false).unwrap();
+    let late_root = node(&with_late_root, "late-root");
+    assert!(late_root["parent_id"].is_null());
+    assert_eq!(late_root["field_provenance"]["parent_id"], "declared");
+
+    store
+        .append(claude_fact(
+            "agent.declared",
+            json!({"provider_agent_id":"late-root","provider_parent_agent_id":42}),
+        ))
+        .unwrap();
+    let with_invalid_update = store.entities(false).unwrap();
+    let invalid = node(&with_invalid_update, "late-root");
+    assert!(invalid["hierarchy_warning"].is_string());
+    assert!(invalid["field_provenance"].get("parent_id").is_none());
 }
 
 fn claude_parent_facts() -> Vec<Event> {
