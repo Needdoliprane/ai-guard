@@ -1,5 +1,23 @@
 # Validation courante
 
+## 25 novembre 2026 — reproduction Legacy G09
+
+Le gel `28af5740` compile hors ligne sur macOS ARM64 en 12 min 37 s.
+Le test exact
+`broker::enforcer::client::legacy::tests::fresh_reservation_cancelled_during_capabilities_sends_no_reserve`
+retient la réponse de capacités du gardien, annule la réservation
+et laisse la réponse parvenir au client. Le gardien reçoit une
+requête `ReserveProspective` alors que le test en attend zéro.
+Le test sort 101 à cette assertion précise.
+
+Le répertoire temporaire et les groupes du build et du test sont
+vides à la fin. Le gel et le binaire de test gardent la même
+empreinte. Les 25 fichiers du reçu privé ont été vérifiés sur le
+manifeste
+`8866d0d90650d3505b16041f53756940e0c57060667336c6f2ff383d5aaabf0f`.
+Le correctif `d2001a73` attend son test. L'origine du refus
+`not_ready` de la recette Docker Linux sur `c7f6c966` reste ouverte.
+
 ## 25 novembre 2026 — frontières CreateIssued et témoin E3 à deux flux
 
 Le gel `d7d4f849` compile hors ligne sur macOS ARM64. Quatre

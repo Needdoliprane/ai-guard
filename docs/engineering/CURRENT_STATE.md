@@ -13,6 +13,12 @@ G10 est validé au périmètre V1 sur `48f81d20`. Le quota accepte
 utilise A1/A2 chez A et B1 chez B. G09 conserve son échec moteur.
 Dix autres gates restent ouverts. [Grille de qualification](PRODUCTION_READINESS.md).
 
+Le gel `28af5740` reproduit une course G09 en fixture. Une
+réservation annulée pendant l'échange de capacités atteint quand même
+le gardien Legacy. Le correctif attend son test et l'origine de
+l'échec Docker Linux reste ouverte.
+[Résultat exact](VALIDATION.md#25-novembre-2026--reproduction-legacy-g09).
+
 Le témoin Full3 laisse `CreateIssued` confirmé dans SQLite et encore
 en attente dans le journal du broker. Le diagnostic distingue désormais
 la réponse HTTP de la publication de l’acquittement local. Deux tests
