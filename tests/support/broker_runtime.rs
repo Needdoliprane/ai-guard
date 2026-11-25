@@ -588,15 +588,13 @@ impl StderrDrain {
         let wait_end = (started + STDERR_DRAIN_WAIT).min(budget_end);
         loop {
             let now = tokio::time::Instant::now();
-            if now >= budget_end {
+            if now >= budget_end || now >= wait_end {
                 return None;
             }
             if self.0.get().is_some() {
                 let bytes = self.read_complete(path)?;
-                return (tokio::time::Instant::now() < budget_end).then_some(bytes);
-            }
-            if now >= wait_end {
-                return None;
+                let finished = tokio::time::Instant::now();
+                return (finished < budget_end && finished < wait_end).then_some(bytes);
             }
             tokio::time::sleep_until((now + STDERR_DRAIN_POLL).min(wait_end)).await;
         }
