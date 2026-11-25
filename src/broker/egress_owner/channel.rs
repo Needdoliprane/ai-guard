@@ -14,7 +14,7 @@ use crate::egress::{
     channel_protocol::{
         self, CommonEgressHandshakeV1, EgressFrameReader, FRAME_TIME, HANDSHAKE_TIME,
     },
-    ids::{CHANNEL_CONTRACT, IdV1},
+    ids::{CHANNEL_CONTRACT, DigestV1, IdV1},
     protocol::{
         DirectionV1, EgressCapabilityV1, EgressChannelState, EgressMessageV1, EgressReasonV1,
         MAX_DATA_BYTES,
@@ -50,6 +50,10 @@ pub(crate) type ControlFuture<'a, T> =
 
 /// Gateway port of the egress owner. Each call is one durable exchange.
 pub(crate) trait EgressControl: Send + Sync + 'static {
+    fn open_channel(
+        &self,
+        request: EgressChannelOpeningRequestV1,
+    ) -> ControlFuture<'_, EgressChannelOpeningReceiptV1>;
     fn decide(&self, request: EgressDecideRequestV1) -> ControlFuture<'_, EgressDecisionV1>;
     fn observe(&self, request: EgressObserveRequestV1) -> ControlFuture<'_, ()>;
     fn renew(&self, request: EgressRenewRequestV1) -> ControlFuture<'_, EgressRenewResponseV1>;
@@ -84,6 +88,8 @@ pub(crate) enum ChannelExit {
     Protocol,
     /// `egress.channel.opened` could not be recorded; no flow was admitted.
     AuditUnavailable,
+    /// The opening was already durable and cannot authorize this channel.
+    OpeningReplayed,
     /// The owner was asked to stop (worker terminal or broker shutdown).
     Stopped,
 }
@@ -93,6 +99,7 @@ impl ChannelExit {
             Self::HelperClosed => "helper_exit",
             Self::Protocol => "protocol",
             Self::AuditUnavailable => "audit_unavailable",
+            Self::OpeningReplayed => "opening_replayed",
             Self::Stopped => "owner_exit",
         }
     }
@@ -605,24 +612,30 @@ struct Owner<W> {
 }
 
 /// Run one channel until the helper closes, a violation occurs or `stop`.
-/// `io` is the helper's stdio (Docker/Podman exec) or any equivalent stream.
-pub(crate) async fn run<IO>(
+/// Owns the helper's stdio after READY. Dropping it closes the channel.
+pub(crate) struct PreparedChannel<IO> {
+    input: tokio::io::ReadHalf<IO>,
+    output: tokio::io::WriteHalf<IO>,
+    binding: EgressBindingV1,
+    stop: watch::Receiver<ChannelStopState>,
+    capability: EgressCapabilityV1,
+}
+
+/// Prepare the helper before the broker requests a durable Running observation.
+pub(crate) async fn prepare<IO>(
     io: IO,
     binding: EgressBindingV1,
-    control: Arc<dyn EgressControl>,
-    resolver: Arc<Resolver>,
-    times: ChannelTimes,
     mut stop: watch::Receiver<ChannelStopState>,
-) -> ChannelTermination
+) -> Result<PreparedChannel<IO>, ChannelTermination>
 where
     IO: AsyncRead + AsyncWrite + Send + 'static,
 {
     let (mut input, mut output) = tokio::io::split(io);
     let Ok(binding_id) = IdV1::parse(&binding.attempt_id) else {
-        return ChannelTermination::without_flows(
+        return Err(ChannelTermination::without_flows(
             ChannelExit::Protocol,
             ChannelAuditClosure::NotOpened,
-        );
+        ));
     };
     let hello = CommonEgressHandshakeV1 {
         version: 1,
@@ -639,10 +652,10 @@ where
     let ready = tokio::select! {
         biased;
         () = wait_for_channel_stop(&mut stop) => {
-            return ChannelTermination::without_flows(
+            return Err(ChannelTermination::without_flows(
                 ChannelExit::Stopped,
                 ChannelAuditClosure::NotOpened,
-            );
+            ));
         }
         ready = async {
             channel_protocol::write_handshake(&mut output, &hello, deadline).await.is_ok()
@@ -651,46 +664,116 @@ where
         } => ready,
     };
     if !ready {
-        return ChannelTermination::without_flows(
+        return Err(ChannelTermination::without_flows(
             ChannelExit::Protocol,
             ChannelAuditClosure::NotOpened,
-        );
+        ));
     }
-    // The channel is durably known before any flow can be admitted.
-    let mut opening_started = false;
-    let opened = tokio::select! {
-        biased;
-        () = wait_for_channel_stop(&mut stop) => None,
-        ack = async {
-            opening_started = true;
-            control.observe(observation(EgressObservationV1::ChannelOpened {
-                binding: binding.clone(),
-            })).await
-        } => Some(ack),
-    };
-    if !matches!(opened, Some(Ok(()))) {
-        let cause = if opened.is_none() {
-            ChannelExit::Stopped
-        } else {
-            ChannelExit::AuditUnavailable
+    Ok(PreparedChannel {
+        input,
+        output,
+        binding,
+        stop,
+        capability: hello.capability,
+    })
+}
+
+/// A live channel with a fresh receipt from its original opening exchange.
+pub(crate) struct OpenedChannel<IO> {
+    prepared: PreparedChannel<IO>,
+    receipt: EgressChannelOpeningReceiptV1,
+}
+
+impl<IO> OpenedChannel<IO> {
+    pub(crate) fn receipt(&self) -> &EgressChannelOpeningReceiptV1 {
+        &self.receipt
+    }
+}
+
+impl<IO> PreparedChannel<IO> {
+    /// Open the channel once, after the broker receives Running for its binding.
+    pub(crate) async fn open(
+        mut self,
+        control: &dyn EgressControl,
+    ) -> Result<OpenedChannel<IO>, ChannelTermination> {
+        let request = EgressChannelOpeningRequestV1 {
+            version: 1,
+            observation_id: IdV1::random(),
+            binding: self.binding.clone(),
         };
-        let audit = if opening_started {
-            // Dropping the wait cannot establish whether the gateway committed.
-            ChannelAuditClosure::Unknown {
-                observations_lost: 0,
-                observations_unconfirmed: 1,
+        let mut opening_started = false;
+        let opened = tokio::select! {
+            biased;
+            () = wait_for_channel_stop(&mut self.stop) => None,
+            ack = async {
+                opening_started = true;
+                control.open_channel(request.clone()).await
+            } => Some(ack),
+        };
+        let (cause, audit) = match opened {
+            Some(Ok(receipt))
+                if receipt.version == request.version
+                    && receipt.observation_id == request.observation_id
+                    && receipt.binding == request.binding
+                    && receipt.receipt.audit_seq > 0
+                    && DigestV1::parse(&receipt.receipt.audit_hash).is_ok() =>
+            {
+                if receipt.disposition == EgressChannelOpeningDispositionV1::Fresh {
+                    return Ok(OpenedChannel {
+                        prepared: self,
+                        receipt,
+                    });
+                }
+                (
+                    ChannelExit::OpeningReplayed,
+                    ChannelAuditClosure::Unknown {
+                        observations_lost: 0,
+                        observations_unconfirmed: 0,
+                    },
+                )
             }
-        } else {
-            ChannelAuditClosure::NotOpened
+            attempt => {
+                let cause = if attempt.is_none() {
+                    ChannelExit::Stopped
+                } else {
+                    ChannelExit::AuditUnavailable
+                };
+                let audit = if opening_started {
+                    // Dropping the wait cannot establish whether the gateway committed.
+                    ChannelAuditClosure::Unknown {
+                        observations_lost: 0,
+                        observations_unconfirmed: 1,
+                    }
+                } else {
+                    ChannelAuditClosure::NotOpened
+                };
+                (cause, audit)
+            }
         };
-        return ChannelTermination::without_flows(cause, audit);
+        Err(ChannelTermination::without_flows(cause, audit))
     }
+}
+
+/// Only a live, freshly opened channel admits flows.
+pub(crate) async fn run_opened<IO>(
+    opened: OpenedChannel<IO>,
+    control: Arc<dyn EgressControl>,
+    resolver: Arc<Resolver>,
+    times: ChannelTimes,
+) -> ChannelTermination
+where
+    IO: AsyncRead + AsyncWrite + Send + 'static,
+{
+    let PreparedChannel {
+        mut input,
+        output,
+        binding,
+        mut stop,
+        capability,
+    } = opened.prepared;
     let started = Instant::now();
     let mut ledger = EgressChannelState::new(0);
-    if ledger
-        .accept_capability(Some(&hello.capability), 0)
-        .is_err()
-    {
+    if ledger.accept_capability(Some(&capability), 0).is_err() {
         return ChannelTermination::without_flows(
             ChannelExit::Protocol,
             ChannelAuditClosure::Unknown {

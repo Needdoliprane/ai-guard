@@ -18,11 +18,34 @@ use tokio::{io::ReadBuf, net::TcpListener};
 
 const FIXTURE: &str = "fixture.egress.test";
 
+async fn run<IO>(
+    io: IO,
+    binding: EgressBindingV1,
+    control: Arc<dyn EgressControl>,
+    resolver: Arc<Resolver>,
+    times: ChannelTimes,
+    stop: watch::Receiver<ChannelStopState>,
+) -> ChannelTermination
+where
+    IO: AsyncRead + AsyncWrite + Send + 'static,
+{
+    let prepared = match prepare(io, binding, stop).await {
+        Ok(prepared) => prepared,
+        Err(terminated) => return terminated,
+    };
+    match prepared.open(control.as_ref()).await {
+        Ok(opened) => run_opened(opened, control, resolver, times).await,
+        Err(terminated) => terminated,
+    }
+}
+
 #[derive(Default)]
 struct Gateway {
     allow: AtomicBool,
     decide_unavailable: AtomicBool,
     observe_unavailable: AtomicBool,
+    opening_reply: OpeningReply,
+    opening_calls: AtomicUsize,
     decision_delay: Duration,
     decision_hold: Option<Arc<PendingOperation>>,
     prior_observation_reply: Option<ObservationReply>,
@@ -32,6 +55,14 @@ struct Gateway {
     decisions: Mutex<Vec<EgressDecideRequestV1>>,
     observations: Mutex<Vec<EgressObservationV1>>,
     revoke: Mutex<Vec<IdV1>>,
+}
+
+#[derive(Clone, Copy, Default)]
+enum OpeningReply {
+    #[default]
+    Fresh,
+    Replayed,
+    DifferentBinding,
 }
 
 enum ObservationReply {
@@ -107,6 +138,41 @@ impl EgressControl for Gateway {
                 }),
                 grant_id: None,
                 remaining_ms: allow.then_some(self.remaining_ms.unwrap_or(60_000)),
+                receipt: EgressReceiptV1 {
+                    audit_seq: 7,
+                    audit_hash: "a".repeat(64),
+                },
+            })
+        })
+    }
+    fn open_channel(
+        &self,
+        request: EgressChannelOpeningRequestV1,
+    ) -> ControlFuture<'_, EgressChannelOpeningReceiptV1> {
+        Box::pin(async move {
+            self.opening_calls.fetch_add(1, Ordering::SeqCst);
+            let disposition = if matches!(self.opening_reply, OpeningReply::Replayed) {
+                EgressChannelOpeningDispositionV1::Replayed
+            } else {
+                self.observe(EgressObserveRequestV1 {
+                    version: request.version,
+                    observation_id: request.observation_id.clone(),
+                    observation: EgressObservationV1::ChannelOpened {
+                        binding: request.binding.clone(),
+                    },
+                })
+                .await?;
+                EgressChannelOpeningDispositionV1::Fresh
+            };
+            let mut binding = request.binding;
+            if matches!(self.opening_reply, OpeningReply::DifferentBinding) {
+                binding.context_digest = DigestV1::of(b"different fixture");
+            }
+            Ok(EgressChannelOpeningReceiptV1 {
+                version: 1,
+                observation_id: request.observation_id,
+                binding,
+                disposition,
                 receipt: EgressReceiptV1 {
                     audit_seq: 7,
                     audit_hash: "a".repeat(64),
@@ -1299,6 +1365,70 @@ async fn egress_broker_stop_cancels_a_pending_handshake() {
 }
 
 #[tokio::test]
+async fn egress_broker_prepares_before_open_and_requires_fresh_correlated_receipt() {
+    for (opening_reply, expected_refusal) in [
+        (OpeningReply::Fresh, None),
+        (OpeningReply::Replayed, Some(ChannelExit::OpeningReplayed)),
+        (
+            OpeningReply::DifferentBinding,
+            Some(ChannelExit::AuditUnavailable),
+        ),
+    ] {
+        let (broker, mut helper) = tokio::io::duplex(4096);
+        let control = Arc::new(Gateway {
+            allow: AtomicBool::new(true),
+            opening_reply,
+            ..Gateway::default()
+        });
+        let (_stop, stopped) = ChannelStop::new();
+        let binding = fixture_binding();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let (prepared, ()) = tokio::join!(
+            timeout_at(deadline, prepare(broker, binding.clone(), stopped)),
+            async {
+                let hello = channel_protocol::read_handshake(&mut helper, deadline)
+                    .await
+                    .unwrap();
+                channel_protocol::write_handshake(&mut helper, &hello, deadline)
+                    .await
+                    .unwrap();
+            },
+        );
+        let prepared = prepared.unwrap().unwrap();
+        assert_eq!(control.opening_calls.load(Ordering::SeqCst), 0);
+        channel_protocol::write_message(
+            &mut helper,
+            &EgressMessageV1::Open {
+                flow_id: 1,
+                authority: format!("{FIXTURE}:443"),
+            },
+            deadline,
+        )
+        .await
+        .unwrap();
+        let result = timeout_at(deadline, prepared.open(control.as_ref()))
+            .await
+            .unwrap();
+        match (result, expected_refusal) {
+            (Ok(opened), None) => {
+                assert_eq!(opened.receipt().binding, binding);
+                assert_eq!(
+                    opened.receipt().disposition,
+                    EgressChannelOpeningDispositionV1::Fresh
+                );
+            }
+            (Err(terminal), Some(cause)) => {
+                assert_eq!(terminal.cause, cause);
+                assert_eq!(terminal.local_quiescence, LocalQuiescence::Confirmed);
+            }
+            _ => panic!("unexpected channel opening result"),
+        }
+        assert_eq!(control.opening_calls.load(Ordering::SeqCst), 1);
+        assert!(control.decisions.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn egress_broker_stop_during_opening_ack_keeps_audit_unknown() {
     let (broker, mut helper) = tokio::io::duplex(4096);
     let pending = Arc::new(PendingOperation::default());
@@ -2111,15 +2241,21 @@ async fn egress_broker_committed_sqlite_decision_precedes_one_loopback_connectio
     .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
+    let opening_requests = Arc::new(AtomicUsize::new(0));
     let committed = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let router = gateway_router(state).layer(middleware::from_fn({
+        let opening_requests = opening_requests.clone();
         let committed = committed.clone();
         let release = release.clone();
         move |request: Request, next: Next| {
+            let opening_requests = opening_requests.clone();
             let committed = committed.clone();
             let release = release.clone();
             async move {
+                if request.uri().path() == "/api/v1/egress/channel-openings" {
+                    opening_requests.fetch_add(1, Ordering::SeqCst);
+                }
                 let decision = request.uri().path() == "/api/v1/egress/decisions";
                 let response = next.run(request).await;
                 if decision {
@@ -2145,6 +2281,7 @@ async fn egress_broker_committed_sqlite_decision_precedes_one_loopback_connectio
     )
     .await
     .unwrap();
+    assert_eq!(opening_requests.load(Ordering::SeqCst), 1);
     let events = read_events();
     let decisions: Vec<_> = events
         .iter()

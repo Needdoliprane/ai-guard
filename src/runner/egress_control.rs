@@ -7,8 +7,9 @@ use super::AuditClient;
 use crate::{
     broker::egress_owner::channel::{ControlError, ControlFuture, EgressControl},
     control::egress_decision::{
-        EgressDecideRequestV1, EgressDecisionV1, EgressObserveRequestV1, EgressReceiptV1,
-        EgressRenewRequestV1, EgressRenewResponseV1,
+        EgressChannelOpeningReceiptV1, EgressChannelOpeningRequestV1, EgressDecideRequestV1,
+        EgressDecisionV1, EgressObserveRequestV1, EgressReceiptV1, EgressRenewRequestV1,
+        EgressRenewResponseV1,
     },
     egress::ids::DigestV1,
 };
@@ -71,12 +72,16 @@ fn decode_json<R: DeserializeOwned>(bytes: &[u8]) -> Result<R, ControlError> {
     serde_json::from_slice(bytes).map_err(|_| ControlError::Unavailable)
 }
 
-fn decode_observation_ack(bytes: &[u8]) -> Result<(), ControlError> {
+fn decode_object<R: DeserializeOwned>(bytes: &[u8]) -> Result<R, ControlError> {
     // The gateway returns a JSON object. Serde also accepts a struct as a sequence.
     if !bytes.trim_ascii_start().starts_with(b"{") {
         return Err(ControlError::Unavailable);
     }
-    let receipt: EgressReceiptV1 = decode_json(bytes)?;
+    decode_json(bytes)
+}
+
+fn decode_observation_ack(bytes: &[u8]) -> Result<(), ControlError> {
+    let receipt: EgressReceiptV1 = decode_object(bytes)?;
     if receipt.audit_seq <= 0 || DigestV1::parse(&receipt.audit_hash).is_err() {
         return Err(ControlError::Unavailable);
     }
@@ -84,6 +89,15 @@ fn decode_observation_ack(bytes: &[u8]) -> Result<(), ControlError> {
 }
 
 impl EgressControl for GatewayEgressControl {
+    fn open_channel(
+        &self,
+        request: EgressChannelOpeningRequestV1,
+    ) -> ControlFuture<'_, EgressChannelOpeningReceiptV1> {
+        Box::pin(async move {
+            self.post("api/v1/egress/channel-openings", &request, decode_object)
+                .await
+        })
+    }
     fn decide(&self, request: EgressDecideRequestV1) -> ControlFuture<'_, EgressDecisionV1> {
         Box::pin(async move {
             self.post("api/v1/egress/decisions", &request, decode_json)
