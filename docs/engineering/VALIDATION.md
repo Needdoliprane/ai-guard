@@ -71,6 +71,40 @@ worker et d'appel au moteur. Le détail du stderr du CLI reste
 interne au test. Manifeste séparé
 `d2347dc50500f43775ba821b19d565f046f86a95f4486dbd6c4250edc4c5b31b`.
 
+## 25 novembre 2026 — témoin de file Writer et frontière d’ouverture E3
+
+Sur `3df8f22f`, le test exact
+`broker_worker_claim_projects_created_reload_without_job_status`
+passe. Il vérifie la restitution depuis SQLite du diagnostic
+`created_reload` quand le statut IPC est indisponible. La recette
+complète Full3 reste sur sa branche de travail.
+
+Le sélecteur
+`runner::broker::executor::journal::tests::create_issued_tests::created_mutation_composition_times_out_while_strict_load_is_queued`
+passe aussi. Dans cette fixture, la lecture expire côté appelant avant
+que le Writer n’entre dans le chargement. Après libération de la file,
+le Writer effectue la lecture stricte, sans publication. La tête et
+l'acquittement SQLite de `CreateIssued` restent identiques. Les deux
+fichiers du témoin et les verrous concordent avec le port `8d0d4036`.
+La cause du timeout historique reste indéterminée.
+
+Le callback E3 échoue en 82,32 s, code 101. Le helper a émis READY.
+L'oracle expire en attendant le commit d'ouverture et observe un EOF
+sans octet de libération. Le callback rend un état retenu après STOP.
+Les jonctions du callback restent non confirmées. Les groupes externes
+et les répertoires temporaires des trois tests sont vides.
+Manifeste 53 fichiers
+`95a82847f71e5573ec858249bfcfa85d6294a2af0fd0e99607cb06c10e1f44d7`.
+
+Le témoin de coût existant, exécuté sur le libtest `2d400f42` dont le
+code concorde avec le candidat `d8bc6989`, confirme deux inventaires
+du périmètre pour une lecture stricte acceptée dans chacun des douze
+échantillons `Load` et `Status`, aux têtes 0, 8, 17 et 18. Les têtes
+restent identiques. Le décompte est observé pendant une compilation
+concomitante. La latence et le gain du correctif restent à mesurer.
+Manifeste 14 pièces
+`809074726ac81660d0023666ae4019b597e157913bcd4315920ce5c25806397e`.
+
 ## 25 novembre 2026 — refus audité après approbation et aide Claude Code
 
 Le gel `2d400f42` compile hors ligne sur macOS ARM64.
