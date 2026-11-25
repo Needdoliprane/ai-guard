@@ -335,6 +335,8 @@ async fn strict_refusal_explains_the_audited_rule_without_invoking_the_engine() 
     let endpoint = format!("unix://{}", scenario.root.join("fixture.sock").display());
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_agentsandbox"));
     command
+        .env_clear()
+        .current_dir(&scenario.root)
         .args(["run", "--gateway", &scenario.url, "--config-dir"])
         .arg(&scenario.config)
         .arg("--runtime-program")
