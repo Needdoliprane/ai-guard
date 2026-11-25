@@ -314,10 +314,10 @@ impl<'a> Execution<'a> {
         &self,
         target: crate::runner::egress_release::EgressReleaseTargetV1,
         opened: &crate::broker::egress_owner::channel::OpenedChannel<IO>,
-        worker: &WorkerV1,
+        running: &crate::control::MutationResultV1,
     ) -> Result<Box<CommittedDraftAtHead>> {
         let intent = crate::runner::egress_release::EgressReleaseIntentV1::from_opened(
-            target, opened, worker,
+            target, opened, running,
         )?;
         self.patch_committed(|draft| {
             self.generation_current()?;

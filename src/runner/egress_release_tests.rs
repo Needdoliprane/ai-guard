@@ -32,6 +32,7 @@ fn marker() -> EgressReleaseIntentV1 {
         },
         target,
         worker_revision: 6,
+        running_audit_seq: 7,
     }
 }
 
@@ -82,6 +83,14 @@ fn release_intent_requires_fresh_opening_for_exact_runtime_target() {
             ..exact.clone()
         };
         assert!(variant.validate_shape().is_err());
+    }
+
+    for running_audit_seq in [0, 10, 11] {
+        let out_of_order = EgressReleaseIntentV1 {
+            running_audit_seq,
+            ..exact.clone()
+        };
+        assert!(out_of_order.validate_shape().is_err());
     }
 
     let mut different_epoch = exact;

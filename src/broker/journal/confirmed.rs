@@ -395,28 +395,30 @@ fn validate_egress_release_transition(
     ) else {
         return Err(JournalError::Conflict);
     };
-    let latest_worker_ack = previous_lifecycle
-        .broker()
-        .supervision()
-        .operations()
-        .iter()
-        .rfind(|operation| {
-            matches!(
-                operation,
-                SupervisionOperationV1::WorkerMutation {
-                    response: Some(_),
-                    ..
-                } | SupervisionOperationV1::WorkerClaim {
-                    response: Some(_),
-                    ..
-                }
-            )
-        });
+    let previous_supervision = previous_lifecycle.broker().supervision();
+    let current_supervision = lifecycle.broker().supervision();
+    // This append records only intent. In particular it cannot also acquit
+    // a worker mutation, including one that supersedes the Running receipt.
+    if canonical(previous_supervision)? != canonical(current_supervision)? {
+        return Err(JournalError::Conflict);
+    }
+    let latest_worker_ack = previous_supervision.operations().iter().rfind(|operation| {
+        matches!(
+            operation,
+            SupervisionOperationV1::WorkerMutation {
+                response: Some(_),
+                ..
+            } | SupervisionOperationV1::WorkerClaim {
+                response: Some(_),
+                ..
+            }
+        )
+    });
     if matches!(
         latest_worker_ack,
         Some(SupervisionOperationV1::WorkerMutation { request, response: Some(response) })
             if matches!(&request.transition, WorkerTransitionV1::Observe { .. })
-                && release.matches_running(&response.worker)
+                && release.matches_running_ack(response)
     ) && old
         .worker
         .is_some_and(|worker| release.matches_running(worker))

@@ -5,7 +5,7 @@
 use crate::{
     broker::{egress_owner::channel::OpenedChannel, journal::canonical},
     control::{
-        NetworkV1, RuntimeStatusV1, WorkerStateV1, WorkerV1,
+        MutationResultV1, NetworkV1, RuntimeStatusV1, WorkerStateV1, WorkerV1,
         egress_decision::{
             EgressBindingV1, EgressChannelOpeningDispositionV1, EgressChannelOpeningReceiptV1,
         },
@@ -177,6 +177,7 @@ pub(crate) struct EgressReleaseIntentV1 {
     target: EgressReleaseTargetV1,
     opening: EgressChannelOpeningReceiptV1,
     worker_revision: u64,
+    running_audit_seq: i64,
 }
 
 impl EgressReleaseIntentV1 {
@@ -185,17 +186,18 @@ impl EgressReleaseIntentV1 {
     pub(crate) fn from_opened<IO>(
         target: EgressReleaseTargetV1,
         opened: &OpenedChannel<IO>,
-        worker: &WorkerV1,
+        running: &MutationResultV1,
     ) -> Result<Self> {
         let value = Self {
             version: 1,
             target,
             opening: opened.receipt().clone(),
-            worker_revision: worker.revision,
+            worker_revision: running.worker.revision,
+            running_audit_seq: running.receipt.audit_seq,
         };
         value.validate_shape()?;
         ensure!(
-            value.matches_running(worker),
+            value.matches_running_ack(running),
             "bootstrap Running receipt differs"
         );
         Ok(value)
@@ -212,13 +214,20 @@ impl EgressReleaseIntentV1 {
             && self.target.matches_running(worker)
     }
 
+    pub(crate) fn matches_running_ack(&self, running: &MutationResultV1) -> bool {
+        self.running_audit_seq == running.receipt.audit_seq
+            && running.receipt.revision == Some(self.worker_revision)
+            && self.matches_running(&running.worker)
+    }
+
     fn validate_shape(&self) -> Result<()> {
         ensure!(
             self.version == 1
                 && self.worker_revision > 0
                 && self.opening.version == 1
                 && self.opening.disposition == EgressChannelOpeningDispositionV1::Fresh
-                && self.opening.receipt.audit_seq > 0
+                && self.running_audit_seq > 0
+                && self.opening.receipt.audit_seq > self.running_audit_seq
                 && self.opening.binding
                     == self.target.binding(
                         self.opening.binding.channel_id.clone(),
