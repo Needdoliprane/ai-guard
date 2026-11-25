@@ -4,6 +4,11 @@ use mysql_async::{Conn, Row, prelude::Queryable};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+mod preparation;
+pub use preparation::{
+    MysqlOwnedPreparationPreflight, MysqlOwnedPreparationRefusal, preflight_owned_preparation,
+};
+
 /// Cooperative ownership of a physical schema on one dedicated SQL session.
 /// Only this session can prove or release the lock.
 pub(super) struct OwnedAuditLock {

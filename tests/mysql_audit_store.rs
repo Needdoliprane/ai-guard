@@ -35,6 +35,8 @@ mod identity;
 mod integrity;
 #[path = "mysql_audit_store/overview.rs"]
 mod overview;
+#[path = "mysql_audit_store/owned_preparation.rs"]
+mod owned_preparation;
 #[path = "mysql_audit_store/prepared_admission.rs"]
 mod prepared_admission;
 #[path = "mysql_audit_store/supervised_write.rs"]

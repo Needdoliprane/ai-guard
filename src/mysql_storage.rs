@@ -17,6 +17,10 @@ mod supervision;
 mod worker;
 mod workload;
 
+pub use owned_origin::{
+    MysqlOwnedPreparationPreflight, MysqlOwnedPreparationRefusal, preflight_owned_preparation,
+};
+
 const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 pub const MAX_CERTIFICATE_BYTES: usize = 65_536;
 pub const MAX_PRIVATE_KEY_BYTES: usize = 16_384;
