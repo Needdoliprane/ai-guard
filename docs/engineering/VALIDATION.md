@@ -1,5 +1,27 @@
 # Validation courante
 
+## 25 novembre 2026 — premier claim Full3, rejeu synthétique
+
+**FAIL, code 101** sur `1aa6dbe5`. Le seul scénario exact attend
+le premier `WorkerClaim` durable et expire après 187,28 s. Le statut
+IPC manque à l’échéance. Le journal confirmé et SQLite concordent
+sur le premier écart `created_exchange_reload`, avec publication
+locale à la révision 33, ACK à la révision 34 et séquence d’audit 19.
+Le préfixe des 37 révisions est vérifié.
+
+La tête SQLite garde le worker en `preparing` avec quota retenu.
+Aucun Arm du worker, claim ou reçu Start du worker n’est observé.
+Le champ `full3_binding` est absent et l’effet runtime reste inconnu.
+Le prochain diagnostic porte sur le rechargement de l’échange Created.
+[Diagnostic ciblé](#25-novembre-2026--diagnostic-de-léchange-created-dans-g07)
+
+Le broker et son gardien synthétiques ont été vérifiés absents
+après un SIGTERM ciblé. Les 123 entrées de la fixture sont préservées
+à l’identique. La retraite supervisée reste non attestée. Manifestes
+privés du scénario et de la fermeture
+`71c9e7f9d5d9e04742cbf3bbc6f92138fc4b2633fd1e7db120ac805b79cf1910` et
+`69a6a84dbeb201261bf71fae3455e988b13000158cfde315d7479dc6a37fea23`.
+
 ## 25 novembre 2026 — étapes de publication de la liaison Full3
 
 **PASS ciblé G07.** Sur `f5cfa48c`, un test unitaire distingue la
