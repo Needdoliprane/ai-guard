@@ -22,6 +22,15 @@ rapport atteste l’ouverture de la fixture et laisse sa fermeture
 non confirmée. Les deux annulations restent `not_attempted` et
 la lecture V5 `unknown`. La frontière après annulation reste à atteindre.
 
+Le rapprochement du journal arrêté à la révision 14 et de SQLite
+confirme l’ACK d’observation du helper d’import à la séquence 12,
+avec sortie 0. A reste `Preparing` et occupe encore son quota.
+Le canari expire en attendant le relais de A, avant la soumission
+de B. Le nettoyage du helper et l’ouverture du relais restent
+inconnus. Le gardien de cette fixture tient encore son verrou et
+son socket au relevé en lecture seule. Le manifeste du relevé est
+`ff630a711bb0a7868f2d7f42426ff4f8ef20f34ddfc7d7743ded9339ea801208`.
+
 Manifestes privés du gel et du sélecteur corrigé
 `3ab1cf9b978d9efa34a6cc69fb260da2272d2c87ca1c5f7782b7959015cf111e` et
 `99a2fbea39cb1ab4e148d9e0a2975e985c30f39b9e84c556f5f385c274e783d1`.
