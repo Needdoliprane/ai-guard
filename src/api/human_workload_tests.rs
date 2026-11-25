@@ -112,6 +112,7 @@ async fn post(
 async fn admitted_oidc_proof_rechecks_workload_collision_on_authentication_and_reauth() {
     use crate::audit::authentication::{
         ApprovedAuthenticationClientV1, AuthenticationAudit, AuthenticationAuditPolicyV1,
+        AuthenticationCapacityPlanV1, AuthenticationCapacityV1, AuthenticationTenantCapacityV1,
     };
     let (directory, state, _) = local_identity_state();
     migrate(&state, directory.path());
@@ -153,17 +154,36 @@ async fn admitted_oidc_proof_rechecks_workload_collision_on_authentication_and_r
             },
         }))
         .unwrap();
+    // The multi-tenant gateway requires a durable v4 ledger whose capacity plan
+    // names exactly the adopted tenants; a fresh v3 ledger without a plan is
+    // refused by with_oidc's capacity-tenant validation.
     let audit = Arc::new(
-        AuthenticationAudit::init_new(
+        AuthenticationAudit::init_new_v4(
             &directory.path().join("authentication-collision.sqlite"),
             Uuid::new_v4(),
             AuthenticationAuditPolicyV1 {
-                max_records: 1000,
+                max_records: 10_000,
                 max_serialized_bytes: 4 * 1024 * 1024,
                 approved_clients: ["web-public", "cli-public"]
                     .map(|client_id| ApprovedAuthenticationClientV1 {
                         issuer: issuer.issuer.clone(),
                         client_id: client_id.into(),
+                    })
+                    .to_vec(),
+            },
+            AuthenticationCapacityPlanV1 {
+                version: 1,
+                unscoped: AuthenticationCapacityV1 {
+                    max_records: 64,
+                    max_serialized_bytes: 256 * 1024,
+                },
+                tenants: ["tenant-a", "tenant-b"]
+                    .map(|tenant_id| AuthenticationTenantCapacityV1 {
+                        tenant_id: tenant_id.into(),
+                        capacity: AuthenticationCapacityV1 {
+                            max_records: 4967,
+                            max_serialized_bytes: 1536 * 1024,
+                        },
                     })
                     .to_vec(),
             },
