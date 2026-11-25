@@ -717,8 +717,9 @@ impl Drop for WriterPauseGuard {
 struct ArmedAdvanceReplyBarrier {
     entered: oneshot::Sender<()>,
     release: mpsc::Receiver<()>,
+    hold_limit: Duration,
     fail_before_ack: bool,
-    cleanup_trace: Option<Arc<CleanupAdvanceTrace>>,
+    trace: Option<Arc<AdvanceTrace>>,
     // Apply only to the first advance that publishes a claim acknowledgement.
     claim_ack_only: bool,
     // Fail that advance before `current.json` is published (not durable).
@@ -726,8 +727,11 @@ struct ArmedAdvanceReplyBarrier {
 }
 #[cfg(test)]
 impl ArmedAdvanceReplyBarrier {
-    fn applies(&self, next: &BrokerCheckpointV3) -> bool {
+    fn applies(&self, next: &BrokerCheckpointV3, matched_trace: bool) -> bool {
         use super::checkpoint::SupervisionOperationV1;
+        if self.trace.as_ref().is_some_and(|trace| trace.is_created()) {
+            return matched_trace;
+        }
         !self.claim_ack_only
             || next
                 .broker()
@@ -750,10 +754,16 @@ impl ArmedAdvanceReplyBarrier {
 }
 
 #[cfg(test)]
-struct CleanupAdvanceTrace {
+enum AdvanceTraceInput {
+    Cleanup(String),
+    Created(String),
+}
+
+#[cfg(test)]
+struct AdvanceTrace {
     operation: Uuid,
     expected: RevisionRefV1,
-    input_hash: String,
+    input: AdvanceTraceInput,
     taken: OnceLock<Instant>,
     durable: Arc<OnceLock<Instant>>,
     returned: OnceLock<(Instant, Option<JournalError>)>,
@@ -761,7 +771,23 @@ struct CleanupAdvanceTrace {
 }
 
 #[cfg(test)]
-impl CleanupAdvanceTrace {
+impl AdvanceTrace {
+    fn new(operation: Uuid, expected: RevisionRefV1, input: AdvanceTraceInput) -> Self {
+        Self {
+            operation,
+            expected,
+            input,
+            taken: OnceLock::new(),
+            durable: Arc::new(OnceLock::new()),
+            returned: OnceLock::new(),
+            reply_returned: OnceLock::new(),
+        }
+    }
+
+    fn is_created(&self) -> bool {
+        matches!(self.input, AdvanceTraceInput::Created(_))
+    }
+
     fn matches(
         &self,
         operation: Uuid,
@@ -771,11 +797,29 @@ impl CleanupAdvanceTrace {
         use super::checkpoint::SupervisionOperationV1;
         self.operation == operation
             && &self.expected == expected
-            && matches!(
-                next.broker().supervision().operations().last(),
-                Some(SupervisionOperationV1::HelperCleanup { request, response: None })
-                    if request.input_hash().is_ok_and(|hash| hash == self.input_hash)
-            )
+            && match (&self.input, next.broker().supervision().operations().last()) {
+                (
+                    AdvanceTraceInput::Cleanup(input),
+                    Some(SupervisionOperationV1::HelperCleanup {
+                        request,
+                        response: None,
+                    }),
+                ) => request.input_hash().is_ok_and(|hash| &hash == input),
+                (
+                    AdvanceTraceInput::Created(input),
+                    Some(SupervisionOperationV1::WorkerMutation {
+                        request,
+                        response: None,
+                    }),
+                ) => {
+                    matches!(
+                        request.transition,
+                        crate::control::WorkerTransitionV1::Created { .. }
+                    ) && crate::control::content_hash("ai-guard:worker-mutation:v1", request)
+                        .is_ok_and(|hash| &hash == input)
+                }
+                _ => false,
+            }
     }
 
     fn report(&self, start: Instant, cutoff: Instant) -> String {
@@ -817,8 +861,8 @@ impl CleanupAdvanceTrace {
 #[cfg(test)]
 pub(crate) struct AdvanceReplyBarrier {
     entered: Option<oneshot::Receiver<()>>,
-    release: mpsc::Sender<()>,
-    cleanup_trace: Option<Arc<CleanupAdvanceTrace>>,
+    release: Option<mpsc::Sender<()>>,
+    trace: Option<Arc<AdvanceTrace>>,
 }
 #[cfg(test)]
 impl AdvanceReplyBarrier {
@@ -830,15 +874,47 @@ impl AdvanceReplyBarrier {
             .expect("actor reached its real reply barrier");
     }
     pub(crate) fn cleanup_trace_for_test(&self, start: Instant, cutoff: Instant) -> Option<String> {
-        self.cleanup_trace
+        self.trace
             .as_ref()
+            .filter(|trace| !trace.is_created())
             .map(|trace| trace.report(start, cutoff))
+    }
+
+    pub(crate) fn release_for_test(&mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+    }
+
+    pub(crate) fn assert_created_late_reply_for_test(
+        &self,
+        start: Instant,
+        caller_returned: Instant,
+    ) -> Result<(), String> {
+        let trace = self
+            .trace
+            .as_ref()
+            .filter(|trace| trace.is_created())
+            .ok_or_else(|| "missing Created Writer trace".to_owned())?;
+        if matches!(
+            (trace.taken.get(), trace.durable.get(), trace.returned.get(), trace.reply_returned.get()),
+            (Some(taken), Some(durable), Some((returned, None)), Some((reply, false)))
+                if start <= *taken && taken <= durable && durable <= returned
+                    && *returned <= caller_returned && caller_returned <= *reply
+        ) {
+            return Ok(());
+        }
+        Err(format!(
+            "caller_return_ms={} {}",
+            caller_returned.duration_since(start).as_millis(),
+            trace.report(start, Instant::now())
+        ))
     }
 }
 #[cfg(test)]
 impl Drop for AdvanceReplyBarrier {
     fn drop(&mut self) {
-        let _ = self.release.send(());
+        self.release_for_test();
     }
 }
 
@@ -887,16 +963,20 @@ impl WriterClient {
         expected: RevisionRefV1,
         input_hash: String,
     ) -> JournalResult<AdvanceReplyBarrier> {
-        let trace = CleanupAdvanceTrace {
-            operation,
-            expected,
-            input_hash,
-            taken: OnceLock::new(),
-            durable: Arc::new(OnceLock::new()),
-            returned: OnceLock::new(),
-            reply_returned: OnceLock::new(),
-        };
+        let trace = AdvanceTrace::new(operation, expected, AdvanceTraceInput::Cleanup(input_hash));
         self.install_advance_reply_barrier_for_test(true, Some(Arc::new(trace)))
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn created_pending_reply_barrier_for_test(
+        &self,
+        operation: Uuid,
+        expected: RevisionRefV1,
+        input_hash: String,
+    ) -> JournalResult<AdvanceReplyBarrier> {
+        let trace = AdvanceTrace::new(operation, expected, AdvanceTraceInput::Created(input_hash));
+        self.install_advance_reply_barrier_for_test(false, Some(Arc::new(trace)))
             .await
     }
 
@@ -924,9 +1004,9 @@ impl WriterClient {
     async fn install_advance_reply_barrier_for_test(
         &self,
         fail_before_ack: bool,
-        cleanup_trace: Option<Arc<CleanupAdvanceTrace>>,
+        trace: Option<Arc<AdvanceTrace>>,
     ) -> JournalResult<AdvanceReplyBarrier> {
-        self.install_barrier_for_test(fail_before_ack, cleanup_trace, false, false)
+        self.install_barrier_for_test(fail_before_ack, trace, false, false)
             .await
     }
 
@@ -934,22 +1014,31 @@ impl WriterClient {
     async fn install_barrier_for_test(
         &self,
         fail_before_ack: bool,
-        cleanup_trace: Option<Arc<CleanupAdvanceTrace>>,
+        trace: Option<Arc<AdvanceTrace>>,
         claim_ack_only: bool,
         fail_before_publication: bool,
     ) -> JournalResult<AdvanceReplyBarrier> {
         let (entered, observed) = oneshot::channel();
         let (release, wait) = mpsc::channel();
+        let fallback = Duration::from_secs(10);
+        // Arm the Created barrier past the actual fixture caller's deadline.
+        // Other reply barriers keep their existing bounded hold.
+        let hold_limit = if trace.as_ref().is_some_and(|trace| trace.is_created()) {
+            self.0.timeout.saturating_add(fallback)
+        } else {
+            fallback
+        };
         let guard = AdvanceReplyBarrier {
             entered: Some(observed),
-            release,
-            cleanup_trace: cleanup_trace.clone(),
+            release: Some(release),
+            trace: trace.clone(),
         };
         let barrier = ArmedAdvanceReplyBarrier {
             entered,
             release: wait,
+            hold_limit,
             fail_before_ack,
-            cleanup_trace,
+            trace,
             claim_ack_only,
             fail_before_publication,
         };
@@ -1793,17 +1882,17 @@ fn serve_backend(
                 reply,
             } => {
                 #[cfg(test)]
-                let barrier_applies = advance_reply_barrier
+                let trace = advance_reply_barrier
                     .as_ref()
-                    .is_some_and(|barrier| barrier.applies(&next));
-                #[cfg(test)]
-                let cleanup_trace = advance_reply_barrier
-                    .as_ref()
-                    .and_then(|barrier| barrier.cleanup_trace.as_ref())
+                    .and_then(|barrier| barrier.trace.as_ref())
                     .filter(|trace| trace.matches(operation_id, &expected, &next))
                     .cloned();
                 #[cfg(test)]
-                let durable_observer = cleanup_trace.as_ref().map(|trace| {
+                let barrier_applies = advance_reply_barrier
+                    .as_ref()
+                    .is_some_and(|barrier| barrier.applies(&next, trace.is_some()));
+                #[cfg(test)]
+                let durable_observer = trace.as_ref().map(|trace| {
                     let _ = trace.taken.set(Instant::now());
                     super::journal::CurrentDurableObserver::install(Arc::clone(&trace.durable))
                 });
@@ -1829,7 +1918,7 @@ fn serve_backend(
                 #[cfg(test)]
                 {
                     drop(durable_observer);
-                    if let Some(trace) = &cleanup_trace {
+                    if let Some(trace) = &trace {
                         let _ = trace
                             .returned
                             .set((Instant::now(), result.as_ref().err().copied()));
@@ -1838,7 +1927,7 @@ fn serve_backend(
                         let _ = barrier.entered.send(());
                         // After the actual Journal call, without any filesystem
                         // mutex held. Drop of the owned test guard releases it.
-                        let _ = barrier.release.recv_timeout(Duration::from_secs(10));
+                        let _ = barrier.release.recv_timeout(barrier.hold_limit);
                     }
                 }
                 let update = result
@@ -1855,7 +1944,7 @@ fn serve_backend(
                 #[cfg(test)]
                 {
                     let outcome = respond(&backend, &status, reply, result, update, true);
-                    if let Some(trace) = &cleanup_trace {
+                    if let Some(trace) = &trace {
                         let _ = trace.reply_returned.set((Instant::now(), outcome.is_ok()));
                     }
                 }

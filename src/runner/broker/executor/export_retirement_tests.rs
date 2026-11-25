@@ -9,6 +9,7 @@ use crate::{
         enforcer::{EnforcerFullClientV3, run_internal_full3_fresh},
         journal::canonical,
         service::{AbandonBeforeClaimV1, preclaim::PreclaimStateV1},
+        writer::WriterCallFailure,
     },
     runtime::{ContainerHandle, RuntimeAuthority},
 };
@@ -820,6 +821,21 @@ fn seed_create_issued_parent(
 
 #[test]
 fn created_pending_writer_failure_replays_exact_request_before_arm() -> Result<()> {
+    run_created_writer_failure(CreatedPendingFailure::ActorIo)
+}
+
+#[test]
+fn created_pending_reply_timeout_replays_exact_request_before_arm() -> Result<()> {
+    run_created_writer_failure(CreatedPendingFailure::ReplyTimeout)
+}
+
+#[derive(Clone, Copy)]
+enum CreatedPendingFailure {
+    ActorIo,
+    ReplyTimeout,
+}
+
+fn run_created_writer_failure(failure: CreatedPendingFailure) -> Result<()> {
     let scheduler = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -827,11 +843,15 @@ fn created_pending_writer_failure_replays_exact_request_before_arm() -> Result<(
     // The synchronous seed uses Handle::block_on. Drive timers and I/O from
     // Runtime::block_on while the seed runs on the blocking pool.
     scheduler.block_on(async move {
-        tokio::task::spawn_blocking(move || run_created_writer_failure_fixture(&handle)).await?
+        tokio::task::spawn_blocking(move || run_created_writer_failure_fixture(&handle, failure))
+            .await?
     })
 }
 
-fn run_created_writer_failure_fixture(handle: &tokio::runtime::Handle) -> Result<()> {
+fn run_created_writer_failure_fixture(
+    handle: &tokio::runtime::Handle,
+    failure: CreatedPendingFailure,
+) -> Result<()> {
     use crate::broker::journal::retirement_live_fixture::INVOCATION_DATA_PROGRAM;
 
     let fixture = handle.block_on(Fixture::new_with_writer_timeout(Duration::from_secs(30)));
@@ -859,7 +879,9 @@ fn run_created_writer_failure_fixture(handle: &tokio::runtime::Handle) -> Result
     let execution = handle.block_on(Execution::open(&executor, operation, &context))?;
     let worker = seed_create_issued_parent(handle, &execution, &fixture, &accepted, &authority)?;
     let outcome = handle.block_on(boxed_execution_phase(|| {
-        exercise_created_writer_failure(&fixture, &execution, &accepted, &authority, &worker)
+        exercise_created_writer_failure(
+            &fixture, &execution, &accepted, &authority, &worker, failure,
+        )
     }));
     drop(execution);
     drop(executor);
@@ -873,6 +895,7 @@ async fn exercise_created_writer_failure(
     accepted: &AcceptedJobV1,
     authority: &RuntimeAuthority,
     parent: &WorkerV1,
+    failure: CreatedPendingFailure,
 ) -> Result<()> {
     let operation = accepted.operation_id();
     let inspection = worker_inspection(parent);
@@ -892,6 +915,7 @@ async fn exercise_created_writer_failure(
     let (before, _) = execution.load().await?;
     let transitions = fixture.worker_requests.load(Ordering::SeqCst);
     let arms = fixture.arm_requests.load(Ordering::SeqCst);
+    let audit_before = fixture.store.head()?;
     let request = WorkerMutationV1 {
         version: 1,
         operation_id: Uuid::new_v4().to_string(),
@@ -906,12 +930,28 @@ async fn exercise_created_writer_failure(
         request: request.clone(),
         response: None,
     };
-    let mut barrier = fixture
-        .writer()
-        .advance_reply_barrier_for_test(true)
-        .await?;
+    let mut barrier = match failure {
+        CreatedPendingFailure::ActorIo => {
+            fixture
+                .writer()
+                .advance_reply_barrier_for_test(true)
+                .await?
+        }
+        CreatedPendingFailure::ReplyTimeout => {
+            fixture
+                .writer()
+                .created_pending_reply_barrier_for_test(
+                    operation,
+                    before.head().clone(),
+                    content_hash("ai-guard:worker-mutation:v1", &request)?,
+                )
+                .await?
+        }
+    };
     let mut call = boxed_execution_phase(|| execution.rpc(pending.clone()));
+    let call_started = std::time::Instant::now();
     tokio::select! {
+        biased;
         _ = &mut call => bail!("Created returned before the pending Writer barrier"),
         reached = tokio::time::timeout(Duration::from_secs(20), barrier.entered()) => reached?,
     }
@@ -933,12 +973,88 @@ async fn exercise_created_writer_failure(
             && fixture.worker_requests.load(Ordering::SeqCst) == transitions,
         "the exact pending Created must be durable before its reply, with zero transition RPCs"
     );
-    drop(barrier);
+    // ActorIo releases immediately. ReplyTimeout keeps the real successful
+    // reply held until the original caller's receive deadline expires.
+    if matches!(failure, CreatedPendingFailure::ActorIo) {
+        barrier.release_for_test();
+    }
     let error = call
         .await
         .err()
         .context("failed pending publication returned success")?;
-    assert_created_writer_report(error, "created_exchange_advance_pending", "pending")?;
+    let caller_returned = std::time::Instant::now();
+    let diagnostic = match (failure, error.downcast_ref::<WriterCallFailure>()) {
+        (CreatedPendingFailure::ActorIo, Some(WriterCallFailure::Actor(JournalError::Io))) => {
+            json!({"stage":"pending","cause":"actor_error","journal_code":"io"})
+        }
+        (CreatedPendingFailure::ReplyTimeout, Some(WriterCallFailure::ReplyTimeout)) => {
+            json!({"stage":"pending","cause":"reply_timeout"})
+        }
+        _ => bail!("Created pending must return the selected typed Writer failure"),
+    };
+    assert_created_writer_report(error, "created_exchange_advance_pending", diagnostic)?;
+    if matches!(failure, CreatedPendingFailure::ReplyTimeout) {
+        barrier.release_for_test();
+        // FIFO: this strict load can only return once Writer tried sending the
+        // reply for the advance keyed by operation, previous head and request.
+        let (recovered, draft) = execution.load().await?;
+        barrier
+            .assert_created_late_reply_for_test(call_started, caller_returned)
+            .map_err(|trace| anyhow!(
+                "expected a successful Created advance before ReplyTimeout and receiver_closed afterwards; {trace}"
+            ))?;
+        ensure!(
+            recovered.head() == durable.head()
+                && same(
+                    draft
+                        .operations
+                        .last()
+                        .context("recovered Created missing")?,
+                    &pending
+                )?
+                && !draft.operations.iter().any(|op| match op {
+                    Operation::Arm { request, .. } =>
+                        matches!(request.subject, ArmSubjectV1::Worker),
+                    Operation::WorkerClaim { .. } => true,
+                    _ => false,
+                })
+                && fixture.store.head()? == audit_before
+                && fixture.worker_requests.load(Ordering::SeqCst) == transitions
+                && fixture.arm_requests.load(Ordering::SeqCst) == arms
+                && fixture
+                    .store
+                    .worker_operation(&request.operation_id)?
+                    .is_none(),
+            "the exact pending Created must survive with zero Created, Arm or claim before reconciliation"
+        );
+        boxed_execution_phase(|| execution.reconcile_pending()).await?;
+        let receipt = fixture
+            .store
+            .worker_operation(&request.operation_id)?
+            .context("replayed Created did not commit")?;
+        let (acked, draft) = execution.load().await?;
+        let Some(
+            last @ Operation::WorkerMutation {
+                response: Some(response),
+                ..
+            },
+        ) = draft.operations.last()
+        else {
+            bail!("replayed Created must have a durable local ACK");
+        };
+        ensure!(
+            acked.head().revision() == recovered.head().revision() + 1
+                && same(&without_response(last), &pending)?
+                && response.receipt == receipt
+                && receipt.input_hash == content_hash("ai-guard:worker-mutation:v1", &request)?
+                && response.worker.attempt.start_operation_id.is_none()
+                && fixture.worker_requests.load(Ordering::SeqCst) == transitions + 1
+                && fixture.arm_requests.load(Ordering::SeqCst) == arms,
+            "reconciliation must ACK the exact Created once, without arming"
+        );
+        return Ok(());
+    }
+    drop(barrier);
     ensure!(
         fixture.worker_requests.load(Ordering::SeqCst) == transitions
             && fixture
@@ -1026,7 +1142,11 @@ async fn exercise_created_writer_failure(
         .await
         .err()
         .context("lost ACK write reply returned success")?;
-    assert_created_writer_report(error, "created_exchange", "acknowledgement")?;
+    assert_created_writer_report(
+        error,
+        "created_exchange",
+        json!({"stage":"acknowledgement","cause":"actor_error","journal_code":"io"}),
+    )?;
     let (acked, draft) = execution.load().await?;
     let Some(
         last @ Operation::WorkerMutation {
@@ -1064,7 +1184,11 @@ async fn exercise_created_writer_failure(
     Ok(())
 }
 
-fn assert_created_writer_report(error: anyhow::Error, step: &str, stage: &str) -> Result<()> {
+fn assert_created_writer_report(
+    error: anyhow::Error,
+    step: &str,
+    diagnostic: serde_json::Value,
+) -> Result<()> {
     let report = serde_json::to_value(diagnostics::failure_report(
         LocalFailurePhaseV1::Worker,
         &error,
@@ -1072,8 +1196,7 @@ fn assert_created_writer_report(error: anyhow::Error, step: &str, stage: &str) -
     ensure!(
         report["broker_step"] == step
             && report["runtime_effect"] == "unknown"
-            && report["created_advance"]
-                == json!({"stage":stage,"cause":"actor_error","journal_code":"io"}),
+            && report["created_advance"] == diagnostic,
         "Created diagnostic must carry the exact Writer boundary and closed cause"
     );
     Ok(())
