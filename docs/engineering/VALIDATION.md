@@ -17,11 +17,18 @@ observés. La prochaine question concerne le passage après r16,
 observé peu avant la borne du canari. Le reçu précédent
 `4a78536a` s’arrêtait à r14.
 
-Le groupe de test est vide en fin d’exécution. La fermeture de
-la fixture et le verdict de lecture V5 restent non confirmés. Le
-répertoire de preuve est préservé et le gardien historique reste
-inchangé. Manifeste de 38 pièces
+Le groupe du test est vide en fin d’exécution. L’inventaire élargi
+retrouve un gardien de cette fixture dans son propre groupe, avec
+huit descripteurs associés. Il refuse la demande authentifiée de
+fermeture à l’état inactif. La clôture de la fixture et la lecture V5
+restent non confirmées. Le binaire exact du gardien est préservé
+hors cache avec la fixture. Le gardien historique est inchangé.
+Manifeste du test de 38 pièces
 `7f04ae50c034d4300c612efcb21bf8c600e50acc34516947afcf52bfb0d8485e`.
+Manifeste de garde
+`f35d67c2bb4cba46ac2e27703ee228f288ec382b66dd952b676aca2cc18f6749`
+et reçu de fermeture refusée
+`59da4dd70b144cbd8efcd7a16b41cde1dc3f0ba4f9ce9fb0abb86a411cbcb857`.
 Ce canari utilise un moteur synthétique et laisse la qualification
 de l’exécution Source17 ouverte.
 
