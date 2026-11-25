@@ -1,5 +1,32 @@
 # Validation courante
 
+## 25 novembre 2026 — terminal Full3 et publication de la possession
+
+Sur `21695ce9` (arbre `ef0b03d8`), le lien du test et du CLI aboutit en
+463,44 s avec le cache isolé. Le sélecteur exact
+`broker_full3_worker_terminal_reconciles_allocation` sort 101 après
+156,14 s. Le moteur de fixture confirme l’import, le retrait du helper,
+la vérification par le helper et le retrait de celui-ci. Il crée et
+inspecte le conteneur worker. Le premier écart est
+`ownership_commit` et l’effet runtime enregistré dans ce diagnostic
+reste inconnu. Le scénario n’atteint ni `Running` ni le terminal injecté.
+La fermeture de la passerelle et du moteur de fixture est confirmée.
+La fermeture du broker et du gardien reste indéterminée. Le groupe du
+test contient encore le processus broker lors de l’inventaire final.
+Manifeste des 44 pièces
+`61629e4c03c2a2c635f3c37d68275d5ebc7c5b11fb5147f8f954fc49d081b93d`.
+
+Une lecture à froid vérifie les 34 révisions et leur chaîne d’empreintes.
+Pour le même worker et la même tentative, `CreateIssued` est en attente à
+r29 puis acquitté à r30, séquence SQLite 18. La possession n’apparaît
+dans aucune révision r29–r33. À r31 figure le constat `Worker /
+Unavailable` et à r33 son événement est acquitté à la séquence 19.
+SQLite conserve A en `Preparing` avec le quota retenu, sans identifiant
+conteneur pour la tentative. Aucune observation terminale ni allocation
+n’est présente dans les deux bases de la recette. La cause interne de
+l’échec de publication reste à déterminer. Reçu à froid
+`634bc2cbbdeee1ee6cd2257bcc7886dd260d5fbb42f7eed966011748c837b6d3`.
+
 ## 25 novembre 2026 — dictionnaire MySQL owned des projections non publiées
 
 Une instance MySQL 8.4.13 ARM64 sur Docker Desktop reçoit deux schémas
