@@ -125,31 +125,33 @@ impl PrearmedBootstrapStdin {
 
 /// The callback is scoped to the owned transport. A pending handoff and its
 /// stdin are dropped if STOP wins or the original CLI exits.
-pub(crate) type BootstrapReady = Box<
-    dyn for<'a> FnOnce(
-            PreparedBootstrapStdin<'a>,
-        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
-        + Send,
+pub(crate) type BootstrapReady<'execution> = Box<
+    dyn FnOnce(
+            PreparedBootstrapStdin,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'execution>>
+        + Send
+        + 'execution,
 >;
 
-/// A single write right for the inspected running incarnation. The snapshot
-/// and STOP receiver borrow the supervised handoff's lifetime.
-pub(crate) struct PreparedBootstrapStdin<'a> {
-    observed: &'a OwnedContainerSnapshot,
-    attempt: &'a crate::egress::ids::IdV1,
-    stop: &'a watch::Receiver<bool>,
+/// A single write right for the inspected running incarnation and its STOP
+/// receiver. Moving it into the borrowed broker callback keeps the pipe with
+/// that callback until submission or until the runtime drops the handoff.
+pub(crate) struct PreparedBootstrapStdin {
+    observed: OwnedContainerSnapshot,
+    attempt: crate::egress::ids::IdV1,
+    stop: watch::Receiver<bool>,
     stdin: PrearmedBootstrapStdin,
 }
 
-impl PreparedBootstrapStdin<'_> {
+impl PreparedBootstrapStdin {
     #[allow(dead_code)] // Consumed by the separate broker composition.
     pub(crate) fn owned(&self) -> &OwnedContainerSnapshot {
-        self.observed
+        &self.observed
     }
 
     #[allow(dead_code)] // Consumed by the separate broker composition.
     pub(crate) fn attempt(&self) -> &crate::egress::ids::IdV1 {
-        self.attempt
+        &self.attempt
     }
 
     #[allow(dead_code)] // Consumed by the separate broker composition.
@@ -162,7 +164,7 @@ impl PreparedBootstrapStdin<'_> {
     ) -> Result<(), BootstrapStdinSubmitError> {
         let Self { stdin, stop, .. } = self;
         stdin.submit_once(frame, generation, expected, || {
-            ensure_prearmed_live(stop)?;
+            ensure_prearmed_live(&stop)?;
             check_release()
         })
     }
@@ -175,7 +177,7 @@ pub(super) async fn supervise(
     binding: HeldBootstrapBinding,
     mut child: Child,
     stdin: Result<PrearmedBootstrapStdin>,
-    on_ready: BootstrapReady,
+    on_ready: BootstrapReady<'_>,
     mut stop: watch::Receiver<bool>,
     stdout_limit: usize,
     stdout_tap: Option<crate::provider_activity::StdoutTap>,
@@ -220,9 +222,9 @@ pub(super) async fn supervise(
                 };
                 stdin.wait_writable(Instant::now() + Duration::from_secs(5)).await?;
                 on_ready(PreparedBootstrapStdin {
-                    observed: &observed,
-                    attempt: &binding.attempt,
-                    stop: &ready_stop,
+                    observed,
+                    attempt: binding.attempt,
+                    stop: ready_stop,
                     stdin,
                 })
                 .await

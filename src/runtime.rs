@@ -892,16 +892,16 @@ impl Drop for TransportTasks {
     }
 }
 
-enum OwnedStartInput {
+enum OwnedStartInput<'execution> {
     Historical(Option<std::fs::File>),
     #[cfg(unix)]
     Bootstrap {
-        ready: bootstrap_stdin::BootstrapReady,
+        ready: bootstrap_stdin::BootstrapReady<'execution>,
         binding: HeldBootstrapBinding,
     },
 }
 
-impl OwnedStartInput {
+impl OwnedStartInput<'_> {
     fn is_bootstrap(&self) -> bool {
         match self {
             Self::Historical(_) => false,
@@ -911,23 +911,23 @@ impl OwnedStartInput {
     }
 }
 
-enum SpawnedPrearmedInput {
+enum SpawnedPrearmedInput<'execution> {
     Historical(Option<std::fs::File>),
     #[cfg(unix)]
     Bootstrap {
-        ready: bootstrap_stdin::BootstrapReady,
+        ready: bootstrap_stdin::BootstrapReady<'execution>,
         binding: HeldBootstrapBinding,
         stdin: Result<bootstrap_stdin::PrearmedBootstrapStdin>,
     },
 }
 
-fn spawn_prearmed_cli(
+fn spawn_prearmed_cli<'execution>(
     mut command: Command,
     target: &str,
-    input: OwnedStartInput,
+    input: OwnedStartInput<'execution>,
     guard: Box<dyn BeforeSpawnGuard>,
     stop: &tokio::sync::watch::Receiver<bool>,
-) -> Result<(tokio::process::Child, SpawnedPrearmedInput)> {
+) -> Result<(tokio::process::Child, SpawnedPrearmedInput<'execution>)> {
     command.args(["start", "--attach"]);
     match &input {
         OwnedStartInput::Historical(None) => {}
@@ -2109,7 +2109,7 @@ impl Runtime {
     async fn execute_created_prearmed<F, Fut>(
         &self,
         instance: &CreatedInstance,
-        input: OwnedStartInput,
+        input: OwnedStartInput<'_>,
         stdout_limit: usize,
         authority: &ManagedRuntime,
         created: &OwnedContainerSnapshot,

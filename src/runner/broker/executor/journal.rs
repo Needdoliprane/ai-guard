@@ -655,6 +655,15 @@ impl<'a> Execution<'a> {
     }
 
     pub(super) async fn mutate(&self, transition: WorkerTransitionV1) -> Result<WorkerV1> {
+        Ok(self.mutate_confirmed(transition).await?.worker)
+    }
+
+    /// Return the receipt from the original mutation only after the journal
+    /// acknowledges it. An E3 opening needs this exact Running acknowledgement.
+    pub(super) async fn mutate_confirmed(
+        &self,
+        transition: WorkerTransitionV1,
+    ) -> Result<MutationResultV1> {
         if matches!(
             transition,
             WorkerTransitionV1::Prepare | WorkerTransitionV1::CreateIssued
@@ -681,9 +690,13 @@ impl<'a> Execution<'a> {
                 response: None,
             })
             .await?;
-        response_worker(&ack)
-            .cloned()
-            .context("worker mutation has no result")
+        match ack {
+            Operation::WorkerMutation {
+                response: Some(response),
+                ..
+            } => Ok(response),
+            _ => Err(anyhow!("worker mutation has no result")),
+        }
     }
 }
 

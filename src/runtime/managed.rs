@@ -1739,7 +1739,7 @@ impl ManagedRuntime {
         spec: &ContainerSpec,
         stdout_limit: usize,
         on_created: C,
-        on_bootstrap_ready: bootstrap_stdin::BootstrapReady,
+        on_bootstrap_ready: bootstrap_stdin::BootstrapReady<'_>,
     ) -> Result<ManagedPrearmedOutcome>
     where
         C: FnOnce(OwnedContainerSnapshot) -> CFut,
@@ -1765,7 +1765,7 @@ impl ManagedRuntime {
     async fn execute_prearmed_with_input<C, CFut, F, Fut>(
         &self,
         spec: &ContainerSpec,
-        input: OwnedStartInput,
+        input: OwnedStartInput<'_>,
         stdout_limit: usize,
         on_created: C,
         on_started: F,
@@ -1835,7 +1835,7 @@ impl ManagedRuntime {
         spec: &ContainerSpec,
         handle: ContainerHandle,
         baseline: Option<&ContainerObservation>,
-        input: OwnedStartInput,
+        input: OwnedStartInput<'_>,
         duration: Option<Duration>,
         stdout_limit: usize,
         on_created: C,

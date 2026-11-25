@@ -108,7 +108,7 @@ fn inert_cli(expected_args: &str) -> Command {
 }
 
 fn unused_handoff<'a>(
-    _: PreparedBootstrapStdin<'a>,
+    _: PreparedBootstrapStdin,
 ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
     Box::pin(async { anyhow::bail!("spawn fixture must not call the handoff") })
 }
