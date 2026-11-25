@@ -11,6 +11,7 @@ use serde::Serialize;
 use std::fmt;
 use uuid::Uuid;
 
+mod audit_manifest;
 mod audit_tables;
 #[cfg(test)]
 mod qa;

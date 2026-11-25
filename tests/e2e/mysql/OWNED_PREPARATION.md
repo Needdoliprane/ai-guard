@@ -54,20 +54,41 @@ même nom d’utilisateur. Un grant de schéma exact ou une attestation
 d’unicité laisse donc la visibilité non prouvée. Un compte limité au schéma
 reçoit `CatalogVisibilityUnconfirmed` avant l’inventaire. [Sélection des droits MySQL](https://dev.mysql.com/doc/refman/8.4/en/request-access.html) · [SHOW GRANTS MySQL](https://dev.mysql.com/doc/refman/8.4/en/show-grants.html)
 
-## Décision requise avant raccordement
+## Sous-manifeste d’audit et publication restante
 
-Fixer le manifeste physique de chaque format MySQL, avec tables, colonnes,
-index et contraintes, genèses et marqueurs de capacité requis, ainsi que
-leur vérificateur owned. Le [DDL Legacy](../../../schema/mysql/audit-v1.sql)
-pose une sentinelle v1 et `initialize` en dépend. Le vérificateur d’origine
-MySQL actuel utilise encore ce lecteur v1. Valider aussi les droits minimaux
-du compte de préparation et les droits de lecture/écriture du compte de
-service sur les objets effectivement retenus. Le compte de service ne doit
-pas pouvoir créer ni modifier le schéma. La [fixture Legacy](GATEWAY_FIXTURE.md)
-ne qualifie pas ce provisionnement owned.
+Le [sous-manifeste d’audit](../../../src/mysql_storage/owned_origin/preparation/audit_manifest.rs)
+couvre les deux tables issues du [DDL partagé](../../../schema/mysql/audit-v1.sql).
+Après les créations internes, la même connexion verrouillée relit dans une
+transaction de lecture les tables InnoDB, les 13 colonnes, les trois index
+et toutes les contraintes, y compris l’expression entière de chaque `CHECK`
+et la version exacte choisie. Elle exige l’absence de lignes d’audit, de
+singleton et de tout autre objet utilisateur du schéma. Cet état est un socle non
+publié. Une nouvelle préparation le refuse comme cible partielle.
+
+- **Formats 14 et 15.** Le DDL MySQL et le rejeu correspondant aux projections
+  [`review_authority_meta`](../../../src/audit/review_authority.rs) et
+  [`runner_review_bindings`](../../../src/audit/review_binding.rs) restent à
+  définir, y compris l’équivalent des deux index uniques filtrés du binding
+  actif. Leurs définitions et leur vérification existent côté SQLite.
+- **Format 15.** Il manque aussi le DDL MySQL et le rejeu des cinq projections
+  `egress_policy_*`, avec leur genèse et leurs réservations durables.
+  [Schéma SQLite 15](../../../src/audit/egress/schema.rs)
+- **Publication commune.** Les projections MySQL existantes couvrent une partie
+  du socle. Le lecteur MySQL d’origine actuel passe par le binding v1 et les
+  relectures Legacy. Il reste à attester ensemble tous les marqueurs du
+  format, la chaîne, le tenant, le namespace, l’origine physique, la tête
+  et l’epoch avant de publier le singleton. Les droits runtime restent
+  bornés à leur tenant. [Lecteur MySQL](../../../src/mysql_storage/audit.rs) ·
+  [Fixture Legacy](GATEWAY_FIXTURE.md)
 
 ## Témoins à exécuter sur cibles jetables
 
+- Les tests purs `owned_audit_manifest_rejects_column_and_index_drift` et
+  `owned_audit_manifest_requires_the_exact_enforced_checks` couvrent le refus
+  d’une forme divergente. L’oracle ignoré
+  `owned_audit_tables_remain_unpublished_and_refuse_reentry` exerce le
+  sous-manifeste SQL sur des cibles séparées, puis le refus de reprise et le
+  refus Legacy. Il reste à exécuter sur MySQL 8.4.
 - Le prévol distingue base vide, préparation interrompue et Legacy. Pour
   `owned_preparation::owned_preflight_refuses_interrupted_and_legacy_schemas`,
   renseigner le compte opérateur dans `maintenance_username` de la configuration
