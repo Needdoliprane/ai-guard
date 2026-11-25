@@ -783,6 +783,14 @@ de travail et les trois marqueurs d’autorité sont rapprochés des reçus
 et retirés. Les inventaires Podman retrouvent leur état initial.
 Chaque passage couvre un moteur local et un gateway.
 
+La recette Linux x86-64 historique de `4334aa3b` sur Ubuntu 24.04
+reste **FAIL, code 101** à l’étape `live_browser_readiness`. La
+fixture était présente et le verdict navigateur est `NOT_ATTESTED`.
+Ce reçu garde sa portée propre sur Linux. L’archive du conducteur
+et de son ZIP primaire est vérifiée par le manifeste privé
+`efbaf679a9a73ece6bf9821ef81b980572fbfaabaaf77c3c53f3d36be45d9145`.
+[Run Linux exact](https://github.com/Needdoliprane/ai-guard/actions/runs/45155627504)
+
 ## 24 novembre 2026 — ancre d’audit protégée au niveau du processus
 
 **PASS ciblé G06** avec `ai-guard-audit-checkpoint` du paquet macOS
