@@ -65,9 +65,25 @@ Reçu du passage
 et manifeste de supervision
 `055b3a442fd969d62895c7c2c825ac0ea9df618fa098becacdb834dd3ecc7f67`.
 
-Le libtest de préparation sous verrou, mTLS, les tables de cycle de vie
-et de supervision, la publication du singleton et l’admission gardent
-leurs preuves propres.
+Sur `3d7641d4` (arbre `42a6d2e6`), le libtest Rust exact de la préparation
+sous verrou compile en 705,09 s. Le passage MySQL 8.4.13 ARM64 TLS sur
+bases jetables exécute le sélecteur une seule fois et sort 101 en
+2,97 s. Le premier contrôle en échec est le manifeste des contraintes
+SQL, après les contrôles des colonnes et des index et avant le contrôle
+séparé des clés étrangères. Le reçu ne nomme ni la contrainte ni le
+format en défaut. La clôture du projet et du port est confirmée.
+mTLS reste à exécuter. La publication du singleton et l’admission
+gardent leurs propres critères.
+
+Le premier prévol du conducteur a refusé une empreinte tronquée du
+kit et s’est arrêté avant la création d’un profil. L’empreinte complète
+a été revérifiée sur les sept pièces du kit puis utilisée avec le même
+libtest. Manifeste du binaire
+`09fd345a8e4273506a1e98878fe4e14028eaf2521e7caa4e03b932c1a064272a`.
+Manifeste du passage TLS
+`607ce5ff03d33f1301548dd4fa780a3535d149fd910cb018c7e06ea881c2f0e2`.
+Le diagnostic suivant doit comparer les tuples du dictionnaire
+aux attentes exactes des formats 14 et 15.
 
 ## 25 novembre 2026 — canari G11 et annulation du premier relais
 
