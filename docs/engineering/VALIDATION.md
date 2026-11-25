@@ -1,5 +1,36 @@
 # Validation courante
 
+## 25 novembre 2026 — projection des parents Claude Code et prévol Full3
+
+Le gel `5fc5fad1` compile sur macOS ARM64. Le premier passage
+valide trois sélecteurs G09 et l’encodage historique du checkpoint
+Claude. Le test de projection s’arrête sur le mode du dossier SQLite
+de recette. L’orchestrateur initial masque son code de sortie. Les
+statuts de chaque sélecteur sont conservés dans le reçu initial
+`6a0cc0777b003d8ae9d3d281c3c2f01126cf215e196604a3ac1293d43ed3ba78`.
+Les cinq sélecteurs Claude et rétention restants passent avec les
+mêmes binaires et un dossier privé. Ce rejeu a son propre reçu
+`c74ade61220e968e2e16760d821ae113a3ffca1b5272658d395c4552ce7dafa3`.
+
+Sur `17fde481`, le test exact de projection passe aussi avec un umask
+022 après adoption du constructeur de dossier privé. Les sources Rust
+applicatives, les verrous et le test de projection sont identiques à
+ceux du candidat `cad5a17d`. La lecture SQLite rattache un enfant
+déclaré à un parent inféré à partir de l’émetteur explicite et d’une
+session fournisseur concordante. Les checkpoints signés existants
+gardent leur encodage. Un parent qui a quitté l’historique accessible
+reste inconnu. Le dashboard a vérifié séparément les libellés
+« Inféré » pour le lien et « Déclaré » pour l’identité.
+
+Sur le même gel `17fde481`, le premier claim Full3 s’arrête avec le
+code 101 en 54,95 s pendant le prévol IPC. Le gardien est déclaré
+indisponible et sa fermeture reste indéterminée dans le harnais.
+Le chemin du répertoire du gardien atteint 108 octets avant le nom
+du socket, pour un maximum de 103 octets du chemin complet.
+L’exécution ne donne aucune preuve sur le claim ou le démarrage
+du worker. Manifeste privé
+`53a3d387d5448a07316ef9648e8d8704f2d00a89466238d6fd3592de39d8135a`.
+
 ## 25 novembre 2026 — diagnostic G09 intégré après les trois tests ciblés
 
 Le gel `5fc5fad1` compile sur macOS ARM64. Les trois sélecteurs
