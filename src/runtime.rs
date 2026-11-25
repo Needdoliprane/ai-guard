@@ -10,7 +10,6 @@ use tokio::{
 use uuid::Uuid;
 mod batch_io;
 #[cfg(unix)]
-#[allow(dead_code)] // The broker composition that grants this port is separate.
 pub(crate) mod bootstrap_stdin;
 #[cfg(all(test, unix))]
 mod bootstrap_stdin_tests;
@@ -389,7 +388,19 @@ impl ContainerSpec {
             .unwrap_or_else(|| volume_name(self.session))
     }
     pub fn create_args(&self, runtime: RuntimeKind) -> Result<Vec<String>> {
+        self.create_args_for(runtime, false)
+    }
+    fn create_args_for(&self, runtime: RuntimeKind, bootstrap_stdin: bool) -> Result<Vec<String>> {
         self.require_current_creation_policy()?;
+        if bootstrap_stdin {
+            ensure!(
+                matches!(self.purpose, ContainerPurpose::Run)
+                    && self.network == NetworkMode::None
+                    && self.egress_proxy_port.is_some()
+                    && !self.security_preset.is_interactive(),
+                "bootstrap stdin requires the retained broker egress worker profile"
+            );
+        }
         self.validate_secret_env_file()?;
         validate_image(&self.image)?;
         validate_command(&self.argv)?;
@@ -461,7 +472,7 @@ impl ContainerSpec {
             "--entrypoint".into(),
             self.argv[0].clone(),
         ];
-        if matches!(self.purpose, ContainerPurpose::Import) {
+        if matches!(self.purpose, ContainerPurpose::Import) || bootstrap_stdin {
             args.push("--interactive".into());
         }
         if self.security_preset.is_interactive() {
@@ -766,6 +777,72 @@ impl Drop for TransportTasks {
             task.abort();
         }
     }
+}
+
+enum OwnedStartInput {
+    Historical(Option<std::fs::File>),
+    #[cfg(unix)]
+    Bootstrap(bootstrap_stdin::BootstrapReady),
+}
+
+impl OwnedStartInput {
+    fn is_bootstrap(&self) -> bool {
+        match self {
+            Self::Historical(_) => false,
+            #[cfg(unix)]
+            Self::Bootstrap(_) => true,
+        }
+    }
+}
+
+enum SpawnedPrearmedInput {
+    Historical(Option<std::fs::File>),
+    #[cfg(unix)]
+    Bootstrap {
+        ready: bootstrap_stdin::BootstrapReady,
+        stdin: Result<bootstrap_stdin::PrearmedBootstrapStdin>,
+    },
+}
+
+fn spawn_prearmed_cli(
+    mut command: Command,
+    target: &str,
+    input: OwnedStartInput,
+    guard: Box<dyn BeforeSpawnGuard>,
+    stop: &tokio::sync::watch::Receiver<bool>,
+) -> Result<(tokio::process::Child, SpawnedPrearmedInput)> {
+    command.args(["start", "--attach"]);
+    match &input {
+        OwnedStartInput::Historical(None) => {}
+        _ => {
+            command.arg("--interactive").stdin(Stdio::piped());
+        }
+    }
+    command
+        .arg(target)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    ensure_prearmed_live(stop).with_context(|| {
+        RuntimePrestartStageFailure::new(RuntimePrestartStage::StopBeforeSpawn, target)
+    })?;
+    let guard_failure =
+        || RuntimePrestartStageFailure::new(RuntimePrestartStage::GuardBeforeSpawn, target);
+    let spawn_failure = || RuntimePrestartStageFailure::new(RuntimePrestartStage::Spawn, target);
+    // Keep the final trusted check adjacent to spawn.
+    guard
+        .check_before_spawn(target)
+        .with_context(guard_failure)?;
+    let mut child = command.spawn().with_context(spawn_failure)?;
+    let input = match input {
+        OwnedStartInput::Historical(archive) => SpawnedPrearmedInput::Historical(archive),
+        #[cfg(unix)]
+        OwnedStartInput::Bootstrap(ready) => SpawnedPrearmedInput::Bootstrap {
+            ready,
+            stdin: bootstrap_stdin::PrearmedBootstrapStdin::take(&mut child),
+        },
+    };
+    Ok((child, input))
 }
 
 fn ensure_prearmed_live(stop: &tokio::sync::watch::Receiver<bool>) -> Result<()> {
@@ -1914,9 +1991,10 @@ impl Runtime {
     async fn execute_created_prearmed<F, Fut>(
         &self,
         instance: &CreatedInstance,
-        input: Option<std::fs::File>,
+        input: OwnedStartInput,
         stdout_limit: usize,
-        managed: (&ManagedRuntime, &ContainerObservation),
+        authority: &ManagedRuntime,
+        created: &OwnedContainerSnapshot,
         control: PrearmedStartControl,
         mut on_started: F,
     ) -> Result<ExecutionResult>
@@ -1924,29 +2002,19 @@ impl Runtime {
         F: FnMut(RuntimeState) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
-        let (authority, _) = managed;
         authority.verify_authority().await.with_context(|| {
             RuntimePrestartStageFailure::new(
                 RuntimePrestartStage::AuthorityBeforeSpawn,
                 &instance.target,
             )
         })?;
-        let (mut command, prepared_profile, _retained_profile) =
+        let (command, prepared_profile, _retained_profile) =
             authority.prearmed_command().with_context(|| {
                 RuntimePrestartStageFailure::new(
                     RuntimePrestartStage::InvocationBeforeSpawn,
                     &instance.target,
                 )
             })?;
-        command.arg("start").arg("--attach");
-        if input.is_some() {
-            command.arg("--interactive").stdin(Stdio::piped());
-        }
-        command
-            .arg(&instance.target)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
         let PrearmedStartControl {
             guard,
             mut stop,
@@ -1958,27 +2026,26 @@ impl Runtime {
             expected: launch_profile,
             prepared: prepared_profile,
         });
-        ensure_prearmed_live(&stop).with_context(|| {
-            RuntimePrestartStageFailure::new(
-                RuntimePrestartStage::StopBeforeSpawn,
-                &instance.target,
-            )
-        })?;
-        // These closures allocate diagnostic metadata only on an error.
-        let guard_failure = || {
-            RuntimePrestartStageFailure::new(
-                RuntimePrestartStage::GuardBeforeSpawn,
-                &instance.target,
-            )
+        let (mut child, input) =
+            spawn_prearmed_cli(command, &instance.target, input, guard, &stop)?;
+        let input = match input {
+            SpawnedPrearmedInput::Historical(archive) => archive,
+            #[cfg(unix)]
+            SpawnedPrearmedInput::Bootstrap { ready, stdin } => {
+                return bootstrap_stdin::supervise(
+                    authority,
+                    created,
+                    child,
+                    stdin,
+                    ready,
+                    stop,
+                    stdout_limit,
+                    stdout_tap,
+                )
+                .await;
+            }
         };
-        let spawn_failure =
-            || RuntimePrestartStageFailure::new(RuntimePrestartStage::Spawn, &instance.target);
-        // Keep the final trusted check adjacent to spawn: no await, command
-        // preparation, filesystem access or callback is permitted between them.
-        guard
-            .check_before_spawn(&instance.target)
-            .with_context(guard_failure)?;
-        let mut child = command.spawn().with_context(spawn_failure)?;
+        let managed = (authority, &created.observation);
         let stdout_release = stdout_tap
             .as_ref()
             .map(crate::provider_activity::StdoutTap::stall_release);
