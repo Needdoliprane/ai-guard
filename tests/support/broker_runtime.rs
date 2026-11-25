@@ -928,6 +928,11 @@ fn project_batch_failure_event(event: &Value) -> Result<Value> {
         full3_binding.is_none() || broker_step == Some("full3_binding_publication"),
         "invalid Full3 binding diagnostic origin"
     );
+    let created_reload = project_created_reload(data.get("created_reload"))?;
+    ensure!(
+        created_reload.is_none() || broker_step == Some("created_exchange_reload"),
+        "invalid Created reload diagnostic origin"
+    );
     // Only this projection is persisted. Neither arbitrary data nor any error
     // body/argv is copied. An outer exchange label is not evidence of an ACK.
     let mut marker = json!({
@@ -938,7 +943,57 @@ fn project_batch_failure_event(event: &Value) -> Result<Value> {
     if let Some(binding) = full3_binding {
         marker["full3_binding"] = binding;
     }
+    if let Some(reload) = created_reload {
+        marker["created_reload"] = reload;
+    }
     Ok(marker)
+}
+
+fn project_created_reload(value: Option<&Value>) -> Result<Option<Value>> {
+    let Some(value) = value.filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let site = optional_failure_label(
+        value.get("site"),
+        &["mutation_composition", "rpc_lookup", "cas_reload"],
+    )?
+    .context("missing Created reload site")?;
+    let cause = optional_failure_label(
+        value.get("cause"),
+        &["queue_full", "reply_timeout", "unavailable", "actor_error"],
+    )?;
+    let journal_code = journal_failure_label(value.get("journal_code"))?;
+    ensure!(
+        (cause == Some("actor_error")) == journal_code.is_some(),
+        "invalid Created reload journal code for cause"
+    );
+    let mut projected = json!({"site":site});
+    if let Some(cause) = cause {
+        projected["cause"] = json!(cause);
+    }
+    if let Some(code) = journal_code {
+        projected["journal_code"] = json!(code);
+    }
+    Ok(Some(projected))
+}
+
+fn journal_failure_label(value: Option<&Value>) -> Result<Option<&str>> {
+    optional_failure_label(
+        value,
+        &[
+            "invalid_input",
+            "unsupported_version",
+            "too_large",
+            "limit_exceeded",
+            "busy",
+            "conflict",
+            "interrupted",
+            "corrupt",
+            "unsafe_filesystem",
+            "control_secret",
+            "io",
+        ],
+    )
 }
 
 fn project_full3_binding(value: Option<&Value>) -> Result<Option<Value>> {
@@ -957,22 +1012,7 @@ fn project_full3_binding(value: Option<&Value>) -> Result<Option<Value>> {
     let fields = value
         .and_then(Value::as_object)
         .context("missing Full3 binding diagnostic")?;
-    let journal_code = optional_failure_label(
-        fields.get("journal_code"),
-        &[
-            "invalid_input",
-            "unsupported_version",
-            "too_large",
-            "limit_exceeded",
-            "busy",
-            "conflict",
-            "interrupted",
-            "corrupt",
-            "unsafe_filesystem",
-            "control_secret",
-            "io",
-        ],
-    )?;
+    let journal_code = journal_failure_label(fields.get("journal_code"))?;
     let enforcer_code = fields
         .get("enforcer_code")
         .filter(|code| !code.is_null())
@@ -1080,6 +1120,8 @@ pub(super) struct ExecutorFailureRow {
     registration: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     full3_binding: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_reload: Option<Value>,
     #[serde(skip)]
     pub(super) audit_key: Option<(Uuid, i64)>,
 }
@@ -1132,6 +1174,8 @@ pub fn executor_failure_page(
                             .and_then(|_| project_registration(&event["data"]["registration"])),
                         full3_binding: audit_key
                             .and_then(|_| marker.as_ref()?.get("full3_binding").cloned()),
+                        created_reload: audit_key
+                            .and_then(|_| marker.as_ref()?.get("created_reload").cloned()),
                         audit_key,
                     }
                 })

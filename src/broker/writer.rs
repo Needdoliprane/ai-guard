@@ -55,6 +55,36 @@ mod cold_audit_tests;
 
 type Reply<T> = oneshot::Sender<JournalResult<T>>;
 
+/// Preserve where the call failed before mapping to the legacy journal error.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum WriterCallFailure {
+    QueueFull,
+    ReplyTimeout,
+    Unavailable,
+    Actor(JournalError),
+}
+
+impl WriterCallFailure {
+    pub(crate) fn journal_error(self) -> JournalError {
+        match self {
+            Self::QueueFull => JournalError::Busy,
+            Self::ReplyTimeout | Self::Unavailable => JournalError::Io,
+            Self::Actor(error) => error,
+        }
+    }
+}
+
+impl fmt::Display for WriterCallFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::QueueFull => "writer command queue is full",
+            Self::ReplyTimeout => "writer response deadline elapsed",
+            Self::Unavailable => "writer call is unavailable",
+            Self::Actor(_) => "writer returned a journal error",
+        })
+    }
+}
+
 /// Owned by the queued scan, so a caller timeout cannot admit another scan.
 struct InventoryPermit(Arc<AtomicBool>);
 impl InventoryPermit {
@@ -388,7 +418,16 @@ impl ClientState {
         &self,
         command: impl FnOnce(Reply<T>) -> Command + Send,
     ) -> JournalResult<T> {
-        tokio::runtime::Handle::try_current().map_err(|_| JournalError::Io)?;
+        self.call_diagnosed(command)
+            .await
+            .map_err(WriterCallFailure::journal_error)
+    }
+
+    async fn call_diagnosed<T: Send + 'static>(
+        &self,
+        command: impl FnOnce(Reply<T>) -> Command + Send,
+    ) -> Result<T, WriterCallFailure> {
+        tokio::runtime::Handle::try_current().map_err(|_| WriterCallFailure::Unavailable)?;
         let (reply, receive) = oneshot::channel();
         let command = command(reply);
         // These commands inspect durable state. The actor applies its
@@ -398,10 +437,10 @@ impl ClientState {
             Command::ReadResult { .. } | Command::PendingRetirementEvents { .. }
         );
         #[cfg(test)]
-        {
+        let cost = {
             use super::journal::cost_measurement::{self, WriterKind};
             let context = self as *const Self as usize;
-            let cost = match &command {
+            match &command {
                 Command::Load { operation_id, .. } => {
                     cost_measurement::caller(context, WriterKind::Load, *operation_id)
                 }
@@ -409,73 +448,60 @@ impl ClientState {
                     cost_measurement::caller(context, WriterKind::Status, *operation_id)
                 }
                 _ => None,
-            };
-            let sent = self.sender.try_send(command);
-            match sent {
-                Ok(()) => {
-                    if let Some(cost) = &cost {
-                        cost.sent();
-                    }
-                }
-                Err(mpsc::TrySendError::Full(_)) => {
-                    if let Some(cost) = cost {
-                        cost.finish(false, false);
-                    }
-                    return Err(JournalError::Busy);
-                }
-                Err(mpsc::TrySendError::Disconnected(_)) => {
-                    if let Some(cost) = cost {
-                        cost.finish(false, false);
-                    }
-                    return Err(JournalError::Io);
-                }
             }
-            // Same timeout and nested error mapping as receive. Only this
-            // test branch can distinguish reception from an actor's Io reply.
-            let mut waiter = (!retain_status_on_lost_reply)
-                .then(|| status_cache::WaiterGuard::new(Arc::clone(&self.status_cache)));
-            let completed = self.receive_reply(receive).await;
-            let received = completed.is_ok();
-            if received && let Some(waiter) = &mut waiter {
-                waiter.acknowledged();
-            }
-            let result = completed.and_then(|result| result);
-            if let Some(cost) = cost {
-                cost.finish(received, result.is_ok());
-            }
-            result
-        }
-        #[cfg(not(test))]
-        {
-            match self.sender.try_send(command) {
-                Ok(()) => {}
-                Err(mpsc::TrySendError::Full(_)) => return Err(JournalError::Busy),
-                Err(mpsc::TrySendError::Disconnected(_)) => return Err(JournalError::Io),
-            }
-            // A lost reply never removes or cancels the actor's typed command.
-            if retain_status_on_lost_reply {
-                self.receive_reply(receive).await?
+        };
+        let sent = self.sender.try_send(command).map_err(|error| match error {
+            mpsc::TrySendError::Full(_) => WriterCallFailure::QueueFull,
+            mpsc::TrySendError::Disconnected(_) => WriterCallFailure::Unavailable,
+        });
+        #[cfg(test)]
+        if let Some(cost) = &cost {
+            if sent.is_ok() {
+                cost.sent();
             } else {
-                self.receive(receive).await
+                cost.finish(false, false);
             }
         }
-    }
-    async fn receive<T>(&self, receive: oneshot::Receiver<JournalResult<T>>) -> JournalResult<T> {
-        let mut waiter = status_cache::WaiterGuard::new(Arc::clone(&self.status_cache));
-        let result = self.receive_reply(receive).await?;
-        waiter.acknowledged();
+        sent?;
+
+        // A lost reply never removes or cancels the actor's typed command.
+        let completed = self
+            .receive_reply(receive, retain_status_on_lost_reply)
+            .await;
+        #[cfg(test)]
+        let received = completed.is_ok();
+        let result = completed.and_then(|reply| reply.map_err(WriterCallFailure::Actor));
+        #[cfg(test)]
+        if let Some(cost) = &cost {
+            cost.finish(received, result.is_ok());
+        }
         result
+    }
+
+    async fn receive<T>(&self, receive: oneshot::Receiver<JournalResult<T>>) -> JournalResult<T> {
+        self.receive_reply(receive, false)
+            .await
+            .map_err(WriterCallFailure::journal_error)?
     }
 
     async fn receive_reply<T>(
         &self,
         receive: oneshot::Receiver<JournalResult<T>>,
-    ) -> JournalResult<JournalResult<T>> {
-        let _awaiting = AwaitingReply::enter(&self.outstanding);
-        tokio::time::timeout(self.timeout, receive)
-            .await
-            .map_err(|_| JournalError::Io)?
-            .map_err(|_| JournalError::Io)
+        retain_status_on_lost_reply: bool,
+    ) -> Result<JournalResult<T>, WriterCallFailure> {
+        let mut waiter = (!retain_status_on_lost_reply)
+            .then(|| status_cache::WaiterGuard::new(Arc::clone(&self.status_cache)));
+        let result = {
+            let _awaiting = AwaitingReply::enter(&self.outstanding);
+            tokio::time::timeout(self.timeout, receive)
+                .await
+                .map_err(|_| WriterCallFailure::ReplyTimeout)?
+                .map_err(|_| WriterCallFailure::Unavailable)?
+        };
+        if let Some(waiter) = &mut waiter {
+            waiter.acknowledged();
+        }
+        Ok(result)
     }
 }
 
@@ -1113,11 +1139,21 @@ impl WriterClient {
         }
     }
     pub async fn load(&self, operation_id: Uuid) -> JournalResult<Option<AcceptedJobV1>> {
-        self.call(move |reply| Command::Load {
-            operation_id,
-            reply,
-        })
-        .await
+        self.load_diagnosed(operation_id)
+            .await
+            .map_err(WriterCallFailure::journal_error)
+    }
+
+    pub(crate) async fn load_diagnosed(
+        &self,
+        operation_id: Uuid,
+    ) -> Result<Option<AcceptedJobV1>, WriterCallFailure> {
+        self.0
+            .call_diagnosed(move |reply| Command::Load {
+                operation_id,
+                reply,
+            })
+            .await
     }
     pub async fn cancel_stop_projection(
         &self,
@@ -2176,6 +2212,45 @@ mod tests {
         assert_eq!(receipt.operation_id(), operation_id);
         assert_eq!(receipt.phase(), RejectionPhaseV1::SubmissionPreparation);
         assert_eq!(receipt.code(), RejectionCodeV1::PreparationFailed);
+    }
+
+    #[tokio::test]
+    async fn diagnosed_load_distinguishes_writer_failures() {
+        let (_root, journal) = private_journal();
+        let operation = Uuid::new_v4();
+        let (paused, receiver) = paused_client(&journal, 1, Duration::from_millis(5));
+
+        // The retained receiver has no consumer, so the first queued call
+        // expires and its command still occupies the only slot.
+        assert!(matches!(
+            paused.load_diagnosed(operation).await,
+            Err(WriterCallFailure::ReplyTimeout)
+        ));
+        assert!(matches!(
+            paused.load_diagnosed(operation).await,
+            Err(WriterCallFailure::QueueFull)
+        ));
+        assert!(matches!(
+            paused.load(operation).await,
+            Err(JournalError::Busy)
+        ));
+        drop(receiver);
+        assert!(matches!(
+            paused.load_diagnosed(operation).await,
+            Err(WriterCallFailure::Unavailable)
+        ));
+        assert!(matches!(
+            paused.load(operation).await,
+            Err(JournalError::Io)
+        ));
+        drop(paused);
+
+        let writer = WriterClient::start(journal, 1, Duration::from_secs(10)).unwrap();
+        assert!(matches!(
+            writer.load_diagnosed(Uuid::nil()).await,
+            Err(WriterCallFailure::Actor(JournalError::InvalidInput))
+        ));
+        assert!(matches!(writer.load(operation).await, Ok(None)));
     }
 
     #[tokio::test]

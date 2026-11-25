@@ -4,6 +4,7 @@ use crate::{
         enforcer::{EnforcerError, EnforcerStageFailure},
         journal::JournalError,
         lifecycle::LocalFailurePhaseV1,
+        writer::WriterCallFailure,
     },
     runtime::RuntimePrestartStageFailure,
 };
@@ -50,7 +51,7 @@ impl std::error::Error for BrokerStep {}
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum CreatedExchangeStage {
-    Reload,
+    Reload(CreatedReloadSite),
     PreparePending,
     AdvancePending,
 }
@@ -58,7 +59,7 @@ pub(super) enum CreatedExchangeStage {
 impl CreatedExchangeStage {
     fn step(self) -> BrokerStep {
         match self {
-            Self::Reload => BrokerStep::CreatedExchangeReload,
+            Self::Reload(_) => BrokerStep::CreatedExchangeReload,
             Self::PreparePending => BrokerStep::CreatedExchangePreparePending,
             Self::AdvancePending => BrokerStep::CreatedExchangeAdvancePending,
         }
@@ -71,6 +72,52 @@ impl fmt::Display for CreatedExchangeStage {
     }
 }
 impl std::error::Error for CreatedExchangeStage {}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum CreatedReloadSite {
+    MutationComposition,
+    RpcLookup,
+    CasReload,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CreatedReloadCause {
+    QueueFull,
+    ReplyTimeout,
+    Unavailable,
+    ActorError,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct CreatedReloadDiagnostic {
+    site: CreatedReloadSite,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cause: Option<CreatedReloadCause>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    journal_code: Option<&'static str>,
+}
+
+impl CreatedReloadSite {
+    fn diagnostic(self, error: &anyhow::Error) -> CreatedReloadDiagnostic {
+        use CreatedReloadCause as Cause;
+        let (cause, journal_code) = match error.downcast_ref::<WriterCallFailure>() {
+            Some(WriterCallFailure::QueueFull) => (Some(Cause::QueueFull), None),
+            Some(WriterCallFailure::ReplyTimeout) => (Some(Cause::ReplyTimeout), None),
+            Some(WriterCallFailure::Unavailable) => (Some(Cause::Unavailable), None),
+            Some(WriterCallFailure::Actor(error)) => {
+                (Some(Cause::ActorError), Some(journal_failure_code(error)))
+            }
+            None => (None, None),
+        };
+        CreatedReloadDiagnostic {
+            site: self,
+            cause,
+            journal_code,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -237,11 +284,17 @@ pub(super) struct BatchFailureDiagnosticV1 {
     registration: Option<RegistrationDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     full3_binding: Option<Full3BindingDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_reload: Option<CreatedReloadDiagnostic>,
 }
 
 impl BatchFailureDiagnosticV1 {
     pub(super) fn full3_binding(&self) -> Option<&Full3BindingDiagnostic> {
         self.full3_binding.as_ref()
+    }
+
+    pub(super) fn created_reload(&self) -> Option<&CreatedReloadDiagnostic> {
+        self.created_reload.as_ref()
     }
 
     pub(super) fn created_exchange_step(&self) -> Option<BrokerStep> {
@@ -275,12 +328,11 @@ pub(super) fn classify(
             .map(|stage| stage.diagnostic())
     };
     let full3_stage = error.downcast_ref::<Full3BindingStage>().copied();
+    let created_stage = error.downcast_ref::<CreatedExchangeStage>().copied();
     let broker_step = match error.downcast_ref::<BrokerStep>().copied() {
-        Some(BrokerStep::CreatedExchange) => Some(
-            error
-                .downcast_ref::<CreatedExchangeStage>()
-                .map_or(BrokerStep::CreatedExchange, |stage| stage.step()),
-        ),
+        Some(BrokerStep::CreatedExchange) => {
+            Some(created_stage.map_or(BrokerStep::CreatedExchange, |stage| stage.step()))
+        }
         step => step
             .or_else(|| full3_stage.map(|_| BrokerStep::Full3BindingPublication))
             .or_else(|| registration.as_ref().map(|_| BrokerStep::Registration)),
@@ -288,6 +340,12 @@ pub(super) fn classify(
     let full3_binding = match broker_step {
         Some(BrokerStep::Full3BindingPublication) => {
             full3_stage.map(|stage| stage.diagnostic(error))
+        }
+        _ => None,
+    };
+    let created_reload = match (broker_step, created_stage) {
+        (Some(BrokerStep::CreatedExchangeReload), Some(CreatedExchangeStage::Reload(site))) => {
+            Some(site.diagnostic(error))
         }
         _ => None,
     };
@@ -303,6 +361,7 @@ pub(super) fn classify(
         broker_step,
         registration,
         full3_binding,
+        created_reload,
     })
 }
 
@@ -322,6 +381,7 @@ pub(super) fn failure_report(
         broker_step: Some(BrokerStep::FailureObserved),
         registration: None,
         full3_binding: None,
+        created_reload: None,
     })
 }
 
@@ -335,7 +395,10 @@ mod tests {
     fn created_exchange_reports_the_local_stage_without_claiming_publication() {
         let private = "synthetic-private-created-error";
         for (stage, label) in [
-            (CreatedExchangeStage::Reload, "created_exchange_reload"),
+            (
+                CreatedExchangeStage::Reload(CreatedReloadSite::RpcLookup),
+                "created_exchange_reload",
+            ),
             (
                 CreatedExchangeStage::PreparePending,
                 "created_exchange_prepare_pending",
@@ -352,7 +415,37 @@ mod tests {
                 serde_json::to_value(failure_report(LocalFailurePhaseV1::Worker, &error)).unwrap();
             assert_eq!(report["broker_step"], label);
             assert_eq!(report["runtime_effect"], "unknown");
+            if matches!(stage, CreatedExchangeStage::Reload(_)) {
+                assert_eq!(report["created_reload"], json!({"site":"rpc_lookup"}));
+            } else {
+                assert!(report.get("created_reload").is_none());
+            }
             assert!(!report.to_string().contains(private));
+        }
+    }
+
+    #[test]
+    fn created_reload_reports_only_closed_writer_causes() {
+        for (failure, cause) in [
+            (WriterCallFailure::QueueFull, "queue_full"),
+            (WriterCallFailure::ReplyTimeout, "reply_timeout"),
+            (WriterCallFailure::Unavailable, "unavailable"),
+            (WriterCallFailure::Actor(JournalError::Io), "actor_error"),
+        ] {
+            let error = anyhow::anyhow!("synthetic private failure")
+                .context(failure)
+                .context(CreatedExchangeStage::Reload(CreatedReloadSite::CasReload))
+                .context(BrokerStep::CreatedExchange);
+            let report =
+                serde_json::to_value(failure_report(LocalFailurePhaseV1::Worker, &error)).unwrap();
+            let mut expected = json!({"site":"cas_reload","cause":cause});
+            if cause == "actor_error" {
+                expected["journal_code"] = json!("io");
+            }
+            assert_eq!(report["created_reload"], expected);
+            assert_eq!(report["broker_step"], "created_exchange_reload");
+            assert_eq!(report["runtime_effect"], "unknown");
+            assert!(!report.to_string().contains("synthetic private failure"));
         }
     }
 

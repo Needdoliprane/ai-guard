@@ -366,6 +366,54 @@ fn batch_failure_marker_projects_only_closed_full3_binding_evidence() {
 }
 
 #[test]
+fn batch_failure_marker_projects_only_closed_created_reload_evidence() {
+    let private = "synthetic-private-detail";
+    let mut page = json!({ "items": [{
+        "id": "11111111-1111-4111-8111-111111111111", "seq": 17,
+        "kind": "broker.batch.failure", "source": "runner", "provenance": "observed",
+        "session_id": "owner-session",
+        "data": {"version":1,"phase":"worker","runtime_effect":"unknown",
+            "broker_step":"created_exchange_reload",
+            "created_reload":{"site":"cas_reload","cause":"actor_error","journal_code":"io",
+                "private":private}}
+    }], "next_cursor": null });
+    let marker = harness::batch_failure_marker(&page).unwrap().unwrap();
+    assert_eq!(
+        marker["created_reload"],
+        json!({"site":"cas_reload","cause":"actor_error","journal_code":"io"})
+    );
+    assert!(!marker.to_string().contains(private));
+    assert_eq!(marker["runtime_effect"], "unknown");
+    let projected =
+        serde_json::to_value(harness::executor_failure_page(&page, "owner-session", 16)).unwrap();
+    assert_eq!(
+        projected["rows"][0]["created_reload"],
+        marker["created_reload"]
+    );
+    let unrelated =
+        serde_json::to_value(harness::executor_failure_page(&page, "other-session", 16)).unwrap();
+    assert!(unrelated["rows"][0].get("created_reload").is_none());
+
+    for invalid in [
+        json!({"site":"rpc_lookup","cause":"actor_error"}),
+        json!({"site":"rpc_lookup","cause":"reply_timeout","journal_code":"io"}),
+        json!({"site":"rpc_lookup","cause":"actor_error","journal_code":private}),
+        json!({"site":private}),
+        json!({"site":"rpc_lookup","cause":private}),
+    ] {
+        page["items"][0]["data"]["created_reload"] = invalid;
+        assert!(harness::batch_failure_marker(&page).is_err());
+    }
+    page["items"][0]["data"]["created_reload"] = json!({"site":"mutation_composition"});
+    assert_eq!(
+        harness::batch_failure_marker(&page).unwrap().unwrap()["created_reload"],
+        json!({"site":"mutation_composition"})
+    );
+    page["items"][0]["data"]["broker_step"] = json!("created_exchange");
+    assert!(harness::batch_failure_marker(&page).is_err());
+}
+
+#[test]
 fn batch_failure_marker_empty_page_is_not_a_failure() {
     assert!(
         harness::batch_failure_marker(&json!({"items":[],"next_cursor":null}))

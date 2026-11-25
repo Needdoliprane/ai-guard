@@ -71,6 +71,7 @@ struct Fixture {
     client: AuditClient,
     config: Directory,
     requests: Arc<AtomicUsize>,
+    worker_requests: Arc<AtomicUsize>,
     drop_next_worker_transition_response: Arc<AtomicBool>,
     audit_response_gate: Arc<StdMutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>>,
     gateway: tokio::task::JoinHandle<()>,
@@ -160,6 +161,8 @@ impl Fixture {
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&requests);
+        let worker_requests = Arc::new(AtomicUsize::new(0));
+        let observed_worker_requests = Arc::clone(&worker_requests);
         let drop_next_worker_transition_response = Arc::new(AtomicBool::new(false));
         let observed_fault = Arc::clone(&drop_next_worker_transition_response);
         let audit_response_gate: Arc<
@@ -177,6 +180,7 @@ impl Fixture {
         .layer(axum::middleware::from_fn(
             move |request: axum::extract::Request, next: axum::middleware::Next| {
                 let observed = Arc::clone(&observed);
+                let observed_worker_requests = Arc::clone(&observed_worker_requests);
                 let observed_fault = Arc::clone(&observed_fault);
                 let observed_audit_response_gate = Arc::clone(&observed_audit_response_gate);
                 async move {
@@ -191,6 +195,7 @@ impl Fixture {
                         eprintln!("cancelled_recovery_fixture phase=decision_http_enter");
                     }
                     if worker_transition {
+                        observed_worker_requests.fetch_add(1, Ordering::SeqCst);
                         eprintln!("cancelled_recovery_fixture phase=worker_transition_http_enter");
                     }
                     let response = next.run(request).await;
@@ -276,6 +281,7 @@ impl Fixture {
             client: AuditClient::new(&origin, RUNNER).unwrap(),
             config,
             requests,
+            worker_requests,
             drop_next_worker_transition_response,
             audit_response_gate,
             gateway,
@@ -764,7 +770,12 @@ async fn created_pending_checkpoint_reports_three_local_failure_boundaries() {
     .await
     .err()
     .expect("strict reload must reject the missing binding");
-    assert_eq!(step(reload)["broker_step"], "created_exchange_reload");
+    let report = step(reload);
+    assert_eq!(report["broker_step"], "created_exchange_reload");
+    assert_eq!(
+        report["created_reload"],
+        json!({"site":"cas_reload","cause":"actor_error","journal_code":"corrupt"})
+    );
 
     fs::rename(preserved, binding).unwrap();
     assert_eq!(
@@ -778,6 +789,100 @@ async fn created_pending_checkpoint_reports_three_local_failure_boundaries() {
         accepted.head()
     );
     assert_eq!(fixture.requests.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.worker_requests.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn created_reload_reports_mutation_and_rpc_sites_before_worker_http() {
+    use crate::control::{
+        NetworkV1, RestartPolicyV1, RuntimeInspectionV1, RuntimeKindV1, SecurityPresetV1,
+    };
+
+    let fixture = Fixture::new().await;
+    let peer = NativePeer::empty(&fixture).await;
+    let runtime =
+        Runtime::with_program(RuntimeKind::Docker, &std::env::current_exe().unwrap()).unwrap();
+    let context = AuthenticatedBatchContext::for_executor_test(
+        fixture.client.clone(),
+        fixture.scope.clone(),
+        fixture.config.clone(),
+        runtime,
+    )
+    .await
+    .unwrap();
+    let executor = BatchExecutor::new(
+        fixture.writer().clone(),
+        peer.client.clone(),
+        Arc::new(NativeHostClock::new().unwrap()),
+    );
+    let operation = Uuid::new_v4();
+    let accepted = fixture.accept(operation, true);
+    let execution = Execution::open(&executor, operation, &context)
+        .await
+        .unwrap();
+    // The strict load rejects the job before these request values are used.
+    let transition = WorkerTransitionV1::Created {
+        inspection: RuntimeInspectionV1 {
+            authority_id: Uuid::new_v4().to_string(),
+            runtime_kind: RuntimeKindV1::Docker,
+            container_id: "d".repeat(64),
+            stable_name: "fixture-worker".into(),
+            volume_name: "fixture-volume".into(),
+            image_id: format!("sha256:{}", "a".repeat(64)),
+            spec_hash: "b".repeat(64),
+            cpu_millis: 1000,
+            memory_bytes: 268_435_456,
+            pids_limit: 64,
+            network: NetworkV1::None,
+            security_preset: SecurityPresetV1::FixedSandboxV2,
+            restart_policy: RestartPolicyV1::No,
+        },
+    };
+    let binding = accepted.binding_source().unwrap().path();
+    let preserved = fixture.root.path().join("created-reload-binding.bin");
+    fs::rename(binding, &preserved).unwrap();
+    let mutation = execution.mutate(transition.clone()).await.err().unwrap();
+    let lookup = execution
+        .rpc(Operation::WorkerMutation {
+            request: WorkerMutationV1 {
+                version: 1,
+                operation_id: Uuid::new_v4().to_string(),
+                worker_id: Uuid::new_v4().to_string(),
+                attempt_id: Uuid::new_v4().to_string(),
+                expected_revision: 0,
+                transition,
+            },
+            response: None,
+        })
+        .await
+        .err()
+        .unwrap();
+    fs::rename(preserved, binding).unwrap();
+    for (error, site) in [(mutation, "mutation_composition"), (lookup, "rpc_lookup")] {
+        let failure = error.context(BrokerStep::CreatedExchange);
+        let report = diagnostics::failure_report(LocalFailurePhaseV1::Worker, &failure);
+        let report = serde_json::to_value(report).unwrap();
+        assert_eq!(report["broker_step"], "created_exchange_reload");
+        assert_eq!(report["runtime_effect"], "unknown");
+        assert_eq!(
+            report["created_reload"],
+            json!({"site":site,"cause":"actor_error","journal_code":"corrupt"})
+        );
+    }
+    assert_eq!(
+        fixture
+            .writer()
+            .load(operation)
+            .await
+            .unwrap()
+            .unwrap()
+            .head(),
+        accepted.head()
+    );
+    assert_eq!(fixture.worker_requests.load(Ordering::SeqCst), 0);
+    drop(execution);
+    drop(executor);
+    peer.close().await;
 }
 
 #[tokio::test]

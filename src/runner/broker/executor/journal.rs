@@ -1,15 +1,27 @@
 //! Private batch journal operations.
 use super::*;
-use diagnostics::CreatedExchangeStage;
+use diagnostics::{CreatedExchangeStage, CreatedReloadSite};
 use std::future::Future;
 
 async fn load_draft(
     writer: &WriterClient,
     operation: Uuid,
     scope: &JournalScopeV1,
+    mode: PublicationMode,
 ) -> Result<(AcceptedJobV1, Draft)> {
     ensure!(same(writer.scope(), scope)?, "writer scope changed");
-    let job = writer.load(operation).await?.context("job disappeared")?;
+    let job = writer
+        .load_diagnosed(operation)
+        .await
+        .map_err(|failure| {
+            let error = anyhow::Error::new(failure.journal_error());
+            if mode == PublicationMode::CreatedPending {
+                error.context(failure)
+            } else {
+                error
+            }
+        })?
+        .context("job disappeared")?;
     ensure!(
         job.operation_id() == operation && same(job.scope(), scope)?,
         "job scope changed"
@@ -72,8 +84,8 @@ async fn commit_patch_with(
 ) -> Result<Box<CommittedDraftAtHead>> {
     for _ in 0..16 {
         let (job, mut draft) = mode.at_created(
-            load_draft(writer, operation, scope).await,
-            CreatedExchangeStage::Reload,
+            load_draft(writer, operation, scope, mode).await,
+            CreatedExchangeStage::Reload(CreatedReloadSite::CasReload),
         )?;
         mode.at_created(change(&mut draft), CreatedExchangeStage::PreparePending)?;
         let next = mode.at_created(
@@ -133,7 +145,7 @@ async fn confirm_exact_head(
     draft: Draft,
 ) -> Result<Box<CommittedDraftAtHead>> {
     let unknown = || anyhow::Error::new(JournalError::Io);
-    let (job, durable) = load_draft(writer, operation, scope)
+    let (job, durable) = load_draft(writer, operation, scope, PublicationMode::FailClosed)
         .await
         .map_err(|_| unknown())?;
     let exact = expected.revision().checked_add(1) == Some(job.head().revision())
@@ -213,7 +225,17 @@ impl<'a> Execution<'a> {
     }
 
     pub(super) async fn load(&self) -> Result<(AcceptedJobV1, Draft)> {
-        load_draft(&self.executor.writer, self.operation, self.context.scope()).await
+        self.load_with_mode(PublicationMode::FailClosed).await
+    }
+
+    async fn load_with_mode(&self, mode: PublicationMode) -> Result<(AcceptedJobV1, Draft)> {
+        load_draft(
+            &self.executor.writer,
+            self.operation,
+            self.context.scope(),
+            mode,
+        )
+        .await
     }
 
     pub(super) fn generation_current(&self) -> Result<()> {
@@ -312,7 +334,9 @@ impl<'a> Execution<'a> {
             // Enqueue may already be durable when HTTP/ACK delivery fails.
             // Do not claim that it is absent, retry the start, or print the
             // underlying error (which may carry a provider's private text).
-            if let Some(step) = diagnostic.created_exchange_step() {
+            if let Some(reload) = diagnostic.created_reload() {
+                eprintln!("broker batch Created reload diagnostic delivery incomplete: {reload:?}");
+            } else if let Some(step) = diagnostic.created_exchange_step() {
                 eprintln!("broker batch diagnostic delivery incomplete at {step:?}");
             } else if let Some(binding) = diagnostic.full3_binding() {
                 eprintln!("broker batch Full3 binding diagnostic delivery incomplete: {binding:?}");
@@ -349,8 +373,10 @@ impl<'a> Execution<'a> {
             }
             _ => PublicationMode::FailClosed,
         };
-        let (job, draft) =
-            pending_mode.at_created(self.load().await, CreatedExchangeStage::Reload)?;
+        let (job, draft) = pending_mode.at_created(
+            self.load_with_mode(pending_mode).await,
+            CreatedExchangeStage::Reload(CreatedReloadSite::RpcLookup),
+        )?;
         let existing = draft
             .operations
             .iter()
@@ -610,7 +636,10 @@ impl<'a> Execution<'a> {
             self.generation_current()?;
         }
         let mode = PublicationMode::for_transition(&transition);
-        let (_, draft) = mode.at_created(self.load().await, CreatedExchangeStage::Reload)?;
+        let (_, draft) = mode.at_created(
+            self.load_with_mode(mode).await,
+            CreatedExchangeStage::Reload(CreatedReloadSite::MutationComposition),
+        )?;
         let worker = mode.at_created(draft.worker(), CreatedExchangeStage::PreparePending)?;
         let request = WorkerMutationV1 {
             version: 1,
