@@ -17,21 +17,25 @@ use sha2::{Digest, Sha256};
 pub(crate) enum InPlaceIdentityMarkerV1 {
     #[serde(rename = "human_rights_v2")]
     HumanRightsV2,
+    #[serde(rename = "session_prepare_v1")]
+    SessionPrepareV1,
 }
 
 impl InPlaceIdentityMarkerV1 {
     /// Installation order. A marker may require every earlier one.
-    pub(crate) const ORDERED: [Self; 1] = [Self::HumanRightsV2];
+    pub(crate) const ORDERED: [Self; 2] = [Self::HumanRightsV2, Self::SessionPrepareV1];
 
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::HumanRightsV2 => "human_rights_v2",
+            Self::SessionPrepareV1 => "session_prepare_v1",
         }
     }
 
     fn kind(self) -> &'static str {
         match self {
             Self::HumanRightsV2 => super::human_rights::GENESIS_KIND,
+            Self::SessionPrepareV1 => super::session_prepare::GENESIS_KIND,
         }
     }
 
@@ -39,6 +43,16 @@ impl InPlaceIdentityMarkerV1 {
     pub(crate) fn installed(self, db: &Connection) -> anyhow::Result<bool> {
         match self {
             Self::HumanRightsV2 => super::human_rights::installed(db),
+            Self::SessionPrepareV1 => super::session_prepare::installed(db),
+        }
+    }
+
+    /// Create the marker's own schema objects inside the held transaction,
+    /// before its genesis event is appended. The rights marker has none.
+    fn install_schema(self, tx: &Transaction<'_>) -> anyhow::Result<()> {
+        match self {
+            Self::HumanRightsV2 => Ok(()),
+            Self::SessionPrepareV1 => super::session_prepare::install_schema(tx),
         }
     }
 
@@ -52,8 +66,10 @@ impl InPlaceIdentityMarkerV1 {
     ) -> anyhow::Result<AuthorityReceiptV1> {
         let mut event = match self {
             Self::HumanRightsV2 => super::human_rights::marker_event(tx)?,
+            Self::SessionPrepareV1 => super::session_prepare::marker_event(tx)?,
         };
         anyhow::ensure!(event.kind == self.kind(), "identity marker kind differs");
+        self.install_schema(tx)?;
         let clock = workload::capture_control_time(tx)?;
         event.id = self.event_id(migration_id);
         event.timestamp = crate::broker_registry::format_time(clock.at());

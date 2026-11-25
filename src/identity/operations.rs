@@ -320,7 +320,11 @@ const fn served(operation: HumanOperationV1, owned_profile: bool) -> bool {
             | O::UsageRead
             | O::MembershipsRead
             | O::ConfigurationRead
-    ) || (owned_profile && matches!(operation, O::MembershipsManage | O::GrantsManage))
+    ) || (owned_profile
+        && matches!(
+            operation,
+            O::MembershipsManage | O::GrantsManage | O::SessionLaunchPrepare
+        ))
 }
 
 /// Operations whose reads or effects are recorded under a marker-fenced audit

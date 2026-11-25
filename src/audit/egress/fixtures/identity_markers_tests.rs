@@ -2,6 +2,9 @@
 //! private SQLite, the real maintenance guard, journal and verified backup.
 use super::*;
 use crate::audit::identity_markers::{IdentityMarkersFailure, InPlaceIdentityMarkerV1};
+use crate::control::session_control::{
+    ProvisionSessionLaunchTargetV1, SessionLaunchPrepareRequestV1, SessionLaunchTargetRecordV1,
+};
 use crate::control_fs::publication::FAIL_AFTER_RENAME;
 use crate::human_authority::migration::egress_journal::RetainedSourceIntent;
 use crate::human_authority::migration::operator::{
@@ -305,13 +308,31 @@ fn assert_installs_once_and_admits(format: u32) {
     let neighbor = store_source_state(&adopted.base.stores[1]);
     let (plan, guard) = adopted.in_place(0);
     let receipts = install_all(&adopted, &guard, "once");
-    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts.len(), 2);
     assert_eq!(receipts[0].marker, InPlaceIdentityMarkerV1::HumanRightsV2);
     assert_eq!(receipts[0].seq, before.head.0 + 1);
+    assert_eq!(
+        receipts[1].marker,
+        InPlaceIdentityMarkerV1::SessionPrepareV1
+    );
+    assert_eq!(receipts[1].seq, before.head.0 + 2);
     let after = maintenance_source_state(&adopted.base);
     assert_eq!(after.format, i64::from(format));
-    assert_eq!(after.head, (receipts[0].seq, receipts[0].hash.clone()));
-    assert_eq!(after.schema, before.schema);
+    assert_eq!(after.head, (receipts[1].seq, receipts[1].hash.clone()));
+    // The only schema additions are the preparation tables and their primary
+    // key autoindexes; the format, anchor and every prior object stay.
+    let mut expected_schema = before.schema.clone();
+    for (_, name, sql) in crate::audit::session_prepare::SCHEMA {
+        expected_schema.push(("table".into(), name.into(), name.into(), Some(sql.into())));
+        expected_schema.push((
+            "index".into(),
+            format!("sqlite_autoindex_{name}_1"),
+            name.into(),
+            None,
+        ));
+    }
+    expected_schema.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    assert_eq!(after.schema, expected_schema);
     assert_eq!(
         marker_rows(&adopted.base.stores[0]),
         vec![(
@@ -376,7 +397,7 @@ fn owned_store15_receives_the_marker_once_and_keeps_its_egress_genesis() {
 }
 
 #[test]
-fn lost_acknowledgements_resume_to_exactly_one_marker() {
+fn lost_acknowledgements_resume_to_exactly_the_committed_markers() {
     let adopted = adopted(14);
     let initial = maintenance_source_state(&adopted.base);
     let (plan, guard) = adopted.in_place(0);
@@ -421,7 +442,10 @@ fn lost_acknowledgements_resume_to_exactly_one_marker() {
             let intent = resume(writer)?;
             assert_eq!(
                 intent.identity_markers(),
-                [InPlaceIdentityMarkerV1::HumanRightsV2]
+                [
+                    InPlaceIdentityMarkerV1::HumanRightsV2,
+                    InPlaceIdentityMarkerV1::SessionPrepareV1
+                ]
             );
             FAIL_AFTER_RENAME.with(|fault| fault.set(true));
             let lost = intent.prepare_backup(writer).map(|_| ()).unwrap_err();
@@ -458,7 +482,7 @@ fn lost_acknowledgements_resume_to_exactly_one_marker() {
     // Committed, then the acknowledgement was lost twice: no confirmation
     // record yet, and the first confirmation publication is interrupted.
     let committed = maintenance_source_state(&adopted.base);
-    assert_eq!(committed.head.0, initial.head.0 + 1);
+    assert_eq!(committed.head.0, initial.head.0 + 2);
     let configuration = adopted.configuration_dir();
     let plan_file = configuration
         .persistent_read(
@@ -538,12 +562,18 @@ fn lost_acknowledgements_resume_to_exactly_one_marker() {
             "version": 1,
             "intent_digest": intent_file.digest(),
             "backup_digest": frame.digest(),
-            "receipts": [{"marker": "human_rights_v2", "seq": applied[0].seq, "hash": applied[0].hash}],
+            "receipts": [
+                {"marker": "human_rights_v2", "seq": applied[0].seq, "hash": applied[0].hash},
+                {"marker": "session_prepare_v1", "seq": applied[1].seq, "hash": applied[1].hash}
+            ],
         })
     );
     let intent: Value = serde_json::from_slice(intent_file.bytes()).unwrap();
     assert_eq!(intent["step"], "in_place_identity_markers");
-    assert_eq!(intent["markers"], json!(["human_rights_v2"]));
+    assert_eq!(
+        intent["markers"],
+        json!(["human_rights_v2", "session_prepare_v1"])
+    );
     assert_eq!(intent["migration_id"], json!(plan.migration_id));
     assert_eq!(
         intent["source_prefix"],
@@ -552,7 +582,7 @@ fn lost_acknowledgements_resume_to_exactly_one_marker() {
 }
 
 #[test]
-fn operator_resume_preserves_an_unpublished_backup_and_confirms_one_marker() {
+fn operator_resume_preserves_an_unpublished_backup_and_confirms_the_markers() {
     let adopted = adopted(14);
     let initial = maintenance_source_state(&adopted.base);
     let neighbor = store_source_state(&adopted.base.stores[1]);
@@ -657,8 +687,9 @@ fn operator_resume_preserves_an_unpublished_backup_and_confirms_one_marker() {
     assert_eq!(installed.backup_path.parent(), Some(backups.path()));
     assert_ne!(installed.backup_path, unpublished);
     assert!(installed.backup_path.is_file());
-    assert_eq!(installed.markers.len(), 1);
+    assert_eq!(installed.markers.len(), 2);
     assert_eq!(installed.markers[0].seq, initial.head.0 + 1);
+    assert_eq!(installed.markers[1].seq, initial.head.0 + 2);
     assert_eq!(marker_rows(&adopted.base.stores[0]).len(), 1);
     assert_eq!(std::fs::read(&unpublished).unwrap(), retained_copy);
     assert_eq!(
@@ -997,4 +1028,601 @@ fn in_place_tokens_and_egress_or_adoption_methods_never_cross() {
         .is_err()
     );
     assert_eq!(maintenance_source_state(&stale.base), before);
+}
+
+// ---------------------------------------------------------------------------
+// G04 `session_prepare_v1`: durable nominative launch preparation on the
+// adopted owned source. Real private SQLite, the real maintenance and the
+// real Store transactions; no grant, reservation or claim may appear.
+// ---------------------------------------------------------------------------
+
+const PREPARE_MARKER_KIND: &str = "control.session_prepare.genesis";
+const PREPARED_KIND: &str = "control.session_prepare.prepared";
+const FUTURE_DEADLINE: &str = "2126-01-01T00:00:00Z";
+const PAST_DEADLINE: &str = "2000-01-01T00:00:00Z";
+
+/// Trusted offline provisioning of one human membership carrying `capability`.
+/// Returns the principal and the committed membership for scope construction.
+fn provision_membership(
+    retained: &Retained,
+    capabilities: &[crate::identity::HumanCapabilityV1],
+) -> anyhow::Result<(
+    crate::identity::PrincipalRefV1,
+    crate::identity::MembershipV1,
+)> {
+    use crate::identity::*;
+    let principal = PrincipalRefV1::HumanLocal {
+        installation_id: retained.source.descriptor().installation_id.to_string(),
+        account_id: Uuid::new_v4().to_string(),
+    };
+    let membership = MembershipV1 {
+        version: 1,
+        membership_id: Uuid::new_v4().to_string(),
+        principal: principal.clone(),
+        tenant_id: "A".into(),
+        organization_scope: "org-a".into(),
+        revision: 1,
+        active: true,
+        capabilities: capabilities.iter().copied().collect(),
+    };
+    let mutation = |change| IdentityMutationV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        actor: PrincipalRefV1::LegacyControl {
+            credential_id: "synthetic-offline-control".into(),
+            role: LegacyControlRoleV1::Runner,
+        },
+        change,
+    };
+    let provision = LocalHumanProvisionV1 {
+        version: 1,
+        mutations: [
+            mutation(IdentityChangeV1::Account {
+                expected_revision: 0,
+                account: HumanAccountV1 {
+                    version: 1,
+                    principal: principal.clone(),
+                    display_name: "Synthetic launcher".into(),
+                    revision: 1,
+                    active: true,
+                },
+            }),
+            mutation(IdentityChangeV1::Credential {
+                expected_revision: 0,
+                binding: LocalCredentialV1 {
+                    version: 1,
+                    credential_id: Uuid::new_v4().to_string(),
+                    principal: principal.clone(),
+                    sha256_digest: "a".repeat(64),
+                    revision: 1,
+                    active: true,
+                    expires_at: None,
+                },
+            }),
+            mutation(IdentityChangeV1::Membership {
+                expected_revision: 0,
+                membership: membership.clone(),
+            }),
+        ],
+    };
+    let epoch = retained.owner.try_write_epoch()?;
+    retained
+        .store
+        .provision_local_human_scoped(&epoch, &retained.source, &provision)?;
+    Ok((principal, membership))
+}
+
+/// Deactivate the account, credential and membership of a prior provisioning.
+fn revoke_membership(
+    retained: &Retained,
+    principal: &crate::identity::PrincipalRefV1,
+    membership: &crate::identity::MembershipV1,
+) -> anyhow::Result<()> {
+    use crate::identity::*;
+    let _ = principal;
+    let mut revoked = membership.clone();
+    revoked.revision = membership.revision + 1;
+    revoked.active = false;
+    // Deactivating the membership closes the personal launch context; the
+    // individual mutation path advances the existing record (the triple
+    // provisioning entry point only admits fresh revision-1 records).
+    let mutation = IdentityMutationV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        actor: PrincipalRefV1::LegacyControl {
+            credential_id: "synthetic-offline-control".into(),
+            role: LegacyControlRoleV1::Runner,
+        },
+        change: IdentityChangeV1::Membership {
+            expected_revision: membership.revision,
+            membership: revoked,
+        },
+    };
+    let epoch = retained.owner.try_write_epoch()?;
+    retained
+        .store
+        .mutate_identity_scoped(&epoch, &retained.source, &mutation)?;
+    Ok(())
+}
+
+/// A personal scope bound to the source's current authorization revision.
+fn personal_scope(
+    retained: &Retained,
+    principal: &crate::identity::PrincipalRefV1,
+    membership: &crate::identity::MembershipV1,
+    mode: crate::identity::ContextModeV1,
+) -> crate::identity::AuthorizedScopeV1 {
+    let revision = {
+        let db = retained.store.db.lock().unwrap();
+        crate::audit::identity::authorization_revision(&db).unwrap()
+    };
+    crate::identity::authorize_context(principal, membership, mode, membership.revision)
+        .unwrap()
+        .at_authorization_revision(revision)
+}
+
+/// The discovery generation the gateway would pass, read under a read epoch.
+fn generation(retained: &Retained) -> crate::audit::human_modern::HumanDiscoveryGeneration {
+    let epoch = retained.owner.try_read_epoch().unwrap();
+    let access = HumanSourceAccess::read(&epoch, &retained.source).unwrap();
+    let mut db = retained.store.db.lock().unwrap();
+    let tx = retained
+        .store
+        .begin_checked_scoped(&mut db, &access, StoreOperationClass::Business)
+        .unwrap();
+    let generation = crate::audit::human_modern::discovery_generation(&tx).unwrap();
+    drop(tx);
+    generation
+}
+
+fn target_command(
+    operation_id: Uuid,
+    launch_target_id: Uuid,
+    revision: u64,
+    expected_revision: u64,
+    launcher: &crate::identity::PrincipalRefV1,
+) -> ProvisionSessionLaunchTargetV1 {
+    ProvisionSessionLaunchTargetV1 {
+        version: 1,
+        operation_id,
+        expected_revision,
+        target: SessionLaunchTargetRecordV1 {
+            version: 1,
+            launch_target_id,
+            revision,
+            tenant_id: "A".into(),
+            organization_scope: "org-a".into(),
+            active: true,
+            launchers: vec![launcher.clone()],
+        },
+    }
+}
+
+fn prepare_request(
+    operation_id: Uuid,
+    launch_target_id: Uuid,
+    expected_target_revision: u64,
+    expires_at: &str,
+) -> SessionLaunchPrepareRequestV1 {
+    SessionLaunchPrepareRequestV1 {
+        version: 1,
+        operation_id,
+        launch_target_id,
+        expected_target_revision,
+        expires_at: expires_at.into(),
+    }
+}
+
+fn prepare(
+    retained: &Retained,
+    scope: &crate::identity::AuthorizedScopeV1,
+    request: &SessionLaunchPrepareRequestV1,
+) -> anyhow::Result<crate::control::session_control::SessionPrepareReceiptV1> {
+    let expected = generation(retained);
+    let epoch = retained.owner.try_write_epoch()?;
+    retained
+        .store
+        .modern_session_launch_prepare(&epoch, &retained.source, scope, request, expected)
+        .map(|(receipt, _)| receipt)
+}
+
+fn identity_failure(error: &anyhow::Error) -> Option<crate::identity::IdentityFailureV1> {
+    error
+        .downcast_ref::<crate::identity::IdentityFailureV1>()
+        .copied()
+}
+
+fn table_count(store: &Store, table: &str) -> i64 {
+    let db = store.db.lock().unwrap();
+    db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+        .unwrap()
+}
+
+fn head(store: &Store) -> (i64, String) {
+    let db = store.db.lock().unwrap();
+    audit_head(&db).unwrap()
+}
+
+/// The complete Prepare contract on one adopted owned format: durable receipt,
+/// exact replay, divergence conflict, stale revision, revocation, unavailable
+/// audit, zero grant/reservation/claim, and fail-closed schema validation.
+fn assert_session_prepare_contract(format: u32) {
+    use crate::identity::{ContextModeV1, HumanCapabilityV1, IdentityFailureV1 as F};
+    let adopted = adopted(format);
+
+    // Before the capability is installed, Prepare is refused and nothing moves.
+    // The capability gate precedes identity revalidation, so an in-memory scope
+    // suffices: no membership is provisioned on the unextended source.
+    {
+        use crate::identity::{MembershipV1, PrincipalRefV1};
+        let retained = adopted.retained(0, &format!("pre-prepare-{format}.json"), format);
+        let principal = PrincipalRefV1::HumanLocal {
+            installation_id: retained.source.descriptor().installation_id.to_string(),
+            account_id: Uuid::new_v4().to_string(),
+        };
+        let membership = MembershipV1 {
+            version: 1,
+            membership_id: Uuid::new_v4().to_string(),
+            principal: principal.clone(),
+            tenant_id: "A".into(),
+            organization_scope: "org-a".into(),
+            revision: 1,
+            active: true,
+            capabilities: [HumanCapabilityV1::LaunchSession].into_iter().collect(),
+        };
+        let scope =
+            crate::identity::authorize_context(&principal, &membership, ContextModeV1::Personal, 1)
+                .unwrap();
+        let before = head(&retained.store);
+        let refusal = prepare(
+            &retained,
+            &scope,
+            &prepare_request(Uuid::new_v4(), Uuid::new_v4(), 1, FUTURE_DEADLINE),
+        )
+        .unwrap_err();
+        assert_eq!(identity_failure(&refusal), Some(F::MigrationRequired));
+        assert_eq!(head(&retained.store), before);
+        let present: bool = {
+            let db = retained.store.db.lock().unwrap();
+            db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='session_preparations')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert!(!present);
+    }
+
+    // The journaled maintenance installs both markers in one transaction.
+    let (plan, guard) = adopted.in_place(0);
+    let receipts = install_all(&adopted, &guard, &format!("prepare-{format}"));
+    assert_eq!(receipts.len(), 2);
+    assert_eq!(
+        receipts[1].marker,
+        InPlaceIdentityMarkerV1::SessionPrepareV1
+    );
+    drop(guard);
+    let retained = adopted.retained(0, &format!("installed-{format}.json"), format);
+    assert!(
+        retained
+            .store
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM events WHERE kind=?1)",
+                [PREPARE_MARKER_KIND],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap()
+    );
+
+    // ReadTenantMetadata is an administration capability: it lets the same
+    // membership form an Administration context, which Prepare must refuse.
+    let (principal, membership) = provision_membership(
+        &retained,
+        &[
+            HumanCapabilityV1::LaunchSession,
+            HumanCapabilityV1::ReadTenantMetadata,
+        ],
+    )
+    .unwrap();
+    let scope = personal_scope(&retained, &principal, &membership, ContextModeV1::Personal);
+    let target_id = Uuid::new_v4();
+
+    // Offline catalog provisioning: exact replay, divergent conflict, revision.
+    // Each provisioning takes its own fresh write epoch: the product bounds an
+    // epoch hold to MAX_EPOCH_TIME, so one epoch must not span several writes.
+    let provision = |command: &crate::control::session_control::ProvisionSessionLaunchTargetV1| {
+        let epoch = retained.owner.try_write_epoch().unwrap();
+        retained
+            .store
+            .provision_session_launch_target_scoped(&epoch, &retained.source, command)
+    };
+    let command = target_command(Uuid::new_v4(), target_id, 1, 0, &principal);
+    let first = provision(&command).unwrap();
+    assert!(!first.replayed);
+    let replayed = provision(&command).unwrap();
+    assert!(replayed.replayed);
+    assert_eq!(replayed.audit_seq, first.audit_seq);
+    assert_eq!(replayed.audit_hash, first.audit_hash);
+    let mut divergent = command.clone();
+    divergent.target.organization_scope = "org-other".into();
+    let conflict = provision(&divergent).unwrap_err();
+    assert_eq!(
+        identity_failure(&conflict),
+        Some(F::Conflict),
+        "{conflict:#}"
+    );
+    // Contract-valid (revision = expected + 1) but stale against the catalog.
+    let wrong_revision = target_command(Uuid::new_v4(), target_id, 4, 3, &principal);
+    let conflict = provision(&wrong_revision).unwrap_err();
+    assert_eq!(
+        identity_failure(&conflict),
+        Some(F::Conflict),
+        "{conflict:#}"
+    );
+
+    // Prepare retains one durable receipt and nothing else.
+    let operation = Uuid::new_v4();
+    let request = prepare_request(operation, target_id, 1, FUTURE_DEADLINE);
+    let resources_before = table_count(&retained.store, "identity_resources");
+    let workers_before = table_count(&retained.store, "workers");
+    let before = head(&retained.store);
+    let receipt = prepare(&retained, &scope, &request).unwrap();
+    assert!(!receipt.replayed);
+    assert_eq!(receipt.operation_id, operation);
+    assert_eq!(receipt.launch_target_id, target_id);
+    assert_eq!(receipt.target_revision, 1);
+    assert_eq!(receipt.input_hash, request.input_hash().unwrap());
+    assert_eq!(receipt.audit_seq, before.0 + 1);
+    assert_eq!(head(&retained.store).0, before.0 + 1);
+    assert_eq!(table_count(&retained.store, "session_preparations"), 1);
+    // Zero grant, reservation or claim: only the preparation row and its event.
+    assert_eq!(
+        table_count(&retained.store, "identity_resources"),
+        resources_before
+    );
+    assert_eq!(table_count(&retained.store, "workers"), workers_before);
+    {
+        let db = retained.store.db.lock().unwrap();
+        let (kind, payload): (String, String) = db
+            .query_row(
+                "SELECT kind,payload FROM events WHERE seq=?1",
+                [receipt.audit_seq],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(kind, PREPARED_KIND);
+        let event: Event = serde_json::from_str(&payload).unwrap();
+        assert_eq!(event.session_id, None);
+        assert_eq!(event.id, receipt.preparation_id);
+        let prepared: Vec<(i64,)> = db
+            .prepare("SELECT seq FROM events WHERE kind=?1")
+            .unwrap()
+            .query_map([PREPARED_KIND], |r| Ok((r.get(0)?,)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(prepared.len(), 1);
+    }
+
+    // A lost response replays to the identical receipt without a second event.
+    let again = prepare(&retained, &scope, &request).unwrap();
+    assert!(again.replayed);
+    assert_eq!(again.audit_seq, receipt.audit_seq);
+    assert_eq!(again.audit_hash, receipt.audit_hash);
+    assert_eq!(again.preparation_id, receipt.preparation_id);
+    assert_eq!(head(&retained.store).0, before.0 + 1);
+    assert_eq!(table_count(&retained.store, "session_preparations"), 1);
+
+    // A divergent intent under the same operation is a conflict.
+    let divergent = prepare_request(operation, target_id, 1, "2127-01-01T00:00:00Z");
+    let conflict = prepare(&retained, &scope, &divergent).unwrap_err();
+    assert_eq!(
+        identity_failure(&conflict),
+        Some(F::Conflict),
+        "{conflict:#}"
+    );
+    assert_eq!(head(&retained.store).0, before.0 + 1);
+
+    // A stale expected revision is a conflict, never a retained preparation.
+    let stale = prepare_request(Uuid::new_v4(), target_id, 2, FUTURE_DEADLINE);
+    let conflict = prepare(&retained, &scope, &stale).unwrap_err();
+    assert_eq!(
+        identity_failure(&conflict),
+        Some(F::Conflict),
+        "{conflict:#}"
+    );
+    assert_eq!(head(&retained.store).0, before.0 + 1);
+    assert_eq!(table_count(&retained.store, "session_preparations"), 1);
+
+    // The catalog advances; the old expectation becomes stale, the new admits.
+    let epoch = retained.owner.try_write_epoch().unwrap();
+    let advance = target_command(Uuid::new_v4(), target_id, 2, 1, &principal);
+    retained
+        .store
+        .provision_session_launch_target_scoped(&epoch, &retained.source, &advance)
+        .unwrap();
+    drop(epoch);
+    let stale = prepare_request(Uuid::new_v4(), target_id, 1, FUTURE_DEADLINE);
+    assert_eq!(
+        identity_failure(&prepare(&retained, &scope, &stale).unwrap_err()),
+        Some(F::Conflict)
+    );
+    let current = prepare_request(Uuid::new_v4(), target_id, 2, FUTURE_DEADLINE);
+    assert!(prepare(&retained, &scope, &current).is_ok());
+
+    // Unknown target, expired deadline and wrong context are refused.
+    let unknown = prepare_request(Uuid::new_v4(), Uuid::new_v4(), 1, FUTURE_DEADLINE);
+    assert_eq!(
+        identity_failure(&prepare(&retained, &scope, &unknown).unwrap_err()),
+        Some(F::NotFound)
+    );
+    let expired = prepare_request(Uuid::new_v4(), target_id, 2, PAST_DEADLINE);
+    assert_eq!(
+        identity_failure(&prepare(&retained, &scope, &expired).unwrap_err()),
+        Some(F::InvalidRequest)
+    );
+    let admin = personal_scope(
+        &retained,
+        &principal,
+        &membership,
+        ContextModeV1::Administration,
+    );
+    let refused = prepare_request(Uuid::new_v4(), target_id, 2, FUTURE_DEADLINE);
+    assert_eq!(
+        identity_failure(&prepare(&retained, &admin, &refused).unwrap_err()),
+        Some(F::PermissionDenied)
+    );
+
+    // The retained receipt reads back for a still-authorized caller.
+    let read = |retained: &Retained, operation: Uuid| {
+        let epoch = retained.owner.try_read_epoch().unwrap();
+        let access = HumanSourceAccess::read(&epoch, &retained.source).unwrap();
+        retained.store.modern_session_preparation(
+            &access,
+            &personal_scope(retained, &principal, &membership, ContextModeV1::Personal),
+            &operation.to_string(),
+        )
+    };
+    let read_receipt = read(&retained, operation).unwrap();
+    assert!(read_receipt.replayed);
+    assert_eq!(read_receipt.audit_seq, receipt.audit_seq);
+    assert_eq!(read_receipt.audit_hash, receipt.audit_hash);
+    assert_eq!(read_receipt.input_hash, receipt.input_hash);
+
+    // An unavailable mandatory audit blocks the effect: nothing is retained.
+    let quota_before: i64 = {
+        let db = retained.store.db.lock().unwrap();
+        db.query_row("SELECT bytes FROM quota WHERE id=1", [], |r| r.get(0))
+            .unwrap()
+    };
+    let blocked_operation = Uuid::new_v4();
+    let blocked = prepare_request(blocked_operation, target_id, 2, FUTURE_DEADLINE);
+    let before = head(&retained.store);
+    // The storage fault refuses the checked transaction itself; drive the
+    // Store entry point with the last good generation to observe the refusal.
+    let expected_before = generation(&retained);
+    {
+        let db = retained.store.db.lock().unwrap();
+        db.execute("UPDATE quota SET bytes=?1", [i64::MAX / 2])
+            .unwrap();
+    }
+    let epoch = retained.owner.try_write_epoch().unwrap();
+    assert!(
+        retained
+            .store
+            .modern_session_launch_prepare(
+                &epoch,
+                &retained.source,
+                &scope,
+                &blocked,
+                expected_before
+            )
+            .is_err()
+    );
+    drop(epoch);
+    assert_eq!(head(&retained.store), before);
+    assert_eq!(table_count(&retained.store, "session_preparations"), 2);
+    {
+        let db = retained.store.db.lock().unwrap();
+        db.execute("UPDATE quota SET bytes=?1", [quota_before])
+            .unwrap();
+    }
+    // The integrity fault latched the live store; clearing the backing alone
+    // does not unlatch it. Recovery is a reopen that revalidates the source.
+    drop(retained);
+    let retained = adopted.retained(0, &format!("recovered-{format}.json"), format);
+    assert!(prepare(&retained, &scope, &blocked).is_ok());
+
+    // A reopened source replays the preparation and serves the same receipt.
+    drop(retained);
+    let reopened = adopted.retained(0, &format!("reopened-{format}.json"), format);
+    let reread = read(&reopened, operation).unwrap();
+    assert_eq!(reread.audit_seq, receipt.audit_seq);
+    assert_eq!(reread.audit_hash, receipt.audit_hash);
+    let replayed = prepare(&reopened, &scope, &request).unwrap();
+    assert!(replayed.replayed);
+    assert_eq!(replayed.audit_hash, receipt.audit_hash);
+
+    // Revocation closes both the replay and the read.
+    revoke_membership(&reopened, &principal, &membership).unwrap();
+    let before = head(&reopened.store);
+    let refusal = prepare(&reopened, &scope, &request).unwrap_err();
+    assert!(
+        matches!(
+            identity_failure(&refusal),
+            Some(F::ContextRevoked) | Some(F::IdentityRevoked)
+        ),
+        "{refusal:#}"
+    );
+    assert!(read(&reopened, operation).is_err());
+    assert_eq!(head(&reopened.store), before);
+    drop(reopened);
+
+    // Fail-closed schema: tables without their marker, or a marker without its
+    // tables, never open healthy — the protection an older reader relies on.
+    let copies = adopted
+        .base
+        .root
+        .persistent_child(&format!("prepare-copies-{format}"), true)
+        .unwrap()
+        .unwrap();
+    let tables_without_marker = copies.path().join("tables-without-marker.sqlite");
+    let (_journal, backups) = adopted.directories(&format!("prepare-{format}"));
+    std::fs::copy(backups.path().join("source.sqlite"), &tables_without_marker).unwrap();
+    {
+        let db = rusqlite::Connection::open(&tables_without_marker).unwrap();
+        for (_, _, sql) in crate::audit::session_prepare::SCHEMA {
+            db.execute_batch(sql).unwrap();
+        }
+    }
+    let refused =
+        Store::open_existing_for_tenant(&tables_without_marker, "A", Redactor::new(vec![]), 10_000);
+    match refused {
+        Ok(store) => assert!(!store.healthy()),
+        Err(_) => {}
+    }
+    let marker_without_tables = copies.path().join("marker-without-tables.sqlite");
+    // Copy the installed source that carries both the validated marker and its
+    // tables (the plan binding path is the pre-install target, without them).
+    let installed = adopted.retained(0, &format!("failclosed-{format}.json"), format);
+    let installed_path: String = {
+        let db = installed.store.db.lock().unwrap();
+        // Flush the WAL into the main file so the copy carries the tables and
+        // the marker chain (a bare file copy would miss uncheckpointed pages).
+        db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        db.query_row("PRAGMA database_list", [], |r| r.get(2))
+            .unwrap()
+    };
+    std::fs::copy(&installed_path, &marker_without_tables).unwrap();
+    drop(installed);
+    {
+        let db = rusqlite::Connection::open(&marker_without_tables).unwrap();
+        db.execute_batch(
+            "DROP TABLE session_preparations; DROP TABLE session_launch_target_operations; DROP TABLE session_launch_targets;",
+        )
+        .unwrap();
+    }
+    let refused =
+        Store::open_existing_for_tenant(&marker_without_tables, "A", Redactor::new(vec![]), 10_000);
+    match refused {
+        Ok(store) => assert!(!store.healthy()),
+        Err(_) => {}
+    }
+    // The plan that installed the capability stays readable and bound.
+    assert_eq!(plan.target.sources[0].required_format, format);
+}
+
+#[test]
+fn owned_store14_session_prepare_is_durable_idempotent_and_fenced() {
+    assert_session_prepare_contract(14);
+}
+
+#[test]
+fn owned_store15_session_prepare_is_durable_idempotent_and_fenced() {
+    assert_session_prepare_contract(15);
 }

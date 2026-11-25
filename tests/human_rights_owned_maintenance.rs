@@ -152,8 +152,13 @@ fn install_appends_the_marker_once_refuses_again_and_resume_is_idempotent() {
     assert_eq!(installed["store_format"], 14);
     assert_eq!(installed["readiness"], "not_checked");
     let markers = installed["markers"].as_array().unwrap();
-    assert_eq!(markers.len(), 1);
+    assert_eq!(markers.len(), 2);
     assert_eq!(markers[0]["marker"], "human_rights_v2");
+    assert_eq!(markers[1]["marker"], "session_prepare_v1");
+    assert_eq!(
+        markers[1]["seq"].as_i64().unwrap(),
+        markers[0]["seq"].as_i64().unwrap() + 1
+    );
     let after = state(&a);
     assert_eq!(after.format, 14);
     assert_eq!(after.markers.len(), 1);

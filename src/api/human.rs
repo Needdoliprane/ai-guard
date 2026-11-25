@@ -190,6 +190,38 @@ pub(super) fn grant_change_failure(error: anyhow::Error) -> (StatusCode, Json<Va
     )
 }
 
+/// Failures of a nominative launch preparation. A conflict (a divergent intent
+/// reused under one operation, or a stale target revision) asks for a re-read;
+/// a missing capability asks for the explicit migration. Everything else maps
+/// like a read. Prepare confers no grant, reservation or start claim.
+pub(super) fn session_prepare_failure(error: anyhow::Error) -> (StatusCode, Json<Value>) {
+    match error.downcast_ref::<IdentityFailureV1>() {
+        Some(IdentityFailureV1::Conflict) => failure(
+            StatusCode::CONFLICT,
+            "conflict",
+            "The preparation intent differs from the one already retained under this operation, or the target revision changed. Re-read it before deciding again.",
+            "reread",
+        ),
+        Some(IdentityFailureV1::PermissionDenied) => failure(
+            StatusCode::FORBIDDEN,
+            "permission_denied",
+            "This context does not permit preparing this launch.",
+            "review_permissions",
+        ),
+        Some(IdentityFailureV1::InvalidRequest) => invalid_session_prepare_request(),
+        _ => store_failure(error),
+    }
+}
+
+pub(super) fn invalid_session_prepare_request() -> (StatusCode, Json<Value>) {
+    failure(
+        StatusCode::BAD_REQUEST,
+        "invalid_request",
+        "Check the launch preparation fields, then try again.",
+        "retry",
+    )
+}
+
 fn context_failure(code: &str) -> (StatusCode, Json<Value>) {
     failure(
         StatusCode::FORBIDDEN,
@@ -974,9 +1006,105 @@ fn finish_page<T: Serialize>(
     Ok(Json(page))
 }
 
+/// Upper bound of one retained launch-preparation intent. It names an opaque
+/// target, its revision, an operation id and a deadline; it carries no argv,
+/// host path, credential or free provider choice.
+const SESSION_PREPARE_BODY_MAX_BYTES: usize = 4_096;
+
+async fn session_prepare_body(
+    request: Request,
+) -> ApiResult<crate::control::session_control::SessionLaunchPrepareRequestV1> {
+    let (_, request) =
+        delegated_change_body::<crate::control::session_control::SessionLaunchPrepareRequestV1>(
+            request,
+            SESSION_PREPARE_BODY_MAX_BYTES,
+            invalid_session_prepare_request,
+        )
+        .await?;
+    request
+        .validate()
+        .map_err(|_| invalid_session_prepare_request())?;
+    Ok(request)
+}
+
+/// `POST /api/v1/human/owned/sessions/prepare`: retain one nominative launch
+/// preparation on the caller's own owned source. The personal launch context is
+/// revalidated inside the transaction; the mandatory audit receipt and the
+/// preparation row commit together before the receipt is returned. Prepare
+/// creates no grant, reservation or start claim. An exact replay returns the
+/// original receipt to a still-authorized caller; a divergent intent under the
+/// same operation is a conflict; revocation closes it.
+pub(super) async fn session_launch_prepare(
+    State(state): State<GatewayState>,
+    request: Request,
+) -> ApiResult<Json<crate::control::session_control::SessionPrepareReceiptV1>> {
+    if state.owned_human.is_none() {
+        return Err(super::human_sources::unavailable());
+    }
+    let (mut parts, body) = request.into_parts();
+    let proof = VerifiedHuman::from_request_parts(&mut parts, &state).await?;
+    let headers = parts.headers.clone();
+    let prepare = session_prepare_body(Request::from_parts(parts, body)).await?;
+    let selected = headers.clone();
+    run_human(&state, &proof, Some(&headers), move |state, proof| {
+        let (_, tenant, scope) = selected_context(&state, &proof, &selected)?;
+        let store = tenant.store.sqlite_api()?;
+        let owned = state
+            .owned_human
+            .as_ref()
+            .ok_or_else(super::human_sources::unavailable)?;
+        let HumanProofSource::Local(source) = proof.source else {
+            return Err(super::human_sources::unavailable());
+        };
+        let receipt = owned.session_launch_prepare(source, store, &scope, &prepare)?;
+        Ok(Json(receipt))
+    })
+    .await
+}
+
+/// `GET /api/v1/human/owned/sessions/preparations/{operation_id}`: read one
+/// retained preparation receipt for a still-authorized caller. Revocation of
+/// the identity, membership or context closes the read.
+pub(super) async fn session_preparation(
+    proof: VerifiedHuman,
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    path: Result<Path<String>, axum::extract::rejection::PathRejection>,
+) -> ApiResult<Json<crate::control::session_control::SessionPrepareReceiptV1>> {
+    if state.owned_human.is_none() {
+        return Err(super::human_sources::unavailable());
+    }
+    let Path(operation_id) = path.map_err(|_| invalid_session_prepare_request())?;
+    let selected = headers.clone();
+    run_human(&state, &proof, Some(&headers), move |state, proof| {
+        let (_, tenant, scope) = selected_context(&state, &proof, &selected)?;
+        let store = tenant.store.sqlite_api()?;
+        let owned = state
+            .owned_human
+            .as_ref()
+            .ok_or_else(super::human_sources::unavailable)?;
+        let HumanProofSource::Local(source) = proof.source else {
+            return Err(super::human_sources::unavailable());
+        };
+        let receipt = owned.session_preparation(source, store, &scope, &operation_id)?;
+        Ok(Json(receipt))
+    })
+    .await
+}
+
 pub(super) fn routes() -> Router<GatewayState> {
     Router::new()
         .route("/human/identity", get(identity))
+        .route(
+            "/human/owned/sessions/prepare",
+            post(session_launch_prepare).layer(axum::extract::DefaultBodyLimit::max(
+                SESSION_PREPARE_BODY_MAX_BYTES,
+            )),
+        )
+        .route(
+            "/human/owned/sessions/preparations/{operation_id}",
+            get(session_preparation),
+        )
         .route("/human/brokers", get(brokers::brokers))
         .route("/human/owned/brokers", get(brokers_owned::brokers))
         .route("/human/workers", get(workers::workers))

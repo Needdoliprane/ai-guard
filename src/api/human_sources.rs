@@ -359,9 +359,43 @@ impl OwnedHumanGateway {
         )
     }
 
+    /// Retain one nominative launch preparation on the proof's own retained
+    /// source under its write epoch. Prepare creates no grant, reservation or
+    /// claim and changes no authorization revision, so the discovery generation
+    /// is unchanged. An exact replay returns the original receipt; a divergent
+    /// intent under the same operation is a conflict; revocation closes it.
+    pub(super) fn session_launch_prepare(
+        &self,
+        index: usize,
+        store: &Store,
+        scope: &AuthorizedScopeV1,
+        request: &crate::control::session_control::SessionLaunchPrepareRequestV1,
+    ) -> ApiResult<crate::control::session_control::SessionPrepareReceiptV1> {
+        self.change_delegated_identity(
+            index,
+            human::session_prepare_failure,
+            |epoch, source, expected| {
+                store.modern_session_launch_prepare(epoch, source, scope, request, expected)
+            },
+        )
+    }
+
+    /// Read one retained preparation receipt for a still-authorized caller.
+    pub(super) fn session_preparation(
+        &self,
+        index: usize,
+        store: &Store,
+        scope: &AuthorizedScopeV1,
+        operation_id: &str,
+    ) -> ApiResult<crate::control::session_control::SessionPrepareReceiptV1> {
+        self.read(index, store, |access| {
+            store.modern_session_preparation(access, scope, operation_id)
+        })
+    }
+
     /// Publish a committed delegated identity change on the proof's own retained
     /// source before releasing its write epoch. Replays keep the current generation.
-    fn change_delegated_identity(
+    fn change_delegated_identity<R>(
         &self,
         index: usize,
         map_failure: fn(anyhow::Error) -> (StatusCode, Json<Value>),
@@ -369,9 +403,8 @@ impl OwnedHumanGateway {
             &HumanSourcesWriteEpoch,
             &OwnedSourceToken,
             HumanDiscoveryGeneration,
-        )
-            -> anyhow::Result<(IdentityReceiptV1, Option<HumanDiscoveryGeneration>)>,
-    ) -> ApiResult<IdentityReceiptV1> {
+        ) -> anyhow::Result<(R, Option<HumanDiscoveryGeneration>)>,
+    ) -> ApiResult<R> {
         self.check()?;
         let source = self.sources.get(index).ok_or_else(unavailable)?;
         let generation = self

@@ -206,6 +206,7 @@ mod review_authority_migration;
 mod review_binding;
 mod review_format14;
 mod review_startup;
+pub(crate) mod session_prepare;
 pub(crate) use kubernetes_admission::{
     ConfirmedKubernetesCreateResult, FreshKubernetesCreateClaimCommit,
     KubernetesCreateAuthorization, PreparedRecovery,
@@ -470,6 +471,7 @@ const WORKER_SNAPSHOT_PREDICATE: &str = "action IN ('admit','prepare','create_is
 fn schema_objects(
     version: i64,
     retention: bool,
+    prepare: bool,
 ) -> impl Iterator<Item = &'static (&'static str, &'static str, &'static str)> {
     // Format14 inherits the complete, closed13 profile. Its extensions are
     // explicit; no future version can inherit it by a range comparison.
@@ -483,6 +485,8 @@ fn schema_objects(
         .chain(egress::SCHEMA.iter().filter(move |_| version == 15))
         // The retention ledger exists exactly when its chain marker does.
         .chain(retention::ledger::SCHEMA.iter().filter(move |_| retention))
+        // The preparation tables exist exactly when their chain marker does.
+        .chain(session_prepare::SCHEMA.iter().filter(move |_| prepare))
 }
 
 fn inherited_schema_objects(
@@ -589,6 +593,14 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
         !retention || retention::ledger::format_admits(version),
         "audit retention requires schema13, 14 or 15"
     );
+    let prepare = objects
+        .iter()
+        .any(|(kind, name, _, _)| kind == "table" && name == "events")
+        && session_prepare::capability_present(db)?;
+    anyhow::ensure!(
+        !prepare || session_prepare::format_admits(version),
+        "session prepare capability requires Store14 or Store15"
+    );
     let inherited = if matches!(version, 14 | 15) {
         13
     } else {
@@ -657,6 +669,11 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
                 .iter()
                 .filter(move |_| retention),
         )
+        .chain(
+            session_prepare::AUTO_INDEX_COUNTS
+                .iter()
+                .filter(move |_| prepare),
+        )
         .chain(effect_indexes.iter())
         .filter(|(table, _)| {
             if *table == "events" {
@@ -686,7 +703,7 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
             );
             continue;
         }
-        let expected = schema_objects(version, retention)
+        let expected = schema_objects(version, retention, prepare)
             .chain(effect_capability.iter())
             .find(|(expected_kind, expected_name, _)| {
                 kind == expected_kind && name == expected_name
@@ -739,7 +756,9 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
             "unexpected audit schema object"
         );
     }
-    for &(kind, name, _) in schema_objects(version, retention).chain(effect_capability.iter()) {
+    for &(kind, name, _) in
+        schema_objects(version, retention, prepare).chain(effect_capability.iter())
+    {
         if allow_legacy && version == 0 && name == "tenant_binding" {
             continue;
         }
@@ -767,6 +786,7 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
     human_brokers::validate_capability(db, version)?;
     human_workers::validate_capability(db, version)?;
     human_rights::validate_capability(db, version)?;
+    session_prepare::validate_capability(db, version)?;
     // Old profiles, including audit-only1, must never contain a future
     // reserved egress family. Exact15's complete replay runs under control.
     if version != 15 {
