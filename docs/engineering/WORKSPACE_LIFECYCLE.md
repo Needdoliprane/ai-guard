@@ -26,3 +26,42 @@ Le responsable revalide les références et les consommateurs juste avant chaque
 2. Supprimer la branche de travail intégrée avec `git branch -d <branche>` une fois ses worktrees fermés. Si un squash ou un rebase empêche la suppression ordinaire, conserver la preuve d'intégration et vérifier le bundle, l'absence de checkout et l'autorisation applicable avant `git branch -D <branche>` sur cette seule référence. Pour supprimer une branche distante, obtenir l'autorisation du mainteneur pour le dépôt et la référence exacts. Conditionner la suppression sur le serveur au SHA vérifié avec `--force-with-lease=refs/heads/<branche>:<sha>` et vérifier la disparition de cette référence. Préserver une référence qui a avancé, les branches pérennes et les tags de release.
 3. Purger les caches historiques régénérables devenus inutiles. Identifier le chemin ou l'identifiant exact, sa provenance, ses consommateurs et la commande de régénération. Utiliser la commande ciblée de l'outil sur la ressource vérifiée. Préserver les caches partagés actifs, les preuves, les volumes et les données persistantes. Mesurer le gain disque sur le même volume avant et après la purge et indiquer le gain observé séparément de la taille logique des fichiers.
 4. Revérifier les références et le chemin de chaque ressource retirée. Enregistrer la date, les références d'intégration et d'archive, les suppressions confirmées, les éléments conservés et l'espace réellement récupéré. Le lot atteint l'état clôturé après retrait de ses ressources de travail intégrées. Un retrait restant conserve son état, sa condition et son propriétaire dans le registre.
+
+## Garantie de non-perte avant toute fermeture (consigne mainteneur du 25 novembre 2026)
+
+« Avant de clôturer / supprimer une branche, tu dois être en mesure de garantir
+qu'on ne perd aucune information. » Cette consigne prime sur toute procédure de
+nettoyage. Une fermeture sans garantie complète reste ouverte.
+
+Avant toute suppression de branche, vérifier et consigner :
+
+1. **Preuve d'intégration** : ascendance du commit exact vers la destination,
+   ou équivalence de patch (`git cherry` sans commit unique), ou rapprochement
+   blob à blob documenté. Un squash/rebase exige le rapprochement des changements
+   attendus et l'explication des différences.
+2. **Conservation des commits exacts** : les commits restent accessibles par une
+   référence pérenne conservée (destination, tag, référence distante) OU un
+   bundle Git vérifié créé **avant** la suppression. Pour des commits sans
+   référence nommée, créer des références d'archive (`refs/archive/…`) puis
+   bundler ces références ; un bundle de SHA nus est refusé par Git. Conserver
+   l'empreinte SHA-256 du bundle et le nombre de têtes vérifiées.
+3. **Absence de consommateur** : aucun checkout actif, processus, gardien ou
+   configuration n'utilise la référence ou son binaire.
+
+Avant toute suppression de worktree, vérifier et consigner en plus :
+
+4. **Fichiers suivis et non suivis** : propres, ou préservés avant suppression
+   (commit de snapshot, bundle ou copie vérifiée hors du worktree).
+5. **Fichiers ignorés inventoriés pièce par pièce** (`find`, pas seulement le
+   statut Git agrégé) : preuves, reçus, configurations privées, credentials et
+   certificats archivés hors du worktree avec empreintes ; seuls des caches
+   régénérables identifiés sont abandonnés. Examiner explicitement les preuves
+   embarquées dans les caches (ex. `target/qa-evidence`) et les répertoires
+   `.claude/` locaux avant tout retrait.
+6. **Processus actifs** : aucun processus n'utilise le chemin, le cache de
+   compilation ou les binaires du worktree.
+
+Chaque fermeture consigne dans le registre : date, références source et
+d'intégration, empreintes des bundles et archives, éléments conservés, espace
+récupéré mesuré. Une incertitude résiduelle se déclare explicitement et garde la
+clôture ouverte ; elle ne se présume pas résolue.
