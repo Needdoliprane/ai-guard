@@ -156,6 +156,12 @@ impl EnforcerClient {
         // The exact target is retained before capability/factory transport.
         // Failure or a dropped waiter cannot erase this unknown admission.
         self.legacy_capabilities().await?;
+        // A fresh reservation can already have lost its local generation
+        // while capabilities was in flight. Keep the post-ACK check for
+        // invalidation after this sample.
+        if !replay_only && retained.generation.current() != expected {
+            return Err(EnforcerError::NotReady);
+        }
         let reply = self
             .0
             .request(
