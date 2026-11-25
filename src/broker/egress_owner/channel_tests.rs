@@ -201,7 +201,7 @@ impl EgressControl for Gateway {
                 binding,
                 disposition,
                 receipt: EgressReceiptV1 {
-                    audit_seq: 6,
+                    audit_seq: FIXTURE_OPENING_AUDIT_SEQ,
                     audit_hash: "a".repeat(64),
                 },
             })
@@ -489,10 +489,12 @@ fn gateway(allow: bool) -> Arc<Gateway> {
     Arc::new(gateway)
 }
 
+const FIXTURE_OPENING_AUDIT_SEQ: i64 = 6;
+
 fn fixture_destination(port: u16) -> OpenDestination {
     OpenDestination {
         opening_id: IdV1::random(),
-        opening_audit_seq: 6,
+        opening_audit_seq: FIXTURE_OPENING_AUDIT_SEQ,
         decision: EgressDecideRequestV1 {
             version: 1,
             decision_id: IdV1::random(),
@@ -1420,19 +1422,27 @@ fn fixture_owner<W>(
     gateway: Arc<Gateway>,
     upstream_port: u16,
     times: ChannelTimes,
-) -> (Owner<W>, mpsc::Receiver<Event>, ChannelStop) {
+) -> (
+    Owner<W>,
+    mpsc::Receiver<Event>,
+    ChannelStop,
+    watch::Sender<bool>,
+) {
     let mut ledger = EgressChannelState::new(0);
     ledger
         .accept_capability(Some(&EgressCapabilityV1::default()), 0)
         .unwrap();
     let (events, incoming) = mpsc::channel(8);
     let (stop, stopping) = ChannelStop::new();
+    let (authorization, native_stop) = fixture_connect_authorization();
     let owner = Owner {
         output: Some(output),
         stop: stopping,
         stopped_during_write: false,
         binding: fixture_binding(),
         opening_id: IdV1::random(),
+        opening_audit_seq: FIXTURE_OPENING_AUDIT_SEQ,
+        authorization,
         control: gateway,
         resolver: fixture_resolver(upstream_port, Arc::new(NoLookup(AtomicUsize::new(0)))),
         times,
@@ -1447,7 +1457,7 @@ fn fixture_owner<W>(
         retirement_unconfirmed: false,
         renewing: false,
     };
-    (owner, incoming, stop)
+    (owner, incoming, stop, native_stop)
 }
 
 #[tokio::test]
@@ -1456,7 +1466,7 @@ async fn egress_broker_unconfirmed_prior_observation_leaves_no_audit_terminal() 
         prior_observation_reply: Some(ObservationReply::LostAfterCommit),
         ..Gateway::default()
     });
-    let (mut owner, _incoming, _stop) = fixture_owner(
+    let (mut owner, _incoming, _stop, _native_stop) = fixture_owner(
         tokio::io::sink(),
         control.clone(),
         443,
@@ -1497,7 +1507,7 @@ async fn egress_broker_audit_terminal_follows_the_saturated_observations() {
         prior_observation_reply: Some(ObservationReply::Wait(gate.clone())),
         ..Gateway::default()
     });
-    let (mut owner, _incoming, _stop) = fixture_owner(
+    let (mut owner, _incoming, _stop, _native_stop) = fixture_owner(
         tokio::io::sink(),
         control.clone(),
         443,
@@ -1557,7 +1567,7 @@ async fn egress_broker_missing_terminal_receipt_keeps_audit_unknown() {
         terminal_observation_reply: Some(ObservationReply::LostAfterCommit),
         ..Gateway::default()
     });
-    let (mut owner, _incoming, _stop) = fixture_owner(
+    let (mut owner, _incoming, _stop, _native_stop) = fixture_owner(
         tokio::io::sink(),
         control.clone(),
         443,
@@ -1598,7 +1608,7 @@ async fn egress_broker_audit_cut_bounds_prior_and_terminal_acknowledgments() {
             terminal_observation_reply: (!prior).then(|| ObservationReply::Wait(gate.clone())),
             ..Gateway::default()
         });
-        let (mut owner, _incoming, _stop) = fixture_owner(
+        let (mut owner, _incoming, _stop, _native_stop) = fixture_owner(
             tokio::io::sink(),
             control.clone(),
             443,
@@ -1660,7 +1670,7 @@ async fn egress_broker_audit_cut_bounds_prior_and_terminal_acknowledgments() {
 
 #[tokio::test]
 async fn egress_broker_missing_detached_opening_report_keeps_quiescence_unknown() {
-    let (mut owner, _incoming, _stop) = fixture_owner(
+    let (mut owner, _incoming, _stop, _native_stop) = fixture_owner(
         tokio::io::sink(),
         gateway(true),
         443,
@@ -1710,7 +1720,7 @@ async fn egress_broker_missing_detached_opening_report_keeps_quiescence_unknown(
 
 #[tokio::test]
 async fn egress_broker_ready_retirement_receipts_after_deadline_cannot_confirm_quiescence() {
-    let (mut owner, _incoming, _stop) = fixture_owner(
+    let (mut owner, _incoming, _stop, _native_stop) = fixture_owner(
         tokio::io::sink(),
         gateway(true),
         443,
@@ -1778,7 +1788,7 @@ async fn egress_broker_ready_retirement_receipts_after_deadline_cannot_confirm_q
 #[tokio::test]
 async fn egress_broker_eof_without_socket_confirmation_keeps_quiescence_unknown() {
     let control = gateway(true);
-    let (mut owner, _incoming, _stop) = fixture_owner(
+    let (mut owner, _incoming, _stop, _native_stop) = fixture_owner(
         tokio::io::sink(),
         control.clone(),
         443,
@@ -2090,7 +2100,7 @@ async fn egress_broker_flow_retirement_cancels_pending_resolution() {
     let upstream = upstream().await;
     let pending = Arc::new(PendingOperation::default());
     let control = gateway(true);
-    let (mut owner, _incoming, _stop) = fixture_owner(
+    let (mut owner, _incoming, _stop, _native_stop) = fixture_owner(
         tokio::io::sink(),
         control.clone(),
         upstream.port,
@@ -2140,7 +2150,7 @@ async fn egress_broker_retirement_closes_observed_socket_before_handoff() {
     let port = listener.local_addr().unwrap().port();
     let control = gateway(true);
     let (output, mut helper) = tokio::io::duplex(4096);
-    let (mut owner, mut incoming, _stop) =
+    let (mut owner, mut incoming, _stop, _native_stop) =
         fixture_owner(output, control.clone(), port, ChannelTimes::default());
     let deadline = Instant::now() + Duration::from_secs(2);
     owner
@@ -2243,7 +2253,7 @@ async fn egress_broker_connect_audit_requires_known_outcome_through_eof() {
         Completion::Connected,
     ] {
         let control = gateway(true);
-        let (mut owner, _incoming, _stop) = fixture_owner(
+        let (mut owner, _incoming, _stop, _native_stop) = fixture_owner(
             tokio::io::sink(),
             control.clone(),
             443,
@@ -2347,7 +2357,7 @@ async fn egress_broker_receipt_expiry_closes_socket_before_event_consumption() {
         ..Gateway::default()
     });
     let (output, mut helper) = tokio::io::duplex(4096);
-    let (mut owner, mut incoming, _stop) = fixture_owner(
+    let (mut owner, mut incoming, _stop, _native_stop) = fixture_owner(
         output,
         gateway.clone(),
         upstream.port,
@@ -2403,7 +2413,8 @@ async fn egress_broker_discards_buffered_data_after_receipt_or_lease_expiry() {
             ..Gateway::default()
         });
         let (output, mut helper) = tokio::io::duplex(4096);
-        let (mut owner, mut incoming, _stop) = fixture_owner(output, control.clone(), port, times);
+        let (mut owner, mut incoming, _stop, _native_stop) =
+            fixture_owner(output, control.clone(), port, times);
         let deadline = Instant::now() + Duration::from_secs(2);
         owner
             .worker_frame(EgressMessageV1::Open {
