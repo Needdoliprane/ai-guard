@@ -13,7 +13,7 @@ use std::{
     os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
-    sync::mpsc,
+    sync::{Arc, OnceLock, mpsc},
     time::{Duration, Instant},
 };
 use tokio::{io::AsyncReadExt, process::Command as AsyncCommand};
@@ -558,6 +558,23 @@ pub fn write_new_private(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Default)]
+pub struct StderrDrain(Arc<OnceLock<usize>>);
+
+impl StderrDrain {
+    pub fn read_complete(&self, path: &Path) -> Option<Vec<u8>> {
+        // The drainer publishes only after clean EOF and a successful sync.
+        let length = *self.0.get()?;
+        let mut bytes = Vec::new();
+        File::open(path)
+            .ok()?
+            .take((length + 1) as u64)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        (bytes.len() == length).then_some(bytes)
+    }
+}
+
 pub struct OwnedProcess {
     child: Child,
     graceful_shutdown: bool,
@@ -568,7 +585,7 @@ impl OwnedProcess {
         log: &Path,
         readiness: bool,
     ) -> Result<(Self, Option<mpsc::Receiver<String>>)> {
-        Self::spawn_with_selection(command, log, readiness, None)
+        Self::spawn_with_selection(command, log, readiness, None, None)
     }
 
     fn spawn_with_selection(
@@ -576,6 +593,7 @@ impl OwnedProcess {
         log: &Path,
         readiness: bool,
         client_selection: Option<&Path>,
+        stderr_drain: Option<StderrDrain>,
     ) -> Result<(Self, Option<mpsc::Receiver<String>>)> {
         let file = OpenOptions::new()
             .write(true)
@@ -594,7 +612,9 @@ impl OwnedProcess {
         let mut child = command.spawn().context("spawn owned native process")?;
         let pipe = child.stderr.take().context("native child stderr")?;
         let (send, receive) = mpsc::channel();
-        std::thread::spawn(move || drain_log(pipe, file, readiness.then_some(send)));
+        std::thread::spawn(move || {
+            drain_log(pipe, file, readiness.then_some(send), stderr_drain.as_ref())
+        });
         Ok((
             Self {
                 child,
@@ -669,16 +689,24 @@ impl Drop for OwnedProcess {
     }
 }
 
-fn drain_log(mut pipe: impl Read, mut file: File, mut ready: Option<mpsc::Sender<String>>) {
+fn drain_log(
+    mut pipe: impl Read,
+    mut file: File,
+    mut ready: Option<mpsc::Sender<String>>,
+    stderr_drain: Option<&StderrDrain>,
+) {
     let mut written = 0;
+    let mut writes_succeeded = true;
     let mut first = Vec::new();
     let mut buffer = [0; 4096];
-    while let Ok(count) = pipe.read(&mut buffer) {
-        if count == 0 {
-            break;
-        }
+    let eof = loop {
+        let count = match pipe.read(&mut buffer) {
+            Ok(0) => break true,
+            Ok(count) => count,
+            Err(_) => break false,
+        };
         let retained = count.min(OUTPUT_LIMIT - written);
-        let _ = file.write_all(&buffer[..retained]);
+        writes_succeeded &= file.write_all(&buffer[..retained]).is_ok();
         written += retained;
         if ready.is_some() {
             for byte in &buffer[..count] {
@@ -696,8 +724,62 @@ fn drain_log(mut pipe: impl Read, mut file: File, mut ready: Option<mpsc::Sender
                 }
             }
         }
+    };
+    let synced = file.sync_all().is_ok();
+    // A full buffer cannot establish that every marker was retained.
+    if eof
+        && writes_succeeded
+        && synced
+        && written < OUTPUT_LIMIT
+        && let Some(drain) = stderr_drain
+    {
+        let _ = drain.0.set(written);
     }
-    let _ = file.sync_all();
+}
+
+#[test]
+fn stderr_stage_sampling_requires_a_complete_drain_below_the_cap() -> Result<()> {
+    struct InterruptedDrain;
+
+    impl Read for InterruptedDrain {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("fixture stderr read failed"))
+        }
+    }
+
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("broker.stderr");
+    let marker = b"broker import verification failure: {\"version\":1,\"stage\":\"observe_only\",\"enforcer_reason\":null,\"runtime_effect\":\"unknown\"}\n";
+    fs::write(&path, marker)?;
+    let incomplete = StderrDrain::default();
+    assert_eq!(incomplete.read_complete(&path), None);
+
+    let complete = StderrDrain::default();
+    drain_log(&marker[..], File::create(&path)?, None, Some(&complete));
+    assert_eq!(complete.read_complete(&path).as_deref(), Some(&marker[..]));
+    fs::write(&path, b"shorter log")?;
+    assert_eq!(complete.read_complete(&path), None);
+
+    let failed = StderrDrain::default();
+    drain_log(
+        (&marker[..]).chain(InterruptedDrain),
+        File::create(&path)?,
+        None,
+        Some(&failed),
+    );
+    assert_eq!(failed.read_complete(&path), None);
+
+    let mut exact_cap = marker.to_vec();
+    exact_cap.resize(OUTPUT_LIMIT, b'\n');
+    let mut truncated = exact_cap.clone();
+    truncated.extend_from_slice(marker);
+    for input in [&exact_cap, &truncated] {
+        let drain = StderrDrain::default();
+        drain_log(input.as_slice(), File::create(&path)?, None, Some(&drain));
+        assert_eq!(fs::read(&path)?, exact_cap);
+        assert_eq!(drain.read_complete(&path), None);
+    }
+    Ok(())
 }
 
 pub fn gateway(
@@ -751,17 +833,24 @@ pub fn gateway(
     Ok((process, format!("http://{address}")))
 }
 
-pub fn broker(selection: &Selection, evidence: &Evidence, generation: u8) -> Result<OwnedProcess> {
+pub fn broker(
+    selection: &Selection,
+    evidence: &Evidence,
+    generation: u8,
+    stderr_drain: Option<StderrDrain>,
+) -> Result<OwnedProcess> {
     let mut command = Command::new(&selection.binary);
     command
         .args(["broker", "serve", "--config"])
         .arg(evidence.root.join("operator/registry.json"));
-    Ok(OwnedProcess::spawn(
+    Ok(OwnedProcess::spawn_with_selection(
         command,
         &evidence
             .root
             .join(format!("logs/broker-{generation}.stderr")),
         false,
+        None,
+        stderr_drain,
     )?
     .0)
 }
@@ -789,6 +878,7 @@ pub fn run_client(
         &evidence.root.join("logs/run-cli.stderr"),
         false,
         Some(client_selection),
+        None,
     )?
     .0)
 }

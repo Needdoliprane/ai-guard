@@ -33,7 +33,7 @@ use agentsandbox::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, FixedOffset};
-use harness::{CAPACITY, Evidence, Selection};
+use harness::{CAPACITY, Evidence, Selection, StderrDrain};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -59,6 +59,7 @@ const EARLY_TERMINAL_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 enum LostProcess<'a> {
     Broker {
         scenario_end: Instant,
+        stderr_drain: &'a StderrDrain,
     },
     LegacyRecoveryStatus,
     RunCli {
@@ -703,20 +704,24 @@ fn batch_failure_marker_rejects_invalid_public_metadata() {
 async fn broker_sigkill_preserves_original_deadline_without_second_start() -> Result<()> {
     let selection = Selection::read()?;
     let evidence = Evidence::new()?;
+    let stderr_drain = StderrDrain::default();
     let scenario_end = Instant::now() + Duration::from_secs(600);
     let outcome = timeout_at(
         scenario_end,
         run(
             &selection,
             &evidence,
-            LostProcess::Broker { scenario_end },
+            LostProcess::Broker {
+                scenario_end,
+                stderr_drain: &stderr_drain,
+            },
             &mut RunClientRecoveryStage::NotReached,
         ),
     )
     .await
     .context("broker runtime qualification exceeded the 600-second global bound")
     .and_then(|result| result);
-    if outcome.is_err() && retain_import_verification_failure(&evidence).is_err() {
+    if outcome.is_err() && retain_import_verification_failure(&evidence, &stderr_drain).is_err() {
         eprintln!("could not retain the local import verification diagnostic");
     }
     evidence.write("result.json", &json!({
@@ -734,24 +739,13 @@ async fn broker_sigkill_preserves_original_deadline_without_second_start() -> Re
 
 const IMPORT_VERIFICATION_FAILURE_PREFIX: &[u8] = b"broker import verification failure: ";
 
-fn retain_import_verification_failure(evidence: &Evidence) -> Result<()> {
-    use std::io::Read as _;
-
-    // Match the cap of the fixture's private child stderr. An absent file, a
-    // partial last line or a lost diagnostic leaves the stage unknown.
-    const MAX_STDERR: u64 = 64 * 1024;
-    let marker = (|| {
-        let mut bytes = Vec::new();
-        fs::File::open(evidence.root.join("logs/broker-1.stderr"))
-            .ok()?
-            .take(MAX_STDERR + 1)
-            .read_to_end(&mut bytes)
-            .ok()?;
-        if bytes.len() as u64 > MAX_STDERR {
-            return None;
-        }
-        import_verification_failure_marker(&bytes)
-    })();
+fn retain_import_verification_failure(
+    evidence: &Evidence,
+    stderr_drain: &StderrDrain,
+) -> Result<()> {
+    let marker = stderr_drain
+        .read_complete(&evidence.root.join("logs/broker-1.stderr"))
+        .and_then(|bytes| import_verification_failure_marker(&bytes));
     let receipt = marker.unwrap_or_else(|| {
         json!({
             "version": 1, "stage": "unknown", "enforcer_reason": null, "runtime_effect": "unknown"
@@ -1116,7 +1110,11 @@ async fn run(
         "operation.json",
         &json!({"operation_id":operation,"profile":PROFILE}),
     )?;
-    let mut broker = harness::broker(selection, evidence, 1)?;
+    let stderr_drain = match &lost {
+        LostProcess::Broker { stderr_drain, .. } => Some(StderrDrain::clone(stderr_drain)),
+        _ => None,
+    };
+    let mut broker = harness::broker(selection, evidence, 1, stderr_drain)?;
     if matches!(lost, LostProcess::RunCli { .. }) {
         broker.require_graceful_shutdown();
     }
@@ -1141,7 +1139,7 @@ async fn run(
     })?;
     let (mut cli, live_events) = match lost {
         LostProcess::Broker { .. } | LostProcess::LegacyRecoveryStatus => {
-            let live = if let LostProcess::Broker { scenario_end } = lost {
+            let live = if let LostProcess::Broker { scenario_end, .. } = lost {
                 let live = selection
                     .open_worker_event_stream(
                         docker_events_since,
@@ -1785,7 +1783,7 @@ async fn run(
         )
         .await;
     }
-    let mut restarted = harness::broker(selection, evidence, 2)?;
+    let mut restarted = harness::broker(selection, evidence, 2, None)?;
     wait_broker(
         evidence,
         &runner,
@@ -2441,7 +2439,7 @@ async fn verify_legacy_recovery(
     gateway: &mut harness::OwnedProcess,
 ) -> Result<()> {
     gateway.require_graceful_shutdown();
-    let mut restarted = harness::broker(selection, evidence, 2).ok();
+    let mut restarted = harness::broker(selection, evidence, 2, None).ok();
     let stage = if let Some(child) = &mut restarted {
         child.require_graceful_shutdown();
         evidence.write("legacy-recovery-stage.json", &LegacyRecoveryStage::Spawned)?;
