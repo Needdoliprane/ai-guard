@@ -551,7 +551,7 @@ impl StopJournal {
             PublicationResources {
                 usage,
                 budget: retirement::PublicationBudget::Cancel,
-                floors: &writer.floors,
+                writer: &mut writer,
             },
         )?;
         writer.floors.insert(operation_id, head.clone());
@@ -638,7 +638,7 @@ impl StopJournal {
             PublicationResources {
                 usage,
                 budget: publication,
-                floors: &writer.floors,
+                writer: &mut writer,
             },
         )?;
         writer.floors.insert(operation, head.clone());
@@ -768,7 +768,7 @@ impl StopJournal {
                 PublicationResources {
                     usage,
                     budget: publication,
-                    floors: &writer.floors,
+                    writer: &mut writer,
                 },
             )?;
             writer.floors.insert(operation, head);

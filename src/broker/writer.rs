@@ -14,12 +14,17 @@ use super::{
         Journal, JournalError, JournalLimitsV1, JournalPageV1, JournalResult, JournalScopeV1,
         JournalStatusV1, RejectionCodeV1, RejectionPhaseV1, RejectionReceiptV1, ReservationMode,
         ReservationTicket, ReserveResult, RevisionRefV1, StopJobSnapshotV1, StopJournal,
+        egress_release_fence::{EgressReleaseFenceIssuer, EgressReleaseHeadPermit},
         recovery::{StopRecoveryReaderV1, StopRecoveryReportV1, inventory::StopInventoryPageV1},
     },
     lifecycle::{BrokerCheckpointV3, LocalCommandReceiptV1, LocalCommandRequestV1, LocalCommandV1},
     outbox::{BrokerCheckpointV4, OutboxEventV1, OutboxReceiptV1},
 };
-use crate::{control_fs::Directory, model::Event, runner::broker::PreparedSubmission};
+use crate::{
+    control_fs::Directory,
+    model::Event,
+    runner::{broker::PreparedSubmission, egress_release::EgressReleaseIntentV1},
+};
 use std::{
     collections::HashSet,
     fmt,
@@ -265,6 +270,12 @@ enum Command {
         operation_id: Uuid,
         reply: Reply<Option<AcceptedJobV1>>,
     },
+    FenceEgressReleaseHead {
+        operation_id: Uuid,
+        expected: RevisionRefV1,
+        intent: Box<EgressReleaseIntentV1>,
+        reply: Reply<EgressReleaseHeadPermit>,
+    },
     Status {
         operation_id: Uuid,
         reply: Reply<Option<JournalStatusV1>>,
@@ -434,7 +445,9 @@ impl ClientState {
         // integrity checks even when the reader abandons the response.
         let retain_status_on_lost_reply = matches!(
             &command,
-            Command::ReadResult { .. } | Command::PendingRetirementEvents { .. }
+            Command::ReadResult { .. }
+                | Command::PendingRetirementEvents { .. }
+                | Command::FenceEgressReleaseHead { .. }
         );
         #[cfg(test)]
         let cost = {
@@ -1157,6 +1170,27 @@ impl WriterClient {
             })
             .await
     }
+
+    /// Issue a revocable ticket for the exact durable release intent. The
+    /// actor only transfers the ticket. The caller retains the live effect.
+    #[allow(dead_code)] // The live executor is connected separately.
+    pub(crate) async fn fence_egress_release_head(
+        &self,
+        operation_id: Uuid,
+        expected: &RevisionRefV1,
+        intent: &EgressReleaseIntentV1,
+    ) -> JournalResult<EgressReleaseHeadPermit> {
+        let expected = expected.clone();
+        let intent = Box::new(intent.clone());
+        self.call(move |reply| Command::FenceEgressReleaseHead {
+            operation_id,
+            expected,
+            intent,
+            reply,
+        })
+        .await
+    }
+
     pub async fn cancel_stop_projection(
         &self,
         operation_id: Uuid,
@@ -1341,6 +1375,7 @@ fn serve_backend(
 ) {
     let _lifetime = retirement_owners::WriterExit(Arc::clone(&_retirements));
     let _status_lifetime = status_cache::ActorLifetime(Arc::clone(&status));
+    let release_fence_issuer = EgressReleaseFenceIssuer::new();
     // At most one preparation can be live in this actor's weak registry. An
     // error retains that strong guard before replying, so another preparation
     // cannot refund or reuse an ambiguous publication's capacity. These inputs
@@ -1650,6 +1685,31 @@ fn serve_backend(
                     .as_ref()
                     .map_or(status_cache::Update::None, status_from_job);
                 let _ = respond(&backend, &status, reply, result, update, true);
+            }
+            Command::FenceEgressReleaseHead {
+                operation_id,
+                expected,
+                intent,
+                reply,
+            } => {
+                let result = backend.full().and_then(|journal| {
+                    journal.fence_egress_release_head(
+                        operation_id,
+                        &expected,
+                        &intent,
+                        &release_fence_issuer,
+                    )
+                });
+                // Conflict here can be a normal head mismatch. Only strict
+                // journal failures invalidate the diagnostic projection.
+                let strict_failed = backend.full().is_ok_and(Journal::status_projection_failed);
+                let _ = status.reply(
+                    reply,
+                    result,
+                    status_cache::Update::None,
+                    false,
+                    strict_failed,
+                );
             }
             Command::Load {
                 operation_id,
@@ -2149,6 +2209,10 @@ mod status_projection_tests;
 #[cfg(all(test, unix))]
 #[path = "writer_checkpoint_heads_tests.rs"]
 mod checkpoint_heads_tests;
+
+#[cfg(all(test, unix))]
+#[path = "writer_egress_release_fence_tests.rs"]
+mod egress_release_fence_tests;
 
 #[cfg(all(test, unix))]
 #[path = "writer_retirement_cold_tests.rs"]

@@ -9,7 +9,7 @@ use crate::{
 use futures_util::FutureExt;
 use serde_json::{Value, json};
 
-fn accepted(journal: &Journal, operation: Uuid) -> AcceptedJobV1 {
+pub(super) fn accepted(journal: &Journal, operation: Uuid) -> AcceptedJobV1 {
     let mut plan: Value = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/broker_intent-plan-v3.json"

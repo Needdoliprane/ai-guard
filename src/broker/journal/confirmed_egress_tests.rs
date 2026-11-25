@@ -224,6 +224,24 @@ fn opening_key_roundtrips_and_evolves_only_after_its_exact_running_ack() {
             "receipt": {"audit_seq": 8, "audit_hash": "f".repeat(64)}},
     });
     let release_head = decode(&released).unwrap();
+    let expected: crate::runner::egress_release::EgressReleaseIntentV1 =
+        serde_json::from_value(released["broker"]["runner"]["egress_release"].clone()).unwrap();
+    let verify_intent = |checkpoint| {
+        super::super::egress_release_fence::require_release_intent(
+            &LoadedCheckpoint::V3(checkpoint),
+            &expected,
+        )
+    };
+    assert_eq!(verify_intent(release_head.clone()), Ok(()));
+    assert_eq!(verify_intent(restored.clone()), Err(JournalError::Conflict));
+
+    let mut different_intent = released.clone();
+    different_intent["broker"]["runner"]["egress_release"]["opening"]["receipt"]["audit_hash"] =
+        json!("a".repeat(64));
+    assert_eq!(
+        verify_intent(decode(&different_intent).unwrap()),
+        Err(JournalError::Conflict)
+    );
     let mut release_without_key = released.clone();
     release_without_key["broker"]["runner"]
         .as_object_mut()
@@ -241,6 +259,10 @@ fn opening_key_roundtrips_and_evolves_only_after_its_exact_running_ack() {
     );
     let mut release_after_stop = released.clone();
     release_after_stop["commands"] = stopped["commands"].clone();
+    assert_eq!(
+        verify_intent(decode(&release_after_stop).unwrap()),
+        Err(JournalError::Conflict)
+    );
     assert_eq!(
         verify(
             decode(&stopped).unwrap(),
