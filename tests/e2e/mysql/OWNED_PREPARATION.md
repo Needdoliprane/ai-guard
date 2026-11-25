@@ -38,6 +38,26 @@ Le verrou arbitre les clients ai-guard qui l’utilisent. La recette exige
 une cible réservée, sans administration concurrente du schéma ni autre
 écrivain pendant la préparation.
 
+## Compte opérateur du prévol
+
+Provisionner un compte TLS dédié, distinct du compte de service du gateway.
+Pour rester au périmètre de la cible, utiliser une seule attribution directe
+au schéma exact qui réunit `SELECT`, `SHOW VIEW`, `ALTER ROUTINE`, `EVENT`,
+`TRIGGER` et `CREATE`, sans rôle actif. Échapper les caractères `_` et `%`
+du nom de la base lorsque `partial_revokes` est désactivé. Lorsqu’il est
+activé, le nom de la portée doit correspondre littéralement à la base.
+L’opérateur réserve un nom d’utilisateur unique sur le serveur, sans autre
+entrée hôte ni droit anonyme concurrent applicable, et maintient les droits
+et `partial_revokes` stables pendant le contrôle. `SHOW GRANTS FOR CURRENT_USER()`
+détaille les attributions directes du compte courant.
+
+Le prévol accepte aussi les droits globaux directs complets en l’absence de
+révocation et sans rôle actif si `partial_revokes` est activé. Pour la preuve
+par schéma, une seconde portée schéma rend la sélection incertaine et produit
+`CatalogVisibilityUnconfirmed`
+avant l’inventaire. Le gateway garde les droits de service sur les objets
+préparés. [Sélection des droits MySQL](https://dev.mysql.com/doc/refman/8.4/en/request-access.html) · [GRANT MySQL](https://dev.mysql.com/doc/refman/8.4/en/grant.html) · [SHOW GRANTS MySQL](https://dev.mysql.com/doc/refman/8.4/en/show-grants.html)
+
 ## Décision requise avant raccordement
 
 Fixer le manifeste physique de chaque format MySQL, avec tables, colonnes,

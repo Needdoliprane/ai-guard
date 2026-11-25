@@ -159,7 +159,8 @@ async fn require_catalog_visibility(conn: &mut Conn, database: &str) -> Result<(
         grants_cover_catalog(
             grants.iter().map(String::as_str),
             database,
-            partial_revokes == 1
+            partial_revokes == 1,
+            role != "NONE",
         ),
         MysqlOwnedPreparationRefusal::CatalogVisibilityUnconfirmed
     );
@@ -170,15 +171,18 @@ fn grants_cover_catalog<'a>(
     grants: impl IntoIterator<Item = &'a str>,
     database: &str,
     partial_revokes: bool,
+    roles_active: bool,
 ) -> bool {
     let name = database.replace('`', "``");
-    let scope = format!("`{name}`.*");
-    let escaped = name
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_");
-    let literal_scope = format!("`{escaped}`.*");
-    let mut present = [false; REQUIRED_GRANTS.len()];
+    let literal_name = if partial_revokes {
+        name
+    } else {
+        name.replace('%', "\\%").replace('_', "\\_")
+    };
+    let literal_scope = format!("`{literal_name}`.* TO ");
+    let mut global_proves_visibility = false;
+    let mut schema_grants = 0;
+    let mut schema_proves_visibility = false;
     for grant in grants {
         if grant.starts_with("REVOKE ") {
             return false;
@@ -186,54 +190,97 @@ fn grants_cover_catalog<'a>(
         let Some((privileges, target)) = grant
             .strip_prefix("GRANT ")
             .and_then(|grant| grant.split_once(" ON "))
-            .and_then(|(privileges, target)| {
-                target
-                    .split_once(" TO ")
-                    .map(|(scope, _)| (privileges, scope))
-            })
         else {
             continue;
         };
-        if target == "*.*"
-            || (!partial_revokes && target == literal_scope)
-            || (!name.contains('\\') && target == scope)
-        {
-            for (required, seen) in REQUIRED_GRANTS.iter().zip(&mut present) {
-                *seen |= privileges == "ALL PRIVILEGES"
-                    || privileges
-                        .split(", ")
-                        .any(|privilege| privilege == *required);
-            }
+        if target.starts_with("*.* TO ") {
+            global_proves_visibility |= privileges_cover_catalog(privileges);
+        } else if target.contains(".* TO ") {
+            // MySQL can use only the first matching schema grant. Count any
+            // other schema grant as a possible competitor without matching patterns.
+            schema_grants += 1;
+            schema_proves_visibility |=
+                target.starts_with(&literal_scope) && privileges_cover_catalog(privileges);
         }
     }
-    present.into_iter().all(|seen| seen)
+    global_proves_visibility
+        || (!roles_active
+            && !database.contains('\\')
+            && schema_grants == 1
+            && schema_proves_visibility)
+}
+
+fn privileges_cover_catalog(privileges: &str) -> bool {
+    // Only accept a plain privilege list. Quoted column names can contain
+    // the separators used to read SHOW GRANTS rows.
+    privileges == "ALL PRIVILEGES"
+        || (privileges
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || matches!(byte, b' ' | b',' | b'_'))
+            && REQUIRED_GRANTS.iter().all(|required| {
+                privileges
+                    .split(", ")
+                    .any(|privilege| privilege == *required)
+            }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::grants_cover_catalog;
 
+    const GLOBAL: &str = "GRANT SELECT, SHOW VIEW, ALTER ROUTINE, EVENT, TRIGGER, CREATE ON *.* TO `prepare`@`localhost`";
+
     #[test]
     fn owned_catalog_requires_schema_wide_visibility_without_a_partial_revoke() {
         let schema = "qa_owned";
         let scoped = "GRANT ALL PRIVILEGES ON `qa_owned`.* TO `prepare`@`localhost`";
-        let literal = "GRANT ALL PRIVILEGES ON `qa\\_owned`.* TO `prepare`@`localhost`";
-        let global = "GRANT SELECT, SHOW VIEW, ALTER ROUTINE, EVENT, TRIGGER, CREATE ON *.* TO `prepare`@`localhost`";
+        let literal = "GRANT SELECT, CREATE, SHOW VIEW, ALTER ROUTINE, EVENT, TRIGGER ON `qa\\_owned`.* TO `prepare`@`localhost`";
         let revoke = "REVOKE EVENT ON `qa_owned`.* FROM `prepare`@`localhost`";
-        assert!(grants_cover_catalog([scoped], schema, false));
-        assert!(grants_cover_catalog([global], schema, true));
-        assert!(grants_cover_catalog([literal], schema, false));
-        assert!(!grants_cover_catalog([literal], schema, true));
-        assert!(!grants_cover_catalog([global, revoke], schema, true));
-        assert!(!grants_cover_catalog([scoped], "qa_other", false));
+        assert!(!grants_cover_catalog([scoped], schema, false, false));
+        assert!(grants_cover_catalog([scoped], schema, true, false));
+        assert!(grants_cover_catalog([GLOBAL], schema, true, false));
+        assert!(grants_cover_catalog([literal], schema, false, false));
+        assert!(!grants_cover_catalog([literal], schema, false, true));
+        assert!(!grants_cover_catalog([literal], schema, true, false));
+        assert!(!grants_cover_catalog([GLOBAL, revoke], schema, true, false));
+        assert!(!grants_cover_catalog([scoped], "qa_other", false, false));
         assert!(!grants_cover_catalog(
             ["GRANT SELECT ON `qa_owned`.* TO `prepare`@`localhost`"],
             schema,
+            false,
             false
         ));
         assert!(!grants_cover_catalog(
             ["GRANT `prepare_role`@`localhost` TO `prepare`@`localhost`"],
             schema,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn owned_catalog_refuses_overlapping_schema_grants() {
+        let escaped = "GRANT SELECT, SHOW VIEW ON `qa\\_owned`.* TO `prepare`@`localhost`";
+        let wildcard =
+            "GRANT ALTER ROUTINE, EVENT, TRIGGER, CREATE ON `qa_owned`.* TO `prepare`@`localhost`";
+        let exact = "GRANT ALL PRIVILEGES ON `qa\\_owned`.* TO `prepare`@`localhost`";
+
+        assert!(!grants_cover_catalog(
+            [escaped, wildcard],
+            "qa_owned",
+            false,
+            false
+        ));
+        assert!(!grants_cover_catalog(
+            [wildcard, exact],
+            "qa_owned",
+            false,
+            false
+        ));
+        assert!(grants_cover_catalog(
+            [wildcard, exact, GLOBAL],
+            "qa_owned",
+            false,
             false
         ));
     }
