@@ -1,5 +1,21 @@
 # Validation courante
 
+## 25 novembre 2026 — inventaire des sources et SBOM G12
+
+Le contrôle hors ligne du candidat `1f056773` compare 3 521 fichiers
+suivis à leurs blobs Git. Le CLI archivé `84971de6` retrouve la même
+liste de publication et les mêmes empreintes dans un paquet temporaire
+de 873 fichiers. Le SBOM de préparation CycloneDX 1.6 contient
+417 composants. Les deux fichiers de verrouillage ont été rapprochés
+de leurs blobs exacts.
+
+Le reçu local conserve le verdict `SOURCE MATCH`, le manifeste
+`3a97d44198d8ff84d78e10f16b67349bb154614618b9c58974a87cd234395cd8`
+et le SBOM
+`0a3270a9347c356f3ef00d3ab1bf7c92fecf68a9ac3a7d9b8d174ca190e78a2e`.
+Aucun artefact compilé n'a été vérifié dans cette passe.
+Le transfert CI du gel exact et la qualification G12 restent ouverts.
+
 ## 25 novembre 2026 — raccord du bootstrap E3 à l’exécuteur du broker
 
 Le gel isolé `6f7ca89d` compile hors ligne sur macOS ARM64.
