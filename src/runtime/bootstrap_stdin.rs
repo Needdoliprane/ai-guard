@@ -177,6 +177,10 @@ impl PreparedBootstrapStdin {
         &self.attempt
     }
 
+    pub(crate) fn stop_receiver(&self) -> watch::Receiver<bool> {
+        self.stop.clone()
+    }
+
     /// The caller verifies the durable Running, fresh opening and release
     /// intent, then reinspects using the current managed authority. The veto
     /// may check only in-memory liveness and proof under the native gate.

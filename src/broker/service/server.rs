@@ -1549,6 +1549,7 @@ impl Service {
         Ok(
             BatchExecutor::new(writer, self.full_enforcer()?.clone(), Arc::new(clock))
                 .with_relays(self.registry.relay_service.get().cloned())
+                .with_egress_resolver(self.registry.egress_resolver())
                 .with_activity_root(self.root.clone(), limits),
         )
     }

@@ -274,6 +274,10 @@ impl ChannelStop {
     pub(crate) fn stop(&self) {
         self.0.send_replace(ChannelStopState(true));
     }
+
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.0.borrow().0
+    }
 }
 
 impl Drop for ChannelStop {
