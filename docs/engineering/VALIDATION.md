@@ -17,6 +17,15 @@ conservée. La fermeture du canari reste indéterminée.
 Les reçus principal, de réconciliation et de fermeture sont conservés
 séparément avec les deux binaires épinglés. Manifeste privé vérifié
 `105a1e15449cd32a93eb995eeb9384a107291ad81a65654b8d63e133fbf1f36c`.
+La relecture passive après la sortie vérifie les 18 liens de
+prédécesseur. r15 publie le nettoyage en attente. SQLite l’enregistre à
+la séquence 13. r16 publie la demande d’annulation et r17 acquitte le
+nettoyage avec le reçu de cette séquence. r18 enregistre `Unavailable`
+pendant `ImportVerification`. L’annulation était déjà demandée avant
+cette dernière observation. A reste `Preparing` avec son quota et B
+sans worker. Reçu de relecture
+`80b5e03eb8657e1b2f946dce3439e51f85c257cbf06270bf05e4c14a3c4f5c51`.
+
 Le relevé r14 décrit l’échéance de ce rejeu. Le reçu r16 du gel
 `a39cfa86` conserve sa propre chronologie.
 
