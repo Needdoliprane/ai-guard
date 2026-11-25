@@ -34,6 +34,11 @@ pub(crate) mod launch_profile;
 mod managed;
 pub mod observation;
 pub(crate) use managed::relay::{RelayExecError, RelayExecPermit, RelayExecTransport};
+#[cfg(unix)]
+pub(crate) use managed::relay::{
+    RelayExecState,
+    egress::{EgressExecIo, EgressExecOwner},
+};
 pub(crate) use managed::selected_podman_target_args;
 pub(crate) mod model_tls;
 mod prestart;

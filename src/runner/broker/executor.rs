@@ -12,6 +12,8 @@ macro_rules! continue_step {
 mod activity;
 mod cancelled;
 mod diagnostics;
+#[cfg(unix)]
+mod egress;
 mod helpers;
 mod journal;
 mod results;
