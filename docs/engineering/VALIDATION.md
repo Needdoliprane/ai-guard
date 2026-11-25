@@ -1,5 +1,22 @@
 # Validation courante
 
+## 25 novembre 2026 — raccord du bootstrap E3 à l’exécuteur du broker
+
+Le gel isolé `6f7ca89d` compile hors ligne sur macOS ARM64.
+Neuf sélecteurs exécutent 22 tests, tous réussis. Ils couvrent
+le stdin exclusif, les marqueurs du helper, les hooks du
+fournisseur, l’intention de libération, la clé d’ouverture
+durable, la garde native et le résolveur approuvé. La garde
+refuse l’écriture sous contention du verrou de santé et
+laisse STOP avancer.
+
+Les tests exercent les composants sur des fixtures. Le
+gel maintient l’admission E3 fermée. La composition avec
+le ticket de tête stricte du journal et le permis numérique
+fera l’objet d’une validation distincte, suivie du parcours
+sur moteur. Manifeste privé
+`38378e6fadbbbc47a4bdae3e37ada7dbcbe99910bf08bde3c9691cbdc7500c57`.
+
 ## 25 novembre 2026 — rejeu du premier claim Full3 sur le candidat G07
 
 Le gel `3da8642d` reprend `1955305b` avec le harnais de
