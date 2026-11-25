@@ -84,6 +84,14 @@ fn channel_open(binding: &EgressBindingV1) -> EgressObserveRequestV1 {
     }
 }
 
+fn channel_opening(binding: &EgressBindingV1) -> EgressChannelOpeningRequestV1 {
+    EgressChannelOpeningRequestV1 {
+        version: 1,
+        observation_id: IdV1::random(),
+        binding: binding.clone(),
+    }
+}
+
 fn configured_policy() -> EgressTenantPolicyV1 {
     EgressTenantPolicyV1 {
         version: 1,
@@ -340,6 +348,17 @@ fn egress_store_retention_preserves_decision_and_channel_receipts() {
     );
     let head = reopened.head().unwrap();
     assert_eq!(reopened.egress_observe(&open).unwrap(), opening);
+    let replayed = reopened
+        .egress_open_channel(&EgressChannelOpeningRequestV1 {
+            observation_id: open.observation_id,
+            ..channel_opening(&binding)
+        })
+        .unwrap();
+    assert_eq!(
+        replayed.disposition,
+        EgressChannelOpeningDispositionV1::Replayed
+    );
+    assert_eq!(replayed.receipt, opening);
     assert_eq!(
         reopened.egress_decide(&request, &policy, NOW + 1).unwrap(),
         decision
@@ -469,7 +488,9 @@ fn egress_store_channel_open_requires_the_current_running_binding() {
         wrong_attempt,
         wrong_session,
     ] {
-        let refusal = a.egress_observe(&channel_open(&rejected)).unwrap_err();
+        let refusal = a
+            .egress_open_channel(&channel_opening(&rejected))
+            .unwrap_err();
         assert_eq!(
             refusal.downcast_ref::<EgressJournalError>(),
             Some(&EgressJournalError::Invalid)
@@ -484,14 +505,28 @@ fn egress_store_stopping_revokes_renewal_and_preserves_the_opening_receipt() {
     let store = store(directory.path(), "tenant-a");
     let worker = software_workers::running_from(&store, egress_admission(&store));
     let binding = binding(&worker);
-    let opening = channel_open(&binding);
+    let opening = channel_opening(&binding);
     assert!(
         store
             .egress_session_events(&binding.session_id, 10)
             .unwrap()
             .is_empty()
     );
-    let opening_receipt = store.egress_observe(&opening).unwrap();
+    let fresh = store.egress_open_channel(&opening).unwrap();
+    assert_eq!(fresh.version, 1);
+    assert_eq!(fresh.disposition, EgressChannelOpeningDispositionV1::Fresh);
+    assert_eq!(fresh.observation_id, opening.observation_id);
+    assert_eq!(fresh.binding, binding);
+    let opening_receipt = fresh.receipt.clone();
+    let first_head = store.head().unwrap();
+    assert_eq!(
+        store.egress_open_channel(&opening).unwrap(),
+        EgressChannelOpeningReceiptV1 {
+            disposition: EgressChannelOpeningDispositionV1::Replayed,
+            ..fresh.clone()
+        }
+    );
+    assert_eq!(store.head().unwrap(), first_head);
     let events = store
         .egress_session_events(&binding.session_id, 10)
         .unwrap();
@@ -525,11 +560,31 @@ fn egress_store_stopping_revokes_renewal_and_preserves_the_opening_receipt() {
         .egress_session_events(&binding.session_id, 10)
         .unwrap();
     assert_eq!(before.len(), 2);
-    assert_eq!(store.egress_observe(&opening).unwrap(), opening_receipt);
+    assert_eq!(
+        store.egress_open_channel(&opening).unwrap(),
+        EgressChannelOpeningReceiptV1 {
+            disposition: EgressChannelOpeningDispositionV1::Replayed,
+            ..fresh
+        }
+    );
+    let legacy = EgressObserveRequestV1 {
+        observation_id: opening.observation_id.clone(),
+        ..channel_open(&binding)
+    };
+    assert_eq!(store.egress_observe(&legacy).unwrap(), opening_receipt);
+    let mut divergent = opening.clone();
+    divergent.binding.epoch += 1;
+    let conflict = store.egress_open_channel(&divergent).unwrap_err();
+    assert_eq!(
+        conflict.downcast_ref::<EgressJournalError>(),
+        Some(&EgressJournalError::Conflict)
+    );
     let closed = store.egress_renew(&renew, &policy, NOW + 2).unwrap();
     assert_eq!(closed.revoked, [decision.decision_id]);
     assert!(closed.expired.is_empty());
-    let refusal = store.egress_observe(&channel_open(&binding)).unwrap_err();
+    let refusal = store
+        .egress_open_channel(&channel_opening(&binding))
+        .unwrap_err();
     assert_eq!(
         refusal.downcast_ref::<EgressJournalError>(),
         Some(&EgressJournalError::Invalid)

@@ -9,13 +9,15 @@ use super::*;
 use crate::{
     audit::egress_decisions::EgressJournalError,
     control::egress_decision::{
-        EgressDecideRequestV1, EgressDecisionV1, EgressObserveRequestV1, EgressReceiptV1,
-        EgressRenewRequestV1, EgressRenewResponseV1,
+        EgressChannelOpeningReceiptV1, EgressChannelOpeningRequestV1, EgressDecideRequestV1,
+        EgressDecisionV1, EgressObserveRequestV1, EgressReceiptV1, EgressRenewRequestV1,
+        EgressRenewResponseV1, deserialize_object,
     },
 };
 
 pub(super) fn routes() -> Router<GatewayState> {
     Router::new()
+        .route("/egress/channel-openings", post(open_channel))
         .route("/egress/decisions", post(decide))
         .route("/egress/observations", post(observe))
         .route("/egress/renewals", post(renew))
@@ -73,14 +75,31 @@ async fn observe(
     RunnerIdentity(tenant): RunnerIdentity,
     Json(request): Json<EgressObserveRequestV1>,
 ) -> ApiResult<Json<EgressReceiptV1>> {
+    record_observation(tenant, move |store| store.egress_observe(&request)).await
+}
+
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct OpeningRequestJson(
+    #[serde(deserialize_with = "deserialize_object")] EgressChannelOpeningRequestV1,
+);
+
+async fn open_channel(
+    RunnerIdentity(tenant): RunnerIdentity,
+    Json(OpeningRequestJson(request)): Json<OpeningRequestJson>,
+) -> ApiResult<Json<EgressChannelOpeningReceiptV1>> {
+    record_observation(tenant, move |store| store.egress_open_channel(&request)).await
+}
+
+async fn record_observation<T: Send + 'static>(
+    tenant: TenantState,
+    record: impl FnOnce(&Store) -> anyhow::Result<T> + Send + 'static,
+) -> ApiResult<Json<T>> {
     tenant.write_quota()?;
     healthy(&tenant)?;
     tenant
         .blocking(false, move |tenant| {
-            tenant
-                .store
-                .sqlite_api()?
-                .egress_observe(&request)
+            record(tenant.store.sqlite_api()?.as_ref())
                 .map(Json)
                 .map_err(journal_failure)
         })
@@ -138,4 +157,135 @@ async fn events(
             })))
         })
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audit::egress_decisions::tests::loopback_store_fixture;
+    use crate::control::egress_decision::EgressChannelOpeningDispositionV1;
+    use crate::egress::ids::IdV1;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn channel_openings_require_a_runner_and_use_its_tenant() {
+        let (directory, a, binding) = loopback_store_fixture("fixture.egress.test:8443");
+        let b = Arc::new(
+            Store::open_for_tenant(
+                &directory.path().join("tenant-b.sqlite"),
+                "tenant-b",
+                Redactor::new(vec![]),
+                10_000,
+            )
+            .unwrap(),
+        );
+        let state = GatewayState::for_tenants(
+            vec![
+                TenantGateway {
+                    tenant_id: "tenant-a".into(),
+                    store: a.clone(),
+                    runner_token: "opening-runner-a".into(),
+                    viewer_token: "opening-viewer-a".into(),
+                },
+                TenantGateway {
+                    tenant_id: "tenant-b".into(),
+                    store: b.clone(),
+                    runner_token: "opening-runner-b".into(),
+                    viewer_token: "opening-viewer-b".into(),
+                },
+            ],
+            Policy::default(),
+            None,
+            Redactor::new(vec![]),
+        )
+        .unwrap();
+        let router = gateway_router(state);
+        let post = |token, body: Value| {
+            router.clone().oneshot(
+                axum::http::Request::post("/api/v1/egress/channel-openings")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+        };
+        let request = EgressChannelOpeningRequestV1 {
+            version: 1,
+            observation_id: IdV1::random(),
+            binding,
+        };
+        let body = serde_json::to_value(&request).unwrap();
+        let before = (a.head().unwrap(), b.head().unwrap());
+        assert_eq!(
+            post("unknown-opening-token", json!({}))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            post("opening-viewer-a", json!({})).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            post("opening-runner-b", body.clone())
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        let mut invalid = body.clone();
+        invalid["version"] = json!(2);
+        assert_eq!(
+            post("opening-runner-a", invalid).await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+        let mut invalid = body.clone();
+        invalid["observation"] = json!({"kind":"channel_closed"});
+        assert_eq!(
+            post("opening-runner-a", invalid).await.unwrap().status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            post(
+                "opening-runner-a",
+                json!([request.version, request.observation_id, request.binding]),
+            )
+            .await
+            .unwrap()
+            .status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!((a.head().unwrap(), b.head().unwrap()), before);
+
+        let response = post("opening-runner-a", body.clone()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let opened: EgressChannelOpeningReceiptV1 = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(opened.version, 1);
+        assert_eq!(opened.observation_id, request.observation_id);
+        assert_eq!(opened.binding, request.binding);
+        assert_eq!(opened.disposition, EgressChannelOpeningDispositionV1::Fresh);
+        assert_eq!(opened.receipt.audit_seq, before.0 + 1);
+
+        let response = post("opening-runner-a", body).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let replayed: EgressChannelOpeningReceiptV1 = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            replayed,
+            EgressChannelOpeningReceiptV1 {
+                disposition: EgressChannelOpeningDispositionV1::Replayed,
+                ..opened
+            }
+        );
+        assert_eq!(
+            (a.head().unwrap(), b.head().unwrap()),
+            (before.0 + 1, before.1)
+        );
+    }
 }

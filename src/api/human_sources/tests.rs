@@ -511,6 +511,7 @@ async fn own_sqlite_busy_is_503_without_legacy_or_neighbor_lookup() {
 async fn modern_route_matrix_closes_before_body_extractors_and_store() {
     // The mounted egress routes must stay covered even if the inventory changes.
     let egress_routes: &[(&str, &[&str])] = &[
+        ("/api/v1/egress/channel-openings", &["POST"]),
         ("/api/v1/egress/decisions", &["POST"]),
         ("/api/v1/egress/events", &["GET", "HEAD"]),
         ("/api/v1/egress/observations", &["POST"]),

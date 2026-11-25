@@ -12,10 +12,11 @@ use crate::{
     control::{
         WorkerStateV1, WorkerV1,
         egress_decision::{
-            Decided, EgressBindingV1, EgressCloseReasonV1, EgressDecideRequestV1, EgressDecisionV1,
-            EgressGrantV1, EgressObservationV1, EgressObserveRequestV1, EgressPolicySnapshot,
-            EgressReceiptV1, EgressRenewRequestV1, EgressRenewResponseV1, WorkerFacts, decide,
-            renewal,
+            Decided, EgressBindingV1, EgressChannelOpeningDispositionV1,
+            EgressChannelOpeningReceiptV1, EgressChannelOpeningRequestV1, EgressCloseReasonV1,
+            EgressDecideRequestV1, EgressDecisionV1, EgressGrantV1, EgressObservationV1,
+            EgressObserveRequestV1, EgressPolicySnapshot, EgressReceiptV1, EgressRenewRequestV1,
+            EgressRenewResponseV1, WorkerFacts, decide, renewal,
         },
     },
     egress::{Authority, ids::IdV1},
@@ -301,22 +302,60 @@ impl Store {
         &self,
         request: &EgressObserveRequestV1,
     ) -> anyhow::Result<EgressReceiptV1> {
-        anyhow::ensure!(request.version == 1, EgressJournalError::Invalid);
-        let kind = observation_kind(&request.observation);
-        let binding = binding_of(&request.observation);
-        let data = serde_json::to_value(&request.observation)?;
+        self.record_egress_observation(
+            request.version,
+            &request.observation_id,
+            &request.observation,
+        )
+        .map(|(receipt, _)| receipt)
+    }
+
+    /// Acknowledge an opening with the disposition of this transaction.
+    pub fn egress_open_channel(
+        &self,
+        request: &EgressChannelOpeningRequestV1,
+    ) -> anyhow::Result<EgressChannelOpeningReceiptV1> {
+        let (receipt, disposition) = self.record_egress_observation(
+            request.version,
+            &request.observation_id,
+            &EgressObservationV1::ChannelOpened {
+                binding: request.binding.clone(),
+            },
+        )?;
+        Ok(EgressChannelOpeningReceiptV1 {
+            version: 1,
+            observation_id: request.observation_id.clone(),
+            binding: request.binding.clone(),
+            disposition,
+            receipt,
+        })
+    }
+
+    fn record_egress_observation(
+        &self,
+        version: u32,
+        observation_id: &IdV1,
+        observation: &EgressObservationV1,
+    ) -> anyhow::Result<(EgressReceiptV1, EgressChannelOpeningDispositionV1)> {
+        anyhow::ensure!(version == 1, EgressJournalError::Invalid);
+        let kind = observation_kind(observation);
+        let binding = binding_of(observation);
+        let data = serde_json::to_value(observation)?;
         let mut db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         let tx = self.begin_checked(&mut db)?;
-        if let Some(existing) = by_id(&tx, &request.observation_id)? {
+        if let Some(existing) = by_id(&tx, observation_id)? {
             anyhow::ensure!(
                 existing.event.kind == kind && existing.event.data == data,
                 EgressJournalError::Conflict
             );
             self.commit_checked(tx)?;
-            return Ok(receipt(&existing));
+            return Ok((
+                receipt(&existing),
+                EgressChannelOpeningDispositionV1::Replayed,
+            ));
         }
         // Validate fresh connections against the decision at the time of
         // admission. The worker can have stopped by the time we record the fact.
@@ -324,7 +363,7 @@ impl Store {
             decision_id,
             flow_id,
             ..
-        } = &request.observation
+        } = observation
         {
             let stored = by_id(&tx, decision_id)?
                 .filter(|event| event.event.kind == DECISION_KIND)
@@ -340,10 +379,7 @@ impl Store {
         }
         // A fresh channel opening requires the exact durable Running worker.
         // A replay above still returns the same historical receipt.
-        if matches!(
-            request.observation,
-            EgressObservationV1::ChannelOpened { .. }
-        ) {
+        if matches!(observation, EgressObservationV1::ChannelOpened { .. }) {
             anyhow::ensure!(
                 worker_facts(&tx, binding)? == WorkerFacts::Eligible,
                 EgressJournalError::Invalid
@@ -351,7 +387,7 @@ impl Store {
         }
         let event = event(
             kind,
-            &request.observation_id,
+            observation_id,
             &binding.session_id,
             &binding.worker_id,
             data,
@@ -359,7 +395,7 @@ impl Store {
         let (event, payload) = self.prepare_egress_event(event)?;
         let stored = self.append_in_transaction(&tx, event, payload)?;
         self.commit_checked(tx)?;
-        Ok(receipt(&stored))
+        Ok((receipt(&stored), EgressChannelOpeningDispositionV1::Fresh))
     }
 
     /// Read-only revalidation of live decisions against current durable state.

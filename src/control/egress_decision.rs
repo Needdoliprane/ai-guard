@@ -10,7 +10,11 @@ use crate::egress::{
     Authority,
     ids::{DigestV1, IdV1},
 };
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{MapAccess, Visitor, value::MapAccessDeserializer},
+};
+use std::{fmt, marker::PhantomData};
 
 /// Correlation of one broker-owned channel. Built from the broker's retained
 /// runtime context, never from worker frames.
@@ -180,6 +184,61 @@ pub struct EgressObserveRequestV1 {
     /// Idempotency key of this observation.
     pub observation_id: IdV1,
     pub observation: EgressObservationV1,
+}
+
+/// One broker-owned ChannelOpened observation, with no other event variants.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EgressChannelOpeningRequestV1 {
+    pub version: u32,
+    pub observation_id: IdV1,
+    #[serde(deserialize_with = "deserialize_object")]
+    pub binding: EgressBindingV1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EgressChannelOpeningDispositionV1 {
+    Fresh,
+    Replayed,
+}
+
+/// Disposition of this exchange, with the original durable audit receipt.
+/// Replaying an opening never establishes fresh authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EgressChannelOpeningReceiptV1 {
+    pub version: u32,
+    pub observation_id: IdV1,
+    #[serde(deserialize_with = "deserialize_object")]
+    pub binding: EgressBindingV1,
+    pub disposition: EgressChannelOpeningDispositionV1,
+    #[serde(deserialize_with = "deserialize_object")]
+    pub receipt: EgressReceiptV1,
+}
+
+// A derived struct also accepts positional JSON arrays. In the opening wire
+// contract, each object must carry its own named fields.
+pub(crate) fn deserialize_object<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct Object<T>(PhantomData<T>);
+
+    impl<'de, T: Deserialize<'de>> Visitor<'de> for Object<T> {
+        type Value = T;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("an object with named fields")
+        }
+
+        fn visit_map<M: MapAccess<'de>>(self, map: M) -> Result<T, M::Error> {
+            T::deserialize(MapAccessDeserializer::new(map))
+        }
+    }
+
+    deserializer.deserialize_map(Object(PhantomData))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
