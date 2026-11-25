@@ -508,13 +508,13 @@ fn claude_parent_inference_uses_only_the_live_suffix_after_retention() {
     let call = |id: &str| {
         claude(
             "delegation.declared",
-            json!({"delegation_tool":"Agent","provider_tool_use_id":id,"provider_agent_id":"parent"}),
+            json!({"delegation_tool":"Agent","provider_tool_use_id":id,"provider_agent_id":"parent","provider_session_id":"provider-session"}),
         )
     };
     let child_activity = |id: &str, call: &str| {
         claude(
             "message.declared",
-            json!({"provider_agent_id":id,"provider_parent_tool_use_id":call}),
+            json!({"provider_agent_id":id,"provider_parent_tool_use_id":call,"provider_session_id":"provider-session"}),
         )
     };
     store

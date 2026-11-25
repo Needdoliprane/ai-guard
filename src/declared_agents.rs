@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_ID_BYTES: usize = 256;
 const CLAUDE_SOURCE: &str = "claude-adapter";
+const MAX_CLAUDE_JOIN_EVENTS: usize = 4_096;
 
 /// Serializable so that audit retention can persist and resume the fold.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -75,86 +76,116 @@ enum ParentUpdate {
 }
 
 /// Evidence collected only from the authorized read's live event suffix.
-#[derive(Default)]
 pub(crate) struct ClaudeReadParents {
-    namespaces: BTreeMap<String, DelegationClaims>,
-    children: BTreeMap<String, ReadParent>,
+    join: Option<ClaudeJoin>,
+    explicit_roots: BTreeSet<String>,
+}
+
+impl Default for ClaudeReadParents {
+    fn default() -> Self {
+        Self {
+            join: Some(ClaudeJoin::default()),
+            explicit_roots: BTreeSet::new(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct ClaudeJoin {
+    events: usize,
+    // None marks a namespace that reported conflicting provider sessions.
+    namespaces: BTreeMap<String, Option<DelegationClaims>>,
+    candidates: BTreeSet<String>,
 }
 
 #[derive(Default)]
 struct DelegationClaims {
+    session: String,
     // None retains a conflict across repeated claims.
     emitters: BTreeMap<String, Option<String>>,
     calls_by_child: BTreeMap<String, Option<String>>,
     children_by_call: BTreeMap<String, Option<String>>,
 }
 
-enum ReadParent {
-    Candidate,
-    ExplicitRoot,
-}
-
 impl ClaudeReadParents {
     fn observe_parent(&mut self, id: &str, first_declaration: bool, update: &ParentUpdate) {
-        match update {
-            ParentUpdate::Unspecified if first_declaration => {
+        if matches!(update, ParentUpdate::Unspecified) {
+            if first_declaration && let Some(join) = &mut self.join {
                 // A checkpoint child does not distinguish omission from null.
-                self.children.insert(id.into(), ReadParent::Candidate);
+                join.candidates.insert(id.into());
             }
-            ParentUpdate::Unspecified => {}
-            ParentUpdate::Root => {
-                self.children.insert(id.into(), ReadParent::ExplicitRoot);
-            }
-            ParentUpdate::Link(_) | ParentUpdate::Invalid => {
-                self.children.remove(id);
-            }
+            return;
+        }
+        if let Some(join) = &mut self.join {
+            join.candidates.remove(id);
+        }
+        if matches!(update, ParentUpdate::Root) {
+            self.explicit_roots.insert(id.into());
+        } else {
+            self.explicit_roots.remove(id);
         }
     }
 
-    fn observe_delegation(&mut self, event: &Event, data: &Map<String, Value>) {
+    fn observe_evidence(&mut self, event: &Event, data: &Map<String, Value>) {
+        let Some(join) = &mut self.join else { return };
+        if join.events == MAX_CLAUDE_JOIN_EVENTS {
+            // A partial scan could keep an edge contradicted by a later fact.
+            self.join = None;
+            return;
+        }
+        join.events += 1;
+        join.observe(event, data);
+    }
+}
+
+impl ClaudeJoin {
+    fn observe(&mut self, event: &Event, data: &Map<String, Value>) {
+        let (Some(session), Some(namespace)) = (
+            join_id(data, "provider_session_id"),
+            Namespace::from_event(event),
+        ) else {
+            return;
+        };
+        let scope = self
+            .namespaces
+            .entry(stable_id(&namespace, ""))
+            .or_insert_with(|| {
+                Some(DelegationClaims {
+                    session: session.into(),
+                    ..Default::default()
+                })
+            });
+        if scope
+            .as_ref()
+            .is_some_and(|claims| claims.session.as_str() != session)
+        {
+            *scope = None;
+        }
+        let Some(claims) = scope else { return };
+
         let child =
             join_id(data, "provider_agent_id").zip(join_id(data, "provider_parent_tool_use_id"));
-        let call = if event.kind == "delegation.declared"
+        if event.kind == "delegation.declared"
             && matches!(
                 data.get("delegation_tool").and_then(Value::as_str),
                 Some("Agent" | "Task")
-            ) {
-            let emitter = if data.contains_key("provider_agent_id") {
-                join_id(data, "provider_agent_id")
-            } else if data
-                .get("provider_parent_tool_use_id")
-                .is_none_or(Value::is_null)
-            {
-                join_id(data, "provider_session_id")
-            } else {
-                None
-            };
-            join_id(data, "provider_tool_use_id").zip(emitter)
-        } else {
-            None
-        };
-        if (call.is_some() || child.is_some())
-            && let Some(namespace) = Namespace::from_event(event)
+            )
+            && let Some((call, emitter)) =
+                join_id(data, "provider_tool_use_id").zip(join_id(data, "provider_agent_id"))
         {
-            let claims = self
-                .namespaces
-                .entry(stable_id(&namespace, ""))
-                .or_default();
-            if let Some((call, emitter)) = call {
-                record_unique(&mut claims.emitters, call, emitter);
-            }
-            if let Some((child, call)) = child {
-                record_unique(&mut claims.calls_by_child, child, call);
-                record_unique(&mut claims.children_by_call, call, child);
-            }
+            record_unique(&mut claims.emitters, call, emitter);
+        }
+        if let Some((child, call)) = child {
+            record_unique(&mut claims.calls_by_child, child, call);
+            record_unique(&mut claims.children_by_call, call, child);
         }
     }
 
-    fn inferred_parent(&self, id: &str, agent: &DeclaredAgent) -> Option<String> {
-        if !matches!(self.children.get(id), Some(ReadParent::Candidate)) {
-            return None;
-        }
-        let claims = self.namespaces.get(&stable_id(&agent.namespace, ""))?;
+    fn inferred_parent(&self, agent: &DeclaredAgent) -> Option<String> {
+        let claims = self
+            .namespaces
+            .get(&stable_id(&agent.namespace, ""))?
+            .as_ref()?;
         let call = claims
             .calls_by_child
             .get(&agent.provider_agent_id)?
@@ -189,7 +220,7 @@ impl DeclaredAgentProjection {
         };
         if event.kind != "agent.declared" {
             if let Some(read) = read {
-                read.observe_delegation(event, data);
+                read.observe_evidence(event, data);
             }
             return;
         }
@@ -202,8 +233,8 @@ impl DeclaredAgentProjection {
         let id = stable_id(&namespace, &provider_agent_id);
         let parent = parent_update(data);
         if let Some(read) = read {
+            read.observe_evidence(event, data);
             read.observe_parent(&id, !self.agents.contains_key(&id), &parent);
-            read.observe_delegation(event, data);
         }
         let agent = self.agents.entry(id).or_insert_with(|| DeclaredAgent {
             namespace,
@@ -302,10 +333,11 @@ impl DeclaredAgentProjection {
         }
         let explicit_cycles = cycle_members(&parents);
         let mut inferred = BTreeSet::new();
-        if let Some(read) = &read {
-            for (id, agent) in &self.agents {
-                if agent.provider_parent_agent_id.is_none()
-                    && let Some(parent_id) = read.inferred_parent(id, agent)
+        if let Some(join) = read.as_ref().and_then(|read| read.join.as_ref()) {
+            for id in &join.candidates {
+                if let Some(agent) = self.agents.get(id)
+                    && agent.provider_parent_agent_id.is_none()
+                    && let Some(parent_id) = join.inferred_parent(agent)
                     && self.agents.contains_key(&parent_id)
                 {
                     inferred.insert(id.clone());
@@ -389,7 +421,7 @@ impl DeclaredAgentProjection {
                     if parent_id.is_some() && inferred_edge {
                         item["field_provenance"]["parent_id"] = json!("inferred");
                     } else if agent.provider_parent_agent_id.is_none()
-                        && !matches!(read.children.get(&id), Some(ReadParent::ExplicitRoot))
+                        && !read.explicit_roots.contains(&id)
                         && let Some(fields) = item["field_provenance"].as_object_mut()
                     {
                         fields.remove("parent_id");
