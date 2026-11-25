@@ -15,7 +15,7 @@ use agentsandbox::{
         MAX_CERTIFICATE_BYTES, MAX_PASSWORD_BYTES, MAX_PRIVATE_KEY_BYTES, MysqlAuthentication,
         MysqlClientIdentity, MysqlCredentials, MysqlEndpoint,
         audit::{AuditHead, MysqlAuditStore},
-        probe,
+        preflight_owned_preparation, probe,
     },
     redaction::Redactor,
     tenancy::validate_tenant_id,
@@ -31,7 +31,7 @@ use std::{
 };
 use uuid::Uuid;
 
-const USAGE: &str = "usage: mysql_storage_probe <private JSON file> | --registry <file> --tenant <id> [--verify-control-projections | --verify-owned-origin <server-uuid> <head-seq> <head-hash>]";
+const USAGE: &str = "usage: mysql_storage_probe <private JSON file> | --registry <file> --tenant <id> [--verify-control-projections | --verify-owned-origin <server-uuid> <head-seq> <head-hash> | --preflight-owned-prepare <server-uuid> <14|15>]";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -71,6 +71,10 @@ enum RegistryVerification {
         server: Uuid,
         head_seq: i64,
         head_hash: String,
+    },
+    OwnedPreparation {
+        server: Uuid,
+        schema_version: u16,
     },
 }
 
@@ -160,6 +164,28 @@ fn parse_invocation(mut arguments: impl Iterator<Item = OsString>) -> Result<Inv
                 server,
                 head_seq,
                 head_hash,
+            }
+        }
+        Some(flag) if flag.as_os_str() == "--preflight-owned-prepare" => {
+            let server_text = arguments
+                .next()
+                .context(USAGE)?
+                .into_string()
+                .map_err(|_| anyhow!("{USAGE}"))?;
+            let server = Uuid::parse_str(&server_text).map_err(|_| anyhow!("{USAGE}"))?;
+            ensure!(
+                !server.is_nil() && server.to_string() == server_text,
+                "{USAGE}"
+            );
+            let format = arguments.next().context(USAGE)?;
+            let schema_version = match format.to_str() {
+                Some("14") => 14,
+                Some("15") => 15,
+                _ => bail!("{USAGE}"),
+            };
+            RegistryVerification::OwnedPreparation {
+                server,
+                schema_version,
             }
         }
         Some(_) => bail!("{USAGE}"),
@@ -310,32 +336,53 @@ async fn check_target(
             };
             // The constructor takes the defaults for mutations. verify uses a
             // read-only transaction without applying the mutation capacity.
-            let store = MysqlAuditStore::new(
-                endpoint,
-                credentials,
-                binding.tenant,
-                binding.namespace,
-                Redactor::new(Vec::new()),
-                DEFAULT_MAX_EVENTS as i64,
-            )?;
-            let (audit_head, control_projections_verified, verification_mode) =
-                match binding.verification {
-                    RegistryVerification::Binding => (store.verify().await?, None, None),
-                    RegistryVerification::ControlProjections => {
-                        (store.verify_control_projections().await?, Some(true), None)
-                    }
-                    RegistryVerification::OwnedOrigin {
-                        server,
-                        head_seq,
-                        head_hash,
-                    } => (
-                        store
-                            .verify_owned_origin(server, head_seq, &head_hash)
-                            .await?,
-                        Some(true),
-                        Some("owned_origin_preflight"),
-                    ),
-                };
+            let bound_store = |endpoint, credentials| {
+                MysqlAuditStore::new(
+                    endpoint,
+                    credentials,
+                    binding.tenant,
+                    binding.namespace,
+                    Redactor::new(Vec::new()),
+                    DEFAULT_MAX_EVENTS as i64,
+                )
+            };
+            let (audit_head, control_projections_verified, verification_mode) = match binding
+                .verification
+            {
+                RegistryVerification::Binding => (
+                    bound_store(endpoint, credentials)?.verify().await?,
+                    None,
+                    None,
+                ),
+                RegistryVerification::ControlProjections => (
+                    bound_store(endpoint, credentials)?
+                        .verify_control_projections()
+                        .await?,
+                    Some(true),
+                    None,
+                ),
+                RegistryVerification::OwnedOrigin {
+                    server,
+                    head_seq,
+                    head_hash,
+                } => (
+                    bound_store(endpoint, credentials)?
+                        .verify_owned_origin(server, head_seq, &head_hash)
+                        .await?,
+                    Some(true),
+                    Some("owned_origin_preflight"),
+                ),
+                RegistryVerification::OwnedPreparation {
+                    server,
+                    schema_version,
+                } => {
+                    let receipt =
+                        preflight_owned_preparation(endpoint, credentials, server, schema_version)
+                            .await?;
+                    println!("{}", serde_json::to_string(&receipt)?);
+                    return Ok(());
+                }
+            };
             serde_json::to_string(&BoundTargetReceipt {
                 configured_authentication,
                 binding_verified: true,
@@ -455,6 +502,40 @@ mod tests {
         ] {
             assert!(parse(args).is_err());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn owned_preparation_preflight_requires_an_explicit_uuid_and_format() -> Result<()> {
+        let server = "01234567-89ab-4def-8012-3456789abcde";
+        let parse = |server: &str, version: &str| {
+            parse_invocation(
+                [
+                    "--registry",
+                    "tenants.json",
+                    "--tenant",
+                    "b",
+                    "--preflight-owned-prepare",
+                    server,
+                    version,
+                ]
+                .into_iter()
+                .map(OsString::from),
+            )
+        };
+        for format in [14_u16, 15] {
+            assert!(matches!(
+                parse(server, &format.to_string())?,
+                Invocation::Registry {
+                    tenant,
+                    verification: RegistryVerification::OwnedPreparation { server: observed, schema_version },
+                    ..
+                } if tenant == "b" && observed.to_string() == server && schema_version == format
+            ));
+        }
+        assert!(parse(server, "1").is_err());
+        assert!(parse(server, "16").is_err());
+        assert!(parse("00000000-0000-0000-0000-000000000000", "14").is_err());
         Ok(())
     }
 
