@@ -1,4 +1,4 @@
-use super::super::fresh_anchor::FreshAnchorRequestV1;
+use super::super::fresh_anchor::{ConfiguredTenantNamespace, FreshAnchorRequestV1};
 use super::{EmptyTargetOperation, MysqlOwnedPreparationRefusal, prepare_empty_owned_target};
 use crate::{
     control_fs::PrivateFile,
@@ -93,7 +93,14 @@ async fn owned_audit_tables_remain_unpublished_and_refuse_reentry() -> Result<()
                 credentials(),
                 server,
                 version,
-                EmptyTargetOperation::InstallUnpublishedTables(&anchor, &redactor),
+                EmptyTargetOperation::InstallUnpublishedTables {
+                    request: &anchor,
+                    configured: ConfiguredTenantNamespace {
+                        tenant_id: &tenant.tenant_id,
+                        namespace_id: profile.namespace,
+                    },
+                    redactor: &redactor,
+                },
             )
         };
         install().await?;

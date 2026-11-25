@@ -20,7 +20,9 @@ const KIND: &str = "control.mysql.owned.source_anchor";
 const REQUEST_HASH_DOMAIN: &str = "ai-guard:mysql-owned:fresh-anchor-request:v1";
 const REPLAY_CONFLICT: &str = "MySQL fresh anchor differs from the requested operation";
 
-/// Expected operator input. Physical observations and receipts are kept out of it.
+/// The operator fixes the intended tenant, namespace, installation and source
+/// for creation, and names the expected physical target. The installation and
+/// source IDs are proposed assignments. The live lock attests the SQL target.
 #[derive(Clone, Serialize)]
 pub(super) struct FreshAnchorRequestV1 {
     pub(super) operation_id: Uuid,
@@ -33,6 +35,13 @@ pub(super) struct FreshAnchorRequestV1 {
     pub(super) schema: String,
 }
 
+/// Tenant and namespace resolved from the selected storage configuration.
+#[derive(Clone, Copy)]
+pub(super) struct ConfiguredTenantNamespace<'a> {
+    pub(super) tenant_id: &'a str,
+    pub(super) namespace_id: Uuid,
+}
+
 #[derive(Serialize)]
 struct FreshAnchorFactV1<'a> {
     version: u8,
@@ -40,8 +49,9 @@ struct FreshAnchorFactV1<'a> {
     request_hash: String,
 }
 
-/// A validated draft. Only an observed row can yield a receipt.
-pub(super) struct PlannedAnchor<'a> {
+/// A checked request and its draft event. A matching historical row yields a
+/// row receipt. Complete source verification and publication remain separate.
+pub(super) struct FreshAnchorDraft<'a> {
     request: &'a FreshAnchorRequestV1,
     event: Event,
 }
@@ -52,8 +62,9 @@ impl FreshAnchorRequestV1 {
         version: u16,
         server: Uuid,
         schema: &str,
+        configured: ConfiguredTenantNamespace<'_>,
         redactor: &Redactor,
-    ) -> Result<PlannedAnchor<'_>> {
+    ) -> Result<FreshAnchorDraft<'_>> {
         validate_tenant_id(&self.tenant_id)?;
         ensure!(
             request_shape_is_valid(self.schema_version, &self.schema)
@@ -72,6 +83,10 @@ impl FreshAnchorRequestV1 {
             self.schema_version == version && self.server_uuid == server && self.schema == schema,
             "MySQL fresh anchor request differs from the selected target"
         );
+        ensure!(
+            self.tenant_id == configured.tenant_id && self.namespace_id == configured.namespace_id,
+            "MySQL fresh anchor request differs from the configured tenant or namespace"
+        );
         let mut event = Event::new(KIND);
         event.id = self.operation_id.to_string();
         event.source = "mysql-storage".into();
@@ -87,16 +102,16 @@ impl FreshAnchorRequestV1 {
             serde_json::to_value(&event)? == expected,
             "MySQL fresh anchor would change under redaction"
         );
-        Ok(PlannedAnchor {
+        Ok(FreshAnchorDraft {
             request: self,
             event,
         })
     }
 }
 
-impl PlannedAnchor<'_> {
-    /// Inspect a possible replay diagnostically. The caller still refuses to
-    /// prepare a nonempty target, even on an exact match.
+impl FreshAnchorDraft<'_> {
+    /// Check a historical row under the observed server, schema and session
+    /// lock. The caller's refusal to prepare a nonempty target still applies.
     pub(super) async fn reject_divergence(
         &self,
         conn: &mut Conn,
@@ -138,13 +153,17 @@ impl PlannedAnchor<'_> {
         if table != Some(1) {
             return Ok(None);
         }
+        let operation_id = self.request.operation_id.to_string();
+        let id = operation_id.as_bytes();
+        // Keep the indexed lookup and make exact binary equality explicit.
         let mut rows: Vec<Row> = tx
             .exec(
                 "SELECT e.seq,e.event_id,e.received_at,e.prev_hash,e.hash, \
                     IF(OCTET_LENGTH(e.payload) <= 131072,e.payload,NULL),p.hash \
              FROM ai_guard_audit_event e LEFT JOIN ai_guard_audit_event p ON p.seq=e.seq-1 \
-             WHERE e.event_id=? AND BINARY e.event_id=BINARY ? LIMIT 2",
-                (&self.event.id, &self.event.id),
+             WHERE e.event_id=CAST(? AS BINARY) \
+             AND CAST(e.event_id AS BINARY)=CAST(? AS BINARY) LIMIT 2",
+                (id, id),
             )
             .await
             .map_err(driver_error)?;
@@ -170,7 +189,11 @@ impl PlannedAnchor<'_> {
         row: EventColumns,
         predecessor: Option<&str>,
     ) -> Result<HumanAuthorityMarkerReceiptV1> {
-        ensure!(row.5.len() <= 131_072, REPLAY_CONFLICT);
+        let operation_id = self.request.operation_id.to_string();
+        ensure!(
+            recorded_row_matches(&operation_id, &row.1, row.5.len()),
+            REPLAY_CONFLICT
+        );
         let raw = row.5.clone();
         let computed = digest(row.0, &row.2, &row.3, &row.5);
         let stored = decode_event_columns(row)
@@ -221,16 +244,24 @@ mod contract_tests {
         }
     }
 
-    fn plan(request: &FreshAnchorRequestV1) -> Result<PlannedAnchor<'_>> {
+    fn configured(request: &FreshAnchorRequestV1) -> ConfiguredTenantNamespace<'_> {
+        ConfiguredTenantNamespace {
+            tenant_id: &request.tenant_id,
+            namespace_id: request.namespace_id,
+        }
+    }
+
+    fn plan(request: &FreshAnchorRequestV1) -> Result<FreshAnchorDraft<'_>> {
         request.plan(
             request.schema_version,
             request.server_uuid,
             &request.schema,
+            configured(request),
             &Redactor::new(Vec::new()),
         )
     }
 
-    fn encoded_row(anchor: &PlannedAnchor<'_>) -> Result<EventColumns> {
+    fn encoded_row(anchor: &FreshAnchorDraft<'_>) -> Result<EventColumns> {
         let mut event = anchor.event.clone();
         event.timestamp = "2026-11-25T00:00:00.000Z".into();
         let (event, payload) = prepare_event(&Redactor::new(Vec::new()), event)?;
@@ -260,6 +291,7 @@ mod contract_tests {
                     15,
                     request.server_uuid,
                     &request.schema,
+                    configured(&request),
                     &Redactor::new(Vec::new())
                 )
                 .is_err()
@@ -270,6 +302,7 @@ mod contract_tests {
                     14,
                     request.server_uuid,
                     &request.schema,
+                    configured(&request),
                     &Redactor::new(vec![request.schema.clone()])
                 )
                 .is_err()
@@ -288,11 +321,46 @@ mod contract_tests {
     }
 
     #[test]
+    fn fresh_anchor_rejects_a_conflicting_configured_tenant_or_namespace() {
+        let request = request();
+        let redactor = Redactor::new(Vec::new());
+        for configured in [
+            ConfiguredTenantNamespace {
+                tenant_id: "tenant_b",
+                ..configured(&request)
+            },
+            ConfiguredTenantNamespace {
+                namespace_id: Uuid::from_u128(6),
+                ..configured(&request)
+            },
+        ] {
+            assert!(
+                request
+                    .plan(
+                        14,
+                        request.server_uuid,
+                        &request.schema,
+                        configured,
+                        &redactor
+                    )
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn fresh_anchor_replays_only_the_same_operation_and_canonical_request() -> Result<()> {
         let original = request();
         let row = encoded_row(&plan(&original)?)?;
         let receipt = plan(&original)?.verify_recorded(row.clone(), Some(&row.3))?;
         assert_eq!((receipt.seq, receipt.hash), (row.0, row.4.clone()));
+        let mut wrong_id = row.clone();
+        wrong_id.1 = Uuid::from_u128(6).to_string();
+        assert!(
+            plan(&original)?
+                .verify_recorded(wrong_id, Some(&row.3))
+                .is_err()
+        );
         for changed in [
             FreshAnchorRequestV1 {
                 schema_version: 15,
@@ -344,6 +412,10 @@ fn request_shape_is_valid(version: u16, schema: &str) -> bool {
         && !schema.chars().any(char::is_control)
 }
 
+fn recorded_row_matches(requested_id: &str, stored_id: &str, payload_len: usize) -> bool {
+    stored_id.as_bytes() == requested_id.as_bytes() && payload_len <= 131_072
+}
+
 fn receipt_matches(
     sequence: i64,
     previous: &str,
@@ -357,7 +429,28 @@ fn receipt_matches(
 
 #[cfg(test)]
 mod replay_tests {
-    use super::{receipt_matches, request_shape_is_valid};
+    use super::{receipt_matches, recorded_row_matches, request_shape_is_valid};
+
+    #[test]
+    fn fresh_anchor_rejects_a_divergent_stored_event_id() {
+        let expected = "abcdef00-0000-0000-0000-000000000001";
+        assert!(recorded_row_matches(expected, expected, 512));
+        assert!(!recorded_row_matches(
+            expected,
+            "abcdef00-0000-0000-0000-000000000002",
+            512
+        ));
+        assert!(!recorded_row_matches(
+            expected,
+            "ABCDEF00-0000-0000-0000-000000000001",
+            512
+        ));
+        assert!(!recorded_row_matches(
+            expected,
+            "abcdef00-0000-0000-0000-000000000001 ",
+            512
+        ));
+    }
 
     #[test]
     fn fresh_anchor_shape_is_bounded_and_format_closed() {

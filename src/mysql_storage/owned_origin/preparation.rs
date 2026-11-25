@@ -1,6 +1,9 @@
 //! Read-only operator preflight for a fresh owned MySQL schema.
 
-use super::{OwnedAuditLock, decode_row, driver_error, fresh_anchor::FreshAnchorRequestV1};
+use super::{
+    OwnedAuditLock, decode_row, driver_error,
+    fresh_anchor::{ConfiguredTenantNamespace, FreshAnchorRequestV1},
+};
 use crate::mysql_storage::{
     MysqlAuthentication, MysqlCredentials, MysqlEndpoint, MysqlProbeError, PROBE_TIMEOUT,
     connect_options, open_verified,
@@ -96,7 +99,11 @@ enum EmptyTargetOperation<'a> {
             reason = "internal installation step pending owned publication"
         )
     )]
-    InstallUnpublishedTables(&'a FreshAnchorRequestV1, &'a Redactor),
+    InstallUnpublishedTables {
+        request: &'a FreshAnchorRequestV1,
+        configured: ConfiguredTenantNamespace<'a>,
+        redactor: &'a Redactor,
+    },
 }
 
 async fn prepare_empty_owned_target(
@@ -133,10 +140,19 @@ async fn prepare_empty_owned_target(
                 EmptyTargetOperation::Inspect => {
                     check_empty_schema(&mut conn, &ownership).await.map(|_| ())
                 }
-                EmptyTargetOperation::InstallUnpublishedTables(request, redactor) => {
+                EmptyTargetOperation::InstallUnpublishedTables {
+                    request,
+                    configured,
+                    redactor,
+                } => {
                     let redactor = redactor.with_secrets([password.to_owned()]);
-                    let anchor =
-                        request.plan(schema_version, server, endpoint.database, &redactor)?;
+                    let anchor = request.plan(
+                        schema_version,
+                        server,
+                        endpoint.database,
+                        configured,
+                        &redactor,
+                    )?;
                     match check_empty_schema(&mut conn, &ownership).await {
                         Ok(target) => audit_tables::install(target, schema_version).await,
                         Err(error) => {
