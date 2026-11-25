@@ -40,23 +40,19 @@ une cible réservée, sans administration concurrente du schéma ni autre
 
 ## Compte opérateur du prévol
 
-Provisionner un compte TLS dédié, distinct du compte de service du gateway.
-Pour rester au périmètre de la cible, utiliser une seule attribution directe
-au schéma exact qui réunit `SELECT`, `SHOW VIEW`, `ALTER ROUTINE`, `EVENT`,
-`TRIGGER` et `CREATE`, sans rôle actif. Échapper les caractères `_` et `%`
-du nom de la base lorsque `partial_revokes` est désactivé. Lorsqu’il est
-activé, le nom de la portée doit correspondre littéralement à la base.
-L’opérateur réserve un nom d’utilisateur unique sur le serveur, sans autre
-entrée hôte ni droit anonyme concurrent applicable, et maintient les droits
-et `partial_revokes` stables pendant le contrôle. `SHOW GRANTS FOR CURRENT_USER()`
-détaille les attributions directes du compte courant.
+Réserver un compte TLS à l’opérateur chargé du prévol et de la future
+préparation. Pour établir la visibilité du catalogue, le prévol exige les
+droits directs `SELECT`, `SHOW VIEW`, `ALTER ROUTINE`, `EVENT`, `TRIGGER` et
+`CREATE` à la portée globale. Il refuse toute révocation affichée et exige
+l’absence de rôle actif si `partial_revokes` est activé. Les droits restent
+stables pendant le contrôle. Le gateway et les autres comptes runtime
+gardent leurs droits bornés au tenant.
 
-Le prévol accepte aussi les droits globaux directs complets en l’absence de
-révocation et sans rôle actif si `partial_revokes` est activé. Pour la preuve
-par schéma, une seconde portée schéma rend la sélection incertaine et produit
-`CatalogVisibilityUnconfirmed`
-avant l’inventaire. Le gateway garde les droits de service sur les objets
-préparés. [Sélection des droits MySQL](https://dev.mysql.com/doc/refman/8.4/en/request-access.html) · [GRANT MySQL](https://dev.mysql.com/doc/refman/8.4/en/grant.html) · [SHOW GRANTS MySQL](https://dev.mysql.com/doc/refman/8.4/en/show-grants.html)
+`SHOW GRANTS FOR CURRENT_USER()` décrit le compte courant. La sélection
+effective des droits de schéma peut dépendre d’une autre entrée hôte pour le
+même nom d’utilisateur. Un grant de schéma exact ou une attestation
+d’unicité laisse donc la visibilité non prouvée. Un compte limité au schéma
+reçoit `CatalogVisibilityUnconfirmed` avant l’inventaire. [Sélection des droits MySQL](https://dev.mysql.com/doc/refman/8.4/en/request-access.html) · [SHOW GRANTS MySQL](https://dev.mysql.com/doc/refman/8.4/en/show-grants.html)
 
 ## Décision requise avant raccordement
 
@@ -72,9 +68,14 @@ ne qualifie pas ce provisionnement owned.
 
 ## Témoins à exécuter sur cibles jetables
 
-- Le prévol distingue base vide, préparation interrompue et Legacy. À
-  l’installation, comparer inventaire et état durable avant/après chaque refus
-  et vérifier qu’aucune instruction mutante n’a été émise sur la cible refusée.
+- Le prévol distingue base vide, préparation interrompue et Legacy. Pour
+  `owned_preparation::owned_preflight_refuses_interrupted_and_legacy_schemas`,
+  renseigner le compte opérateur dans `maintenance_username` de la configuration
+  `AI_GUARD_MYSQL_OWNED_PREPARATION_QA_CONFIG`. La fixture pose la sentinelle
+  Legacy et requiert aussi `INSERT` sur le schéma de recette.
+  À l’installation, comparer inventaire et état durable avant/après chaque
+  refus et vérifier qu’aucune instruction mutante n’a été émise sur la cible
+  refusée.
 - L’oracle `owned_preparation::legacy_store_refuses_uncommitted_and_owned_version_state`
   exerce le Store Legacy sur deux cibles distinctes. Il couvre base vide,
   premier DDL seul, sentinelle absente, sentinelle encore non commise puis

@@ -83,7 +83,7 @@ pub async fn preflight_owned_preparation(
                 return Err(error);
             }
         };
-        let checked = check_empty_schema(&mut conn, &ownership, endpoint.database).await;
+        let checked = check_empty_schema(&mut conn, &ownership).await;
         let released = ownership.release(&mut conn).await;
         conn.disconnect().await.map_err(driver_error)?;
         released?;
@@ -99,13 +99,9 @@ pub async fn preflight_owned_preparation(
     .map_err(|_| MysqlProbeError::TimedOut)?
 }
 
-async fn check_empty_schema(
-    conn: &mut Conn,
-    ownership: &OwnedAuditLock,
-    database: &str,
-) -> Result<()> {
+async fn check_empty_schema(conn: &mut Conn, ownership: &OwnedAuditLock) -> Result<()> {
     ownership.verify(conn).await?;
-    require_catalog_visibility(conn, database).await?;
+    require_catalog_visibility(conn).await?;
     let row = conn.query_first::<Row, _>(
         "SELECT EXISTS (SELECT 1 FROM information_schema.TABLES WHERE BINARY TABLE_SCHEMA = BINARY DATABASE()) \
          OR EXISTS (SELECT 1 FROM information_schema.ROUTINES WHERE BINARY ROUTINE_SCHEMA = BINARY DATABASE()) \
@@ -127,10 +123,10 @@ async fn check_empty_schema(
     ownership.verify(conn).await
 }
 
-async fn require_catalog_visibility(conn: &mut Conn, database: &str) -> Result<()> {
+async fn require_catalog_visibility(conn: &mut Conn) -> Result<()> {
     // INFORMATION_SCHEMA hides objects from accounts lacking privileges.
-    // Require direct grants spanning the selected schema or the server. A
-    // role-only grant or partial revoke yields no proof in this preflight.
+    // Only direct global grants prove visibility independently of MySQL's
+    // choice of a schema grant, which can depend on another host entry.
     let row = conn
         .query_first::<Row, _>("SELECT CURRENT_ROLE(), @@GLOBAL.partial_revokes")
         .await
@@ -156,58 +152,27 @@ async fn require_catalog_visibility(conn: &mut Conn, database: &str) -> Result<(
     }
     result.drop_result().await.map_err(driver_error)?;
     ensure!(
-        grants_cover_catalog(
-            grants.iter().map(String::as_str),
-            database,
-            partial_revokes == 1,
-            role != "NONE",
-        ),
+        global_grants_cover_catalog(grants.iter().map(String::as_str)),
         MysqlOwnedPreparationRefusal::CatalogVisibilityUnconfirmed
     );
     Ok(())
 }
 
-fn grants_cover_catalog<'a>(
-    grants: impl IntoIterator<Item = &'a str>,
-    database: &str,
-    partial_revokes: bool,
-    roles_active: bool,
-) -> bool {
-    let name = database.replace('`', "``");
-    let literal_name = if partial_revokes {
-        name
-    } else {
-        name.replace('%', "\\%").replace('_', "\\_")
-    };
-    let literal_scope = format!("`{literal_name}`.* TO ");
-    let mut global_proves_visibility = false;
-    let mut schema_grants = 0;
-    let mut schema_proves_visibility = false;
+fn global_grants_cover_catalog<'a>(grants: impl IntoIterator<Item = &'a str>) -> bool {
+    let mut has_global_visibility = false;
     for grant in grants {
         if grant.starts_with("REVOKE ") {
             return false;
         }
-        let Some((privileges, target)) = grant
+        let Some((privileges, _)) = grant
             .strip_prefix("GRANT ")
-            .and_then(|grant| grant.split_once(" ON "))
+            .and_then(|grant| grant.split_once(" ON *.* TO "))
         else {
             continue;
         };
-        if target.starts_with("*.* TO ") {
-            global_proves_visibility |= privileges_cover_catalog(privileges);
-        } else if target.contains(".* TO ") {
-            // MySQL can use only the first matching schema grant. Count any
-            // other schema grant as a possible competitor without matching patterns.
-            schema_grants += 1;
-            schema_proves_visibility |=
-                target.starts_with(&literal_scope) && privileges_cover_catalog(privileges);
-        }
+        has_global_visibility |= privileges_cover_catalog(privileges);
     }
-    global_proves_visibility
-        || (!roles_active
-            && !database.contains('\\')
-            && schema_grants == 1
-            && schema_proves_visibility)
+    has_global_visibility
 }
 
 fn privileges_cover_catalog(privileges: &str) -> bool {
@@ -226,36 +191,26 @@ fn privileges_cover_catalog(privileges: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::grants_cover_catalog;
+    use super::global_grants_cover_catalog;
 
     const GLOBAL: &str = "GRANT SELECT, SHOW VIEW, ALTER ROUTINE, EVENT, TRIGGER, CREATE ON *.* TO `prepare`@`localhost`";
 
     #[test]
-    fn owned_catalog_requires_schema_wide_visibility_without_a_partial_revoke() {
-        let schema = "qa_owned";
-        let scoped = "GRANT ALL PRIVILEGES ON `qa_owned`.* TO `prepare`@`localhost`";
+    fn owned_catalog_requires_direct_global_visibility_without_a_partial_revoke() {
+        let scoped = "GRANT ALL PRIVILEGES ON `qaowned`.* TO `prepare`@`localhost`";
         let literal = "GRANT SELECT, CREATE, SHOW VIEW, ALTER ROUTINE, EVENT, TRIGGER ON `qa\\_owned`.* TO `prepare`@`localhost`";
         let revoke = "REVOKE EVENT ON `qa_owned`.* FROM `prepare`@`localhost`";
-        assert!(!grants_cover_catalog([scoped], schema, false, false));
-        assert!(grants_cover_catalog([scoped], schema, true, false));
-        assert!(grants_cover_catalog([GLOBAL], schema, true, false));
-        assert!(grants_cover_catalog([literal], schema, false, false));
-        assert!(!grants_cover_catalog([literal], schema, false, true));
-        assert!(!grants_cover_catalog([literal], schema, true, false));
-        assert!(!grants_cover_catalog([GLOBAL, revoke], schema, true, false));
-        assert!(!grants_cover_catalog([scoped], "qa_other", false, false));
-        assert!(!grants_cover_catalog(
-            ["GRANT SELECT ON `qa_owned`.* TO `prepare`@`localhost`"],
-            schema,
-            false,
-            false
-        ));
-        assert!(!grants_cover_catalog(
-            ["GRANT `prepare_role`@`localhost` TO `prepare`@`localhost`"],
-            schema,
-            false,
-            false
-        ));
+        assert!(global_grants_cover_catalog([GLOBAL]));
+        assert!(!global_grants_cover_catalog([scoped]));
+        assert!(!global_grants_cover_catalog([literal]));
+        assert!(!global_grants_cover_catalog([GLOBAL, revoke]));
+        assert!(!global_grants_cover_catalog([
+            "GRANT SELECT ON *.* TO `prepare`@`localhost`",
+            literal,
+        ]));
+        assert!(!global_grants_cover_catalog([
+            "GRANT `prepare_role`@`localhost` TO `prepare`@`localhost`",
+        ]));
     }
 
     #[test]
@@ -265,23 +220,8 @@ mod tests {
             "GRANT ALTER ROUTINE, EVENT, TRIGGER, CREATE ON `qa_owned`.* TO `prepare`@`localhost`";
         let exact = "GRANT ALL PRIVILEGES ON `qa\\_owned`.* TO `prepare`@`localhost`";
 
-        assert!(!grants_cover_catalog(
-            [escaped, wildcard],
-            "qa_owned",
-            false,
-            false
-        ));
-        assert!(!grants_cover_catalog(
-            [wildcard, exact],
-            "qa_owned",
-            false,
-            false
-        ));
-        assert!(grants_cover_catalog(
-            [wildcard, exact, GLOBAL],
-            "qa_owned",
-            false,
-            false
-        ));
+        assert!(!global_grants_cover_catalog([escaped, wildcard]));
+        assert!(!global_grants_cover_catalog([wildcard, exact]));
+        assert!(global_grants_cover_catalog([wildcard, exact, GLOBAL]));
     }
 }
