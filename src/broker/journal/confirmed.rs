@@ -5,6 +5,10 @@ use crate::{
     control::WorkerTransitionV1,
 };
 
+#[cfg(test)]
+#[path = "confirmed_egress_tests.rs"]
+mod egress_tests;
+
 #[derive(Clone)]
 pub(super) struct ConfirmedChainV1 {
     pub payload: LoadedCheckpoint,
@@ -303,7 +307,7 @@ pub(super) fn check_transition(
     legacy_managed_seen: bool,
     last_cancel_operations: Option<usize>,
 ) -> JournalResult<()> {
-    validate_egress_release_transition(previous, next)?;
+    validate_egress_transition(previous, next)?;
     if let Some(profile) = previous
         .runner()
         .broker_context()
@@ -375,30 +379,32 @@ pub(super) fn check_transition(
     }
 }
 
-/// A release intent may be first recorded only on an already acknowledged
-/// Running attempt with no durable STOP. Later revisions preserve it byte for
-/// byte, even after the worker stops or its terminal audit is reconciled.
-fn validate_egress_release_transition(
+/// Append the request after the Running acknowledgement, then the intent
+/// after the request. Both records survive later STOP and reconciliation.
+fn validate_egress_transition(
     previous: &LoadedCheckpoint,
     next: &LoadedCheckpoint,
 ) -> JournalResult<()> {
     let old = previous.runner().broker_context();
     let new = next.runner().broker_context();
-    if old.egress_release == new.egress_release {
+    if old.egress_opening == new.egress_opening && old.egress_release == new.egress_release {
         return Ok(());
     }
-    let (None, Some(release), Some(previous_lifecycle), Some(lifecycle)) = (
-        old.egress_release,
-        new.egress_release,
-        previous.lifecycle(),
-        next.lifecycle(),
-    ) else {
+    let (Some(opening), Some(previous_lifecycle), Some(lifecycle)) =
+        (new.egress_opening, previous.lifecycle(), next.lifecycle())
+    else {
         return Err(JournalError::Conflict);
     };
+    match (old.egress_opening, old.egress_release, new.egress_release) {
+        (None, None, None) => {}
+        (Some(previous_opening), None, Some(release))
+            if previous_opening == opening
+                && release.matches_retained_opening(previous_opening) => {}
+        _ => return Err(JournalError::Conflict),
+    }
     let previous_supervision = previous_lifecycle.broker().supervision();
     let current_supervision = lifecycle.broker().supervision();
-    // This append records only intent. In particular it cannot also acquit
-    // a worker mutation, including one that supersedes the Running receipt.
+    // Neither append can also acknowledge a worker mutation.
     if canonical(previous_supervision)? != canonical(current_supervision)? {
         return Err(JournalError::Conflict);
     }
@@ -418,16 +424,17 @@ fn validate_egress_release_transition(
         latest_worker_ack,
         Some(SupervisionOperationV1::WorkerMutation { request, response: Some(response) })
             if matches!(&request.transition, WorkerTransitionV1::Observe { .. })
-                && release.matches_running_ack(response)
+                && opening.matches_running_ack(response)
     ) && old
         .worker
-        .is_some_and(|worker| release.matches_running(worker))
+        .is_some_and(|worker| opening.matches_running(worker))
         && new
             .worker
-            .is_some_and(|worker| release.matches_running(worker))
-        && !lifecycle
+            .is_some_and(|worker| opening.matches_running(worker))
+        && !previous_lifecycle
             .commands()
             .iter()
+            .chain(lifecycle.commands())
             .any(|entry| matches!(entry.request(), LocalCommandRequestV1::CancelRequested))
     {
         Ok(())

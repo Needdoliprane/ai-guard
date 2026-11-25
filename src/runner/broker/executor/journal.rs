@@ -308,6 +308,35 @@ impl<'a> Execution<'a> {
         )
     }
 
+    /// Retain the exact opening request as history before submitting it.
+    /// A lost writer acknowledgement must keep the caller from making the POST.
+    pub(super) async fn record_egress_opening(
+        &self,
+        target: &crate::runner::egress_release::EgressReleaseTargetV1,
+        request: &crate::control::egress_decision::EgressChannelOpeningRequestV1,
+        running: &MutationResultV1,
+    ) -> Result<()> {
+        let retained = crate::runner::egress_release::RetainedEgressOpeningV1::from_running(
+            target.clone(),
+            request.clone(),
+            running,
+        )?;
+        self.patch(|draft| {
+            self.generation_current()?;
+            ensure!(
+                !draft.cancelled()
+                    && self.generation == retained.generation()
+                    && draft.egress_opening.is_none()
+                    && draft.egress_release.is_none()
+                    && retained.matches_running(draft.worker()?),
+                "bootstrap opening request cannot be published on this head"
+            );
+            draft.egress_opening = Some(Box::new(retained.clone()));
+            Ok(())
+        })
+        .await
+    }
+
     /// Publish intent without turning an unknown writer reply into authority.
     /// The live callback is responsible for the final stop/deadline guard.
     pub(super) async fn record_egress_release_intent<IO>(
@@ -325,6 +354,10 @@ impl<'a> Execution<'a> {
                 !draft.cancelled()
                     && self.generation == intent.generation()
                     && draft.egress_release.is_none()
+                    && draft
+                        .egress_opening
+                        .as_deref()
+                        .is_some_and(|opening| intent.matches_retained_opening(opening))
                     && intent.matches_running(draft.worker()?),
                 "bootstrap release intent cannot be published on this head"
             );

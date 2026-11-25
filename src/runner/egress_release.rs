@@ -1,4 +1,4 @@
-//! Broker-private data for the first, durable bootstrap release intent.
+//! Broker-private data for bootstrap opening reconciliation and release intent.
 //! A decoded record is historical evidence. The runtime still needs a live
 //! opening, its private transport, and the current stop/deadline guard.
 
@@ -8,6 +8,7 @@ use crate::{
         MutationResultV1, NetworkV1, RuntimeStatusV1, WorkerStateV1, WorkerV1,
         egress_decision::{
             EgressBindingV1, EgressChannelOpeningDispositionV1, EgressChannelOpeningReceiptV1,
+            EgressChannelOpeningRequestV1,
         },
     },
     egress::ids::{DigestV1, IdV1},
@@ -168,6 +169,104 @@ impl EgressReleaseTargetV1 {
                         .is_some_and(|start| start.to_utc() == self.started_at)
             })
     }
+
+    fn matches_running_revision(&self, worker: &WorkerV1, revision: u64) -> bool {
+        worker.revision == revision
+            && self.worker_id.as_str() == worker.worker_id
+            && self.attempt_id.as_str() == worker.attempt.attempt_id
+            && self.matches_running(worker)
+    }
+
+    fn matches_running_ack(&self, ack: &MutationResultV1, revision: u64, audit_seq: i64) -> bool {
+        ack.receipt.audit_seq == audit_seq
+            && ack.receipt.revision == Some(revision)
+            && self.matches_running_revision(&ack.worker, revision)
+    }
+}
+
+/// Reconciliation identity retained before the POST. This can be decoded after
+/// a crash and carries neither a channel owner nor permission to send anything.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RetainedEgressOpeningV1 {
+    version: u32,
+    target: EgressReleaseTargetV1,
+    #[serde(deserialize_with = "crate::control::egress_decision::deserialize_object")]
+    request: EgressChannelOpeningRequestV1,
+    worker_revision: u64,
+    running_audit_seq: i64,
+}
+
+impl RetainedEgressOpeningV1 {
+    pub(crate) fn from_running(
+        target: EgressReleaseTargetV1,
+        request: EgressChannelOpeningRequestV1,
+        running: &MutationResultV1,
+    ) -> Result<Self> {
+        let value = Self {
+            version: 1,
+            target,
+            request,
+            worker_revision: running.worker.revision,
+            running_audit_seq: running.receipt.audit_seq,
+        };
+        value.validate_shape()?;
+        ensure!(
+            value.matches_running_ack(running),
+            "bootstrap Running receipt differs"
+        );
+        Ok(value)
+    }
+
+    pub(crate) fn request(&self) -> &EgressChannelOpeningRequestV1 {
+        &self.request
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.target.generation
+    }
+
+    pub(crate) fn matches_running(&self, worker: &WorkerV1) -> bool {
+        self.target
+            .matches_running_revision(worker, self.worker_revision)
+    }
+
+    pub(crate) fn matches_running_ack(&self, running: &MutationResultV1) -> bool {
+        self.target
+            .matches_running_ack(running, self.worker_revision, self.running_audit_seq)
+    }
+
+    fn validate_shape(&self) -> Result<()> {
+        let binding = &self.request.binding;
+        ensure!(
+            self.version == 1
+                && self.request.version == 1
+                && self.worker_revision > 0
+                && self.running_audit_seq > 0
+                && *binding
+                    == self
+                        .target
+                        .binding(binding.channel_id.clone(), binding.epoch)?,
+            "bootstrap opening reconciliation identity is invalid"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn validate_retained(
+        &self,
+        tenant_id: &str,
+        worker: &WorkerV1,
+        authority: &RuntimeAuthority,
+        owned: &OwnedContainerSnapshot,
+    ) -> Result<()> {
+        self.validate_shape()?;
+        ensure!(
+            worker.revision >= self.worker_revision,
+            "bootstrap opening worker revision regressed"
+        );
+        self.target
+            .validate_retained(tenant_id, worker, authority, owned)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,16 +307,23 @@ impl EgressReleaseIntentV1 {
     }
 
     pub(crate) fn matches_running(&self, worker: &WorkerV1) -> bool {
-        worker.revision == self.worker_revision
-            && self.target.worker_id.as_str() == worker.worker_id
-            && self.target.attempt_id.as_str() == worker.attempt.attempt_id
-            && self.target.matches_running(worker)
+        self.target
+            .matches_running_revision(worker, self.worker_revision)
     }
 
     pub(crate) fn matches_running_ack(&self, running: &MutationResultV1) -> bool {
-        self.running_audit_seq == running.receipt.audit_seq
-            && running.receipt.revision == Some(self.worker_revision)
-            && self.matches_running(&running.worker)
+        self.target
+            .matches_running_ack(running, self.worker_revision, self.running_audit_seq)
+    }
+
+    pub(crate) fn matches_retained_opening(&self, retained: &RetainedEgressOpeningV1) -> bool {
+        let request = retained.request();
+        self.target == retained.target
+            && self.worker_revision == retained.worker_revision
+            && self.running_audit_seq == retained.running_audit_seq
+            && self.opening.version == request.version
+            && self.opening.observation_id == request.observation_id
+            && self.opening.binding == request.binding
     }
 
     fn validate_shape(&self) -> Result<()> {

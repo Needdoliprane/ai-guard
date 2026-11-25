@@ -136,11 +136,13 @@ struct Draft {
     helpers: Vec<HelperPreparationV1>,
     operations: Vec<Operation>,
     commands: Vec<LocalCommandV1>,
+    egress_opening: Option<Box<crate::runner::egress_release::RetainedEgressOpeningV1>>,
     egress_release: Option<Box<crate::runner::egress_release::EgressReleaseIntentV1>>,
 }
 impl Draft {
     fn from_job(job: &AcceptedJobV1) -> Result<Self> {
         let supervision = job.broker_checkpoint_v2().map(|cp| cp.supervision());
+        let context = job.checkpoint().broker_context();
         Ok(Self {
             run: BrokerRunState::from_job(job)?,
             helpers: supervision
@@ -153,11 +155,8 @@ impl Draft {
                 .broker_checkpoint_v3()
                 .map(|cp| cp.commands().to_vec())
                 .unwrap_or_default(),
-            egress_release: job
-                .checkpoint()
-                .broker_context()
-                .egress_release
-                .map(|intent| Box::new(intent.clone())),
+            egress_opening: context.egress_opening.cloned().map(Box::new),
+            egress_release: context.egress_release.cloned().map(Box::new),
         })
     }
     fn cancelled(&self) -> bool {
@@ -178,6 +177,7 @@ impl Draft {
             version: 1,
             current_request: self.run.plan.request.clone(),
             managed: self.run.plan.managed.clone(),
+            egress_opening: self.egress_opening.clone(),
             egress_release: self.egress_release.clone(),
         });
         Ok(BrokerCheckpointV3::new(

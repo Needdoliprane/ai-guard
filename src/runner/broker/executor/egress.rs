@@ -163,6 +163,13 @@ impl Execution<'_> {
                 .context("retained egress Running acknowledgement unavailable")?;
             self.require_egress_live(&exec)?;
 
+            boxed_execution_phase(|| {
+                self.record_egress_opening(&plan.target, prepared.opening_request(), &running)
+            })
+            .await
+            .context("retained egress opening request acknowledgement unavailable")?;
+            self.require_egress_live(&exec)?;
+
             let control: Arc<dyn EgressControl> =
                 Arc::new(GatewayEgressControl::new(self.client.clone()));
             let evidence = opening_evidence.insert(EgressOpeningEvidence {
@@ -223,6 +230,7 @@ impl Execution<'_> {
         let worker = draft.worker()?;
         ensure!(
             !draft.cancelled()
+                && draft.egress_opening.is_none()
                 && draft.egress_release.is_none()
                 && worker.state == WorkerStateV1::StartIssued
                 && worker.quota_held
@@ -288,6 +296,7 @@ impl Execution<'_> {
         ensure!(
             fresh
                 && !committed.draft.cancelled()
+                && committed.draft.egress_opening.is_none()
                 && committed.draft.egress_release.is_none()
                 && running.worker.state == WorkerStateV1::Running
                 && running.worker.quota_held
