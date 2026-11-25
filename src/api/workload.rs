@@ -712,8 +712,7 @@ async fn revoke(
             Ok(Json(
                 tenant
                     .store
-                    .sqlite_api()?
-                    .revoke_workload_binding(&input)
+                    .revoke_workload_binding_guarded(&input, tenant.control_guard())
                     .map_err(|error| store_failure(&tenant.store, error))?,
             ))
         })

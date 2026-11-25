@@ -20,12 +20,15 @@ use agentsandbox::{
     model::Event as ModelEvent,
     mysql_storage::{
         MysqlEndpoint, MysqlProbeError,
-        audit::{BatchConflict, ControlGuardRefused, with_control_guard},
+        audit::{BatchConflict, ControlCollision, ControlGuardRefused, with_control_guard},
         probe,
     },
     policy::Policy,
     redaction::Redactor,
-    workload::{WorkloadBindingIssueV1, WorkloadBindingReceiptV1, WorkloadSubjectV1},
+    workload::{
+        WorkloadBindingIssueV1, WorkloadBindingReceiptV1, WorkloadBindingRevocationV1,
+        WorkloadSubjectV1,
+    },
 };
 use reqwest::{Client, StatusCode};
 use sha2::{Digest, Sha256};
@@ -81,6 +84,12 @@ async fn fresh_gateway_schema(fixture: &FixtureFiles) -> Result<Conn> {
 }
 
 async fn fresh_gateway_pair(a: &FixtureFiles, b: &FixtureFiles) -> Result<(Conn, Conn)> {
+    let pair = fresh_isolated_gateway_pair(a, b).await?;
+    require_read_only_witness(b).await?;
+    Ok(pair)
+}
+
+async fn fresh_isolated_gateway_pair(a: &FixtureFiles, b: &FixtureFiles) -> Result<(Conn, Conn)> {
     ensure!(
         a.target.port == b.target.port
             && a.client_identity.is_some() == b.client_identity.is_some()
@@ -126,7 +135,6 @@ async fn fresh_gateway_pair(a: &FixtureFiles, b: &FixtureFiles) -> Result<(Conn,
             );
         }
     }
-    require_read_only_witness(b).await?;
     Ok((conn_a, conn_b))
 }
 
@@ -211,7 +219,11 @@ impl Registry {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_agentsandbox"));
+        self.command_for(Path::new(env!("CARGO_BIN_EXE_agentsandbox")))
+    }
+
+    fn command_for(&self, program: &Path) -> Command {
+        let mut command = Command::new(program);
         command
             .env_clear()
             .env("TMPDIR", &self.root)
@@ -237,7 +249,11 @@ struct Gateway {
 
 impl Gateway {
     async fn start(registry: &Registry) -> Result<Self> {
-        let mut child = registry.command().spawn()?;
+        Self::start_command(registry.command()).await
+    }
+
+    async fn start_command(mut command: Command) -> Result<Self> {
+        let mut child = command.spawn()?;
         let mut stderr = BufReader::new(child.stderr.take().context("stderr missing")?);
         let mut line = String::new();
         timeout(DEADLINE, stderr.read_line(&mut line))
@@ -531,6 +547,195 @@ async fn gateway_appends_to_the_prepared_target_and_replays_after_restart() -> R
     );
     ensure!(audit_snapshot(&mut conn_b).await? == witness_b, "B changed");
     restarted.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires two fresh prepared private MySQL 8.4 QA schemas and a built gateway"]
+async fn gateway_revokes_mysql_workload_binding_and_replays_after_restart() -> Result<()> {
+    let gateway_program = optional_material("AI_GUARD_MYSQL_REVOKE_QA_GATEWAY")
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_agentsandbox")));
+    ensure!(
+        gateway_program.is_absolute() && gateway_program.is_file(),
+        "MySQL revocation QA requires an absolute path to a gateway executable"
+    );
+    let a = FixtureFiles::open_gateway("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_A")?;
+    let b = FixtureFiles::open_gateway("AI_GUARD_MYSQL_IDENTITY_QA_CONFIG_B")?;
+    let (mut conn_a, mut conn_b) = fresh_isolated_gateway_pair(&a, &b).await?;
+    prepare_gateway_target(&mut conn_a, &a, "tenant-a", &DIGEST_A).await?;
+    prepare_gateway_target(&mut conn_b, &b, "tenant-b", &DIGEST_B).await?;
+    let seed = a.target.open(
+        &a.target.maintenance_username,
+        a.credentials(&a.maintenance_password)?,
+        "tenant-a",
+        a.target.namespace,
+        128,
+    )?;
+    let issue = |digest: [u8; 32]| WorkloadBindingIssueV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        credential_id: Uuid::new_v4().to_string(),
+        expected_revision: 0,
+        subject: WorkloadSubjectV1::Broker {
+            broker_id: Uuid::new_v4().to_string(),
+            incarnation_id: Uuid::new_v4().to_string(),
+        },
+        sha256_digest: hex::encode(digest),
+        expires_at: (chrono::Utc::now() + chrono::Duration::minutes(5))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    };
+    let binding = seed
+        .issue_workload_binding(&issue(Sha256::digest(Uuid::new_v4().as_bytes()).into()))
+        .await?;
+    let before_a = audit_snapshot(&mut conn_a).await?;
+    let before_b = audit_snapshot(&mut conn_b).await?;
+
+    // In addition to the audit writer grants, the disposable A service account
+    // needs UPDATE on ai_guard_workload_bindings and INSERT on
+    // ai_guard_workload_binding_history and ai_guard_workload_operations.
+    // B needs SELECT and UPDATE on its own ai_guard_audit_state for FOR UPDATE,
+    // with SELECT alone on the audit events and projections.
+    let registry = Registry::new()?;
+    registry.write(&[
+        registry.entry(&a, "tenant-a", "a")?,
+        registry.entry(&b, "tenant-b", "b")?,
+    ])?;
+    let http = Client::builder().no_proxy().timeout(DEADLINE).build()?;
+    let input = WorkloadBindingRevocationV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        credential_id: binding.credential_id.clone(),
+        expected_revision: binding.revision,
+    };
+    let post = |gateway: &Gateway, token: &str, id: &str, body: &WorkloadBindingRevocationV1| {
+        http.post(gateway.url(&format!("/api/v1/workload-bindings/{id}/revoke")))
+            .bearer_auth(token)
+            .json(body)
+    };
+
+    let gateway = Gateway::start_command(registry.command_for(&gateway_program)).await?;
+    let first = async {
+        let id = &input.credential_id;
+        let viewer = post(&gateway, VIEWER_A, id, &input).send().await?;
+        ensure!(viewer.status() == StatusCode::FORBIDDEN);
+        let wrong_path = post(&gateway, RUNNER_A, &Uuid::new_v4().to_string(), &input)
+            .send()
+            .await?;
+        ensure!(wrong_path.status() == StatusCode::BAD_REQUEST);
+        ensure!(audit_snapshot(&mut conn_a).await? == before_a);
+        ensure!(audit_snapshot(&mut conn_b).await? == before_b);
+
+        let response = post(&gateway, RUNNER_A, id, &input).send().await?;
+        if response.status() == StatusCode::NOT_IMPLEMENTED {
+            let body = response.json::<Value>().await?;
+            ensure!(
+                body["error"]["code"] == "storage_capability_unavailable",
+                "runner A returned an unexpected HTTP 501 refusal"
+            );
+            ensure!(
+                audit_snapshot(&mut conn_a).await? == before_a
+                    && audit_snapshot(&mut conn_b).await? == before_b,
+                "runner A's HTTP 501 changed an audit"
+            );
+            anyhow::bail!("RED: runner A returned HTTP 501 storage_capability_unavailable with both audits unchanged");
+        }
+        ensure!(
+            response.status() == StatusCode::OK,
+            "runner A's workload revocation returned {}",
+            response.status()
+        );
+        let receipt = response.json::<WorkloadBindingReceiptV1>().await?;
+        ensure!(receipt.credential_id == *id && receipt.revision == binding.revision + 1);
+        ensure!(!receipt.replayed && receipt.audit_seq == binding.audit_seq + 1);
+        let committed = audit_snapshot(&mut conn_a).await?;
+        ensure!(
+            committed.1.len() == before_a.1.len() + 1 && committed.1.starts_with(&before_a.1)
+        );
+        ensure!(audit_snapshot(&mut conn_b).await? == before_b);
+
+        let identity_b = http
+            .get(gateway.url("/api/v1/identity"))
+            .bearer_auth(RUNNER_B)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        ensure!(identity_b == json!({"tenant_id": "tenant-b", "role": "runner"}));
+        let wrong_tenant = post(&gateway, RUNNER_B, id, &input).send().await?;
+        ensure!(
+            wrong_tenant.status() == StatusCode::CONFLICT,
+            "runner B's workload revocation returned {}",
+            wrong_tenant.status()
+        );
+        ensure!(wrong_tenant.json::<Value>().await?["error"]["code"] == "workload_conflict");
+        ensure!(audit_snapshot(&mut conn_a).await? == committed);
+        ensure!(audit_snapshot(&mut conn_b).await? == before_b);
+        Ok::<_, anyhow::Error>((receipt, committed))
+    }
+    .await;
+    gateway.stop().await?;
+    let (receipt, committed) = first?;
+
+    let store = a.reader("tenant-a", a.target.namespace)?;
+    let head = store.verify_control_projections().await?;
+    ensure!(head.seq == receipt.audit_seq && head.hash == receipt.audit_hash);
+    ensure!(audit_snapshot(&mut conn_b).await? == before_b);
+
+    let restarted = Gateway::start_command(registry.command_for(&gateway_program)).await?;
+    let replay = async {
+        let id = &input.credential_id;
+        let response = post(&restarted, RUNNER_A, id, &input).send().await?;
+        ensure!(response.status() == StatusCode::OK);
+        let replay = response.json::<WorkloadBindingReceiptV1>().await?;
+        ensure!(
+            replay
+                == WorkloadBindingReceiptV1 {
+                    replayed: true,
+                    ..receipt
+                }
+        );
+        let divergent_input = WorkloadBindingRevocationV1 {
+            expected_revision: receipt.revision,
+            ..input.clone()
+        };
+        let divergent = post(&restarted, RUNNER_A, id, &divergent_input)
+            .send()
+            .await?;
+        ensure!(divergent.status() == StatusCode::CONFLICT);
+        ensure!(divergent.json::<Value>().await?["error"]["code"] == "workload_conflict");
+        ensure!(audit_snapshot(&mut conn_a).await? == committed);
+        ensure!(audit_snapshot(&mut conn_b).await? == before_b);
+
+        // The fixture's separate, schema-scoped maintenance account changes
+        // the verified prefix after the revocation was already replayable.
+        let runner_digest = Sha256::digest(RUNNER_A.as_bytes()).into();
+        let collision = seed.issue_workload_binding(&issue(runner_digest)).await?;
+        let with_collision = audit_snapshot(&mut conn_a).await?;
+        ensure!(
+            collision.audit_seq == receipt.audit_seq + 1
+                && with_collision.1.len() == committed.1.len() + 1
+                && with_collision.1.starts_with(&committed.1)
+        );
+        let denied = post(&restarted, RUNNER_A, id, &input).send().await?;
+        ensure!(denied.status() == StatusCode::SERVICE_UNAVAILABLE);
+        ensure!(denied.json::<Value>().await?["error"]["code"] == "identity_unavailable");
+
+        // Present the previously accepted digest directly to the same Store
+        // transaction so the HTTP admission refusal cannot mask a guard bug.
+        let rejected = with_control_guard(runner_digest, store.revoke_workload_binding(&input))
+            .await
+            .expect_err("lost runner guard returned the historical revocation receipt");
+        ensure!(
+            rejected.downcast_ref::<ControlGuardRefused>()
+                == Some(&ControlGuardRefused(ControlCollision::Workload))
+        );
+        ensure!(audit_snapshot(&mut conn_a).await? == with_collision);
+        ensure!(audit_snapshot(&mut conn_b).await? == before_b);
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    restarted.stop().await?;
+    replay
 }
 
 #[tokio::test]

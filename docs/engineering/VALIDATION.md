@@ -1,5 +1,40 @@
 # Validation courante
 
+## 25 novembre 2026 — révocation workload MySQL Legacy sur TLS et mTLS
+
+Quatre exécutions du même sélecteur Rust utilisent deux gateways
+macOS ARM64 épinglés et MySQL 8.4.13 sur Docker Desktop ARM64. Chaque
+passage dispose d’une instance jetable en loopback, de deux bases et
+de deux paires de comptes distinctes. Le profil mot de passe impose
+TLS et le profil mTLS impose un certificat client.
+
+| Profil | Référence `57b55c0d` | Correctif `f6f775d7` |
+| --- | --- | --- |
+| Mot de passe et TLS | HTTP 501 `storage_capability_unavailable`, audits A et B identiques | 1 test réussi en 6,96 s |
+| mTLS | HTTP 501 `storage_capability_unavailable`, audits A et B identiques | 1 test réussi en 7,91 s |
+
+Sur chaque passage corrigé, A révoque une fois et retrouve le même
+reçu après redémarrage du gateway. Le rejeu divergent et la demande
+de B sont refusés avec HTTP 409. La perte d’autorité bloque la route
+avec HTTP 503. Le test vérifie aussi le refus dans la transaction
+Store elle-même et préserve les deux chaînes d’audit attendues.
+Les quatre ports sont fermés et les conteneurs, volumes et réseaux
+de recette ont été retirés.
+
+Les deux prévols précédents se sont arrêtés sur la préparation de la
+fixture. Le premier rencontrait une table absente lors d’un `GRANT`.
+Le deuxième avait déjà ajouté les tables que le test Rust doit créer.
+La recette corrigée conserve les grants fins et restitue les dix
+tables initiales attendues avant le lancement du test Rust.
+[Règles MySQL 8.4 sur les droits de table](https://dev.mysql.com/doc/refman/8.4/en/drop-table.html).
+
+Le manifeste vérifié des quatre reçus privés porte le SHA-256
+`609515f051e599664e7e2cacdbdb7bef9944b656fbef3a965353d395537c9325`.
+Les deux fichiers applicatifs de la révocation, le fichier de test et
+les fichiers Cargo du port correspondent au gel `f6f775d7`. Ce gel
+comporte aussi le prévol MySQL owned en lecture seule, gardé dans son
+lot de préparation. La qualification physique porte sur MySQL Legacy.
+
 ## 25 novembre 2026 — rétention SQLite après perte du reçu de commit
 
 À 12 h 53 min 11 s UTC, la recette R1 lance le vrai CLI macOS archivé sur

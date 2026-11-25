@@ -8,6 +8,7 @@ use crate::{
     audit::{EventQuery, Integrity, Store},
     model::{Event, StoredEvent},
     redaction::Redactor,
+    workload::{WorkloadBindingReceiptV1, WorkloadBindingRevocationV1},
 };
 use anyhow::Result;
 use serde_json::Value;
@@ -126,6 +127,27 @@ impl TenantStore {
             #[cfg(feature = "mysql-storage")]
             Self::Mysql(store) => {
                 store.block_guarded(Some(guard), store.store().append_batch(events))
+            }
+        }
+    }
+
+    /// Revoke under the Legacy runner authority. MySQL must recheck the
+    /// authenticated runner digest against the projections in the write
+    /// transaction before either revocation or replay.
+    pub(crate) fn revoke_workload_binding_guarded(
+        &self,
+        input: &WorkloadBindingRevocationV1,
+        guard: Option<[u8; 32]>,
+    ) -> Result<WorkloadBindingReceiptV1> {
+        match self {
+            Self::Sqlite(store) => {
+                let _ = guard;
+                store.revoke_workload_binding(input)
+            }
+            #[cfg(feature = "mysql-storage")]
+            Self::Mysql(store) => {
+                let digest = guard.ok_or(crate::workload::WorkloadFailureV1::Unauthorized)?;
+                store.block_guarded(Some(digest), store.store().revoke_workload_binding(input))
             }
         }
     }
