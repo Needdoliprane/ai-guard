@@ -28,6 +28,7 @@ async fn native_s1_reservation_precedes_arm_and_status_shutdown_count_it() {
         .legacy_reserve_prospective(first.prospective().unwrap(), CancelGeneration::new(), false)
         .await
         .unwrap();
+    assert_eq!(fixture.reserve_requests(), 1);
     let observed = client.legacy_capabilities().await.unwrap();
     assert_eq!(observed.known_stop_slots, 1);
     assert_eq!(observed.owned_active, Some(1));
@@ -51,6 +52,50 @@ async fn native_s1_reservation_precedes_arm_and_status_shutdown_count_it() {
     // not S/W arithmetic, a stopped container, or a usable engine permit.
     drop(client);
     fixture.finish().await;
+}
+
+#[tokio::test]
+async fn fresh_reservation_cancelled_during_capabilities_sends_no_reserve() -> anyhow::Result<()> {
+    let fixture = LegacyIpcFixture::start(1, 0).await;
+    let client = connect(&fixture, 1, 0).await;
+    let target = registration(fixture.root().path()).prospective().unwrap();
+    let generation = CancelGeneration::new();
+    let (held, resume) = fixture.pause_capabilities_reply();
+    let observed = async {
+        let reserve = client.legacy_reserve_prospective(target, generation.clone(), false);
+        tokio::pin!(reserve);
+        tokio::select! {
+            result = &mut reserve => anyhow::bail!("reserve returned before capabilities reply was held: {result:?}"),
+            reached = tokio::time::timeout(IO_TIMEOUT, held) => reached??,
+        }
+        anyhow::ensure!(
+            fixture.reserve_requests() == 0,
+            "ReserveProspective arrived while capabilities was still held"
+        );
+        generation.invalidate();
+        resume
+            .send(())
+            .map_err(|_| anyhow::anyhow!("the capabilities reply was abandoned"))?;
+        let result = tokio::time::timeout(REGISTER_TIMEOUT + IO_TIMEOUT, reserve).await?;
+        let requests = fixture.reserve_requests();
+        let status = client.legacy_capabilities().await?;
+        Ok::<_, anyhow::Error>((result, requests, status.known_stop_slots, status.owned_active))
+    }
+    .await;
+    drop(client);
+    // On RED the old client installed a slot before cancelling it. Collect
+    // that fixture-owned slot before asserting the wire count.
+    fixture.finish().await;
+
+    let (result, requests, known_stop_slots, owned_active) = observed?;
+    assert_eq!(result, Err(EnforcerError::NotReady));
+    assert_eq!(
+        requests, 0,
+        "cancelled fresh reservation reached the Legacy wire"
+    );
+    assert_eq!(known_stop_slots, 0);
+    assert_eq!(owned_active, Some(0));
+    Ok(())
 }
 
 #[tokio::test]

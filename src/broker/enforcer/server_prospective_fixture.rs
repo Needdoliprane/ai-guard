@@ -7,11 +7,45 @@ use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::PathBuf,
-    sync::{OnceLock, Weak},
+    sync::{OnceLock, Weak, atomic::AtomicUsize},
 };
+use tokio::sync::oneshot;
 
 pub(in crate::broker::enforcer) fn registration(root: &std::path::Path) -> RegistrationV1 {
     prospective::fixture_registration(root)
+}
+
+struct HeldCapabilitiesReply {
+    reached: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+}
+
+/// Count authenticated reservations at the wire and hold one real capabilities
+/// response after dispatch. Each private server owns an independent probe.
+#[derive(Default)]
+pub(super) struct ReserveProbe {
+    requests: AtomicUsize,
+    next_capabilities: Mutex<Option<HeldCapabilitiesReply>>,
+}
+
+impl ReserveProbe {
+    pub(super) fn observe_request(&self, request: &Request) {
+        if matches!(request, Request::ReserveProspective { .. }) {
+            self.requests.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    pub(super) async fn hold_capabilities_reply(&self) -> EnforcerResult<()> {
+        let held = self.next_capabilities.lock().unwrap().take();
+        if let Some(held) = held {
+            let _ = held.reached.send(());
+            tokio::time::timeout(IO_TIMEOUT, held.release)
+                .await
+                .map_err(|_| EnforcerError::Unavailable)?
+                .map_err(|_| EnforcerError::Unavailable)?;
+        }
+        Ok(())
+    }
 }
 
 static STATES: OnceLock<Mutex<BTreeMap<PathBuf, Weak<State>>>> = OnceLock::new();
@@ -90,6 +124,29 @@ impl LegacyIpcFixture {
     pub(in crate::broker::enforcer) fn launch_nonce(&self) -> Uuid {
         self.launch_nonce
     }
+    pub(in crate::broker::enforcer) fn reserve_requests(&self) -> usize {
+        self.native
+            .as_ref()
+            .unwrap()
+            .reserve_probe
+            .requests
+            .load(Ordering::SeqCst)
+    }
+    pub(in crate::broker::enforcer) fn pause_capabilities_reply(
+        &self,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (reached, entered) = oneshot::channel();
+        let (resume, release) = oneshot::channel();
+        let probe = &self.native.as_ref().unwrap().reserve_probe;
+        let mut next = probe.next_capabilities.lock().unwrap();
+        assert!(
+            next.is_none(),
+            "only one capabilities response can be retained"
+        );
+        *next = Some(HeldCapabilitiesReply { reached, release });
+        (entered, resume)
+    }
+
     pub(in crate::broker::enforcer) async fn finish(mut self) {
         let native = self.native.as_ref().unwrap();
         {

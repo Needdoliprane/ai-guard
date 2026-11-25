@@ -51,6 +51,8 @@ struct State {
     healthy: AtomicBool,
     progress: AtomicU64,
     shutdown: watch::Sender<bool>,
+    #[cfg(test)]
+    reserve_probe: test_support::ReserveProbe,
 }
 struct Actor {
     _lease: Arc<RoleLease>,
@@ -189,6 +191,8 @@ async fn run_legacy(
         healthy: AtomicBool::new(true),
         progress: AtomicU64::new(1),
         shutdown,
+        #[cfg(test)]
+        reserve_probe: test_support::ReserveProbe::default(),
     });
     let mut listener_owner = Some(ListenerOwner::new(
         owners,
@@ -330,6 +334,8 @@ async fn serve_connection(mut stream: UnixStream, state: Arc<State>) -> Enforcer
     #[cfg(test)]
     let _lifetime_ipc = lifetime_tests::authenticated_owner().await;
     let request: Request = read_frame(&mut stream, MAX_FRAME, IO_TIMEOUT).await?;
+    #[cfg(test)]
+    state.reserve_probe.observe_request(&request);
     if matches!(request, Request::Watch {}) {
         loop {
             let response = dispatch(&state, Request::Status {}).await?;
@@ -342,6 +348,10 @@ async fn serve_connection(mut stream: UnixStream, state: Arc<State>) -> Enforcer
         Ok(response) => response,
         Err(code) => Response::Error { code },
     };
+    #[cfg(test)]
+    if matches!(response, Response::ProspectiveCapabilities { .. }) {
+        state.reserve_probe.hold_capabilities_reply().await?;
+    }
     let shutdown = shutdown_request && matches!(response, Response::Acknowledged {});
     let written = write_frame(&mut stream, &response, MAX_FRAME, IO_TIMEOUT).await;
     if shutdown {
