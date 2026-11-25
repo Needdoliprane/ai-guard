@@ -5,6 +5,7 @@
 //! A policy allowance and a validated candidate list are descriptive values.
 //! Neither is an execution capability, durable audit receipt or DNS witness.
 
+pub(crate) mod bootstrap_release;
 pub mod channel_helper;
 pub mod channel_protocol;
 pub mod frontend;
