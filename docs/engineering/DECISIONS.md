@@ -1507,6 +1507,7 @@ Le mainteneur autorise création de session et courte consigne sur une session e
 Direction retenue : catalogue de cibles autorisées, préparation held sans démarrage puis commit idempotent d’une intention vérifiée ; mutations humaines scoped avec LaunchSession/SendSessionMessage et ACL explicites, grant nominatif réellement créé, audit avant action. Consignes via nouveau mode conversation officiel lié au worker/tentative/epoch exacts ; anciens batch/TTY incompatibles explicites. Conserver réseau None et egress Rust approuvé ; aucune conversion de token humain en runner, de metadata en autorité ou de texte en approbation. Les profils/migrations fermés évoluent explicitement avec l’intégrateur.
 
 Claude reçoit le code et les guides EN/FR ; Codex conserve contrats partagés, tests pertinents avec Luna, revues, composition, intégration, push et cycle de vie du worktree. Pas de nouvelle campagne fournisseur ou runtime par Claude. Les dépendances Source17/identité/egress ne disparaissent pas : elles doivent être raccordées réellement et restent des écarts tant que les preuves manquent.
+
 ## 21 novembre 2026 — périmètre de la V1 et répartition des responsabilités d'infrastructure
 
 Décisions du mainteneur recueillies par Claude, coordinateur de la V1, le 21 novembre 2026 entre 16 h 35 et 16 h 50 CET.
@@ -1651,3 +1652,46 @@ soumission donne zéro signal. Rapprocher les coupures avant et après
 soumission, préserver l’échéance et restituer la livraison inconnue
 lorsque la preuve manque. Les routes Legacy gardent leur refus en
 mode owned.
+
+## 25 novembre 2026 — G04, persistance de la préparation nominative
+
+**Proposition soumise au mainteneur.** Le contrat du 15 novembre exige
+une préparation durable avant lancement. Le candidat autorise déjà
+l'opération `SessionLaunchPrepare` dans un contexte personnel doté de
+`LaunchSession`. Le donneur Claude `081790aa` crée un grant de session
+dans la transaction de préparation. Dans le candidat, le producteur de
+grants considère déjà comme connue une session citée dans un événement
+antérieur hors de la famille `control.identity`.
+[Contrat session](SESSION_CONTROL.fr.md) · [Autorisation](../../src/identity/operations.rs) · [Ressource connue](../../src/audit/identity.rs)
+
+- **Capacité SQLite owned 15 explicitement installée, option recommandée.**
+  Reprendre le modèle de migration avec marqueur et schéma validés. Une
+  table de préparation relie l'opération, l'identité et le contexte à un
+  reçu d'audit et aux révisions serveur de la cible. Les anciens lecteurs
+  doivent refuser la source étendue. Un profil format 15 sans cette
+  capacité conserve son contrat actuel.
+- **Nouveau format SQLite.** Le numéro rend l'incompatibilité explicite.
+  Il impose aussi de migrer les descripteurs de source, les validateurs et
+  les recettes de restauration qui travaillent actuellement sur les
+  formats 14 et 15.
+- **Rejeu du journal seul.** La préparation serait retrouvée à partir
+  des événements structurels. Il faudrait établir une recherche bornée
+  et le maintien du même reçu après rétention, ainsi qu'une persistance
+  métier séparée des contenus.
+
+La préparation auditée emploie son propre identifiant et laisse le
+champ d'événement `session_id` vide. La transaction vérifie l'autorité
+du Store, le contexte, le catalogue autorisé, les révisions et l'expiration.
+La même opération et la même demande rendent le reçu d'origine à un
+appelant encore autorisé. Une divergence rend un conflit. La révocation
+ferme la lecture et le rejeu. Le lancement engage ensuite l'intention
+exacte et crée le grant nominatif par le producteur existant. Réservation,
+claim et canal conversationnel suivent leurs contrats respectifs.
+
+La première preuve proposée utilise le vrai routeur et un Store SQLite
+owned rouvert. Elle couvre réponse perdue, rejeu à reçu identique,
+conflit de contenu, révocation, audit indisponible et zéro grant,
+réservation ou claim pendant Prepare. Vérifier aussi le refus à
+l'ouverture avec l'ancien lecteur et la visibilité inchangée des sources
+format 15 dépourvues de cette capacité.
+[Validation de schéma](../../src/audit.rs) · [Contrat de rétention](../../src/audit/retention/classify.rs)
