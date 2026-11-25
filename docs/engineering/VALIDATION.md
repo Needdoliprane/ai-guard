@@ -1,5 +1,22 @@
 # Validation courante
 
+## 25 novembre 2026 — reçu de relecture Created dans le dashboard
+
+Sur `276d6e6c`, les 30 tests du modèle frontend et TypeScript sans
+émission passent. Les fichiers du frontend et les verrous concordent
+avec le donneur `32fece03`. Le reçu donneur conserve les deux échecs
+attendus avant correction, les deux tests ciblés réussis et quatre
+régressions réussies. Manifeste à quatre pièces
+`78d20e9ebbfb6f4de7073ef9ee6a854edd435a4839877b4af6ac24b1b3fbdd47`.
+
+Le résumé et le détail lisent les sites et causes reconnus du reçu V1
+`broker.batch.failure` issu du runner et de provenance observée.
+Les anciens reçus conservent leur rendu générique. Un détail inconnu
+reste omis. L’effet sur l’exécution reste non confirmé. La revue séparée
+a vérifié le contrat du [reçu Rust](../../src/runner/broker/executor/diagnostics.rs)
+et l’insertion des libellés comme texte. Cette preuve logicielle porte
+sur le rendu de lecture et ne confère aucun nouveau statut au rejeu Full3.
+
 ## 25 novembre 2026 — reproduction Legacy G09
 
 Le gel `28af5740` compile hors ligne sur macOS ARM64 en 12 min 37 s.
