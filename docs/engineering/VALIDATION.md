@@ -1,5 +1,31 @@
 # Validation courante
 
+## 25 novembre 2026 — profil E3, diagnostic Created et canari du relais
+
+Le gel exact `4a78536a` compile hors ligne sur macOS ARM64. Sept
+contrôles du profil E3 et de l’intention historique passent. Ils
+couvrent la sélection opérateur, la relecture du plan fournisseur,
+le refus d’une soumission fraîche si le runtime E3 est indisponible,
+le rejeu historique et la conservation des empreintes V1. Six autres
+contrôles passent pour le diagnostic G07. Ils distinguent les trois
+sites de rechargement Created et les sorties du writer, dont le délai
+de réponse, sans déduire d’effet runtime. Les dix-neuf fichiers des
+deux lots correspondent au candidat `b5fcd044`.
+
+Le sélecteur stdin initial lance zéro test. Le sélecteur corrigé,
+retrouvé dans `--list`, passe 1/1 sur le même binaire attesté. La
+preuve concerne la primitive sur un processus inerte. Le bootstrap
+retenu et son raccord au runtime gardent leurs validations propres.
+
+Le canari de relais G11 échoue avec le code 101 après 30,79 s. Le
+rapport atteste l’ouverture de la fixture et laisse sa fermeture
+non confirmée. Les deux annulations restent `not_attempted` et
+la lecture V5 `unknown`. La frontière après annulation reste à atteindre.
+
+Manifestes privés du gel et du sélecteur corrigé
+`3ab1cf9b978d9efa34a6cc69fb260da2272d2c87ca1c5f7782b7959015cf111e` et
+`99a2fbea39cb1ab4e148d9e0a2975e985c30f39b9e84c556f5f385c274e783d1`.
+
 ## 25 novembre 2026 — préparation et ouverture du canal E3
 
 **PASS ciblé, 5/5** sur `1002b28a`, macOS ARM64, fonctionnalités
