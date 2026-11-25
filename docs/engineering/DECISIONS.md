@@ -1520,6 +1520,25 @@ Décisions du mainteneur recueillies par Claude, coordinateur de la V1, le 21 no
 - **Abonnements fournisseurs (G07).** Claude prépare les recettes et prévols sur le SHA final. Le mainteneur joue les connexions officielles par abonnement et les TTY fournisseurs. Claude rattache leurs reçus au gate.
 - **Infrastructure du client.** L'IdP (Keycloak ou autre), le serveur MySQL distant, la PKI et l'infrastructure cloud sont exploités par le client. ai-guard livre et qualifie son intégration côté client : client OIDC public PKCE S256, connecteur MySQL avec mot de passe et TLS ou mTLS, validation de configuration, refus explicites et documentation. Les recettes utilisent des fixtures locales jetables : Keycloak DEMO, conteneur MySQL avec CA autosignée dédiée. Haute disponibilité, sauvegarde, restauration et administration de ces services relèvent de l'exploitant et ne sont pas qualifiées par le projet. La consigne du mainteneur est d'éviter toute complexité d'infrastructure superflue.
 
+## 22 novembre 2026 — Mode MySQL owned 14 et 15
+
+Le mainteneur a retenu le profil MySQL owned pour la V1 le 22 novembre.
+L'origine lie l'UUID du serveur, la base canonique, le namespace et une
+tête de chaîne vérifiée. Le verrou consultatif `GET_LOCK` est détenu sur
+une connexion SQL dédiée. La barrière d'epoch reste inchangée. Les
+formats 14 et 15 reposent sur le DDL et les marqueurs vérifiés. La
+sauvegarde relève de l'opérateur et l'intégration exige une revue de
+sûreté indépendante.
+
+Le verrou ne contraint pas un écrivain extérieur à ai-guard. La
+vérification de la chaîne et de ses projections doit détecter une
+divergence. Le lot `owned-auth` porte l'admission des écritures
+humaines et l'authentification des brokers. Le prévol actif vérifie
+le socle d'audit Legacy sous verrou, puis ferme sa connexion.
+Le traitement de l'incompatibilité physique avec les anciens
+lecteurs pendant les migrations 1 → 14 et 14 → 15 reste à arbitrer.
+[Contrat de stockage](ARCHITECTURE_CONTRACT.md#stockage-sql-par-tenant)
+
 ## 24 novembre 2026 — Qualification de capacité G10
 
 Le mainteneur fixe la preuve de capacité V1 à 100 réservations durables pour un même tenant. La recette sur moteur utilise trois workers, A1/A2 chez A et B1 chez B. Le pilote historique à trois workers du même tenant reste une preuve complémentaire.
