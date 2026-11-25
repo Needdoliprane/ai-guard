@@ -1,5 +1,52 @@
 # Validation courante
 
+## 25 novembre 2026 — étapes de publication de la liaison Full3
+
+**PASS ciblé G07.** Sur `f5cfa48c`, un test unitaire distingue la
+lecture de la liaison native, le rechargement du journal, le retour
+du writer et la limite de conflits. Un test d’intégration vérifie la
+restitution des seuls motifs fermés et leur corrélation à la bonne
+session. Manifeste vérifié
+`5aea41b85abe2a1b8d48baf1bf5740ca27dda28d599dac2840130afd7d929ae8`.
+
+Sur `e7354ed5`, le lecteur exact rejette en plus la combinaison
+`advance_writer/conflict`, accepte `reload_journal/conflict` et
+conserve l’étape lorsque le motif facultatif est absent. Le seul
+binaire d’intégration est recompilé. Manifeste vérifié
+`2f2e425ed66c6958501e780a2deb30530e6f67fbe7e23503b37aa7ab12573224`.
+Les sources Rust applicatives des deux gels sont identiques. Les
+sept fichiers concernés sont identiques au candidat `304a17d4`.
+Deux tests frontend ciblés et le build du dashboard ont également
+réussi sur les sources intégrées.
+
+Ces résultats vérifient la restitution du diagnostic. L’issue
+d’une avance du writer et l’effet runtime requièrent des témoins
+distincts.
+
+## 25 novembre 2026 — prévol du transport stdin E3
+
+**PASS transport sur moteur local ARM64.** L’image worker locale
+exacte `sha256:e61e61f183736416948a9155f6490ac2e6a2e67081308a0e779aeed6691f3714`
+a exécuté un récepteur inerte `/bin/cat` sur chaque moteur, avec
+réseau `none`, sans montage, racine en lecture seule et stdin ouvert.
+`start --attach --interactive` restitue exactement la trame transmise
+au PID 1. Le CLI et le conteneur sortent à zéro. Les deux conteneurs
+de recette sont retirés.
+
+| Moteur | Tty | OpenStdin | AttachStdin | StdinOnce |
+| --- | --- | --- | --- | --- |
+| Docker Desktop 29.9.3 | false | true | true | true |
+| Podman rootless 6.1.4 | false | true | false | false |
+
+Les manifestes vérifiés sont
+`ceee50017422b3ccccb32fe48b307b1e0d35b3bf99706dddce4ba75c248c9f0c`
+pour Docker et
+`d9ef4c7dae7ee81364948f2d36cc07c3d338ebe58a87c2d5283092a1a6d458db`
+pour Podman, sous `g05-e3-direct-stdin-*` dans l’archive privée.
+Le contrôle de l’exclusivité du fd, la garde STOP, le refus des trames
+tronquées et le raccord du bootstrap fournisseur restent à qualifier.
+[Contrat E3](DECISIONS.md#25-novembre-2026--g05e3-libération-du-fournisseur-par-le-broker)
+
 ## 25 novembre 2026 — diagnostic de l’échange Created dans G07
 
 **PASS logiciel ciblé, 2/2** sur `7f9eceef`, macOS ARM64,
