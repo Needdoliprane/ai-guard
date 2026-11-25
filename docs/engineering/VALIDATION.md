@@ -1,5 +1,20 @@
 # Validation courante
 
+## 25 novembre 2026 — rejeu du premier claim Full3 sur le candidat G07
+
+Le gel `3da8642d` reprend `1955305b` avec le harnais de
+qualification sur deux fichiers de test. La compilation et
+la présence du sélecteur exact dans le binaire sont vérifiées.
+Le harnais synthétique observe une création et une inspection
+du conteneur Run, puis expire à 190,30 s avec le code 101.
+La lecture IPC du statut broker reste indisponible. La preuve
+du claim durable et du démarrage du worker reste inconnue.
+
+Le harnais joint son runtime synthétique et son gateway. La
+fermeture du gardien reste non confirmée et le répertoire
+de la fixture est conservé pour rapprochement. Manifeste privé
+`6d6188f457886ea4108ff976ec210b3350813fb7b1a7d24c1d52293b33bf47b7`.
+
 ## 25 novembre 2026 — composants du bootstrap retenu E3
 
 Le gel isolé `b8865a3a` compile hors ligne sur macOS ARM64 avec
