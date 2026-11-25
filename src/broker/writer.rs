@@ -12,17 +12,14 @@ use super::{
     journal::{
         AcceptedJobV1, CancelStopProjectionV1, CheckpointReceiptV1, ControlSecrets, FsExclusions,
         Journal, JournalError, JournalLimitsV1, JournalPageV1, JournalResult, JournalScopeV1,
-        JournalStatusV1, RejectionCodeV1, RejectionPhaseV1, RejectionReceiptV1, ReservationTicket,
-        ReserveResult, RevisionRefV1, StopJobSnapshotV1, StopJournal,
+        JournalStatusV1, RejectionCodeV1, RejectionPhaseV1, RejectionReceiptV1, ReservationMode,
+        ReservationTicket, ReserveResult, RevisionRefV1, StopJobSnapshotV1, StopJournal,
         recovery::{StopRecoveryReaderV1, StopRecoveryReportV1, inventory::StopInventoryPageV1},
     },
     lifecycle::{BrokerCheckpointV3, LocalCommandReceiptV1, LocalCommandRequestV1, LocalCommandV1},
     outbox::{BrokerCheckpointV4, OutboxEventV1, OutboxReceiptV1},
 };
-use crate::{
-    control::EgressLaunchV1, control_fs::Directory, model::Event,
-    runner::broker::PreparedSubmission,
-};
+use crate::{control_fs::Directory, model::Event, runner::broker::PreparedSubmission};
 use std::{
     collections::HashSet,
     fmt,
@@ -223,7 +220,7 @@ enum Command {
     Reserve {
         operation_id: Uuid,
         submit: Vec<u8>,
-        egress: Option<EgressLaunchV1>,
+        mode: ReservationMode,
         reply: Reply<ReserveResult>,
     },
     Reject {
@@ -1011,13 +1008,14 @@ impl WriterClient {
         operation_id: Uuid,
         submit: Vec<u8>,
     ) -> JournalResult<ReserveResult> {
-        self.reserve_with_egress(operation_id, submit, None).await
+        self.reserve_with_mode(operation_id, submit, ReservationMode::AllowNew(None))
+            .await
     }
-    pub(crate) async fn reserve_with_egress(
+    pub(crate) async fn reserve_with_mode(
         &self,
         operation_id: Uuid,
         submit: Vec<u8>,
-        egress: Option<EgressLaunchV1>,
+        mode: ReservationMode,
     ) -> JournalResult<ReserveResult> {
         if submit.len() > 256 * 1024 {
             return Err(JournalError::TooLarge);
@@ -1025,7 +1023,7 @@ impl WriterClient {
         self.call(move |reply| Command::Reserve {
             operation_id,
             submit,
-            egress,
+            mode,
             reply,
         })
         .await
@@ -1556,12 +1554,12 @@ fn serve_backend(
             Command::Reserve {
                 operation_id,
                 submit,
-                egress,
+                mode,
                 reply,
             } => {
                 let result = backend
                     .full()
-                    .and_then(|journal| journal.reserve_with_egress(operation_id, &submit, egress));
+                    .and_then(|journal| journal.reserve_with_mode(operation_id, &submit, mode));
                 let _ = respond(
                     &backend,
                     &status,

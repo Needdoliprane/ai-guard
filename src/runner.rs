@@ -1,5 +1,6 @@
 mod egress_policy;
 use crate::{
+    control::EgressLaunchV1,
     model::{CommandSpec, DecisionRequest},
     redaction::Redactor,
     runtime::{ContainerPurpose, ContainerSpec, NetworkMode, Runtime, RuntimeKind},
@@ -1247,6 +1248,7 @@ pub(crate) fn execution_intent_from_plan_bytes(
         plan.provider_input,
         plan.provider_credential
             .map(|reference| (reference.binding_id, reference.file_name, reference.digest)),
+        None,
     )
 }
 
@@ -1270,7 +1272,8 @@ pub(crate) fn validate_execution_intent_provider(
         }),
         credential_source: None,
     };
-    validate_provider_plan(&plan).map_err(|_| crate::broker::intent::IntentError::Incoherent)
+    validate_provider_plan(&plan, intent.egress())
+        .map_err(|_| crate::broker::intent::IntentError::Incoherent)
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunSummary {
@@ -1423,6 +1426,7 @@ enum PlanPreparation<'a> {
     Broker {
         operation_id: Uuid,
         control_literals: &'a [String],
+        egress: Option<&'a EgressLaunchV1>,
     },
 }
 
@@ -1497,7 +1501,7 @@ fn choose_plan_prepared(
                 && crate::policy::request_hash(&pending.request) == hash,
             "pending approval does not match these managed client, project, network, image, or runtime options"
         );
-        validate_provider_plan(&pending)?;
+        validate_provider_plan(&pending, None)?;
         return Ok(ChosenPlan {
             plan: pending,
             config,
@@ -1509,6 +1513,11 @@ fn choose_plan_prepared(
     let mut provider_credential = None;
     let mut provider_record = None;
     if managed_selection {
+        let egress = match &preparation {
+            PlanPreparation::Legacy => None,
+            PlanPreparation::Broker { egress, .. } => *egress,
+        };
+        validate_managed_provider_network(&options, egress)?;
         let providers_file = options
             .providers_file
             .clone()
@@ -1523,10 +1532,6 @@ fn choose_plan_prepared(
         );
         let providers = crate::provider::load_config_source(&providers_source)?;
         providers_source.revalidate()?;
-        anyhow::ensure!(
-            options.profile == "observe" && options.network == NetworkMode::Bridge,
-            "provider credentials require explicit --profile observe --network bridge; no policy profile or network was changed"
-        );
         let client = match options.client.as_deref() {
             None | Some("auto") => None,
             Some("codex") => Some(crate::provider::ClientKind::Codex),
@@ -1882,7 +1887,28 @@ fn freeze_provider_credential_retained(
     ))
 }
 
-fn validate_provider_plan(plan: &RunPlan) -> Result<()> {
+fn validate_managed_provider_network(
+    options: &RunOptions,
+    egress: Option<&EgressLaunchV1>,
+) -> Result<()> {
+    if let Some(egress) = egress {
+        egress.validate()?;
+        ensure!(
+            options.profile == "observe"
+                && options.network == NetworkMode::None
+                && !options.interactive,
+            "managed broker egress requires observe policy, network none and batch mode"
+        );
+    } else {
+        ensure!(
+            options.profile == "observe" && options.network == NetworkMode::Bridge,
+            "provider credentials require explicit --profile observe --network bridge; no policy profile or network was changed"
+        );
+    }
+    Ok(())
+}
+
+fn validate_provider_plan(plan: &RunPlan, egress: Option<&EgressLaunchV1>) -> Result<()> {
     if plan.version != 3 {
         anyhow::ensure!(
             plan.provider_input.is_none()
@@ -1892,6 +1918,7 @@ fn validate_provider_plan(plan: &RunPlan) -> Result<()> {
         );
         return Ok(());
     }
+    validate_managed_provider_network(&plan.options, egress)?;
     let resolution = plan
         .request
         .provider_resolution
@@ -1910,8 +1937,6 @@ fn validate_provider_plan(plan: &RunPlan) -> Result<()> {
             && plan.request.command.argv == plan.options.argv
             && plan.options.provider == resolution.provider_name()
             && plan.options.interactive == resolution.transport.is_interactive()
-            && plan.options.profile == "observe"
-            && plan.options.network == NetworkMode::Bridge
             && plan.options.secret_env_file.is_none(),
         "managed provider plan conflicts with its frozen invocation or credential binding"
     );
@@ -1922,7 +1947,7 @@ fn frozen_provider_credentials(
     plan: &RunPlan,
     config: &crate::control_fs::Directory,
 ) -> Result<Option<CredentialFile>> {
-    validate_provider_plan(plan)?;
+    validate_provider_plan(plan, None)?;
     let Some(frozen) = &plan.provider_credential else {
         return Ok(None);
     };

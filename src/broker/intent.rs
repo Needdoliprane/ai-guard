@@ -399,9 +399,10 @@ impl ExecutionIntentV1 {
         request: DecisionRequest,
         provider_input: Option<RunOptions>,
         credential: Option<(Uuid, String, String)>,
+        egress: Option<EgressLaunchV1>,
     ) -> IntentResult<Self> {
         let intent = Self {
-            version: 1,
+            version: if egress.is_some() { 2 } else { 1 },
             plan_version,
             operation_id,
             session,
@@ -415,7 +416,7 @@ impl ExecutionIntentV1 {
                     digest,
                 })
             }),
-            egress: None,
+            egress,
         };
         intent.validate()?;
         Ok(intent)
@@ -457,11 +458,6 @@ impl ExecutionIntentV1 {
     pub fn provider_credential(&self) -> Option<&ProviderCredentialRefV1> {
         self.provider_credential.as_ref()
     }
-    pub(crate) fn with_broker_egress(mut self, egress: EgressLaunchV1) -> IntentResult<Self> {
-        self.egress = Some(egress);
-        self.validate()?;
-        Ok(self)
-    }
     pub fn egress(&self) -> Option<&EgressLaunchV1> {
         self.egress.as_ref()
     }
@@ -479,7 +475,11 @@ impl ExecutionIntentV1 {
         Ok(bytes)
     }
     fn validate_shape(&self) -> IntentResult<()> {
-        if self.version != 1 || !(1..=3).contains(&self.plan_version) {
+        if !matches!(
+            (self.version, self.egress.is_some()),
+            (1, false) | (2, true)
+        ) || !(1..=3).contains(&self.plan_version)
+        {
             return Err(IntentError::UnsupportedVersion);
         }
         require(!self.operation_id.is_nil() && !self.session.is_nil())?;

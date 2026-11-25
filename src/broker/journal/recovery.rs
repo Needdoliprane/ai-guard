@@ -1659,10 +1659,7 @@ impl StopRecoveryReaderV1 {
             return Err(JournalError::LimitExceeded);
         }
         let reservation: Reservation = self.read_record(&job, "reservation.json", SMALL)?;
-        if reservation.version != 1
-            || reservation.operation_id != operation_id
-            || reservation.scope_hash != self.scope_hash
-        {
+        if reservation.operation_id != operation_id || reservation.scope_hash != self.scope_hash {
             return Err(JournalError::Corrupt);
         }
         valid_hash(&reservation.submit_hash).map_err(|_| JournalError::Corrupt)?;
@@ -1676,11 +1673,10 @@ impl StopRecoveryReaderV1 {
             if let Some(file) = rejected_file {
                 self.control.record(file.bytes())?;
                 let rejected: Rejected = parse(file.bytes())?;
-                if rejected.version != 1
-                    || rejected.scope_hash != self.scope_hash
+                if rejected.scope_hash != self.scope_hash
                     || rejected.operation_id != operation_id
                     || rejected.submit_hash != reservation.submit_hash
-                    || !rejected.matches_egress(&reservation)
+                    || !rejected.matches_reservation_format(&reservation)
                     || canonical(&rejected)? != file.bytes()
                 {
                     return Err(JournalError::Corrupt);

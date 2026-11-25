@@ -18,7 +18,7 @@ use crate::{
         journal::{
             AcceptedJobV1, CancelStopProjectionV1, ControlSecrets, FsExclusions, Journal,
             JournalLimitsV1, JournalScopeV1, JournalStatusV1, RejectionCodeV1, RejectionPhaseV1,
-            RejectionReceiptV1, ReserveResult, canonical,
+            RejectionReceiptV1, ReservationMode, ReserveResult, canonical,
             recovery::{StopRecoveryReaderV1, StopRecoveryReportV1},
         },
         lifecycle::{LocalCommandReceiptV1, LocalCommandRequestV1},
@@ -1870,26 +1870,33 @@ impl Service {
         self.material.screen(&parsed, credential)?;
         let egress = self.registry.egress(&profile.id).cloned();
         let operation = submit.operation_id;
-        let job = jobs.job(operation)?;
-        let preparation_generation = job.cancel.current();
-        // Status is only a capacity preflight hint. The same live Journal
-        // records every known ID/floor: an existing operation cannot legally
-        // become New again. reserve below still validates the exact payload,
-        // and rejects disappearance, rollback or divergent bytes itself.
-        let owner = if writer
-            .status(operation)
-            .await
-            .map_err(jobs::journal_error)?
-            .is_none()
-        {
-            Some(self.reserve_full_owner()?)
-        } else {
-            None
-        };
+        let (mode, generation_and_owner) =
+            if require_retained_egress_runtime(egress.as_ref()).is_err() {
+                (ReservationMode::ReplayOnly, None)
+            } else {
+                let job = jobs.job(operation)?;
+                let generation = job.cancel.current();
+                // Status is only a capacity hint. The same writer retains every
+                // observed ID and independently checks exact replay and rollback.
+                let owner = if writer
+                    .status(operation)
+                    .await
+                    .map_err(jobs::journal_error)?
+                    .is_none()
+                {
+                    Some(self.reserve_full_owner()?)
+                } else {
+                    None
+                };
+                (
+                    ReservationMode::AllowNew(egress.clone()),
+                    Some((job, generation, owner)),
+                )
+            };
         // Reserve the exact runnable payload before opening a provider or a
         // source directory. The authentication envelope is never persisted.
-        let (ticket, owner) = match writer
-            .reserve_with_egress(operation, payload.into_bytes(), egress.clone())
+        let (ticket, job, preparation_generation, owner) = match writer
+            .reserve_with_mode(operation, payload.into_bytes(), mode)
             .await
             .map_err(jobs::journal_error)?
         {
@@ -1899,7 +1906,10 @@ impl Service {
             }
             ReserveResult::InProgress => return Err(BrokerErrorCodeV1::Busy),
             ReserveResult::Interrupted => return Err(BrokerErrorCodeV1::Interrupted),
+            ReserveResult::Absent => return Err(BrokerErrorCodeV1::IncompatibleControl),
             ReserveResult::New(ticket) => {
+                let (job, generation, owner) =
+                    generation_and_owner.ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
                 let Some(owner) = owner else {
                     // This contradicts the live writer's observed-ID floor.
                     // Preserve the interrupted reservation for reconciliation;
@@ -1908,19 +1918,9 @@ impl Service {
                     drop(ticket);
                     return Err(BrokerErrorCodeV1::NeedsReconciliation);
                 };
-                (ticket, owner)
+                (ticket, job, generation, owner)
             }
         };
-        if require_retained_egress_runtime(egress.as_ref()).is_err() {
-            job.result(Some(BrokerErrorCodeV1::IncompatibleControl));
-            let code = if job.cancel.current() != preparation_generation {
-                RejectionCodeV1::CancelledBeforeAcceptance
-            } else {
-                RejectionCodeV1::RetainedEgressRuntimeUnavailable
-            };
-            let receipt = complete_rejection(&writer, operation, ticket, &job, code).await?;
-            return Ok(Response::reply(rejected(&receipt, false)));
-        }
         let running = match job.enter() {
             Ok(running) => running,
             Err(error) => {

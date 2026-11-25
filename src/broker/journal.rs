@@ -610,6 +610,12 @@ struct Reservation {
 }
 impl Reservation {
     fn validate_egress(&self) -> JournalResult<()> {
+        if !matches!(
+            (self.version, self.egress.is_some()),
+            (1, false) | (2, true)
+        ) {
+            return Err(JournalError::UnsupportedVersion);
+        }
         if let Some(egress) = &self.egress {
             egress.validate().map_err(|_| JournalError::Corrupt)?;
         }
@@ -683,10 +689,8 @@ struct Rejected {
     egress: Option<EgressLaunchV1>,
 }
 impl Rejected {
-    fn matches_egress(&self, reservation: &Reservation) -> bool {
-        self.egress == reservation.egress
-            && (self.code != RejectionCodeV1::RetainedEgressRuntimeUnavailable
-                || self.egress.is_some())
+    fn matches_reservation_format(&self, reservation: &Reservation) -> bool {
+        self.version == reservation.version && self.egress == reservation.egress
     }
 }
 record!(Current {
@@ -1011,14 +1015,14 @@ impl Journal {
     }
 
     pub fn reserve(&self, operation_id: Uuid, submit_bytes: &[u8]) -> JournalResult<ReserveResult> {
-        self.reserve_with_egress(operation_id, submit_bytes, None)
+        self.reserve_with_mode(operation_id, submit_bytes, ReservationMode::AllowNew(None))
     }
 
-    pub(crate) fn reserve_with_egress(
+    pub(crate) fn reserve_with_mode(
         &self,
         operation_id: Uuid,
         submit_bytes: &[u8],
-        egress: Option<EgressLaunchV1>,
+        mode: ReservationMode,
     ) -> JournalResult<ReserveResult> {
         if submit_bytes.len() > 256 * 1024 {
             return Err(JournalError::TooLarge);
@@ -1057,12 +1061,17 @@ impl Journal {
         {
             return Err(JournalError::Conflict);
         }
+        // Once exact replay and rollback checks have run, a disabled profile
+        // may learn that the operation is absent without reserving it.
+        let ReservationMode::AllowNew(egress) = mode else {
+            return Ok(ReserveResult::Absent);
+        };
         if let Some(egress) = &egress {
             egress.validate().map_err(|_| JournalError::InvalidInput)?;
         }
         self.check_observation_capacity(operation_id, &writer)?;
         let reservation = Reservation {
-            version: 1,
+            version: if egress.is_some() { 2 } else { 1 },
             scope_hash: self.0.scope_hash.clone(),
             operation_id,
             submit_hash: submit_hash.clone(),
@@ -1136,7 +1145,7 @@ impl Journal {
             return Err(JournalError::Conflict);
         }
         let record = Rejected {
-            version: 1,
+            version: reservation.version,
             scope_hash: self.0.scope_hash.clone(),
             operation_id: ticket.operation,
             submit_hash: ticket.submit_hash.clone(),
@@ -1144,9 +1153,6 @@ impl Journal {
             code,
             egress: reservation.egress.clone(),
         };
-        if !record.matches_egress(&reservation) {
-            return Err(JournalError::InvalidInput);
-        }
         let bytes = self.checked_record(&record, SMALL)?;
         self.budget(
             &ticket.operation.to_string(),
@@ -1269,11 +1275,10 @@ impl Journal {
             return Err(JournalError::Corrupt);
         }
         let record: Rejected = self.read_canonical(job, "rejected.json", SMALL)?;
-        if record.version != 1
-            || record.scope_hash != self.0.scope_hash
+        if record.scope_hash != self.0.scope_hash
             || record.operation_id != reservation.operation_id
             || record.submit_hash != reservation.submit_hash
-            || !record.matches_egress(reservation)
+            || !record.matches_reservation_format(reservation)
         {
             return Err(JournalError::Corrupt);
         }
@@ -1297,7 +1302,6 @@ impl Journal {
             submit_hash: record.submit_hash,
             phase: record.phase,
             code: record.code,
-            egress: record.egress,
             record_hash,
         })
     }
@@ -2322,10 +2326,7 @@ impl Journal {
             .ok_or(JournalError::Interrupted)
     }
     fn check_reservation(&self, reservation: &Reservation, operation: Uuid) -> JournalResult<()> {
-        if reservation.version != 1
-            || reservation.scope_hash != self.0.scope_hash
-            || reservation.operation_id != operation
-        {
+        if reservation.scope_hash != self.0.scope_hash || reservation.operation_id != operation {
             return Err(JournalError::Corrupt);
         }
         reservation.validate_egress()?;

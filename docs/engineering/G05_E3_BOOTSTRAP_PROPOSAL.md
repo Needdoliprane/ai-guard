@@ -16,9 +16,22 @@ Le registre opérateur doit autoriser explicitement `broker_proxy_v1`
 pour `observe` avec réseau `none`. Le broker retient ce choix avant
 admission et le propage à `LaunchSpecV1.egress` avant de calculer
 l’empreinte de la spécification. Les parcours historiques conservent
-leur profil. Le plan actuel prépare encore `egress: None`.
+leur profil. La résolution et la relecture d’un fournisseur géré avec
+`egress` exigent le mode batch. Les plans historiques et le CLI
+continuent d’exiger `observe` avec `bridge` pour ces fournisseurs.
 [Registre du broker](../../src/broker/service/profile.rs) ·
 [Préparation](../../src/runner/managed.rs)
+
+Tant que le runtime retenu est indisponible, le writer vérifie les rejeux
+existants et refuse une soumission E3 neuve avec `incompatible_control`
+avant toute réservation. Les octets et empreintes historiques restent
+en version 1. À l’activation, une réservation, une intention ou un refus
+durable qui contient `egress` porte la version 2. Les lecteurs antérieurs
+refusent ces enregistrements. La version 1 avec `egress`, forme
+intermédiaire de `4ce0547a`, est également refusée. L’activation exige donc
+des lecteurs compatibles sur tous les chemins de reprise du journal.
+[Writer du broker](../../src/broker/writer.rs) ·
+[Journal](../../src/broker/journal.rs)
 
 Le broker prépare le canal avant de demander l’acquittement `Running`.
 La poignée de préparation doit établir que le conteneur inspecté et

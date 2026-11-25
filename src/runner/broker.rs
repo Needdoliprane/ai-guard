@@ -150,13 +150,14 @@ pub fn prepare_broker_submission(
     prepare_broker_submission_with_egress(options, operation_id, control_literals, None)
 }
 
+/// The broker service checks retained runtime availability before reserving a
+/// fresh operation and calling this preparation with its selected profile.
 pub(crate) fn prepare_broker_submission_with_egress(
     options: RunOptions,
     operation_id: Uuid,
     control_literals: &[String],
     egress: Option<EgressLaunchV1>,
 ) -> Result<PreparedSubmission> {
-    require_retained_egress_runtime(egress.as_ref())?;
     ensure!(
         !operation_id.is_nil(),
         "broker operation UUID must not be nil"
@@ -215,10 +216,11 @@ fn prepare_submission(
         PlanPreparation::Broker {
             operation_id,
             control_literals,
+            egress: egress.as_ref(),
         },
     )?;
     let mut plan = chosen.plan;
-    validate_provider_plan(&plan)?;
+    validate_provider_plan(&plan, egress.as_ref())?;
     let binding = match (plan.credential_source.take(), chosen.provider_record) {
         (None, None) => PreparedBinding::None,
         (Some(source), None) => {
@@ -246,11 +248,8 @@ fn prepare_submission(
         plan.provider_input,
         plan.provider_credential
             .map(|reference| (reference.binding_id, reference.file_name, reference.digest)),
+        egress,
     )?;
-    let intent = match egress {
-        Some(egress) => intent.with_broker_egress(egress)?,
-        None => intent,
-    };
     Ok(PreparedSubmission {
         intent,
         binding,
@@ -299,7 +298,7 @@ impl BrokerRunState {
             }),
             credential_source: None,
         });
-        validate_provider_plan(&plan).map_err(|_| JournalError::Conflict)?;
+        validate_provider_plan(&plan, intent.egress()).map_err(|_| JournalError::Conflict)?;
         Ok(Self { plan })
     }
 

@@ -2120,7 +2120,7 @@ pub(super) async fn execute_plan(
         matches!(plan.version, 2 | 3) && !plan.operation_id.is_nil(),
         "legacy pending plans cannot launch workers; create a new audited request"
     );
-    validate_provider_plan(&plan)?;
+    validate_provider_plan(&plan, None)?;
     let approved = approved_runtime(&plan.options, None)?;
     let _admission_guard =
         AttemptGuard::acquire(&plan.options.config_dir, plan.operation_id, None)?;
@@ -3673,7 +3673,7 @@ fn validate_checkpoint(plan: &RunPlan, client: &AuditClient) -> Result<()> {
                 == checkpoint.admission.launch.workspace_manifest_digest,
         "private session checkpoint conflicts with its admitted specification, identity or origin"
     );
-    validate_provider_plan(plan)?;
+    validate_provider_plan(plan, None)?;
     if let Some(binding) = &checkpoint.binding {
         anyhow::ensure!(
             binding.authority_id.to_string() == checkpoint.admission.launch.authority_id

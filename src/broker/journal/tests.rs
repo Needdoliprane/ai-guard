@@ -227,107 +227,233 @@ fn injected_rejection_io_errors_never_return_ack_and_exact_replay_recovers() {
     }
 }
 
-#[test]
-fn egress_selection_survives_rejected_and_accepted_submissions() {
-    use crate::control::EgressLaunchV1;
+#[tokio::test]
+async fn replay_only_reservation_keeps_historical_receipts_and_leaves_fresh_id_absent() {
+    use super::ReservationMode;
+    use crate::broker::writer::WriterClient;
 
     let temporary = tempfile::tempdir().unwrap();
     let journal = open(temporary.path());
-    let egress = EgressLaunchV1::broker_proxy(3240).unwrap();
-    let ReserveResult::New(ticket) = journal
-        .reserve_with_egress(operation(), submit(), Some(egress.clone()))
-        .unwrap()
-    else {
-        panic!("expected new submission");
+    let ReserveResult::New(ticket) = journal.reserve(operation(), submit()).unwrap() else {
+        panic!("expected new historical submission");
     };
-    let refused = journal
-        .reject(
-            ticket,
-            RejectionPhaseV1::SubmissionPreparation,
-            RejectionCodeV1::RetainedEgressRuntimeUnavailable,
-        )
-        .unwrap();
-    let second = second_operation();
-    let mut wire: Value =
-        serde_json::from_slice(&intent_for(second).canonical_bytes().unwrap()).unwrap();
-    wire["initial_options"]["profile"] = json!("observe");
-    wire["initial_request"]["profile"] = json!("observe");
-    let historical = ExecutionIntentV1::from_bytes(&serde_json::to_vec(&wire).unwrap()).unwrap();
-    let blocked = crate::runner::broker::prepare_broker_submission_with_egress(
-        historical.initial_options().run_options(),
-        second,
-        &[],
-        Some(egress.clone()),
-    )
-    .unwrap_err();
-    assert_eq!(
-        blocked.to_string(),
-        "retained broker egress runtime is unavailable"
-    );
-    wire["egress"] = serde_json::to_value(&egress).unwrap();
-    let intent = historical
-        .clone()
-        .with_broker_egress(egress.clone())
-        .unwrap();
-    assert_ne!(
-        historical.intent_hash().unwrap(),
-        intent.intent_hash().unwrap()
-    );
-    assert_eq!(serde_json::to_value(&intent).unwrap(), wire);
-    let ReserveResult::New(ticket) = journal
-        .reserve_with_egress(second, submit(), Some(egress.clone()))
-        .unwrap()
-    else {
-        panic!("expected new submission");
-    };
+    let intent = intent();
     let checkpoint = CheckpointPayloadV1::initial(&intent).unwrap();
     let accepted = journal
         .accept(ticket, &intent, BindingInputs::None, &checkpoint)
         .unwrap();
-    let intent_hash = accepted.intent_hash().to_owned();
-    drop(accepted);
-    drop(journal);
+    let rejected_id = second_operation();
+    let ReserveResult::New(ticket) = journal.reserve(rejected_id, submit()).unwrap() else {
+        panic!("expected new historical submission");
+    };
+    let rejected = journal
+        .reject(
+            ticket,
+            RejectionPhaseV1::SubmissionPreparation,
+            RejectionCodeV1::PreparationFailed,
+        )
+        .unwrap();
+    let writer = WriterClient::start(journal.clone(), 8, Duration::from_secs(2)).unwrap();
+    let fresh = Uuid::new_v4();
 
-    let reopened = open(temporary.path());
-    let changed = EgressLaunchV1::broker_proxy(3241).unwrap();
-    let ReserveResult::Rejected(replayed) = reopened
-        .reserve_with_egress(operation(), submit(), Some(changed.clone()))
+    let ReserveResult::Accepted(replayed) = writer
+        .reserve_with_mode(operation(), submit().to_vec(), ReservationMode::ReplayOnly)
+        .await
         .unwrap()
     else {
-        panic!("expected the original rejection");
+        panic!("expected original acceptance");
     };
-    assert_eq!(replayed.record_hash(), refused.record_hash());
+    assert_eq!(replayed.intent_hash(), accepted.intent_hash());
+    let ReserveResult::Rejected(replayed) = writer
+        .reserve_with_mode(rejected_id, submit().to_vec(), ReservationMode::ReplayOnly)
+        .await
+        .unwrap()
+    else {
+        panic!("expected original rejection");
+    };
+    assert_eq!(replayed.record_hash(), rejected.record_hash());
     assert_eq!(
-        replayed.code(),
-        RejectionCodeV1::RetainedEgressRuntimeUnavailable
+        writer
+            .reserve_with_mode(
+                operation(),
+                b"{\"different\":true}".to_vec(),
+                ReservationMode::ReplayOnly
+            )
+            .await
+            .unwrap_err(),
+        JournalError::Conflict
     );
-    assert_eq!(replayed.egress(), Some(&egress));
-    let stored = reopened.load(second).unwrap().unwrap();
+    assert!(matches!(
+        writer
+            .reserve_with_mode(fresh, submit().to_vec(), ReservationMode::ReplayOnly)
+            .await
+            .unwrap(),
+        ReserveResult::Absent
+    ));
+    assert!(writer.status(fresh).await.unwrap().is_none());
+    assert!(!journal.0.jobs.path().join(fresh.to_string()).exists());
+    assert!(matches!(
+        writer.reserve(fresh, submit().to_vec()).await.unwrap(),
+        ReserveResult::New(_)
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn managed_egress_plan_derives_and_reloads_the_same_provider_binding() {
+    use super::{BindingKindV1, ReservationMode};
+    use crate::{
+        control::EgressLaunchV1,
+        runner::broker::{
+            BrokerRunState, credentials_from_job, prepare_broker_submission,
+            prepare_broker_submission_with_egress,
+        },
+        runtime::NetworkMode,
+    };
+
+    let temporary = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let root = Directory::open_existing(&temporary.path().canonicalize().unwrap()).unwrap();
+    let config = root.child("config").unwrap();
+    let project = root.child("project").unwrap();
+    let journal_root = root.child("journal").unwrap();
+    let source = config
+        .persistent_create(
+            "provider.env",
+            b"OPENAI_API_KEY=synthetic-provider-fixture\n",
+        )
+        .unwrap();
+    let providers = config
+        .persistent_create(
+            "providers.json",
+            &serde_json::to_vec(&json!({
+                "version": 1,
+                "profiles": [{
+                    "id": "codex-api", "revision": 1, "client": "codex", "auth_mode": "api",
+                    "credential": {"kind": "api_env_file", "path": source.path()}
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let mut options: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/broker_intent-plan-v3.json"
+    ))
+    .unwrap();
+    let options = &mut options["options"];
+    options["project"] = json!(project.path());
+    options["config_dir"] = json!(config.path());
+    options["network"] = json!("none");
+    options["provider"] = json!("generic");
+    options["argv"] = json!([]);
+    options["providers_file"] = json!(providers.path());
+    let options: crate::runner::RunOptions = serde_json::from_value(options.clone()).unwrap();
+    let egress = EgressLaunchV1::broker_proxy(3240).unwrap();
+
+    assert!(prepare_broker_submission(options.clone(), operation(), &[]).is_err());
+    let mut bridge = options.clone();
+    bridge.network = NetworkMode::Bridge;
+    assert!(
+        prepare_broker_submission_with_egress(bridge, operation(), &[], Some(egress.clone()),)
+            .is_err()
+    );
+
+    let prepared =
+        prepare_broker_submission_with_egress(options, operation(), &[], Some(egress.clone()))
+            .unwrap();
+    let intent = prepared.intent();
+    let resolution = intent.request_data().provider_resolution.as_ref().unwrap();
+    assert_eq!(resolution.client, crate::provider::ClientKind::Codex);
+    assert_eq!(
+        resolution.transport,
+        crate::provider::ClientTransport::Batch
+    );
+    assert_eq!(intent.egress(), Some(&egress));
+    assert_eq!(intent.version(), 2);
+    let mut wire = serde_json::to_value(intent).unwrap();
+    wire["egress"]["proxy_port"] = json!(3241);
+    let changed = ExecutionIntentV1::from_bytes(&serde_json::to_vec(&wire).unwrap()).unwrap();
+    assert_ne!(
+        changed.intent_hash().unwrap(),
+        intent.intent_hash().unwrap()
+    );
+    wire["version"] = json!(1);
+    assert!(ExecutionIntentV1::from_bytes(&serde_json::to_vec(&wire).unwrap()).is_err());
+    wire.as_object_mut().unwrap().remove("egress");
+    assert!(ExecutionIntentV1::from_bytes(&serde_json::to_vec(&wire).unwrap()).is_err());
+    let checkpoint = prepared.initial_checkpoint().unwrap();
+
+    let journal = open(journal_root.path());
+    let other = second_operation();
+    let mut conflicting = serde_json::to_value(intent).unwrap();
+    conflicting["operation_id"] = json!(other);
+    let conflicting =
+        ExecutionIntentV1::from_bytes(&serde_json::to_vec(&conflicting).unwrap()).unwrap();
+    let conflicting_checkpoint = CheckpointPayloadV1::initial(&conflicting).unwrap();
+    let ReserveResult::New(ticket) = journal
+        .reserve_with_mode(
+            other,
+            submit(),
+            ReservationMode::AllowNew(changed.egress().cloned()),
+        )
+        .unwrap()
+    else {
+        panic!("expected new reservation");
+    };
+    assert_eq!(
+        journal
+            .accept(
+                ticket,
+                &conflicting,
+                prepared.binding_inputs(),
+                &conflicting_checkpoint
+            )
+            .unwrap_err(),
+        JournalError::Conflict
+    );
+    let binding_id = resolution.credential_binding_id;
+    let ReserveResult::New(ticket) = journal
+        .reserve_with_mode(
+            operation(),
+            submit(),
+            ReservationMode::AllowNew(Some(egress.clone())),
+        )
+        .unwrap()
+    else {
+        panic!("expected new versioned reservation");
+    };
+    let accepted = journal
+        .accept(ticket, intent, prepared.binding_inputs(), &checkpoint)
+        .unwrap();
+    let intent_hash = accepted.intent_hash().to_owned();
+    assert_eq!(accepted.binding_manifest().kind(), BindingKindV1::Provider);
+    assert_eq!(accepted.binding_manifest().binding_id(), Some(binding_id));
+    drop(accepted);
+    drop(journal);
+    drop(prepared);
+    std::fs::remove_file(providers.path()).unwrap();
+    std::fs::remove_file(source.path()).unwrap();
+
+    let journal = open(journal_root.path());
+    let stored = journal.load(operation()).unwrap().unwrap();
+    let replayed = BrokerRunState::from_job(&stored).unwrap();
+    assert_eq!(replayed.options().network, NetworkMode::None);
+    assert_eq!(
+        replayed
+            .request()
+            .provider_resolution
+            .as_ref()
+            .unwrap()
+            .credential_binding_id,
+        binding_id
+    );
     assert_eq!(stored.intent().egress(), Some(&egress));
     assert_eq!(stored.intent_hash(), intent_hash);
-    let directory = Directory::open_existing(&temporary.path().canonicalize().unwrap()).unwrap();
     assert_eq!(
-        crate::runner::broker::credentials_from_job(&stored, &directory)
+        credentials_from_job(&stored, &config)
             .unwrap_err()
             .to_string(),
         "retained broker egress runtime is unavailable"
-    );
-
-    let third = Uuid::new_v4();
-    wire["operation_id"] = json!(third);
-    let conflicting = ExecutionIntentV1::from_bytes(&serde_json::to_vec(&wire).unwrap()).unwrap();
-    let checkpoint = CheckpointPayloadV1::initial(&conflicting).unwrap();
-    let ReserveResult::New(ticket) = reopened
-        .reserve_with_egress(third, submit(), Some(changed))
-        .unwrap()
-    else {
-        panic!("expected new submission");
-    };
-    assert_eq!(
-        reopened
-            .accept(ticket, &conflicting, BindingInputs::None, &checkpoint)
-            .unwrap_err(),
-        JournalError::Conflict
     );
 }
 
