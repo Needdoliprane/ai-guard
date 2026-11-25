@@ -15,9 +15,10 @@ Dix autres gates restent ouverts. [Grille de qualification](PRODUCTION_READINESS
 
 Le gel `28af5740` reproduit une course G09 en fixture. Une
 réservation annulée pendant l'échange de capacités atteint quand même
-le gardien Legacy. Le correctif attend son test et l'origine de
-l'échec Docker Linux reste ouverte.
-[Résultat exact](VALIDATION.md#25-novembre-2026--reproduction-legacy-g09).
+le gardien Legacy. Le correctif intégré en `e0ca4f4c` passe le
+témoin d'annulation et le cas nominal sur `b7ba4276`. L'origine
+de l'échec Docker Linux reste ouverte.
+[Résultats exacts](VALIDATION.md#25-novembre-2026--reproduction-legacy-g09).
 
 Le témoin Full3 laisse `CreateIssued` confirmé dans SQLite et encore
 en attente dans le journal du broker. Le diagnostic distingue désormais

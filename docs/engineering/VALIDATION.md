@@ -15,8 +15,18 @@ vides à la fin. Le gel et le binaire de test gardent la même
 empreinte. Les 25 fichiers du reçu privé ont été vérifiés sur le
 manifeste
 `8866d0d90650d3505b16041f53756940e0c57060667336c6f2ff383d5aaabf0f`.
-Le correctif `d2001a73` attend son test. L'origine du refus
-`not_ready` de la recette Docker Linux sur `c7f6c966` reste ouverte.
+
+Le gel `b7ba4276` compile hors ligne sur macOS ARM64. Le même test
+passe avec zéro requête et zéro slot. Le cas nominal
+`broker::enforcer::client::legacy::tests::native_s1_reservation_precedes_arm_and_status_shutdown_count_it`
+passe également et vérifie que la réservation est comptée avant
+l'armement. Les deux sélections sont exactes et leurs groupes
+sont vides. Les quatre fichiers G09 et les manifestes Cargo
+concordent à l'octet près avec l'intégration `e0ca4f4c`.
+Le sous-reçu vérifié compte 28 fichiers, manifeste
+`e97c462415f7c0d94f01fa5aa83522cdbdc6249b22bd16bfc8a17b3c040d9971`.
+L'origine du refus `not_ready` de la recette Docker Linux sur
+`c7f6c966` reste ouverte.
 
 ## 25 novembre 2026 — frontières CreateIssued et témoin E3 à deux flux
 
