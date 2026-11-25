@@ -18,6 +18,7 @@ use uuid::Uuid;
 mod audit_manifest;
 mod audit_tables;
 mod egress_manifest;
+mod publication;
 #[cfg(test)]
 mod qa;
 mod supervision_manifest;
@@ -74,7 +75,7 @@ pub async fn preflight_owned_preparation(
     server: Uuid,
     schema_version: u16,
 ) -> Result<MysqlOwnedPreparationPreflight> {
-    let (configured_authentication, tls_version) = prepare_empty_owned_target(
+    let (configured_authentication, tls_version, _) = prepare_empty_owned_target(
         endpoint,
         credentials,
         server,
@@ -85,6 +86,68 @@ pub async fn preflight_owned_preparation(
     Ok(MysqlOwnedPreparationPreflight {
         verification_mode: "owned_preparation_preflight",
         target_schema_version: schema_version,
+        configured_authentication,
+        tls_version,
+    })
+}
+
+/// The durable receipt of a fresh owned publication. It attests the verified
+/// head observed after COMMIT under the physical lock; it grants no runtime
+/// admission until the gateway opens the configured target independently.
+#[derive(Serialize)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "owned publication receipt pending gateway open wiring"
+    )
+)]
+pub(crate) struct MysqlOwnedPreparationReceipt {
+    pub verification_mode: &'static str,
+    pub target_schema_version: u16,
+    pub head_seq: i64,
+    pub head_hash: String,
+    pub configured_authentication: MysqlAuthentication,
+    pub tls_version: String,
+}
+
+/// Install the selected owned format on a verified empty target and publish the
+/// genesis, the fresh creation anchor and the singleton in one durable
+/// transaction, then re-verify the published prefix under the same lock.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "owned publication entry pending gateway open wiring"
+    )
+)]
+pub(crate) async fn prepare_owned_fresh_source(
+    endpoint: MysqlEndpoint<'_>,
+    credentials: MysqlCredentials<'_>,
+    server: Uuid,
+    schema_version: u16,
+    request: &FreshAnchorRequestV1,
+    configured: ConfiguredTenantNamespace<'_>,
+    redactor: &Redactor,
+) -> Result<MysqlOwnedPreparationReceipt> {
+    let (configured_authentication, tls_version, head) = prepare_empty_owned_target(
+        endpoint,
+        credentials,
+        server,
+        schema_version,
+        EmptyTargetOperation::PublishFreshSource {
+            request,
+            configured,
+            redactor,
+        },
+    )
+    .await?;
+    let head = head.context("MySQL owned publication receipt is missing")?;
+    Ok(MysqlOwnedPreparationReceipt {
+        verification_mode: "owned_preparation_published",
+        target_schema_version: schema_version,
+        head_seq: head.seq,
+        head_hash: head.hash,
         configured_authentication,
         tls_version,
     })
@@ -106,6 +169,18 @@ enum EmptyTargetOperation<'a> {
         configured: ConfiguredTenantNamespace<'a>,
         redactor: &'a Redactor,
     },
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "owned publication step pending gateway open wiring"
+        )
+    )]
+    PublishFreshSource {
+        request: &'a FreshAnchorRequestV1,
+        configured: ConfiguredTenantNamespace<'a>,
+        redactor: &'a Redactor,
+    },
 }
 
 async fn prepare_empty_owned_target(
@@ -114,7 +189,11 @@ async fn prepare_empty_owned_target(
     server: Uuid,
     schema_version: u16,
     operation: EmptyTargetOperation<'_>,
-) -> Result<(MysqlAuthentication, String)> {
+) -> Result<(
+    MysqlAuthentication,
+    String,
+    Option<crate::mysql_storage::audit::AuditHead>,
+)> {
     ensure!(
         !server.is_nil() && matches!(schema_version, 14 | 15),
         "invalid MySQL owned preparation target"
@@ -139,9 +218,9 @@ async fn prepare_empty_owned_target(
         };
         let checked = async {
             match operation {
-                EmptyTargetOperation::Inspect => {
-                    check_empty_schema(&mut conn, &ownership).await.map(|_| ())
-                }
+                EmptyTargetOperation::Inspect => check_empty_schema(&mut conn, &ownership)
+                    .await
+                    .map(|_| None),
                 EmptyTargetOperation::InstallUnpublishedTables {
                     request,
                     configured,
@@ -156,16 +235,67 @@ async fn prepare_empty_owned_target(
                         &redactor,
                     )?;
                     match check_empty_schema(&mut conn, &ownership).await {
-                        Ok(target) => audit_tables::install(target, schema_version).await,
+                        Ok(target) => audit_tables::install(target, schema_version).await?,
                         Err(error) => {
                             if error.downcast_ref::<MysqlOwnedPreparationRefusal>()
                                 == Some(&MysqlOwnedPreparationRefusal::TargetNotEmpty)
                             {
                                 anchor.reject_divergence(&mut conn, &ownership).await?;
                             }
-                            Err(error)
+                            return Err(error);
                         }
                     }
+                    Ok(None)
+                }
+                EmptyTargetOperation::PublishFreshSource {
+                    request,
+                    configured,
+                    redactor,
+                } => {
+                    let redactor = redactor.with_secrets([password.to_owned()]);
+                    let anchor = request.plan(
+                        schema_version,
+                        server,
+                        endpoint.database,
+                        configured,
+                        &redactor,
+                    )?;
+                    let target = match check_empty_schema(&mut conn, &ownership).await {
+                        Ok(target) => target,
+                        Err(error) => {
+                            if error.downcast_ref::<MysqlOwnedPreparationRefusal>()
+                                == Some(&MysqlOwnedPreparationRefusal::TargetNotEmpty)
+                            {
+                                anchor.reject_divergence(&mut conn, &ownership).await?;
+                            }
+                            return Err(error);
+                        }
+                    };
+                    audit_tables::install(target, schema_version).await?;
+                    let target = CheckedEmptyTarget {
+                        conn: &mut conn,
+                        lock: &ownership,
+                    };
+                    let head = publication::publish(
+                        target,
+                        schema_version,
+                        &anchor,
+                        configured.tenant_id,
+                        configured.namespace_id,
+                        &redactor,
+                    )
+                    .await?;
+                    publication::verify_published(
+                        &mut conn,
+                        &ownership,
+                        schema_version,
+                        configured.tenant_id,
+                        configured.namespace_id,
+                        server,
+                        endpoint.database,
+                    )
+                    .await?;
+                    Ok(Some(head))
                 }
             }
         }
@@ -173,8 +303,8 @@ async fn prepare_empty_owned_target(
         let released = ownership.release(&mut conn).await;
         conn.disconnect().await.map_err(driver_error)?;
         released?;
-        checked?;
-        Ok((configured_authentication, tls_version))
+        let head = checked?;
+        Ok((configured_authentication, tls_version, head))
     })
     .await
     .map_err(|_| MysqlProbeError::TimedOut)?

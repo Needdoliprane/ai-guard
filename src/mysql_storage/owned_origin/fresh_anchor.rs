@@ -23,8 +23,8 @@ const REPLAY_CONFLICT: &str = "MySQL fresh anchor differs from the requested ope
 /// The operator fixes the intended tenant, namespace, installation and source
 /// for creation, and names the expected physical target. The installation and
 /// source IDs are proposed assignments. The live lock attests the SQL target.
-#[derive(Clone, Serialize)]
-pub(super) struct FreshAnchorRequestV1 {
+#[derive(Clone, Serialize, serde::Deserialize)]
+pub(crate) struct FreshAnchorRequestV1 {
     pub(super) operation_id: Uuid,
     pub(super) schema_version: u16,
     pub(super) tenant_id: String,
@@ -37,7 +37,7 @@ pub(super) struct FreshAnchorRequestV1 {
 
 /// Tenant and namespace resolved from the selected storage configuration.
 #[derive(Clone, Copy)]
-pub(super) struct ConfiguredTenantNamespace<'a> {
+pub(crate) struct ConfiguredTenantNamespace<'a> {
     pub(super) tenant_id: &'a str,
     pub(super) namespace_id: Uuid,
 }
@@ -107,9 +107,59 @@ impl FreshAnchorRequestV1 {
             event,
         })
     }
+
+    /// Verify a stored creation event binds the configured origin exactly. The
+    /// open guard uses this without the original draft: the closed request form
+    /// and its content hash must match the tenant, namespace, format and target.
+    pub(super) fn verify_stored_origin(
+        event: &Event,
+        tenant: &str,
+        namespace: &str,
+        version: u16,
+        server: Uuid,
+        schema: &str,
+    ) -> Result<()> {
+        ensure!(
+            event.kind == KIND && event.source == "mysql-storage" && event.data["version"] == 1,
+            "MySQL fresh anchor origin mismatch"
+        );
+        let request: FreshAnchorRequestV1 = serde_json::from_value(event.data["request"].clone())
+            .map_err(|_| anyhow!(REPLAY_CONFLICT))?;
+        ensure!(
+            serde_json::to_value(&request)? == event.data["request"],
+            REPLAY_CONFLICT
+        );
+        ensure!(
+            request.tenant_id == tenant
+                && request.namespace_id.to_string() == namespace
+                && request.schema_version == version
+                && request.server_uuid == server
+                && request.schema == schema
+                && !request.operation_id.is_nil()
+                && !request.installation_id.is_nil()
+                && !request.source_id.is_nil(),
+            "MySQL fresh anchor origin mismatch"
+        );
+        ensure!(
+            event.data["request_hash"].as_str()
+                == Some(content_hash(REQUEST_HASH_DOMAIN, &request)?.as_str()),
+            REPLAY_CONFLICT
+        );
+        Ok(())
+    }
 }
 
 impl FreshAnchorDraft<'_> {
+    /// The prepared, redaction-checked creation event ready for durable insert.
+    pub(super) fn event(&self) -> &Event {
+        &self.event
+    }
+
+    /// The canonical request bound to this draft.
+    pub(super) fn request(&self) -> &FreshAnchorRequestV1 {
+        self.request
+    }
+
     /// Check a historical row under the observed server, schema and session
     /// lock. The caller's refusal to prepare a nonempty target still applies.
     pub(super) async fn reject_divergence(
@@ -401,6 +451,38 @@ mod contract_tests {
                     .is_err()
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn fresh_anchor_stored_origin_binds_the_configured_target() -> Result<()> {
+        let request = request();
+        let draft = plan(&request)?;
+        let event = draft.event();
+        let namespace = request.namespace_id.to_string();
+        let server = request.server_uuid;
+        let ok = |event: &Event, tenant: &str, version: u16, server: Uuid, schema: &str| {
+            FreshAnchorRequestV1::verify_stored_origin(
+                event, tenant, &namespace, version, server, schema,
+            )
+        };
+        assert!(ok(event, "tenant_a", 14, server, "qa_owned").is_ok());
+        assert!(ok(event, "tenant_b", 14, server, "qa_owned").is_err());
+        assert!(ok(event, "tenant_a", 15, server, "qa_owned").is_err());
+        assert!(ok(event, "tenant_a", 14, Uuid::from_u128(9), "qa_owned").is_err());
+        assert!(ok(event, "tenant_a", 14, server, "qa_other").is_err());
+
+        let mut tampered_hash = event.clone();
+        tampered_hash.data["request_hash"] = "0".repeat(64).into();
+        assert!(ok(&tampered_hash, "tenant_a", 14, server, "qa_owned").is_err());
+
+        let mut extended = event.clone();
+        extended.data["request"]["extra"] = 1.into();
+        assert!(ok(&extended, "tenant_a", 14, server, "qa_owned").is_err());
+
+        let mut wrong_kind = event.clone();
+        wrong_kind.kind = "control.mysql.audit.genesis".into();
+        assert!(ok(&wrong_kind, "tenant_a", 14, server, "qa_owned").is_err());
         Ok(())
     }
 }

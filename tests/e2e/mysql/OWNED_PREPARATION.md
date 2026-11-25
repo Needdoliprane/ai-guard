@@ -127,10 +127,12 @@ pouvoir référencer les tables de la cible et garder `foreign_key_checks` et
    explicite. Le reçu d’ancre sert ensuite au descripteur privé attendu.
    Le préparateur interne vérifie déjà la demande d’ancre avant le DDL et
    peut refuser un historique divergent lors d’une réentrée. L’écriture de
-   l’ancre et la publication du singleton restent à raccorder.
+   l’ancre et la publication du singleton sont posées par la transaction
+   interne de publication ; le raccord runtime au gateway reste à livrer.
    [Ancre SQLite](../../../src/audit/review_authority.rs) ·
    [Genèse egress SQLite](../../../src/audit/egress/types.rs) ·
-   [Ancre neuve MySQL](../../../src/mysql_storage/owned_origin/fresh_anchor.rs)
+   [Ancre neuve MySQL](../../../src/mysql_storage/owned_origin/fresh_anchor.rs) ·
+   [Publication MySQL](../../../src/mysql_storage/owned_origin/preparation/publication.rs)
 2. Fermer le manifeste commun et ses marqueurs. Les douze ou dix-sept tables
    actuelles forment le socle audit, décision, revue, réservation worker,
    cycle de vie et supervision, avec egress en format 15. La genèse et le
@@ -174,6 +176,21 @@ pouvoir référencer les tables de la cible et garder `foreign_key_checks` et
    nouvel instantané avant tout reçu. Le bootstrap Legacy part d’une
    sentinelle 1 et la met à jour. Le nouveau parcours exige une sentinelle
    absente jusqu’à cette insertion. [Bootstrap MySQL](../../../src/mysql_storage/audit.rs)
+
+   **État livré (interne).** `publication::publish` pose, dans une transaction
+   InnoDB bornée sur la connexion verrouillée, la genèse audit (séquence 1),
+   l’ancre neuve (séquence 2) puis l’unique singleton 14/15 après le garde vide
+   `verify_empty_in_transaction` et le contrôle durable inscriptible. Il relit
+   le singleton et rejoue le préfixe fermé avant `COMMIT`, et `verify_published`
+   revérifie le format, l’origine, le tenant, le namespace, la tête et le
+   manifeste physique sous verrou dans un nouvel instantané après commit.
+   `prepare_owned_fresh_source` enchaîne installation et publication et rend un
+   reçu sans autorité d’admission. Restent à livrer : la genèse egress du format
+   15 et les marqueurs de supervision owned, le chemin d’écriture owned sur 14/15
+   (le lecteur Legacy reste fermé à ces versions), et le raccord du gateway qui
+   ouvrira la cible publiée via `verify_published`. La recette physique de ces
+   oracles reste `NOT_RUN` sans serveur MySQL 8.4 jetable.
+   [Publication MySQL](../../../src/mysql_storage/owned_origin/preparation/publication.rs)
 5. Sur commit ou réponse incertains, rapprocher l’opération exacte par une
    relecture intégrale sous verrou. Un état partiel ou divergent reste
    fermé, sans nouvelle genèse ni DDL de reprise. La résolution d’une

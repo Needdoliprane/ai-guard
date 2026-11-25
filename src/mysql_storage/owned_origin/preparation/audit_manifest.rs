@@ -686,6 +686,54 @@ pub(super) async fn verify_empty_in_transaction(
         ensure!(empty == [1], "MySQL unpublished egress tables contain rows");
     }
 
+    verify_physical_structure(tx, version).await?;
+    lock.verify_preparation_target(tx).await
+}
+
+/// Verify the published manifest on the caller's locked transaction. The seed
+/// rows are present, so emptiness is not required; the physical structure,
+/// catalog visibility and durable origin must still match the selected format.
+pub(super) async fn verify_structure(
+    tx: &mut Transaction<'_>,
+    lock: &OwnedAuditLock,
+    version: u16,
+) -> Result<()> {
+    ensure!(
+        matches!(version, 14 | 15),
+        "invalid MySQL owned audit format"
+    );
+    lock.verify_preparation_target(tx).await?;
+    require_catalog_visibility(tx).await?;
+    require_constraints_enabled(tx).await?;
+    let inventory = metadata_rows(
+        "SELECT COUNT(*), COUNT(CASE WHEN TABLE_TYPE = 'BASE TABLE' AND ENGINE = 'InnoDB' \
+         AND BINARY TABLE_NAME IN ('ai_guard_audit_decision', 'ai_guard_audit_event', \
+             'ai_guard_audit_state', 'review_authority_meta', 'runner_review_bindings', \
+             'ai_guard_worker', 'ai_guard_worker_attempt', 'ai_guard_worker_mutation', \
+             'ai_guard_worker_observation', 'ai_guard_worker_allocation', \
+             'ai_guard_supervision_meta', 'ai_guard_worker_supervision') THEN 1 END), \
+         COUNT(CASE WHEN TABLE_TYPE = 'BASE TABLE' AND ENGINE = 'InnoDB' \
+         AND BINARY TABLE_NAME IN ('egress_policy_meta', 'egress_policy_revisions', \
+             'egress_policy_heads', 'egress_policy_operations', 'egress_policy_reservations') THEN 1 END), \
+         NOT EXISTS (SELECT 1 FROM information_schema.ROUTINES WHERE BINARY ROUTINE_SCHEMA = BINARY DATABASE()) \
+         AND NOT EXISTS (SELECT 1 FROM information_schema.EVENTS WHERE BINARY EVENT_SCHEMA = BINARY DATABASE()) \
+         AND NOT EXISTS (SELECT 1 FROM information_schema.TRIGGERS WHERE BINARY TRIGGER_SCHEMA = BINARY DATABASE()) \
+         AND NOT EXISTS (SELECT 1 FROM information_schema.PARTITIONS \
+                         WHERE BINARY TABLE_SCHEMA = BINARY DATABASE() AND PARTITION_NAME IS NOT NULL) \
+         FROM information_schema.TABLES WHERE BINARY TABLE_SCHEMA = BINARY DATABASE()",
+        tx,
+    ).await?;
+    ensure!(
+        inventory_matches(&inventory, version),
+        "unexpected MySQL owned preparation objects"
+    );
+    verify_physical_structure(tx, version).await?;
+    lock.verify_preparation_target(tx).await
+}
+
+/// Compare the column, index, constraint and foreign-key manifests. The caller
+/// has already proven catalog visibility and the exact table inventory.
+async fn verify_physical_structure(tx: &mut Transaction<'_>, version: u16) -> Result<()> {
     let columns = manifest_rows(
         "SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, \
          COLUMN_DEFAULT IS NULL AND CHARACTER_SET_NAME IS NULL AND COLLATION_NAME IS NULL \
@@ -727,7 +775,7 @@ pub(super) async fn verify_empty_in_transaction(
         foreign_keys_match(&keys, version),
         "MySQL owned preparation foreign key mismatch"
     );
-    lock.verify_preparation_target(tx).await
+    Ok(())
 }
 
 async fn read_foreign_keys(connection: &mut impl Queryable) -> Result<Vec<ForeignKey>> {

@@ -74,6 +74,31 @@ const EVENT_BY_ID: &str = "SELECT seq,event_id,received_at,prev_hash,hash,payloa
 const FIRST_EVENT: &str =
     "SELECT seq,event_id,received_at,prev_hash,hash,payload FROM ai_guard_audit_event WHERE seq=1";
 
+/// The owned fresh-source genesis binds the tenant and namespace at sequence 1.
+/// It shares the Legacy genesis discriminant and closed data shape so the same
+/// chain replay recognizes it; publication and the owned open guard reuse it.
+pub(super) fn owned_genesis_event(tenant: &str, namespace: &str) -> Event {
+    let mut event = Event::new(GENESIS);
+    event.source = "mysql-storage".into();
+    event.data =
+        json!({"format": "mysql-audit-v1", "tenant_id": tenant, "namespace_id": namespace});
+    event
+}
+
+/// Validate a stored genesis against the configured tenant and namespace.
+pub(super) fn require_owned_genesis(event: &Event, tenant: &str, namespace: &str) -> Result<()> {
+    ensure!(
+        event.kind == GENESIS
+            && event.source == "mysql-storage"
+            && event.provenance == "observed"
+            && event.coverage == "observed"
+            && event.data
+                == json!({"format": "mysql-audit-v1", "tenant_id": tenant, "namespace_id": namespace}),
+        "MySQL audit genesis mismatch"
+    );
+    Ok(())
+}
+
 /// A failed or timed-out COMMIT cannot prove rollback.
 #[derive(Debug)]
 pub struct CommitUncertain;
@@ -107,7 +132,7 @@ pub struct AuditHead {
 }
 
 impl AuditHead {
-    fn empty() -> Self {
+    pub(super) fn empty() -> Self {
         Self {
             seq: 0,
             hash: "0".repeat(64),
@@ -115,7 +140,7 @@ impl AuditHead {
         }
     }
 
-    fn extended(&self, received: &str, payload: &str) -> Result<Self> {
+    pub(super) fn extended(&self, received: &str, payload: &str) -> Result<Self> {
         let seq = self.seq.checked_add(1).context("audit sequence overflow")?;
         let payload_bytes = self
             .payload_bytes
@@ -138,7 +163,7 @@ struct Binding {
 
 pub(super) struct EncodedEvent {
     pub(super) stored: StoredEvent,
-    payload: String,
+    pub(super) payload: String,
     received: DateTime<Utc>,
 }
 
