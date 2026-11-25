@@ -195,7 +195,12 @@ mod tests {
 
     #[tokio::test]
     async fn connect_permits_authenticate_before_strict_json_and_hide_rejection_details() {
-        let directory = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
         let store = Arc::new(
             Store::open_for_tenant(
                 &directory.path().join("tenant-a.sqlite"),
