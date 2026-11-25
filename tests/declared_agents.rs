@@ -1,3 +1,5 @@
+mod support;
+
 use agentsandbox::{
     adapters::{AdapterContext, normalize_hook_record, normalize_stdout_record, parse_line},
     audit::Store,
@@ -639,7 +641,7 @@ fn claude_parent_facts() -> Vec<Event> {
 }
 
 fn claude_read_store(max_events: u64) -> (tempfile::TempDir, Store) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = support::private_tempdir();
     let store = Store::open_for_tenant(
         &dir.path().join("tenant.sqlite"),
         "tenant-a",
