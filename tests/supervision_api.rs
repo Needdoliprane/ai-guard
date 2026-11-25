@@ -4,6 +4,8 @@
 mod control_capabilities;
 #[path = "supervision_api/control_transport.rs"]
 mod control_transport;
+#[path = "supervision_api/retention_seal.rs"]
+mod retention_seal;
 mod support;
 
 use agentsandbox::{

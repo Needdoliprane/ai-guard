@@ -64,6 +64,11 @@ pub mod code {
     pub const EXPORT_DIVERGES: &str = "export_diverges";
     pub const EVENT_PREDATES_ARCHIVE: &str = "event_predates_archive";
     pub const CHECKPOINT_LOG_UNAVAILABLE: &str = "checkpoint_log_unavailable";
+    /// G06/R2 read-only selection of a closed worker (first slice).
+    pub const SEAL_WORKER_NOT_FOUND: &str = "seal_worker_not_found";
+    pub const SEAL_CLOSURE_INCOMPLETE: &str = "seal_closure_incomplete";
+    pub const SEAL_BROKER_HEAD_INCOMPLETE: &str = "seal_broker_head_incomplete";
+    pub const SEAL_HEAD_DRIFT: &str = "seal_head_drift";
 }
 
 /// The refusal carried by typed context or the underlying error chain.

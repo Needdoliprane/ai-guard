@@ -25,6 +25,7 @@ pub mod cli;
 pub mod failure;
 pub(crate) mod ledger;
 pub mod policy;
+mod seal;
 pub(crate) mod snapshot;
 mod store;
 
@@ -40,6 +41,7 @@ pub use classify::ReclaimClassV1;
 pub use failure::RetentionFailure;
 pub use ledger::RetentionAppliedV1;
 pub use policy::{AuditRetentionPolicyV1, MIN_AGE_FLOOR_SECONDS};
+pub use seal::{SEAL_SELECTION_FORMAT, SealBrokerHeadV1, SealProofRefV1, SealedWorkerSelectionV1};
 pub use store::{
     ArchiveSummaryV1, AuditUsageV1, PlannedRetentionV1, RetentionApplyRequest,
     RetentionInstallReportV1, RetentionLedgerV1, RetentionPlanV1, RetentionReceiptV1,
