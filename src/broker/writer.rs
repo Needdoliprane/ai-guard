@@ -454,15 +454,17 @@ impl ClientState {
             mpsc::TrySendError::Full(_) => WriterCallFailure::QueueFull,
             mpsc::TrySendError::Disconnected(_) => WriterCallFailure::Unavailable,
         });
-        #[cfg(test)]
-        if let Some(cost) = &cost {
-            if sent.is_ok() {
-                cost.sent();
-            } else {
+        if let Err(failure) = sent {
+            #[cfg(test)]
+            if let Some(cost) = cost {
                 cost.finish(false, false);
             }
+            return Err(failure);
         }
-        sent?;
+        #[cfg(test)]
+        if let Some(cost) = &cost {
+            cost.sent();
+        }
 
         // A lost reply never removes or cancels the actor's typed command.
         let completed = self
@@ -472,7 +474,7 @@ impl ClientState {
         let received = completed.is_ok();
         let result = completed.and_then(|reply| reply.map_err(WriterCallFailure::Actor));
         #[cfg(test)]
-        if let Some(cost) = &cost {
+        if let Some(cost) = cost {
             cost.finish(received, result.is_ok());
         }
         result
