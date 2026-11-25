@@ -4,6 +4,7 @@ use mysql_async::{Conn, Row, Transaction, prelude::Queryable};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+mod fresh_anchor;
 mod preparation;
 pub use preparation::{
     MysqlOwnedPreparationPreflight, MysqlOwnedPreparationRefusal, preflight_owned_preparation,
