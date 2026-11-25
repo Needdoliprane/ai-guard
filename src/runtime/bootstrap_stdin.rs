@@ -85,7 +85,10 @@ impl PrearmedBootstrapStdin {
         {
             return Err(io::Error::last_os_error()).context("configure prearmed bootstrap stdin");
         }
-        Ok(Self(AsyncFd::with_interest(fd, Interest::WRITABLE)?))
+        // SAFETY: AsyncFd takes the sole OwnedFd, which stays open and
+        // unchanged until AsyncFd drops it.
+        let registered = unsafe { AsyncFd::register_with_interest(fd, Interest::WRITABLE) };
+        Ok(Self(registered.map_err(io::Error::from)?))
     }
 
     /// Wait outside the cancellation gate, within the caller's preparation
