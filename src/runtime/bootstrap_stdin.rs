@@ -162,7 +162,10 @@ impl PreparedBootstrapStdin {
         check_release: impl FnOnce() -> Result<()>,
     ) -> Result<(), BootstrapStdinSubmitError> {
         let Self {
-            stdin, stop, attempt, ..
+            stdin,
+            stop,
+            attempt,
+            ..
         } = self;
         let frame = crate::egress::bootstrap_release::encode_frame(&attempt);
         stdin.submit_once(&frame, generation, expected, || {
