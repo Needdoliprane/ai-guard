@@ -11,6 +11,7 @@ use agentsandbox::{
     redaction::Redactor,
     runner::AuditClient,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fs, os::unix::fs::PermissionsExt, sync::Arc};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -36,12 +37,19 @@ struct Fixture {
     _root: TempDir,
     store: Arc<Store>,
     server: Server,
+    initial_worker_corrupted: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Copy)]
 enum InitialWorkerMutation {
     StartOperationPresent,
     NilAttemptId,
+}
+
+#[derive(Clone)]
+struct InitialWorkerCorruption {
+    mutation: InitialWorkerMutation,
+    applied: Arc<AtomicBool>,
 }
 
 impl Fixture {
@@ -86,10 +94,14 @@ impl Fixture {
         .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
+        let initial_worker_corrupted = Arc::new(AtomicBool::new(false));
         let mut router = gateway_router(state);
         if let Some(mutation) = mutate_initial_worker {
             router = router.layer(axum::middleware::from_fn_with_state(
-                mutation,
+                InitialWorkerCorruption {
+                    mutation,
+                    applied: Arc::clone(&initial_worker_corrupted),
+                },
                 corrupt_initial_worker_response,
             ));
         }
@@ -100,6 +112,7 @@ impl Fixture {
             _root: root,
             store,
             server: Server { url, task },
+            initial_worker_corrupted,
         }
     }
 
@@ -184,10 +197,13 @@ impl Fixture {
 }
 
 async fn corrupt_initial_worker_response(
-    axum::extract::State(mutation): axum::extract::State<InitialWorkerMutation>,
+    axum::extract::State(corruption): axum::extract::State<InitialWorkerCorruption>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    // The typed client submits through the explicit runner control transport
+    // (`/control` prefix), never the historical public path. Targeting the
+    // public path left the reply uncorrupted and the rejection untested.
     let target = request.uri().path() == "/control/api/v1/workers/supervised-reservations";
     let response = next.run(request).await;
     if !target || response.status() != axum::http::StatusCode::CREATED {
@@ -196,7 +212,7 @@ async fn corrupt_initial_worker_response(
     let (mut parts, body) = response.into_parts();
     let bytes = axum::body::to_bytes(body, 512 * 1024).await.unwrap();
     let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    match mutation {
+    match corruption.mutation {
         InitialWorkerMutation::StartOperationPresent => {
             value["worker"]["attempt"]["start_operation_id"] =
                 serde_json::json!(Uuid::new_v4().to_string());
@@ -205,6 +221,7 @@ async fn corrupt_initial_worker_response(
             value["worker"]["attempt"]["attempt_id"] = serde_json::json!(Uuid::nil().to_string());
         }
     }
+    corruption.applied.store(true, Ordering::SeqCst);
     parts.headers.remove(axum::http::header::CONTENT_LENGTH);
     axum::http::Response::from_parts(
         parts,
@@ -316,6 +333,10 @@ async fn typed_client_rejects_an_inconsistent_initial_worker_from_real_gateway_r
         let request = fixture.admission("observe", &["/usr/bin/id", "-u"]);
         let client = fixture.client(TOKEN);
         let result = client.admit_supervised(&request).await;
+        assert!(
+            fixture.initial_worker_corrupted.load(Ordering::SeqCst),
+            "the middleware must corrupt the real gateway reply on the runner control transport"
+        );
         assert!(
             result.is_err(),
             "the Store-created initial worker cannot contain a start-operation identity or a nil attempt ID"
