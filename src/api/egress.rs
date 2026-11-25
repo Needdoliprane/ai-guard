@@ -9,9 +9,10 @@ use super::*;
 use crate::{
     audit::egress_decisions::EgressJournalError,
     control::egress_decision::{
-        EgressChannelOpeningReceiptV1, EgressChannelOpeningRequestV1, EgressConnectPermitRequestV1,
-        EgressConnectPermitV1, EgressDecideRequestV1, EgressDecisionV1, EgressObserveRequestV1,
-        EgressReceiptV1, EgressRenewRequestV1, EgressRenewResponseV1, deserialize_object,
+        EgressChannelOpeningReceiptV1, EgressChannelOpeningRequestV1, EgressConnectPermitReceiptV1,
+        EgressConnectPermitRequestV1, EgressDecideRequestV1, EgressDecisionV1,
+        EgressObserveRequestV1, EgressReceiptV1, EgressRenewRequestV1, EgressRenewResponseV1,
+        deserialize_object,
     },
 };
 
@@ -107,12 +108,11 @@ struct ConnectPermitRequestJson(
 async fn issue_connect_permit(
     RunnerIdentity(tenant): RunnerIdentity,
     request: Result<Json<ConnectPermitRequestJson>, JsonRejection>,
-) -> ApiResult<Json<EgressConnectPermitV1>> {
+) -> ApiResult<Json<EgressConnectPermitReceiptV1>> {
     let Json(ConnectPermitRequestJson(request)) =
         request.map_err(|rejection| invalid_request(rejection.status()))?;
     write_egress(tenant, move |store| {
-        let policy = store.egress_policy();
-        store.egress_issue_connect_permit(&request, &policy, now_ms())
+        store.egress_issue_connect_permit(&request)
     })
     .await
 }
