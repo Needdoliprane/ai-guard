@@ -41,6 +41,13 @@ a vérifié le contrat du [reçu Rust](../../src/runner/broker/executor/diagnost
 et l’insertion des libellés comme texte. Cette preuve logicielle porte
 sur le rendu de lecture et ne confère aucun nouveau statut au rejeu Full3.
 
+Chromium vérifie aussi le résumé et le panneau en 1 440 × 900 et
+390 × 844 sur le frontend `276d6e6c`, avec un gateway de recette
+loopback. Les reçus anciens ou de provenance inattendue gardent le
+rendu de repli. Zéro requête externe et zéro erreur de page.
+Navigateur et serveur fermés. SHA-256 du reçu
+`bc26ae7db7dba240e8dc663cd0b8ccb21841196fd4973145154a23400c4b433f`.
+
 ## 25 novembre 2026 — reproduction Legacy G09
 
 Le gel `28af5740` compile hors ligne sur macOS ARM64 en 12 min 37 s.
