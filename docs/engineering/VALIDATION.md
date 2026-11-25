@@ -13,9 +13,11 @@ de supervision et un worker `Preparing` avec quota retenu. B
 garde sa seule initialisation. Le dernier statut relayé ne porte
 aucun endpoint et une demande reste en cours à l’échéance. La
 vérification d’import et le lancement du worker ne sont pas
-observés. La prochaine question concerne le passage après r16,
-observé peu avant la borne du canari. Le reçu précédent
-`4a78536a` s’arrêtait à r14.
+observés. La prochaine question concerne la préparation de
+`ImportVerification` à partir du reçu r16. Les 23,706 s de r0
+à r16 viennent des horodatages du journal. La fenêtre distincte
+de 25 s débute lors de l’attente de l’endpoint après Submit.
+Le reçu précédent `4a78536a` s’arrêtait à r14.
 
 Le groupe du test est vide en fin d’exécution. L’inventaire élargi
 retrouve un gardien de cette fixture dans son propre groupe, avec
