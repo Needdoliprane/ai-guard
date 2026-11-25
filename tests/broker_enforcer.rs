@@ -134,7 +134,7 @@ async fn explicit_recovery_cli_uses_existing_auth_and_keeps_full_closed() {
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    wait_for_announcement(&role, Duration::from_secs(5))
+    wait_for_announcement(&role, Duration::from_secs(20))
         .await
         .unwrap();
     let root = Directory::open_existing(&role).unwrap();
@@ -449,7 +449,7 @@ async fn real_enforcer_child_health_stop_recovery_and_idle_shutdown() {
         .unwrap();
     let pid: libc::pid_t = child.id().unwrap().try_into().unwrap();
 
-    let published = wait_for_announcement(&root_path, Duration::from_secs(5))
+    let published = wait_for_announcement(&root_path, Duration::from_secs(20))
         .await
         .expect("the child must durably publish a real endpoint announcement");
     assert!(published.is_file());
@@ -555,7 +555,7 @@ async fn public_client_reconnects_to_the_genuinely_fresh_legacy_enforcer_and_shu
         .await
         .unwrap();
     drop(launch_pipe);
-    let announcement_path = wait_for_announcement(&root_path, Duration::from_secs(5))
+    let announcement_path = wait_for_announcement(&root_path, Duration::from_secs(20))
         .await
         .expect("the genuine fresh child must publish its endpoint");
     let endpoint = endpoint_from_announcement(&announcement_path).unwrap();

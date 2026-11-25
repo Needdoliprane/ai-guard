@@ -151,21 +151,22 @@ fn scoped_identity_and_authentication_reads_require_the_migrated_source() {
                 .is_none()
         );
     });
-    read(&bundle, "A", |store, _access| {
-        assert_eq!(
-            head(store),
-            before,
-            "metadata and authentication do not invent human read receipts"
-        );
-        assert!(store.human_account(principal).is_err());
-        assert!(store.authentication_membership_snapshot(principal).is_err());
-        assert!(store.identity_memberships(principal).is_err());
-        assert!(store.identity_resource_grant(&missing).is_err());
-        assert!(store.identity_authorization_revision().is_err());
-        assert!(store.local_credential_binding(&[0xad; 32]).is_err());
-        assert!(store.authenticate_local_digest(&[0xad; 32]).is_err());
-        assert_eq!(head(store), before);
-    });
+    // The unscoped refusals and head checks need no borrowed read epoch: head
+    // is a direct durable read and the unscoped calls must simply refuse.
+    let store = bundle.store(source_id(&bundle, "A")).unwrap();
+    assert_eq!(
+        head(store),
+        before,
+        "metadata and authentication do not invent human read receipts"
+    );
+    assert!(store.human_account(principal).is_err());
+    assert!(store.authentication_membership_snapshot(principal).is_err());
+    assert!(store.identity_memberships(principal).is_err());
+    assert!(store.identity_resource_grant(&missing).is_err());
+    assert!(store.identity_authorization_revision().is_err());
+    assert!(store.local_credential_binding(&[0xad; 32]).is_err());
+    assert!(store.authenticate_local_digest(&[0xad; 32]).is_err());
+    assert_eq!(head(store), before);
 }
 
 #[test]
