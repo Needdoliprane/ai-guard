@@ -94,7 +94,7 @@ enum EmptyTargetOperation {
             reason = "internal installation step pending owned publication"
         )
     )]
-    InstallAuditTables,
+    InstallUnpublishedTables,
 }
 
 async fn prepare_empty_owned_target(
@@ -129,7 +129,7 @@ async fn prepare_empty_owned_target(
             let target = check_empty_schema(&mut conn, &ownership).await?;
             match operation {
                 EmptyTargetOperation::Inspect => Ok(()),
-                EmptyTargetOperation::InstallAuditTables => {
+                EmptyTargetOperation::InstallUnpublishedTables => {
                     audit_tables::install(target, schema_version).await
                 }
             }

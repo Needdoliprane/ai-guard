@@ -81,7 +81,7 @@ async fn owned_audit_tables_remain_unpublished_and_refuse_reentry() -> Result<()
                 credentials(),
                 server,
                 version,
-                EmptyTargetOperation::InstallAuditTables,
+                EmptyTargetOperation::InstallUnpublishedTables,
             )
         };
         install().await?;

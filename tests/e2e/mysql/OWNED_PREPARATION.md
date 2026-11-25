@@ -57,19 +57,25 @@ reçoit `CatalogVisibilityUnconfirmed` avant l’inventaire. [Sélection des dro
 ## Sous-manifeste d’audit et publication restante
 
 Le [sous-manifeste d’audit](../../../src/mysql_storage/owned_origin/preparation/audit_manifest.rs)
-couvre les deux tables issues du [DDL partagé](../../../schema/mysql/audit-v1.sql).
+compose le [DDL d’audit partagé](../../../schema/mysql/audit-v1.sql) et le
+[DDL MySQL des projections de revue](../../../schema/mysql/review-owned-v1.sql).
 Après les créations internes, la même connexion verrouillée relit dans une
-transaction de lecture les tables InnoDB, les 13 colonnes, les trois index
-et toutes les contraintes, y compris l’expression entière de chaque `CHECK`
-et la version exacte choisie. Elle exige l’absence de lignes d’audit, de
-singleton et de tout autre objet utilisateur du schéma. Cet état est un socle non
-publié. Une nouvelle préparation le refuse comme cible partielle.
+transaction de lecture les quatre tables InnoDB, les colonnes, les index et
+les contraintes. Elle compare notamment le format choisi, l’expression qui
+réserve l’unicité aux bindings actifs et les trois clés étrangères vers
+l’événement d’audit du même schéma. Elle exige que les quatre tables soient
+vides, y compris le singleton, l’autorité et les bindings. Une reprise
+refuse ce socle comme cible partielle. Le compte opérateur doit aussi
+pouvoir référencer la table d’audit et garder `foreign_key_checks` et
+`unique_checks` actifs dans la session d’installation.
 
-- **Formats 14 et 15.** Le DDL MySQL et le rejeu correspondant aux projections
+- **Formats 14 et 15.** Le DDL MySQL reprend les colonnes des projections
   [`review_authority_meta`](../../../src/audit/review_authority.rs) et
-  [`runner_review_bindings`](../../../src/audit/review_binding.rs) restent à
-  définir, y compris l’équivalent des deux index uniques filtrés du binding
-  actif. Leurs définitions et leur vérification existent côté SQLite.
+  [`runner_review_bindings`](../../../src/audit/review_binding.rs). Une
+  colonne générée nulle pour les bindings révoqués porte les deux index
+  uniques des bindings actifs. Le rejeu MySQL reste à écrire avec une
+  ancre de création neuve. Le lecteur SQLite valide une ancre de conversion
+  13→14 et le dépôt MySQL ne publie aucune ancre équivalente.
 - **Format 15.** Il manque aussi le DDL MySQL et le rejeu des cinq projections
   `egress_policy_*`, avec leur genèse et leurs réservations durables.
   [Schéma SQLite 15](../../../src/audit/egress/schema.rs)
@@ -85,7 +91,10 @@ publié. Une nouvelle préparation le refuse comme cible partielle.
 
 - Les tests purs `owned_audit_manifest_rejects_column_and_index_drift` et
   `owned_audit_manifest_requires_the_exact_enforced_checks` couvrent le refus
-  d’une forme divergente. L’oracle ignoré
+  d’une forme divergente. `owned_review_manifest_rejects_changed_binding_and_audit_links`
+  vérifie le refus d’une expression générée ou d’une cible de clé étrangère
+  divergente. `owned_review_ddl_preserves_active_uniqueness_and_audit_references`
+  vérifie les clauses du DDL de revue. L’oracle ignoré
   `owned_audit_tables_remain_unpublished_and_refuse_reentry` exerce le
   sous-manifeste SQL sur des cibles séparées, puis le refus de reprise et le
   refus Legacy. Il reste à exécuter sur MySQL 8.4.

@@ -1,4 +1,4 @@
-//! The two audit tables on a freshly verified empty MySQL owned target.
+//! Unpublished audit and review tables on a verified empty MySQL owned target.
 
 use super::{CheckedEmptyTarget, audit_manifest, driver_error};
 use anyhow::{Context, Result, ensure};
@@ -44,23 +44,48 @@ fn audit_tables_ddl(version: u16) -> Result<(&'static str, String)> {
     Ok((event, state))
 }
 
+fn review_tables_ddl() -> Result<[&'static str; 2]> {
+    let ddl = include_str!("../../../../schema/mysql/review-owned-v1.sql");
+    let (_, statements) = ddl
+        .split_once('\n')
+        .context("review DDL header is missing")?;
+    let mut statements = statements
+        .split(';')
+        .map(str::trim)
+        .filter(|sql| !sql.is_empty());
+    let authority = statements
+        .next()
+        .filter(|sql| sql.starts_with("CREATE TABLE review_authority_meta ("))
+        .context("review authority DDL is missing")?;
+    let bindings = statements
+        .next()
+        .filter(|sql| sql.starts_with("CREATE TABLE runner_review_bindings ("))
+        .context("review bindings DDL is missing")?;
+    ensure!(
+        statements.next().is_none(),
+        "unexpected statements in review DDL"
+    );
+    Ok([authority, bindings])
+}
+
 /// Called after the full empty-target check on this locked connection.
-/// The singleton and all audit rows remain absent until owned publication.
+/// The singleton, audit events and review projections stay empty.
 pub(super) async fn install(target: CheckedEmptyTarget<'_>, version: u16) -> Result<()> {
     let CheckedEmptyTarget { conn, lock } = target;
     let (event, state) = audit_tables_ddl(version)?;
+    let [authority, bindings] = review_tables_ddl()?;
     audit_manifest::require_empty_constraints(conn).await?;
-    lock.verify(conn).await?;
-    conn.query_drop(event).await.map_err(driver_error)?;
-    lock.verify(conn).await?;
-    conn.query_drop(state).await.map_err(driver_error)?;
+    for statement in [event, state.as_str(), authority, bindings] {
+        lock.verify(conn).await?;
+        conn.query_drop(statement).await.map_err(driver_error)?;
+    }
 
     audit_manifest::verify_unpublished(conn, lock, version).await
 }
 
 #[cfg(test)]
 mod tests {
-    use super::audit_tables_ddl;
+    use super::{audit_tables_ddl, review_tables_ddl};
     use anyhow::Result;
 
     #[test]
@@ -75,6 +100,29 @@ mod tests {
             assert!(!event.contains(';') && !state.contains(';'));
         }
         assert!(audit_tables_ddl(1).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn owned_review_ddl_preserves_active_uniqueness_and_audit_references() -> Result<()> {
+        let [authority, bindings] = review_tables_ddl()?;
+        assert!(
+            authority.contains("FOREIGN KEY (anchor_seq) REFERENCES ai_guard_audit_event (seq)")
+        );
+        assert!(
+            authority
+                .contains("FOREIGN KEY (incarnation_seq) REFERENCES ai_guard_audit_event (seq)")
+        );
+        assert!(
+            bindings.contains("FOREIGN KEY (last_event_seq) REFERENCES ai_guard_audit_event (seq)")
+        );
+        assert!(bindings.contains("AS (IF(active = 1, tenant_id, NULL)) STORED"));
+        assert!(bindings.contains(
+            "UNIQUE KEY runner_review_bindings_active_credential (credential_id, active_tenant_id)"
+        ));
+        assert!(
+            bindings.contains("UNIQUE KEY runner_review_bindings_active_tenant (active_tenant_id)")
+        );
         Ok(())
     }
 }
