@@ -179,7 +179,7 @@ async fn check_empty_schema<'a>(
     Ok(CheckedEmptyTarget { conn, lock })
 }
 
-async fn require_catalog_visibility(conn: &mut Conn) -> Result<()> {
+async fn require_catalog_visibility(conn: &mut impl Queryable) -> Result<()> {
     // INFORMATION_SCHEMA hides objects from accounts lacking privileges.
     // Only direct global grants prove visibility independently of MySQL's
     // choice of a schema grant, which can depend on another host entry.

@@ -96,8 +96,79 @@ pouvoir référencer les tables de la cible et garder `foreign_key_checks` et
   bornés à leur tenant. [Lecteur MySQL](../../../src/mysql_storage/audit.rs) ·
   [Fixture Legacy](GATEWAY_FIXTURE.md)
 
+## Raccord de l’ancre neuve avant publication
+
+1. Figer la demande depuis la configuration opérateur de confiance. Elle doit
+   nommer le format exact, le tenant, le namespace et les UUID de
+   l’installation et de la source, ainsi que la cible physique attendue
+   (UUID serveur et schéma canonique). Réserver un identifiant d’opération
+   stable et lier son contenu à la même demande au rejeu. Définir le
+   discriminant et les octets de l’événement de création neuve avant de les
+   écrire. `SourceAnchorV1` valide `from_format = 13` et l’ID de migration
+   comme ID d’événement. La genèse egress SQLite décrit également une
+   transition et porte un ID de migration. Réutiliser les reçus `seq/hash`,
+   le tenant, le namespace et les liens de préfixe dans une forme neuve
+   explicite. Le reçu d’ancre sert ensuite au descripteur privé attendu.
+   [Ancre SQLite](../../../src/audit/review_authority.rs) ·
+   [Genèse egress SQLite](../../../src/audit/egress/types.rs)
+2. Fermer le manifeste commun et ses marqueurs. Les quatre ou neuf tables
+   actuelles forment le socle audit/revue/egress. Le lecteur MySQL ordinaire
+   exige aussi la décision, les tables worker/lifecycle et la supervision.
+   `control_projections()` exige identité et workload, tandis que le registre
+   broker reste facultatif dans ce lecteur. Fixer les capacités owned
+   obligatoires et les intégrer au manifeste exact avec les DDL MySQL
+   existants et leur rejeu. `verify_empty_in_transaction` relit le manifeste
+   actuel et l’absence de lignes dans la transaction appelante. Il vérifie
+   avant et après lecture la session, le détenteur du verrou, l’UUID serveur
+   et le schéma courant canonique. Il refait la preuve de visibilité du
+   catalogue et vérifie les contraintes activées dans cette session. Le garde
+   devra couvrir le manifeste étendu avant que l’écrivain puisse l’utiliser.
+   [Garde de préparation](../../../src/mysql_storage/owned_origin/preparation/audit_manifest.rs) ·
+   [Lecteur MySQL](../../../src/mysql_storage/audit.rs)
+3. Construire le vérificateur des préfixes owned et le lecteur de singleton
+   exact 14/15. Réutiliser le codec d’événement et de hachage, le calcul de
+   `AuditHead`, la lecture de chaîne et les rejeux MySQL compatibles. La
+   genèse `control.mysql.audit.genesis` lie déjà tenant et namespace à la
+   séquence 1. Si le marqueur de supervision actuel est retenu, il doit
+   rester à la séquence 2. Le lecteur `binding` de Legacy doit continuer
+   à n’accepter que 1.
+   `verify_bound` peut inspirer la relecture d’un binding préparé en mémoire
+   avant insertion du singleton, après séparation explicite des marqueurs
+   owned. Rejouer les projections d’autorité et de binding à partir des
+   événements, puis comparer leurs lignes et leurs empreintes. En 15,
+   rejouer aussi la genèse egress. Elle doit référencer l’ancre antérieure
+   exacte, le même tenant et namespace et le préfixe immédiatement précédent.
+   [Codec commun](../../../src/audit/event_codec.rs) ·
+   [Rejeu egress](../../../src/audit/egress/replay.rs)
+4. Après le DDL, commencer une transaction InnoDB d’écriture bornée sur la
+   connexion verrouillée. Vérifier que la cible reste durable et inscriptible.
+   Refaire le garde vide avant le premier insert, puis composer
+   la genèse audit, les genèses communes convenues, l’ancre neuve et, en 15,
+   la genèse egress. Réutiliser la préparation d’événement, le contrôle de
+   capacité et l’insertion d’événement existants. Relire les marqueurs après
+   masquage, la chaîne, les projections et la tête calculée dans cette
+   transaction. Insérer en dernier l’unique singleton avec format, tenant,
+   namespace, séquence, empreinte et octets cumulés. Relire ce singleton
+   avant `COMMIT`, puis vérifier à nouveau la cible sous verrou dans un
+   nouvel instantané avant tout reçu. Le bootstrap Legacy part d’une
+   sentinelle 1 et la met à jour. Le nouveau parcours exige une sentinelle
+   absente jusqu’à cette insertion. [Bootstrap MySQL](../../../src/mysql_storage/audit.rs)
+5. Sur commit ou réponse incertains, rapprocher l’opération exacte par une
+   relecture intégrale sous verrou. Un état partiel ou divergent reste
+   fermé, sans nouvelle genèse ni DDL de reprise. La résolution d’une
+   préparation ne donne aucune autorité d’admission. Le descripteur et le
+   propriétaire retenu actuels portent des identités de fichiers POSIX.
+   Avant tout raccord runtime, il faut la liaison MySQL explicite à la
+   source attendue et sa validation par le véritable propriétaire sous la
+   barrière d’epoch. Le verrou SQL atteste la session de la base.
+   [Descripteur actuel](../../../src/human_authority/manifest.rs) ·
+   [Epoch et propriétaire](../../../src/human_authority.rs)
+
 ## Témoins à exécuter sur cibles jetables
 
+- Le test pur `owned_preparation_requires_the_locked_physical_target`
+  vérifie que le manifeste reste lié à l’UUID serveur, au schéma canonique
+  et à la session qui détient le verrou.
 - Les tests purs `owned_audit_manifest_rejects_column_and_index_drift` et
   `owned_audit_manifest_requires_the_exact_enforced_checks` couvrent le refus
   d’une forme divergente. `owned_review_manifest_rejects_changed_binding_and_audit_links`

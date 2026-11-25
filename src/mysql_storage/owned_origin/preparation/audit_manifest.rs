@@ -1,9 +1,11 @@
 //! Physical manifest of the unpublished audit, review and format-15 egress tables.
 
-use super::{OwnedAuditLock, decode_row, driver_error, egress_manifest as egress};
+use super::{
+    OwnedAuditLock, decode_row, driver_error, egress_manifest as egress, require_catalog_visibility,
+};
 use anyhow::{Result, ensure};
 use mysql_async::{
-    Conn, IsolationLevel, Row, TxOpts,
+    Conn, IsolationLevel, Row, Transaction, TxOpts,
     prelude::{FromRow, Queryable},
 };
 
@@ -510,9 +512,13 @@ pub(super) async fn require_empty_constraints(conn: &mut Conn) -> Result<()> {
         read_constraints(conn).await?.is_empty(),
         "unexpected MySQL audit constraints before DDL"
     );
+    require_constraints_enabled(conn).await
+}
+
+async fn require_constraints_enabled(connection: &mut impl Queryable) -> Result<()> {
     let checks: Vec<(u8, u8)> = metadata_rows(
         "SELECT @@SESSION.foreign_key_checks, @@SESSION.unique_checks",
-        conn,
+        connection,
     )
     .await?;
     ensure!(
@@ -528,10 +534,6 @@ pub(super) async fn verify_unpublished(
     lock: &OwnedAuditLock,
     version: u16,
 ) -> Result<()> {
-    ensure!(
-        matches!(version, 14 | 15),
-        "invalid MySQL owned audit format"
-    );
     let mut options = TxOpts::new();
     options
         .with_readonly(true)
@@ -540,76 +542,111 @@ pub(super) async fn verify_unpublished(
         .start_transaction(options)
         .await
         .map_err(driver_error)?;
-    let verification = async {
-        lock.verify(&mut tx).await?;
-        let inventory = metadata_rows(
-            "SELECT COUNT(*), COUNT(CASE WHEN TABLE_TYPE = 'BASE TABLE' AND ENGINE = 'InnoDB' \
-             AND BINARY TABLE_NAME IN ('ai_guard_audit_event', 'ai_guard_audit_state', \
-                 'review_authority_meta', 'runner_review_bindings') THEN 1 END), \
-             COUNT(CASE WHEN TABLE_TYPE = 'BASE TABLE' AND ENGINE = 'InnoDB' \
-             AND BINARY TABLE_NAME IN ('egress_policy_meta', 'egress_policy_revisions', \
-                 'egress_policy_heads', 'egress_policy_operations', 'egress_policy_reservations') THEN 1 END), \
-             NOT EXISTS (SELECT 1 FROM information_schema.ROUTINES WHERE BINARY ROUTINE_SCHEMA = BINARY DATABASE()) \
-             AND NOT EXISTS (SELECT 1 FROM information_schema.EVENTS WHERE BINARY EVENT_SCHEMA = BINARY DATABASE()) \
-             AND NOT EXISTS (SELECT 1 FROM information_schema.TRIGGERS WHERE BINARY TRIGGER_SCHEMA = BINARY DATABASE()) \
-             AND NOT EXISTS (SELECT 1 FROM information_schema.PARTITIONS \
-                             WHERE BINARY TABLE_SCHEMA = BINARY DATABASE() AND PARTITION_NAME IS NOT NULL) \
-             FROM information_schema.TABLES WHERE BINARY TABLE_SCHEMA = BINARY DATABASE()",
-            &mut tx,
-        ).await?;
-        ensure!(inventory_matches(&inventory, version), "unexpected MySQL owned preparation objects");
-
-        // Read the tables before their column and index metadata to retain their
-        // metadata locks for the rest of this snapshot.
-        let empty: Vec<u8> = metadata_rows(
-            "SELECT NOT EXISTS (SELECT 1 FROM ai_guard_audit_state) \
-             AND NOT EXISTS (SELECT 1 FROM ai_guard_audit_event) \
-             AND NOT EXISTS (SELECT 1 FROM review_authority_meta) \
-             AND NOT EXISTS (SELECT 1 FROM runner_review_bindings)",
-            &mut tx,
-        ).await?;
-        ensure!(empty == [1], "MySQL unpublished audit or review tables contain rows");
-        if version == 15 {
-            let empty: Vec<u8> = metadata_rows(
-                "SELECT NOT EXISTS (SELECT 1 FROM egress_policy_meta) \
-                 AND NOT EXISTS (SELECT 1 FROM egress_policy_revisions) \
-                 AND NOT EXISTS (SELECT 1 FROM egress_policy_heads) \
-                 AND NOT EXISTS (SELECT 1 FROM egress_policy_operations) \
-                 AND NOT EXISTS (SELECT 1 FROM egress_policy_reservations)",
-                &mut tx,
-            ).await?;
-            ensure!(empty == [1], "MySQL unpublished egress tables contain rows");
-        }
-
-        let columns = metadata_rows(
-            "SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, \
-             COLUMN_DEFAULT IS NULL AND CHARACTER_SET_NAME IS NULL AND COLLATION_NAME IS NULL \
-             AND ((BINARY EXTRA = '' AND GENERATION_EXPRESSION = '') \
-                  OR (BINARY EXTRA = 'STORED GENERATED' AND GENERATION_EXPRESSION <> '')), \
-             IF(OCTET_LENGTH(GENERATION_EXPRESSION) <= 512, GENERATION_EXPRESSION, NULL) \
-             FROM information_schema.COLUMNS WHERE BINARY TABLE_SCHEMA = BINARY DATABASE() \
-             ORDER BY BINARY TABLE_NAME, ORDINAL_POSITION LIMIT 59",
-            &mut tx,
-        ).await?;
-        ensure!(columns_match(&columns, version), "MySQL owned preparation column manifest mismatch");
-
-        let indexes = metadata_rows(
-            "SELECT s.TABLE_NAME, s.INDEX_NAME, s.COLUMN_NAME, s.SEQ_IN_INDEX, s.NON_UNIQUE, \
-             s.SUB_PART IS NULL AND s.COLLATION = 'A' \
-             AND s.INDEX_TYPE = 'BTREE' AND s.IS_VISIBLE = 'YES' AND s.EXPRESSION IS NULL \
-             FROM information_schema.STATISTICS AS s WHERE BINARY s.TABLE_SCHEMA = BINARY DATABASE() \
-             ORDER BY BINARY s.TABLE_NAME, BINARY s.INDEX_NAME, s.SEQ_IN_INDEX LIMIT 29",
-            &mut tx,
-        ).await?;
-        ensure!(indexes_match(&indexes, version), "MySQL owned preparation index manifest mismatch");
-        let constraints = read_constraints(&mut tx).await?;
-        ensure!(constraints_match(&constraints, version), "MySQL owned preparation constraint manifest mismatch");
-        let keys = read_foreign_keys(&mut tx).await?;
-        ensure!(foreign_keys_match(&keys, version), "MySQL owned preparation foreign key mismatch");
-        lock.verify(&mut tx).await
-    }.await;
+    let verification = verify_empty_in_transaction(&mut tx, lock, version).await;
     tx.rollback().await.map_err(driver_error)?;
     verification
+}
+
+/// Check the empty manifest on the caller's locked transaction before any seed rows.
+pub(super) async fn verify_empty_in_transaction(
+    tx: &mut Transaction<'_>,
+    lock: &OwnedAuditLock,
+    version: u16,
+) -> Result<()> {
+    ensure!(
+        matches!(version, 14 | 15),
+        "invalid MySQL owned audit format"
+    );
+    lock.verify_preparation_target(tx).await?;
+    require_catalog_visibility(tx).await?;
+    require_constraints_enabled(tx).await?;
+    let inventory = metadata_rows(
+        "SELECT COUNT(*), COUNT(CASE WHEN TABLE_TYPE = 'BASE TABLE' AND ENGINE = 'InnoDB' \
+         AND BINARY TABLE_NAME IN ('ai_guard_audit_event', 'ai_guard_audit_state', \
+             'review_authority_meta', 'runner_review_bindings') THEN 1 END), \
+         COUNT(CASE WHEN TABLE_TYPE = 'BASE TABLE' AND ENGINE = 'InnoDB' \
+         AND BINARY TABLE_NAME IN ('egress_policy_meta', 'egress_policy_revisions', \
+             'egress_policy_heads', 'egress_policy_operations', 'egress_policy_reservations') THEN 1 END), \
+         NOT EXISTS (SELECT 1 FROM information_schema.ROUTINES WHERE BINARY ROUTINE_SCHEMA = BINARY DATABASE()) \
+         AND NOT EXISTS (SELECT 1 FROM information_schema.EVENTS WHERE BINARY EVENT_SCHEMA = BINARY DATABASE()) \
+         AND NOT EXISTS (SELECT 1 FROM information_schema.TRIGGERS WHERE BINARY TRIGGER_SCHEMA = BINARY DATABASE()) \
+         AND NOT EXISTS (SELECT 1 FROM information_schema.PARTITIONS \
+                         WHERE BINARY TABLE_SCHEMA = BINARY DATABASE() AND PARTITION_NAME IS NOT NULL) \
+         FROM information_schema.TABLES WHERE BINARY TABLE_SCHEMA = BINARY DATABASE()",
+        tx,
+    ).await?;
+    ensure!(
+        inventory_matches(&inventory, version),
+        "unexpected MySQL owned preparation objects"
+    );
+
+    // Read the tables before their column and index metadata to retain their
+    // metadata locks for the rest of this snapshot.
+    let empty: Vec<u8> = metadata_rows(
+        "SELECT NOT EXISTS (SELECT 1 FROM ai_guard_audit_state) \
+         AND NOT EXISTS (SELECT 1 FROM ai_guard_audit_event) \
+         AND NOT EXISTS (SELECT 1 FROM review_authority_meta) \
+         AND NOT EXISTS (SELECT 1 FROM runner_review_bindings)",
+        tx,
+    )
+    .await?;
+    ensure!(
+        empty == [1],
+        "MySQL unpublished audit or review tables contain rows"
+    );
+    if version == 15 {
+        let empty: Vec<u8> = metadata_rows(
+            "SELECT NOT EXISTS (SELECT 1 FROM egress_policy_meta) \
+             AND NOT EXISTS (SELECT 1 FROM egress_policy_revisions) \
+             AND NOT EXISTS (SELECT 1 FROM egress_policy_heads) \
+             AND NOT EXISTS (SELECT 1 FROM egress_policy_operations) \
+             AND NOT EXISTS (SELECT 1 FROM egress_policy_reservations)",
+            tx,
+        )
+        .await?;
+        ensure!(empty == [1], "MySQL unpublished egress tables contain rows");
+    }
+
+    let columns = metadata_rows(
+        "SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, \
+         COLUMN_DEFAULT IS NULL AND CHARACTER_SET_NAME IS NULL AND COLLATION_NAME IS NULL \
+         AND ((BINARY EXTRA = '' AND GENERATION_EXPRESSION = '') \
+              OR (BINARY EXTRA = 'STORED GENERATED' AND GENERATION_EXPRESSION <> '')), \
+         IF(OCTET_LENGTH(GENERATION_EXPRESSION) <= 512, GENERATION_EXPRESSION, NULL) \
+         FROM information_schema.COLUMNS WHERE BINARY TABLE_SCHEMA = BINARY DATABASE() \
+         ORDER BY BINARY TABLE_NAME, ORDINAL_POSITION LIMIT 59",
+        tx,
+    )
+    .await?;
+    ensure!(
+        columns_match(&columns, version),
+        "MySQL owned preparation column manifest mismatch"
+    );
+
+    let indexes = metadata_rows(
+        "SELECT s.TABLE_NAME, s.INDEX_NAME, s.COLUMN_NAME, s.SEQ_IN_INDEX, s.NON_UNIQUE, \
+         s.SUB_PART IS NULL AND s.COLLATION = 'A' \
+         AND s.INDEX_TYPE = 'BTREE' AND s.IS_VISIBLE = 'YES' AND s.EXPRESSION IS NULL \
+         FROM information_schema.STATISTICS AS s WHERE BINARY s.TABLE_SCHEMA = BINARY DATABASE() \
+         ORDER BY BINARY s.TABLE_NAME, BINARY s.INDEX_NAME, s.SEQ_IN_INDEX LIMIT 29",
+        tx,
+    )
+    .await?;
+    ensure!(
+        indexes_match(&indexes, version),
+        "MySQL owned preparation index manifest mismatch"
+    );
+    let constraints = read_constraints(tx).await?;
+    ensure!(
+        constraints_match(&constraints, version),
+        "MySQL owned preparation constraint manifest mismatch"
+    );
+    let keys = read_foreign_keys(tx).await?;
+    ensure!(
+        foreign_keys_match(&keys, version),
+        "MySQL owned preparation foreign key mismatch"
+    );
+    lock.verify_preparation_target(tx).await
 }
 
 async fn read_foreign_keys(connection: &mut impl Queryable) -> Result<Vec<ForeignKey>> {
