@@ -11,6 +11,10 @@ use serde::Serialize;
 use std::fmt;
 use uuid::Uuid;
 
+mod audit_tables;
+#[cfg(test)]
+mod qa;
+
 const REQUIRED_GRANTS: [&str; 6] = [
     "SELECT",
     "SHOW VIEW",
@@ -62,6 +66,43 @@ pub async fn preflight_owned_preparation(
     server: Uuid,
     schema_version: u16,
 ) -> Result<MysqlOwnedPreparationPreflight> {
+    let (configured_authentication, tls_version) = prepare_empty_owned_target(
+        endpoint,
+        credentials,
+        server,
+        schema_version,
+        EmptyTargetOperation::Inspect,
+    )
+    .await?;
+    Ok(MysqlOwnedPreparationPreflight {
+        verification_mode: "owned_preparation_preflight",
+        target_schema_version: schema_version,
+        configured_authentication,
+        tls_version,
+    })
+}
+
+enum EmptyTargetOperation {
+    Inspect,
+    // The complete physical manifest and owned publication are prerequisites
+    // for exposing installation to an operator.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "internal installation step pending owned publication"
+        )
+    )]
+    InstallAuditTables,
+}
+
+async fn prepare_empty_owned_target(
+    endpoint: MysqlEndpoint<'_>,
+    credentials: MysqlCredentials<'_>,
+    server: Uuid,
+    schema_version: u16,
+    operation: EmptyTargetOperation,
+) -> Result<(MysqlAuthentication, String)> {
     ensure!(
         !server.is_nil() && matches!(schema_version, 14 | 15),
         "invalid MySQL owned preparation target"
@@ -83,24 +124,36 @@ pub async fn preflight_owned_preparation(
                 return Err(error);
             }
         };
-        let checked = check_empty_schema(&mut conn, &ownership).await;
+        let checked = async {
+            let target = check_empty_schema(&mut conn, &ownership).await?;
+            match operation {
+                EmptyTargetOperation::Inspect => Ok(()),
+                EmptyTargetOperation::InstallAuditTables => {
+                    audit_tables::install(target, schema_version).await
+                }
+            }
+        }
+        .await;
         let released = ownership.release(&mut conn).await;
         conn.disconnect().await.map_err(driver_error)?;
         released?;
         checked?;
-        Ok(MysqlOwnedPreparationPreflight {
-            verification_mode: "owned_preparation_preflight",
-            target_schema_version: schema_version,
-            configured_authentication,
-            tls_version,
-        })
+        Ok((configured_authentication, tls_version))
     })
     .await
     .map_err(|_| MysqlProbeError::TimedOut)?
 }
 
-async fn check_empty_schema(conn: &mut Conn, ownership: &OwnedAuditLock) -> Result<()> {
-    ownership.verify(conn).await?;
+struct CheckedEmptyTarget<'a> {
+    conn: &'a mut Conn,
+    lock: &'a OwnedAuditLock,
+}
+
+async fn check_empty_schema<'a>(
+    conn: &'a mut Conn,
+    lock: &'a OwnedAuditLock,
+) -> Result<CheckedEmptyTarget<'a>> {
+    lock.verify(conn).await?;
     require_catalog_visibility(conn).await?;
     let row = conn.query_first::<Row, _>(
         "SELECT EXISTS (SELECT 1 FROM information_schema.TABLES WHERE BINARY TABLE_SCHEMA = BINARY DATABASE()) \
@@ -120,7 +173,8 @@ async fn check_empty_schema(conn: &mut Conn, ownership: &OwnedAuditLock) -> Resu
         decode_row::<(u64, u8, u8, u8)>(row)? == (1, 0, 0, 1),
         MysqlOwnedPreparationRefusal::IncompatibleServer
     );
-    ownership.verify(conn).await
+    lock.verify(conn).await?;
+    Ok(CheckedEmptyTarget { conn, lock })
 }
 
 async fn require_catalog_visibility(conn: &mut Conn) -> Result<()> {
