@@ -182,16 +182,15 @@ impl Execution<'_> {
                     .await
                     .context("cannot revalidate the held bootstrap incarnation")?;
 
-            let (job, draft) = boxed_execution_phase(|| self.load()).await?;
-            ensure!(
-                same(job.head(), ready.committed.head())?
-                    && !draft.cancelled()
-                    && draft.egress_release.as_deref() == Some(ready.committed.intent())
-                    && ready.committed.intent().matches_running(draft.worker()?),
-                "confirmed egress release intent is no longer current"
-            );
-            drop(draft);
-            drop(job);
+            let head = boxed_execution_phase(|| {
+                self.executor.writer.fence_egress_release_head(
+                    self.operation,
+                    ready.committed.head(),
+                    ready.committed.intent(),
+                )
+            })
+            .await
+            .context("confirmed egress release intent is no longer current")?;
 
             let PreparedEgressRelease {
                 bootstrap,
@@ -203,7 +202,7 @@ impl Execution<'_> {
             // The native authorization supplies the original generation and
             // deadline. This veto has local checks only.
             let mut native_stop: watch::Receiver<bool> = bootstrap.stop_receiver();
-            bootstrap.submit_once(runtime.binding(), &reinspected, || {
+            bootstrap.submit_once(runtime.binding(), &reinspected, head, || {
                 // The only channel-stop sender stays here through the write.
                 // The native owner orders its independent STOP with submission.
                 ensure!(!stop.is_stopped(), "retained egress channel has stopped");

@@ -9,6 +9,7 @@ use super::{
 };
 #[cfg(test)]
 use crate::broker::enforcer::CancelGeneration;
+use crate::broker::journal::egress_release_fence::EgressReleaseHeadPermit;
 use crate::egress::ids::IdV1;
 use anyhow::{Context, Result, ensure};
 use std::{
@@ -193,6 +194,7 @@ impl PreparedBootstrapStdin {
         self,
         inspected_authority: &RuntimeAuthority,
         reinspected: &ContainerObservation,
+        head: EgressReleaseHeadPermit,
         check_live_release: impl FnOnce() -> Result<()>,
     ) -> Result<(), BootstrapStdinSubmitError> {
         let Self {
@@ -226,7 +228,14 @@ impl PreparedBootstrapStdin {
                 );
                 check_live_release()
             }),
-            Box::new(|| stdin.write_once(&frame)),
+            Box::new(|| {
+                // The journal and native generation gates both hold only
+                // through this synchronous nonblocking write.
+                let _head = head
+                    .claim()
+                    .map_err(|_| BootstrapStdinSubmitError::Refused)?;
+                stdin.write_once(&frame)
+            }),
         );
         // Closing the exclusive endpoint delivers EOF outside the native gate.
         drop(stdin);
