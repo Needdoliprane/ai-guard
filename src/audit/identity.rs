@@ -926,7 +926,11 @@ impl Store {
         self.commit_checked(tx)?;
         Ok(receipts)
     }
-    fn persist_identity_mutation(
+    /// Persist one identity mutation inside a held identity-authority transaction
+    /// without committing. The caller owns the atomic commit (e.g. the session
+    /// launch, which appends its mandatory audit and retains its binding together
+    /// with the nominative grant). Replay and projection rules are unchanged.
+    pub(super) fn persist_identity_mutation(
         &self,
         tx: &CheckedTransaction<'_>,
         mutation: &IdentityMutationV1,

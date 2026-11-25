@@ -380,6 +380,29 @@ impl OwnedHumanGateway {
         )
     }
 
+    /// Commit one retained preparation as a real nominative session launch on the
+    /// proof's own retained source under its write epoch. The launch creates the
+    /// nominative grant and retains the conversation binding; the additive grant
+    /// keeps the authorization revision, so the discovery generation is reconciled
+    /// exactly. An exact replay returns the original receipt; a divergent intent
+    /// under the same operation, a consumed preparation or a changed target is a
+    /// conflict; revocation closes it.
+    pub(super) fn session_launch(
+        &self,
+        index: usize,
+        store: &Store,
+        scope: &AuthorizedScopeV1,
+        request: &crate::control::session_control::SessionLaunchRequestV1,
+    ) -> ApiResult<crate::control::session_control::SessionLaunchReceiptV1> {
+        self.change_delegated_identity(
+            index,
+            human::session_launch_failure,
+            |epoch, source, expected| {
+                store.modern_session_launch(epoch, source, scope, request, expected)
+            },
+        )
+    }
+
     /// Read one retained preparation receipt for a still-authorized caller.
     pub(super) fn session_preparation(
         &self,

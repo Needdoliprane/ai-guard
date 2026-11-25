@@ -13,14 +13,20 @@
 //! nominative grant through the existing identity grant producer.
 use super::*;
 use crate::control::session_control::{
-    ProvisionSessionLaunchTargetV1, SessionLaunchPrepareRequestV1, SessionLaunchTargetRecordV1,
-    SessionPrepareReceiptV1,
+    ProvisionSessionLaunchTargetV1, SessionConversationBindingV1, SessionConversationStatusV1,
+    SessionLaunchPrepareRequestV1, SessionLaunchReceiptV1, SessionLaunchRequestV1,
+    SessionLaunchTargetRecordV1, SessionLaunchTargetSelectionV1, SessionPrepareReceiptV1,
 };
-use crate::identity::{AuthorizedScopeV1, ContextModeV1, HumanCapabilityV1, IdentityFailureV1};
+use crate::identity::{
+    AuthorizedScopeV1, ContextModeV1, HumanCapabilityV1, IdentityChangeV1, IdentityFailureV1,
+    IdentityMutationV1, LegacyControlRoleV1, PrincipalRefV1, ResourceGrantV1, ResourceKindV1,
+    ResourceRefV1,
+};
 use uuid::Uuid;
 
 pub(crate) const GENESIS_KIND: &str = "control.session_prepare.genesis";
 pub(crate) const PREPARED_KIND: &str = "control.session_prepare.prepared";
+pub(crate) const LAUNCHED_KIND: &str = "control.session_prepare.launched";
 const TARGET_PROVISION_KIND: &str = "control.session_prepare.target_provisioned";
 const PROTOCOL: &str = "session_prepare_v1";
 const MARKER_VERSION: u32 = 1;
@@ -28,20 +34,24 @@ const MARKER_VERSION: u32 = 1;
 const TARGETS_TABLE: &str = "session_launch_targets";
 const TARGET_OPERATIONS_TABLE: &str = "session_launch_target_operations";
 const PREPARATIONS_TABLE: &str = "session_preparations";
+const LAUNCHES_TABLE: &str = "session_launches";
 
 const TARGETS_SCHEMA: &str = "CREATE TABLE session_launch_targets(launch_target_id TEXT PRIMARY KEY,revision INTEGER NOT NULL,tenant_id TEXT NOT NULL,organization_scope TEXT NOT NULL,active INTEGER NOT NULL CHECK(active IN (0,1)),payload_json TEXT NOT NULL,event_seq INTEGER NOT NULL REFERENCES events(seq))";
 const TARGET_OPERATIONS_SCHEMA: &str = "CREATE TABLE session_launch_target_operations(operation_id TEXT PRIMARY KEY,input_hash TEXT NOT NULL,event_seq INTEGER NOT NULL REFERENCES events(seq))";
 const PREPARATIONS_SCHEMA: &str = "CREATE TABLE session_preparations(operation_id TEXT PRIMARY KEY,input_hash TEXT NOT NULL,principal_key TEXT NOT NULL,membership_id TEXT NOT NULL,organization_scope TEXT NOT NULL,launch_target_id TEXT NOT NULL,target_revision INTEGER NOT NULL,expires_at TEXT NOT NULL,event_seq INTEGER NOT NULL REFERENCES events(seq),event_hash TEXT NOT NULL)";
+const LAUNCHES_SCHEMA: &str = "CREATE TABLE session_launches(operation_id TEXT PRIMARY KEY,input_hash TEXT NOT NULL,session_id TEXT NOT NULL,preparation_operation_id TEXT NOT NULL,event_seq INTEGER NOT NULL REFERENCES events(seq),event_hash TEXT NOT NULL,receipt_json TEXT NOT NULL)";
 
-pub(crate) const SCHEMA: [(&str, &str, &str); 3] = [
+pub(crate) const SCHEMA: [(&str, &str, &str); 4] = [
     ("table", TARGETS_TABLE, TARGETS_SCHEMA),
     ("table", TARGET_OPERATIONS_TABLE, TARGET_OPERATIONS_SCHEMA),
     ("table", PREPARATIONS_TABLE, PREPARATIONS_SCHEMA),
+    ("table", LAUNCHES_TABLE, LAUNCHES_SCHEMA),
 ];
-pub(crate) const AUTO_INDEX_COUNTS: [(&str, u32); 3] = [
+pub(crate) const AUTO_INDEX_COUNTS: [(&str, u32); 4] = [
     (TARGETS_TABLE, 1),
     (TARGET_OPERATIONS_TABLE, 1),
     (PREPARATIONS_TABLE, 1),
+    (LAUNCHES_TABLE, 1),
 ];
 
 /// The capability exists only on the owned formats it is installed on.
@@ -134,7 +144,8 @@ pub(crate) fn validate_capability(db: &Connection, version: i64) -> anyhow::Resu
     let present = capability_present(db)?;
     let tables = table_present(db, TARGETS_TABLE)?
         && table_present(db, TARGET_OPERATIONS_TABLE)?
-        && table_present(db, PREPARATIONS_TABLE)?;
+        && table_present(db, PREPARATIONS_TABLE)?
+        && table_present(db, LAUNCHES_TABLE)?;
     if present || tables {
         anyhow::ensure!(
             format_admits(version) && present && tables,
@@ -160,16 +171,71 @@ struct Prepared {
     expires_at: String,
 }
 
+/// The closed payload of one committed launch event. It carries the session id
+/// (the launch creates the session identity), the consumed preparation reference
+/// and exact fingerprint, the nominative grant operation and the retained
+/// conversation binding.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Launched {
+    version: u32,
+    operation_id: String,
+    principal_key: String,
+    membership_id: String,
+    organization_scope: String,
+    launch_target_id: String,
+    target_revision: u64,
+    preparation_operation_id: String,
+    preparation_input_hash: String,
+    session_id: String,
+    input_hash: String,
+    grant_operation_id: String,
+    conversation: SessionConversationBindingV1,
+}
+
 /// Replay validation of one `control.session_prepare.*` event inside the
 /// closed control replay. The marker revalidates against its durable prefix;
-/// the preparation and catalog payloads are closed records. None of them may
-/// carry a session id: the preparation uses its own identifier.
+/// the preparation and catalog payloads are closed records. The preparation and
+/// catalog events carry no session id; the launch event carries the session it
+/// creates and binds it to its own identifier.
 pub(crate) fn validate_replay_event(db: &Connection, stored: &StoredEvent) -> anyhow::Result<()> {
     anyhow::ensure!(
         stored.event.source == "gateway"
             && stored.event.provenance == "observed"
-            && stored.event.coverage == "native"
-            && stored.event.session_id.is_none(),
+            && stored.event.coverage == "native",
+        "unexpected session prepare event provenance"
+    );
+    if stored.event.kind == LAUNCHED_KIND {
+        let record: Launched = serde_json::from_value(stored.event.data.clone())?;
+        anyhow::ensure!(
+            record.version == 1
+                && crate::control::session_control::canonical_uuid(&record.operation_id).is_ok()
+                && crate::control::session_control::canonical_uuid(&record.launch_target_id)
+                    .is_ok()
+                && crate::control::session_control::canonical_uuid(
+                    &record.preparation_operation_id
+                )
+                .is_ok()
+                && crate::control::session_control::canonical_uuid(&record.session_id).is_ok()
+                && crate::control::session_control::canonical_uuid(&record.grant_operation_id)
+                    .is_ok()
+                && (1..=i64::MAX as u64).contains(&record.target_revision)
+                && !record.principal_key.is_empty()
+                && !record.membership_id.is_empty()
+                && !record.organization_scope.is_empty()
+                && !record.input_hash.is_empty()
+                && !record.preparation_input_hash.is_empty()
+                && record.conversation.version == 1
+                && record.conversation.session_id == record.session_id
+                && record.conversation.status == SessionConversationStatusV1::Prepared
+                && chrono::DateTime::parse_from_rfc3339(&record.conversation.expires_at).is_ok()
+                && stored.event.session_id.as_deref() == Some(record.session_id.as_str()),
+            "invalid session launch record"
+        );
+        return Ok(());
+    }
+    anyhow::ensure!(
+        stored.event.session_id.is_none(),
         "unexpected session prepare event provenance"
     );
     match stored.event.kind.as_str() {
@@ -280,15 +346,18 @@ fn authorize_prepare(
 }
 
 /// Resolve one active catalog target and check the exact selection against it.
+/// Shared by Prepare (retains the intent) and Launch (commits it): both must
+/// resolve the current server revision, so a stale expectation is a conflict.
 fn authorize_target(
     tx: &CheckedTransaction<'_>,
     current: &AuthorizedScopeV1,
-    request: &SessionLaunchPrepareRequestV1,
+    launch_target_id: Uuid,
+    selection: SessionLaunchTargetSelectionV1,
 ) -> anyhow::Result<SessionLaunchTargetRecordV1> {
     let row: Option<String> = tx
         .query_row(
             "SELECT payload_json FROM session_launch_targets WHERE launch_target_id=?1",
-            [request.launch_target_id.to_string()],
+            [launch_target_id.to_string()],
             |r| r.get(0),
         )
         .optional()?;
@@ -299,17 +368,14 @@ fn authorize_target(
     // selection check refuses a stale expectation instead of comparing the
     // request against itself.
     let policy = crate::identity::SessionLaunchTargetPolicyV1 {
-        selection: crate::control::session_control::SessionLaunchTargetSelectionV1::new(
-            target.launch_target_id,
-            target.revision,
-        )?,
+        selection: SessionLaunchTargetSelectionV1::new(target.launch_target_id, target.revision)?,
         active: target.active,
         tenant_id: &target.tenant_id,
         organization_scope: &target.organization_scope,
         launchers: &target.launchers,
     };
     policy
-        .authorize_launch(current, request.selection()?)
+        .authorize_launch(current, selection)
         .map_err(|error| match error {
             crate::identity::SessionLaunchTargetFailureV1::Stale => {
                 failure(IdentityFailureV1::Conflict)
@@ -447,7 +513,12 @@ impl Store {
         }
         // A new preparation resolves the current catalog target; an exact replay
         // above serves the retained receipt even if the target has since advanced.
-        let target = authorize_target(&tx, &current, request)?;
+        let target = authorize_target(
+            &tx,
+            &current,
+            request.launch_target_id,
+            request.selection()?,
+        )?;
         let principal_key = current.principal().key()?;
         let mut event = Event::new(PREPARED_KIND);
         event.id = preparation_event_id(request.operation_id);
@@ -494,6 +565,236 @@ impl Store {
         Ok((preparation_receipt(request, &stored, false), None))
     }
 
+    /// Commit one retained preparation as a real nominative session launch on
+    /// the owned source under its write epoch. The identity-authority transaction
+    /// revalidates Store authority, the personal launch context, the exact retained
+    /// preparation (initiator, membership, fingerprint, deadline) and the current
+    /// catalog target before any effect. It then appends the mandatory launch audit
+    /// event, creates the nominative session grant through the existing identity
+    /// grant producer, and retains the conversation binding — all atomically. An
+    /// exact replay returns the original receipt to a still-authorized caller; a
+    /// divergent intent under the same operation is a conflict; a source/config
+    /// change, an expired preparation or revocation closes it.
+    ///
+    /// This proves the durable launch authority and grant. The supervised worker
+    /// admission and the runtime-observed start are the broker's separate effect,
+    /// reconciled against this binding; they are not fabricated here.
+    pub(crate) fn modern_session_launch(
+        &self,
+        epoch: &crate::human_authority::HumanSourcesWriteEpoch,
+        source: &crate::human_authority::OwnedSourceToken,
+        scope: &AuthorizedScopeV1,
+        request: &SessionLaunchRequestV1,
+        expected: HumanDiscoveryGeneration,
+    ) -> anyhow::Result<(SessionLaunchReceiptV1, Option<HumanDiscoveryGeneration>)> {
+        request
+            .validate()
+            .map_err(|_| failure(IdentityFailureV1::InvalidRequest))?;
+        let access = HumanSourceAccess::write(epoch, source)?;
+        let mut db = self
+            .db
+            .try_lock()
+            .map_err(|_| crate::human_authority::HumanAuthorityFailure::StorageUnavailable)?;
+        // Launch creates a nominative grant: it is an identity-authority effect,
+        // not a Business read. The same checked transaction also appends the
+        // mandatory launch audit and retains the binding before commit.
+        let tx =
+            self.begin_checked_scoped(&mut db, &access, StoreOperationClass::IdentityAuthority)?;
+        tx.require_identity_authority()?;
+        if human_modern::discovery_generation(&tx)? != expected {
+            return Err(HumanDiscoveryStale.into());
+        }
+        // Authorization is revalidated before any replay disclosure: a revoked
+        // caller never receives the retained receipt.
+        let current = authorize_prepare(&tx, scope, &self.tenant_id)?;
+        let clock = workload::capture_control_time(&tx)?;
+        let input_hash = request.input_hash()?;
+        let operation_id = request.operation_id.to_string();
+        if let Some(row) = launch_row(&tx, &operation_id)? {
+            anyhow::ensure!(row.input_hash == input_hash, IdentityFailureV1::Conflict);
+            let event = stored_event(&tx, row.event_seq)?;
+            anyhow::ensure!(event.hash == row.event_hash, IdentityFailureV1::Conflict);
+            let mut receipt: SessionLaunchReceiptV1 = serde_json::from_str(&row.receipt_json)?;
+            receipt.replayed = true;
+            return Ok((receipt, None));
+        }
+        // Consume the exact retained preparation. Only its nominative initiator,
+        // in the same membership and organization, may commit it.
+        let preparation_operation_id = request.preparation_operation_id.to_string();
+        let preparation = preparation_row(&tx, &preparation_operation_id)?
+            .ok_or(failure(IdentityFailureV1::NotFound))?;
+        let principal_key = current.principal().key()?;
+        anyhow::ensure!(
+            preparation.principal_key == principal_key,
+            IdentityFailureV1::PermissionDenied
+        );
+        anyhow::ensure!(
+            preparation.membership_id == current.membership_id()
+                && preparation.organization_scope == current.organization_scope(),
+            IdentityFailureV1::ContextRevoked
+        );
+        anyhow::ensure!(
+            preparation.input_hash == request.preparation_input_hash,
+            IdentityFailureV1::Conflict
+        );
+        anyhow::ensure!(
+            preparation.launch_target_id == request.launch_target_id.to_string()
+                && preparation.target_revision == request.expected_target_revision as i64,
+            IdentityFailureV1::Conflict
+        );
+        let expires_at = chrono::DateTime::parse_from_rfc3339(&preparation.expires_at)
+            .map_err(|_| failure(IdentityFailureV1::InvalidRequest))?
+            .with_timezone(&chrono::Utc);
+        anyhow::ensure!(expires_at > clock.at(), IdentityFailureV1::InvalidRequest);
+        let preparation_event = stored_event(&tx, preparation.event_seq)?;
+        anyhow::ensure!(
+            preparation_event.hash == preparation.event_hash,
+            IdentityFailureV1::Conflict
+        );
+        // One preparation commits at most one launch.
+        anyhow::ensure!(
+            consumed_by_launch(&tx, &preparation_operation_id)?.is_none(),
+            IdentityFailureV1::Conflict
+        );
+        // Re-resolve the current catalog target: a source/config change (advanced
+        // revision, deactivation or ACL change) invalidates the preparation.
+        let target = authorize_target(
+            &tx,
+            &current,
+            request.launch_target_id,
+            request.selection()?,
+        )?;
+        anyhow::ensure!(
+            target.revision == request.expected_target_revision,
+            IdentityFailureV1::Conflict
+        );
+        // The session identity is deterministic from the launch operation, so a
+        // replay reconciles to the same session without a second allocation.
+        let session_id =
+            bound_event_id(b"ai-guard:session-launch-session:v1", request.operation_id);
+        let grant_operation_id =
+            bound_event_id(b"ai-guard:session-launch-grant:v1", request.operation_id);
+        let source_id: String = tx.query_row(
+            "SELECT namespace_uuid FROM control_meta WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )?;
+        let conversation = SessionConversationBindingV1 {
+            version: 1,
+            tenant_id: self.tenant_id.clone(),
+            source_id,
+            session_id: session_id.clone(),
+            launch_target_id: request.launch_target_id,
+            target_revision: target.revision,
+            broker_id: None,
+            broker_incarnation: None,
+            worker_id: None,
+            attempt_id: None,
+            runtime_instance: None,
+            input_epoch: 0,
+            provider: None,
+            protocol: None,
+            expires_at: preparation.expires_at.clone(),
+            status: SessionConversationStatusV1::Prepared,
+        };
+        // The mandatory launch audit is durable before the grant and any effect.
+        let mut event = Event::new(LAUNCHED_KIND);
+        event.id = bound_event_id(b"ai-guard:session-launch:v1", request.operation_id);
+        event.timestamp = crate::broker_registry::format_time(clock.at());
+        event.coverage = "native".into();
+        event.session_id = Some(session_id.clone());
+        event.data = serde_json::to_value(Launched {
+            version: 1,
+            operation_id: operation_id.clone(),
+            principal_key: principal_key.clone(),
+            membership_id: current.membership_id().to_string(),
+            organization_scope: current.organization_scope().to_string(),
+            launch_target_id: request.launch_target_id.to_string(),
+            target_revision: target.revision,
+            preparation_operation_id: preparation_operation_id.clone(),
+            preparation_input_hash: request.preparation_input_hash.clone(),
+            session_id: session_id.clone(),
+            input_hash: input_hash.clone(),
+            grant_operation_id: grant_operation_id.clone(),
+            conversation: conversation.clone(),
+        })?;
+        let original = serde_json::to_value(&event)?;
+        let (event, payload) = self.prepare_event(event)?;
+        anyhow::ensure!(
+            serde_json::to_value(&event)? == original,
+            "session launch requires redaction"
+        );
+        let stored = self.append_authorized_in_transaction(&tx, event, payload, &clock)?;
+        // The real nominative session grant through the existing grant producer.
+        // The owner is the authenticated initiator; ownership binds the session
+        // to that human (a share never names the owner). The trusted control is
+        // the effective actor, never a browser-supplied principal.
+        let grant = ResourceGrantV1 {
+            version: 1,
+            tenant_id: self.tenant_id.clone(),
+            organization_scope: current.organization_scope().to_string(),
+            resource: ResourceRefV1 {
+                kind: ResourceKindV1::Session,
+                resource_id: session_id.clone(),
+            },
+            owner: current.principal().clone(),
+            revision: 1,
+            active: true,
+            shares: vec![],
+        };
+        let mutation = IdentityMutationV1 {
+            version: 1,
+            operation_id: grant_operation_id.clone(),
+            actor: PrincipalRefV1::LegacyControl {
+                credential_id: "session-launch-control".into(),
+                role: LegacyControlRoleV1::Runner,
+            },
+            change: IdentityChangeV1::ResourceGrant {
+                expected_revision: 0,
+                grant,
+            },
+        };
+        let grant_receipt = self.persist_identity_mutation(&tx, &mutation)?;
+        let receipt = SessionLaunchReceiptV1 {
+            version: 1,
+            operation_id: request.operation_id,
+            launch_id: stored.event.id.clone(),
+            session_id: session_id.clone(),
+            launch_target_id: request.launch_target_id,
+            target_revision: target.revision,
+            preparation_operation_id: request.preparation_operation_id,
+            preparation_id: preparation_event.event.id.clone(),
+            input_hash: input_hash.clone(),
+            grant_revision: 1,
+            grant_audit_seq: grant_receipt.audit_seq,
+            grant_audit_hash: grant_receipt.audit_hash.clone(),
+            audit_seq: stored.seq,
+            audit_hash: stored.hash.clone(),
+            conversation,
+            replayed: false,
+        };
+        tx.execute(
+            "INSERT INTO session_launches(operation_id,input_hash,session_id,preparation_operation_id,event_seq,event_hash,receipt_json) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                operation_id,
+                input_hash,
+                session_id,
+                preparation_operation_id,
+                stored.seq,
+                stored.hash,
+                serde_json::to_string(&receipt)?,
+            ],
+        )?;
+        // The additive first-binding grant keeps the authorization revision after
+        // the human rights marker; reconcile the discovery generation exactly.
+        let next = expected.after_delegated_change(
+            human_modern::discovery_generation(&tx)?,
+            grant_receipt.authorization_revision,
+        )?;
+        self.commit_authorized(tx, &clock)?;
+        Ok((receipt, next))
+    }
+
     /// Read one retained preparation receipt for a still-authorized caller.
     /// Revocation of the identity, membership or context closes the read.
     pub(crate) fn modern_session_preparation(
@@ -530,6 +831,9 @@ impl Store {
 
 struct PreparationRow {
     input_hash: String,
+    principal_key: String,
+    membership_id: String,
+    organization_scope: String,
     launch_target_id: String,
     target_revision: i64,
     expires_at: String,
@@ -540,18 +844,61 @@ struct PreparationRow {
 fn preparation_row(tx: &Connection, operation_id: &str) -> anyhow::Result<Option<PreparationRow>> {
     Ok(tx
         .query_row(
-            "SELECT input_hash,launch_target_id,target_revision,expires_at,event_seq,event_hash FROM session_preparations WHERE operation_id=?1",
+            "SELECT input_hash,principal_key,membership_id,organization_scope,launch_target_id,target_revision,expires_at,event_seq,event_hash FROM session_preparations WHERE operation_id=?1",
             [operation_id],
             |r| {
                 Ok(PreparationRow {
                     input_hash: r.get(0)?,
-                    launch_target_id: r.get(1)?,
-                    target_revision: r.get(2)?,
-                    expires_at: r.get(3)?,
-                    event_seq: r.get(4)?,
-                    event_hash: r.get(5)?,
+                    principal_key: r.get(1)?,
+                    membership_id: r.get(2)?,
+                    organization_scope: r.get(3)?,
+                    launch_target_id: r.get(4)?,
+                    target_revision: r.get(5)?,
+                    expires_at: r.get(6)?,
+                    event_seq: r.get(7)?,
+                    event_hash: r.get(8)?,
                 })
             },
+        )
+        .optional()?)
+}
+
+struct LaunchRow {
+    input_hash: String,
+    event_seq: i64,
+    event_hash: String,
+    receipt_json: String,
+}
+
+fn launch_row(tx: &Connection, operation_id: &str) -> anyhow::Result<Option<LaunchRow>> {
+    Ok(tx
+        .query_row(
+            "SELECT input_hash,event_seq,event_hash,receipt_json FROM session_launches WHERE operation_id=?1",
+            [operation_id],
+            |r| {
+                Ok(LaunchRow {
+                    input_hash: r.get(0)?,
+                    event_seq: r.get(1)?,
+                    event_hash: r.get(2)?,
+                    receipt_json: r.get(3)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// The launch operation that already consumed one preparation, if any. One
+/// retained preparation commits at most one launch; a second distinct launch
+/// operation referencing it is a conflict, never a second session.
+fn consumed_by_launch(
+    tx: &Connection,
+    preparation_operation_id: &str,
+) -> anyhow::Result<Option<String>> {
+    Ok(tx
+        .query_row(
+            "SELECT operation_id FROM session_launches WHERE preparation_operation_id=?1",
+            [preparation_operation_id],
+            |r| r.get(0),
         )
         .optional()?)
 }

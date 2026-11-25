@@ -196,8 +196,8 @@ fn owned_launch_right_matches_the_operation_registry_without_serving_routes() {
             permission == OperationPermissionV1::Granted
         );
         // Both owned formats use the same operation facts. The marker is
-        // independent of the permission. Prepare is served on the owned profile
-        // and gated by the marker; the launch itself is still not served here.
+        // independent of the permission. Prepare and Launch are both served on
+        // the owned profile and gated by the same marker.
         for human_rights_marker in [false, true] {
             let registry = context_operations(
                 mode,
@@ -217,15 +217,10 @@ fn owned_launch_right_matches_the_operation_registry_without_serving_routes() {
                     .find(|entry| entry.operation == operation)
                     .unwrap();
                 assert_eq!(entry.permission, permission);
-                let expected = match operation {
-                    HumanOperationV1::SessionLaunchPrepare => {
-                        if human_rights_marker {
-                            OperationAvailabilityV1::Available
-                        } else {
-                            OperationAvailabilityV1::MigrationRequired
-                        }
-                    }
-                    _ => OperationAvailabilityV1::NotInThisBuild,
+                let expected = if human_rights_marker {
+                    OperationAvailabilityV1::Available
+                } else {
+                    OperationAvailabilityV1::MigrationRequired
                 };
                 assert_eq!(entry.availability, expected);
             }

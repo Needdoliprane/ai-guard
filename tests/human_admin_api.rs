@@ -71,6 +71,34 @@ impl Stack {
         assert_eq!(reply.status, StatusCode::OK, "{account} authenticates");
         reply
     }
+    /// Post a JSON body to the gateway itself, like the dashboard's mutations.
+    async fn post(
+        &self,
+        path: &str,
+        account: Option<&str>,
+        context: Option<&str>,
+        body: &Value,
+    ) -> Reply {
+        let mut request = self
+            .served
+            .client
+            .post(format!("{}{path}", self.served.gateway))
+            .json(body);
+        if let Some(account) = account {
+            request = request.bearer_auth(self.token(account));
+        }
+        if let Some(context) = context {
+            request = request.header("X-AiGuard-Context", context);
+        }
+        let response = request.send().await.unwrap();
+        let status = response.status();
+        let raw = response.bytes().await.unwrap().to_vec();
+        Reply {
+            status,
+            body: serde_json::from_slice(&raw).unwrap_or(Value::Null),
+            raw,
+        }
+    }
     async fn context(&self, account: &str, mode: &str) -> Value {
         self.identity(account).await.body["contexts"]
             .as_array()
@@ -594,4 +622,56 @@ async fn configuration_lists_kinds_and_modes_never_addresses_or_paths() {
     for account in stack.seed.accounts.values() {
         assert!(!String::from_utf8_lossy(&reply.raw).contains(&account.token));
     }
+}
+
+/// The session-launch route is served by the real gateway router and refuses
+/// without owned human-source coverage, never a silent 404. The legacy seed has
+/// no owned Store14/15 bundle, so the launch commits nothing here; the durable
+/// owned happy path (exact preparation consumption, nominative grant, audit
+/// before effect, idempotence) is proven on the real owned Store fixture.
+#[tokio::test]
+async fn session_launch_route_is_served_and_refuses_without_owned_coverage() {
+    let stack = Stack::start().await;
+    let body = serde_json::json!({
+        "version": 1,
+        "operation_id": uuid::Uuid::new_v4().to_string(),
+        "launch_target_id": uuid::Uuid::new_v4().to_string(),
+        "expected_target_revision": 1,
+        "preparation_operation_id": uuid::Uuid::new_v4().to_string(),
+        "preparation_input_hash": "a".repeat(64),
+    });
+    let reply = stack
+        .post(
+            "/api/v1/human/owned/sessions/launch",
+            Some("user_a1"),
+            None,
+            &body,
+        )
+        .await;
+    assert_eq!(
+        reply.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        reply.body
+    );
+    assert_eq!(
+        reply.body["error"]["code"], "identity_unavailable",
+        "{}",
+        reply.body
+    );
+    // An invalid body is refused before any owned effect, never a panic.
+    let invalid = stack
+        .post(
+            "/api/v1/human/owned/sessions/launch",
+            Some("user_a1"),
+            None,
+            &serde_json::json!({"version": 1}),
+        )
+        .await;
+    assert!(
+        invalid.status == StatusCode::SERVICE_UNAVAILABLE
+            || invalid.status == StatusCode::BAD_REQUEST,
+        "{}",
+        invalid.body
+    );
 }

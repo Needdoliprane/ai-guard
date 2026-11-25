@@ -222,6 +222,38 @@ pub(super) fn invalid_session_prepare_request() -> (StatusCode, Json<Value>) {
     )
 }
 
+/// Failures of a nominative session launch. A conflict (a divergent intent reused
+/// under one operation, a consumed preparation, or a changed target revision)
+/// asks for a re-read; a missing capability asks for the explicit migration.
+/// Launch creates the real grant; it never elevates from a read or admin context.
+pub(super) fn session_launch_failure(error: anyhow::Error) -> (StatusCode, Json<Value>) {
+    match error.downcast_ref::<IdentityFailureV1>() {
+        Some(IdentityFailureV1::Conflict) => failure(
+            StatusCode::CONFLICT,
+            "conflict",
+            "The launch intent differs from the one already retained under this operation, the preparation was already consumed, or the target revision changed. Re-read it before deciding again.",
+            "reread",
+        ),
+        Some(IdentityFailureV1::PermissionDenied) => failure(
+            StatusCode::FORBIDDEN,
+            "permission_denied",
+            "This context does not permit launching this session.",
+            "review_permissions",
+        ),
+        Some(IdentityFailureV1::InvalidRequest) => invalid_session_launch_request(),
+        _ => store_failure(error),
+    }
+}
+
+pub(super) fn invalid_session_launch_request() -> (StatusCode, Json<Value>) {
+    failure(
+        StatusCode::BAD_REQUEST,
+        "invalid_request",
+        "Check the session launch fields, then try again.",
+        "retry",
+    )
+}
+
 fn context_failure(code: &str) -> (StatusCode, Json<Value>) {
     failure(
         StatusCode::FORBIDDEN,
@@ -1062,6 +1094,65 @@ pub(super) async fn session_launch_prepare(
     .await
 }
 
+/// Upper bound of one session-launch commit. It names the launch operation, the
+/// opaque target and revision, and the consumed preparation by reference and
+/// exact fingerprint; it carries no argv, host path, image, credential or free
+/// provider choice.
+const SESSION_LAUNCH_BODY_MAX_BYTES: usize = 4_096;
+
+async fn session_launch_body(
+    request: Request,
+) -> ApiResult<crate::control::session_control::SessionLaunchRequestV1> {
+    let (_, request) =
+        delegated_change_body::<crate::control::session_control::SessionLaunchRequestV1>(
+            request,
+            SESSION_LAUNCH_BODY_MAX_BYTES,
+            invalid_session_launch_request,
+        )
+        .await?;
+    request
+        .validate()
+        .map_err(|_| invalid_session_launch_request())?;
+    Ok(request)
+}
+
+/// `POST /api/v1/human/owned/sessions/launch`: commit one retained preparation as
+/// a real nominative session launch on the caller's own owned source. The personal
+/// launch context is revalidated inside the identity-authority transaction; the
+/// mandatory launch audit, the nominative session grant and the retained
+/// conversation binding commit together before the receipt is returned. An exact
+/// replay returns the original receipt to a still-authorized caller; a divergent
+/// intent under the same operation, a consumed preparation or a changed target is
+/// a conflict; revocation closes it. The supervised worker admission and the
+/// runtime-observed start remain the broker's separate effect.
+pub(super) async fn session_launch(
+    State(state): State<GatewayState>,
+    request: Request,
+) -> ApiResult<Json<crate::control::session_control::SessionLaunchReceiptV1>> {
+    if state.owned_human.is_none() {
+        return Err(super::human_sources::unavailable());
+    }
+    let (mut parts, body) = request.into_parts();
+    let proof = VerifiedHuman::from_request_parts(&mut parts, &state).await?;
+    let headers = parts.headers.clone();
+    let launch = session_launch_body(Request::from_parts(parts, body)).await?;
+    let selected = headers.clone();
+    run_human(&state, &proof, Some(&headers), move |state, proof| {
+        let (_, tenant, scope) = selected_context(&state, &proof, &selected)?;
+        let store = tenant.store.sqlite_api()?;
+        let owned = state
+            .owned_human
+            .as_ref()
+            .ok_or_else(super::human_sources::unavailable)?;
+        let HumanProofSource::Local(source) = proof.source else {
+            return Err(super::human_sources::unavailable());
+        };
+        let receipt = owned.session_launch(source, store, &scope, &launch)?;
+        Ok(Json(receipt))
+    })
+    .await
+}
+
 /// `GET /api/v1/human/owned/sessions/preparations/{operation_id}`: read one
 /// retained preparation receipt for a still-authorized caller. Revocation of
 /// the identity, membership or context closes the read.
@@ -1099,6 +1190,12 @@ pub(super) fn routes() -> Router<GatewayState> {
             "/human/owned/sessions/prepare",
             post(session_launch_prepare).layer(axum::extract::DefaultBodyLimit::max(
                 SESSION_PREPARE_BODY_MAX_BYTES,
+            )),
+        )
+        .route(
+            "/human/owned/sessions/launch",
+            post(session_launch).layer(axum::extract::DefaultBodyLimit::max(
+                SESSION_LAUNCH_BODY_MAX_BYTES,
             )),
         )
         .route(

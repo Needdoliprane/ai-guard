@@ -323,7 +323,7 @@ const fn served(operation: HumanOperationV1, owned_profile: bool) -> bool {
     ) || (owned_profile
         && matches!(
             operation,
-            O::MembershipsManage | O::GrantsManage | O::SessionLaunchPrepare
+            O::MembershipsManage | O::GrantsManage | O::SessionLaunchPrepare | O::SessionLaunch
         ))
 }
 
@@ -535,6 +535,47 @@ mod tests {
                 "{operation:?} on the owned profile"
             );
             assert_eq!(legacy.availability, OperationAvailabilityV1::Available);
+        }
+    }
+
+    #[test]
+    fn session_launch_is_served_on_marked_owned_sources_only() {
+        use HumanCapabilityV1 as C;
+        use OperationAvailabilityV1 as A;
+        let capabilities = BTreeSet::from([C::LaunchSession]);
+        for (owned_profile, human_rights_marker, availability) in [
+            (true, true, A::Available),
+            (true, false, A::MigrationRequired),
+            (false, true, A::NotInThisBuild),
+            (false, false, A::NotInThisBuild),
+        ] {
+            let catalogue = context_operations(
+                ContextModeV1::Personal,
+                &capabilities,
+                &capabilities,
+                OperationFactsV1 {
+                    owned_profile,
+                    human_rights_marker,
+                },
+            );
+            let offer = entry(&catalogue, HumanOperationV1::SessionLaunch);
+            assert_eq!(offer.permission, OperationPermissionV1::Granted);
+            assert_eq!(offer.scope, Some(OperationScopeV1::OwnAndShared));
+            assert_eq!(offer.availability, availability);
+            // Launch never elevates from an administration context.
+            let administration = context_operations(
+                ContextModeV1::Administration,
+                &capabilities,
+                &capabilities,
+                OperationFactsV1 {
+                    owned_profile,
+                    human_rights_marker,
+                },
+            );
+            assert_eq!(
+                entry(&administration, HumanOperationV1::SessionLaunch).permission,
+                OperationPermissionV1::RequiresPersonal
+            );
         }
     }
 
