@@ -1,5 +1,26 @@
 # Validation courante
 
+## 25 novembre 2026 — ticket de libération E3, permis numérique et diagnostic Created
+
+Le gel isolé `bf1a74cb` compile hors ligne sur macOS ARM64.
+Sur 53 tests sélectionnés, 51 passent. Le dossier privé du
+test HTTP est refusé avant la route et le témoin Created expire
+pendant l’amorçage. Le manifeste de ce résultat mixte est
+`46c3f69b36c5fbaad0e5b6f51213d604f14ea939a3cfa1596b3fa442e060a39b`.
+
+Les tests réussis couvrent notamment les courses entre publication
+de tête et consommation du ticket, les trois oracles SQLite du
+permis numérique, les 36 tests du canal broker et les deux
+diagnostics locaux Created. Le test HTTP de refus avant lecture du
+corps réussit au rejeu sur le même binaire avec un umask privé
+`077`. Le manifeste de ce rejeu distinct est
+`d4ab0437546e344a6e6d6ae3b3701a095adff9ff49ab3643ba5425318475fb1b`.
+
+Le blocage Created se situe dans le harnais, avant son injection
+de faute. Les corrections des deux harnais et la vérification de
+l’échéance de l’Arm attendent leur nouveau gel. L’admission E3
+reste fermée. Le résultat Full3 antérieur reste ouvert.
+
 ## 25 novembre 2026 — inventaire des sources et SBOM G12
 
 Le contrôle hors ligne du candidat `1f056773` compare 3 521 fichiers
