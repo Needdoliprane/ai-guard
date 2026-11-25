@@ -1,7 +1,10 @@
 //! Coded control failures, without formatting an arbitrary error chain.
 use crate::{
     broker::{
-        enforcer::{EnforcerError, EnforcerStageFailure},
+        enforcer::{
+            EnforcerError, EnforcerStageFailure, LegacyReservationMotifV1,
+            LegacyReservationRefusalV1,
+        },
         journal::JournalError,
         lifecycle::LocalFailurePhaseV1,
         writer::WriterCallFailure,
@@ -308,6 +311,20 @@ impl fmt::Display for ReservationMode {
 
 impl std::error::Error for ReservationMode {}
 
+/// Carries the closed Legacy refusal of one reservation attempt into the
+/// diagnostic chain. The motif is absent when the peer did not negotiate
+/// support or the response was lost; it is never guessed.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ReservationRefusal(pub(super) LegacyReservationRefusalV1);
+
+impl fmt::Display for ReservationRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&RegistrationStage::ReserveProspective, f)
+    }
+}
+
+impl std::error::Error for ReservationRefusal {}
+
 #[derive(Serialize)]
 struct RegistrationDiagnostic {
     stage: RegistrationStage,
@@ -316,6 +333,8 @@ struct RegistrationDiagnostic {
     reservation_mode: Option<ReservationMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     enforcer_code: Option<EnforcerError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reservation_motif: Option<LegacyReservationMotifV1>,
 }
 
 impl RegistrationStage {
@@ -334,6 +353,7 @@ impl RegistrationStage {
             arm_state,
             reservation_mode: None,
             enforcer_code: None,
+            reservation_motif: None,
         }
     }
 }
@@ -403,10 +423,14 @@ pub(super) fn classify(
     let enforcer = error.downcast_ref::<EnforcerStageFailure>().cloned();
     let runtime = error.downcast_ref::<RuntimePrestartStageFailure>().cloned();
     let registration = if let Some(mode) = error.downcast_ref::<ReservationMode>() {
+        let refusal = error.downcast_ref::<ReservationRefusal>().map(|r| r.0);
         Some(RegistrationDiagnostic {
             reservation_mode: Some(*mode),
             // The code can originate locally or from the enforcer reply.
-            enforcer_code: error.downcast_ref::<EnforcerError>().copied(),
+            enforcer_code: refusal
+                .map(|r| r.code())
+                .or_else(|| error.downcast_ref::<EnforcerError>().copied()),
+            reservation_motif: refusal.and_then(|r| r.motif),
             ..RegistrationStage::ReserveProspective.diagnostic()
         })
     } else {
@@ -752,6 +776,65 @@ mod tests {
             report["registration"],
             json!({"stage": "reserve_prospective", "arm_state": "pending",
                 "reservation_mode": "fresh"})
+        );
+    }
+
+    #[test]
+    fn negotiated_reservation_refusal_reports_its_closed_motif() {
+        for (motif, label) in [
+            (
+                LegacyReservationMotifV1::ClockRejectedBeforeAllocation,
+                "clock_rejected_before_allocation",
+            ),
+            (
+                LegacyReservationMotifV1::ClockRejectedBeforeAck,
+                "clock_rejected_before_ack",
+            ),
+            (
+                LegacyReservationMotifV1::InstallDeadlineElapsed,
+                "install_deadline_elapsed",
+            ),
+            (
+                LegacyReservationMotifV1::StopReservedBeforeAck,
+                "stop_reserved_before_ack",
+            ),
+        ] {
+            let refusal = LegacyReservationRefusalV1::with_motif(EnforcerError::NotReady, motif);
+            let error = anyhow::Error::new(ReservationRefusal(refusal))
+                .context(ReservationMode::from_replay_only(false))
+                .context("synthetic private outer context");
+            let report =
+                serde_json::to_value(failure_report(LocalFailurePhaseV1::FinalScan, &error))
+                    .unwrap();
+            assert_eq!(
+                report["registration"],
+                json!({
+                    "stage": "reserve_prospective",
+                    "arm_state": "pending",
+                    "reservation_mode": "fresh",
+                    "enforcer_code": "not_ready",
+                    "reservation_motif": label,
+                })
+            );
+            assert!(!report.to_string().contains("synthetic private"));
+        }
+    }
+
+    #[test]
+    fn unnegotiated_reservation_refusal_keeps_motif_absent() {
+        let refusal = LegacyReservationRefusalV1::from(EnforcerError::Capacity);
+        let error = anyhow::Error::new(ReservationRefusal(refusal))
+            .context(ReservationMode::from_replay_only(true));
+        let report =
+            serde_json::to_value(failure_report(LocalFailurePhaseV1::FinalScan, &error)).unwrap();
+        assert_eq!(
+            report["registration"],
+            json!({
+                "stage": "reserve_prospective",
+                "arm_state": "pending",
+                "reservation_mode": "replay",
+                "enforcer_code": "capacity",
+            })
         );
     }
 

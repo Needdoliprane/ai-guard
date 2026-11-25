@@ -257,13 +257,16 @@ impl Execution<'_> {
             }
             let replay_only = !newly_requested_arm;
             enforcer
-                .reserve_prospective(
+                .reserve_prospective_diagnosed(
                     target.clone(),
                     self.context.cancel_generation().clone(),
                     replay_only,
                 )
                 .await
-                .with_context(|| diagnostics::ReservationMode::from_replay_only(replay_only))?;
+                .map_err(|refusal| {
+                    anyhow::Error::new(diagnostics::ReservationRefusal(refusal))
+                        .context(diagnostics::ReservationMode::from_replay_only(replay_only))
+                })?;
             if let Err(error) = self.generation_current() {
                 if let ExecutionEnforcerV1::Legacy(client) = enforcer {
                     if let Err(cancel) = client
