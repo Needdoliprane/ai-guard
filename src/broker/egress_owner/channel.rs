@@ -8,7 +8,6 @@
 //! close the affected sockets. The channel never reattaches an old epoch.
 
 use super::resolve::{ResolveError, Resolver};
-use crate::control::egress_decision::*;
 use crate::egress::{
     Admission, Authority,
     channel_protocol::{
@@ -19,6 +18,10 @@ use crate::egress::{
         DirectionV1, EgressCapabilityV1, EgressChannelState, EgressMessageV1, EgressReasonV1,
         MAX_DATA_BYTES,
     },
+};
+use crate::{
+    broker::{clock::HostClock, enforcer::CancelGeneration},
+    control::{HostClockSampleV1, egress_decision::*},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -297,9 +300,34 @@ async fn wait_for_channel_stop(stop: &mut watch::Receiver<ChannelStopState>) {
     }
 }
 
+/// The native clock and STOP sources retained by the original worker execution.
+pub(crate) struct ConnectAuthorization {
+    clock: Arc<dyn HostClock>,
+    generation: CancelGeneration,
+    expected_generation: u64,
+    native_stop: watch::Receiver<bool>,
+}
+
+impl ConnectAuthorization {
+    pub(crate) fn new(
+        clock: Arc<dyn HostClock>,
+        generation: CancelGeneration,
+        expected_generation: u64,
+        native_stop: watch::Receiver<bool>,
+    ) -> Self {
+        Self {
+            clock,
+            generation,
+            expected_generation,
+            native_stop,
+        }
+    }
+}
+
 struct OpeningLifetime {
     owner: watch::Receiver<Option<ObservedStop>>,
     stop: watch::Receiver<ChannelStopState>,
+    authorization: Arc<ConnectAuthorization>,
 }
 
 impl OpeningLifetime {
@@ -318,19 +346,29 @@ impl OpeningLifetime {
         deadline: Instant,
         poll: impl FnOnce() -> Poll<T>,
     ) -> Option<Poll<T>> {
-        // Both invalidators publish through these watch values before dropping.
-        // Hold the snapshots through one synchronous poll only.
-        let stop = self.stop.borrow();
-        let owner = self.owner.borrow();
-        if stop.0
-            || owner.is_some()
-            || !matches!(self.stop.has_changed(), Ok(false))
-            || !matches!(self.owner.has_changed(), Ok(false))
-            || Instant::now() >= deadline
-        {
-            return None;
-        }
-        Some(poll())
+        let authorization = &self.authorization;
+        authorization
+            .generation
+            .with_current_generation(authorization.expected_generation, || {
+                // Order the bounded poll with publication at each STOP source,
+                // including the native slot before any asynchronous forwarding.
+                let native_stop = authorization.native_stop.borrow();
+                let stop = self.stop.borrow();
+                let owner = self.owner.borrow();
+                if *native_stop
+                    || authorization.native_stop.has_changed().is_err()
+                    || stop.0
+                    || owner.is_some()
+                    || !matches!(self.stop.has_changed(), Ok(false))
+                    || !matches!(self.owner.has_changed(), Ok(false))
+                    || Instant::now() >= deadline
+                {
+                    return None;
+                }
+                Some(poll())
+            })
+            .ok()
+            .flatten()
     }
 
     async fn cancelled(&self) {
@@ -607,6 +645,8 @@ struct Owner<W> {
     stopped_during_write: bool,
     binding: EgressBindingV1,
     opening_id: IdV1,
+    opening_audit_seq: i64,
+    authorization: Arc<ConnectAuthorization>,
     control: Arc<dyn EgressControl>,
     resolver: Arc<Resolver>,
     times: ChannelTimes,
@@ -783,6 +823,7 @@ pub(crate) async fn run_opened<IO>(
     control: Arc<dyn EgressControl>,
     resolver: Arc<Resolver>,
     times: ChannelTimes,
+    authorization: Arc<ConnectAuthorization>,
 ) -> ChannelTermination
 where
     IO: AsyncRead + AsyncWrite + Send + 'static,
@@ -797,6 +838,7 @@ where
     let EgressChannelOpeningReceiptV1 {
         binding,
         observation_id: opening_id,
+        receipt,
         ..
     } = opened.receipt;
     let started = Instant::now();
@@ -817,6 +859,8 @@ where
         stopped_during_write: false,
         binding,
         opening_id,
+        opening_audit_seq: receipt.audit_seq,
+        authorization,
         control,
         resolver,
         times,
@@ -1188,6 +1232,7 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
         self.flows.insert(flow_id, flow);
         let destination = OpenDestination {
             opening_id: self.opening_id.clone(),
+            opening_audit_seq: self.opening_audit_seq,
             decision: EgressDecideRequestV1 {
                 version: 1,
                 decision_id: decision_id.clone(),
@@ -1204,6 +1249,7 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
         let lifetime = OpeningLifetime {
             owner: owned,
             stop: self.stop.clone(),
+            authorization: self.authorization.clone(),
         };
         tokio::spawn(async move {
             let mut progress = ConnectProgress::default();
@@ -1699,8 +1745,73 @@ fn cancelled_opening() -> Refusal {
     }
 }
 
+/// Samples from one boot and clock method, ordered across the whole opening.
+struct OpeningClock<'a> {
+    clock: &'a dyn HostClock,
+    origin: HostClockSampleV1,
+    last_ns: u128,
+}
+
+impl<'a> OpeningClock<'a> {
+    fn start(clock: &'a dyn HostClock) -> Result<Self, Refusal> {
+        let origin = clock.sample().map_err(|_| Self::unavailable())?;
+        let last_ns = origin.continuous_ns().map_err(|_| Self::unavailable())?;
+        Ok(Self {
+            clock,
+            origin,
+            last_ns,
+        })
+    }
+
+    fn before(&mut self, deadline: OpeningDeadline) -> Result<u128, Refusal> {
+        let sample = self.clock.sample().map_err(|_| Self::unavailable())?;
+        let now = sample.continuous_ns().map_err(|_| Self::unavailable())?;
+        if sample.boot_id != self.origin.boot_id
+            || sample.method != self.origin.method
+            || now < self.last_ns
+        {
+            return Err(Self::unavailable());
+        }
+        self.last_ns = now;
+        if now >= deadline.ns {
+            return Err(Refusal {
+                reason: deadline.reason,
+                failure: None,
+            });
+        }
+        Ok(now)
+    }
+
+    fn unavailable() -> Refusal {
+        Refusal {
+            reason: EgressReasonV1::Unavailable,
+            failure: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct OpeningDeadline {
+    ns: u128,
+    reason: EgressReasonV1,
+}
+
+impl OpeningDeadline {
+    fn after(origin_ns: u128, duration: Duration, reason: EgressReasonV1) -> Result<Self, Refusal> {
+        let ns = origin_ns
+            .checked_add(duration.as_nanos())
+            .ok_or_else(OpeningClock::unavailable)?;
+        Ok(Self { ns, reason })
+    }
+
+    fn limited_by(self, other: Self) -> Self {
+        if other.ns <= self.ns { other } else { self }
+    }
+}
+
 struct OpenDestination {
     opening_id: IdV1,
+    opening_audit_seq: i64,
     decision: EgressDecideRequestV1,
     authority: Authority,
 }
@@ -1716,13 +1827,20 @@ async fn open_upstream(
 ) -> Result<Opened, Refusal> {
     let OpenDestination {
         opening_id,
+        opening_audit_seq,
         decision: request,
         authority,
     } = destination;
     if lifetime.loss().is_some() {
         return Err(cancelled_opening());
     }
+    // Tokio schedules the waits. Only the continuous boot clock can prove
+    // the authorization still lives when the host resumes or a reply is late.
     let sent = Instant::now();
+    let mut native = OpeningClock::start(lifetime.authorization.clock.as_ref())?;
+    let name_sent_ns = native.last_ns;
+    let native_deadline =
+        OpeningDeadline::after(name_sent_ns, times.open_budget, EgressReasonV1::Timeout)?;
     let deadline = sent + times.open_budget;
     let decision = match timeout_at(deadline, control.decide(request.clone())).await {
         Ok(Ok(decision)) => decision,
@@ -1733,6 +1851,12 @@ async fn open_upstream(
             });
         }
     };
+    if decision.receipt.audit_seq <= opening_audit_seq {
+        return Err(Refusal {
+            reason: EgressReasonV1::AuditUnavailable,
+            failure: None,
+        });
+    }
     if !decision.allows(&request) {
         let reason = match decision.outcome {
             EgressOutcomeV1::Review => EgressReasonV1::Review,
@@ -1743,12 +1867,16 @@ async fn open_upstream(
             failure: None,
         });
     }
-    let valid_until = sent
-        .checked_add(Duration::from_millis(decision.remaining_ms.unwrap_or(0)))
-        .ok_or(Refusal {
-            reason: EgressReasonV1::Denied,
-            failure: None,
-        })?;
+    let name_duration = Duration::from_millis(decision.remaining_ms.unwrap_or(0));
+    let native_deadline = native_deadline.limited_by(OpeningDeadline::after(
+        name_sent_ns,
+        name_duration,
+        EgressReasonV1::Expired,
+    )?);
+    let valid_until = sent.checked_add(name_duration).ok_or(Refusal {
+        reason: EgressReasonV1::Denied,
+        failure: None,
+    })?;
     let (deadline, elapsed_reason) = if valid_until <= deadline {
         (valid_until, EgressReasonV1::Expired)
     } else {
@@ -1763,6 +1891,7 @@ async fn open_upstream(
     if lifetime.loss().is_some() {
         return Err(cancelled_opening());
     }
+    native.before(native_deadline)?;
     let resolution = match resolver.resolve(&authority, deadline).await {
         Ok(resolution) => resolution,
         Err(error) => {
@@ -1788,13 +1917,6 @@ async fn open_upstream(
     if lifetime.loss().is_some() {
         return Err(cancelled_opening());
     }
-    let permit_sent = Instant::now();
-    if permit_sent >= deadline {
-        return Err(Refusal {
-            reason: elapsed_reason,
-            failure: None,
-        });
-    }
     let resolution_digest =
         egress_resolution_digest_v1(&resolution.addresses).map_err(|_| Refusal {
             reason: EgressReasonV1::Unavailable,
@@ -1809,6 +1931,14 @@ async fn open_upstream(
         ip: address,
         resolution_digest,
     };
+    let permit_sent = Instant::now();
+    if permit_sent >= deadline {
+        return Err(Refusal {
+            reason: elapsed_reason,
+            failure: None,
+        });
+    }
+    let permit_sent_ns = native.before(native_deadline)?;
     let permit = match timeout_at(
         deadline,
         control.issue_connect_permit(permit_request.clone()),
@@ -1832,12 +1962,16 @@ async fn open_upstream(
             });
         }
     };
-    let permit_until = permit_sent
-        .checked_add(Duration::from_millis(permit.valid_for_ms))
-        .ok_or(Refusal {
-            reason: EgressReasonV1::Denied,
-            failure: None,
-        })?;
+    let permit_duration = Duration::from_millis(permit.valid_for_ms);
+    let native_deadline = native_deadline.limited_by(OpeningDeadline::after(
+        permit_sent_ns,
+        permit_duration,
+        EgressReasonV1::Expired,
+    )?);
+    let permit_until = permit_sent.checked_add(permit_duration).ok_or(Refusal {
+        reason: EgressReasonV1::Denied,
+        failure: None,
+    })?;
     let (deadline, elapsed_reason) = if permit_until <= deadline {
         (permit_until, EgressReasonV1::Expired)
     } else {
@@ -1855,6 +1989,7 @@ async fn open_upstream(
     }
     let target = SocketAddr::new(address, authority.port());
     let attempt = (now + times.connect_attempt).min(deadline);
+    let mut native_attempt = native_deadline;
     let mut attempted = false;
     let mut connecting = std::pin::pin!(async {
         let socket = match target {
@@ -1867,16 +2002,30 @@ async fn open_upstream(
         Some(socket.connect(target).await)
     });
     let connect = poll_fn(|cx| {
-        if let Some(polled) = lifetime.poll_connect(attempt, || {
+        let polled = lifetime.poll_connect(attempt, || {
+            // Keep the final clock sample inside the same gate as connect.
+            let now_ns = native.before(native_attempt)?;
+            if !attempted {
+                native_attempt = native_attempt.limited_by(OpeningDeadline::after(
+                    now_ns,
+                    times.connect_attempt,
+                    EgressReasonV1::Unavailable,
+                )?);
+            }
             attempted = true;
             progress.pending = true;
-            connecting.as_mut().poll(cx)
-        }) {
-            return polled.map(|result| progress.complete(result));
-        }
+            connecting.as_mut().poll(cx).map(Ok)
+        });
+        let interrupted = match polled {
+            Some(Poll::Pending) => return Poll::Pending,
+            Some(Poll::Ready(Ok(result))) => return Poll::Ready(Ok(progress.complete(result))),
+            Some(Poll::Ready(Err(refusal))) => Err(refusal),
+            None if Instant::now() >= attempt => Ok(None),
+            None => Err(cancelled_opening()),
+        };
         progress.unobserved |= progress.pending;
         progress.pending = false;
-        Poll::Ready(None)
+        Poll::Ready(interrupted)
     });
     // An elapsed attempt takes precedence over a ready connect future.
     let stream = tokio::select! {
@@ -1885,10 +2034,10 @@ async fn open_upstream(
             // The wait ended without an observed OS result.
             progress.unobserved |= progress.pending;
             progress.pending = false;
-            None
+            Ok(None)
         }
         stream = connect => stream,
-    };
+    }?;
     if let Some(stream) = stream {
         if stream.peer_addr().is_ok_and(|peer| peer == target) {
             let _ = stream.set_nodelay(true);

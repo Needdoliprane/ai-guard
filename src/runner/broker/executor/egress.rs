@@ -6,8 +6,8 @@ use crate::{
     broker::{
         egress_owner::{
             channel::{
-                self, ChannelStop, ChannelTermination, ChannelTimes, EgressControl,
-                LocalQuiescence, OpenedChannel,
+                self, ChannelStop, ChannelTermination, ChannelTimes, ConnectAuthorization,
+                EgressControl, LocalQuiescence, OpenedChannel,
             },
             resolve::Resolver,
         },
@@ -208,11 +208,23 @@ impl Execution<'_> {
                 ensure!(!stop.is_stopped(), "retained egress channel has stopped");
                 self.require_egress_live(exec)
             })?;
+            let authorization = Arc::new(ConnectAuthorization::new(
+                self.executor.clock.clone(),
+                self.context.cancel_generation().clone(),
+                self.generation,
+                native_stop.clone(),
+            ));
             let stop = Arc::new(stop);
             let task_stop = Arc::clone(&stop);
             let task = tokio::spawn(async move {
                 let mut run = boxed_execution_phase(|| {
-                    channel::run_opened(channel, control, resolver, ChannelTimes::default())
+                    channel::run_opened(
+                        channel,
+                        control,
+                        resolver,
+                        ChannelTimes::default(),
+                        authorization,
+                    )
                 });
                 tokio::select! {
                     biased;
