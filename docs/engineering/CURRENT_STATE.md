@@ -8,6 +8,12 @@ que le refus du CLI expose la règle et le motif audités. Le
 candidat `0585be3c` reprend les sources et les tests du correctif.
 [Résultats exacts et limites](VALIDATION.md).
 
+Le candidat `d8c7846f` intègre les deux tests réussis de `2d400f42`.
+Le CLI explique le refus audité après approbation. Le bootstrap
+Claude Code ajoute l'option de remontée du texte des sous-agents
+sur une entrée d'aide complète.
+[Résultats exacts](VALIDATION.md#25-novembre-2026--refus-audité-après-approbation-et-aide-claude-code).
+
 G10 est validé au périmètre V1 sur `48f81d20`. Le quota accepte
 100 réservations durables pour un tenant et la recette physique
 utilise A1/A2 chez A et B1 chez B. G09 conserve son échec moteur.

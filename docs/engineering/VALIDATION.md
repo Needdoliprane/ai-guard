@@ -71,6 +71,25 @@ worker et d'appel au moteur. Le détail du stderr du CLI reste
 interne au test. Manifeste séparé
 `d2347dc50500f43775ba821b19d565f046f86a95f4486dbd6c4250edc4c5b31b`.
 
+## 25 novembre 2026 — refus audité après approbation et aide Claude Code
+
+Le gel `2d400f42` compile hors ligne sur macOS ARM64.
+`approved_refusal_explains_the_audited_rule_without_invoking_the_engine`
+passe. Après approbation, le CLI affiche la règle, le motif et
+la séquence du refus durable. Le test recoupe le reçu dans SQLite
+et vérifie zéro worker et zéro appel à la fixture moteur.
+
+`provider::bootstrap::tests::subagent_text_is_forwarded_only_when_claude_batch_help_lists_it`
+passe aussi. Le bootstrap ajoute `--forward-subagent-text` quand
+l'aide Claude Code contient une entrée d'option complète. Les cas
+de mention et de fin tronquée gardent l'invocation intacte.
+La validation sur les clients réels reste ouverte.
+
+Les deux sélections sont exactes, les groupes et répertoires temporaires
+sont vides. Les trois fichiers de code et de test ainsi que les verrous
+concordent à l'octet près avec `d8c7846f`. Manifeste 41 fichiers
+`fe3ae03a92f9cd5341c2150f86c76f8d7b4999d8fead4d09a7d58e335ed4dc4b`.
+
 ## 25 novembre 2026 — disponibilité locale Kubernetes
 
 Le contexte local Docker Desktop, vérifié sur un endpoint HTTPS
