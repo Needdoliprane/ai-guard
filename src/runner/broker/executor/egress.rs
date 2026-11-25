@@ -61,12 +61,68 @@ pub(super) struct PreparedEgressRelease {
     pub(super) committed: CommittedEgressReleaseIntent,
 }
 
+#[must_use = "supervise the opened channel through worker stop and reconciliation"]
+pub(super) struct ReleasedEgressChannel {
+    pub(super) channel: OpenedChannel<EgressExecIo>,
+    pub(super) exec: EgressExecOwner,
+    pub(super) stop: ChannelStop,
+    pub(super) control: Arc<dyn EgressControl>,
+}
+
 struct RunningPlan {
     target: EgressReleaseTargetV1,
     request: WorkerMutationV1,
 }
 
 impl Execution<'_> {
+    /// Revalidate the committed intent and the live incarnation before the
+    /// original native authorization arbitrates STOP and the one pipe write.
+    /// The returned owners keep the helper and its channel open for supervision.
+    pub(super) fn submit_prepared_egress_release<'ready>(
+        &'ready self,
+        runtime: &'ready ManagedRuntime,
+        ready: Box<PreparedEgressRelease>,
+    ) -> BoxFuture<'ready, Result<Box<ReleasedEgressChannel>>> {
+        boxed_execution_phase(|| async move {
+            self.require_egress_live(&ready.exec)?;
+            let (job, draft) = boxed_execution_phase(|| self.load()).await?;
+            ensure!(
+                same(job.head(), ready.committed.head())?
+                    && !draft.cancelled()
+                    && draft.egress_release.as_deref() == Some(ready.committed.intent())
+                    && ready.committed.intent().matches_running(draft.worker()?),
+                "confirmed egress release intent is no longer current"
+            );
+            drop(draft);
+            drop(job);
+
+            let reinspected =
+                boxed_execution_phase(|| runtime.observe(&ready.bootstrap.owned().handle))
+                    .await
+                    .context("cannot revalidate the held bootstrap incarnation")?;
+
+            let PreparedEgressRelease {
+                bootstrap,
+                channel,
+                exec,
+                stop,
+                control,
+                ..
+            } = *ready;
+            // The native authorization supplies the original generation and
+            // deadline. This veto has local checks only.
+            bootstrap.submit_once(runtime.binding(), &reinspected, || {
+                self.require_egress_live(&exec)
+            })?;
+            Ok(Box::new(ReleasedEgressChannel {
+                channel,
+                exec,
+                stop,
+                control,
+            }))
+        })
+    }
+
     /// Use only inside the runtime's supervised BootstrapReady callback.
     /// Consumes the one-shot stdin owner and returns it untouched on success.
     /// Keep opening evidence outside the callback to reconcile ambiguous POSTs.
