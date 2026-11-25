@@ -2469,7 +2469,7 @@ fn validate_endpoint(kind: RuntimeKind, endpoint: &str) -> Result<()> {
             && endpoint.len() <= 4096
             && !endpoint.chars().any(char::is_control)
             && !endpoint.contains(['?', '#', '@']),
-        "managed runtime requires an explicit local Unix endpoint (or Podman local)"
+        "managed runtime requires an explicit local Unix endpoint in the form unix:///absolute/path.sock (or 'local' for a native Podman engine on Linux)"
     );
     let path = Path::new(&endpoint[7..]);
     ensure!(
@@ -2514,6 +2514,20 @@ fn podman_diagnostics_and_managed_commands_share_local_targets() {
             "{incompatible}"
         );
     }
+}
+
+#[cfg(test)]
+#[test]
+fn podman_endpoint_refusal_shows_expected_unix_format() {
+    // A bare socket path (no unix:// scheme) is the common operator mistake on
+    // macOS; the refusal must show the exact accepted format instead of a vague
+    // "explicit local Unix endpoint" hint.
+    let err = selected_podman_target_args("/tmp/podman-qa.sock").unwrap_err();
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("unix:///absolute/path.sock"),
+        "refusal must show the unix:// format: {message}"
+    );
 }
 
 // Configuration is checked while private inspect bytes are in scope, but is not

@@ -1073,7 +1073,7 @@ async fn selected_runtime(
     } else {
         anyhow::ensure!(
             endpoint.is_none(),
-            "operator --runtime-endpoint requires Docker; managed Podman sessions accept local or Unix endpoints through run"
+            "operator --runtime-endpoint is accepted for Docker build/up/down only; Podman build/up/down use the approved Podman program's own connection. To diagnose a specific Podman socket use 'doctor --runtime podman --runtime-endpoint unix:///absolute/path.sock'; managed Podman sessions accept local or Unix endpoints through run"
         );
         None
     };
