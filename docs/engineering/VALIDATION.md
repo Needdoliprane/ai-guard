@@ -1,5 +1,23 @@
 # Validation courante
 
+## 25 novembre 2026 — composants du bootstrap retenu E3
+
+Le gel isolé `b8865a3a` compile hors ligne sur macOS ARM64 avec
+le lockfile et les fonctionnalités par défaut. Dix tests ciblés
+passent. Quatre portent sur le stdin exclusif, les marqueurs et
+la configuration de création. Trois couvrent l’attachement du
+helper, son environnement fermé et la révocation des pipes.
+Le test de l’intention durable exige un reçu d’ouverture frais
+et lié à l’incarnation exacte. Deux tests du bootstrap exigent
+la trame exacte puis EOF avant l’accès au handoff fournisseur.
+
+Le récepteur, le pipe et le helper sont exercés avec des
+fixtures inertes. Le raccordement de la garde native, la reprise
+après perte d’ACK et le départ complet sur moteur restent
+à valider. Ces résultats appartiennent au gel isolé.
+Manifeste privé
+`f9a99a80f857c8a1db7fee8e36cf8c623de1b779db1d24ccf7f82b409c1f1343`.
+
 ## 25 novembre 2026 — profil E3, diagnostic Created et canari du relais
 
 Le gel exact `4a78536a` compile hors ligne sur macOS ARM64. Sept
