@@ -86,6 +86,8 @@ pub struct PrearmedStartControl {
     stop: tokio::sync::watch::Receiver<bool>,
     launch_profile: Option<Box<launch_profile::DockerLaunchProfileBindingV1>>,
     stdout_tap: Option<crate::provider_activity::StdoutTap>,
+    #[cfg(unix)]
+    native_release: Option<Box<dyn bootstrap_stdin::NativeBootstrapRelease>>,
 }
 impl PrearmedStartControl {
     pub fn new(guard: Box<dyn BeforeSpawnGuard>, stop: tokio::sync::watch::Receiver<bool>) -> Self {
@@ -94,18 +96,23 @@ impl PrearmedStartControl {
             stop,
             launch_profile: None,
             stdout_tap: None,
+            #[cfg(unix)]
+            native_release: None,
         }
     }
     pub(crate) fn with_launch_profile(
         guard: Box<dyn BeforeSpawnGuard>,
         stop: tokio::sync::watch::Receiver<bool>,
         launch_profile: Option<launch_profile::DockerLaunchProfileBindingV1>,
+        #[cfg(unix)] native_release: Option<Box<dyn bootstrap_stdin::NativeBootstrapRelease>>,
     ) -> Self {
         Self {
             guard,
             stop,
             launch_profile: launch_profile.map(Box::new),
             stdout_tap: None,
+            #[cfg(unix)]
+            native_release,
         }
     }
     /// Forward the batch client stdout live to the activity collector, in
@@ -2153,7 +2160,14 @@ impl Runtime {
             mut stop,
             launch_profile,
             stdout_tap,
+            #[cfg(unix)]
+            native_release,
         } = control;
+        #[cfg(unix)]
+        ensure!(
+            !input.is_bootstrap() || native_release.is_some(),
+            "retained bootstrap requires the original native worker release authorization"
+        );
         let guard: Box<dyn BeforeSpawnGuard> = Box::new(ProfileBoundSpawnGuard {
             inner: guard,
             expected: launch_profile,
@@ -2177,6 +2191,7 @@ impl Runtime {
                     stdin,
                     ready,
                     stop,
+                    native_release,
                     stdout_limit,
                     stdout_tap,
                 )

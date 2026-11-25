@@ -377,3 +377,148 @@ async fn retained_cancel_real_ipc_retries_without_seeding_or_targeting_later_slo
     );
     assert_eq!(generation.current(), 1);
 }
+
+#[test]
+fn native_worker_release_submits_only_with_the_original_live_slot_and_target() {
+    use crate::{
+        egress::ids::IdV1,
+        runtime::bootstrap_stdin::{BootstrapStdinSubmitError, NativeBootstrapRelease},
+    };
+    use std::cell::Cell;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Case {
+        Submit,
+        Cancel,
+        Stop,
+        StopDuringVeto,
+        SlotLost,
+        WrongAuthority,
+        WrongAttempt,
+        WrongCid,
+        Expired,
+        ChannelClosed,
+    }
+
+    let temp = tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir_in(PRIVATE_TMP)
+        .unwrap();
+    let root_path = temp.path().canonicalize().unwrap();
+    let root = Directory::open_existing(&root_path).unwrap();
+    let registration = unavailable_registration(&root_path, "release");
+    let foreign = unavailable_registration(&root_path, "foreign");
+    let clock = Arc::new(NativeHostClock::new().unwrap());
+
+    for case in [
+        Case::Submit,
+        Case::Cancel,
+        Case::Stop,
+        Case::StopDuringVeto,
+        Case::SlotLost,
+        Case::WrongAuthority,
+        Case::WrongAttempt,
+        Case::WrongCid,
+        Case::Expired,
+        Case::ChannelClosed,
+    ] {
+        // The Unix pair supplies local liveness only. All slot and runtime
+        // observations are fixture data, with no guardian or engine launched.
+        let (_peer, live) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut client = EnforcerClient::unavailable_for_test(&root).unwrap();
+        Arc::get_mut(&mut client.0).unwrap().liveness = live.into();
+        client.0.failed.store(false, Ordering::SeqCst);
+        *client.0.health.lock().unwrap() = Some((1, Instant::now()));
+        let sample = clock.sample().unwrap();
+        let arm = &registration.arm;
+        let digest = registration.digest().unwrap();
+        let generation = CancelGeneration::new();
+        let (stop, _stop_rx) = watch::channel(false);
+        let status = EnforcerSlotStatusV1 {
+            arm_id: arm.operation_id.clone(),
+            registration_hash: digest.clone(),
+            phase: SlotPhaseV1::Ready,
+            prepared_once: true,
+            generation: generation.current(),
+            clock: Some(sample.clone()),
+            observation: None,
+            stop_failures: 0,
+        };
+        let mut deadline = WorkerReleaseDeadline::new(arm, &sample, &sample).unwrap();
+        if case == Case::Expired {
+            deadline.deadline_ns = sample.continuous_ns().unwrap();
+        }
+        let local = Arc::new(LocalSlot {
+            registration: registration.clone(),
+            digest,
+            generation: generation.clone(),
+            status: Mutex::new((status, Instant::now())),
+            stop,
+            acknowledged: AtomicBool::new(true),
+            cancel_durable: AtomicBool::new(false),
+            retained_cancel: AtomicBool::new(false),
+            latch: retirement::SlotLatch::default(),
+        });
+        local.latch.reserve_claim().unwrap();
+        if case != Case::SlotLost {
+            client
+                .0
+                .slots
+                .lock()
+                .unwrap()
+                .insert(arm.operation_id.clone(), Arc::clone(&local));
+        }
+        let permit = Box::new(WorkerBootstrapRelease {
+            client,
+            local: Arc::clone(&local),
+            expected_generation: generation.current(),
+            clock: Arc::clone(&clock),
+            deadline,
+        });
+        if case == Case::Cancel {
+            generation.invalidate();
+        } else if case == Case::Stop {
+            local.stop.send_replace(true);
+        }
+        let attempt = IdV1::parse(if case == Case::WrongAttempt {
+            &foreign.arm.attempt_id
+        } else {
+            &arm.attempt_id
+        })
+        .unwrap();
+        let authority = if case == Case::WrongAuthority {
+            &foreign.authority
+        } else {
+            &registration.authority
+        };
+        let observed = if case == Case::WrongCid {
+            &foreign.owned
+        } else {
+            &registration.owned
+        };
+        let writes = Cell::new(0);
+        let result = permit.submit(
+            authority,
+            observed,
+            &attempt,
+            Box::new(|| {
+                anyhow::ensure!(case != Case::ChannelClosed, "fixture channel closed");
+                if case == Case::StopDuringVeto {
+                    local.stop.send_replace(true);
+                }
+                Ok(())
+            }),
+            Box::new(|| {
+                writes.set(writes.get() + 1);
+                Ok(())
+            }),
+        );
+        let expected = if case == Case::Submit {
+            Ok(())
+        } else {
+            Err(BootstrapStdinSubmitError::Refused)
+        };
+        assert_eq!(result, expected, "{case:?}");
+        assert_eq!(writes.get(), usize::from(case == Case::Submit), "{case:?}");
+    }
+}

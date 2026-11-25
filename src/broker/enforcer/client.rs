@@ -12,8 +12,12 @@ use crate::{
         local_ipc::{EndpointRecordV1, read_frame, write_frame},
     },
     control_fs::Directory,
+    egress::ids::IdV1,
     runner::broker::FreshStartPermission,
-    runtime::{BeforeSpawnGuard, PrearmedStartControl},
+    runtime::{
+        BeforeSpawnGuard, PrearmedStartControl,
+        bootstrap_stdin::{BootstrapStdinSubmitError, NativeBootstrapRelease},
+    },
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -2387,6 +2391,34 @@ impl EnforcedSlot {
                 Some(&sample),
             ));
         }
+        let clock = Arc::new(clock);
+        let native_release: Option<Box<dyn NativeBootstrapRelease>> =
+            if matches!(&arm.subject, crate::control::ArmSubjectV1::Worker)
+                && arm.inspection.network == crate::control::NetworkV1::None
+                && arm.inspection.security_preset
+                    == crate::control::SecurityPresetV1::FixedSandboxV2
+                && self.local.latch.claim_reserved()
+                && self.local.acknowledged.load(Ordering::SeqCst)
+                && value.phase == SlotPhaseV1::Ready
+                && value.prepared_once
+                && value.generation == expected_generation
+            {
+                value
+                    .clock
+                    .as_ref()
+                    .and_then(|observed| WorkerReleaseDeadline::new(arm, &sample, observed))
+                    .map(|deadline| {
+                        Box::new(WorkerBootstrapRelease {
+                            client: self.client.clone(),
+                            local: Arc::clone(&self.local),
+                            expected_generation,
+                            clock: Arc::clone(&clock),
+                            deadline,
+                        }) as Box<dyn NativeBootstrapRelease>
+                    })
+            } else {
+                None
+            };
         *self
             .local
             .status
@@ -2402,6 +2434,7 @@ impl EnforcedSlot {
             }),
             self.local.stop.subscribe(),
             registration.authority.docker_launch_profile.clone(),
+            native_release,
         ))
     }
 
@@ -2432,11 +2465,141 @@ impl EnforcedSlot {
     }
 }
 
+/// Process-local authorization retained only by the original Prepare result.
+struct WorkerBootstrapRelease {
+    client: EnforcerClient,
+    local: Arc<LocalSlot>,
+    expected_generation: u64,
+    clock: Arc<NativeHostClock>,
+    deadline: WorkerReleaseDeadline,
+}
+
+impl NativeBootstrapRelease for WorkerBootstrapRelease {
+    fn submit(
+        self: Box<Self>,
+        authority: &RuntimeAuthority,
+        observed: &OwnedContainerSnapshot,
+        attempt: &IdV1,
+        check_release: Box<dyn FnOnce() -> anyhow::Result<()> + '_>,
+        write: Box<dyn FnOnce() -> Result<(), BootstrapStdinSubmitError> + '_>,
+    ) -> Result<(), BootstrapStdinSubmitError> {
+        use BootstrapStdinSubmitError::Refused;
+
+        let registration = &self.local.registration;
+        let arm = &registration.arm;
+        let original = &registration.owned;
+        let expected = self.expected_generation;
+        self.local
+            .generation
+            .with_current_generation(expected, || {
+                if authority != &registration.authority
+                    || attempt.as_str() != arm.attempt_id
+                    || observed.handle.id() != original.handle.id()
+                    || observed.handle.name() != original.handle.name()
+                    || observed.handle.session_id() != original.handle.session_id()
+                    || observed.handle.operation_id() != original.handle.operation_id()
+                    || observed.handle.authority_fingerprint() != arm.authority_binding_hash
+                    || observed.handle.fingerprint_version()
+                        != arm.configuration_fingerprint_version
+                    || observed
+                        .observation
+                        .validate_identity_allocation(&original.observation)
+                        .is_err()
+                {
+                    return Err(Refused);
+                }
+                check_release().map_err(|_| Refused)?;
+
+                let client = &self.client.0;
+                client.check_health().map_err(|_| Refused)?;
+                let slots = client.slots.try_lock().map_err(|_| Refused)?;
+                if !slots
+                    .get(&arm.operation_id)
+                    .is_some_and(|slot| Arc::ptr_eq(slot, &self.local))
+                {
+                    return Err(Refused);
+                }
+                // Match the guardian's latest authenticated view. Keep the
+                // local slot and STOP snapshot through the single write.
+                let state = self.local.status.try_lock().map_err(|_| Refused)?;
+                let (status, received) = &*state;
+                let stop = self.local.stop.borrow();
+                if *stop
+                    || !self.local.acknowledged.load(Ordering::SeqCst)
+                    || !self.local.latch.claim_reserved()
+                    || self.local.cancel_durable.load(Ordering::SeqCst)
+                    || self.local.retained_cancel.load(Ordering::SeqCst)
+                    || status.arm_id != arm.operation_id
+                    || status.registration_hash != self.local.digest
+                    || spawn_snapshot_failure(status, expected, received).is_some()
+                {
+                    return Err(Refused);
+                }
+                let observed_clock = status.clock.as_ref().ok_or(Refused)?;
+                let current_clock = self.clock.sample().map_err(|_| Refused)?;
+                if !self
+                    .deadline
+                    .accepts(&arm.clock, observed_clock, &current_clock)
+                {
+                    return Err(Refused);
+                }
+                write()
+            })
+            .map_err(|_| Refused)?
+    }
+}
+
+struct WorkerReleaseDeadline {
+    prepared_floor_ns: u128,
+    deadline_ns: u128,
+}
+
+impl WorkerReleaseDeadline {
+    fn new(
+        arm: &ArmV1,
+        prepare_clock: &HostClockSampleV1,
+        observed_clock: &HostClockSampleV1,
+    ) -> Option<Self> {
+        // Prepare has already validated the local reading and the original Arm.
+        arm.validate_clock_check(observed_clock).ok()?;
+        Some(Self {
+            prepared_floor_ns: prepare_clock
+                .continuous_ns()
+                .ok()?
+                .max(observed_clock.continuous_ns().ok()?),
+            deadline_ns: arm.deadline_ns_decimal.parse().ok()?,
+        })
+    }
+
+    fn accepts(
+        &self,
+        original: &HostClockSampleV1,
+        observed: &HostClockSampleV1,
+        current: &HostClockSampleV1,
+    ) -> bool {
+        if original.method != current.method
+            || original.boot_id != current.boot_id
+            || observed.method != current.method
+            || observed.boot_id != current.boot_id
+        {
+            return false;
+        }
+        let (Ok(now), Ok(previous)) = (current.continuous_ns(), observed.continuous_ns()) else {
+            return false;
+        };
+        now >= self.prepared_floor_ns
+            && now < self.deadline_ns
+            && now
+                .checked_sub(previous)
+                .is_some_and(|distance| distance <= HEALTH_WINDOW.as_nanos())
+    }
+}
+
 struct SpawnGuard {
     client: EnforcerClient,
     local: Arc<LocalSlot>,
     expected_generation: u64,
-    clock: NativeHostClock,
+    clock: Arc<NativeHostClock>,
 }
 impl BeforeSpawnGuard for SpawnGuard {
     fn check_before_spawn(self: Box<Self>, target: &str) -> anyhow::Result<()> {
@@ -3058,6 +3221,37 @@ fn peer_pid(stream: &UnixStream) -> Option<u32> {
 #[cfg(test)]
 mod stage_diagnostic_tests {
     use super::*;
+
+    #[test]
+    fn native_release_deadline_rejects_expiry_regression_stale_and_foreign_clock() {
+        use crate::control::HostClockMethodV1;
+
+        let sample = |ns: u128| HostClockSampleV1 {
+            version: 1,
+            method: HostClockMethodV1::LinuxBoottimeV1,
+            boot_id: "11111111-1111-4111-8111-111111111111".into(),
+            continuous_ns_decimal: ns.to_string(),
+            observed_utc: None,
+        };
+        let original = sample(1);
+        let deadline = WorkerReleaseDeadline {
+            prepared_floor_ns: 100,
+            deadline_ns: 2_000_000_000,
+        };
+        let before = sample(1_999_999_999);
+        assert!(deadline.accepts(&original, &before, &before));
+        assert!(!deadline.accepts(&original, &before, &sample(2_000_000_000)));
+        assert!(!deadline.accepts(&original, &sample(10), &sample(99)));
+        assert!(!deadline.accepts(&original, &sample(120), &sample(119)));
+        assert!(!deadline.accepts(&original, &sample(100), &sample(750_000_101)));
+
+        let mut foreign = before.clone();
+        foreign.boot_id = "22222222-2222-4222-8222-222222222222".into();
+        assert!(!deadline.accepts(&original, &before, &foreign));
+        let mut wrong_method = before.clone();
+        wrong_method.method = HostClockMethodV1::DarwinMachContinuousV1;
+        assert!(!deadline.accepts(&original, &wrong_method, &before));
+    }
 
     #[test]
     fn preclaim_snapshot_distinguishes_each_guard_and_keeps_first_failure_order() {

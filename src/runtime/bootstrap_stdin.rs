@@ -3,10 +3,13 @@
 //! observed AttachStdin and StdinOnce both true on Docker and both false on
 //! Podman. The managed caller must attest these facts before handing off.
 use super::{
-    ExecutionResult, HeldBootstrapBinding, ManagedRuntime, OwnedContainerSnapshot, TransportTasks,
-    capture_stream, capture_stream_tapped, ensure_prearmed_live, wait_prearmed_stop,
+    ContainerObservation, ExecutionResult, HeldBootstrapBinding, ManagedRuntime,
+    OwnedContainerSnapshot, RuntimeAuthority, TransportTasks, capture_stream,
+    capture_stream_tapped, ensure_prearmed_live, wait_prearmed_stop,
 };
+#[cfg(test)]
 use crate::broker::enforcer::CancelGeneration;
+use crate::egress::ids::IdV1;
 use anyhow::{Context, Result, ensure};
 use std::{
     fmt,
@@ -45,6 +48,19 @@ impl fmt::Display for BootstrapStdinSubmitError {
 }
 
 impl std::error::Error for BootstrapStdinSubmitError {}
+
+/// Implemented by the original worker Prepare owner. It holds that slot's
+/// generation gate across both the caller's synchronous veto and the write.
+pub(crate) trait NativeBootstrapRelease: Send {
+    fn submit(
+        self: Box<Self>,
+        authority: &RuntimeAuthority,
+        observed: &OwnedContainerSnapshot,
+        attempt: &IdV1,
+        check_release: Box<dyn FnOnce() -> Result<()> + '_>,
+        write: Box<dyn FnOnce() -> Result<(), BootstrapStdinSubmitError> + '_>,
+    ) -> Result<(), BootstrapStdinSubmitError>;
+}
 
 /// Owns the only write endpoint provided by the newly spawned CLI. Dropping
 /// it closes that endpoint, including on refusal or cancelled preparation.
@@ -86,12 +102,24 @@ impl PrearmedBootstrapStdin {
         Ok(())
     }
 
-    /// Consume the only write right. The broker supplies the final synchronous
-    /// check of the live channel, current authority, inspected incarnation
-    /// and original native deadline. Readiness, inspection and durable
-    /// acknowledgements must already have completed outside the gate.
-    ///
-    /// Success establishes only submission to the local CLI pipe.
+    fn write_once(&self, frame: &[u8]) -> Result<(), BootstrapStdinSubmitError> {
+        use BootstrapStdinSubmitError::{DeliveryUnknown, Refused};
+
+        if frame.is_empty() || frame.len() > MAX_BOOTSTRAP_STDIN_BYTES {
+            return Err(Refused);
+        }
+        // SAFETY: self owns the live, nonblocking pipe and frame is readable
+        // for its bounded length. The broker ignores SIGPIPE.
+        let fd = self.0.get_ref().as_raw_fd();
+        let written = unsafe { libc::write(fd, frame.as_ptr().cast(), frame.len()) };
+        if written == frame.len() as libc::ssize_t {
+            Ok(())
+        } else {
+            Err(DeliveryUnknown)
+        }
+    }
+
+    #[cfg(test)]
     pub(super) fn submit_once(
         self,
         frame: &[u8],
@@ -99,27 +127,17 @@ impl PrearmedBootstrapStdin {
         expected: u64,
         check_release: impl FnOnce() -> Result<()>,
     ) -> Result<(), BootstrapStdinSubmitError> {
-        use BootstrapStdinSubmitError::{DeliveryUnknown, Refused};
+        use BootstrapStdinSubmitError::Refused;
 
         if frame.is_empty() || frame.len() > MAX_BOOTSTRAP_STDIN_BYTES {
             return Err(Refused);
         }
-        let fd = self.0.get_ref().as_raw_fd();
-        let result = generation.with_current_generation(expected, || {
-            check_release().map_err(|_| Refused)?;
-            // SAFETY: self owns the live, nonblocking pipe and frame is
-            // readable for its bounded length. The Rust broker uses the
-            // default ignored SIGPIPE disposition. A broken pipe is an error.
-            let written = unsafe { libc::write(fd, frame.as_ptr().cast(), frame.len()) };
-            if written == frame.len() as libc::ssize_t {
-                Ok(())
-            } else {
-                Err(DeliveryUnknown)
-            }
-        });
-        // Deregistration and close stay outside the generation gate.
-        drop(self);
-        result.map_err(|_| Refused)?
+        generation
+            .with_current_generation(expected, || {
+                check_release().map_err(|_| Refused)?;
+                self.write_once(frame)
+            })
+            .map_err(|_| Refused)?
     }
 }
 
@@ -138,9 +156,11 @@ pub(crate) type BootstrapReady<'execution> = Box<
 /// that callback until submission or until the runtime drops the handoff.
 pub(crate) struct PreparedBootstrapStdin {
     observed: OwnedContainerSnapshot,
-    attempt: crate::egress::ids::IdV1,
+    attempt: IdV1,
+    authority: Box<RuntimeAuthority>,
     stop: watch::Receiver<bool>,
     stdin: PrearmedBootstrapStdin,
+    native_release: Box<dyn NativeBootstrapRelease>,
 }
 
 impl PreparedBootstrapStdin {
@@ -154,24 +174,55 @@ impl PreparedBootstrapStdin {
         &self.attempt
     }
 
+    /// The caller verifies the durable Running, fresh opening and release
+    /// intent, then reinspects using the current managed authority. The veto
+    /// may check only in-memory liveness and proof under the native gate.
+    /// The caller keeps the channel owned through submission and orders local
+    /// revocation of release authority with that gate.
+    /// Success establishes one submission to the existing local CLI pipe.
     #[allow(dead_code)] // Consumed by the separate broker composition.
     pub(crate) fn submit_once(
         self,
-        generation: &CancelGeneration,
-        expected: u64,
-        check_release: impl FnOnce() -> Result<()>,
+        inspected_authority: &RuntimeAuthority,
+        reinspected: &ContainerObservation,
+        check_live_release: impl FnOnce() -> Result<()>,
     ) -> Result<(), BootstrapStdinSubmitError> {
         let Self {
             stdin,
             stop,
             attempt,
-            ..
+            authority,
+            observed,
+            native_release,
         } = self;
         let frame = crate::egress::bootstrap_release::encode_frame(&attempt);
-        stdin.submit_once(&frame, generation, expected, || {
-            ensure_prearmed_live(&stop)?;
-            check_release()
-        })
+        let result = native_release.submit(
+            &authority,
+            &observed,
+            &attempt,
+            Box::new(|| {
+                ensure_prearmed_live(&stop)?;
+                ensure!(
+                    inspected_authority == authority.as_ref(),
+                    "bootstrap authority changed"
+                );
+                reinspected.validate_identity_allocation(&observed.observation)?;
+                let started = observed.observation.process.started_at;
+                ensure!(
+                    started.is_some_and(|date| date.timestamp() > 0)
+                        && reinspected.process.started_at == started
+                        && reinspected.process.running == Some(true)
+                        && reinspected.process.status.as_deref() == Some("running")
+                        && reinspected.process.finished_at.is_none(),
+                    "bootstrap incarnation changed before release"
+                );
+                check_live_release()
+            }),
+            Box::new(|| stdin.write_once(&frame)),
+        );
+        // Closing the exclusive endpoint delivers EOF outside the native gate.
+        drop(stdin);
+        result
     }
 }
 
@@ -184,11 +235,13 @@ pub(super) async fn supervise(
     stdin: Result<PrearmedBootstrapStdin>,
     on_ready: BootstrapReady<'_>,
     mut stop: watch::Receiver<bool>,
+    native_release: Option<Box<dyn NativeBootstrapRelease>>,
     stdout_limit: usize,
     stdout_tap: Option<crate::provider_activity::StdoutTap>,
 ) -> Result<ExecutionResult> {
     let result = async move {
         let stdin = stdin.context("cannot retain the prearmed bootstrap stdin")?;
+        let native_release = native_release.context("missing native bootstrap release authorization")?;
         let start = Instant::now();
         let stdout_release = stdout_tap
             .as_ref()
@@ -229,8 +282,10 @@ pub(super) async fn supervise(
                 on_ready(PreparedBootstrapStdin {
                     observed,
                     attempt: binding.attempt,
+                    authority: Box::new(authority.binding().clone()),
                     stop: ready_stop,
                     stdin,
+                    native_release,
                 })
                 .await
             } => ready?,
