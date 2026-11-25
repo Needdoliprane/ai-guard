@@ -14,6 +14,8 @@ Tenir les affectations, preuves d'intégration et opérations de fermeture dans 
 2. Examiner séparément les modifications suivies, indexées, non suivies et ignorées. Confirmer l'intégration ou la conservation vérifiée de chaque élément utile. Préserver les preuves et commandes de rejeu, la configuration privée, les credentials et certificats, les données persistantes et les binaires encore nécessaires. Vérifier leur accès et leurs empreintes selon leur nature. Pour chaque preuve à garder, inscrire l'identifiant ou le chemin et l'empreinte de son archive durable, hors du worktree et des caches purgeables. Indiquer comment le prochain propriétaire pourra y accéder, avec les droits existants si la preuve est privée.
 3. Affecter la fermeture à un seul responsable. Rapprocher le worktree et ses chemins de compilation des agents, sessions, processus, configurations et dépendances qui les utilisent. Préserver le checkout principal, les références pérennes et les ressources actives. Une dépendance, une preuve manquante ou une incertitude impose une ligne de clôture avec propriétaire et condition de reprise.
 
+Sur macOS, lire les enregistrements de `lsof` pour le chemin vérifié. Un descripteur affiché atteste un usage même si la commande retourne une erreur. Après un délai de test, vérifier aussi ses descendants et l’identité de son groupe de processus avant la fermeture.
+
 Pour un lot abandonné avant intégration, consigner la décision du mainteneur et conserver les commits et changements locaux dans une archive vérifiée avant toute fermeture autorisée. Inscrire l'adresse de l'archive et la procédure de reprise dans le registre.
 
 ## Fermer les ressources intégrées
