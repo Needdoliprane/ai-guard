@@ -1,5 +1,18 @@
 # Validation courante
 
+## 25 novembre 2026 — diagnostic G09 intégré après les trois tests ciblés
+
+Le gel `5fc5fad1` compile sur macOS ARM64. Les trois sélecteurs
+G09 passent sur le binaire `broker_runtime`. Ils incluent le refus
+des captures incomplètes, saturées ou après la borne d’attente.
+Les trois fichiers G09 portés au candidat concordent avec ce gel.
+
+Le lot commun s’arrête plus tard sur la création du dossier de
+fixture SQLite du test Claude. Le manifeste de l’exécution initiale
+`6a0cc0777b003d8ae9d3d281c3c2f01126cf215e196604a3ac1293d43ed3ba78`
+établit les résultats par sélecteur. Le pilote moteur G09 conserve
+son verdict FAIL.
+
 ## 25 novembre 2026 — composition E3 et reprise locale de Created
 
 Le gel `c37f3d00` compile hors ligne sur macOS ARM64. Les onze
