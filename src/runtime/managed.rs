@@ -1279,6 +1279,28 @@ impl ManagedRuntime {
         &self,
         spec: &ContainerSpec,
     ) -> Result<Option<OwnedContainerSnapshot>> {
+        self.lookup_created_with_binding(spec, None).await
+    }
+
+    /// Read-only recovery lookup for the exact held worker. A returned
+    /// snapshot is Created evidence and carries no permission to start.
+    #[cfg(unix)]
+    #[allow(dead_code)] // Broker composition supplies the caller.
+    pub(crate) async fn lookup_created_bootstrap(
+        &self,
+        spec: &ContainerSpec,
+    ) -> Result<Option<OwnedContainerSnapshot>> {
+        let held = self
+            .checked_held_bootstrap_for(spec, true)?
+            .context("held bootstrap worker binding is missing")?;
+        self.lookup_created_with_binding(spec, Some(held)).await
+    }
+
+    async fn lookup_created_with_binding(
+        &self,
+        spec: &ContainerSpec,
+        held: Option<&HeldBootstrapBinding>,
+    ) -> Result<Option<OwnedContainerSnapshot>> {
         ensure!(
             spec.managed_names.is_some(),
             "managed lookup requires control-assigned names"
@@ -1316,7 +1338,11 @@ impl ManagedRuntime {
         let Some(id) = ids.first() else {
             return Ok(None);
         };
-        let facts = self.inspect_facts(id).await?;
+        let facts = if held.is_some() {
+            self.inspect_bootstrap_facts(id).await?
+        } else {
+            self.inspect_facts(id).await?
+        };
         let observed = parse_container_observation_version(
             &facts.bytes,
             self.binding.kind,
@@ -1326,8 +1352,17 @@ impl ManagedRuntime {
             observed.id.as_deref() == Some(*id) && observed.name == spec.name(),
             "runtime lookup identity conflicts with the reserved attempt"
         );
-        validate_authorized_identity(spec, &observed)?;
-        validate_configuration(spec, &facts.bytes, self.binding.kind)?;
+        if let Some(held) = held {
+            validate_created(spec, &observed)?;
+            ensure!(
+                observed.configuration_fingerprint.is_some(),
+                "retained bootstrap lacks its created confinement fingerprint"
+            );
+            validate_configuration_for(spec, &facts.bytes, self.binding.kind, Some(held))?;
+        } else {
+            validate_authorized_identity(spec, &observed)?;
+            validate_configuration(spec, &facts.bytes, self.binding.kind)?;
+        }
         let handle = ContainerHandle {
             authority_fingerprint: self.binding.fingerprint(),
             session: spec.session,
@@ -1628,6 +1663,22 @@ impl ManagedRuntime {
         .await
         .and_then(OwnedExecutionOutcome::into_legacy)
     }
+    fn checked_held_bootstrap_for<'spec>(
+        &self,
+        spec: &'spec ContainerSpec,
+        bootstrap_stdin: bool,
+    ) -> Result<Option<&'spec HeldBootstrapBinding>> {
+        let held = spec.held_bootstrap_for(bootstrap_stdin)?;
+        ensure!(
+            held.is_none_or(|binding| {
+                binding.runtime == self.binding.kind
+                    && binding.authority_id == self.binding.authority_id
+            }),
+            "held bootstrap authority differs from the authorized worker"
+        );
+        Ok(held)
+    }
+
     async fn create_owned_handle(
         &self,
         spec: &ContainerSpec,
@@ -1638,14 +1689,7 @@ impl ManagedRuntime {
             spec.managed_names.is_some(),
             "managed creation requires control-assigned names"
         );
-        ensure!(
-            spec.held_bootstrap_for(bootstrap_stdin)?
-                .is_none_or(|held| {
-                    held.runtime == self.binding.kind
-                        && held.authority_id == self.binding.authority_id
-                }),
-            "held bootstrap authority differs from the authorized worker"
-        );
+        self.checked_held_bootstrap_for(spec, bootstrap_stdin)?;
         self.verify_authority().await?;
         super::observation::record(
             &self.runtime.observation,
@@ -1753,21 +1797,73 @@ impl ManagedRuntime {
         C: FnOnce(OwnedContainerSnapshot) -> CFut,
         CFut: Future<Output = Result<PrearmedStartDirective>>,
     {
-        let binding = spec
-            .held_bootstrap_for(true)?
+        self.execute_prearmed_bootstrap(spec, None, stdout_limit, on_created, on_bootstrap_ready)
+            .await
+    }
+
+    /// Start the exact retained Created instance, with its original
+    /// inspection as the baseline. The broker still needs a fresh EmitOnce
+    /// from on_created before this port can attach.
+    #[cfg(unix)]
+    #[allow(dead_code)] // Broker composition supplies the caller.
+    pub(crate) async fn start_owned_prearmed_bootstrap_retained<C, CFut>(
+        &self,
+        spec: &ContainerSpec,
+        owned: &OwnedContainerSnapshot,
+        stdout_limit: usize,
+        on_created: C,
+        on_bootstrap_ready: bootstrap_stdin::BootstrapReady<'_>,
+    ) -> Result<ManagedPrearmedOutcome>
+    where
+        C: FnOnce(OwnedContainerSnapshot) -> CFut,
+        CFut: Future<Output = Result<PrearmedStartDirective>>,
+    {
+        self.execute_prearmed_bootstrap(
+            spec,
+            Some(owned),
+            stdout_limit,
+            on_created,
+            on_bootstrap_ready,
+        )
+        .await
+    }
+
+    #[cfg(unix)]
+    async fn execute_prearmed_bootstrap<C, CFut>(
+        &self,
+        spec: &ContainerSpec,
+        owned: Option<&OwnedContainerSnapshot>,
+        stdout_limit: usize,
+        on_created: C,
+        on_bootstrap_ready: bootstrap_stdin::BootstrapReady<'_>,
+    ) -> Result<ManagedPrearmedOutcome>
+    where
+        C: FnOnce(OwnedContainerSnapshot) -> CFut,
+        CFut: Future<Output = Result<PrearmedStartDirective>>,
+    {
+        let binding = self
+            .checked_held_bootstrap_for(spec, true)?
             .context("held bootstrap worker binding is missing")?
             .clone();
-        self.execute_prearmed_with_input(
+        let (handle, baseline) = match owned {
+            Some(owned) => (owned.handle.clone(), Some(&owned.observation)),
+            None => (self.create_owned_handle(spec, true).await?, None),
+        };
+        self.execute_owned(
             spec,
+            handle,
+            baseline,
             OwnedStartInput::Bootstrap {
                 ready: on_bootstrap_ready,
                 binding,
             },
+            None,
             stdout_limit,
-            on_created,
+            |created| async move { on_created(created).await.map(Into::into) },
             |_| std::future::ready(Ok(())),
         )
         .await
+        .map(OwnedExecutionOutcome::into_prearmed)
     }
 
     async fn execute_prearmed_with_input<C, CFut, F, Fut>(
