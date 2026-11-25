@@ -820,14 +820,22 @@ fn seed_create_issued_parent(
 
 #[test]
 fn created_pending_writer_failure_replays_exact_request_before_arm() -> Result<()> {
-    use crate::broker::journal::retirement_live_fixture::INVOCATION_DATA_PROGRAM;
-
     let scheduler = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let handle = scheduler.handle();
-    let fixture = scheduler.block_on(Fixture::new_with_writer_timeout(Duration::from_secs(30)));
-    let peer = scheduler.block_on(NativePeer::for_admission(&fixture));
+    let handle = scheduler.handle().clone();
+    // The synchronous seed uses Handle::block_on. Drive timers and I/O from
+    // Runtime::block_on while the seed runs on the blocking pool.
+    scheduler.block_on(async move {
+        tokio::task::spawn_blocking(move || run_created_writer_failure_fixture(&handle)).await?
+    })
+}
+
+fn run_created_writer_failure_fixture(handle: &tokio::runtime::Handle) -> Result<()> {
+    use crate::broker::journal::retirement_live_fixture::INVOCATION_DATA_PROGRAM;
+
+    let fixture = handle.block_on(Fixture::new_with_writer_timeout(Duration::from_secs(30)));
+    let peer = handle.block_on(NativePeer::for_admission(&fixture));
     // Retain an invocation identity for the journal. This test never invokes
     // it, registers a native slot, or starts a worker.
     let runtime = Runtime::with_program(RuntimeKind::Docker, Path::new(INVOCATION_DATA_PROGRAM))?;
@@ -835,7 +843,7 @@ fn created_pending_writer_failure_replays_exact_request_before_arm() -> Result<(
         "authority_id": Uuid::new_v4(), "kind": "docker", "endpoint": "unix:///created-fixture.sock",
         "engine_id": ENGINE, "invocation": runtime.invocation(), "podman": null,
     }))?;
-    let context = scheduler.block_on(AuthenticatedBatchContext::for_executor_test(
+    let context = handle.block_on(AuthenticatedBatchContext::for_executor_test(
         fixture.client.clone(),
         fixture.scope.clone(),
         fixture.config.clone(),
@@ -848,14 +856,14 @@ fn created_pending_writer_failure_replays_exact_request_before_arm() -> Result<(
     );
     let operation = Uuid::new_v4();
     let accepted = fixture.accept(operation, false);
-    let execution = scheduler.block_on(Execution::open(&executor, operation, &context))?;
+    let execution = handle.block_on(Execution::open(&executor, operation, &context))?;
     let worker = seed_create_issued_parent(handle, &execution, &fixture, &accepted, &authority)?;
-    let outcome = scheduler.block_on(boxed_execution_phase(|| {
+    let outcome = handle.block_on(boxed_execution_phase(|| {
         exercise_created_writer_failure(&fixture, &execution, &accepted, &authority, &worker)
     }));
     drop(execution);
     drop(executor);
-    scheduler.block_on(peer.close());
+    handle.block_on(peer.close());
     outcome
 }
 
