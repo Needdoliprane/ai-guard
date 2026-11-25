@@ -1,6 +1,9 @@
 //! Shared verification of confirmed revision bytes. No filesystem or runtime effects.
 use super::*;
-use crate::broker::lifecycle::LocalCommandRequestV1;
+use crate::{
+    broker::{checkpoint::SupervisionOperationV1, lifecycle::LocalCommandRequestV1},
+    control::WorkerTransitionV1,
+};
 
 #[derive(Clone)]
 pub(super) struct ConfirmedChainV1 {
@@ -300,6 +303,7 @@ pub(super) fn check_transition(
     legacy_managed_seen: bool,
     last_cancel_operations: Option<usize>,
 ) -> JournalResult<()> {
+    validate_egress_release_transition(previous, next)?;
     if let Some(profile) = previous
         .runner()
         .broker_context()
@@ -368,5 +372,64 @@ pub(super) fn check_transition(
         | (_, LoadedCheckpoint::V4(_))
         | (LoadedCheckpoint::V5(_), _)
         | (_, LoadedCheckpoint::V5(_)) => Err(JournalError::Conflict),
+    }
+}
+
+/// A release intent may be first recorded only on an already acknowledged
+/// Running attempt with no durable STOP. Later revisions preserve it byte for
+/// byte, even after the worker stops or its terminal audit is reconciled.
+fn validate_egress_release_transition(
+    previous: &LoadedCheckpoint,
+    next: &LoadedCheckpoint,
+) -> JournalResult<()> {
+    let old = previous.runner().broker_context();
+    let new = next.runner().broker_context();
+    if old.egress_release == new.egress_release {
+        return Ok(());
+    }
+    let (None, Some(release), Some(previous_lifecycle), Some(lifecycle)) = (
+        old.egress_release,
+        new.egress_release,
+        previous.lifecycle(),
+        next.lifecycle(),
+    ) else {
+        return Err(JournalError::Conflict);
+    };
+    let latest_worker_ack = previous_lifecycle
+        .broker()
+        .supervision()
+        .operations()
+        .iter()
+        .rfind(|operation| {
+            matches!(
+                operation,
+                SupervisionOperationV1::WorkerMutation {
+                    response: Some(_),
+                    ..
+                } | SupervisionOperationV1::WorkerClaim {
+                    response: Some(_),
+                    ..
+                }
+            )
+        });
+    if matches!(
+        latest_worker_ack,
+        Some(SupervisionOperationV1::WorkerMutation { request, response: Some(response) })
+            if matches!(&request.transition, WorkerTransitionV1::Observe { .. })
+                && release.matches_running(&response.worker)
+    ) && old
+        .worker
+        .is_some_and(|worker| release.matches_running(worker))
+        && new
+            .worker
+            .is_some_and(|worker| release.matches_running(worker))
+        && !lifecycle
+            .commands()
+            .iter()
+            .any(|entry| matches!(entry.request(), LocalCommandRequestV1::CancelRequested))
+    {
+        Ok(())
+    } else {
+        Err(JournalError::Conflict)
     }
 }

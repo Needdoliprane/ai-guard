@@ -308,6 +308,32 @@ impl<'a> Execution<'a> {
         )
     }
 
+    /// Publish intent without turning an unknown writer reply into authority.
+    /// The live callback is responsible for the final stop/deadline guard.
+    pub(super) async fn record_egress_release_intent<IO>(
+        &self,
+        target: crate::runner::egress_release::EgressReleaseTargetV1,
+        opened: &crate::broker::egress_owner::channel::OpenedChannel<IO>,
+        worker: &WorkerV1,
+    ) -> Result<Box<CommittedDraftAtHead>> {
+        let intent = crate::runner::egress_release::EgressReleaseIntentV1::from_opened(
+            target, opened, worker,
+        )?;
+        self.patch_committed(|draft| {
+            self.generation_current()?;
+            ensure!(
+                !draft.cancelled()
+                    && self.generation == intent.generation()
+                    && draft.egress_release.is_none()
+                    && intent.matches_running(draft.worker()?),
+                "bootstrap release intent cannot be published on this head"
+            );
+            draft.egress_release = Some(intent.clone());
+            Ok(())
+        })
+        .await
+    }
+
     pub(super) async fn failure(&self, phase: LocalFailurePhaseV1, error: &anyhow::Error) {
         // A transport/IO error is a local observation. It never fabricates a
         // terminal worker and never releases central quota.

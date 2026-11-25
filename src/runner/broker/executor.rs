@@ -134,6 +134,7 @@ struct Draft {
     helpers: Vec<HelperPreparationV1>,
     operations: Vec<Operation>,
     commands: Vec<LocalCommandV1>,
+    egress_release: Option<crate::runner::egress_release::EgressReleaseIntentV1>,
 }
 impl Draft {
     fn from_job(job: &AcceptedJobV1) -> Result<Self> {
@@ -150,6 +151,7 @@ impl Draft {
                 .broker_checkpoint_v3()
                 .map(|cp| cp.commands().to_vec())
                 .unwrap_or_default(),
+            egress_release: job.checkpoint().broker_context().egress_release.cloned(),
         })
     }
     fn cancelled(&self) -> bool {
@@ -170,6 +172,7 @@ impl Draft {
             version: 1,
             current_request: self.run.plan.request.clone(),
             managed: self.run.plan.managed.clone(),
+            egress_release: self.egress_release.clone(),
         });
         Ok(BrokerCheckpointV3::new(
             BrokerCheckpointV2::new(

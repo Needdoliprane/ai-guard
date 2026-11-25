@@ -1,4 +1,5 @@
 mod egress_policy;
+pub(crate) mod egress_release;
 use crate::{
     control::EgressLaunchV1,
     model::{CommandSpec, DecisionRequest},
@@ -870,6 +871,8 @@ struct CheckpointDataV1 {
     version: u32,
     current_request: DecisionRequest,
     managed: Option<managed::ManagedCheckpoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    egress_release: Option<egress_release::EgressReleaseIntentV1>,
 }
 /// Borrowed data for pure broker validation; never an execution capability.
 pub(crate) struct BrokerRunnerContext<'a> {
@@ -883,6 +886,7 @@ pub(crate) struct BrokerRunnerContext<'a> {
     pub legacy_import: bool,
     pub tenant_id: Option<&'a str>,
     pub gateway_origin: Option<&'a str>,
+    pub egress_release: Option<&'a egress_release::EgressReleaseIntentV1>,
 }
 
 /// Pure projection of already retained data; this performs no runtime call and
@@ -931,6 +935,7 @@ impl CheckpointPayloadV1 {
             legacy_import: managed.is_some_and(|value| value.import.is_some()),
             tenant_id: managed.map(|value| value.tenant_id.as_str()),
             gateway_origin: managed.map(|value| value.gateway_origin.as_str()),
+            egress_release: self.0.egress_release.as_ref(),
         }
     }
     pub fn initial(
@@ -942,6 +947,7 @@ impl CheckpointPayloadV1 {
             version: 1,
             current_request: intent.request_data().clone(),
             managed: None,
+            egress_release: None,
         }))
     }
     pub fn from_plan_bytes(
@@ -986,6 +992,7 @@ impl CheckpointPayloadV1 {
             version: 1,
             current_request: plan.request,
             managed: plan.managed,
+            egress_release: None,
         });
         result.validate_request(intent)?;
         result.canonical_bytes()?;
@@ -1006,6 +1013,7 @@ impl CheckpointPayloadV1 {
             return Err(JournalError::UnsupportedVersion);
         }
         self.validate_versions()?;
+        self.validate_egress_release()?;
         let request = &self.0.current_request;
         if (request.human_approved
             && !request.approval_hash.as_deref().is_some_and(|hash| {
@@ -1024,6 +1032,25 @@ impl CheckpointPayloadV1 {
         }
         Ok(bytes)
     }
+    fn validate_egress_release(&self) -> crate::broker::journal::JournalResult<()> {
+        use crate::broker::journal::JournalError;
+        let context = self.broker_context();
+        let Some(release) = context.egress_release else {
+            return Ok(());
+        };
+        let (Some(tenant), Some(worker), Some(authority), Some(owned)) = (
+            context.tenant_id,
+            context.worker,
+            context.binding,
+            context.owned,
+        ) else {
+            return Err(JournalError::Conflict);
+        };
+        release
+            .validate_retained(tenant, worker, authority, owned)
+            .map_err(|_| JournalError::Conflict)
+    }
+
     fn validate_versions(&self) -> crate::broker::journal::JournalResult<()> {
         use crate::broker::journal::JournalError;
         let Some(checkpoint) = &self.0.managed else {
