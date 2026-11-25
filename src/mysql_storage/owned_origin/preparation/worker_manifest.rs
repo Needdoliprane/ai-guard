@@ -1,5 +1,4 @@
-//! Common unpublished worker reservation tables for MySQL formats 14 and 15.
-//! Worker lifecycle, supervision and the remaining owned projections are separate.
+//! Common unpublished worker reservation and lifecycle tables for MySQL formats 14 and 15.
 
 use super::audit_manifest::{
     ExpectedColumn, ExpectedConstraint, ExpectedForeignKey, ExpectedIndex,
@@ -8,25 +7,42 @@ use super::audit_manifest::{
 const WORKER: &str = "ai_guard_worker";
 const ATTEMPT: &str = "ai_guard_worker_attempt";
 const MUTATION: &str = "ai_guard_worker_mutation";
+const OBSERVATION: &str = "ai_guard_worker_observation";
+const ALLOCATION: &str = "ai_guard_worker_allocation";
 const EVENT: &str = "ai_guard_audit_event";
 
-pub(super) fn ddl() -> Option<[&'static str; 3]> {
-    let (_, after_header) =
-        include_str!("../../../../schema/mysql/workers-v1.sql").split_once('\n')?;
-    let (_, body) = after_header.split_once('\n')?;
-    let mut statements = body.split(';').map(str::trim).filter(|sql| !sql.is_empty());
-    let [worker, attempt, mutation] = [WORKER, ATTEMPT, MUTATION].map(|table| {
+pub(super) fn ddl() -> Option<[&'static str; 5]> {
+    let [worker, attempt, mutation] = table_ddl(
+        include_str!("../../../../schema/mysql/workers-v1.sql"),
+        [WORKER, ATTEMPT, MUTATION],
+    )?;
+    let [observation, allocation] = table_ddl(
+        include_str!("../../../../schema/mysql/worker-lifecycle-v1.sql"),
+        [OBSERVATION, ALLOCATION],
+    )?;
+    Some([worker, attempt, mutation, observation, allocation])
+}
+
+fn table_ddl<const N: usize>(
+    mut ddl: &'static str,
+    tables: [&str; N],
+) -> Option<[&'static str; N]> {
+    while ddl.starts_with("-- ") {
+        (_, ddl) = ddl.split_once('\n')?;
+    }
+    let mut statements = ddl.split(';').map(str::trim).filter(|sql| !sql.is_empty());
+    let mut ordered = [""; N];
+    for (table, statement) in tables.into_iter().zip(&mut ordered) {
         let sql = statements.next()?;
         sql.strip_prefix("CREATE TABLE ")?
             .strip_prefix(table)?
-            .starts_with(" (")
-            .then_some(sql)
-    });
-    let ddl = [worker?, attempt?, mutation?];
-    statements.next().is_none().then_some(ddl)
+            .strip_prefix(" (")?;
+        *statement = sql;
+    }
+    statements.next().is_none().then_some(ordered)
 }
 
-pub(super) const COLUMNS: [ExpectedColumn; 23] = [
+pub(super) const COLUMNS: [ExpectedColumn; 34] = [
     column(WORKER, "worker_id", "binary(36)"),
     column(WORKER, "operation_id", "binary(36)"),
     column(WORKER, "request_id", "binary(36)"),
@@ -50,13 +66,24 @@ pub(super) const COLUMNS: [ExpectedColumn; 23] = [
     column(MUTATION, "action", "varbinary(32)"),
     column(MUTATION, "input_hash", "binary(64)"),
     column(MUTATION, "event_seq", "bigint"),
+    column(OBSERVATION, "observation_id", "binary(36)"),
+    column(OBSERVATION, "worker_id", "binary(36)"),
+    column(OBSERVATION, "attempt_id", "binary(36)"),
+    column(OBSERVATION, "input_hash", "binary(64)"),
+    column(OBSERVATION, "snapshot", "mediumblob"),
+    column(OBSERVATION, "event_seq", "bigint"),
+    column(ALLOCATION, "attempt_id", "binary(36)"),
+    column(ALLOCATION, "worker_id", "binary(36)"),
+    column(ALLOCATION, "terminal_observation_id", "binary(36)"),
+    column(ALLOCATION, "snapshot", "mediumblob"),
+    column(ALLOCATION, "event_seq", "bigint"),
 ];
 
 const fn column(table: &'static str, name: &'static str, ty: &'static str) -> ExpectedColumn {
     (table, name, ty, "NO", 1)
 }
 
-pub(super) const INDEXES: [ExpectedIndex; 12] = [
+pub(super) const INDEXES: [ExpectedIndex; 20] = [
     (WORKER, "PRIMARY", Some("worker_id"), 1, 0, 1),
     unique_index(WORKER, "event_seq"),
     unique_index(WORKER, "operation_id"),
@@ -67,18 +94,39 @@ pub(super) const INDEXES: [ExpectedIndex; 12] = [
     unique_index(ATTEMPT, "volume_name"),
     unique_index(ATTEMPT, "worker_id"),
     (MUTATION, "PRIMARY", Some("operation_id"), 1, 0, 1),
-    // The DDL names this nonunique covering index explicitly. The FK
-    // constraint has a separate name and no implicit index is accepted.
-    (
-        MUTATION,
-        "ai_guard_worker_mutation_worker_idx",
-        Some("worker_id"),
-        1,
-        1,
-        1,
-    ),
+    covering_index(MUTATION, "ai_guard_worker_mutation_worker_idx", "worker_id"),
     unique_index(MUTATION, "event_seq"),
+    (OBSERVATION, "PRIMARY", Some("observation_id"), 1, 0, 1),
+    covering_index(
+        OBSERVATION,
+        "ai_guard_worker_observation_attempt_idx",
+        "attempt_id",
+    ),
+    covering_index(
+        OBSERVATION,
+        "ai_guard_worker_observation_worker_idx",
+        "worker_id",
+    ),
+    unique_index(OBSERVATION, "event_seq"),
+    (ALLOCATION, "PRIMARY", Some("attempt_id"), 1, 0, 1),
+    covering_index(
+        ALLOCATION,
+        "ai_guard_worker_allocation_worker_idx",
+        "worker_id",
+    ),
+    unique_index(ALLOCATION, "event_seq"),
+    unique_index(ALLOCATION, "terminal_observation_id"),
 ];
+
+// When the primary or a unique key does not cover a foreign key, the DDL
+// declares a separate nonunique index so no implicit index name is expected.
+const fn covering_index(
+    table: &'static str,
+    name: &'static str,
+    column: &'static str,
+) -> ExpectedIndex {
+    (table, name, Some(column), 1, 1, 1)
+}
 
 const fn unique_index(table: &'static str, column: &'static str) -> ExpectedIndex {
     (table, column, Some(column), 1, 0, 1)
@@ -86,7 +134,7 @@ const fn unique_index(table: &'static str, column: &'static str) -> ExpectedInde
 
 // Expected MySQL dictionary renderings. The physical 8.4 matrix must show
 // these exact names and CHECK_CLAUSE forms (apart from identifier quotes).
-pub(super) const CONSTRAINTS: [ExpectedConstraint<'static>; 28] = [
+pub(super) const CONSTRAINTS: [ExpectedConstraint<'static>; 45] = [
     primary(WORKER),
     check(
         WORKER,
@@ -163,6 +211,43 @@ pub(super) const CONSTRAINTS: [ExpectedConstraint<'static>; 28] = [
     ),
     foreign(MUTATION, "ai_guard_worker_mutation_worker_ref"),
     unique(MUTATION, "event_seq"),
+    primary(OBSERVATION),
+    foreign(OBSERVATION, "ai_guard_worker_observation_attempt_ref"),
+    foreign(OBSERVATION, "ai_guard_worker_observation_event_ref"),
+    check(
+        OBSERVATION,
+        "ai_guard_worker_observation_event_seq",
+        "(`event_seq` > 0)",
+    ),
+    check(
+        OBSERVATION,
+        "ai_guard_worker_observation_input_hash",
+        "(locate(0x00,`input_hash`) = 0)",
+    ),
+    check(
+        OBSERVATION,
+        "ai_guard_worker_observation_snapshot_size",
+        "(length(`snapshot`) between 1 and 131072)",
+    ),
+    foreign(OBSERVATION, "ai_guard_worker_observation_worker_ref"),
+    unique(OBSERVATION, "event_seq"),
+    primary(ALLOCATION),
+    foreign(ALLOCATION, "ai_guard_worker_allocation_attempt_ref"),
+    foreign(ALLOCATION, "ai_guard_worker_allocation_event_ref"),
+    check(
+        ALLOCATION,
+        "ai_guard_worker_allocation_event_seq",
+        "(`event_seq` > 0)",
+    ),
+    foreign(ALLOCATION, "ai_guard_worker_allocation_observation_ref"),
+    check(
+        ALLOCATION,
+        "ai_guard_worker_allocation_snapshot_size",
+        "(length(`snapshot`) between 1 and 131072)",
+    ),
+    foreign(ALLOCATION, "ai_guard_worker_allocation_worker_ref"),
+    unique(ALLOCATION, "event_seq"),
+    unique(ALLOCATION, "terminal_observation_id"),
 ];
 
 const fn primary(table: &'static str) -> ExpectedConstraint<'static> {
@@ -185,7 +270,7 @@ const fn check(
     (table, name, "CHECK", "YES", Some(expression))
 }
 
-pub(super) const FOREIGN_KEYS: [ExpectedForeignKey; 4] = [
+pub(super) const FOREIGN_KEYS: [ExpectedForeignKey; 11] = [
     (
         WORKER,
         "ai_guard_worker_event_ref",
@@ -216,6 +301,69 @@ pub(super) const FOREIGN_KEYS: [ExpectedForeignKey; 4] = [
     (
         MUTATION,
         "ai_guard_worker_mutation_worker_ref",
+        "worker_id",
+        WORKER,
+        "worker_id",
+        1,
+        1,
+    ),
+    (
+        OBSERVATION,
+        "ai_guard_worker_observation_attempt_ref",
+        "attempt_id",
+        ATTEMPT,
+        "attempt_id",
+        1,
+        1,
+    ),
+    (
+        OBSERVATION,
+        "ai_guard_worker_observation_event_ref",
+        "event_seq",
+        EVENT,
+        "seq",
+        1,
+        1,
+    ),
+    (
+        OBSERVATION,
+        "ai_guard_worker_observation_worker_ref",
+        "worker_id",
+        WORKER,
+        "worker_id",
+        1,
+        1,
+    ),
+    (
+        ALLOCATION,
+        "ai_guard_worker_allocation_attempt_ref",
+        "attempt_id",
+        ATTEMPT,
+        "attempt_id",
+        1,
+        1,
+    ),
+    (
+        ALLOCATION,
+        "ai_guard_worker_allocation_event_ref",
+        "event_seq",
+        EVENT,
+        "seq",
+        1,
+        1,
+    ),
+    (
+        ALLOCATION,
+        "ai_guard_worker_allocation_observation_ref",
+        "terminal_observation_id",
+        OBSERVATION,
+        "observation_id",
+        1,
+        1,
+    ),
+    (
+        ALLOCATION,
+        "ai_guard_worker_allocation_worker_ref",
         "worker_id",
         WORKER,
         "worker_id",

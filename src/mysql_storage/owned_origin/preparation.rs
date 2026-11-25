@@ -20,6 +20,7 @@ mod audit_tables;
 mod egress_manifest;
 #[cfg(test)]
 mod qa;
+mod supervision_manifest;
 mod worker_manifest;
 
 const REQUIRED_GRANTS: [&str; 6] = [

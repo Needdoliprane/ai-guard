@@ -7,7 +7,10 @@ CREATE TABLE ai_guard_worker_observation (
     attempt_id BINARY(36) NOT NULL,
     input_hash BINARY(64) NOT NULL,
     snapshot MEDIUMBLOB NOT NULL,
-    event_seq BIGINT NOT NULL UNIQUE,
+    event_seq BIGINT NOT NULL,
+    UNIQUE KEY event_seq (event_seq),
+    KEY ai_guard_worker_observation_attempt_idx (attempt_id),
+    KEY ai_guard_worker_observation_worker_idx (worker_id),
     CONSTRAINT ai_guard_worker_observation_input_hash CHECK (LOCATE(X'00', input_hash) = 0),
     CONSTRAINT ai_guard_worker_observation_snapshot_size
         CHECK (OCTET_LENGTH(snapshot) BETWEEN 1 AND 131072),
@@ -26,9 +29,12 @@ CREATE TABLE ai_guard_worker_observation (
 CREATE TABLE ai_guard_worker_allocation (
     attempt_id BINARY(36) NOT NULL PRIMARY KEY,
     worker_id BINARY(36) NOT NULL,
-    terminal_observation_id BINARY(36) NOT NULL UNIQUE,
+    terminal_observation_id BINARY(36) NOT NULL,
     snapshot MEDIUMBLOB NOT NULL,
-    event_seq BIGINT NOT NULL UNIQUE,
+    event_seq BIGINT NOT NULL,
+    UNIQUE KEY terminal_observation_id (terminal_observation_id),
+    UNIQUE KEY event_seq (event_seq),
+    KEY ai_guard_worker_allocation_worker_idx (worker_id),
     CONSTRAINT ai_guard_worker_allocation_snapshot_size
         CHECK (OCTET_LENGTH(snapshot) BETWEEN 1 AND 131072),
     CONSTRAINT ai_guard_worker_allocation_event_seq CHECK (event_seq > 0),

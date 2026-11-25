@@ -59,13 +59,16 @@ reçoit `CatalogVisibilityUnconfirmed` avant l’inventaire. [Sélection des dro
 
 Le [sous-manifeste d’audit](../../../src/mysql_storage/owned_origin/preparation/audit_manifest.rs)
 compose le [DDL d’audit partagé](../../../schema/mysql/audit-v1.sql), le
-[DDL des reçus de décision](../../../schema/mysql/decisions-v1.sql), le
-[DDL des réservations worker](../../../schema/mysql/workers-v1.sql) et le
-[DDL MySQL des projections de revue](../../../schema/mysql/review-owned-v1.sql),
-avec cinq [projections egress](../../../schema/mysql/egress-owned-v1.sql)
-exclusives au format 15.
+[DDL des reçus de décision](../../../schema/mysql/decisions-v1.sql) et le
+[DDL MySQL des projections de revue](../../../schema/mysql/review-owned-v1.sql)
+avant les [réservations worker](../../../schema/mysql/workers-v1.sql), puis
+l’observation et l’allocation du [cycle de vie worker](../../../schema/mysql/worker-lifecycle-v1.sql).
+Les tables de [supervision](../../../schema/mysql/supervision-v1.sql) et de
+[supervision worker](../../../schema/mysql/worker-supervision-v1.sql)
+suivent dans cet ordre. Les cinq [projections egress](../../../schema/mysql/egress-owned-v1.sql)
+sont créées en dernier et exclusivement au format 15.
 Après les créations internes, la même connexion verrouillée relit dans une
-transaction de lecture les huit tables InnoDB du format 14 ou les treize
+transaction de lecture les douze tables InnoDB du format 14 ou les dix-sept
 du format 15, avec leurs colonnes, index et contraintes. Une table egress
 en 14 ou une table egress manquante en 15 entraîne un refus. Le contrôle
 compare l’expression qui réserve l’unicité aux bindings actifs et les
@@ -75,6 +78,12 @@ vers la chaîne d’audit et les deux contraintes de validation sont vérifiés.
 Les tables worker, tentative et mutation ont leurs index et références
 attendus. La colonne de rattachement de la mutation porte son index
 explicite pour obtenir le même catalogue lors d’une installation neuve.
+Deux index non uniques couvrent les liens de l’observation vers la tentative
+et le worker. Un troisième couvre le lien de l’allocation vers le worker.
+L’allocation est unique par tentative et par observation terminale, et son
+snapshot conserve le contrat d’allocation non facturable.
+Les deux projections de supervision restent vides. Les index primaires
+et uniques déclarés couvrent leurs trois clés étrangères.
 Toutes les tables doivent être vides, y compris les singletons et projections.
 Une reprise refuse ce socle comme cible partielle. Le compte opérateur doit
 pouvoir référencer les tables de la cible et garder `foreign_key_checks` et
@@ -116,12 +125,16 @@ pouvoir référencer les tables de la cible et garder `foreign_key_checks` et
    transition et porte un ID de migration. Réutiliser les reçus `seq/hash`,
    le tenant, le namespace et les liens de préfixe dans une forme neuve
    explicite. Le reçu d’ancre sert ensuite au descripteur privé attendu.
+   Le préparateur interne vérifie déjà la demande d’ancre avant le DDL et
+   peut refuser un historique divergent lors d’une réentrée. L’écriture de
+   l’ancre et la publication du singleton restent à raccorder.
    [Ancre SQLite](../../../src/audit/review_authority.rs) ·
-   [Genèse egress SQLite](../../../src/audit/egress/types.rs)
-2. Fermer le manifeste commun et ses marqueurs. Les huit ou treize tables
-   actuelles forment le socle audit, décision, revue, réservation worker et
-   egress. Le lecteur MySQL ordinaire exige aussi les tables d’observation
-   et d’allocation du cycle de vie des workers et la supervision.
+   [Genèse egress SQLite](../../../src/audit/egress/types.rs) ·
+   [Ancre neuve MySQL](../../../src/mysql_storage/owned_origin/fresh_anchor.rs)
+2. Fermer le manifeste commun et ses marqueurs. Les douze ou dix-sept tables
+   actuelles forment le socle audit, décision, revue, réservation worker,
+   cycle de vie et supervision, avec egress en format 15. La genèse et le
+   rejeu des marqueurs de supervision restent à raccorder côté owned.
    `control_projections()` exige identité et workload, tandis que le registre
    broker reste facultatif dans ce lecteur. Fixer les capacités owned
    obligatoires et les intégrer au manifeste exact avec les DDL MySQL
@@ -190,6 +203,17 @@ pouvoir référencer les tables de la cible et garder `foreign_key_checks` et
   `owned_audit_tables_remain_unpublished_and_refuse_reentry` exerce le
   sous-manifeste SQL sur des cibles séparées, puis le refus de reprise et le
   refus Legacy. Il reste à exécuter sur MySQL 8.4.
+- Sur les deux cibles jetables de cet oracle, relever les `CHECK_CLAUSE`
+  du cycle de vie et de la supervision. Pour le protocole, le manifeste
+  attend le rendu `length` et l’introducteur `_binary'broker_supervision_v1'`.
+  Rapprocher `STATISTICS` du manifeste, dont les trois index non uniques
+  explicites du cycle de vie et les clés primaires et uniques de supervision.
+  Vérifier l’absence d’index implicite supplémentaire et les sept liens
+  du cycle de vie et trois liens de supervision dans `KEY_COLUMN_USAGE`
+  et `REFERENTIAL_CONSTRAINTS`. Sur des copies jetables des tables vides,
+  ajouter séparément un index surnuméraire au cycle de vie et à la
+  supervision, puis appeler `verify_unpublished` sous verrou pour attester
+  le refus du manifeste d’index.
 - Le prévol distingue base vide, préparation interrompue et Legacy. Pour
   `owned_preparation::owned_preflight_refuses_interrupted_and_legacy_schemas`,
   renseigner le compte opérateur dans `maintenance_username` de la configuration
