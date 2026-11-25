@@ -28,16 +28,20 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+fn invalid_request(status: StatusCode) -> (StatusCode, Json<Value>) {
+    (
+        status,
+        Json(json!({"error":{"code":"egress_invalid","retry_action":"none"}})),
+    )
+}
+
 fn journal_failure(failure: anyhow::Error) -> (StatusCode, Json<Value>) {
     match failure.downcast_ref::<EgressJournalError>() {
         Some(EgressJournalError::Conflict) => (
             StatusCode::CONFLICT,
             Json(json!({"error":{"code":"egress_conflict","retry_action":"none"}})),
         ),
-        Some(EgressJournalError::Invalid) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error":{"code":"egress_invalid","retry_action":"none"}})),
-        ),
+        Some(EgressJournalError::Invalid) => invalid_request(StatusCode::BAD_REQUEST),
         None => unavailable(failure),
     }
 }
@@ -86,8 +90,10 @@ struct OpeningRequestJson(
 
 async fn open_channel(
     RunnerIdentity(tenant): RunnerIdentity,
-    Json(OpeningRequestJson(request)): Json<OpeningRequestJson>,
+    request: Result<Json<OpeningRequestJson>, JsonRejection>,
 ) -> ApiResult<Json<EgressChannelOpeningReceiptV1>> {
+    let Json(OpeningRequestJson(request)) =
+        request.map_err(|rejection| invalid_request(rejection.status()))?;
     record_observation(tenant, move |store| store.egress_open_channel(&request)).await
 }
 
@@ -255,6 +261,21 @@ mod tests {
             .unwrap()
             .status(),
             StatusCode::UNPROCESSABLE_ENTITY
+        );
+
+        let private_field = "private_fixture_opening_field";
+        let mut invalid = body.clone();
+        invalid[private_field] = json!(true);
+        let response = post("opening-runner-a", invalid).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let text = std::str::from_utf8(&bytes).unwrap();
+        assert!(!text.contains(private_field));
+        assert_eq!(
+            serde_json::from_str::<Value>(text).unwrap(),
+            json!({"error":{"code":"egress_invalid","retry_action":"none"}})
         );
         assert_eq!((a.head().unwrap(), b.head().unwrap()), before);
 
