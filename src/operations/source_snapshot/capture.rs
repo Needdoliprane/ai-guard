@@ -82,7 +82,7 @@ const BUILD_IGNORE_FILE: &str = ".dockerignore";
 /// engine would apply rules the copy was not selected with. Change the file,
 /// the allowlist and this digest together.
 pub(super) const BUILD_IGNORE_SHA256: &str =
-    "2b55fbd77990389969cfda9ddad4888718da687a24c384cb6d78228605125af2";
+    "fc8c87e58279770815bc5d035e96c609569ee4f3953b51231db2bcbe680ccf7c";
 /// Suffix of a per-Dockerfile ignore file. The shipped distribution has none,
 /// and a builder may apply such a file instead of `.dockerignore`.
 const DOCKERFILE_IGNORE_SUFFIX: &str = ".Dockerfile.dockerignore";
