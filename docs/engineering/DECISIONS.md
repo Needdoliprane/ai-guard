@@ -1745,3 +1745,107 @@ réservation ou claim pendant Prepare. Vérifier aussi le refus à
 l'ouverture avec l'ancien lecteur et la visibilité inchangée des sources
 dépourvues de cette capacité.
 [Validation de schéma](../../src/audit.rs) · [Contrat de rétention](../../src/audit/retention/classify.rs)
+
+## 25 novembre 2026 — Arbitrages délégués par le goal mainteneur (G04, G06, G09, G11, E3 owned)
+
+Le goal du 25 novembre 2026 délègue explicitement les arbitrages au
+coordinateur (« gérer en autonomie les différents sujets et arbitrages »).
+Les décisions ci-dessous adoptent les options recommandées des propositions
+examinées, avec leurs oracles d'acceptation inchangés. Elles ne ferment aucun
+gate : chaque preuve reste à exécuter sur la candidate intégrée.
+
+### G04 — liaison nominative à l'admission et préparation durable
+
+**Décision.** La [proposition d'admission nominative](G04_NAMED_ADMISSION_PROPOSAL.md)
+est adoptée : le gateway émet une liaison durable après confirmation humaine
+de l'empreinte Prepare ; le broker présente une référence résolue côté serveur,
+sans preuve signée autonome ; la transaction d'admission revérifie droits,
+appartenance, plafond OIDC, ACL, révocation, empreintes et révisions avant
+commit atomique (consommation de liaison, grant nominatif, admission,
+réservation, reçu d'audit). Ordre de livraison : Legacy SQLite d'abord,
+owned ensuite après adoption explicite par un profil de mutation. Le raccord
+appartient au lot Prepare existant. La persistance de la préparation suit
+l'option recommandée ci-dessus : capacité SQLite owned explicitement installée
+sur les formats 14 et 15, marqueur et schéma validés, anciens lecteurs refusant
+la source étendue. Les deux commits Prepare hors ascendance (`3a36d554`,
+`f294c786`) doivent être composés et vérifiés avant implémentation.
+**Acceptation.** Oracle de la proposition (six cas) sur vrai routeur et Store
+rouvert, plus les cas Prepare de l'entrée du 25 novembre (réponse perdue, rejeu
+identique, conflit, révocation, audit indisponible, zéro grant/réservation/claim
+pendant Prepare, refus ancien lecteur). Premiers oracles SQLite sans fournisseur.
+
+### G06 — remise en service d'une copie SQLite owned
+
+**Décision.** Les conditions de la [proposition de restauration](G06_OWNED_SQLITE_RESTORE_PROPOSAL.md)
+sont adoptées pour Store14 et Store15 : identité physique nouvelle vérifiée
+sur l'union entière avant publication successorale ; tête d'audit et références
+comparées au dernier état durable indépendamment vérifiable ; historique
+manquant ou divergent maintient la copie en maintenance ; claims consommés
+vérifiés rejouables avec le même reçu ; aucun effet indéterminé réautorisé ;
+procédure opérateur explicite et rejouable, interruption reprenable.
+**Acceptation.** Clôture originale refusant la copie avant écriture durable ;
+cas autorisé rejoignant une tête vérifiée avec activation unique ; copie
+antérieure, claim non réconcilié et interruption avant publication restent en
+maintenance ; vérification finale par commandes opérateur en recette.
+
+### G09 — diagnostic de réservation Legacy et réconciliation terminale
+
+**Décision.** La [proposition de compatibilité](G09_LEGACY_RESERVATION_DIAGNOSTIC.md)
+est adoptée : négociation de la prise en charge du motif avant réservation
+pour le même pair IPC authentifié et la même incarnation ; motif fermé porté
+sur la réponse de cette tentative ; requête Legacy conservant exactement sa
+réponse historique ; aucune renvoi ni repli sur réponse perdue, inconnue ou
+incomplète. Le parcours distinct de réconciliation terminale après redémarrage
+Legacy est également adopté : réconciliation authentifiée de l'instance détenue
+sous admission fermée, observation terminale qualifiée du même moteur rapprochée
+du tenant, de la tentative, du CID et du claim durable, transition centrale
+rejouable sur la même identité avec audit obligatoire, quota conservé pendant
+l'incertitude, retrait attesté après acquittement.
+**Acceptation.** Quatre contrôles à motif statique distinct sans réservation ;
+deux combinaisons ancien/nouveau avec réponse Legacy exacte ; deux refus
+concurrents attribués à leurs tentatives ; perte de réponse sans second envoi.
+Pour la réconciliation : perte d'ACK terminal, second rejeu sans allocation
+supplémentaire, absence de nouveau démarrage, refus de CID divergent, maintien
+du quota si audit indisponible, retrait attesté.
+
+### G11 — port Source17 pour les opérations Kubernetes V2
+
+**Décision.** La [proposition Source17](G11_SOURCE17_KUBERNETES_PROPOSAL.md)
+est adoptée : extension du port broker Source17 aux opérations Kubernetes V2
+existantes, mêmes requêtes, reçus et règles de rejeu ; identité d'exécution
+authentifiée déterminant tenant et incarnation ; revalidation source, grant,
+politique et réservation dans une même transaction tenant, projection et audit
+avant réponse ; compatibilité format 17 démontrée. Aucune extension du format
+ni des capacités durables n'est autorisée par cette décision. Le driver
+Kubernetes existant conserve commandes d'effet uniques, observation par UID et
+réconciliation ; permis durable avant effet, échéance armée avant levée du
+verrou de planification, démarrage réseau coupé.
+**Acceptation.** Premier test hors ligne de la proposition (création pod, levée
+de verrou, attachement, trame de démarrage par tentative ; quota retenu après
+sortie déclarée ; terminal du même UID, reçu durable, retour du quota ; rejeu
+sans second démarrage ni seconde libération). Passage sur cluster réel distinct,
+identité de broker bornée et stockage RWOP dédié.
+
+### G05/E3 — autorité de l'ouverture en mode owned
+
+**Décision.** L'option recommandée de l'entrée du 25 novembre ci-dessus est
+adoptée : attribution G08 à l'admission (tenant, broker et incarnation tirés du
+transport authentifié, audités avec la réservation) et claim worker consommé
+référencant l'exécution à l'ouverture. Le Store retrouve le claim par
+`worker.attempt.start_operation_id`, vérifie chaîne, révisions et autorité dans
+la transaction du reçu ; le broker garde le compteur natif lié au même claim et
+réapplique garde de STOP et échéance au signal. La séquence E3 de libération par
+le broker reste applicable.
+**Acceptation.** Formats 14 et 15 : ancien bearer après rotation, incarnation
+étrangère, claim divergent — trois refus à tête d'audit intacte ; ACK après
+`Running` et après commit d'ouverture ; intention durable et ACK frais exact
+avant l'unique signal ; rejeu ou invalidation native avant soumission = zéro
+signal ; coupures avant/après soumission, échéance préservée, livraison inconnue
+restituée sans preuve ; routes Legacy refusées en mode owned.
+
+### Reste ouvert
+
+L'arbitrage G08 « autorité Podman durable avant présence » n'a pas de
+proposition formalisée à ce jour ; une proposition écrite avec oracle est
+requise avant décision. La liaison claim/E3 en mode owned est couverte par la
+décision E3 ci-dessus.
