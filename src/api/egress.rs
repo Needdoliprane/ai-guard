@@ -9,15 +9,16 @@ use super::*;
 use crate::{
     audit::egress_decisions::EgressJournalError,
     control::egress_decision::{
-        EgressChannelOpeningReceiptV1, EgressChannelOpeningRequestV1, EgressDecideRequestV1,
-        EgressDecisionV1, EgressObserveRequestV1, EgressReceiptV1, EgressRenewRequestV1,
-        EgressRenewResponseV1, deserialize_object,
+        EgressChannelOpeningReceiptV1, EgressChannelOpeningRequestV1, EgressConnectPermitRequestV1,
+        EgressConnectPermitV1, EgressDecideRequestV1, EgressDecisionV1, EgressObserveRequestV1,
+        EgressReceiptV1, EgressRenewRequestV1, EgressRenewResponseV1, deserialize_object,
     },
 };
 
 pub(super) fn routes() -> Router<GatewayState> {
     Router::new()
         .route("/egress/channel-openings", post(open_channel))
+        .route("/egress/connect-permits", post(issue_connect_permit))
         .route("/egress/decisions", post(decide))
         .route("/egress/observations", post(observe))
         .route("/egress/renewals", post(renew))
@@ -79,7 +80,7 @@ async fn observe(
     RunnerIdentity(tenant): RunnerIdentity,
     Json(request): Json<EgressObserveRequestV1>,
 ) -> ApiResult<Json<EgressReceiptV1>> {
-    record_observation(tenant, move |store| store.egress_observe(&request)).await
+    write_egress(tenant, move |store| store.egress_observe(&request)).await
 }
 
 #[derive(Deserialize)]
@@ -94,10 +95,29 @@ async fn open_channel(
 ) -> ApiResult<Json<EgressChannelOpeningReceiptV1>> {
     let Json(OpeningRequestJson(request)) =
         request.map_err(|rejection| invalid_request(rejection.status()))?;
-    record_observation(tenant, move |store| store.egress_open_channel(&request)).await
+    write_egress(tenant, move |store| store.egress_open_channel(&request)).await
 }
 
-async fn record_observation<T: Send + 'static>(
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct ConnectPermitRequestJson(
+    #[serde(deserialize_with = "deserialize_object")] EgressConnectPermitRequestV1,
+);
+
+async fn issue_connect_permit(
+    RunnerIdentity(tenant): RunnerIdentity,
+    request: Result<Json<ConnectPermitRequestJson>, JsonRejection>,
+) -> ApiResult<Json<EgressConnectPermitV1>> {
+    let Json(ConnectPermitRequestJson(request)) =
+        request.map_err(|rejection| invalid_request(rejection.status()))?;
+    write_egress(tenant, move |store| {
+        let policy = store.egress_policy();
+        store.egress_issue_connect_permit(&request, &policy, now_ms())
+    })
+    .await
+}
+
+async fn write_egress<T: Send + 'static>(
     tenant: TenantState,
     record: impl FnOnce(&Store) -> anyhow::Result<T> + Send + 'static,
 ) -> ApiResult<Json<T>> {
@@ -172,6 +192,74 @@ mod tests {
     use crate::control::egress_decision::EgressChannelOpeningDispositionV1;
     use crate::egress::ids::IdV1;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn connect_permits_authenticate_before_strict_json_and_hide_rejection_details() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            Store::open_for_tenant(
+                &directory.path().join("tenant-a.sqlite"),
+                "tenant-a",
+                Redactor::new(vec![]),
+                10_000,
+            )
+            .unwrap(),
+        );
+        let router = gateway_router(GatewayState::new(
+            store.clone(),
+            "permit-runner".into(),
+            "permit-viewer".into(),
+            Policy::default(),
+            None,
+            Redactor::new(vec![]),
+        ));
+        let post = |token, body| {
+            router.clone().oneshot(
+                axum::http::Request::post("/api/v1/egress/connect-permits")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(body)
+                    .unwrap(),
+            )
+        };
+        let before = store.head().unwrap();
+        for (token, expected) in [
+            ("unknown-permit-token", StatusCode::UNAUTHORIZED),
+            ("permit-viewer", StatusCode::FORBIDDEN),
+        ] {
+            let pending_body = Body::from_stream(futures_util::stream::pending::<
+                Result<axum::body::Bytes, std::io::Error>,
+            >());
+            let response =
+                tokio::time::timeout(std::time::Duration::from_secs(5), post(token, pending_body))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+        let private_field = "private_fixture_permit_field";
+        for (request, expected) in [
+            ("{".to_owned(), StatusCode::BAD_REQUEST),
+            ("[]".to_owned(), StatusCode::UNPROCESSABLE_ENTITY),
+            (
+                format!(r#"{{"{private_field}":true}}"#),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+        ] {
+            let response = post("permit-runner", Body::from(request)).await.unwrap();
+            assert_eq!(response.status(), expected);
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let text = std::str::from_utf8(&bytes).unwrap();
+            assert!(!text.contains(private_field));
+            assert_eq!(
+                serde_json::from_str::<Value>(text).unwrap(),
+                json!({"error":{"code":"egress_invalid","retry_action":"none"}})
+            );
+        }
+        assert_eq!(store.head().unwrap(), before);
+    }
 
     #[tokio::test]
     async fn channel_openings_require_a_runner_and_use_its_tenant() {

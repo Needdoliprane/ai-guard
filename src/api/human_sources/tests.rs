@@ -512,6 +512,7 @@ async fn modern_route_matrix_closes_before_body_extractors_and_store() {
     // The mounted egress routes must stay covered even if the inventory changes.
     let egress_routes: &[(&str, &[&str])] = &[
         ("/api/v1/egress/channel-openings", &["POST"]),
+        ("/api/v1/egress/connect-permits", &["POST"]),
         ("/api/v1/egress/decisions", &["POST"]),
         ("/api/v1/egress/events", &["GET", "HEAD"]),
         ("/api/v1/egress/observations", &["POST"]),
@@ -571,7 +572,10 @@ async fn modern_route_matrix_closes_before_body_extractors_and_store() {
                     .unwrap();
             assert_eq!(response.status(), expected, "{method} {path}");
             assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
-            if path == "/api/v1/events/batch" {
+            if matches!(
+                path.as_str(),
+                "/api/v1/events/batch" | "/api/v1/egress/connect-permits"
+            ) {
                 let body = axum::body::to_bytes(response.into_body(), 4096)
                     .await
                     .unwrap();
