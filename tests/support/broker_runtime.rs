@@ -984,8 +984,11 @@ fn project_full3_binding(value: Option<&Value>) -> Result<Option<Value>> {
     ensure!(
         match stage {
             "read_native_binding" => journal_code.is_none(),
-            "reload_journal" | "advance_writer" => enforcer_code.is_none(),
-            "retry_limit" => enforcer_code.is_none() && journal_code == Some("conflict"),
+            "reload_journal" => enforcer_code.is_none(),
+            "advance_writer" => enforcer_code.is_none() && journal_code != Some("conflict"),
+            "retry_limit" => {
+                enforcer_code.is_none() && journal_code.is_none_or(|code| code == "conflict")
+            }
             _ => false,
         },
         "invalid Full3 binding diagnostic code for stage"

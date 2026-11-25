@@ -342,6 +342,19 @@ fn batch_failure_marker_projects_only_closed_full3_binding_evidence() {
         serde_json::to_value(harness::executor_failure_page(&page, "other-session", 16)).unwrap();
     assert!(other_session["rows"][0].get("full3_binding").is_none());
 
+    page["items"][0]["data"]["full3_binding"]["journal_code"] = json!("conflict");
+    assert!(harness::batch_failure_marker(&page).is_err());
+    page["items"][0]["data"]["full3_binding"]["stage"] = json!("reload_journal");
+    let reload = harness::batch_failure_marker(&page).unwrap().unwrap();
+    assert_eq!(reload["full3_binding"]["journal_code"], "conflict");
+
+    page["items"][0]["data"]["full3_binding"] = json!({"stage":"retry_limit"});
+    let stage_only = harness::batch_failure_marker(&page).unwrap().unwrap();
+    assert_eq!(stage_only["full3_binding"], json!({"stage":"retry_limit"}));
+    page["items"][0]["data"]["full3_binding"]["journal_code"] = json!("io");
+    assert!(harness::batch_failure_marker(&page).is_err());
+
+    page["items"][0]["data"]["full3_binding"]["stage"] = json!("advance_writer");
     page["items"][0]["data"]["full3_binding"]["journal_code"] = json!("synthetic-private-detail");
     assert!(harness::batch_failure_marker(&page).is_err());
     page["items"][0]["data"]["full3_binding"]["journal_code"] = json!("io");
