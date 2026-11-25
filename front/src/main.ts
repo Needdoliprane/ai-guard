@@ -68,7 +68,7 @@ const navItems: {
     id: "agents",
     label: "Agents",
     icon: "agents",
-    description: "Identités, tâches et liens explicitement reçus.",
+    description: "Identités, tâches et liens de parenté.",
   },
   {
     id: "actions",
@@ -2025,7 +2025,7 @@ function showAgent(agent: Agent) {
     el(
       "p",
       "field-provenance-help",
-      "Le badge global décrit l’identité. La provenance d’un modèle ou d’une tâche reste distincte lorsqu’elle est fournie.",
+      "Le badge global décrit l’identité. Le parent, le modèle et la tâche affichent leur propre provenance lorsqu’elle est connue.",
     ),
     agent.hierarchy_warning || agent.parent_unresolved
       ? el(
@@ -2047,7 +2047,7 @@ function showAgent(agent: Agent) {
       ),
       labelValue("Modèle", agent.model, agent.field_provenance?.model),
       labelValue(
-        "Parent explicite",
+        "Parent",
         agent.parent_id,
         agent.field_provenance?.parent_id,
       ),

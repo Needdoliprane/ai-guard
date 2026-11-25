@@ -24,7 +24,8 @@ const scenario = process.env.AI_GUARD_BROWSER_SCENARIO;
 const eventFocusOnly = scenario === "event-focus";
 const summaryFreshnessOnly = scenario === "summary-freshness";
 const journalOlderOnly = scenario === "journal-older-boundaries";
-const focusedScenario = eventFocusOnly || summaryFreshnessOnly || journalOlderOnly;
+const agentParentOnly = scenario === "agent-parent-provenance";
+const focusedScenario = eventFocusOnly || summaryFreshnessOnly || journalOlderOnly || agentParentOnly;
 const journalEvent = (seq, kind = "command.completed") => ({
   seq, id: `journal-${seq}`, kind, timestamp: "2026-10-29T12:10:00Z", provenance: "observed",
 });
@@ -99,6 +100,7 @@ const agents = [
     id: "agent-child",
     name: "Relecture",
     parent_id: "agent-main",
+    ...(agentParentOnly ? { field_provenance: { parent_id: "inferred" } } : {}),
     provider: "Claude",
     status: "completed",
     compatibility: "generic",
@@ -419,6 +421,23 @@ const assertGeometry = async (label) => {
   assert.ok(geometry.targets.every((rect) => rect.width >= 44 && rect.height >= 44), `${label} : cibles d’au moins 44 pixels`);
   assert.ok(geometry.targets.every((rect) => rect.top >= 0 && rect.bottom <= geometry.dockBottom), `${label} : commandes dans leur zone réservée`);
 };
+async function runAgentParentProvenanceCheck() {
+  await page.goto(origin);
+  await page.getByLabel("Jeton de lecture").fill("viewer-test-token");
+  await page.getByRole("button", { name: "Ouvrir la supervision", exact: true }).click();
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
+  await page.getByRole("button", { name: "Hiérarchie", exact: true }).click();
+  const child = page.locator('[data-agent-id="agent-main"] [data-agent-id="agent-child"]');
+  await child.getByRole("button", { name: "Détails", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  const parent = dialog.locator(".key-value").filter({ hasText: "agent-main" });
+  assert.match(await parent.locator("dt").innerText(), /^Parent\s*Inféré$/);
+  assert.equal(await parent.locator("dd").textContent(), "agent-main");
+  assert.equal(await dialog.locator(".detail-badges").getByText("Déclaré", { exact: true }).count(), 1);
+  assert.deepEqual(errors, []);
+  process.stdout.write("Provenance du parent affichée dans la fiche agent.\n");
+}
+
 async function runJournalOlderBoundariesCheck() {
   const token = page.getByLabel("Jeton de lecture");
   const login = async () => {
@@ -1219,6 +1238,7 @@ try {
   if (eventFocusOnly) await runEventFocusCheck();
   else if (summaryFreshnessOnly) await runSummaryFreshnessCheck();
   else if (journalOlderOnly) await runJournalOlderBoundariesCheck();
+  else if (agentParentOnly) await runAgentParentProvenanceCheck();
   else await runBrowserChecks();
 } catch (error) {
   await mkdir(join(root, "tests", "artifacts"), { recursive: true });
