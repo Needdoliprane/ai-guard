@@ -1,5 +1,30 @@
 # Validation courante
 
+## 25 novembre 2026 — canari G11 après acquittement du nettoyage d’import
+
+Le gel logiciel `a39cfa86` compile hors ligne en 7 min 09 s. Le
+sélecteur `software_broker_scoped_relay_ipc_refuses_before_private_detail`
+sort 101 en 30,62 s à l’échéance d’observation du relais A.
+
+Le témoin confirme le retour du retrait du helper exact. Le POST
+`HelperCleanup` trouve sa demande publiée à r15 et le journal
+acquitte le POST à r16. La copie SQLite de A porte la séquence 13
+de supervision et un worker `Preparing` avec quota retenu. B
+garde sa seule initialisation. Le dernier statut relayé ne porte
+aucun endpoint et une demande reste en cours à l’échéance. La
+vérification d’import et le lancement du worker ne sont pas
+observés. La prochaine question concerne le passage après r16,
+observé peu avant la borne du canari. Le reçu précédent
+`4a78536a` s’arrêtait à r14.
+
+Le groupe de test est vide en fin d’exécution. La fermeture de
+la fixture et le verdict de lecture V5 restent non confirmés. Le
+répertoire de preuve est préservé et le gardien historique reste
+inchangé. Manifeste de 38 pièces
+`7f04ae50c034d4300c612efcb21bf8c600e50acc34516947afcf52bfb0d8485e`.
+Ce canari utilise un moteur synthétique et laisse la qualification
+de l’exécution Source17 ouverte.
+
 ## 25 novembre 2026 — E3 entre le retour Running et l’acquittement Writer
 
 Le gel test-only `2e497796` compile hors ligne en 12 min 02 s. Le
