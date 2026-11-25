@@ -1,5 +1,29 @@
 # Validation courante
 
+## 25 novembre 2026 — inventaire Writer et autorisation de cible G04
+
+Le gel `e64fb406` compile hors ligne sur macOS ARM64 en 18 min 38 s.
+Les neuf tests exacts passent. Trois vérifient l’inventaire unique du
+Writer, la trace conservée pour un dossier partiel hérité et le refus
+d’un recul de pointeur sous le plancher déjà observé. Six vérifient
+l’autorisation G04. Ils couvrent la sélection canonique, les droits
+nominatifs, l’ACL et le périmètre tenant/organisation, la révision
+périmée, le plafond OIDC et l’alignement sur la capacité du registre.
+
+Le témoin de coût passe aussi. Pour chacun des 12 échantillons aux
+têtes 0, 8, 17 et 18, la lecture stricte acceptée effectue un inventaire,
+contre deux dans le lot de référence `2d400f42`. La tête reste identique
+et aucune publication n’est observée. Ce comptage ne mesure pas un gain
+de latence et n’attribue pas le dernier délai Full3 au Writer.
+
+Les groupes de processus et répertoires temporaires sont vides après
+les tests. La fixture de coût est archivée avec ses 49 fichiers.
+Manifeste du gel à 174 pièces
+`238932b6d952e8c028d8785ab80435dfbad5dfa1661b09c393cb4716ea0b1d2a`.
+Les arbres Rust et les verrous de `a9f3ba34` et du gel concordent.
+Le port Writer est `e088d548`. G04 qualifie ici le contrôle commun.
+L’exposition des routes et la préparation durable restent ouvertes.
+
 ## 25 novembre 2026 — reçu de relecture Created dans le dashboard
 
 Sur `276d6e6c`, les 30 tests du modèle frontend et TypeScript sans
