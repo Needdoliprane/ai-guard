@@ -82,7 +82,7 @@ const BUILD_IGNORE_FILE: &str = ".dockerignore";
 /// engine would apply rules the copy was not selected with. Change the file,
 /// the allowlist and this digest together.
 pub(super) const BUILD_IGNORE_SHA256: &str =
-    "fc8c87e58279770815bc5d035e96c609569ee4f3953b51231db2bcbe680ccf7c";
+    "e0bca73fb949b5e9fddb7ef0ccb7c7fb35d79de59ee8dedc9979526baae77b18";
 /// Suffix of a per-Dockerfile ignore file. The shipped distribution has none,
 /// and a builder may apply such a file instead of `.dockerignore`.
 const DOCKERFILE_IGNORE_SUFFIX: &str = ".Dockerfile.dockerignore";
@@ -247,6 +247,7 @@ impl Scope {
                 .any(|name| named(0, name)),
                 length => {
                     named(0, "src") && ends(".rs")
+                        || named(0, "schema") && ends(".sql")
                         || length == 2 && named(0, "policies") && ends(".json")
                         || length == 2
                             && named(0, "front")
@@ -293,11 +294,12 @@ impl Scope {
             },
             Self::Build => match parts.len() {
                 0 => false,
-                1 => ["src", "policies", "front", "images"]
+                1 => ["src", "schema", "policies", "front", "images"]
                     .iter()
                     .any(|name| named(0, name)),
                 length => {
                     named(0, "src")
+                        || named(0, "schema")
                         || named(0, "front") && named(1, "src")
                         || length == 2 && named(0, "front") && named(1, "public")
                         || length == 2 && named(0, "images") && named(1, "provider-activity")

@@ -8,6 +8,10 @@
 src/**
 !src/**/
 !src/**/*.rs
+!schema/
+schema/**
+!schema/**/
+!schema/**/*.sql
 !policies/
 policies/**
 !policies/*.json
