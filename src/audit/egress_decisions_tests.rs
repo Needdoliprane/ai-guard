@@ -112,7 +112,7 @@ fn store(directory: &Path, tenant: &str) -> Store {
 }
 
 /// A new private (0700, canonical, symlink-free) parent for tenant stores.
-fn private_directory() -> tempfile::TempDir {
+pub(crate) fn private_directory() -> tempfile::TempDir {
     use std::os::unix::fs::PermissionsExt;
     tempfile::Builder::new()
         .permissions(std::fs::Permissions::from_mode(0o700))

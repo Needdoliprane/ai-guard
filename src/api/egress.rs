@@ -188,19 +188,14 @@ async fn events(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audit::egress_decisions::tests::loopback_store_fixture;
+    use crate::audit::egress_decisions::tests::{loopback_store_fixture, private_directory};
     use crate::control::egress_decision::EgressChannelOpeningDispositionV1;
     use crate::egress::ids::IdV1;
     use tower::ServiceExt;
 
     #[tokio::test]
     async fn connect_permits_authenticate_before_strict_json_and_hide_rejection_details() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let directory = tempfile::Builder::new()
-            .permissions(std::fs::Permissions::from_mode(0o700))
-            .tempdir()
-            .unwrap();
+        let directory = private_directory();
         let store = Arc::new(
             Store::open_for_tenant(
                 &directory.path().join("tenant-a.sqlite"),
