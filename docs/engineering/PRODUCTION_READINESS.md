@@ -212,14 +212,24 @@ et `f1b96120b44724d43c1905a7c76bd0844356bcee1d844016e5b008aa5b3bb4e2`.
 L’exécution du harnais avec l’archive Linux x86-64 reste à qualifier.
 
 Le [workflow Linux x86-64](../../.github/workflows/g01-linux-archive-runtime.yaml)
-est intégré localement depuis `5063391f`. Il sélectionne le même binaire
-extrait de l’archive `1c9e8e01` pour Docker rootful et Podman rootless,
-puis vérifie le retour des inventaires de conteneurs et volumes. Il
-atteste séparément le retrait de l’étiquette d’image QA et relève le
-nombre d’images de base ajoutées. Les contrôles locaux de syntaxe et de
-projection des reçus passent. Aucun job Linux de ce workflow n’a été
-exécuté. Le prévol Podman doit confirmer le mode rootless sur un runner
-compatible avant tout lancement.
+et le [transfert d’archives G12](../../.github/workflows/g12-transfer.yaml)
+sont des contrôles réutilisables lancés manuellement depuis `main`. Le
+transfert construit les archives depuis un commit source exact, ancêtre de
+`main`, puis revérifie chaque octet après un téléchargement indépendant et
+publie un reçu `g12-transfer-receipt` (sommes, source, run, empreinte du
+CLI Linux). Le workflow G01 accepte l’identifiant d’un run de transfert
+réussi et le commit source ; il vérifie le chemin du workflow, lie
+l’archive Linux et l’empreinte du CLI au reçu, puis exécute ce binaire
+pour Docker rootful et Podman rootless avec le retour des inventaires de
+conteneurs et volumes, le retrait de l’étiquette d’image QA et le relevé
+des images de base ajoutées. La variante historique à reçus datés figés
+(run `45344993418`, source `1c9e8e01`, intégrée depuis `5063391f`) est
+remplacée : ses artefacts expirent après sept jours et son fichier de
+transfert avait été retiré du dépôt. Les contrôles locaux de syntaxe YAML
+et Bash passent sur la variante courante. Aucun job Linux de cette
+variante n’a été exécuté ; les reçus datés du 24 novembre restent attachés
+à leurs révisions. Le prévol Podman doit confirmer le mode rootless sur un
+runner compatible avant tout lancement.
 
 **G02 — montage racine observé dans le worker.** Avec le CLI macOS archivé
 `99cb885e` sur Podman 6.1.4 rootless ARM64, la commande auditée

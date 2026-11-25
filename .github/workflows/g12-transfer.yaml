@@ -1,0 +1,417 @@
+name: G12 archive transfer qualification
+
+# Reusable qualification, dispatched manually from main. Builds the native
+# archives, frontend bundle, manifest and SBOM from an exact verified source
+# commit (an ancestor of main), then re-downloads and re-verifies every asset
+# independently. Artifacts stay scoped to this Actions run; no tag or release
+# is created. RELEASE_TAG is only an archive label.
+#
+# History: the one-shot conductor variant (commits 1b961f3e, 221b5d6a) pinned a
+# single source SHA and required a dedicated conductor commit whose only diff
+# was this file. That file was removed after the dated qualification, leaving a
+# dangling reference in g01-linux-archive-runtime.yaml. This dispatch form keeps
+# the same byte guarantees: every build job checks out the verified source and
+# refuses any other HEAD, and the transfer job binds the re-downloaded bytes to
+# the archive verifier's checksums.
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full commit SHA to qualify (must be an ancestor of main)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+env:
+  SOURCE_SHA: ${{ inputs.source_sha }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      RELEASE_TAG: v0.0.1
+      # Binaries built by `cargo build --bins` that are not shipped in the native archives. The
+      # test-CA generator stays a local tool (AGENTS.md); list names separated by spaces.
+      EXCLUDED_BINARIES: ai-guard-demo-pki
+    outputs:
+      tag: ${{ steps.gate.outputs.tag }}
+      sha: ${{ steps.gate.outputs.sha }}
+      native_binaries: ${{ steps.gate.outputs.native_binaries }}
+      license_sha256: ${{ steps.gate.outputs.license_sha256 }}
+      release_workflow_blob: ${{ steps.gate.outputs.release_workflow_blob }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select the exact verified source
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git merge-base --is-ancestor "$SOURCE_SHA" HEAD
+          git switch --detach "$SOURCE_SHA"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          version=${RELEASE_TAG#v}
+          metadata=$(cargo metadata --locked --offline --no-deps --format-version 1)
+          jq -e --arg version "$version" '.packages[] | select(.name == "agentsandbox") | .version == $version' <<< "$metadata" >/dev/null
+          native_binaries=$(jq -er --arg excluded "$EXCLUDED_BINARIES" '
+            [.packages[] | select(.name == "agentsandbox")] | select(length == 1)
+            | [.[0].targets[] | select(.kind | index("bin")) | .name] | sort
+            | . - ($excluded | split(" ") | map(select(length > 0)))
+            | if index("agentsandbox") != null and length == (unique | length) and
+                all(.[]; type == "string" and test("\\A[A-Za-z0-9_.-]+\\z") and . != "." and . != "..")
+              then join(" ") else error("Invalid agentsandbox binary targets") end
+          ' <<< "$metadata")
+          jq -e --arg version "$version" '.version == $version' front/package.json >/dev/null
+          jq -e --arg version "$version" '.version == $version and .packages[""].version == $version' front/package-lock.json >/dev/null
+          if ! license_sum=$(git show --no-textconv "$SOURCE_SHA:LICENSE" | shasum -a 256) ||
+            [[ ! ${license_sum%% *} =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Cannot hash LICENSE from the selected commit"
+            exit 1
+          fi
+          release_workflow_blob=$(git rev-parse "$SOURCE_SHA:.github/workflows/release.yaml")
+          printf 'tag=%s\nsha=%s\nnative_binaries=%s\nlicense_sha256=%s\nrelease_workflow_blob=%s\n' \
+            "$RELEASE_TAG" "$SOURCE_SHA" "$native_binaries" "${license_sum%% *}" "$release_workflow_blob" >> "$GITHUB_OUTPUT"
+
+  metadata:
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+      RELEASE_SHA: ${{ needs.verify.outputs.sha }}
+      AI_GUARD_BUILD_REVISION: ${{ needs.verify.outputs.sha }}
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify.outputs.sha }}
+          persist-credentials: false
+      - name: Produce and re-verify the release manifest and the CycloneDX SBOM
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          export AI_GUARD_VERSION="${RELEASE_TAG#v}"
+          cargo fetch --locked
+          cargo build --release --locked --offline --bin agentsandbox
+          cli="$PWD/target/release/agentsandbox"
+
+          mkdir -m 700 "$RUNNER_TEMP/private" "$RUNNER_TEMP/private/tmp" "$RUNNER_TEMP/private/parent"
+          export TMPDIR="$RUNNER_TEMP/private/tmp"
+          name="ai-guard-$RELEASE_TAG-release-metadata"
+          package="$RUNNER_TEMP/package/$name"
+          assets="$RUNNER_TEMP/release-assets"
+          install -d "$package" "$assets"
+          "$cli" release manifest --source . --output "$RUNNER_TEMP/private/parent/manifest"
+          "$cli" release verify --source . --manifest "$RUNNER_TEMP/private/parent/manifest" --source-only
+          install -d "$package/manifest"
+          for file in release-manifest.json sbom.cdx.json SHA256SUMS; do
+            install -m 0644 "$RUNNER_TEMP/private/parent/manifest/$file" "$package/manifest/$file"
+          done
+          jq -e --arg version "${RELEASE_TAG#v}" '
+            .bomFormat == "CycloneDX" and .specVersion == "1.6" and .metadata.component.version == $version
+          ' "$package/manifest/sbom.cdx.json" >/dev/null
+          install -m 0644 LICENSE "$package/"
+          printf 'tag=%s\ncommit=%s\nrun=%s\nrepository=%s\n' \
+            "$RELEASE_TAG" "$RELEASE_SHA" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY" > "$package/BUILD-INFO"
+          COPYFILE_DISABLE=1 tar -C "$RUNNER_TEMP/package" -czf "$assets/$name.tar.gz" "$name"
+          tar -tzf "$assets/$name.tar.gz" >/dev/null
+          install -m 0644 "$package/manifest/sbom.cdx.json" "$assets/ai-guard-$RELEASE_TAG-sbom.cdx.json"
+          cd "$assets"
+          for file in "$name.tar.gz" "ai-guard-$RELEASE_TAG-sbom.cdx.json"; do
+            test -s "$file"
+            shasum -a 256 "$file" > "$file.sha256"
+          done
+      - name: Check third-party licences for release
+        run: cargo run --quiet --locked --offline --example third_party_notices -- check --for-release --allowed .github/third-party-license-expressions.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-metadata
+          path: ${{ runner.temp }}/release-assets/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: archive-verifier
+          path: target/release/agentsandbox
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  build:
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: macos-15
+            target: aarch64-apple-darwin
+    env:
+      RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+      RELEASE_SHA: ${{ needs.verify.outputs.sha }}
+      RUST_TARGET: ${{ matrix.target }}
+      NATIVE_BINARIES: ${{ needs.verify.outputs.native_binaries }}
+      AI_GUARD_BUILD_REVISION: ${{ needs.verify.outputs.sha }}
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify.outputs.sha }}
+          persist-credentials: false
+      - name: Build and package native binaries
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          test "$(rustc -vV | sed -n 's/^host: //p')" = "$RUST_TARGET"
+          export AI_GUARD_VERSION="${RELEASE_TAG#v}"
+          cargo fetch --locked --target "$RUST_TARGET"
+          cargo build --release --locked --offline --bins --target "$RUST_TARGET"
+
+          name="ai-guard-$RELEASE_TAG-$RUST_TARGET"
+          package="$RUNNER_TEMP/package/$name"
+          assets="$RUNNER_TEMP/release-assets"
+          install -d "$package/bin" "$assets"
+          install -m 0644 LICENSE "$package/"
+          printf 'tag=%s\ncommit=%s\ntarget=%s\nrun=%s\nrepository=%s\n' \
+            "$RELEASE_TAG" "$RELEASE_SHA" "$RUST_TARGET" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY" > "$package/BUILD-INFO"
+          # Every crate source is needed to read the licence texts, whatever the target.
+          cargo fetch --locked
+          cargo run --quiet --release --locked --offline --target "$RUST_TARGET" \
+            --example third_party_notices -- notices --for-release --allowed .github/third-party-license-expressions.txt \
+            --output "$package/THIRD-PARTY-NOTICES"
+          test -s "$package/THIRD-PARTY-NOTICES"
+          read -r -a programs <<< "$NATIVE_BINARIES"
+          test "${#programs[@]}" -gt 0
+          for program in "${programs[@]}"; do
+            install -m 0755 "target/$RUST_TARGET/release/$program" "$package/bin/"
+          done
+          "$package/bin/agentsandbox" --help >/dev/null
+          if ! "$package/bin/agentsandbox" version --json |
+            jq -es --arg version "${RELEASE_TAG#v}" --arg revision "$RELEASE_SHA" '
+              length == 1 and (.[0] |
+                .schema_version == 1 and .product == "ai-guard" and .component == "agentsandbox" and
+                .version == $version and .build.revision == $revision)
+            ' >/dev/null; then
+            echo "::error::Packaged CLI identity does not match the release tag and commit"
+            exit 1
+          fi
+          COPYFILE_DISABLE=1 tar -C "$RUNNER_TEMP/package" -czf "$assets/$name.tar.gz" "$name"
+          tar -tzf "$assets/$name.tar.gz" >/dev/null
+
+      - name: Setup Node for the frontend bundle
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.22.2'
+          package-manager-cache: false
+      - name: Build and package frontend assets
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        working-directory: front
+        run: |
+          export AI_GUARD_VERSION="${RELEASE_TAG#v}"
+          npm ci --no-audit --no-fund
+          npm run build
+          test -s dist/index.html
+          test -s node_modules/vite/LICENSE.md
+          name="ai-guard-$RELEASE_TAG-frontend"
+          package="$RUNNER_TEMP/package/$name"
+          install -d "$package/licenses"
+          cp -R dist/. "$package/"
+          install -m 0644 ../LICENSE "$package/"
+          install -m 0644 node_modules/vite/LICENSE.md "$package/licenses/vite-LICENSE.md"
+          printf 'tag=%s\ncommit=%s\nrun=%s\nrepository=%s\n' \
+            "$RELEASE_TAG" "$RELEASE_SHA" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY" > "$package/BUILD-INFO"
+          COPYFILE_DISABLE=1 tar -C "$RUNNER_TEMP/package" -czf "$RUNNER_TEMP/release-assets/$name.tar.gz" "$name"
+
+      - name: Record archive checksums
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/release-assets"
+          for archive in *.tar.gz; do
+            test -s "$archive"
+            test "$(wc -c < "$archive")" -lt 2147483648
+            shasum -a 256 "$archive" > "$archive.sha256"
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ matrix.target }}
+          path: ${{ runner.temp }}/release-assets/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  archive_checks:
+    needs: [verify, metadata, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      assets_sha256: ${{ steps.members.outputs.assets_sha256 }}
+    env:
+      RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+      NATIVE_BINARIES: ${{ needs.verify.outputs.native_binaries }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: archive-verifier
+          path: ${{ runner.temp }}/archive-verifier
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          path: ${{ runner.temp }}/release-download
+          merge-multiple: true
+      - name: Verify release archive members and bind the checked bytes
+        id: members
+        shell: bash
+        run: |
+          cli="$RUNNER_TEMP/archive-verifier/agentsandbox"
+          chmod 0700 "$cli"
+          cd "$RUNNER_TEMP/release-download"
+          archives=()
+          for target in x86_64-unknown-linux-gnu aarch64-apple-darwin frontend release-metadata; do
+            name="ai-guard-$RELEASE_TAG-$target"
+            archive="$name.tar.gz"
+            test -s "$archive"
+            test "$(wc -c < "$archive")" -lt 2147483648
+            "$cli" release verify-archive --archive "$archive" --root "$name" \
+              --target "$target" --native-binaries "$NATIVE_BINARIES"
+            archives+=("$archive")
+          done
+          sbom="ai-guard-$RELEASE_TAG-sbom.cdx.json"
+          checksums="$RUNNER_TEMP/verified-release-SHA256SUMS"
+          shasum -a 256 "${archives[@]}" "$sbom" > "$checksums"
+          digest=$(shasum -a 256 "$checksums")
+          printf 'assets_sha256=%s\n' "${digest%% *}" >> "$GITHUB_OUTPUT"
+
+  transfer:
+    needs: [verify, archive_checks]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+      RELEASE_SHA: ${{ needs.verify.outputs.sha }}
+      VERIFIED_ASSETS_SHA256: ${{ needs.archive_checks.outputs.assets_sha256 }}
+      LICENSE_SHA256: ${{ needs.verify.outputs.license_sha256 }}
+      RELEASE_WORKFLOW_BLOB: ${{ needs.verify.outputs.release_workflow_blob }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          path: ${{ runner.temp }}/release-download
+          merge-multiple: true
+      - name: Recheck independently downloaded release assets
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/release-download"
+          archives=(
+            "ai-guard-$RELEASE_TAG-x86_64-unknown-linux-gnu.tar.gz"
+            "ai-guard-$RELEASE_TAG-aarch64-apple-darwin.tar.gz"
+            "ai-guard-$RELEASE_TAG-frontend.tar.gz"
+            "ai-guard-$RELEASE_TAG-release-metadata.tar.gz"
+          )
+          sbom="ai-guard-$RELEASE_TAG-sbom.cdx.json"
+          if [[ ! "$LICENSE_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Missing or invalid LICENSE digest from the selected commit"
+            exit 1
+          fi
+          matches_verified_assets() {
+            [[ "$VERIFIED_ASSETS_SHA256" =~ ^[0-9a-f]{64}$ &&
+               "${1%% *}" == "$VERIFIED_ASSETS_SHA256" ]]
+          }
+          shasum -a 256 "${archives[@]}" "$sbom" > SHA256SUMS
+          digest=$(shasum -a 256 SHA256SUMS)
+          if ! matches_verified_assets "$digest"; then
+            echo "::error::Release assets differ from the bytes checked by the archive verifier"
+            exit 1
+          fi
+          for archive in "${archives[@]}"; do
+            test -s "$archive"
+            test "$(wc -c < "$archive")" -lt 2147483648
+            test "$(shasum -a 256 "$archive")" = "$(cat "$archive.sha256")"
+            name=${archive%.tar.gz}
+            target=${name#"ai-guard-$RELEASE_TAG-"}
+            if ! license_sum=$(tar -xOzf "$archive" -- "$name/LICENSE" | shasum -a 256) ||
+              [[ ${license_sum%% *} != "$LICENSE_SHA256" ]]; then
+              echo "::error::$archive LICENSE does not match the selected commit"
+              exit 1
+            fi
+            if ! tar -xOzf "$archive" -- "$name/BUILD-INFO" | cmp -s - <(
+              printf 'tag=%s\ncommit=%s\n' "$RELEASE_TAG" "$RELEASE_SHA"
+              if [[ "$target" != frontend && "$target" != release-metadata ]]; then
+                printf 'target=%s\n' "$target"
+              fi
+              printf 'run=%s\nrepository=%s\n' "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY"
+            ); then
+              echo "::error::$archive BUILD-INFO does not match the selected tag, commit and target"
+              exit 1
+            fi
+          done
+          test -s "$sbom"
+          test "$(shasum -a 256 "$sbom")" = "$(cat "$sbom.sha256")"
+          metadata_archive="ai-guard-$RELEASE_TAG-release-metadata.tar.gz"
+          if ! tar -xOzf "$metadata_archive" -- "ai-guard-$RELEASE_TAG-release-metadata/manifest/sbom.cdx.json" | cmp -s - "$sbom"; then
+            echo "::error::The standalone SBOM differs from the SBOM inside the metadata archive"
+            exit 1
+          fi
+          if ! jq -e --arg version "${RELEASE_TAG#v}" '
+            .bomFormat == "CycloneDX" and .specVersion == "1.6" and
+            (.components | type == "array" and length > 0) and .metadata.component.version == $version
+          ' "$sbom" >/dev/null; then
+            echo "::error::The SBOM is not a nonempty CycloneDX 1.6 document for the release version"
+            exit 1
+          fi
+
+          # Record the Linux CLI digest so a later archived-CLI qualification
+          # (g01-linux-archive-runtime.yaml) can bind its own independent
+          # download to the bytes verified here.
+          linux_archive="ai-guard-$RELEASE_TAG-x86_64-unknown-linux-gnu.tar.gz"
+          linux_name=${linux_archive%.tar.gz}
+          cli_sum=$(tar -xOzf "$linux_archive" -- "$linux_name/bin/agentsandbox" | shasum -a 256)
+          if [[ ! ${cli_sum%% *} =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Cannot hash the Linux CLI from the transferred archive"
+            exit 1
+          fi
+
+          # Alter only this runner's downloaded copy, after all positive checks.
+          printf '\n' >> "$sbom"
+          shasum -a 256 "${archives[@]}" "$sbom" > "$RUNNER_TEMP/tampered-SHA256SUMS"
+          tampered_digest=$(shasum -a 256 "$RUNNER_TEMP/tampered-SHA256SUMS")
+          if matches_verified_assets "$tampered_digest"; then
+            echo "::error::The transfer digest guard accepted a modified SBOM"
+            exit 1
+          fi
+
+          receipt="$RUNNER_TEMP/g12-transfer-receipt"
+          install -d "$receipt"
+          install -m 0644 SHA256SUMS "$receipt/"
+          printf 'status=PASS\nsource=%s\nconductor=%s\nrelease_workflow_blob=%s\nrun=%s\nattempt=%s\nrepository=%s\nlabel=%s\nassets_sha256=%s\nlinux_cli_sha256=%s\nsbom_tamper=rejected\n' \
+            "$RELEASE_SHA" "$GITHUB_SHA" "$RELEASE_WORKFLOW_BLOB" "$GITHUB_RUN_ID" \
+            "$GITHUB_RUN_ATTEMPT" "$GITHUB_REPOSITORY" "$RELEASE_TAG" "$VERIFIED_ASSETS_SHA256" "${cli_sum%% *}" \
+            > "$receipt/result.txt"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: g12-transfer-receipt
+          path: ${{ runner.temp }}/g12-transfer-receipt/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
