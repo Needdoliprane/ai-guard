@@ -1535,8 +1535,8 @@ vérification de la chaîne et de ses projections doit détecter une
 divergence. Le lot `owned-auth` porte l'admission des écritures
 humaines et l'authentification des brokers. Le prévol actif vérifie
 le socle d'audit Legacy sous verrou, puis ferme sa connexion.
-Le traitement de l'incompatibilité physique avec les anciens
-lecteurs pendant les migrations 1 → 14 et 14 → 15 reste à arbitrer.
+La préparation des cibles et la compatibilité avec les anciens lecteurs
+ont été précisées dans la [décision du 25 novembre](#25-novembre-2026--g06-initialisation-mysql-owned-sur-base-neuve).
 [Contrat de stockage](ARCHITECTURE_CONTRACT.md#stockage-sql-par-tenant)
 
 ## 24 novembre 2026 — Qualification de capacité G10
@@ -1555,6 +1555,34 @@ Le mainteneur fixe la preuve de capacité V1 à 100 réservations durables pour 
 Si la révocation précède l’admission ou le claim dans l’ordre durable, elle le bloque. Après un claim consommé, l’arrêt et la réconciliation suivent leurs contrats et le quota suit les faits durables. Une réadoption vérifiée ajoute au besoin un fait de reprise et conserve l’attribution et le reçu d’origine, le claim consommé et son échéance. Rust revalide le contexte avant de servir la projection. Workers exige `read_worker_registry` en administration et la lecture composée Workers/Brokers exige aussi `read_broker_registry`. La projection expose admission attribuée, historique, présence et observation moteur. Les anciens faits gardent leur provenance et une attribution absente reste inconnue. Les claims OIDC et la chaîne de preuve de l’initiateur humain suivent leurs contrats actuels. [Contrat des vues](../ui.md#supervision-unifiée-nominative--candidat-du-10-novembre-2026) · [Contrat API](../api.md)
 
 **Preuve attendue.** Avec le vrai gateway et un moteur local, lancer A1 et A2 par deux brokers distincts de A et B1 chez B. Le reçu audité établit l’admission attribuée et l’inspection établit l’état observé de l’instance exacte. Corréler les deux. La lecture nominative d’A réunit A1 et A2 avec leurs incarnations d’admission, celle de B restitue B1 seul et les contextes croisés sont refusés. Vérifier les refus pour un broker ou une incarnation substitués, une preuve absente ou révoquée et un audit indisponible. Vérifier le refus du premier claim après une révocation intervenue entre admission et claim. Vérifier séparément qu’après consommation du claim le rejeu et la réadoption préservent le reçu et l’échéance d’origine, le claim consommé et le quota tant que les faits durables exigent sa retenue. La vue garde la couverture partielle et l’inventaire runtime inconnu. [Écart de qualification](PRODUCTION_READINESS.md)
+
+## 25 novembre 2026 — G06, initialisation MySQL owned sur base neuve
+
+Le mainteneur fixe l’installation initiale de MySQL owned V1 sur une
+base dédiée vierge, créée par l’opérateur. La préparation installe
+directement le format owned 14 ou 15 sélectionné. Les conversions des
+schémas de développement antérieurs et les transferts des données
+qu’ils contiennent sont hors du périmètre de livraison. L’opérateur
+peut recréer ses propres bases de développement. Lors d’un passage de
+SQLite à une base centrale, il prend en charge le transfert de ses
+données s’il souhaite les conserver.
+
+Le préparateur vérifie que la base ne contient aucun objet utilisateur
+avant le premier DDL, sauf si le format exact est déjà installé et
+vérifiable intégralement. Une préparation interrompue ou incomplète
+ferme l’admission et exige une intervention explicite de l’opérateur.
+Le gateway ouvre la cible configurée après vérification de son format,
+de son origine, de son tenant et de l’état durable. L’ouverture de la
+cible doit rester fermée aux anciens binaires. La liaison UUID serveur,
+base, namespace et tête vérifiée, le verrou sur connexion dédiée et
+la barrière d’epoch restent requis.
+
+La recette utilise des bases jetables séparées. Elle vérifie
+l’installation directe des formats 14 et 15, le refus d’une cible
+non vierge ou partiellement initialisée, le refus par l’ancien gateway
+et l’absence de modification d’une base refusée. Les opérations
+destructives sur les bases de preuve relèvent de leur procédure de
+clôture. [Contrat de stockage](ARCHITECTURE_CONTRACT.md#stockage-sql-par-tenant)
 
 ## 25 novembre 2026 — G05/E3, libération du fournisseur par le broker
 

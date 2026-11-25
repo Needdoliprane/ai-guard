@@ -31,6 +31,8 @@ Le stockage distant utilise une base et des privilèges SQL distincts par tenant
 
 Les backends conservent les mêmes contrats d’identité, de quotas, de transitions, de relais et de reçus. Le Store garantit l’atomicité entre mutation, quota et audit obligatoire. Un rejeu après un résultat de commit incertain retrouve le même reçu ou se clôture en refus explicite. MySQL dispose de son propre schéma versionné.
 
+L’installation initiale d’un profil MySQL owned V1 utilise une base dédiée vierge préparée par l’opérateur. Le préparateur installe directement le format sélectionné et le gateway vérifie le résultat avant admission. Une cible héritée, divergente ou partiellement préparée est refusée. [Décision G06](DECISIONS.md#25-novembre-2026--g06-initialisation-mysql-owned-sur-base-neuve)
+
 Lors d’un changement de stockage, l’opérateur prépare la cible et réalise lui-même tout transfert d’historique. Le gateway ouvre uniquement la cible sélectionnée. Il vérifie le schéma, le rattachement au tenant et l’intégrité de l’état durable avant d’ajouter les nouveaux événements. Chaque ajout prolonge la chaîne de cette base en préservant les octets hachés et les séquences de l’historique existant. La nouvelle tête et les projections métier associées sont écrites dans la même transaction. La [matrice SQL](TEST_STRATEGY.md#stockage-sql-configurable--à-qualifier) définit les preuves requises.
 
 ## Direction de supervision autorisée le 30 octobre
