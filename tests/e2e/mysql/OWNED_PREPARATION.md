@@ -2,6 +2,7 @@
 
 Critères d’acceptation tirés de `d2e3a277` pour une base dédiée fournie
 par l’opérateur. L’installation sélectionne directement le format 14 ou 15.
+[Plan G06](../../../docs/engineering/IMPLEMENTATION_PLAN.md#stockage-sql-configurable)
 
 ## Garde et publication
 
@@ -58,15 +59,18 @@ reçoit `CatalogVisibilityUnconfirmed` avant l’inventaire. [Sélection des dro
 
 Le [sous-manifeste d’audit](../../../src/mysql_storage/owned_origin/preparation/audit_manifest.rs)
 compose le [DDL d’audit partagé](../../../schema/mysql/audit-v1.sql) et le
-[DDL MySQL des projections de revue](../../../schema/mysql/review-owned-v1.sql).
+[DDL MySQL des projections de revue](../../../schema/mysql/review-owned-v1.sql),
+avec cinq [projections egress](../../../schema/mysql/egress-owned-v1.sql)
+exclusives au format 15.
 Après les créations internes, la même connexion verrouillée relit dans une
-transaction de lecture les quatre tables InnoDB, les colonnes, les index et
-les contraintes. Elle compare notamment le format choisi, l’expression qui
-réserve l’unicité aux bindings actifs et les trois clés étrangères vers
-l’événement d’audit du même schéma. Elle exige que les quatre tables soient
-vides, y compris le singleton, l’autorité et les bindings. Une reprise
-refuse ce socle comme cible partielle. Le compte opérateur doit aussi
-pouvoir référencer la table d’audit et garder `foreign_key_checks` et
+transaction de lecture les quatre tables InnoDB du format 14 ou les neuf
+du format 15, avec leurs colonnes, index et contraintes. Une table egress
+en 14 ou une table egress manquante en 15 entraîne un refus. Le contrôle
+compare l’expression qui réserve l’unicité aux bindings actifs et les
+clés étrangères, y compris les colonnes ordonnées des liens composites.
+Toutes les tables doivent être vides, y compris les singletons et projections.
+Une reprise refuse ce socle comme cible partielle. Le compte opérateur doit
+pouvoir référencer les tables de la cible et garder `foreign_key_checks` et
 `unique_checks` actifs dans la session d’installation.
 
 - **Formats 14 et 15.** Le DDL MySQL reprend les colonnes des projections
@@ -76,9 +80,14 @@ pouvoir référencer la table d’audit et garder `foreign_key_checks` et
   uniques des bindings actifs. Le rejeu MySQL reste à écrire avec une
   ancre de création neuve. Le lecteur SQLite valide une ancre de conversion
   13→14 et le dépôt MySQL ne publie aucune ancre équivalente.
-- **Format 15.** Il manque aussi le DDL MySQL et le rejeu des cinq projections
-  `egress_policy_*`, avec leur genèse et leurs réservations durables.
-  [Schéma SQLite 15](../../../src/audit/egress/schema.rs)
+- **Format 15.** Le DDL reprend les clés tenant/session, les références à
+  l’audit et la réservation fixe d’un événement et de 98 304 octets. La clé
+  réservation → tête est immédiate sur MySQL. Le futur écrivain devra
+  comptabiliser la réservation prévue dans la transaction avant l’append,
+  puis écrire la révision et la tête avant la ligne de réservation. La genèse,
+  le rejeu durable et la validation de cette séquence restent à livrer.
+  [Schéma SQLite 15](../../../src/audit/egress/schema.rs) ·
+  [Ordre des écritures SQLite](../../../src/audit/egress/mutation.rs)
 - **Publication commune.** Les projections MySQL existantes couvrent une partie
   du socle. Le lecteur MySQL d’origine actuel passe par le binding v1 et les
   relectures Legacy. Il reste à attester ensemble tous les marqueurs du
@@ -94,7 +103,11 @@ pouvoir référencer la table d’audit et garder `foreign_key_checks` et
   d’une forme divergente. `owned_review_manifest_rejects_changed_binding_and_audit_links`
   vérifie le refus d’une expression générée ou d’une cible de clé étrangère
   divergente. `owned_review_ddl_preserves_active_uniqueness_and_audit_references`
-  vérifie les clauses du DDL de revue. L’oracle ignoré
+  vérifie les clauses du DDL de revue. Les tests purs
+  `owned_egress_ddl_is_selected_only_for_format_15` et
+  `owned_egress_manifest_rejects_wrong_format_and_composite_edges` couvrent
+  la sélection du bloc et le refus d’un catalogue ou d’un lien composite
+  divergent. L’oracle ignoré
   `owned_audit_tables_remain_unpublished_and_refuse_reentry` exerce le
   sous-manifeste SQL sur des cibles séparées, puis le refus de reprise et le
   refus Legacy. Il reste à exécuter sur MySQL 8.4.

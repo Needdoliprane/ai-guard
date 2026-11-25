@@ -1,6 +1,6 @@
-//! Unpublished audit and review tables on a verified empty MySQL owned target.
+//! Unpublished tables on a verified empty MySQL owned target.
 
-use super::{CheckedEmptyTarget, audit_manifest, driver_error};
+use super::{CheckedEmptyTarget, audit_manifest, driver_error, egress_manifest};
 use anyhow::{Context, Result, ensure};
 use mysql_async::prelude::Queryable;
 
@@ -69,13 +69,18 @@ fn review_tables_ddl() -> Result<[&'static str; 2]> {
 }
 
 /// Called after the full empty-target check on this locked connection.
-/// The singleton, audit events and review projections stay empty.
+/// The singleton, audit events and all projections stay empty.
 pub(super) async fn install(target: CheckedEmptyTarget<'_>, version: u16) -> Result<()> {
     let CheckedEmptyTarget { conn, lock } = target;
     let (event, state) = audit_tables_ddl(version)?;
     let [authority, bindings] = review_tables_ddl()?;
+    let egress =
+        egress_manifest::ddl(version).context("unexpected egress DDL for the owned format")?;
     audit_manifest::require_empty_constraints(conn).await?;
-    for statement in [event, state.as_str(), authority, bindings] {
+    for statement in [event, state.as_str(), authority, bindings]
+        .into_iter()
+        .chain(egress)
+    {
         lock.verify(conn).await?;
         conn.query_drop(statement).await.map_err(driver_error)?;
     }

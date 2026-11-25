@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 mod audit_manifest;
 mod audit_tables;
+mod egress_manifest;
 #[cfg(test)]
 mod qa;
 

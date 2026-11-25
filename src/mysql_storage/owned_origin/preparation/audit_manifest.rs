@@ -1,6 +1,6 @@
-//! Physical manifest of the unpublished audit and review tables.
+//! Physical manifest of the unpublished audit, review and format-15 egress tables.
 
-use super::{OwnedAuditLock, decode_row, driver_error};
+use super::{OwnedAuditLock, decode_row, driver_error, egress_manifest as egress};
 use anyhow::{Result, ensure};
 use mysql_async::{
     Conn, IsolationLevel, Row, TxOpts,
@@ -13,9 +13,21 @@ const REVIEW_AUTHORITY: &str = "review_authority_meta";
 const REVIEW_BINDINGS: &str = "runner_review_bindings";
 
 type Column = (String, String, String, String, u8, String);
-type Index = (String, String, Option<String>, u8, u8);
+type Index = (String, String, Option<String>, u8, u8, u8);
 type Constraint = (String, String, String, String, Option<String>);
-type ForeignKey = (String, String, String, String, String, u8);
+type ForeignKey = (String, String, String, String, String, u8, u8);
+
+pub(super) type ExpectedColumn = (&'static str, &'static str, &'static str, &'static str, u8);
+pub(super) type ExpectedIndex = (&'static str, &'static str, Option<&'static str>, u8, u8, u8);
+pub(super) type ExpectedForeignKey = (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    u8,
+    u8,
+);
 
 const FOREIGN_KEYS: [(&str, &str, &str, &str, &str, u8); 3] = [
     (
@@ -46,7 +58,7 @@ const FOREIGN_KEYS: [(&str, &str, &str, &str, &str, u8); 3] = [
 
 // Ordered by table and ordinal position. The final flag requires no non-null
 // default or character collation, and either an ordinary or stored column.
-const COLUMNS: [(&str, &str, &str, &str, u8); 32] = [
+const COLUMNS: [ExpectedColumn; 32] = [
     (EVENT, "seq", "bigint", "NO", 1),
     (EVENT, "event_id", "varbinary(64)", "NO", 1),
     (EVENT, "received_at", "varbinary(32)", "NO", 1),
@@ -87,7 +99,7 @@ const COLUMNS: [(&str, &str, &str, &str, u8); 32] = [
     ),
 ];
 
-type ExpectedConstraint<'a> = (
+pub(super) type ExpectedConstraint<'a> = (
     &'static str,
     &'static str,
     &'static str,
@@ -279,7 +291,30 @@ fn expected_constraints(version_check: &str) -> [ExpectedConstraint<'_>; 29] {
     ]
 }
 
-fn columns_match(columns: &[Column]) -> bool {
+fn expected_in_format<T: Copy>(
+    common: &[T],
+    extension: &[T],
+    version: u16,
+    table: impl Fn(&T) -> &'static str,
+) -> Vec<T> {
+    let mut expected = common.to_vec();
+    if version == 15 {
+        expected.extend_from_slice(extension);
+        // Keep ordinal positions and constraint names ordered within each table.
+        expected.sort_by_key(table);
+    }
+    expected
+}
+
+fn inventory_matches(actual: &[(u64, u64, u64, u8)], version: u16) -> bool {
+    match version {
+        14 => actual == [(4, 4, 0, 1)],
+        15 => actual == [(9, 4, 5, 1)],
+        _ => false,
+    }
+}
+
+fn columns_match(columns: &[Column], version: u16) -> bool {
     columns
         .iter()
         .map(|(table, column, ty, nullable, shape, _)| {
@@ -291,7 +326,12 @@ fn columns_match(columns: &[Column]) -> bool {
                 *shape,
             )
         })
-        .eq(COLUMNS)
+        .eq(expected_in_format(
+            &COLUMNS,
+            &egress::COLUMNS,
+            version,
+            |row| row.0,
+        ))
         && columns.iter().all(|(table, column, _, _, _, expression)| {
             generation_matches(table, column, expression)
         })
@@ -365,24 +405,37 @@ const INDEXES: [(&str, &str, Option<&str>, u8, u8); 12] = [
     ),
 ];
 
-fn indexes_match(indexes: &[Index]) -> bool {
+fn indexes_match(indexes: &[Index], version: u16) -> bool {
+    let common = INDEXES
+        .map(|(table, name, column, position, shape)| (table, name, column, position, 0, shape));
     indexes
         .iter()
-        .map(|(table, name, column, position, shape)| {
+        .map(|(table, name, column, position, non_unique, shape)| {
             (
                 table.as_str(),
                 name.as_str(),
                 column.as_deref(),
                 *position,
+                *non_unique,
                 *shape,
             )
         })
-        .eq(INDEXES)
+        .eq(expected_in_format(
+            &common,
+            &egress::INDEXES,
+            version,
+            |row| row.0,
+        ))
 }
 
 fn constraints_match(constraints: &[Constraint], version: u16) -> bool {
     let version_check = format!("(`schema_version` = {version})");
-    let expected = expected_constraints(&version_check);
+    let expected = expected_in_format(
+        &expected_constraints(&version_check),
+        &egress::CONSTRAINTS,
+        version,
+        |row| row.0,
+    );
     constraints.len() == expected.len()
         && constraints.iter().zip(expected).all(|(actual, expected)| {
             let (table, name, kind, enforced, clause) = actual;
@@ -408,19 +461,28 @@ fn expressions_match(actual: Option<&str>, expected: Option<&str>) -> bool {
         || expected.is_some_and(|rule| actual == Some(rule.replace('`', "").as_str()))
 }
 
-fn foreign_keys_match(keys: &[ForeignKey]) -> bool {
+fn foreign_keys_match(keys: &[ForeignKey], version: u16) -> bool {
+    let common = FOREIGN_KEYS.map(|(table, key, column, parent, reference, exact)| {
+        (table, key, column, parent, reference, 1, exact)
+    });
     keys.iter()
-        .map(|(table, key, column, parent, reference, exact)| {
+        .map(|(table, key, column, parent, reference, position, exact)| {
             (
                 table.as_str(),
                 key.as_str(),
                 column.as_str(),
                 parent.as_str(),
                 reference.as_str(),
+                *position,
                 *exact,
             )
         })
-        .eq(FOREIGN_KEYS)
+        .eq(expected_in_format(
+            &common,
+            &egress::FOREIGN_KEYS,
+            version,
+            |row| row.0,
+        ))
 }
 
 async fn metadata_rows<T: FromRow>(sql: &str, connection: &mut impl Queryable) -> Result<Vec<T>> {
@@ -437,7 +499,7 @@ async fn read_constraints(connection: &mut impl Queryable) -> Result<Vec<Constra
          ON t.CONSTRAINT_TYPE = 'CHECK' AND BINARY c.CONSTRAINT_SCHEMA = BINARY t.CONSTRAINT_SCHEMA \
          AND BINARY c.CONSTRAINT_NAME = BINARY t.CONSTRAINT_NAME \
          WHERE BINARY t.TABLE_SCHEMA = BINARY DATABASE() \
-         ORDER BY BINARY t.TABLE_NAME, BINARY t.CONSTRAINT_NAME LIMIT 30",
+         ORDER BY BINARY t.TABLE_NAME, BINARY t.CONSTRAINT_NAME LIMIT 56",
         connection,
     ).await
 }
@@ -455,12 +517,12 @@ pub(super) async fn require_empty_constraints(conn: &mut Conn) -> Result<()> {
     .await?;
     ensure!(
         checks == [(1, 1)],
-        "MySQL owned review constraints must be enabled"
+        "MySQL owned preparation constraints must be enabled"
     );
     Ok(())
 }
 
-/// Attest the freshly installed audit and review tables and their empty state.
+/// Attest the freshly installed manifest and its empty state.
 pub(super) async fn verify_unpublished(
     conn: &mut Conn,
     lock: &OwnedAuditLock,
@@ -480,10 +542,13 @@ pub(super) async fn verify_unpublished(
         .map_err(driver_error)?;
     let verification = async {
         lock.verify(&mut tx).await?;
-        let inventory: Vec<(u64, u64, u8)> = metadata_rows(
+        let inventory = metadata_rows(
             "SELECT COUNT(*), COUNT(CASE WHEN TABLE_TYPE = 'BASE TABLE' AND ENGINE = 'InnoDB' \
              AND BINARY TABLE_NAME IN ('ai_guard_audit_event', 'ai_guard_audit_state', \
                  'review_authority_meta', 'runner_review_bindings') THEN 1 END), \
+             COUNT(CASE WHEN TABLE_TYPE = 'BASE TABLE' AND ENGINE = 'InnoDB' \
+             AND BINARY TABLE_NAME IN ('egress_policy_meta', 'egress_policy_revisions', \
+                 'egress_policy_heads', 'egress_policy_operations', 'egress_policy_reservations') THEN 1 END), \
              NOT EXISTS (SELECT 1 FROM information_schema.ROUTINES WHERE BINARY ROUTINE_SCHEMA = BINARY DATABASE()) \
              AND NOT EXISTS (SELECT 1 FROM information_schema.EVENTS WHERE BINARY EVENT_SCHEMA = BINARY DATABASE()) \
              AND NOT EXISTS (SELECT 1 FROM information_schema.TRIGGERS WHERE BINARY TRIGGER_SCHEMA = BINARY DATABASE()) \
@@ -492,7 +557,7 @@ pub(super) async fn verify_unpublished(
              FROM information_schema.TABLES WHERE BINARY TABLE_SCHEMA = BINARY DATABASE()",
             &mut tx,
         ).await?;
-        ensure!(inventory == [(4, 4, 1)], "unexpected MySQL owned preparation objects");
+        ensure!(inventory_matches(&inventory, version), "unexpected MySQL owned preparation objects");
 
         // Read the tables before their column and index metadata to retain their
         // metadata locks for the rest of this snapshot.
@@ -504,6 +569,17 @@ pub(super) async fn verify_unpublished(
             &mut tx,
         ).await?;
         ensure!(empty == [1], "MySQL unpublished audit or review tables contain rows");
+        if version == 15 {
+            let empty: Vec<u8> = metadata_rows(
+                "SELECT NOT EXISTS (SELECT 1 FROM egress_policy_meta) \
+                 AND NOT EXISTS (SELECT 1 FROM egress_policy_revisions) \
+                 AND NOT EXISTS (SELECT 1 FROM egress_policy_heads) \
+                 AND NOT EXISTS (SELECT 1 FROM egress_policy_operations) \
+                 AND NOT EXISTS (SELECT 1 FROM egress_policy_reservations)",
+                &mut tx,
+            ).await?;
+            ensure!(empty == [1], "MySQL unpublished egress tables contain rows");
+        }
 
         let columns = metadata_rows(
             "SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, \
@@ -512,24 +588,24 @@ pub(super) async fn verify_unpublished(
                   OR (BINARY EXTRA = 'STORED GENERATED' AND GENERATION_EXPRESSION <> '')), \
              IF(OCTET_LENGTH(GENERATION_EXPRESSION) <= 512, GENERATION_EXPRESSION, NULL) \
              FROM information_schema.COLUMNS WHERE BINARY TABLE_SCHEMA = BINARY DATABASE() \
-             ORDER BY BINARY TABLE_NAME, ORDINAL_POSITION LIMIT 33",
+             ORDER BY BINARY TABLE_NAME, ORDINAL_POSITION LIMIT 59",
             &mut tx,
         ).await?;
-        ensure!(columns_match(&columns), "MySQL owned preparation column manifest mismatch");
+        ensure!(columns_match(&columns, version), "MySQL owned preparation column manifest mismatch");
 
         let indexes = metadata_rows(
-            "SELECT s.TABLE_NAME, s.INDEX_NAME, s.COLUMN_NAME, s.SEQ_IN_INDEX, \
-             s.NON_UNIQUE = 0 AND s.SUB_PART IS NULL AND s.COLLATION = 'A' \
+            "SELECT s.TABLE_NAME, s.INDEX_NAME, s.COLUMN_NAME, s.SEQ_IN_INDEX, s.NON_UNIQUE, \
+             s.SUB_PART IS NULL AND s.COLLATION = 'A' \
              AND s.INDEX_TYPE = 'BTREE' AND s.IS_VISIBLE = 'YES' AND s.EXPRESSION IS NULL \
              FROM information_schema.STATISTICS AS s WHERE BINARY s.TABLE_SCHEMA = BINARY DATABASE() \
-             ORDER BY BINARY s.TABLE_NAME, BINARY s.INDEX_NAME, s.SEQ_IN_INDEX LIMIT 13",
+             ORDER BY BINARY s.TABLE_NAME, BINARY s.INDEX_NAME, s.SEQ_IN_INDEX LIMIT 29",
             &mut tx,
         ).await?;
-        ensure!(indexes_match(&indexes), "MySQL owned preparation index manifest mismatch");
+        ensure!(indexes_match(&indexes, version), "MySQL owned preparation index manifest mismatch");
         let constraints = read_constraints(&mut tx).await?;
         ensure!(constraints_match(&constraints, version), "MySQL owned preparation constraint manifest mismatch");
         let keys = read_foreign_keys(&mut tx).await?;
-        ensure!(foreign_keys_match(&keys), "MySQL owned review audit linkage mismatch");
+        ensure!(foreign_keys_match(&keys, version), "MySQL owned preparation foreign key mismatch");
         lock.verify(&mut tx).await
     }.await;
     tx.rollback().await.map_err(driver_error)?;
@@ -539,8 +615,8 @@ pub(super) async fn verify_unpublished(
 async fn read_foreign_keys(connection: &mut impl Queryable) -> Result<Vec<ForeignKey>> {
     metadata_rows(
         "SELECT k.TABLE_NAME, k.CONSTRAINT_NAME, k.COLUMN_NAME, \
-                k.REFERENCED_TABLE_NAME, k.REFERENCED_COLUMN_NAME, \
-                k.ORDINAL_POSITION = 1 AND k.POSITION_IN_UNIQUE_CONSTRAINT = 1 \
+                k.REFERENCED_TABLE_NAME, k.REFERENCED_COLUMN_NAME, k.ORDINAL_POSITION, \
+                k.POSITION_IN_UNIQUE_CONSTRAINT = k.ORDINAL_POSITION \
                 AND BINARY k.REFERENCED_TABLE_SCHEMA = BINARY DATABASE() \
                 AND r.UNIQUE_CONSTRAINT_NAME = 'PRIMARY' AND r.MATCH_OPTION = 'NONE' \
                 AND r.UPDATE_RULE = 'RESTRICT' AND r.DELETE_RULE = 'RESTRICT' \
@@ -550,7 +626,7 @@ async fn read_foreign_keys(connection: &mut impl Queryable) -> Result<Vec<Foreig
          AND BINARY r.TABLE_NAME = BINARY k.TABLE_NAME \
          AND BINARY r.CONSTRAINT_NAME = BINARY k.CONSTRAINT_NAME \
          WHERE BINARY k.TABLE_SCHEMA = BINARY DATABASE() AND k.REFERENCED_TABLE_NAME IS NOT NULL \
-         ORDER BY BINARY k.TABLE_NAME, BINARY k.CONSTRAINT_NAME, k.ORDINAL_POSITION LIMIT 4",
+         ORDER BY BINARY k.TABLE_NAME, BINARY k.CONSTRAINT_NAME, k.ORDINAL_POSITION LIMIT 13",
         connection,
     )
     .await
@@ -578,9 +654,23 @@ mod tests {
                 )
             })
             .into();
-        assert!(columns_match(&columns));
+        assert!(columns_match(&columns, 14));
+        let mut extended = columns.clone();
+        extended.extend(egress::COLUMNS.map(|(t, c, ty, nullable, shape)| {
+            (
+                t.into(),
+                c.into(),
+                ty.into(),
+                nullable.into(),
+                shape,
+                String::new(),
+            )
+        }));
+        extended.sort_by(|left, right| left.0.cmp(&right.0));
+        assert!(columns_match(&extended, 15));
+        assert!(!columns_match(&extended, 14));
         columns[2].2 = "varbinary(31)".into();
-        assert!(!columns_match(&columns));
+        assert!(!columns_match(&columns, 14));
         columns[2].2 = "varbinary(32)".into();
         columns.push((
             STATE.into(),
@@ -590,7 +680,7 @@ mod tests {
             1,
             String::new(),
         ));
-        assert!(!columns_match(&columns));
+        assert!(!columns_match(&columns, 14));
 
         let mut indexes: [Index; 12] = INDEXES.map(|(table, name, column, position, shape)| {
             (
@@ -598,17 +688,38 @@ mod tests {
                 name.into(),
                 column.map(str::to_owned),
                 position,
+                0,
                 shape,
             )
         });
-        assert!(indexes_match(&indexes));
+        assert!(indexes_match(&indexes, 14));
+        let mut extended = indexes.to_vec();
+        extended.extend(egress::INDEXES.map(|(t, n, c, pos, non_unique, shape)| {
+            (
+                t.into(),
+                n.into(),
+                c.map(str::to_owned),
+                pos,
+                non_unique,
+                shape,
+            )
+        }));
+        extended.sort_by(|left, right| left.0.cmp(&right.0));
+        assert!(indexes_match(&extended, 15));
+        assert!(!indexes_match(&extended, 14));
+        let key = extended
+            .iter_mut()
+            .find(|row| row.1 == "egress_heads_revision_key")
+            .unwrap();
+        key.4 = 0;
+        assert!(!indexes_match(&extended, 15));
         indexes[9].3 = 1;
-        assert!(!indexes_match(&indexes));
+        assert!(!indexes_match(&indexes, 14));
         indexes[9].3 = 2;
-        indexes[1].4 = 0;
-        assert!(!indexes_match(&indexes));
-        indexes[1].4 = 1;
-        assert!(!indexes_match(&indexes[..11]));
+        indexes[1].5 = 0;
+        assert!(!indexes_match(&indexes, 14));
+        indexes[1].5 = 1;
+        assert!(!indexes_match(&indexes[..11], 14));
     }
 
     #[test]
@@ -633,33 +744,70 @@ mod tests {
                     column.into(),
                     parent.into(),
                     reference.into(),
+                    1,
                     exact,
                 )
             })
             .into();
-        assert!(foreign_keys_match(&links));
+        assert!(foreign_keys_match(&links, 14));
         links[2].3 = "other_audit_event".into();
-        assert!(!foreign_keys_match(&links));
+        assert!(!foreign_keys_match(&links, 14));
         links[2].3 = EVENT.into();
-        links[2].5 = 0;
-        assert!(!foreign_keys_match(&links));
+        links[2].6 = 0;
+        assert!(!foreign_keys_match(&links, 14));
+    }
+
+    #[test]
+    fn owned_egress_manifest_rejects_wrong_format_and_composite_edges() {
+        assert!(inventory_matches(&[(4, 4, 0, 1)], 14));
+        assert!(inventory_matches(&[(9, 4, 5, 1)], 15));
+        assert!(!inventory_matches(&[(5, 4, 1, 1)], 14));
+        assert!(!inventory_matches(&[(4, 3, 1, 1)], 14));
+        assert!(!inventory_matches(&[(8, 4, 4, 1)], 15));
+        assert!(!inventory_matches(&[(9, 4, 5, 1)], 14));
+
+        let common = FOREIGN_KEYS.map(|(t, n, c, p, r, exact)| (t, n, c, p, r, 1, exact));
+        let mut links: Vec<ForeignKey> =
+            expected_in_format(&common, &egress::FOREIGN_KEYS, 15, |row| row.0)
+                .into_iter()
+                .map(|(t, n, c, p, r, pos, exact)| {
+                    (t.into(), n.into(), c.into(), p.into(), r.into(), pos, exact)
+                })
+                .collect();
+        assert!(foreign_keys_match(&links, 15));
+        assert!(!foreign_keys_match(&links, 14));
+        let scope_id = links
+            .iter()
+            .position(|row| row.1 == "egress_heads_revision_ref" && row.2 == "scope_id")
+            .unwrap();
+        links[scope_id].5 = 1;
+        assert!(!foreign_keys_match(&links, 15));
+        links[scope_id].5 = 2;
+        links[scope_id].4 = "scope_kind".into();
+        assert!(!foreign_keys_match(&links, 15));
     }
 
     #[test]
     fn owned_audit_manifest_requires_the_exact_enforced_checks() {
         for version in [14, 15] {
             let clause = format!("(`schema_version` = {version})");
-            let mut constraints: Vec<Constraint> = expected_constraints(&clause)
-                .map(|(table, name, kind, enforced, rule)| {
-                    (
-                        table.into(),
-                        name.into(),
-                        kind.into(),
-                        enforced.into(),
-                        rule.map(str::to_owned),
-                    )
-                })
-                .into();
+            let mut constraints: Vec<Constraint> = expected_in_format(
+                &expected_constraints(&clause),
+                &egress::CONSTRAINTS,
+                version,
+                |row| row.0,
+            )
+            .into_iter()
+            .map(|(table, name, kind, enforced, rule)| {
+                (
+                    table.into(),
+                    name.into(),
+                    kind.into(),
+                    enforced.into(),
+                    rule.map(str::to_owned),
+                )
+            })
+            .collect();
             assert!(constraints_match(&constraints, version));
             assert!(!constraints_match(
                 &constraints,
@@ -667,6 +815,17 @@ mod tests {
             ));
             constraints[11].4 = Some(format!("(schema_version = {version})"));
             assert!(constraints_match(&constraints, version));
+            if version == 15 {
+                let reservation = constraints
+                    .iter()
+                    .position(|row| row.1 == "egress_reservations_bytes")
+                    .unwrap();
+                let original = constraints[reservation]
+                    .4
+                    .replace("(`bytes` = 98303)".into());
+                assert!(!constraints_match(&constraints, version));
+                constraints[reservation].4 = original;
+            }
             constraints[5].3 = "NO".into();
             assert!(!constraints_match(&constraints, version));
             constraints[5].3 = "YES".into();
