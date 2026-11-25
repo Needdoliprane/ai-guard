@@ -51,7 +51,8 @@ impl std::error::Error for BootstrapStdinSubmitError {}
 
 /// Implemented by the original worker Prepare owner. It holds that slot's
 /// generation gate across both the caller's synchronous veto and the write.
-pub(crate) trait NativeBootstrapRelease: Send {
+/// Sharing a reference for inspection cannot take the consuming write right.
+pub(crate) trait NativeBootstrapRelease: Send + Sync {
     fn submit(
         self: Box<Self>,
         authority: &RuntimeAuthority,
