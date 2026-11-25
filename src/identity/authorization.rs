@@ -109,15 +109,22 @@ impl AuthorizedScopeV1 {
         self.capability_ceiling = Some(self.capabilities.clone());
         Ok(self)
     }
+    pub(super) fn require_oidc_capability_ceiling(&self) -> Result<(), IdentityFailureV1> {
+        if matches!(self.principal, PrincipalRefV1::HumanOidc { .. })
+            && self.capability_ceiling.is_none()
+        {
+            return Err(IdentityFailureV1::PermissionDenied);
+        }
+        Ok(())
+    }
+
     pub(crate) fn retain_ceiling_on_revalidation(
         &self,
         current: Self,
     ) -> Result<Self, IdentityFailureV1> {
+        self.require_oidc_capability_ceiling()?;
         match &self.capability_ceiling {
             Some(ceiling) => current.restrict_capabilities(ceiling.clone()),
-            None if matches!(self.principal, PrincipalRefV1::HumanOidc { .. }) => {
-                Err(IdentityFailureV1::PermissionDenied)
-            }
             None => Ok(current),
         }
     }

@@ -9,6 +9,7 @@ mod entropy;
 mod grants;
 mod memberships;
 mod operations;
+mod session_control;
 mod summary;
 mod types;
 
@@ -22,6 +23,7 @@ pub(crate) use entropy::random_bytes;
 pub use grants::*;
 pub use memberships::*;
 pub use operations::*;
+pub use session_control::{SessionLaunchTargetFailureV1, SessionLaunchTargetPolicyV1};
 pub use summary::*;
 pub use types::*;
 

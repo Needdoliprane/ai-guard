@@ -15,6 +15,7 @@ pub mod kubernetes_admission;
 mod kubernetes_admission_tests;
 pub mod kubernetes_session;
 pub(crate) mod review_binding;
+pub mod session_control;
 mod supervision;
 pub use supervision::{
     ArmReceiptV1, ArmResultV1, ArmSubjectV1, ArmV1, ArmedStartClaimV1, BindLegacyIntentV1,
