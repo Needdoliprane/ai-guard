@@ -1,5 +1,6 @@
 //! Private batch journal operations.
 use super::*;
+use crate::broker::writer::WriterCallFailure;
 use diagnostics::{CreatedExchangeStage, CreatedReloadSite};
 use std::future::Future;
 
@@ -38,6 +39,8 @@ enum PublicationMode {
     FailClosed,
     /// Same fail-closed outcome, with the local stage of a Created request.
     CreatedPending,
+    /// Report a failure of the separate local write of a Created response.
+    CreatedAck,
     /// Accept the outcome only if the durable head is exactly this checkpoint.
     ConfirmExactHead,
 }
@@ -57,6 +60,23 @@ impl PublicationMode {
         } else {
             result
         }
+    }
+
+    fn advance_failure(
+        self,
+        error: anyhow::Error,
+        writer_failure: Option<WriterCallFailure>,
+    ) -> anyhow::Error {
+        let stage = match self {
+            Self::CreatedPending => CreatedExchangeStage::AdvancePending,
+            Self::CreatedAck => CreatedExchangeStage::AdvanceAck,
+            _ => return error,
+        };
+        let error = match writer_failure {
+            Some(failure) => error.context(failure),
+            None => error,
+        };
+        error.context(stage)
     }
 }
 
@@ -96,7 +116,7 @@ async fn commit_patch_with(
         tests::before_commit()?;
         let proposed = (mode == PublicationMode::ConfirmExactHead).then(|| next.clone());
         match writer
-            .advance_lifecycle(operation, job.head().clone(), next)
+            .advance_lifecycle_diagnosed(operation, job.head().clone(), next)
             .await
         {
             Ok(receipt) => {
@@ -113,23 +133,20 @@ async fn commit_patch_with(
                     draft,
                 }));
             }
-            Err(JournalError::Conflict) => continue,
-            Err(JournalError::Io) if proposed.is_some() => {
+            Err(WriterCallFailure::Actor(JournalError::Conflict)) => continue,
+            Err(failure) if failure.journal_error() == JournalError::Io && proposed.is_some() => {
                 let proposed = proposed.context("proposed checkpoint is retained")?;
                 return confirm_exact_head(writer, operation, scope, job.head(), &proposed, draft)
                     .await;
             }
-            Err(error) => {
+            Err(failure) => {
                 // The actor can fail before or after writing a checkpoint.
                 // This boundary carries no proof of publication.
-                return mode.at_created(Err(error.into()), CreatedExchangeStage::AdvancePending);
+                return Err(mode.advance_failure(failure.journal_error().into(), Some(failure)));
             }
         }
     }
-    mode.at_created(
-        Err(anyhow!("journal contention requires reconciliation")),
-        CreatedExchangeStage::AdvancePending,
-    )
+    Err(mode.advance_failure(anyhow!("journal contention requires reconciliation"), None))
 }
 
 /// A reply timeout after the actor accepted this advance is an unknown
@@ -395,6 +412,10 @@ impl<'a> Execution<'a> {
             // underlying error (which may carry a provider's private text).
             if let Some(reload) = diagnostic.created_reload() {
                 eprintln!("broker batch Created reload diagnostic delivery incomplete: {reload:?}");
+            } else if let Some(advance) = diagnostic.created_advance() {
+                eprintln!(
+                    "broker batch Created advance diagnostic delivery incomplete: {advance:?}"
+                );
             } else if let Some(step) = diagnostic.created_exchange_step() {
                 eprintln!("broker batch diagnostic delivery incomplete at {step:?}");
             } else if let Some(binding) = diagnostic.full3_binding() {
@@ -500,6 +521,8 @@ impl<'a> Execution<'a> {
         // other unknown publication, and any replayed claim, fails closed.
         let uncertain = if fresh && emits_once(&completed) {
             PublicationMode::ConfirmExactHead
+        } else if pending_mode == PublicationMode::CreatedPending {
+            PublicationMode::CreatedAck
         } else {
             PublicationMode::FailClosed
         };

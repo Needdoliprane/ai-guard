@@ -54,6 +54,7 @@ pub(super) enum CreatedExchangeStage {
     Reload(CreatedReloadSite),
     PreparePending,
     AdvancePending,
+    AdvanceAck,
 }
 
 impl CreatedExchangeStage {
@@ -62,6 +63,17 @@ impl CreatedExchangeStage {
             Self::Reload(_) => BrokerStep::CreatedExchangeReload,
             Self::PreparePending => BrokerStep::CreatedExchangePreparePending,
             Self::AdvancePending => BrokerStep::CreatedExchangeAdvancePending,
+            // The optional diagnostic distinguishes the ACK write while
+            // preserving the existing outer code for readers of V1.
+            Self::AdvanceAck => BrokerStep::CreatedExchange,
+        }
+    }
+
+    fn advance_stage(self) -> Option<CreatedAdvanceStage> {
+        match self {
+            Self::AdvancePending => Some(CreatedAdvanceStage::Pending),
+            Self::AdvanceAck => Some(CreatedAdvanceStage::Acknowledgement),
+            _ => None,
         }
     }
 }
@@ -83,7 +95,7 @@ pub(super) enum CreatedReloadSite {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum CreatedReloadCause {
+enum CreatedWriterCause {
     QueueFull,
     ReplyTimeout,
     Unavailable,
@@ -94,28 +106,50 @@ enum CreatedReloadCause {
 pub(super) struct CreatedReloadDiagnostic {
     site: CreatedReloadSite,
     #[serde(skip_serializing_if = "Option::is_none")]
-    cause: Option<CreatedReloadCause>,
+    cause: Option<CreatedWriterCause>,
     #[serde(skip_serializing_if = "Option::is_none")]
     journal_code: Option<&'static str>,
 }
 
 impl CreatedReloadSite {
     fn diagnostic(self, error: &anyhow::Error) -> CreatedReloadDiagnostic {
-        use CreatedReloadCause as Cause;
-        let (cause, journal_code) = match error.downcast_ref::<WriterCallFailure>() {
-            Some(WriterCallFailure::QueueFull) => (Some(Cause::QueueFull), None),
-            Some(WriterCallFailure::ReplyTimeout) => (Some(Cause::ReplyTimeout), None),
-            Some(WriterCallFailure::Unavailable) => (Some(Cause::Unavailable), None),
-            Some(WriterCallFailure::Actor(error)) => {
-                (Some(Cause::ActorError), Some(journal_failure_code(error)))
-            }
-            None => (None, None),
-        };
+        let (cause, journal_code) = created_writer_failure(error);
         CreatedReloadDiagnostic {
             site: self,
             cause,
             journal_code,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CreatedAdvanceStage {
+    Pending,
+    Acknowledgement,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct CreatedAdvanceDiagnostic {
+    stage: CreatedAdvanceStage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cause: Option<CreatedWriterCause>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    journal_code: Option<&'static str>,
+}
+
+fn created_writer_failure(
+    error: &anyhow::Error,
+) -> (Option<CreatedWriterCause>, Option<&'static str>) {
+    use CreatedWriterCause as Cause;
+    match error.downcast_ref::<WriterCallFailure>() {
+        Some(WriterCallFailure::QueueFull) => (Some(Cause::QueueFull), None),
+        Some(WriterCallFailure::ReplyTimeout) => (Some(Cause::ReplyTimeout), None),
+        Some(WriterCallFailure::Unavailable) => (Some(Cause::Unavailable), None),
+        Some(WriterCallFailure::Actor(error)) => {
+            (Some(Cause::ActorError), Some(journal_failure_code(error)))
+        }
+        None => (None, None),
     }
 }
 
@@ -286,6 +320,8 @@ pub(super) struct BatchFailureDiagnosticV1 {
     full3_binding: Option<Full3BindingDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     created_reload: Option<CreatedReloadDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_advance: Option<CreatedAdvanceDiagnostic>,
 }
 
 impl BatchFailureDiagnosticV1 {
@@ -295,6 +331,10 @@ impl BatchFailureDiagnosticV1 {
 
     pub(super) fn created_reload(&self) -> Option<&CreatedReloadDiagnostic> {
         self.created_reload.as_ref()
+    }
+
+    pub(super) fn created_advance(&self) -> Option<&CreatedAdvanceDiagnostic> {
+        self.created_advance.as_ref()
     }
 
     pub(super) fn created_exchange_step(&self) -> Option<BrokerStep> {
@@ -329,13 +369,19 @@ pub(super) fn classify(
     };
     let full3_stage = error.downcast_ref::<Full3BindingStage>().copied();
     let created_stage = error.downcast_ref::<CreatedExchangeStage>().copied();
+    let advance_stage = created_stage.and_then(CreatedExchangeStage::advance_stage);
     let broker_step = match error.downcast_ref::<BrokerStep>().copied() {
         Some(BrokerStep::CreatedExchange) => {
             Some(created_stage.map_or(BrokerStep::CreatedExchange, |stage| stage.step()))
         }
         step => step
             .or_else(|| full3_stage.map(|_| BrokerStep::Full3BindingPublication))
-            .or_else(|| registration.as_ref().map(|_| BrokerStep::Registration)),
+            .or_else(|| registration.as_ref().map(|_| BrokerStep::Registration))
+            .or_else(|| {
+                advance_stage
+                    .and(created_stage)
+                    .map(CreatedExchangeStage::step)
+            }),
     };
     let full3_binding = match broker_step {
         Some(BrokerStep::Full3BindingPublication) => {
@@ -346,6 +392,22 @@ pub(super) fn classify(
     let created_reload = match (broker_step, created_stage) {
         (Some(BrokerStep::CreatedExchangeReload), Some(CreatedExchangeStage::Reload(site))) => {
             Some(site.diagnostic(error))
+        }
+        _ => None,
+    };
+    let created_advance = match (broker_step, advance_stage) {
+        (
+            Some(BrokerStep::CreatedExchangeAdvancePending),
+            Some(stage @ CreatedAdvanceStage::Pending),
+        )
+        | (Some(BrokerStep::CreatedExchange), Some(stage @ CreatedAdvanceStage::Acknowledgement)) =>
+        {
+            let (cause, journal_code) = created_writer_failure(error);
+            Some(CreatedAdvanceDiagnostic {
+                stage,
+                cause,
+                journal_code,
+            })
         }
         _ => None,
     };
@@ -362,6 +424,7 @@ pub(super) fn classify(
         registration,
         full3_binding,
         created_reload,
+        created_advance,
     })
 }
 
@@ -382,6 +445,7 @@ pub(super) fn failure_report(
         registration: None,
         full3_binding: None,
         created_reload: None,
+        created_advance: None,
     })
 }
 
@@ -407,6 +471,7 @@ mod tests {
                 CreatedExchangeStage::AdvancePending,
                 "created_exchange_advance_pending",
             ),
+            (CreatedExchangeStage::AdvanceAck, "created_exchange"),
         ] {
             let error = anyhow::anyhow!("{private}")
                 .context(stage)
@@ -419,6 +484,18 @@ mod tests {
                 assert_eq!(report["created_reload"], json!({"site":"rpc_lookup"}));
             } else {
                 assert!(report.get("created_reload").is_none());
+            }
+            match stage {
+                CreatedExchangeStage::AdvancePending => {
+                    assert_eq!(report["created_advance"], json!({"stage":"pending"}));
+                }
+                CreatedExchangeStage::AdvanceAck => {
+                    assert_eq!(
+                        report["created_advance"],
+                        json!({"stage":"acknowledgement"})
+                    );
+                }
+                _ => assert!(report.get("created_advance").is_none()),
             }
             assert!(!report.to_string().contains(private));
         }

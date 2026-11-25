@@ -72,6 +72,7 @@ struct Fixture {
     config: Directory,
     requests: Arc<AtomicUsize>,
     worker_requests: Arc<AtomicUsize>,
+    arm_requests: Arc<AtomicUsize>,
     drop_next_worker_transition_response: Arc<AtomicBool>,
     audit_response_gate: Arc<StdMutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>>,
     gateway: tokio::task::JoinHandle<()>,
@@ -163,6 +164,8 @@ impl Fixture {
         let observed = Arc::clone(&requests);
         let worker_requests = Arc::new(AtomicUsize::new(0));
         let observed_worker_requests = Arc::clone(&worker_requests);
+        let arm_requests = Arc::new(AtomicUsize::new(0));
+        let observed_arm_requests = Arc::clone(&arm_requests);
         let drop_next_worker_transition_response = Arc::new(AtomicBool::new(false));
         let observed_fault = Arc::clone(&drop_next_worker_transition_response);
         let audit_response_gate: Arc<
@@ -181,6 +184,7 @@ impl Fixture {
             move |request: axum::extract::Request, next: axum::middleware::Next| {
                 let observed = Arc::clone(&observed);
                 let observed_worker_requests = Arc::clone(&observed_worker_requests);
+                let observed_arm_requests = Arc::clone(&observed_arm_requests);
                 let observed_fault = Arc::clone(&observed_fault);
                 let observed_audit_response_gate = Arc::clone(&observed_audit_response_gate);
                 async move {
@@ -188,6 +192,12 @@ impl Fixture {
                     let worker_transition = request.method() == axum::http::Method::POST
                         && request.uri().path().starts_with("/control/api/v1/workers/")
                         && request.uri().path().ends_with("/transitions");
+                    if request.method() == axum::http::Method::POST
+                        && request.uri().path().starts_with("/control/api/v1/workers/")
+                        && request.uri().path().ends_with("/arms")
+                    {
+                        observed_arm_requests.fetch_add(1, Ordering::SeqCst);
+                    }
                     let audit_event = request.method() == axum::http::Method::POST
                         && matches!(request.uri().path(), "/api/events" | "/api/v1/events");
                     if decision {
@@ -282,6 +292,7 @@ impl Fixture {
             config,
             requests,
             worker_requests,
+            arm_requests,
             drop_next_worker_transition_response,
             audit_response_gate,
             gateway,
