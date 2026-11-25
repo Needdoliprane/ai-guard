@@ -6,8 +6,8 @@ use crate::{
     broker::{
         egress_owner::{
             channel::{
-                self, ChannelStop, ChannelTermination, ChannelTimes, ConnectAuthorization,
-                EgressControl, LocalQuiescence, OpenedChannel,
+                self, ChannelStop, ChannelTermination, ChannelTimes, EgressControl,
+                LocalQuiescence, OpenedChannel,
             },
             resolve::Resolver,
         },
@@ -202,18 +202,14 @@ impl Execution<'_> {
             // The native authorization supplies the original generation and
             // deadline. This veto has local checks only.
             let mut native_stop: watch::Receiver<bool> = bootstrap.stop_receiver();
-            bootstrap.submit_once(runtime.binding(), &reinspected, head, || {
-                // The only channel-stop sender stays here through the write.
-                // The native owner orders its independent STOP with submission.
-                ensure!(!stop.is_stopped(), "retained egress channel has stopped");
-                self.require_egress_live(exec)
-            })?;
-            let authorization = Arc::new(ConnectAuthorization::new(
-                self.executor.clock.clone(),
-                self.context.cancel_generation().clone(),
-                self.generation,
-                native_stop.clone(),
-            ));
+            let authorization =
+                bootstrap.submit_once(runtime.binding(), &reinspected, head, || {
+                    // The only channel-stop sender stays here through the write.
+                    // The native owner orders its independent STOP with submission.
+                    ensure!(!stop.is_stopped(), "retained egress channel has stopped");
+                    self.require_egress_live(exec)
+                })?;
+            let authorization = Arc::from(authorization);
             let stop = Arc::new(stop);
             let task_stop = Arc::clone(&stop);
             let task = tokio::spawn(async move {

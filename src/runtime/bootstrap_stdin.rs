@@ -9,8 +9,11 @@ use super::{
 };
 #[cfg(test)]
 use crate::broker::enforcer::CancelGeneration;
-use crate::broker::journal::egress_release_fence::EgressReleaseHeadPermit;
 use crate::egress::ids::IdV1;
+use crate::{
+    broker::{clock::HostClock, journal::egress_release_fence::EgressReleaseHeadPermit},
+    control::HostClockSampleV1,
+};
 use anyhow::{Context, Result, ensure};
 use std::{
     fmt,
@@ -61,7 +64,25 @@ pub(crate) trait NativeBootstrapRelease: Send + Sync {
         attempt: &IdV1,
         check_release: Box<dyn FnOnce() -> Result<()> + '_>,
         write: Box<dyn FnOnce() -> Result<(), BootstrapStdinSubmitError> + '_>,
-    ) -> Result<(), BootstrapStdinSubmitError>;
+    ) -> Result<Box<dyn NativeConnectGuard>, BootstrapStdinSubmitError>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeConnectRefusal {
+    Stopped,
+    Expired,
+    Unavailable,
+}
+
+/// Retained only after the original Prepare's successful bootstrap write.
+/// The synchronous callback runs at most once per check under the exact slot's
+/// generation and STOP guards. It must only poll the already-authorized dial.
+pub(crate) trait NativeConnectGuard: Send + Sync {
+    fn clock(&self) -> &dyn HostClock;
+    fn with_current(
+        &self,
+        poll: &mut dyn FnMut(&HostClockSampleV1),
+    ) -> Result<(), NativeConnectRefusal>;
 }
 
 /// Owns the only write endpoint provided by the newly spawned CLI. Dropping
@@ -188,7 +209,8 @@ impl PreparedBootstrapStdin {
     /// may check only in-memory liveness and proof under the native gate.
     /// The caller keeps the channel owned through submission and orders local
     /// revocation of release authority with that gate.
-    /// Success establishes one submission to the existing local CLI pipe.
+    /// Success establishes one submission to the existing local CLI pipe
+    /// and transfers the retained slot guard for subsequent egress connects.
     #[allow(dead_code)] // Consumed by the separate broker composition.
     pub(crate) fn submit_once(
         self,
@@ -196,7 +218,7 @@ impl PreparedBootstrapStdin {
         reinspected: &ContainerObservation,
         head: EgressReleaseHeadPermit,
         check_live_release: impl FnOnce() -> Result<()>,
-    ) -> Result<(), BootstrapStdinSubmitError> {
+    ) -> Result<Box<dyn NativeConnectGuard>, BootstrapStdinSubmitError> {
         let Self {
             stdin,
             stop,

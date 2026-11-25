@@ -20,8 +20,9 @@ use crate::egress::{
     },
 };
 use crate::{
-    broker::{clock::HostClock, enforcer::CancelGeneration},
+    broker::clock::HostClock,
     control::{HostClockSampleV1, egress_decision::*},
+    runtime::bootstrap_stdin::{NativeConnectGuard, NativeConnectRefusal},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -300,34 +301,10 @@ async fn wait_for_channel_stop(stop: &mut watch::Receiver<ChannelStopState>) {
     }
 }
 
-/// The native clock and STOP sources retained by the original worker execution.
-pub(crate) struct ConnectAuthorization {
-    clock: Arc<dyn HostClock>,
-    generation: CancelGeneration,
-    expected_generation: u64,
-    native_stop: watch::Receiver<bool>,
-}
-
-impl ConnectAuthorization {
-    pub(crate) fn new(
-        clock: Arc<dyn HostClock>,
-        generation: CancelGeneration,
-        expected_generation: u64,
-        native_stop: watch::Receiver<bool>,
-    ) -> Self {
-        Self {
-            clock,
-            generation,
-            expected_generation,
-            native_stop,
-        }
-    }
-}
-
 struct OpeningLifetime {
     owner: watch::Receiver<Option<ObservedStop>>,
     stop: watch::Receiver<ChannelStopState>,
-    authorization: Arc<ConnectAuthorization>,
+    authorization: Arc<dyn NativeConnectGuard>,
 }
 
 impl OpeningLifetime {
@@ -344,31 +321,30 @@ impl OpeningLifetime {
     fn poll_connect<T>(
         &self,
         deadline: Instant,
-        poll: impl FnOnce() -> Poll<T>,
-    ) -> Option<Poll<T>> {
-        let authorization = &self.authorization;
-        authorization
-            .generation
-            .with_current_generation(authorization.expected_generation, || {
-                // Order the bounded poll with publication at each STOP source,
-                // including the native slot before any asynchronous forwarding.
-                let native_stop = authorization.native_stop.borrow();
-                let stop = self.stop.borrow();
-                let owner = self.owner.borrow();
-                if *native_stop
-                    || authorization.native_stop.has_changed().is_err()
-                    || stop.0
-                    || owner.is_some()
-                    || !matches!(self.stop.has_changed(), Ok(false))
-                    || !matches!(self.owner.has_changed(), Ok(false))
-                    || Instant::now() >= deadline
-                {
-                    return None;
-                }
-                Some(poll())
-            })
-            .ok()
-            .flatten()
+        poll: impl FnOnce(&HostClockSampleV1) -> Poll<T>,
+    ) -> Result<Option<Poll<T>>, NativeConnectRefusal> {
+        // Channel-local STOP and retirement publish directly to these watches.
+        // Take these snapshots before the final native sample and retain both
+        // through the poll. The native guard then arbitrates the worker slot.
+        let stop = self.stop.borrow();
+        let owner = self.owner.borrow();
+        if stop.0
+            || owner.is_some()
+            || !matches!(self.stop.has_changed(), Ok(false))
+            || !matches!(self.owner.has_changed(), Ok(false))
+        {
+            return Ok(None);
+        }
+        let mut poll = Some(poll);
+        let mut result = None;
+        self.authorization.with_current(&mut |sample| {
+            if Instant::now() < deadline
+                && let Some(poll) = poll.take()
+            {
+                result = Some(poll(sample));
+            }
+        })?;
+        Ok(result)
     }
 
     async fn cancelled(&self) {
@@ -646,7 +622,7 @@ struct Owner<W> {
     binding: EgressBindingV1,
     opening_id: IdV1,
     opening_audit_seq: i64,
-    authorization: Arc<ConnectAuthorization>,
+    authorization: Arc<dyn NativeConnectGuard>,
     control: Arc<dyn EgressControl>,
     resolver: Arc<Resolver>,
     times: ChannelTimes,
@@ -823,7 +799,7 @@ pub(crate) async fn run_opened<IO>(
     control: Arc<dyn EgressControl>,
     resolver: Arc<Resolver>,
     times: ChannelTimes,
-    authorization: Arc<ConnectAuthorization>,
+    authorization: Arc<dyn NativeConnectGuard>,
 ) -> ChannelTermination
 where
     IO: AsyncRead + AsyncWrite + Send + 'static,
@@ -1765,6 +1741,14 @@ impl<'a> OpeningClock<'a> {
 
     fn before(&mut self, deadline: OpeningDeadline) -> Result<u128, Refusal> {
         let sample = self.clock.sample().map_err(|_| Self::unavailable())?;
+        self.before_sample(&sample, deadline)
+    }
+
+    fn before_sample(
+        &mut self,
+        sample: &HostClockSampleV1,
+        deadline: OpeningDeadline,
+    ) -> Result<u128, Refusal> {
         let now = sample.continuous_ns().map_err(|_| Self::unavailable())?;
         if sample.boot_id != self.origin.boot_id
             || sample.method != self.origin.method
@@ -1837,7 +1821,7 @@ async fn open_upstream(
     // Tokio schedules the waits. Only the continuous boot clock can prove
     // the authorization still lives when the host resumes or a reply is late.
     let sent = Instant::now();
-    let mut native = OpeningClock::start(lifetime.authorization.clock.as_ref())?;
+    let mut native = OpeningClock::start(lifetime.authorization.clock())?;
     let name_sent_ns = native.last_ns;
     let native_deadline =
         OpeningDeadline::after(name_sent_ns, times.open_budget, EgressReasonV1::Timeout)?;
@@ -2002,9 +1986,10 @@ async fn open_upstream(
         Some(socket.connect(target).await)
     });
     let connect = poll_fn(|cx| {
-        let polled = lifetime.poll_connect(attempt, || {
-            // Keep the final clock sample inside the same gate as connect.
-            let now_ns = native.before(native_attempt)?;
+        let polled = lifetime.poll_connect(attempt, |sample| {
+            // The native guard sampled the clock and checked the Arm under
+            // this same gate. Use that reading for the name and permit bounds.
+            let now_ns = native.before_sample(sample, native_attempt)?;
             if !attempted {
                 native_attempt = native_attempt.limited_by(OpeningDeadline::after(
                     now_ns,
@@ -2017,11 +2002,16 @@ async fn open_upstream(
             connecting.as_mut().poll(cx).map(Ok)
         });
         let interrupted = match polled {
-            Some(Poll::Pending) => return Poll::Pending,
-            Some(Poll::Ready(Ok(result))) => return Poll::Ready(Ok(progress.complete(result))),
-            Some(Poll::Ready(Err(refusal))) => Err(refusal),
-            None if Instant::now() >= attempt => Ok(None),
-            None => Err(cancelled_opening()),
+            Ok(Some(Poll::Pending)) => return Poll::Pending,
+            Ok(Some(Poll::Ready(Ok(result)))) => return Poll::Ready(Ok(progress.complete(result))),
+            Ok(Some(Poll::Ready(Err(refusal)))) => Err(refusal),
+            Ok(None) if Instant::now() >= attempt => Ok(None),
+            Ok(None) | Err(NativeConnectRefusal::Stopped) => Err(cancelled_opening()),
+            Err(NativeConnectRefusal::Expired) => Err(Refusal {
+                reason: EgressReasonV1::Expired,
+                failure: None,
+            }),
+            Err(NativeConnectRefusal::Unavailable) => Err(OpeningClock::unavailable()),
         };
         progress.unobserved |= progress.pending;
         progress.pending = false;

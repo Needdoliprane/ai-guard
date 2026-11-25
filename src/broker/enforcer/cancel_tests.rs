@@ -50,6 +50,16 @@ impl Drop for NativeChild {
 }
 
 fn unavailable_registration(root: &Path, suffix: &str) -> RegistrationV1 {
+    let clock = NativeHostClock::new().unwrap().sample().unwrap();
+    unavailable_registration_at(root, suffix, clock, 3600)
+}
+
+fn unavailable_registration_at(
+    root: &Path,
+    suffix: &str,
+    clock: HostClockSampleV1,
+    timeout_seconds: u32,
+) -> RegistrationV1 {
     // The program does not exist: reopening must remain NotReady and must not
     // execute any host program. These are explicit test data, not engine facts.
     let missing = root.join("unavailable-runtime");
@@ -112,7 +122,6 @@ fn unavailable_registration(root: &Path, suffix: &str) -> RegistrationV1 {
         }
     }))
     .unwrap();
-    let clock = NativeHostClock::new().unwrap().sample().unwrap();
     let arm = ArmV1 {
         version: 1,
         operation_id: Uuid::new_v4().to_string(),
@@ -125,11 +134,11 @@ fn unavailable_registration(root: &Path, suffix: &str) -> RegistrationV1 {
         authority_binding_hash: authority.fingerprint(),
         configuration_fingerprint_version: 2,
         configuration_fingerprint: "c".repeat(64),
-        deadline_ns_decimal: checked_deadline(clock.continuous_ns().unwrap(), 3600)
+        deadline_ns_decimal: checked_deadline(clock.continuous_ns().unwrap(), timeout_seconds)
             .unwrap()
             .to_string(),
         clock,
-        timeout_seconds: 3600,
+        timeout_seconds,
     };
     let receipt = ArmReceiptV1 {
         version: 1,
@@ -424,59 +433,25 @@ fn native_worker_release_submits_only_with_the_original_live_slot_and_target() {
         Case::Expired,
         Case::ChannelClosed,
     ] {
-        // The Unix pair supplies local liveness only. All slot and runtime
-        // observations are fixture data, with no guardian or engine launched.
-        let (_peer, live) = std::os::unix::net::UnixStream::pair().unwrap();
-        let mut client = EnforcerClient::unavailable_for_test(&root).unwrap();
-        Arc::get_mut(&mut client.0).unwrap().liveness = live.into();
-        client.0.failed.store(false, Ordering::SeqCst);
-        *client.0.health.lock().unwrap() = Some((1, Instant::now()));
-        let sample = clock.sample().unwrap();
+        let (_peer, mut release) =
+            ready_release_fixture(&root, registration.clone(), clock.clone());
         let arm = &registration.arm;
-        let digest = registration.digest().unwrap();
-        let generation = CancelGeneration::new();
-        let (stop, _stop_rx) = watch::channel(false);
-        let status = EnforcerSlotStatusV1 {
-            arm_id: arm.operation_id.clone(),
-            registration_hash: digest.clone(),
-            phase: SlotPhaseV1::Ready,
-            prepared_once: true,
-            generation: generation.current(),
-            clock: Some(sample.clone()),
-            observation: None,
-            stop_failures: 0,
-        };
-        let mut deadline = WorkerReleaseDeadline::new(arm, &sample, &sample).unwrap();
+        let local = Arc::clone(&release.local);
+        let generation = local.generation.clone();
         if case == Case::Expired {
-            deadline.deadline_ns = sample.continuous_ns().unwrap();
+            release.deadline.deadline_ns = clock.sample().unwrap().continuous_ns().unwrap();
         }
-        let local = Arc::new(LocalSlot {
-            registration: registration.clone(),
-            digest,
-            generation: generation.clone(),
-            status: Mutex::new((status, Instant::now())),
-            stop,
-            acknowledged: AtomicBool::new(true),
-            cancel_durable: AtomicBool::new(false),
-            retained_cancel: AtomicBool::new(false),
-            latch: retirement::SlotLatch::default(),
-        });
-        local.latch.reserve_claim().unwrap();
-        if case != Case::SlotLost {
-            client
+        if case == Case::SlotLost {
+            release
+                .client
                 .0
                 .slots
                 .lock()
                 .unwrap()
-                .insert(arm.operation_id.clone(), Arc::clone(&local));
+                .remove(&arm.operation_id)
+                .unwrap();
         }
-        let permit = Box::new(WorkerBootstrapRelease {
-            client,
-            local: Arc::clone(&local),
-            expected_generation: generation.current(),
-            clock: Arc::clone(&clock),
-            deadline,
-        });
+        let permit = Box::new(release);
         if case == Case::Cancel {
             generation.invalidate();
         } else if case == Case::Stop {
@@ -501,25 +476,27 @@ fn native_worker_release_submits_only_with_the_original_live_slot_and_target() {
         let contended = (case == Case::HealthContended).then(|| permit.client.clone());
         let submit = |entered: Option<mpsc::Sender<()>>| {
             let writes = Cell::new(0);
-            let result = permit.submit(
-                authority,
-                observed,
-                &attempt,
-                Box::new(|| {
-                    if let Some(entered) = entered {
-                        entered.send(()).unwrap();
-                    }
-                    anyhow::ensure!(case != Case::ChannelClosed, "fixture channel closed");
-                    if case == Case::StopDuringVeto {
-                        local.stop.send_replace(true);
-                    }
-                    Ok(())
-                }),
-                Box::new(|| {
-                    writes.set(writes.get() + 1);
-                    Ok(())
-                }),
-            );
+            let result = permit
+                .submit(
+                    authority,
+                    observed,
+                    &attempt,
+                    Box::new(|| {
+                        if let Some(entered) = entered {
+                            entered.send(()).unwrap();
+                        }
+                        anyhow::ensure!(case != Case::ChannelClosed, "fixture channel closed");
+                        if case == Case::StopDuringVeto {
+                            local.stop.send_replace(true);
+                        }
+                        Ok(())
+                    }),
+                    Box::new(|| {
+                        writes.set(writes.get() + 1);
+                        Ok(())
+                    }),
+                )
+                .map(|_| ());
             (result, writes.get())
         };
         let (result, writes) = if let Some(client) = contended {
@@ -560,4 +537,121 @@ fn native_worker_release_submits_only_with_the_original_live_slot_and_target() {
         assert_eq!(result, expected, "{case:?}");
         assert_eq!(writes, usize::from(case == Case::Submit), "{case:?}");
     }
+}
+
+/// A real local guard from a successful fixture submission. Runtime identity
+/// and guardian status are synthetic, and the Unix pair supplies only liveness.
+pub(crate) struct ReleasedConnectFixture {
+    _directory: tempfile::TempDir,
+    _peer: std::os::unix::net::UnixStream,
+    client: EnforcerClient,
+    local: Arc<LocalSlot>,
+    pub(crate) deadline_ns: u128,
+    pub(crate) authorization: Arc<dyn NativeConnectGuard>,
+}
+
+impl ReleasedConnectFixture {
+    pub(crate) fn withdraw_without_stop(&self) {
+        let removed = self
+            .client
+            .0
+            .slots
+            .lock()
+            .unwrap()
+            .remove(&self.local.registration.arm.operation_id)
+            .unwrap();
+        assert!(Arc::ptr_eq(&removed, &self.local));
+    }
+
+    pub(crate) fn stop_published(&self) -> bool {
+        *self.local.stop.borrow()
+    }
+}
+
+pub(crate) fn released_connect_fixture(clock: Arc<dyn HostClock>) -> ReleasedConnectFixture {
+    let directory = tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir_in(PRIVATE_TMP)
+        .unwrap();
+    let root_path = directory.path().canonicalize().unwrap();
+    let root = Directory::open_existing(&root_path).unwrap();
+    let sample = clock.sample().unwrap();
+    let mut armed_at = sample.clone();
+    armed_at.continuous_ns_decimal = (sample.continuous_ns().unwrap() - 500_000_000).to_string();
+    let registration = unavailable_registration_at(&root_path, "connect", armed_at, 1);
+    let arm = &registration.arm;
+    let (peer, release) = ready_release_fixture(&root, registration.clone(), clock);
+    let deadline_ns = release.deadline.deadline_ns;
+    let client = release.client.clone();
+    let local = Arc::clone(&release.local);
+    let release = Box::new(release);
+    let guard = release
+        .submit(
+            &registration.authority,
+            &registration.owned,
+            &IdV1::parse(&arm.attempt_id).unwrap(),
+            Box::new(|| Ok(())),
+            Box::new(|| Ok(())),
+        )
+        .unwrap();
+
+    ReleasedConnectFixture {
+        _directory: directory,
+        _peer: peer,
+        client,
+        local,
+        deadline_ns,
+        authorization: Arc::from(guard),
+    }
+}
+
+fn ready_release_fixture(
+    root: &Directory,
+    registration: RegistrationV1,
+    clock: Arc<dyn HostClock>,
+) -> (std::os::unix::net::UnixStream, WorkerBootstrapRelease) {
+    let sample = clock.sample().unwrap();
+    let arm = &registration.arm;
+    let deadline = WorkerReleaseDeadline::new(arm, &sample, &sample).unwrap();
+    let (peer, live) = std::os::unix::net::UnixStream::pair().unwrap();
+    let mut client = EnforcerClient::unavailable_for_test(root).unwrap();
+    Arc::get_mut(&mut client.0).unwrap().liveness = live.into();
+    client.0.failed.store(false, Ordering::SeqCst);
+    *client.0.health.lock().unwrap() = Some((1, Instant::now()));
+    let (stop, _) = watch::channel(false);
+    let digest = registration.digest().unwrap();
+    let status = EnforcerSlotStatusV1 {
+        arm_id: arm.operation_id.clone(),
+        registration_hash: digest.clone(),
+        phase: SlotPhaseV1::Ready,
+        prepared_once: true,
+        generation: 0,
+        clock: Some(sample),
+        observation: None,
+        stop_failures: 0,
+    };
+    let local = Arc::new(LocalSlot {
+        registration,
+        digest,
+        generation: CancelGeneration::new(),
+        status: Mutex::new((status, Instant::now())),
+        stop,
+        acknowledged: AtomicBool::new(true),
+        cancel_durable: AtomicBool::new(false),
+        retained_cancel: AtomicBool::new(false),
+        latch: retirement::SlotLatch::default(),
+    });
+    local.latch.reserve_claim().unwrap();
+    client.0.slots.lock().unwrap().insert(
+        local.registration.arm.operation_id.clone(),
+        Arc::clone(&local),
+    );
+    let release = WorkerBootstrapRelease {
+        client,
+        local,
+        expected_generation: 0,
+        clock,
+        deadline,
+    };
+    (peer, release)
 }

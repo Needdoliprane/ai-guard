@@ -12,6 +12,7 @@ use crate::{
     broker::{
         clock::{ClockResult, NativeHostClock},
         egress_owner::resolve::{HostLookup, InternalService, LookupFuture},
+        enforcer::CancelGeneration,
     },
     control::HostClockSampleV1,
 };
@@ -503,16 +504,65 @@ fn fixture_destination(port: u16) -> OpenDestination {
     }
 }
 
-fn fixture_connect_authorization() -> (Arc<ConnectAuthorization>, watch::Sender<bool>) {
+struct FixtureConnectGuard {
+    clock: Arc<dyn HostClock>,
+    generation: CancelGeneration,
+    expected_generation: u64,
+    stop: watch::Receiver<bool>,
+}
+
+impl FixtureConnectGuard {
+    fn new(
+        clock: Arc<dyn HostClock>,
+        generation: CancelGeneration,
+        expected_generation: u64,
+        stop: watch::Receiver<bool>,
+    ) -> Self {
+        Self {
+            clock,
+            generation,
+            expected_generation,
+            stop,
+        }
+    }
+}
+
+impl NativeConnectGuard for FixtureConnectGuard {
+    fn clock(&self) -> &dyn HostClock {
+        self.clock.as_ref()
+    }
+
+    fn with_current(
+        &self,
+        poll: &mut dyn FnMut(&HostClockSampleV1),
+    ) -> Result<(), NativeConnectRefusal> {
+        self.generation
+            .with_current_generation(self.expected_generation, || {
+                let stop = self.stop.borrow();
+                if *stop || self.stop.has_changed().is_err() {
+                    return Err(NativeConnectRefusal::Stopped);
+                }
+                let sample = self
+                    .clock
+                    .sample()
+                    .map_err(|_| NativeConnectRefusal::Unavailable)?;
+                poll(&sample);
+                Ok(())
+            })
+            .map_err(|_| NativeConnectRefusal::Stopped)?
+    }
+}
+
+fn fixture_connect_authorization() -> (Arc<FixtureConnectGuard>, watch::Sender<bool>) {
     let (stop, stopped) = watch::channel(false);
     let clock = Arc::new(NativeHostClock::new().unwrap());
     let generation = CancelGeneration::new();
-    let authorization = ConnectAuthorization::new(clock, generation, 0, stopped);
+    let authorization = FixtureConnectGuard::new(clock, generation, 0, stopped);
     (Arc::new(authorization), stop)
 }
 
 fn fixture_opening_lifetime(
-    authorization: Arc<ConnectAuthorization>,
+    authorization: Arc<dyn NativeConnectGuard>,
 ) -> (OpeningLifetime, OpeningOwner, ChannelStop) {
     let (owner, opening) = OpeningOwner::new();
     let (stop, running) = ChannelStop::new();
@@ -564,7 +614,7 @@ fn egress_broker_connect_and_invalidation_share_the_initial_poll() {
                 (opening, stop, native_stop, generation)
             });
 
-            let polled = lifetime.poll_connect(deadline, || {
+            let polled = lifetime.poll_connect(deadline, |_| {
                 ready.recv_timeout(Duration::from_secs(1)).unwrap();
                 assert!(
                     matches!(
@@ -575,16 +625,15 @@ fn egress_broker_connect_and_invalidation_share_the_initial_poll() {
                 );
                 Poll::<()>::Pending
             });
-            assert!(matches!(polled, Some(Poll::Pending)));
+            assert!(matches!(polled, Ok(Some(Poll::Pending))));
             observed.recv_timeout(Duration::from_secs(1)).unwrap();
             let _owners = invalidator.join().unwrap();
-            assert!(
-                lifetime
-                    .poll_connect(deadline, || -> Poll<()> {
-                        panic!("a terminal opening must never poll a connect")
-                    })
-                    .is_none()
-            );
+            assert!(matches!(
+                lifetime.poll_connect(deadline, |_| -> Poll<()> {
+                    panic!("a terminal opening must never poll a connect")
+                }),
+                Ok(None) | Err(NativeConnectRefusal::Stopped)
+            ));
         });
     }
 }
@@ -723,7 +772,7 @@ async fn egress_broker_held_permit_cannot_outlive_native_opening_authority() {
         let clock = Arc::new(FixtureOpeningClock::new());
         let generation = CancelGeneration::new();
         let (native_stop, native_stopped) = watch::channel(false);
-        let authorization = Arc::new(ConnectAuthorization::new(
+        let authorization = Arc::new(FixtureConnectGuard::new(
             clock.clone(),
             generation.clone(),
             generation.current(),
@@ -787,6 +836,99 @@ async fn egress_broker_held_permit_cannot_outlive_native_opening_authority() {
             .is_err(),
             "the held ACK must never produce a connection after native invalidation"
         );
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn egress_broker_fresh_permit_respects_the_original_arm_without_published_stop() {
+    #[derive(Debug)]
+    enum Case {
+        BeforeArmDeadline,
+        AtArmDeadline,
+        SlotWithdrawn,
+    }
+
+    for (case, refusal) in [
+        (Case::BeforeArmDeadline, None),
+        (Case::AtArmDeadline, Some(EgressReasonV1::Expired)),
+        (Case::SlotWithdrawn, Some(EgressReasonV1::Cancelled)),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let gate = Arc::new(ObservationGate {
+            started: Semaphore::new(0),
+            release: Semaphore::new(0),
+        });
+        let control = Arc::new(Gateway {
+            allow: AtomicBool::new(true),
+            connect_permit_gate: Some(gate.clone()),
+            ..Gateway::default()
+        });
+        let clock = Arc::new(FixtureOpeningClock::new());
+        let slot = crate::broker::enforcer::released_connect_fixture(clock.clone());
+        let (lifetime, _opening, _channel_stop) =
+            fixture_opening_lifetime(slot.authorization.clone());
+        let opening = tokio::spawn(async move {
+            open_upstream(
+                control,
+                fixture_resolver(port, Arc::new(NoLookup(AtomicUsize::new(0)))),
+                ChannelTimes::default(),
+                fixture_destination(port),
+                &lifetime,
+                &mut ConnectProgress::default(),
+            )
+            .await
+        });
+
+        timeout_at(
+            Instant::now() + Duration::from_secs(2),
+            gate.started.acquire(),
+        )
+        .await
+        .expect("a fresh numeric permit ACK is held")
+        .unwrap()
+        .forget();
+        let mut now = slot.deadline_ns - 1;
+        match case {
+            Case::BeforeArmDeadline => {}
+            Case::AtArmDeadline => now = slot.deadline_ns,
+            Case::SlotWithdrawn => slot.withdraw_without_stop(),
+        }
+        clock.0.lock().unwrap().continuous_ns_decimal = now.to_string();
+        assert!(!slot.stop_published());
+        gate.release.add_permits(1);
+
+        let outcome = timeout_at(Instant::now() + Duration::from_secs(2), opening)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!slot.stop_published());
+        if let Some(reason) = refusal {
+            assert!(
+                matches!(outcome, Err(error) if error.reason == reason),
+                "{case:?}"
+            );
+            assert!(
+                timeout_at(
+                    Instant::now() + Duration::from_millis(50),
+                    listener.accept()
+                )
+                .await
+                .is_err(),
+                "{case:?}: a fresh reply must not open a socket"
+            );
+        } else {
+            let opened = outcome
+                .ok()
+                .expect("the original Arm has one nanosecond left");
+            let (accepted, _) =
+                timeout_at(Instant::now() + Duration::from_secs(2), listener.accept())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(opened.peer, accepted.local_addr().unwrap());
+        }
     }
 }
 
@@ -888,7 +1030,7 @@ async fn egress_broker_late_allow_receipt_expires_before_resolution() {
     let resolver = Arc::new(Resolver::new(lookup.clone(), vec![], vec![]).unwrap());
     let clock = Arc::new(FixtureOpeningClock::new());
     let (_native_stop, native_stopped) = watch::channel(false);
-    let authorization = Arc::new(ConnectAuthorization::new(
+    let authorization = Arc::new(FixtureConnectGuard::new(
         clock.clone(),
         CancelGeneration::new(),
         0,
