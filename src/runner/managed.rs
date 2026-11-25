@@ -1566,11 +1566,11 @@ async fn authorize_plan(
             chosen.human_approved = true;
             chosen.approval_hash = Some(hash);
             answer = client.decide(&chosen).await?;
-            anyhow::ensure!(
-                answer.pointer("/decision/outcome").and_then(Value::as_str) == Some("allow"),
-                "approved request did not receive a durable allow"
-            );
-            false
+            match answer.pointer("/decision/outcome").and_then(Value::as_str) {
+                Some("allow") => false,
+                Some("deny") => true,
+                _ => bail!("approved request did not receive a durable allow"),
+            }
         }
         _ => bail!("gateway returned an unknown policy outcome"),
     };

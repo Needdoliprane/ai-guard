@@ -7,6 +7,8 @@ use agentsandbox::{
     api::{GatewayState, TenantGateway, gateway_router},
     audit::{EventQuery, Store},
     control::{QuotaPolicyV1, WorkerMutationV1, WorkerStateV1, WorkerTransitionV1},
+    jev::{JevBackend, RuleCatalog, SelectionSource},
+    model::Outcome,
     operations::initialize_config,
     policy::Policy,
     redaction::Redactor,
@@ -77,6 +79,15 @@ impl Drop for Scenario {
 }
 impl Scenario {
     async fn new(parent: &Path, bin: &Path, case: &'static str) -> Self {
+        Self::new_with_backend(parent, bin, case, None).await
+    }
+
+    async fn new_with_backend(
+        parent: &Path,
+        bin: &Path,
+        case: &'static str,
+        backend: Option<JevBackend>,
+    ) -> Self {
         assert!(
             case.len() <= 64
                 && case
@@ -126,7 +137,7 @@ impl Scenario {
             Store::open_for_tenant(&root.join("other.sqlite"), "other", redactor.clone(), 1000)
                 .unwrap(),
         );
-        let gateway = GatewayState::for_tenants(
+        let gateway = GatewayState::for_tenants_with_backend(
             vec![
                 TenantGateway {
                     tenant_id: "local".into(),
@@ -142,7 +153,7 @@ impl Scenario {
                 },
             ],
             Policy::default(),
-            None,
+            backend,
             redactor,
         )
         .unwrap();
@@ -380,6 +391,127 @@ async fn strict_refusal_explains_the_audited_rule_without_invoking_the_engine() 
     assert!(
         diagnostic.contains(&decision.reason),
         "CLI omitted the audited reason"
+    );
+}
+
+#[tokio::test]
+async fn approved_refusal_explains_the_audited_rule_without_invoking_the_engine() {
+    use std::{io::Write, os::unix::fs::OpenOptionsExt, process::Stdio};
+
+    let temporary = support::private_tempdir();
+    let argv = ["/bin/echo", "approval-veto-fixture"];
+    let catalogue = temporary.path().join("rule-catalogue.json");
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&catalogue)
+        .unwrap()
+        .write_all(
+            &serde_json::to_vec(&serde_json::json!({
+                "version": 1, "allow_argv": [], "deny_argv": [argv],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let backend = JevBackend::rust_rules(
+        RuleCatalog::from_private_file(&catalogue).unwrap(),
+        SelectionSource::Programmatic,
+    );
+    let bin = fixture_binary(temporary.path());
+    let scenario =
+        Scenario::new_with_backend(temporary.path(), &bin, "approved-refusal", Some(backend)).await;
+    let endpoint = format!("unix://{}", scenario.root.join("fixture.sock").display());
+    let command = |approval: Option<&str>| {
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_agentsandbox"));
+        command
+            .env_clear()
+            .current_dir(&scenario.root)
+            .stdin(Stdio::null())
+            .args(["run", "--gateway", &scenario.url, "--config-dir"])
+            .arg(&scenario.config)
+            .arg("--runtime-program")
+            .arg(scenario.bin.join("docker"))
+            .args(["--runtime-endpoint", &endpoint, "--image", "worker:fixture"])
+            .arg("--project")
+            .arg(&scenario.project)
+            .args(["--profile", "review"])
+            .kill_on_drop(true);
+        if let Some(hash) = approval {
+            command.args(["--approve-hash", hash]);
+        }
+        command.arg("--").args(argv);
+        command
+    };
+    let decisions = || {
+        scenario
+            .store
+            .events(&EventQuery {
+                kind: Some("security.decision".into()),
+                order: Some("asc".into()),
+                ..Default::default()
+            })
+            .unwrap()
+    };
+    let pending = tokio::time::timeout(CLI_OBSERVATION_TIMEOUT, command(None).output())
+        .await
+        .expect("CLI initial review deadline")
+        .unwrap();
+    assert!(!pending.status.success());
+    assert!(pending.stdout.is_empty());
+    let initial = decisions();
+    let [review] = initial.as_slice() else {
+        panic!("expected one durable initial decision");
+    };
+    assert_eq!(
+        review.event.decision.as_ref().unwrap().outcome,
+        Outcome::Review
+    );
+    assert_eq!(review.event.data["human_approved"], false);
+    let digest = review.event.data["request_hash"].as_str().unwrap();
+    assert!(
+        String::from_utf8(pending.stderr)
+            .unwrap()
+            .contains(&format!("Human review required. Request digest: {digest}")),
+        "CLI did not ask for approval of the durable review"
+    );
+
+    let output = tokio::time::timeout(CLI_OBSERVATION_TIMEOUT, command(Some(digest)).output())
+        .await
+        .expect("CLI approved refusal deadline")
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(scenario.store.workers().unwrap().is_empty());
+    assert!(!scenario.root.join("calls").try_exists().unwrap());
+    scenario.invariant();
+
+    let final_decisions = decisions();
+    let [retained_review, refusal] = final_decisions.as_slice() else {
+        panic!("expected the initial review and one durable approved refusal");
+    };
+    assert_eq!(retained_review.hash, review.hash);
+    assert!(refusal.seq > review.seq);
+    assert_eq!(refusal.event.data["human_approved"], true);
+    assert!(review.event.data["request_id"].is_string());
+    assert_eq!(
+        refusal.event.data["request_id"],
+        review.event.data["request_id"]
+    );
+    assert_eq!(refusal.event.data["request_hash"], digest);
+    assert!(review.event.session_id.is_some());
+    assert_eq!(refusal.event.session_id, review.event.session_id);
+    let decision = refusal.event.decision.as_ref().unwrap();
+    assert_eq!(decision.outcome, Outcome::Deny);
+    assert_eq!(decision.rule, "rust_rules_deny");
+    assert!(!decision.reason.is_empty());
+    let diagnostic = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        diagnostic.contains(&format!(
+            "policy denied the command under rule {} at audit sequence {}. {}",
+            decision.rule, refusal.seq, decision.reason
+        )),
+        "CLI omitted the audited approved refusal"
     );
 }
 

@@ -267,8 +267,26 @@ struct ProbeFacts {
     forward_subagent_text: bool,
 }
 
-/// Every required invocation flag must appear in the help; optional ones are
-/// reported as facts. Substring presence only: help text is not an API.
+/// Recognize an option entry before its description, including a short alias.
+fn help_lists_option(help: &str, flag: &str) -> bool {
+    // Keep line endings so a bare option name at EOF is ambiguous.
+    help.split_inclusive('\n').any(|line| {
+        let entry = line.trim_start();
+        // Option columns fit within six spaces. Wrapped descriptions sit deeper.
+        if line.len() - entry.len() > 6 {
+            return false;
+        }
+        let entry = match entry.as_bytes() {
+            [b'-', short, b',', ..] if short.is_ascii_alphanumeric() => entry[3..].trim_start(),
+            _ => entry,
+        };
+        entry.strip_prefix(flag).is_some_and(|suffix| {
+            suffix.starts_with([' ', '\t', ',', '=', '\n']) || suffix.starts_with("\r\n")
+        })
+    })
+}
+
+/// Require the existing invocation flags and report optional batch capabilities.
 fn help_facts(client: ClientKind, transport: ClientTransport, help: &str) -> Result<ProbeFacts> {
     let required: &[&str] = match (client, transport) {
         (ClientKind::Codex, ClientTransport::Batch) => &[
@@ -296,7 +314,7 @@ fn help_facts(client: ClientKind, transport: ClientTransport, help: &str) -> Res
     Ok(ProbeFacts {
         forward_subagent_text: client == ClientKind::ClaudeCode
             && transport == ClientTransport::Batch
-            && help.contains(FORWARD_SUBAGENT_TEXT),
+            && help_lists_option(help, FORWARD_SUBAGENT_TEXT),
     })
 }
 
@@ -1192,12 +1210,23 @@ mod tests {
 
     #[test]
     fn subagent_text_is_forwarded_only_when_claude_batch_help_lists_it() {
-        let batch = "--setting-sources --print --output-format --verbose \
-                     --no-session-persistence --permission-mode";
-        let listed = format!("{batch} --forward-subagent-text");
+        let batch = concat!(
+            "Options:\n",
+            "  --setting-sources <sources>\n",
+            "  --print\n",
+            "  --output-format <format>\n",
+            "  --verbose\n",
+            "  --no-session-persistence\n",
+            "  --permission-mode <mode>",
+        );
+        let listed = format!("{batch}\n  --forward-subagent-text\n");
+        let aliased = format!("{batch}\n  -f, --forward-subagent-text  Forward text.");
         let facts = |client, transport, help: &str| help_facts(client, transport, help).unwrap();
         assert!(
             facts(ClientKind::ClaudeCode, ClientTransport::Batch, &listed).forward_subagent_text
+        );
+        assert!(
+            facts(ClientKind::ClaudeCode, ClientTransport::Batch, &aliased).forward_subagent_text
         );
         assert!(
             !facts(ClientKind::ClaudeCode, ClientTransport::Batch, batch).forward_subagent_text
@@ -1242,11 +1271,26 @@ mod tests {
             transport: ClientTransport::Batch,
             client: ClientKind::ClaudeCode,
         };
-        execution.apply_probe_facts(ProbeFacts::default());
-        assert_eq!(execution.arguments(), arguments.as_slice());
-        execution.apply_probe_facts(ProbeFacts {
-            forward_subagent_text: true,
-        });
+        for entry in [
+            "  --trace   Help for the former --forward-subagent-text option",
+            "          --forward-subagent-text was removed",
+            "  --forward-subagent-text-format <format>",
+            "  --forward-subagent-text",
+            "  -f, --forward-subagent-text",
+        ] {
+            let help = format!("{batch}\n{entry}");
+            execution.apply_probe_facts(facts(
+                ClientKind::ClaudeCode,
+                ClientTransport::Batch,
+                &help,
+            ));
+            assert_eq!(execution.arguments(), arguments.as_slice());
+        }
+        execution.apply_probe_facts(facts(
+            ClientKind::ClaudeCode,
+            ClientTransport::Batch,
+            &listed,
+        ));
         let mut expected = arguments.clone();
         expected.insert(5, "--forward-subagent-text".into());
         assert_eq!(execution.arguments(), expected.as_slice());
