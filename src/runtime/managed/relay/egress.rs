@@ -80,7 +80,7 @@ impl ManagedRuntime {
     }
 }
 
-fn validate_egress_helper_environment(
+pub(in crate::runtime::managed) fn validate_egress_helper_environment(
     bytes: &[u8],
     held: &HeldBootstrapBinding,
 ) -> std::result::Result<(), RelayExecError> {
