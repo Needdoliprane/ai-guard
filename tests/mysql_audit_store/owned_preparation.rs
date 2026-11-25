@@ -1,4 +1,4 @@
-//! Operator preflight against a disposable loopback MySQL schema.
+//! Operator preflight and Legacy refusal against disposable loopback MySQL schemas.
 use super::{identity::FixtureFiles, *};
 use agentsandbox::mysql_storage::{
     MysqlOwnedPreparationPreflight, MysqlOwnedPreparationRefusal, preflight_owned_preparation,
@@ -76,15 +76,6 @@ async fn legacy_store_refuses_uncommitted_and_owned_version_state() -> Result<()
             table_count(&mut conn).await? == 0,
             "QA database is not empty"
         );
-        // Use the historical table layout to isolate the version guard from
-        // missing columns. This is a direct fixture, without a Legacy row.
-        let ddl = include_str!("../../schema/mysql/audit-v1.sql").replace(
-            "CHECK (schema_version = 1)",
-            "CHECK (schema_version IN (14, 15))",
-        );
-        for statement in ddl.split(';').take(2) {
-            run_ddl(&mut conn, statement).await?;
-        }
         let namespace = fixture.target.namespace;
         let store = fixture.target.open(
             &fixture.target.maintenance_username,
@@ -93,36 +84,69 @@ async fn legacy_store_refuses_uncommitted_and_owned_version_state() -> Result<()
             namespace,
             128,
         )?;
-        for error in [store.verify().await.err(), store.initialize().await.err()] {
-            ensure!(
-                error
-                    .context("Legacy accepted a missing state row")?
-                    .to_string()
-                    == "MySQL audit schema was not prepared"
-            );
-        }
-        tokio::time::timeout(
-            std::time::Duration::from_secs(8),
-            conn.exec_drop(
+
+        // Keep the historical columns so the test reaches the version guard.
+        // This fixture models the publication boundary, without the Legacy seed.
+        let ddl = include_str!("../../schema/mysql/audit-v1.sql").replace(
+            "CHECK (schema_version = 1)",
+            "CHECK (schema_version IN (14, 15))",
+        );
+        let mut ddl = ddl.split(';');
+        let missing_table = MysqlProbeError::ServerRefused(1146).to_string();
+        require_legacy_refusal(&store, &missing_table).await?;
+        run_ddl(&mut conn, ddl.next().context("audit event DDL is absent")?).await?;
+        require_legacy_refusal(&store, &missing_table).await?;
+        run_ddl(&mut conn, ddl.next().context("audit state DDL is absent")?).await?;
+
+        let missing_state = "MySQL audit schema was not prepared";
+        require_legacy_refusal(&store, missing_state).await?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+        let mut tx =
+            tokio::time::timeout_at(deadline, conn.start_transaction(TxOpts::new())).await??;
+        tokio::time::timeout_at(
+            deadline,
+            tx.exec_drop(
                 "INSERT INTO ai_guard_audit_state (singleton, schema_version, tenant_id, namespace_id, head_seq, head_hash, payload_bytes) VALUES (1, ?, ?, ?, 0, ?, 0)",
                 (format, TENANT, namespace.to_string(), "0".repeat(64)),
             ),
         )
         .await??;
-        for error in [store.verify().await.err(), store.initialize().await.err()] {
-            ensure!(
-                error
-                    .context("Legacy accepted an owned version")?
-                    .to_string()
-                    == "unsupported MySQL audit schema version"
-            );
-        }
+        // verify uses a separate nonlocking snapshot. The initialize paths
+        // take a row lock, so exercise them only outside this open transaction.
+        let error = tokio::time::timeout_at(deadline, store.verify())
+            .await?
+            .err()
+            .context("Legacy accepted an uncommitted state row")?;
+        ensure!(
+            error.to_string() == missing_state,
+            "state visible before commit"
+        );
+        tokio::time::timeout_at(deadline, tx.commit()).await??;
+
+        require_legacy_refusal(&store, "unsupported MySQL audit schema version").await?;
         let state = tokio::time::timeout(std::time::Duration::from_secs(8), conn.query_first::<(u16, i64, u64), _>(
             "SELECT schema_version, head_seq, (SELECT COUNT(*) FROM ai_guard_audit_event) FROM ai_guard_audit_state WHERE singleton=1",
         )).await??;
         ensure!(
             state == Some((format, 0, 0)),
             "Legacy changed the owned fixture"
+        );
+    }
+    Ok(())
+}
+
+async fn require_legacy_refusal(store: &MysqlAuditStore, expected: &str) -> Result<()> {
+    for error in [
+        store.verify().await.err(),
+        store.initialize().await.err(),
+        store.initialize_supervised().await.err(),
+    ] {
+        ensure!(
+            error
+                .context("Legacy accepted the preparation phase")?
+                .to_string()
+                == expected,
+            "Legacy did not reject the preparation phase with {expected}"
         );
     }
     Ok(())
