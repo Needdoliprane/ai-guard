@@ -2,6 +2,8 @@
 
 Thank you for your interest in contributing to ai-guard!
 
+[Version française](CONTRIBUTING.fr.md)
+
 ## Getting Started
 
 Please read the [architecture contract](docs/engineering/ARCHITECTURE_CONTRACT.md) and [coding rules](docs/engineering/CODING_RULES.md) before submitting any changes.
