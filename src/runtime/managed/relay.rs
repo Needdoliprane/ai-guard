@@ -24,6 +24,9 @@ use tokio::{
     time::timeout_at,
 };
 
+#[cfg(unix)]
+pub(crate) mod egress;
+
 const HELPER: &str = "/usr/local/bin/ai-guard-relay";
 const STDERR_LIMIT: usize = 16 * 1024;
 const CLOSE_TIME: Duration = Duration::from_secs(5);
@@ -307,6 +310,21 @@ fn relay_exec_args(
     kind: RuntimeKind,
     id: &str,
 ) -> std::result::Result<Vec<String>, RelayExecError> {
+    helper_exec_args(kind, id, RelayHelperMode::Relay)
+}
+
+#[derive(Clone, Copy)]
+enum RelayHelperMode {
+    Relay,
+    #[cfg(unix)]
+    Egress(u16),
+}
+
+fn helper_exec_args(
+    kind: RuntimeKind,
+    id: &str,
+    mode: RelayHelperMode,
+) -> std::result::Result<Vec<String>, RelayExecError> {
     if !valid_immutable_id(id) {
         return Err(RelayExecError::Identity);
     }
@@ -320,13 +338,27 @@ fn relay_exec_args(
         args.push("--detach-keys=".into());
     }
     args.extend(EMPTY_EXEC_ENV.iter().map(|key| format!("--env={key}=")));
+    #[cfg(unix)]
+    if let RelayHelperMode::Egress(port) = mode {
+        args.extend(
+            crate::egress::proxy_env::proxy_environment(port)
+                .iter()
+                .map(|(key, _)| format!("--env={key}=")),
+        );
+    }
     args.extend([
         "--user".into(),
         "1000:1000".into(),
         id.into(),
         HELPER.into(),
-        "serve-v1".into(),
     ]);
+    match mode {
+        RelayHelperMode::Relay => args.push("serve-v1".into()),
+        #[cfg(unix)]
+        RelayHelperMode::Egress(port) => {
+            args.extend(["serve-egress-v1".into(), "--port".into(), port.to_string()]);
+        }
+    }
     Ok(args)
 }
 
@@ -376,6 +408,13 @@ pub(super) fn validate_running_snapshot(
 /// values. Other entries must be fixed public image values or short version
 /// strings; unknown keys, duplicates and opaque values remain closed.
 pub(super) fn validate_helper_environment(bytes: &[u8]) -> std::result::Result<(), RelayExecError> {
+    validate_helper_environment_for(bytes, &[])
+}
+
+fn validate_helper_environment_for(
+    bytes: &[u8],
+    required_proxy: &[(&str, String)],
+) -> std::result::Result<(), RelayExecError> {
     #[derive(Deserialize)]
     #[serde(rename_all = "PascalCase")]
     struct Environment {
@@ -399,7 +438,8 @@ pub(super) fn validate_helper_environment(bytes: &[u8]) -> std::result::Result<(
     let environment: Environment =
         serde_json::from_slice(bytes).map_err(|_| RelayExecError::Profile)?;
     let mut seen = std::collections::HashSet::new();
-    if environment.config.env.len() > ALLOWED.len() + EMPTY_EXEC_ENV.len() + 2
+    if environment.config.env.len()
+        > ALLOWED.len() + EMPTY_EXEC_ENV.len() + 2 + required_proxy.len()
         || environment.config.env.iter().any(|entry| {
             let Some((key, value)) = entry.split_once('=') else {
                 return true;
@@ -411,7 +451,11 @@ pub(super) fn validate_helper_environment(bytes: &[u8]) -> std::result::Result<(
                 && !EMPTY_EXEC_ENV.contains(&key)
                 && !(key == "NODE_VERSION" && short_version(value, Some("24")))
                 && !(key == "YARN_VERSION" && short_version(value, Some("1")))
+                && !required_proxy
+                    .iter()
+                    .any(|(name, expected)| *name == key && expected.as_str() == value)
         })
+        || required_proxy.iter().any(|(key, _)| !seen.contains(key))
     {
         return Err(RelayExecError::Profile);
     }
@@ -475,11 +519,11 @@ impl Health {
 /// behind it. Dropping the serving future returns these borrows to this owner.
 pub(crate) struct RelayExecReader<'a> {
     pipe: &'a mut ChildStdout,
-    health: Arc<Health>,
+    health: &'a Health,
 }
 pub(crate) struct RelayExecWriter<'a> {
     pipe: &'a mut Option<ChildStdin>,
-    health: Arc<Health>,
+    health: &'a Health,
 }
 impl AsyncRead for RelayExecReader<'_> {
     fn poll_read(
@@ -709,11 +753,11 @@ impl RelayExecTransport {
         Ok((
             RelayExecReader {
                 pipe: input,
-                health: Arc::clone(&self.health),
+                health: &self.health,
             },
             RelayExecWriter {
                 pipe: &mut self.stdin,
-                health: Arc::clone(&self.health),
+                health: &self.health,
             },
         ))
     }
