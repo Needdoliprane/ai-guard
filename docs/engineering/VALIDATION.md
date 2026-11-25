@@ -1,5 +1,34 @@
 # Validation courante
 
+## 25 novembre 2026 — dictionnaire MySQL owned des projections non publiées
+
+Une instance MySQL 8.4.13 ARM64 sur Docker Desktop reçoit deux schémas
+vierges et deux comptes opérateur sur le profil TLS. Le conducteur
+exécute le DDL dérivé de la source sous test, puis compare le dictionnaire
+réel avec les requêtes et les comparateurs Rust extraits du même gel.
+
+La référence `df7ff7f7` refuse le premier lien étranger de décision en
+format 14. L’inventaire, la vacuité des tables, les colonnes, les index
+et les contraintes concordent à cette étape. La référence constate le
+format 15 vierge avant de s’arrêter. Manifeste privé
+`85ef019214a6c1e642a3866a924efb56185e0c38764f0eb40c7700acc4b2b0cb`.
+
+Sur `6fa2a85b`, les cinq tables du format 14 et les dix du format 15
+passent toutes les comparaisons en 19,72 s. MySQL rapporte `NO ACTION`
+en mise à jour et en suppression pour la clé de décision. Les deux
+formes restrictives sont admises sur l’inventaire InnoDB vérifié. Après
+les deux succès, la même clé modifiée en `ON DELETE CASCADE` dans le
+schéma jetable 14 est refusée au tuple attendu.
+[Règles de référence MySQL 8.4](https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html).
+
+Le projet Docker de chaque passage a été retiré et son port est fermé.
+Le manifeste du passage corrigé est
+`0279b6ccf6512f7b5e6f55f79b286c99ba60c5db3f566ceb337da0dc219af2f1`.
+La preuve couvre le dictionnaire du socle audit, décision, revue et
+egress 15. Le libtest de préparation sous verrou, les projections
+workers supplémentaires, la publication du singleton et l’admission
+gardent leurs preuves propres.
+
 ## 25 novembre 2026 — canari G11 et annulation du premier relais
 
 Sur `4c46dd1c`, le binaire du canari et son CLI compilent en 419,74 s.
