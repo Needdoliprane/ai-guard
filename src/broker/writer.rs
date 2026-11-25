@@ -20,6 +20,8 @@ use super::{
     lifecycle::{BrokerCheckpointV3, LocalCommandReceiptV1, LocalCommandRequestV1, LocalCommandV1},
     outbox::{BrokerCheckpointV4, OutboxEventV1, OutboxReceiptV1},
 };
+#[cfg(test)]
+use crate::control::egress_decision::EgressChannelOpeningReceiptV1;
 use crate::{
     control_fs::Directory,
     model::Event,
@@ -729,7 +731,12 @@ struct ArmedAdvanceReplyBarrier {
 impl ArmedAdvanceReplyBarrier {
     fn applies(&self, next: &BrokerCheckpointV3, matched_trace: bool) -> bool {
         use super::checkpoint::SupervisionOperationV1;
-        if self.trace.as_ref().is_some_and(|trace| trace.is_created()) {
+        if self.trace.as_ref().is_some_and(|trace| {
+            matches!(
+                trace.input,
+                AdvanceTraceInput::Created(_) | AdvanceTraceInput::EgressRelease(_)
+            )
+        }) {
             return matched_trace;
         }
         !self.claim_ack_only
@@ -751,12 +758,28 @@ impl ArmedAdvanceReplyBarrier {
                     )
                 })
     }
+
+    fn wait_for_release(self, trace: Option<&AdvanceTrace>) {
+        let _ = self.entered.send(());
+        let received = self.release.recv_timeout(self.hold_limit);
+        if let Some(egress) = trace.and_then(AdvanceTrace::egress_release) {
+            let _ = egress.received.set((Instant::now(), received));
+        }
+    }
 }
 
 #[cfg(test)]
 enum AdvanceTraceInput {
     Cleanup(String),
     Created(String),
+    EgressRelease(Box<EgressReleaseTrace>),
+}
+
+#[cfg(test)]
+struct EgressReleaseTrace {
+    opening: EgressChannelOpeningReceiptV1,
+    sent: OnceLock<()>,
+    received: OnceLock<(Instant, Result<(), mpsc::RecvTimeoutError>)>,
 }
 
 #[cfg(test)]
@@ -788,6 +811,13 @@ impl AdvanceTrace {
         matches!(self.input, AdvanceTraceInput::Created(_))
     }
 
+    fn egress_release(&self) -> Option<&EgressReleaseTrace> {
+        match &self.input {
+            AdvanceTraceInput::EgressRelease(trace) => Some(trace),
+            _ => None,
+        }
+    }
+
     fn matches(
         &self,
         operation: Uuid,
@@ -798,6 +828,12 @@ impl AdvanceTrace {
         self.operation == operation
             && &self.expected == expected
             && match (&self.input, next.broker().supervision().operations().last()) {
+                (AdvanceTraceInput::EgressRelease(trace), _) => next
+                    .broker()
+                    .runner()
+                    .broker_context()
+                    .egress_release
+                    .is_some_and(|intent| intent.opening_for_test() == &trace.opening),
                 (
                     AdvanceTraceInput::Cleanup(input),
                     Some(SupervisionOperationV1::HelperCleanup {
@@ -859,6 +895,38 @@ impl AdvanceTrace {
 }
 
 #[cfg(test)]
+pub(crate) struct EgressReleaseAckWitness(Arc<AdvanceTrace>);
+
+#[cfg(test)]
+impl EgressReleaseAckWitness {
+    pub(crate) fn require_explicit_release_and_ack(&self) -> Result<(), &'static str> {
+        let trace = self.0.egress_release().ok_or("missing E3 release trace")?;
+        let received = match trace.received.get() {
+            Some((at, Ok(()))) => at,
+            Some((_, Err(mpsc::RecvTimeoutError::Timeout))) => {
+                return Err("Writer release barrier expired");
+            }
+            Some((_, Err(mpsc::RecvTimeoutError::Disconnected))) => {
+                return Err("Writer release barrier disconnected");
+            }
+            None => return Err("Writer has not received the explicit release"),
+        };
+        if trace.sent.get().is_none() {
+            return Err("explicit Writer release send was not confirmed");
+        }
+        if matches!(
+            (self.0.durable.get(), self.0.returned.get(), self.0.reply_returned.get()),
+            (Some(durable), Some((returned, None)), Some((sent, true)))
+                if durable <= returned && returned <= received && received <= sent
+        ) {
+            Ok(())
+        } else {
+            Err("Writer did not acknowledge the exact durable release intent")
+        }
+    }
+}
+
+#[cfg(test)]
 pub(crate) struct AdvanceReplyBarrier {
     entered: Option<oneshot::Receiver<()>>,
     release: Option<mpsc::Sender<()>>,
@@ -867,16 +935,22 @@ pub(crate) struct AdvanceReplyBarrier {
 #[cfg(test)]
 impl AdvanceReplyBarrier {
     pub(crate) async fn entered(&mut self) {
-        self.entered
-            .take()
-            .expect("one owned barrier waiter")
+        self.try_entered_for_test()
             .await
             .expect("actor reached its real reply barrier");
+    }
+
+    pub(crate) async fn try_entered_for_test(&mut self) -> Result<(), &'static str> {
+        self.entered
+            .take()
+            .ok_or("missing owned barrier waiter")?
+            .await
+            .map_err(|_| "actor disconnected before reaching its reply barrier")
     }
     pub(crate) fn cleanup_trace_for_test(&self, start: Instant, cutoff: Instant) -> Option<String> {
         self.trace
             .as_ref()
-            .filter(|trace| !trace.is_created())
+            .filter(|trace| matches!(trace.input, AdvanceTraceInput::Cleanup(_)))
             .map(|trace| trace.report(start, cutoff))
     }
 
@@ -884,6 +958,20 @@ impl AdvanceReplyBarrier {
         if let Some(release) = self.release.take() {
             let _ = release.send(());
         }
+    }
+
+    pub(crate) fn release_egress_for_test(&mut self) -> Result<(), &'static str> {
+        let trace = self
+            .trace
+            .as_deref()
+            .and_then(AdvanceTrace::egress_release)
+            .ok_or("missing E3 release trace")?;
+        self.release
+            .take()
+            .ok_or("Writer release sender was already consumed")?
+            .send(())
+            .map_err(|_| "Writer did not accept the explicit release send")?;
+        trace.sent.set(()).map_err(|_| "duplicate E3 release send")
     }
 
     pub(crate) fn assert_created_late_reply_for_test(
@@ -914,7 +1002,16 @@ impl AdvanceReplyBarrier {
 #[cfg(test)]
 impl Drop for AdvanceReplyBarrier {
     fn drop(&mut self) {
-        self.release_for_test();
+        // An abandoned E3 oracle must disconnect, so only an explicit send
+        // can satisfy its write witness. Other fixtures keep the drop release.
+        if self
+            .trace
+            .as_deref()
+            .and_then(AdvanceTrace::egress_release)
+            .is_none()
+        {
+            self.release_for_test();
+        }
     }
 }
 
@@ -980,6 +1077,30 @@ impl WriterClient {
             .await
     }
 
+    /// Hold only the advance of this head that publishes the exact opening
+    /// receipt. The witness records a successful reply from the real actor.
+    #[cfg(test)]
+    pub(crate) async fn egress_release_reply_barrier_for_test(
+        &self,
+        operation: Uuid,
+        expected: RevisionRefV1,
+        opening: EgressChannelOpeningReceiptV1,
+    ) -> Result<(AdvanceReplyBarrier, EgressReleaseAckWitness), WriterCallFailure> {
+        let trace = Arc::new(AdvanceTrace::new(
+            operation,
+            expected,
+            AdvanceTraceInput::EgressRelease(Box::new(EgressReleaseTrace {
+                opening,
+                sent: OnceLock::new(),
+                received: OnceLock::new(),
+            })),
+        ));
+        let barrier = self
+            .install_barrier_diagnosed_for_test(false, Some(Arc::clone(&trace)), false, false)
+            .await?;
+        Ok((barrier, EgressReleaseAckWitness(trace)))
+    }
+
     /// The first advance that publishes a claim ACK becomes durable, then its
     /// reply is lost (`fail_before_ack`) or delayed until the guard is dropped.
     #[cfg(test)]
@@ -1018,6 +1139,24 @@ impl WriterClient {
         claim_ack_only: bool,
         fail_before_publication: bool,
     ) -> JournalResult<AdvanceReplyBarrier> {
+        self.install_barrier_diagnosed_for_test(
+            fail_before_ack,
+            trace,
+            claim_ack_only,
+            fail_before_publication,
+        )
+        .await
+        .map_err(WriterCallFailure::journal_error)
+    }
+
+    #[cfg(test)]
+    async fn install_barrier_diagnosed_for_test(
+        &self,
+        fail_before_ack: bool,
+        trace: Option<Arc<AdvanceTrace>>,
+        claim_ack_only: bool,
+        fail_before_publication: bool,
+    ) -> Result<AdvanceReplyBarrier, WriterCallFailure> {
         let (entered, observed) = oneshot::channel();
         let (release, wait) = mpsc::channel();
         let fallback = Duration::from_secs(10);
@@ -1042,7 +1181,8 @@ impl WriterClient {
             claim_ack_only,
             fail_before_publication,
         };
-        self.call(move |reply| Command::TestAdvanceReplyBarrier { barrier, reply })
+        self.0
+            .call_diagnosed(move |reply| Command::TestAdvanceReplyBarrier { barrier, reply })
             .await?;
         Ok(guard)
     }
@@ -1278,6 +1418,25 @@ impl WriterClient {
             reply,
         })
         .await
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) async fn fence_egress_release_head_diagnosed_for_test(
+        &self,
+        operation_id: Uuid,
+        expected: &RevisionRefV1,
+        intent: &EgressReleaseIntentV1,
+    ) -> Result<EgressReleaseHeadPermit, WriterCallFailure> {
+        let expected = expected.clone();
+        let intent = Box::new(intent.clone());
+        self.0
+            .call_diagnosed(move |reply| Command::FenceEgressReleaseHead {
+                operation_id,
+                expected,
+                intent,
+                reply,
+            })
+            .await
     }
 
     pub async fn cancel_stop_projection(
@@ -1575,9 +1734,10 @@ fn serve_backend(
             #[cfg(test)]
             Command::TestAdvanceReplyBarrier { barrier, reply } => {
                 assert!(
-                    advance_reply_barrier.replace(barrier).is_none(),
+                    advance_reply_barrier.is_none(),
                     "one pending actor reply barrier"
                 );
+                advance_reply_barrier = Some(barrier);
                 let _ = respond(
                     &backend,
                     &status,
@@ -1924,10 +2084,9 @@ fn serve_backend(
                             .set((Instant::now(), result.as_ref().err().copied()));
                     }
                     if let Some(barrier) = advance_reply_barrier.take_if(|_| barrier_applies) {
-                        let _ = barrier.entered.send(());
                         // After the actual Journal call, without any filesystem
-                        // mutex held. Drop of the owned test guard releases it.
-                        let _ = barrier.release.recv_timeout(barrier.hold_limit);
+                        // mutex held.
+                        barrier.wait_for_release(trace.as_deref());
                     }
                 }
                 let update = result
@@ -2316,6 +2475,78 @@ mod tests {
     use crate::control_fs::Directory;
     use std::os::unix::fs::PermissionsExt;
     use tokio::sync::oneshot;
+
+    #[test]
+    fn egress_release_witness_rejects_expiry_and_disconnection() {
+        use crate::{
+            control::egress_decision::{
+                EgressBindingV1, EgressChannelOpeningDispositionV1, EgressReceiptV1,
+            },
+            egress::ids::{DigestV1, IdV1},
+        };
+
+        for (disconnect, hold_limit, expected) in [
+            (false, Duration::ZERO, "Writer release barrier expired"),
+            (
+                true,
+                Duration::from_secs(1),
+                "Writer release barrier disconnected",
+            ),
+        ] {
+            let trace = Arc::new(AdvanceTrace::new(
+                Uuid::new_v4(),
+                RevisionRefV1::new(1, &"a".repeat(64)).unwrap(),
+                AdvanceTraceInput::EgressRelease(Box::new(EgressReleaseTrace {
+                    opening: EgressChannelOpeningReceiptV1 {
+                        version: 1,
+                        observation_id: IdV1::random(),
+                        binding: EgressBindingV1 {
+                            session_id: IdV1::random().as_str().to_owned(),
+                            worker_id: IdV1::random().as_str().to_owned(),
+                            attempt_id: IdV1::random().as_str().to_owned(),
+                            channel_id: IdV1::random(),
+                            epoch: 1,
+                            context_digest: DigestV1::of(b"release barrier fixture"),
+                        },
+                        disposition: EgressChannelOpeningDispositionV1::Fresh,
+                        receipt: EgressReceiptV1 {
+                            audit_seq: 2,
+                            audit_hash: "b".repeat(64),
+                        },
+                    },
+                    sent: OnceLock::new(),
+                    received: OnceLock::new(),
+                })),
+            ));
+            let (entered, observed) = oneshot::channel();
+            let (release, wait) = mpsc::channel();
+            let mut guard = Some(AdvanceReplyBarrier {
+                entered: Some(observed),
+                release: Some(release),
+                trace: Some(Arc::clone(&trace)),
+            });
+            let barrier = ArmedAdvanceReplyBarrier {
+                entered,
+                release: wait,
+                hold_limit,
+                fail_before_ack: false,
+                trace: Some(Arc::clone(&trace)),
+                claim_ack_only: false,
+                fail_before_publication: false,
+            };
+            if disconnect {
+                drop(guard.take());
+            }
+            let durable = Instant::now();
+            trace.durable.set(durable).unwrap();
+            trace.returned.set((durable, None)).unwrap();
+            barrier.wait_for_release(Some(&trace));
+            trace.reply_returned.set((Instant::now(), true)).unwrap();
+            let witness = EgressReleaseAckWitness(trace);
+            assert_eq!(witness.require_explicit_release_and_ack(), Err(expected));
+            drop(guard);
+        }
+    }
 
     pub(super) fn private_journal() -> (tempfile::TempDir, Journal) {
         let root = tempfile::Builder::new()

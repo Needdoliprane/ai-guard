@@ -1,5 +1,8 @@
 //! Test infrastructure only: real Store/HTTP/Journal authorization and receipts,
 //! with explicitly synthetic engine observations. No Docker/Podman is invoked.
+#[path = "egress_ack_tests.rs"]
+mod egress_ack_tests;
+
 use super::super::*;
 use crate::{
     broker::journal::{JournalLimitsV1, recovery::StopRecoveryReaderV1},
@@ -231,37 +234,43 @@ impl RecoveryFixture {
                 _ => None,
             })
             .unwrap();
-        let (import, import_arm, import_terminal) = seed_helper(
-            handle,
-            &execution,
-            &worker,
-            &authority,
-            accepted.intent_hash(),
-            HelperPurposeV1::Import,
-            HelperPermissionV1::Admission {
-                receipt: admission_receipt,
-            },
-            None,
-        );
-        seed_helper(
-            handle,
-            &execution,
-            &worker,
-            &authority,
-            accepted.intent_hash(),
-            HelperPurposeV1::ImportVerification,
-            HelperPermissionV1::ImportVerification {
-                import_helper_id: import.to_string(),
-                import_arm,
-                import_terminal,
-                manifest_digest: worker.launch.workspace_manifest_digest.clone(),
-            },
-            Some(ImportVerificationReportV1 {
-                import_helper_id: import.to_string(),
-                expected_manifest_digest: worker.launch.workspace_manifest_digest.clone(),
-                observed_manifest_digest: worker.launch.workspace_manifest_digest.clone(),
-            }),
-        );
+        let (import, import_arm, import_terminal) = handle
+            .block_on(boxed_execution_phase(|| {
+                seed_helper(
+                    &execution,
+                    &worker,
+                    &authority,
+                    accepted.intent_hash(),
+                    HelperPurposeV1::Import,
+                    HelperPermissionV1::Admission {
+                        receipt: admission_receipt,
+                    },
+                    None,
+                )
+            }))
+            .unwrap();
+        handle
+            .block_on(boxed_execution_phase(|| {
+                seed_helper(
+                    &execution,
+                    &worker,
+                    &authority,
+                    accepted.intent_hash(),
+                    HelperPurposeV1::ImportVerification,
+                    HelperPermissionV1::ImportVerification {
+                        import_helper_id: import.to_string(),
+                        import_arm,
+                        import_terminal,
+                        manifest_digest: worker.launch.workspace_manifest_digest.clone(),
+                    },
+                    Some(ImportVerificationReportV1 {
+                        import_helper_id: import.to_string(),
+                        expected_manifest_digest: worker.launch.workspace_manifest_digest.clone(),
+                        observed_manifest_digest: worker.launch.workspace_manifest_digest.clone(),
+                    }),
+                )
+            }))
+            .unwrap();
         eprintln!("cancelled_recovery_fixture phase=helpers_ready");
         let worker = handle
             .block_on(execution.mutate(WorkerTransitionV1::CreateIssued))
@@ -1175,8 +1184,7 @@ fn arm(
     }
 }
 
-fn seed_helper(
-    handle: &tokio::runtime::Handle,
+async fn seed_helper(
     execution: &Execution<'_>,
     worker: &WorkerV1,
     authority: &RuntimeAuthority,
@@ -1184,19 +1192,19 @@ fn seed_helper(
     purpose: HelperPurposeV1,
     permission: HelperPermissionV1,
     verification: Option<ImportVerificationReportV1>,
-) -> (Uuid, ArmReceiptV1, MutationReceiptV1) {
+) -> Result<(Uuid, ArmReceiptV1, MutationReceiptV1)> {
     let helper = Uuid::new_v4();
-    let policy = helper_execution_policy_v1(worker, purpose, helper).unwrap();
-    handle
-        .block_on(execution.patch(|draft| {
+    let policy = helper_execution_policy_v1(worker, purpose, helper)?;
+    execution
+        .patch(|draft| {
             draft.helpers.push(HelperPreparationV1::new(
                 policy.clone(),
                 permission.clone(),
                 None,
             )?);
             Ok(())
-        }))
-        .unwrap();
+        })
+        .await?;
     let inspect = RuntimeInspectionV1 {
         authority_id: policy.authority_id.clone(),
         runtime_kind: policy.runtime_kind,
@@ -1204,7 +1212,7 @@ fn seed_helper(
         stable_name: policy.stable_name.clone(),
         volume_name: policy.volume_name.clone(),
         image_id: policy.image_id.clone(),
-        spec_hash: policy.spec_hash().unwrap(),
+        spec_hash: policy.spec_hash()?,
         cpu_millis: policy.cpu_millis,
         memory_bytes: policy.memory_bytes,
         pids_limit: policy.pids_limit,
@@ -1224,15 +1232,18 @@ fn seed_helper(
                 "memory_bytes":inspect.memory_bytes,"pids_limit":inspect.pids_limit},
             "configuration_fingerprint":fingerprint,"configuration_fingerprint_version":2,
             "observed_at":STARTED,"diagnostics":[]}
-    })).unwrap();
-    handle
-        .block_on(execution.patch(|draft| {
-            let entry = draft.helpers.last_mut().unwrap();
+    }))?;
+    execution
+        .patch(|draft| {
+            let entry = draft
+                .helpers
+                .last_mut()
+                .context("fixture helper preparation missing")?;
             *entry =
                 HelperPreparationV1::new(policy.clone(), permission.clone(), Some(owned.clone()))?;
             Ok(())
-        }))
-        .unwrap();
+        })
+        .await?;
     let arm = arm(
         worker,
         authority,
@@ -1246,23 +1257,23 @@ fn seed_helper(
         },
         fingerprint,
     );
-    let (armed, _) = handle
-        .block_on(execution.rpc(Operation::Arm {
+    let (armed, _) = execution
+        .rpc(Operation::Arm {
             parent: worker.clone(),
             owned,
             request: arm.clone(),
             response: None,
-        }))
-        .unwrap();
+        })
+        .await?;
     let Operation::Arm {
         response: Some(armed),
         ..
     } = armed
     else {
-        panic!("fixture helper arm missing")
+        anyhow::bail!("fixture helper arm missing")
     };
-    handle
-        .block_on(execution.rpc(Operation::HelperClaim {
+    execution
+        .rpc(Operation::HelperClaim {
             request: HelperStartClaimV1 {
                 version: 1,
                 operation_id: Uuid::new_v4().to_string(),
@@ -1272,10 +1283,10 @@ fn seed_helper(
                 clock_check: arm.clock,
             },
             response: None,
-        }))
-        .unwrap();
-    let (terminal, _) = handle
-        .block_on(execution.rpc(Operation::HelperObservation {
+        })
+        .await?;
+    let (terminal, _) = execution
+        .rpc(Operation::HelperObservation {
             request: HelperObservationV1 {
                 version: 1,
                 operation_id: Uuid::new_v4().to_string(),
@@ -1295,16 +1306,16 @@ fn seed_helper(
                 },
             },
             response: None,
-        }))
-        .unwrap();
+        })
+        .await?;
     let Operation::HelperObservation {
         response: Some(receipt),
         ..
     } = terminal
     else {
-        panic!("fixture helper terminal missing")
+        anyhow::bail!("fixture helper terminal missing")
     };
-    (helper, armed.receipt, receipt)
+    Ok((helper, armed.receipt, receipt))
 }
 
 fn inspect_facts(worker: &WorkerV1) -> Value {

@@ -8,6 +8,7 @@ mod create_issued_tests;
 #[path = "export_retirement_tests.rs"]
 mod export_retirement_tests;
 use super::super::diagnostics::BrokerStep;
+use super::super::egress::EgressOpeningProgress;
 use super::*;
 use crate::{
     api::{GatewayState, gateway_router},
@@ -77,8 +78,14 @@ struct Fixture {
     arm_requests: Arc<AtomicUsize>,
     drop_next_worker_transition_response: Arc<AtomicBool>,
     audit_response_gate: Arc<StdMutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>>,
+    egress_opening_gate: Arc<StdMutex<Option<HeldOpeningResponse>>>,
     gateway: tokio::task::JoinHandle<()>,
     root: tempfile::TempDir,
+}
+struct HeldOpeningResponse {
+    release: oneshot::Receiver<()>,
+    forwarded: Arc<AtomicBool>,
+    progress: Arc<EgressOpeningProgress>,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -89,6 +96,22 @@ impl Drop for Fixture {
     }
 }
 impl Fixture {
+    fn pause_next_egress_opening(
+        &self,
+        progress: Arc<EgressOpeningProgress>,
+    ) -> (oneshot::Sender<()>, Arc<AtomicBool>) {
+        let (release_tx, release_rx) = oneshot::channel();
+        let forwarded = Arc::new(AtomicBool::new(false));
+        let mut gate = self.egress_opening_gate.lock().unwrap();
+        assert!(gate.is_none());
+        *gate = Some(HeldOpeningResponse {
+            release: release_rx,
+            forwarded: forwarded.clone(),
+            progress,
+        });
+        (release_tx, forwarded)
+    }
+
     /// Pause one successful event response after its real gateway handler has
     /// committed the event to SQLite, but before the response reaches the
     /// client. This is a test-only ownership barrier, not a fake receipt.
@@ -174,6 +197,8 @@ impl Fixture {
             StdMutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
         > = Arc::new(StdMutex::new(None));
         let observed_audit_response_gate = Arc::clone(&audit_response_gate);
+        let egress_opening_gate = Arc::new(StdMutex::new(None::<HeldOpeningResponse>));
+        let observed_egress_opening_gate = Arc::clone(&egress_opening_gate);
         let app = gateway_router(GatewayState::new(
             Arc::clone(&store),
             RUNNER.into(),
@@ -189,7 +214,10 @@ impl Fixture {
                 let observed_arm_requests = Arc::clone(&observed_arm_requests);
                 let observed_fault = Arc::clone(&observed_fault);
                 let observed_audit_response_gate = Arc::clone(&observed_audit_response_gate);
+                let observed_egress_opening_gate = Arc::clone(&observed_egress_opening_gate);
                 async move {
+                    let egress_opening = request.method() == axum::http::Method::POST
+                        && request.uri().path() == "/api/v1/egress/channel-openings";
                     let decision = request.uri().path() == "/control/api/decide";
                     let worker_transition = request.method() == axum::http::Method::POST
                         && request.uri().path().starts_with("/control/api/v1/workers/")
@@ -210,7 +238,29 @@ impl Fixture {
                         observed_worker_requests.fetch_add(1, Ordering::SeqCst);
                         eprintln!("cancelled_recovery_fixture phase=worker_transition_http_enter");
                     }
+                    // The E3 fixture arms this only after seeding Created and
+                    // StartIssued. Its only worker transition here is Observe Running.
+                    let opening_progress = if egress_opening || worker_transition {
+                        observed_egress_opening_gate
+                            .lock()
+                            .ok()
+                            .and_then(|gate| gate.as_ref().map(|gate| gate.progress.clone()))
+                    } else {
+                        None
+                    };
+                    if egress_opening && let Some(progress) = &opening_progress {
+                        progress.mark(&progress.opening_http_enter);
+                    }
                     let response = next.run(request).await;
+                    if let Some(progress) = opening_progress {
+                        let status = (progress.elapsed_ms(), response.status().as_u16());
+                        let slot = if egress_opening {
+                            &progress.opening_http
+                        } else {
+                            &progress.running_http
+                        };
+                        let _ = slot.set(status);
+                    }
                     if decision {
                         eprintln!("cancelled_recovery_fixture phase=decision_http_complete");
                     }
@@ -246,6 +296,15 @@ impl Fixture {
                         if let Some((entered, release)) = gate {
                             let _ = entered.send(());
                             let _ = release.await;
+                        }
+                    }
+                    if egress_opening && response.status().is_success() {
+                        let gate = observed_egress_opening_gate.lock().unwrap().take();
+                        if let Some(gate) = gate {
+                            gate.progress.mark(&gate.progress.opening_receipt_held);
+                            if gate.release.await.is_ok() {
+                                gate.forwarded.store(true, Ordering::Release);
+                            }
                         }
                     }
                     response
@@ -297,6 +356,7 @@ impl Fixture {
             arm_requests,
             drop_next_worker_transition_response,
             audit_response_gate,
+            egress_opening_gate,
             gateway,
             root,
         }
@@ -381,7 +441,7 @@ impl Fixture {
 
 struct NativePeer {
     client: EnforcerClient,
-    child: NativeChild,
+    child: NativePeerChild,
 }
 
 struct NativeChild(Child);
@@ -389,6 +449,102 @@ impl Drop for NativeChild {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
+    }
+}
+
+enum NativePeerChild {
+    Legacy(NativeChild),
+    Egress(EgressPeerChild),
+}
+
+impl NativePeerChild {
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        match self {
+            Self::Legacy(child) => child.0.try_wait(),
+            Self::Egress(child) => child.process.as_mut().expect("owned E3 peer").try_wait(),
+        }
+    }
+}
+
+struct EgressPeerChild {
+    process: Option<Child>,
+    fixture_pgid: libc::pid_t,
+    stop_budget: Duration,
+    stop_deadline: Option<std::time::Instant>,
+}
+
+impl EgressPeerChild {
+    fn observed_group(&self) -> Result<libc::pid_t> {
+        let child = self.process.as_ref().context("missing owned E3 peer")?;
+        let pid = libc::pid_t::try_from(child.id()).context("invalid E3 peer PID")?;
+        // SAFETY: getpgid only queries the owned child's process group.
+        let group = unsafe { libc::getpgid(pid) };
+        if group < 0 {
+            return Err(std::io::Error::last_os_error()).context("read E3 peer process group");
+        }
+        Ok(group)
+    }
+
+    fn stop(&mut self) -> Result<()> {
+        let Some(child) = self.process.as_mut() else {
+            return Ok(());
+        };
+
+        let budget = self.stop_budget;
+        let deadline = *self
+            .stop_deadline
+            .get_or_insert_with(|| std::time::Instant::now() + budget);
+        let time_left = || deadline.saturating_duration_since(std::time::Instant::now());
+        if !time_left().is_zero()
+            && let Err(error) = child.kill()
+            && child
+                .try_wait()
+                .context("poll E3 fixture peer exit")?
+                .is_none()
+        {
+            return Err(error).context("kill E3 fixture peer");
+        }
+        // A late Drop can still reap a terminal child without another wait.
+        loop {
+            if child
+                .try_wait()
+                .context("poll E3 fixture peer exit")?
+                .is_some()
+            {
+                self.process = None;
+                return Ok(());
+            }
+            let remaining = time_left();
+            ensure!(
+                !remaining.is_zero(),
+                "E3 fixture peer did not exit before the deadline"
+            );
+            std::thread::sleep(remaining.min(Duration::from_millis(10)));
+        }
+    }
+}
+
+impl Drop for EgressPeerChild {
+    fn drop(&mut self) {
+        if let Err(error) = self.stop() {
+            use std::io::Write as _;
+
+            let Some(child) = self.process.as_ref() else {
+                return;
+            };
+            let observed_group = self
+                .observed_group()
+                .map_or_else(|_| "unknown".into(), |group| group.to_string());
+            // Write to the launcher's stderr capture even during libtest
+            // unwinding. It owns the remaining_group_members check, not wait.
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "e3_fixture_peer_handoff reap=unconfirmed fixture_pid={} fixture_pgid={} child_pid={} child_pgid={observed_group}: {error:#}",
+                std::process::id(),
+                self.fixture_pgid,
+                child.id(),
+            );
+        }
     }
 }
 const FRESH_PEER_PARENT: &str = "AI_GUARD_TEST_RECOVERY_FRESH_PEER_PARENT";
@@ -410,38 +566,60 @@ fn native_fresh_recovery_peer_child() {
 
 impl NativePeer {
     async fn empty(fixture: &Fixture) -> Self {
-        Self::start(fixture, None).await
+        Self::start(fixture, None, None, &mut None).await.unwrap()
     }
 
     async fn for_admission(fixture: &Fixture) -> Self {
-        Self::start(fixture, Some(Uuid::new_v4())).await
+        Self::start(fixture, Some(Uuid::new_v4()), None, &mut None)
+            .await
+            .unwrap()
     }
 
-    async fn start(fixture: &Fixture, fresh_nonce: Option<Uuid>) -> Self {
+    async fn for_egress_ack_oracle(
+        fixture: &Fixture,
+        stop_budget: Duration,
+        child: &mut Option<NativePeerChild>,
+    ) -> Result<Self> {
+        Self::start(fixture, Some(Uuid::new_v4()), Some(stop_budget), child).await
+    }
+
+    async fn start(
+        fixture: &Fixture,
+        fresh_nonce: Option<Uuid>,
+        egress_stop_budget: Option<Duration>,
+        child_slot: &mut Option<NativePeerChild>,
+    ) -> Result<Self> {
         let path = fixture.root.path().canonicalize().unwrap();
         let parent = Directory::open_existing(&path).unwrap();
         let executable = std::env::current_exe().unwrap();
-        let stderr = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(fixture.root.path().join("enforcer.stderr"))
-            .unwrap();
+        let stderr = if egress_stop_budget.is_some() {
+            Stdio::null()
+        } else {
+            Stdio::from(
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(fixture.root.path().join("enforcer.stderr"))
+                    .unwrap(),
+            )
+        };
         let mut command = Command::new(&executable);
         command
             .env_clear()
             .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::from(stderr));
+            .stderr(stderr);
         if let Some(nonce) = fresh_nonce {
             // The owned child creates the missing role with the genuine
             // factory. Reopening an existing role leaves it cold-fenced.
-            assert!(
+            ensure!(
                 parent
                     .persistent_child("enforcer", false)
                     .unwrap()
-                    .is_none()
+                    .is_none(),
+                "native fixture role already exists"
             );
             command
                 .args([
@@ -469,51 +647,106 @@ impl NativePeer {
                 ])
                 .env("AI_GUARD_TEST_RETAINED_CANCEL_ROOT", root.path());
         }
-        let mut child = NativeChild(command.spawn().unwrap());
+        let egress_stop = egress_stop_budget.map(|budget| {
+            // SAFETY: getpgrp only reads the libtest process group inherited
+            // by the direct spawn below. The child never calls setsid.
+            let group = unsafe { libc::getpgrp() };
+            (budget, group)
+        });
+        ensure!(
+            child_slot.is_none(),
+            "native fixture child already retained"
+        );
+        let process = command.spawn()?;
+        let child_pid = process.id();
+        let child = child_slot.insert(match egress_stop {
+            Some((stop_budget, fixture_pgid)) => NativePeerChild::Egress(EgressPeerChild {
+                process: Some(process),
+                fixture_pgid,
+                stop_budget,
+                stop_deadline: None,
+            }),
+            None => NativePeerChild::Legacy(NativeChild(process)),
+        });
+        if let NativePeerChild::Egress(child) = &*child {
+            ensure!(
+                child.observed_group()? == child.fixture_pgid,
+                "E3 fixture peer must remain in the launcher's captured group"
+            );
+        }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let mut owned = Self {
-            client: loop {
-                if let Some(root) = parent.persistent_child("enforcer", false).unwrap() {
-                    match load_endpoint(&root) {
-                        Ok(Some(_)) => {
-                            break EnforcerClient::connect_or_spawn(&root, &executable, 8)
-                                .await
-                                .unwrap();
+        let client = loop {
+            if let Some(root) = parent.persistent_child("enforcer", false).unwrap() {
+                match load_endpoint(&root) {
+                    Ok(Some(_)) => {
+                        if egress_stop_budget.is_some() {
+                            ensure!(
+                                child.try_wait()?.is_none(),
+                                "E3 fixture child exited before connection"
+                            );
+                            break tokio::time::timeout_at(
+                                deadline,
+                                EnforcerClient::connect_owned_legacy_peer_for_test(
+                                    &root, child_pid, 8,
+                                ),
+                            )
+                            .await
+                            .context("owned E3 peer connection deadline")?
+                            .context("authenticate the existing E3 child")?;
                         }
-                        // The owned fixture can still be writing its first announcement.
-                        Ok(None) | Err(IpcError::UnsafeFilesystem) => {}
-                        Err(error) => panic!("native recovery fixture discovery failed: {error:?}"),
+                        break EnforcerClient::connect_or_spawn(&root, &executable, 8)
+                            .await
+                            .unwrap();
+                    }
+                    // The owned fixture can still be writing its first announcement.
+                    Ok(None) | Err(IpcError::UnsafeFilesystem) => {}
+                    Err(error) => {
+                        anyhow::bail!("native recovery fixture discovery failed: {error:?}")
                     }
                 }
-                assert!(
-                    child.0.try_wait().unwrap().is_none(),
-                    "native fixture child exited before IPC was ready"
-                );
-                assert!(
-                    tokio::time::Instant::now() < deadline,
-                    "native fixture child did not publish IPC"
-                );
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            },
-            child,
+            }
+            ensure!(
+                child.try_wait()?.is_none(),
+                "native fixture child exited before IPC was ready"
+            );
+            ensure!(
+                tokio::time::Instant::now() < deadline,
+                "native fixture child did not publish IPC"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
         };
-        assert!(owned.child.0.try_wait().unwrap().is_none());
-        assert_eq!(owned.client.status().await.unwrap().slot_count(), 0);
+        ensure!(
+            child.try_wait()?.is_none(),
+            "native fixture peer already exited"
+        );
+        ensure!(
+            client.status().await?.slot_count() == 0,
+            "native fixture peer already has slots"
+        );
         if let Some(nonce) = fresh_nonce {
-            let capabilities =
-                serde_json::to_value(owned.client.legacy_capabilities().await.unwrap()).unwrap();
-            assert!(
+            let capabilities = serde_json::to_value(client.legacy_capabilities().await?)?;
+            ensure!(
                 capabilities.get("fresh_launch_nonce") == Some(&json!(nonce)),
                 "native fixture child nonce mismatch"
             );
-            owned.client.require_admission_ready().await.unwrap();
+            client.require_admission_ready().await?;
         }
-        owned
+        Ok(Self {
+            client,
+            child: child_slot.take().expect("retained native child"),
+        })
     }
+    fn stop_egress_ack_oracle(&mut self) -> Result<()> {
+        match &mut self.child {
+            NativePeerChild::Egress(child) => child.stop(),
+            NativePeerChild::Legacy(_) => anyhow::bail!("expected an owned E3 fixture peer"),
+        }
+    }
+
     async fn close(mut self) {
         self.client.shutdown_if_idle().await.unwrap();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        while self.child.0.try_wait().unwrap().is_none() {
+        while self.child.try_wait().unwrap().is_none() {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "empty native child did not release its lease"

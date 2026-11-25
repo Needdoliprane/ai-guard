@@ -280,6 +280,11 @@ pub(crate) struct EgressReleaseIntentV1 {
 }
 
 impl EgressReleaseIntentV1 {
+    #[cfg(test)]
+    pub(crate) fn opening_for_test(&self) -> &EgressChannelOpeningReceiptV1 {
+        &self.opening
+    }
+
     /// Freeze only an opening from this live exchange. Recovery can read the
     /// persisted intent but cannot recreate an opened channel from its bytes.
     pub(crate) fn from_opened<IO>(

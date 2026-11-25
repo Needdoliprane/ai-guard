@@ -2,6 +2,8 @@
 
 use super::{Execution, Operation, WorkerMutationV1, WorkerStateV1, WorkerTransitionV1};
 use super::{boxed_execution_phase, managed, same};
+#[cfg(test)]
+use crate::broker::writer::WriterCallFailure;
 use crate::{
     broker::{
         egress_owner::{
@@ -28,9 +30,210 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow, ensure};
 use futures_util::future::BoxFuture;
+#[cfg(test)]
+use std::sync::OnceLock;
 use std::{future::Future, sync::Arc, time::Duration};
+#[cfg(test)]
+use tokio::{
+    sync::Notify,
+    time::{Instant, sleep_until},
+};
 use tokio::{sync::watch, task::JoinHandle, time::timeout};
 use uuid::Uuid;
+
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct EgressOpeningProgress {
+    started: OnceLock<Instant>,
+    changed: Notify,
+    pub(super) ready: OnceLock<Instant>,
+    pub(super) running_http: OnceLock<(u128, u16)>,
+    pub(super) running_decoded: OnceLock<Instant>,
+    pub(super) running_ack: OnceLock<Instant>,
+    pub(super) opening_key_ack: OnceLock<Instant>,
+    pub(super) opening_attempt: OnceLock<Instant>,
+    pub(super) opening_http_enter: OnceLock<Instant>,
+    pub(super) opening_http: OnceLock<(u128, u16)>,
+    pub(super) opening_receipt_held: OnceLock<Instant>,
+    pub(super) release_intent_ack: OnceLock<Instant>,
+    pub(super) stop: OnceLock<Instant>,
+    pub(super) callback_failed: OnceLock<Instant>,
+    writer_failure: OnceLock<(Instant, EgressWitnessWriterFailure)>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(super) struct EgressWitnessWriterFailure {
+    phase: &'static str,
+    call: &'static str,
+    cause: WriterCallFailure,
+}
+
+#[cfg(test)]
+impl std::fmt::Display for EgressWitnessWriterFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let cause = match self.cause {
+            WriterCallFailure::QueueFull => "queue_full",
+            WriterCallFailure::ReplyTimeout => "reply_timeout",
+            WriterCallFailure::Unavailable => "unavailable",
+            WriterCallFailure::Actor(_) => "actor_error",
+        };
+        write!(
+            f,
+            "writer phase={} call={} cause={cause}",
+            self.phase, self.call
+        )
+    }
+}
+
+#[cfg(test)]
+impl std::error::Error for EgressWitnessWriterFailure {}
+
+#[cfg(test)]
+impl EgressOpeningProgress {
+    pub(super) fn start(&self) -> Instant {
+        *self.started.get_or_init(Instant::now)
+    }
+
+    pub(super) fn elapsed_ms(&self) -> u128 {
+        self.started.get_or_init(Instant::now).elapsed().as_millis()
+    }
+
+    pub(super) fn mark(&self, milestone: &OnceLock<Instant>) {
+        if milestone.set(Instant::now()).is_ok() {
+            // There is one oracle. A stored permit covers a mark before its next wait.
+            self.changed.notify_one();
+        }
+    }
+
+    pub(super) fn writer_failed(&self, call: &'static str, failure: &WriterCallFailure) {
+        let phase = if self.ready.get().is_none() {
+            "ready"
+        } else if self.running_decoded.get().is_none() {
+            "running_before_decode"
+        } else if self.running_ack.get().is_none() {
+            "running_ack"
+        } else if self.opening_key_ack.get().is_none() {
+            "opening_key_ack"
+        } else if self.release_intent_ack.get().is_none() {
+            "release_intent_ack"
+        } else {
+            return;
+        };
+        self.record_writer_failure(phase, call, *failure);
+    }
+
+    pub(super) fn record_writer_failure(
+        &self,
+        phase: &'static str,
+        call: &'static str,
+        cause: WriterCallFailure,
+    ) -> EgressWitnessWriterFailure {
+        let failure = EgressWitnessWriterFailure { phase, call, cause };
+        if self.writer_failure.set((Instant::now(), failure)).is_ok() {
+            self.changed.notify_one();
+        }
+        failure
+    }
+
+    pub(super) fn writer_failure_before(
+        &self,
+        deadline: Instant,
+    ) -> Option<EgressWitnessWriterFailure> {
+        self.writer_failure
+            .get()
+            .and_then(|&(at, failure)| (at < deadline).then_some(failure))
+    }
+
+    pub(super) async fn wait_for(
+        &self,
+        milestone: &OnceLock<Instant>,
+        deadline: Instant,
+    ) -> Result<Instant> {
+        loop {
+            // Sample expiry before reading the marks. A delayed poll can still
+            // observe a mark published before the original deadline.
+            let expired = Instant::now() >= deadline;
+            if let Some(&at) = milestone.get()
+                && at < deadline
+            {
+                return Ok(at);
+            }
+            if let Some(failure) = self.writer_failure_before(deadline) {
+                return Err(failure.into());
+            }
+            if self.callback_failed.get().is_some_and(|&at| at < deadline) {
+                anyhow::bail!("callback failed before this milestone was observed");
+            }
+            ensure!(!expired, "harness phase deadline elapsed");
+            tokio::select! {
+                () = self.changed.notified() => {},
+                () = sleep_until(deadline) => {},
+            }
+        }
+    }
+
+    pub(super) async fn observe_release<T>(
+        &self,
+        deadline: Instant,
+        observation: impl Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let mut observation = std::pin::pin!(observation);
+        loop {
+            if let Some(failure) = self.writer_failure_before(deadline) {
+                return Err(failure.into());
+            }
+            tokio::select! {
+                biased;
+                result = observation.as_mut() => {
+                    if let Some(failure) = self.writer_failure_before(deadline) {
+                        return Err(failure.into());
+                    }
+                    return result;
+                }
+                () = sleep_until(deadline) => {
+                    if let Some(failure) = self.writer_failure_before(deadline) {
+                        return Err(failure.into());
+                    }
+                    anyhow::bail!("harness release observation deadline elapsed");
+                }
+                () = self.changed.notified() => {},
+            }
+        }
+    }
+
+    pub(super) fn report(&self) -> String {
+        let started = self.start();
+        let elapsed = |point: &OnceLock<Instant>| {
+            point
+                .get()
+                .map(|at| at.saturating_duration_since(started).as_millis())
+        };
+        format!(
+            "ready_ms={:?} running_http_ms_status={:?} running_decoded_ms={:?} running_ack_ms={:?} opening_key_ack_ms={:?} opening_attempt_ms={:?} opening_http_enter_ms={:?} opening_http_ms_status={:?} opening_receipt_held_ms={:?} release_intent_ack_ms={:?} stop_ms={:?} writer_failure_ms={:?}",
+            elapsed(&self.ready),
+            self.running_http.get(),
+            elapsed(&self.running_decoded),
+            elapsed(&self.running_ack),
+            elapsed(&self.opening_key_ack),
+            elapsed(&self.opening_attempt),
+            elapsed(&self.opening_http_enter),
+            self.opening_http.get(),
+            elapsed(&self.opening_receipt_held),
+            elapsed(&self.release_intent_ack),
+            elapsed(&self.stop),
+            self.writer_failure.get().map(|(at, failure)| (
+                at.saturating_duration_since(started).as_millis(),
+                failure.to_string()
+            )),
+        )
+    }
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(super) static EGRESS_OPENING_PROGRESS: Arc<EgressOpeningProgress>;
+}
 
 // The channel owner bounds its local retirement and audit drain to five seconds.
 const CHANNEL_JOIN_TIMEOUT: Duration = Duration::from_secs(6);
@@ -183,11 +386,31 @@ impl Execution<'_> {
                     .context("cannot revalidate the held bootstrap incarnation")?;
 
             let head = boxed_execution_phase(|| {
-                self.executor.writer.fence_egress_release_head(
-                    self.operation,
-                    ready.committed.head(),
-                    ready.committed.intent(),
-                )
+                #[cfg(not(test))]
+                {
+                    self.executor.writer.fence_egress_release_head(
+                        self.operation,
+                        ready.committed.head(),
+                        ready.committed.intent(),
+                    )
+                }
+                #[cfg(test)]
+                async {
+                    self.executor
+                        .writer
+                        .fence_egress_release_head_diagnosed_for_test(
+                            self.operation,
+                            ready.committed.head(),
+                            ready.committed.intent(),
+                        )
+                        .await
+                        .map_err(|failure| {
+                            let _ = EGRESS_OPENING_PROGRESS.try_with(|trace| {
+                                trace.record_writer_failure("release_fence", "fence", failure)
+                            });
+                            failure.journal_error()
+                        })
+                }
             })
             .await
             .context("confirmed egress release intent is no longer current")?;
@@ -268,6 +491,8 @@ impl Execution<'_> {
                 .map_err(|failure| {
                     anyhow!("egress helper READY failed ({})", failure.cause.code())
                 })?;
+            #[cfg(test)]
+            let _ = EGRESS_OPENING_PROGRESS.try_with(|trace| trace.mark(&trace.ready));
 
             self.require_egress_live(exec)?;
             let running = boxed_execution_phase(|| self.acknowledge_egress_running(&plan.request))
@@ -280,10 +505,14 @@ impl Execution<'_> {
             })
             .await
             .context("retained egress opening request acknowledgement unavailable")?;
+            #[cfg(test)]
+            let _ = EGRESS_OPENING_PROGRESS.try_with(|trace| trace.mark(&trace.opening_key_ack));
             self.require_egress_live(exec)?;
 
             let control: Arc<dyn EgressControl> =
                 Arc::new(GatewayEgressControl::new(self.client.clone()));
+            #[cfg(test)]
+            let _ = EGRESS_OPENING_PROGRESS.try_with(|trace| trace.mark(&trace.opening_attempt));
             let channel = boxed_execution_phase(|| prepared.open(control.as_ref()))
                 .await
                 .map_err(|failure| {
@@ -296,6 +525,8 @@ impl Execution<'_> {
             })
             .await
             .context("retained egress intent acknowledgement unavailable")?;
+            #[cfg(test)]
+            let _ = EGRESS_OPENING_PROGRESS.try_with(|trace| trace.mark(&trace.release_intent_ack));
             self.require_egress_live(exec)?;
             committed.require_context(self.operation, self.context.scope())?;
             let intent = committed
@@ -401,6 +632,8 @@ impl Execution<'_> {
                 && same(committed.draft.worker()?, &running.worker)?,
             "retained egress Running acknowledgement differs from its observation or journal head",
         );
+        #[cfg(test)]
+        let _ = EGRESS_OPENING_PROGRESS.try_with(|trace| trace.mark(&trace.running_ack));
         Ok(Box::new(running))
     }
 

@@ -32,7 +32,17 @@ fn run() -> io::Result<i32> {
         let _ = input.shutdown(Shutdown::Write);
         result
     });
-    io::copy(&mut channel, &mut io::stdout().lock())?;
+    // A binary READY frame may carry no newline. Forward it before EOF.
+    let mut output = io::stdout().lock();
+    let mut bytes = [0; 4096];
+    loop {
+        let count = channel.read(&mut bytes)?;
+        if count == 0 {
+            break;
+        }
+        output.write_all(&bytes[..count])?;
+        output.flush()?;
+    }
     producer
         .join()
         .map_err(|_| io::Error::other("fixture stdin owner failed"))??;

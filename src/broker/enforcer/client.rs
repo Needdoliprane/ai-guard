@@ -59,6 +59,8 @@ struct Client {
     endpoint: EndpointRecordV1,
     capability: [u8; 32],
     liveness: OwnedFd,
+    #[cfg(test)]
+    owned_peer_pid_for_test: Option<u32>,
     replacement: Mutex<Option<EnforcerClient>>,
     unknown_slots: AtomicU64,
     lost_unknown: AtomicBool,
@@ -362,6 +364,8 @@ impl EnforcerFullClientV3 {
             endpoint,
             capability: secret,
             liveness,
+            #[cfg(test)]
+            owned_peer_pid_for_test: None,
             replacement: Mutex::new(None),
             // Full3 admission is arbitrated against the server's shared
             // registry per Arm; another job's known STOP is not a global fuse.
@@ -1495,6 +1499,7 @@ impl EnforcerClient {
             endpoint: EndpointRecordV1::unavailable_for_test(),
             capability: [0; 32],
             liveness: root.try_clone_file()?.into(),
+            owned_peer_pid_for_test: None,
             replacement: Mutex::new(None),
             unknown_slots: AtomicU64::new(0),
             lost_unknown: AtomicBool::new(false),
@@ -1536,6 +1541,66 @@ impl EnforcerClient {
         max_recovery_stop_owners: u32,
         auto_recovery: bool,
     ) -> Result<Self, ConnectFailure> {
+        let (client, stream) = Self::connect_legacy_watch(
+            root,
+            executable,
+            endpoint,
+            secret,
+            max_slots,
+            max_recovery_stop_owners,
+            LegacyWatchOptions {
+                auto_recovery,
+                #[cfg(test)]
+                owned_peer_pid: None,
+            },
+        )
+        .await?;
+        tokio::spawn(monitor(Arc::downgrade(&client.0), stream));
+        Ok(client)
+    }
+
+    /// Authenticate only the already-spawned fixture child. Keep the live
+    /// watch descriptor for the health check, with no reader task or recovery.
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    pub(crate) async fn connect_owned_legacy_peer_for_test(
+        root: &Directory,
+        child_pid: u32,
+        max_slots: u32,
+    ) -> EnforcerResult<Self> {
+        if child_pid == 0 || !(1..=MAX_SLOTS).contains(&max_slots) {
+            return Err(EnforcerError::InvalidInput);
+        }
+        let endpoint = load_endpoint(root)?.ok_or(EnforcerError::Unavailable)?;
+        let secret = capability(root, false)?;
+        let (client, _watch) = Self::connect_legacy_watch(
+            root,
+            Path::new(""),
+            endpoint,
+            secret,
+            max_slots,
+            0,
+            LegacyWatchOptions {
+                auto_recovery: false,
+                owned_peer_pid: Some(child_pid),
+            },
+        )
+        .await
+        .map_err(|error| match error {
+            ConnectFailure::Absent => EnforcerError::Unavailable,
+            ConnectFailure::Other(error) => error,
+        })?;
+        Ok(client)
+    }
+
+    async fn connect_legacy_watch(
+        root: &Directory,
+        executable: &Path,
+        endpoint: EndpointRecordV1,
+        secret: [u8; 32],
+        max_slots: u32,
+        max_recovery_stop_owners: u32,
+        options: LegacyWatchOptions,
+    ) -> Result<(Self, UnixStream), ConnectFailure> {
         let endpoint_root = root
             .persistent_child("endpoints", false)
             .map_err(|_| ConnectFailure::Other(EnforcerError::UnsafeFilesystem))?
@@ -1549,6 +1614,13 @@ impl EnforcerClient {
             }
             Err(error) => return Err(ConnectFailure::Other(error.into())),
         };
+        #[cfg(test)]
+        if options
+            .owned_peer_pid
+            .is_some_and(|expected| peer_pid(&stream) != Some(expected))
+        {
+            return Err(ConnectFailure::Other(EnforcerError::Unauthorized));
+        }
         // Retain a kernel object, not a PID that could later be reused. The
         // monitor reads heartbeats; the final guard only polls HUP/ERR without
         // reading, blocking or touching the filesystem.
@@ -1569,11 +1641,13 @@ impl EnforcerClient {
             endpoint,
             capability: secret,
             liveness,
+            #[cfg(test)]
+            owned_peer_pid_for_test: options.owned_peer_pid,
             replacement: Mutex::new(None),
             unknown_slots: AtomicU64::new(0),
             lost_unknown: AtomicBool::new(false),
             accounted: Mutex::new(BTreeSet::new()),
-            auto_recovery: AtomicBool::new(auto_recovery),
+            auto_recovery: AtomicBool::new(options.auto_recovery),
             recovery_gate: Mutex::new(()),
             failed: AtomicBool::new(false),
             health: Mutex::new(None),
@@ -1609,8 +1683,7 @@ impl EnforcerClient {
             }
             _ => return Err(ConnectFailure::Other(EnforcerError::Unhealthy)),
         }
-        tokio::spawn(monitor(Arc::downgrade(&client.0), stream));
-        Ok(client)
+        Ok((client, stream))
     }
 
     pub async fn register(
@@ -1964,6 +2037,12 @@ impl EnforcerClient {
                 return Err(EnforcerError::NotReady);
             }
         }
+        #[cfg(test)]
+        if active.0.owned_peer_pid_for_test.is_some() {
+            // This fixture has no monitor. Sample the authenticated owned
+            // child on demand before checking the normal health window.
+            record_health_and_slots(&active.0, active.status().await?).await?;
+        }
         active.0.check_health()?;
         let response = active.0.request(Request::Status {}, IO_TIMEOUT).await?;
         let Response::Status { value } = response else {
@@ -2111,6 +2190,12 @@ enum ConnectFailure {
     Other(EnforcerError),
 }
 
+struct LegacyWatchOptions {
+    auto_recovery: bool,
+    #[cfg(test)]
+    owned_peer_pid: Option<u32>,
+}
+
 impl Client {
     async fn authenticate(&self, stream: &mut UnixStream) -> EnforcerResult<()> {
         let challenge: Challenge = read_frame(stream, 1024, IO_TIMEOUT).await?;
@@ -2148,6 +2233,13 @@ impl Client {
             return Err(EnforcerError::Unavailable);
         }
         let mut stream = self.endpoint.connect_checked(&self.endpoint_root).await?;
+        #[cfg(test)]
+        if self
+            .owned_peer_pid_for_test
+            .is_some_and(|expected| peer_pid(&stream) != Some(expected))
+        {
+            return Err(EnforcerError::Unauthorized);
+        }
         self.authenticate(&mut stream).await?;
         write_frame(&mut stream, &request, MAX_FRAME, IO_TIMEOUT).await?;
         let response = read_frame(&mut stream, MAX_FRAME, timeout).await?;

@@ -15,6 +15,9 @@ async fn load_draft(
         .load_diagnosed(operation)
         .await
         .map_err(|failure| {
+            #[cfg(all(test, unix))]
+            let _ = super::egress::EGRESS_OPENING_PROGRESS
+                .try_with(|trace| trace.writer_failed("load", &failure));
             let error = anyhow::Error::new(failure.journal_error());
             if matches!(
                 mode,
@@ -173,6 +176,9 @@ async fn commit_patch_with(
                     .await;
             }
             Err(failure) => {
+                #[cfg(all(test, unix))]
+                let _ = super::egress::EGRESS_OPENING_PROGRESS
+                    .try_with(|trace| trace.writer_failed("advance", &failure));
                 // The actor can fail before or after writing a checkpoint.
                 // This boundary carries no proof of publication.
                 return Err(mode.advance_failure(failure.journal_error().into(), Some(failure)));
@@ -650,6 +656,13 @@ impl<'a> Execution<'a> {
                         &request,
                     )
                     .await?;
+                #[cfg(all(test, unix))]
+                if matches!(&request.transition, WorkerTransitionV1::Observe { observation }
+                    if observation.status == RuntimeStatusV1::Running)
+                {
+                    let _ = super::egress::EGRESS_OPENING_PROGRESS
+                        .try_with(|trace| trace.mark(&trace.running_decoded));
+                }
                 Operation::WorkerMutation {
                     request,
                     response: Some(response),

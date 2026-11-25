@@ -1,5 +1,38 @@
 # Validation courante
 
+## 25 novembre 2026 — E3 libération après acquittements du gateway et du Writer
+
+**PASS 1/1** sur le gel `4c46dd1c`. Le callback Rust utilise le gateway
+HTTP loopback et SQLite. L’oracle retient la réponse d’ouverture après
+avoir vérifié le commit, puis retient séparément l’acquittement du Writer
+pour l’intention de libération. Le flux d’entrée reste silencieux aux
+deux barrières. À la levée de la seconde, le point d’écriture de recette
+atteste les deux acquittements et le flux reçoit la trame exacte jusqu’à
+EOF. Une relecture confirme un seul commit d’ouverture et l’intention
+qui lui correspond.
+
+Sur l’horloge de l’oracle, le retour HTTP `Running` arrive à 6 615 ms,
+son acquittement local à 10 991 ms, le retour d’ouverture à 16 086 ms
+et l’acquittement d’intention à 22 794 ms. Le test dure 99,96 s. Le
+contrôleur, le pair natif de recette et le callback sont joints. Le
+groupe et le dossier temporaire sont vides après la sortie. Manifeste
+privé vérifié `db60f7fdd0f796ae0d118902f4dfae81d3a71b21351d44d50e34996ad8e092f4`.
+
+Trois régressions passent avec le même libtest épinglé. L’annulation
+Legacy pendant l’échange de capacités empêche l’envoi de la réservation.
+Le Writer exige l’intention exacte sur la tête stricte. La publication
+de STOP partage le verrou et conserve l’identité d’annulation.
+Manifeste vérifié `0146bef790502200b96a5bf83a840ad96e8aa0a729c44f227bae2f8c42ebc8ff`.
+
+Le runtime et l’autorité de libération sont simulés dans ce témoin.
+Les parcours de confinement avec moteur et fournisseur réels gardent
+leurs critères propres. Les onze fichiers E3 et les fichiers Cargo du
+port correspondent au gel. La composition de validation porte aussi
+la fermeture du canari G11. Son contrôle de types passe en 307,44 s
+avec groupe terminé, manifeste
+`d5dd814fb16d4d8d640298456a372d8bf264c438cd778456b3d193afef25a57f`.
+L’exécution du canari G11 reste ouverte.
+
 ## 25 novembre 2026 — révocation workload MySQL Legacy sur TLS et mTLS
 
 Quatre exécutions du même sélecteur Rust utilisent deux gateways

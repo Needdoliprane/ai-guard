@@ -22,7 +22,10 @@ async fn held_egress_ready_does_not_consume_bootstrap_stdin() -> Result<()> {
     let (mut release, mut receiver) = duplex(128);
     let (mut control, mut helper) = duplex(4096);
     let (started, mut first_byte) = oneshot::channel();
-    let capture = tokio::spawn(async move { witness::read_release(&mut receiver, started).await });
+    let capture_deadline = Instant::now() + Duration::from_secs(10);
+    let capture = tokio::spawn(async move {
+        witness::read_release(&mut receiver, started, capture_deadline).await
+    });
     let hello = egress_wire::CommonEgressHandshakeV1 {
         version: 1,
         protocol: CHANNEL_CONTRACT.into(),

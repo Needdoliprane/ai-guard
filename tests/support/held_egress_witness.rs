@@ -5,7 +5,7 @@ use anyhow::{Result, ensure};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite},
     sync::oneshot,
-    time::{Duration, Instant, timeout},
+    time::{Duration, Instant, timeout_at},
 };
 
 const RELEASE_LIMIT: usize = 512;
@@ -16,8 +16,9 @@ const WITNESS_TIMEOUT: Duration = Duration::from_secs(10);
 pub(super) async fn read_release(
     input: &mut (impl AsyncRead + Unpin),
     first_byte: oneshot::Sender<()>,
+    deadline: Instant,
 ) -> Result<Vec<u8>> {
-    timeout(WITNESS_TIMEOUT, async {
+    timeout_at(deadline, async {
         let mut first = [0_u8; 1];
         if input.read(&mut first).await? == 0 {
             return Ok(Vec::new());
