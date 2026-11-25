@@ -1,7 +1,7 @@
 //! Private batch journal operations.
 use super::*;
 use crate::broker::writer::WriterCallFailure;
-use diagnostics::{CreatedExchangeStage, CreatedReloadSite};
+use diagnostics::{CreateIssuedStage, CreatedExchangeStage, CreatedReloadSite};
 use std::future::Future;
 
 async fn load_draft(
@@ -16,7 +16,10 @@ async fn load_draft(
         .await
         .map_err(|failure| {
             let error = anyhow::Error::new(failure.journal_error());
-            if mode == PublicationMode::CreatedPending {
+            if matches!(
+                mode,
+                PublicationMode::CreatedPending | PublicationMode::CreateIssuedAck
+            ) {
                 error.context(failure)
             } else {
                 error
@@ -41,6 +44,8 @@ enum PublicationMode {
     CreatedPending,
     /// Report a failure of the separate local write of a Created response.
     CreatedAck,
+    /// Report a failure after the client returned a typed CreateIssued response.
+    CreateIssuedAck,
     /// Accept the outcome only if the durable head is exactly this checkpoint.
     ConfirmExactHead,
 }
@@ -62,21 +67,39 @@ impl PublicationMode {
         }
     }
 
+    fn at_checkpoint<T>(
+        self,
+        result: Result<T>,
+        created_stage: CreatedExchangeStage,
+        create_issued_stage: CreateIssuedStage,
+    ) -> Result<T> {
+        if self == Self::CreateIssuedAck {
+            result.context(create_issued_stage)
+        } else {
+            self.at_created(result, created_stage)
+        }
+    }
+
     fn advance_failure(
         self,
         error: anyhow::Error,
         writer_failure: Option<WriterCallFailure>,
     ) -> anyhow::Error {
-        let stage = match self {
-            Self::CreatedPending => CreatedExchangeStage::AdvancePending,
-            Self::CreatedAck => CreatedExchangeStage::AdvanceAck,
-            _ => return error,
-        };
+        if matches!(self, Self::FailClosed | Self::ConfirmExactHead) {
+            return error;
+        }
+        let exhausted_cas = writer_failure.is_none();
         let error = match writer_failure {
             Some(failure) => error.context(failure),
             None => error,
         };
-        error.context(stage)
+        match self {
+            Self::CreatedPending => error.context(CreatedExchangeStage::AdvancePending),
+            Self::CreatedAck => error.context(CreatedExchangeStage::AdvanceAck),
+            Self::CreateIssuedAck if exhausted_cas => error.context(CreateIssuedStage::AckCasLimit),
+            Self::CreateIssuedAck => error.context(CreateIssuedStage::AckAdvance),
+            Self::FailClosed | Self::ConfirmExactHead => error,
+        }
     }
 }
 
@@ -103,14 +126,20 @@ async fn commit_patch_with(
     mode: PublicationMode,
 ) -> Result<Box<CommittedDraftAtHead>> {
     for _ in 0..16 {
-        let (job, mut draft) = mode.at_created(
+        let (job, mut draft) = mode.at_checkpoint(
             load_draft(writer, operation, scope, mode).await,
             CreatedExchangeStage::Reload(CreatedReloadSite::CasReload),
+            CreateIssuedStage::AckReload,
         )?;
-        mode.at_created(change(&mut draft), CreatedExchangeStage::PreparePending)?;
-        let next = mode.at_created(
+        mode.at_checkpoint(
+            change(&mut draft),
+            CreatedExchangeStage::PreparePending,
+            CreateIssuedStage::AckPrepare,
+        )?;
+        let next = mode.at_checkpoint(
             draft.checkpoint(scope.control_namespace_uuid()),
             CreatedExchangeStage::PreparePending,
+            CreateIssuedStage::AckPrepare,
         )?;
         #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
         tests::before_commit()?;
@@ -120,10 +149,14 @@ async fn commit_patch_with(
             .await
         {
             Ok(receipt) => {
-                ensure!(
-                    receipt.operation_id() == operation,
-                    "checkpoint receipt operation changed"
-                );
+                if receipt.operation_id() != operation {
+                    let error = anyhow!("checkpoint receipt operation changed");
+                    return Err(if mode == PublicationMode::CreateIssuedAck {
+                        error.context(CreateIssuedStage::AckAdvance)
+                    } else {
+                        error
+                    });
+                }
                 // Only an acknowledged exact input produces this value. An
                 // error, including an unknown publication, returns no Draft.
                 return Ok(Box::new(CommittedDraftAtHead {
@@ -410,7 +443,11 @@ impl<'a> Execution<'a> {
             // Enqueue may already be durable when HTTP/ACK delivery fails.
             // Do not claim that it is absent, retry the start, or print the
             // underlying error (which may carry a provider's private text).
-            if let Some(reload) = diagnostic.created_reload() {
+            if let Some(create_issued) = diagnostic.create_issued() {
+                eprintln!(
+                    "broker batch CreateIssued diagnostic delivery incomplete: {create_issued:?}"
+                );
+            } else if let Some(reload) = diagnostic.created_reload() {
                 eprintln!("broker batch Created reload diagnostic delivery incomplete: {reload:?}");
             } else if let Some(advance) = diagnostic.created_advance() {
                 eprintln!(
@@ -515,12 +552,27 @@ impl<'a> Execution<'a> {
             slot.check_ready_for_claim_diagnosed(self.generation)
                 .context(diagnostics::BrokerStep::ReadinessBeforeClaim)?;
         }
-        let completed = self.call(input.clone()).await?;
+        let create_issued = matches!(
+            &input,
+            Operation::WorkerMutation { request, .. }
+                if matches!(request.transition, WorkerTransitionV1::CreateIssued)
+        );
+        if create_issued {
+            self.stage(LocalFailurePhaseV1::Worker);
+        }
+        let completed = self.call(input.clone()).await;
+        let completed = if create_issued {
+            completed.context(CreateIssuedStage::HttpExchange)?
+        } else {
+            completed?
+        };
         // Only this execution's own fresh EmitOnce claim may survive a lost
         // writer reply: it still holds the in-memory start permission. Every
         // other unknown publication, and any replayed claim, fails closed.
         let uncertain = if fresh && emits_once(&completed) {
             PublicationMode::ConfirmExactHead
+        } else if create_issued {
+            PublicationMode::CreateIssuedAck
         } else if pending_mode == PublicationMode::CreatedPending {
             PublicationMode::CreatedAck
         } else {

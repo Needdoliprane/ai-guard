@@ -95,7 +95,7 @@ pub(super) enum CreatedReloadSite {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum CreatedWriterCause {
+enum WriterFailureCause {
     QueueFull,
     ReplyTimeout,
     Unavailable,
@@ -106,14 +106,14 @@ enum CreatedWriterCause {
 pub(super) struct CreatedReloadDiagnostic {
     site: CreatedReloadSite,
     #[serde(skip_serializing_if = "Option::is_none")]
-    cause: Option<CreatedWriterCause>,
+    cause: Option<WriterFailureCause>,
     #[serde(skip_serializing_if = "Option::is_none")]
     journal_code: Option<&'static str>,
 }
 
 impl CreatedReloadSite {
     fn diagnostic(self, error: &anyhow::Error) -> CreatedReloadDiagnostic {
-        let (cause, journal_code) = created_writer_failure(error);
+        let (cause, journal_code) = writer_failure(error);
         CreatedReloadDiagnostic {
             site: self,
             cause,
@@ -133,15 +133,13 @@ enum CreatedAdvanceStage {
 pub(super) struct CreatedAdvanceDiagnostic {
     stage: CreatedAdvanceStage,
     #[serde(skip_serializing_if = "Option::is_none")]
-    cause: Option<CreatedWriterCause>,
+    cause: Option<WriterFailureCause>,
     #[serde(skip_serializing_if = "Option::is_none")]
     journal_code: Option<&'static str>,
 }
 
-fn created_writer_failure(
-    error: &anyhow::Error,
-) -> (Option<CreatedWriterCause>, Option<&'static str>) {
-    use CreatedWriterCause as Cause;
+fn writer_failure(error: &anyhow::Error) -> (Option<WriterFailureCause>, Option<&'static str>) {
+    use WriterFailureCause as Cause;
     match error.downcast_ref::<WriterCallFailure>() {
         Some(WriterCallFailure::QueueFull) => (Some(Cause::QueueFull), None),
         Some(WriterCallFailure::ReplyTimeout) => (Some(Cause::ReplyTimeout), None),
@@ -150,6 +148,49 @@ fn created_writer_failure(
             (Some(Cause::ActorError), Some(journal_failure_code(error)))
         }
         None => (None, None),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum CreateIssuedStage {
+    // The client did not return a typed result. The gateway's outcome is unknown.
+    HttpExchange,
+    // The client returned a typed result. These stages concern only its local ACK.
+    AckReload,
+    AckPrepare,
+    AckAdvance,
+    AckCasLimit,
+}
+
+impl fmt::Display for CreateIssuedStage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("broker CreateIssued exchange failed")
+    }
+}
+
+impl std::error::Error for CreateIssuedStage {}
+
+#[derive(Debug, Serialize)]
+pub(super) struct CreateIssuedDiagnostic {
+    stage: CreateIssuedStage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cause: Option<WriterFailureCause>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    journal_code: Option<&'static str>,
+}
+
+impl CreateIssuedStage {
+    fn diagnostic(self, error: &anyhow::Error) -> CreateIssuedDiagnostic {
+        let (cause, journal_code) = match self {
+            Self::AckReload | Self::AckAdvance => writer_failure(error),
+            _ => (None, None),
+        };
+        CreateIssuedDiagnostic {
+            stage: self,
+            cause,
+            journal_code,
+        }
     }
 }
 
@@ -322,6 +363,8 @@ pub(super) struct BatchFailureDiagnosticV1 {
     created_reload: Option<CreatedReloadDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     created_advance: Option<CreatedAdvanceDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    create_issued: Option<CreateIssuedDiagnostic>,
 }
 
 impl BatchFailureDiagnosticV1 {
@@ -335,6 +378,10 @@ impl BatchFailureDiagnosticV1 {
 
     pub(super) fn created_advance(&self) -> Option<&CreatedAdvanceDiagnostic> {
         self.created_advance.as_ref()
+    }
+
+    pub(super) fn create_issued(&self) -> Option<&CreateIssuedDiagnostic> {
+        self.create_issued.as_ref()
     }
 
     pub(super) fn created_exchange_step(&self) -> Option<BrokerStep> {
@@ -369,6 +416,9 @@ pub(super) fn classify(
     };
     let full3_stage = error.downcast_ref::<Full3BindingStage>().copied();
     let created_stage = error.downcast_ref::<CreatedExchangeStage>().copied();
+    let create_issued = error
+        .downcast_ref::<CreateIssuedStage>()
+        .map(|stage| stage.diagnostic(error));
     let advance_stage = created_stage.and_then(CreatedExchangeStage::advance_stage);
     let broker_step = match error.downcast_ref::<BrokerStep>().copied() {
         Some(BrokerStep::CreatedExchange) => {
@@ -381,7 +431,9 @@ pub(super) fn classify(
                 advance_stage
                     .and(created_stage)
                     .map(CreatedExchangeStage::step)
-            }),
+            })
+            // Existing V1 readers know this outer label.
+            .or_else(|| create_issued.as_ref().map(|_| BrokerStep::FailureObserved)),
     };
     let full3_binding = match broker_step {
         Some(BrokerStep::Full3BindingPublication) => {
@@ -402,7 +454,7 @@ pub(super) fn classify(
         )
         | (Some(BrokerStep::CreatedExchange), Some(stage @ CreatedAdvanceStage::Acknowledgement)) =>
         {
-            let (cause, journal_code) = created_writer_failure(error);
+            let (cause, journal_code) = writer_failure(error);
             Some(CreatedAdvanceDiagnostic {
                 stage,
                 cause,
@@ -425,6 +477,7 @@ pub(super) fn classify(
         full3_binding,
         created_reload,
         created_advance,
+        create_issued,
     })
 }
 
@@ -446,6 +499,7 @@ pub(super) fn failure_report(
         full3_binding: None,
         created_reload: None,
         created_advance: None,
+        create_issued: None,
     })
 }
 
@@ -454,6 +508,55 @@ mod tests {
     use super::*;
     use crate::runtime::RuntimePrestartStage;
     use serde_json::json;
+
+    #[test]
+    fn create_issued_reports_http_and_local_ack_as_distinct_boundaries() {
+        let private = "synthetic-private-create-issued-detail";
+        for (stage, cause, expected) in [
+            (
+                CreateIssuedStage::HttpExchange,
+                None,
+                json!({"stage":"http_exchange"}),
+            ),
+            (
+                CreateIssuedStage::AckReload,
+                Some(WriterCallFailure::Actor(JournalError::Corrupt)),
+                json!({"stage":"ack_reload","cause":"actor_error","journal_code":"corrupt"}),
+            ),
+            (
+                CreateIssuedStage::AckPrepare,
+                None,
+                json!({"stage":"ack_prepare"}),
+            ),
+            (
+                CreateIssuedStage::AckAdvance,
+                Some(WriterCallFailure::ReplyTimeout),
+                json!({"stage":"ack_advance","cause":"reply_timeout"}),
+            ),
+            (
+                CreateIssuedStage::AckCasLimit,
+                None,
+                json!({"stage":"ack_cas_limit"}),
+            ),
+        ] {
+            let error = anyhow::anyhow!("{private}");
+            let error = match cause {
+                Some(cause) => error.context(cause),
+                None => error,
+            };
+            let diagnostic = failure_report(LocalFailurePhaseV1::Worker, &error.context(stage));
+            let report = serde_json::to_value(&diagnostic).unwrap();
+            assert_eq!(
+                report,
+                json!({
+                    "version":1, "phase":"worker", "runtime_effect":"unknown",
+                    "enforcer":null, "runtime":null, "broker_step":"failure_observed",
+                    "create_issued":expected,
+                })
+            );
+            assert!(!format!("{:?}", diagnostic.create_issued()).contains(private));
+        }
+    }
 
     #[test]
     fn created_exchange_reports_the_local_stage_without_claiming_publication() {
