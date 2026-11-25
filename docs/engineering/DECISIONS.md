@@ -1849,3 +1849,44 @@ L'arbitrage G08 « autorité Podman durable avant présence » n'a pas de
 proposition formalisée à ce jour ; une proposition écrite avec oracle est
 requise avant décision. La liaison claim/E3 en mode owned est couverte par la
 décision E3 ci-dessus.
+
+## 25 novembre 2026 — G06/R2, gel et conservation du worker scellé (arbitrage délégué)
+
+Le goal du 25 novembre délègue les arbitrages. Les deux choix requis par le
+ticket R2 (`.scratch/v1-resume/issues/12-g06-retention-r2.md`, base R1 `41cefe09`)
+sont tranchés ; aucune qualification n'est fermée par cette décision.
+
+1. **Propriétaire du gel : le Store du tenant.** L'intention de maintenance
+   durable du Store gèle les admissions pertinentes et retient les preuves ;
+   elle référence les deux têtes (tête d'audit du Store, tête du journal Full
+   de la même opération broker). La transaction de sélection revérifie les
+   deux têtes et les références d'archives sous ce gel avant commit ; toute
+   dérive impose de refaire la sélection. Les Arms, exports et reprises
+   tardifs sont refusés avant commit par la comparaison de l'état d'admission
+   gelé dans la même transaction sérialisée qui applique révocation et quota
+   (même autorità que l'admission nominative G04). Le gardien natif du broker
+   conserve sa garde propre ; le gel central ne s'y substitue pas. Preuve
+   attendue : refus d'un Arm/export/reprise tardif sous gel, rejeu idempotent
+   de la sélection, refus sur perte d'archive, deux têtes concordantes au
+   commit et dérive détectée.
+
+2. **Conservation : dossier vérifiable dédié référençant les archives R1.**
+   Le worker scellé est conservé dans un dossier dédié qui référence chaque
+   archive R1 utile par son manifeste vérifié et ses positions de chaîne,
+   sans étendre ni réécrire les archives chaînées R1. La chaîne R1, ses
+   archives, ses reçus après perte d'acquittement et sa garde de destination
+   privée neuve restent inchangés. Restauration : la relecture des reçus et
+   la vérification des manifestes/positions précèdent toute récupération ;
+   une archive manquante ou divergente bloque la restauration et laisse la
+   sélection incomplète. L'usage non facturable unique et les projections
+   historiques restent rejouables depuis l'audit. Chaque backend (SQLite
+   local, owned 14/15, MySQL password, MySQL mTLS) produit la même preuve
+   depuis son stockage vérifié et se qualifie séparément.
+
+La première tranche reste en lecture seule sur le parcours de maintenance
+existant, exercée par la fixture (oracle du ticket : tentative terminale
+nettoyée, jeu exact de références ; export en attête après terminal → refus
+de sélection avec tête, reçus, quota, projections et registre conservés ;
+tête broker incomplète → refus). Le format de publication et les interfaces
+de scellement découlent de ces choix ; leur implémentation et leurs tests
+restent à livrer. [R1](../../docs/setup/audit-retention/README.fr.md)
