@@ -1213,7 +1213,7 @@ impl Journal {
             }
             return Ok(None);
         };
-        self.usage(Some(&name))?;
+        self.inventory_usage(Some(&name), Some(&job))?;
         self.check_observation_capacity(operation_id, writer)?;
         let accepted = self.read_file(&job, "accepted.json", SMALL)?.is_some();
         let rejected = self.read_file(&job, "rejected.json", SMALL)?.is_some();
@@ -1226,9 +1226,10 @@ impl Journal {
             return Err(JournalError::Conflict);
         }
         if accepted {
-            let value = self
-                .load_locked(operation_id, writer)?
-                .ok_or(JournalError::Corrupt)?;
+            #[cfg(test)]
+            cost_measurement::load(self.0.directory.path(), operation_id, false);
+            let previous_prefix = writer.verified_prefix.take();
+            let value = self.load_scanned_job_locked(operation_id, writer, job, previous_prefix)?;
             return Ok(Some(JournalStatusV1::Accepted(value)));
         }
         if self.read_file(&job, "reservation.json", SMALL)?.is_none() {
@@ -2047,8 +2048,22 @@ impl Journal {
                 Ok(None)
             };
         };
-        self.usage(Some(&name))?;
+        self.inventory_usage(Some(&name), Some(&job))?;
         self.check_observation_capacity(operation_id, writer)?;
+        self.load_scanned_job_locked(operation_id, writer, job, previous_prefix)
+            .map(Some)
+    }
+
+    /// The caller has already checked quota and observation capacity with the
+    /// same retained job directory. Keep strict marker, chain, binding and
+    /// durability checks in the common path.
+    fn load_scanned_job_locked(
+        &self,
+        operation_id: Uuid,
+        writer: &mut Writer,
+        job: Directory,
+        previous_prefix: Option<VerifiedPrefix>,
+    ) -> JournalResult<AcceptedJobV1> {
         let has_accepted = self.read_file(&job, "accepted.json", SMALL)?.is_some();
         let has_rejected = self.read_file(&job, "rejected.json", SMALL)?.is_some();
         if has_accepted && has_rejected {
@@ -2171,7 +2186,7 @@ impl Journal {
         writer.observed_jobs.insert(operation_id);
         #[cfg(test)]
         cost_measurement::load(self.0.directory.path(), operation_id, true);
-        Ok(Some(AcceptedJobV1(Box::new(AcceptedData {
+        Ok(AcceptedJobV1(Box::new(AcceptedData {
             scope: self.0.scope.clone(),
             operation_id,
             intent,
@@ -2188,7 +2203,7 @@ impl Journal {
             command_receipts,
             outbox_receipts,
             last_cancel_operations,
-        }))))
+        })))
     }
 
     fn verify_confirmed_chain(
@@ -2376,6 +2391,14 @@ impl Journal {
         Ok(())
     }
     fn usage(&self, selected: Option<&str>) -> JournalResult<Usage> {
+        self.inventory_usage(selected, None)
+    }
+
+    fn inventory_usage(
+        &self,
+        selected: Option<&str>,
+        mut retained_selected: Option<&Directory>,
+    ) -> JournalResult<Usage> {
         #[cfg(test)]
         cost_measurement::usage(self.0.directory.path());
         let mut usage = Usage::default();
@@ -2423,8 +2446,19 @@ impl Journal {
             usage.jobs += 1;
             let active = selected == Some(entry.name.as_str());
             usage.add(0, 1, active, &self.0.limits)?;
-            let directory = fscheck(self.0.jobs.persistent_child(&entry.name, false))?
-                .ok_or(JournalError::Corrupt)?;
+            // Count the selected job through the same anchored directory
+            // that the strict load will read. Other jobs still get a fresh
+            // verified open. Enumeration must include the retained job.
+            let retained = if active {
+                retained_selected.take()
+            } else {
+                None
+            };
+            let directory = match retained {
+                Some(job) => job.clone(),
+                None => fscheck(self.0.jobs.persistent_child(&entry.name, false))?
+                    .ok_or(JournalError::Corrupt)?,
+            };
             let mut bytes = 0u64;
             let mut count = 1u32;
             let mut revisions = 0u32;
@@ -2516,6 +2550,9 @@ impl Journal {
             {
                 return Err(JournalError::LimitExceeded);
             }
+        }
+        if retained_selected.is_some() {
+            return Err(JournalError::Conflict);
         }
         Ok(usage)
     }

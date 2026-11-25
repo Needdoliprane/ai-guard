@@ -54,6 +54,44 @@ pub(super) fn accepted(journal: &Journal, operation: Uuid) -> AcceptedJobV1 {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn strict_accepted_reads_inventory_scope_once() {
+    use crate::broker::journal::cost_measurement::{Measurement, WriterKind};
+
+    let (_root, journal) = private_journal();
+    let expected = accepted(&journal, Uuid::new_v4());
+    let _other = accepted(&journal, Uuid::new_v4());
+    let writer = WriterClient::start(journal.clone(), 8, Duration::from_secs(10)).unwrap();
+    let _exclusive = crate::control_fs::cost_probe::EXCLUSIVE.lock().await;
+
+    for kind in [WriterKind::Load, WriterKind::Status] {
+        let measure = Measurement::start(
+            &journal,
+            writer.cost_context_for_test(),
+            expected.operation_id(),
+            kind,
+        )
+        .unwrap();
+        let observed = match kind {
+            WriterKind::Load => writer.load(expected.operation_id()).await.unwrap().unwrap(),
+            WriterKind::Status => match writer.status(expected.operation_id()).await.unwrap() {
+                Some(JournalStatusV1::Accepted(job)) => job,
+                _ => panic!("strict status must return the accepted job"),
+            },
+        };
+        // An accepted reply still traverses the entire strict load. Count
+        // scope scans separately from the mandatory chain and binding checks.
+        assert_eq!(observed.head(), expected.head());
+        let sample = measure.finish().unwrap();
+        assert!(sample.writer_read_coverage(kind).is_complete());
+        let cost = serde_json::to_value(sample).unwrap();
+        assert_eq!(
+            cost["usage_calls"], 1,
+            "one strict read must inventory the scope once"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cold_heads_are_unknown_without_reading_existing_jobs_or_the_fifo() {
     use crate::{
         broker::journal::cost_measurement::{Measurement as JournalMeasurement, WriterKind},
