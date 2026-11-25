@@ -1656,7 +1656,9 @@ mode owned.
 ## 25 novembre 2026 — G04, persistance de la préparation nominative
 
 **Proposition soumise au mainteneur.** Le contrat du 15 novembre exige
-une préparation durable avant lancement. Le candidat autorise déjà
+une préparation durable avant lancement. La parité G04 décidée le
+21 novembre couvre les sources SQLite owned aux formats 14 et 15.
+Le candidat autorise déjà
 l'opération `SessionLaunchPrepare` dans un contexte personnel doté de
 `LaunchSession`. Le donneur Claude `081790aa` crée un grant de session
 dans la transaction de préparation. Dans le candidat, le producteur de
@@ -1664,12 +1666,12 @@ grants considère déjà comme connue une session citée dans un événement
 antérieur hors de la famille `control.identity`.
 [Contrat session](SESSION_CONTROL.fr.md) · [Autorisation](../../src/identity/operations.rs) · [Ressource connue](../../src/audit/identity.rs)
 
-- **Capacité SQLite owned 15 explicitement installée, option recommandée.**
+- **Capacité SQLite owned explicitement installée sur 14 et 15, option recommandée.**
   Reprendre le modèle de migration avec marqueur et schéma validés. Une
   table de préparation relie l'opération, l'identité et le contexte à un
   reçu d'audit et aux révisions serveur de la cible. Les anciens lecteurs
-  doivent refuser la source étendue. Un profil format 15 sans cette
-  capacité conserve son contrat actuel.
+  doivent refuser la source étendue. Les profils 14 et 15 dépourvus
+  de cette capacité conservent leur contrat actuel.
 - **Nouveau format SQLite.** Le numéro rend l'incompatibilité explicite.
   Il impose aussi de migrer les descripteurs de source, les validateurs et
   les recettes de restauration qui travaillent actuellement sur les
@@ -1689,9 +1691,10 @@ exacte et crée le grant nominatif par le producteur existant. Réservation,
 claim et canal conversationnel suivent leurs contrats respectifs.
 
 La première preuve proposée utilise le vrai routeur et un Store SQLite
-owned rouvert. Elle couvre réponse perdue, rejeu à reçu identique,
+owned rouvert, sur chacun des formats 14 et 15. Elle couvre réponse
+perdue, rejeu à reçu identique,
 conflit de contenu, révocation, audit indisponible et zéro grant,
 réservation ou claim pendant Prepare. Vérifier aussi le refus à
 l'ouverture avec l'ancien lecteur et la visibilité inchangée des sources
-format 15 dépourvues de cette capacité.
+dépourvues de cette capacité.
 [Validation de schéma](../../src/audit.rs) · [Contrat de rétention](../../src/audit/retention/classify.rs)
