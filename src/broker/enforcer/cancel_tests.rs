@@ -384,7 +384,7 @@ fn native_worker_release_submits_only_with_the_original_live_slot_and_target() {
         egress::ids::IdV1,
         runtime::bootstrap_stdin::{BootstrapStdinSubmitError, NativeBootstrapRelease},
     };
-    use std::cell::Cell;
+    use std::{cell::Cell, sync::mpsc};
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Case {
@@ -392,6 +392,7 @@ fn native_worker_release_submits_only_with_the_original_live_slot_and_target() {
         Cancel,
         Stop,
         StopDuringVeto,
+        HealthContended,
         SlotLost,
         WrongAuthority,
         WrongAttempt,
@@ -415,6 +416,7 @@ fn native_worker_release_submits_only_with_the_original_live_slot_and_target() {
         Case::Cancel,
         Case::Stop,
         Case::StopDuringVeto,
+        Case::HealthContended,
         Case::SlotLost,
         Case::WrongAuthority,
         Case::WrongAttempt,
@@ -496,29 +498,66 @@ fn native_worker_release_submits_only_with_the_original_live_slot_and_target() {
         } else {
             &registration.owned
         };
-        let writes = Cell::new(0);
-        let result = permit.submit(
-            authority,
-            observed,
-            &attempt,
-            Box::new(|| {
-                anyhow::ensure!(case != Case::ChannelClosed, "fixture channel closed");
-                if case == Case::StopDuringVeto {
-                    local.stop.send_replace(true);
-                }
-                Ok(())
-            }),
-            Box::new(|| {
-                writes.set(writes.get() + 1);
-                Ok(())
-            }),
-        );
+        let contended = (case == Case::HealthContended).then(|| permit.client.clone());
+        let submit = |entered: Option<mpsc::Sender<()>>| {
+            let writes = Cell::new(0);
+            let result = permit.submit(
+                authority,
+                observed,
+                &attempt,
+                Box::new(|| {
+                    if let Some(entered) = entered {
+                        entered.send(()).unwrap();
+                    }
+                    anyhow::ensure!(case != Case::ChannelClosed, "fixture channel closed");
+                    if case == Case::StopDuringVeto {
+                        local.stop.send_replace(true);
+                    }
+                    Ok(())
+                }),
+                Box::new(|| {
+                    writes.set(writes.get() + 1);
+                    Ok(())
+                }),
+            );
+            (result, writes.get())
+        };
+        let (result, writes) = if let Some(client) = contended {
+            let health = client.0.health.lock().unwrap();
+            std::thread::scope(|scope| {
+                let (entered_tx, entered_rx) = mpsc::channel();
+                let (release_tx, release_rx) = mpsc::channel();
+                let release =
+                    scope.spawn(move || release_tx.send(submit(Some(entered_tx))).unwrap());
+                // This signal comes from inside the generation gate.
+                let entered = entered_rx.recv_timeout(Duration::from_secs(5));
+                let (cancel_tx, cancel_rx) = mpsc::channel();
+                let generation = &generation;
+                let cancel = scope.spawn(move || cancel_tx.send(generation.invalidate()).unwrap());
+                let released = release_rx.recv_timeout(Duration::from_secs(5));
+                let invalidated = cancel_rx.recv_timeout(Duration::from_secs(5));
+
+                // Release the mutex even on a regression so both threads can
+                // finish before the test reports a failed bounded check.
+                drop(health);
+                release.join().unwrap();
+                cancel.join().unwrap();
+                entered.expect("release entered the generation gate");
+                assert_eq!(
+                    invalidated.expect("invalidation finished while health was locked"),
+                    1
+                );
+                released.expect("release refused while health was locked")
+            })
+        } else {
+            submit(None)
+        };
         let expected = if case == Case::Submit {
             Ok(())
         } else {
             Err(BootstrapStdinSubmitError::Refused)
         };
         assert_eq!(result, expected, "{case:?}");
-        assert_eq!(writes.get(), usize::from(case == Case::Submit), "{case:?}");
+        assert_eq!(writes, usize::from(case == Case::Submit), "{case:?}");
     }
 }

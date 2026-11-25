@@ -2511,7 +2511,7 @@ impl NativeBootstrapRelease for WorkerBootstrapRelease {
                 check_release().map_err(|_| Refused)?;
 
                 let client = &self.client.0;
-                client.check_health().map_err(|_| Refused)?;
+                client.try_check_health().map_err(|_| Refused)?;
                 let slots = client.slots.try_lock().map_err(|_| Refused)?;
                 if !slots
                     .get(&arm.operation_id)
@@ -2725,6 +2725,15 @@ fn spawn_snapshot_failure(
 
 impl Client {
     fn check_health(&self) -> EnforcerResult<()> {
+        self.check_health_with_lock(false)
+    }
+
+    /// Release already owns the cancellation gate. Refuse a busy health snapshot.
+    fn try_check_health(&self) -> EnforcerResult<()> {
+        self.check_health_with_lock(true)
+    }
+
+    fn check_health_with_lock(&self, nonblocking: bool) -> EnforcerResult<()> {
         let mut descriptor = libc::pollfd {
             fd: self.liveness.as_raw_fd(),
             events: libc::POLLIN,
@@ -2733,7 +2742,12 @@ impl Client {
         // SAFETY: one initialized pollfd for a socket retained by self, timeout
         // zero. POLLHUP is checked even if old heartbeat bytes remain queued.
         let polled = unsafe { libc::poll(&mut descriptor, 1, 0) };
-        let health = self.health.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        let health = if nonblocking {
+            self.health.try_lock().ok()
+        } else {
+            self.health.lock().ok()
+        }
+        .ok_or(EnforcerError::Unhealthy)?;
         if polled < 0
             || descriptor.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
             || self.failed.load(Ordering::SeqCst)
