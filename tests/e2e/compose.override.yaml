@@ -1,0 +1,10 @@
+services:
+  gateway:
+    image: ${AI_GUARD_E2E_CONTROL_IMAGE:?Choose a local control image}
+  dashboard:
+    image: ${AI_GUARD_E2E_CONTROL_IMAGE:?Choose a local control image}
+  ingress:
+    image: ${AI_GUARD_E2E_CONTROL_IMAGE:?Choose a local control image}
+    ports: !override
+      - "127.0.0.1:${AI_GUARD_E2E_GATEWAY_PORT:-18787}:8787"
+      - "127.0.0.1:${AI_GUARD_E2E_DASHBOARD_PORT:-14000}:4000"

@@ -684,3 +684,47 @@ AI_GUARD_TEST_FRONT_DIR="$QA_FRONT_DIR" RUST_MIN_STACK=8388608 \
   chromium_reads_bounded_supervision_window_without_cross_tenant_data \
   -- --ignored --exact --nocapture
 ```
+
+## Rejouer les preuves historiques du 18 novembre 2026 (harnais portés le 25 novembre)
+
+Ces harnais reproduisent les reçus datés du 18 novembre conservés dans
+`docs/engineering/evidence/2026-11-18/functional/` ; ils ne qualifient pas un
+parcours courant et restent opt-in. Leur source est le snapshot du checkout
+principal `snapshot/main-checkout-20261125` (`4bf11098`), porté par le lot de
+rapprochement G01 pour rendre ces reçus reproductibles depuis l'intégration.
+
+- `tests/control_stack_e2e.rs` (`cli_restarts_a_dedicated_control_stack_without_losing_audit`,
+  `#[ignore]`) rejoue `docker-control-stack-replay.json` : pile Compose neuve,
+  `up`/`down` CLI, volume et tête d'audit conservés. Il exige un moteur Docker
+  réel, une image de contrôle locale et un répertoire de preuve neuf
+  (`AGENTSANDBOX_TEST_RUNTIME_ENDPOINT`, `AGENTSANDBOX_TEST_CONTROL_IMAGE`,
+  `AGENTSANDBOX_TEST_EVIDENCE_DIR`). Seule adaptation au port : la ligne d'image
+  Compose paramétrée `${AI_GUARD_CONTROL_IMAGE:-agentsandbox-control:local}`
+  remplace la déclaration littérale du snapshot ; les trois services et le
+  volume d'audit sont inchangés.
+- `tests/e2e/run_crash_recovery.py` rejoue `docker-crash-recovery.json`,
+  `docker-crash-autonomous-deadline.json` et `docker-crash-replay.json` : perte
+  SIGKILL de la CLI `run` héritée, reprise `worker-resume`, échéance autonome
+  optionnelle observée sur Docker. Il réutilise les fonctions de
+  `run_provider_case.py` et les mêmes garde-fous de configuration privée.
+- `tests/e2e/compose.override.yaml` publie la pile de recette sur des ports
+  loopback distincts (`AI_GUARD_E2E_CONTROL_IMAGE`, `AI_GUARD_E2E_GATEWAY_PORT`,
+  `AI_GUARD_E2E_DASHBOARD_PORT`) ; à donner en second fichier Compose, sans
+  modifier le fichier distribué.
+- `front/tests/browser_judge_live.mjs` relit dans Chromium une décision durable
+  du modèle local (`qwen-local-gateway.json`, séquence désignée par
+  `AI_GUARD_TEST_DECISION_SEQ`) depuis la copie privée d'audit du 18 novembre.
+  Il vise ces données datées : l'API et l'IHM courantes ont évolué depuis
+  (qualification `not_qualified_to_authorize`, libellés et synthèse de santé
+  différents) ; ne pas l'exécuter contre un gateway courant sans adapter ses
+  assertions. Le parcours courant du modèle local est couvert par
+  `front/tests/browser_decision_live.mjs`.
+
+Le harnais `tests/local_judge_gateway.rs` du snapshot n'est pas porté : son
+contrat de fixture (`LocalJudge`, `with_local_judge`, verdict `decision`,
+`json_schema`, 64 jetons, `advisory_only`) ne correspond plus au backend local
+de l'intégration (`JevBackend::local_openai`, verdict `outcome`, `json_object`,
+256 jetons, `not_qualified_to_authorize`). Les reçus qui comptent
+`local_judge_gateway: 2` restent datés du 18 novembre ; leur rejeu exige une
+décision du coordinateur (nouveau harnais sous le contrat courant ou annotation
+des reçus).
