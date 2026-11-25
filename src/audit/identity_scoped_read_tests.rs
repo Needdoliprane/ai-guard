@@ -96,7 +96,10 @@ fn scoped_identity_and_authentication_reads_require_the_migrated_source() {
         kind: ResourceKindV1::Project,
         resource_id: "absent-project".into(),
     };
-    read(&bundle, "A", |store, access| {
+    // Fresh owner epoch per phase; the two-second bound is never reused across
+    // the whole scenario. Metadata/authentication reads invent no receipt, so
+    // the head captured in the first phase stays valid for the final check.
+    let before = read(&bundle, "A", |store, access| {
         let before = head(store);
         assert_eq!(
             store
@@ -118,6 +121,9 @@ fn scoped_identity_and_authentication_reads_require_the_migrated_source() {
                 .unwrap(),
             metadata.authorization_revision
         );
+        before
+    });
+    read(&bundle, "A", |store, access| {
         assert!(
             store
                 .identity_resource_grant_scoped(access, &missing)
@@ -144,6 +150,8 @@ fn scoped_identity_and_authentication_reads_require_the_migrated_source() {
                 .unwrap()
                 .is_none()
         );
+    });
+    read(&bundle, "A", |store, _access| {
         assert_eq!(
             head(store),
             before,
@@ -192,7 +200,9 @@ fn scoped_human_reads_preserve_resource_acl_redaction_and_atomic_receipts() {
     );
     let current = scope(&bundle, principal);
     let transient = Redactor::new(vec!["synthetic-content-token".into()]);
-    read(&bundle, "A", |store, access| {
+    // Fresh owner epoch per read; receipts are durable so the head captured in
+    // the first phase keeps incrementing across phases (before+1..before+4).
+    let before = read(&bundle, "A", |store, access| {
         assert!(
             store
                 .authorized_resource_grant_scoped(
@@ -211,14 +221,19 @@ fn scoped_human_reads_preserve_resource_acl_redaction_and_atomic_receipts() {
         assert_eq!(profile.account.unwrap().principal, *principal);
         assert_eq!(profile.memberships.len(), 1);
         assert_eq!(head(store), before + 1);
+        before
+    });
+    read(&bundle, "A", |store, access| {
         let resources = store
             .human_resources_scoped(access, &current, "", 1, &transient)
             .unwrap();
         assert_eq!(resources.items.len(), 1);
         assert_eq!(resources.items[0].resource, resource);
         assert_eq!(head(store), before + 2);
-        let mut content = filter();
-        content.view = HumanReadViewV1::Content;
+    });
+    let mut content = filter();
+    content.view = HumanReadViewV1::Content;
+    read(&bundle, "A", |store, access| {
         let events = store
             .human_events_scoped(access, &current, &content, 0, None, 1, &transient)
             .unwrap()
@@ -232,11 +247,15 @@ fn scoped_human_reads_preserve_resource_acl_redaction_and_atomic_receipts() {
                 .contains("synthetic-content-token")
         );
         assert_eq!(head(store), before + 3);
+    });
+    read(&bundle, "A", |store, access| {
         let recent = store
             .human_events_recent_scoped(access, &current, &content, None, 1, &transient)
             .unwrap();
         assert_eq!(recent.items[0].metadata.id, event_id);
         assert_eq!(head(store), before + 4);
+    });
+    read(&bundle, "A", |store, access| {
         assert!(store.human_profile(principal, &transient).is_err());
         assert!(
             store

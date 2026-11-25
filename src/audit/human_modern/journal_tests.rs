@@ -156,7 +156,8 @@ fn metadata_events_rejects_non_list_filters_before_read_audit() {
 fn metadata_events_retains_requested_snapshot_upper_bound() {
     let (fixture, first, second) = fixture();
     let bundle = fixture.migrated();
-    read(&bundle, |store, access| {
+    // Fresh owner epoch per phase; the two-second bound is never reused.
+    let (scope, upper) = read(&bundle, |store, access| {
         let scope = scope(store, access, fixture.principal());
         let upper: i64 = store
             .db
@@ -166,6 +167,9 @@ fn metadata_events_retains_requested_snapshot_upper_bound() {
                 row.get(0)
             })
             .unwrap();
+        (scope, upper)
+    });
+    read(&bundle, |store, access| {
         let poll = store
             .modern_human_events(
                 access,
@@ -181,6 +185,8 @@ fn metadata_events_retains_requested_snapshot_upper_bound() {
         assert_eq!(page.upper_event, upper);
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].metadata.id, first);
+    });
+    read(&bundle, |store, access| {
         let poll = store
             .modern_human_events(
                 access,
@@ -202,34 +208,38 @@ fn metadata_events_retains_requested_snapshot_upper_bound() {
 fn metadata_events_own_busy_restores_timeout_and_preserves_health() {
     let (fixture, _, _) = fixture();
     let bundle = fixture.migrated();
-    read(&bundle, |store, access| {
+    // Each phase acquires a fresh owner epoch so the production two-second
+    // bound is never reused across the whole scenario; the Busy mechanism
+    // (held store lock / immediate connection) and every assertion are kept.
+    let scope = read(&bundle, |store, access| {
         let scope = scope(store, access, fixture.principal());
-        {
-            let held = store.db.lock().unwrap();
-            held.busy_timeout(std::time::Duration::from_millis(713))
-                .unwrap();
-            let error = store
-                .modern_human_events(
-                    access,
-                    &scope,
-                    &metadata(),
-                    0,
-                    None,
-                    25,
-                    &Redactor::new(vec![]),
-                )
-                .err()
-                .unwrap();
-            assert_eq!(
-                error.downcast_ref::<review_access::ReviewAccessFailure>(),
-                Some(&review_access::ReviewAccessFailure::Busy)
-            );
-            assert_eq!(
-                held.pragma_query_value(None, "busy_timeout", |row| row.get::<_, i64>(0))
-                    .unwrap(),
-                713
-            );
-        }
+        let held = store.db.lock().unwrap();
+        held.busy_timeout(std::time::Duration::from_millis(713))
+            .unwrap();
+        let error = store
+            .modern_human_events(
+                access,
+                &scope,
+                &metadata(),
+                0,
+                None,
+                25,
+                &Redactor::new(vec![]),
+            )
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.downcast_ref::<review_access::ReviewAccessFailure>(),
+            Some(&review_access::ReviewAccessFailure::Busy)
+        );
+        assert_eq!(
+            held.pragma_query_value(None, "busy_timeout", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            713
+        );
+        scope
+    });
+    read(&bundle, |store, access| {
         let connection = rusqlite::Connection::open(store.backing.path()).unwrap();
         connection.execute_batch("BEGIN IMMEDIATE").unwrap();
         let before = audit_head(&store.db.lock().unwrap()).unwrap();
@@ -262,6 +272,8 @@ fn metadata_events_own_busy_restores_timeout_and_preserves_health() {
         assert!(store.healthy());
         assert!(!connection.is_autocommit());
         connection.execute_batch("ROLLBACK").unwrap();
+    });
+    read(&bundle, |store, access| {
         assert_eq!(
             store
                 .modern_human_events(
