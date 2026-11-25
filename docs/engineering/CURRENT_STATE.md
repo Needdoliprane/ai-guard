@@ -23,9 +23,10 @@ de l'échec Docker Linux reste ouverte.
 Le premier échec Full3 conservé laisse `CreateIssued` confirmé
 dans SQLite et en attente dans le journal. Sur le rejeu instrumenté
 `b7ba4276`, le journal confirme son acquittement. Le claim attendu
-n'arrive toujours pas et le dernier état précède `Arm`. Le callback
-E3 échoue séparément. Le contrat confie la libération
-au broker après ouverture durable.
+n'arrive toujours pas. Un diagnostic SQLite confirme l'expiration
+de la relecture stricte de `Created` avant `Arm`. Le callback
+E3 échoue séparément. Le contrat confie la libération au broker
+après ouverture durable.
 [Rejeu Full3 et E3](VALIDATION.md#25-novembre-2026--rejeu-full3-callback-e3-et-refus-après-approbation) · [Décision E3](DECISIONS.md#25-novembre-2026--g05e3-libération-du-fournisseur-par-le-broker).
 
 ## Synthèse courante — 17 novembre 2026

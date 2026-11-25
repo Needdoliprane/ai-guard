@@ -34,8 +34,21 @@ Sur `b7ba4276`, le premier claim Full3 expire en 189,86 s, code
 101. Le rapprochement du journal et de SQLite confirme
 `CreateIssued` acquitté jusqu'à la révision 34, avec le reçu
 SQLite de séquence 18. Le journal ne contient ni `Arm` pour
-le worker ni `WorkerClaim`. Le statut IPC est indisponible
-et la première cause après cet acquittement reste ouverte.
+le worker ni `WorkerClaim`. Le statut IPC est indisponible.
+La relecture de la base archivée retrouve à la séquence 19
+le diagnostic durable `created_exchange_reload`, site
+`mutation_composition`, cause `reply_timeout`. La chaîne
+place l'acquittement de `CreateIssued` en r30 et celui du
+diagnostic en r34. Le témoin enregistre un create et une
+inspection du worker de recette, puis zéro start. Le reçu
+ne départage pas l'attente dans la file du Writer, la
+lecture stricte et la livraison de sa réponse.
+
+La requête du harnais `46fb3077` ignore le champ
+`created_reload`. Exécutée en lecture seule sur la base
+archivée, elle renvoie zéro ligne. La requête de `5efeda36`
+renvoie uniquement la séquence 19. Le test Rust de projection
+reste à exécuter.
 
 Le gateway et le moteur de recette terminent. Le broker et
 le gardien restent recensés à la fin du test. Après deux
@@ -57,6 +70,17 @@ confirment le refus audité après approbation et l'absence de
 worker et d'appel au moteur. Le détail du stderr du CLI reste
 interne au test. Manifeste séparé
 `d2347dc50500f43775ba821b19d565f046f86a95f4486dbd6c4250edc4c5b31b`.
+
+## 25 novembre 2026 — disponibilité locale Kubernetes
+
+Le contexte local Docker Desktop, vérifié sur un endpoint HTTPS
+loopback, répond `ok` à `/readyz`. Le nœud ARM64 en v1.36.1
+est `Ready`. La classe `ai-guard-rwop` utilise `Immediate`
+et le pilote déclaré `hostpath.csi.k8s.io`. Ce relevé en
+lecture seule couvre les prérequis du cluster. Le raccordement
+Source17 et les preuves d'exécution G11 restent ouverts.
+Manifeste à six fichiers
+`a27e9e7d3d2666d89411321a96afbccef767a6c3b34a281ef6d01513efb1658c`.
 
 ## 25 novembre 2026 — frontières CreateIssued et témoin E3 à deux flux
 
