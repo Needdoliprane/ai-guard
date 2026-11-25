@@ -1,5 +1,49 @@
 # Validation courante
 
+## 25 novembre 2026 — borne Claude, régressions Jev et reprise SQLite
+
+Le gel `4411e705` compile hors ligne sur macOS ARM64. Douze
+sélecteurs ciblés passent. Six couvrent la projection Claude, son
+budget et la compaction. Cinq couvrent le refus durable Jev,
+son rejeu et la configuration des moteurs sur loopback. Le
+témoin CLI SQLite couvre la migration, la lecture de l'audit
+et la réouverture d'une copie restaurée. Le code applicatif et
+les fichiers de ces tests concordent avec le candidat `cdad9a2f`.
+
+Le treizième sélecteur échoue comme attendu, code 101. Le CLI
+refuse la commande et l'audit porte la règle, mais le diagnostic
+du CLI omet cette dernière. Son correctif a un rejeu séparé.
+Manifeste privé
+`4f8ff65c9ec57f796ffac3caafaf9880784a10ce010d9f08fec3f322c2d97570`.
+
+## 25 novembre 2026 — Full3 s’arrête après CreateIssued dans SQLite
+
+Le premier rejeu sur les mêmes binaires `17fde481` a annoncé un
+nouveau `TMPDIR` sans l’exporter. Le chemin de socket effectif
+atteignait 107 octets. Cet échec de prévol a son propre manifeste
+`1f3544c6729bbc3f7825a9551dff8f61e2448976ec3de36e9f9625063eb33389`.
+
+Le rejeu suivant transmet la racine privée au processus. Le chemin
+du socket fait 73 octets et l’identité du gardien est attestée. Le
+test expire sur le premier `WorkerClaim`, code 101 en 188,10 s.
+La vérification du journal rapproche ses 33 révisions et confirme
+la clôture du helper de vérification d’import en r28. L’opération
+`CreateIssued` est en attente en r29 et SQLite la confirme à la
+séquence 18. Le broker conserve cette opération sans réponse dans
+sa tête r32. Le worker reste `preparing`, avec quota retenu.
+
+Le diagnostic générique SQLite de séquence 19 indique
+`import_verification`. La corrélation du journal situe l'écart
+après l’import et avant l’acquittement local de `CreateIssued`.
+La lecture fermée ne distingue pas l’obtention de la réponse HTTP
+de la publication de son acquittement. Le broker de recette reste
+sous garde après l’échec de fermeture. Manifeste du rejeu
+`7588c57c20a1f0b9cefce19b331b966b688e1798292c3dc300489232d4731365`
+et projections SQLite/journal et rapprochement de l’opération exacte
+`eaeb4935699203c586b0abc37d9fd0df6107348215f6d68776aa61e8aef9621f`,
+`802b5bb4fde38556c8ab541748726c3a6e1b64007df49e34bede4fa6ae6e97a7`,
+`b69b7c476d3567e6a6cdb8183bd4d3ff2e99efc074a2b9aa03e219d0ea46775a`.
+
 ## 25 novembre 2026 — projection des parents Claude Code et prévol Full3
 
 Le gel `5fc5fad1` compile sur macOS ARM64. Le premier passage
