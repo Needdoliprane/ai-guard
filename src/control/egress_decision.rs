@@ -259,11 +259,15 @@ impl EgressConnectPermitRequestV1 {
     /// One journal key per channel epoch and flow. Changing the opening or
     /// decision ID must not create a second key for the same live flow.
     pub(crate) fn permit_id(&self) -> Result<IdV1, IdError> {
+        Self::permit_id_for(&self.binding, self.flow_id)
+    }
+
+    pub(crate) fn permit_id_for(binding: &EgressBindingV1, flow_id: u64) -> Result<IdV1, IdError> {
         let mut hasher = Sha256::new();
         hasher.update(b"ai-guard/egress-connect-permit/v1\0");
-        hasher.update(self.binding.channel_id.as_str().as_bytes());
-        hasher.update(self.binding.epoch.to_be_bytes());
-        hasher.update(self.flow_id.to_be_bytes());
+        hasher.update(binding.channel_id.as_str().as_bytes());
+        hasher.update(binding.epoch.to_be_bytes());
+        hasher.update(flow_id.to_be_bytes());
         let hash = hasher.finalize();
         let mut bytes = [0; 16];
         bytes.copy_from_slice(&hash[..16]);

@@ -27,6 +27,7 @@ use crate::{
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::net::SocketAddr;
 
 pub const NAMESPACE: &str = "egress";
 pub const DECISION_KIND: &str = "egress.decision";
@@ -191,6 +192,22 @@ fn stored_decision(
     Ok((request, decision))
 }
 
+fn channel_opening_seq(
+    tx: &CheckedTransaction<'_>,
+    opening_id: &IdV1,
+    binding: &EgressBindingV1,
+) -> anyhow::Result<i64> {
+    let opening = by_id(tx, opening_id)?
+        .filter(|stored| stored.event.kind == "egress.channel.opened")
+        .ok_or(EgressJournalError::Invalid)?;
+    let observation: EgressObservationV1 = serde_json::from_value(opening.event.data)?;
+    anyhow::ensure!(
+        matches!(observation, EgressObservationV1::ChannelOpened { binding: recorded } if &recorded == binding),
+        EgressJournalError::Invalid
+    );
+    Ok(opening.seq)
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ConnectPermitRecord {
@@ -223,6 +240,31 @@ impl ConnectPermitRecord {
             receipt: receipt(stored),
         })
     }
+}
+
+fn require_connected_permit(
+    tx: &CheckedTransaction<'_>,
+    name: &EgressDecideRequestV1,
+    decision_seq: i64,
+    peer: &str,
+) -> anyhow::Result<()> {
+    let permit_id = EgressConnectPermitRequestV1::permit_id_for(&name.binding, name.flow_id)?;
+    let stored = by_id(tx, &permit_id)?
+        .filter(|stored| stored.event.kind == CONNECT_PERMIT_KIND && stored.seq > decision_seq)
+        .ok_or(EgressJournalError::Invalid)?;
+    let permit: ConnectPermitRecord = serde_json::from_value(stored.event.data)?;
+    let request = permit.request;
+    anyhow::ensure!(
+        request.version == 1
+            && request.decision_id == name.decision_id
+            && request.binding == name.binding
+            && request.flow_id == name.flow_id
+            && permit.port != 0
+            && SocketAddr::new(request.ip, permit.port).to_string() == peer
+            && channel_opening_seq(tx, &request.opening_id, &request.binding)? < decision_seq,
+        EgressJournalError::Invalid
+    );
+    Ok(())
 }
 
 impl Store {
@@ -368,13 +410,9 @@ impl Store {
             return Ok(replay);
         }
 
-        let opening = by_id(&tx, &request.opening_id)?
-            .filter(|stored| stored.event.kind == "egress.channel.opened")
-            .ok_or(EgressJournalError::Invalid)?;
-        let fact: EgressObservationV1 = serde_json::from_value(opening.event.data)?;
+        let opening_seq = channel_opening_seq(&tx, &request.opening_id, &request.binding)?;
         anyhow::ensure!(
-            matches!(fact, EgressObservationV1::ChannelOpened { binding } if binding == request.binding)
-                && worker_facts(&tx, &request.binding)? == WorkerFacts::Eligible,
+            worker_facts(&tx, &request.binding)? == WorkerFacts::Eligible,
             EgressJournalError::Invalid
         );
         let epoch =
@@ -389,7 +427,7 @@ impl Store {
         anyhow::ensure!(!closed, EgressJournalError::Invalid);
 
         let stored = by_id(&tx, &request.decision_id)?
-            .filter(|stored| stored.event.kind == DECISION_KIND && stored.seq > opening.seq)
+            .filter(|stored| stored.event.kind == DECISION_KIND && stored.seq > opening_seq)
             .ok_or(EgressJournalError::Invalid)?;
         let (name, decision) = stored_decision(&stored)?;
         let policy = self.egress_policy();
@@ -539,11 +577,14 @@ impl Store {
                 EgressChannelOpeningDispositionV1::Replayed,
             ));
         }
-        // Validate fresh connections against the decision at the time of
-        // admission. The worker can have stopped by the time we record the fact.
+        // Record effects against the historic authorization. A result can arrive
+        // after the worker stopped, and resolution can fail before a permit exists.
         if let EgressObservationV1::Connection {
             decision_id,
             flow_id,
+            connected,
+            failure,
+            peer,
             ..
         } = observation
         {
@@ -558,6 +599,11 @@ impl Store {
                     && decision.allows(&decided_request),
                 EgressJournalError::Invalid
             );
+            if *connected {
+                anyhow::ensure!(failure.is_none(), EgressJournalError::Invalid);
+                let peer = peer.as_deref().ok_or(EgressJournalError::Invalid)?;
+                require_connected_permit(&tx, &decided_request, stored.seq, peer)?;
+            }
         }
         // A fresh channel opening requires the exact durable Running worker.
         // A replay above still returns the same historical receipt.
