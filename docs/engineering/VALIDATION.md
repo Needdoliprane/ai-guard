@@ -28,6 +28,36 @@ Le sous-reçu vérifié compte 28 fichiers, manifeste
 L'origine du refus `not_ready` de la recette Docker Linux sur
 `c7f6c966` reste ouverte.
 
+## 25 novembre 2026 — rejeu Full3, callback E3 et refus après approbation
+
+Sur `b7ba4276`, le premier claim Full3 expire en 189,86 s, code
+101. Le rapprochement du journal et de SQLite confirme
+`CreateIssued` acquitté jusqu'à la révision 34, avec le reçu
+SQLite de séquence 18. Le journal ne contient ni `Arm` pour
+le worker ni `WorkerClaim`. Le statut IPC est indisponible
+et la première cause après cet acquittement reste ouverte.
+
+Le gateway et le moteur de recette terminent. Le broker et
+le gardien restent recensés à la fin du test. Après deux
+signaux ciblés au broker de recette, les deux processus sont
+absents, leurs groupes sont vides et les sockets ne répondent
+plus. Les 124 entrées de la fixture sont déplacées sans
+changement d'inode, de mode ou d'empreinte. La retraite métier
+reste indéterminée. Manifeste de fermeture
+`54f903e7263d7ce08ead6a8bc4294c6f86e32c7ea1318c02dd3ae6df6579f808`.
+
+Le callback E3 échoue séparément sur `release capture abandoned`,
+code 101. Son groupe est vide. La première cause de l'échec
+de fixture reste ouverte. Manifeste Full3 et E3
+`9530bd7fb29a11d590f74d44ba6112ae15aae8a55110b9d6108297e185ed9c2e`.
+
+Le test exact `approved_refusal_explains_the_audited_rule_without_invoking_the_engine`
+sort 101 à l'assertion finale. Les assertions précédentes
+confirment le refus audité après approbation et l'absence de
+worker et d'appel au moteur. Le détail du stderr du CLI reste
+interne au test. Manifeste séparé
+`d2347dc50500f43775ba821b19d565f046f86a95f4486dbd6c4250edc4c5b31b`.
+
 ## 25 novembre 2026 — frontières CreateIssued et témoin E3 à deux flux
 
 Le gel `d7d4f849` compile hors ligne sur macOS ARM64. Quatre

@@ -20,14 +20,13 @@ témoin d'annulation et le cas nominal sur `b7ba4276`. L'origine
 de l'échec Docker Linux reste ouverte.
 [Résultats exacts](VALIDATION.md#25-novembre-2026--reproduction-legacy-g09).
 
-Le témoin Full3 laisse `CreateIssued` confirmé dans SQLite et encore
-en attente dans le journal du broker. Le diagnostic distingue désormais
-la réponse HTTP de la publication de l’acquittement local. Deux tests
-de fixture, un par frontière, passent sur `d7d4f849`. La cause de
-l’échec Full3 historique attend un rejeu instrumenté. Le contrat
-E3 confie la libération au broker après ouverture durable. Son
-intégration logicielle et la qualification moteur ont chacune leurs
-preuves. [Résultats Full3](VALIDATION.md#25-novembre-2026--full3-sarrête-après-createissued-dans-sqlite) · [Décision E3](DECISIONS.md#25-novembre-2026--g05e3-libération-du-fournisseur-par-le-broker).
+Le premier échec Full3 conservé laisse `CreateIssued` confirmé
+dans SQLite et en attente dans le journal. Sur le rejeu instrumenté
+`b7ba4276`, le journal confirme son acquittement. Le claim attendu
+n'arrive toujours pas et le dernier état précède `Arm`. Le callback
+E3 échoue séparément. Le contrat confie la libération
+au broker après ouverture durable.
+[Rejeu Full3 et E3](VALIDATION.md#25-novembre-2026--rejeu-full3-callback-e3-et-refus-après-approbation) · [Décision E3](DECISIONS.md#25-novembre-2026--g05e3-libération-du-fournisseur-par-le-broker).
 
 ## Synthèse courante — 17 novembre 2026
 
