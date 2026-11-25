@@ -1,5 +1,6 @@
 //! Private batch journal operations.
 use super::*;
+use crate::broker::writer::WriterCallFailure;
 use diagnostics::{CreatedExchangeStage, CreatedReloadSite};
 use std::future::Future;
 
@@ -38,6 +39,8 @@ enum PublicationMode {
     FailClosed,
     /// Same fail-closed outcome, with the local stage of a Created request.
     CreatedPending,
+    /// Report a failure of the separate local write of a Created response.
+    CreatedAck,
     /// Accept the outcome only if the durable head is exactly this checkpoint.
     ConfirmExactHead,
 }
@@ -57,6 +60,23 @@ impl PublicationMode {
         } else {
             result
         }
+    }
+
+    fn advance_failure(
+        self,
+        error: anyhow::Error,
+        writer_failure: Option<WriterCallFailure>,
+    ) -> anyhow::Error {
+        let stage = match self {
+            Self::CreatedPending => CreatedExchangeStage::AdvancePending,
+            Self::CreatedAck => CreatedExchangeStage::AdvanceAck,
+            _ => return error,
+        };
+        let error = match writer_failure {
+            Some(failure) => error.context(failure),
+            None => error,
+        };
+        error.context(stage)
     }
 }
 
@@ -96,7 +116,7 @@ async fn commit_patch_with(
         tests::before_commit()?;
         let proposed = (mode == PublicationMode::ConfirmExactHead).then(|| next.clone());
         match writer
-            .advance_lifecycle(operation, job.head().clone(), next)
+            .advance_lifecycle_diagnosed(operation, job.head().clone(), next)
             .await
         {
             Ok(receipt) => {
@@ -113,23 +133,20 @@ async fn commit_patch_with(
                     draft,
                 }));
             }
-            Err(JournalError::Conflict) => continue,
-            Err(JournalError::Io) if proposed.is_some() => {
+            Err(WriterCallFailure::Actor(JournalError::Conflict)) => continue,
+            Err(failure) if failure.journal_error() == JournalError::Io && proposed.is_some() => {
                 let proposed = proposed.context("proposed checkpoint is retained")?;
                 return confirm_exact_head(writer, operation, scope, job.head(), &proposed, draft)
                     .await;
             }
-            Err(error) => {
+            Err(failure) => {
                 // The actor can fail before or after writing a checkpoint.
                 // This boundary carries no proof of publication.
-                return mode.at_created(Err(error.into()), CreatedExchangeStage::AdvancePending);
+                return Err(mode.advance_failure(failure.journal_error().into(), Some(failure)));
             }
         }
     }
-    mode.at_created(
-        Err(anyhow!("journal contention requires reconciliation")),
-        CreatedExchangeStage::AdvancePending,
-    )
+    Err(mode.advance_failure(anyhow!("journal contention requires reconciliation"), None))
 }
 
 /// A reply timeout after the actor accepted this advance is an unknown
@@ -308,6 +325,65 @@ impl<'a> Execution<'a> {
         )
     }
 
+    /// Retain the exact opening request as history before submitting it.
+    /// A lost writer acknowledgement must keep the caller from making the POST.
+    pub(super) async fn record_egress_opening(
+        &self,
+        target: &crate::runner::egress_release::EgressReleaseTargetV1,
+        request: &crate::control::egress_decision::EgressChannelOpeningRequestV1,
+        running: &MutationResultV1,
+    ) -> Result<()> {
+        let retained = crate::runner::egress_release::RetainedEgressOpeningV1::from_running(
+            target.clone(),
+            request.clone(),
+            running,
+        )?;
+        self.patch(|draft| {
+            self.generation_current()?;
+            ensure!(
+                !draft.cancelled()
+                    && self.generation == retained.generation()
+                    && draft.egress_opening.is_none()
+                    && draft.egress_release.is_none()
+                    && retained.matches_running(draft.worker()?),
+                "bootstrap opening request cannot be published on this head"
+            );
+            draft.egress_opening = Some(Box::new(retained.clone()));
+            Ok(())
+        })
+        .await
+    }
+
+    /// Publish intent without turning an unknown writer reply into authority.
+    /// The live callback is responsible for the final stop/deadline guard.
+    pub(super) async fn record_egress_release_intent<IO>(
+        &self,
+        target: crate::runner::egress_release::EgressReleaseTargetV1,
+        opened: &crate::broker::egress_owner::channel::OpenedChannel<IO>,
+        running: &crate::control::MutationResultV1,
+    ) -> Result<Box<CommittedDraftAtHead>> {
+        let intent = crate::runner::egress_release::EgressReleaseIntentV1::from_opened(
+            target, opened, running,
+        )?;
+        self.patch_committed(|draft| {
+            self.generation_current()?;
+            ensure!(
+                !draft.cancelled()
+                    && self.generation == intent.generation()
+                    && draft.egress_release.is_none()
+                    && draft
+                        .egress_opening
+                        .as_deref()
+                        .is_some_and(|opening| intent.matches_retained_opening(opening))
+                    && intent.matches_running(draft.worker()?),
+                "bootstrap release intent cannot be published on this head"
+            );
+            draft.egress_release = Some(Box::new(intent.clone()));
+            Ok(())
+        })
+        .await
+    }
+
     pub(super) async fn failure(&self, phase: LocalFailurePhaseV1, error: &anyhow::Error) {
         // A transport/IO error is a local observation. It never fabricates a
         // terminal worker and never releases central quota.
@@ -336,6 +412,10 @@ impl<'a> Execution<'a> {
             // underlying error (which may carry a provider's private text).
             if let Some(reload) = diagnostic.created_reload() {
                 eprintln!("broker batch Created reload diagnostic delivery incomplete: {reload:?}");
+            } else if let Some(advance) = diagnostic.created_advance() {
+                eprintln!(
+                    "broker batch Created advance diagnostic delivery incomplete: {advance:?}"
+                );
             } else if let Some(step) = diagnostic.created_exchange_step() {
                 eprintln!("broker batch diagnostic delivery incomplete at {step:?}");
             } else if let Some(binding) = diagnostic.full3_binding() {
@@ -441,6 +521,8 @@ impl<'a> Execution<'a> {
         // other unknown publication, and any replayed claim, fails closed.
         let uncertain = if fresh && emits_once(&completed) {
             PublicationMode::ConfirmExactHead
+        } else if pending_mode == PublicationMode::CreatedPending {
+            PublicationMode::CreatedAck
         } else {
             PublicationMode::FailClosed
         };
@@ -629,6 +711,15 @@ impl<'a> Execution<'a> {
     }
 
     pub(super) async fn mutate(&self, transition: WorkerTransitionV1) -> Result<WorkerV1> {
+        Ok(self.mutate_confirmed(transition).await?.worker)
+    }
+
+    /// Return the receipt from the original mutation only after the journal
+    /// acknowledges it. An E3 opening needs this exact Running acknowledgement.
+    pub(super) async fn mutate_confirmed(
+        &self,
+        transition: WorkerTransitionV1,
+    ) -> Result<MutationResultV1> {
         if matches!(
             transition,
             WorkerTransitionV1::Prepare | WorkerTransitionV1::CreateIssued
@@ -655,9 +746,13 @@ impl<'a> Execution<'a> {
                 response: None,
             })
             .await?;
-        response_worker(&ack)
-            .cloned()
-            .context("worker mutation has no result")
+        match ack {
+            Operation::WorkerMutation {
+                response: Some(response),
+                ..
+            } => Ok(response),
+            _ => Err(anyhow!("worker mutation has no result")),
+        }
     }
 }
 

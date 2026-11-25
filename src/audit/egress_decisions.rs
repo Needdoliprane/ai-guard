@@ -7,25 +7,31 @@
 //! different content is a conflict. Pure evaluation lives in
 //! `control::egress_decision` and is shared with the MySQL adapter.
 
-use super::{CheckedTransaction, Store, row_event};
+use super::{CheckedTransaction, Store, row_event, workload};
 use crate::{
     control::{
         WorkerStateV1, WorkerV1,
         egress_decision::{
             Decided, EgressBindingV1, EgressChannelOpeningDispositionV1,
             EgressChannelOpeningReceiptV1, EgressChannelOpeningRequestV1, EgressCloseReasonV1,
-            EgressDecideRequestV1, EgressDecisionV1, EgressGrantV1, EgressObservationV1,
-            EgressObserveRequestV1, EgressPolicySnapshot, EgressReceiptV1, EgressRenewRequestV1,
-            EgressRenewResponseV1, WorkerFacts, decide, renewal,
+            EgressConnectPermitDispositionV1, EgressConnectPermitReceiptV1,
+            EgressConnectPermitRequestV1, EgressDecideRequestV1, EgressDecisionV1, EgressGrantV1,
+            EgressObservationV1, EgressObserveRequestV1, EgressPolicySnapshot, EgressReceiptV1,
+            EgressRenewRequestV1, EgressRenewResponseV1, MAX_CONNECT_PERMIT_MS, WorkerFacts,
+            decide, deserialize_object, renewal,
         },
     },
-    egress::{Authority, ids::IdV1},
+    egress::{Authority, PolicyLimits, ValidatedResolution, ids::IdV1},
     model::{Event, StoredEvent},
 };
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::net::SocketAddr;
 
 pub const NAMESPACE: &str = "egress";
 pub const DECISION_KIND: &str = "egress.decision";
+const CONNECT_PERMIT_KIND: &str = "egress.connect.permit";
 pub const GRANT_ISSUED_KIND: &str = "egress.grant.issued";
 pub const GRANT_REVOKED_KIND: &str = "egress.grant.revoked";
 /// Bound on grant facts replayed for one session inside a transaction.
@@ -186,6 +192,81 @@ fn stored_decision(
     Ok((request, decision))
 }
 
+fn channel_opening_seq(
+    tx: &CheckedTransaction<'_>,
+    opening_id: &IdV1,
+    binding: &EgressBindingV1,
+) -> anyhow::Result<i64> {
+    let opening = by_id(tx, opening_id)?
+        .filter(|stored| stored.event.kind == "egress.channel.opened")
+        .ok_or(EgressJournalError::Invalid)?;
+    let observation: EgressObservationV1 = serde_json::from_value(opening.event.data)?;
+    anyhow::ensure!(
+        matches!(observation, EgressObservationV1::ChannelOpened { binding: recorded } if &recorded == binding),
+        EgressJournalError::Invalid
+    );
+    Ok(opening.seq)
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ConnectPermitRecord {
+    #[serde(deserialize_with = "deserialize_object")]
+    request: EgressConnectPermitRequestV1,
+    port: u16,
+    issued_at_ms: i64,
+    expires_at_ms: i64,
+}
+
+impl ConnectPermitRecord {
+    fn into_receipt(
+        self,
+        stored: &StoredEvent,
+        disposition: EgressConnectPermitDispositionV1,
+    ) -> anyhow::Result<EgressConnectPermitReceiptV1> {
+        let valid_for_ms = self
+            .expires_at_ms
+            .checked_sub(self.issued_at_ms)
+            .and_then(|ms| u64::try_from(ms).ok())
+            .filter(|ms| (1..=MAX_CONNECT_PERMIT_MS).contains(ms))
+            .ok_or(EgressJournalError::Invalid)?;
+        Ok(EgressConnectPermitReceiptV1 {
+            version: 1,
+            permit_id: self.request.permit_id()?,
+            request: self.request,
+            port: self.port,
+            valid_for_ms,
+            disposition,
+            receipt: receipt(stored),
+        })
+    }
+}
+
+fn require_connected_permit(
+    tx: &CheckedTransaction<'_>,
+    name: &EgressDecideRequestV1,
+    decision_seq: i64,
+    peer: &str,
+) -> anyhow::Result<()> {
+    let permit_id = EgressConnectPermitRequestV1::permit_id_for(&name.binding, name.flow_id)?;
+    let stored = by_id(tx, &permit_id)?
+        .filter(|stored| stored.event.kind == CONNECT_PERMIT_KIND && stored.seq > decision_seq)
+        .ok_or(EgressJournalError::Invalid)?;
+    let permit: ConnectPermitRecord = serde_json::from_value(stored.event.data)?;
+    let request = permit.request;
+    anyhow::ensure!(
+        request.version == 1
+            && request.decision_id == name.decision_id
+            && request.binding == name.binding
+            && request.flow_id == name.flow_id
+            && permit.port != 0
+            && SocketAddr::new(request.ip, permit.port).to_string() == peer
+            && channel_opening_seq(tx, &request.opening_id, &request.binding)? < decision_seq,
+        EgressJournalError::Invalid
+    );
+    Ok(())
+}
+
 impl Store {
     fn prepare_egress_event(&self, event: Event) -> anyhow::Result<(Event, String)> {
         // The event has a canonical timestamp and its typed payload is the
@@ -297,6 +378,145 @@ impl Store {
         Ok(decision)
     }
 
+    /// Commit an exact numeric dial permit for a live Legacy SQLite opening.
+    /// A replay reads history only, including after the opening is no longer live.
+    pub fn egress_issue_connect_permit(
+        &self,
+        request: &EgressConnectPermitRequestV1,
+    ) -> anyhow::Result<EgressConnectPermitReceiptV1> {
+        anyhow::ensure!(
+            request.version == 1
+                && request.flow_id > 0
+                && request.binding.epoch > 0
+                && request.ip == request.ip.to_canonical(),
+            EgressJournalError::Invalid
+        );
+        let permit_id = request.permit_id()?;
+        let mut db = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
+        let tx = self.begin_checked(&mut db)?;
+        if let Some(stored) = by_id(&tx, &permit_id)? {
+            anyhow::ensure!(
+                stored.event.kind == CONNECT_PERMIT_KIND,
+                EgressJournalError::Conflict
+            );
+            let record: ConnectPermitRecord = serde_json::from_value(stored.event.data.clone())?;
+            anyhow::ensure!(&record.request == request, EgressJournalError::Conflict);
+            let replay =
+                record.into_receipt(&stored, EgressConnectPermitDispositionV1::Replayed)?;
+            self.commit_checked(tx)?;
+            return Ok(replay);
+        }
+
+        let opening_seq = channel_opening_seq(&tx, &request.opening_id, &request.binding)?;
+        anyhow::ensure!(
+            worker_facts(&tx, &request.binding)? == WorkerFacts::Eligible,
+            EgressJournalError::Invalid
+        );
+        let epoch =
+            i64::try_from(request.binding.epoch).map_err(|_| EgressJournalError::Invalid)?;
+        let closed: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE kind='egress.channel.closed' \
+             AND json_extract(payload,'$.data.binding.channel_id')=?1 \
+             AND json_extract(payload,'$.data.binding.epoch')=?2)",
+            rusqlite::params![request.binding.channel_id.as_str(), epoch],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(!closed, EgressJournalError::Invalid);
+
+        let stored = by_id(&tx, &request.decision_id)?
+            .filter(|stored| stored.event.kind == DECISION_KIND && stored.seq > opening_seq)
+            .ok_or(EgressJournalError::Invalid)?;
+        let (name, decision) = stored_decision(&stored)?;
+        let policy = self.egress_policy();
+        anyhow::ensure!(
+            name.decision_id == request.decision_id
+                && name.binding == request.binding
+                && name.flow_id == request.flow_id
+                && decision.allows(&name)
+                && decision.policy.as_ref() == Some(&policy.reference()),
+            EgressJournalError::Invalid
+        );
+        let authority =
+            Authority::parse_connect(&name.authority).map_err(|_| EgressJournalError::Invalid)?;
+        ValidatedResolution::new(&authority, &[request.ip], PolicyLimits::new(1, 1)?)
+            .map_err(|_| EgressJournalError::Invalid)?;
+
+        // Old Legacy formats without the durable UTC floor cannot issue permits.
+        anyhow::ensure!(
+            workload::time_floors_present(&tx)?,
+            EgressJournalError::Invalid
+        );
+        let grants = session_grants(&tx, &request.binding.session_id)?;
+        let grant = decision.grant_id.as_ref().and_then(|id| {
+            grants.iter().find(|grant| {
+                &grant.grant_id == id
+                    && grant.session_id == request.binding.session_id
+                    && grant.authority == name.authority
+            })
+        });
+        let clock = workload::capture_control_time(&tx)?;
+        let issued_at_ms = clock.at().timestamp_millis();
+        let decided_at_ms = stored.event.data["decided_at_ms"]
+            .as_i64()
+            .filter(|at| *at <= issued_at_ms)
+            .ok_or(EgressJournalError::Invalid)?;
+        let name_expires_at_ms = decision
+            .remaining_ms
+            .and_then(|ms| i64::try_from(ms).ok())
+            .and_then(|ms| decided_at_ms.checked_add(ms))
+            .ok_or(EgressJournalError::Invalid)?;
+        let decided = Decided {
+            outcome: decision.outcome,
+            reason: decision.reason,
+            grant_id: decision.grant_id,
+            remaining_ms: decision.remaining_ms,
+        };
+        anyhow::ensure!(
+            renewal(&policy, &decided, grant, &authority, issued_at_ms).is_none(),
+            EgressJournalError::Invalid
+        );
+        let expires_at_ms = grant
+            .map_or(name_expires_at_ms, |grant| {
+                name_expires_at_ms.min(grant.expires_at_ms)
+            })
+            .min(
+                issued_at_ms
+                    .checked_add(MAX_CONNECT_PERMIT_MS as i64)
+                    .ok_or(EgressJournalError::Invalid)?,
+            );
+        anyhow::ensure!(expires_at_ms > issued_at_ms, EgressJournalError::Invalid);
+        let record = ConnectPermitRecord {
+            request: request.clone(),
+            port: authority.port(),
+            issued_at_ms,
+            expires_at_ms,
+        };
+        let mut event = event(
+            CONNECT_PERMIT_KIND,
+            &permit_id,
+            &request.binding.session_id,
+            &request.binding.worker_id,
+            serde_json::to_value(&record)?,
+        );
+        event.timestamp = crate::broker_registry::format_time(clock.at());
+        let (event, payload) = self.prepare_egress_event(event)?;
+        let stored = self.append_authorized_in_transaction(&tx, event, payload, &clock)?;
+        anyhow::ensure!(
+            Utc::now().timestamp_millis() < expires_at_ms,
+            EgressJournalError::Invalid
+        );
+        self.commit_authorized(tx, &clock)?;
+        // A commit may outlast its window. Keep its history without granting a dial.
+        anyhow::ensure!(
+            (issued_at_ms..expires_at_ms).contains(&Utc::now().timestamp_millis()),
+            EgressJournalError::Invalid
+        );
+        record.into_receipt(&stored, EgressConnectPermitDispositionV1::Fresh)
+    }
+
     /// Broker observation, idempotent by observation id.
     pub fn egress_observe(
         &self,
@@ -357,11 +577,14 @@ impl Store {
                 EgressChannelOpeningDispositionV1::Replayed,
             ));
         }
-        // Validate fresh connections against the decision at the time of
-        // admission. The worker can have stopped by the time we record the fact.
+        // Record effects against the historic authorization. A result can arrive
+        // after the worker stopped, and resolution can fail before a permit exists.
         if let EgressObservationV1::Connection {
             decision_id,
             flow_id,
+            connected,
+            failure,
+            peer,
             ..
         } = observation
         {
@@ -376,6 +599,11 @@ impl Store {
                     && decision.allows(&decided_request),
                 EgressJournalError::Invalid
             );
+            if *connected {
+                anyhow::ensure!(failure.is_none(), EgressJournalError::Invalid);
+                let peer = peer.as_deref().ok_or(EgressJournalError::Invalid)?;
+                require_connected_permit(&tx, &decided_request, stored.seq, peer)?;
+            }
         }
         // A fresh channel opening requires the exact durable Running worker.
         // A replay above still returns the same historical receipt.

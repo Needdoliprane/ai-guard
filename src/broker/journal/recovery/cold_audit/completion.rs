@@ -218,6 +218,9 @@ fn complete_with_mode(
     )?;
     let usage = publication_usage(&journal.core, reserved, &mut writer, &target, &bytes)?;
     reader.check_shared()?;
+    // Busy must precede sealing an attempt as possibly published. The same
+    // writer lock excludes new tickets until the common publisher finishes.
+    writer.revoke_release_head(reserved.operation_id)?;
     // All validation/preflight is finished. Retain the exact lot and target
     // before the first possible publication effect, including ambiguous I/O.
     progress.attempt = Some(CompletionAttempt {
@@ -234,7 +237,7 @@ fn complete_with_mode(
         PublicationResources {
             usage,
             budget: super::super::super::retirement::PublicationBudget::NewAllocation,
-            floors: &writer.floors,
+            writer: &mut writer,
         },
     )?;
     writer.floors.insert(reserved.operation_id, target.clone());

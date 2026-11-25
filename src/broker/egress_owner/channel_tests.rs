@@ -3,11 +3,18 @@
 //! and a scripted gateway port. No DNS, engine or external network is used.
 
 use super::*;
-use crate::broker::egress_owner::resolve::{HostLookup, InternalService, LookupFuture};
 use crate::egress::{
     EgressTransport,
     channel_helper::{self, LoopbackConfig},
     ids::DigestV1,
+};
+use crate::{
+    broker::{
+        clock::{ClockResult, NativeHostClock},
+        egress_owner::resolve::{HostLookup, InternalService, LookupFuture},
+        enforcer::CancelGeneration,
+    },
+    control::HostClockSampleV1,
 };
 use std::sync::{
     Mutex,
@@ -33,8 +40,9 @@ where
         Ok(prepared) => prepared,
         Err(terminated) => return terminated,
     };
+    let (authorization, _native_stop) = fixture_connect_authorization();
     match prepared.open(control.as_ref()).await {
-        Ok(opened) => run_opened(opened, control, resolver, times).await,
+        Ok(opened) => run_opened(opened, control, resolver, times, authorization).await,
         Err(terminated) => terminated,
     }
 }
@@ -47,13 +55,17 @@ struct Gateway {
     opening_reply: OpeningReply,
     stop_on_opening_ack: Option<ChannelStop>,
     opening_calls: AtomicUsize,
-    decision_delay: Duration,
+    decision_gate: Option<Arc<ObservationGate>>,
+    decision_audit_seq: Option<i64>,
     decision_hold: Option<Arc<PendingOperation>>,
+    connect_permit_reply: ConnectPermitReply,
+    connect_permit_gate: Option<Arc<ObservationGate>>,
     prior_observation_reply: Option<ObservationReply>,
     terminal_observation_reply: Option<ObservationReply>,
     remaining_ms: Option<u64>,
     renewal: Option<Arc<ScriptedRenewal>>,
     decisions: Mutex<Vec<EgressDecideRequestV1>>,
+    connect_permits: Mutex<Vec<EgressConnectPermitRequestV1>>,
     observations: Mutex<Vec<EgressObservationV1>>,
     revoke: Mutex<Vec<IdV1>>,
 }
@@ -64,6 +76,16 @@ enum OpeningReply {
     Fresh,
     Replayed,
     DifferentBinding,
+}
+
+#[derive(Clone, Copy, Default)]
+enum ConnectPermitReply {
+    #[default]
+    Fresh,
+    Replayed,
+    DifferentIp,
+    Expired,
+    Lost,
 }
 
 enum ObservationReply {
@@ -114,8 +136,9 @@ impl EgressControl for Gateway {
             if let Some(hold) = &self.decision_hold {
                 hold.hold().await;
             }
-            if !self.decision_delay.is_zero() {
-                tokio::time::sleep(self.decision_delay).await;
+            if let Some(gate) = &self.decision_gate {
+                gate.started.add_permits(1);
+                gate.release.acquire().await.unwrap().forget();
             }
             let allow = self.allow.load(Ordering::SeqCst);
             self.decisions.lock().unwrap().push(request.clone());
@@ -140,7 +163,7 @@ impl EgressControl for Gateway {
                 grant_id: None,
                 remaining_ms: allow.then_some(self.remaining_ms.unwrap_or(60_000)),
                 receipt: EgressReceiptV1 {
-                    audit_seq: 7,
+                    audit_seq: self.decision_audit_seq.unwrap_or(7),
                     audit_hash: "a".repeat(64),
                 },
             })
@@ -178,8 +201,57 @@ impl EgressControl for Gateway {
                 binding,
                 disposition,
                 receipt: EgressReceiptV1 {
-                    audit_seq: 7,
+                    audit_seq: FIXTURE_OPENING_AUDIT_SEQ,
                     audit_hash: "a".repeat(64),
+                },
+            })
+        })
+    }
+    fn issue_connect_permit(
+        &self,
+        request: EgressConnectPermitRequestV1,
+    ) -> ControlFuture<'_, EgressConnectPermitReceiptV1> {
+        Box::pin(async move {
+            let port = self
+                .decisions
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|decision| decision.decision_id == request.decision_id)
+                .and_then(|decision| Authority::parse_connect(&decision.authority).ok())
+                .ok_or(ControlError::Refused)?
+                .port();
+            self.connect_permits.lock().unwrap().push(request.clone());
+            if let Some(gate) = &self.connect_permit_gate {
+                gate.started.add_permits(1);
+                gate.release.acquire().await.unwrap().forget();
+            }
+            if matches!(self.connect_permit_reply, ConnectPermitReply::Lost) {
+                return Err(ControlError::Unavailable);
+            }
+            let permit_id = request.permit_id().unwrap();
+            let mut request = request;
+            if matches!(self.connect_permit_reply, ConnectPermitReply::DifferentIp) {
+                request.ip = "127.0.0.2".parse().unwrap();
+            }
+            Ok(EgressConnectPermitReceiptV1 {
+                version: 1,
+                permit_id,
+                request,
+                port,
+                valid_for_ms: if matches!(self.connect_permit_reply, ConnectPermitReply::Expired) {
+                    1
+                } else {
+                    1_000
+                },
+                disposition: if matches!(self.connect_permit_reply, ConnectPermitReply::Replayed) {
+                    EgressConnectPermitDispositionV1::Replayed
+                } else {
+                    EgressConnectPermitDispositionV1::Fresh
+                },
+                receipt: EgressReceiptV1 {
+                    audit_seq: 8,
+                    audit_hash: "b".repeat(64),
                 },
             })
         })
@@ -417,25 +489,90 @@ fn gateway(allow: bool) -> Arc<Gateway> {
     Arc::new(gateway)
 }
 
-fn fixture_open_request() -> (EgressDecideRequestV1, Authority) {
-    let authority = Authority::new(FIXTURE, 443, EgressTransport::ConnectTcpOpaque).unwrap();
-    let request = EgressDecideRequestV1 {
-        version: 1,
-        decision_id: IdV1::random(),
-        binding: fixture_binding(),
-        flow_id: 1,
-        authority: format!("{FIXTURE}:443"),
-    };
-    (request, authority)
+const FIXTURE_OPENING_AUDIT_SEQ: i64 = 6;
+
+fn fixture_destination(port: u16) -> OpenDestination {
+    OpenDestination {
+        opening_id: IdV1::random(),
+        opening_audit_seq: FIXTURE_OPENING_AUDIT_SEQ,
+        decision: EgressDecideRequestV1 {
+            version: 1,
+            decision_id: IdV1::random(),
+            binding: fixture_binding(),
+            flow_id: 1,
+            authority: format!("{FIXTURE}:{port}"),
+        },
+        authority: Authority::new(FIXTURE, port, EgressTransport::ConnectTcpOpaque).unwrap(),
+    }
 }
 
-fn fixture_opening_lifetime() -> (OpeningLifetime, OpeningOwner, ChannelStop) {
+struct FixtureConnectGuard {
+    clock: Arc<dyn HostClock>,
+    generation: CancelGeneration,
+    expected_generation: u64,
+    stop: watch::Receiver<bool>,
+}
+
+impl FixtureConnectGuard {
+    fn new(
+        clock: Arc<dyn HostClock>,
+        generation: CancelGeneration,
+        expected_generation: u64,
+        stop: watch::Receiver<bool>,
+    ) -> Self {
+        Self {
+            clock,
+            generation,
+            expected_generation,
+            stop,
+        }
+    }
+}
+
+impl NativeConnectGuard for FixtureConnectGuard {
+    fn clock(&self) -> &dyn HostClock {
+        self.clock.as_ref()
+    }
+
+    fn with_current(
+        &self,
+        poll: &mut dyn FnMut(&HostClockSampleV1),
+    ) -> Result<(), NativeConnectRefusal> {
+        self.generation
+            .with_current_generation(self.expected_generation, || {
+                let stop = self.stop.borrow();
+                if *stop || self.stop.has_changed().is_err() {
+                    return Err(NativeConnectRefusal::Stopped);
+                }
+                let sample = self
+                    .clock
+                    .sample()
+                    .map_err(|_| NativeConnectRefusal::Unavailable)?;
+                poll(&sample);
+                Ok(())
+            })
+            .map_err(|_| NativeConnectRefusal::Stopped)?
+    }
+}
+
+fn fixture_connect_authorization() -> (Arc<FixtureConnectGuard>, watch::Sender<bool>) {
+    let (stop, stopped) = watch::channel(false);
+    let clock = Arc::new(NativeHostClock::new().unwrap());
+    let generation = CancelGeneration::new();
+    let authorization = FixtureConnectGuard::new(clock, generation, 0, stopped);
+    (Arc::new(authorization), stop)
+}
+
+fn fixture_opening_lifetime(
+    authorization: Arc<dyn NativeConnectGuard>,
+) -> (OpeningLifetime, OpeningOwner, ChannelStop) {
     let (owner, opening) = OpeningOwner::new();
     let (stop, running) = ChannelStop::new();
     (
         OpeningLifetime {
             owner: opening,
             stop: running,
+            authorization,
         },
         owner,
         stop,
@@ -444,23 +581,42 @@ fn fixture_opening_lifetime() -> (OpeningLifetime, OpeningOwner, ChannelStop) {
 
 #[test]
 fn egress_broker_connect_and_invalidation_share_the_initial_poll() {
-    for stop_channel in [false, true] {
-        let (lifetime, opening, stop) = fixture_opening_lifetime();
+    enum Invalidation {
+        Flow,
+        Channel,
+        Native,
+        Generation,
+    }
+    for invalidate in [
+        Invalidation::Flow,
+        Invalidation::Channel,
+        Invalidation::Native,
+        Invalidation::Generation,
+    ] {
+        let (authorization, native_stop) = fixture_connect_authorization();
+        let generation = authorization.generation.clone();
+        let (lifetime, opening, stop) = fixture_opening_lifetime(authorization);
         std::thread::scope(|scope| {
             let (announced, ready) = std::sync::mpsc::sync_channel(0);
             let (published, observed) = std::sync::mpsc::channel();
             let deadline = Instant::now() + Duration::from_secs(2);
-            scope.spawn(move || {
+            let invalidator = scope.spawn(move || {
                 announced.send(()).unwrap();
-                if stop_channel {
-                    stop.stop();
-                } else {
-                    opening.retire(EgressCloseReasonV1::WorkerReset);
+                match invalidate {
+                    Invalidation::Flow => opening.retire(EgressCloseReasonV1::WorkerReset),
+                    Invalidation::Channel => stop.stop(),
+                    Invalidation::Native => {
+                        native_stop.send_replace(true);
+                    }
+                    Invalidation::Generation => {
+                        generation.invalidate();
+                    }
                 }
                 published.send(()).unwrap();
+                (opening, stop, native_stop, generation)
             });
 
-            let polled = lifetime.poll_connect(deadline, || {
+            let polled = lifetime.poll_connect(deadline, |_| {
                 ready.recv_timeout(Duration::from_secs(1)).unwrap();
                 assert!(
                     matches!(
@@ -471,16 +627,331 @@ fn egress_broker_connect_and_invalidation_share_the_initial_poll() {
                 );
                 Poll::<()>::Pending
             });
-            assert!(matches!(polled, Some(Poll::Pending)));
+            assert!(matches!(polled, Ok(Some(Poll::Pending))));
             observed.recv_timeout(Duration::from_secs(1)).unwrap();
-            assert!(
-                lifetime
-                    .poll_connect(deadline, || -> Poll<()> {
-                        panic!("a terminal opening must never poll a connect")
-                    })
-                    .is_none()
-            );
+            let _owners = invalidator.join().unwrap();
+            assert!(matches!(
+                lifetime.poll_connect(deadline, |_| -> Poll<()> {
+                    panic!("a terminal opening must never poll a connect")
+                }),
+                Ok(None) | Err(NativeConnectRefusal::Stopped)
+            ));
         });
+    }
+}
+
+#[tokio::test]
+async fn egress_broker_waits_for_a_fresh_exact_numeric_permit_before_connecting() {
+    for (reply, connects) in [
+        (ConnectPermitReply::Fresh, true),
+        (ConnectPermitReply::Replayed, false),
+        (ConnectPermitReply::DifferentIp, false),
+        (ConnectPermitReply::Expired, false),
+        (ConnectPermitReply::Lost, false),
+    ] {
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = upstream.local_addr().unwrap().port();
+        let gate = Arc::new(ObservationGate {
+            started: Semaphore::new(0),
+            release: Semaphore::new(0),
+        });
+        let gateway = Arc::new(Gateway {
+            allow: AtomicBool::new(true),
+            connect_permit_gate: Some(gate.clone()),
+            connect_permit_reply: reply,
+            ..Gateway::default()
+        });
+        let harness = harness(gateway.clone(), port).await;
+        let authority = format!("{FIXTURE}:{port}");
+        let helper_port = harness.helper_port;
+        let client = tokio::spawn(async move { connect(helper_port, &authority).await });
+        timeout_at(
+            Instant::now() + Duration::from_secs(3),
+            gate.started.acquire(),
+        )
+        .await
+        .expect("the broker must request the numeric permit")
+        .unwrap()
+        .forget();
+        assert!(
+            timeout_at(
+                Instant::now() + Duration::from_millis(50),
+                upstream.accept()
+            )
+            .await
+            .is_err(),
+            "an upstream socket opened before the permit reply"
+        );
+        let request = gateway.connect_permits.lock().unwrap()[0].clone();
+        assert_eq!(request.ip.to_string(), "127.0.0.1");
+        let decision = gateway.decisions.lock().unwrap()[0].clone();
+        assert_eq!(request.decision_id, decision.decision_id);
+        assert_eq!(request.binding, decision.binding);
+        assert_eq!(request.flow_id, decision.flow_id);
+        gate.release.add_permits(1);
+        let (_client, response) = timeout_at(Instant::now() + Duration::from_secs(3), client)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.starts_with("HTTP/1.1 200"), connects);
+        if connects {
+            timeout_at(Instant::now() + Duration::from_secs(3), upstream.accept())
+                .await
+                .expect("the fresh permit allows one connection")
+                .unwrap();
+        }
+        assert_eq!(gateway.connect_permits.lock().unwrap().len(), 1);
+        harness.stop.stop();
+        assert_eq!(harness.owner.await.unwrap().cause, ChannelExit::Stopped);
+        assert!(
+            timeout_at(
+                Instant::now() + Duration::from_millis(50),
+                upstream.accept()
+            )
+            .await
+            .is_err(),
+            "the broker attempted an unauthorized or repeated connection"
+        );
+    }
+}
+
+struct FixtureOpeningClock(Mutex<HostClockSampleV1>);
+
+impl FixtureOpeningClock {
+    fn new() -> Self {
+        Self(Mutex::new(HostClockSampleV1 {
+            version: 1,
+            method: crate::control::HostClockMethodV1::LinuxBoottimeV1,
+            boot_id: "00000000-0000-4000-8000-0000000000a1".into(),
+            continuous_ns_decimal: "10000000000".into(),
+            observed_utc: None,
+        }))
+    }
+}
+
+impl HostClock for FixtureOpeningClock {
+    fn sample(&self) -> ClockResult<HostClockSampleV1> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+}
+
+#[tokio::test]
+async fn egress_broker_held_permit_cannot_outlive_native_opening_authority() {
+    enum Invalidation {
+        NativeStop,
+        Generation,
+        BootChanged,
+        ClockRegressed,
+        NameExpired,
+        PermitExpired,
+    }
+    for (invalidation, expected) in [
+        (Invalidation::NativeStop, EgressReasonV1::Cancelled),
+        (Invalidation::Generation, EgressReasonV1::Cancelled),
+        (Invalidation::BootChanged, EgressReasonV1::Unavailable),
+        (Invalidation::ClockRegressed, EgressReasonV1::Unavailable),
+        (Invalidation::NameExpired, EgressReasonV1::Expired),
+        (Invalidation::PermitExpired, EgressReasonV1::Expired),
+    ] {
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = upstream.local_addr().unwrap().port();
+        let resolver = fixture_resolver(port, Arc::new(NoLookup(AtomicUsize::new(0))));
+        let gate = Arc::new(ObservationGate {
+            started: Semaphore::new(0),
+            release: Semaphore::new(0),
+        });
+        let remaining_ms = if matches!(invalidation, Invalidation::NameExpired) {
+            750
+        } else {
+            60_000
+        };
+        let control = Arc::new(Gateway {
+            allow: AtomicBool::new(true),
+            remaining_ms: Some(remaining_ms),
+            connect_permit_gate: Some(gate.clone()),
+            ..Gateway::default()
+        });
+        let clock = Arc::new(FixtureOpeningClock::new());
+        let generation = CancelGeneration::new();
+        let (native_stop, native_stopped) = watch::channel(false);
+        let authorization = Arc::new(FixtureConnectGuard::new(
+            clock.clone(),
+            generation.clone(),
+            generation.current(),
+            native_stopped,
+        ));
+        let (lifetime, _opening, _channel_stop) = fixture_opening_lifetime(authorization);
+        let opening = tokio::spawn(async move {
+            open_upstream(
+                control,
+                resolver,
+                ChannelTimes::default(),
+                fixture_destination(port),
+                &lifetime,
+                &mut ConnectProgress::default(),
+            )
+            .await
+        });
+
+        timeout_at(
+            Instant::now() + Duration::from_secs(2),
+            gate.started.acquire(),
+        )
+        .await
+        .expect("the permit request reached the gateway")
+        .unwrap()
+        .forget();
+        // Deliberately leave channel-local STOP untouched. Only the original
+        // generation gate or native watch can reject these STOP cases.
+        match invalidation {
+            Invalidation::NativeStop => {
+                native_stop.send_replace(true);
+            }
+            Invalidation::Generation => {
+                generation.invalidate();
+            }
+            Invalidation::BootChanged => {
+                clock.0.lock().unwrap().boot_id = "00000000-0000-4000-8000-0000000000a2".into();
+            }
+            Invalidation::ClockRegressed => {
+                clock.0.lock().unwrap().continuous_ns_decimal = "9999999999".into();
+            }
+            Invalidation::NameExpired => {
+                clock.0.lock().unwrap().continuous_ns_decimal = "10750000000".into();
+            }
+            Invalidation::PermitExpired => {
+                clock.0.lock().unwrap().continuous_ns_decimal = "11000000000".into();
+            }
+        }
+        gate.release.add_permits(1);
+        let result = timeout_at(Instant::now() + Duration::from_secs(2), opening)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result, Err(refusal) if refusal.reason == expected));
+        assert!(
+            timeout_at(
+                Instant::now() + Duration::from_millis(50),
+                upstream.accept()
+            )
+            .await
+            .is_err(),
+            "the held ACK must never produce a connection after native invalidation"
+        );
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn egress_broker_fresh_permit_respects_the_original_arm_without_published_stop() {
+    #[derive(Debug)]
+    enum Case {
+        BeforeArmDeadline,
+        AtArmDeadline,
+        SlotWithdrawn,
+    }
+
+    for (case, refusal) in [
+        (Case::BeforeArmDeadline, None),
+        (Case::AtArmDeadline, Some(EgressReasonV1::Expired)),
+        (Case::SlotWithdrawn, Some(EgressReasonV1::Cancelled)),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let gate = Arc::new(ObservationGate {
+            started: Semaphore::new(0),
+            release: Semaphore::new(0),
+        });
+        let control = Arc::new(Gateway {
+            allow: AtomicBool::new(true),
+            connect_permit_gate: Some(gate.clone()),
+            ..Gateway::default()
+        });
+        let clock = Arc::new(FixtureOpeningClock::new());
+        let slot = crate::broker::enforcer::released_connect_fixture(clock.clone());
+        let (lifetime, _opening, _channel_stop) =
+            fixture_opening_lifetime(slot.authorization.clone());
+        let opening = tokio::spawn(async move {
+            open_upstream(
+                control,
+                fixture_resolver(port, Arc::new(NoLookup(AtomicUsize::new(0)))),
+                ChannelTimes::default(),
+                fixture_destination(port),
+                &lifetime,
+                &mut ConnectProgress::default(),
+            )
+            .await
+        });
+
+        timeout_at(
+            Instant::now() + Duration::from_secs(2),
+            gate.started.acquire(),
+        )
+        .await
+        .expect("a fresh numeric permit ACK is held")
+        .unwrap()
+        .forget();
+        let mut now = slot.deadline_ns - 1;
+        match case {
+            Case::BeforeArmDeadline => {}
+            Case::AtArmDeadline => now = slot.deadline_ns,
+            Case::SlotWithdrawn => slot.withdraw_without_stop(),
+        }
+        clock.0.lock().unwrap().continuous_ns_decimal = now.to_string();
+        assert!(!slot.stop_published());
+        gate.release.add_permits(1);
+
+        let outcome = timeout_at(Instant::now() + Duration::from_secs(2), opening)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!slot.stop_published());
+        if let Some(reason) = refusal {
+            assert!(
+                matches!(outcome, Err(error) if error.reason == reason),
+                "{case:?}"
+            );
+            assert!(
+                timeout_at(
+                    Instant::now() + Duration::from_millis(50),
+                    listener.accept()
+                )
+                .await
+                .is_err(),
+                "{case:?}: a fresh reply must not open a socket"
+            );
+        } else {
+            let opened = outcome
+                .ok()
+                .expect("the original Arm has one nanosecond left");
+            let (accepted, _) =
+                timeout_at(Instant::now() + Duration::from_secs(2), listener.accept())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(opened.peer, accepted.local_addr().unwrap());
+        }
+    }
+}
+
+#[tokio::test]
+async fn egress_broker_requires_name_decision_after_opening_before_dns() {
+    for audit_seq in [5, 6] {
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway = Arc::new(Gateway {
+            allow: AtomicBool::new(true),
+            decision_audit_seq: Some(audit_seq),
+            ..Gateway::default()
+        });
+        let harness = harness(gateway.clone(), upstream.local_addr().unwrap().port()).await;
+        let (_client, response) =
+            connect(harness.helper_port, "other.fixture.egress.test:443").await;
+        assert!(response.starts_with("HTTP/1.1 403"));
+        assert_eq!(gateway.decisions.lock().unwrap().len(), 1);
+        assert_eq!(harness.lookups.0.load(Ordering::SeqCst), 0);
+        assert!(gateway.connect_permits.lock().unwrap().is_empty());
+        harness.stop.stop();
+        assert_eq!(harness.owner.await.unwrap().cause, ChannelExit::Stopped);
     }
 }
 
@@ -498,14 +969,12 @@ async fn egress_broker_an_unavailable_first_address_exhausts_the_permit() {
             Err(error) if error.kind() == std::io::ErrorKind::AddrNotAvailable => None,
             Err(error) => panic!("reserve first loopback address: {error}"),
         });
-    let authority = Authority::new(FIXTURE, port, EgressTransport::ConnectTcpOpaque).unwrap();
-    let (mut request, _) = fixture_open_request();
-    request.authority = format!("{FIXTURE}:{port}");
+    let destination = fixture_destination(port);
     let resolver = Arc::new(
         Resolver::new(
             Arc::new(NoLookup(AtomicUsize::new(0))),
             vec![InternalService {
-                authority: authority.clone(),
+                authority: destination.authority.clone(),
                 addresses: vec![first.ip(), fallback.local_addr().unwrap().ip()],
             }],
             vec![],
@@ -513,7 +982,8 @@ async fn egress_broker_an_unavailable_first_address_exhausts_the_permit() {
         .unwrap(),
     );
     let control = gateway(true);
-    let (lifetime, _opening, _stop) = fixture_opening_lifetime();
+    let (authorization, _native_stop) = fixture_connect_authorization();
+    let (lifetime, _opening, _stop) = fixture_opening_lifetime(authorization);
     let mut progress = ConnectProgress::default();
 
     let result = open_upstream(
@@ -523,14 +993,16 @@ async fn egress_broker_an_unavailable_first_address_exhausts_the_permit() {
             connect_attempt: Duration::from_millis(200),
             ..ChannelTimes::default()
         },
-        request,
-        authority,
+        destination,
         &lifetime,
         &mut progress,
     )
     .await;
 
     assert_eq!(control.decisions.lock().unwrap().len(), 1);
+    let permits = control.connect_permits.lock().unwrap();
+    assert_eq!(permits.len(), 1);
+    assert_eq!(permits[0].ip, first.ip());
     assert!(!progress.pending);
     assert!(
         matches!(
@@ -546,29 +1018,54 @@ async fn egress_broker_an_unavailable_first_address_exhausts_the_permit() {
 
 #[tokio::test]
 async fn egress_broker_late_allow_receipt_expires_before_resolution() {
+    let gate = Arc::new(ObservationGate {
+        started: Semaphore::new(0),
+        release: Semaphore::new(0),
+    });
     let control = Arc::new(Gateway {
         allow: AtomicBool::new(true),
-        decision_delay: Duration::from_millis(30),
-        remaining_ms: Some(1),
+        decision_gate: Some(gate.clone()),
+        remaining_ms: Some(2_000),
         ..Gateway::default()
     });
     let lookup = Arc::new(NoLookup(AtomicUsize::new(0)));
     let resolver = Arc::new(Resolver::new(lookup.clone(), vec![], vec![]).unwrap());
-    let (request, authority) = fixture_open_request();
-    let (lifetime, _opening, _stop) = fixture_opening_lifetime();
+    let clock = Arc::new(FixtureOpeningClock::new());
+    let (_native_stop, native_stopped) = watch::channel(false);
+    let authorization = Arc::new(FixtureConnectGuard::new(
+        clock.clone(),
+        CancelGeneration::new(),
+        0,
+        native_stopped,
+    ));
+    let (lifetime, _opening, _stop) = fixture_opening_lifetime(authorization);
 
-    let result = open_upstream(
-        control.clone(),
-        resolver,
-        ChannelTimes::default(),
-        request,
-        authority,
-        &lifetime,
-        &mut ConnectProgress::default(),
-    )
-    .await;
+    let mut progress = ConnectProgress::default();
+    let (result, ()) = tokio::join!(
+        open_upstream(
+            control.clone(),
+            resolver,
+            ChannelTimes::default(),
+            fixture_destination(443),
+            &lifetime,
+            &mut progress,
+        ),
+        async {
+            timeout_at(
+                Instant::now() + Duration::from_secs(2),
+                gate.started.acquire(),
+            )
+            .await
+            .expect("the name request reached the gateway")
+            .unwrap()
+            .forget();
+            clock.0.lock().unwrap().continuous_ns_decimal = "12000000000".into();
+            gate.release.add_permits(1);
+        },
+    );
 
     assert_eq!(control.decisions.lock().unwrap().len(), 1);
+    assert!(control.connect_permits.lock().unwrap().is_empty());
     assert!(matches!(
         result,
         Err(Refusal {
@@ -588,8 +1085,8 @@ async fn egress_broker_receipt_expiry_stops_pending_resolution() {
     });
     let lookup = Arc::new(PendingLookup(AtomicUsize::new(0)));
     let resolver = Arc::new(Resolver::new(lookup.clone(), vec![], vec![]).unwrap());
-    let (request, authority) = fixture_open_request();
-    let (lifetime, _opening, _stop) = fixture_opening_lifetime();
+    let (authorization, _native_stop) = fixture_connect_authorization();
+    let (lifetime, _opening, _stop) = fixture_opening_lifetime(authorization);
 
     let result = tokio::time::timeout(
         Duration::from_secs(2),
@@ -597,8 +1094,7 @@ async fn egress_broker_receipt_expiry_stops_pending_resolution() {
             control,
             resolver,
             ChannelTimes::default(),
-            request,
-            authority,
+            fixture_destination(443),
             &lifetime,
             &mut ConnectProgress::default(),
         ),
@@ -926,18 +1422,27 @@ fn fixture_owner<W>(
     gateway: Arc<Gateway>,
     upstream_port: u16,
     times: ChannelTimes,
-) -> (Owner<W>, mpsc::Receiver<Event>, ChannelStop) {
+) -> (
+    Owner<W>,
+    mpsc::Receiver<Event>,
+    ChannelStop,
+    watch::Sender<bool>,
+) {
     let mut ledger = EgressChannelState::new(0);
     ledger
         .accept_capability(Some(&EgressCapabilityV1::default()), 0)
         .unwrap();
     let (events, incoming) = mpsc::channel(8);
     let (stop, stopping) = ChannelStop::new();
+    let (authorization, native_stop) = fixture_connect_authorization();
     let owner = Owner {
         output: Some(output),
         stop: stopping,
         stopped_during_write: false,
         binding: fixture_binding(),
+        opening_id: IdV1::random(),
+        opening_audit_seq: FIXTURE_OPENING_AUDIT_SEQ,
+        authorization,
         control: gateway,
         resolver: fixture_resolver(upstream_port, Arc::new(NoLookup(AtomicUsize::new(0)))),
         times,
@@ -952,7 +1457,7 @@ fn fixture_owner<W>(
         retirement_unconfirmed: false,
         renewing: false,
     };
-    (owner, incoming, stop)
+    (owner, incoming, stop, native_stop)
 }
 
 #[tokio::test]
@@ -961,7 +1466,7 @@ async fn egress_broker_unconfirmed_prior_observation_leaves_no_audit_terminal() 
         prior_observation_reply: Some(ObservationReply::LostAfterCommit),
         ..Gateway::default()
     });
-    let (mut owner, _incoming, _stop) = fixture_owner(
+    let (mut owner, _incoming, _stop, _native_stop) = fixture_owner(
         tokio::io::sink(),
         control.clone(),
         443,
@@ -1002,7 +1507,7 @@ async fn egress_broker_audit_terminal_follows_the_saturated_observations() {
         prior_observation_reply: Some(ObservationReply::Wait(gate.clone())),
         ..Gateway::default()
     });
-    let (mut owner, _incoming, _stop) = fixture_owner(
+    let (mut owner, _incoming, _stop, _native_stop) = fixture_owner(
         tokio::io::sink(),
         control.clone(),
         443,
@@ -1062,7 +1567,7 @@ async fn egress_broker_missing_terminal_receipt_keeps_audit_unknown() {
         terminal_observation_reply: Some(ObservationReply::LostAfterCommit),
         ..Gateway::default()
     });
-    let (mut owner, _incoming, _stop) = fixture_owner(
+    let (mut owner, _incoming, _stop, _native_stop) = fixture_owner(
         tokio::io::sink(),
         control.clone(),
         443,
@@ -1103,7 +1608,7 @@ async fn egress_broker_audit_cut_bounds_prior_and_terminal_acknowledgments() {
             terminal_observation_reply: (!prior).then(|| ObservationReply::Wait(gate.clone())),
             ..Gateway::default()
         });
-        let (mut owner, _incoming, _stop) = fixture_owner(
+        let (mut owner, _incoming, _stop, _native_stop) = fixture_owner(
             tokio::io::sink(),
             control.clone(),
             443,
@@ -1165,7 +1670,7 @@ async fn egress_broker_audit_cut_bounds_prior_and_terminal_acknowledgments() {
 
 #[tokio::test]
 async fn egress_broker_missing_detached_opening_report_keeps_quiescence_unknown() {
-    let (mut owner, _incoming, _stop) = fixture_owner(
+    let (mut owner, _incoming, _stop, _native_stop) = fixture_owner(
         tokio::io::sink(),
         gateway(true),
         443,
@@ -1215,7 +1720,7 @@ async fn egress_broker_missing_detached_opening_report_keeps_quiescence_unknown(
 
 #[tokio::test]
 async fn egress_broker_ready_retirement_receipts_after_deadline_cannot_confirm_quiescence() {
-    let (mut owner, _incoming, _stop) = fixture_owner(
+    let (mut owner, _incoming, _stop, _native_stop) = fixture_owner(
         tokio::io::sink(),
         gateway(true),
         443,
@@ -1283,7 +1788,7 @@ async fn egress_broker_ready_retirement_receipts_after_deadline_cannot_confirm_q
 #[tokio::test]
 async fn egress_broker_eof_without_socket_confirmation_keeps_quiescence_unknown() {
     let control = gateway(true);
-    let (mut owner, _incoming, _stop) = fixture_owner(
+    let (mut owner, _incoming, _stop, _native_stop) = fixture_owner(
         tokio::io::sink(),
         control.clone(),
         443,
@@ -1595,7 +2100,7 @@ async fn egress_broker_flow_retirement_cancels_pending_resolution() {
     let upstream = upstream().await;
     let pending = Arc::new(PendingOperation::default());
     let control = gateway(true);
-    let (mut owner, _incoming, _stop) = fixture_owner(
+    let (mut owner, _incoming, _stop, _native_stop) = fixture_owner(
         tokio::io::sink(),
         control.clone(),
         upstream.port,
@@ -1645,7 +2150,7 @@ async fn egress_broker_retirement_closes_observed_socket_before_handoff() {
     let port = listener.local_addr().unwrap().port();
     let control = gateway(true);
     let (output, mut helper) = tokio::io::duplex(4096);
-    let (mut owner, mut incoming, _stop) =
+    let (mut owner, mut incoming, _stop, _native_stop) =
         fixture_owner(output, control.clone(), port, ChannelTimes::default());
     let deadline = Instant::now() + Duration::from_secs(2);
     owner
@@ -1748,7 +2253,7 @@ async fn egress_broker_connect_audit_requires_known_outcome_through_eof() {
         Completion::Connected,
     ] {
         let control = gateway(true);
-        let (mut owner, _incoming, _stop) = fixture_owner(
+        let (mut owner, _incoming, _stop, _native_stop) = fixture_owner(
             tokio::io::sink(),
             control.clone(),
             443,
@@ -1852,7 +2357,7 @@ async fn egress_broker_receipt_expiry_closes_socket_before_event_consumption() {
         ..Gateway::default()
     });
     let (output, mut helper) = tokio::io::duplex(4096);
-    let (mut owner, mut incoming, _stop) = fixture_owner(
+    let (mut owner, mut incoming, _stop, _native_stop) = fixture_owner(
         output,
         gateway.clone(),
         upstream.port,
@@ -1908,7 +2413,8 @@ async fn egress_broker_discards_buffered_data_after_receipt_or_lease_expiry() {
             ..Gateway::default()
         });
         let (output, mut helper) = tokio::io::duplex(4096);
-        let (mut owner, mut incoming, _stop) = fixture_owner(output, control.clone(), port, times);
+        let (mut owner, mut incoming, _stop, _native_stop) =
+            fixture_owner(output, control.clone(), port, times);
         let deadline = Instant::now() + Duration::from_secs(2);
         owner
             .worker_frame(EgressMessageV1::Open {
@@ -2206,7 +2712,7 @@ async fn egress_broker_allowed_destination_is_decided_durably_before_one_pinned_
 }
 
 #[tokio::test]
-async fn egress_broker_committed_sqlite_decision_precedes_one_loopback_connection() {
+async fn egress_broker_committed_sqlite_decision_does_not_authorize_loopback() {
     use crate::{
         api::{GatewayState, TenantGateway, gateway_router},
         audit::egress_decisions::tests::loopback_store_fixture,
@@ -2264,14 +2770,17 @@ async fn egress_broker_committed_sqlite_decision_precedes_one_loopback_connectio
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let opening_requests = Arc::new(AtomicUsize::new(0));
+    let rejected_permits = Arc::new(AtomicUsize::new(0));
     let committed = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let router = gateway_router(state).layer(middleware::from_fn({
         let opening_requests = opening_requests.clone();
+        let rejected_permits = rejected_permits.clone();
         let committed = committed.clone();
         let release = release.clone();
         move |request: Request, next: Next| {
             let opening_requests = opening_requests.clone();
+            let rejected_permits = rejected_permits.clone();
             let committed = committed.clone();
             let release = release.clone();
             async move {
@@ -2279,7 +2788,11 @@ async fn egress_broker_committed_sqlite_decision_precedes_one_loopback_connectio
                     opening_requests.fetch_add(1, Ordering::SeqCst);
                 }
                 let decision = request.uri().path() == "/api/v1/egress/decisions";
+                let permit = request.uri().path() == "/api/v1/egress/connect-permits";
                 let response = next.run(request).await;
+                if permit && response.status() == axum::http::StatusCode::BAD_REQUEST {
+                    rejected_permits.fetch_add(1, Ordering::SeqCst);
+                }
                 if decision {
                     committed.notify_one();
                     release.notified().await;
@@ -2328,23 +2841,12 @@ async fn egress_broker_committed_sqlite_decision_precedes_one_loopback_connectio
     );
     release.notify_one();
 
-    let (mut socket, _) = timeout_at(Instant::now() + Duration::from_secs(3), upstream.accept())
+    let (_client, response) = timeout_at(Instant::now() + Duration::from_secs(3), client)
         .await
         .unwrap()
         .unwrap();
-    let (mut client, response) = client.await.unwrap();
-    assert!(response.starts_with("HTTP/1.1 200"));
-    timeout_at(Instant::now() + Duration::from_secs(2), async {
-        client.write_all(b"ping").await.unwrap();
-        let mut bytes = [0; 4];
-        socket.read_exact(&mut bytes).await.unwrap();
-        assert_eq!(&bytes, b"ping");
-        socket.write_all(&bytes).await.unwrap();
-        client.read_exact(&mut bytes).await.unwrap();
-        assert_eq!(&bytes, b"ping");
-    })
-    .await
-    .unwrap();
+    assert!(response.starts_with("HTTP/1.1 403"));
+    assert_eq!(rejected_permits.load(Ordering::SeqCst), 1);
     stop.stop();
     let terminal = timeout_at(Instant::now() + Duration::from_secs(7), owner)
         .await
@@ -2365,19 +2867,11 @@ async fn egress_broker_committed_sqlite_decision_precedes_one_loopback_connectio
         .unwrap();
 
     let events = read_events();
-    let connections: Vec<_> = events
-        .iter()
-        .filter(|(_, event)| event.kind == "egress.connection")
-        .collect();
-    assert_eq!(connections.len(), 1);
-    let (connection_seq, connection) = connections[0];
-    assert!(connection_seq > decision_seq);
-    assert_eq!(connection.data["decision_id"], request.decision_id.as_str());
-    assert_eq!(connection.data["connected"], true);
-    assert_eq!(connection.data["flow_id"], request.flow_id);
-    assert_eq!(connection.data["peer"], format!("127.0.0.1:{port}"));
+    assert!(!events.iter().any(|(_, event)| {
+        event.kind == "egress.connect.permit" || event.kind == "egress.connection"
+    }));
     let (closed_seq, closed) = events.last().unwrap();
-    assert!(*closed_seq > *connection_seq && closed.kind == "egress.channel.closed");
+    assert!(*closed_seq > *decision_seq && closed.kind == "egress.channel.closed");
     assert_eq!(closed.data["observations_lost"], 0);
     assert_eq!(
         closed.data["binding"],
@@ -2392,7 +2886,7 @@ async fn egress_broker_committed_sqlite_decision_precedes_one_loopback_connectio
         )
         .await
         .is_err(),
-        "a second upstream socket was connected"
+        "the rejected loopback permit must leave the upstream unopened"
     );
     gateway.abort();
     assert!(gateway.await.unwrap_err().is_cancelled());

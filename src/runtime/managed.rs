@@ -1279,6 +1279,28 @@ impl ManagedRuntime {
         &self,
         spec: &ContainerSpec,
     ) -> Result<Option<OwnedContainerSnapshot>> {
+        self.lookup_created_with_binding(spec, None).await
+    }
+
+    /// Read-only recovery lookup for the exact held worker. A returned
+    /// snapshot is Created evidence and carries no permission to start.
+    #[cfg(unix)]
+    #[allow(dead_code)] // Broker composition supplies the caller.
+    pub(crate) async fn lookup_created_bootstrap(
+        &self,
+        spec: &ContainerSpec,
+    ) -> Result<Option<OwnedContainerSnapshot>> {
+        let held = self
+            .checked_held_bootstrap_for(spec, true)?
+            .context("held bootstrap worker binding is missing")?;
+        self.lookup_created_with_binding(spec, Some(held)).await
+    }
+
+    async fn lookup_created_with_binding(
+        &self,
+        spec: &ContainerSpec,
+        held: Option<&HeldBootstrapBinding>,
+    ) -> Result<Option<OwnedContainerSnapshot>> {
         ensure!(
             spec.managed_names.is_some(),
             "managed lookup requires control-assigned names"
@@ -1316,7 +1338,11 @@ impl ManagedRuntime {
         let Some(id) = ids.first() else {
             return Ok(None);
         };
-        let facts = self.inspect_facts(id).await?;
+        let facts = if held.is_some() {
+            self.inspect_bootstrap_facts(id).await?
+        } else {
+            self.inspect_facts(id).await?
+        };
         let observed = parse_container_observation_version(
             &facts.bytes,
             self.binding.kind,
@@ -1326,8 +1352,17 @@ impl ManagedRuntime {
             observed.id.as_deref() == Some(*id) && observed.name == spec.name(),
             "runtime lookup identity conflicts with the reserved attempt"
         );
-        validate_authorized_identity(spec, &observed)?;
-        validate_configuration(spec, &facts.bytes, self.binding.kind)?;
+        if let Some(held) = held {
+            validate_created(spec, &observed)?;
+            ensure!(
+                observed.configuration_fingerprint.is_some(),
+                "retained bootstrap lacks its created confinement fingerprint"
+            );
+            validate_configuration_for(spec, &facts.bytes, self.binding.kind, Some(held))?;
+        } else {
+            validate_authorized_identity(spec, &observed)?;
+            validate_configuration(spec, &facts.bytes, self.binding.kind)?;
+        }
         let handle = ContainerHandle {
             authority_fingerprint: self.binding.fingerprint(),
             session: spec.session,
@@ -1341,6 +1376,48 @@ impl ManagedRuntime {
             handle,
             observation: observed,
         }))
+    }
+    async fn inspect_bootstrap_facts(&self, id: &str) -> Result<Capture> {
+        self.inspect_facts(id)
+            .await
+            .map_err(|_| anyhow::anyhow!("held bootstrap runtime inspection failed"))
+    }
+
+    #[cfg(unix)]
+    pub(super) async fn inspect_bootstrap_running(
+        &self,
+        created: &OwnedContainerSnapshot,
+        binding: &HeldBootstrapBinding,
+    ) -> Result<Option<OwnedContainerSnapshot>> {
+        self.validate_handle(&created.handle)?;
+        let facts = self.inspect_bootstrap_facts(created.handle.id()).await?;
+        validate_bootstrap_stdin_flags(&facts.bytes, self.binding.kind)?;
+        validate_bootstrap_environment(&facts.bytes, binding)?;
+        let observation = parse_container_observation_version(
+            &facts.bytes,
+            self.binding.kind,
+            created.handle.fingerprint_version(),
+        )?;
+        observation.validate_identity_allocation(&created.observation)?;
+        if observation.process.running == Some(true)
+            && observation.process.status.as_deref() == Some("running")
+            && observation.process.started_at.is_some()
+        {
+            return Ok(Some(OwnedContainerSnapshot {
+                handle: created.handle.clone(),
+                observation,
+            }));
+        }
+        ensure!(
+            observation.process.started_at.is_none()
+                && observation.process.running == Some(false)
+                && matches!(
+                    observation.process.status.as_deref(),
+                    Some("created" | "configured" | "initialized")
+                ),
+            "runtime did not prove a live retained bootstrap incarnation"
+        );
+        Ok(None)
     }
     pub(super) async fn inspect_process(
         &self,
@@ -1572,12 +1649,12 @@ impl ManagedRuntime {
         F: FnMut(ContainerObservation) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
-        let handle = self.create_owned_handle(spec).await?;
+        let handle = self.create_owned_handle(spec, false).await?;
         self.execute_owned(
             spec,
             handle,
             None,
-            input,
+            OwnedStartInput::Historical(input),
             Some(duration),
             stdout_limit,
             |created| async move { on_created(created).await.map(Into::into) },
@@ -1586,12 +1663,33 @@ impl ManagedRuntime {
         .await
         .and_then(OwnedExecutionOutcome::into_legacy)
     }
-    async fn create_owned_handle(&self, spec: &ContainerSpec) -> Result<ContainerHandle> {
+    fn checked_held_bootstrap_for<'spec>(
+        &self,
+        spec: &'spec ContainerSpec,
+        bootstrap_stdin: bool,
+    ) -> Result<Option<&'spec HeldBootstrapBinding>> {
+        let held = spec.held_bootstrap_for(bootstrap_stdin)?;
+        ensure!(
+            held.is_none_or(|binding| {
+                binding.runtime == self.binding.kind
+                    && binding.authority_id == self.binding.authority_id
+            }),
+            "held bootstrap authority differs from the authorized worker"
+        );
+        Ok(held)
+    }
+
+    async fn create_owned_handle(
+        &self,
+        spec: &ContainerSpec,
+        bootstrap_stdin: bool,
+    ) -> Result<ContainerHandle> {
         spec.require_current_creation_policy()?;
         ensure!(
             spec.managed_names.is_some(),
             "managed creation requires control-assigned names"
         );
+        self.checked_held_bootstrap_for(spec, bootstrap_stdin)?;
         self.verify_authority().await?;
         super::observation::record(
             &self.runtime.observation,
@@ -1599,7 +1697,7 @@ impl ManagedRuntime {
         );
         let output = self
             .cli(
-                &spec.create_args(self.binding.kind)?,
+                &spec.create_args_for(self.binding.kind, bootstrap_stdin)?,
                 Duration::from_secs(30),
             )
             .await
@@ -1647,7 +1745,7 @@ impl ManagedRuntime {
             spec,
             owned.handle.clone(),
             Some(&owned.observation),
-            input,
+            OwnedStartInput::Historical(input),
             Some(duration),
             stdout_limit,
             |created| async move { on_ready(created).await.map(Into::into) },
@@ -1672,11 +1770,121 @@ impl ManagedRuntime {
         F: FnMut(ContainerObservation) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
+        self.execute_prearmed_with_input(
+            spec,
+            OwnedStartInput::Historical(input),
+            stdout_limit,
+            on_created,
+            on_started,
+        )
+        .await
+    }
+
+    /// The trusted broker supplies the admitted waiting-bootstrap spec, the
+    /// explicit owned handoff and a fresh prearmed claim. Caller verification
+    /// of the bootstrap image/entrypoint and durable release stays with the
+    /// broker.
+    #[cfg(unix)]
+    #[allow(dead_code)] // Broker composition is a separate lot.
+    pub(crate) async fn execute_prearmed_bootstrap_retained<C, CFut>(
+        &self,
+        spec: &ContainerSpec,
+        stdout_limit: usize,
+        on_created: C,
+        on_bootstrap_ready: bootstrap_stdin::BootstrapReady<'_>,
+    ) -> Result<ManagedPrearmedOutcome>
+    where
+        C: FnOnce(OwnedContainerSnapshot) -> CFut,
+        CFut: Future<Output = Result<PrearmedStartDirective>>,
+    {
+        self.execute_prearmed_bootstrap(spec, None, stdout_limit, on_created, on_bootstrap_ready)
+            .await
+    }
+
+    /// Start the exact retained Created instance, with its original
+    /// inspection as the baseline. The broker still needs a fresh EmitOnce
+    /// from on_created before this port can attach.
+    #[cfg(unix)]
+    #[allow(dead_code)] // Broker composition supplies the caller.
+    pub(crate) async fn start_owned_prearmed_bootstrap_retained<C, CFut>(
+        &self,
+        spec: &ContainerSpec,
+        owned: &OwnedContainerSnapshot,
+        stdout_limit: usize,
+        on_created: C,
+        on_bootstrap_ready: bootstrap_stdin::BootstrapReady<'_>,
+    ) -> Result<ManagedPrearmedOutcome>
+    where
+        C: FnOnce(OwnedContainerSnapshot) -> CFut,
+        CFut: Future<Output = Result<PrearmedStartDirective>>,
+    {
+        self.execute_prearmed_bootstrap(
+            spec,
+            Some(owned),
+            stdout_limit,
+            on_created,
+            on_bootstrap_ready,
+        )
+        .await
+    }
+
+    #[cfg(unix)]
+    async fn execute_prearmed_bootstrap<C, CFut>(
+        &self,
+        spec: &ContainerSpec,
+        owned: Option<&OwnedContainerSnapshot>,
+        stdout_limit: usize,
+        on_created: C,
+        on_bootstrap_ready: bootstrap_stdin::BootstrapReady<'_>,
+    ) -> Result<ManagedPrearmedOutcome>
+    where
+        C: FnOnce(OwnedContainerSnapshot) -> CFut,
+        CFut: Future<Output = Result<PrearmedStartDirective>>,
+    {
+        let binding = self
+            .checked_held_bootstrap_for(spec, true)?
+            .context("held bootstrap worker binding is missing")?
+            .clone();
+        let (handle, baseline) = match owned {
+            Some(owned) => (owned.handle.clone(), Some(&owned.observation)),
+            None => (self.create_owned_handle(spec, true).await?, None),
+        };
+        self.execute_owned(
+            spec,
+            handle,
+            baseline,
+            OwnedStartInput::Bootstrap {
+                ready: on_bootstrap_ready,
+                binding,
+            },
+            None,
+            stdout_limit,
+            |created| async move { on_created(created).await.map(Into::into) },
+            |_| std::future::ready(Ok(())),
+        )
+        .await
+        .map(OwnedExecutionOutcome::into_prearmed)
+    }
+
+    async fn execute_prearmed_with_input<C, CFut, F, Fut>(
+        &self,
+        spec: &ContainerSpec,
+        input: OwnedStartInput<'_>,
+        stdout_limit: usize,
+        on_created: C,
+        on_started: F,
+    ) -> Result<ManagedPrearmedOutcome>
+    where
+        C: FnOnce(OwnedContainerSnapshot) -> CFut,
+        CFut: Future<Output = Result<PrearmedStartDirective>>,
+        F: FnMut(ContainerObservation) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
         ensure!(
             !spec.security_preset.is_interactive(),
             "prearmed batch transport refuses interactive sessions"
         );
-        let handle = self.create_owned_handle(spec).await?;
+        let handle = self.create_owned_handle(spec, input.is_bootstrap()).await?;
         self.execute_owned(
             spec,
             handle,
@@ -1716,7 +1924,7 @@ impl ManagedRuntime {
             spec,
             owned.handle.clone(),
             Some(&owned.observation),
-            input,
+            OwnedStartInput::Historical(input),
             None,
             stdout_limit,
             |created| async move { on_ready(created).await.map(Into::into) },
@@ -1731,7 +1939,7 @@ impl ManagedRuntime {
         spec: &ContainerSpec,
         handle: ContainerHandle,
         baseline: Option<&ContainerObservation>,
-        input: Option<std::fs::File>,
+        input: OwnedStartInput<'_>,
         duration: Option<Duration>,
         stdout_limit: usize,
         on_created: C,
@@ -1747,6 +1955,11 @@ impl ManagedRuntime {
             duration.is_none() || self.binding.docker_launch_profile.is_none(),
             "strict Docker start profile requires the prearmed start port"
         );
+        ensure!(
+            duration.is_none() || !input.is_bootstrap(),
+            "bootstrap stdin requires prearmed execution"
+        );
+        let held_bootstrap = spec.held_bootstrap_for(input.is_bootstrap())?;
         self.validate_handle(&handle)?;
         ensure!(
             handle.session == spec.session
@@ -1769,7 +1982,11 @@ impl ManagedRuntime {
             observation: observation.clone(),
         });
         let result: Result<OwnedExecutionOutcome> = async {
-            let facts = self.inspect_facts(&id).await?;
+            let facts = if held_bootstrap.is_some() {
+                self.inspect_bootstrap_facts(&id).await?
+            } else {
+                self.inspect_facts(&id).await?
+            };
             let observation = parse_container_observation_version(
                 &facts.bytes,
                 self.binding.kind,
@@ -1780,6 +1997,10 @@ impl ManagedRuntime {
                 "runtime inspected a different immutable instance"
             );
             validate_created(spec, &observation)?;
+            ensure!(
+                !input.is_bootstrap() || observation.configuration_fingerprint.is_some(),
+                "retained bootstrap lacks its created confinement fingerprint"
+            );
             if let Some(baseline) = baseline {
                 ensure!(
                     baseline.configuration_fingerprint.is_some(),
@@ -1788,7 +2009,7 @@ impl ManagedRuntime {
                 validate_created(spec, baseline)?;
                 observation.validate_identity_allocation(baseline)?;
             }
-            validate_configuration(spec, &facts.bytes, self.binding.kind)?;
+            validate_configuration_for(spec, &facts.bytes, self.binding.kind, held_bootstrap)?;
             let created = OwnedContainerSnapshot {
                 handle: handle.clone(),
                 observation,
@@ -1867,12 +2088,16 @@ impl ManagedRuntime {
                         &instance,
                         input,
                         stdout_limit,
-                        (self, &created.observation),
+                        self,
+                        &created,
                         control,
                         callback,
                     )
                     .await?
             } else {
+                let OwnedStartInput::Historical(input) = input else {
+                    bail!("bootstrap stdin cannot use the legacy start transport");
+                };
                 self.runtime
                     .execute_created(
                         &instance,
@@ -2475,7 +2700,20 @@ pub(super) fn validate_stream_configuration(
     bytes: &[u8],
     kind: RuntimeKind,
 ) -> Result<()> {
+    validate_stream_configuration_for(spec, bytes, kind, None)
+}
+
+fn validate_stream_configuration_for(
+    spec: &ContainerSpec,
+    bytes: &[u8],
+    kind: RuntimeKind,
+    held_bootstrap: Option<&HeldBootstrapBinding>,
+) -> Result<()> {
     if !spec.security_preset.requires_no_engine_logs() {
+        ensure!(
+            held_bootstrap.is_none(),
+            "bootstrap stdin requires strict stream inspection"
+        );
         return Ok(());
     }
     let streams: StreamConfigurationFacts = serde_json::from_slice(bytes).map_err(|_| {
@@ -2495,6 +2733,10 @@ pub(super) fn validate_stream_configuration(
             }),
         "runtime logging differs from the required none driver without options"
     );
+    if let Some(binding) = held_bootstrap {
+        validate_bootstrap_stdin_flags(bytes, kind)?;
+        return validate_bootstrap_environment(bytes, binding);
+    }
     let import = matches!(spec.purpose, ContainerPurpose::Import);
     if spec.security_preset.is_interactive() {
         ensure!(
@@ -2525,7 +2767,124 @@ pub(super) fn validate_stream_configuration(
     Ok(())
 }
 fn validate_configuration(spec: &ContainerSpec, bytes: &[u8], kind: RuntimeKind) -> Result<()> {
-    validate_stream_configuration(spec, bytes, kind)?;
+    spec.held_bootstrap_for(false)?;
+    validate_configuration_for(spec, bytes, kind, None)
+}
+
+pub(super) fn validate_bootstrap_stdin_flags(bytes: &[u8], kind: RuntimeKind) -> Result<()> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct Inspect {
+        config: Streams,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct Streams {
+        tty: bool,
+        open_stdin: bool,
+        attach_stdin: bool,
+        stdin_once: bool,
+    }
+    let streams = serde_json::from_slice::<Inspect>(bytes)
+        .map_err(|_| anyhow::anyhow!("runtime inspection lacks bootstrap stdin flags"))?
+        .config;
+    let docker = kind == RuntimeKind::Docker;
+    ensure!(
+        !streams.tty
+            && streams.open_stdin
+            && streams.attach_stdin == docker
+            && streams.stdin_once == docker,
+        "runtime stdin flags differ from the retained bootstrap profile"
+    );
+    Ok(())
+}
+
+pub(super) fn validate_bootstrap_environment(
+    bytes: &[u8],
+    binding: &HeldBootstrapBinding,
+) -> Result<()> {
+    use crate::egress::proxy_env::parse_marker;
+    use serde::de::{Error, SeqAccess, Visitor};
+
+    #[derive(Deserialize)]
+    struct Inspect {
+        #[serde(rename = "Config")]
+        config: Config,
+    }
+
+    #[derive(Deserialize)]
+    struct Config {
+        #[serde(rename = "Env")]
+        env: HeldEnvironment,
+    }
+
+    #[derive(Default)]
+    struct HeldEnvironment {
+        attempt: Option<IdV1>,
+        proxy_port: Option<u16>,
+    }
+
+    impl<'de> Deserialize<'de> for HeldEnvironment {
+        fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            struct EnvironmentVisitor;
+            impl<'de> Visitor<'de> for EnvironmentVisitor {
+                type Value = HeldEnvironment;
+
+                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("container environment entries")
+                }
+
+                fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
+                where
+                    A: SeqAccess<'de>,
+                {
+                    let mut held = HeldEnvironment::default();
+                    // Keep only the two markers. Each other entry is dropped
+                    // before reading the next, including credential values.
+                    while let Some(entry) = sequence.next_element::<String>()? {
+                        let (key, value) = entry.split_once('=').unwrap_or((entry.as_str(), ""));
+                        match key {
+                            HELD_CHALLENGE_ENV if held.attempt.is_none() => {
+                                held.attempt = Some(IdV1::parse(value).map_err(A::Error::custom)?);
+                            }
+                            EGRESS_PROXY_MARKER if held.proxy_port.is_none() => {
+                                held.proxy_port = Some(parse_marker(value).ok_or_else(|| {
+                                    A::Error::custom("invalid held proxy marker")
+                                })?);
+                            }
+                            HELD_CHALLENGE_ENV | EGRESS_PROXY_MARKER => {
+                                return Err(A::Error::custom("duplicate held bootstrap marker"));
+                            }
+                            _ => {}
+                        }
+                    }
+                    Ok(held)
+                }
+            }
+            deserializer.deserialize_seq(EnvironmentVisitor)
+        }
+    }
+
+    let Inspect { config } = serde_json::from_slice(bytes)
+        .map_err(|_| anyhow::anyhow!("runtime inspection lacks valid held bootstrap markers"))?;
+    ensure!(
+        config.env.attempt.as_ref() == Some(&binding.attempt)
+            && config.env.proxy_port == Some(binding.proxy_port),
+        "runtime held bootstrap markers differ from the authorized attempt and profile"
+    );
+    Ok(())
+}
+
+fn validate_configuration_for(
+    spec: &ContainerSpec,
+    bytes: &[u8],
+    kind: RuntimeKind,
+    held_bootstrap: Option<&HeldBootstrapBinding>,
+) -> Result<()> {
+    validate_stream_configuration_for(spec, bytes, kind, held_bootstrap)?;
     let facts: ConfigurationFacts = serde_json::from_slice(bytes).map_err(|_| {
         anyhow::anyhow!("runtime inspection lacks required sandbox configuration facts")
     })?;

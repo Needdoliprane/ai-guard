@@ -5,7 +5,10 @@ use super::{
     credentials::{BootstrapPayload, codex_auth, validate_secret},
     selection::parse_bootstrap_argv,
 };
-use crate::control_fs::Directory;
+use crate::{
+    control_fs::Directory,
+    egress::{bootstrap_release, ids::IdV1, proxy_env},
+};
 use anyhow::{Result, anyhow, bail, ensure};
 use sha2::{Digest, Sha256};
 use std::{
@@ -13,9 +16,9 @@ use std::{
     ffi::{CString, OsStr, OsString},
     fmt,
     fs::File,
-    io::{Read, Write},
+    io::{IsTerminal, Read, Write},
     os::{
-        fd::{AsRawFd, FromRawFd},
+        fd::{AsFd, AsRawFd, FromRawFd},
         unix::{ffi::OsStrExt, fs::MetadataExt, process::CommandExt},
     },
     path::Path,
@@ -627,13 +630,23 @@ impl BootstrapExecution {
 /// The inherited entry remains in this process until replacement; no memory or
 /// `/proc` scrubbing guarantee is implied.
 pub fn run_from_environment(args: &[String]) -> Result<i32> {
-    let payload = standalone_handoff(
-        std::env::var_os(crate::egress::proxy_env::EGRESS_PROXY_MARKER).as_deref(),
-        || std::env::var_os(BOOTSTRAP_ENV),
-    )?;
     let mut argv = vec![BOOTSTRAP_PROGRAM.into()];
     argv.extend_from_slice(args);
+    let (payload, proxy_port) = standalone_handoff(
+        &argv,
+        std::env::var_os(proxy_env::EGRESS_PROXY_MARKER).as_deref(),
+        std::env::var_os(bootstrap_release::HELD_CHALLENGE_ENV).as_deref(),
+        read_pid1_release,
+        || std::env::var_os(BOOTSTRAP_ENV),
+    )?;
     let mut execution = prepare_execution(&argv, &payload, Path::new("/home/agent"))?;
+    if let Some(port) = proxy_port {
+        execution.environment.extend(
+            proxy_env::proxy_environment(port)
+                .into_iter()
+                .map(|(name, value)| (name.into(), value)),
+        );
+    }
     // No provider command (not even a probe) runs without the managed hooks
     // that feed the activity channel.
     let (managed, expected) = managed_activity_config(execution.client);
@@ -658,24 +671,72 @@ pub fn run_from_environment(args: &[String]) -> Result<i32> {
         .env_clear()
         .envs(&execution.environment)
         .current_dir("/workspace");
+    if proxy_port.is_some() {
+        command.stdin(Stdio::null());
+    }
     let _error = command.exec();
     bail!("client_missing: provider executable could not replace the bootstrap process")
 }
 
-fn standalone_handoff(
-    egress_marker: Option<&OsStr>,
-    read_handoff: impl FnOnce() -> Option<OsString>,
-) -> Result<String> {
-    // The helper binds its listener before the broker has the opening receipt.
-    // This entry has no broker release signal after that durable ACK.
+const RELEASE_UNAVAILABLE: &str =
+    "egress_transport_unavailable: the held provider release input is missing or invalid";
+
+fn read_pid1_release(challenge: &IdV1) -> Result<()> {
+    let stdin = std::io::stdin();
     ensure!(
-        egress_marker.is_none(),
-        "egress_transport_unavailable: the broker's durable channel opening has not released the provider"
+        std::process::id() == 1 && !stdin.is_terminal(),
+        "{RELEASE_UNAVAILABLE}"
     );
-    read_handoff()
+    // An unbuffered read keeps input consumption at the frame plus one byte.
+    let input = stdin
+        .as_fd()
+        .try_clone_to_owned()
+        .map_err(|_| anyhow!("{RELEASE_UNAVAILABLE}"))?;
+    read_release_frame(File::from(input), challenge)
+}
+
+fn read_release_frame(input: impl Read, challenge: &IdV1) -> Result<()> {
+    ensure!(
+        bootstrap_release::receive_frame(input, challenge),
+        "{RELEASE_UNAVAILABLE}"
+    );
+    Ok(())
+}
+
+fn standalone_handoff(
+    argv: &[String],
+    egress_marker: Option<&OsStr>,
+    held_challenge: Option<&OsStr>,
+    read_release: impl FnOnce(&IdV1) -> Result<()>,
+    read_handoff: impl FnOnce() -> Option<OsString>,
+) -> Result<(String, Option<u16>)> {
+    let proxy_port = match (egress_marker, held_challenge) {
+        (None, None) => None,
+        (Some(marker), Some(challenge)) => {
+            let port = marker
+                .to_str()
+                .and_then(proxy_env::parse_marker)
+                .ok_or_else(|| anyhow!("{RELEASE_UNAVAILABLE}"))?;
+            let challenge = challenge
+                .to_str()
+                .and_then(|value| IdV1::parse(value).ok())
+                .ok_or_else(|| anyhow!("{RELEASE_UNAVAILABLE}"))?;
+            let selected =
+                parse_bootstrap_argv(argv).map_err(|_| anyhow!("{RELEASE_UNAVAILABLE}"))?;
+            ensure!(
+                selected.transport == ClientTransport::Batch,
+                "{RELEASE_UNAVAILABLE}"
+            );
+            read_release(&challenge)?;
+            Some(port)
+        }
+        _ => bail!("{RELEASE_UNAVAILABLE}"),
+    };
+    let payload = read_handoff()
         .ok_or_else(|| anyhow!("credential_missing: provider bootstrap credential is unavailable"))?
         .into_string()
-        .map_err(|_| anyhow!("invalid provider bootstrap credential encoding"))
+        .map_err(|_| anyhow!("invalid provider bootstrap credential encoding"))?;
+    Ok((payload, proxy_port))
 }
 
 impl BootstrapExecution {
@@ -776,18 +837,171 @@ pub fn public_error(error: &anyhow::Error) -> &'static str {
 mod tests {
     use super::*;
     use std::time::Instant;
+    use std::{cell::Cell, io};
 
     #[test]
     fn marked_standalone_provider_requires_broker_release_before_the_handoff() {
         for marker in ["http://127.0.0.1:3128", "invalid"] {
-            let error = standalone_handoff(Some(OsStr::new(marker)), || {
-                panic!("the standalone provider must not read its handoff before release");
-            })
+            let error = standalone_handoff(
+                &[],
+                Some(OsStr::new(marker)),
+                None,
+                |_| panic!("the legacy marker must not consume stdin"),
+                || panic!("the legacy marker must not read credentials"),
+            )
             .unwrap_err();
             assert!(public_error(&error).starts_with("egress_transport_unavailable:"));
         }
-        let error = standalone_handoff(None, || None).unwrap_err();
+        let error = standalone_handoff(
+            &[],
+            None,
+            None,
+            |_| panic!("the unmarked bootstrap must not consume stdin"),
+            || None,
+        )
+        .unwrap_err();
         assert!(public_error(&error).starts_with("credential_missing:"));
+        let (payload, port) = standalone_handoff(
+            &[],
+            None,
+            None,
+            |_| panic!("the unmarked bootstrap must not consume stdin"),
+            || Some("synthetic handoff".into()),
+        )
+        .unwrap();
+        assert_eq!(payload, "synthetic handoff");
+        assert_eq!(port, None);
+    }
+
+    #[test]
+    fn held_provider_releases_credentials_only_after_the_exact_frame_and_eof() {
+        const CHALLENGE: &str = "11111111-1111-4111-8111-111111111111";
+        const FRAME: &[u8] = b"AI-GUARD-EGRESS-RELEASE-V1 11111111-1111-4111-8111-111111111111\n";
+        let argv = [
+            BOOTSTRAP_PROGRAM,
+            "exec",
+            "--client",
+            "codex",
+            "--auth-mode",
+            "api",
+            "--transport",
+            "batch",
+            "--preset-version",
+            "1",
+            "--prompt",
+            "synthetic",
+        ]
+        .map(str::to_owned);
+        let marker = Some(OsStr::new("http://127.0.0.1:3128"));
+        let held = Some(OsStr::new(CHALLENGE));
+        let eof = Cell::new(false);
+        let credentials = Cell::new(0);
+        let input = io::Read::chain(io::Read::chain(&FRAME[..9], &FRAME[9..]), EofWitness(&eof));
+        let (payload, port) = standalone_handoff(
+            &argv,
+            marker,
+            held,
+            |challenge| {
+                assert_eq!(bootstrap_release::encode_frame(challenge).as_slice(), FRAME);
+                read_release_frame(input, challenge)
+            },
+            || {
+                assert!(
+                    eof.get(),
+                    "credentials were requested before the end of stdin"
+                );
+                credentials.set(credentials.get() + 1);
+                Some("synthetic handoff".into())
+            },
+        )
+        .unwrap();
+        assert_eq!(credentials.get(), 1);
+        assert_eq!(payload, "synthetic handoff");
+        assert_eq!(port, Some(3128));
+
+        let repeated = [FRAME, FRAME].concat();
+        let wrong = b"AI-GUARD-EGRESS-RELEASE-V1 22222222-2222-4222-8222-222222222222\n";
+        let mut unreadable = FRAME.to_vec();
+        unreadable[FRAME.len() - 2] = 0xff;
+        for input in [
+            &[][..],
+            &FRAME[..FRAME.len() - 1],
+            repeated.as_slice(),
+            wrong,
+            unreadable.as_slice(),
+        ] {
+            let error = standalone_handoff(
+                &argv,
+                marker,
+                held,
+                |challenge| read_release_frame(input, challenge),
+                || panic!("invalid release must not read credentials"),
+            )
+            .unwrap_err();
+            assert!(public_error(&error).starts_with("egress_transport_unavailable:"));
+        }
+        let mut extra = io::Cursor::new([FRAME, &[b'x'; 512]].concat());
+        let error = standalone_handoff(
+            &argv,
+            marker,
+            held,
+            |challenge| read_release_frame(&mut extra, challenge),
+            || panic!("extra input must not read credentials"),
+        )
+        .unwrap_err();
+        assert!(public_error(&error).starts_with("egress_transport_unavailable:"));
+        assert_eq!(extra.position(), 65);
+        let error = standalone_handoff(
+            &argv,
+            marker,
+            held,
+            |challenge| read_release_frame(io::Read::chain(FRAME, Unreadable), challenge),
+            || panic!("IO failure at the end of stdin must not read credentials"),
+        )
+        .unwrap_err();
+        assert!(public_error(&error).starts_with("egress_transport_unavailable:"));
+
+        for (marker, held) in [
+            (None, held),
+            (Some(OsStr::new("invalid marker")), held),
+            (marker, Some(OsStr::new("invalid challenge"))),
+        ] {
+            let error = standalone_handoff(
+                &argv,
+                marker,
+                held,
+                |_| panic!("invalid held configuration must not consume stdin"),
+                || panic!("invalid held configuration must not read credentials"),
+            )
+            .unwrap_err();
+            assert!(public_error(&error).starts_with("egress_transport_unavailable:"));
+        }
+        let mut interactive = argv;
+        interactive[7] = "interactive-tty".into();
+        let error = standalone_handoff(
+            &interactive,
+            marker,
+            held,
+            |_| panic!("the held mode must reject interactive input before reading stdin"),
+            || panic!("the held mode must reject interactive input before credentials"),
+        )
+        .unwrap_err();
+        assert!(public_error(&error).starts_with("egress_transport_unavailable:"));
+    }
+
+    struct EofWitness<'a>(&'a Cell<bool>);
+    impl Read for EofWitness<'_> {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            self.0.set(true);
+            Ok(0)
+        }
+    }
+
+    struct Unreadable;
+    impl Read for Unreadable {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("synthetic input failure"))
+        }
     }
 
     #[test]

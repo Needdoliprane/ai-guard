@@ -1,4 +1,7 @@
-use crate::broker::enforcer::CancelGeneration;
+use crate::{
+    broker::enforcer::CancelGeneration,
+    egress::{bootstrap_release::HELD_CHALLENGE_ENV, ids::IdV1},
+};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::{future::Future, process::Stdio, time::Duration};
@@ -9,6 +12,10 @@ use tokio::{
 };
 use uuid::Uuid;
 mod batch_io;
+#[cfg(unix)]
+pub(crate) mod bootstrap_stdin;
+#[cfg(all(test, unix))]
+mod bootstrap_stdin_tests;
 mod control_outcome;
 pub(crate) use control_outcome::{
     NativeCollected, NativeCollectionOutcome, NativeIoPhase, NativeNoChild, NativeRuntimeOutcome,
@@ -27,6 +34,11 @@ pub(crate) mod launch_profile;
 mod managed;
 pub mod observation;
 pub(crate) use managed::relay::{RelayExecError, RelayExecPermit, RelayExecTransport};
+#[cfg(unix)]
+pub(crate) use managed::relay::{
+    RelayExecState,
+    egress::{EgressExecIo, EgressExecOwner},
+};
 pub(crate) use managed::selected_podman_target_args;
 pub(crate) mod model_tls;
 mod prestart;
@@ -74,6 +86,8 @@ pub struct PrearmedStartControl {
     stop: tokio::sync::watch::Receiver<bool>,
     launch_profile: Option<Box<launch_profile::DockerLaunchProfileBindingV1>>,
     stdout_tap: Option<crate::provider_activity::StdoutTap>,
+    #[cfg(unix)]
+    native_release: Option<Box<dyn bootstrap_stdin::NativeBootstrapRelease>>,
 }
 impl PrearmedStartControl {
     pub fn new(guard: Box<dyn BeforeSpawnGuard>, stop: tokio::sync::watch::Receiver<bool>) -> Self {
@@ -82,18 +96,23 @@ impl PrearmedStartControl {
             stop,
             launch_profile: None,
             stdout_tap: None,
+            #[cfg(unix)]
+            native_release: None,
         }
     }
     pub(crate) fn with_launch_profile(
         guard: Box<dyn BeforeSpawnGuard>,
         stop: tokio::sync::watch::Receiver<bool>,
         launch_profile: Option<launch_profile::DockerLaunchProfileBindingV1>,
+        #[cfg(unix)] native_release: Option<Box<dyn bootstrap_stdin::NativeBootstrapRelease>>,
     ) -> Self {
         Self {
             guard,
             stop,
             launch_profile: launch_profile.map(Box::new),
             stdout_tap: None,
+            #[cfg(unix)]
+            native_release,
         }
     }
     /// Forward the batch client stdout live to the activity collector, in
@@ -225,7 +244,18 @@ pub struct ContainerSpec {
     security_preset: crate::control::SecurityPresetV1,
     terminal_secrets: TerminalSecrets,
     egress_proxy_port: Option<u16>,
+    held_bootstrap: Option<HeldBootstrapBinding>,
 }
+
+#[derive(Clone, Debug)]
+struct HeldBootstrapBinding {
+    attempt: IdV1,
+    proxy_port: u16,
+    runtime: RuntimeKind,
+    authority_id: Uuid,
+    spec_digest: String,
+}
+
 pub use crate::egress::proxy_env::EGRESS_PROXY_MARKER;
 fn egress_environment(port: u16) -> Vec<String> {
     crate::egress::proxy_env::proxy_environment(port)
@@ -277,8 +307,94 @@ impl ContainerSpec {
             security_preset: crate::control::SecurityPresetV1::FixedSandboxV2,
             terminal_secrets: TerminalSecrets::default(),
             egress_proxy_port: None,
+            held_bootstrap: None,
         })
     }
+    /// Build only from the authorized worker retained by the broker. The
+    /// attempt supplies the public challenge; the launch supplies the exact
+    /// managed bootstrap argv and proxy profile.
+    #[allow(dead_code)] // Used when the broker composes the held runtime port.
+    pub(crate) fn for_held_worker(worker: &crate::control::WorkerV1) -> Result<Self> {
+        use crate::{
+            control::{NetworkV1, RuntimeKindV1, SecurityPresetV1},
+            provider::ClientTransport,
+        };
+
+        let launch = &worker.launch;
+        launch.validate()?;
+        let egress = launch
+            .egress
+            .as_ref()
+            .context("held bootstrap requires broker egress")?;
+        ensure!(
+            worker.quota_held
+                && worker.spec_hash == launch.spec_hash()?
+                && launch.network == NetworkV1::None
+                && launch.security_preset == SecurityPresetV1::FixedSandboxV2
+                && launch.command.cwd == "/workspace"
+                && launch
+                    .provider_resolution
+                    .as_ref()
+                    .is_some_and(|provider| provider.transport == ClientTransport::Batch),
+            "held bootstrap requires an authorized managed batch worker"
+        );
+        let attempt = IdV1::parse(&worker.attempt.attempt_id)?;
+        let operation = IdV1::parse(&worker.admission_operation_id)?;
+        let authority = IdV1::parse(&launch.authority_id)?;
+        let mut spec = Self::with_operation(
+            Uuid::parse_str(&launch.session_id)?,
+            ContainerPurpose::Run,
+            &launch.image_id,
+            launch.command.argv.clone(),
+            NetworkMode::None,
+            Uuid::parse_str(operation.as_str())?,
+        )?
+        .with_managed_names(&worker.attempt.stable_name, &worker.attempt.volume_name)?
+        .with_broker_egress(egress)?;
+        spec.held_bootstrap = Some(HeldBootstrapBinding {
+            attempt,
+            proxy_port: egress.proxy_port,
+            runtime: match launch.runtime_kind {
+                RuntimeKindV1::Docker => RuntimeKind::Docker,
+                RuntimeKindV1::Podman => RuntimeKind::Podman,
+            },
+            authority_id: Uuid::parse_str(authority.as_str())?,
+            spec_digest: spec.held_bootstrap_spec_digest()?,
+        });
+        Ok(spec)
+    }
+
+    fn held_bootstrap_spec_digest(&self) -> Result<String> {
+        crate::control::content_hash(
+            "ai-guard:runtime-held-bootstrap-spec:v1",
+            &(
+                self.session,
+                self.operation,
+                &self.image,
+                &self.argv,
+                &self.managed_names,
+            ),
+        )
+    }
+
+    fn held_bootstrap_for(&self, requested: bool) -> Result<Option<&HeldBootstrapBinding>> {
+        match (&self.held_bootstrap, requested) {
+            (None, false) => Ok(None),
+            (Some(binding), true) => {
+                ensure!(
+                    matches!(self.purpose, ContainerPurpose::Run)
+                        && self.network == NetworkMode::None
+                        && self.security_preset == crate::control::SecurityPresetV1::FixedSandboxV2
+                        && self.egress_proxy_port == Some(binding.proxy_port)
+                        && self.held_bootstrap_spec_digest()? == binding.spec_digest,
+                    "held bootstrap specification differs from the authorized worker"
+                );
+                Ok(Some(binding))
+            }
+            _ => bail!("held bootstrap specification and runtime port must be selected together"),
+        }
+    }
+
     pub fn operation_id(&self) -> Uuid {
         self.operation
     }
@@ -330,6 +446,10 @@ impl ContainerSpec {
     pub fn with_broker_egress(mut self, egress: &crate::control::EgressLaunchV1) -> Result<Self> {
         egress.validate()?;
         ensure!(
+            self.held_bootstrap.is_none(),
+            "the held bootstrap proxy profile is already bound"
+        );
+        ensure!(
             matches!(self.purpose, ContainerPurpose::Run) && self.network == NetworkMode::None,
             "broker egress requires a worker execution on network none"
         );
@@ -352,13 +472,30 @@ impl ContainerSpec {
                 "credential injection is valid only for a broker-egress or explicitly bridged worker and a regular absolute env file"
             );
         }
-        file.revalidate()?;
+        self.validate_credential_env(&file)?;
         self.secret_env_file = Some(file);
         Ok(self)
     }
+    fn validate_credential_env(&self, file: &crate::control_fs::PrivateFile) -> Result<()> {
+        file.revalidate()?;
+        if self.held_bootstrap.is_some() {
+            let prefix = format!("{}=", crate::provider::BOOTSTRAP_ENV);
+            ensure!(
+                file.bytes()
+                    .strip_prefix(prefix.as_bytes())
+                    .and_then(|payload| payload.strip_suffix(b"\n"))
+                    .is_some_and(|payload| {
+                        !payload.is_empty()
+                            && payload.iter().all(|b| !matches!(*b, b'\r' | b'\n' | 0))
+                    }),
+                "held bootstrap credential file must contain only the managed provider handoff"
+            );
+        }
+        Ok(())
+    }
     fn validate_secret_env_file(&self) -> Result<()> {
         if let Some(file) = &self.secret_env_file {
-            file.revalidate()?;
+            self.validate_credential_env(file)?;
         }
         Ok(())
     }
@@ -384,7 +521,15 @@ impl ContainerSpec {
             .unwrap_or_else(|| volume_name(self.session))
     }
     pub fn create_args(&self, runtime: RuntimeKind) -> Result<Vec<String>> {
+        self.create_args_for(runtime, false)
+    }
+    fn create_args_for(&self, runtime: RuntimeKind, bootstrap_stdin: bool) -> Result<Vec<String>> {
         self.require_current_creation_policy()?;
+        let held = self.held_bootstrap_for(bootstrap_stdin)?;
+        ensure!(
+            held.is_none_or(|binding| binding.runtime == runtime),
+            "held bootstrap runtime differs from the authorized worker"
+        );
         self.validate_secret_env_file()?;
         validate_image(&self.image)?;
         validate_command(&self.argv)?;
@@ -456,7 +601,7 @@ impl ContainerSpec {
             "--entrypoint".into(),
             self.argv[0].clone(),
         ];
-        if matches!(self.purpose, ContainerPurpose::Import) {
+        if matches!(self.purpose, ContainerPurpose::Import) || bootstrap_stdin {
             args.push("--interactive".into());
         }
         if self.security_preset.is_interactive() {
@@ -474,6 +619,12 @@ impl ContainerSpec {
             for value in egress_environment(port) {
                 args.extend(["--env".into(), value]);
             }
+        }
+        if let Some(held) = held {
+            args.extend([
+                "--env".into(),
+                format!("{HELD_CHALLENGE_ENV}={}", held.attempt.as_str()),
+            ]);
         }
         if let Some(file) = &self.secret_env_file {
             args.extend([
@@ -761,6 +912,77 @@ impl Drop for TransportTasks {
             task.abort();
         }
     }
+}
+
+enum OwnedStartInput<'execution> {
+    Historical(Option<std::fs::File>),
+    #[cfg(unix)]
+    Bootstrap {
+        ready: bootstrap_stdin::BootstrapReady<'execution>,
+        binding: HeldBootstrapBinding,
+    },
+}
+
+impl OwnedStartInput<'_> {
+    fn is_bootstrap(&self) -> bool {
+        match self {
+            Self::Historical(_) => false,
+            #[cfg(unix)]
+            Self::Bootstrap { .. } => true,
+        }
+    }
+}
+
+enum SpawnedPrearmedInput<'execution> {
+    Historical(Option<std::fs::File>),
+    #[cfg(unix)]
+    Bootstrap {
+        ready: bootstrap_stdin::BootstrapReady<'execution>,
+        binding: HeldBootstrapBinding,
+        stdin: Result<bootstrap_stdin::PrearmedBootstrapStdin>,
+    },
+}
+
+fn spawn_prearmed_cli<'execution>(
+    mut command: Command,
+    target: &str,
+    input: OwnedStartInput<'execution>,
+    guard: Box<dyn BeforeSpawnGuard>,
+    stop: &tokio::sync::watch::Receiver<bool>,
+) -> Result<(tokio::process::Child, SpawnedPrearmedInput<'execution>)> {
+    command.args(["start", "--attach"]);
+    match &input {
+        OwnedStartInput::Historical(None) => {}
+        _ => {
+            command.arg("--interactive").stdin(Stdio::piped());
+        }
+    }
+    command
+        .arg(target)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    ensure_prearmed_live(stop).with_context(|| {
+        RuntimePrestartStageFailure::new(RuntimePrestartStage::StopBeforeSpawn, target)
+    })?;
+    let guard_failure =
+        || RuntimePrestartStageFailure::new(RuntimePrestartStage::GuardBeforeSpawn, target);
+    let spawn_failure = || RuntimePrestartStageFailure::new(RuntimePrestartStage::Spawn, target);
+    // Keep the final trusted check adjacent to spawn.
+    guard
+        .check_before_spawn(target)
+        .with_context(guard_failure)?;
+    let mut child = command.spawn().with_context(spawn_failure)?;
+    let input = match input {
+        OwnedStartInput::Historical(archive) => SpawnedPrearmedInput::Historical(archive),
+        #[cfg(unix)]
+        OwnedStartInput::Bootstrap { ready, binding } => SpawnedPrearmedInput::Bootstrap {
+            ready,
+            binding,
+            stdin: bootstrap_stdin::PrearmedBootstrapStdin::take(&mut child),
+        },
+    };
+    Ok((child, input))
 }
 
 fn ensure_prearmed_live(stop: &tokio::sync::watch::Receiver<bool>) -> Result<()> {
@@ -1909,9 +2131,10 @@ impl Runtime {
     async fn execute_created_prearmed<F, Fut>(
         &self,
         instance: &CreatedInstance,
-        input: Option<std::fs::File>,
+        input: OwnedStartInput<'_>,
         stdout_limit: usize,
-        managed: (&ManagedRuntime, &ContainerObservation),
+        authority: &ManagedRuntime,
+        created: &OwnedContainerSnapshot,
         control: PrearmedStartControl,
         mut on_started: F,
     ) -> Result<ExecutionResult>
@@ -1919,61 +2142,63 @@ impl Runtime {
         F: FnMut(RuntimeState) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
-        let (authority, _) = managed;
         authority.verify_authority().await.with_context(|| {
             RuntimePrestartStageFailure::new(
                 RuntimePrestartStage::AuthorityBeforeSpawn,
                 &instance.target,
             )
         })?;
-        let (mut command, prepared_profile, _retained_profile) =
+        let (command, prepared_profile, _retained_profile) =
             authority.prearmed_command().with_context(|| {
                 RuntimePrestartStageFailure::new(
                     RuntimePrestartStage::InvocationBeforeSpawn,
                     &instance.target,
                 )
             })?;
-        command.arg("start").arg("--attach");
-        if input.is_some() {
-            command.arg("--interactive").stdin(Stdio::piped());
-        }
-        command
-            .arg(&instance.target)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
         let PrearmedStartControl {
             guard,
             mut stop,
             launch_profile,
             stdout_tap,
+            #[cfg(unix)]
+            native_release,
         } = control;
+        #[cfg(unix)]
+        ensure!(
+            !input.is_bootstrap() || native_release.is_some(),
+            "retained bootstrap requires the original native worker release authorization"
+        );
         let guard: Box<dyn BeforeSpawnGuard> = Box::new(ProfileBoundSpawnGuard {
             inner: guard,
             expected: launch_profile,
             prepared: prepared_profile,
         });
-        ensure_prearmed_live(&stop).with_context(|| {
-            RuntimePrestartStageFailure::new(
-                RuntimePrestartStage::StopBeforeSpawn,
-                &instance.target,
-            )
-        })?;
-        // These closures allocate diagnostic metadata only on an error.
-        let guard_failure = || {
-            RuntimePrestartStageFailure::new(
-                RuntimePrestartStage::GuardBeforeSpawn,
-                &instance.target,
-            )
+        let (mut child, input) =
+            spawn_prearmed_cli(command, &instance.target, input, guard, &stop)?;
+        let input = match input {
+            SpawnedPrearmedInput::Historical(archive) => archive,
+            #[cfg(unix)]
+            SpawnedPrearmedInput::Bootstrap {
+                ready,
+                binding,
+                stdin,
+            } => {
+                return bootstrap_stdin::supervise(
+                    authority,
+                    created,
+                    binding,
+                    child,
+                    stdin,
+                    ready,
+                    stop,
+                    native_release,
+                    stdout_limit,
+                    stdout_tap,
+                )
+                .await;
+            }
         };
-        let spawn_failure =
-            || RuntimePrestartStageFailure::new(RuntimePrestartStage::Spawn, &instance.target);
-        // Keep the final trusted check adjacent to spawn: no await, command
-        // preparation, filesystem access or callback is permitted between them.
-        guard
-            .check_before_spawn(&instance.target)
-            .with_context(guard_failure)?;
-        let mut child = command.spawn().with_context(spawn_failure)?;
+        let managed = (authority, &created.observation);
         let stdout_release = stdout_tap
             .as_ref()
             .map(crate::provider_activity::StdoutTap::stall_release);

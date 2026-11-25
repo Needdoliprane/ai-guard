@@ -1,5 +1,26 @@
 # Validation courante
 
+## 25 novembre 2026 — composition E3 et reprise locale de Created
+
+Le gel `c37f3d00` compile hors ligne sur macOS ARM64. Les onze
+sélecteurs donnent 58 PASS et chaque groupe de test se termine.
+Les 39 tests du canal couvrent notamment l’échéance de l’Arm
+d’origine avec un permis encore frais. Les tests SQLite et HTTP
+vérifient le reçu numérique exact, le rejeu, le refus inter-tenant
+et la corrélation du pair observé. Les sept tests du Writer
+vérifient les deux ordres de publication et de consommation du
+ticket de tête.
+
+Les scénarios Created distinguent une erreur acteur après
+publication et un vrai délai d’attente côté appelant, suivi du
+reçu tardif. Ils reprennent la même demande et bornent le passage
+vers Arm. Ils restent des témoins de fixture. Le premier claim
+Full3 et la qualification moteur d’E3 restent ouverts. L’admission
+E3 reste fermée dans cette composition.
+
+Manifeste privé
+`b95ee59ec843056324fd0e56a0e4aec48a4b582d52f1815df1a10ff8fc5b9431`.
+
 ## 25 novembre 2026 — collecte du diagnostic ImportVerification G09
 
 Le gel `05fe3e9c` compile hors ligne sur macOS ARM64. Les trois

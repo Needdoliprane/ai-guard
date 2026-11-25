@@ -1,15 +1,15 @@
 //! Gateway adapter of the broker egress owner, over the runner credential.
 //!
-//! One attempt per exchange: a lost decision is never replayed into a connect,
+//! One attempt per exchange: lost decisions or permits cannot authorize a connect,
 //! and any non-success answer refuses the flow.
 
 use super::AuditClient;
 use crate::{
     broker::egress_owner::channel::{ControlError, ControlFuture, EgressControl},
     control::egress_decision::{
-        EgressChannelOpeningReceiptV1, EgressChannelOpeningRequestV1, EgressDecideRequestV1,
-        EgressDecisionV1, EgressObserveRequestV1, EgressReceiptV1, EgressRenewRequestV1,
-        EgressRenewResponseV1,
+        EgressChannelOpeningReceiptV1, EgressChannelOpeningRequestV1, EgressConnectPermitReceiptV1,
+        EgressConnectPermitRequestV1, EgressDecideRequestV1, EgressDecisionV1,
+        EgressObserveRequestV1, EgressReceiptV1, EgressRenewRequestV1, EgressRenewResponseV1,
     },
     egress::ids::DigestV1,
 };
@@ -101,6 +101,15 @@ impl EgressControl for GatewayEgressControl {
     fn decide(&self, request: EgressDecideRequestV1) -> ControlFuture<'_, EgressDecisionV1> {
         Box::pin(async move {
             self.post("api/v1/egress/decisions", &request, decode_json)
+                .await
+        })
+    }
+    fn issue_connect_permit(
+        &self,
+        request: EgressConnectPermitRequestV1,
+    ) -> ControlFuture<'_, EgressConnectPermitReceiptV1> {
+        Box::pin(async move {
+            self.post("api/v1/egress/connect-permits", &request, decode_object)
                 .await
         })
     }

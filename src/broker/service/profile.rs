@@ -1,7 +1,10 @@
 //! Private operator configuration. A profile routes authentication; its tenant
 //! strings are expectations to compare with the gateway, never an identity.
 use crate::{
-    broker::journal::JournalScopeV1,
+    broker::{
+        egress_owner::resolve::{Resolver, ResolverConfigV1, SystemLookup},
+        journal::JournalScopeV1,
+    },
     control::EgressLaunchV1,
     control_fs::{Directory, PrivateFile, absolute_path},
     provider::AuthPreference,
@@ -14,7 +17,9 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fmt,
+    net::IpAddr,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use uuid::Uuid;
 
@@ -69,6 +74,7 @@ pub(super) struct Registry {
     gateway_trust: BTreeMap<String, crate::tls::ClientTrust>,
     relay_profiles: BTreeMap<String, RelayProfileV1>,
     egress_profiles: BTreeMap<String, EgressLaunchV1>,
+    egress_resolver: Option<Arc<Resolver>>,
     pub(super) relay_service:
         std::sync::OnceLock<std::sync::Arc<crate::broker::relay_owner::RelayRegistry>>,
 }
@@ -103,6 +109,9 @@ struct RegistryWireV2 {
     #[serde(default)]
     max_recovery_stop_owners: u32,
     profiles: Vec<ControlProfileV2>,
+    /// Private installation-wide approval and exact control IP exclusions.
+    #[serde(default)]
+    egress_resolver: Option<ResolverConfigV1>,
     #[serde(default)]
     additional_control_secret_files: Vec<PathBuf>,
     #[serde(default)]
@@ -250,12 +259,18 @@ impl Registry {
         let mut gateway_ca_paths = BTreeMap::new();
         let mut relay_profiles = BTreeMap::new();
         let mut egress_profiles = BTreeMap::new();
+        let mut egress_resolver = None;
         let mut data: RegistryWireV1 = match version.version {
             1 => serde_json::from_slice(source.bytes())
                 .map_err(|_| anyhow!("invalid private broker configuration"))?,
             2 => {
                 let wire: RegistryWireV2 = serde_json::from_slice(source.bytes())
                     .map_err(|_| anyhow!("invalid private broker configuration"))?;
+                egress_resolver = wire
+                    .egress_resolver
+                    .map(|config| Resolver::from_operator_config(config, Arc::new(SystemLookup)))
+                    .transpose()?
+                    .map(Arc::new);
                 let mut profiles = Vec::with_capacity(wire.profiles.len());
                 for mut profile in wire.profiles {
                     if let Some(path) = &profile.gateway_ca_bundle_file {
@@ -329,7 +344,7 @@ impl Registry {
         }
         let mut ids = std::collections::HashSet::new();
         for profile in &mut data.profiles {
-            profile.validate(data.installation_id)?;
+            profile.validate(data.installation_id, egress_resolver.as_deref())?;
             if let Some(relay) = relay_profiles.get(&profile.id) {
                 for operation in &relay.workload_operations {
                     for root in profile.source_roots.iter().chain(&profile.export_roots) {
@@ -389,6 +404,7 @@ impl Registry {
             gateway_trust,
             relay_profiles,
             egress_profiles,
+            egress_resolver,
             relay_service: std::sync::OnceLock::new(),
         })
     }
@@ -405,6 +421,10 @@ impl Registry {
     }
     pub(super) fn egress(&self, id: &str) -> Option<&EgressLaunchV1> {
         self.egress_profiles.get(id)
+    }
+    #[allow(dead_code)] // The resolver is retained for the separate E3 runtime composition.
+    pub(super) fn egress_resolver(&self) -> Option<Arc<Resolver>> {
+        self.egress_resolver.clone()
     }
     pub(super) fn presence_path(&self, id: &str) -> Option<&Path> {
         self.presence_profiles.get(id).map(PathBuf::as_path)
@@ -459,7 +479,7 @@ impl fmt::Debug for ControlProfileV1 {
     }
 }
 impl ControlProfileV1 {
-    fn validate(&mut self, installation: Uuid) -> Result<()> {
+    fn validate(&mut self, installation: Uuid, egress_resolver: Option<&Resolver>) -> Result<()> {
         let url = reqwest::Url::parse(&self.gateway)
             .map_err(|_| anyhow!("invalid broker gateway origin"))?;
         ensure!(
@@ -470,6 +490,16 @@ impl ControlProfileV1 {
                 && url.fragment().is_none(),
             "invalid broker gateway origin"
         );
+        if let Some(resolver) = egress_resolver
+            && let Some(ip) = url
+                .host_str()
+                .and_then(|host| host.trim_matches(['[', ']']).parse::<IpAddr>().ok())
+        {
+            ensure!(
+                resolver.excludes_control_ip(ip.to_canonical()),
+                "broker egress control addresses must include the configured gateway IP"
+            );
+        }
         self.gateway = url.as_str().trim_end_matches('/').to_owned();
         JournalScopeV1::new(
             installation,
@@ -785,6 +815,42 @@ mod tests {
         assert_eq!(strict.data.max_recovery_stop_owners, 0);
         assert!(legacy.egress("strict-docker").is_none());
         assert!(strict.egress("strict-docker").is_none());
+        assert!(legacy.egress_resolver().is_none());
+        assert!(strict.egress_resolver().is_none());
+
+        let mut configured = v2.clone();
+        configured["egress_resolver"] = json!({
+            "version": 1,
+            "host_resolver_approved": true,
+            "control_ip_exclusions": ["127.0.0.1", "2001:db8::2"]
+        });
+        let configured_file = directory
+            .persistent_create(
+                "registry-resolver.json",
+                &serde_json::to_vec(&configured).unwrap(),
+            )
+            .unwrap();
+        configured_file.persistent_sync().unwrap();
+        directory.sync().unwrap();
+        let configured_registry = Registry::load(configured_file.path()).unwrap();
+        let resolver = configured_registry.egress_resolver().unwrap();
+        assert!(Arc::ptr_eq(
+            &resolver,
+            &configured_registry.egress_resolver().unwrap()
+        ));
+        assert!(configured_registry.egress("strict-docker").is_none());
+
+        configured["egress_resolver"]["control_ip_exclusions"] = json!(["2001:db8::2"]);
+        let incomplete_file = directory
+            .persistent_create(
+                "registry-incomplete-resolver.json",
+                &serde_json::to_vec(&configured).unwrap(),
+            )
+            .unwrap();
+        incomplete_file.persistent_sync().unwrap();
+        directory.sync().unwrap();
+        assert!(Registry::load(incomplete_file.path()).is_err());
+
         let selection = json!({"version": 1, "profile": "broker_proxy_v1", "proxy_port": 3240});
         for (name, policy, network, egress, accepted) in [
             ("egress", "observe", "none", Some(selection.clone()), true),

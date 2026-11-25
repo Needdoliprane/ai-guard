@@ -12,6 +12,8 @@ macro_rules! continue_step {
 mod activity;
 mod cancelled;
 mod diagnostics;
+#[cfg(unix)]
+mod egress;
 mod helpers;
 mod journal;
 mod results;
@@ -74,6 +76,7 @@ pub(crate) struct BatchExecutor {
     enforcer: ExecutionEnforcerV1,
     clock: Arc<dyn HostClock>,
     relays: Option<Arc<crate::broker::relay_owner::RelayRegistry>>,
+    egress_resolver: Option<Arc<crate::broker::egress_owner::resolve::Resolver>>,
     activity_root: Option<crate::control_fs::Directory>,
     activity_limits: crate::provider_activity::ActivityLimits,
 }
@@ -134,10 +137,13 @@ struct Draft {
     helpers: Vec<HelperPreparationV1>,
     operations: Vec<Operation>,
     commands: Vec<LocalCommandV1>,
+    egress_opening: Option<Box<crate::runner::egress_release::RetainedEgressOpeningV1>>,
+    egress_release: Option<Box<crate::runner::egress_release::EgressReleaseIntentV1>>,
 }
 impl Draft {
     fn from_job(job: &AcceptedJobV1) -> Result<Self> {
         let supervision = job.broker_checkpoint_v2().map(|cp| cp.supervision());
+        let context = job.checkpoint().broker_context();
         Ok(Self {
             run: BrokerRunState::from_job(job)?,
             helpers: supervision
@@ -150,6 +156,8 @@ impl Draft {
                 .broker_checkpoint_v3()
                 .map(|cp| cp.commands().to_vec())
                 .unwrap_or_default(),
+            egress_opening: context.egress_opening.cloned().map(Box::new),
+            egress_release: context.egress_release.cloned().map(Box::new),
         })
     }
     fn cancelled(&self) -> bool {
@@ -170,6 +178,8 @@ impl Draft {
             version: 1,
             current_request: self.run.plan.request.clone(),
             managed: self.run.plan.managed.clone(),
+            egress_opening: self.egress_opening.clone(),
+            egress_release: self.egress_release.clone(),
         });
         Ok(BrokerCheckpointV3::new(
             BrokerCheckpointV2::new(
@@ -270,6 +280,7 @@ impl BatchExecutor {
             enforcer: enforcer.into(),
             clock,
             relays: None,
+            egress_resolver: None,
             activity_root: None,
             activity_limits: crate::provider_activity::ActivityLimits::default(),
         }
@@ -279,6 +290,13 @@ impl BatchExecutor {
         relays: Option<Arc<crate::broker::relay_owner::RelayRegistry>>,
     ) -> Self {
         self.relays = relays;
+        self
+    }
+    pub(crate) fn with_egress_resolver(
+        mut self,
+        resolver: Option<Arc<crate::broker::egress_owner::resolve::Resolver>>,
+    ) -> Self {
+        self.egress_resolver = resolver;
         self
     }
     /// Retained broker root and budget for the live provider activity spool.
@@ -1006,11 +1024,24 @@ impl<'a> Execution<'a> {
         if let Some(credentials) = &credentials {
             credentials.validate()?;
         }
-        let spec = managed::worker_spec(
-            &draft.run.plan,
-            &worker,
-            credentials.as_ref().map(|c| &c.credential),
-        )?;
+        let held_egress = worker.launch.egress.is_some();
+        let spec = if held_egress {
+            ensure!(
+                self.executor.egress_resolver.is_some(),
+                "broker egress requires a retained operator-approved resolver"
+            );
+            let mut spec = crate::runtime::ContainerSpec::for_held_worker(&worker)?;
+            if let Some(credentials) = &credentials {
+                spec = spec.with_secret_env_handle(credentials.credential.file.private_file())?;
+            }
+            spec
+        } else {
+            managed::worker_spec(
+                &draft.run.plan,
+                &worker,
+                credentials.as_ref().map(|c| &c.credential),
+            )?
+        };
         let owned = draft
             .run
             .plan
@@ -1019,6 +1050,7 @@ impl<'a> Execution<'a> {
             .and_then(|m| m.owned.clone());
         let owned = match owned {
             Some(owned) => Some(owned),
+            None if held_egress => runtime.lookup_created_bootstrap(&spec).await?,
             None => runtime.lookup_created(&spec).await?,
         };
         if let Some(owned) = &owned
@@ -1061,7 +1093,7 @@ impl<'a> Execution<'a> {
                 owned.clone(),
             )?)
             .await?;
-            if let Some(relays) = &self.executor.relays {
+            if !held_egress && let Some(relays) = &self.executor.relays {
                 let (current, _) = self.load().await?;
                 relays
                     .started(
@@ -1083,7 +1115,7 @@ impl<'a> Execution<'a> {
             self.post_worker_result()
                 .await
                 .context(diagnostics::BrokerStep::ResultAudit)?;
-            if let Some(relays) = &self.executor.relays {
+            if !held_egress && let Some(relays) = &self.executor.relays {
                 let (current, _) = self.load().await?;
                 relays
                     .retire(self.context, current, self.executor.clock.clone())
@@ -1154,68 +1186,77 @@ impl<'a> Execution<'a> {
                 })
             })
         };
-        let relay_spec = spec.clone();
-        let started = |observation: ContainerObservation| {
-            let relay_spec = relay_spec.clone();
-            let hooks = hooks.clone();
-            boxed_execution_phase(|| async move {
-                let (_, draft) = self.load().await?;
-                // The worker hook channel of this running incarnation. Its
-                // failure is a recorded coverage fact, never a start failure:
-                // gated hooks inside the worker then refuse their actions.
-                if let Some(hooks) = &hooks
-                    && let Some(owned) = draft
-                        .run
-                        .plan
-                        .managed
-                        .as_ref()
-                        .and_then(|m| m.owned.clone())
-                {
-                    let running = OwnedContainerSnapshot {
-                        handle: owned.handle,
-                        observation: observation.clone(),
-                    };
-                    hooks.attach(runtime, running, &relay_spec).await;
-                }
-                let observation = managed::observation_dto(draft.worker()?, &observation)?;
-                boxed_execution_phase(|| self.mutate(WorkerTransitionV1::Observe { observation }))
-                    .await?;
-                if let Some(relays) = &self.executor.relays {
-                    let (current, _) = self.load().await?;
-                    relays
-                        .started(
-                            self.context,
-                            current,
-                            runtime.clone(),
-                            relay_spec,
-                            self.executor.clock.clone(),
-                        )
-                        .await?;
-                }
-                Ok(())
-            })
-        };
-        // Construct each runtime future outside this phase's poll frame.
-        let retained = if let Some(owned) = owned {
-            // An owned instance is always reopened by immutable CID. A stored
-            // claim is only observed; the callback cannot reconstruct its permit.
+        let (retained, egress_joined) = if held_egress {
             boxed_execution_phase(|| {
-                runtime.start_owned_prearmed_retained(
-                    &spec,
-                    &owned,
-                    None,
-                    1024 * 1024,
-                    callback,
-                    started,
-                )
+                self.execute_held_egress(runtime, &spec, owned.as_ref(), callback, hooks)
             })
             .await?
         } else {
-            self.generation_current()?;
-            boxed_execution_phase(|| {
-                runtime.execute_prearmed_retained(&spec, None, 1024 * 1024, callback, started)
-            })
-            .await?
+            let relay_spec = spec.clone();
+            let started = |observation: ContainerObservation| {
+                let relay_spec = relay_spec.clone();
+                let hooks = hooks.clone();
+                boxed_execution_phase(|| async move {
+                    let (_, draft) = self.load().await?;
+                    // The worker hook channel of this running incarnation. Its
+                    // failure is a recorded coverage fact, never a start failure:
+                    // gated hooks inside the worker then refuse their actions.
+                    if let Some(hooks) = &hooks
+                        && let Some(owned) = draft
+                            .run
+                            .plan
+                            .managed
+                            .as_ref()
+                            .and_then(|m| m.owned.clone())
+                    {
+                        let running = OwnedContainerSnapshot {
+                            handle: owned.handle,
+                            observation: observation.clone(),
+                        };
+                        hooks.attach(runtime, running, &relay_spec).await;
+                    }
+                    let observation = managed::observation_dto(draft.worker()?, &observation)?;
+                    boxed_execution_phase(|| {
+                        self.mutate(WorkerTransitionV1::Observe { observation })
+                    })
+                    .await?;
+                    if let Some(relays) = &self.executor.relays {
+                        let (current, _) = self.load().await?;
+                        relays
+                            .started(
+                                self.context,
+                                current,
+                                runtime.clone(),
+                                relay_spec,
+                                self.executor.clock.clone(),
+                            )
+                            .await?;
+                    }
+                    Ok(())
+                })
+            };
+            // An owned instance is reopened by immutable CID. The runtime
+            // consumes only the fresh claim returned by the callback.
+            let retained = if let Some(owned) = owned.as_ref() {
+                boxed_execution_phase(|| {
+                    runtime.start_owned_prearmed_retained(
+                        &spec,
+                        owned,
+                        None,
+                        1024 * 1024,
+                        callback,
+                        started,
+                    )
+                })
+                .await?
+            } else {
+                self.generation_current()?;
+                boxed_execution_phase(|| {
+                    runtime.execute_prearmed_retained(&spec, None, 1024 * 1024, callback, started)
+                })
+                .await?
+            };
+            (retained, true)
         };
         let retained = match retained {
             crate::runtime::ManagedPrearmedOutcome::Executed(retained) => retained,
@@ -1249,7 +1290,9 @@ impl<'a> Execution<'a> {
             .context(diagnostics::BrokerStep::ResultAudit)?;
         // Enforcer registrations remain held. Cleanup is an independent fact;
         // no disarm or capacity release is inferred from this central terminal.
-        let relay_joined = if let Some(relays) = &self.executor.relays {
+        let relay_joined = if held_egress {
+            egress_joined
+        } else if let Some(relays) = &self.executor.relays {
             let (current, _) = self.load().await?;
             relays.worker_terminal(&current).await.is_ok()
         } else {

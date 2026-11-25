@@ -25,6 +25,7 @@ use uuid::Uuid;
 #[cfg(test)]
 mod canonical_tests;
 mod confirmed;
+pub(crate) mod egress_release_fence;
 pub mod recovery;
 pub(crate) mod retirement;
 #[cfg(all(test, unix))]
@@ -559,6 +560,7 @@ fn note_status_read_failure<T>(core: &Inner, result: &JournalResult<T>) {
 struct Writer {
     tickets: HashMap<Uuid, Weak<()>>,
     floors: HashMap<Uuid, RevisionRefV1>,
+    egress_release_heads: HashMap<Uuid, Weak<std::sync::atomic::AtomicU8>>,
     rejected_floors: HashMap<Uuid, String>,
     observed_jobs: HashSet<Uuid>,
     cold_audit: Weak<recovery::cold_audit::ReservationState>,
@@ -829,7 +831,7 @@ fn encode_checkpoint(
 struct PublicationResources<'a> {
     usage: Usage,
     budget: retirement::PublicationBudget,
-    floors: &'a HashMap<Uuid, RevisionRefV1>,
+    writer: &'a mut Writer,
 }
 
 /// The sole filesystem publication algorithm. Callers have already validated
@@ -846,11 +848,14 @@ fn publish_revision(
     let PublicationResources {
         mut usage,
         budget: publication,
-        floors,
+        writer,
     } = resources;
     if head.revision >= u64::from(core.limits.revisions) {
         return Err(JournalError::LimitExceeded);
     }
+    // Arbitration precedes the first persistent effect. Once revoked, the
+    // ticket stays revoked even if publication or its acknowledgement fails.
+    writer.revoke_release_head(operation_id)?;
     let job = fscheck(core.jobs.persistent_child(&operation_id.to_string(), false))?
         .ok_or(JournalError::Interrupted)?;
     if fscheck(job.persistent_read(
@@ -882,7 +887,7 @@ fn publish_revision(
         Some((head, bytes)),
         &usage,
         &publication,
-        floors,
+        &writer.floors,
     )?;
     let file = io(job.persistent_create(&revision_name(head.revision), bytes))?;
     stage!(RevisionWritten);
@@ -1805,7 +1810,7 @@ impl Journal {
             PublicationResources {
                 usage,
                 budget: retirement::PublicationBudget::NewAllocation,
-                floors: &writer.floors,
+                writer,
             },
         )?;
         // The CAS and directory barrier committed this head even when a later

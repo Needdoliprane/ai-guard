@@ -9,9 +9,11 @@ use crate::{
         enforcer::{EnforcerFullClientV3, run_internal_full3_fresh},
         journal::canonical,
         service::{AbandonBeforeClaimV1, preclaim::PreclaimStateV1},
+        writer::WriterCallFailure,
     },
     runtime::{ContainerHandle, RuntimeAuthority},
 };
+use anyhow::bail;
 use std::{
     collections::BTreeMap,
     io::Read,
@@ -689,7 +691,7 @@ async fn abandon_during_registration(
     Ok((arm, bytes, seq))
 }
 
-fn seed_terminal_parent(
+fn seed_create_issued_parent(
     handle: &tokio::runtime::Handle,
     execution: &Execution<'_>,
     fixture: &Fixture,
@@ -814,7 +816,400 @@ fn seed_terminal_parent(
         }),
     )?;
     trace_phase("parent_verification_seeded");
-    let worker = handle.block_on(execution.mutate(WorkerTransitionV1::CreateIssued))?;
+    handle.block_on(execution.mutate(WorkerTransitionV1::CreateIssued))
+}
+
+#[test]
+fn created_pending_writer_failure_replays_exact_request_before_arm() -> Result<()> {
+    run_created_writer_failure(CreatedPendingFailure::ActorIo)
+}
+
+#[test]
+fn created_pending_reply_timeout_replays_exact_request_before_arm() -> Result<()> {
+    run_created_writer_failure(CreatedPendingFailure::ReplyTimeout)
+}
+
+#[derive(Clone, Copy)]
+enum CreatedPendingFailure {
+    ActorIo,
+    ReplyTimeout,
+}
+
+fn run_created_writer_failure(failure: CreatedPendingFailure) -> Result<()> {
+    let scheduler = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let handle = scheduler.handle().clone();
+    // The synchronous seed uses Handle::block_on. Drive timers and I/O from
+    // Runtime::block_on while the seed runs on the blocking pool.
+    scheduler.block_on(async move {
+        tokio::task::spawn_blocking(move || run_created_writer_failure_fixture(&handle, failure))
+            .await?
+    })
+}
+
+fn run_created_writer_failure_fixture(
+    handle: &tokio::runtime::Handle,
+    failure: CreatedPendingFailure,
+) -> Result<()> {
+    use crate::broker::journal::retirement_live_fixture::INVOCATION_DATA_PROGRAM;
+
+    let fixture = handle.block_on(Fixture::new_with_writer_timeout(Duration::from_secs(30)));
+    let peer = handle.block_on(NativePeer::for_admission(&fixture));
+    // Retain an invocation identity for the journal. This test never invokes
+    // it, registers a native slot, or starts a worker.
+    let runtime = Runtime::with_program(RuntimeKind::Docker, Path::new(INVOCATION_DATA_PROGRAM))?;
+    let authority: RuntimeAuthority = serde_json::from_value(json!({
+        "authority_id": Uuid::new_v4(), "kind": "docker", "endpoint": "unix:///created-fixture.sock",
+        "engine_id": ENGINE, "invocation": runtime.invocation(), "podman": null,
+    }))?;
+    let context = handle.block_on(AuthenticatedBatchContext::for_executor_test(
+        fixture.client.clone(),
+        fixture.scope.clone(),
+        fixture.config.clone(),
+        runtime,
+    ))?;
+    let executor = BatchExecutor::new(
+        fixture.writer().clone(),
+        peer.client.clone(),
+        Arc::new(NativeHostClock::new()?),
+    );
+    let operation = Uuid::new_v4();
+    let accepted = fixture.accept(operation, false);
+    let execution = handle.block_on(Execution::open(&executor, operation, &context))?;
+    let worker = seed_create_issued_parent(handle, &execution, &fixture, &accepted, &authority)?;
+    let outcome = handle.block_on(boxed_execution_phase(|| {
+        exercise_created_writer_failure(
+            &fixture, &execution, &accepted, &authority, &worker, failure,
+        )
+    }));
+    drop(execution);
+    drop(executor);
+    handle.block_on(peer.close());
+    outcome
+}
+
+async fn exercise_created_writer_failure(
+    fixture: &Fixture,
+    execution: &Execution<'_>,
+    accepted: &AcceptedJobV1,
+    authority: &RuntimeAuthority,
+    parent: &WorkerV1,
+    failure: CreatedPendingFailure,
+) -> Result<()> {
+    let operation = accepted.operation_id();
+    let inspection = worker_inspection(parent);
+    let owned = synthetic_owned(parent, authority, operation, &inspection);
+    execution
+        .patch(|draft| {
+            draft
+                .run
+                .plan
+                .managed
+                .as_mut()
+                .context("Created fixture is missing its managed plan")?
+                .owned = Some(owned.clone());
+            Ok(())
+        })
+        .await?;
+    let (before, _) = execution.load().await?;
+    let transitions = fixture.worker_requests.load(Ordering::SeqCst);
+    let arms = fixture.arm_requests.load(Ordering::SeqCst);
+    let audit_before = fixture.store.head()?;
+    let request = WorkerMutationV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        worker_id: parent.worker_id.clone(),
+        attempt_id: parent.attempt.attempt_id.clone(),
+        expected_revision: parent.revision,
+        transition: WorkerTransitionV1::Created {
+            inspection: inspection.clone(),
+        },
+    };
+    let pending = Operation::WorkerMutation {
+        request: request.clone(),
+        response: None,
+    };
+    let mut barrier = match failure {
+        CreatedPendingFailure::ActorIo => {
+            fixture
+                .writer()
+                .advance_reply_barrier_for_test(true)
+                .await?
+        }
+        CreatedPendingFailure::ReplyTimeout => {
+            fixture
+                .writer()
+                .created_pending_reply_barrier_for_test(
+                    operation,
+                    before.head().clone(),
+                    content_hash("ai-guard:worker-mutation:v1", &request)?,
+                )
+                .await?
+        }
+    };
+    let mut call = boxed_execution_phase(|| execution.rpc(pending.clone()));
+    let call_started = std::time::Instant::now();
+    tokio::select! {
+        biased;
+        _ = &mut call => bail!("Created returned before the pending Writer barrier"),
+        reached = tokio::time::timeout(Duration::from_secs(20), barrier.entered()) => reached?,
+    }
+    let durable = fixture
+        .journal()
+        .load(operation)?
+        .context("Created checkpoint missing")?;
+    let draft = Draft::from_job(&durable)?;
+    ensure!(
+        durable.head().revision() == before.head().revision() + 1
+            && draft
+                .operations
+                .last()
+                .is_some_and(|op| matches!(op, Operation::WorkerMutation { response: None, .. }))
+            && same(
+                draft.operations.last().context("pending Created missing")?,
+                &pending
+            )?
+            && fixture.worker_requests.load(Ordering::SeqCst) == transitions,
+        "the exact pending Created must be durable before its reply, with zero transition RPCs"
+    );
+    // ActorIo releases immediately. ReplyTimeout keeps the real successful
+    // reply held until the original caller's receive deadline expires.
+    if matches!(failure, CreatedPendingFailure::ActorIo) {
+        barrier.release_for_test();
+    }
+    let error = call
+        .await
+        .err()
+        .context("failed pending publication returned success")?;
+    let caller_returned = std::time::Instant::now();
+    let diagnostic = match (failure, error.downcast_ref::<WriterCallFailure>()) {
+        (CreatedPendingFailure::ActorIo, Some(WriterCallFailure::Actor(JournalError::Io))) => {
+            json!({"stage":"pending","cause":"actor_error","journal_code":"io"})
+        }
+        (CreatedPendingFailure::ReplyTimeout, Some(WriterCallFailure::ReplyTimeout)) => {
+            json!({"stage":"pending","cause":"reply_timeout"})
+        }
+        _ => bail!("Created pending must return the selected typed Writer failure"),
+    };
+    assert_created_writer_report(error, "created_exchange_advance_pending", diagnostic)?;
+    if matches!(failure, CreatedPendingFailure::ReplyTimeout) {
+        barrier.release_for_test();
+        // FIFO: this strict load can only return once Writer tried sending the
+        // reply for the advance keyed by operation, previous head and request.
+        let (recovered, draft) = execution.load().await?;
+        barrier
+            .assert_created_late_reply_for_test(call_started, caller_returned)
+            .map_err(|trace| anyhow!(
+                "expected a successful Created advance before ReplyTimeout and receiver_closed afterwards; {trace}"
+            ))?;
+        ensure!(
+            recovered.head() == durable.head()
+                && same(
+                    draft
+                        .operations
+                        .last()
+                        .context("recovered Created missing")?,
+                    &pending
+                )?
+                && !draft.operations.iter().any(|op| match op {
+                    Operation::Arm { request, .. } =>
+                        matches!(request.subject, ArmSubjectV1::Worker),
+                    Operation::WorkerClaim { .. } => true,
+                    _ => false,
+                })
+                && fixture.store.head()? == audit_before
+                && fixture.worker_requests.load(Ordering::SeqCst) == transitions
+                && fixture.arm_requests.load(Ordering::SeqCst) == arms
+                && fixture
+                    .store
+                    .worker_operation(&request.operation_id)?
+                    .is_none(),
+            "the exact pending Created must survive with zero Created, Arm or claim before reconciliation"
+        );
+        boxed_execution_phase(|| execution.reconcile_pending()).await?;
+        let receipt = fixture
+            .store
+            .worker_operation(&request.operation_id)?
+            .context("replayed Created did not commit")?;
+        let (acked, draft) = execution.load().await?;
+        let Some(
+            last @ Operation::WorkerMutation {
+                response: Some(response),
+                ..
+            },
+        ) = draft.operations.last()
+        else {
+            bail!("replayed Created must have a durable local ACK");
+        };
+        ensure!(
+            acked.head().revision() == recovered.head().revision() + 1
+                && same(&without_response(last), &pending)?
+                && response.receipt == receipt
+                && receipt.input_hash == content_hash("ai-guard:worker-mutation:v1", &request)?
+                && response.worker.attempt.start_operation_id.is_none()
+                && fixture.worker_requests.load(Ordering::SeqCst) == transitions + 1
+                && fixture.arm_requests.load(Ordering::SeqCst) == arms,
+            "reconciliation must ACK the exact Created once, without arming"
+        );
+        return Ok(());
+    }
+    drop(barrier);
+    ensure!(
+        fixture.worker_requests.load(Ordering::SeqCst) == transitions
+            && fixture
+                .store
+                .worker_operation(&request.operation_id)?
+                .is_none(),
+        "a failed pending call must never send Created"
+    );
+
+    // Recreate the split in the archived run. The real Gateway saves Created,
+    // but this fixture cuts its response before it reaches the executor.
+    fixture
+        .drop_next_worker_transition_response
+        .store(true, Ordering::SeqCst);
+    ensure!(
+        boxed_execution_phase(|| execution.reconcile_pending())
+            .await
+            .is_err(),
+        "reconciliation must observe the cut Gateway response"
+    );
+    let gateway_ack = fixture
+        .store
+        .worker_operation(&request.operation_id)?
+        .context("replayed Created did not commit")?;
+    let gateway_worker = fixture
+        .store
+        .worker(&parent.worker_id)?
+        .context("Gateway worker missing")?;
+    let (still_pending, mut draft) = execution.load().await?;
+    ensure!(
+        gateway_ack.input_hash == content_hash("ai-guard:worker-mutation:v1", &request)?
+            && gateway_worker.state == WorkerStateV1::Created
+            && still_pending.head() == durable.head()
+            && same(
+                draft.operations.last().context("Created request lost")?,
+                &pending
+            )?
+            && fixture.worker_requests.load(Ordering::SeqCst) == transitions + 1,
+        "reconciliation must send the same request and leave its missing local ACK observable"
+    );
+
+    let arm = Operation::Arm {
+        request: prior_arm(
+            &gateway_worker,
+            authority,
+            accepted.intent_hash(),
+            inspection,
+            ArmSubjectV1::Worker,
+        )?,
+        parent: gateway_worker,
+        owned,
+        response: None,
+    };
+    draft.operations.push(arm.clone());
+    let refusal = draft
+        .checkpoint(fixture.scope.control_namespace_uuid())
+        .and_then(|candidate| {
+            fixture
+                .journal()
+                .advance_lifecycle_preserving_outbox(
+                    operation,
+                    still_pending.head().clone(),
+                    &candidate,
+                )
+                .map_err(anyhow::Error::from)
+        });
+    ensure!(
+        matches!(refusal, Err(error) if matches!(error.downcast_ref::<JournalError>(), Some(JournalError::Conflict)))
+            && fixture.arm_requests.load(Ordering::SeqCst) == arms,
+        "the journal must reject an Arm using a Created response known only to the Gateway"
+    );
+
+    // On replay of the same request, the next advance writes the local ACK.
+    let mut barrier = fixture
+        .writer()
+        .advance_reply_barrier_for_test(true)
+        .await?;
+    let mut replay = boxed_execution_phase(|| execution.reconcile_pending());
+    tokio::select! {
+        _ = &mut replay => bail!("Created replay returned before the ACK Writer barrier"),
+        reached = tokio::time::timeout(Duration::from_secs(20), barrier.entered()) => reached?,
+    }
+    drop(barrier);
+    let error = replay
+        .await
+        .err()
+        .context("lost ACK write reply returned success")?;
+    assert_created_writer_report(
+        error,
+        "created_exchange",
+        json!({"stage":"acknowledgement","cause":"actor_error","journal_code":"io"}),
+    )?;
+    let (acked, draft) = execution.load().await?;
+    let Some(
+        last @ Operation::WorkerMutation {
+            response: Some(response),
+            ..
+        },
+    ) = draft.operations.last()
+    else {
+        bail!("the local Created ACK did not survive the fault after its write");
+    };
+    ensure!(
+        acked.head().revision() == still_pending.head().revision() + 1
+            && same(&without_response(last), &pending)?
+            && same(&response.receipt, &gateway_ack)?
+            && fixture.worker_requests.load(Ordering::SeqCst) == transitions + 2
+            && fixture.arm_requests.load(Ordering::SeqCst) == arms,
+        "the local ACK must confirm the exact idempotent Created result before any Arm"
+    );
+    boxed_execution_phase(|| execution.reconcile_pending()).await?;
+    ensure!(
+        fixture.worker_requests.load(Ordering::SeqCst) == transitions + 2,
+        "a confirmed local Created ACK must need no further RPC"
+    );
+    let (armed, _) = boxed_execution_phase(|| execution.rpc(arm)).await?;
+    ensure!(
+        matches!(
+            armed,
+            Operation::Arm {
+                response: Some(_),
+                ..
+            }
+        ) && fixture.arm_requests.load(Ordering::SeqCst) == arms + 1,
+        "the same Arm must succeed once Created is acknowledged locally"
+    );
+    Ok(())
+}
+
+fn assert_created_writer_report(
+    error: anyhow::Error,
+    step: &str,
+    diagnostic: serde_json::Value,
+) -> Result<()> {
+    let report = serde_json::to_value(diagnostics::failure_report(
+        LocalFailurePhaseV1::Worker,
+        &error,
+    ))?;
+    ensure!(
+        report["broker_step"] == step
+            && report["runtime_effect"] == "unknown"
+            && report["created_advance"] == diagnostic,
+        "Created diagnostic must carry the exact Writer boundary and closed cause"
+    );
+    Ok(())
+}
+
+fn seed_terminal_parent(
+    handle: &tokio::runtime::Handle,
+    execution: &Execution<'_>,
+    fixture: &Fixture,
+    accepted: &AcceptedJobV1,
+    authority: &RuntimeAuthority,
+) -> Result<WorkerV1> {
+    let worker = seed_create_issued_parent(handle, execution, fixture, accepted, authority)?;
     let inspection = worker_inspection(&worker);
     let worker = handle.block_on(execution.mutate(WorkerTransitionV1::Created {
         inspection: inspection.clone(),

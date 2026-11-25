@@ -14,15 +14,19 @@
 //! overrides and the worker UID.
 #![cfg_attr(not(test), allow(dead_code))]
 use super::relay::{
-    EMPTY_EXEC_ENV, RelayExecError, validate_helper_environment, validate_running_snapshot,
+    EMPTY_EXEC_ENV, RelayExecError, egress::validate_egress_helper_environment,
+    validate_helper_environment, validate_running_snapshot,
 };
 use super::*;
-use crate::activity_channel::{
-    helper::MAX_PENDING_HOOKS,
-    wire::{
-        AckV1, BrokerFrameV1, FrameReader, FrameWriter, HelperFrameV1, HelperSequence,
-        PROTOCOL_VERSION, ReadyV1, StatusV1, WireError,
+use crate::{
+    activity_channel::{
+        helper::MAX_PENDING_HOOKS,
+        wire::{
+            AckV1, BrokerFrameV1, FrameReader, FrameWriter, HelperFrameV1, HelperSequence,
+            PROTOCOL_VERSION, ReadyV1, StatusV1, WireError,
+        },
     },
+    egress::{bootstrap_release::HELD_CHALLENGE_ENV, proxy_env::proxy_environment},
 };
 use std::{collections::BTreeSet, process::ExitStatus};
 use tokio::{
@@ -97,6 +101,7 @@ impl ManagedRuntime {
     /// approved exec profile), then a fresh inspection must
     /// show the same running incarnation, authorized identity, complete
     /// configuration, closed inherited environment and private secret file.
+    /// Held specs also require the admitted runtime and exact inspected attempt.
     /// A successful spawn is not a handshake: call
     /// [`ActivityExecTransport::handshake`] next.
     pub(crate) async fn open_activity_channel(
@@ -108,6 +113,14 @@ impl ManagedRuntime {
             .map_err(|_| ActivityExecError::Identity)?;
         validate_running_snapshot(&snapshot, &snapshot.observation).map_err(relay)?;
         bind_spec(&snapshot, authorized)?;
+        let held = authorized
+            .held_bootstrap_for(authorized.egress_proxy_port().is_some())
+            .map_err(|_| ActivityExecError::Profile)?;
+        if let Some(held) = held
+            && (held.runtime != self.binding.kind || held.authority_id != self.binding.authority_id)
+        {
+            return Err(ActivityExecError::Authority);
+        }
         let profile = self.relay_profile().map_err(relay)?;
         // Raw facts are read transiently; no environment or inspection byte is
         // copied into errors or the transport owner.
@@ -124,14 +137,16 @@ impl ManagedRuntime {
         validate_running_snapshot(&snapshot, &observed).map_err(relay)?;
         validate_authorized_identity(authorized, &observed)
             .map_err(|_| ActivityExecError::Profile)?;
-        validate_configuration(authorized, &facts.bytes, self.binding.kind)
-            .map_err(|_| ActivityExecError::Profile)?;
-        validate_helper_environment(&facts.bytes).map_err(relay)?;
+        validate_activity_configuration(authorized, &facts.bytes, self.binding.kind, held)?;
         authorized
             .validate_secret_env_file()
             .map_err(|_| ActivityExecError::Profile)?;
         let (mut command, retained) = self.relay_command().map_err(relay)?;
-        command.args(activity_exec_args(self.binding.kind, &snapshot.handle.id)?);
+        command.args(activity_exec_args(
+            self.binding.kind,
+            &snapshot.handle.id,
+            held,
+        )?);
         // inspect_facts verified engine authority immediately before the exact
         // inspection; no await follows this incarnation check before spawn.
         if self.relay_profile().map_err(relay)? != profile {
@@ -145,11 +160,24 @@ impl ManagedRuntime {
     }
 }
 
+fn validate_activity_configuration(
+    authorized: &ContainerSpec,
+    facts: &[u8],
+    kind: RuntimeKind,
+    held: Option<&HeldBootstrapBinding>,
+) -> std::result::Result<(), ActivityExecError> {
+    if let Some(binding) = held {
+        validate_configuration_for(authorized, facts, kind, Some(binding))
+            .map_err(|_| ActivityExecError::Profile)?;
+        validate_egress_helper_environment(facts, binding).map_err(relay)
+    } else {
+        validate_configuration(authorized, facts, kind).map_err(|_| ActivityExecError::Profile)?;
+        validate_helper_environment(facts).map_err(relay)
+    }
+}
+
 /// The owned snapshot must be the `Run` container of its authorized spec. The
-/// worker's network mode (none, bridge, or egress-filtered) is not checked
-/// here: the channel is an exec stdio transport that never uses that network,
-/// and `validate_configuration` still compares the inspected network with
-/// the spec.
+/// activity configuration check compares the inspected network with the spec.
 fn bind_spec(
     snapshot: &OwnedContainerSnapshot,
     authorized: &ContainerSpec,
@@ -171,6 +199,7 @@ fn bind_spec(
 fn activity_exec_args(
     kind: RuntimeKind,
     id: &str,
+    held: Option<&HeldBootstrapBinding>,
 ) -> std::result::Result<Vec<String>, ActivityExecError> {
     if !valid_immutable_id(id) {
         return Err(ActivityExecError::Identity);
@@ -185,6 +214,15 @@ fn activity_exec_args(
         args.push("--detach-keys=".into());
     }
     args.extend(EMPTY_EXEC_ENV.iter().map(|key| format!("--env={key}=")));
+    if let Some(held) = held {
+        // The hook helper uses the fixed worker root and stdio for its protocol.
+        args.push(format!("--env={HELD_CHALLENGE_ENV}="));
+        args.extend(
+            proxy_environment(held.proxy_port)
+                .into_iter()
+                .map(|(key, _)| format!("--env={key}=")),
+        );
+    }
     args.extend([
         "--user".into(),
         "1000:1000".into(),
@@ -622,10 +660,162 @@ mod tests {
         (temp, managed)
     }
 
+    const HELD_ATTEMPT: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    fn held_spec(snapshot: &OwnedContainerSnapshot, authority_id: Uuid) -> ContainerSpec {
+        let mut spec = ContainerSpec::with_operation(
+            snapshot.handle.session,
+            ContainerPurpose::Run,
+            &format!("sha256:{}", "b".repeat(64)),
+            vec!["/usr/local/bin/ai-guard-provider".into(), "exec".into()],
+            NetworkMode::None,
+            snapshot.handle.operation,
+        )
+        .unwrap()
+        .with_managed_names(&snapshot.handle.name, "aig-activity-work")
+        .unwrap()
+        .with_broker_egress(&crate::control::EgressLaunchV1::broker_proxy(43128).unwrap())
+        .unwrap();
+        spec.held_bootstrap = Some(HeldBootstrapBinding {
+            attempt: crate::egress::ids::IdV1::parse(HELD_ATTEMPT).unwrap(),
+            proxy_port: 43128,
+            runtime: RuntimeKind::Docker,
+            authority_id,
+            spec_digest: spec.held_bootstrap_spec_digest().unwrap(),
+        });
+        spec
+    }
+
+    #[test]
+    fn held_activity_requires_the_inspected_attempt_and_scrubs_its_helper() {
+        let spec = held_spec(&owned(&"c".repeat(64), true), Uuid::from_u128(2));
+        let held = spec.held_bootstrap_for(true).unwrap();
+        let challenge = format!("AI_GUARD_EGRESS_HELD_V1={HELD_ATTEMPT}");
+        let mut facts = json!({
+            "Config": {
+                "Tty": false, "OpenStdin": true, "AttachStdin": true, "StdinOnce": true,
+                "Entrypoint": ["/usr/local/bin/ai-guard-provider"], "Cmd": ["exec"],
+                "User": "1000:1000", "WorkingDir": "/workspace",
+                "Labels": {
+                    "agentsandbox.session": spec.session,
+                    "agentsandbox.operation": spec.operation_id(),
+                    "agentsandbox.purpose": "run"
+                },
+                "Env": [
+                    "AI_GUARD_PROVIDER_BOOTSTRAP=synthetic-credential",
+                    "HTTP_PROXY=http://127.0.0.1:43128", "http_proxy=http://127.0.0.1:43128",
+                    "HTTPS_PROXY=http://127.0.0.1:43128", "https_proxy=http://127.0.0.1:43128",
+                    "NO_PROXY=localhost,127.0.0.1,::1", "no_proxy=localhost,127.0.0.1,::1",
+                    "AI_GUARD_EGRESS_PROXY=http://127.0.0.1:43128", challenge
+                ]
+            },
+            "HostConfig": {
+                "LogConfig": {"Type": "none", "Config": {}}, "NetworkMode": "none",
+                "Privileged": false, "ReadonlyRootfs": true, "AutoRemove": false,
+                "CapDrop": ["ALL"], "SecurityOpt": ["no-new-privileges"],
+                "RestartPolicy": {"Name": "no"}, "Tmpfs": {
+                    "/tmp": "rw,nosuid,nodev,noexec,size=256m,mode=1777",
+                    "/home/agent": "rw,nosuid,nodev,size=64m,uid=1000,gid=1000,mode=700"
+                }
+            },
+            "Mounts": [{"Type": "volume", "Name": spec.volume(), "Destination": "/workspace", "RW": true}]
+        });
+        let validate = |facts: &serde_json::Value| {
+            validate_activity_configuration(
+                &spec,
+                &serde_json::to_vec(facts).unwrap(),
+                RuntimeKind::Docker,
+                held,
+            )
+        };
+        assert_eq!(validate(&facts), Ok(()));
+        let env = facts["Config"]["Env"].as_array_mut().unwrap();
+        env.push(json!("PRIVATE=synthetic-unknown"));
+        let error = validate(&facts).unwrap_err();
+        assert_eq!(error, ActivityExecError::Profile);
+        assert!(!format!("{error:?} {error}").contains("synthetic"));
+        let env = facts["Config"]["Env"].as_array_mut().unwrap();
+        env.truncate(env.len() - 2);
+        assert_eq!(validate(&facts), Err(ActivityExecError::Profile));
+        facts["Config"]["Env"].as_array_mut().unwrap().push(json!(
+            "AI_GUARD_EGRESS_HELD_V1=550e8400-e29b-41d4-a716-446655440001"
+        ));
+        assert_eq!(validate(&facts), Err(ActivityExecError::Profile));
+
+        for kind in [RuntimeKind::Docker, RuntimeKind::Podman] {
+            let cid = "a".repeat(64);
+            let mut expected = activity_exec_args(kind, &cid, None).unwrap();
+            let user = expected.iter().position(|arg| arg == "--user").unwrap();
+            drop(
+                expected.splice(
+                    user..user,
+                    [
+                        "--env=AI_GUARD_EGRESS_HELD_V1=",
+                        "--env=HTTPS_PROXY=",
+                        "--env=https_proxy=",
+                        "--env=HTTP_PROXY=",
+                        "--env=http_proxy=",
+                        "--env=NO_PROXY=",
+                        "--env=no_proxy=",
+                        "--env=AI_GUARD_EGRESS_PROXY=",
+                    ]
+                    .map(str::to_owned),
+                ),
+            );
+            assert_eq!(activity_exec_args(kind, &cid, held).unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn held_activity_refuses_changed_spec_and_foreign_authority_before_engine_io() {
+        let (_temp, mut managed) = managed();
+        // Without a retained profile, a missed authority check would fail as
+        // Profile, and the CLI could never be invoked by this test.
+        managed.launch_profile = None;
+        let snapshot = owned(&managed.binding.fingerprint(), true);
+        let mut spec = held_spec(&snapshot, managed.binding.authority_id);
+
+        spec.held_bootstrap.as_mut().unwrap().runtime = RuntimeKind::Podman;
+        assert_eq!(
+            managed
+                .open_activity_channel(snapshot.clone(), &spec)
+                .await
+                .unwrap_err(),
+            ActivityExecError::Authority,
+        );
+        let held = spec.held_bootstrap.as_mut().unwrap();
+        held.runtime = RuntimeKind::Docker;
+        held.authority_id = Uuid::from_u128(3);
+        assert_eq!(
+            managed
+                .open_activity_channel(snapshot.clone(), &spec)
+                .await
+                .unwrap_err(),
+            ActivityExecError::Authority,
+        );
+        spec.held_bootstrap.as_mut().unwrap().authority_id = managed.binding.authority_id;
+        spec.argv.push("changed".into());
+        assert_eq!(
+            managed
+                .open_activity_channel(snapshot.clone(), &spec)
+                .await
+                .unwrap_err(),
+            ActivityExecError::Profile,
+        );
+        spec.held_bootstrap = None;
+        assert_eq!(
+            managed
+                .open_activity_channel(snapshot, &spec)
+                .await
+                .unwrap_err(),
+            ActivityExecError::Profile,
+        );
+    }
+
     #[test]
     fn docker_and_podman_activity_exec_arguments_are_fixed_and_use_the_exact_cid() {
         let cid = "a".repeat(64);
-        let docker = activity_exec_args(RuntimeKind::Docker, &cid).unwrap();
+        let docker = activity_exec_args(RuntimeKind::Docker, &cid, None).unwrap();
         let expected = vec![
             "exec",
             "--interactive",
@@ -645,7 +835,7 @@ mod tests {
             "serve-v1",
         ];
         assert_eq!(docker, expected);
-        let podman = activity_exec_args(RuntimeKind::Podman, &cid).unwrap();
+        let podman = activity_exec_args(RuntimeKind::Podman, &cid, None).unwrap();
         let mut podman_expected = expected.clone();
         podman_expected.insert(4, "--detach-keys=");
         assert_eq!(podman, podman_expected);
@@ -657,7 +847,7 @@ mod tests {
             &"g".repeat(64),
         ] {
             assert_eq!(
-                activity_exec_args(RuntimeKind::Docker, invalid),
+                activity_exec_args(RuntimeKind::Docker, invalid, None),
                 Err(ActivityExecError::Identity)
             );
         }
@@ -792,7 +982,7 @@ mod tests {
             Err(ActivityExecError::Profile)
         );
         // The network never reaches the exec argv (see the golden test above).
-        let argv = activity_exec_args(RuntimeKind::Podman, &"a".repeat(64)).unwrap();
+        let argv = activity_exec_args(RuntimeKind::Podman, &"a".repeat(64), None).unwrap();
         assert!(
             !argv
                 .iter()

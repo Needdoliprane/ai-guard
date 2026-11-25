@@ -2,19 +2,21 @@
 //!
 //! The gateway selects the tenant from the broker's authenticated runner
 //! credential; no field here names or chooses a tenant. A decision is durable
-//! in the tenant journal before the gateway answers, and the broker connects
-//! only after an `allow` receipt. Values echoed by the worker never reach these
-//! DTOs except the canonical `name:port` authority it requested.
+//! in the tenant journal before the gateway answers and before resolution.
+//! A connect permit is a separate, post-resolution receipt.
+//! Values echoed by the worker never reach these DTOs except the canonical
+//! `name:port` authority it requested.
 
 use crate::egress::{
     Authority,
-    ids::{DigestV1, IdV1},
+    ids::{DigestV1, IdError, IdV1},
 };
 use serde::{
     Deserialize, Deserializer, Serialize,
     de::{MapAccess, Visitor, value::MapAccessDeserializer},
 };
-use std::{fmt, marker::PhantomData};
+use sha2::{Digest, Sha256};
+use std::{fmt, marker::PhantomData, net::IpAddr};
 
 /// Correlation of one broker-owned channel. Built from the broker's retained
 /// runtime context, never from worker frames.
@@ -215,6 +217,118 @@ pub struct EgressChannelOpeningReceiptV1 {
     pub disposition: EgressChannelOpeningDispositionV1,
     #[serde(deserialize_with = "deserialize_object")]
     pub receipt: EgressReceiptV1,
+}
+
+pub const MAX_CONNECT_PERMIT_MS: u64 = 2_000;
+pub const MAX_CONNECT_RESOLUTION_ADDRESSES: usize = 16;
+
+/// Digest the broker's bounded, validated numeric answer. Ordering and duplicate
+/// answers do not change the digest. The Store records this broker attestation
+/// without acquiring a resolver or treating it as an independent DNS observation.
+pub fn egress_resolution_digest_v1(addresses: &[IpAddr]) -> anyhow::Result<DigestV1> {
+    anyhow::ensure!(
+        (1..=MAX_CONNECT_RESOLUTION_ADDRESSES).contains(&addresses.len())
+            && addresses.iter().all(|ip| *ip == ip.to_canonical()),
+        "invalid egress resolution evidence"
+    );
+    let mut addresses = addresses.to_vec();
+    addresses.sort_unstable();
+    addresses.dedup();
+    let mut input = b"ai-guard/egress-resolution/v1\0".to_vec();
+    serde_json::to_writer(&mut input, &addresses)?;
+    Ok(DigestV1::of(&input))
+}
+
+/// Post-resolution request from the broker. V1 admits public host-resolver
+/// addresses only. The exact authority and numeric port come from the decision.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EgressConnectPermitRequestV1 {
+    pub version: u32,
+    pub opening_id: IdV1,
+    pub decision_id: IdV1,
+    #[serde(deserialize_with = "deserialize_object")]
+    pub binding: EgressBindingV1,
+    pub flow_id: u64,
+    #[serde(deserialize_with = "deserialize_canonical_ip")]
+    pub ip: IpAddr,
+    pub resolution_digest: DigestV1,
+}
+
+impl EgressConnectPermitRequestV1 {
+    /// One journal key per channel epoch and flow. Changing the opening or
+    /// decision ID must not create a second key for the same live flow.
+    pub(crate) fn permit_id(&self) -> Result<IdV1, IdError> {
+        Self::permit_id_for(&self.binding, self.flow_id)
+    }
+
+    pub(crate) fn permit_id_for(binding: &EgressBindingV1, flow_id: u64) -> Result<IdV1, IdError> {
+        let mut hasher = Sha256::new();
+        hasher.update(b"ai-guard/egress-connect-permit/v1\0");
+        hasher.update(binding.channel_id.as_str().as_bytes());
+        hasher.update(binding.epoch.to_be_bytes());
+        hasher.update(flow_id.to_be_bytes());
+        let hash = hasher.finalize();
+        let mut bytes = [0; 16];
+        bytes.copy_from_slice(&hash[..16]);
+        bytes[6] = (bytes[6] & 0x0f) | 0x80;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        IdV1::new(uuid::Uuid::from_bytes(bytes))
+    }
+}
+
+fn deserialize_canonical_ip<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<IpAddr, D::Error> {
+    let raw = String::deserialize(deserializer)?;
+    let err = || serde::de::Error::custom("noncanonical egress IP");
+    let ip: IpAddr = raw.parse().map_err(|_| err())?;
+    if ip != ip.to_canonical() || ip.to_string() != raw {
+        return Err(err());
+    }
+    Ok(ip)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EgressConnectPermitDispositionV1 {
+    Fresh,
+    Replayed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EgressConnectPermitReceiptV1 {
+    pub version: u32,
+    pub permit_id: IdV1,
+    #[serde(deserialize_with = "deserialize_object")]
+    pub request: EgressConnectPermitRequestV1,
+    pub port: u16,
+    /// Original validity window. A broker must measure from before sending the
+    /// original exchange and consume only Fresh in the live opening.
+    pub valid_for_ms: u64,
+    pub disposition: EgressConnectPermitDispositionV1,
+    #[serde(deserialize_with = "deserialize_object")]
+    pub receipt: EgressReceiptV1,
+}
+
+impl EgressConnectPermitReceiptV1 {
+    /// Correlation only. The live channel must still enforce expiry and consume once.
+    pub fn is_fresh_for(&self, request: &EgressConnectPermitRequestV1, port: u16) -> bool {
+        self.version == 1
+            && request.version == 1
+            && request.flow_id > 0
+            && request.binding.epoch > 0
+            && request.ip == request.ip.to_canonical()
+            && self.disposition == EgressConnectPermitDispositionV1::Fresh
+            && &self.request == request
+            && self.port != 0
+            && self.port == port
+            && request.permit_id().is_ok_and(|id| id == self.permit_id)
+            && (1..=MAX_CONNECT_PERMIT_MS).contains(&self.valid_for_ms)
+            && self.receipt.audit_seq > 0
+            && DigestV1::parse(&self.receipt.audit_hash).is_ok()
+    }
 }
 
 // A derived struct also accepts positional JSON arrays. In the opening wire

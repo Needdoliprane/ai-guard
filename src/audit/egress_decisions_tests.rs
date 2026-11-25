@@ -112,7 +112,7 @@ fn store(directory: &Path, tenant: &str) -> Store {
 }
 
 /// A new private (0700, canonical, symlink-free) parent for tenant stores.
-fn private_directory() -> tempfile::TempDir {
+pub(crate) fn private_directory() -> tempfile::TempDir {
     use std::os::unix::fs::PermissionsExt;
     tempfile::Builder::new()
         .permissions(std::fs::Permissions::from_mode(0o700))
@@ -191,30 +191,398 @@ fn egress_store_allow_is_durable_bound_to_the_running_egress_worker_and_idempote
     assert_eq!(events[0].event.coverage, "partial");
 }
 
-#[test]
-fn egress_store_connection_correlates_with_its_durable_decision() {
-    let directory = private_directory();
-    let store = store(directory.path(), "tenant-a");
-    let worker = software_workers::running_from(&store, egress_admission(&store));
-    let request = request(&binding(&worker), "fixture.egress.test:8443");
-    let decision = store.egress_decide(&request, &policy(), NOW).unwrap();
-    assert!(decision.allows(&request));
+fn numeric_permit(
+    opening: &EgressChannelOpeningRequestV1,
+    name: &EgressDecideRequestV1,
+) -> EgressConnectPermitRequestV1 {
+    let ip = "93.184.216.34".parse().unwrap();
+    EgressConnectPermitRequestV1 {
+        version: 1,
+        opening_id: opening.observation_id.clone(),
+        decision_id: name.decision_id.clone(),
+        binding: name.binding.clone(),
+        flow_id: name.flow_id,
+        ip,
+        resolution_digest: egress_resolution_digest_v1(&[ip]).unwrap(),
+    }
+}
 
-    let observation = EgressObserveRequestV1 {
+#[test]
+fn egress_store_numeric_connect_permit_commits_once_and_replays_without_authority() {
+    let (directory, store, binding) = loopback_store_fixture("fixture.egress.test:8443");
+    let opening = channel_opening(&binding);
+    let opened = store.egress_open_channel(&opening).unwrap();
+    let name = request(&binding, "fixture.egress.test:8443");
+    let decision = store
+        .egress_decide(&name, &store.egress_policy(), Utc::now().timestamp_millis())
+        .unwrap();
+    let request = numeric_permit(&opening, &name);
+    let fresh = store.egress_issue_connect_permit(&request).unwrap();
+    assert!(fresh.is_fresh_for(&request, 8443));
+    assert!(!fresh.is_fresh_for(&request, 443));
+    assert!(opened.receipt.audit_seq < decision.receipt.audit_seq);
+    assert_eq!(fresh.receipt.audit_seq, decision.receipt.audit_seq + 1);
+    let head = store.head().unwrap();
+    assert_eq!(head, fresh.receipt.audit_seq);
+
+    let mut different_ip = request.clone();
+    different_ip.ip = "93.184.216.35".parse().unwrap();
+    different_ip.resolution_digest = egress_resolution_digest_v1(&[different_ip.ip]).unwrap();
+    assert_eq!(
+        store
+            .egress_issue_connect_permit(&different_ip)
+            .unwrap_err()
+            .downcast_ref::<EgressJournalError>(),
+        Some(&EgressJournalError::Conflict)
+    );
+    let another_opening = channel_opening(&name.binding);
+    store.egress_open_channel(&another_opening).unwrap();
+    let mut duplicate_decision = name.clone();
+    duplicate_decision.decision_id = IdV1::random();
+    store
+        .egress_decide(
+            &duplicate_decision,
+            &store.egress_policy(),
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .unwrap();
+    let mut same_flow = request.clone();
+    same_flow.decision_id = duplicate_decision.decision_id;
+    assert_eq!(
+        store
+            .egress_issue_connect_permit(&same_flow)
+            .unwrap_err()
+            .downcast_ref::<EgressJournalError>(),
+        Some(&EgressJournalError::Conflict)
+    );
+    same_flow.opening_id = another_opening.observation_id;
+    assert_eq!(
+        store
+            .egress_issue_connect_permit(&same_flow)
+            .unwrap_err()
+            .downcast_ref::<EgressJournalError>(),
+        Some(&EgressJournalError::Conflict)
+    );
+    assert_eq!(store.head().unwrap(), head + 2);
+    drop(store);
+
+    let reopened = Store::open_existing_for_tenant(
+        &directory.path().join("tenant-a.sqlite"),
+        "tenant-a",
+        Redactor::new(vec![]),
+        10_000,
+    )
+    .unwrap();
+    let replay = reopened.egress_issue_connect_permit(&request).unwrap();
+    assert!(!replay.is_fresh_for(&request, 8443));
+    assert_eq!(
+        replay,
+        EgressConnectPermitReceiptV1 {
+            disposition: EgressConnectPermitDispositionV1::Replayed,
+            ..fresh
+        }
+    );
+    assert_eq!(reopened.head().unwrap(), head + 2);
+    let events = reopened
+        .egress_session_events(&request.binding.session_id, 10)
+        .unwrap();
+    let permits: Vec<_> = events
+        .iter()
+        .filter(|event| event.event.kind == "egress.connect.permit")
+        .collect();
+    assert_eq!(permits.len(), 1);
+    assert_eq!(receipt(permits[0]), replay.receipt);
+    assert_eq!(permits[0].event.data["request"]["ip"], "93.184.216.34");
+    assert_eq!(permits[0].event.data["port"], 8443);
+    assert!(reopened.integrity().unwrap().valid);
+}
+
+#[test]
+fn egress_store_numeric_connect_permit_requires_the_exact_live_opening_and_decision() {
+    let (_directory, store, binding) = loopback_store_fixture("fixture.egress.test:8443");
+    let opening = channel_opening(&binding);
+    store.egress_open_channel(&opening).unwrap();
+    let name = request(&binding, "fixture.egress.test:8443");
+    let now = Utc::now().timestamp_millis();
+    let policy = store.egress_policy();
+    store.egress_decide(&name, &policy, now).unwrap();
+    let permit = numeric_permit(&opening, &name);
+
+    let mut not_open = permit.clone();
+    not_open.opening_id = IdV1::random();
+    let mut another_epoch = permit.clone();
+    another_epoch.binding.epoch += 1;
+    let mut wrong_flow = permit.clone();
+    wrong_flow.flow_id += 1;
+    let mut wrong_context = permit.clone();
+    wrong_context.binding.context_digest = crate::egress::ids::DigestV1::of(b"foreign context");
+    let mut private_ip = permit.clone();
+    private_ip.ip = "127.0.0.1".parse().unwrap();
+    let mut later_opening = permit.clone();
+    let other_opening = channel_opening(&binding);
+    store.egress_open_channel(&other_opening).unwrap();
+    later_opening.opening_id = other_opening.observation_id;
+
+    let unknown = request(&binding, "unknown.fixture.egress.test:8443");
+    assert_eq!(
+        store.egress_decide(&unknown, &policy, now).unwrap().outcome,
+        EgressOutcomeV1::Review
+    );
+    let expired = request(&binding, "fixture.egress.test:8443");
+    let past = now - MAX_POLICY_VALIDITY_MS as i64 - 1;
+    assert!(
+        store
+            .egress_decide(&expired, &policy, past)
+            .unwrap()
+            .allows(&expired)
+    );
+    let head = store.head().unwrap();
+    for invalid in [
+        not_open,
+        another_epoch,
+        wrong_flow,
+        wrong_context,
+        private_ip,
+        later_opening,
+        numeric_permit(&opening, &unknown),
+        numeric_permit(&opening, &expired),
+    ] {
+        assert_eq!(
+            store
+                .egress_issue_connect_permit(&invalid)
+                .unwrap_err()
+                .downcast_ref::<EgressJournalError>(),
+            Some(&EgressJournalError::Invalid)
+        );
+    }
+    assert_eq!(store.head().unwrap(), head);
+
+    store
+        .egress_observe(&EgressObserveRequestV1 {
+            version: 1,
+            observation_id: IdV1::random(),
+            observation: EgressObservationV1::ChannelClosed {
+                binding: binding.clone(),
+                reason: "owner_exit".into(),
+                observations_lost: 0,
+            },
+        })
+        .unwrap();
+    let head = store.head().unwrap();
+    assert_eq!(
+        store
+            .egress_issue_connect_permit(&permit)
+            .unwrap_err()
+            .downcast_ref::<EgressJournalError>(),
+        Some(&EgressJournalError::Invalid)
+    );
+    assert_eq!(store.head().unwrap(), head);
+}
+
+// Seed a historical journal fact or a durable future receive time through the
+// checked transaction, without adding a production writer for the fixture.
+fn append_permit_fixture_fact(store: &Store, fact: Event, received_at: chrono::DateTime<Utc>) {
+    let mut db = store.db.lock().unwrap();
+    let tx = store.begin_checked(&mut db).unwrap();
+    let (fact, payload) = store.prepare_egress_event(fact).unwrap();
+    store
+        .append_with_capacity_class_at(
+            &tx,
+            fact,
+            payload,
+            crate::audit::capacity::Class::ControlWrite,
+            received_at,
+        )
+        .unwrap();
+    store.commit_checked(tx).unwrap();
+}
+
+#[test]
+fn egress_store_numeric_connect_permit_refuses_a_revoked_grant_or_regressed_utc() {
+    let (_directory, store, binding) = loopback_store_fixture("fixture.egress.test:8443");
+    let opening = channel_opening(&binding);
+    store.egress_open_channel(&opening).unwrap();
+    let policy = store.egress_policy();
+    let now = Utc::now();
+    let authority = "grantable.fixture.egress.test:8443";
+    let grant = EgressGrantV1 {
+        version: 1,
+        grant_id: IdV1::random(),
+        session_id: binding.session_id.clone(),
+        authority: authority.into(),
+        not_before_ms: now.timestamp_millis() - 1_000,
+        expires_at_ms: now.timestamp_millis() + 60_000,
+        approver: "fixture".into(),
+        revoked_at_ms: None,
+    };
+    append_permit_fixture_fact(
+        &store,
+        event(
+            GRANT_ISSUED_KIND,
+            &grant.grant_id,
+            &binding.session_id,
+            &binding.worker_id,
+            json!({"grant": grant}),
+        ),
+        Utc::now(),
+    );
+    let name = request(&binding, authority);
+    let decision = store
+        .egress_decide(&name, &policy, Utc::now().timestamp_millis())
+        .unwrap();
+    assert!(decision.allows(&name));
+    assert_eq!(decision.grant_id.as_ref(), Some(&grant.grant_id));
+    append_permit_fixture_fact(
+        &store,
+        event(
+            GRANT_REVOKED_KIND,
+            &IdV1::random(),
+            &binding.session_id,
+            &binding.worker_id,
+            json!({"grant_id": grant.grant_id, "revoked_at_ms": Utc::now().timestamp_millis()}),
+        ),
+        Utc::now(),
+    );
+    let head = store.head().unwrap();
+    assert_eq!(
+        store
+            .egress_issue_connect_permit(&numeric_permit(&opening, &name))
+            .unwrap_err()
+            .downcast_ref::<EgressJournalError>(),
+        Some(&EgressJournalError::Invalid)
+    );
+    assert_eq!(store.head().unwrap(), head);
+    let unchanged_renewal = store
+        .egress_renew(
+            &EgressRenewRequestV1 {
+                version: 1,
+                binding: binding.clone(),
+                decisions: vec![name.decision_id],
+            },
+            &policy,
+            Utc::now().timestamp_millis(),
+        )
+        .unwrap();
+    assert_eq!(unchanged_renewal.revoked.len(), 1);
+    assert!(unchanged_renewal.expired.is_empty());
+
+    let name = request(&binding, "fixture.egress.test:8443");
+    assert!(
+        store
+            .egress_decide(&name, &policy, Utc::now().timestamp_millis())
+            .unwrap()
+            .allows(&name)
+    );
+    append_permit_fixture_fact(
+        &store,
+        Event::new("fixture.future_clock"),
+        Utc::now() + chrono::Duration::minutes(10),
+    );
+    let head = store.head().unwrap();
+    assert_eq!(
+        store
+            .egress_issue_connect_permit(&numeric_permit(&opening, &name))
+            .unwrap_err()
+            .downcast_ref::<crate::workload::WorkloadFailureV1>(),
+        Some(&crate::workload::WorkloadFailureV1::ClockRegression)
+    );
+    assert_eq!(store.head().unwrap(), head);
+    assert!(store.healthy());
+}
+
+fn connected_observation(
+    request: &EgressDecideRequestV1,
+    peer: Option<&str>,
+) -> EgressObserveRequestV1 {
+    EgressObserveRequestV1 {
         version: 1,
         observation_id: IdV1::random(),
         observation: EgressObservationV1::Connection {
             binding: request.binding.clone(),
-            decision_id: decision.decision_id.clone(),
+            decision_id: request.decision_id.clone(),
             flow_id: request.flow_id,
             connected: true,
             failure: None,
-            peer: Some("192.0.2.1:8443".into()),
+            peer: peer.map(str::to_owned),
             resolver: "fixture".into(),
         },
-    };
+    }
+}
+
+#[test]
+fn egress_store_connection_correlates_with_its_durable_decision() {
+    let (_directory, store, binding) = loopback_store_fixture("fixture.egress.test:8443");
+    let opening = channel_opening(&binding);
+    let opened = store.egress_open_channel(&opening).unwrap();
+    let name = request(&binding, "fixture.egress.test:8443");
+    let decision = store
+        .egress_decide(&name, &store.egress_policy(), Utc::now().timestamp_millis())
+        .unwrap();
+    assert!(decision.allows(&name));
+
+    let observation = connected_observation(&name, Some("[2001:4860::8888]:8443"));
+    let allowed_head = store.head().unwrap();
+    assert_eq!(
+        store
+            .egress_observe(&observation)
+            .unwrap_err()
+            .downcast_ref::<EgressJournalError>(),
+        Some(&EgressJournalError::Invalid)
+    );
+    assert_eq!(store.head().unwrap(), allowed_head);
+
+    let mut other_decision = name.clone();
+    other_decision.decision_id = IdV1::random();
+    let other = store
+        .egress_decide(
+            &other_decision,
+            &store.egress_policy(),
+            Utc::now().timestamp_millis(),
+        )
+        .unwrap();
+    assert!(other.allows(&other_decision));
+
+    let mut permit_request = numeric_permit(&opening, &name);
+    permit_request.ip = "2001:4860::8888".parse().unwrap();
+    permit_request.resolution_digest = egress_resolution_digest_v1(&[permit_request.ip]).unwrap();
+    let permit = store.egress_issue_connect_permit(&permit_request).unwrap();
+    assert_eq!(store.head().unwrap(), permit.receipt.audit_seq);
+    for peer in [
+        None,
+        Some("[2001:4860::8889]:8443"),
+        Some("[2001:4860::8888]:443"),
+        Some("[2001:4860:0:0:0:0:0:8888]:8443"),
+    ] {
+        assert_eq!(
+            store
+                .egress_observe(&connected_observation(&name, peer))
+                .unwrap_err()
+                .downcast_ref::<EgressJournalError>(),
+            Some(&EgressJournalError::Invalid),
+            "peer {peer:?}"
+        );
+    }
+    assert_eq!(store.head().unwrap(), permit.receipt.audit_seq);
+    assert!(
+        store
+            .egress_session_events(&binding.session_id, 10)
+            .unwrap()
+            .iter()
+            .all(|event| event.event.kind != "egress.connection")
+    );
+
+    let same_peer = connected_observation(&other_decision, Some("[2001:4860::8888]:8443"));
+    assert_eq!(
+        store
+            .egress_observe(&same_peer)
+            .unwrap_err()
+            .downcast_ref::<EgressJournalError>(),
+        Some(&EgressJournalError::Invalid)
+    );
+    assert_eq!(store.head().unwrap(), permit.receipt.audit_seq);
+
     let observed = store.egress_observe(&observation).unwrap();
-    assert!(observed.audit_seq > decision.receipt.audit_seq);
+    assert!(observed.audit_seq > permit.receipt.audit_seq);
     let head = store.head().unwrap();
     assert_eq!(store.egress_observe(&observation).unwrap(), observed);
     assert_eq!(store.head().unwrap(), head);
@@ -224,7 +592,7 @@ fn egress_store_connection_correlates_with_its_durable_decision() {
     let EgressObservationV1::Connection { flow_id, .. } = &mut different_flow.observation else {
         unreachable!("fixture is a connection observation");
     };
-    *flow_id = request.flow_id + 1;
+    *flow_id = name.flow_id + 1;
     let error = store.egress_observe(&different_flow).unwrap_err();
     assert_eq!(
         error.downcast_ref::<EgressJournalError>(),
@@ -233,16 +601,109 @@ fn egress_store_connection_correlates_with_its_durable_decision() {
     assert_eq!(store.head().unwrap(), head);
 
     let events = store
-        .egress_session_events(&request.binding.session_id, 10)
+        .egress_session_events(&binding.session_id, 10)
         .unwrap();
-    assert_eq!(events.len(), 2);
-    assert_eq!(receipt(&events[0]), decision.receipt);
-    assert_eq!(receipt(&events[1]), observed);
-    assert_eq!(events[1].event.kind, "egress.connection");
+    assert_eq!(events.len(), 5);
+    assert_eq!(receipt(&events[0]), opened.receipt);
+    assert_eq!(receipt(&events[1]), decision.receipt);
+    assert_eq!(receipt(&events[2]), other.receipt);
+    assert_eq!(receipt(&events[3]), permit.receipt);
+    assert_eq!(receipt(&events[4]), observed);
+    assert_eq!(events[4].event.kind, "egress.connection");
     assert_eq!(
-        events[1].event.data,
+        events[4].event.data,
         serde_json::to_value(&observation.observation).unwrap()
     );
+}
+
+#[test]
+fn egress_store_historical_connection_without_permit_remains_readable_and_replayable() {
+    let (directory, store, binding) = loopback_store_fixture("fixture.egress.test:8443");
+    let name = request(&binding, "fixture.egress.test:8443");
+    let decision = store
+        .egress_decide(&name, &store.egress_policy(), NOW)
+        .unwrap();
+    assert!(decision.allows(&name));
+    let historical = connected_observation(&name, Some("192.0.2.1:8443"));
+    let data = serde_json::to_value(&historical.observation).unwrap();
+    append_permit_fixture_fact(
+        &store,
+        event(
+            "egress.connection",
+            &historical.observation_id,
+            &binding.session_id,
+            &binding.worker_id,
+            data.clone(),
+        ),
+        Utc::now(),
+    );
+    let head = store.head().unwrap();
+    drop(store);
+
+    let reopened = Store::open_existing_for_tenant(
+        &directory.path().join("tenant-a.sqlite"),
+        "tenant-a",
+        Redactor::new(vec![]),
+        10_000,
+    )
+    .unwrap();
+    let events = reopened
+        .egress_session_events(&binding.session_id, 10)
+        .unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1].event.data, data);
+    assert_eq!(
+        reopened.egress_observe(&historical).unwrap(),
+        receipt(&events[1])
+    );
+
+    let mut changed = connected_observation(&name, Some("192.0.2.2:8443"));
+    changed.observation_id = historical.observation_id.clone();
+    assert_eq!(
+        reopened
+            .egress_observe(&changed)
+            .unwrap_err()
+            .downcast_ref::<EgressJournalError>(),
+        Some(&EgressJournalError::Conflict)
+    );
+    let mut new_publication = historical;
+    new_publication.observation_id = IdV1::random();
+    assert_eq!(
+        reopened
+            .egress_observe(&new_publication)
+            .unwrap_err()
+            .downcast_ref::<EgressJournalError>(),
+        Some(&EgressJournalError::Invalid)
+    );
+    assert_eq!(reopened.head().unwrap(), head);
+    assert!(reopened.integrity().unwrap().valid);
+}
+
+#[test]
+fn egress_store_resolution_failure_does_not_require_a_connect_permit() {
+    let (_directory, store, binding) = loopback_store_fixture("fixture.egress.test:8443");
+    let name = request(&binding, "fixture.egress.test:8443");
+    let decision = store
+        .egress_decide(&name, &store.egress_policy(), NOW)
+        .unwrap();
+    assert!(decision.allows(&name));
+    let failure = EgressObserveRequestV1 {
+        version: 1,
+        observation_id: IdV1::random(),
+        observation: EgressObservationV1::Connection {
+            binding,
+            decision_id: name.decision_id,
+            flow_id: name.flow_id,
+            connected: false,
+            failure: Some("resolution_timeout".into()),
+            peer: None,
+            resolver: "host_resolver".into(),
+        },
+    };
+    let observed = store.egress_observe(&failure).unwrap();
+    assert_eq!(observed.audit_seq, decision.receipt.audit_seq + 1);
+    assert_eq!(store.egress_observe(&failure).unwrap(), observed);
+    assert_eq!(store.head().unwrap(), observed.audit_seq);
 }
 
 #[test]

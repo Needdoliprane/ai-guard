@@ -1,6 +1,13 @@
 //! Shared verification of confirmed revision bytes. No filesystem or runtime effects.
 use super::*;
-use crate::broker::lifecycle::LocalCommandRequestV1;
+use crate::{
+    broker::{checkpoint::SupervisionOperationV1, lifecycle::LocalCommandRequestV1},
+    control::WorkerTransitionV1,
+};
+
+#[cfg(test)]
+#[path = "confirmed_egress_tests.rs"]
+mod egress_tests;
 
 #[derive(Clone)]
 pub(super) struct ConfirmedChainV1 {
@@ -300,6 +307,7 @@ pub(super) fn check_transition(
     legacy_managed_seen: bool,
     last_cancel_operations: Option<usize>,
 ) -> JournalResult<()> {
+    validate_egress_transition(previous, next)?;
     if let Some(profile) = previous
         .runner()
         .broker_context()
@@ -368,5 +376,69 @@ pub(super) fn check_transition(
         | (_, LoadedCheckpoint::V4(_))
         | (LoadedCheckpoint::V5(_), _)
         | (_, LoadedCheckpoint::V5(_)) => Err(JournalError::Conflict),
+    }
+}
+
+/// Append the request after the Running acknowledgement, then the intent
+/// after the request. Both records survive later STOP and reconciliation.
+fn validate_egress_transition(
+    previous: &LoadedCheckpoint,
+    next: &LoadedCheckpoint,
+) -> JournalResult<()> {
+    let old = previous.runner().broker_context();
+    let new = next.runner().broker_context();
+    if old.egress_opening == new.egress_opening && old.egress_release == new.egress_release {
+        return Ok(());
+    }
+    let (Some(opening), Some(previous_lifecycle), Some(lifecycle)) =
+        (new.egress_opening, previous.lifecycle(), next.lifecycle())
+    else {
+        return Err(JournalError::Conflict);
+    };
+    match (old.egress_opening, old.egress_release, new.egress_release) {
+        (None, None, None) => {}
+        (Some(previous_opening), None, Some(release))
+            if previous_opening == opening
+                && release.matches_retained_opening(previous_opening) => {}
+        _ => return Err(JournalError::Conflict),
+    }
+    let previous_supervision = previous_lifecycle.broker().supervision();
+    let current_supervision = lifecycle.broker().supervision();
+    // Neither append can also acknowledge a worker mutation.
+    if canonical(previous_supervision)? != canonical(current_supervision)? {
+        return Err(JournalError::Conflict);
+    }
+    let latest_worker_ack = previous_supervision.operations().iter().rfind(|operation| {
+        matches!(
+            operation,
+            SupervisionOperationV1::WorkerMutation {
+                response: Some(_),
+                ..
+            } | SupervisionOperationV1::WorkerClaim {
+                response: Some(_),
+                ..
+            }
+        )
+    });
+    if matches!(
+        latest_worker_ack,
+        Some(SupervisionOperationV1::WorkerMutation { request, response: Some(response) })
+            if matches!(&request.transition, WorkerTransitionV1::Observe { .. })
+                && opening.matches_running_ack(response)
+    ) && old
+        .worker
+        .is_some_and(|worker| opening.matches_running(worker))
+        && new
+            .worker
+            .is_some_and(|worker| opening.matches_running(worker))
+        && !previous_lifecycle
+            .commands()
+            .iter()
+            .chain(lifecycle.commands())
+            .any(|entry| matches!(entry.request(), LocalCommandRequestV1::CancelRequested))
+    {
+        Ok(())
+    } else {
+        Err(JournalError::Conflict)
     }
 }
