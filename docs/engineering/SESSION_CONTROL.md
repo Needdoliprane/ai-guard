@@ -18,6 +18,8 @@ Keep initiator, effective broker actor and causality distinct. A normal instruct
 
 ## A real conversation channel
 
+[Protocol and test design note in French](evidence/2026-11-25/provider-conversation.fr.md).
+
 Create a retained conversation binding during launch, linked to tenant/source, session, broker and incarnation, worker/attempt, runtime instance, input epoch, provider/protocol and expiry. Routing from a declared provider-session log or an arbitrary session UUID is insufficient. Restart, attempt or owner changes never silently retarget a message.
 
 Use documented bidirectional Codex/Claude protocols in a separately resolved conversation mode. Historical batch and TTY sessions remain explicitly unsupported for input unless a genuine retained channel proves otherwise. Do not inject terminal bytes or run a command as a substitute for conversation input. Preserve the four required provider/authentication combinations and qualify each separately.

@@ -18,6 +18,8 @@ Distinguer initiateur, acteur broker effectif et causalité. Une consigne normal
 
 ## Un vrai canal de conversation
 
+[Étude des protocoles et oracles de recette](evidence/2026-11-25/provider-conversation.fr.md).
+
 Créer au lancement un binding de conversation retenu, lié à tenant/source, session, broker/incarnation, worker/tentative, instance runtime, epoch d'entrée, fournisseur/protocole et expiration. Une association de log provider-session déclarée ou un UUID libre ne suffit pas. Un redémarrage/changement de tentative/propriétaire ne redirige jamais silencieusement un message.
 
 Utiliser les protocoles bidirectionnels documentés Codex/Claude dans un mode conversation résolu séparément. Les anciennes sessions batch et TTY restent explicitement incompatibles avec l'entrée, sauf preuve d'un vrai canal retenu. Ni injection de terminal ni commande exécutée pour simuler une entrée conversation. Conserver les quatre combinaisons fournisseur/authentification requises et les qualifier séparément.
