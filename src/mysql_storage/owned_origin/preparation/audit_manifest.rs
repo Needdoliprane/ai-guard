@@ -702,13 +702,15 @@ pub(super) async fn verify_empty_in_transaction(
 }
 
 async fn read_foreign_keys(connection: &mut impl Queryable) -> Result<Vec<ForeignKey>> {
+    // The checked InnoDB inventory enforces either spelling immediately.
     metadata_rows(
         "SELECT k.TABLE_NAME, k.CONSTRAINT_NAME, k.COLUMN_NAME, \
                 k.REFERENCED_TABLE_NAME, k.REFERENCED_COLUMN_NAME, k.ORDINAL_POSITION, \
                 k.POSITION_IN_UNIQUE_CONSTRAINT = k.ORDINAL_POSITION \
                 AND BINARY k.REFERENCED_TABLE_SCHEMA = BINARY DATABASE() \
                 AND r.UNIQUE_CONSTRAINT_NAME = 'PRIMARY' AND r.MATCH_OPTION = 'NONE' \
-                AND r.UPDATE_RULE = 'RESTRICT' AND r.DELETE_RULE = 'RESTRICT' \
+                AND r.UPDATE_RULE IN ('NO ACTION', 'RESTRICT') \
+                AND r.DELETE_RULE IN ('NO ACTION', 'RESTRICT') \
          FROM information_schema.KEY_COLUMN_USAGE AS k \
          JOIN information_schema.REFERENTIAL_CONSTRAINTS AS r \
          ON BINARY r.CONSTRAINT_SCHEMA = BINARY k.CONSTRAINT_SCHEMA \
