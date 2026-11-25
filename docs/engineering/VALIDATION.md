@@ -11,10 +11,16 @@ et la réouverture d'une copie restaurée. Le code applicatif et
 les fichiers de ces tests concordent avec le candidat `cdad9a2f`.
 
 Le treizième sélecteur échoue comme attendu, code 101. Le CLI
-refuse la commande et l'audit porte la règle, mais le diagnostic
-du CLI omet cette dernière. Son correctif a un rejeu séparé.
-Manifeste privé
+refuse la commande et l'audit porte la règle, que le diagnostic
+du CLI omet. Manifeste privé
 `4f8ff65c9ec57f796ffac3caafaf9880784a10ce010d9f08fec3f322c2d97570`.
+
+Le même sélecteur passe sur `379265e8`, en 2,78 s. Le CLI affiche
+la règle et le motif de la décision associée au reçu durable, avec
+son numéro de séquence. Le test vérifie le refus, l’absence de worker et d’appel
+au moteur. Le code et les tests concordent avec `0585be3c`.
+Manifeste privé
+`5489e9fe58abe68481b18eb630af2489d297622a178ad569e8320a451359c8b1`.
 
 ## 25 novembre 2026 — Full3 s’arrête après CreateIssued dans SQLite
 

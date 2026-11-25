@@ -3,8 +3,9 @@
 Le candidat local intègre la projection d’audit Claude Code, ses
 régressions de compaction, les témoins Jev sur loopback et la recette
 de migration et de restauration SQLite via le CLI. Le gel `4411e705`
-apporte douze résultats ciblés réussis et reproduit séparément
-l’omission de la règle auditée dans le message de refus du CLI.
+apporte douze résultats ciblés réussis. Le gel `379265e8` vérifie
+que le refus du CLI expose la règle et le motif audités. Le
+candidat `0585be3c` reprend les sources et les tests du correctif.
 [Résultats exacts et limites](VALIDATION.md).
 
 G10 est validé au périmètre V1 sur `48f81d20`. Le quota accepte
