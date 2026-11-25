@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   buildAgentForest,
   brokerBatchResultDetails,
+  brokerFailureDetails,
   brokerWorkspaceDetails,
   decisionEvaluationDetails,
   matchesFilters,
@@ -480,6 +481,75 @@ test("un échec de liaison Full3 affiche un libellé fermé et préserve les anc
     assert.ok(summary.includes("Effet sur l’exécution : non confirmé"));
     assert.ok(!summary.includes("synthetic-private-stage"));
   }
+});
+
+test("la relecture Created observée affiche son point et sa cause fermée", () => {
+  const canary = "CREATED_RELOAD_PRIVATE_CANARY";
+  for (const [site, cause, pointLabel, causeLabel] of [
+    ["mutation_composition", "reply_timeout", "Composition de la mutation", "Délai de réponse du journal dépassé"],
+    ["rpc_lookup", "queue_full", "Recherche de la demande dans le journal", "File du journal pleine"],
+    ["cas_reload", "unavailable", "Relecture pour la mise à jour du journal", "Service du journal indisponible"],
+    ["cas_reload", "actor_error", "Relecture pour la mise à jour du journal", "Erreur de l’acteur du journal"],
+    ["rpc_lookup", undefined, "Recherche de la demande dans le journal", undefined],
+  ]) {
+    const event = {
+      ...brokerFailureEvent,
+      data: {
+        ...brokerFailureEvent.data,
+        broker_step: "created_exchange_reload",
+        created_reload: { site, cause, journal_code: cause === "actor_error" ? "io" : canary, message: canary },
+        runtime_effect: "completed",
+      },
+    };
+    const details = brokerFailureDetails(event);
+    assert.equal(details?.createdReload?.site, pointLabel);
+    assert.equal(details?.createdReload?.cause, causeLabel);
+    assert.equal(details?.runtimeEffect, "non confirmé");
+    assert.equal(eventSummary(event), [
+      "Échec signalé", "Phase : Worker", "Étape : Relecture du journal pour la création",
+      'Point de relecture : ' + pointLabel,
+      ...(causeLabel ? ['Cause : ' + causeLabel] : []),
+      "Effet sur l’exécution : non confirmé",
+    ].join(" · "));
+    assert.ok(!JSON.stringify(details).includes(canary));
+  }
+});
+
+test("la relecture Created conserve le repli des reçus anciens et non fiables", () => {
+  const canary = "CREATED_RELOAD_UNTRUSTED_CANARY";
+  const event = {
+    ...brokerFailureEvent,
+    data: {
+      ...brokerFailureEvent.data,
+      broker_step: "created_exchange_reload",
+      created_reload: { site: "mutation_composition", cause: "reply_timeout" },
+      message: canary,
+    },
+  };
+  const generic = "Échec signalé · Phase : Worker · Étape : Relecture du journal pour la création · Effet sur l’exécution : non confirmé";
+  const unknown = "Échec signalé · Phase : Inconnue · Étape : Inconnue · Effet sur l’exécution : non confirmé";
+  for (const [sample, expected] of [
+    [{ ...event, data: { ...event.data, created_reload: undefined } }, generic],
+    [{ ...event, data: { ...event.data, created_reload: [] } }, generic],
+    [{ ...event, data: { ...event.data, created_reload: { site: "__proto__", cause: "reply_timeout", journal_code: canary } } }, generic],
+    [{ ...event, data: { ...event.data, broker_step: "failure_observed" } },
+      "Échec signalé · Phase : Worker · Étape : Observation d’un échec · Effet sur l’exécution : non confirmé"],
+    [{ ...event, data: { ...event.data, version: 2 } }, unknown],
+    [{ ...event, data: { ...event.data, version: "1" } }, unknown],
+    [{ ...event, source: "provider" }, unknown],
+    [{ ...event, provenance: "declared" }, unknown],
+  ]) {
+    assert.equal(brokerFailureDetails(sample)?.createdReload, undefined);
+    assert.equal(eventSummary(sample), expected);
+  }
+
+  const unknownCause = {
+    ...event,
+    data: { ...event.data, created_reload: { site: "mutation_composition", cause: canary, journal_code: canary } },
+  };
+  assert.equal(brokerFailureDetails(unknownCause)?.createdReload?.cause, undefined);
+  assert.equal(eventSummary(unknownCause),
+    "Échec signalé · Phase : Worker · Étape : Relecture du journal pour la création · Point de relecture : Composition de la mutation · Effet sur l’exécution : non confirmé");
 });
 
 test("un échec broker sans commande reste dans Actions sans devenir un incident de sécurité", () => {

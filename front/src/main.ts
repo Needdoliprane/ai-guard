@@ -2352,7 +2352,7 @@ function showEvent(event: AuditEvent) {
           el(
             "p",
             "detail-task",
-            "L’observation porte sur l’échec du broker. L’état final de l’exécution reste à confirmer.",
+            "Ce signalement ne confirme pas l’état final de l’exécution.",
           ),
         );
         return;
@@ -2429,12 +2429,14 @@ function showEvent(event: AuditEvent) {
             "detail-grid",
             labelValue("Phase", failure.phase),
             labelValue("Étape", failure.step),
+            failure.createdReload ? labelValue("Point de relecture", failure.createdReload.site) : null,
+            failure.createdReload?.cause ? labelValue("Cause", failure.createdReload.cause) : null,
             labelValue("Effet sur l’exécution", failure.runtimeEffect),
           ),
           el(
             "p",
             "detail-task",
-            "L’observation porte sur l’échec du broker. La phase et l’étape situent le signalement ; l’état final de l’exécution reste à confirmer.",
+            "La phase et l’étape situent le signalement. L’état final de l’exécution reste à confirmer.",
           ),
         ]
       : event.kind === "broker.batch.scan" || event.kind === "broker.batch.export"

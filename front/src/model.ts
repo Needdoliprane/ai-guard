@@ -162,6 +162,17 @@ const failureStepLabels: ReadonlyMap<string, string> = new Map([
   ["cleanup_ack", "Enregistrement du résultat du retrait"],
   ["failure_observed", "Observation d’un échec"],
 ]);
+const createdReloadSiteLabels: ReadonlyMap<string, string> = new Map([
+  ["mutation_composition", "Composition de la mutation"],
+  ["rpc_lookup", "Recherche de la demande dans le journal"],
+  ["cas_reload", "Relecture pour la mise à jour du journal"],
+]);
+const createdReloadCauseLabels: ReadonlyMap<string, string> = new Map([
+  ["queue_full", "File du journal pleine"],
+  ["reply_timeout", "Délai de réponse du journal dépassé"],
+  ["unavailable", "Service du journal indisponible"],
+  ["actor_error", "Erreur de l’acteur du journal"],
+]);
 const full3BindingStageLabels: ReadonlyMap<string, string> = new Map([
   ["read_native_binding", "Lecture de la liaison au gardien"],
   ["reload_journal", "Relecture du journal avant publication de la liaison"],
@@ -186,7 +197,8 @@ const runtimeStageLabels: ReadonlyMap<string, string> = new Map([
 
 export function brokerFailureDetails(event: AuditEvent) {
   if (event.kind !== "broker.batch.failure") return null;
-  const supported = event.data?.version === 1;
+  const supported = event.source === "runner" && event.provenance === "observed" &&
+    event.data?.version === 1;
   const label = (labels: ReadonlyMap<string, string>, value: unknown) =>
     supported && typeof value === "string"
       ? labels.get(value)
@@ -199,6 +211,9 @@ export function brokerFailureDetails(event: AuditEvent) {
   const full3BindingStep = brokerStep === "full3_binding_publication"
     ? label(full3BindingStageLabels, stage(event.data?.full3_binding))
     : undefined;
+  const payload = event.data?.created_reload;
+  const reload = brokerStep === "created_exchange_reload" && object(payload) ? payload : null;
+  const reloadSite = label(createdReloadSiteLabels, reload?.site);
   return {
     phase: label(failurePhaseLabels, event.data?.phase) ?? "Inconnue",
     step:
@@ -207,6 +222,9 @@ export function brokerFailureDetails(event: AuditEvent) {
       label(enforcerStageLabels, stage(event.data?.enforcer)) ??
       label(runtimeStageLabels, stage(event.data?.runtime)) ??
       "Inconnue",
+    createdReload: reloadSite
+      ? { site: reloadSite, cause: label(createdReloadCauseLabels, reload?.cause) }
+      : undefined,
     // This report observes a broker failure, never an execution outcome.
     runtimeEffect: "non confirmé",
   };
@@ -665,8 +683,12 @@ export function eventSummary(event: AuditEvent): string {
   const activity = providerActivitySummary(event);
   if (activity) return activity;
   const failure = brokerFailureDetails(event);
-  if (failure)
-    return `Échec signalé · Phase : ${failure.phase} · Étape : ${failure.step} · Effet sur l’exécution : ${failure.runtimeEffect}`;
+  if (failure) {
+    const reload = failure.createdReload;
+    const point = reload ? ` · Point de relecture : ${reload.site}` : "";
+    const cause = reload?.cause ? ` · Cause : ${reload.cause}` : "";
+    return `Échec signalé · Phase : ${failure.phase} · Étape : ${failure.step}${point}${cause} · Effet sur l’exécution : ${failure.runtimeEffect}`;
+  }
   const workspace = brokerWorkspaceDetails(event);
   if (workspace?.kind === "scan")
     return `${workspace.changedFiles} ${workspace.changedFiles === 1 ? "modification observée" : "modifications observées"}`;
