@@ -632,6 +632,7 @@ impl<'a> Execution<'a> {
         let managed = boxed_execution_phase(|| {
             managed::broker_prepare(managed::BrokerPreparation {
                 plan: &current.run.plan,
+                egress: current_job.intent().egress(),
                 scope: self.context.scope(),
                 binding: current_job.binding_manifest(),
                 answer: &answer,

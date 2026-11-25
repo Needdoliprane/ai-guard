@@ -1129,6 +1129,7 @@ impl CheckpointPayloadV1 {
             || launch.profile != options.profile
             || launch.runtime_kind != kind
             || launch.network != network
+            || launch.egress.as_ref() != intent.egress()
             || u64::from(launch.timeout_seconds) != options.timeout
             || launch.image_ref != options.image
             || launch.provider != options.provider

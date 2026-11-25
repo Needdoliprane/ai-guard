@@ -1666,6 +1666,7 @@ impl StopRecoveryReaderV1 {
             return Err(JournalError::Corrupt);
         }
         valid_hash(&reservation.submit_hash).map_err(|_| JournalError::Corrupt)?;
+        reservation.validate_egress()?;
         let accepted_file = self.read_file(&job, "accepted.json", SMALL)?;
         let rejected_file = self.read_file(&job, "rejected.json", SMALL)?;
         if accepted_file.is_some() && rejected_file.is_some() {
@@ -1679,6 +1680,7 @@ impl StopRecoveryReaderV1 {
                     || rejected.scope_hash != self.scope_hash
                     || rejected.operation_id != operation_id
                     || rejected.submit_hash != reservation.submit_hash
+                    || !rejected.matches_egress(&reservation)
                     || canonical(&rejected)? != file.bytes()
                 {
                     return Err(JournalError::Corrupt);
@@ -1721,6 +1723,7 @@ impl StopRecoveryReaderV1 {
         let intent_hash = intent.intent_hash().map_err(|_| JournalError::Corrupt)?;
         if intent.operation_id() != operation_id
             || accepted.intent_hash != intent_hash
+            || reservation.egress.as_ref() != intent.egress()
             || intent
                 .canonical_bytes()
                 .map_err(|_| JournalError::Corrupt)?

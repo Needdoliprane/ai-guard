@@ -1600,6 +1600,7 @@ fn credential_digest(credentials: Option<&CredentialFile>) -> Result<Option<Stri
 /// This builder performs no admission and creates no runtime resource.
 pub(super) struct BrokerPreparation<'a> {
     pub plan: &'a RunPlan,
+    pub egress: Option<&'a EgressLaunchV1>,
     pub scope: &'a crate::broker::journal::JournalScopeV1,
     pub binding: &'a crate::broker::journal::BindingManifestV1,
     pub answer: &'a crate::broker::checkpoint::DecisionAnswerV1,
@@ -1680,7 +1681,7 @@ pub(super) async fn broker_prepare(input: BrokerPreparation<'_>) -> Result<Manag
         credential_binding_id: input.binding.binding_id().map(|id| id.to_string()),
         credential_names: input.binding.names().to_vec(),
         provider_resolution: plan.request.provider_resolution.clone(),
-        egress: None,
+        egress: input.egress.cloned(),
     };
     Ok(ManagedCheckpoint {
         tenant_id: input.scope.tenant_id().into(),

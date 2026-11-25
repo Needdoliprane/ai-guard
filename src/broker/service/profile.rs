@@ -2,6 +2,7 @@
 //! strings are expectations to compare with the gateway, never an identity.
 use crate::{
     broker::journal::JournalScopeV1,
+    control::EgressLaunchV1,
     control_fs::{Directory, PrivateFile, absolute_path},
     provider::AuthPreference,
     runner::RunOptions,
@@ -67,6 +68,7 @@ pub(super) struct Registry {
     presence_profiles: BTreeMap<String, PathBuf>,
     gateway_trust: BTreeMap<String, crate::tls::ClientTrust>,
     relay_profiles: BTreeMap<String, RelayProfileV1>,
+    egress_profiles: BTreeMap<String, EgressLaunchV1>,
     pub(super) relay_service:
         std::sync::OnceLock<std::sync::Arc<crate::broker::relay_owner::RelayRegistry>>,
 }
@@ -139,6 +141,8 @@ struct ControlProfileV2 {
     gateway_ca_bundle_file: Option<PathBuf>,
     #[serde(default)]
     relay: Option<RelayProfileV1>,
+    #[serde(default)]
+    egress: Option<EgressLaunchV1>,
 }
 
 #[derive(Deserialize)]
@@ -245,6 +249,7 @@ impl Registry {
         let mut presence_profiles = BTreeMap::new();
         let mut gateway_ca_paths = BTreeMap::new();
         let mut relay_profiles = BTreeMap::new();
+        let mut egress_profiles = BTreeMap::new();
         let mut data: RegistryWireV1 = match version.version {
             1 => serde_json::from_slice(source.bytes())
                 .map_err(|_| anyhow!("invalid private broker configuration"))?,
@@ -252,9 +257,18 @@ impl Registry {
                 let wire: RegistryWireV2 = serde_json::from_slice(source.bytes())
                     .map_err(|_| anyhow!("invalid private broker configuration"))?;
                 let mut profiles = Vec::with_capacity(wire.profiles.len());
-                for profile in wire.profiles {
+                for mut profile in wire.profiles {
                     if let Some(path) = &profile.gateway_ca_bundle_file {
                         gateway_ca_paths.insert(profile.id.clone(), normalized(path)?);
+                    }
+                    if let Some(egress) = profile.egress.take() {
+                        egress.validate()?;
+                        ensure!(
+                            profile.policy_profile == "observe"
+                                && profile.network == NetworkMode::None,
+                            "broker egress requires observe policy and network none"
+                        );
+                        egress_profiles.insert(profile.id.clone(), egress);
                     }
                     let (profile, selection, presence, relay) = profile.resolve()?;
                     ensure!(
@@ -374,6 +388,7 @@ impl Registry {
             presence_profiles,
             gateway_trust,
             relay_profiles,
+            egress_profiles,
             relay_service: std::sync::OnceLock::new(),
         })
     }
@@ -387,6 +402,9 @@ impl Registry {
     }
     pub(super) fn start_profile(&self, id: &str) -> PrearmedStartProfile {
         self.start_profiles.get(id).copied().unwrap_or_default()
+    }
+    pub(super) fn egress(&self, id: &str) -> Option<&EgressLaunchV1> {
+        self.egress_profiles.get(id)
     }
     pub(super) fn presence_path(&self, id: &str) -> Option<&Path> {
         self.presence_profiles.get(id).map(PathBuf::as_path)
@@ -765,6 +783,66 @@ mod tests {
         );
         assert!(strict.start_profile("strict-docker") == PrearmedStartProfile::DockerMinimal);
         assert_eq!(strict.data.max_recovery_stop_owners, 0);
+        assert!(legacy.egress("strict-docker").is_none());
+        assert!(strict.egress("strict-docker").is_none());
+        let selection = json!({"version": 1, "profile": "broker_proxy_v1", "proxy_port": 3240});
+        for (name, policy, network, egress, accepted) in [
+            ("egress", "observe", "none", Some(selection.clone()), true),
+            ("historical-bridge", "observe", "bridge", None, true),
+            ("historical-none", "observe", "none", None, true),
+            (
+                "egress-bridge",
+                "observe",
+                "bridge",
+                Some(selection.clone()),
+                false,
+            ),
+            (
+                "egress-strict",
+                "strict",
+                "none",
+                Some(selection.clone()),
+                false,
+            ),
+            (
+                "egress-version",
+                "observe",
+                "none",
+                Some(json!({"version": 2, "profile": "broker_proxy_v1", "proxy_port": 3240})),
+                false,
+            ),
+            (
+                "egress-extra",
+                "observe",
+                "none",
+                Some(
+                    json!({"version": 1, "profile": "broker_proxy_v1", "proxy_port": 3240, "extra": true}),
+                ),
+                false,
+            ),
+        ] {
+            let mut configured = v2.clone();
+            configured["profiles"][0]["policy_profile"] = json!(policy);
+            configured["profiles"][0]["network"] = json!(network);
+            if let Some(egress) = &egress {
+                configured["profiles"][0]["egress"] = egress.clone();
+            }
+            let file = directory
+                .persistent_create(name, &serde_json::to_vec(&configured).unwrap())
+                .unwrap();
+            file.persistent_sync().unwrap();
+            directory.sync().unwrap();
+            let loaded = Registry::load(file.path());
+            assert_eq!(loaded.is_ok(), accepted, "{name}");
+            if let Ok(loaded) = loaded {
+                assert_eq!(
+                    loaded
+                        .egress("strict-docker")
+                        .map(|value| serde_json::to_value(value).unwrap()),
+                    egress
+                );
+            }
+        }
         // Exercise both real private-file decoders and the shared loader
         // validation, without opening any referenced runtime or credential.
         for version in [1, 2] {
@@ -830,5 +908,18 @@ mod tests {
                 assert!(loaded.start_profile("strict-docker") == PrearmedStartProfile::Legacy);
             }
         }
+    }
+
+    #[test]
+    fn submit_cannot_select_broker_egress() {
+        let mut payload = json!({
+            "version": 1,
+            "operation_id": Uuid::new_v4(),
+            "project": "/synthetic/project",
+            "execution": {"command": {"argv": ["/usr/bin/id"]}}
+        });
+        assert!(SubmitV1::parse(&serde_json::to_vec(&payload).unwrap()).is_ok());
+        payload["egress"] = json!({"version": 1, "profile": "broker_proxy_v1", "proxy_port": 3240});
+        assert!(SubmitV1::parse(&serde_json::to_vec(&payload).unwrap()).is_err());
     }
 }

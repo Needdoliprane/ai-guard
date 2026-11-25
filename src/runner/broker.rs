@@ -11,6 +11,7 @@ use crate::{
         intent::ExecutionIntentV1,
         journal::{AcceptedJobV1, BindingInputs, BindingKindV1, JournalError, JournalResult},
     },
+    control::EgressLaunchV1,
     control_fs::{Directory, PrivateFile},
     model::DecisionRequest,
 };
@@ -146,6 +147,16 @@ pub fn prepare_broker_submission(
     operation_id: Uuid,
     control_literals: &[String],
 ) -> Result<PreparedSubmission> {
+    prepare_broker_submission_with_egress(options, operation_id, control_literals, None)
+}
+
+pub(crate) fn prepare_broker_submission_with_egress(
+    options: RunOptions,
+    operation_id: Uuid,
+    control_literals: &[String],
+    egress: Option<EgressLaunchV1>,
+) -> Result<PreparedSubmission> {
+    require_retained_egress_runtime(egress.as_ref())?;
     ensure!(
         !operation_id.is_nil(),
         "broker operation UUID must not be nil"
@@ -166,8 +177,17 @@ pub fn prepare_broker_submission(
             && control_literals.iter().map(String::len).sum::<usize>() <= 256 * 1024,
         "broker control literal context exceeds its bounds"
     );
-    prepare_submission(options, operation_id, control_literals)
+    prepare_submission(options, operation_id, control_literals, egress)
         .map_err(|_| anyhow!("broker submission preparation failed"))
+}
+
+/// The composition lot must establish a retained bootstrap before enabling this profile.
+pub(crate) fn require_retained_egress_runtime(egress: Option<&EgressLaunchV1>) -> Result<()> {
+    ensure!(
+        egress.is_none(),
+        "retained broker egress runtime is unavailable"
+    );
+    Ok(())
 }
 
 /// Preflight before granting a fresh source capability for an unprepared job.
@@ -188,6 +208,7 @@ fn prepare_submission(
     options: RunOptions,
     operation_id: Uuid,
     control_literals: &[String],
+    egress: Option<EgressLaunchV1>,
 ) -> Result<PreparedSubmission> {
     let chosen = choose_plan_prepared(
         options,
@@ -226,6 +247,10 @@ fn prepare_submission(
         plan.provider_credential
             .map(|reference| (reference.binding_id, reference.file_name, reference.digest)),
     )?;
+    let intent = match egress {
+        Some(egress) => intent.with_broker_egress(egress)?,
+        None => intent,
+    };
     Ok(PreparedSubmission {
         intent,
         binding,
@@ -348,6 +373,7 @@ pub fn credentials_from_job(
     job: &AcceptedJobV1,
     config: &Directory,
 ) -> Result<Option<BrokerCredentials>> {
+    require_retained_egress_runtime(job.intent().egress())?;
     credentials_from_binding(job, config)
         .map_err(|_| anyhow!("broker credential binding is unavailable or invalid"))
 }

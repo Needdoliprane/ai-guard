@@ -9,6 +9,7 @@ use crate::runtime::launch_profile::{
     DockerLaunchProfileBindingV1, LaunchProfileSelection, RetainedDockerLaunchProfile,
 };
 use crate::{
+    control::EgressLaunchV1,
     control_fs::{Directory, PrivateFile},
     runner::CheckpointPayloadV1,
 };
@@ -597,12 +598,24 @@ macro_rules! record {
         struct $name { $($field: $ty),* }
     };
 }
-record!(Reservation {
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Reservation {
     version: u32,
     scope_hash: String,
     operation_id: Uuid,
-    submit_hash: String
-});
+    submit_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    egress: Option<EgressLaunchV1>,
+}
+impl Reservation {
+    fn validate_egress(&self) -> JournalResult<()> {
+        if let Some(egress) = &self.egress {
+            egress.validate().map_err(|_| JournalError::Corrupt)?;
+        }
+        Ok(())
+    }
+}
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Bindings {
@@ -657,14 +670,25 @@ record!(SupervisedCheckpoint { version:u32, operation_id:Uuid, intent_hash:Strin
 record!(LifecycleCheckpoint { version:u32, operation_id:Uuid, intent_hash:String, revision:u64, previous:Option<RevisionRefV1>, payload:BrokerCheckpointV3 });
 record!(OutboxCheckpoint { version:u32, operation_id:Uuid, intent_hash:String, revision:u64, previous:Option<RevisionRefV1>, payload:BrokerCheckpointV4 });
 record!(RetirementCheckpoint { version:u32, operation_id:Uuid, intent_hash:String, revision:u64, previous:Option<RevisionRefV1>, payload:super::retirement_checkpoint::BrokerCheckpointV5 });
-record!(Rejected {
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Rejected {
     version: u32,
     scope_hash: String,
     operation_id: Uuid,
     submit_hash: String,
     phase: RejectionPhaseV1,
-    code: RejectionCodeV1
-});
+    code: RejectionCodeV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    egress: Option<EgressLaunchV1>,
+}
+impl Rejected {
+    fn matches_egress(&self, reservation: &Reservation) -> bool {
+        self.egress == reservation.egress
+            && (self.code != RejectionCodeV1::RetainedEgressRuntimeUnavailable
+                || self.egress.is_some())
+    }
+}
 record!(Current {
     version: u32,
     operation_id: Uuid,
@@ -987,6 +1011,15 @@ impl Journal {
     }
 
     pub fn reserve(&self, operation_id: Uuid, submit_bytes: &[u8]) -> JournalResult<ReserveResult> {
+        self.reserve_with_egress(operation_id, submit_bytes, None)
+    }
+
+    pub(crate) fn reserve_with_egress(
+        &self,
+        operation_id: Uuid,
+        submit_bytes: &[u8],
+        egress: Option<EgressLaunchV1>,
+    ) -> JournalResult<ReserveResult> {
         if submit_bytes.len() > 256 * 1024 {
             return Err(JournalError::TooLarge);
         }
@@ -1024,12 +1057,16 @@ impl Journal {
         {
             return Err(JournalError::Conflict);
         }
+        if let Some(egress) = &egress {
+            egress.validate().map_err(|_| JournalError::InvalidInput)?;
+        }
         self.check_observation_capacity(operation_id, &writer)?;
         let reservation = Reservation {
             version: 1,
             scope_hash: self.0.scope_hash.clone(),
             operation_id,
             submit_hash: submit_hash.clone(),
+            egress,
         };
         let bytes = self.checked_record(&reservation, SMALL)?;
         let mut usage = self.usage(None)?;
@@ -1105,7 +1142,11 @@ impl Journal {
             submit_hash: ticket.submit_hash.clone(),
             phase,
             code,
+            egress: reservation.egress.clone(),
         };
+        if !record.matches_egress(&reservation) {
+            return Err(JournalError::InvalidInput);
+        }
         let bytes = self.checked_record(&record, SMALL)?;
         self.budget(
             &ticket.operation.to_string(),
@@ -1232,6 +1273,7 @@ impl Journal {
             || record.scope_hash != self.0.scope_hash
             || record.operation_id != reservation.operation_id
             || record.submit_hash != reservation.submit_hash
+            || !record.matches_egress(reservation)
         {
             return Err(JournalError::Corrupt);
         }
@@ -1255,6 +1297,7 @@ impl Journal {
             submit_hash: record.submit_hash,
             phase: record.phase,
             code: record.code,
+            egress: record.egress,
             record_hash,
         })
     }
@@ -1291,6 +1334,15 @@ impl Journal {
         intent.validate().map_err(|_| JournalError::InvalidInput)?;
         let initial = CheckpointPayloadV1::initial(intent)?;
         if initial.canonical_bytes()? != checkpoint0.canonical_bytes()? {
+            return Err(JournalError::Conflict);
+        }
+        let name = ticket.operation.to_string();
+        let job = self.job(ticket.operation)?;
+        let reservation: Reservation = self.read(&job, "reservation.json", SMALL)?;
+        self.check_reservation(&reservation, ticket.operation)?;
+        if reservation.submit_hash != ticket.submit_hash
+            || reservation.egress.as_ref() != intent.egress()
+        {
             return Err(JournalError::Conflict);
         }
         let intent_bytes = intent
@@ -1353,13 +1405,6 @@ impl Journal {
             initial_checkpoint: head,
         };
         let accepted_bytes = self.checked_record(&accepted, SMALL)?;
-        let name = ticket.operation.to_string();
-        let job = self.job(ticket.operation)?;
-        let reservation: Reservation = self.read(&job, "reservation.json", SMALL)?;
-        self.check_reservation(&reservation, ticket.operation)?;
-        if reservation.submit_hash != ticket.submit_hash {
-            return Err(JournalError::Conflict);
-        }
         let entries = fscheck(job.persistent_entries(self.0.limits.job_entries))?;
         if entries.len() != 1 || entries[0].name != "reservation.json" {
             return Err(JournalError::Interrupted);
@@ -2030,6 +2075,7 @@ impl Journal {
         let intent_hash = intent.intent_hash().map_err(|_| JournalError::Corrupt)?;
         if intent.operation_id() != operation_id
             || accepted.intent_hash != intent_hash
+            || reservation.egress.as_ref() != intent.egress()
             || intent
                 .canonical_bytes()
                 .map_err(|_| JournalError::Corrupt)?
@@ -2282,6 +2328,7 @@ impl Journal {
         {
             return Err(JournalError::Corrupt);
         }
+        reservation.validate_egress()?;
         valid_hash(&reservation.submit_hash).map_err(|_| JournalError::Corrupt)
     }
     fn context(

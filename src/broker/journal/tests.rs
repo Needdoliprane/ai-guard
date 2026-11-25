@@ -228,6 +228,110 @@ fn injected_rejection_io_errors_never_return_ack_and_exact_replay_recovers() {
 }
 
 #[test]
+fn egress_selection_survives_rejected_and_accepted_submissions() {
+    use crate::control::EgressLaunchV1;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let journal = open(temporary.path());
+    let egress = EgressLaunchV1::broker_proxy(3240).unwrap();
+    let ReserveResult::New(ticket) = journal
+        .reserve_with_egress(operation(), submit(), Some(egress.clone()))
+        .unwrap()
+    else {
+        panic!("expected new submission");
+    };
+    let refused = journal
+        .reject(
+            ticket,
+            RejectionPhaseV1::SubmissionPreparation,
+            RejectionCodeV1::RetainedEgressRuntimeUnavailable,
+        )
+        .unwrap();
+    let second = second_operation();
+    let mut wire: Value =
+        serde_json::from_slice(&intent_for(second).canonical_bytes().unwrap()).unwrap();
+    wire["initial_options"]["profile"] = json!("observe");
+    wire["initial_request"]["profile"] = json!("observe");
+    let historical = ExecutionIntentV1::from_bytes(&serde_json::to_vec(&wire).unwrap()).unwrap();
+    let blocked = crate::runner::broker::prepare_broker_submission_with_egress(
+        historical.initial_options().run_options(),
+        second,
+        &[],
+        Some(egress.clone()),
+    )
+    .unwrap_err();
+    assert_eq!(
+        blocked.to_string(),
+        "retained broker egress runtime is unavailable"
+    );
+    wire["egress"] = serde_json::to_value(&egress).unwrap();
+    let intent = historical
+        .clone()
+        .with_broker_egress(egress.clone())
+        .unwrap();
+    assert_ne!(
+        historical.intent_hash().unwrap(),
+        intent.intent_hash().unwrap()
+    );
+    assert_eq!(serde_json::to_value(&intent).unwrap(), wire);
+    let ReserveResult::New(ticket) = journal
+        .reserve_with_egress(second, submit(), Some(egress.clone()))
+        .unwrap()
+    else {
+        panic!("expected new submission");
+    };
+    let checkpoint = CheckpointPayloadV1::initial(&intent).unwrap();
+    let accepted = journal
+        .accept(ticket, &intent, BindingInputs::None, &checkpoint)
+        .unwrap();
+    let intent_hash = accepted.intent_hash().to_owned();
+    drop(accepted);
+    drop(journal);
+
+    let reopened = open(temporary.path());
+    let changed = EgressLaunchV1::broker_proxy(3241).unwrap();
+    let ReserveResult::Rejected(replayed) = reopened
+        .reserve_with_egress(operation(), submit(), Some(changed.clone()))
+        .unwrap()
+    else {
+        panic!("expected the original rejection");
+    };
+    assert_eq!(replayed.record_hash(), refused.record_hash());
+    assert_eq!(
+        replayed.code(),
+        RejectionCodeV1::RetainedEgressRuntimeUnavailable
+    );
+    assert_eq!(replayed.egress(), Some(&egress));
+    let stored = reopened.load(second).unwrap().unwrap();
+    assert_eq!(stored.intent().egress(), Some(&egress));
+    assert_eq!(stored.intent_hash(), intent_hash);
+    let directory = Directory::open_existing(&temporary.path().canonicalize().unwrap()).unwrap();
+    assert_eq!(
+        crate::runner::broker::credentials_from_job(&stored, &directory)
+            .unwrap_err()
+            .to_string(),
+        "retained broker egress runtime is unavailable"
+    );
+
+    let third = Uuid::new_v4();
+    wire["operation_id"] = json!(third);
+    let conflicting = ExecutionIntentV1::from_bytes(&serde_json::to_vec(&wire).unwrap()).unwrap();
+    let checkpoint = CheckpointPayloadV1::initial(&conflicting).unwrap();
+    let ReserveResult::New(ticket) = reopened
+        .reserve_with_egress(third, submit(), Some(changed))
+        .unwrap()
+    else {
+        panic!("expected new submission");
+    };
+    assert_eq!(
+        reopened
+            .accept(ticket, &conflicting, BindingInputs::None, &checkpoint)
+            .unwrap_err(),
+        JournalError::Conflict
+    );
+}
+
+#[test]
 fn lifecycle_adapter_retains_observation_of_an_inherited_partial_job() {
     use crate::broker::{
         checkpoint::{BrokerCheckpointV2, SupervisionCheckpointV1},

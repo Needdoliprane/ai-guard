@@ -1,5 +1,6 @@
 //! Private immutable invocation metadata, never an execution authorization.
 use crate::{
+    control::EgressLaunchV1,
     model::DecisionRequest,
     provider::{AuthPreference, ClientKind},
     runner::RunOptions,
@@ -333,6 +334,8 @@ pub struct ExecutionIntentV1 {
     initial_request: InitialRequestV1,
     provider_input: Option<InitialOptionsV1>,
     provider_credential: Option<ProviderCredentialRefV1>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    egress: Option<EgressLaunchV1>,
 }
 impl fmt::Debug for ExecutionIntentV1 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -350,6 +353,8 @@ struct IntentWire {
     initial_request: InitialRequestV1,
     provider_input: Option<InitialOptionsV1>,
     provider_credential: Option<ProviderCredentialRefV1>,
+    #[serde(default)]
+    egress: Option<EgressLaunchV1>,
 }
 impl<'de> Deserialize<'de> for ExecutionIntentV1 {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
@@ -365,6 +370,7 @@ impl<'de> Deserialize<'de> for ExecutionIntentV1 {
             initial_request: v.initial_request,
             provider_input: v.provider_input,
             provider_credential: v.provider_credential,
+            egress: v.egress,
         };
         intent
             .validate()
@@ -409,6 +415,7 @@ impl ExecutionIntentV1 {
                     digest,
                 })
             }),
+            egress: None,
         };
         intent.validate()?;
         Ok(intent)
@@ -450,6 +457,14 @@ impl ExecutionIntentV1 {
     pub fn provider_credential(&self) -> Option<&ProviderCredentialRefV1> {
         self.provider_credential.as_ref()
     }
+    pub(crate) fn with_broker_egress(mut self, egress: EgressLaunchV1) -> IntentResult<Self> {
+        self.egress = Some(egress);
+        self.validate()?;
+        Ok(self)
+    }
+    pub fn egress(&self) -> Option<&EgressLaunchV1> {
+        self.egress.as_ref()
+    }
     pub(crate) fn request_data(&self) -> &DecisionRequest {
         &self.initial_request.0
     }
@@ -469,6 +484,15 @@ impl ExecutionIntentV1 {
         }
         require(!self.operation_id.is_nil() && !self.session.is_nil())?;
         self.initial_options.validate(false)?;
+        if let Some(egress) = &self.egress {
+            egress.validate().map_err(|_| IntentError::InvalidIntent)?;
+            let options = &self.initial_options.0;
+            require(
+                options.profile == "observe"
+                    && options.network == NetworkMode::None
+                    && !options.interactive,
+            )?;
+        }
         let request = &self.initial_request.0;
         require(Uuid::parse_str(&request.request_id).is_ok_and(|id| !id.is_nil()))?;
         if request.human_approved || request.approval_hash.is_some() {

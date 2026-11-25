@@ -586,7 +586,8 @@ rejection_enum!(RejectionPhaseV1 {
 });
 rejection_enum!(RejectionCodeV1 {
     PreparationFailed,
-    CancelledBeforeAcceptance
+    CancelledBeforeAcceptance,
+    RetainedEgressRuntimeUnavailable
 });
 
 pub struct RejectionReceiptV1 {
@@ -594,6 +595,7 @@ pub struct RejectionReceiptV1 {
     pub(super) submit_hash: String,
     pub(super) phase: RejectionPhaseV1,
     pub(super) code: RejectionCodeV1,
+    pub(super) egress: Option<EgressLaunchV1>,
     pub(super) record_hash: String,
 }
 impl RejectionReceiptV1 {
@@ -608,6 +610,9 @@ impl RejectionReceiptV1 {
     }
     pub fn code(&self) -> RejectionCodeV1 {
         self.code
+    }
+    pub fn egress(&self) -> Option<&EgressLaunchV1> {
+        self.egress.as_ref()
     }
     pub fn record_hash(&self) -> &str {
         &self.record_hash

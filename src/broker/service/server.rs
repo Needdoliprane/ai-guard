@@ -37,7 +37,7 @@ use crate::{
     redaction::Redactor,
     runner::broker::{
         BatchExecutor, BatchOutcome, BrokerRunState, deliver_cancellation,
-        prepare_broker_submission,
+        prepare_broker_submission_with_egress, require_retained_egress_runtime,
     },
     workspace::AuthorizedSource,
 };
@@ -1868,6 +1868,7 @@ impl Service {
         let parsed: Value =
             serde_json::from_str(&payload).map_err(|_| BrokerErrorCodeV1::InvalidInput)?;
         self.material.screen(&parsed, credential)?;
+        let egress = self.registry.egress(&profile.id).cloned();
         let operation = submit.operation_id;
         let job = jobs.job(operation)?;
         let preparation_generation = job.cancel.current();
@@ -1888,7 +1889,7 @@ impl Service {
         // Reserve the exact runnable payload before opening a provider or a
         // source directory. The authentication envelope is never persisted.
         let (ticket, owner) = match writer
-            .reserve(operation, payload.into_bytes())
+            .reserve_with_egress(operation, payload.into_bytes(), egress.clone())
             .await
             .map_err(jobs::journal_error)?
         {
@@ -1910,6 +1911,16 @@ impl Service {
                 (ticket, owner)
             }
         };
+        if require_retained_egress_runtime(egress.as_ref()).is_err() {
+            job.result(Some(BrokerErrorCodeV1::IncompatibleControl));
+            let code = if job.cancel.current() != preparation_generation {
+                RejectionCodeV1::CancelledBeforeAcceptance
+            } else {
+                RejectionCodeV1::RetainedEgressRuntimeUnavailable
+            };
+            let receipt = complete_rejection(&writer, operation, ticket, &job, code).await?;
+            return Ok(Response::reply(rejected(&receipt, false)));
+        }
         let running = match job.enter() {
             Ok(running) => running,
             Err(error) => {
@@ -1975,7 +1986,9 @@ impl Service {
             let mut literals = self.material.literals.clone();
             literals.push(credential.to_owned());
             let mut prepared = self
-                .filesystem(move || prepare_broker_submission(options, operation, &literals))
+                .filesystem(move || {
+                    prepare_broker_submission_with_egress(options, operation, &literals, egress)
+                })
                 .await?;
             if job.cancel.current() != preparation_generation {
                 return Err(BrokerErrorCodeV1::Interrupted);
