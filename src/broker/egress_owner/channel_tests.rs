@@ -49,11 +49,14 @@ struct Gateway {
     opening_calls: AtomicUsize,
     decision_delay: Duration,
     decision_hold: Option<Arc<PendingOperation>>,
+    connect_permit_reply: ConnectPermitReply,
+    connect_permit_gate: Option<Arc<ObservationGate>>,
     prior_observation_reply: Option<ObservationReply>,
     terminal_observation_reply: Option<ObservationReply>,
     remaining_ms: Option<u64>,
     renewal: Option<Arc<ScriptedRenewal>>,
     decisions: Mutex<Vec<EgressDecideRequestV1>>,
+    connect_permits: Mutex<Vec<EgressConnectPermitRequestV1>>,
     observations: Mutex<Vec<EgressObservationV1>>,
     revoke: Mutex<Vec<IdV1>>,
 }
@@ -64,6 +67,16 @@ enum OpeningReply {
     Fresh,
     Replayed,
     DifferentBinding,
+}
+
+#[derive(Clone, Copy, Default)]
+enum ConnectPermitReply {
+    #[default]
+    Fresh,
+    Replayed,
+    DifferentIp,
+    Expired,
+    Lost,
 }
 
 enum ObservationReply {
@@ -180,6 +193,55 @@ impl EgressControl for Gateway {
                 receipt: EgressReceiptV1 {
                     audit_seq: 7,
                     audit_hash: "a".repeat(64),
+                },
+            })
+        })
+    }
+    fn issue_connect_permit(
+        &self,
+        request: EgressConnectPermitRequestV1,
+    ) -> ControlFuture<'_, EgressConnectPermitReceiptV1> {
+        Box::pin(async move {
+            let port = self
+                .decisions
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|decision| decision.decision_id == request.decision_id)
+                .and_then(|decision| Authority::parse_connect(&decision.authority).ok())
+                .ok_or(ControlError::Refused)?
+                .port();
+            self.connect_permits.lock().unwrap().push(request.clone());
+            if let Some(gate) = &self.connect_permit_gate {
+                gate.started.add_permits(1);
+                gate.release.acquire().await.unwrap().forget();
+            }
+            if matches!(self.connect_permit_reply, ConnectPermitReply::Lost) {
+                return Err(ControlError::Unavailable);
+            }
+            let permit_id = request.permit_id().unwrap();
+            let mut request = request;
+            if matches!(self.connect_permit_reply, ConnectPermitReply::DifferentIp) {
+                request.ip = "127.0.0.2".parse().unwrap();
+            }
+            Ok(EgressConnectPermitReceiptV1 {
+                version: 1,
+                permit_id,
+                request,
+                port,
+                valid_for_ms: if matches!(self.connect_permit_reply, ConnectPermitReply::Expired) {
+                    1
+                } else {
+                    1_000
+                },
+                disposition: if matches!(self.connect_permit_reply, ConnectPermitReply::Replayed) {
+                    EgressConnectPermitDispositionV1::Replayed
+                } else {
+                    EgressConnectPermitDispositionV1::Fresh
+                },
+                receipt: EgressReceiptV1 {
+                    audit_seq: 8,
+                    audit_hash: "b".repeat(64),
                 },
             })
         })
@@ -417,16 +479,18 @@ fn gateway(allow: bool) -> Arc<Gateway> {
     Arc::new(gateway)
 }
 
-fn fixture_open_request() -> (EgressDecideRequestV1, Authority) {
-    let authority = Authority::new(FIXTURE, 443, EgressTransport::ConnectTcpOpaque).unwrap();
-    let request = EgressDecideRequestV1 {
-        version: 1,
-        decision_id: IdV1::random(),
-        binding: fixture_binding(),
-        flow_id: 1,
-        authority: format!("{FIXTURE}:443"),
-    };
-    (request, authority)
+fn fixture_destination(port: u16) -> OpenDestination {
+    OpenDestination {
+        opening_id: IdV1::random(),
+        decision: EgressDecideRequestV1 {
+            version: 1,
+            decision_id: IdV1::random(),
+            binding: fixture_binding(),
+            flow_id: 1,
+            authority: format!("{FIXTURE}:{port}"),
+        },
+        authority: Authority::new(FIXTURE, port, EgressTransport::ConnectTcpOpaque).unwrap(),
+    }
 }
 
 fn fixture_opening_lifetime() -> (OpeningLifetime, OpeningOwner, ChannelStop) {
@@ -485,6 +549,61 @@ fn egress_broker_connect_and_invalidation_share_the_initial_poll() {
 }
 
 #[tokio::test]
+async fn egress_broker_waits_for_a_fresh_exact_numeric_permit_before_connecting() {
+    for (reply, expected_accepts) in [
+        (ConnectPermitReply::Fresh, 1),
+        (ConnectPermitReply::Replayed, 0),
+        (ConnectPermitReply::DifferentIp, 0),
+        (ConnectPermitReply::Expired, 0),
+        (ConnectPermitReply::Lost, 0),
+    ] {
+        let upstream = upstream().await;
+        let gate = Arc::new(ObservationGate {
+            started: Semaphore::new(0),
+            release: Semaphore::new(0),
+        });
+        let gateway = Arc::new(Gateway {
+            allow: AtomicBool::new(true),
+            connect_permit_gate: Some(gate.clone()),
+            connect_permit_reply: reply,
+            ..Gateway::default()
+        });
+        let harness = harness(gateway.clone(), upstream.port).await;
+        let authority = format!("{FIXTURE}:{}", upstream.port);
+        let helper_port = harness.helper_port;
+        let client = tokio::spawn(async move { connect(helper_port, &authority).await });
+        timeout_at(
+            Instant::now() + Duration::from_secs(3),
+            gate.started.acquire(),
+        )
+        .await
+        .expect("the broker must request the numeric permit")
+        .unwrap()
+        .forget();
+        assert_eq!(upstream.accepts.load(Ordering::SeqCst), 0);
+        let request = gateway.connect_permits.lock().unwrap()[0].clone();
+        assert_eq!(request.ip.to_string(), "127.0.0.1");
+        let decision = gateway.decisions.lock().unwrap()[0].clone();
+        assert_eq!(request.decision_id, decision.decision_id);
+        assert_eq!(request.binding, decision.binding);
+        assert_eq!(request.flow_id, decision.flow_id);
+        if matches!(reply, ConnectPermitReply::Expired) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        gate.release.add_permits(1);
+        let (_client, response) = timeout_at(Instant::now() + Duration::from_secs(3), client)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.starts_with("HTTP/1.1 200"), expected_accepts == 1);
+        assert_eq!(upstream.accepts.load(Ordering::SeqCst), expected_accepts);
+        assert_eq!(gateway.connect_permits.lock().unwrap().len(), 1);
+        harness.stop.stop();
+        assert_eq!(harness.owner.await.unwrap().cause, ChannelExit::Stopped);
+    }
+}
+
+#[tokio::test]
 async fn egress_broker_an_unavailable_first_address_exhausts_the_permit() {
     let fallback = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = fallback.local_addr().unwrap().port();
@@ -498,14 +617,12 @@ async fn egress_broker_an_unavailable_first_address_exhausts_the_permit() {
             Err(error) if error.kind() == std::io::ErrorKind::AddrNotAvailable => None,
             Err(error) => panic!("reserve first loopback address: {error}"),
         });
-    let authority = Authority::new(FIXTURE, port, EgressTransport::ConnectTcpOpaque).unwrap();
-    let (mut request, _) = fixture_open_request();
-    request.authority = format!("{FIXTURE}:{port}");
+    let destination = fixture_destination(port);
     let resolver = Arc::new(
         Resolver::new(
             Arc::new(NoLookup(AtomicUsize::new(0))),
             vec![InternalService {
-                authority: authority.clone(),
+                authority: destination.authority.clone(),
                 addresses: vec![first.ip(), fallback.local_addr().unwrap().ip()],
             }],
             vec![],
@@ -523,14 +640,16 @@ async fn egress_broker_an_unavailable_first_address_exhausts_the_permit() {
             connect_attempt: Duration::from_millis(200),
             ..ChannelTimes::default()
         },
-        request,
-        authority,
+        destination,
         &lifetime,
         &mut progress,
     )
     .await;
 
     assert_eq!(control.decisions.lock().unwrap().len(), 1);
+    let permits = control.connect_permits.lock().unwrap();
+    assert_eq!(permits.len(), 1);
+    assert_eq!(permits[0].ip, first.ip());
     assert!(!progress.pending);
     assert!(
         matches!(
@@ -554,15 +673,13 @@ async fn egress_broker_late_allow_receipt_expires_before_resolution() {
     });
     let lookup = Arc::new(NoLookup(AtomicUsize::new(0)));
     let resolver = Arc::new(Resolver::new(lookup.clone(), vec![], vec![]).unwrap());
-    let (request, authority) = fixture_open_request();
     let (lifetime, _opening, _stop) = fixture_opening_lifetime();
 
     let result = open_upstream(
         control.clone(),
         resolver,
         ChannelTimes::default(),
-        request,
-        authority,
+        fixture_destination(443),
         &lifetime,
         &mut ConnectProgress::default(),
     )
@@ -588,7 +705,6 @@ async fn egress_broker_receipt_expiry_stops_pending_resolution() {
     });
     let lookup = Arc::new(PendingLookup(AtomicUsize::new(0)));
     let resolver = Arc::new(Resolver::new(lookup.clone(), vec![], vec![]).unwrap());
-    let (request, authority) = fixture_open_request();
     let (lifetime, _opening, _stop) = fixture_opening_lifetime();
 
     let result = tokio::time::timeout(
@@ -597,8 +713,7 @@ async fn egress_broker_receipt_expiry_stops_pending_resolution() {
             control,
             resolver,
             ChannelTimes::default(),
-            request,
-            authority,
+            fixture_destination(443),
             &lifetime,
             &mut ConnectProgress::default(),
         ),
@@ -938,6 +1053,7 @@ fn fixture_owner<W>(
         stop: stopping,
         stopped_during_write: false,
         binding: fixture_binding(),
+        opening_id: IdV1::random(),
         control: gateway,
         resolver: fixture_resolver(upstream_port, Arc::new(NoLookup(AtomicUsize::new(0)))),
         times,
@@ -2206,7 +2322,7 @@ async fn egress_broker_allowed_destination_is_decided_durably_before_one_pinned_
 }
 
 #[tokio::test]
-async fn egress_broker_committed_sqlite_decision_precedes_one_loopback_connection() {
+async fn egress_broker_committed_sqlite_decision_does_not_authorize_loopback() {
     use crate::{
         api::{GatewayState, TenantGateway, gateway_router},
         audit::egress_decisions::tests::loopback_store_fixture,
@@ -2264,14 +2380,17 @@ async fn egress_broker_committed_sqlite_decision_precedes_one_loopback_connectio
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let opening_requests = Arc::new(AtomicUsize::new(0));
+    let rejected_permits = Arc::new(AtomicUsize::new(0));
     let committed = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let router = gateway_router(state).layer(middleware::from_fn({
         let opening_requests = opening_requests.clone();
+        let rejected_permits = rejected_permits.clone();
         let committed = committed.clone();
         let release = release.clone();
         move |request: Request, next: Next| {
             let opening_requests = opening_requests.clone();
+            let rejected_permits = rejected_permits.clone();
             let committed = committed.clone();
             let release = release.clone();
             async move {
@@ -2279,7 +2398,11 @@ async fn egress_broker_committed_sqlite_decision_precedes_one_loopback_connectio
                     opening_requests.fetch_add(1, Ordering::SeqCst);
                 }
                 let decision = request.uri().path() == "/api/v1/egress/decisions";
+                let permit = request.uri().path() == "/api/v1/egress/connect-permits";
                 let response = next.run(request).await;
+                if permit && response.status() == axum::http::StatusCode::BAD_REQUEST {
+                    rejected_permits.fetch_add(1, Ordering::SeqCst);
+                }
                 if decision {
                     committed.notify_one();
                     release.notified().await;
@@ -2328,23 +2451,12 @@ async fn egress_broker_committed_sqlite_decision_precedes_one_loopback_connectio
     );
     release.notify_one();
 
-    let (mut socket, _) = timeout_at(Instant::now() + Duration::from_secs(3), upstream.accept())
+    let (_client, response) = timeout_at(Instant::now() + Duration::from_secs(3), client)
         .await
         .unwrap()
         .unwrap();
-    let (mut client, response) = client.await.unwrap();
-    assert!(response.starts_with("HTTP/1.1 200"));
-    timeout_at(Instant::now() + Duration::from_secs(2), async {
-        client.write_all(b"ping").await.unwrap();
-        let mut bytes = [0; 4];
-        socket.read_exact(&mut bytes).await.unwrap();
-        assert_eq!(&bytes, b"ping");
-        socket.write_all(&bytes).await.unwrap();
-        client.read_exact(&mut bytes).await.unwrap();
-        assert_eq!(&bytes, b"ping");
-    })
-    .await
-    .unwrap();
+    assert!(response.starts_with("HTTP/1.1 403"));
+    assert_eq!(rejected_permits.load(Ordering::SeqCst), 1);
     stop.stop();
     let terminal = timeout_at(Instant::now() + Duration::from_secs(7), owner)
         .await
@@ -2365,19 +2477,11 @@ async fn egress_broker_committed_sqlite_decision_precedes_one_loopback_connectio
         .unwrap();
 
     let events = read_events();
-    let connections: Vec<_> = events
-        .iter()
-        .filter(|(_, event)| event.kind == "egress.connection")
-        .collect();
-    assert_eq!(connections.len(), 1);
-    let (connection_seq, connection) = connections[0];
-    assert!(connection_seq > decision_seq);
-    assert_eq!(connection.data["decision_id"], request.decision_id.as_str());
-    assert_eq!(connection.data["connected"], true);
-    assert_eq!(connection.data["flow_id"], request.flow_id);
-    assert_eq!(connection.data["peer"], format!("127.0.0.1:{port}"));
+    assert!(!events.iter().any(|(_, event)| {
+        event.kind == "egress.connect.permit" || event.kind == "egress.connection"
+    }));
     let (closed_seq, closed) = events.last().unwrap();
-    assert!(*closed_seq > *connection_seq && closed.kind == "egress.channel.closed");
+    assert!(*closed_seq > *decision_seq && closed.kind == "egress.channel.closed");
     assert_eq!(closed.data["observations_lost"], 0);
     assert_eq!(
         closed.data["binding"],
@@ -2392,7 +2496,7 @@ async fn egress_broker_committed_sqlite_decision_precedes_one_loopback_connectio
         )
         .await
         .is_err(),
-        "a second upstream socket was connected"
+        "the rejected loopback permit must leave the upstream unopened"
     );
     gateway.abort();
     assert!(gateway.await.unwrap_err().is_cancelled());

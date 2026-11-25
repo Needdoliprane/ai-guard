@@ -1,8 +1,8 @@
 //! One broker-owned egress channel: the trusted end of a worker helper pipe.
 //!
 //! Order per flow: validate the requested authority, obtain a durable gateway
-//! decision, then (allow only) resolve with full address validation and
-//! connect once to a pinned numeric address. No worker byte reaches upstream
+//! decision, then (allow only) resolve with full address validation. A fresh
+//! durable permit binds one connect to the selected numeric address. No worker byte reaches upstream
 //! before that. Every upstream socket is owned here; dropping a flow closes
 //! it. Revocation, expiry, a lost lease, helper EOF or a protocol violation
 //! close the affected sockets. The channel never reattaches an old epoch.
@@ -55,6 +55,10 @@ pub(crate) trait EgressControl: Send + Sync + 'static {
         request: EgressChannelOpeningRequestV1,
     ) -> ControlFuture<'_, EgressChannelOpeningReceiptV1>;
     fn decide(&self, request: EgressDecideRequestV1) -> ControlFuture<'_, EgressDecisionV1>;
+    fn issue_connect_permit(
+        &self,
+        request: EgressConnectPermitRequestV1,
+    ) -> ControlFuture<'_, EgressConnectPermitReceiptV1>;
     fn observe(&self, request: EgressObserveRequestV1) -> ControlFuture<'_, ()>;
     fn renew(&self, request: EgressRenewRequestV1) -> ControlFuture<'_, EgressRenewResponseV1>;
 }
@@ -65,7 +69,7 @@ pub(crate) struct ChannelTimes {
     /// A live flow without a successful renewal for this long is closed.
     pub(crate) lease: Duration,
     pub(crate) renew_every: Duration,
-    /// Decision + resolution + connect, inside the ledger's 10 s open time.
+    /// Decision, resolution, permit and connect, inside the ledger's 10 s open time.
     pub(crate) open_budget: Duration,
     pub(crate) connect_attempt: Duration,
 }
@@ -602,6 +606,7 @@ struct Owner<W> {
     stop: watch::Receiver<ChannelStopState>,
     stopped_during_write: bool,
     binding: EgressBindingV1,
+    opening_id: IdV1,
     control: Arc<dyn EgressControl>,
     resolver: Arc<Resolver>,
     times: ChannelTimes,
@@ -789,7 +794,11 @@ where
         capability,
         ..
     } = opened.prepared;
-    let binding = opened.receipt.binding;
+    let EgressChannelOpeningReceiptV1 {
+        binding,
+        observation_id: opening_id,
+        ..
+    } = opened.receipt;
     let started = Instant::now();
     let mut ledger = EgressChannelState::new(0);
     if ledger.accept_capability(Some(&capability), 0).is_err() {
@@ -807,6 +816,7 @@ where
         stop: stop.clone(),
         stopped_during_write: false,
         binding,
+        opening_id,
         control,
         resolver,
         times,
@@ -1176,12 +1186,16 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
         let mut flow = self.pending_flow(decision_id.clone());
         flow.opening = Some(OpeningHandle { owner, outcome });
         self.flows.insert(flow_id, flow);
-        let request = EgressDecideRequestV1 {
-            version: 1,
-            decision_id: decision_id.clone(),
-            binding: self.binding.clone(),
-            flow_id,
-            authority: format!("{}:{}", authority.name(), authority.port()),
+        let destination = OpenDestination {
+            opening_id: self.opening_id.clone(),
+            decision: EgressDecideRequestV1 {
+                version: 1,
+                decision_id: decision_id.clone(),
+                binding: self.binding.clone(),
+                flow_id,
+                authority: format!("{}:{}", authority.name(), authority.port()),
+            },
+            authority,
         };
         let control = self.control.clone();
         let resolver = self.resolver.clone();
@@ -1196,7 +1210,7 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
             let result = tokio::select! {
                 biased;
                 _ = lifetime.cancelled() => Err(cancelled_opening()),
-                result = open_upstream(control, resolver, times, request, authority, &lifetime, &mut progress) => result,
+                result = open_upstream(control, resolver, times, destination, &lifetime, &mut progress) => result,
             };
             let socket_unobserved = progress.pending || progress.unobserved;
             let result = result.map(|opened| opened.start_pump(flow_id, events.clone(), lifetime));
@@ -1685,16 +1699,26 @@ fn cancelled_opening() -> Refusal {
     }
 }
 
-/// Durable decision first; resolution and connect only after an allow.
+struct OpenDestination {
+    opening_id: IdV1,
+    decision: EgressDecideRequestV1,
+    authority: Authority,
+}
+
+/// A durable decision gates lookup. A fresh permit gates the first poll of connect.
 async fn open_upstream(
     control: Arc<dyn EgressControl>,
     resolver: Arc<Resolver>,
     times: ChannelTimes,
-    request: EgressDecideRequestV1,
-    authority: Authority,
+    destination: OpenDestination,
     lifetime: &OpeningLifetime,
     progress: &mut ConnectProgress,
 ) -> Result<Opened, Refusal> {
+    let OpenDestination {
+        opening_id,
+        decision: request,
+        authority,
+    } = destination;
     if lifetime.loss().is_some() {
         return Err(cancelled_opening());
     }
@@ -1754,8 +1778,8 @@ async fn open_upstream(
         }
     };
     let source = resolution.source.code();
-    // Keep the resolver's validated order. This permit authorizes one connect.
-    let Some(address) = resolution.addresses.first() else {
+    // Keep the resolver's validated order. Only one address is selected.
+    let Some(address) = resolution.addresses.first().copied() else {
         return Err(Refusal {
             reason: EgressReasonV1::Unavailable,
             failure: None,
@@ -1764,6 +1788,61 @@ async fn open_upstream(
     if lifetime.loss().is_some() {
         return Err(cancelled_opening());
     }
+    let permit_sent = Instant::now();
+    if permit_sent >= deadline {
+        return Err(Refusal {
+            reason: elapsed_reason,
+            failure: None,
+        });
+    }
+    let resolution_digest =
+        egress_resolution_digest_v1(&resolution.addresses).map_err(|_| Refusal {
+            reason: EgressReasonV1::Unavailable,
+            failure: None,
+        })?;
+    let permit_request = EgressConnectPermitRequestV1 {
+        version: 1,
+        opening_id,
+        decision_id: request.decision_id,
+        binding: request.binding,
+        flow_id: request.flow_id,
+        ip: address,
+        resolution_digest,
+    };
+    let permit = match timeout_at(
+        deadline,
+        control.issue_connect_permit(permit_request.clone()),
+    )
+    .await
+    {
+        Ok(Ok(permit))
+            if permit.is_fresh_for(&permit_request, authority.port())
+                && permit.receipt.audit_seq > decision.receipt.audit_seq =>
+        {
+            permit
+        }
+        reply => {
+            return Err(Refusal {
+                reason: match reply {
+                    Err(_) => elapsed_reason,
+                    Ok(Err(ControlError::Refused)) => EgressReasonV1::Denied,
+                    _ => EgressReasonV1::AuditUnavailable,
+                },
+                failure: None,
+            });
+        }
+    };
+    let permit_until = permit_sent
+        .checked_add(Duration::from_millis(permit.valid_for_ms))
+        .ok_or(Refusal {
+            reason: EgressReasonV1::Denied,
+            failure: None,
+        })?;
+    let (deadline, elapsed_reason) = if permit_until <= deadline {
+        (permit_until, EgressReasonV1::Expired)
+    } else {
+        (deadline, elapsed_reason)
+    };
     let now = Instant::now();
     if now >= deadline {
         return Err(Refusal {
@@ -1771,7 +1850,10 @@ async fn open_upstream(
             failure: None,
         });
     }
-    let target = SocketAddr::new(*address, authority.port());
+    if lifetime.loss().is_some() {
+        return Err(cancelled_opening());
+    }
+    let target = SocketAddr::new(address, authority.port());
     let attempt = (now + times.connect_attempt).min(deadline);
     let mut attempted = false;
     let mut connecting = std::pin::pin!(async {
