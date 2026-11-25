@@ -1,4 +1,25 @@
-# Synthèse courante — 17 novembre 2026
+# Synthèse courante — 25 novembre 2026
+
+Le candidat local intègre la projection d’audit Claude Code, ses
+régressions de compaction, les témoins Jev sur loopback et la recette
+de migration et de restauration SQLite via le CLI. Le gel `4411e705`
+apporte douze résultats ciblés réussis et reproduit séparément
+l’omission de la règle auditée dans le message de refus du CLI.
+[Résultats exacts et limites](VALIDATION.md).
+
+G10 est validé au périmètre V1 sur `48f81d20`. Le quota accepte
+100 réservations durables pour un tenant et la recette physique
+utilise A1/A2 chez A et B1 chez B. G09 conserve son échec moteur.
+Dix autres gates restent ouverts. [Grille de qualification](PRODUCTION_READINESS.md).
+
+Le témoin Full3 laisse `CreateIssued` confirmé dans SQLite et encore
+en attente dans le journal du broker. Le diagnostic doit départager
+la réponse HTTP de la publication de l’acquittement local. Le contrat
+E3 confie la libération au broker après ouverture durable. Son
+intégration logicielle et la qualification moteur ont chacune leurs
+preuves. [Résultats Full3](VALIDATION.md#25-novembre-2026--full3-sarrête-après-createissued-dans-sqlite) · [Décision E3](DECISIONS.md#25-novembre-2026--g05e3-libération-du-fournisseur-par-le-broker).
+
+## Synthèse courante — 17 novembre 2026
 
 ## 17 novembre — contribution D7 intégrée, qualification ouverte
 
