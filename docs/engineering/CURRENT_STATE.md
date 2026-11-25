@@ -14,8 +14,10 @@ utilise A1/A2 chez A et B1 chez B. G09 conserve son échec moteur.
 Dix autres gates restent ouverts. [Grille de qualification](PRODUCTION_READINESS.md).
 
 Le témoin Full3 laisse `CreateIssued` confirmé dans SQLite et encore
-en attente dans le journal du broker. Le diagnostic doit départager
-la réponse HTTP de la publication de l’acquittement local. Le contrat
+en attente dans le journal du broker. Le diagnostic distingue désormais
+la réponse HTTP de la publication de l’acquittement local. Deux tests
+de fixture, un par frontière, passent sur `d7d4f849`. La cause de
+l’échec Full3 historique attend un rejeu instrumenté. Le contrat
 E3 confie la libération au broker après ouverture durable. Son
 intégration logicielle et la qualification moteur ont chacune leurs
 preuves. [Résultats Full3](VALIDATION.md#25-novembre-2026--full3-sarrête-après-createissued-dans-sqlite) · [Décision E3](DECISIONS.md#25-novembre-2026--g05e3-libération-du-fournisseur-par-le-broker).

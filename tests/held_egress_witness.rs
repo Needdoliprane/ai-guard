@@ -42,7 +42,10 @@ async fn held_egress_ready_does_not_consume_bootstrap_stdin() -> Result<()> {
         hello
     );
     assert_eq!(ready.await??, hello);
-    assert_eq!(first_byte.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+    assert_eq!(
+        first_byte.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    );
 
     release.write_all(frame.as_bytes()).await?;
     timeout(Duration::from_secs(3), &mut first_byte).await??;

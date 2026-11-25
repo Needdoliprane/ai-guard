@@ -1,5 +1,24 @@
 # Validation courante
 
+## 25 novembre 2026 — frontières CreateIssued et témoin E3 à deux flux
+
+Le gel `d7d4f849` compile hors ligne sur macOS ARM64. Quatre
+sélecteurs exacts passent et leurs groupes sont vides à la sortie.
+Le premier vérifie les catégories du diagnostic `CreateIssued`.
+Le second coupe la réponse HTTP après le commit SQLite (47,32 s).
+Il retrouve la demande préparée dans le journal, un seul POST et
+aucune création ni tentative de démarrage. Le troisième laisse
+expirer la réponse du Writer (50,71 s) puis retrouve dans le
+journal l’acquittement exact qui avait été publié.
+
+Le témoin E3 à deux flux vérifie séparément que l’acquittement de la
+session de contrôle laisse le stdin du bootstrap retenu. Les sources
+du diagnostic et des témoins ciblés sont portées au candidat
+depuis ce gel. Le callback E3 et le rejeu Full3 complet n’ont pas été
+exécutés pendant cette validation. La cause de l’échec Full3
+historique reste entre les deux frontières.
+Manifeste privé `c685b8c3301f9908f3e7eb22cf1a9cc08b8fcb7aa60096095833ce615f7def7c`.
+
 ## 25 novembre 2026 — borne Claude, régressions Jev et reprise SQLite
 
 Le gel `4411e705` compile hors ligne sur macOS ARM64. Douze
@@ -42,8 +61,13 @@ Le diagnostic générique SQLite de séquence 19 indique
 `import_verification`. La corrélation du journal situe l'écart
 après l’import et avant l’acquittement local de `CreateIssued`.
 La lecture fermée ne distingue pas l’obtention de la réponse HTTP
-de la publication de son acquittement. Le broker de recette reste
-sous garde après l’échec de fermeture. Manifeste du rejeu
+de la publication de son acquittement. Après l’échec de fermeture,
+le processus du broker synthétique est terminé par deux signaux
+directs sur son identité vérifiée. Les trois sockets sont fermés et
+aucun descripteur ne reste ouvert dans la fixture. La clôture est
+documentée séparément par le manifeste
+`c038ced80ce6a23114418586ed6794ed0cc330387f0f56c1c2277f48a4314dc1`.
+Manifeste du rejeu
 `7588c57c20a1f0b9cefce19b331b966b688e1798292c3dc300489232d4731365`
 et projections SQLite/journal et rapprochement de l’opération exacte
 `eaeb4935699203c586b0abc37d9fd0df6107348215f6d68776aa61e8aef9621f`,

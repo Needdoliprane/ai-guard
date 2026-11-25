@@ -28,7 +28,10 @@ pub(super) async fn read_release(
             .take(RELEASE_LIMIT as u64)
             .read_to_end(&mut bytes)
             .await?;
-        ensure!(bytes.len() <= RELEASE_LIMIT, "held bootstrap stdin exceeds witness bound");
+        ensure!(
+            bytes.len() <= RELEASE_LIMIT,
+            "held bootstrap stdin exceeds witness bound"
+        );
         Ok(bytes)
     })
     .await?
@@ -42,7 +45,10 @@ pub(super) async fn echo_ready(
 ) -> Result<egress_wire::CommonEgressHandshakeV1> {
     let deadline = Instant::now() + WITNESS_TIMEOUT;
     let hello = egress_wire::read_handshake(stream, deadline).await?;
-    ensure!(&hello.binding_id == attempt, "helper HELLO binds another attempt");
+    ensure!(
+        &hello.binding_id == attempt,
+        "helper HELLO binds another attempt"
+    );
     egress_wire::write_handshake(stream, &hello, deadline).await?;
     Ok(hello)
 }
