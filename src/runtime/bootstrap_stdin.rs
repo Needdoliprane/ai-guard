@@ -157,13 +157,15 @@ impl PreparedBootstrapStdin {
     #[allow(dead_code)] // Consumed by the separate broker composition.
     pub(crate) fn submit_once(
         self,
-        frame: &[u8],
         generation: &CancelGeneration,
         expected: u64,
         check_release: impl FnOnce() -> Result<()>,
     ) -> Result<(), BootstrapStdinSubmitError> {
-        let Self { stdin, stop, .. } = self;
-        stdin.submit_once(frame, generation, expected, || {
+        let Self {
+            stdin, stop, attempt, ..
+        } = self;
+        let frame = crate::egress::bootstrap_release::encode_frame(&attempt);
+        stdin.submit_once(&frame, generation, expected, || {
             ensure_prearmed_live(&stop)?;
             check_release()
         })
