@@ -10,6 +10,17 @@ du conteneur Run, puis expire à 190,30 s avec le code 101.
 La lecture IPC du statut broker reste indisponible. La preuve
 du claim durable et du démarrage du worker reste inconnue.
 
+Le rapprochement après exécution localise le premier écart
+à l’acquittement local de `Created`. La demande figure en
+attente de r32 à r35 dans le journal V5. SQLite confirme le
+commit de la même demande à la séquence 20, empreinte d’entrée
+identique. Le worker est `Created` côté SQLite et reste
+`Preparing` côté broker. Le diagnostic durable
+`created_exchange_advance_pending` précède ce commit. Les deux
+historiques vérifiés s’arrêtent avant l’Arm et le claim du worker.
+L’origine du rejeu de la demande et l’issue exacte de la réponse
+du writer initial restent indéterminées.
+
 Le harnais joint son runtime synthétique et son gateway. La
 fermeture du gardien reste non confirmée et le répertoire
 de la fixture est conservé pour rapprochement. Manifeste privé
