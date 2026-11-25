@@ -328,7 +328,7 @@ impl<'a> Execution<'a> {
                     && intent.matches_running(draft.worker()?),
                 "bootstrap release intent cannot be published on this head"
             );
-            draft.egress_release = Some(intent.clone());
+            draft.egress_release = Some(Box::new(intent.clone()));
             Ok(())
         })
         .await

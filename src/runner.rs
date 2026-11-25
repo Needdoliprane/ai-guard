@@ -872,7 +872,7 @@ struct CheckpointDataV1 {
     current_request: DecisionRequest,
     managed: Option<managed::ManagedCheckpoint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    egress_release: Option<egress_release::EgressReleaseIntentV1>,
+    egress_release: Option<Box<egress_release::EgressReleaseIntentV1>>,
 }
 /// Borrowed data for pure broker validation; never an execution capability.
 pub(crate) struct BrokerRunnerContext<'a> {
@@ -935,7 +935,7 @@ impl CheckpointPayloadV1 {
             legacy_import: managed.is_some_and(|value| value.import.is_some()),
             tenant_id: managed.map(|value| value.tenant_id.as_str()),
             gateway_origin: managed.map(|value| value.gateway_origin.as_str()),
-            egress_release: self.0.egress_release.as_ref(),
+            egress_release: self.0.egress_release.as_deref(),
         }
     }
     pub fn initial(
