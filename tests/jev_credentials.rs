@@ -13,7 +13,7 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use serde_json::json;
-use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, BufReader},
     process::Command,
@@ -29,10 +29,26 @@ struct GatewayFixture {
 }
 
 fn gateway_fixture(registry: bool, reused_role: Option<&str>) -> GatewayFixture {
+    let mut fixture = gateway_control_fixture(registry, reused_role);
+    add_typesafe_options(&mut fixture.command, fixture.provider.local_addr().unwrap());
+    fixture
+}
+
+fn add_typesafe_options(command: &mut Command, address: SocketAddr) {
+    command.args([
+        "--jev-url",
+        &format!("http://{address}/fixture-only"),
+        "--jev-key-file",
+        "jev",
+        "--jev-model",
+        "fixture",
+    ]);
+}
+
+fn gateway_control_fixture(registry: bool, reused_role: Option<&str>) -> GatewayFixture {
     let directory = support::private_tempdir();
     let provider = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     provider.set_nonblocking(true).unwrap();
-    let endpoint = format!("http://{}/fixture-only", provider.local_addr().unwrap());
     let mut credentials = Vec::new();
     let mut tenants = Vec::new();
     let mut databases = Vec::new();
@@ -68,15 +84,7 @@ fn gateway_fixture(registry: bool, reused_role: Option<&str>) -> GatewayFixture 
         .current_dir(directory.path())
         .args(["gateway", "--listen", "127.0.0.1:0", "--policy"])
         .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies/default.json"))
-        .args([
-            "--jev-url",
-            &endpoint,
-            "--jev-allow-local-http",
-            "--jev-key-file",
-            "jev",
-            "--jev-model",
-            "fixture",
-        ])
+        .arg("--jev-allow-local-http")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -172,7 +180,46 @@ async fn registry_gateway_refuses_jev_viewer_reuse_from_the_second_tenant() {
 
 #[tokio::test]
 async fn distinct_jev_key_allows_gateway_startup_without_contacting_the_provider() {
-    let mut fixture = gateway_fixture(true, None);
+    assert_gateway_starts_without_provider_contact(gateway_fixture(true, None)).await;
+}
+
+#[tokio::test]
+async fn explicit_local_jev_rejects_typesafe_options_before_database_or_provider_contact() {
+    let local_fixture = || {
+        let mut fixture = gateway_control_fixture(true, None);
+        let address = fixture.provider.local_addr().unwrap();
+        fixture.command.args([
+            "--jev-backend",
+            "local-openai",
+            "--jev-local-url",
+            &format!("http://{address}/v1/chat/completions"),
+            "--jev-local-model",
+            "fixture-local-model",
+        ]);
+        fixture
+    };
+    let mut mixed = local_fixture();
+    let typesafe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    typesafe.set_nonblocking(true).unwrap();
+    add_typesafe_options(&mut mixed.command, typesafe.local_addr().unwrap());
+
+    let output = tokio::time::timeout(Duration::from_secs(10), mixed.command.output())
+        .await
+        .expect("mixed configuration must exit before serving")
+        .unwrap();
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert_no_credentials(&diagnostic, &mixed.credentials);
+    assert_no_credentials(&String::from_utf8_lossy(&output.stdout), &mixed.credentials);
+    assert!(!output.status.success());
+    assert!(diagnostic.contains("Incomplete or mixed Jev backend configuration"));
+    assert!(mixed.databases.iter().all(|path| !path.exists()));
+    assert_no_provider_contact(&mixed.provider);
+    assert_no_provider_contact(&typesafe);
+
+    assert_gateway_starts_without_provider_contact(local_fixture()).await;
+}
+
+async fn assert_gateway_starts_without_provider_contact(mut fixture: GatewayFixture) {
     let mut child = fixture.command.spawn().unwrap();
     let mut stderr = BufReader::new(child.stderr.take().unwrap());
     let mut diagnostic = String::new();
@@ -182,9 +229,16 @@ async fn distinct_jev_key_allows_gateway_startup_without_contacting_the_provider
         .unwrap();
     assert_no_credentials(&diagnostic, &fixture.credentials);
     assert!(diagnostic.starts_with("Gateway "));
-    let address = diagnostic.split_whitespace().nth(1).unwrap();
+    let address: SocketAddr = diagnostic
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(address.ip().is_loopback());
     let response = reqwest::Client::builder()
         .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap()
@@ -193,11 +247,14 @@ async fn distinct_jev_key_allows_gateway_startup_without_contacting_the_provider
         .await
         .unwrap();
     assert!(response.status().is_success());
+    assert!(fixture.databases.iter().all(|path| path.is_file()));
+    assert!(child.try_wait().unwrap().is_none());
     child.start_kill().unwrap();
     let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
         .await
         .unwrap()
         .unwrap();
+    assert!(!output.status.success());
     stderr.read_to_string(&mut diagnostic).await.unwrap();
     diagnostic.push_str(&String::from_utf8_lossy(&output.stdout));
     assert_no_credentials(&diagnostic, &fixture.credentials);
