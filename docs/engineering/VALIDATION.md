@@ -1,5 +1,30 @@
 # Validation courante
 
+## 25 novembre 2026 — E3 entre le retour Running et l’acquittement Writer
+
+Le gel test-only `2e497796` compile hors ligne en 12 min 02 s. Le
+sélecteur du callback E3 est listé une fois et sort 101 après 83,27 s.
+Le helper donne READY à 1 289 ms. Le broker relève HTTP 200 à 7 502 ms
+et décode son retour Running à 7 503 ms. À 8 006 ms, le témoin
+déclenche STOP. Aucun acquittement Writer Running, aucune clé
+d’ouverture acquittée et aucun appel HTTP d’ouverture ne sont
+observés pendant cette fenêtre. Le bootstrap voit un EOF sans octet
+de libération.
+
+Le budget actuel du témoin ne laisse que 503 ms après le décodage.
+Le Writer de la fixture dispose de 10 s par appel. La preuve situe
+la dernière étape observée, avec cause du délai encore indéterminée.
+Le rejeu suivant doit observer chaque étape avec un budget démarré
+à la frontière correspondante, sous l’échéance native existante.
+Le contrat de libération unique et le statut G05 restent ouverts.
+
+Les codes de sortie du transport et de l’inspection terminale,
+ainsi que les jointures internes du callback, restent non confirmés.
+Le contrôleur et le pair de fixture se ferment, le groupe externe
+et le répertoire temporaire sont vides. Le gardien historique hors
+fixture est inchangé. Manifeste de 33 pièces
+`dce10a0a4b90fa24c6ffbac8e63105b84e760df31e534da1e0c05f2b6fa162ea`.
+
 ## 25 novembre 2026 — inventaire Writer et autorisation de cible G04
 
 Le gel `e64fb406` compile hors ligne sur macOS ARM64 en 18 min 38 s.
