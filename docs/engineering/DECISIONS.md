@@ -1535,3 +1535,67 @@ Le mainteneur fixe la preuve de capacité V1 à 100 réservations durables pour 
 Si la révocation précède l’admission ou le claim dans l’ordre durable, elle le bloque. Après un claim consommé, l’arrêt et la réconciliation suivent leurs contrats et le quota suit les faits durables. Une réadoption vérifiée ajoute au besoin un fait de reprise et conserve l’attribution et le reçu d’origine, le claim consommé et son échéance. Rust revalide le contexte avant de servir la projection. Workers exige `read_worker_registry` en administration et la lecture composée Workers/Brokers exige aussi `read_broker_registry`. La projection expose admission attribuée, historique, présence et observation moteur. Les anciens faits gardent leur provenance et une attribution absente reste inconnue. Les claims OIDC et la chaîne de preuve de l’initiateur humain suivent leurs contrats actuels. [Contrat des vues](../ui.md#supervision-unifiée-nominative--candidat-du-10-novembre-2026) · [Contrat API](../api.md)
 
 **Preuve attendue.** Avec le vrai gateway et un moteur local, lancer A1 et A2 par deux brokers distincts de A et B1 chez B. Le reçu audité établit l’admission attribuée et l’inspection établit l’état observé de l’instance exacte. Corréler les deux. La lecture nominative d’A réunit A1 et A2 avec leurs incarnations d’admission, celle de B restitue B1 seul et les contextes croisés sont refusés. Vérifier les refus pour un broker ou une incarnation substitués, une preuve absente ou révoquée et un audit indisponible. Vérifier le refus du premier claim après une révocation intervenue entre admission et claim. Vérifier séparément qu’après consommation du claim le rejeu et la réadoption préservent le reçu et l’échéance d’origine, le claim consommé et le quota tant que les faits durables exigent sa retenue. La vue garde la couverture partielle et l’inventaire runtime inconnu. [Écart de qualification](PRODUCTION_READINESS.md)
+
+## 25 novembre 2026 — G05/E3, libération du fournisseur par le broker
+
+**Décision V1.** Le mainteneur a délégué le choix parmi quatre options.
+La revue indépendante GPT-6.2 Astra, effort maximal, sur `e0ef5899`
+retient la **libération par le broker**. Le broker qui possède le
+canal de la tentative possède aussi le droit exclusif de soumettre
+le signal. Le gardien conserve sa mission d’arrêt et son échéance.
+
+**État produit.** Pour `broker_proxy_v1`, le broker fait acquitter
+`Running` après inspection du conteneur et préparation du canal du
+bootstrap retenu. Le CLI et le dashboard distinguent le conteneur
+inspecté, le bootstrap retenu, le signal soumis ou sa livraison
+inconnue, et le démarrage observé du fournisseur. Chaque observation
+porte sa source et sa date. Un STOP central en transit apparaît
+comme demandé jusqu’à son application. [Contrat des états](../ui.md)
+
+**Ordre durable.** L’échange d’ouverture versionné restitue une
+disposition déterminée par la transaction du Store au moment de
+l’insertion ou du rejeu. Seul l’ACK d’une ouverture neuve reçu
+par l’appel d’origine encore vivant peut alimenter la garde de
+libération, après `Running` acquitté. Le reçu historique sert à
+l’audit et à la réconciliation. Le broker inscrit une intention
+durable sur la révision attendue avant de soumettre le signal.
+L’intention lie le tenant authentifié, la session, le worker, la
+tentative, l’autorité, la génération, le canal, l’époque et
+l’incarnation du conteneur, dont CID, `StartedAt`, `RestartCount`
+et l’empreinte de confinement.
+
+**Arbitrage STOP.** La soumission effective est synchrone et bornée
+sous la même garde que l’invalidation de génération. À ce point,
+le broker vérifie le canal exclusif vivant, l’autorité courante,
+l’incarnation et l’échéance native d’origine. STOP appliqué avant
+la soumission impose zéro signal, même après l’intention durable.
+Si la soumission est déjà passée, STOP arrête et réconcilie le même
+conteneur. Une tentative admet au plus une soumission, toutes
+générations confondues.
+
+**Reprise.** La perte de l’ACK d’ouverture avant l’intention implique
+zéro signal et un commit d’ouverture à rapprocher. Après crash avec
+intention durable, la livraison reste inconnue si elle manque de
+preuve. La reprise réconcilie le même conteneur, conserve le quota
+pendant l’incertitude et garde l’échéance initiale, avec zéro
+réémission. Les preuves excluent credentials, cookies et en-têtes
+bruts selon le contrat egress. [Séquence de référence](EGRESS_CONTROL.md)
+
+**Comparaison.** L’état central dédié donnerait à `Running` un
+sens fournisseur plus précis au prix d’une évolution de la machine
+d’états, des API et de leurs consommateurs. Un permis dédié du
+gateway ajouterait un échange et une reprise de permis, avec la
+même garde finale requise. Confier le signal au gardien demanderait
+un transfert exclusif du droit d’écriture et une évolution de son
+IPC et de sa reprise, aujourd’hui centrée sur STOP.
+
+**Acceptation.** Au point de composition réel, tenir l’ACK après le
+commit du Store et compter les signaux sur un récepteur inerte.
+Vérifier zéro avant l’ACK, puis un après ACK neuf et intention
+durable. Intercaler STOP ou une invalidation de génération entre
+intention et soumission et vérifier zéro. Vérifier séparément perte
+d’ACK, crash avant et après soumission, preuve rejouée, incarnation
+divergente et échéance atteinte. L’oracle exige zéro réémission et
+la restitution de l’inconnue lorsque la livraison manque de preuve.
+Cette décision lance le raccordement et les tests locaux isolés.
+[Proposition et oracle E3](G05_E3_BOOTSTRAP_PROPOSAL.md)

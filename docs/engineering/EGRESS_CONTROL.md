@@ -6,7 +6,7 @@ Le lot Claude du 22 novembre a introduit le frontal Rust loopback du worker, le 
 
 La suite de la verticale ajoute la lecture des décisions, des observations et de la fermeture du canal dans le Journal, ainsi que des opérations de politique dans le CLI. Les douze sélecteurs du candidat `8b7ff9b5` passent sur un canal de fixture en boucle locale et sur des tests de politique et de CLI. [Validation du 24 novembre](VALIDATION.md#24-novembre-2026--décisions-expiration-et-révocation-du-canal-egress), [gate G05](PRODUCTION_READINESS.md).
 
-Le choix par défaut reste le réseau coupé. Le profil `bridge` est un choix explicite hors médiation. Le raccord E3 au runtime et au superviseur, l’observation indépendante des tentatives directes et les recettes sur workers réels restent ouverts. Les preuves de cette tranche laissent G05, G07 et G11 ouverts. [Proposition E3](G05_E3_BOOTSTRAP_PROPOSAL.md).
+Le choix par défaut reste le réseau coupé. Le profil `bridge` est un choix explicite hors médiation. Le raccord E3 au runtime et au superviseur, l’observation indépendante des tentatives directes et les recettes sur workers réels restent ouverts. Les preuves de cette tranche laissent G05, G07 et G11 ouverts. [Décision G05/E3](DECISIONS.md#25-novembre-2026--g05e3-libération-du-fournisseur-par-le-broker).
 
 ## Tranche logicielle du 13 novembre — noyau et protocole vérifiés
 
