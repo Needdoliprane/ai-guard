@@ -1,5 +1,28 @@
 # Validation courante
 
+## 25 novembre 2026 — préparation et ouverture du canal E3
+
+**PASS ciblé, 5/5** sur `1002b28a`, macOS ARM64, fonctionnalités
+par défaut et compilation Rust hors ligne avec le lockfile. La
+préparation de la poignée atteint READY sans POST. L’ouverture
+accepte le reçu frais corrélé de cet appel. Les cas rejoué et
+binding divergent n’ouvrent aucun flux. La clé du reçu est
+accessible avant le POST pour le rapprochement après perte d’ACK.
+
+STOP interrompt le handshake ou l’attente du reçu. Dans le poll
+où STOP coïncide avec un ACK frais, le canal reste arrêté et
+l’ouverture acquittée conserve une projection distincte de la
+fermeture. Le gateway SQLite loopback reçoit un seul POST d’ouverture
+versionné avant la décision et la connexion synthétiques. Le lecteur
+historique d’observations conserve le contrôle du reçu canonique.
+
+Les trois fichiers du lot correspondent au candidat `159dfeb3`.
+Manifeste privé vérifié
+`96e42a173177350a12dc44ef9756ae67c8ab38367ddbb532673e0ec5c6fadbbe`.
+Le callback réel, l’intention durable de libération et le signal
+du bootstrap gardent leurs preuves propres.
+[Séquence E3](G05_E3_BOOTSTRAP_PROPOSAL.md)
+
 ## 25 novembre 2026 — premier claim Full3, rejeu synthétique
 
 **FAIL, code 101** sur `1aa6dbe5`. Le seul scénario exact attend
