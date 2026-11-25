@@ -31,6 +31,21 @@ L’exécution ne donne aucune preuve sur le claim ou le démarrage
 du worker. Manifeste privé
 `53a3d387d5448a07316ef9648e8d8704f2d00a89466238d6fd3592de39d8135a`.
 
+## 25 novembre 2026 — harnais de capture Chromium G08
+
+Sur `e5be058f`, Chromium collecte une capture HTML masquée et un
+PNG sur le dashboard loopback après un échec du scénario. Un essai
+distinct redirige vers une autre origine loopback non approuvée.
+Le harnais refuse la redirection, l’autre origine reçoit zéro
+requête et aucune capture n’est écrite. Les deux essais confirment
+la fermeture du contexte et du navigateur. Les deux tests Node
+du prévol fournisseur passent séparément.
+
+Les deux origines sont des fixtures HTTP locales. La recette
+navigateur avec une installation réelle a son propre critère.
+Manifeste privé
+`17822ea0fb9efd3cb654b86af6d5ebc4b29ead36f27b9f1b54874d8c4ad46aed`.
+
 ## 25 novembre 2026 — diagnostic G09 intégré après les trois tests ciblés
 
 Le gel `5fc5fad1` compile sur macOS ARM64. Les trois sélecteurs
