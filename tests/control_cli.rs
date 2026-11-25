@@ -1,7 +1,22 @@
 mod support;
 
 use agentsandbox::{audit::Store, model::Event, redaction::Redactor};
-use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt, path::Path, time::Duration};
+use reqwest::StatusCode;
+use serde_json::{Value, json};
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    net::SocketAddr,
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
+    path::Path,
+    process::Stdio,
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncBufReadExt, BufReader},
+    process::Command,
+    time::timeout,
+};
 
 fn legacy(path: &Path) {
     drop(
@@ -36,37 +51,188 @@ async fn migrate(data: &Path, backup: &Path, confirmed: bool) -> std::process::O
         .unwrap()
 }
 
+fn write_private(path: &Path, bytes: &[u8]) {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .unwrap();
+    file.write_all(bytes).unwrap();
+    file.sync_all().unwrap();
+}
+
+fn probe_command(operation: &str) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_agentsandbox"));
+    command
+        .arg(operation)
+        .env_clear()
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    command
+}
+
+async fn inspect_gateway(data: &Path, runner: &Path, viewer: &Path) -> (Value, StatusCode, Value) {
+    let mut gateway = probe_command("gateway")
+        .args(["--listen", "127.0.0.1:0", "--data"])
+        .arg(data)
+        .arg("--runner-token-file")
+        .arg(runner)
+        .arg("--viewer-token-file")
+        .arg(viewer)
+        .arg("--policy")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("policies/default.json"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the loopback gateway");
+    let mut stderr = BufReader::new(gateway.stderr.take().expect("gateway stderr"));
+    let address = timeout(Duration::from_secs(15), async {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let read = stderr
+                .read_line(&mut line)
+                .await
+                .expect("read gateway stderr");
+            assert!(read > 0, "gateway exited before announcing its address");
+            if let Some(address) = line
+                .strip_prefix("Gateway ")
+                .and_then(|rest| rest.split_whitespace().next())
+            {
+                break address
+                    .parse::<SocketAddr>()
+                    .expect("gateway socket address");
+            }
+        }
+    })
+    .await
+    .expect("gateway did not announce its address in time");
+    assert!(address.ip().is_loopback() && address.port() != 0);
+    // Keep draining startup diagnostics without copying them into test output.
+    let drain =
+        tokio::spawn(async move { tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await });
+    let url = format!("http://{address}");
+
+    let result = timeout(
+        Duration::from_secs(30),
+        probe_command("verify-audit")
+            .arg("--viewer-token-file")
+            .arg(viewer)
+            .arg("--gateway")
+            .arg(&url)
+            .output(),
+    )
+    .await
+    .expect("verify-audit timed out")
+    .expect("run verify-audit");
+    assert!(
+        result.status.success(),
+        "verify-audit failed: {}",
+        result.status
+    );
+    let audit = serde_json::from_slice(&result.stdout).expect("verify-audit JSON");
+
+    let token = agentsandbox::runner::read_token(viewer).expect("read the fixture viewer token");
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap()
+        .get(format!("{url}/api/workers"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .expect("read the worker registry over loopback");
+    let status = response.status();
+    let workers = response.json().await.expect("worker registry JSON");
+
+    let pid = i32::try_from(gateway.id().expect("owned gateway PID")).unwrap();
+    // SAFETY: this test still owns the child and has not reaped it.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+    let stopped = timeout(Duration::from_secs(15), async {
+        let status = gateway.wait().await.expect("wait for the gateway to stop");
+        drain
+            .await
+            .expect("join stderr drain")
+            .expect("drain gateway stderr");
+        status
+    })
+    .await
+    .expect("gateway shutdown timed out");
+    assert!(
+        stopped.success(),
+        "gateway did not drain cleanly: {stopped}"
+    );
+    (audit, status, workers)
+}
+
 #[tokio::test]
 async fn migration_cli_preserves_history_and_backup_and_requires_operator_attestation() {
     let dir = support::private_tempdir();
     let data = dir.path().join("audit.sqlite");
     let backup = dir.path().join("backup.sqlite");
+    let runner = dir.path().join("runner-token");
+    let viewer = dir.path().join("viewer-token");
+    write_private(&runner, uuid::Uuid::new_v4().to_string().as_bytes());
+    write_private(&viewer, uuid::Uuid::new_v4().to_string().as_bytes());
     legacy(&data);
     let original = Store::open(&data, Redactor::new(vec![]), 1000)
         .unwrap()
         .append(Event::new("historic.event"))
         .unwrap();
+    let (before, legacy_status, legacy_workers) = inspect_gateway(&data, &runner, &viewer).await;
+    assert_eq!(before["valid"], true);
+    assert_eq!(before["event_count"], 1);
+    assert_eq!(before["head_hash"], original.hash);
+    assert_eq!(legacy_status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(legacy_workers["code"], "migration_required");
+
     assert!(!migrate(&data, &backup, false).await.status.success());
     assert!(!backup.exists());
     let result = migrate(&data, &backup, true).await;
     assert!(
         result.status.success(),
         "migration failed: {}",
-        String::from_utf8_lossy(&result.stderr)
+        result.status
     );
-    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    let report: Value = serde_json::from_slice(&result.stdout).unwrap();
     assert_eq!(report["from_version"], 1);
     assert_eq!(report["to_version"], 2);
     assert_eq!(report["genesis_seq"], original.seq + 1);
-    let archived = Store::open(&backup, Redactor::new(vec![]), 1000).unwrap();
-    assert_eq!(archived.head().unwrap(), original.seq);
-    assert_eq!(archived.integrity().unwrap().head_hash, original.hash);
+    let (after, migrated_status, migrated_workers) = inspect_gateway(&data, &runner, &viewer).await;
+    assert_eq!(migrated_status, StatusCode::OK);
+    assert_eq!(migrated_workers["items"], json!([]));
+    assert_eq!(after["valid"], true);
+    assert_eq!(after["event_count"], 2);
+    assert_eq!(after["head_hash"], report["genesis_hash"]);
     let current = Store::open(&data, Redactor::new(vec![]), 1000).unwrap();
     assert!(current.workers().unwrap().is_empty());
     assert!(current.integrity().unwrap().valid);
-    let bytes = std::fs::read(&backup).unwrap();
+    drop(current);
+
+    // Reopen a fresh copy so the backup itself stays untouched by SQLite.
+    let bytes = fs::read(&backup).unwrap();
+    let restored_dir = dir.path().join("restored");
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&restored_dir)
+        .unwrap();
+    let restored = restored_dir.join("audit.sqlite");
+    write_private(&restored, &bytes);
+    let archived = Store::open(&restored, Redactor::new(vec![]), 1000).unwrap();
+    assert_eq!(archived.head().unwrap(), original.seq);
+    assert_eq!(archived.integrity().unwrap().head_hash, original.hash);
+    drop(archived);
+    let (recovered, restored_status, restored_workers) =
+        inspect_gateway(&restored, &runner, &viewer).await;
+    assert_eq!(recovered, before);
+    assert_eq!(restored_status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(restored_workers["code"], "migration_required");
+
     assert!(!migrate(&data, &backup, true).await.status.success());
-    assert_eq!(std::fs::read(&backup).unwrap(), bytes);
+    assert_eq!(fs::read(&backup).unwrap(), bytes);
 }
 
 #[tokio::test]
