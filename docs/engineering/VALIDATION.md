@@ -1,5 +1,25 @@
 # Validation courante
 
+## 25 novembre 2026 — canari G11 et annulation du premier relais
+
+Sur `4c46dd1c`, le binaire du canari et son CLI compilent en 419,74 s.
+Le scénario exact du relais sort 101 en 44,94 s, à l’échéance du premier
+endpoint A. Le dernier relevé avant annulation montre r14, l’inspection
+et le retrait exacts du helper terminés et le POST `HelperCleanup`
+encore non observé dans cette fenêtre. B reste non soumis.
+
+L’annulation d’A est acquittée. Le dernier reçu de réconciliation
+conserve l’exécuteur actif, l’état `Preparing`, le quota retenu et zéro
+RPC en attente. Le groupe du libtest est vide après sa sortie. Un gardien
+propre à la fixture reste recensé hors de ce groupe, avec sa racine
+conservée. La fermeture du canari reste indéterminée.
+
+Les reçus principal, de réconciliation et de fermeture sont conservés
+séparément avec les deux binaires épinglés. Manifeste privé vérifié
+`105a1e15449cd32a93eb995eeb9384a107291ad81a65654b8d63e133fbf1f36c`.
+Le relevé r14 décrit l’échéance de ce rejeu. Le reçu r16 du gel
+`a39cfa86` conserve sa propre chronologie.
+
 ## 25 novembre 2026 — E3 libération après acquittements du gateway et du Writer
 
 **PASS 1/1** sur le gel `4c46dd1c`. Le callback Rust utilise le gateway
@@ -31,7 +51,7 @@ port correspondent au gel. La composition de validation porte aussi
 la fermeture du canari G11. Son contrôle de types passe en 307,44 s
 avec groupe terminé, manifeste
 `d5dd814fb16d4d8d640298456a372d8bf264c438cd778456b3d193afef25a57f`.
-L’exécution du canari G11 reste ouverte.
+Le rejeu est consigné dans le [reçu du premier relais G11](#25-novembre-2026--canari-g11-et-annulation-du-premier-relais).
 
 ## 25 novembre 2026 — révocation workload MySQL Legacy sur TLS et mTLS
 
