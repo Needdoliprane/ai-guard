@@ -73,12 +73,12 @@ impl RunCommand {
             let summary = match Box::pin(runner::run(self.run)).await {
                 Ok(summary) => summary,
                 Err(error) => {
-                    if let Some(summary) = runner::confirmed_deadline_summary(&error) {
-                        if let Ok(json) = serde_json::to_string_pretty(summary) {
-                            // Reporting is best-effort here. A closed stdout must preserve
-                            // the original execution failure.
-                            let _ = writeln!(std::io::stdout().lock(), "{json}");
-                        }
+                    if let Some(summary) = runner::confirmed_deadline_summary(&error)
+                        && let Ok(json) = serde_json::to_string_pretty(summary)
+                    {
+                        // Reporting is best-effort here. A closed stdout must preserve
+                        // the original execution failure.
+                        let _ = writeln!(std::io::stdout().lock(), "{json}");
                     }
                     return Err(error);
                 }

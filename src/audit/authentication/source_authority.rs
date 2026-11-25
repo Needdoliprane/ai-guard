@@ -228,16 +228,22 @@ impl Snapshot {
 
 /// No Legacy variant and no deserialization of an access capability.
 pub(crate) enum AuthenticationSourceAccess<'e> {
+    // Scoped source-access capability; production wiring pending.
+    #[allow(dead_code)]
     Read {
         epoch: &'e HumanSourcesReadEpoch,
         source: &'e OwnedSourceToken,
     },
+    // Scoped source-access capability; production wiring pending.
+    #[allow(dead_code)]
     Write {
         epoch: &'e HumanSourcesWriteEpoch,
         source: &'e OwnedSourceToken,
     },
 }
 impl<'e> AuthenticationSourceAccess<'e> {
+    // Scoped source-access capability; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn read(
         epoch: &'e HumanSourcesReadEpoch,
         source: &'e OwnedSourceToken,
@@ -245,6 +251,8 @@ impl<'e> AuthenticationSourceAccess<'e> {
         epoch.validate_source(source)?;
         Ok(Self::Read { epoch, source })
     }
+    // Scoped source-access capability; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn write(
         epoch: &'e HumanSourcesWriteEpoch,
         source: &'e OwnedSourceToken,

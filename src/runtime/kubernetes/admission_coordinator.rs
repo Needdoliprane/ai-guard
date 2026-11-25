@@ -2,6 +2,8 @@
 //! No production activation or authority constructor. Store and journal calls
 //! remain synchronous: a future service caller must own bounded control-worker
 //! admission; this module does not isolate blocking I/O from Tokio workers.
+// Closed held-CREATE target; production wiring pending.
+#![allow(dead_code)]
 use super::{
     journal::{AdmissionJournal, CandidateRefusal},
     permission::{HeldCreateClaimOutcome, PendingHeldCreateClaim},
@@ -229,7 +231,7 @@ impl<'a> HeldCreateCoordinator<'a> {
             return Err(CoordinatorError::InvalidContext);
         }
         let control = self.store.supervision_state().map_err(control_error)?;
-        if !matches!(control.schema_version, 8 | 9 | 10 | 11 | 12 | 13)
+        if !matches!(control.schema_version, 8..=13)
             || control.control_namespace_uuid.as_deref()
                 != Some(journal.intent().control_namespace_uuid.as_str())
         {

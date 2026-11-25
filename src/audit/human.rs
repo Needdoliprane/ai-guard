@@ -163,6 +163,8 @@ impl Store {
     ) -> anyhow::Result<Option<LocalCredentialV1>> {
         self.local_credential_binding_impl(None, digest)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn local_credential_binding_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -203,6 +205,8 @@ impl Store {
     ) -> anyhow::Result<Option<VerifiedLocalCredentialV1>> {
         self.authenticate_local_digest_impl(None, digest)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn authenticate_local_digest_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -234,18 +238,18 @@ impl Store {
         tx: &CheckedTransaction<'_>,
         digest: &[u8; 32],
     ) -> anyhow::Result<Option<VerifiedLocalCredentialV1>> {
-        if !identity::identity_read_format(&tx)? {
+        if !identity::identity_read_format(tx)? {
             return Ok(None);
         }
         let binding: Option<LocalCredentialV1> = identity::json_row(
-            &tx,
+            tx,
             "SELECT payload_json FROM identity_credentials WHERE digest=?1",
             &hex::encode(digest),
         )?;
         let Some(binding) = binding else {
             return Ok(None);
         };
-        identity::require_human_read(&tx)?;
+        identity::require_human_read(tx)?;
         binding.validate()?;
         if !binding.active {
             return Err(IdentityFailureV1::IdentityRevoked.into());
@@ -257,7 +261,7 @@ impl Store {
             return Err(IdentityFailureV1::CredentialExpired.into());
         }
         let account: HumanAccountV1 = identity::json_row(
-            &tx,
+            tx,
             "SELECT payload_json FROM identity_accounts WHERE principal_key=?1",
             &binding.principal.key()?,
         )?
@@ -280,6 +284,8 @@ impl Store {
     ) -> anyhow::Result<HumanProfileSnapshotV1> {
         self.human_profile_impl(None, principal, transient)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn human_profile_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -314,7 +320,7 @@ impl Store {
         principal: &PrincipalRefV1,
         transient: &Redactor,
     ) -> anyhow::Result<HumanProfileSnapshotV1> {
-        if !identity::identity_read_format(&tx)? {
+        if !identity::identity_read_format(tx)? {
             return Ok(HumanProfileSnapshotV1 {
                 account: None,
                 memberships: vec![],
@@ -322,11 +328,11 @@ impl Store {
                 human_rights_marker: false,
             });
         }
-        let revision = identity::authorization_revision(&tx)?;
+        let revision = identity::authorization_revision(tx)?;
         let human_rights_marker = super::human_rights::installed(tx)?;
         let key = principal.key()?;
         let account: Option<HumanAccountV1> = identity::json_row(
-            &tx,
+            tx,
             "SELECT payload_json FROM identity_accounts WHERE principal_key=?1",
             &key,
         )?;
@@ -338,7 +344,7 @@ impl Store {
                 human_rights_marker,
             });
         };
-        identity::require_human_read(&tx)?;
+        identity::require_human_read(tx)?;
         let members = {
             let mut stmt = tx.prepare("SELECT payload_json FROM identity_memberships WHERE principal_key=?1 AND active=1 ORDER BY membership_id LIMIT 257")?;
             stmt.query_map([&key], |r| r.get::<_, String>(0))?
@@ -346,7 +352,7 @@ impl Store {
                 .collect::<anyhow::Result<Vec<MembershipV1>>>()?
         };
         anyhow::ensure!(members.len() <= 256, "human membership capacity exceeded");
-        self.record_human_read_checked(&tx, principal, None, "identity", 1, transient)?;
+        self.record_human_read_checked(tx, principal, None, "identity", 1, transient)?;
         Ok(HumanProfileSnapshotV1 {
             account: Some(account),
             memberships: members,
@@ -363,6 +369,8 @@ impl Store {
     ) -> anyhow::Result<HumanStorePageV1<HumanResourceItemV1>> {
         self.human_resources_impl(None, scope, after, limit, transient)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn human_resources_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -405,8 +413,8 @@ impl Store {
         transient: &Redactor,
     ) -> anyhow::Result<HumanStorePageV1<HumanResourceItemV1>> {
         validate_resource_page(after, limit)?;
-        identity::require_human_read(&tx)?;
-        let current = identity::revalidate_scope_checked(&tx, scope, &self.tenant_id)?;
+        identity::require_human_read(tx)?;
+        let current = identity::revalidate_scope_checked(tx, scope, &self.tenant_id)?;
         require_view(
             &current,
             &HumanEventFilterV1 {
@@ -472,7 +480,7 @@ impl Store {
             }
         }
         let receipt = self.record_human_read_checked(
-            &tx,
+            tx,
             current.principal(),
             Some(&current),
             "resources",
@@ -499,6 +507,9 @@ impl Store {
     ) -> anyhow::Result<HumanEventPollV1> {
         self.human_events_impl(None, scope, filter, after, upper, limit, transient)
     }
+    // Each argument is a distinct authorized selection input; keep the explicit signature.
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code, clippy::too_many_arguments)]
     pub(crate) fn human_events_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -511,6 +522,8 @@ impl Store {
     ) -> anyhow::Result<HumanEventPollV1> {
         self.human_events_impl(Some(access), scope, filter, after, upper, limit, transient)
     }
+    // Each argument is a distinct authorized selection input; keep the explicit signature.
+    #[allow(clippy::too_many_arguments)]
     fn human_events_impl(
         &self,
         access: Option<&HumanSourceAccess<'_>>,
@@ -540,6 +553,8 @@ impl Store {
         self.commit_checked(tx)?;
         Ok(result)
     }
+    // Each argument is a distinct authorized selection input; keep the explicit signature.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn human_events_checked(
         &self,
         tx: &CheckedTransaction<'_>,
@@ -554,12 +569,12 @@ impl Store {
             (1..=HUMAN_MAX_PAGE_ITEMS).contains(&limit) && after >= 0,
             "invalid human event page"
         );
-        identity::require_human_read(&tx)?;
-        let current = identity::revalidate_scope_checked(&tx, scope, &self.tenant_id)?;
+        identity::require_human_read(tx)?;
+        let current = identity::revalidate_scope_checked(tx, scope, &self.tenant_id)?;
         require_view(&current, filter)?;
         if let Some(resource) = &filter.resource {
             let grant: ResourceGrantV1 = identity::json_row(
-                &tx,
+                tx,
                 "SELECT payload_json FROM identity_resources WHERE resource_key=?1",
                 &resource.key()?,
             )?
@@ -575,7 +590,7 @@ impl Store {
                 return Err(IdentityFailureV1::PermissionDenied.into());
             }
         }
-        let upper = upper.unwrap_or(audit_head(&tx)?.0);
+        let upper = upper.unwrap_or(audit_head(tx)?.0);
         anyhow::ensure!(upper >= after, "invalid human snapshot bound");
         let mut predicates = vec![allowed(&current, ResourcePermissionV1::Metadata)];
         if filter.view == HumanReadViewV1::Content {
@@ -683,7 +698,7 @@ impl Store {
             "events"
         };
         let receipt = self.record_human_read_checked(
-            &tx,
+            tx,
             current.principal(),
             Some(&current),
             action,
@@ -704,6 +719,8 @@ impl Store {
             }),
         })
     }
+    // Scoped read-audit variant; production wiring pending.
+    #[allow(dead_code)]
     pub(super) fn record_human_read(
         &self,
         tx: &Transaction<'_>,

@@ -172,6 +172,8 @@ impl SourceWriter for AuthenticationMaintenanceWriter<'_, '_> {
     }
 }
 
+// Migration source value contract; keep the by-value shape.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum MaintenanceSource {
     Store(ReviewStoreMaintenance),
     Authentication(AuthenticationReviewMaintenance),
@@ -305,10 +307,14 @@ fn acquire_next<T>(
     })
 }
 
+// Migration source value contract; keep the by-value shape.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum StartupSource {
     Store(ReviewStoreStartup),
     Authentication(AuthenticationReviewStartup),
 }
+// Migration source value contract; keep the by-value shape.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum RetainedSource {
     Store(Store),
     Authentication(AuthenticationAudit),

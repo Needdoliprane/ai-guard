@@ -240,7 +240,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&version),
         "unsupported control schema"
     );
-    if matches!(version, 13 | 14 | 15) {
+    if matches!(version, 13..=15) {
         super::kubernetes_admission::validate_recovery_marker(db)?;
     }
     // The retention marker and every applied segment against the ledger.
@@ -346,7 +346,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         }
         if stored.event.kind == super::broker_checkpoint_migration::GENESIS_KIND {
             anyhow::ensure!(
-                matches!(version, 12 | 13 | 14 | 15),
+                matches!(version, 12..=15),
                 "broker checkpoint marker requires schema12 or schema13"
             );
             super::broker_checkpoint_migration::marker(&stored.event)?;
@@ -354,7 +354,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         }
         if stored.event.kind == "control.kubernetes.create.recovery.genesis" {
             anyhow::ensure!(
-                matches!(version, 13 | 14 | 15),
+                matches!(version, 13..=15),
                 "held-create recovery marker requires schema13"
             );
             super::kubernetes_admission::recovery_event(&stored.event)?;

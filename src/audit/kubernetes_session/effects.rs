@@ -66,6 +66,8 @@ pub(crate) const AUTO_INDEX_COUNTS: [(&str, u32); 4] = [
 /// tables and events exist.
 /// Liveness of one Kubernetes session for the G05 egress decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// Closed Kubernetes session egress-binding target; production wiring pending.
+#[allow(dead_code)]
 pub(crate) enum EgressBindingState {
     /// Released, attached, not ended, and its profile asked for broker egress.
     Active,
@@ -80,6 +82,8 @@ pub(crate) enum EgressBindingState {
 /// Read-only predicate for the egress decision transaction `tx` of this
 /// tenant store. It proves only that the subject is live and opted in;
 /// destinations stay decided by the tenant egress policy.
+// Closed Kubernetes session egress-binding target; production wiring pending.
+#[allow(dead_code)]
 pub(crate) fn egress_binding_active(
     tx: &Connection,
     reservation_id: &str,
@@ -1076,22 +1080,22 @@ fn write_projection(
                     ],
                 )? == 1,
             )?;
-            if let KubernetesSessionEffectOutcomeV2::Applied { object_uid, .. } = &result.outcome {
-                if record.post_state.workspace_claim_uid.as_deref() == Some(object_uid.as_str()) {
-                    let fresh: bool = tx.query_row(
+            if let KubernetesSessionEffectOutcomeV2::Applied { object_uid, .. } = &result.outcome
+                && record.post_state.workspace_claim_uid.as_deref() == Some(object_uid.as_str())
+            {
+                let fresh: bool = tx.query_row(
                         "SELECT NOT EXISTS(SELECT 1 FROM kubernetes_session_claims WHERE reservation_id=?1)",
                         [&record.reservation_id],
                         |row| row.get(0),
                     )?;
-                    if fresh {
-                        // The primary key refuses any claim UID already bound
-                        // to another reservation: a claim is never reused (Q7).
-                        tx.execute(
+                if fresh {
+                    // The primary key refuses any claim UID already bound
+                    // to another reservation: a claim is never reused (Q7).
+                    tx.execute(
                             "INSERT INTO kubernetes_session_claims(claim_uid,reservation_id,bound_seq) VALUES(?1,?2,?3)",
                             params![object_uid, record.reservation_id, stored.seq],
                         )
                         .map_err(|_| Failure::Conflict)?;
-                    }
                 }
             }
         }

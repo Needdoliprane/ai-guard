@@ -11,6 +11,8 @@ pub enum ReviewBindingFailureV1 {
     PermissionDenied,
     MigrationRequired,
     NotFound,
+    // Closed Review binding failure contract; production wiring pending.
+    #[allow(dead_code)]
     Unavailable,
     Integrity,
 }
@@ -96,8 +98,11 @@ fn public_text(value: &str, maximum: usize) -> anyhow::Result<()> {
 // from_json path also rejects duplicate JSON keys and enforces the byte bound.
 macro_rules! validated_dto {
     ($name:ident, $wire:ident, $maximum:expr, { $($(#[$meta:meta])* $field:ident : $ty:ty),+ $(,)? }) => {
+        // Review binding DTO contract; the receipt DTO awaits production wiring.
+        #[allow(dead_code)]
         #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
         pub struct $name { $($(#[$meta])* pub $field:$ty),+ }
+        #[allow(dead_code)]
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct $wire { $($(#[$meta])* $field:$ty),+ }
@@ -110,6 +115,8 @@ macro_rules! validated_dto {
             }
         }
         impl $name {
+            // Explicit from_json path is exercised by unit tests; production wiring pending.
+            #[allow(dead_code)]
             pub fn from_json(bytes:&[u8])->anyhow::Result<Self> {
                 require(bytes.len() <= $maximum)?;
                 let value=crate::json::decode_unique(bytes,32).map_err(|_|ReviewBindingFailureV1::InvalidRequest)?;
@@ -339,6 +346,8 @@ validated_dto!(ReviewBindingReceiptV1, ReviewBindingReceiptWire, 4096, {
     version:u32,operation_id:String,input_hash:String,binding_id:String,
     binding_revision:u64,audit_seq:i64,audit_hash:String
 });
+// Closed Review binding receipt contract; production wiring pending.
+#[allow(dead_code)]
 impl ReviewBindingReceiptV1 {
     pub fn validate(&self) -> anyhow::Result<()> {
         require(self.version == 1 && self.audit_seq > 0)?;
@@ -349,6 +358,8 @@ impl ReviewBindingReceiptV1 {
         digest(&self.audit_hash)
     }
 }
+// Closed Review binding mutation result contract; production wiring pending.
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize)]
 pub struct ReviewBindingMutationResultV1 {
     pub version: u32,

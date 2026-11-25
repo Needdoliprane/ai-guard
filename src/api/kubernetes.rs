@@ -332,13 +332,12 @@ async fn claim(
                 .sqlite_api()?
                 .claim_kubernetes_create(&identity, &authorization, &input)
                 .map_err(|e| failure(&store, e))?;
-            if let Some(proof) = fresh.as_ref() {
-                if proof.claim() != &input
+            if let Some(proof) = fresh.as_ref()
+                && (proof.claim() != &input
                     || proof.receipt() != &body.receipt
-                    || proof.snapshot() != &body.snapshot
-                {
-                    return Err(unavailable_reply());
-                }
+                    || proof.snapshot() != &body.snapshot)
+            {
+                return Err(unavailable_reply());
             }
             let emitting = fresh.is_some()
                 && body.disposition == KubernetesCreateDispositionV1::EmitOnce

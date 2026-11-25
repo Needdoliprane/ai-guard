@@ -80,6 +80,7 @@ mod relay_admission;
 mod store_io;
 mod supervision;
 mod workload;
+pub(crate) use auth::AuthenticatedControlRecoveryV2;
 pub(crate) use auth::AuthenticatedReviewRunnerCredential;
 pub use auth::GatewayControlRecoveryRetirementV2;
 #[cfg(test)]
@@ -88,7 +89,6 @@ pub(crate) use auth::authenticate_review_runner_fixture;
 pub(crate) use auth::with_authenticated_control_recovery_for_test;
 #[cfg(test)]
 pub(crate) use auth::with_control_recovery_auth_pair_for_test;
-pub(crate) use auth::{AuthenticatedControlRecoveryV2, ControlRecoveryUsageV2};
 use auth::{CredentialIndex, CredentialRole, ReadIdentity, RunnerIdentity, bearer};
 pub use oidc::{OidcClaimRuleV1, OidcClaimsMappingV1, OidcGateway, OidcGatewayConfigV1};
 

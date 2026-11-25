@@ -1,5 +1,7 @@
 //! Internal one-shot held CREATE. Production activation remains unavailable;
 //! returned observations grant no handle or mutation authority by themselves.
+// Closed held-CREATE target; production wiring pending.
+#![allow(dead_code)]
 use super::{journal::AdmissionJournal, permission::FreshKubernetesCreatePermission};
 use crate::control::kubernetes_admission::{
     KubernetesCreateOutcomeV1, KubernetesCreateUnknownReasonV1,

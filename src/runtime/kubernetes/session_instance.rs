@@ -19,6 +19,8 @@ use super::{
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
+// The json macro is used by the inline test module; keep the import.
+#[allow(unused_imports)]
 use serde_json::{Map, Value, json};
 use std::fmt;
 

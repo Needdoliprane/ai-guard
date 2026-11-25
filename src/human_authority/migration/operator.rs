@@ -892,7 +892,7 @@ impl PrivatePreparationDirectory {
 
 pub fn observe_private_file_binding(file: &PrivateFile) -> Result<SourceStorageBindingV1> {
     file.persistent_revalidate()?;
-    super::super::startup::observe_human_storage_binding(file.path()).map_err(Into::into)
+    super::super::startup::observe_human_storage_binding(file.path())
 }
 
 #[cfg(test)]

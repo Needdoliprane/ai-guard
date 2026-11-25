@@ -312,12 +312,10 @@ impl RelayRegistry {
             terminal_observation_receipt,
             ..
         } = &response.outcome
+            && (*worker_revision != terminal.worker_revision
+                || terminal_observation_receipt != &terminal.receipt)
         {
-            if *worker_revision != terminal.worker_revision
-                || terminal_observation_receipt != &terminal.receipt
-            {
-                return Err(RelayOwnerError::Scope);
-            }
+            return Err(RelayOwnerError::Scope);
         }
         self.change_channel_history(
             entry,

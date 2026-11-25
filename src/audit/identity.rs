@@ -188,6 +188,8 @@ fn require_identity_projection(db: &Connection) -> anyhow::Result<()> {
         Err(IdentityFailureV1::MigrationRequired.into())
     }
 }
+// Closed human-access schema guard; production wiring pending.
+#[allow(dead_code)]
 pub(super) fn require_human_access(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if [5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
@@ -452,7 +454,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         if stored.event.kind == super::human_workers::GENESIS_KIND {
             let (expected, revision) = super::human_workers::genesis(db)?;
             invalid(
-                matches!(version, 10 | 11 | 12 | 13 | 14 | 15)
+                matches!(version, 10..=15)
                     && seen_human_access
                     && seen_broker_access
                     && !seen_worker_access
@@ -480,7 +482,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         }
         if stored.event.kind == super::human_workers::READ_KIND {
             invalid(
-                matches!(version, 10 | 11 | 12 | 13 | 14 | 15)
+                matches!(version, 10..=15)
                     && seen_worker_access
                     && stored.event.source == "gateway"
                     && stored.event.provenance == "observed"
@@ -530,7 +532,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     invalid(seen_genesis)?;
     invalid(([5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&version)) == seen_human_access)?;
     invalid(([7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&version)) == seen_broker_access)?;
-    invalid((matches!(version, 10 | 11 | 12 | 13 | 14 | 15)) == seen_worker_access)?;
+    invalid((matches!(version, 10..=15)) == seen_worker_access)?;
     let mut expected = projection.rows(genesis.seq, &genesis.hash)?;
     for (table, query) in QUERIES {
         let mut statement = db.prepare(query)?;
@@ -779,6 +781,8 @@ impl Store {
     /// Modern trusted-control entrance. The epoch serializes authority changes;
     /// it does not authenticate the supplied actor or grant human approval.
     /// Startup/source14 validation remains mandatory before this can succeed.
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn mutate_identity_scoped(
         &self,
         epoch: &crate::human_authority::HumanSourcesWriteEpoch,
@@ -863,6 +867,8 @@ impl Store {
     /// Exact three-operation provisioning under the same write epoch and real
     /// SQLite transaction. No serialized scope or stopped-control assertion can
     /// construct the retained source/epoch needed by this entrance.
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn provision_local_human_scoped(
         &self,
         epoch: &crate::human_authority::HumanSourcesWriteEpoch,
@@ -900,7 +906,7 @@ impl Store {
             )?;
             super::human_workers::require_mutation_capability(
                 mutation,
-                matches!(version, 10 | 11 | 12 | 13 | 14 | 15),
+                matches!(version, 10..=15),
             )?;
             super::human_rights::require_mutation_capability(mutation, rights_access)?;
         }
@@ -936,10 +942,7 @@ impl Store {
             mutation,
             [7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&version),
         )?;
-        super::human_workers::require_mutation_capability(
-            mutation,
-            matches!(version, 10 | 11 | 12 | 13 | 14 | 15),
-        )?;
+        super::human_workers::require_mutation_capability(mutation, matches!(version, 10..=15))?;
         super::human_rights::require_mutation_capability(mutation, rights_access)?;
         let value = serde_json::to_value(mutation)?;
         invalid(self.redactor.value(&value) == value)?;
@@ -996,6 +999,8 @@ impl Store {
     ) -> anyhow::Result<Option<HumanAccountV1>> {
         self.human_account_impl(None, principal)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn human_account_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -1034,6 +1039,8 @@ impl Store {
     ) -> anyhow::Result<AuthenticationMembershipSnapshotV1> {
         self.authentication_membership_snapshot_impl(None, principal)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn authentication_membership_snapshot_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -1104,6 +1111,8 @@ impl Store {
     ) -> anyhow::Result<Vec<MembershipV1>> {
         self.identity_memberships_impl(None, principal)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn identity_memberships_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -1144,6 +1153,8 @@ impl Store {
     ) -> anyhow::Result<Option<ResourceGrantV1>> {
         self.identity_resource_grant_impl(None, resource)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn identity_resource_grant_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -1186,6 +1197,8 @@ impl Store {
     ) -> anyhow::Result<AuthorizedScopeV1> {
         self.authorize_human_context_impl(None, principal, membership_id, expected_revision, mode)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn authorize_human_context_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -1241,9 +1254,9 @@ impl Store {
         expected_revision: u64,
         mode: ContextModeV1,
     ) -> anyhow::Result<AuthorizedScopeV1> {
-        require_identity_read(&tx)?;
+        require_identity_read(tx)?;
         let account: HumanAccountV1 = json_row(
-            &tx,
+            tx,
             "SELECT payload_json FROM identity_accounts WHERE principal_key=?1",
             key,
         )?
@@ -1252,13 +1265,13 @@ impl Store {
             return Err(IdentityFailureV1::IdentityRevoked.into());
         }
         let membership: MembershipV1 = json_row(
-            &tx,
+            tx,
             "SELECT payload_json FROM identity_memberships WHERE membership_id=?1",
             membership_id,
         )?
         .ok_or(IdentityFailureV1::ContextRevoked)?;
         invalid(membership.tenant_id == self.tenant_id)?;
-        let authorization_revision = authorization_revision(&tx)?;
+        let authorization_revision = authorization_revision(tx)?;
         let scope =
             crate::identity::authorize_context(principal, &membership, mode, expected_revision)?
                 .at_authorization_revision(authorization_revision);
@@ -1275,6 +1288,8 @@ impl Store {
     ) -> anyhow::Result<Option<ResourceGrantV1>> {
         self.authorized_resource_grant_impl(None, scope, resource, permission)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn authorized_resource_grant_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -1315,6 +1330,8 @@ impl Store {
     pub fn identity_authorization_revision(&self) -> anyhow::Result<u64> {
         self.identity_authorization_revision_impl(None)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn identity_authorization_revision_scoped(
         &self,
         access: &HumanSourceAccess<'_>,

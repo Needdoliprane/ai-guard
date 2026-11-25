@@ -398,6 +398,8 @@ impl Store {
         self.relay_retention_status_with_access(None, limit)
     }
 
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn relay_retention_status_scoped(
         &self,
         access: &HumanSourceAccess<'_>,

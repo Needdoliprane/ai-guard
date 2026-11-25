@@ -113,11 +113,11 @@ pub(super) fn require_session(
             let event: Event = serde_json::from_str(&row?)?;
             let mutation: IdentityMutationV1 =
                 serde_json::from_value(event.data["mutation"].clone())?;
-            if let IdentityChangeV1::ResourceGrant { grant, .. } = mutation.change {
-                if grant.resource == resource {
-                    found = Some(grant);
-                    break;
-                }
+            if let IdentityChangeV1::ResourceGrant { grant, .. } = mutation.change
+                && grant.resource == resource
+            {
+                found = Some(grant);
+                break;
             }
         }
         found

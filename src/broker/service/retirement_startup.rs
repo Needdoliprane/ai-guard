@@ -44,6 +44,8 @@ enum State {
     Running,
     Completed(Arc<StopRecoveryReportV1>),
 }
+// Error returns the verified receipt for recovery; keep the value contract.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum InstallError {
     Retained(JournalError),
     Returned {
@@ -232,6 +234,8 @@ impl StartupOwner {
             .ok_or(JournalError::LimitExceeded)?;
         Ok(())
     }
+    // A refusal returns the verified receipt for recovery; keep the contract.
+    #[allow(clippy::result_large_err)]
     pub(super) fn retain_verified(
         &self,
         verified: VerifiedRetirementReceipt,
@@ -381,11 +385,11 @@ impl StartupOwner {
             .retirement_index
             .checked_add(1)
             .ok_or(JournalError::LimitExceeded)?;
-        if let Some(full) = full {
-            if full.retire_local_slot(verified).is_err() {
-                data.failed = true;
-                return Err(JournalError::Conflict);
-            }
+        if let Some(full) = full
+            && full.retire_local_slot(verified).is_err()
+        {
+            data.failed = true;
+            return Err(JournalError::Conflict);
         }
         drop(data.verified.take());
         let _ = data.result.take();

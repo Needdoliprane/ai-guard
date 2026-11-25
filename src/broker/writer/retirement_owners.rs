@@ -332,6 +332,8 @@ impl RetirementOwners {
         }
     }
 
+    // Generic retirement retry outcome; keep the explicit return type.
+    #[allow(clippy::type_complexity)]
     pub(super) fn retry<I: Send + 'static, O: Send + 'static>(
         self: &Arc<Self>,
         continuation: RetirementContinuation<I>,

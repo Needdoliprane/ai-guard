@@ -451,6 +451,8 @@ impl<'a, 'db> ReviewStoreMaintenanceWriter<'a, 'db> {
             .inspect_review_source_migration(self.transaction()?, self.token)
     }
 
+    // Closed Review startup read target; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn durable_wall_floor(&self) -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
         durable_wall_floor(self.transaction()?)
     }
@@ -794,6 +796,8 @@ impl Store {
     /// Reuse the read-write maintenance opener and its Immediate transaction.
     /// Opening may change SQLite journal state or recover or create sidecars.
     /// Confirmation does not install the schema or append an audit event.
+    // Closed Review startup egress confirmation target; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn confirm_egress_format15(
         token: &HumanMaintenanceSourceToken,
         redactor: Redactor,

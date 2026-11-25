@@ -2178,41 +2178,45 @@ impl ManagedRuntime {
                 // baseline, and only after a complete transport/IO result.
                 let mut completed = None;
                 let mut terminal_validation_error = None;
-                if completed_transport.is_some() {
-                    if let (Some(created), Some(terminal)) =
+                if completed_transport.is_some()
+                    && let (Some(created), Some(terminal)) =
                         (stop_snapshot.as_ref(), fallback_stop.as_ref())
-                    {
-                        match self.validate_handle(&created.handle).and_then(|()| {
-                            terminal.validate_terminal(self.binding.kind, &created.observation)?;
-                            if let Some(result) = completed_transport.as_ref() {
-                                result.state.validate_terminal(self.binding.kind)?;
-                                let started = chrono::DateTime::parse_from_rfc3339(&result.state.started_at)?;
-                                let finished = chrono::DateTime::parse_from_rfc3339(&result.state.finished_at)?;
-                                ensure!(terminal.process.started_at == Some(started)
+                {
+                    match self.validate_handle(&created.handle).and_then(|()| {
+                        terminal.validate_terminal(self.binding.kind, &created.observation)?;
+                        if let Some(result) = completed_transport.as_ref() {
+                            result.state.validate_terminal(self.binding.kind)?;
+                            let started =
+                                chrono::DateTime::parse_from_rfc3339(&result.state.started_at)?;
+                            let finished =
+                                chrono::DateTime::parse_from_rfc3339(&result.state.finished_at)?;
+                            ensure!(
+                                terminal.process.started_at == Some(started)
                                     && terminal.process.finished_at == Some(finished)
-                                    && terminal.process.exit_code == u32::try_from(result.state.exit_code).ok(),
-                                    "fallback terminal contradicts the completed transport observation");
-                            }
-                            Ok(())
-                        }) {
-                            Ok(()) => {
-                                if let Some(result) = completed_transport.take() {
-                                    completed = Some(ManagedRetainedExecution {
-                                        execution: RetainedExecution {
-                                            result,
-                                            instance: CreatedInstance {
-                                                kind: self.binding.kind,
-                                                name: created.handle.name.clone(),
-                                                target: created.handle.id.clone(),
-                                            },
-                                        },
-                                        created: created.clone(),
-                                        terminal: terminal.clone(),
-                                    });
-                                }
-                            }
-                            Err(error) => terminal_validation_error = Some(error),
+                                    && terminal.process.exit_code
+                                        == u32::try_from(result.state.exit_code).ok(),
+                                "fallback terminal contradicts the completed transport observation"
+                            );
                         }
+                        Ok(())
+                    }) {
+                        Ok(()) => {
+                            if let Some(result) = completed_transport.take() {
+                                completed = Some(ManagedRetainedExecution {
+                                    execution: RetainedExecution {
+                                        result,
+                                        instance: CreatedInstance {
+                                            kind: self.binding.kind,
+                                            name: created.handle.name.clone(),
+                                            target: created.handle.id.clone(),
+                                        },
+                                    },
+                                    created: created.clone(),
+                                    terminal: terminal.clone(),
+                                });
+                            }
+                        }
+                        Err(error) => terminal_validation_error = Some(error),
                     }
                 }
                 Err(RetainedLegacyExecutionFailure {

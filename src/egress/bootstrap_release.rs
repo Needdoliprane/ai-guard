@@ -11,7 +11,7 @@ pub(crate) const HELD_CHALLENGE_ENV: &str = "AI_GUARD_EGRESS_HELD_V1";
 
 const PREFIX: &[u8] = b"AI-GUARD-EGRESS-RELEASE-V1 ";
 const FRAME_BYTES: usize = PREFIX.len() + 36 + 1;
-const _: () = assert!(FRAME_BYTES + 1 <= 512);
+const _: () = assert!(FRAME_BYTES < 512);
 
 /// Encode exactly one frame. The sender closes its write endpoint after the
 /// single write. Both the complete frame and EOF are required at the receiver.

@@ -236,6 +236,8 @@ impl OwnedBatchIo {
     }
     /// Infallible transfer. Without a current runtime, Child and archive remain
     /// in unstarted until an async observer can start the same owner task.
+    // Closed batch IO owner constructor; production wiring pending.
+    #[allow(dead_code)]
     pub(super) fn own(child: Child, input: Option<File>, stdout_limit: usize) -> Self {
         Self::own_with_input(child, input, stdout_limit, STDERR_LIMIT, None, None)
     }

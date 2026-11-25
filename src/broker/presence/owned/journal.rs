@@ -485,10 +485,10 @@ impl<K: Kind> Journal<K> {
                 break;
             }
             let (pending, file): (K::Pending, _) = read(p, &directory, PENDING, K::RECORD_BYTES)?;
-            if let Some(expected) = head.replacement.take() {
-                if pending != expected {
-                    return Err(PresenceError::UnsafeState);
-                }
+            if let Some(expected) = head.replacement.take()
+                && pending != expected
+            {
+                return Err(PresenceError::UnsafeState);
             }
             K::check_pending(&p.pins, head.last.as_ref(), &pending)
                 .map_err(|_| PresenceError::UnsafeState)?;

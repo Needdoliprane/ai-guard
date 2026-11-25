@@ -271,8 +271,8 @@ impl NativeOwners {
             .legacy_custody
             .lock()
             .map_err(|_| EnforcerError::Unhealthy)?;
-        if let Some(targets) = &custody.targets {
-            if !targets
+        if let Some(targets) = &custody.targets
+            && (!targets
                 .slots
                 .lock()
                 .map_err(|_| EnforcerError::Unhealthy)?
@@ -281,10 +281,9 @@ impl NativeOwners {
                     .prospective
                     .lock()
                     .map_err(|_| EnforcerError::Unhealthy)?
-                    .is_empty()
-            {
-                return Err(EnforcerError::NotIdle);
-            }
+                    .is_empty())
+        {
+            return Err(EnforcerError::NotIdle);
         }
         if self.failed()
             || custody

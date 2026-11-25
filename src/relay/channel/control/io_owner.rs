@@ -14,6 +14,8 @@ struct IoBudget {
 struct IoResources {
     role: Arc<RoleLease>,
 }
+// Bounded by-value IO command; keep value semantics across the channel.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum IoCommand {
     Check,
     Prepare(
@@ -24,6 +26,8 @@ pub(super) enum IoCommand {
     ),
     Dispatched(RequestPayloadV1, Arc<Binding>, Arc<Secrets>),
     Confirmed(RequestPayloadV1, crate::relay::RelayReceiptV1, Arc<Secrets>),
+    // Closed relay channel read command; production wiring pending.
+    #[allow(dead_code)]
     ChannelGet(uuid::Uuid),
     ChannelSave(ChannelFact, Arc<Secrets>),
     ChannelHistory(uuid::Uuid),
@@ -36,6 +40,8 @@ pub(super) enum IoCommand {
         crate::tls::ClientTrust,
     ),
 }
+// Bounded by-value IO reply; keep value semantics across the channel.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum IoReply {
     Unit,
     Channel(Option<ChannelFact>),
@@ -57,16 +63,16 @@ impl PartialEq for IoReply {
         )
     }
 }
+type IoJoinResult = (
+    Outbox,
+    Option<ChannelJournal>,
+    Result<IoReply, ControlError>,
+);
+
 struct IoState {
     ready: Option<Outbox>,
     channels: Option<ChannelJournal>,
-    pending: Option<
-        JoinHandle<(
-            Outbox,
-            Option<ChannelJournal>,
-            Result<IoReply, ControlError>,
-        )>,
-    >,
+    pending: Option<JoinHandle<IoJoinResult>>,
     poisoned: bool,
 }
 

@@ -418,6 +418,8 @@ impl RetirementSubmission {
             .map_err(|_| EnforcerError::Unhealthy)
     }
 
+    // A refusal returns the same verified receipt for retention; keep the contract.
+    #[allow(clippy::result_large_err)]
     pub(crate) fn retain_verified(
         &self,
         verified: crate::broker::enforcer::retirement::VerifiedRetirementReceipt,
@@ -850,6 +852,8 @@ impl PreclaimControlV1 {
     /// Install the real input before the consumer can suspend. A refused
     /// installation returns that same input, so the existing retention path
     /// can preserve it without reconstructing authority or growing a retry map.
+    // A refused installation returns the same authorized input; keep the contract.
+    #[allow(clippy::result_large_err)]
     pub(crate) fn retain_authorized_submission(
         &self,
         request: &AbandonBeforeClaimV1,

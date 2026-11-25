@@ -88,10 +88,10 @@ pub(super) async fn run_owned(
                 let identity = interrupt(shutdown, client.identity(&p)).await?;
                 let view = interrupt(shutdown, client.view(&p)).await?;
                 validate_handshake(&p, &identity, &view)?;
-                if let Some(binding) = binding_this_run {
-                    if binding != identity.binding_revision {
-                        return Err(PresenceError::Conflict);
-                    }
+                if let Some(binding) = binding_this_run
+                    && binding != identity.binding_revision
+                {
+                    return Err(PresenceError::Conflict);
                 }
                 if let Some(pending) = &head.pending {
                     if identity != pending.identity
@@ -190,7 +190,7 @@ pub(super) fn validate_handshake(
     view: &BrokerViewV1,
 ) -> Result<()> {
     if identity.version != 1
-        || !matches!(identity.schema_version, 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13)
+        || !matches!(identity.schema_version, 6..=13)
         || identity.tenant_id != p.scope.expected_tenant_id
         || identity.control_namespace_uuid != p.scope.control_namespace_uuid.to_string()
         || identity.broker_id != p.config.broker_id

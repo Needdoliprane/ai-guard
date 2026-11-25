@@ -38,6 +38,8 @@ impl<I> RetirementFailure<I> {
             | Self::Unknown { error } => *error,
         }
     }
+    // Closed retirement continuation input recovery; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn into_input(self) -> Option<I> {
         match self {
             Self::NotQueued { input, .. } => Some(input),
@@ -623,6 +625,8 @@ impl StopWriterClient {
             })
             .map(|(_, receive)| receive)
     }
+    // RetirementFailure returns the verified receipt for recovery; keep the contract.
+    #[allow(clippy::result_large_err)]
     pub(crate) async fn retry_final_retirement(
         &self,
         continuation: RetirementContinuation<VerifiedRetirementReceipt>,
@@ -634,6 +638,8 @@ impl StopWriterClient {
             })
             .await
     }
+    // RetirementFailure returns the verified receipt for recovery; keep the contract.
+    #[allow(clippy::result_large_err)]
     pub(crate) async fn finalize_retirement(
         &self,
         receipt: VerifiedRetirementReceipt,
@@ -645,6 +651,8 @@ impl StopWriterClient {
             })
             .await
     }
+    // RetirementFailure returns the verified receipt for recovery; keep the contract.
+    #[allow(clippy::result_large_err)]
     pub(crate) fn recover_final_retirement(
         &self,
         operation: Uuid,
@@ -657,6 +665,8 @@ impl StopWriterClient {
     }
     /// Unlike the legacy bounded-wait callback above, this distinguishes a
     /// live owner before a reconciler considers querying/admitting any work.
+    // RetirementFailure returns the verified receipt for recovery; keep the contract.
+    #[allow(clippy::result_large_err)]
     pub(crate) fn recover_final_retirement_state(
         &self,
         operation: Uuid,

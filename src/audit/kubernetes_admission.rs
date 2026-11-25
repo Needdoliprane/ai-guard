@@ -11,11 +11,10 @@ mod replay;
 #[cfg(test)]
 mod schema12_tests;
 pub(crate) use mutations::{ConfirmedKubernetesCreateResult, FreshKubernetesCreateClaimCommit};
-pub(crate) use recovery::{
-    KubernetesCreateRecoveryAuthorization, KubernetesCreateRecoveryLookupAuthorization,
-    PreparedRecovery,
-};
+pub(crate) use recovery::PreparedRecovery;
 
+// Closed Kubernetes admission schema guard; production wiring pending.
+#[allow(dead_code)]
 fn require_schema(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     // The legacy fixture issuer remains schema8-only. Mutation entry points
@@ -151,7 +150,7 @@ pub(super) fn workload_audit_identity(
     record.change.validate()?;
     let is_result = matches!(record.change, model::Change::Result { .. });
     model::conflict(
-        matches!(record.version, 1 | 2 | 3)
+        matches!(record.version, 1..=3)
             && (record.version == 3)
                 == matches!(record.change, model::Change::RecoverBeforeEmission { .. })
             && record.version == *record.authorization.version()

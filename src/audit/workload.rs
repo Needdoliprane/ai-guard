@@ -179,10 +179,10 @@ pub(super) fn validate_control_time_floor(
             |row| row.get(0),
         )
         .optional()?;
-    if let Some(previous) = previous {
-        if at < parse_time(&previous)? {
-            return Err(WorkloadFailureV1::ClockRegression.into());
-        }
+    if let Some(previous) = previous
+        && at < parse_time(&previous)?
+    {
+        return Err(WorkloadFailureV1::ClockRegression.into());
     }
     Ok(())
 }
@@ -341,12 +341,11 @@ fn preflight(db: &Connection, change: &Change) -> anyhow::Result<Projection> {
                 .digests
                 .insert(input.sha256_digest.clone(), owner);
         }
-        if let WorkloadSubjectV1::Worker { worker_id, .. } = &input.subject {
-            if let Some((attempt,generation,seq))=db.query_row("SELECT attempt_id,generation,event_seq FROM workload_worker_endpoints WHERE worker_id=?1",[worker_id],|row|Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?,row.get::<_,i64>(2)?))).optional()? {
+        if let WorkloadSubjectV1::Worker { worker_id, .. } = &input.subject
+            && let Some((attempt,generation,seq))=db.query_row("SELECT attempt_id,generation,event_seq FROM workload_worker_endpoints WHERE worker_id=?1",[worker_id],|row|Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?,row.get::<_,i64>(2)?))).optional()? {
                 let generation = u64::try_from(generation).context("invalid negative workload endpoint generation")?;
                 projection.endpoints.insert(worker_id.clone(),(RelayEndpointV1{worker_id:worker_id.clone(),attempt_id:attempt,generation},seq));
             }
-        }
     }
     Ok(projection)
 }
@@ -422,6 +421,8 @@ impl Store {
     ) -> anyhow::Result<Option<WorkloadDigestOwnerV1>> {
         self.workload_digest_binding_with_access(None, digest)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn workload_digest_binding_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -475,6 +476,8 @@ impl Store {
             },
         )
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn issue_workload_binding_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -500,6 +503,8 @@ impl Store {
             },
         )
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn revoke_workload_binding_scoped(
         &self,
         access: &HumanSourceAccess<'_>,

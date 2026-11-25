@@ -24,6 +24,8 @@ struct CompletionAttempt {
 
 /// Confirmed local metadata only. This grants no runtime, Full, HTTP or
 /// authentication capability and cannot be constructed from a sequence alone.
+// Closed cold-audit completion receipt; production wiring pending.
+#[allow(dead_code)]
 pub(in crate::broker) struct ConfirmedColdAudit {
     operation_id: Uuid,
     head: RevisionRefV1,
@@ -32,6 +34,8 @@ pub(in crate::broker) struct ConfirmedColdAudit {
 
 opaque!(CompletionProgress, CompletionAttempt, ConfirmedColdAudit);
 
+// Closed cold-audit completion receipt; production wiring pending.
+#[allow(dead_code)]
 impl ConfirmedColdAudit {
     pub(in crate::broker) fn operation_id(&self) -> Uuid {
         self.operation_id

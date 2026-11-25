@@ -45,6 +45,8 @@ impl TenantRelayIo {
     }
     /// Synchronous filesystem admission; the broker must call this only inside
     /// its bounded, retained blocking segment, never on an async worker thread.
+    // Each argument is a distinct owned channel resource; keep the explicit signature.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn open(
         parent: &Directory,
         scope: &crate::broker::journal::JournalScopeV1,
@@ -78,6 +80,8 @@ impl TenantRelayIo {
     pub(crate) async fn join_pending(&self) -> Result<(), ControlError> {
         self.io.join_pending().await
     }
+    // Closed relay channel control read; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) async fn channel(
         &self,
         job: uuid::Uuid,

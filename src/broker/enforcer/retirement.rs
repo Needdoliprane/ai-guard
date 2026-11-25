@@ -119,6 +119,8 @@ struct FullActor {
     // its handle and this thread constructed its own runtime context.
     runtime_installed: Arc<AtomicBool>,
     failures: Arc<NativeStopFailures>,
+    // Retained native owner handle; read by the pending Full recovery wiring.
+    #[allow(dead_code)]
     owners: NativeOwners,
 }
 type FinalResult = EnforcerResult<(RetiredReceiptV1, LedgerHeadV1)>;

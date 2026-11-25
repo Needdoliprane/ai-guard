@@ -13,6 +13,8 @@ use crate::{
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
+// Closed CREATE response projection; production wiring pending.
+#[allow(dead_code)]
 pub(super) fn parse(
     intent: &KubernetesCreateIntentV1,
     bytes: &[u8],
@@ -93,8 +95,8 @@ pub(super) fn validate(
     {
         return Err(KubernetesError::InvalidResponse);
     }
-    if let Some(status) = &observation.status {
-        if status
+    if let Some(status) = &observation.status
+        && (status
             .phase
             .as_deref()
             .is_some_and(|phase| phase != "Pending")
@@ -111,10 +113,9 @@ pub(super) fn validate(
             || status.unexpected_fields_present
             || status.pod_scheduled.as_ref().is_some_and(|condition| {
                 condition.status != "False" || condition.reason != "SchedulingGated"
-            })
-        {
-            return Err(KubernetesError::InvalidResponse);
-        }
+            }))
+    {
+        return Err(KubernetesError::InvalidResponse);
     }
     // Reuse the historical normalizer unchanged, against the new request that
     // includes its mandatory gate. Persist/hash the real admitted spec, not
@@ -125,6 +126,8 @@ pub(super) fn validate(
     preflight::validate_admitted(&requested, &admitted)
 }
 
+// Closed CREATE response projection; production wiring pending.
+#[allow(dead_code)]
 fn metadata(value: &Value) -> KubernetesResult<KubernetesCreateMetadataV1> {
     let fields = object(value)?;
     if let Some(value) = fields.get("creationTimestamp") {
@@ -189,6 +192,8 @@ fn metadata(value: &Value) -> KubernetesResult<KubernetesCreateMetadataV1> {
     })
 }
 
+// Closed CREATE response projection; production wiring pending.
+#[allow(dead_code)]
 fn status(value: &Value) -> KubernetesResult<KubernetesCreateStatusV1> {
     let fields = object(value)?;
     let phase = fields
@@ -279,9 +284,13 @@ fn status(value: &Value) -> KubernetesResult<KubernetesCreateStatusV1> {
     })
 }
 
+// Closed CREATE response projection; production wiring pending.
+#[allow(dead_code)]
 fn object(value: &Value) -> KubernetesResult<&Map<String, Value>> {
     value.as_object().ok_or(KubernetesError::InvalidResponse)
 }
+// Closed CREATE response projection; production wiring pending.
+#[allow(dead_code)]
 fn string(fields: &Map<String, Value>, name: &str) -> KubernetesResult<String> {
     fields
         .get(name)
@@ -289,12 +298,18 @@ fn string(fields: &Map<String, Value>, name: &str) -> KubernetesResult<String> {
         .map(str::to_owned)
         .ok_or(KubernetesError::InvalidResponse)
 }
+// Closed CREATE response projection; production wiring pending.
+#[allow(dead_code)]
 fn unexpected(fields: &Map<String, Value>, allowed: &[&str]) -> bool {
     fields.keys().any(|key| !allowed.contains(&key.as_str()))
 }
+// Closed CREATE response projection; production wiring pending.
+#[allow(dead_code)]
 fn count(value: usize) -> KubernetesResult<u32> {
     u32::try_from(value).map_err(|_| KubernetesError::InvalidResponse)
 }
+// Closed CREATE response projection; production wiring pending.
+#[allow(dead_code)]
 fn array_count(fields: &Map<String, Value>, name: &str) -> KubernetesResult<Option<u32>> {
     fields
         .get(name)

@@ -154,20 +154,18 @@ impl HumanSourcesMaintenancePlanV1 {
         let mut physical = BTreeMap::<(u64, u64), &HumanMaintenanceSourceV1>::new();
         for view in plan.prior.iter().chain(std::iter::once(&plan.target)) {
             for source in &view.sources {
-                if let Some(previous) = logical.insert(source.source_id, source) {
-                    if !same_logical_source(previous, source) {
-                        return Err(HumanAuthorityFailure::InvalidManifest);
-                    }
+                if let Some(previous) = logical.insert(source.source_id, source)
+                    && !same_logical_source(previous, source)
+                {
+                    return Err(HumanAuthorityFailure::InvalidManifest);
                 }
                 if let Some(previous) =
                     physical.insert(source.storage_binding.source_identity(), source)
-                {
-                    if !same_logical_source(previous, source)
+                    && (!same_logical_source(previous, source)
                         || previous.storage_binding.parent_identity()
-                            != source.storage_binding.parent_identity()
-                    {
-                        return Err(HumanAuthorityFailure::InvalidManifest);
-                    }
+                            != source.storage_binding.parent_identity())
+                {
+                    return Err(HumanAuthorityFailure::InvalidManifest);
                 }
             }
         }
@@ -468,10 +466,9 @@ impl HumanSourcesMaintenanceGuard {
                 }
                 if let Some(previous) =
                     config_roles.insert(identity.physical_identity(), descriptor.kind)
+                    && previous != descriptor.kind
                 {
-                    if previous != descriptor.kind {
-                        return Err(HumanAuthorityFailure::ConfigurationMismatch);
-                    }
+                    return Err(HumanAuthorityFailure::ConfigurationMismatch);
                 }
                 file.persistent_revalidate()
                     .map_err(|_| HumanAuthorityFailure::StorageUnavailable)?;

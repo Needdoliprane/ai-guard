@@ -205,6 +205,8 @@ enum AttemptLease {
         _lease: Arc<crate::broker::discovery::RoleLease>,
     },
 }
+// Both variants carry large durable stop receipts; keep value semantics.
+#[allow(clippy::large_enum_variant)]
 enum AttemptRequest {
     Recovery(RestoreRequiredStopV1),
     // No source, ledger identity or durable Cancel is fabricated for V1.
@@ -463,10 +465,10 @@ impl RecoveryAttemptOwner {
                     worker.cause_history.native_thread_failed(payload);
                     worker.failures.fetch_add(1, Ordering::SeqCst);
                 }
-                if !worker.normal_idle_exit.load(Ordering::SeqCst) {
-                    if let Some(failed) = &worker.native_failed {
-                        failed.store(true, Ordering::SeqCst);
-                    }
+                if !worker.normal_idle_exit.load(Ordering::SeqCst)
+                    && let Some(failed) = &worker.native_failed
+                {
+                    failed.store(true, Ordering::SeqCst);
                 }
             })
             .map_err(|error| {

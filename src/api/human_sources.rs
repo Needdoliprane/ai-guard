@@ -133,7 +133,7 @@ impl OwnedHumanGateway {
     pub(super) fn admit(self: &Arc<Self>) -> ApiResult<Arc<HumanOwnedUsage>> {
         self.check()?;
         self.usages
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 (current < CLOSED - 1).then(|| current + 1)
             })
             .map_err(|_| unavailable())?;
@@ -496,6 +496,8 @@ impl OwnedHumanGateway {
         })
     }
 
+    // Each argument is a distinct authorized read input; keep the explicit signature.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn memberships(
         &self,
         index: usize,
@@ -522,6 +524,8 @@ impl OwnedHumanGateway {
         })
     }
 
+    // Each argument is a distinct authorized read input; keep the explicit signature.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn events(
         &self,
         index: usize,

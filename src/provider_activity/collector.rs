@@ -188,6 +188,8 @@ struct State {
     coverage: CoverageFinalization,
 }
 
+// Bounded collector state value; keep value semantics.
+#[allow(clippy::large_enum_variant)]
 enum CoverageFinalization {
     Open,
     Live(ActivitySummary),

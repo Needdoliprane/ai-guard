@@ -1,4 +1,6 @@
 //! Held-CREATE over authenticated control HTTP with owned filesystem admission.
+// Closed held-CREATE target; production wiring pending.
+#![allow(dead_code)]
 use super::{
     coordinator::{CoordinatorError, HeldCreateCompletion, pending_error, pre_send_unknown},
     journal::{AdmissionJournal, CandidateRefusal},

@@ -565,6 +565,8 @@ impl Store {
     pub fn relay_grant(&self, input: &RelayGrantV1) -> anyhow::Result<RelayReceiptV1> {
         self.relay_grant_with_access(None, input)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn relay_grant_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -616,6 +618,8 @@ impl Store {
     pub fn relay_revoke(&self, input: &RelayRevokeV1) -> anyhow::Result<RelayReceiptV1> {
         self.relay_revoke_with_access(None, input)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn relay_revoke_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -669,6 +673,8 @@ impl Store {
     ) -> anyhow::Result<RelayReceiptV1> {
         self.relay_send_with_access(None, identity, input)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn relay_send_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -833,6 +839,8 @@ impl Store {
     ) -> anyhow::Result<RelayInboxV1> {
         self.relay_inbox_with_access(None, identity, after, limit)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn relay_inbox_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -965,6 +973,8 @@ impl Store {
     ) -> anyhow::Result<RelayReceiptV1> {
         self.relay_ack_with_access(None, identity, input)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn relay_ack_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -1033,6 +1043,8 @@ impl Store {
     pub fn relay_prune(&self, input: &RelayPruneV1) -> anyhow::Result<RelayReceiptV1> {
         self.relay_prune_with_access(None, input)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn relay_prune_scoped(
         &self,
         access: &HumanSourceAccess<'_>,

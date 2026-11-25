@@ -268,16 +268,15 @@ impl Execution<'_> {
                         .context(diagnostics::ReservationMode::from_replay_only(replay_only))
                 })?;
             if let Err(error) = self.generation_current() {
-                if let ExecutionEnforcerV1::Legacy(client) = enforcer {
-                    if let Err(cancel) = client
+                if let ExecutionEnforcerV1::Legacy(client) = enforcer
+                    && let Err(cancel) = client
                         .legacy_cancel_prospective(
                             &target,
                             self.context.cancel_generation().current(),
                         )
                         .await
-                    {
-                        return Err(error.context(cancel));
-                    }
+                {
+                    return Err(error.context(cancel));
                 }
                 return Err(error);
             }
@@ -286,16 +285,15 @@ impl Execution<'_> {
                 .await
                 .context(diagnostics::RegistrationStage::BeginExchange)?;
             if let Err(error) = self.generation_current() {
-                if let ExecutionEnforcerV1::Legacy(client) = enforcer {
-                    if let Err(cancel) = client
+                if let ExecutionEnforcerV1::Legacy(client) = enforcer
+                    && let Err(cancel) = client
                         .legacy_cancel_prospective(
                             &target,
                             self.context.cancel_generation().current(),
                         )
                         .await
-                    {
-                        return Err(error.context(cancel));
-                    }
+                {
+                    return Err(error.context(cancel));
                 }
                 return Err(error);
             }
@@ -731,7 +729,7 @@ impl Execution<'_> {
     ) -> BoxFuture<'phase, Result<crate::runtime::ManagedPrearmedOutcome>> {
         async move {
             let PreparedHelper {
-                worker,
+                worker: _,
                 draft,
                 preparation,
                 policy,
@@ -752,7 +750,7 @@ impl Execution<'_> {
             } else {
                 None
             };
-            let spec = managed::broker_helper_spec(&policy)?;
+            let spec = managed::broker_helper_spec(policy)?;
             let recovered = match preparation.owned() {
                 Some(owned) => Some(owned.clone()),
                 None => runtime.lookup_created(&spec).await?,

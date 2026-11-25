@@ -321,10 +321,10 @@ async fn forward(State(state): State<ControlRelay>, request: Request) -> Respons
     };
     // An identity refusal is allowed before body EOF. Other responses must not
     // turn a failed bounded upload into an apparent successful operation.
-    if !matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
-        if let Some(failure) = upload_failure(&progress) {
-            return failure.into_response();
-        }
+    if !matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
+        && let Some(failure) = upload_failure(&progress)
+    {
+        return failure.into_response();
     }
     if status == StatusCode::SWITCHING_PROTOCOLS
         || status.is_success() && progress.load(Ordering::Acquire) != COMPLETE

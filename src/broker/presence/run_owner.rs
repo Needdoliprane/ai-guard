@@ -112,10 +112,10 @@ pub(super) fn start(
             result = &mut joined => result,
         };
         for result in [results.0, results.1] {
-            if let Err(error) = result {
-                if error != PresenceError::Stopped {
-                    return Err(error);
-                }
+            if let Err(error) = result
+                && error != PresenceError::Stopped
+            {
+                return Err(error);
             }
         }
         Ok(())

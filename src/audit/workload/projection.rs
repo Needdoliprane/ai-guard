@@ -195,10 +195,10 @@ impl Projection {
             .bindings
             .get(record.change.credential_id())
             .map(|(binding, _)| binding);
-        if let Some(previous) = previous {
-            if now < parse_time(&previous.updated_at)? {
-                return Err(WorkloadFailureV1::ClockRegression.into());
-            }
+        if let Some(previous) = previous
+            && now < parse_time(&previous.updated_at)?
+        {
+            return Err(WorkloadFailureV1::ClockRegression.into());
         }
         let binding = match &record.change {
             Change::Issue { input } => {

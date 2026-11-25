@@ -649,6 +649,8 @@ mod native_logout_tests;
 /// Private modern ports. Every mutation borrows the exact live WriteEpoch;
 /// capacity candidates remain accounting facts and cannot substitute for it.
 impl AuthenticationAudit {
+    // Owned authentication append variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn append_typed_owned(
         &self,
         epoch: &crate::human_authority::HumanSourcesWriteEpoch,
@@ -664,6 +666,8 @@ impl AuthenticationAudit {
             )?
             .receipt)
     }
+    // Owned authentication append variant; production wiring pending.
+    #[allow(dead_code)]
     fn append_owned(
         &self,
         epoch: &crate::human_authority::HumanSourcesWriteEpoch,
@@ -675,6 +679,8 @@ impl AuthenticationAudit {
         self.inner
             .append_entry_with_candidates(Some(&access), entry, candidates)
     }
+    // Owned authentication append variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn begin_verified_initial_owned(
         &self,
         epoch: &crate::human_authority::HumanSourcesWriteEpoch,
@@ -699,6 +705,8 @@ impl AuthenticationAudit {
             Some(candidates),
         )
     }
+    // Owned authentication append variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn begin_verified_initial_after_membership_owned(
         &self,
         epoch: &crate::human_authority::HumanSourcesWriteEpoch,
@@ -723,6 +731,8 @@ impl AuthenticationAudit {
             Some(candidates),
         )
     }
+    // Owned authentication append variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn begin_verified_initial_with_candidates_owned(
         &self,
         epoch: &crate::human_authority::HumanSourcesWriteEpoch,
@@ -744,6 +754,8 @@ impl AuthenticationAudit {
             Some(candidates),
         )
     }
+    // Owned authentication mutation variant; production wiring pending.
+    #[allow(dead_code)]
     fn mutate_owned(
         &self,
         epoch: &crate::human_authority::HumanSourcesWriteEpoch,
@@ -759,6 +771,8 @@ impl AuthenticationAudit {
             None,
         )
     }
+    // Owned authentication mutation variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn admit_session_owned(
         &self,
         epoch: &crate::human_authority::HumanSourcesWriteEpoch,
@@ -774,6 +788,8 @@ impl AuthenticationAudit {
             )?
             .receipt)
     }
+    // Owned authentication mutation variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn refresh_pending_owned(
         &self,
         epoch: &crate::human_authority::HumanSourcesWriteEpoch,
@@ -792,6 +808,8 @@ impl AuthenticationAudit {
             },
         )
     }
+    // Owned authentication mutation variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn rotate_session_owned(
         &self,
         epoch: &crate::human_authority::HumanSourcesWriteEpoch,
@@ -814,6 +832,8 @@ impl AuthenticationAudit {
             )?
             .receipt)
     }
+    // Owned authentication mutation variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn close_session_owned(
         &self,
         epoch: &crate::human_authority::HumanSourcesWriteEpoch,
@@ -834,6 +854,8 @@ impl AuthenticationAudit {
             )?
             .receipt)
     }
+    // Owned authentication mutation variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn begin_native_logout_during_refresh_owned(
         &self,
         epoch: &crate::human_authority::HumanSourcesWriteEpoch,
@@ -856,6 +878,9 @@ impl AuthenticationAudit {
             )?
             .receipt)
     }
+    // Each argument is a distinct durable logout input; keep the explicit signature.
+    // Owned authentication mutation variant; production wiring pending.
+    #[allow(dead_code, clippy::too_many_arguments)]
     pub(crate) fn record_native_logout_after_refresh_closed_owned(
         &self,
         epoch: &crate::human_authority::HumanSourcesWriteEpoch,
@@ -880,6 +905,8 @@ impl AuthenticationAudit {
             )?
             .receipt)
     }
+    // Owned authentication ledger read; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn session_current_owned(
         &self,
         access: &AuthenticationSourceAccess<'_>,
@@ -893,6 +920,8 @@ impl AuthenticationAudit {
             Ok(r.session_current(session_id))
         })
     }
+    // Owned authentication ledger read; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn fingerprint_seen_owned(
         &self,
         access: &AuthenticationSourceAccess<'_>,
@@ -901,6 +930,8 @@ impl AuthenticationAudit {
         self.inner
             .read_projection_access(Some(access), |r| Ok(r.fingerprint_seen(fingerprint)))
     }
+    // Owned authentication ledger read; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn verify_owned(
         &self,
         access: &AuthenticationSourceAccess<'_>,
@@ -908,6 +939,8 @@ impl AuthenticationAudit {
         self.inner
             .read_projection_access(Some(access), |r| Ok(r.verified.clone()))
     }
+    // Owned authentication ledger read; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn capacity_plan_owned(
         &self,
         access: &AuthenticationSourceAccess<'_>,
@@ -915,6 +948,8 @@ impl AuthenticationAudit {
         self.inner
             .read_projection_access(Some(access), |r| Ok(r.budget.plan.clone()))
     }
+    // Owned authentication ledger read; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn format_version_owned(
         &self,
         access: &AuthenticationSourceAccess<'_>,
@@ -927,6 +962,8 @@ impl AuthenticationAudit {
             Ok(5)
         })
     }
+    // Owned authentication ledger read; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn validate_capacity_tenants_owned(
         &self,
         access: &AuthenticationSourceAccess<'_>,
@@ -944,6 +981,8 @@ impl AuthenticationAudit {
             Ok(())
         })
     }
+    // Owned authentication ledger read; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn durable_wall_floor_owned(
         &self,
         access: &AuthenticationSourceAccess<'_>,
@@ -952,6 +991,8 @@ impl AuthenticationAudit {
             Ok(chrono::DateTime::parse_from_rfc3339(&r.wall_floor)?.with_timezone(&chrono::Utc))
         })
     }
+    // Owned authentication read variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn backup_new_owned(
         &self,
         access: &AuthenticationSourceAccess<'_>,

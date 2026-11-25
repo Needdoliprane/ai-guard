@@ -408,6 +408,8 @@ pub(super) fn schema_version(db: &Connection) -> Result<i64> {
     Ok(version)
 }
 
+// Closed authentication schema guard; production wiring pending.
+#[allow(dead_code)]
 pub(super) fn validate_schema(db: &Connection) -> Result<()> {
     validate_schema_mode(db, false)
 }
@@ -1056,6 +1058,8 @@ impl Replay {
         Ok(())
     }
 
+    // Each argument is a distinct validated logout input; keep the explicit signature.
+    #[allow(clippy::too_many_arguments)]
     fn validate_native_logout_end(
         &self,
         record: &AuthenticationRecordV1,

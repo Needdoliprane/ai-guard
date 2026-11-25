@@ -271,6 +271,8 @@ impl Store {
         ))?;
         self.observe_session_with_evidence(identity, &authorization.evidence, id, false)
     }
+    // Closed Kubernetes session recovery target; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn observe_recoverable_kubernetes_session(
         &self,
         identity: &BrokerIdentityV1,

@@ -198,6 +198,8 @@ opaque_input!(AcceptInput);
 opaque_input!(RejectInput);
 opaque_input!(CancelInputV1);
 
+// Bounded by-value writer command; keep value semantics across the queue.
+#[allow(clippy::large_enum_variant)]
 enum Command {
     CompleteColdAudit {
         input: ColdAuditCompletion,
@@ -469,13 +471,7 @@ impl ClientState {
             mpsc::TrySendError::Full(_) => WriterCallFailure::QueueFull,
             mpsc::TrySendError::Disconnected(_) => WriterCallFailure::Unavailable,
         });
-        if let Err(failure) = sent {
-            #[cfg(test)]
-            if let Some(cost) = cost {
-                cost.finish(false, false);
-            }
-            return Err(failure);
-        }
+        sent?;
         #[cfg(test)]
         if let Some(cost) = &cost {
             cost.sent();

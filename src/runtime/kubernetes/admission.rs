@@ -44,6 +44,8 @@ pub(crate) fn prepare(intent: &KubernetesCreateIntentV1) -> KubernetesResult<Pre
     profile::prepare(intent)
 }
 
+// Closed held-CREATE parsing target; production wiring pending.
+#[allow(dead_code)]
 pub(crate) fn parse_created_held(
     intent: &KubernetesCreateIntentV1,
     response: &[u8],

@@ -391,6 +391,8 @@ impl ExecutionIntentV1 {
         }
         serde_json::from_slice(bytes).map_err(|_| IntentError::InvalidIntent)
     }
+    // Each argument is a distinct projected intent field; keep the explicit signature.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_projection(
         plan_version: u32,
         operation_id: Uuid,

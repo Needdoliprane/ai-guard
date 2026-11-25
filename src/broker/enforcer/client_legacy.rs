@@ -513,15 +513,14 @@ impl Client {
                 .count())
     }
     pub(super) fn legacy_bound(&self, arm_id: &str) -> EnforcerResult<()> {
-        if let Some(legacy) = &self.legacy {
-            if let Some(retained) = legacy
+        if let Some(legacy) = &self.legacy
+            && let Some(retained) = legacy
                 .prospective
                 .lock()
                 .map_err(|_| EnforcerError::Unhealthy)?
                 .get(arm_id)
-            {
-                retained.bound.store(true, Ordering::SeqCst);
-            }
+        {
+            retained.bound.store(true, Ordering::SeqCst);
         }
         Ok(())
     }

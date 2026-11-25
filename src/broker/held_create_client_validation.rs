@@ -1,3 +1,5 @@
+// Closed held-CREATE client validation target; production wiring pending.
+#![allow(dead_code)]
 use super::*;
 use crate::{
     broker_registry::{format_time, parse_time},

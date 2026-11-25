@@ -40,7 +40,7 @@ impl ControlRecoveryAuthEpochV2 {
 
     fn acquire(&self) -> anyhow::Result<()> {
         self.leases
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 (current < RETIRED - 1).then(|| current + 1)
             })
             .map(|_| ())

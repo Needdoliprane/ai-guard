@@ -3,6 +3,8 @@ use super::*;
 use crate::audit::{HumanEventFilterV1, HumanStorePageV1};
 
 impl OwnedHumanGateway {
+    // Each argument is a distinct authorized read input; keep the explicit signature.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::api) fn recent(
         &self,
         index: usize,

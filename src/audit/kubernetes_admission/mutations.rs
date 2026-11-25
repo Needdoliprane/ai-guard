@@ -1,3 +1,5 @@
+// Closed Kubernetes admission mutation target; production wiring pending.
+#![allow(dead_code)]
 use super::*;
 use crate::broker_registry::BrokerIdentityV1;
 use crate::broker_registry::format_time;

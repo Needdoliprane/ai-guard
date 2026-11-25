@@ -65,6 +65,8 @@ pub(crate) struct HumanSourcesMigrationRequest {
 }
 
 /// A complete, checked private bundle. Its existence is not human readiness.
+// Closed migrated-sources bundle; production wiring pending.
+#[allow(dead_code)]
 pub(crate) struct MigratedHumanSources {
     owner: OwnedHumanSources,
     stores: BTreeMap<Uuid, Store>,
@@ -72,6 +74,8 @@ pub(crate) struct MigratedHumanSources {
     manifest: PrivateFile,
 }
 
+// Closed migrated-sources bundle accessors; production wiring pending.
+#[allow(dead_code)]
 impl MigratedHumanSources {
     pub(crate) fn owner(&self) -> &OwnedHumanSources {
         &self.owner

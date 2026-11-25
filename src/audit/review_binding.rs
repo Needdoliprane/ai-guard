@@ -43,6 +43,8 @@ fn require_modern(db: &Connection) -> anyhow::Result<()> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+// Durable serde binding-change contract; preserve the value shape.
+#[allow(clippy::large_enum_variant)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum BindingChangeV1 {
     Provision {
@@ -297,6 +299,8 @@ fn sql_row(snapshot: &ReviewBindingSnapshotV1, seq: i64) -> anyhow::Result<SqlRo
         S::Integer(seq),
     ])
 }
+// Closed Review binding ledger target; production wiring pending.
+#[allow(dead_code)]
 fn load_snapshot(
     db: &Connection,
     binding_id: &str,
@@ -318,6 +322,8 @@ fn load_snapshot(
         })
         .transpose()
 }
+// Closed Review binding ledger target; production wiring pending.
+#[allow(dead_code)]
 fn write_snapshot(
     db: &Connection,
     snapshot: &ReviewBindingSnapshotV1,
@@ -372,6 +378,8 @@ pub(super) fn validate(db: &Connection, tenant: &str) -> anyhow::Result<()> {
     replay(db, tenant).map(|_| ())
 }
 
+// Closed Review binding ledger target; production wiring pending.
+#[allow(dead_code)]
 fn receipt(stored: &StoredEvent, record: &BindingRecordV1) -> ReviewBindingReceiptV1 {
     ReviewBindingReceiptV1 {
         version: 1,
@@ -384,6 +392,8 @@ fn receipt(stored: &StoredEvent, record: &BindingRecordV1) -> ReviewBindingRecei
     }
 }
 
+// Closed Review binding ledger target; production wiring pending.
+#[allow(dead_code)]
 fn historical_result(
     stored: &StoredEvent,
     change: &BindingChangeV1,
@@ -479,6 +489,8 @@ fn validate_policy_accounts(
     Ok(())
 }
 
+// Closed Review binding ledger target; production wiring pending.
+#[allow(dead_code)]
 fn derive_session_grant(
     policy: &ReviewSessionBindingPolicyV1,
     session_id: &str,
@@ -522,6 +534,8 @@ fn derive_session_grant(
     Ok(grant)
 }
 
+// Closed Review binding mutation target; production wiring pending.
+#[allow(dead_code)]
 impl Store {
     /// Operator maintenance only. The owned write epoch, real modern source
     /// marker and private credential configuration are supplied by trusted glue.
@@ -695,6 +709,8 @@ fn compare_credential(
     )
 }
 
+// Closed Review binding ledger target; production wiring pending.
+#[allow(dead_code)]
 fn compare_retained_binding(
     current: &ReviewBindingSnapshotV1,
     retained: &RunnerReviewBindingV1,
@@ -733,17 +749,23 @@ impl VerifiedRunnerReviewBinding<'_, '_> {
     pub(crate) fn binding(&self) -> &RunnerReviewBindingV1 {
         &self.snapshot.binding
     }
+    // Closed Review binding read target; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn policy(&self) -> &ReviewSessionBindingPolicyV1 {
         &self.snapshot.policy
     }
     pub(crate) fn binding_digest(&self) -> &str {
         &self.snapshot.binding_digest
     }
+    // Closed Review binding read target; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn snapshot(&self) -> &ReviewBindingSnapshotV1 {
         &self.snapshot
     }
     /// Consent, admission and claim compare the exact server tuple retained by
     /// their target; no revision, generation, routing or project remapping.
+    // Closed Review binding read target; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn require_exact_binding(
         &self,
         retained: &RunnerReviewBindingV1,
@@ -785,6 +807,8 @@ impl VerifiedRunnerReviewBinding<'_, '_> {
     /// Only policy data selects owner/shares. There is no runner-supplied
     /// principal, organization, project, share or permission argument.
     /// This legacy Content grant is not proof of an approval ACL or consent.
+    // Closed Review binding read target; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn session_grant(&self, session_id: &str) -> anyhow::Result<ResourceGrantV1> {
         self.revalidate()?;
         derive_session_grant(&self.snapshot.policy, session_id)

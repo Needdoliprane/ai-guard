@@ -213,6 +213,8 @@ pub(crate) enum AuthenticationSourceMigrationState {
     Ordinary4 { prefix: AuthenticationReceiptV1 },
     Converted5 { anchor: AuthenticationReceiptV1 },
 }
+// Closed migration-state anchor read; production wiring pending.
+#[allow(dead_code)]
 impl AuthenticationSourceMigrationState {
     pub(crate) fn anchor(&self) -> Option<AuthenticationReceiptV1> {
         match self {
@@ -338,12 +340,16 @@ impl AuthenticationMaintenanceWriter<'_, '_> {
             },
         })
     }
+    // Closed maintenance read target; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn verification(&self) -> Result<AuthenticationVerificationV1> {
         Ok(self.checked()?.verified)
     }
     pub(crate) fn capacity_plan(&self) -> Result<Option<AuthenticationCapacityPlanV1>> {
         Ok(self.checked()?.budget.plan)
     }
+    // Closed maintenance read target; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn durable_wall_floor(&self) -> Result<chrono::DateTime<chrono::Utc>> {
         Ok(
             chrono::DateTime::parse_from_rfc3339(&self.checked()?.wall_floor)?

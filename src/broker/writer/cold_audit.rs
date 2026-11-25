@@ -145,6 +145,8 @@ impl ReservedColdAudit {
     /// enqueue without any new await, queue acquisition or replacement client.
     /// A receipt batch is still descriptive data; only the authenticated owner
     /// may choose to submit it, and the journal rechecks every exact entry.
+    // A refusal returns the exact batch for recovery; keep the contract.
+    #[allow(clippy::result_large_err)]
     pub(in crate::broker) fn submit(
         self,
         receipts: Vec<ExactStoredEventReceipt>,
@@ -217,6 +219,8 @@ impl ColdAuditCompletion {
 }
 
 impl ColdAuditCompletionWaiter {
+    // A refusal returns the exact batch for recovery; keep the contract.
+    #[allow(clippy::result_large_err)]
     pub(in crate::broker) async fn confirmed(
         self,
     ) -> Result<ConfirmedColdAudit, CompletionFailure<ColdAuditCompletion>> {

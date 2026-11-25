@@ -20,6 +20,8 @@ use crate::{
 };
 use std::sync::{Arc, atomic::AtomicBool};
 
+// Closed held-CREATE claim target; production wiring pending.
+#[allow(dead_code)]
 pub(crate) struct HeldCreateActivation {
     intent_hash: String,
     authority_fingerprint: String,
@@ -47,6 +49,8 @@ impl HeldCreateActivation {
         activation.revalidate(intent)?;
         Ok(activation)
     }
+    // Closed held-CREATE claim target; production wiring pending.
+    #[allow(dead_code)]
     fn revalidate(&self, intent: &KubernetesCreateIntentV1) -> KubernetesResult<()> {
         if self.intent_hash
             != intent
@@ -85,6 +89,8 @@ impl HeldCreateActivation {
     }
 }
 
+// Closed held-CREATE claim target; production wiring pending.
+#[allow(dead_code)]
 pub(crate) struct PendingHeldCreateClaim {
     activation: HeldCreateActivation,
     clock: Arc<dyn HostClock>,
@@ -92,6 +98,8 @@ pub(crate) struct PendingHeldCreateClaim {
     intent: KubernetesCreateIntentV1,
     prepared: PreparedHeldCreate,
 }
+// Claim outcome value contract; keep the by-value shape. Production wiring pending.
+#[allow(dead_code, clippy::large_enum_variant)]
 pub(crate) enum HeldCreateClaimOutcome {
     Ready {
         response: KubernetesCreateClaimResponseV1,
@@ -101,6 +109,8 @@ pub(crate) enum HeldCreateClaimOutcome {
         response: KubernetesCreateClaimResponseV1,
     },
 }
+// Closed held-CREATE claim target; production wiring pending.
+#[allow(dead_code)]
 pub(crate) struct FreshKubernetesCreatePermission {
     activation: HeldCreateActivation,
     clock: Arc<dyn HostClock>,
@@ -113,10 +123,14 @@ pub(crate) struct FreshKubernetesCreatePermission {
 
 // Both sources are opaque, non-serializable, and obtained from a live commit.
 // Boxing keeps a larger HTTP proof from enlarging every permission on the stack.
+// Closed held-CREATE claim target; production wiring pending.
+#[allow(dead_code)]
 enum ClaimProvenance {
     Store(Box<FreshKubernetesCreateClaimCommit>),
     Http(Box<LiveHeldCreateClaimAck>),
 }
+// Closed held-CREATE claim target; production wiring pending.
+#[allow(dead_code)]
 impl ClaimProvenance {
     fn tenant_id(&self) -> &str {
         match self {
@@ -146,10 +160,14 @@ impl ClaimProvenance {
     }
 }
 impl PendingHeldCreateClaim {
+    // Closed held-CREATE claim target; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn intent(&self) -> &KubernetesCreateIntentV1 {
         &self.intent
     }
 
+    // Closed held-CREATE claim target; production wiring pending.
+    #[allow(dead_code)]
     fn remote_context(&self, journal: &AdmissionJournal) -> KubernetesResult<()> {
         self.activation.revalidate(&self.intent)?;
         if journal.intent() != &self.intent
@@ -163,6 +181,8 @@ impl PendingHeldCreateClaim {
     }
 
     /// Synchronous preparation runs in the caller's admitted journal worker.
+    // Closed held-CREATE claim target; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn remote_attempt(
         &self,
         journal: &AdmissionJournal,
@@ -181,6 +201,8 @@ impl PendingHeldCreateClaim {
         })
     }
 
+    // Closed held-CREATE claim target; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn accept_remote_history(
         self,
         response: KubernetesCreateClaimResponseV1,
@@ -253,6 +275,8 @@ impl PendingHeldCreateClaim {
             },
         })
     }
+    // Closed held-CREATE claim target; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn begin(
         activation: HeldCreateActivation,
         intent: &KubernetesCreateIntentV1,
@@ -270,6 +294,8 @@ impl PendingHeldCreateClaim {
     ) -> KubernetesResult<Self> {
         Self::begin_with_clock(activation, clock, intent)
     }
+    // Closed held-CREATE claim target; production wiring pending.
+    #[allow(dead_code)]
     fn begin_with_clock(
         activation: HeldCreateActivation,
         clock: Arc<dyn HostClock>,
@@ -376,6 +402,8 @@ impl PendingHeldCreateClaim {
         })
     }
 }
+// Closed held-CREATE claim target; production wiring pending.
+#[allow(dead_code)]
 impl FreshKubernetesCreatePermission {
     pub(crate) fn intent(&self) -> &KubernetesCreateIntentV1 {
         &self.intent
@@ -462,6 +490,8 @@ impl FreshKubernetesCreatePermission {
     }
 }
 
+// Closed held-CREATE claim target; production wiring pending.
+#[allow(dead_code)]
 fn control_error(error: anyhow::Error) -> KubernetesError {
     use KubernetesCreateFailureV1::*;
     match error.downcast_ref::<KubernetesCreateFailureV1>() {

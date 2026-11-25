@@ -55,6 +55,8 @@ struct Receipt {
 // Untagged preserves the exact serialized binding-receipt shape in V1 records.
 // The recovery action selects and validates the appropriate closed DTO.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+// Durable untagged receipt serde contract; preserve the value shape.
+#[allow(clippy::large_enum_variant)]
 #[serde(untagged)]
 pub(super) enum RecordedReceipt {
     Binding(WorkloadBindingReceiptV1),
@@ -309,7 +311,7 @@ impl Operation {
     fn validate_protocol(&self, protocol: &ControlProtocolV1) -> Result<()> {
         protocol.validate().map_err(|_| E::Protocol)?;
         if protocol.version != 1
-            || !matches!(protocol.schema_version, 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13)
+            || !matches!(protocol.schema_version, 6..=13)
             || protocol.role != "runner"
             || protocol.tenant_id != self.recovery.expected_tenant_id
             || protocol.control_namespace_uuid.as_deref()

@@ -346,23 +346,22 @@ impl RelayRegistry {
         let admission = fact.admission.clone().ok_or(RelayOwnerError::Unknown)?;
         // Reuse a transition whose acknowledgement was lost before requesting
         // a different effect. Its durable identity is never overwritten early.
-        if let Some(previous) = fact.transition.clone() {
-            if fact
+        if let Some(previous) = fact.transition.clone()
+            && fact
                 .core
                 .as_ref()
                 .is_some_and(|core| core.revision == previous.expected_revision)
-            {
-                let response = source
-                    .client
-                    .transition_relay_channel(source.scope.tenant_id(), &admission, &previous)
-                    .await
-                    .map_err(|_| RelayOwnerError::Unknown)?;
-                let mut acknowledged = acknowledged_transition(fact, &previous, response.channel)?;
-                self.save(entry, tenant, io, &mut acknowledged).await?;
-                *fact = acknowledged;
-                if previous.transition == kind || fact.phase == AttachmentPhase::Closed {
-                    return Ok(());
-                }
+        {
+            let response = source
+                .client
+                .transition_relay_channel(source.scope.tenant_id(), &admission, &previous)
+                .await
+                .map_err(|_| RelayOwnerError::Unknown)?;
+            let mut acknowledged = acknowledged_transition(fact, &previous, response.channel)?;
+            self.save(entry, tenant, io, &mut acknowledged).await?;
+            *fact = acknowledged;
+            if previous.transition == kind || fact.phase == AttachmentPhase::Closed {
+                return Ok(());
             }
         }
         let revision = fact
@@ -495,10 +494,10 @@ impl RelayRegistry {
         let joined_io = tokio::time::timeout(Duration::from_secs(5), retained.io.join_pending())
             .await
             .is_ok_and(|result| result.is_ok());
-        if let Ok(view) = entry.view.lock() {
-            if let Some(fact) = view.as_ref() {
-                retained.fact = fact.clone();
-            }
+        if let Ok(view) = entry.view.lock()
+            && let Some(fact) = view.as_ref()
+        {
+            retained.fact = fact.clone();
         }
         retained.fact.local_joined = joined_transport && joined_io;
         retained.fact.phase = AttachmentPhase::Unknown;

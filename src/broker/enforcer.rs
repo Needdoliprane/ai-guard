@@ -488,21 +488,31 @@ impl ProspectiveRegistrationV1 {
         Ok(())
     }
 
+    // Closed enforcer snapshot accessor; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn arm(&self) -> &ArmV1 {
         &self.arm
     }
     pub(crate) fn arm_id(&self) -> &str {
         &self.arm.operation_id
     }
+    // Closed enforcer snapshot accessor; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn authority(&self) -> &RuntimeAuthority {
         &self.authority
     }
+    // Closed enforcer snapshot accessor; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn owned(&self) -> &OwnedContainerSnapshot {
         &self.owned
     }
+    // Closed enforcer snapshot accessor; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn control_origin_hash(&self) -> &str {
         &self.control_origin_hash
     }
+    // Closed enforcer snapshot accessor; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn tenant_id(&self) -> &str {
         &self.tenant_id
     }

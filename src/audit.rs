@@ -1610,10 +1610,10 @@ impl Store {
                 .store(checked_changes, Ordering::Release);
             Ok(())
         })();
-        if let Err(error) = &result {
-            if !review_access::admission_refusal(error, source_access.is_some()) {
-                self.storage_failure(&mut lease, error);
-            }
+        if let Err(error) = &result
+            && !review_access::admission_refusal(error, source_access.is_some())
+        {
+            self.storage_failure(&mut lease, error);
         }
         result
     }
@@ -1772,20 +1772,19 @@ impl Store {
             .context("invalid audit event count")?;
         if retention::classify::classify(&event.kind)
             == retention::classify::EventClass::Reclaimable(retention::ReclaimClassV1::Ordinary)
+            && let Some(floor) = retention::ledger::latest_floor(tx)?
         {
-            if let Some(floor) = retention::ledger::latest_floor(tx)? {
-                // An event declared at or before the archived horizon could be a
-                // retry of a reclaimed event whose identifier is no longer live.
-                let declared = chrono::DateTime::parse_from_rfc3339(&event.timestamp)?;
-                let archived = chrono::DateTime::parse_from_rfc3339(&floor)?;
-                if declared <= archived {
-                    return Err(retention::RetentionFailure::new(
-                        retention::failure::code::EVENT_PREDATES_ARCHIVE,
-                        "an ordinary event declared at or before the archived horizon is refused",
-                    )
-                    .with("archived_floor", floor)
-                    .into());
-                }
+            // An event declared at or before the archived horizon could be a
+            // retry of a reclaimed event whose identifier is no longer live.
+            let declared = chrono::DateTime::parse_from_rfc3339(&event.timestamp)?;
+            let archived = chrono::DateTime::parse_from_rfc3339(&floor)?;
+            if declared <= archived {
+                return Err(retention::RetentionFailure::new(
+                    retention::failure::code::EVENT_PREDATES_ARCHIVE,
+                    "an ordinary event declared at or before the archived horizon is refused",
+                )
+                .with("archived_floor", floor)
+                .into());
             }
         }
         if let capacity::Class::EgressTerminal(reservation) = &class {
@@ -2009,11 +2008,11 @@ impl Store {
                     error: None,
                 }
             };
-            if integrity.valid {
-                if let Err(error) = lease.verify_prefix(&self.backing, &tx) {
-                    integrity.valid = false;
-                    integrity.error = Some(error.to_string());
-                }
+            if integrity.valid
+                && let Err(error) = lease.verify_prefix(&self.backing, &tx)
+            {
+                integrity.valid = false;
+                integrity.error = Some(error.to_string());
             }
             let positive_bindings = if integrity.valid && changed {
                 Some(Arc::new(metadata::PositiveBindings::load(&tx)?))

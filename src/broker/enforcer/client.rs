@@ -276,6 +276,8 @@ impl VerifiedRetirementReceipt {
     pub(crate) fn accepted(&self) -> &ClosingAcceptanceV1 {
         &self.accepted
     }
+    // Closed enforcer client decomposition; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn into_parts(
         self,
     ) -> (
@@ -3203,6 +3205,8 @@ fn valid_uuid(value: &str) -> bool {
         .is_ok_and(|value_id| !value_id.is_nil() && value_id.hyphenated().to_string() == value)
 }
 
+// Closed enforcer recovery helper; production wiring pending.
+#[allow(dead_code)]
 pub(super) fn spawn_recovery_helper(
     root: &Directory,
     executable: &Path,

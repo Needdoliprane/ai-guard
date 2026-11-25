@@ -380,10 +380,11 @@ impl DurableAuthenticationAudit {
         if result.as_ref().is_err_and(|e| {
             e.downcast_ref::<source_authority::AuthenticationSourceFailure>()
                 == Some(&source_authority::AuthenticationSourceFailure::Mismatch)
-        }) {
-            if let Some(access) = access {
-                access.source().invalidate_authority(crate::human_authority::HumanAuthorityInvalidationReason::DurableAuthorityMismatch);
-            }
+        }) && let Some(access) = access
+        {
+            access.source().invalidate_authority(
+                crate::human_authority::HumanAuthorityInvalidationReason::DurableAuthorityMismatch,
+            );
         }
         if result.as_ref().is_err_and(|e| {
             !source_authority::admission_refusal(e)

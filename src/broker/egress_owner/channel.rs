@@ -1531,16 +1531,13 @@ impl<W: AsyncWrite + Unpin + Send> Owner<W> {
         let now_ms = self.now_ms();
         let mut stopped = Vec::new();
         for flow_id in self.ledger.check_deadlines(now_ms).map_err(|_| ())? {
-            match self.flows.get(&flow_id) {
-                Some(flow) => {
-                    let wire = if flow.socket.is_some() {
-                        TerminalFrame::Reset(EgressReasonV1::Timeout)
-                    } else {
-                        TerminalFrame::Rejected(EgressReasonV1::Timeout)
-                    };
-                    stopped.push((flow_id, wire, EgressCloseReasonV1::IdleTimeout));
-                }
-                None => {}
+            if let Some(flow) = self.flows.get(&flow_id) {
+                let wire = if flow.socket.is_some() {
+                    TerminalFrame::Reset(EgressReasonV1::Timeout)
+                } else {
+                    TerminalFrame::Rejected(EgressReasonV1::Timeout)
+                };
+                stopped.push((flow_id, wire, EgressCloseReasonV1::IdleTimeout));
             }
         }
         self.retire_flows(stopped).await

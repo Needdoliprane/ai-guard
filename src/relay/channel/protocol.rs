@@ -183,10 +183,10 @@ impl ResponseV1 {
     pub(super) fn validate(&self) -> Result<(), ChannelError> {
         exchange_header(self.version, &self.channel_id, self.epoch, self.operation)?;
         correlation(&self.correlation_id)?;
-        if let ResponseResultV1::SendRefusal(refusal) = &self.result {
-            if self.version != 2 || self.operation != OperationV1::Send || !refusal.valid() {
-                return Err(ChannelError::Protocol);
-            }
+        if let ResponseResultV1::SendRefusal(refusal) = &self.result
+            && (self.version != 2 || self.operation != OperationV1::Send || !refusal.valid())
+        {
+            return Err(ChannelError::Protocol);
         }
         if let ResponseResultV1::Ok(reply) = &self.result {
             if reply.operation() != self.operation {

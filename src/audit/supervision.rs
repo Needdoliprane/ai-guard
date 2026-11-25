@@ -887,6 +887,8 @@ impl Store {
     pub fn supervision_state(&self) -> anyhow::Result<SupervisionStateV1> {
         self.supervision_state_with_access(None)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn supervision_state_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -1077,6 +1079,8 @@ impl Store {
     ) -> anyhow::Result<AdmissionResultV1> {
         self.admit_supervised_with_access(None, request, policy, fresh_decision, jev, quota)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn admit_supervised_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -1116,6 +1120,8 @@ impl Store {
     ) -> anyhow::Result<MutationReceiptV1> {
         self.bind_legacy_intent_with_access(None, request)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn bind_legacy_intent_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -1137,6 +1143,8 @@ impl Store {
     pub fn arm_execution(&self, request: &ArmV1) -> anyhow::Result<ArmResultV1> {
         self.arm_execution_with_access(None, request)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn arm_execution_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -1174,6 +1182,8 @@ impl Store {
     pub fn execution_arm(&self, id: &str) -> anyhow::Result<Option<ArmResultV1>> {
         self.execution_arm_with_access(None, id)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn execution_arm_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -1212,6 +1222,8 @@ impl Store {
     ) -> anyhow::Result<MutationResultV1> {
         self.claim_armed_start_with_access(None, request)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn claim_armed_start_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -1282,6 +1294,8 @@ impl Store {
     ) -> anyhow::Result<HelperClaimResultV1> {
         self.claim_helper_start_with_access(None, request)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn claim_helper_start_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -1314,6 +1328,8 @@ impl Store {
     ) -> anyhow::Result<MutationReceiptV1> {
         self.observe_helper_with_access(None, request)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn observe_helper_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -1339,6 +1355,8 @@ impl Store {
     ) -> anyhow::Result<MutationReceiptV1> {
         self.record_helper_cleanup_with_access(None, request)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn record_helper_cleanup_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -1361,6 +1379,8 @@ impl Store {
     pub fn request_export(&self, request: &ExportRequestV1) -> anyhow::Result<MutationReceiptV1> {
         self.request_export_with_access(None, request)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn request_export_scoped(
         &self,
         access: &HumanSourceAccess<'_>,

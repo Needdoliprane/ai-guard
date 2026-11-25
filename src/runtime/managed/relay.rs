@@ -493,7 +493,10 @@ pub(crate) enum RelayExecState {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RelayExecClosure {
     pub(crate) local_joined: bool,
+    // Retained CLI terminal facts; read by the pending relay exec wiring.
+    #[allow(dead_code)]
     pub(crate) cli_exit_code: Option<i32>,
+    #[allow(dead_code)]
     pub(crate) cli_kill_requested: bool,
 }
 #[derive(Default)]

@@ -172,6 +172,8 @@ impl AuditClient {
 
     /// Exact data for this one authenticated control request. A positive seq
     /// alone, changed masking or a changed stored Event never grants an ACK.
+    // Closed retirement resume HTTP target; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) async fn post_retirement_resume_event(
         &self,
         event: &Event,
@@ -203,6 +205,8 @@ impl AuditClient {
 
     /// Validation before the local outbox append as well as before HTTP. A
     /// changed redaction is refused; it cannot silently change a bound digest.
+    // Closed retirement resume HTTP target; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn validate_retirement_resume_event(
         &self,
         event: &Event,
@@ -210,6 +214,8 @@ impl AuditClient {
         self.retirement_resume_body(event).map(|_| ())
     }
 
+    // Closed retirement resume HTTP target; production wiring pending.
+    #[allow(dead_code)]
     fn retirement_resume_body(
         &self,
         event: &Event,

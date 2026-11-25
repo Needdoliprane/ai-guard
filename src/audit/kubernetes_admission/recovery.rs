@@ -24,6 +24,8 @@ pub(super) fn validate_historical_identity(
 
 /// Only checked Store preparation constructs either variant. A JSON request
 /// cannot choose Historical, synthesize a proof, or reconstruct this enum.
+// Recovery authorization value contract; keep the by-value shape stable.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum PreparedRecovery {
     Historical(KubernetesCreateRecoveryLookupAuthorization),
     New(KubernetesCreateRecoveryAuthorization),

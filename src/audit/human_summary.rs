@@ -353,7 +353,8 @@ fn worker_groups(
     };
     let mut by_state = Vec::new();
     let mut held = 0u64;
-    let mut groups: BTreeMap<(String, String), (Vec<(String, u64)>, u64)> = BTreeMap::new();
+    type Groups = BTreeMap<(String, String), (Vec<(String, u64)>, u64)>;
+    let mut groups: Groups = BTreeMap::new();
     for worker in &workers {
         let state = label(&worker.state)?;
         by_state.push((state.clone(), 1));

@@ -205,12 +205,11 @@ impl RelayRegistry {
             .map_err(|_| RelayOwnerError::Unavailable)?
             .get(&(scope.tenant_id().into(), job))
             .cloned();
-        if let Some(entry) = entry.as_ref() {
-            if crate::broker::journal::canonical(&entry.source.scope).ok()
+        if let Some(entry) = entry.as_ref()
+            && crate::broker::journal::canonical(&entry.source.scope).ok()
                 != crate::broker::journal::canonical(scope).ok()
-            {
-                return Err(RelayOwnerError::Scope);
-            }
+        {
+            return Err(RelayOwnerError::Scope);
         }
         let fact = entry
             .as_ref()
@@ -396,10 +395,10 @@ impl RelayRegistry {
                     }
                 }
                 if let Some(owner) = retained.as_mut() {
-                    if let Some(transport) = owner.transport.as_mut() {
-                        if !transport.close_and_join().await.local_joined {
-                            return Err(RelayOwnerError::Unknown);
-                        }
+                    if let Some(transport) = owner.transport.as_mut()
+                        && !transport.close_and_join().await.local_joined
+                    {
+                        return Err(RelayOwnerError::Unknown);
                     }
                     if owner.fact.phase != AttachmentPhase::Closed {
                         return Err(RelayOwnerError::Unknown);

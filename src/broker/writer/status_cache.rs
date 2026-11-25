@@ -264,10 +264,10 @@ impl State {
                 head,
                 next,
             } => {
-                if let Some(mut value) = self.remove(operation) {
-                    if value.update_lifecycle(head, next).is_ok() {
-                        self.insert(value);
-                    }
+                if let Some(mut value) = self.remove(operation)
+                    && value.update_lifecycle(head, next).is_ok()
+                {
+                    self.insert(value);
                 }
             }
             Update::Head { operation, head } => {
@@ -286,12 +286,11 @@ impl State {
                 head,
                 request,
             } => {
-                if let Some(mut value) = self.remove(operation) {
-                    if value.entry().pending_rpc_count().is_some()
-                        && value.update_local(head, request).is_ok()
-                    {
-                        self.insert(value);
-                    }
+                if let Some(mut value) = self.remove(operation)
+                    && value.entry().pending_rpc_count().is_some()
+                    && value.update_local(head, request).is_ok()
+                {
+                    self.insert(value);
                 }
             }
         }

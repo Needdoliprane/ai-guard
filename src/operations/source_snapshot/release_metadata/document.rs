@@ -319,7 +319,7 @@ pub(super) fn parse_sums(bytes: &[u8]) -> std::result::Result<(String, String), 
         let (hex, rest) = line.split_once("  ")?;
         (lowercase_hex64(hex) && rest == name).then(|| hex.to_owned())
     };
-    match (digest(*first, MANIFEST_FILE), digest(*second, SBOM_FILE)) {
+    match (digest(first, MANIFEST_FILE), digest(second, SBOM_FILE)) {
         (Some(manifest), Some(sbom)) => Ok((manifest, sbom)),
         _ => Err(malformed()),
     }

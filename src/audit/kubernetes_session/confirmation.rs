@@ -83,6 +83,8 @@ impl Store {
 
     /// S2 counterpart: preserves the actual auth epoch, policy, retained usage
     /// and before-effect checks instead of accepting an operator-supplied DTO.
+    // Closed Kubernetes session before-effect target; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn confirm_kubernetes_session_control_before_effect(
         &self,
         auth: &AuthenticatedControlRecoveryV2,

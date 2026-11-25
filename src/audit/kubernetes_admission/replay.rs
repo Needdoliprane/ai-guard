@@ -84,7 +84,7 @@ pub(super) fn record(stored: &StoredEvent) -> anyhow::Result<Record> {
     record.intent.validate()?;
     let is_result = matches!(record.change, Change::Result { .. });
     conflict(
-        matches!(record.version, 1 | 2 | 3)
+        matches!(record.version, 1..=3)
             && record.version == *record.authorization.version()
             && (record.version == 3)
                 == matches!(record.change, Change::RecoverBeforeEmission { .. })
@@ -381,7 +381,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
             continue;
         }
         if stored.event.kind == migration::RECOVERY_GENESIS_KIND {
-            conflict(matches!(version, 13 | 14 | 15) && policy_seen && !recovery_seen)?;
+            conflict(matches!(version, 13..=15) && policy_seen && !recovery_seen)?;
             migration::recovery_event(&stored.event)?;
             recovery_seen = true;
             continue;
@@ -437,7 +437,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     conflict(
         create_genesis.is_some()
             && policy_seen == ([9, 10, 11, 12, 13, 14, 15].contains(&version))
-            && recovery_seen == matches!(version, 13 | 14 | 15),
+            && recovery_seen == matches!(version, 13..=15),
     )?;
     let mut statement = db.prepare(&format!("{SELECT_ROW} ORDER BY create_id"))?;
     let actual = statement

@@ -1,6 +1,8 @@
 //! Private held-CREATE retention, separate from legacy execution checkpoints.
 //! No disk data or method grants a CREATE permission. Partial writes are retained
 //! and refused on reopen; there is deliberately no repair or overwrite path.
+// Closed held-CREATE retention target; production wiring pending.
+#![allow(dead_code)]
 use super::PreparedHeldCreate;
 use crate::audit::{ConfirmedKubernetesCreateResult, FreshKubernetesCreateClaimCommit};
 use crate::broker::held_create_client::{ConfirmedHeldCreateResultAck, LiveHeldCreateClaimAck};
@@ -129,6 +131,8 @@ impl RecoveredHeldCreate {
 }
 
 impl AdmissionJournal {
+    // Each argument is a distinct durable journal input; keep the explicit signature.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare(
         root: Directory,
         protection: AdmissionJournalProtection,
@@ -253,14 +257,13 @@ impl AdmissionJournal {
         {
             return Err(JournalError::Conflict);
         }
-        if let Some(code) = refusal {
-            if self
+        if let Some(code) = refusal
+            && self
                 .refusal
                 .as_ref()
                 .is_some_and(|retained| retained.refusal != code)
-            {
-                return Err(JournalError::Conflict);
-            }
+        {
+            return Err(JournalError::Conflict);
         }
         let emission = self.emission.as_ref().ok_or(JournalError::InvalidInput)?;
         records::validate_candidate(&self.prepared, emission, candidate)?;
@@ -467,13 +470,12 @@ impl AdmissionJournal {
             .get("refusal.json")
             .map(|bytes| records::decode(bytes, 1024))
             .transpose()?;
-        if let Some(refusal) = &refusal {
-            if candidate.is_none()
+        if let Some(refusal) = &refusal
+            && (candidate.is_none()
                 || refusal.version != 1
-                || refusal.candidate_sha256 != disk.commitment("candidate.json")?
-            {
-                return Err(JournalError::Corrupt);
-            }
+                || refusal.candidate_sha256 != disk.commitment("candidate.json")?)
+        {
+            return Err(JournalError::Corrupt);
         }
         let ack: Option<AckRecord> = payloads
             .get("ack.json")

@@ -41,6 +41,8 @@ impl ExecutionEnforcerV1 {
             Self::Full3(client) => client.fence_unknown_prearm_write(),
         }
     }
+    // Closed prospective reservation target; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) async fn reserve_prospective(
         &self,
         target: ProspectiveRegistrationV1,

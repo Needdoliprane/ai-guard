@@ -76,6 +76,8 @@ impl CurrentRelayAuthority {
         &self.evidence.admission
     }
 }
+// Claim result value contract; keep the by-value shape.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum RelayExecClaimResult {
     Fresh(FreshRelayExecClaim),
     /// Historical receipt only. It cannot be converted to FreshRelayExecClaim.

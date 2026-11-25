@@ -337,6 +337,8 @@ impl PreparedPresence {
     fn screen(&self, value: &Value) -> Result<()> {
         screen_with(&self.secrets, value)
     }
+    // Closed presence run loop; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) async fn run(
         self,
         shutdown: watch::Receiver<bool>,
@@ -369,6 +371,8 @@ impl PreparedPresence {
     pub(crate) fn publication_interval(&self) -> std::time::Duration {
         std::time::Duration::from_secs(u64::from(self.config.interval_seconds))
     }
+    // Closed presence run loop; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) async fn run_with_checkpoints(
         self,
         snapshots: watch::Receiver<Option<crate::broker_registry::BrokerCheckpointSnapshotV1>>,

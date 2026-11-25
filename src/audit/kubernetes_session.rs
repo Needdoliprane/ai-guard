@@ -3,7 +3,7 @@ use super::*;
 use crate::broker_registry::{
     BrokerIdentityV1, BrokerRuntimeKindV1, BrokerV1, format_time, parse_time,
 };
-use crate::control::kubernetes_session::validation::{canonical, digest, hash, require, uuid};
+use crate::control::kubernetes_session::validation::{digest, hash, require, uuid};
 use crate::control::kubernetes_session::*;
 use chrono::{DateTime, Utc};
 
@@ -85,8 +85,7 @@ pub(crate) use authorization::{
 };
 pub(crate) use confirmation::ConfirmedSessionReservationV2;
 pub(crate) use control_recovery::{
-    ControlRecoverBeforeEffectV2, ControlRecoveryReceiptLookupV2,
-    KubernetesSessionControlRecoveryAuthorizationV2,
+    ControlRecoverBeforeEffectV2, KubernetesSessionControlRecoveryAuthorizationV2,
 };
 pub(super) fn initialize(store: &Store, tx: &Transaction<'_>) -> anyhow::Result<()> {
     migration::initialize(store, tx)

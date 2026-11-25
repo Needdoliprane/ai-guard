@@ -25,6 +25,8 @@ impl Store {
     ) -> anyhow::Result<HumanStorePageV1<HumanEventItemV1>> {
         self.human_events_recent_impl(None, scope, filter, upper, limit, transient)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn human_events_recent_scoped(
         &self,
         access: &HumanSourceAccess<'_>,

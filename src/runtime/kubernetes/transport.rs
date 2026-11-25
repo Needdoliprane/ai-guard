@@ -44,6 +44,8 @@ pub(super) struct Transport {
 }
 /// The outer Result is reserved for refusals before HTTP initiation. Once the
 /// consumed guard has admitted initiation, every failure is an uncertain effect.
+// Closed held-CREATE transport target; production wiring pending.
+#[allow(dead_code)]
 pub(super) enum HeldCreateResponse {
     Complete(Vec<u8>),
     Uncertain(KubernetesError),
@@ -181,6 +183,8 @@ impl Transport {
 
     /// One fixed retained-CREATE route, exact bytes from a nonserialized permit.
     /// Neither a caller-supplied URL/body nor the dry-run guard can reach it.
+    // Closed held-CREATE transport target; production wiring pending.
+    #[allow(dead_code)]
     pub(super) async fn create_held_pod(
         &self,
         binding: &KubernetesAuthorityV1,

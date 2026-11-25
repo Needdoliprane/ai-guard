@@ -907,7 +907,7 @@ impl Store {
                 usage_after: after,
             })
         })();
-        let receipt = applied.map_err(&orphan)?;
+        let receipt = applied.map_err(orphan)?;
         self.commit_checked(tx).map_err(|error| {
             error.context(
                 RetentionFailure::new(
@@ -1419,8 +1419,7 @@ fn verify_in(
     archives: &[PathBuf],
     report: &mut RetentionVerificationV1,
 ) -> Result<(), RetentionFailure> {
-    let (namespace, genesis_seq, genesis_hash) =
-        control_genesis(db).map_err(|error| sql_refusal(error))?;
+    let (namespace, genesis_seq, genesis_hash) = control_genesis(db).map_err(sql_refusal)?;
     let mut retention: BTreeMap<String, OpenedArchive> = BTreeMap::new();
     let mut exports = Vec::new();
     for path in archives {
@@ -1513,10 +1512,7 @@ fn verify_in(
                     "an event that the segment reclaims is still in the live store",
                 )),
                 (true, _) => {
-                    let candidate = live
-                        .next()
-                        .expect("peeked")
-                        .map_err(|error| sql_refusal(error))?;
+                    let candidate = live.next().expect("peeked").map_err(sql_refusal)?;
                     if same_row(&candidate, archived) {
                         Ok(())
                     } else {

@@ -323,6 +323,8 @@ impl Store {
     /// Offline provisioning of one opaque launch target under the source write
     /// epoch. Exact replay returns the committed receipt; a divergent command
     /// under the same operation is a conflict. No HTTP route writes the catalog.
+    // Closed session launch target catalog; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn provision_session_launch_target_scoped(
         &self,
         epoch: &crate::human_authority::HumanSourcesWriteEpoch,
@@ -554,6 +556,8 @@ fn preparation_row(tx: &Connection, operation_id: &str) -> anyhow::Result<Option
         .optional()?)
 }
 
+// Closed session launch target catalog; production wiring pending.
+#[allow(dead_code)]
 fn target_operation(tx: &Connection, operation_id: &str) -> anyhow::Result<Option<(i64, String)>> {
     Ok(tx
         .query_row(
@@ -591,6 +595,8 @@ fn preparation_receipt(
     }
 }
 
+// Closed session launch target catalog; production wiring pending.
+#[allow(dead_code)]
 fn target_receipt(
     command: &ProvisionSessionLaunchTargetV1,
     event: &StoredEvent,
@@ -631,6 +637,8 @@ fn preparation_event_id(operation_id: Uuid) -> String {
     bound_event_id(b"ai-guard:session-prepare:v1", operation_id)
 }
 
+// Closed session launch target catalog; production wiring pending.
+#[allow(dead_code)]
 fn provision_event_id(operation_id: Uuid) -> String {
     bound_event_id(b"ai-guard:session-launch-target:v1", operation_id)
 }

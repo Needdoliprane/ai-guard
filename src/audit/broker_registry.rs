@@ -381,10 +381,10 @@ impl Projection {
                     .filter(|(value, _)| value.incarnation_id == checkpoint.incarnation_id)
                     .map_or(0, |(value, _)| value.sequence);
                 conflict(checkpoint.previous_sequence == previous_sequence)?;
-                if let Some((_, received_at)) = previous {
-                    if now < parse_time(received_at)? {
-                        return Err(BrokerRegistryFailureV1::ClockRegression.into());
-                    }
+                if let Some((_, received_at)) = previous
+                    && now < parse_time(received_at)?
+                {
+                    return Err(BrokerRegistryFailureV1::ClockRegression.into());
                 }
                 self.checkpoints.insert(
                     broker.broker_id.clone(),
@@ -523,10 +523,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         }
         require(seen_genesis)?;
         let record: Record = serde_json::from_value(stored.event.data.clone())?;
-        require(
-            !matches!(record.change, Change::Checkpoint { .. })
-                || matches!(version, 12 | 13 | 14 | 15),
-        )?;
+        require(!matches!(record.change, Change::Checkpoint { .. }) || matches!(version, 12..=15))?;
         require(
             stored.event.kind == record.change.kind()
                 && parse_time(&record.received_at)? <= parse_time(&stored.received_at)?,
@@ -699,12 +696,12 @@ fn preflight(db: &Connection, change: &Change) -> anyhow::Result<Projection> {
             .brokers
             .insert(broker.broker_id.clone(), (broker, 0));
     }
-    if matches!(change, Change::Checkpoint { .. }) {
-        if let Some((value, time)) = checkpoint::latest_publication(db, change.broker_id())? {
-            projection
-                .checkpoints
-                .insert(change.broker_id().into(), (value, time));
-        }
+    if matches!(change, Change::Checkpoint { .. })
+        && let Some((value, time)) = checkpoint::latest_publication(db, change.broker_id())?
+    {
+        projection
+            .checkpoints
+            .insert(change.broker_id().into(), (value, time));
     }
     if let Change::Grant { mutation } = change {
         if let Some((broker_id,seq)) = db.query_row("SELECT broker_id,event_seq FROM broker_registry_incarnations WHERE incarnation_id=?1", [&mutation.incarnation_id], |row| Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?))).optional()? {
@@ -792,13 +789,7 @@ impl Store {
         view: &BrokerIdentityViewV1,
         heartbeat: &BrokerHeartbeatV1,
     ) -> anyhow::Result<String> {
-        require(
-            view.version == 1
-                && matches!(
-                    view.schema_version,
-                    6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15
-                ),
-        )?;
+        require(view.version == 1 && matches!(view.schema_version, 6..=15))?;
         crate::tenancy::validate_tenant_id(&view.tenant_id)?;
         for id in [
             &view.control_namespace_uuid,
@@ -840,6 +831,8 @@ impl Store {
             None,
         )
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn mutate_broker_grant_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -868,6 +861,8 @@ impl Store {
             None,
         )
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn revoke_broker_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -896,6 +891,8 @@ impl Store {
             Some(identity),
         )
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn broker_heartbeat_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -1032,6 +1029,8 @@ impl Store {
     pub fn broker(&self, id: &str) -> anyhow::Result<Option<BrokerViewV1>> {
         self.broker_with_access(None, id)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn broker_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -1068,6 +1067,8 @@ impl Store {
     pub fn broker_for_identity(&self, identity: &BrokerIdentityV1) -> anyhow::Result<BrokerViewV1> {
         self.broker_for_identity_with_access(None, identity)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn broker_for_identity_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -1111,6 +1112,8 @@ impl Store {
     ) -> anyhow::Result<BrokerIdentityViewV1> {
         self.broker_authenticated_identity_with_access(None, identity)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn broker_authenticated_identity_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -1174,6 +1177,8 @@ impl Store {
     pub fn broker_for_authority(&self, authority_id: &str) -> anyhow::Result<Option<BrokerViewV1>> {
         self.broker_for_authority_with_access(None, authority_id)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn broker_for_authority_scoped(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -1227,6 +1232,8 @@ impl Store {
     ) -> anyhow::Result<Vec<BrokerViewV1>> {
         self.brokers_page_with_access(None, cursor, limit)
     }
+    // Scoped authorization variant; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn brokers_page_scoped(
         &self,
         access: &HumanSourceAccess<'_>,

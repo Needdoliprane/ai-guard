@@ -1161,6 +1161,8 @@ pub(in crate::broker::enforcer) async fn connect_full(
     Ok((session, ledger.ok_or(EnforcerError::Unauthorized)?))
 }
 
+// Closed Full recovery request target; production wiring pending.
+#[allow(dead_code)]
 pub(in crate::broker::enforcer) async fn request_full(
     stream: &mut UnixStream,
     session: &Session3,

@@ -15,6 +15,8 @@ pub(crate) enum ChannelOperationPurposeV2 {
     Retirement,
 }
 #[derive(Clone, Serialize, Deserialize)]
+// Durable serde resolution contract; preserve the value shape.
+#[allow(clippy::large_enum_variant)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum ChannelResolutionV2 {
     History {
@@ -50,6 +52,8 @@ pub(crate) struct ChannelHistoryV2 {
     pub terminal_records: usize,
 }
 #[derive(Clone, Serialize, Deserialize)]
+// Durable serde change contract; preserve the value shape.
+#[allow(clippy::large_enum_variant)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum ChannelChangeV2 {
     Fact {
@@ -563,17 +567,15 @@ impl State {
                     response,
                 )
                 .map_err(|_| RelayOwnerError::Scope)?;
-                if let Some(previous) = &before.operations[index].resolution {
-                    if Self::final_class(previous)?.as_ref() == Some(&response.receipt) {
-                        if let Some(core) = &before.fact.core {
-                            ensure(
-                                response.channel.revision != core.revision
-                                    || response.channel == *core,
-                            )?;
-                            if response.channel.revision <= core.revision {
-                                return Ok(None);
-                            }
-                        }
+                if let Some(previous) = &before.operations[index].resolution
+                    && Self::final_class(previous)?.as_ref() == Some(&response.receipt)
+                    && let Some(core) = &before.fact.core
+                {
+                    ensure(
+                        response.channel.revision != core.revision || response.channel == *core,
+                    )?;
+                    if response.channel.revision <= core.revision {
+                        return Ok(None);
                     }
                 }
                 if matches!(

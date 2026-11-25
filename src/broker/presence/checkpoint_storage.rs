@@ -252,12 +252,11 @@ impl Stream {
             if pending.checkpoint.previous_sequence != previous_sequence {
                 return Err(PresenceError::UnsafeState);
             }
-            if let Some((previous, _)) = &head.last {
-                if pending.identity.grant_revision != previous.identity.grant_revision
-                    || pending.identity.binding_revision < previous.identity.binding_revision
-                {
-                    return Err(PresenceError::UnsafeState);
-                }
+            if let Some((previous, _)) = &head.last
+                && (pending.identity.grant_revision != previous.identity.grant_revision
+                    || pending.identity.binding_revision < previous.identity.binding_revision)
+            {
+                return Err(PresenceError::UnsafeState);
             }
             fs(file.persistent_sync())?;
             fold(&mut head, &directory, "pending.json", file.bytes())?;

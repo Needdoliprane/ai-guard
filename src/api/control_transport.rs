@@ -135,6 +135,8 @@ fn refused(status: StatusCode, code: &'static str, message: &'static str) -> Res
     response
 }
 
+// axum Response is the standard body-rejection error type.
+#[allow(clippy::result_large_err)]
 async fn read_body(body: Body, max_body: usize) -> Result<Vec<u8>, Response> {
     let deadline = tokio::time::Instant::now() + UPLOAD_TOTAL;
     let mut input = body.into_data_stream();

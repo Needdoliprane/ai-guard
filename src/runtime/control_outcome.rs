@@ -393,6 +393,8 @@ impl fmt::Debug for NativeUncollectedCall {
 impl NativeUncollectedCall {
     /// Private inspection only; never format captured data into status/audit.
     /// The borrow cannot move or release the actual native IO owner.
+    // Closed control outcome cause accessor; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn cause(&self) -> Option<&anyhow::Error> {
         self.cause.as_ref()
     }
@@ -404,17 +406,17 @@ impl NativeUncollectedCall {
             return NativeCollectionOutcome::PendingOrUnknown;
         }
         let spawn = self.scope.state().spawn.clone();
-        if let Some(spawn) = spawn {
-            if let Err(collection) = self.scope.wait_spawn(&spawn).await {
-                if let Some(first) = self.cause.take() {
-                    self.cause = Some(anyhow::Error::new(CollectionFailure {
-                        first,
-                        _collection: collection,
-                    }));
-                }
-                if self.scope.phase() == NativeIoPhase::Unknown {
-                    return NativeCollectionOutcome::PendingOrUnknown;
-                }
+        if let Some(spawn) = spawn
+            && let Err(collection) = self.scope.wait_spawn(&spawn).await
+        {
+            if let Some(first) = self.cause.take() {
+                self.cause = Some(anyhow::Error::new(CollectionFailure {
+                    first,
+                    _collection: collection,
+                }));
+            }
+            if self.scope.phase() == NativeIoPhase::Unknown {
+                return NativeCollectionOutcome::PendingOrUnknown;
             }
         }
         let io = self.scope.state().io.clone();

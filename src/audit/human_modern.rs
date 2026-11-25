@@ -184,6 +184,8 @@ impl Store {
     }
 
     /// Metadata list or a single event, using the same authorized selection.
+    // Each argument is a distinct authorized selection input; keep the explicit signature.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn modern_human_events(
         &self,
         access: &HumanSourceAccess<'_>,

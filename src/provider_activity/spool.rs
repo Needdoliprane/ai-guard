@@ -22,6 +22,8 @@ const GENESIS: &str = "000000000000000000000000000000000000000000000000000000000
 const MAX_SPOOL_LINE: usize = 256 * 1024;
 
 #[derive(Serialize, Deserialize)]
+// Durable spool line serde contract; preserve the value shape.
+#[allow(clippy::large_enum_variant)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum Line {
     Event {

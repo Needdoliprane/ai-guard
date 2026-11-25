@@ -40,33 +40,31 @@ impl EnforcerClient {
             if let Some(root) = parent
                 .persistent_child(name, false)
                 .map_err(|_| EnforcerError::UnsafeFilesystem)?
+                && let Some(endpoint) = load_endpoint(&root)?
             {
-                if let Some(endpoint) = load_endpoint(&root)? {
-                    let secret = capability(&root, false)?;
-                    match Self::connect(&root, executable, endpoint, secret, slots, recovery, true)
-                        .await
-                    {
-                        Ok(client) => {
-                            let value = client.legacy_capabilities().await?;
-                            if value.fresh_launch_nonce != Some(nonce)
-                                || value.recovery_generation.is_some()
-                                || value.recovery_incomplete
-                                || value.known_stop_slots != 0
-                                || value.owned_active != Some(0)
-                            {
-                                return Err(EnforcerError::Conflict);
-                            }
-                            *client
-                                .legacy_transport()?
-                                .fresh_startup
-                                .lock()
-                                .map_err(|_| EnforcerError::Unhealthy)? =
-                                Some((value.epoch, nonce));
-                            return Ok(client);
+                let secret = capability(&root, false)?;
+                match Self::connect(&root, executable, endpoint, secret, slots, recovery, true)
+                    .await
+                {
+                    Ok(client) => {
+                        let value = client.legacy_capabilities().await?;
+                        if value.fresh_launch_nonce != Some(nonce)
+                            || value.recovery_generation.is_some()
+                            || value.recovery_incomplete
+                            || value.known_stop_slots != 0
+                            || value.owned_active != Some(0)
+                        {
+                            return Err(EnforcerError::Conflict);
                         }
-                        Err(ConnectFailure::Absent) => {}
-                        Err(ConnectFailure::Other(error)) => return Err(error),
+                        *client
+                            .legacy_transport()?
+                            .fresh_startup
+                            .lock()
+                            .map_err(|_| EnforcerError::Unhealthy)? = Some((value.epoch, nonce));
+                        return Ok(client);
                     }
+                    Err(ConnectFailure::Absent) => {}
+                    Err(ConnectFailure::Other(error)) => return Err(error),
                 }
             }
             if Instant::now() >= expires {

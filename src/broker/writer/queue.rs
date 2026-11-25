@@ -183,6 +183,8 @@ impl<T> QueueReceiver<T> {
         self.receiver.recv().map(Queued::into_value)
     }
 
+    // Closed non-blocking queue receive; production wiring pending.
+    #[allow(dead_code)]
     pub(super) fn try_recv(&self) -> Result<T, mpsc::TryRecvError> {
         self.receiver.try_recv().map(Queued::into_value)
     }

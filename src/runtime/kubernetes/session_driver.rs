@@ -569,7 +569,7 @@ impl<'a, L: SessionLedgerV2> SessionDriverV2<'a, L> {
         clippy::too_many_arguments,
         reason = "the streaming attach inputs; each is owned by a different layer"
     )]
-    pub(crate) async fn attach_session(
+    pub(in crate::runtime::kubernetes) async fn attach_session(
         &mut self,
         instance: &SessionInstanceV2,
         binding: SessionBootstrapBindingV2,

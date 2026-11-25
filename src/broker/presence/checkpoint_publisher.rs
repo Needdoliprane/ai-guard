@@ -65,16 +65,17 @@ fn validate_remote(
         }
         // A committed response may have been lost. It must be the exact
         // retained operation; the replay never allocates a new sequence.
-        if let Some(remote) = &view.checkpoint {
-            if remote.in_current_grant && remote.checkpoint == pending.checkpoint {
-                let result = BrokerCheckpointResultV1 {
-                    checkpoint: remote.checkpoint.clone(),
-                    receipt: remote.receipt.clone(),
-                    replayed: true,
-                };
-                checkpoint_storage::validate_result(pending, &result)?;
-                return Ok(());
-            }
+        if let Some(remote) = &view.checkpoint
+            && remote.in_current_grant
+            && remote.checkpoint == pending.checkpoint
+        {
+            let result = BrokerCheckpointResultV1 {
+                checkpoint: remote.checkpoint.clone(),
+                receipt: remote.receipt.clone(),
+                replayed: true,
+            };
+            checkpoint_storage::validate_result(pending, &result)?;
+            return Ok(());
         }
     }
     if let Some((last, result)) = &head.last {

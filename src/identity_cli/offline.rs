@@ -238,10 +238,7 @@ pub(super) fn provision(args: ProvisionArgs) -> Result<()> {
             .capabilities
             .iter()
             .any(|cap| matches!(cap, super::Capability::ReadWorkerRegistry))
-            || matches!(
-                control.store.supervision_state()?.schema_version,
-                10 | 11 | 12 | 13
-            ),
+            || matches!(control.store.supervision_state()?.schema_version, 10..=13),
         "read-worker-registry requires explicit migration9→10 before preparing a local identity"
     );
     ensure!(
@@ -249,10 +246,7 @@ pub(super) fn provision(args: ProvisionArgs) -> Result<()> {
             .capabilities
             .iter()
             .any(|cap| matches!(cap, super::Capability::ReadBrokerRegistry))
-            || matches!(
-                control.store.supervision_state()?.schema_version,
-                7 | 8 | 9 | 10 | 11 | 12 | 13
-            ),
+            || matches!(control.store.supervision_state()?.schema_version, 7..=13),
         "read-broker-registry requires explicit migration6→7 before preparing a local identity"
     );
     ensure!(

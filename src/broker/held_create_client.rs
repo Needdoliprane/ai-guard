@@ -110,10 +110,14 @@ impl HeldCreateControlClient {
         &self.scope
     }
 
+    // Closed held-CREATE client surface; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) async fn protocol(&self) -> ClientResult<KubernetesHeldCreateProtocolV1> {
         self.handshake().await.map(|(_, protocol)| protocol)
     }
 
+    // Closed held-CREATE client surface; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) async fn reserve(
         &self,
         intent: &KubernetesCreateIntentV1,
@@ -128,6 +132,8 @@ impl HeldCreateControlClient {
         Ok(response)
     }
 
+    // Closed held-CREATE client surface; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) async fn claim_once(
         &self,
         attempt: HeldCreateClaimAttempt,
@@ -233,6 +239,8 @@ impl HeldCreateControlClient {
         })
     }
 
+    // Closed held-CREATE client surface; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) async fn cancel(
         &self,
         cancel: &KubernetesCreateCancelV1,
@@ -261,6 +269,8 @@ impl HeldCreateControlClient {
     /// Close one retained, never-claimed reservation. The caller retains both
     /// values and retries this exact operation ID after an uncertain exchange.
     /// This method never creates an operation ID or a runtime authorization.
+    // Closed held-CREATE client surface; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) async fn recover(
         &self,
         intent: &KubernetesCreateIntentV1,
@@ -287,6 +297,8 @@ impl HeldCreateControlClient {
 
     /// Read only the receipt for this retained exact request. Missing data is
     /// NotFound; no POST, issuer, replacement UUID or launch fallback is used.
+    // Closed held-CREATE client surface; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) async fn observe_recovery(
         &self,
         intent: &KubernetesCreateIntentV1,
@@ -313,6 +325,8 @@ impl HeldCreateControlClient {
 
 /// One owned invocation, sampled before every preclaim control read.
 /// No wire value or recovered journal can recreate this invocation.
+// Closed held-CREATE claim target; production wiring pending.
+#[allow(dead_code)]
 pub(crate) struct HeldCreateClaimAttempt {
     tenant_id: String,
     intent: KubernetesCreateIntentV1,
@@ -322,6 +336,8 @@ pub(crate) struct HeldCreateClaimAttempt {
     before_claim: HostClockSampleV1,
 }
 impl HeldCreateClaimAttempt {
+    // Closed held-CREATE claim target; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn begin(journal: &AdmissionJournal) -> ClientResult<Self> {
         let clock: Arc<dyn HostClock> =
             Arc::new(NativeHostClock::new().map_err(|_| HeldCreateClientError::Clock)?);
@@ -331,6 +347,8 @@ impl HeldCreateClaimAttempt {
 
     /// Trusted runtime glue passes its original producer and preclaim sample.
     /// This request context is descriptive and grants no HTTP or runtime effect.
+    // Closed held-CREATE claim target; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn from_clock_origin(
         journal: &AdmissionJournal,
         clock: Arc<dyn HostClock>,
@@ -375,10 +393,14 @@ impl HeldCreateClaimAttempt {
     }
 }
 
+// Closed held-CREATE claim target; production wiring pending.
+#[allow(dead_code)]
 pub(crate) struct HeldCreateClaimExchange {
     response: KubernetesCreateClaimResponseV1,
     live_ack: Option<LiveHeldCreateClaimAck>,
 }
+// Closed held-CREATE claim target; production wiring pending.
+#[allow(dead_code)]
 impl HeldCreateClaimExchange {
     pub(crate) fn response(&self) -> &KubernetesCreateClaimResponseV1 {
         &self.response
@@ -389,6 +411,8 @@ impl HeldCreateClaimExchange {
 }
 
 /// Private live HTTP provenance, never audit::FreshKubernetesCreateClaimCommit.
+// Closed held-CREATE claim target; production wiring pending.
+#[allow(dead_code)]
 pub(crate) struct LiveHeldCreateClaimAck {
     tenant_id: String,
     claim: KubernetesCreateClaimV1,
@@ -398,6 +422,8 @@ pub(crate) struct LiveHeldCreateClaimAck {
     before_claim: HostClockSampleV1,
     protected_files: Vec<PrivateFile>,
 }
+// Closed held-CREATE claim target; production wiring pending.
+#[allow(dead_code)]
 impl LiveHeldCreateClaimAck {
     pub(crate) fn tenant_id(&self) -> &str {
         &self.tenant_id

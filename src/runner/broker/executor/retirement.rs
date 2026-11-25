@@ -238,6 +238,8 @@ impl Execution<'_> {
             .context("retirement is blocked; its live continuation remains with this process owner")
     }
 
+    // The retirement callback returns the verified receipt on refusal; keep the contract.
+    #[allow(clippy::result_large_err)]
     pub(super) async fn retire_unused_before_claim(
         &self,
         slot: EnforcedSlot,

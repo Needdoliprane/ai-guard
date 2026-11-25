@@ -948,6 +948,8 @@ pub async fn run_internal_recovery_enforcer_with_budget(
     .await
 }
 
+// Closed Full recovery listener target; production wiring pending.
+#[allow(dead_code)]
 pub(super) async fn run_full_listener(
     ledger: Arc<super::ledger::RetirementLedger>,
     max_slots: u32,
@@ -1004,6 +1006,8 @@ pub(super) fn full_fixture_state(
     Ok(Arc::new(state))
 }
 
+// Closed Full recovery listener target; production wiring pending.
+#[allow(dead_code)]
 pub(super) async fn run_full_existing_listener(
     root: &Directory,
     max_slots: u32,

@@ -76,6 +76,8 @@ pub struct HumanOwnedStartupBundle {
     pub(crate) transferred: bool,
 }
 
+// Startup source value contract; keep the by-value shape.
+#[allow(clippy::large_enum_variant)]
 enum Opening {
     Store(ReviewStoreStartup),
     Authentication(AuthenticationReviewStartup),

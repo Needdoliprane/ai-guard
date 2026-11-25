@@ -348,6 +348,8 @@ impl AuthorizedExportParent {
         ExportAncestry::from_retained(&self.anchor)
     }
 
+    // Closed authorized workspace extraction; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn extract<R: Read>(
         &self,
         reader: R,

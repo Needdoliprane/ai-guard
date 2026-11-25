@@ -17,9 +17,11 @@ mod history;
 mod history_tests;
 #[cfg(test)]
 mod v2_tests;
+// ChannelResolutionV2 is consumed by the closed replay tests; keep the re-export.
+#[allow(unused_imports)]
 pub(crate) use history::{
-    ChannelChangeV2, ChannelHistoryV2, ChannelOperationPurposeV2, ChannelOperationV2,
-    ChannelResolutionV2, ChannelTerminalV2,
+    ChannelChangeV2, ChannelHistoryV2, ChannelOperationPurposeV2, ChannelResolutionV2,
+    ChannelTerminalV2,
 };
 
 const LEGACY_MAX: usize = 4096;
@@ -292,10 +294,10 @@ impl ChannelJournal {
                 .map_or(current, |(_, state)| state);
             Self::index_uuids(&mut ids, *job, state)?;
         }
-        if let Some((job, state)) = candidate {
-            if !self.jobs.contains_key(&job) {
-                Self::index_uuids(&mut ids, job, state)?;
-            }
+        if let Some((job, state)) = candidate
+            && !self.jobs.contains_key(&job)
+        {
+            Self::index_uuids(&mut ids, job, state)?;
         }
         Ok(())
     }

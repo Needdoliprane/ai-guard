@@ -336,7 +336,7 @@ fn cursor_unavailable() -> (StatusCode, Json<Value>) {
 }
 
 #[derive(Clone)]
-struct VerifiedHuman {
+pub(super) struct VerifiedHuman {
     credential: HumanAuthenticationProof,
     source: HumanProofSource,
     digest: [u8; 32],

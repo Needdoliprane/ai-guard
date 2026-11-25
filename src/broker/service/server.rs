@@ -584,6 +584,8 @@ pub async fn serve_selected(
 
 /// The degraded outcome owns the service, original backend leases and existing
 /// endpoint. It must be captured by the CLI rather than flattened into anyhow.
+// Public shutdown contract captured by the CLI; keep the value shape.
+#[allow(clippy::large_enum_variant)]
 pub enum ServiceShutdown {
     Drained,
     Retained(RetainedServiceShutdown),
@@ -1089,10 +1091,10 @@ impl Service {
                 degraded |= writers.stops().drain_retirement_owners().await.is_err();
             }
         }
-        if let Some(relays) = relay_shutdown {
-            if relays.shutdown().await.is_err() {
-                degraded = true;
-            }
+        if let Some(relays) = relay_shutdown
+            && relays.shutdown().await.is_err()
+        {
+            degraded = true;
         }
         if degraded {
             Err(anyhow!("broker shutdown needs reconciliation"))
@@ -2948,7 +2950,7 @@ impl Service {
             || startup_owner
                 .as_ref()
                 .is_some_and(|owner| owner.had_uncertainty());
-        let factory_jobs = Arc::clone(&jobs);
+        let factory_jobs = Arc::clone(jobs);
         let factory_scope = scope.clone();
         match self
             .filesystem(move || {
@@ -3219,11 +3221,10 @@ impl Service {
             .retirement_startup
             .retained()
             .map_err(jobs::journal_error)?
+            && let Err(error) = self.resume_startup_profile(&profile, &jobs, owner).await
         {
-            if let Err(error) = self.resume_startup_profile(&profile, &jobs, owner).await {
-                self.fenced.store(true, Ordering::Release);
-                return Err(error);
-            }
+            self.fenced.store(true, Ordering::Release);
+            return Err(error);
         }
         let Some(capabilities) = jobs.writer.get() else {
             return Ok(());

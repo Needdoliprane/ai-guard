@@ -94,6 +94,8 @@ impl std::error::Error for HumanAuthorityFailure {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HumanAuthorityInvalidationReason {
     DurableAuthorityMismatch,
+    // Closed invalidation reason; production wiring pending.
+    #[allow(dead_code)]
     RetainedConfigurationMismatch,
 }
 
@@ -423,6 +425,8 @@ impl OwnedHumanSources {
     /// the actual owner FDs remain retained until accepted work/references end.
     /// Callers must not derive this assertion from unverified request data or
     /// ordinary per-command/proof/capacity failures. Normal shutdown uses close.
+    // Closed authority invalidation latch; production wiring pending.
+    #[allow(dead_code)]
     pub(crate) fn invalidate_authority(&self, reason: HumanAuthorityInvalidationReason) {
         self.owner.invalidate_authority(reason);
     }

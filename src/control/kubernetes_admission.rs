@@ -202,6 +202,8 @@ pub struct KubernetesCreateReceiptV1 {
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+// Durable serde outcome contract; preserve the value shape.
+#[allow(clippy::large_enum_variant)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum KubernetesCreateOutcomeV1 {
     CreatedHeld {
