@@ -1,8 +1,13 @@
 //! Real loopback gateway, SQLite and Writer, with synthetic helper history.
 //! The worker port under test ends at acknowledgement. No engine is invoked.
-use super::{export_retirement_tests::seed_before_create_issued, *};
+use super::{
+    export_retirement_tests::{seed_before_create_issued, synthetic_owned, worker_inspection},
+    *,
+};
 use crate::{
-    broker::journal::retirement_live_fixture::INVOCATION_DATA_PROGRAM, runtime::RuntimeAuthority,
+    broker::journal::retirement_live_fixture::INVOCATION_DATA_PROGRAM,
+    control_fs::cost_probe::{self, Measurement, Operation as FsOperation},
+    runtime::RuntimeAuthority,
 };
 use tokio::time::{Instant, timeout_at};
 
@@ -30,6 +35,141 @@ fn create_issued_writer_reply_timeout_leaves_durable_ack_unconfirmed_to_caller()
             }))
         },
     )
+}
+
+#[test]
+fn created_mutation_composition_times_out_while_strict_load_is_queued() -> Result<()> {
+    with_prepared_worker(
+        Duration::from_secs(10),
+        |handle, fixture, execution, worker| {
+            handle.block_on(boxed_execution_phase(|| {
+                exercise_queued_created_reload(fixture, execution, worker)
+            }))
+        },
+    )
+}
+
+async fn exercise_queued_created_reload(
+    fixture: &Fixture,
+    execution: &Execution<'_>,
+    worker: &WorkerV1,
+) -> Result<()> {
+    let before = BeforeCreateIssued::read(fixture, execution, worker)?;
+    let issued = execution
+        .mutate_confirmed(WorkerTransitionV1::CreateIssued)
+        .await?;
+    let (_, draft) = execution.load().await?;
+    let Some(Operation::WorkerMutation {
+        request,
+        response: Some(ack),
+    }) = draft.operations.last()
+    else {
+        anyhow::bail!("fixture requires the durable CreateIssued ACK");
+    };
+    let receipt = assert_single_sqlite_create_issued(fixture, &before, worker, request)?;
+    ensure!(ack.receipt == receipt && issued.receipt == receipt);
+    let managed = draft.run.plan.managed.as_ref().context("managed fixture")?;
+    let authority = managed.binding.as_ref().context("fixture authority")?;
+    let inspection = worker_inspection(&issued.worker);
+    let owned = synthetic_owned(&issued.worker, authority, execution.operation, &inspection);
+    execution
+        .patch(|draft| {
+            draft
+                .run
+                .plan
+                .managed
+                .as_mut()
+                .context("managed fixture")?
+                .owned = Some(owned.clone());
+            Ok(())
+        })
+        .await?;
+    let retained_head = execution.load().await?.0.head().clone();
+
+    // Only the fault Writer uses the short reply budget. Setup and the final
+    // invariant read use the original fixture Writer and the same Journal.
+    let writer = WriterClient::start(fixture.journal().clone(), 8, Duration::from_secs(2))?;
+    let executor = BatchExecutor {
+        writer: writer.clone(),
+        ..(*execution.executor).clone()
+    };
+    let subject = Execution::open(&executor, execution.operation, execution.context).await?;
+    subject.stage(LocalFailurePhaseV1::Worker);
+
+    let root = fixture.root.path().canonicalize()?.join("journal");
+    let exclusive = cost_probe::EXCLUSIVE.lock().await;
+    let paused = writer.pause_for_test().await?;
+    ensure!(paused.is_paused(), "Writer did not retain the FIFO pause");
+    let queued = Measurement::start(&root).map_err(|e| anyhow!("filesystem probe: {e:?}"))?;
+    let error = boxed_execution_phase(|| {
+        subject.mutate_confirmed(WorkerTransitionV1::Created { inspection })
+    })
+    .await
+    .context(BrokerStep::CreatedExchange)
+    .err()
+    .context("Created returned a confirmed mutation while its strict load was queued")?;
+    let queued = queued
+        .finish()
+        .map_err(|e| anyhow!("filesystem probe: {e:?}"))?;
+    ensure!(
+        paused.is_paused()
+            && queued.outstanding == 0
+            && queued.metric(FsOperation::ReadToEnd).calls == 0,
+        "the expiry must be observed before the actor can enter the strict read"
+    );
+    ensure!(
+        matches!(
+            error.downcast_ref::<WriterCallFailure>(),
+            Some(WriterCallFailure::ReplyTimeout)
+        ),
+        "the Writer must report a reply timeout for the queued Load"
+    );
+    let report = serde_json::to_value(diagnostics::failure_report(subject.phase(), &error))?;
+    ensure!(
+        report["broker_step"] == "created_exchange_reload"
+            && report["phase"] == "worker"
+            && report["runtime_effect"] == "unknown"
+            && report["created_reload"]
+                == json!({"site":"mutation_composition","cause":"reply_timeout"}),
+        "the caller must classify the strict composition load without claiming a mutation"
+    );
+
+    let late = Measurement::start(&root).map_err(|e| anyhow!("filesystem probe: {e:?}"))?;
+    drop(paused);
+    // Each marker queues behind the abandoned Load and performs no journal IO.
+    // A lost marker ACK drops its guard, so a later marker can still prove
+    // FIFO drain within a separate observation budget.
+    let drained = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match writer.pause_for_test().await {
+                Err(JournalError::Io) => tokio::time::sleep(Duration::from_millis(20)).await,
+                result => return result,
+            }
+        }
+    })
+    .await
+    .context("late strict load did not drain within the FIFO observation budget")??;
+    let late = late
+        .finish()
+        .map_err(|e| anyhow!("filesystem probe: {e:?}"))?;
+    drop(drained);
+    drop(exclusive);
+    ensure!(
+        late.outstanding == 0
+            && late.metric(FsOperation::ReadToEnd).succeeded > 0
+            && late.metric(FsOperation::DirectorySync).succeeded == 3
+            && late.metric(FsOperation::Publish).calls == 0,
+        "the timed-out Load must still reach the strict journal sync tail after release"
+    );
+
+    let (current, after) = execution.load().await?;
+    ensure!(
+        current.head() == &retained_head && same(after.worker()?, &issued.worker)?,
+        "a timed-out strict read must preserve the head with CreateIssued and ownership"
+    );
+    ensure!(assert_single_sqlite_create_issued(fixture, &before, worker, request)? == receipt);
+    println!("phase=created_mutation_composition expiry=queued strict_read_after_expiry=observed");
+    Ok(())
 }
 
 fn with_prepared_worker(

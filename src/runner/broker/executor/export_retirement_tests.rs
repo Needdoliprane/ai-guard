@@ -1381,7 +1381,7 @@ fn seed_prior_helper(
     Ok((helper, armed.receipt, receipt))
 }
 
-fn worker_inspection(worker: &WorkerV1) -> RuntimeInspectionV1 {
+pub(super) fn worker_inspection(worker: &WorkerV1) -> RuntimeInspectionV1 {
     RuntimeInspectionV1 {
         authority_id: worker.launch.authority_id.clone(),
         runtime_kind: worker.launch.runtime_kind,
@@ -1441,7 +1441,7 @@ fn prior_arm(
         timeout_seconds: timeout,
     })
 }
-fn synthetic_owned(
+pub(super) fn synthetic_owned(
     worker: &WorkerV1,
     authority: &RuntimeAuthority,
     operation: Uuid,
