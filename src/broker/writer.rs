@@ -1209,13 +1209,25 @@ impl WriterClient {
         expected: RevisionRefV1,
         next: BrokerCheckpointV3,
     ) -> JournalResult<CheckpointReceiptV1> {
-        self.call(move |reply| Command::AdvanceLifecycle {
-            operation_id,
-            expected,
-            next: Box::new(next),
-            reply,
-        })
-        .await
+        self.advance_lifecycle_diagnosed(operation_id, expected, next)
+            .await
+            .map_err(WriterCallFailure::journal_error)
+    }
+
+    pub(crate) async fn advance_lifecycle_diagnosed(
+        &self,
+        operation_id: Uuid,
+        expected: RevisionRefV1,
+        next: BrokerCheckpointV3,
+    ) -> Result<CheckpointReceiptV1, WriterCallFailure> {
+        self.0
+            .call_diagnosed(move |reply| Command::AdvanceLifecycle {
+                operation_id,
+                expected,
+                next: Box::new(next),
+                reply,
+            })
+            .await
     }
     pub async fn append_command(
         &self,
