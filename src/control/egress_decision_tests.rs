@@ -37,6 +37,51 @@ fn outcome(decided: &Decided) -> (EgressOutcomeV1, EgressDecisionReasonV1) {
 }
 
 #[test]
+fn egress_numeric_connect_permit_uses_canonical_ip_and_bounded_resolution_digest() {
+    let v4: IpAddr = "93.184.216.34".parse().unwrap();
+    let v6: IpAddr = "2001:4860::8888".parse().unwrap();
+    let digest = egress_resolution_digest_v1(&[v4, v6]).unwrap();
+    assert_eq!(digest, egress_resolution_digest_v1(&[v6, v4, v6]).unwrap());
+    assert_ne!(digest, egress_resolution_digest_v1(&[v4]).unwrap());
+    assert!(egress_resolution_digest_v1(&[]).is_err());
+    assert!(egress_resolution_digest_v1(&[v4; MAX_CONNECT_RESOLUTION_ADDRESSES + 1]).is_err());
+    let mapped: IpAddr = "::ffff:93.184.216.34".parse().unwrap();
+    assert!(egress_resolution_digest_v1(&[mapped]).is_err());
+
+    let body = serde_json::json!({
+        "version": 1,
+        "opening_id": IdV1::random(),
+        "decision_id": IdV1::random(),
+        "binding": {
+            "session_id": SESSION,
+            "worker_id": "worker",
+            "attempt_id": "attempt",
+            "channel_id": IdV1::random(),
+            "epoch": 1,
+            "context_digest": DigestV1::of(b"fixture context"),
+        },
+        "flow_id": 1,
+        "ip": v6,
+        "resolution_digest": digest
+    });
+    let parsed: EgressConnectPermitRequestV1 = serde_json::from_value(body.clone()).unwrap();
+    assert_eq!(parsed.ip, v6);
+    assert_eq!(parsed.resolution_digest, digest);
+    for (key, value) in [
+        ("ip", serde_json::json!("2001:4860:0:0:0:0:0:8888")),
+        ("ip", serde_json::json!("::ffff:93.184.216.34")),
+        ("ip", serde_json::json!("93.184.216.34:443")),
+        ("resolution_digest", serde_json::json!("a".repeat(65))),
+        ("tenant_id", serde_json::json!("foreign")),
+        ("port", serde_json::json!(443)),
+    ] {
+        let mut variant = body.clone();
+        variant[key] = value;
+        assert!(serde_json::from_value::<EgressConnectPermitRequestV1>(variant).is_err());
+    }
+}
+
+#[test]
 fn egress_decision_policy_destinations_are_allowed_and_unknown_ones_follow_the_grantable_class() {
     let public = policy(EgressGrantableV1::PublicNames, &[]);
     let closed = policy(EgressGrantableV1::None, &[]);
