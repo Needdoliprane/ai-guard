@@ -1,6 +1,6 @@
 //! Shared projection of the legacy dashboard entities from ordered audit facts.
 use crate::{
-    declared_agents::DeclaredAgentProjection,
+    declared_agents::{ClaudeReadParents, DeclaredAgentProjection},
     model::{Event, Outcome},
 };
 use serde_json::{Value, json};
@@ -10,6 +10,7 @@ pub(crate) struct Projection {
     sandboxes: bool,
     items: BTreeMap<String, Value>,
     declared: DeclaredAgentProjection,
+    claude_read_parents: Option<ClaudeReadParents>,
 }
 
 /// Resumable state of a projection, persisted by audit retention snapshots.
@@ -27,6 +28,7 @@ impl Projection {
             sandboxes,
             items: BTreeMap::new(),
             declared: DeclaredAgentProjection::default(),
+            claude_read_parents: None,
         }
     }
 
@@ -35,6 +37,7 @@ impl Projection {
             sandboxes,
             items: state.items,
             declared: state.declared,
+            claude_read_parents: None,
         }
     }
 
@@ -42,6 +45,12 @@ impl Projection {
         ProjectionStateV1 {
             items: self.items.clone(),
             declared: self.declared.clone(),
+        }
+    }
+
+    pub(super) fn enable_claude_parents_for_read(&mut self) {
+        if !self.sandboxes {
+            self.claude_read_parents = Some(ClaudeReadParents::default());
         }
     }
 
@@ -54,7 +63,8 @@ impl Projection {
         };
         let Some(id) = id else { return };
         if !sandboxes {
-            self.declared.observe(event);
+            self.declared
+                .observe_with_claude_parents(event, self.claude_read_parents.as_mut());
             if event.kind == "agent.declared"
                 && event.provenance == "declared"
                 && (event.data.get("provider_agent_id").is_some()
@@ -158,7 +168,10 @@ impl Projection {
     pub(crate) fn finish(self) -> Vec<Value> {
         let mut items: Vec<Value> = self.items.into_values().collect();
         if !self.sandboxes {
-            items.extend(self.declared.finish());
+            items.extend(
+                self.declared
+                    .finish_with_claude_parents(self.claude_read_parents),
+            );
         }
         items
     }

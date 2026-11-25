@@ -1,7 +1,9 @@
 use agentsandbox::{
-    adapters::{AdapterContext, parse_line},
+    adapters::{AdapterContext, normalize_hook_record, normalize_stdout_record, parse_line},
+    audit::Store,
     declared_agents::DeclaredAgentProjection,
     model::Event,
+    redaction::Redactor,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -302,4 +304,180 @@ fn legacy_claude_checkpoint_replay_preserves_canonical_bytes() {
     );
     let resumed: DeclaredAgentProjection = serde_json::from_slice(&checkpoint).unwrap();
     assert_eq!(serde_json::to_vec(&resumed).unwrap(), checkpoint);
+}
+
+#[test]
+fn sqlite_joins_normalized_claude_activity_and_preserves_explicit_parent_updates() {
+    const PARENT: &str = "c0de0000-0000-4000-8000-0000000000c1";
+    const CHILD: &str = "a1b2c3d4e5f60718";
+    let (_directory, store) = claude_read_store();
+    let context = AdapterContext {
+        session_id: "session".into(),
+        project_id: "project".into(),
+        sandbox_id: "sandbox".into(),
+        agent_id: "runner-agent".into(),
+        correlation_id: "correlation".into(),
+        trace_id: "trace".into(),
+    };
+    let redactor = Redactor::new(vec![]);
+    let hooks = include_str!("adapters_fixtures/claude-code.hooks.jsonl")
+        .lines()
+        .flat_map(|line| normalize_hook_record("claude-code", line, &context, &redactor).events)
+        .map(serde_json::from_value)
+        .collect::<Result<Vec<Event>, _>>()
+        .unwrap();
+    store.append_batch(hooks).unwrap();
+    let items = store.entities(false).unwrap();
+    assert!(node(&items, CHILD)["parent_id"].is_null());
+    assert!(
+        node(&items, CHILD)["field_provenance"]
+            .get("parent_id")
+            .is_none()
+    );
+
+    let stdout = include_str!("adapters_fixtures/claude-code.stream.jsonl")
+        .lines()
+        .flat_map(|line| normalize_stdout_record("claude-code", line, &context, &redactor).events)
+        .map(serde_json::from_value)
+        .collect::<Result<Vec<Event>, _>>()
+        .unwrap();
+    store.append_batch(stdout).unwrap();
+    let items = store.entities(false).unwrap();
+    let child = node(&items, CHILD);
+    assert_eq!(child["parent_id"], node(&items, PARENT)["id"]);
+    assert_eq!(child["parent_link"], "inferred");
+    assert_eq!(child["field_provenance"]["parent_id"], "inferred");
+    assert_eq!(child["provenance"], "declared");
+    assert_eq!(child["status"], "completed");
+    assert!(child["provider_parent_agent_id"].is_null());
+
+    store
+        .append(claude_fact(
+            "agent.declared",
+            json!({
+                "provider_agent_id": PARENT,
+                "provider_parent_agent_id": CHILD,
+            }),
+        ))
+        .unwrap();
+    let cycle = store.entities(false).unwrap();
+    assert_eq!(node(&cycle, PARENT)["parent_id"], node(&cycle, CHILD)["id"]);
+    assert_eq!(node(&cycle, PARENT)["parent_link"], "declared");
+    assert!(node(&cycle, CHILD)["parent_id"].is_null());
+    assert!(node(&cycle, CHILD)["hierarchy_warning"].is_string());
+
+    store
+        .append_batch(vec![
+            claude_fact(
+                "agent.declared",
+                json!({
+                    "provider_agent_id": CHILD,
+                    "provider_parent_agent_id": null,
+                }),
+            ),
+            claude_fact("agent.declared", json!({"provider_agent_id": CHILD})),
+        ])
+        .unwrap();
+    let cleared = store.entities(false).unwrap();
+    let child = node(&cleared, CHILD);
+    assert!(child["parent_id"].is_null());
+    assert!(child["parent_link"].is_null());
+    assert!(child["hierarchy_warning"].is_null());
+    assert_eq!(child["field_provenance"]["parent_id"], "declared");
+}
+
+#[test]
+fn sqlite_claude_parent_rejects_conflicting_and_out_of_scope_evidence() {
+    let (_directory, store) = claude_read_store();
+    let call = |id: &str, emitter: &str| {
+        claude_fact(
+            "delegation.declared",
+            json!({"delegation_tool":"Task","provider_tool_use_id":id,"provider_agent_id":emitter}),
+        )
+    };
+    let activity = |child: &str, id: &str| {
+        claude_fact(
+            "message.declared",
+            json!({"provider_agent_id":child,"provider_parent_tool_use_id":id}),
+        )
+    };
+    let mut wrong_session = call("session-call", "parent");
+    wrong_session.session_id = Some("other-session".into());
+    let mut wrong_sandbox = call("sandbox-call", "parent");
+    wrong_sandbox.sandbox_id = Some("other-sandbox".into());
+    let mut wrong_agent = call("agent-call", "parent");
+    wrong_agent.agent_id = Some("other-agent".into());
+    let mut wrong_source = call("source-call", "parent");
+    wrong_source.source = "codex-adapter".into();
+    let mut wrong_provenance = call("observed-call", "parent");
+    wrong_provenance.provenance = "observed".into();
+    store
+        .append_batch(vec![
+            claude_fact("agent.declared", json!({"provider_agent_id":"parent"})),
+            wrong_session,
+            wrong_sandbox,
+            wrong_agent,
+            wrong_source,
+            wrong_provenance,
+            call("Case-call", "parent"),
+            call("masked-[REDACTED]", "parent"),
+            call("unknown-call", "missing-parent"),
+            call("conflict-emitter", "parent"),
+            call("conflict-emitter", "other"),
+            call("conflict-emitter", "parent"),
+            call("conflict-call", "parent"),
+            activity("conflict-call-child", "different-call"),
+            call("conflict-child", "parent"),
+            activity("another-child", "conflict-child"),
+        ])
+        .unwrap();
+    let cases = [
+        ("session", "session-call"),
+        ("sandbox", "sandbox-call"),
+        ("agent", "agent-call"),
+        ("source", "source-call"),
+        ("observed", "observed-call"),
+        ("exact", "case-call"),
+        ("masked", "masked-[REDACTED]"),
+        ("unknown", "unknown-call"),
+        ("ambiguous-emitter", "conflict-emitter"),
+        ("conflict-call-child", "conflict-call"),
+        ("ambiguous-child", "conflict-child"),
+    ];
+    for (child, call_id) in cases {
+        store
+            .append_batch(vec![
+                claude_fact("agent.declared", json!({"provider_agent_id":child})),
+                activity(child, call_id),
+            ])
+            .unwrap();
+    }
+    let items = store.entities(false).unwrap();
+    for (id, _) in cases {
+        let child = node(&items, id);
+        assert!(child["parent_id"].is_null(), "{id}");
+        assert!(child["parent_link"].is_null(), "{id}");
+        assert!(child["field_provenance"].get("parent_id").is_none(), "{id}");
+    }
+}
+
+fn claude_read_store() -> (tempfile::TempDir, Store) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_for_tenant(
+        &dir.path().join("tenant.sqlite"),
+        "tenant-a",
+        Redactor::new(vec![]),
+        1_000,
+    )
+    .unwrap();
+    (dir, store)
+}
+
+fn claude_fact(kind: &str, data: Value) -> Event {
+    let mut event = declared("session", "unused", Value::Null, None);
+    event.kind = kind.into();
+    event.source = "claude-adapter".into();
+    event.coverage = "native".into();
+    event.data = data;
+    event
 }

@@ -2259,6 +2259,7 @@ impl Store {
             ),
             None => (0, entities::Projection::new(sandboxes)),
         };
+        projection.enable_claude_parents_for_read();
         let mut stmt = db.prepare(if sandboxes {
             "SELECT payload FROM events WHERE sandbox_id IS NOT NULL AND seq>?1 ORDER BY seq"
         } else {

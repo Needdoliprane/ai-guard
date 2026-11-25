@@ -485,6 +485,134 @@ fn a_full_store_recovers_capacity_and_verifies_end_to_end() {
 }
 
 #[test]
+fn claude_parent_inference_uses_only_the_live_suffix_after_retention() {
+    let dir = support::private_tempdir();
+    let (data, store) = store13(dir.path());
+    store
+        .install_audit_retention(&dir.path().join("before-retention.sqlite"))
+        .unwrap();
+
+    let declared = |source: &str, kind: &str, data| {
+        let mut event = Event::new(kind);
+        event.source = source.into();
+        event.provenance = "declared".into();
+        event.coverage = "native".into();
+        event.session_id = Some("session".into());
+        event.sandbox_id = Some("sandbox".into());
+        event.agent_id = Some("runner-agent".into());
+        event.data = data;
+        event
+    };
+    let claude = |kind: &str, data| declared("claude-adapter", kind, data);
+    let agent = |id: &str| claude("agent.declared", json!({"provider_agent_id": id}));
+    let call = |id: &str| {
+        claude(
+            "delegation.declared",
+            json!({"delegation_tool":"Agent","provider_tool_use_id":id,"provider_agent_id":"parent"}),
+        )
+    };
+    let child_activity = |id: &str, call: &str| {
+        claude(
+            "message.declared",
+            json!({"provider_agent_id":id,"provider_parent_tool_use_id":call}),
+        )
+    };
+    store
+        .append_batch(vec![
+            claude(
+                "agent.declared",
+                json!({"provider_agent_id":"parent","provider_parent_agent_id":null}),
+            ),
+            agent("checkpoint-child"),
+            declared(
+                "codex-adapter",
+                "agent.declared",
+                json!({"provider_agent_id":"thread"}),
+            ),
+            declared(
+                "codex-adapter",
+                "agent.declared",
+                json!({"provider_agent_id":"explicit-child","provider_parent_agent_id":"thread"}),
+            ),
+        ])
+        .unwrap();
+    let boundary = store.append(call("boundary-call")).unwrap().seq;
+    let mut live_call = call("live-call");
+    live_call.data["delegation_tool"] = json!("Task");
+    store
+        .append_batch(vec![
+            agent("cross-boundary-child"),
+            child_activity("cross-boundary-child", "boundary-call"),
+            agent("checkpoint-child"), // An omitted parent remains ambiguous after restore.
+            call("checkpoint-child-call"),
+            child_activity("checkpoint-child", "checkpoint-child-call"),
+            live_call,
+            child_activity("live-child", "live-call"),
+            agent("live-child"),
+        ])
+        .unwrap();
+
+    let lookup = |items: &[Value], id: &str| {
+        items
+            .iter()
+            .find(|item| item["provider_agent_id"] == id)
+            .unwrap()
+            .clone()
+    };
+    let before = store.entities(false).unwrap();
+    let parent_id = lookup(&before, "parent")["id"].clone();
+    for id in ["checkpoint-child", "cross-boundary-child", "live-child"] {
+        let child = lookup(&before, id);
+        assert_eq!(child["parent_id"], parent_id);
+        assert_eq!(child["parent_link"], "inferred");
+        assert_eq!(child["field_provenance"]["parent_id"], "inferred");
+        assert_eq!(child["provenance"], "declared");
+    }
+    let explicit = lookup(&before, "explicit-child");
+    assert_eq!(explicit["parent_id"], lookup(&before, "thread")["id"]);
+    assert_eq!(explicit["field_provenance"]["parent_id"], "declared");
+
+    let archive = dir.path().join("archive-claude");
+    let planned = store
+        .audit_retention_plan(&policy(), later(), Some(boundary), &BTreeSet::new())
+        .unwrap();
+    assert_eq!(planned.plan.last_seq, boundary);
+    apply(&store, &planned, &archive).unwrap();
+    let ledger = store.audit_retention_ledger().unwrap();
+    assert_eq!(ledger.archived_through_seq, boundary);
+    drop(store);
+
+    let store = reopen(&data).unwrap();
+    let pinned = store
+        .events(&EventQuery {
+            after: Some(boundary - 1),
+            before: Some(boundary + 1),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(pinned.len(), 1);
+    assert_eq!(pinned[0].seq, boundary);
+    assert_eq!(
+        pinned[0].event.data["provider_tool_use_id"],
+        "boundary-call"
+    );
+    let after = store.entities(false).unwrap();
+    assert_eq!(lookup(&after, "explicit-child"), explicit);
+    assert_eq!(lookup(&after, "live-child"), lookup(&before, "live-child"));
+    for id in ["checkpoint-child", "cross-boundary-child"] {
+        let child = lookup(&after, id);
+        assert!(child["parent_id"].is_null());
+        assert!(child["parent_link"].is_null());
+        assert!(child["parent_unresolved"].is_null());
+        assert!(child["field_provenance"].get("parent_id").is_none());
+        assert_eq!(child["provenance"], "declared");
+    }
+    assert_eq!(store.audit_retention_ledger().unwrap(), ledger);
+    let verified = store.verify_audit_archives(&[archive]).unwrap();
+    assert_eq!(verified.verdict, "verified", "{:?}", verified.failure);
+}
+
+#[test]
 fn refusals_leave_the_live_chain_and_destinations_unchanged() {
     let dir = support::private_tempdir();
     let (data, store) = store13(dir.path());
