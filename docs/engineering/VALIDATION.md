@@ -1,5 +1,18 @@
 # Validation courante
 
+## 25 novembre 2026 — collecte du diagnostic ImportVerification G09
+
+Le gel `05fe3e9c` compile hors ligne sur macOS ARM64. Les trois
+tests ciblés du pilote `broker_runtime` passent. Ils vérifient la
+sélection d’un seul marqueur fermé, le refus d’une capture incomplète
+ou saturée et l’attente d’une publication retardée dans le budget du
+scénario. Une publication après le budget du scénario reste inconnue.
+
+Le réveil tardif après la limite intermédiaire d’une seconde garde
+son écart propre. Le gel prouve le harnais logiciel. Le pilote moteur
+G09 conserve son verdict FAIL. Manifeste privé
+`c699d6fe1e5123d76d974a9c3b1c1104d1b3cbd05211542c183f58ccd3e53b4f`.
+
 ## 25 novembre 2026 — ticket de libération E3, permis numérique et diagnostic Created
 
 Le gel isolé `bf1a74cb` compile hors ligne sur macOS ARM64.
