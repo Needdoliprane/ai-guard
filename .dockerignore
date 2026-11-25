@@ -6,6 +6,7 @@
 !LICENSE
 !src/
 src/**
+!src/**/
 !src/**/*.rs
 !policies/
 policies/**
