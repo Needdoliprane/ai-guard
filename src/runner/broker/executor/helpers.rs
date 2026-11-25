@@ -2,6 +2,7 @@
 use super::journal::{same, without_response};
 use super::*;
 use futures_util::{FutureExt, future::BoxFuture};
+use std::io::Write as _;
 
 #[cfg(all(test, unix))]
 #[path = "prospective_live_tests.rs"]
@@ -17,6 +18,34 @@ struct PreparedHelper {
 enum HelperPreparationPhase {
     Completed(Box<HelperCompletion>),
     Ready(Box<PreparedHelper>),
+}
+
+#[cold]
+fn report_import_verification_failure(error: &anyhow::Error) {
+    let diagnostic = diagnostics::failure_report(LocalFailurePhaseV1::ImportVerification, error);
+    let Ok(fields) = serde_json::to_value(diagnostic) else {
+        return;
+    };
+    let stage = fields
+        .pointer("/runtime/stage")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| match fields["broker_step"].as_str() {
+            step @ Some("claim_exchange" | "generation_before_prepare" | "prepare") => step,
+            _ => None,
+        })
+        .unwrap_or("unknown");
+    let reason = (stage == "prepare")
+        .then(|| fields.pointer("/enforcer/reason"))
+        .flatten();
+    // The fixture retains this before the outbox can fail. Project only the
+    // typed labels, without identifiers, clock data or the error's text.
+    let marker = serde_json::json!({
+        "version": 1, "stage": stage, "enforcer_reason": reason, "runtime_effect": "unknown"
+    });
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "broker import verification failure: {marker}"
+    );
 }
 
 impl Execution<'_> {
@@ -566,7 +595,13 @@ impl Execution<'_> {
             }
             HelperPreparationPhase::Ready(prepared) => prepared,
         };
-        let retained = match self.execute_helper(runtime, &prepared).await? {
+        let outcome = self.execute_helper(runtime, &prepared).await;
+        if purpose == HelperPurposeV1::ImportVerification
+            && let Err(error) = &outcome
+        {
+            report_import_verification_failure(error);
+        }
+        let retained = match outcome? {
             crate::runtime::ManagedPrearmedOutcome::Executed(retained) => retained,
             crate::runtime::ManagedPrearmedOutcome::Abandoned { owned, retirement } => {
                 return Ok(ControlFlow::Break(Box::new(AbandonedBatch {

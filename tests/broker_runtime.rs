@@ -9,7 +9,7 @@ mod harness;
 use agentsandbox::{
     broker::{
         clock::{HostClock, NativeHostClock},
-        enforcer::{EnforcerClient, SlotPhaseV1},
+        enforcer::{EnforcerClient, EnforcerError, SlotPhaseV1},
         journal::JournalScopeV1,
         local_ipc::EndpointRecordV1,
         service::{
@@ -716,6 +716,9 @@ async fn broker_sigkill_preserves_original_deadline_without_second_start() -> Re
     .await
     .context("broker runtime qualification exceeded the 600-second global bound")
     .and_then(|result| result);
+    if outcome.is_err() && retain_import_verification_failure(&evidence).is_err() {
+        eprintln!("could not retain the local import verification diagnostic");
+    }
     evidence.write("result.json", &json!({
         "runtime_test":if outcome.is_ok() { "PASS" } else { "FAIL" },
         "worker_event_proof":if outcome.is_ok() { "observed_live_and_history_agree" } else { "not_qualified" },
@@ -727,6 +730,140 @@ async fn broker_sigkill_preserves_original_deadline_without_second_start() -> Re
         "scope":"one native control host / selected Docker engine; no Podman, cloud, SIGSTOP or provider qualification"
     }))?;
     outcome
+}
+
+const IMPORT_VERIFICATION_FAILURE_PREFIX: &[u8] = b"broker import verification failure: ";
+
+fn retain_import_verification_failure(evidence: &Evidence) -> Result<()> {
+    use std::io::Read as _;
+
+    // Match the cap of the fixture's private child stderr. An absent file, a
+    // partial last line or a lost diagnostic leaves the stage unknown.
+    const MAX_STDERR: u64 = 64 * 1024;
+    let marker = (|| {
+        let mut bytes = Vec::new();
+        fs::File::open(evidence.root.join("logs/broker-1.stderr"))
+            .ok()?
+            .take(MAX_STDERR + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() as u64 > MAX_STDERR {
+            return None;
+        }
+        import_verification_failure_marker(&bytes)
+    })();
+    let receipt = marker.unwrap_or_else(|| {
+        json!({
+            "version": 1, "stage": "unknown", "enforcer_reason": null, "runtime_effect": "unknown"
+        })
+    });
+    evidence.write("import-verification-failure.json", &receipt)
+}
+
+fn import_verification_failure_marker(stderr: &[u8]) -> Option<Value> {
+    let mut matches = stderr
+        .split_inclusive(|&byte| byte == b'\n')
+        .filter_map(|line| line.strip_prefix(IMPORT_VERIFICATION_FAILURE_PREFIX));
+    let line = matches.next()?.strip_suffix(b"\n")?;
+    if line.len() > 512 || matches.next().is_some() {
+        return None;
+    }
+    let data: Value = serde_json::from_slice(line).ok()?;
+    if data["version"] != 1 || data["runtime_effect"] != "unknown" {
+        return None;
+    }
+    let stage = data["stage"].as_str()?;
+    match stage {
+        "prepare"
+        | "generation_before_prepare"
+        | "claim_exchange"
+        | "observe_only"
+        | "authority_before_spawn"
+        | "invocation_before_spawn"
+        | "stop_before_spawn"
+        | "guard_before_spawn"
+        | "spawn"
+        | "started_observation"
+        | "unknown" => {}
+        _ => return None,
+    }
+    let reason = data.get("enforcer_reason")?;
+    if !reason.is_null()
+        && (stage != "prepare" || !valid_import_verification_prepare_reason(reason))
+    {
+        return None;
+    }
+    Some(json!({
+        "version": 1, "stage": stage, "enforcer_reason": reason, "runtime_effect": "unknown"
+    }))
+}
+
+fn valid_import_verification_prepare_reason(reason: &Value) -> bool {
+    if let Some(label) = reason.as_str() {
+        return matches!(
+            label,
+            "stop_signalled"
+                | "permission_binding_mismatch"
+                | "invalid_arm"
+                | "generation_changed"
+                | "helper_unhealthy"
+                | "clock_unavailable"
+                | "arm_clock_identity_mismatch"
+                | "arm_clock_regressed"
+                | "arm_clock_rejected"
+                | "deadline_expired"
+                | "response_mismatch"
+                | "response_binding_mismatch"
+                | "lock_poisoned"
+        );
+    }
+    let Some(fields) = reason.as_object() else {
+        return false;
+    };
+    fields.len() == 1
+        && fields.iter().all(|(key, code)| {
+            matches!(key.as_str(), "prepare_outcome_unknown" | "remote_rejected")
+                && serde_json::from_value::<EnforcerError>(code.clone()).is_ok()
+        })
+}
+
+#[test]
+fn import_verification_failure_receipt_keeps_only_closed_stage_evidence() {
+    assert!(import_verification_failure_marker(b"no local receipt\n").is_none());
+    let marker = br#"broker import verification failure: {"version":1,"stage":"prepare","enforcer_reason":{"prepare_outcome_unknown":"unavailable"},"runtime_effect":"unknown","private":"do not copy"}"#;
+    let mut log = b"unrelated private stderr\n".to_vec();
+    log.extend_from_slice(marker);
+    assert!(import_verification_failure_marker(&log).is_none());
+    log.push(b'\n');
+    assert_eq!(
+        import_verification_failure_marker(&log).unwrap(),
+        json!({
+            "version": 1, "stage": "prepare",
+            "enforcer_reason": {"prepare_outcome_unknown": "unavailable"},
+            "runtime_effect": "unknown"
+        })
+    );
+    log.extend_from_slice(marker);
+    assert!(import_verification_failure_marker(&log).is_none());
+    for stage in ["observe_only", "guard_before_spawn", "unknown"] {
+        let line = format!(
+            "broker import verification failure: {{\"version\":1,\"stage\":\"{stage}\",\"enforcer_reason\":null,\"runtime_effect\":\"unknown\"}}\n"
+        );
+        assert_eq!(
+            import_verification_failure_marker(line.as_bytes()).unwrap(),
+            json!({
+                "version": 1, "stage": stage, "enforcer_reason": null, "runtime_effect": "unknown"
+            })
+        );
+    }
+    let invalid = br#"{"version":1,"stage":"prepare","enforcer_reason":{"remote_rejected":"private"},"runtime_effect":"unknown"}"#;
+    let log = [
+        IMPORT_VERIFICATION_FAILURE_PREFIX,
+        invalid.as_slice(),
+        b"\n",
+    ]
+    .concat();
+    assert!(import_verification_failure_marker(&log).is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
