@@ -262,6 +262,157 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn connect_permits_return_the_exact_committed_receipt_for_the_runner_tenant() {
+        use crate::control::egress_decision::{
+            EgressConnectPermitDispositionV1, egress_resolution_digest_v1,
+        };
+
+        const AUTHORITY: &str = "fixture.egress.test:8443";
+        const OPENINGS: &str = "/api/v1/egress/channel-openings";
+        const DECISIONS: &str = "/api/v1/egress/decisions";
+        const PERMITS: &str = "/api/v1/egress/connect-permits";
+        const RUNNER_A: &str = "permit-runner-a";
+        const RUNNER_B: &str = "permit-runner-b";
+
+        async fn receipt<T: serde::de::DeserializeOwned>(response: Response) -> T {
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            serde_json::from_slice(&bytes).unwrap()
+        }
+
+        let (directory, a, binding) = loopback_store_fixture(AUTHORITY);
+        let b = Arc::new(
+            Store::open_for_tenant(
+                &directory.path().join("tenant-b.sqlite"),
+                "tenant-b",
+                Redactor::new(vec![]),
+                10_000,
+            )
+            .unwrap(),
+        );
+        let router = gateway_router(
+            GatewayState::for_tenants(
+                vec![
+                    TenantGateway {
+                        tenant_id: "tenant-a".into(),
+                        store: a.clone(),
+                        runner_token: RUNNER_A.into(),
+                        viewer_token: "permit-viewer-a".into(),
+                    },
+                    TenantGateway {
+                        tenant_id: "tenant-b".into(),
+                        store: b.clone(),
+                        runner_token: RUNNER_B.into(),
+                        viewer_token: "permit-viewer-b".into(),
+                    },
+                ],
+                Policy::default(),
+                None,
+                Redactor::new(vec![]),
+            )
+            .unwrap(),
+        );
+        let post = |path, token, body: Value| {
+            router.clone().oneshot(
+                axum::http::Request::post(path)
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+        };
+        let opening = EgressChannelOpeningRequestV1 {
+            version: 1,
+            observation_id: IdV1::random(),
+            binding: binding.clone(),
+        };
+        let opened: EgressChannelOpeningReceiptV1 = receipt(
+            post(OPENINGS, RUNNER_A, serde_json::to_value(&opening).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(opened.disposition, EgressChannelOpeningDispositionV1::Fresh);
+        let decision = EgressDecideRequestV1 {
+            version: 1,
+            decision_id: IdV1::random(),
+            binding: binding.clone(),
+            flow_id: 1,
+            authority: AUTHORITY.into(),
+        };
+        let allowed: EgressDecisionV1 = receipt(
+            post(
+                DECISIONS,
+                RUNNER_A,
+                serde_json::to_value(&decision).unwrap(),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert!(allowed.allows(&decision));
+        assert!(opened.receipt.audit_seq < allowed.receipt.audit_seq);
+
+        // Only the request reaches SQLite. The test does not start a resolver
+        // or open a socket to the address in this fixture.
+        let ip = "93.184.216.34".parse().unwrap();
+        let request = EgressConnectPermitRequestV1 {
+            version: 1,
+            opening_id: opening.observation_id,
+            decision_id: decision.decision_id,
+            binding,
+            flow_id: decision.flow_id,
+            ip,
+            resolution_digest: egress_resolution_digest_v1(&[ip]).unwrap(),
+        };
+        let body = serde_json::to_value(&request).unwrap();
+        let heads = (a.head().unwrap(), b.head().unwrap());
+        assert_eq!(
+            post(PERMITS, RUNNER_B, body.clone())
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!((a.head().unwrap(), b.head().unwrap()), heads);
+
+        let fresh: EgressConnectPermitReceiptV1 =
+            receipt(post(PERMITS, RUNNER_A, body.clone()).await.unwrap()).await;
+        assert!(fresh.is_fresh_for(&request, 8443));
+        assert_eq!(fresh.receipt.audit_seq, heads.0 + 1);
+        assert_eq!(a.head().unwrap(), fresh.receipt.audit_seq);
+        let replay: EgressConnectPermitReceiptV1 =
+            receipt(post(PERMITS, RUNNER_A, body).await.unwrap()).await;
+        assert_eq!(
+            replay,
+            EgressConnectPermitReceiptV1 {
+                disposition: EgressConnectPermitDispositionV1::Replayed,
+                ..fresh
+            }
+        );
+
+        let ip = "93.184.216.35".parse().unwrap();
+        let different = EgressConnectPermitRequestV1 {
+            ip,
+            resolution_digest: egress_resolution_digest_v1(&[ip]).unwrap(),
+            ..request
+        };
+        assert_eq!(
+            post(PERMITS, RUNNER_A, serde_json::to_value(&different).unwrap())
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            (a.head().unwrap(), b.head().unwrap()),
+            (heads.0 + 1, heads.1)
+        );
+    }
+
+    #[tokio::test]
     async fn channel_openings_require_a_runner_and_use_its_tenant() {
         let (directory, a, binding) = loopback_store_fixture("fixture.egress.test:8443");
         let b = Arc::new(
