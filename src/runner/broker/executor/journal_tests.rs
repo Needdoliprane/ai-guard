@@ -3,6 +3,8 @@
 //! this file. The child recovery module declares its synthetic engine fixture.
 #[path = "cancelled_recovery_tests.rs"]
 mod cancelled_recovery_tests;
+#[path = "create_issued_tests.rs"]
+mod create_issued_tests;
 #[path = "export_retirement_tests.rs"]
 mod export_retirement_tests;
 use super::super::diagnostics::BrokerStep;

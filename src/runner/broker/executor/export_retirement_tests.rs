@@ -698,6 +698,17 @@ fn seed_create_issued_parent(
     accepted: &AcceptedJobV1,
     authority: &RuntimeAuthority,
 ) -> Result<WorkerV1> {
+    seed_before_create_issued(handle, execution, fixture, accepted, authority)?;
+    handle.block_on(execution.mutate(WorkerTransitionV1::CreateIssued))
+}
+
+pub(super) fn seed_before_create_issued(
+    handle: &tokio::runtime::Handle,
+    execution: &Execution<'_>,
+    fixture: &Fixture,
+    accepted: &AcceptedJobV1,
+    authority: &RuntimeAuthority,
+) -> Result<WorkerV1> {
     let request = accepted.checkpoint().0.current_request.clone();
     let (answer, _) = handle.block_on(execution.rpc(Operation::Decision {
         request: request.clone(),
@@ -816,7 +827,7 @@ fn seed_create_issued_parent(
         }),
     )?;
     trace_phase("parent_verification_seeded");
-    handle.block_on(execution.mutate(WorkerTransitionV1::CreateIssued))
+    Ok(worker)
 }
 
 #[test]
