@@ -188,7 +188,7 @@ async fn corrupt_initial_worker_response(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let target = request.uri().path() == "/api/v1/workers/supervised-reservations";
+    let target = request.uri().path() == "/control/api/v1/workers/supervised-reservations";
     let response = next.run(request).await;
     if !target || response.status() != axum::http::StatusCode::CREATED {
         return response;
