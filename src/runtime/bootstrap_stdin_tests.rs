@@ -1,24 +1,90 @@
 use super::{
-    BeforeSpawnGuard, CancelGeneration, ContainerPurpose, ContainerSpec, NetworkMode,
-    OwnedStartInput, RuntimeKind, SpawnedPrearmedInput,
+    BeforeSpawnGuard, CancelGeneration, ContainerPurpose, ContainerSpec, EGRESS_PROXY_MARKER,
+    HELD_CHALLENGE_ENV, NetworkMode, OwnedStartInput, RuntimeKind, SpawnedPrearmedInput,
     batch_io::OwnedBatchIo,
     bootstrap_stdin::{
         BootstrapStdinSubmitError, MAX_BOOTSTRAP_STDIN_BYTES, PrearmedBootstrapStdin,
         PreparedBootstrapStdin,
     },
-    managed::validate_bootstrap_stdin_flags,
+    managed::{validate_bootstrap_environment, validate_bootstrap_stdin_flags},
     spawn_prearmed_cli,
 };
-use crate::control::EgressLaunchV1;
+use crate::{
+    control::{EgressLaunchV1, LaunchSpecV1, NetworkV1, SecurityPresetV1, WorkerV1},
+    provider::{BOOTSTRAP_ENV, BOOTSTRAP_PROGRAM},
+};
 use anyhow::Result;
+use serde_json::json;
 use std::{future::Future, pin::Pin, process::Stdio, time::Duration};
 use tokio::{
     process::{Child, Command},
     sync::watch,
     time::{Instant, timeout},
 };
+use uuid::Uuid;
 
 const TARGET: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const ATTEMPT: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+fn held_worker() -> WorkerV1 {
+    let launch: LaunchSpecV1 = serde_json::from_value(json!({
+        "version": 1,
+        "session_id": Uuid::from_u128(1),
+        "command": {
+            "argv": [BOOTSTRAP_PROGRAM, "exec", "--client", "codex", "--auth-mode", "api",
+                     "--transport", "batch", "--preset-version", "1", "--prompt", "fixture"],
+            "cwd": "/workspace"
+        },
+        "profile": "observe",
+        "runtime_kind": "docker",
+        "authority_id": "fixture-runtime",
+        "image_ref": "worker:fixture",
+        "image_id": format!("sha256:{TARGET}"),
+        "network": "none",
+        "cpu_millis": 2000,
+        "memory_bytes": 1_073_741_824_u64,
+        "pids_limit": 256,
+        "timeout_seconds": 120,
+        "security_preset": "fixed_sandbox_v2",
+        "restart_policy": "no",
+        "workspace_manifest_digest": TARGET,
+        "workspace_import_policy_version": 1,
+        "provider": "codex",
+        "capture_output": true,
+        "credential_binding_id": Uuid::from_u128(2),
+        "credential_names": [BOOTSTRAP_ENV],
+        "provider_resolution": {
+            "version": 1, "client": "codex", "auth_mode": "api", "transport": "batch",
+            "profile_id": "codex-api", "profile_revision": 1,
+            "credential_binding_id": Uuid::from_u128(2), "credential_names": [BOOTSTRAP_ENV],
+            "invocation_preset_version": 1,
+            "provenance": {"client": "cli", "auth_mode": "cli", "profile": "cli", "model": "cli"}
+        },
+        "egress": EgressLaunchV1::broker_proxy(3128).unwrap(),
+    }))
+    .unwrap();
+    serde_json::from_value(json!({
+        "worker_id": Uuid::from_u128(3),
+        "admission_operation_id": Uuid::from_u128(4),
+        "request_id": Uuid::from_u128(5),
+        "receipt": {
+            "version": 1, "request_id": Uuid::from_u128(5), "request_hash": TARGET,
+            "phase": "initial", "audit_seq": 1, "audit_hash": TARGET
+        },
+        "spec_hash": launch.spec_hash().unwrap(),
+        "launch": launch,
+        "policy_hash": TARGET,
+        "state": "reserved",
+        "quota_held": true,
+        "revision": 1,
+        "attempt": {
+            "attempt_id": ATTEMPT, "stable_name": "aig-held-fixture",
+            "volume_name": "aig-held-fixture-work"
+        },
+        "allocation_inconsistent": false,
+    }))
+    .unwrap()
+}
 
 struct FixtureGuard;
 impl BeforeSpawnGuard for FixtureGuard {
@@ -49,10 +115,15 @@ fn unused_handoff<'a>(
 
 fn bootstrap_child() -> (Child, PrearmedBootstrapStdin) {
     let (_stop_tx, stop) = watch::channel(false);
+    let spec = ContainerSpec::for_held_worker(&held_worker(), Uuid::from_u128(6)).unwrap();
+    let binding = spec.held_bootstrap_for(true).unwrap().unwrap().clone();
     let (child, input) = spawn_prearmed_cli(
         inert_cli(&format!("start --attach --interactive {TARGET}")),
         TARGET,
-        OwnedStartInput::Bootstrap(Box::new(unused_handoff)),
+        OwnedStartInput::Bootstrap {
+            ready: Box::new(unused_handoff),
+            binding,
+        },
         Box::new(FixtureGuard),
         &stop,
     )
@@ -196,13 +267,15 @@ async fn prearmed_spawn_preserves_historical_stdin_and_rejects_wrong_engine_flag
         .with_broker_egress(&EgressLaunchV1::broker_proxy(3128).unwrap())
         .unwrap();
 
-    use serde_json::json;
     for kind in [RuntimeKind::Docker, RuntimeKind::Podman] {
         let historical = spec.create_args(kind).unwrap();
         assert!(!historical.iter().any(|arg| arg == "--interactive"));
-        let bootstrap = spec.create_args_for(kind, true).unwrap();
-        assert!(bootstrap.iter().any(|arg| arg == "--interactive"));
-        assert!(!bootstrap.iter().any(|arg| arg == "--tty"));
+        assert!(
+            !historical
+                .iter()
+                .any(|arg| arg.starts_with(HELD_CHALLENGE_ENV))
+        );
+        assert!(spec.create_args_for(kind, true).is_err());
         let docker = kind == RuntimeKind::Docker;
         let valid = json!({"Config": {
             "Tty": false, "OpenStdin": true, "AttachStdin": docker, "StdinOnce": docker
@@ -224,5 +297,126 @@ async fn prearmed_spawn_preserves_historical_stdin_and_rejects_wrong_engine_flag
                 validate_bootstrap_stdin_flags(&serde_json::to_vec(&wrong).unwrap(), kind).is_err()
             );
         }
+    }
+}
+
+#[test]
+fn held_spec_freezes_the_admitted_worker_and_emits_only_its_markers() {
+    let worker = held_worker();
+    let operation = Uuid::from_u128(6);
+    let spec = ContainerSpec::for_held_worker(&worker, operation).unwrap();
+    assert!(spec.create_args(RuntimeKind::Docker).is_err());
+    for kind in [RuntimeKind::Docker, RuntimeKind::Podman] {
+        let args = spec.create_args_for(kind, true).unwrap();
+        assert!(args.iter().any(|arg| arg == "--interactive"));
+        assert!(!args.iter().any(|arg| arg == "--tty"));
+        for expected in [
+            format!("AI_GUARD_EGRESS_HELD_V1={ATTEMPT}"),
+            "AI_GUARD_EGRESS_PROXY=http://127.0.0.1:3128".to_owned(),
+        ] {
+            assert_eq!(
+                args.windows(2)
+                    .filter(|pair| pair[0] == "--env" && pair[1] == expected)
+                    .count(),
+                1
+            );
+        }
+        let separator = args.iter().position(|arg| arg == "--").unwrap();
+        assert_eq!(&args[separator + 2..], &worker.launch.command.argv[1..]);
+    }
+
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let root =
+        crate::control_fs::Directory::open_existing(&directory.path().canonicalize().unwrap())
+            .unwrap();
+    let payload = format!("{BOOTSTRAP_ENV}=synthetic-credential\n");
+    let collision = format!("{payload}{HELD_CHALLENGE_ENV}={ATTEMPT}\n");
+    let file = root
+        .persistent_create("colliding.env", collision.as_bytes())
+        .unwrap();
+    assert!(spec.clone().with_secret_env_handle(file).is_err());
+    let file = root
+        .persistent_create("provider.env", payload.as_bytes())
+        .unwrap();
+    let credential_args = spec
+        .clone()
+        .with_secret_env_handle(file)
+        .unwrap()
+        .create_args_for(RuntimeKind::Docker, true)
+        .unwrap();
+    assert!(
+        !credential_args
+            .iter()
+            .any(|arg| arg.contains("synthetic-credential"))
+    );
+
+    let mut changed = spec.clone();
+    *changed.argv.last_mut().unwrap() = "substituted prompt".into();
+    assert!(changed.create_args_for(RuntimeKind::Docker, true).is_err());
+
+    let mut bad = worker.clone();
+    bad.launch.command.argv[0] = "/bin/cat".into();
+    bad.spec_hash = bad.launch.spec_hash().unwrap();
+    assert!(ContainerSpec::for_held_worker(&bad, operation).is_err());
+
+    let mut bad = worker.clone();
+    bad.attempt.attempt_id = ATTEMPT.to_ascii_uppercase();
+    assert!(ContainerSpec::for_held_worker(&bad, operation).is_err());
+
+    let mut bad = worker.clone();
+    bad.launch.egress = None;
+    bad.launch.network = NetworkV1::Bridge;
+    bad.spec_hash = bad.launch.spec_hash().unwrap();
+    assert!(ContainerSpec::for_held_worker(&bad, operation).is_err());
+
+    let mut bad = worker;
+    bad.launch.security_preset = SecurityPresetV1::FixedSandboxInteractiveV3;
+    bad.spec_hash = bad.launch.spec_hash().unwrap();
+    assert!(ContainerSpec::for_held_worker(&bad, operation).is_err());
+}
+
+#[test]
+fn held_inspect_accepts_only_the_exact_marker_pair_and_hides_raw_values() {
+    let spec = ContainerSpec::for_held_worker(&held_worker(), Uuid::from_u128(6)).unwrap();
+    let binding = spec.held_bootstrap_for(true).unwrap().unwrap();
+    let challenge = format!("{HELD_CHALLENGE_ENV}={ATTEMPT}");
+    let marker = format!("{EGRESS_PROXY_MARKER}=http://127.0.0.1:3128");
+    let private = format!(r#"{BOOTSTRAP_ENV}={{"secret":"private-inspection-canary"}}"#);
+    let inspect = |env: &[&str]| serde_json::to_vec(&json!({"Config": {"Env": env}})).unwrap();
+    validate_bootstrap_environment(&inspect(&[&private, &marker, &challenge]), binding).unwrap();
+
+    for env in [
+        vec![private.as_str(), &challenge],
+        vec![&private, &marker],
+        vec![&private, &marker, &challenge, &challenge],
+        vec![&private, &marker, &challenge, &marker],
+        vec![&private, &marker, HELD_CHALLENGE_ENV],
+        vec![
+            &private,
+            &marker,
+            "AI_GUARD_EGRESS_HELD_V1=private-inspection-canary",
+        ],
+        vec![
+            &private,
+            &marker,
+            "AI_GUARD_EGRESS_HELD_V1=550e8400-e29b-41d4-a716-446655440001",
+        ],
+        vec![
+            &private,
+            "AI_GUARD_EGRESS_PROXY=http://127.0.0.1:3129",
+            &challenge,
+        ],
+        vec![
+            &private,
+            "AI_GUARD_EGRESS_PROXY=http://127.0.0.1:03128",
+            &challenge,
+        ],
+    ] {
+        let error = validate_bootstrap_environment(&inspect(&env), binding).unwrap_err();
+        assert!(!format!("{error:?}").contains("private-inspection-canary"));
     }
 }

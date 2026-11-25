@@ -3,8 +3,8 @@
 //! observed AttachStdin and StdinOnce both true on Docker and both false on
 //! Podman. The managed caller must attest these facts before handing off.
 use super::{
-    ExecutionResult, ManagedRuntime, OwnedContainerSnapshot, TransportTasks, capture_stream,
-    capture_stream_tapped, ensure_prearmed_live, wait_prearmed_stop,
+    ExecutionResult, HeldBootstrapBinding, ManagedRuntime, OwnedContainerSnapshot, TransportTasks,
+    capture_stream, capture_stream_tapped, ensure_prearmed_live, wait_prearmed_stop,
 };
 use crate::broker::enforcer::CancelGeneration;
 use anyhow::{Context, Result, ensure};
@@ -136,6 +136,7 @@ pub(crate) type BootstrapReady = Box<
 /// and STOP receiver borrow the supervised handoff's lifetime.
 pub(crate) struct PreparedBootstrapStdin<'a> {
     observed: &'a OwnedContainerSnapshot,
+    attempt: &'a crate::egress::ids::IdV1,
     stop: &'a watch::Receiver<bool>,
     stdin: PrearmedBootstrapStdin,
 }
@@ -144,6 +145,11 @@ impl PreparedBootstrapStdin<'_> {
     #[allow(dead_code)] // Consumed by the separate broker composition.
     pub(crate) fn owned(&self) -> &OwnedContainerSnapshot {
         self.observed
+    }
+
+    #[allow(dead_code)] // Consumed by the separate broker composition.
+    pub(crate) fn attempt(&self) -> &crate::egress::ids::IdV1 {
+        self.attempt
     }
 
     #[allow(dead_code)] // Consumed by the separate broker composition.
@@ -166,6 +172,7 @@ impl PreparedBootstrapStdin<'_> {
 pub(super) async fn supervise(
     authority: &ManagedRuntime,
     created: &OwnedContainerSnapshot,
+    binding: HeldBootstrapBinding,
     mut child: Child,
     stdin: Result<PrearmedBootstrapStdin>,
     on_ready: BootstrapReady,
@@ -207,13 +214,14 @@ pub(super) async fn supervise(
                 let mut interval = tokio::time::interval(Duration::from_millis(200));
                 let observed = loop {
                     interval.tick().await;
-                    if let Some(observed) = authority.inspect_bootstrap_running(created).await? {
+                    if let Some(observed) = authority.inspect_bootstrap_running(created, &binding).await? {
                         break observed;
                     }
                 };
                 stdin.wait_writable(Instant::now() + Duration::from_secs(5)).await?;
                 on_ready(PreparedBootstrapStdin {
                     observed: &observed,
+                    attempt: &binding.attempt,
                     stop: &ready_stop,
                     stdin,
                 })

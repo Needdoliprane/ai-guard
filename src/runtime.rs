@@ -1,4 +1,7 @@
-use crate::broker::enforcer::CancelGeneration;
+use crate::{
+    broker::enforcer::CancelGeneration,
+    egress::{bootstrap_release::HELD_CHALLENGE_ENV, ids::IdV1},
+};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::{future::Future, process::Stdio, time::Duration};
@@ -229,7 +232,16 @@ pub struct ContainerSpec {
     security_preset: crate::control::SecurityPresetV1,
     terminal_secrets: TerminalSecrets,
     egress_proxy_port: Option<u16>,
+    held_bootstrap: Option<HeldBootstrapBinding>,
 }
+
+#[derive(Clone, Debug)]
+struct HeldBootstrapBinding {
+    attempt: IdV1,
+    proxy_port: u16,
+    spec_digest: String,
+}
+
 pub use crate::egress::proxy_env::EGRESS_PROXY_MARKER;
 fn egress_environment(port: u16) -> Vec<String> {
     crate::egress::proxy_env::proxy_environment(port)
@@ -281,8 +293,90 @@ impl ContainerSpec {
             security_preset: crate::control::SecurityPresetV1::FixedSandboxV2,
             terminal_secrets: TerminalSecrets::default(),
             egress_proxy_port: None,
+            held_bootstrap: None,
         })
     }
+    /// Build only from the authorized worker retained by the broker. The
+    /// attempt supplies the public challenge; the launch supplies the exact
+    /// managed bootstrap argv and proxy profile.
+    #[allow(dead_code)] // Used when the broker composes the held runtime port.
+    pub(crate) fn for_held_worker(
+        worker: &crate::control::WorkerV1,
+        operation: Uuid,
+    ) -> Result<Self> {
+        use crate::{
+            control::{NetworkV1, SecurityPresetV1},
+            provider::ClientTransport,
+        };
+
+        let launch = &worker.launch;
+        launch.validate()?;
+        let egress = launch
+            .egress
+            .as_ref()
+            .context("held bootstrap requires broker egress")?;
+        ensure!(
+            worker.quota_held
+                && worker.spec_hash == launch.spec_hash()?
+                && launch.network == NetworkV1::None
+                && launch.security_preset == SecurityPresetV1::FixedSandboxV2
+                && launch.command.cwd == "/workspace"
+                && launch
+                    .provider_resolution
+                    .as_ref()
+                    .is_some_and(|provider| provider.transport == ClientTransport::Batch),
+            "held bootstrap requires an authorized managed batch worker"
+        );
+        let attempt = IdV1::parse(&worker.attempt.attempt_id)?;
+        let mut spec = Self::with_operation(
+            Uuid::parse_str(&launch.session_id)?,
+            ContainerPurpose::Run,
+            &launch.image_id,
+            launch.command.argv.clone(),
+            NetworkMode::None,
+            operation,
+        )?
+        .with_managed_names(&worker.attempt.stable_name, &worker.attempt.volume_name)?
+        .with_broker_egress(egress)?;
+        spec.held_bootstrap = Some(HeldBootstrapBinding {
+            attempt,
+            proxy_port: egress.proxy_port,
+            spec_digest: spec.held_bootstrap_spec_digest()?,
+        });
+        Ok(spec)
+    }
+
+    fn held_bootstrap_spec_digest(&self) -> Result<String> {
+        crate::control::content_hash(
+            "ai-guard:runtime-held-bootstrap-spec:v1",
+            &(
+                self.session,
+                self.operation,
+                &self.image,
+                &self.argv,
+                &self.managed_names,
+            ),
+        )
+    }
+
+    fn held_bootstrap_for(&self, requested: bool) -> Result<Option<&HeldBootstrapBinding>> {
+        match (&self.held_bootstrap, requested) {
+            (None, false) => Ok(None),
+            (Some(binding), true) => {
+                ensure!(
+                    matches!(self.purpose, ContainerPurpose::Run)
+                        && self.network == NetworkMode::None
+                        && self.security_preset == crate::control::SecurityPresetV1::FixedSandboxV2
+                        && self.egress_proxy_port == Some(binding.proxy_port)
+                        && self.held_bootstrap_spec_digest()? == binding.spec_digest,
+                    "held bootstrap specification differs from the authorized worker"
+                );
+                Ok(Some(binding))
+            }
+            _ => bail!("held bootstrap specification and runtime port must be selected together"),
+        }
+    }
+
     pub fn operation_id(&self) -> Uuid {
         self.operation
     }
@@ -334,6 +428,10 @@ impl ContainerSpec {
     pub fn with_broker_egress(mut self, egress: &crate::control::EgressLaunchV1) -> Result<Self> {
         egress.validate()?;
         ensure!(
+            self.held_bootstrap.is_none(),
+            "the held bootstrap proxy profile is already bound"
+        );
+        ensure!(
             matches!(self.purpose, ContainerPurpose::Run) && self.network == NetworkMode::None,
             "broker egress requires a worker execution on network none"
         );
@@ -356,13 +454,30 @@ impl ContainerSpec {
                 "credential injection is valid only for a broker-egress or explicitly bridged worker and a regular absolute env file"
             );
         }
-        file.revalidate()?;
+        self.validate_credential_env(&file)?;
         self.secret_env_file = Some(file);
         Ok(self)
     }
+    fn validate_credential_env(&self, file: &crate::control_fs::PrivateFile) -> Result<()> {
+        file.revalidate()?;
+        if self.held_bootstrap.is_some() {
+            let prefix = format!("{}=", crate::provider::BOOTSTRAP_ENV);
+            ensure!(
+                file.bytes()
+                    .strip_prefix(prefix.as_bytes())
+                    .and_then(|payload| payload.strip_suffix(b"\n"))
+                    .is_some_and(|payload| {
+                        !payload.is_empty()
+                            && payload.iter().all(|b| !matches!(*b, b'\r' | b'\n' | 0))
+                    }),
+                "held bootstrap credential file must contain only the managed provider handoff"
+            );
+        }
+        Ok(())
+    }
     fn validate_secret_env_file(&self) -> Result<()> {
         if let Some(file) = &self.secret_env_file {
-            file.revalidate()?;
+            self.validate_credential_env(file)?;
         }
         Ok(())
     }
@@ -392,15 +507,7 @@ impl ContainerSpec {
     }
     fn create_args_for(&self, runtime: RuntimeKind, bootstrap_stdin: bool) -> Result<Vec<String>> {
         self.require_current_creation_policy()?;
-        if bootstrap_stdin {
-            ensure!(
-                matches!(self.purpose, ContainerPurpose::Run)
-                    && self.network == NetworkMode::None
-                    && self.egress_proxy_port.is_some()
-                    && !self.security_preset.is_interactive(),
-                "bootstrap stdin requires the retained broker egress worker profile"
-            );
-        }
+        let held = self.held_bootstrap_for(bootstrap_stdin)?;
         self.validate_secret_env_file()?;
         validate_image(&self.image)?;
         validate_command(&self.argv)?;
@@ -490,6 +597,12 @@ impl ContainerSpec {
             for value in egress_environment(port) {
                 args.extend(["--env".into(), value]);
             }
+        }
+        if let Some(held) = held {
+            args.extend([
+                "--env".into(),
+                format!("{HELD_CHALLENGE_ENV}={}", held.attempt.as_str()),
+            ]);
         }
         if let Some(file) = &self.secret_env_file {
             args.extend([
@@ -782,7 +895,10 @@ impl Drop for TransportTasks {
 enum OwnedStartInput {
     Historical(Option<std::fs::File>),
     #[cfg(unix)]
-    Bootstrap(bootstrap_stdin::BootstrapReady),
+    Bootstrap {
+        ready: bootstrap_stdin::BootstrapReady,
+        binding: HeldBootstrapBinding,
+    },
 }
 
 impl OwnedStartInput {
@@ -790,7 +906,7 @@ impl OwnedStartInput {
         match self {
             Self::Historical(_) => false,
             #[cfg(unix)]
-            Self::Bootstrap(_) => true,
+            Self::Bootstrap { .. } => true,
         }
     }
 }
@@ -800,6 +916,7 @@ enum SpawnedPrearmedInput {
     #[cfg(unix)]
     Bootstrap {
         ready: bootstrap_stdin::BootstrapReady,
+        binding: HeldBootstrapBinding,
         stdin: Result<bootstrap_stdin::PrearmedBootstrapStdin>,
     },
 }
@@ -837,8 +954,9 @@ fn spawn_prearmed_cli(
     let input = match input {
         OwnedStartInput::Historical(archive) => SpawnedPrearmedInput::Historical(archive),
         #[cfg(unix)]
-        OwnedStartInput::Bootstrap(ready) => SpawnedPrearmedInput::Bootstrap {
+        OwnedStartInput::Bootstrap { ready, binding } => SpawnedPrearmedInput::Bootstrap {
             ready,
+            binding,
             stdin: bootstrap_stdin::PrearmedBootstrapStdin::take(&mut child),
         },
     };
@@ -2031,10 +2149,15 @@ impl Runtime {
         let input = match input {
             SpawnedPrearmedInput::Historical(archive) => archive,
             #[cfg(unix)]
-            SpawnedPrearmedInput::Bootstrap { ready, stdin } => {
+            SpawnedPrearmedInput::Bootstrap {
+                ready,
+                binding,
+                stdin,
+            } => {
                 return bootstrap_stdin::supervise(
                     authority,
                     created,
+                    binding,
                     child,
                     stdin,
                     ready,
