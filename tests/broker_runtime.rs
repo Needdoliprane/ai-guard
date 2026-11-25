@@ -721,7 +721,11 @@ async fn broker_sigkill_preserves_original_deadline_without_second_start() -> Re
     .await
     .context("broker runtime qualification exceeded the 600-second global bound")
     .and_then(|result| result);
-    if outcome.is_err() && retain_import_verification_failure(&evidence, &stderr_drain).is_err() {
+    if outcome.is_err()
+        && retain_import_verification_failure(&evidence, &stderr_drain, scenario_end)
+            .await
+            .is_err()
+    {
         eprintln!("could not retain the local import verification diagnostic");
     }
     evidence.write("result.json", &json!({
@@ -739,19 +743,35 @@ async fn broker_sigkill_preserves_original_deadline_without_second_start() -> Re
 
 const IMPORT_VERIFICATION_FAILURE_PREFIX: &[u8] = b"broker import verification failure: ";
 
-fn retain_import_verification_failure(
+async fn retain_import_verification_failure(
     evidence: &Evidence,
     stderr_drain: &StderrDrain,
+    scenario_end: Instant,
 ) -> Result<()> {
+    let receipt = import_verification_failure_receipt(
+        stderr_drain,
+        &evidence.root.join("logs/broker-1.stderr"),
+        scenario_end,
+    )
+    .await;
+    evidence.write("import-verification-failure.json", &receipt)
+}
+
+async fn import_verification_failure_receipt(
+    stderr_drain: &StderrDrain,
+    path: &Path,
+    scenario_end: Instant,
+) -> Value {
     let marker = stderr_drain
-        .read_complete(&evidence.root.join("logs/broker-1.stderr"))
+        .read_complete_before(path, scenario_end)
+        .await
         .and_then(|bytes| import_verification_failure_marker(&bytes));
     let receipt = marker.unwrap_or_else(|| {
         json!({
             "version": 1, "stage": "unknown", "enforcer_reason": null, "runtime_effect": "unknown"
         })
     });
-    evidence.write("import-verification-failure.json", &receipt)
+    receipt
 }
 
 fn import_verification_failure_marker(stderr: &[u8]) -> Option<Value> {

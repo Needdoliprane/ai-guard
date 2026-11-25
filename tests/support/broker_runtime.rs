@@ -23,6 +23,8 @@ const DEFAULT_BIN: &str = env!("CARGO_BIN_EXE_agentsandbox");
 pub const CAPACITY: u32 = 8;
 pub const BROKER_SELECTION_ENV: &str = "AGENTSANDBOX_BROKER_SELECTION";
 const OUTPUT_LIMIT: usize = 64 * 1024;
+const STDERR_DRAIN_WAIT: Duration = Duration::from_secs(1);
+const STDERR_DRAIN_POLL: Duration = Duration::from_millis(10);
 const LIVE_EVENT_LIMIT: usize = 256;
 const LIVE_EVIDENCE_RESERVE: Duration = Duration::from_secs(15);
 
@@ -573,6 +575,32 @@ impl StderrDrain {
             .ok()?;
         (bytes.len() == length).then_some(bytes)
     }
+
+    pub async fn read_complete_before(
+        &self,
+        path: &Path,
+        budget_end: tokio::time::Instant,
+    ) -> Option<Vec<u8>> {
+        let started = tokio::time::Instant::now();
+        if started >= budget_end {
+            return None;
+        }
+        let wait_end = (started + STDERR_DRAIN_WAIT).min(budget_end);
+        loop {
+            let now = tokio::time::Instant::now();
+            if now >= budget_end {
+                return None;
+            }
+            if self.0.get().is_some() {
+                let bytes = self.read_complete(path)?;
+                return (tokio::time::Instant::now() < budget_end).then_some(bytes);
+            }
+            if now >= wait_end {
+                return None;
+            }
+            tokio::time::sleep_until((now + STDERR_DRAIN_POLL).min(wait_end)).await;
+        }
+    }
 }
 
 pub struct OwnedProcess {
@@ -762,7 +790,7 @@ fn stderr_stage_sampling_requires_a_complete_drain_below_the_cap() -> Result<()>
 
     let failed = StderrDrain::default();
     drain_log(
-        (&marker[..]).chain(InterruptedDrain),
+        Read::chain(&marker[..], InterruptedDrain),
         File::create(&path)?,
         None,
         Some(&failed),
@@ -779,6 +807,100 @@ fn stderr_stage_sampling_requires_a_complete_drain_below_the_cap() -> Result<()>
         assert_eq!(fs::read(&path)?, exact_cap);
         assert_eq!(drain.read_complete(&path), None);
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn stderr_stage_sampling_waits_for_delayed_publication_only_before_deadline() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let marker = br#"broker import verification failure: {"version":1,"stage":"observe_only","enforcer_reason":null,"runtime_effect":"unknown","private":"do not retain"}
+"#;
+
+    let in_budget_path = dir.path().join("in-budget.stderr");
+    let in_budget_drain = StderrDrain::default();
+    let publisher_drain = in_budget_drain.clone();
+    let publisher_path = in_budget_path.clone();
+    let publisher_marker = marker.to_vec();
+    let publisher = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        drain_log(
+            std::io::Cursor::new(publisher_marker),
+            File::create(publisher_path)?,
+            None,
+            Some(&publisher_drain),
+        );
+        Ok::<_, io::Error>(())
+    });
+    let in_budget = super::import_verification_failure_receipt(
+        &in_budget_drain,
+        &in_budget_path,
+        tokio::time::Instant::now() + Duration::from_millis(300),
+    )
+    .await;
+    publisher.await??;
+    assert_eq!(in_budget["stage"], "observe_only");
+    assert!(in_budget.get("private").is_none());
+
+    let late_path = dir.path().join("late.stderr");
+    let late_drain = StderrDrain::default();
+    let publisher_drain = late_drain.clone();
+    let publisher_path = late_path.clone();
+    let publisher_marker = marker.to_vec();
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(25);
+    let publisher = tokio::spawn(async move {
+        tokio::time::sleep_until(deadline + Duration::from_millis(20)).await;
+        drain_log(
+            std::io::Cursor::new(publisher_marker),
+            File::create(publisher_path)?,
+            None,
+            Some(&publisher_drain),
+        );
+        Ok::<_, io::Error>(())
+    });
+    let out_of_budget =
+        super::import_verification_failure_receipt(&late_drain, &late_path, deadline).await;
+    assert_eq!(out_of_budget["stage"], "unknown");
+    publisher.await??;
+    assert_eq!(
+        super::import_verification_failure_marker(&fs::read(&late_path)?).unwrap()["stage"],
+        "observe_only"
+    );
+    assert_eq!(
+        super::import_verification_failure_receipt(&late_drain, &late_path, deadline).await["stage"],
+        "unknown"
+    );
+
+    let incomplete_path = dir.path().join("incomplete.stderr");
+    fs::write(&incomplete_path, marker)?;
+    let incomplete = StderrDrain::default();
+    assert_eq!(
+        super::import_verification_failure_receipt(
+            &incomplete,
+            &incomplete_path,
+            tokio::time::Instant::now() + Duration::from_millis(15),
+        )
+        .await["stage"],
+        "unknown"
+    );
+
+    let capped_path = dir.path().join("capped.stderr");
+    let capped = StderrDrain::default();
+    let capped_bytes = vec![b'\n'; OUTPUT_LIMIT];
+    drain_log(
+        capped_bytes.as_slice(),
+        File::create(&capped_path)?,
+        None,
+        Some(&capped),
+    );
+    assert_eq!(
+        super::import_verification_failure_receipt(
+            &capped,
+            &capped_path,
+            tokio::time::Instant::now() + Duration::from_millis(15),
+        )
+        .await["stage"],
+        "unknown"
+    );
     Ok(())
 }
 
