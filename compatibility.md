@@ -1,6 +1,6 @@
 # Compatibilité des agents et intégration Jev
 
-État de la recherche : **29 octobre 2026**. Sources primaires : [registre des sources](sources.md). Les documentations consultées sont évolutives ; elles ne prouvent pas que toutes les versions déjà installées possèdent les fonctionnalités décrites.
+État de la recherche : **29 octobre 2026**. Sources primaires : [registre des sources](docs/sources.md). Les documentations consultées sont évolutives ; elles ne prouvent pas que toutes les versions déjà installées possèdent les fonctionnalités décrites.
 
 ## 1. Ce que signifie « compatible »
 
@@ -31,7 +31,7 @@ La provenance de **chaque événement** reste distincte du niveau du connecteur 
 | **Continue CLI** | `cn -p`, `--format json`, permissions par outil. | Observed recommandé ; résultats structurés intégrables. | Non confirmé par les interfaces consultées. | Ne pas assimiler un résultat JSON à un flux complet de commandes ; tester les modes de permissions choisis. [N1][N2] |
 | **Agent personnalisé / framework** | Contrat d'événements du projet et API du broker, sous contrôle du développeur de l'adaptateur. | Native si le contrat est implémenté et testé ; sinon Observed/Generic. | Seulement à partir d'IDs explicites. | Identité, séquence des événements, refus effectif, reprise et volume. |
 
-**État de la livraison :** des parseurs Rust Codex JSONL, Claude stream-json et télémétrie générique v1 sont implémentés et testés sur des fixtures synthétiques fondées sur les schémas officiels. Ils restent `declared`/`observed` : voir [adaptateurs livrés](adapters.md). Gemini, OpenCode, Aider et Continue n'ont pas de parseur natif livré. Les hooks fournisseurs décrits ici sont des possibilités d'intégration documentées, pas des hooks activés par cette livraison.
+**État de la livraison :** des parseurs Rust Codex JSONL, Claude stream-json et télémétrie générique v1 sont implémentés et testés sur des fixtures synthétiques fondées sur les schémas officiels. Ils restent `declared`/`observed` : voir [adaptateurs livrés](docs/adapters.md). Gemini, OpenCode, Aider et Continue n'ont pas de parseur natif livré. Les hooks fournisseurs décrits ici sont des possibilités d'intégration documentées, pas des hooks activés par cette livraison.
 
 **État de validation fournisseur :** aucun appel payant aux modèles ni authentification sur un compte fournisseur n'est attesté par cette recherche. Les tests du dépôt distinguent les fixtures de formats, les tests du broker et une véritable exécution Codex/Claude/Gemini. L'absence d'une métrique se représente par une valeur inconnue, jamais par zéro.
 

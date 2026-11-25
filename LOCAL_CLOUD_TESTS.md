@@ -102,7 +102,7 @@ Les volumes sont conservés. L'utilisation de ports déjà occupés doit être r
 | Viewer A : événements/SSE/export/usage | Aucune donnée B, y compris via IDs ou paramètres forcés. |
 | Restriction réseau native | Vérifier aussi le trafic réellement refusé sur le moteur/CNI choisi, au-delà de la présence des réseaux dans un manifeste. |
 
-Les scénarios de panne étendus et la qualification des restrictions runtime restent régis par [TEST_STRATEGY.md](TEST_STRATEGY.md). Le statut de chaque essai réellement exécuté est dans [../validation.md](../validation.md).
+Les scénarios de panne étendus et la qualification des restrictions runtime restent régis par [TEST_STRATEGY.md](docs/engineering/TEST_STRATEGY.md). Le statut de chaque essai réellement exécuté est dans [docs/validation.md](docs/validation.md).
 
 ## Passage vers Kubernetes
 

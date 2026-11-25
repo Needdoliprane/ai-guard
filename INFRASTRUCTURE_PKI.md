@@ -4,7 +4,7 @@ Ce document applique principalement G01, G02, G05, G06, G09 et G11 de [PRODUCTIO
 
 Les informations sont **Confirmé**, **Supposé** ou **À vérifier**. Les résultats d'essais emploient séparément `PASS`, `FAIL`, `BLOCKED`, `NOT_RUN` et `NOT_APPLICABLE`. Aucune qualification TLS/mTLS, Kubernetes ou NAS nouvelle n'est fournie ici.
 
-Références : [contrats cloud](CLOUD_TENANCY.md), [tests local/cloud](LOCAL_CLOUD_TESTS.md), [mesure d'usage](USAGE_METERING.md), [opérations locales](../operations.md), [API](../api.md) et [stratégie de tests](TEST_STRATEGY.md).
+Références : [contrats cloud](docs/engineering/CLOUD_TENANCY.md), [tests local/cloud](LOCAL_CLOUD_TESTS.md), [mesure d'usage](docs/engineering/USAGE_METERING.md), [opérations locales](docs/operations.md), [API](docs/api.md) et [stratégie de tests](docs/engineering/TEST_STRATEGY.md).
 
 ## 1. Profils d'exploitation
 
@@ -23,15 +23,15 @@ L'architecture cloud doit traiter des clients qui ne se font pas confiance. Le r
 
 ### Contrôle et stockage locaux
 
-Les fichiers [Compose Docker](../../deploy/docker/compose.yaml) et [Podman](../../deploy/podman/compose.yaml) publient `127.0.0.1:8787` et `127.0.0.1:4000`. Le réseau de contrôle est interne. Seule la gateway monte le volume d'audit ; le dashboard reçoit seulement le secret viewer. Les services sont UID 1000, sans capacités et avec racine en lecture seule. Il s'agit de **configuration confirmée**, dont l'application par les moteurs reste `NOT_RUN` dans la baseline.
+Les fichiers [Compose Docker](deploy/docker/compose.yaml) et [Podman](deploy/podman/compose.yaml) publient `127.0.0.1:8787` et `127.0.0.1:4000`. Le réseau de contrôle est interne. Seule la gateway monte le volume d'audit ; le dashboard reçoit seulement le secret viewer. Les services sont UID 1000, sans capacités et avec racine en lecture seule. Il s'agit de **configuration confirmée**, dont l'application par les moteurs reste `NOT_RUN` dans la baseline.
 
-`--container-listen` permet l'écoute interne `0.0.0.0` attendue par Compose ; ce drapeau n'est pas une option d'exposition Internet sécurisée. Les serveurs de [main.rs](../../src/main.rs) utilisent une écoute TCP HTTP, sans options certificat/clé/mTLS. Le contrôle d'origine de [api.rs](../../src/api.rs) accepte les origines loopback prévues par l'usage local. Une origine DNS LAN/cloud exige une politique explicite et testée, pas la désactivation de ce contrôle.
+`--container-listen` permet l'écoute interne `0.0.0.0` attendue par Compose ; ce drapeau n'est pas une option d'exposition Internet sécurisée. Les serveurs de [main.rs](src/main.rs) utilisent une écoute TCP HTTP, sans options certificat/clé/mTLS. Le contrôle d'origine de [api.rs](src/api.rs) accepte les origines loopback prévues par l'usage local. Une origine DNS LAN/cloud exige une politique explicite et testée, pas la désactivation de ce contrôle.
 
 La gateway utilise SQLite WAL et un volume local dans ce déploiement. La sauvegarde cohérente, la restauration, la migration et la rétention restent des gates G06. Ne pas déplacer la base active sur un partage NAS ni changer son filesystem sans qualifier les garanties de stockage et le comportement WAL. Une sauvegarde vers un stockage distinct est un parcours différent de l'hébergement de la base active.
 
 ### Secrets et maintenance
 
-Les originaux `secrets/runner` et `secrets/viewer` restent `0600`. Les projections `mounted-secrets/*` sont `0444` sous un parent privé `0700` et seules ces projections sont montées en lecture seule. `init` valide ces emplacements et rafraîchit les projections atomiquement. Les projections sont exclues de la copie du workspace. Voir [operations.rs](../../src/operations.rs) et [operations.md](../operations.md).
+Les originaux `secrets/runner` et `secrets/viewer` restent `0600`. Les projections `mounted-secrets/*` sont `0444` sous un parent privé `0700` et seules ces projections sont montées en lecture seule. `init` valide ces emplacements et rafraîchit les projections atomiquement. Les projections sont exclues de la copie du workspace. Voir [operations.rs](src/operations.rs) et [operations.md](docs/operations.md).
 
 `up` recrée gateway et dashboard pour remonter les nouveaux fichiers et recharger les clés. **Répéter `up` interrompt les connexions HTTP/SSE, même sans changement de secret.** Un job actif peut échouer à sa prochaine écriture d'audit. Pour une rotation locale : terminer les jobs, remplacer uniquement les sources privées en conservant leurs droits, exécuter le parcours `init`/`up` documenté, vérifier la disponibilité puis l'invalidité des anciennes clés, et reconnecter le navigateur. Les volumes d'audit et de travail ne sont pas supprimés.
 
@@ -39,9 +39,9 @@ Les jetons actuels n'expirent pas automatiquement. Une rotation de Bearer, un re
 
 ### Flux sortants
 
-Le runner refuse le HTTP distant pour son audit et désactive les redirections. Le client Jev utilise HTTPS, avec une exception HTTP loopback explicite destinée aux intégrations contrôlées. Le déploiement Jev optionnel ajoute un réseau sortant à la gateway ; il ne filtre pas les destinations. Les workers restent en `none` sauf demande explicite `observe` + `bridge`. Le mode bridge ne constitue pas un réseau de tenants autorisé par grants. Sources : [runner](../../src/runner.rs), [Jev](../../src/jev.rs), [override Jev](../../deploy/docker/compose.jev.example.yaml).
+Le runner refuse le HTTP distant pour son audit et désactive les redirections. Le client Jev utilise HTTPS, avec une exception HTTP loopback explicite destinée aux intégrations contrôlées. Le déploiement Jev optionnel ajoute un réseau sortant à la gateway ; il ne filtre pas les destinations. Les workers restent en `none` sauf demande explicite `observe` + `bridge`. Le mode bridge ne constitue pas un réseau de tenants autorisé par grants. Sources : [runner](src/runner.rs), [Jev](src/jev.rs), [override Jev](deploy/docker/compose.jev.example.yaml).
 
-La [fixture à trois workers](../../deploy/local-cloud/compose.yaml) est un parcours distinct : chaque worker rejoint son propre réseau interne, la gateway sert de relais, aucun secret runner n'est monté dans un worker. `peer-send` et `peer-inbox` acceptent HTTPS ou loopback ; `--allow-test-http` autorise explicitement HTTP vers l'alias `gateway` ou une IP privée du test isolé. Cette option ne désactive jamais TLS et ne qualifie pas un transport cloud. Les grants actuels portent sur des messages JSON et un channel, pas sur un mesh TCP.
+La fixture à trois workers (chemin historique `deploy/local-cloud/compose.yaml`) est un parcours distinct : chaque worker rejoint son propre réseau interne, la gateway sert de relais, aucun secret runner n'est monté dans un worker. `peer-send` et `peer-inbox` acceptent HTTPS ou loopback ; `--allow-test-http` autorise explicitement HTTP vers l'alias `gateway` ou une IP privée du test isolé. Cette option ne désactive jamais TLS et ne qualifie pas un transport cloud. Les grants actuels portent sur des messages JSON et un channel, pas sur un mesh TCP.
 
 Les options actuelles ne fournissent pas de configuration explicite de CA privée ou de certificat client pour tous ces chemins. L'ajout d'une CA ou du mTLS doit être implémenté et testé dans le composant concerné, sans prétendre que modifier le magasin du navigateur modifie aussi celui du CLI ou des conteneurs.
 
@@ -131,6 +131,6 @@ Pour le profil local loopback sans PKI, ces essais de certificats sont `NOT_APPL
 
 Une production locale peut être fiable avec arrêt planifié et sauvegarde à froid cohérente ; elle ne nécessite pas de HA. Avant toute procédure, définir ce qui est sauvegardé : audit, métadonnées de sessions, volumes utiles, identité des tenants et ledger pour le profil cloud, configurations et version de schéma. Les secrets suivent un circuit de protection distinct ; ils ne sont pas joints au dossier de test. Une copie de fichier SQLite actif n'est pas une procédure de restauration qualifiée.
 
-Le profil cloud doit publier sa capacité réellement testée, ses quotas, son domaine de panne et ses engagements de reprise. Les 100 workers/client sont un objectif à mesurer, pas une taille déduite de trois workers locaux. Les réglages de ressources, alertes de disque et RPO/RTO proposés dans [TEST_STRATEGY.md](TEST_STRATEGY.md) restent des hypothèses jusqu'aux essais.
+Le profil cloud doit publier sa capacité réellement testée, ses quotas, son domaine de panne et ses engagements de reprise. Les 100 workers/client sont un objectif à mesurer, pas une taille déduite de trois workers locaux. Les réglages de ressources, alertes de disque et RPO/RTO proposés dans [TEST_STRATEGY.md](docs/engineering/TEST_STRATEGY.md) restent des hypothèses jusqu'aux essais.
 
 L'utilisation éventuelle d'un NAS ne dispense d'aucun exercice de restauration et ne rend pas la release dépendante de cet équipement si une autre solution répond aux gates. Le dossier de release doit pouvoir expliquer les flux, les identités, les preuves et les opérations de maintenance sans contenir de secret.
