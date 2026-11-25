@@ -47,6 +47,24 @@ Le contrôle de l’exclusivité du fd, la garde STOP, le refus des trames
 tronquées et le raccord du bootstrap fournisseur restent à qualifier.
 [Contrat E3](DECISIONS.md#25-novembre-2026--g05e3-libération-du-fournisseur-par-le-broker)
 
+## 25 novembre 2026 — reçu durable d’ouverture E3
+
+**PASS ciblé, 5/5** sur `29154d3d`, macOS ARM64, fonctionnalités
+par défaut et compilation Rust hors ligne avec le lockfile.
+Les sélecteurs couvrent le contrôle d’identité avant extraction,
+la portée tenant et le masquage des détails de décodage de la route
+versionnée. Sur SQLite, ils vérifient la liaison exacte `Running`,
+la disposition `fresh` de la première insertion, le reçu `replayed`
+après transition vers `Stopping` et sa conservation à la rétention.
+Le rejeu conserve la séquence et l’empreinte du premier reçu.
+
+Manifeste vérifié
+`bd17cc635fb34445da0b39b5505bc95b2abcaabc7f2309bcf8a30d8e3c5a7026`.
+Les sept fichiers du lot coïncident avec le candidat `2be45e34`.
+La préparation du canal, l’intention durable du broker et la
+soumission du signal sur un runtime gardent leurs preuves propres.
+[Contrat HTTP versionné](../api.md#reçu-douverture-réseau-e3--e3-egress-opening-receipt)
+
 ## 25 novembre 2026 — diagnostic de l’échange Created dans G07
 
 **PASS logiciel ciblé, 2/2** sur `7f9eceef`, macOS ARM64,
