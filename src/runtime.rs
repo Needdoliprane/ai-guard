@@ -870,6 +870,25 @@ pub fn parse_runtime_state(bytes: &[u8]) -> Result<RuntimeState> {
     serde_json::from_slice(bytes).context("runtime returned malformed container state")
 }
 
+/// Environment pairs that hand a frozen Podman endpoint to the external Compose
+/// provider. `local` (a native engine) selects no override and keeps Podman's
+/// own connection. Any other endpoint must be the same explicit absolute Unix
+/// socket the native targeting accepts; it is carried by `DOCKER_HOST` for the
+/// provider and `CONTAINER_HOST` for Podman, never by the global `--url` flag,
+/// which the provider cannot resolve into a machine connection.
+pub(crate) fn podman_compose_target_env(
+    endpoint: &str,
+) -> Result<Option<[(&'static str, String); 2]>> {
+    if endpoint == "local" {
+        return Ok(None);
+    }
+    selected_podman_target_args(endpoint)?;
+    Ok(Some([
+        ("DOCKER_HOST", endpoint.to_owned()),
+        ("CONTAINER_HOST", endpoint.to_owned()),
+    ]))
+}
+
 #[derive(Clone, Debug)]
 pub struct Runtime {
     pub kind: RuntimeKind,
@@ -878,6 +897,12 @@ pub struct Runtime {
     observer: Option<observation::ObservationSink>,
     observation: Option<observation::Scope>,
     native_control: Option<control_outcome::NativeControlScope>,
+    /// Frozen explicit target for an operator Podman `compose` command only.
+    /// The external Compose provider cannot resolve the global `--url` flag
+    /// into a machine connection, so the endpoint is handed to it through
+    /// `DOCKER_HOST`/`CONTAINER_HOST` instead. `None` for every native command
+    /// and for Docker, which keep their existing targeting unchanged.
+    podman_compose_endpoint: Option<String>,
 }
 #[derive(Debug, Serialize)]
 pub struct RuntimeInfo {
@@ -1147,7 +1172,21 @@ impl Runtime {
             observer: None,
             observation: None,
             native_control: None,
+            podman_compose_endpoint: None,
         })
+    }
+    /// Bind the frozen endpoint an operator Podman `compose` command hands to
+    /// its external provider through the environment. The endpoint is validated
+    /// here once; the resulting clone is used only for that Compose command, so
+    /// native commands keep their own targeting. An explicit frozen target wins
+    /// over any mutable CLI context: `command` clears the inherited selection
+    /// variables before setting these.
+    pub(crate) fn with_podman_compose_endpoint(mut self, endpoint: Option<String>) -> Result<Self> {
+        if let Some(endpoint) = &endpoint {
+            podman_compose_target_env(endpoint)?;
+        }
+        self.podman_compose_endpoint = endpoint;
+        Ok(self)
     }
     /// Optional bounded diagnostics only; never authorizes an operation.
     pub fn with_observation(mut self, observer: observation::ObservationSink) -> Self {
@@ -1176,6 +1215,19 @@ impl Runtime {
             .envs(&self.invocation.environment)
             .stdin(Stdio::null())
             .kill_on_drop(true);
+        // A frozen explicit Compose target wins over mutable CLI context: the
+        // inherited selection variables were just cleared, and only this
+        // command's approved endpoint is set. The external Compose provider
+        // reads DOCKER_HOST (and Podman reads CONTAINER_HOST); it cannot resolve
+        // the global `--url` flag into a machine connection.
+        if self.kind == RuntimeKind::Podman
+            && let Some(endpoint) = &self.podman_compose_endpoint
+            && let Some(pairs) = podman_compose_target_env(endpoint)?
+        {
+            for (key, value) in pairs {
+                command.env(key, value);
+            }
+        }
         Ok(command)
     }
     async fn command_async(&self) -> Result<Command> {
@@ -1281,12 +1333,16 @@ impl Runtime {
         cleanup_guard: Option<CleanupSpawnGuard>,
     ) -> Result<Capture> {
         ensure!(
-            environment
-                .iter()
-                .all(|(key, value)| *key == "AGENTSANDBOX_CONFIG_DIR"
+            environment.iter().all(|(key, value)| {
+                // TMPDIR is a filesystem location, not an engine selection: the
+                // read-only Podman machine probe needs the control's own temporary
+                // directory to resolve the host API socket the Compose provider
+                // uses. It never chooses an engine, a connection or a tenant.
+                matches!(*key, "AGENTSANDBOX_CONFIG_DIR" | "TMPDIR")
                     && std::path::Path::new(value).is_absolute()
-                    && !value.chars().any(char::is_control)),
-            "runtime environment override is not an approved absolute control configuration directory"
+                    && !value.chars().any(char::is_control)
+            }),
+            "runtime environment override is not an approved absolute control configuration or temporary directory"
         );
         if let Some(scope) = &self.native_control {
             let (io, armed) = scope
@@ -3129,5 +3185,77 @@ mod capture_error_tests {
             "runtime-private values must join the caller dictionary before masking"
         );
         assert!(safe.contains("[REDACTED]"));
+    }
+}
+
+#[cfg(test)]
+mod podman_compose_target_tests {
+    use super::*;
+
+    const SOCKET: &str = "unix:///tmp/podman-compose-qa.sock";
+
+    #[test]
+    fn compose_endpoint_is_carried_by_environment_not_the_global_url_flag() {
+        let pairs = podman_compose_target_env(SOCKET).unwrap().unwrap();
+        assert_eq!(pairs[0], ("DOCKER_HOST", SOCKET.to_owned()));
+        assert_eq!(pairs[1], ("CONTAINER_HOST", SOCKET.to_owned()));
+        // Native targeting for the same endpoint keeps the global --url flag.
+        assert_eq!(
+            selected_podman_target_args(SOCKET).unwrap(),
+            ["--remote", "--url", SOCKET]
+        );
+    }
+
+    #[test]
+    fn local_compose_selects_no_environment_override() {
+        assert!(podman_compose_target_env("local").unwrap().is_none());
+    }
+
+    #[test]
+    fn compose_endpoint_rejects_non_unix_or_mutable_targets() {
+        for bad in [
+            "",
+            "tcp://127.0.0.1:1234",
+            "ssh://host/podman.sock",
+            "unix://relative.sock",
+            "/tmp/bare.sock",
+            "unix:///tmp/podman.sock?connection=qa",
+        ] {
+            assert!(podman_compose_target_env(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn frozen_compose_endpoint_reaches_the_command_environment_and_native_has_none() {
+        let program = std::env::current_exe().unwrap();
+        let native = Runtime::with_program(RuntimeKind::Podman, &program).unwrap();
+        let compose = native
+            .clone()
+            .with_podman_compose_endpoint(Some(SOCKET.to_owned()))
+            .unwrap();
+        let env_of = |runtime: &Runtime| -> std::collections::BTreeMap<String, String> {
+            let command = runtime.command().unwrap();
+            command
+                .as_std()
+                .get_envs()
+                .filter_map(|(key, value)| {
+                    Some((key.to_str()?.to_owned(), value?.to_str()?.to_owned()))
+                })
+                .collect()
+        };
+        let compose_env = env_of(&compose);
+        assert_eq!(
+            compose_env.get("DOCKER_HOST").map(String::as_str),
+            Some(SOCKET)
+        );
+        assert_eq!(
+            compose_env.get("CONTAINER_HOST").map(String::as_str),
+            Some(SOCKET)
+        );
+        // A native command carries no Compose provider override, and the cleared
+        // environment never inherits a mutable DOCKER_HOST/CONTAINER_HOST.
+        let native_env = env_of(&native);
+        assert!(!native_env.contains_key("DOCKER_HOST"));
+        assert!(!native_env.contains_key("CONTAINER_HOST"));
     }
 }

@@ -94,6 +94,7 @@ impl super::Runtime {
             observer: None,
             observation: None,
             native_control: None,
+            podman_compose_endpoint: None,
         })
     }
 }

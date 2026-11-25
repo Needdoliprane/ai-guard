@@ -315,7 +315,21 @@ impl OperatorRuntime {
         if let Some(directory) = directory {
             directory.revalidate()?;
         }
-        consume(&self.approved, prefix, command, duration, environment).await
+        // Only the Podman Compose command carries the frozen provider endpoint
+        // through DOCKER_HOST/CONTAINER_HOST; native commands (build, probes)
+        // keep their own targeting. The endpoint was resolved and frozen once at
+        // runtime selection, so it wins over any mutable CLI context here.
+        let effective = if self.approved.kind == RuntimeKind::Podman
+            && command.verb == "compose"
+            && self.podman_compose_endpoint.is_some()
+        {
+            self.approved
+                .clone()
+                .with_podman_compose_endpoint(self.podman_compose_endpoint.clone())?
+        } else {
+            self.approved.clone()
+        };
+        consume(&effective, prefix, command, duration, environment).await
     }
 }
 

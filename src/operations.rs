@@ -1002,6 +1002,10 @@ struct OperatorRuntime {
     kind: RuntimeKind,
     approved: crate::runtime::Runtime,
     docker: Option<crate::runtime::ManagedRuntime>,
+    /// Frozen host endpoint the Podman Compose provider must use, resolved once
+    /// from the approved program's own machine connection. `None` keeps the
+    /// provider's default resolution (native Linux engine, or no machine).
+    podman_compose_endpoint: Option<String>,
 }
 impl OperatorRuntime {
     async fn doctor(&self, allow_rootful: bool) -> Result<crate::runtime::RuntimeInfo> {
@@ -1077,11 +1081,102 @@ async fn selected_runtime(
         );
         None
     };
+    // Freeze the host socket the external Compose provider must target. Podman
+    // derives the machine API socket from TMPDIR, which the sanitized invocation
+    // environment does not inherit; resolving it here once keeps the Compose
+    // command bound to an explicit endpoint instead of a mutable re-resolution.
+    let podman_compose_endpoint = if kind == RuntimeKind::Podman {
+        resolve_podman_compose_endpoint(&runtime).await?
+    } else {
+        None
+    };
     Ok(OperatorRuntime {
         kind,
         approved: runtime,
         docker,
+        podman_compose_endpoint,
     })
+}
+
+/// Read-only resolution of the host API socket of the approved Podman program's
+/// default machine, frozen for the Compose provider. The probe runs with the
+/// control's own temporary directory so Podman computes the real socket path.
+/// A platform without a machine (native Linux) or without a running machine
+/// keeps `None`, leaving the provider's existing default resolution unchanged.
+async fn resolve_podman_compose_endpoint(
+    runtime: &crate::runtime::Runtime,
+) -> Result<Option<String>> {
+    #[derive(serde::Deserialize)]
+    struct Machine {
+        #[serde(rename = "Name")]
+        name: String,
+        #[serde(rename = "State")]
+        state: String,
+        #[serde(rename = "ConnectionInfo")]
+        connection: Connection,
+    }
+    #[derive(serde::Deserialize)]
+    struct Connection {
+        #[serde(rename = "PodmanSocket")]
+        socket: Option<Socket>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Socket {
+        #[serde(rename = "Path")]
+        path: String,
+    }
+    let temporary = std::env::temp_dir();
+    let Some(temporary) = temporary.to_str() else {
+        return Ok(None);
+    };
+    let output = match runtime
+        .cli_env(
+            &["machine".into(), "inspect".into()],
+            Duration::from_secs(15),
+            &[("TMPDIR", temporary)],
+        )
+        .await
+    {
+        Ok(output) => output,
+        // No machine on this platform, or the program cannot report one: the
+        // provider keeps its default resolution rather than failing the command.
+        Err(_) => return Ok(None),
+    };
+    if output.truncated {
+        return Ok(None);
+    }
+    let machines: Vec<Machine> = match serde_json::from_slice(&output.bytes) {
+        Ok(machines) => machines,
+        Err(_) => return Ok(None),
+    };
+    let candidates: Vec<(&str, &str)> = machines
+        .iter()
+        .filter(|machine| machine.state == "running")
+        .filter_map(|machine| {
+            machine
+                .connection
+                .socket
+                .as_ref()
+                .map(|socket| (machine.name.as_str(), socket.path.as_str()))
+        })
+        .collect();
+    let selected = candidates
+        .iter()
+        .find(|(name, _)| *name == "podman-machine-default")
+        .or_else(|| {
+            if candidates.len() == 1 {
+                candidates.first()
+            } else {
+                None
+            }
+        });
+    let Some((_, path)) = selected else {
+        return Ok(None);
+    };
+    let endpoint = format!("unix://{path}");
+    // Reuse the native targeting validation: an explicit absolute Unix socket.
+    crate::runtime::selected_podman_target_args(&endpoint)?;
+    Ok(Some(endpoint))
 }
 
 #[cfg(unix)]
