@@ -1,5 +1,28 @@
 # Validation courante
 
+## 25 novembre 2026 — rétention SQLite après perte du reçu de commit
+
+À 12 h 53 min 11 s UTC, la recette R1 lance le vrai CLI macOS archivé sur
+une copie SQLite jetable, après le seuil d’âge de la politique de rétention.
+Le premier `apply` perd son lecteur de sortie et retourne 1. Une lecture
+SQLite avant tout rejeu confirme pourtant un segment et un seul événement
+d’audit de rétention, à la séquence 76. Le segment couvre 40 événements
+et 31 594 octets d’audit libérés.
+
+Deux rejeux restituent le même reçu sans nouvelle écriture durable. La
+tête d’audit, le ledger et l’archive sont identiques après les rejeux.
+La vérification finale valide l’unique segment et les empreintes des
+originaux restent identiques. Le conducteur retourne 0 à 12 h 53 min 12 s UTC.
+
+Périmètre du résultat **PASS**. Le binaire provient de `7e1f9cb1`, SHA-256
+`73f457016f5fb1c66b127560d498b2eaafbe1a822c6034dc9bd9a5779f4ca428`.
+Les sources du CLI et de la rétention correspondent au candidat `47b268e4`.
+La projection partagée et le lockfile diffèrent entre les deux révisions.
+Les 19 entrées du manifeste privé `run-20261125/SHA256SUMS` ont été
+vérifiées. Son SHA-256 est
+`fc88eef4a421d5935b0207d60d4a9e49938253f98c6827d55ee109f4ea223757`.
+Le résultat est rattaché à ce binaire et à cette copie SQLite.
+
 ## 25 novembre 2026 — canari G11 après acquittement du nettoyage d’import
 
 Le gel logiciel `a39cfa86` compile hors ligne en 7 min 09 s. Le
