@@ -3,9 +3,7 @@
 
 use super::*;
 use crate::{
-    control::{EgressLaunchV1, SecurityPresetV1},
-    egress::proxy_env::proxy_environment,
-    provider::BOOTSTRAP_PROGRAM,
+    egress::proxy_env::proxy_environment, provider::BOOTSTRAP_PROGRAM,
     runtime::bootstrap_stdin::PreparedBootstrapStdin,
 };
 use std::sync::{Mutex, PoisonError};
@@ -17,23 +15,26 @@ impl ManagedRuntime {
     /// STOP ordering. This attachment cannot write to the bootstrap's stdin.
     pub(crate) async fn open_owned_egress_proxy(
         &self,
-        bootstrap: &PreparedBootstrapStdin<'_>,
+        bootstrap: &PreparedBootstrapStdin,
         authorized: &ContainerSpec,
     ) -> std::result::Result<(EgressExecOwner, EgressExecIo), RelayExecError> {
         let snapshot = bootstrap.owned();
         self.validate_handle(&snapshot.handle)
             .map_err(|_| RelayExecError::Authority)?;
         validate_running_snapshot(snapshot, &snapshot.observation)?;
-        let port = authorized
-            .egress_proxy_port()
-            .filter(|port| *port >= EgressLaunchV1::MIN_PROXY_PORT)
+        let held = authorized
+            .held_bootstrap_for(true)
+            .map_err(|_| RelayExecError::Profile)?
             .ok_or(RelayExecError::Profile)?;
+        if &held.attempt != bootstrap.attempt() {
+            return Err(RelayExecError::Identity);
+        }
+        if held.runtime != self.binding.kind || held.authority_id != self.binding.authority_id {
+            return Err(RelayExecError::Authority);
+        }
         if snapshot.handle.session != authorized.session
             || snapshot.handle.operation != authorized.operation_id()
             || snapshot.handle.fingerprint_version() != authorized.fingerprint_version()
-            || authorized.security_preset != SecurityPresetV1::FixedSandboxV2
-            || !matches!(authorized.purpose, ContainerPurpose::Run)
-            || authorized.network != NetworkMode::None
             || !matches!(authorized.argv.as_slice(), [program, verb, ..]
                 if program == BOOTSTRAP_PROGRAM && verb == "exec")
         {
@@ -52,9 +53,9 @@ impl ManagedRuntime {
         .map_err(|_| RelayExecError::Identity)?;
         validate_running_snapshot(snapshot, &observed)?;
         validate_authorized_identity(authorized, &observed).map_err(|_| RelayExecError::Profile)?;
-        validate_configuration_for(authorized, &facts.bytes, self.binding.kind, true)
+        validate_configuration_for(authorized, &facts.bytes, self.binding.kind, Some(held))
             .map_err(|_| RelayExecError::Profile)?;
-        validate_helper_environment_for(&facts.bytes, &proxy_environment(port))?;
+        validate_egress_helper_environment(&facts.bytes, held)?;
         authorized
             .validate_secret_env_file()
             .map_err(|_| RelayExecError::Profile)?;
@@ -62,7 +63,7 @@ impl ManagedRuntime {
         command.args(helper_exec_args(
             self.binding.kind,
             &snapshot.handle.id,
-            RelayHelperMode::Egress(port),
+            RelayHelperMode::Egress(held.proxy_port),
         )?);
         if self.relay_profile()? != profile {
             return Err(RelayExecError::Profile);
@@ -77,6 +78,15 @@ impl ManagedRuntime {
         let transport = RelayExecTransport::spawn(command, snapshot.clone(), retained)?;
         Ok(EgressExecOwner::split(transport))
     }
+}
+
+fn validate_egress_helper_environment(
+    bytes: &[u8],
+    held: &HeldBootstrapBinding,
+) -> std::result::Result<(), RelayExecError> {
+    let mut required = proxy_environment(held.proxy_port);
+    required.push((HELD_CHALLENGE_ENV, held.attempt.as_str().to_owned()));
+    validate_helper_environment_for(bytes, &required)
 }
 
 struct EgressPipes {
@@ -293,6 +303,7 @@ mod tests {
                 "--env=CLAUDE_CODE_OAUTH_TOKEN=",
                 "--env=CODEX_HOME=",
                 "--env=CLAUDE_CONFIG_DIR=",
+                "--env=AI_GUARD_EGRESS_HELD_V1=",
                 "--env=HTTPS_PROXY=",
                 "--env=https_proxy=",
                 "--env=HTTP_PROXY=",
@@ -327,44 +338,58 @@ mod tests {
 
     #[test]
     fn owned_proxy_environment_requires_the_exact_loopback_profile() {
-        let port = 43128;
-        let expected = proxy_environment(port);
+        const ATTEMPT: &str = "550e8400-e29b-41d4-a716-446655440000";
+        let held = HeldBootstrapBinding {
+            attempt: crate::egress::ids::IdV1::parse(ATTEMPT).unwrap(),
+            proxy_port: 43128,
+            runtime: RuntimeKind::Docker,
+            authority_id: Uuid::from_u128(7),
+            spec_digest: String::new(),
+        };
         let mut env = vec![
             "HOME=/home/agent".into(),
-            "OPENAI_API_KEY=synthetic-private".into(),
+            "AI_GUARD_PROVIDER_BOOTSTRAP=synthetic-private".into(),
         ];
-        env.extend(expected.iter().map(|(key, value)| format!("{key}={value}")));
         let inspect = |env: &[String]| serde_json::to_vec(&json!({"Config":{"Env":env}})).unwrap();
-        assert_eq!(
-            validate_helper_environment_for(&inspect(&env), &expected),
-            Ok(())
-        );
+        assert_eq!(validate_helper_environment(&inspect(&env)), Ok(()));
+        let challenge = format!("AI_GUARD_EGRESS_HELD_V1={ATTEMPT}");
+        env.push(challenge.clone());
         assert_eq!(
             validate_helper_environment(&inspect(&env)),
             Err(RelayExecError::Profile)
         );
+        env.extend(
+            proxy_environment(43128)
+                .into_iter()
+                .map(|(key, value)| format!("{key}={value}")),
+        );
+        let validate = |env: &[String]| validate_egress_helper_environment(&inspect(env), &held);
+        assert_eq!(validate(&env), Ok(()));
         for unexpected in [
             "ALL_PROXY=http://127.0.0.1:43128",
             "AI_GUARD_EGRESS_PROXY=http://127.0.0.1:43128",
-            "OPENAI_API_KEY=second-synthetic-private",
+            "AI_GUARD_PROVIDER_BOOTSTRAP=second-synthetic-private",
+            challenge.as_str(),
         ] {
             let mut with_extra = env.clone();
             with_extra.push(unexpected.into());
-            assert_eq!(
-                validate_helper_environment_for(&inspect(&with_extra), &expected),
-                Err(RelayExecError::Profile)
-            );
+            assert_eq!(validate(&with_extra), Err(RelayExecError::Profile));
         }
+        let mut without_challenge = env.clone();
+        without_challenge.retain(|entry| entry != &challenge);
+        assert_eq!(validate(&without_challenge), Err(RelayExecError::Profile));
+        for value in ["", "550e8400-e29b-41d4-a716-446655440001"] {
+            let mut with_wrong_challenge = without_challenge.clone();
+            with_wrong_challenge.push(format!("AI_GUARD_EGRESS_HELD_V1={value}"));
+            let error = validate(&with_wrong_challenge).unwrap_err();
+            assert_eq!(error, RelayExecError::Profile);
+            assert!(!format!("{error:?} {error}").contains("synthetic-private"));
+        }
+
         let marker = env.pop().unwrap();
         assert!(marker.starts_with("AI_GUARD_EGRESS_PROXY="));
-        assert_eq!(
-            validate_helper_environment_for(&inspect(&env), &expected),
-            Err(RelayExecError::Profile)
-        );
+        assert_eq!(validate(&env), Err(RelayExecError::Profile));
         env.push("AI_GUARD_EGRESS_PROXY=http://127.0.0.1:3128".into());
-        assert_eq!(
-            validate_helper_environment_for(&inspect(&env), &expected),
-            Err(RelayExecError::Profile)
-        );
+        assert_eq!(validate(&env), Err(RelayExecError::Profile));
     }
 }

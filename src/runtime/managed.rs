@@ -1638,6 +1638,14 @@ impl ManagedRuntime {
             spec.managed_names.is_some(),
             "managed creation requires control-assigned names"
         );
+        ensure!(
+            spec.held_bootstrap_for(bootstrap_stdin)?
+                .is_none_or(|held| {
+                    held.runtime == self.binding.kind
+                        && held.authority_id == self.binding.authority_id
+                }),
+            "held bootstrap authority differs from the authorized worker"
+        );
         self.verify_authority().await?;
         super::observation::record(
             &self.runtime.observation,

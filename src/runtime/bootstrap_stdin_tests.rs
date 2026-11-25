@@ -37,7 +37,7 @@ fn held_worker() -> WorkerV1 {
         },
         "profile": "observe",
         "runtime_kind": "docker",
-        "authority_id": "fixture-runtime",
+        "authority_id": Uuid::from_u128(7),
         "image_ref": "worker:fixture",
         "image_id": format!("sha256:{TARGET}"),
         "network": "none",
@@ -115,7 +115,7 @@ fn unused_handoff<'a>(
 
 fn bootstrap_child() -> (Child, PrearmedBootstrapStdin) {
     let (_stop_tx, stop) = watch::channel(false);
-    let spec = ContainerSpec::for_held_worker(&held_worker(), Uuid::from_u128(6)).unwrap();
+    let spec = ContainerSpec::for_held_worker(&held_worker()).unwrap();
     let binding = spec.held_bootstrap_for(true).unwrap().unwrap().clone();
     let (child, input) = spawn_prearmed_cli(
         inert_cli(&format!("start --attach --interactive {TARGET}")),
@@ -303,10 +303,20 @@ async fn prearmed_spawn_preserves_historical_stdin_and_rejects_wrong_engine_flag
 #[test]
 fn held_spec_freezes_the_admitted_worker_and_emits_only_its_markers() {
     let worker = held_worker();
-    let operation = Uuid::from_u128(6);
-    let spec = ContainerSpec::for_held_worker(&worker, operation).unwrap();
+    let spec = ContainerSpec::for_held_worker(&worker).unwrap();
+    assert_eq!(
+        spec.operation_id().to_string(),
+        worker.admission_operation_id
+    );
     assert!(spec.create_args(RuntimeKind::Docker).is_err());
+    assert!(spec.create_args_for(RuntimeKind::Podman, true).is_err());
     for kind in [RuntimeKind::Docker, RuntimeKind::Podman] {
+        let mut matching = worker.clone();
+        if kind == RuntimeKind::Podman {
+            matching.launch.runtime_kind = crate::control::RuntimeKindV1::Podman;
+            matching.spec_hash = matching.launch.spec_hash().unwrap();
+        }
+        let spec = ContainerSpec::for_held_worker(&matching).unwrap();
         let args = spec.create_args_for(kind, true).unwrap();
         assert!(args.iter().any(|arg| arg == "--interactive"));
         assert!(!args.iter().any(|arg| arg == "--tty"));
@@ -361,27 +371,27 @@ fn held_spec_freezes_the_admitted_worker_and_emits_only_its_markers() {
     let mut bad = worker.clone();
     bad.launch.command.argv[0] = "/bin/cat".into();
     bad.spec_hash = bad.launch.spec_hash().unwrap();
-    assert!(ContainerSpec::for_held_worker(&bad, operation).is_err());
+    assert!(ContainerSpec::for_held_worker(&bad).is_err());
 
     let mut bad = worker.clone();
     bad.attempt.attempt_id = ATTEMPT.to_ascii_uppercase();
-    assert!(ContainerSpec::for_held_worker(&bad, operation).is_err());
+    assert!(ContainerSpec::for_held_worker(&bad).is_err());
 
     let mut bad = worker.clone();
     bad.launch.egress = None;
     bad.launch.network = NetworkV1::Bridge;
     bad.spec_hash = bad.launch.spec_hash().unwrap();
-    assert!(ContainerSpec::for_held_worker(&bad, operation).is_err());
+    assert!(ContainerSpec::for_held_worker(&bad).is_err());
 
     let mut bad = worker;
     bad.launch.security_preset = SecurityPresetV1::FixedSandboxInteractiveV3;
     bad.spec_hash = bad.launch.spec_hash().unwrap();
-    assert!(ContainerSpec::for_held_worker(&bad, operation).is_err());
+    assert!(ContainerSpec::for_held_worker(&bad).is_err());
 }
 
 #[test]
 fn held_inspect_accepts_only_the_exact_marker_pair_and_hides_raw_values() {
-    let spec = ContainerSpec::for_held_worker(&held_worker(), Uuid::from_u128(6)).unwrap();
+    let spec = ContainerSpec::for_held_worker(&held_worker()).unwrap();
     let binding = spec.held_bootstrap_for(true).unwrap().unwrap();
     let challenge = format!("{HELD_CHALLENGE_ENV}={ATTEMPT}");
     let marker = format!("{EGRESS_PROXY_MARKER}=http://127.0.0.1:3128");

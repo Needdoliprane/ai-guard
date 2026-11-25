@@ -239,6 +239,8 @@ pub struct ContainerSpec {
 struct HeldBootstrapBinding {
     attempt: IdV1,
     proxy_port: u16,
+    runtime: RuntimeKind,
+    authority_id: Uuid,
     spec_digest: String,
 }
 
@@ -300,12 +302,9 @@ impl ContainerSpec {
     /// attempt supplies the public challenge; the launch supplies the exact
     /// managed bootstrap argv and proxy profile.
     #[allow(dead_code)] // Used when the broker composes the held runtime port.
-    pub(crate) fn for_held_worker(
-        worker: &crate::control::WorkerV1,
-        operation: Uuid,
-    ) -> Result<Self> {
+    pub(crate) fn for_held_worker(worker: &crate::control::WorkerV1) -> Result<Self> {
         use crate::{
-            control::{NetworkV1, SecurityPresetV1},
+            control::{NetworkV1, RuntimeKindV1, SecurityPresetV1},
             provider::ClientTransport,
         };
 
@@ -328,19 +327,26 @@ impl ContainerSpec {
             "held bootstrap requires an authorized managed batch worker"
         );
         let attempt = IdV1::parse(&worker.attempt.attempt_id)?;
+        let operation = IdV1::parse(&worker.admission_operation_id)?;
+        let authority = IdV1::parse(&launch.authority_id)?;
         let mut spec = Self::with_operation(
             Uuid::parse_str(&launch.session_id)?,
             ContainerPurpose::Run,
             &launch.image_id,
             launch.command.argv.clone(),
             NetworkMode::None,
-            operation,
+            Uuid::parse_str(operation.as_str())?,
         )?
         .with_managed_names(&worker.attempt.stable_name, &worker.attempt.volume_name)?
         .with_broker_egress(egress)?;
         spec.held_bootstrap = Some(HeldBootstrapBinding {
             attempt,
             proxy_port: egress.proxy_port,
+            runtime: match launch.runtime_kind {
+                RuntimeKindV1::Docker => RuntimeKind::Docker,
+                RuntimeKindV1::Podman => RuntimeKind::Podman,
+            },
+            authority_id: Uuid::parse_str(authority.as_str())?,
             spec_digest: spec.held_bootstrap_spec_digest()?,
         });
         Ok(spec)
@@ -508,6 +514,10 @@ impl ContainerSpec {
     fn create_args_for(&self, runtime: RuntimeKind, bootstrap_stdin: bool) -> Result<Vec<String>> {
         self.require_current_creation_policy()?;
         let held = self.held_bootstrap_for(bootstrap_stdin)?;
+        ensure!(
+            held.is_none_or(|binding| binding.runtime == runtime),
+            "held bootstrap runtime differs from the authorized worker"
+        );
         self.validate_secret_env_file()?;
         validate_image(&self.image)?;
         validate_command(&self.argv)?;

@@ -6,6 +6,8 @@
 //! this owner until explicit close/join and exact terminal reconciliation.
 
 use super::*;
+#[cfg(unix)]
+use crate::egress::bootstrap_release::HELD_CHALLENGE_ENV;
 use futures_util::task::AtomicWaker;
 use std::{
     io,
@@ -340,6 +342,8 @@ fn helper_exec_args(
     args.extend(EMPTY_EXEC_ENV.iter().map(|key| format!("--env={key}=")));
     #[cfg(unix)]
     if let RelayHelperMode::Egress(port) = mode {
+        // The held marker belongs to PID 1. The helper takes its port from argv.
+        args.push(format!("--env={HELD_CHALLENGE_ENV}="));
         args.extend(
             crate::egress::proxy_env::proxy_environment(port)
                 .iter()
@@ -413,7 +417,7 @@ pub(super) fn validate_helper_environment(bytes: &[u8]) -> std::result::Result<(
 
 fn validate_helper_environment_for(
     bytes: &[u8],
-    required_proxy: &[(&str, String)],
+    required_environment: &[(&str, String)],
 ) -> std::result::Result<(), RelayExecError> {
     #[derive(Deserialize)]
     #[serde(rename_all = "PascalCase")]
@@ -439,7 +443,7 @@ fn validate_helper_environment_for(
         serde_json::from_slice(bytes).map_err(|_| RelayExecError::Profile)?;
     let mut seen = std::collections::HashSet::new();
     if environment.config.env.len()
-        > ALLOWED.len() + EMPTY_EXEC_ENV.len() + 2 + required_proxy.len()
+        > ALLOWED.len() + EMPTY_EXEC_ENV.len() + 2 + required_environment.len()
         || environment.config.env.iter().any(|entry| {
             let Some((key, value)) = entry.split_once('=') else {
                 return true;
@@ -451,11 +455,13 @@ fn validate_helper_environment_for(
                 && !EMPTY_EXEC_ENV.contains(&key)
                 && !(key == "NODE_VERSION" && short_version(value, Some("24")))
                 && !(key == "YARN_VERSION" && short_version(value, Some("1")))
-                && !required_proxy
+                && !required_environment
                     .iter()
                     .any(|(name, expected)| *name == key && expected.as_str() == value)
         })
-        || required_proxy.iter().any(|(key, _)| !seen.contains(key))
+        || required_environment
+            .iter()
+            .any(|(key, _)| !seen.contains(key))
     {
         return Err(RelayExecError::Profile);
     }
