@@ -51,10 +51,23 @@ schéma jetable 14 est refusée au tuple attendu.
 Le projet Docker de chaque passage a été retiré et son port est fermé.
 Le manifeste du passage corrigé est
 `0279b6ccf6512f7b5e6f55f79b286c99ba60c5db3f566ceb337da0dc219af2f1`.
-La preuve couvre le dictionnaire du socle audit, décision, revue et
-egress 15. Le libtest de préparation sous verrou, les projections
-workers supplémentaires, la publication du singleton et l’admission
-gardent leurs preuves propres.
+Cette première preuve couvre le dictionnaire du socle audit, décision,
+revue et egress 15.
+
+Sur `64109f8b`, une nouvelle instance de MySQL 8.4.13 ARM64 avec TLS
+confirme le dictionnaire des trois tables de réservation worker,
+tentative et mutation. Les huit tables du format 14 et les treize du
+format 15 passent. Dans chaque format, les douze tuples d’index et les
+quatre tuples de clés étrangères des trois tables concordent. Le passage
+sort 0 en 21,20 s. La fermeture du projet et du port est confirmée.
+Reçu du passage
+`c68fab0d9bc12fd031f5cd971129eb4f52bfb874eaf6fe6bbbd8af10410d47b1`
+et manifeste de supervision
+`055b3a442fd969d62895c7c2c825ac0ea9df618fa098becacdb834dd3ecc7f67`.
+
+Le libtest de préparation sous verrou, mTLS, les tables de cycle de vie
+et de supervision, la publication du singleton et l’admission gardent
+leurs preuves propres.
 
 ## 25 novembre 2026 — canari G11 et annulation du premier relais
 
