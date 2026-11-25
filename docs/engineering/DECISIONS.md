@@ -1599,3 +1599,55 @@ divergente et échéance atteinte. L’oracle exige zéro réémission et
 la restitution de l’inconnue lorsque la livraison manque de preuve.
 Cette décision lance le raccordement et les tests locaux isolés.
 [Proposition et oracle E3](G05_E3_BOOTSTRAP_PROPOSAL.md)
+
+## 25 novembre 2026 — G05/E3, preuve d’autorité de l’ouverture en mode owned
+
+**Proposition soumise au mainteneur.** Sur `118d5efb`, le Store owned
+peut rapprocher la tentative, le worker, le claim et les faits Arm.
+L’ouverture doit aussi établir l’incarnation du broker responsable
+de cette tentative. Le digest E3 V1 engage par ailleurs le compteur
+local d’invalidation que le gardien et le broker utilisent pour STOP.
+Le claim consommé, l’incarnation enrôlée et ce compteur ont des
+sources distinctes. [Contrat egress](EGRESS_CONTROL.md#6-contrats-et-ordre-des-effets-proposés) · [Sujet workload](../../src/workload.rs)
+
+1. **Fixer l’incarnation à l’admission.** Tirer le tenant, le broker et
+   son incarnation du transport authentifié et les auditer avec la
+   réservation du worker. L’autorité runtime reste liée à l’opération.
+   Le claim consommé fournit ensuite l’identité durable de l’exécution.
+   [Proposition G08](#24-novembre-2026--g08-attribution-du-worker-au-broker-à-ladmission)
+2. **Fixer les deux identités dans un Arm ou un claim versionné.**
+   Le claim rattache l’émetteur, la tentative et le reçu d’Arm exact
+   au premier droit d’exécution. L’attribution avant le claim resterait
+   ouverte. L’Arm seul établirait une préparation avec l’échéance.
+   [Contrats Arm et claim](../../src/control/supervision.rs)
+3. **Établir l’autorité à l’ouverture centrale.** La transaction
+   pourrait l’inscrire avec le reçu du canal. Sans preuve antérieure
+   dans l’admission ou le claim, cette option laisserait la
+   première demande fixer le propriétaire qu’elle doit prouver.
+4. **Fournir une attestation broker vérifiable.** Une preuve signée
+   et liée au claim pourrait engager le compteur local. Elle
+   requiert la gestion de la clé, de sa révocation et de sa durée
+   de validité par le contrôle. Le heartbeat courant ne remplit pas
+   cette fonction. [Checkpoint broker](../../src/broker_registry/checkpoint.rs)
+
+**Option recommandée.** Reprendre l’attribution G08 à l’admission
+et utiliser le claim worker consommé pour référencer l’exécution lors
+de l’ouverture. Le Store tire l’identité du transport, retrouve le
+claim par `worker.attempt.start_operation_id` puis vérifie la chaîne,
+les révisions et l’autorité dans la transaction du reçu. Le broker
+garde le compteur natif lié à ce même claim et réapplique sa garde de
+STOP et son échéance au signal. Un contrôle central de la valeur
+numérique de ce compteur demanderait une preuve native distincte.
+La génération du credential worker suit son propre contrat.
+La séquence E3 de libération par le broker reste applicable.
+
+**Acceptation.** Exercer les formats 14 et 15 avec l’ancien bearer
+après rotation, une incarnation courante étrangère à la tentative et
+un claim divergent. Les trois refus gardent la tête d’audit intacte.
+Retenir les ACK après `Running` et après le commit d’ouverture, puis
+compter les signaux. L’intention durable et l’ACK frais exact doivent
+précéder l’unique signal. Un rejeu ou une invalidation native avant
+soumission donne zéro signal. Rapprocher les coupures avant et après
+soumission, préserver l’échéance et restituer la livraison inconnue
+lorsque la preuve manque. Les routes Legacy gardent leur refus en
+mode owned.
