@@ -13,6 +13,7 @@ use agentsandbox::{
         Store,
         authentication::{
             ApprovedAuthenticationClientV1, AuthenticationAudit, AuthenticationAuditPolicyV1,
+            AuthenticationCapacityPlanV1, AuthenticationCapacityV1, AuthenticationTenantCapacityV1,
         },
     },
     identity::{
@@ -88,12 +89,12 @@ fn member(store: &Store, issuer: &str, subject: &str) {
     }
 }
 
-fn router(
+fn try_router(
     store: Arc<Store>,
     audit: Arc<AuthenticationAudit>,
     config: OidcGatewayConfigV1,
-) -> Router {
-    gateway_router(
+) -> anyhow::Result<Router> {
+    Ok(gateway_router(
         GatewayState::new(
             store,
             "r".repeat(48),
@@ -102,9 +103,16 @@ fn router(
             None,
             Redactor::new(vec![]),
         )
-        .with_oidc(OidcGateway::new(config, audit, None).unwrap())
-        .unwrap(),
-    )
+        .with_oidc(OidcGateway::new(config, audit, None)?)?,
+    ))
+}
+
+fn router(
+    store: Arc<Store>,
+    audit: Arc<AuthenticationAudit>,
+    config: OidcGatewayConfigV1,
+) -> Router {
+    try_router(store, audit, config).unwrap()
 }
 
 async fn build(max_records: u64) -> Fixture {
@@ -112,6 +120,45 @@ async fn build(max_records: u64) -> Fixture {
 }
 
 async fn build_limits(max_records: u64, max_serialized_bytes: u64) -> Fixture {
+    build_with_plan(max_records, max_serialized_bytes, None).await
+}
+
+fn capacity(max_records: u64, max_serialized_bytes: u64) -> AuthenticationCapacityV1 {
+    AuthenticationCapacityV1 {
+        max_records,
+        max_serialized_bytes,
+    }
+}
+
+/// One closed logical plan for the single `tenant-a` gateway. The unscoped
+/// partition funds verified-but-unapproved denials; the tenant partition funds
+/// approved admissions. They never borrow from each other (V4 accounting).
+fn tenant_a_plan(
+    unscoped: AuthenticationCapacityV1,
+    tenant_a: AuthenticationCapacityV1,
+) -> AuthenticationCapacityPlanV1 {
+    AuthenticationCapacityPlanV1 {
+        version: 1,
+        unscoped,
+        tenants: vec![AuthenticationTenantCapacityV1 {
+            tenant_id: "tenant-a".into(),
+            capacity: tenant_a,
+        }],
+    }
+}
+
+/// A genuinely new V4 ledger (genesis + capacity plan = 2 records) with an
+/// explicit closed plan. `policy_max_records` must fund
+/// `2 + unscoped.max_records + tenant_a.max_records` (budget::install).
+async fn build_v4(policy_max_records: u64, plan: AuthenticationCapacityPlanV1) -> Fixture {
+    build_with_plan(policy_max_records, 8 * 1024 * 1024, Some(plan)).await
+}
+
+async fn build_with_plan(
+    max_records: u64,
+    max_serialized_bytes: u64,
+    plan: Option<AuthenticationCapacityPlanV1>,
+) -> Fixture {
     let files = support::private_tempdir();
     let issuer = ControlledIssuer::new().await;
     let path = files.path().join("tenant.sqlite");
@@ -138,15 +185,24 @@ async fn build_limits(max_records: u64, max_serialized_bytes: u64) -> Fixture {
             })
             .to_vec(),
     };
-    let audit = Arc::new(
-        AuthenticationAudit::init_new(
-            &files.path().join("authentication.sqlite"),
+    let audit_path = files.path().join("authentication.sqlite");
+    let audit = Arc::new(match plan {
+        Some(plan) => AuthenticationAudit::init_new_v4(
+            &audit_path,
+            installation,
+            policy.clone(),
+            plan,
+            Redactor::new(vec![]),
+        )
+        .unwrap(),
+        None => AuthenticationAudit::init_new(
+            &audit_path,
             installation,
             policy.clone(),
             Redactor::new(vec![]),
         )
         .unwrap(),
-    );
+    });
     let config = OidcGatewayConfigV1 {
         version: 1,
         provider: issuer.config(),
@@ -227,8 +283,18 @@ fn diagnostic_provider_requests(issuer: &ControlledIssuer) -> (usize, usize, usi
     )
 }
 
+/// The gateway paces anonymous native intents to `ANONYMOUS_STARTS` (8) per
+/// one-second `START_WINDOW` (src/api/oidc/gateway.rs). A scenario that needs
+/// more than eight anonymous intents must wait for a fresh window. This paces
+/// the test client like a real caller; it never relaxes the product's
+/// anti-abuse boundary, nor any ledger/subject capacity assertion.
+async fn fresh_anonymous_start_window() {
+    tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+}
+
 async fn admit(router: &Router, token: &str) -> (StatusCode, Value) {
-    // Each scenario stays below the gateway's 16/s pacing budget.
+    // Each burst stays within the gateway's anonymous start window; scenarios
+    // needing more than eight intents call fresh_anonymous_start_window().
     // An unexpected setup refusal is not an authentication-ledger RED.
     let (status, intent) = post(
         router,
@@ -255,9 +321,15 @@ async fn admit(router: &Router, token: &str) -> (StatusCode, Value) {
 
 #[tokio::test]
 async fn refused_verified_proof_replay_preserves_shared_ledger_for_another_subject() {
-    let f = build(13).await;
+    // V4: the unscoped partition funds exactly one verified denial (intention +
+    // terminal = 2 records); the tenant-a partition funds the approved subject.
+    // Replaying the refused proof must not spend either partition again, and an
+    // independently approved subject must still admit. policy 8 = 2 genesis/plan
+    // + 2 unscoped + 4 tenant-a (budget::install).
+    let f = build_v4(8, tenant_a_plan(capacity(2, 70_000), capacity(4, 100_000))).await;
     let (issuer, audit, router) = (&f.issuer, &f.audit, &f.router);
     let before = audit.verify().unwrap().records;
+    assert_eq!(before, 2, "V4 genesis + capacity plan");
     let token = issuer.token("cli-public", "never-provisioned", None, &[], "one-proof");
     let (first_status, first_body) = admit(router, &token).await;
     assert_eq!(first_status, StatusCode::FORBIDDEN);
@@ -286,6 +358,8 @@ async fn refused_verified_proof_replay_preserves_shared_ledger_for_another_subje
         &[],
         "independent-proof",
     );
+    // 1 initial + 7 replays already consumed this window's 8 anonymous starts.
+    fresh_anonymous_start_window().await;
     let (other_status, other_body) = admit(router, &other).await;
     println!(
         "AUTH_LEDGER_REPLAY before={before} first={after_first} after_replays={after_replays} other={} trace={trace:?}",
@@ -322,14 +396,21 @@ async fn refused_verified_proof_replay_preserves_shared_ledger_for_another_subje
 
 #[tokio::test]
 async fn fresh_tokens_for_one_refused_subject_cannot_spend_the_shared_ledger() {
-    let f = build(13).await;
+    // V4 replaces the V3 per-subject attempt budget with closed logical
+    // partitions. The unscoped partition funds exactly one verified denial
+    // (intention + terminal = 2 records); fresh proofs for the same refused
+    // subject cannot spend it again, and the tenant-a partition stays available
+    // for an independently approved subject. policy 8 = 2 genesis/plan + 2
+    // unscoped + 4 tenant-a (budget::install).
+    let f = build_v4(8, tenant_a_plan(capacity(2, 70_000), capacity(4, 100_000))).await;
     let before = f.audit.verify().unwrap().records;
+    assert_eq!(before, 2, "V4 genesis + capacity plan");
     let first = f
         .issuer
         .token("cli-public", "unapproved", None, &[], "first");
     assert_eq!(admit(&f.router, &first).await.0, StatusCode::FORBIDDEN);
     let after_first = f.audit.verify().unwrap().records;
-    let mut statuses = Vec::new();
+    let mut refusals = Vec::new();
     for index in 0..7 {
         let token = f.issuer.token(
             "cli-public",
@@ -338,29 +419,46 @@ async fn fresh_tokens_for_one_refused_subject_cannot_spend_the_shared_ledger() {
             &[],
             &format!("fresh-{index}"),
         );
-        statuses.push(admit(&f.router, &token).await.0);
+        let (status, body) = admit(&f.router, &token).await;
+        refusals.push((status, body["error"]["code"].clone()));
     }
     let after = f.audit.verify().unwrap().records;
     let other = f
         .issuer
         .token("cli-public", "approved-subject", None, &[], "other");
+    // 1 initial + 7 fresh proofs already consumed this window's 8 anonymous starts.
+    fresh_anonymous_start_window().await;
     assert_eq!(
         admit(&f.router, &other).await.0,
         StatusCode::CREATED,
         "one verified subject with fresh tokens must leave room for another subject; records={after}"
     );
     assert_eq!(after_first, before + 2);
-    assert_eq!(after, after_first);
+    assert_eq!(
+        after, after_first,
+        "fresh refused proofs must append no durable operation to the shared ledger"
+    );
+    // V4 durable partition exhaustion is fail-closed `audit_unavailable` (503),
+    // not the V3 subject-budget 429. The isolation guarantee is unchanged: no
+    // ledger growth above, and the approved subject still admits.
     assert!(
-        statuses
-            .iter()
-            .all(|status| *status == StatusCode::TOO_MANY_REQUESTS)
+        refusals.iter().all(|(status, code)| {
+            *status == StatusCode::SERVICE_UNAVAILABLE && code == "audit_unavailable"
+        }),
+        "fresh proofs must be refused without spending the shared ledger: {refusals:?}"
     );
 }
 
 #[tokio::test]
 async fn concurrent_refused_proof_is_reserved_once() {
-    let f = build(100).await;
+    // V4: two unscoped denials fit (first race + ready race = 4 records); the
+    // provider-inflight refusals and the dedup conflicts append nothing.
+    // policy 100 generously funds 2 genesis/plan + 8 unscoped + 8 tenant-a.
+    let f = build_v4(
+        100,
+        tenant_a_plan(capacity(8, 150_000), capacity(8, 150_000)),
+    )
+    .await;
     let token = f
         .issuer
         .token("cli-public", "unapproved", None, &[], "concurrent");
@@ -396,7 +494,10 @@ async fn concurrent_refused_proof_is_reserved_once() {
         f.audit.verify().unwrap().records,
         diagnostic_provider_requests(&f.issuer)
     );
-    assert_eq!(records_while_discovering, 1);
+    assert_eq!(
+        records_while_discovering, 2,
+        "V4 genesis + plan; no intention yet"
+    );
     assert_eq!(requests_while_discovering, (1, 1, 0));
     assert_eq!(
         diagnostic_response(one.0, &one.1),
@@ -416,7 +517,11 @@ async fn concurrent_refused_proof_is_reserved_once() {
         1,
         "only the first reservation may evaluate a new denial: {statuses:?}"
     );
-    assert_eq!(f.audit.verify().unwrap().records, 3);
+    assert_eq!(
+        f.audit.verify().unwrap().records,
+        4,
+        "V4 genesis + plan + one denial"
+    );
     assert_eq!(diagnostic_provider_requests(&f.issuer), (1, 1, 0));
     // With all four requests complete, retry each consumed intent using a new
     // nonce and the same proof. Every replay must now conflict without another
@@ -427,13 +532,15 @@ async fn concurrent_refused_proof_is_reserved_once() {
             diagnostic_response(status, &body),
             (409, "session_conflict")
         );
-        assert_eq!(f.audit.verify().unwrap().records, 3);
+        assert_eq!(f.audit.verify().unwrap().records, 4);
     }
     assert_eq!(diagnostic_provider_requests(&f.issuer), (1, 1, 0));
 
     // Exercise the original strict race after metadata/keys are ready. A new
     // proof from the same refused subject must reserve exactly one intention,
     // even when all four verifications can reach the durable ledger.
+    // 4 concurrent + 4 replays already consumed this window's 8 anonymous starts.
+    fresh_anonymous_start_window().await;
     let ready_token = f
         .issuer
         .token("cli-public", "unapproved", None, &[], "ready-concurrent");
@@ -831,7 +938,6 @@ async fn v1_requires_explicit_migration_and_preserves_its_entries_and_backup() {
         1_000_001,
         "open must not migrate a V1 ledger implicitly"
     );
-    let old_router = router(f.store.clone(), reopened.clone(), f.config.clone());
     let other = f.issuer.token(
         "cli-public",
         "approved-subject",
@@ -839,9 +945,13 @@ async fn v1_requires_explicit_migration_and_preserves_its_entries_and_backup() {
         &[],
         "migration-other",
     );
-    let (status, body) = admit(&old_router, &other).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(body["error"]["code"], "audit_unavailable");
+    // The current gateway fails closed at assembly on an unmigrated V1 ledger:
+    // GatewayState::with_oidc requires format 3 or 4 (src/api.rs). No admission
+    // can even be attempted, and the durable entries stay untouched.
+    assert!(
+        try_router(f.store.clone(), reopened.clone(), f.config.clone()).is_err(),
+        "a V1 ledger must not assemble an OIDC gateway"
+    );
     assert_eq!(entries(&path), before);
 
     let occupied = f.files.path().join("occupied-backup");
@@ -876,6 +986,15 @@ async fn v1_requires_explicit_migration_and_preserves_its_entries_and_backup() {
         Some(&Failure::Format)
     );
     assert!(!duplicate.exists());
+    // V2 is still not a supported gateway format. The explicit chain continues
+    // to V3 (migrate_native_logout_v3) before any admission; like V1->V2 it
+    // consumes no ledger entry or quota and leaves the V1 backup above intact.
+    let before_v3 = f.files.path().join("before-native-v3.sqlite");
+    reopened.migrate_native_logout_v3(&before_v3).unwrap();
+    assert_eq!(version(&path), 1_000_003);
+    assert_eq!(version(&before_v3), 1_000_002);
+    assert_eq!(entries(&path), before);
+    let old_router = router(f.store.clone(), reopened.clone(), f.config.clone());
     // A historical verified denial already consumes that subject's budget.
     let denied = f.issuer.token(
         "cli-public",
