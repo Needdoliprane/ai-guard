@@ -550,14 +550,15 @@ fn egress_broker_connect_and_invalidation_share_the_initial_poll() {
 
 #[tokio::test]
 async fn egress_broker_waits_for_a_fresh_exact_numeric_permit_before_connecting() {
-    for (reply, expected_accepts) in [
-        (ConnectPermitReply::Fresh, 1),
-        (ConnectPermitReply::Replayed, 0),
-        (ConnectPermitReply::DifferentIp, 0),
-        (ConnectPermitReply::Expired, 0),
-        (ConnectPermitReply::Lost, 0),
+    for (reply, connects) in [
+        (ConnectPermitReply::Fresh, true),
+        (ConnectPermitReply::Replayed, false),
+        (ConnectPermitReply::DifferentIp, false),
+        (ConnectPermitReply::Expired, false),
+        (ConnectPermitReply::Lost, false),
     ] {
-        let upstream = upstream().await;
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = upstream.local_addr().unwrap().port();
         let gate = Arc::new(ObservationGate {
             started: Semaphore::new(0),
             release: Semaphore::new(0),
@@ -568,8 +569,8 @@ async fn egress_broker_waits_for_a_fresh_exact_numeric_permit_before_connecting(
             connect_permit_reply: reply,
             ..Gateway::default()
         });
-        let harness = harness(gateway.clone(), upstream.port).await;
-        let authority = format!("{FIXTURE}:{}", upstream.port);
+        let harness = harness(gateway.clone(), port).await;
+        let authority = format!("{FIXTURE}:{port}");
         let helper_port = harness.helper_port;
         let client = tokio::spawn(async move { connect(helper_port, &authority).await });
         timeout_at(
@@ -580,26 +581,45 @@ async fn egress_broker_waits_for_a_fresh_exact_numeric_permit_before_connecting(
         .expect("the broker must request the numeric permit")
         .unwrap()
         .forget();
-        assert_eq!(upstream.accepts.load(Ordering::SeqCst), 0);
+        assert!(
+            timeout_at(
+                Instant::now() + Duration::from_millis(50),
+                upstream.accept()
+            )
+            .await
+            .is_err(),
+            "an upstream socket opened before the permit reply"
+        );
         let request = gateway.connect_permits.lock().unwrap()[0].clone();
         assert_eq!(request.ip.to_string(), "127.0.0.1");
         let decision = gateway.decisions.lock().unwrap()[0].clone();
         assert_eq!(request.decision_id, decision.decision_id);
         assert_eq!(request.binding, decision.binding);
         assert_eq!(request.flow_id, decision.flow_id);
-        if matches!(reply, ConnectPermitReply::Expired) {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
         gate.release.add_permits(1);
         let (_client, response) = timeout_at(Instant::now() + Duration::from_secs(3), client)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(response.starts_with("HTTP/1.1 200"), expected_accepts == 1);
-        assert_eq!(upstream.accepts.load(Ordering::SeqCst), expected_accepts);
+        assert_eq!(response.starts_with("HTTP/1.1 200"), connects);
+        if connects {
+            timeout_at(Instant::now() + Duration::from_secs(3), upstream.accept())
+                .await
+                .expect("the fresh permit allows one connection")
+                .unwrap();
+        }
         assert_eq!(gateway.connect_permits.lock().unwrap().len(), 1);
         harness.stop.stop();
         assert_eq!(harness.owner.await.unwrap().cause, ChannelExit::Stopped);
+        assert!(
+            timeout_at(
+                Instant::now() + Duration::from_millis(50),
+                upstream.accept()
+            )
+            .await
+            .is_err(),
+            "the broker attempted an unauthorized or repeated connection"
+        );
     }
 }
 
