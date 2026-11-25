@@ -1526,9 +1526,9 @@ async fn authorize_plan(
     initial.approval_hash = None;
     let mut answer = client.decide(&initial).await?;
     let mut chosen = initial;
-    match answer.pointer("/decision/outcome").and_then(Value::as_str) {
-        Some("allow") => {}
-        Some("deny") => bail!("policy denied the command; no worker was reserved or launched"),
+    let denied = match answer.pointer("/decision/outcome").and_then(Value::as_str) {
+        Some("allow") => false,
+        Some("deny") => true,
         Some("review") => {
             let hash = crate::policy::request_hash(&chosen);
             let pending = approval_path(&plan.options.config_dir, &hash)?;
@@ -1570,11 +1570,21 @@ async fn authorize_plan(
                 answer.pointer("/decision/outcome").and_then(Value::as_str) == Some("allow"),
                 "approved request did not receive a durable allow"
             );
+            false
         }
         _ => bail!("gateway returned an unknown policy outcome"),
-    }
-    let receipt: DecisionReceiptV1 = serde_json::from_value(answer["receipt"].clone())
-        .context("gateway decision has no versioned durable receipt; worker launch is blocked")?;
+    };
+    let receipt = match serde_json::from_value::<DecisionReceiptV1>(answer["receipt"].clone()) {
+        Ok(receipt) => receipt,
+        Err(_) if denied => {
+            bail!("policy denied the command. The durable receipt is missing or invalid.")
+        }
+        Err(error) => {
+            return Err(error).context(
+                "gateway decision has no versioned durable receipt; worker launch is blocked",
+            );
+        }
+    };
     anyhow::ensure!(
         receipt.version == 1
             && receipt.audit_seq > 0
@@ -1587,8 +1597,36 @@ async fn authorize_plan(
                 } else {
                     DecisionPhaseV1::Initial
                 },
-        "decision receipt is not bound to the exact authorized identity and phase"
+        "{}",
+        if denied {
+            "policy denied the command. The durable receipt is invalid for this request."
+        } else {
+            "decision receipt is not bound to the exact authorized identity and phase"
+        }
     );
+    if denied {
+        anyhow::ensure!(
+            crate::control::hash(&receipt.audit_hash).is_ok()
+                && answer["audit_seq"].as_i64() == Some(receipt.audit_seq)
+                && answer["audit_hash"].as_str() == Some(receipt.audit_hash.as_str()),
+            "policy denied the command. The audit sequence or hash could not be confirmed."
+        );
+        let detail = |field: &str, limit: usize| -> Result<String> {
+            let text = answer["decision"][field]
+                .as_str()
+                .filter(|text| !text.trim().is_empty())
+                .context("policy denied the command. The decision explanation is incomplete.")?;
+            let masked = client.redactor.text(text);
+            let escaped = crate::diagnostics::escape_controls(&masked);
+            Ok(crate::redaction::clip(&escaped, limit))
+        };
+        let rule = detail("rule", 128)?;
+        let reason = detail("reason", 512)?;
+        bail!(
+            "policy denied the command under rule {rule} at audit sequence {}. {reason}",
+            receipt.audit_seq
+        );
+    }
     plan.request = chosen;
     Ok((receipt, answer["decision"].clone()))
 }

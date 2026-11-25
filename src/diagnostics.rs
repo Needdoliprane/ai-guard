@@ -33,6 +33,8 @@ pub mod report;
 mod tenants;
 mod trust;
 
+pub(crate) use output::escape_controls;
+
 use crate::control_fs;
 use catalogue::{FindingCode, TARGET_PLACEHOLDER};
 use output::{IdKind, IdTable, Root, Safe, quoted};
