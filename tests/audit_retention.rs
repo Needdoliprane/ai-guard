@@ -505,6 +505,12 @@ fn claude_parent_inference_uses_only_the_live_suffix_after_retention() {
     };
     let claude = |kind: &str, data| declared("claude-adapter", kind, data);
     let agent = |id: &str| claude("agent.declared", json!({"provider_agent_id": id}));
+    let root_declaration = || {
+        claude(
+            "agent.declared",
+            json!({"provider_agent_id":"parent","provider_parent_agent_id":null}),
+        )
+    };
     let call = |id: &str| {
         claude(
             "delegation.declared",
@@ -519,10 +525,7 @@ fn claude_parent_inference_uses_only_the_live_suffix_after_retention() {
     };
     store
         .append_batch(vec![
-            claude(
-                "agent.declared",
-                json!({"provider_agent_id":"parent","provider_parent_agent_id":null}),
-            ),
+            root_declaration(),
             agent("checkpoint-child"),
             declared(
                 "codex-adapter",
@@ -560,7 +563,10 @@ fn claude_parent_inference_uses_only_the_live_suffix_after_retention() {
             .clone()
     };
     let before = store.entities(false).unwrap();
-    let parent_id = lookup(&before, "parent")["id"].clone();
+    let parent = lookup(&before, "parent");
+    assert!(parent["parent_id"].is_null());
+    assert_eq!(parent["field_provenance"]["parent_id"], "declared");
+    let parent_id = parent["id"].clone();
     for id in ["checkpoint-child", "cross-boundary-child", "live-child"] {
         let child = lookup(&before, id);
         assert_eq!(child["parent_id"], parent_id);
@@ -597,6 +603,9 @@ fn claude_parent_inference_uses_only_the_live_suffix_after_retention() {
         "boundary-call"
     );
     let after = store.entities(false).unwrap();
+    let parent = lookup(&after, "parent");
+    assert!(parent["parent_id"].is_null());
+    assert!(parent["field_provenance"].get("parent_id").is_none());
     assert_eq!(lookup(&after, "explicit-child"), explicit);
     assert_eq!(lookup(&after, "live-child"), lookup(&before, "live-child"));
     for id in ["checkpoint-child", "cross-boundary-child"] {
@@ -610,6 +619,12 @@ fn claude_parent_inference_uses_only_the_live_suffix_after_retention() {
     assert_eq!(store.audit_retention_ledger().unwrap(), ledger);
     let verified = store.verify_audit_archives(&[archive]).unwrap();
     assert_eq!(verified.verdict, "verified", "{:?}", verified.failure);
+
+    store.append(root_declaration()).unwrap();
+    let restored = store.entities(false).unwrap();
+    let parent = lookup(&restored, "parent");
+    assert!(parent["parent_id"].is_null());
+    assert_eq!(parent["field_provenance"]["parent_id"], "declared");
 }
 
 #[test]
