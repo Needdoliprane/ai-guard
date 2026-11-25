@@ -6,6 +6,8 @@
 //! CNAME chains are not observable through the host resolver and stay unknown.
 
 use crate::egress::{Authority, PolicyLimits, ValidatedResolution};
+use anyhow::{anyhow, ensure};
+use serde::Deserialize;
 use std::{
     future::Future,
     io,
@@ -22,6 +24,7 @@ use tokio::{
 pub(crate) const MAX_ADDRESSES: usize = 16;
 /// Concurrent host lookups per broker; getaddrinfo occupies a blocking thread.
 pub(crate) const MAX_CONCURRENT_LOOKUPS: usize = 8;
+const MAX_CONTROL_IP_EXCLUSIONS: usize = 256;
 
 /// Where the validated addresses came from. Recorded with each connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,6 +96,19 @@ impl HostLookup for SystemLookup {
     }
 }
 
+/// Installation-wide operator input from the private broker registry V2.
+/// Approval refers to the host's resolver configuration. Construction performs
+/// no lookup and does not attest the host's upstream DNS configuration.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ResolverConfigV1 {
+    version: u32,
+    host_resolver_approved: bool,
+    /// Exact IPv4/IPv6 addresses of all control services, including those
+    /// configured by hostname. The operator supplies the inventory.
+    control_ip_exclusions: Vec<String>,
+}
+
 pub(crate) struct Resolver {
     lookup: Arc<dyn HostLookup>,
     internal: Vec<InternalService>,
@@ -101,6 +117,51 @@ pub(crate) struct Resolver {
 }
 
 impl Resolver {
+    pub(crate) fn from_operator_config(
+        config: ResolverConfigV1,
+        lookup: Arc<dyn HostLookup>,
+    ) -> anyhow::Result<Self> {
+        ensure!(
+            config.version == 1,
+            "unsupported broker egress resolver version"
+        );
+        ensure!(
+            config.host_resolver_approved,
+            "broker host resolver requires operator approval"
+        );
+        ensure!(
+            (1..=MAX_CONTROL_IP_EXCLUSIONS).contains(&config.control_ip_exclusions.len()),
+            "broker egress resolver needs 1..=256 exact control addresses"
+        );
+
+        let mut exclusions = Vec::with_capacity(config.control_ip_exclusions.len());
+        for raw in config.control_ip_exclusions {
+            let address: IpAddr = raw
+                .parse()
+                .map_err(|_| anyhow!("invalid broker egress control address"))?;
+            ensure!(
+                address == address.to_canonical()
+                    && address.to_string() == raw
+                    && !address.is_unspecified()
+                    && !address.is_multicast()
+                    && !matches!(address, IpAddr::V4(ip) if ip.is_broadcast()),
+                "broker egress control address must be a canonical unicast IP"
+            );
+            exclusions.push(address);
+        }
+        exclusions.sort_unstable();
+        ensure!(
+            exclusions.windows(2).all(|pair| pair[0] != pair[1]),
+            "duplicate broker egress control address"
+        );
+
+        Self::new(lookup, Vec::new(), exclusions)
+    }
+
+    pub(crate) fn excludes_control_ip(&self, address: IpAddr) -> bool {
+        self.exclusions.contains(&address)
+    }
+
     /// `exclusions` are exact addresses of this installation's control
     /// services (gateway, dashboard, ingress, broker IPC peers). An internal
     /// service may never alias one of them.
@@ -177,7 +238,7 @@ impl Resolver {
         }
         if addresses
             .iter()
-            .any(|address| self.exclusions.contains(address))
+            .any(|&address| self.excludes_control_ip(address))
         {
             return Err(ResolveError::RefusedAddress);
         }

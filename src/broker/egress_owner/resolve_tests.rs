@@ -42,6 +42,86 @@ fn soon() -> Instant {
     Instant::now() + Duration::from_secs(5)
 }
 
+#[test]
+fn operator_resolver_config_requires_approval_and_canonical_control_ips() {
+    let valid = serde_json::json!({
+        "version": 1,
+        "host_resolver_approved": true,
+        "control_ip_exclusions": ["127.0.0.1", "2001:db8::2"]
+    });
+    let source = answer(&[]);
+    let build = |wire| {
+        serde_json::from_value(wire)
+            .map_err(anyhow::Error::from)
+            .and_then(|config| Resolver::from_operator_config(config, source.clone()))
+    };
+    assert!(build(valid.clone()).is_ok());
+    assert_eq!(source.calls.load(Ordering::SeqCst), 0);
+
+    let mut missing_approval = valid.clone();
+    missing_approval
+        .as_object_mut()
+        .unwrap()
+        .remove("host_resolver_approved");
+    assert!(build(missing_approval).is_err());
+
+    let oversized: Vec<_> = (1..=257).map(|i| format!("2001:db8::{i:x}")).collect();
+    for (field, value) in [
+        ("version", serde_json::json!(2)),
+        ("host_resolver_approved", serde_json::json!(false)),
+        ("internal_services", serde_json::json!([])),
+        ("control_ip_exclusions", serde_json::json!([])),
+        ("control_ip_exclusions", serde_json::json!(oversized)),
+        (
+            "control_ip_exclusions",
+            serde_json::json!(["192.0.2.1", "192.0.2.1"]),
+        ),
+        ("control_ip_exclusions", serde_json::json!(["2001:0DB8::2"])),
+        (
+            "control_ip_exclusions",
+            serde_json::json!(["::ffff:192.0.2.1"]),
+        ),
+        ("control_ip_exclusions", serde_json::json!(["0.0.0.0"])),
+        ("control_ip_exclusions", serde_json::json!(["ff02::1"])),
+        (
+            "control_ip_exclusions",
+            serde_json::json!(["255.255.255.255"]),
+        ),
+        ("control_ip_exclusions", serde_json::json!(["192.0.2.0/24"])),
+        (
+            "control_ip_exclusions",
+            serde_json::json!(["gateway.example.com"]),
+        ),
+    ] {
+        let mut wire = valid.clone();
+        wire[field] = value;
+        assert!(build(wire).is_err(), "{field}");
+    }
+    assert_eq!(source.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn operator_resolver_rejects_mixed_answers_with_either_control_ip_family() {
+    let control_ips = ["203.0.114.10", "2606:4700::1234"];
+    for excluded in control_ips {
+        let config = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "host_resolver_approved": true,
+            "control_ip_exclusions": control_ips,
+        }))
+        .unwrap();
+        let resolver =
+            Resolver::from_operator_config(config, answer(&["93.184.216.34", excluded])).unwrap();
+        assert_eq!(
+            resolver
+                .resolve(&authority("example.com", 443), soon())
+                .await,
+            Err(ResolveError::RefusedAddress),
+            "{excluded}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn egress_resolve_returns_validated_public_addresses_from_the_host_resolver() {
     let source = answer(&[
