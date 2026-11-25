@@ -9,6 +9,11 @@ use tokio::{
 };
 use uuid::Uuid;
 mod batch_io;
+#[cfg(unix)]
+#[allow(dead_code)] // The broker composition that grants this port is separate.
+pub(crate) mod bootstrap_stdin;
+#[cfg(all(test, unix))]
+mod bootstrap_stdin_tests;
 mod control_outcome;
 pub(crate) use control_outcome::{
     NativeCollected, NativeCollectionOutcome, NativeIoPhase, NativeNoChild, NativeRuntimeOutcome,
