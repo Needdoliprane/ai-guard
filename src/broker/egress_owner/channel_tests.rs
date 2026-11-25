@@ -45,6 +45,7 @@ struct Gateway {
     decide_unavailable: AtomicBool,
     observe_unavailable: AtomicBool,
     opening_reply: OpeningReply,
+    stop_on_opening_ack: Option<ChannelStop>,
     opening_calls: AtomicUsize,
     decision_delay: Duration,
     decision_hold: Option<Arc<PendingOperation>>,
@@ -164,6 +165,9 @@ impl EgressControl for Gateway {
                 .await?;
                 EgressChannelOpeningDispositionV1::Fresh
             };
+            if let Some(stop) = &self.stop_on_opening_ack {
+                stop.stop();
+            }
             let mut binding = request.binding;
             if matches!(self.opening_reply, OpeningReply::DifferentBinding) {
                 binding.context_digest = DigestV1::of(b"different fixture");
@@ -1366,21 +1370,33 @@ async fn egress_broker_stop_cancels_a_pending_handshake() {
 
 #[tokio::test]
 async fn egress_broker_prepares_before_open_and_requires_fresh_correlated_receipt() {
-    for (opening_reply, expected_refusal) in [
-        (OpeningReply::Fresh, None),
-        (OpeningReply::Replayed, Some(ChannelExit::OpeningReplayed)),
+    for (opening_reply, stop_with_ack, expected_refusal) in [
+        (OpeningReply::Fresh, false, None),
+        (
+            OpeningReply::Replayed,
+            false,
+            Some(ChannelExit::OpeningReplayed),
+        ),
         (
             OpeningReply::DifferentBinding,
+            false,
             Some(ChannelExit::AuditUnavailable),
         ),
+        (OpeningReply::Fresh, true, Some(ChannelExit::Stopped)),
     ] {
         let (broker, mut helper) = tokio::io::duplex(4096);
+        let (stop, stopped) = ChannelStop::new();
+        let (stop_on_opening_ack, _stop_owner) = if stop_with_ack {
+            (Some(stop), None)
+        } else {
+            (None, Some(stop))
+        };
         let control = Arc::new(Gateway {
             allow: AtomicBool::new(true),
             opening_reply,
+            stop_on_opening_ack,
             ..Gateway::default()
         });
-        let (_stop, stopped) = ChannelStop::new();
         let binding = fixture_binding();
         let deadline = Instant::now() + Duration::from_secs(2);
         let (prepared, ()) = tokio::join!(
@@ -1395,6 +1411,8 @@ async fn egress_broker_prepares_before_open_and_requires_fresh_correlated_receip
             },
         );
         let prepared = prepared.unwrap().unwrap();
+        let request = prepared.opening_request().clone();
+        assert_eq!(request.binding, binding);
         assert_eq!(control.opening_calls.load(Ordering::SeqCst), 0);
         channel_protocol::write_message(
             &mut helper,
@@ -1412,6 +1430,7 @@ async fn egress_broker_prepares_before_open_and_requires_fresh_correlated_receip
         match (result, expected_refusal) {
             (Ok(opened), None) => {
                 assert_eq!(opened.receipt().binding, binding);
+                assert_eq!(opened.receipt().observation_id, request.observation_id);
                 assert_eq!(
                     opened.receipt().disposition,
                     EgressChannelOpeningDispositionV1::Fresh
@@ -1420,6 +1439,9 @@ async fn egress_broker_prepares_before_open_and_requires_fresh_correlated_receip
             (Err(terminal), Some(cause)) => {
                 assert_eq!(terminal.cause, cause);
                 assert_eq!(terminal.local_quiescence, LocalQuiescence::Confirmed);
+                if stop_with_ack {
+                    assert_eq!(terminal.audit, ChannelAuditClosure::OpeningAcknowledged);
+                }
             }
             _ => panic!("unexpected channel opening result"),
         }

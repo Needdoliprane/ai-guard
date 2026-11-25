@@ -114,6 +114,8 @@ pub(crate) enum LocalQuiescence {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ChannelAuditClosure {
     NotOpened,
+    /// The fresh opening was acknowledged before STOP. Terminal audit is outstanding.
+    OpeningAcknowledged,
     /// The gateway acknowledged the terminal after the prior submissions.
     Acknowledged {
         observations_lost: u64,
@@ -616,7 +618,7 @@ struct Owner<W> {
 pub(crate) struct PreparedChannel<IO> {
     input: tokio::io::ReadHalf<IO>,
     output: tokio::io::WriteHalf<IO>,
-    binding: EgressBindingV1,
+    opening: EgressChannelOpeningRequestV1,
     stop: watch::Receiver<ChannelStopState>,
     capability: EgressCapabilityV1,
 }
@@ -672,7 +674,11 @@ where
     Ok(PreparedChannel {
         input,
         output,
-        binding,
+        opening: EgressChannelOpeningRequestV1 {
+            version: 1,
+            observation_id: IdV1::random(),
+            binding,
+        },
         stop,
         capability: hello.capability,
     })
@@ -691,16 +697,17 @@ impl<IO> OpenedChannel<IO> {
 }
 
 impl<IO> PreparedChannel<IO> {
+    /// Lets the broker retain the reconciliation key before starting the POST.
+    pub(crate) fn opening_request(&self) -> &EgressChannelOpeningRequestV1 {
+        &self.opening
+    }
+
     /// Open the channel once, after the broker receives Running for its binding.
     pub(crate) async fn open(
         mut self,
         control: &dyn EgressControl,
     ) -> Result<OpenedChannel<IO>, ChannelTermination> {
-        let request = EgressChannelOpeningRequestV1 {
-            version: 1,
-            observation_id: IdV1::random(),
-            binding: self.binding.clone(),
-        };
+        let request = &self.opening;
         let mut opening_started = false;
         let opened = tokio::select! {
             biased;
@@ -719,6 +726,13 @@ impl<IO> PreparedChannel<IO> {
                     && DigestV1::parse(&receipt.receipt.audit_hash).is_ok() =>
             {
                 if receipt.disposition == EgressChannelOpeningDispositionV1::Fresh {
+                    // The ACK future may complete in the poll that requests STOP.
+                    if self.stop.borrow().0 || self.stop.has_changed().is_err() {
+                        return Err(ChannelTermination::without_flows(
+                            ChannelExit::Stopped,
+                            ChannelAuditClosure::OpeningAcknowledged,
+                        ));
+                    }
                     return Ok(OpenedChannel {
                         prepared: self,
                         receipt,
@@ -767,10 +781,11 @@ where
     let PreparedChannel {
         mut input,
         output,
-        binding,
         mut stop,
         capability,
+        ..
     } = opened.prepared;
+    let binding = opened.receipt.binding;
     let started = Instant::now();
     let mut ledger = EgressChannelState::new(0);
     if ledger.accept_capability(Some(&capability), 0).is_err() {
