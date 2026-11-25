@@ -1181,6 +1181,40 @@ Ces API sont des contrats du contrôle de confiance ; une déclaration par le ru
 
 Les schémas3 à7 conservent le protocole `broker_supervision_v1` ; les routes ci-dessous exposent les transactions du Store Rust. Le schéma par défaut reste2. Les [migrations CLI explicites](setup/broker/README.fr.md#mettre-à-jour-le-stockage-explicitement) progressent d'une version avec sauvegarde neuve ; elles ne sont pas une route d'activation ou une installation de service OS. Une base3 à7 rouverte/restaurée est en maintenance : les effets frais sont refusés avec `503 supervision_inactive`. La capacité d'origine neuve est non sérialisée ; le numéro de schéma seul n'autorise aucun start. Réactivation après restart et migration des anciens Created restent des exigences ouvertes, sans repli legacy. [Preuves historiques du schéma3 et limites du Store](engineering/evidence/2026-10-30/supervision-store/README.md).
 
+### Reçu d’ouverture réseau E3 / E3 egress opening receipt
+
+Le POST `/api/v1/egress/channel-openings` exige un `runner` de
+confiance et utilise le Store SQLite de son tenant authentifié. Le
+contrat candidat `EgressChannelOpeningRequestV1` porte `version: 1`,
+`observation_id` et le `binding` exact du canal. Une insertion neuve
+requiert un worker `Running` avec egress et la même tentative. La
+modification du contenu pour le même `observation_id` est un conflit.
+
+Le reçu `EgressChannelOpeningReceiptV1` porte `version: 1`,
+`observation_id`, `binding`, `disposition` et le reçu d’audit
+`receipt`. `fresh` atteste une insertion par cette transaction.
+`replayed` restitue le reçu initial pour le même contenu, y compris
+après STOP, avec zéro ajout au journal. Le POST
+`/api/v1/egress/observations` conserve le reçu historique
+`EgressReceiptV1`. La libération du fournisseur suit sa garde et
+ses preuves propres. [Décision E3](engineering/DECISIONS.md#25-novembre-2026--g05e3-libération-du-fournisseur-par-le-broker)
+
+The POST to `/api/v1/egress/channel-openings` requires a trusted
+runner and uses its authenticated tenant's SQLite Store. The
+candidate `EgressChannelOpeningRequestV1` carries `version: 1`,
+`observation_id`, and the exact channel binding. A new observation
+requires a `Running` worker with egress and the same attempt.
+Changing the content for a reused `observation_id` is a conflict.
+
+`EgressChannelOpeningReceiptV1` carries `version: 1`,
+`observation_id`, `binding`, `disposition`, and the audit receipt
+in `receipt`. `fresh` confirms an insertion by this transaction.
+`replayed` returns the original receipt for identical content,
+including after STOP, with zero additional journal entries.
+`POST /api/v1/egress/observations` keeps its existing
+`EgressReceiptV1` receipt. Provider release has its own guard and
+evidence. [E3 decision](engineering/DECISIONS.md#25-novembre-2026--g05e3-libération-du-fournisseur-par-le-broker)
+
 <a id="owned-control-a0"></a>
 
 ### Diagnostic technique owned A0 / Owned technical diagnostic A0
