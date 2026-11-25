@@ -333,18 +333,39 @@ async fn serve_connection(mut stream: UnixStream, state: Arc<State>) -> Enforcer
     }
     #[cfg(test)]
     let _lifetime_ipc = lifetime_tests::authenticated_owner().await;
-    let request: Request = read_frame(&mut stream, MAX_FRAME, IO_TIMEOUT).await?;
+    let mut request: Request = read_frame(&mut stream, MAX_FRAME, IO_TIMEOUT).await?;
+    // Motif support is negotiated on this same authenticated connection and
+    // incarnation, before the reservation write. It reuses the admission
+    // above; it reserves nothing and grants nothing by itself.
+    let mut motif_negotiated = false;
+    if matches!(request, Request::NegotiateReservationMotif {}) {
+        #[cfg(test)]
+        if state.reserve_probe.refuses_negotiation() {
+            // Historical decoder boundary: the unknown kind closes this
+            // connection without any response frame.
+            return Err(EnforcerError::InvalidInput);
+        }
+        write_frame(
+            &mut stream,
+            &Response::ReservationMotifSupported { epoch: state.epoch },
+            MAX_FRAME,
+            IO_TIMEOUT,
+        )
+        .await?;
+        request = read_frame(&mut stream, MAX_FRAME, IO_TIMEOUT).await?;
+        motif_negotiated = true;
+    }
     #[cfg(test)]
     state.reserve_probe.observe_request(&request);
     if matches!(request, Request::Watch {}) {
         loop {
-            let response = dispatch(&state, Request::Status {}).await?;
+            let response = dispatch(&state, Request::Status {}, false).await?;
             write_frame(&mut stream, &response, MAX_FRAME, IO_TIMEOUT).await?;
             tokio::time::sleep(POLL).await;
         }
     }
     let shutdown_request = matches!(request, Request::ShutdownIfIdle {});
-    let response = match dispatch(&state, request).await {
+    let response = match dispatch(&state, request, motif_negotiated).await {
         Ok(response) => response,
         Err(code) => Response::Error { code },
     };
@@ -361,7 +382,11 @@ async fn serve_connection(mut stream: UnixStream, state: Arc<State>) -> Enforcer
     Ok(())
 }
 
-async fn dispatch(state: &Arc<State>, request: Request) -> EnforcerResult<Response> {
+async fn dispatch(
+    state: &Arc<State>,
+    request: Request,
+    motif_negotiated: bool,
+) -> EnforcerResult<Response> {
     match request {
         Request::Status {} => {
             let admitted = state
@@ -379,6 +404,8 @@ async fn dispatch(state: &Arc<State>, request: Request) -> EnforcerResult<Respon
             })
         }
         Request::Watch {} => Err(EnforcerError::InvalidInput),
+        // Valid only as the connection preamble handled before dispatch.
+        Request::NegotiateReservationMotif {} => Err(EnforcerError::InvalidInput),
         Request::ProspectiveCapabilities {} => {
             let admitted = state
                 .admission
@@ -406,11 +433,15 @@ async fn dispatch(state: &Arc<State>, request: Request) -> EnforcerResult<Respon
             prospective,
             generation,
             replay_only,
-        } => Ok(Response::ProspectiveReserved {
-            reservation: state
+        } => {
+            match state
                 .reserve_prospective(*prospective, generation, replay_only)
-                .await?,
-        }),
+                .await
+            {
+                Ok(reservation) => Ok(Response::ProspectiveReserved { reservation }),
+                Err(refusal) => Ok(refusal.into_response(motif_negotiated)),
+            }
+        }
         Request::BeginProspectiveArmExchange {
             reservation,
             generation,

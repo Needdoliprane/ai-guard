@@ -15,7 +15,7 @@ pub(in crate::broker::enforcer) fn registration(root: &std::path::Path) -> Regis
     prospective::fixture_registration(root)
 }
 
-struct HeldCapabilitiesReply {
+struct HeldReply {
     reached: oneshot::Sender<()>,
     release: oneshot::Receiver<()>,
 }
@@ -25,7 +25,10 @@ struct HeldCapabilitiesReply {
 #[derive(Default)]
 pub(super) struct ReserveProbe {
     requests: AtomicUsize,
-    next_capabilities: Mutex<Option<HeldCapabilitiesReply>>,
+    next_capabilities: Mutex<Option<HeldReply>>,
+    next_before_start: Mutex<Option<HeldReply>>,
+    next_reserve_ack: Mutex<Option<HeldReply>>,
+    refuse_negotiation: AtomicBool,
 }
 
 impl ReserveProbe {
@@ -35,8 +38,12 @@ impl ReserveProbe {
         }
     }
 
-    pub(super) async fn hold_capabilities_reply(&self) -> EnforcerResult<()> {
-        let held = self.next_capabilities.lock().unwrap().take();
+    pub(super) fn refuses_negotiation(&self) -> bool {
+        self.refuse_negotiation.load(Ordering::SeqCst)
+    }
+
+    async fn hold(slot: &Mutex<Option<HeldReply>>) -> EnforcerResult<()> {
+        let held = slot.lock().unwrap().take();
         if let Some(held) = held {
             let _ = held.reached.send(());
             tokio::time::timeout(IO_TIMEOUT, held.release)
@@ -45,6 +52,18 @@ impl ReserveProbe {
                 .map_err(|_| EnforcerError::Unavailable)?;
         }
         Ok(())
+    }
+
+    pub(super) async fn hold_capabilities_reply(&self) -> EnforcerResult<()> {
+        Self::hold(&self.next_capabilities).await
+    }
+
+    pub(super) async fn hold_before_start(&self) -> EnforcerResult<()> {
+        Self::hold(&self.next_before_start).await
+    }
+
+    pub(super) async fn hold_reserve_ack(&self) -> EnforcerResult<()> {
+        Self::hold(&self.next_reserve_ack).await
     }
 }
 
@@ -143,8 +162,76 @@ impl LegacyIpcFixture {
             next.is_none(),
             "only one capabilities response can be retained"
         );
-        *next = Some(HeldCapabilitiesReply { reached, release });
+        *next = Some(HeldReply { reached, release });
         (entered, resume)
+    }
+
+    /// Hold the next fresh reservation after its cell is retained but before
+    /// the native worker starts, so a test can decide the installation outcome.
+    pub(in crate::broker::enforcer) fn pause_before_start(
+        &self,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (reached, entered) = oneshot::channel();
+        let (resume, release) = oneshot::channel();
+        let probe = &self.native.as_ref().unwrap().reserve_probe;
+        let mut next = probe.next_before_start.lock().unwrap();
+        assert!(next.is_none(), "only one pre-start hold can be retained");
+        *next = Some(HeldReply { reached, release });
+        (entered, resume)
+    }
+
+    /// Hold the next fresh reservation after its native worker started, before
+    /// the ACK control loop publishes a grant.
+    pub(in crate::broker::enforcer) fn pause_reserve_ack(
+        &self,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (reached, entered) = oneshot::channel();
+        let (resume, release) = oneshot::channel();
+        let probe = &self.native.as_ref().unwrap().reserve_probe;
+        let mut next = probe.next_reserve_ack.lock().unwrap();
+        assert!(next.is_none(), "only one reserve ACK hold can be retained");
+        *next = Some(HeldReply { reached, release });
+        (entered, resume)
+    }
+
+    /// Simulate the historical peer decoder boundary: the negotiation request
+    /// kind is unknown there, so the connection closes without any response.
+    pub(in crate::broker::enforcer) fn refuse_motif_negotiation(&self) {
+        self.native
+            .as_ref()
+            .unwrap()
+            .reserve_probe
+            .refuse_negotiation
+            .store(true, Ordering::SeqCst);
+    }
+
+    pub(in crate::broker::enforcer) fn pending_reservation(
+        &self,
+        arm_id: &str,
+    ) -> Option<ProspectiveReservationV1> {
+        self.native
+            .as_ref()
+            .unwrap()
+            .prospective
+            .lock()
+            .unwrap()
+            .get(arm_id)
+            .map(|actor| actor.fixture_reservation())
+    }
+
+    /// Make the retained native worker exit before installing any runtime
+    /// context. Only a test that already holds the pre-start barrier may use
+    /// this; the reservation then observes the real installation deadline.
+    pub(in crate::broker::enforcer) fn exit_pending_before_install(&self, arm_id: &str) {
+        let native = self.native.as_ref().unwrap();
+        let actor = native
+            .prospective
+            .lock()
+            .unwrap()
+            .get(arm_id)
+            .cloned()
+            .expect("retained prospective target");
+        let _key = actor.fixture_exit_key();
     }
 
     pub(in crate::broker::enforcer) async fn finish(mut self) {

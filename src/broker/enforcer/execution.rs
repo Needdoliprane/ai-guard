@@ -4,8 +4,8 @@
 
 use super::{
     CancelGeneration, EnforcedSlot, EnforcerClient, EnforcerError, EnforcerFullClientV3,
-    EnforcerResult, EnforcerStatusV1, ProspectiveRegistrationV1, RegistrationV1,
-    client::ProspectiveArmExchange,
+    EnforcerResult, EnforcerStatusV1, LegacyReservationRefusalV1, ProspectiveRegistrationV1,
+    RegistrationV1, client::ProspectiveArmExchange,
 };
 use crate::{
     broker::{
@@ -47,17 +47,29 @@ impl ExecutionEnforcerV1 {
         generation: CancelGeneration,
         replay_only: bool,
     ) -> EnforcerResult<()> {
+        self.reserve_prospective_diagnosed(target, generation, replay_only)
+            .await
+            .map_err(|refusal| refusal.code())
+    }
+    /// Same single attempt, retaining the closed Legacy refusal motif when the
+    /// authenticated peer negotiated support on this attempt's connection.
+    /// Full3 keeps its own closed codes; no motif is invented for it.
+    pub(crate) async fn reserve_prospective_diagnosed(
+        &self,
+        target: ProspectiveRegistrationV1,
+        generation: CancelGeneration,
+        replay_only: bool,
+    ) -> Result<(), LegacyReservationRefusalV1> {
         match self {
             Self::Legacy(client) => {
                 client
-                    .legacy_reserve_prospective(target, generation, replay_only)
+                    .legacy_reserve_prospective_diagnosed(target, generation, replay_only)
                     .await
             }
-            Self::Full3(client) => {
-                client
-                    .reserve_prospective(target, generation, replay_only)
-                    .await
-            }
+            Self::Full3(client) => client
+                .reserve_prospective(target, generation, replay_only)
+                .await
+                .map_err(LegacyReservationRefusalV1::from),
         }
     }
     pub(crate) async fn begin_prospective_arm_exchange(

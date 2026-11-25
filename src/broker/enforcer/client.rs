@@ -1277,6 +1277,7 @@ impl Client {
     ) -> EnforcerResult<Response> {
         let command = match request {
             Request::ProspectiveCapabilities {}
+            | Request::NegotiateReservationMotif {}
             | Request::ReserveProspective { .. }
             | Request::BeginProspectiveArmExchange { .. }
             | Request::BindProspective { .. }
@@ -2264,6 +2265,82 @@ impl Client {
             return Err(EnforcerError::Unavailable);
         }
         Ok(response)
+    }
+    /// Negotiate motif support on one authenticated connection, before any
+    /// reservation write. `Ok(false)` means the peer closed the unknown
+    /// negotiation without a response, exactly as the historical decoder does;
+    /// a decoded but unexpected reply is a protocol failure, not a fallback.
+    async fn negotiate_reservation_motif(&self, stream: &mut UnixStream) -> EnforcerResult<bool> {
+        if write_frame(
+            stream,
+            &Request::NegotiateReservationMotif {},
+            MAX_FRAME,
+            IO_TIMEOUT,
+        )
+        .await
+        .is_err()
+        {
+            return Ok(false);
+        }
+        match read_frame::<Response>(stream, MAX_FRAME, IO_TIMEOUT).await {
+            Ok(Response::ReservationMotifSupported { epoch }) if epoch == self.endpoint.epoch() => {
+                Ok(true)
+            }
+            Ok(_) => Err(EnforcerError::Unavailable),
+            Err(_) => Ok(false),
+        }
+    }
+    /// Transport of one Legacy fresh reservation attempt. The negotiation and
+    /// the single reservation write share one authenticated connection and
+    /// incarnation. Against a peer that refused the negotiation, the
+    /// reservation is written once, unnegotiated, on a fresh connection. A
+    /// lost, unknown or incomplete reservation response is never resent.
+    async fn request_reservation(
+        &self,
+        request: Request,
+        timeout: Duration,
+    ) -> EnforcerResult<(Response, bool)> {
+        if let SlotAuthorityV1::Full3(full) = &self.authority {
+            return self
+                .request_full_legacy(full, request, timeout)
+                .await
+                .map(|response| (response, false));
+        }
+        let mut stream = self.endpoint.connect_checked(&self.endpoint_root).await?;
+        #[cfg(test)]
+        if self
+            .owned_peer_pid_for_test
+            .is_some_and(|expected| peer_pid(&stream) != Some(expected))
+        {
+            return Err(EnforcerError::Unauthorized);
+        }
+        self.authenticate(&mut stream).await?;
+        let negotiated = self.negotiate_reservation_motif(&mut stream).await?;
+        if !negotiated {
+            stream = self.endpoint.connect_checked(&self.endpoint_root).await?;
+            #[cfg(test)]
+            if self
+                .owned_peer_pid_for_test
+                .is_some_and(|expected| peer_pid(&stream) != Some(expected))
+            {
+                return Err(EnforcerError::Unauthorized);
+            }
+            self.authenticate(&mut stream).await?;
+        }
+        write_frame(&mut stream, &request, MAX_FRAME, IO_TIMEOUT).await?;
+        let response = read_frame(&mut stream, MAX_FRAME, timeout).await?;
+        #[cfg(test)]
+        if matches!(
+            &response,
+            Response::ProspectiveReserved { .. } | Response::ProspectiveRefused { .. }
+        ) && self
+            .legacy
+            .as_ref()
+            .is_some_and(|legacy| legacy.lose_next_reserve_reply.swap(false, Ordering::SeqCst))
+        {
+            return Err(EnforcerError::Unavailable);
+        }
+        Ok((response, negotiated))
     }
     fn fail(&self) {
         self.failed.store(true, Ordering::SeqCst);

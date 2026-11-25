@@ -13,6 +13,8 @@ pub(super) struct LegacyTransport {
     #[cfg(test)]
     pub(super) lose_next_begin_reply: AtomicBool,
     #[cfg(test)]
+    pub(super) lose_next_reserve_reply: AtomicBool,
+    #[cfg(test)]
     pub(super) fail_next_bind_before_connect: AtomicBool,
 }
 impl LegacyTransport {
@@ -26,6 +28,8 @@ impl LegacyTransport {
             lose_next_bind_reply: AtomicBool::new(false),
             #[cfg(test)]
             lose_next_begin_reply: AtomicBool::new(false),
+            #[cfg(test)]
+            lose_next_reserve_reply: AtomicBool::new(false),
             #[cfg(test)]
             fail_next_bind_before_connect: AtomicBool::new(false),
         }
@@ -117,10 +121,24 @@ impl EnforcerClient {
         generation: CancelGeneration,
         replay_only: bool,
     ) -> EnforcerResult<()> {
+        self.legacy_reserve_prospective_diagnosed(target, generation, replay_only)
+            .await
+            .map_err(|refusal| refusal.code())
+    }
+    /// Same single reservation attempt, retaining the closed refusal motif
+    /// carried by this attempt's own negotiated response. The motif stays
+    /// absent when the peer is historical or the response was lost, unknown
+    /// or incomplete; no resend or fallback follows such a response.
+    pub(crate) async fn legacy_reserve_prospective_diagnosed(
+        &self,
+        target: ProspectiveRegistrationV1,
+        generation: CancelGeneration,
+        replay_only: bool,
+    ) -> Result<(), LegacyReservationRefusalV1> {
         target.validate()?;
         let expected = generation.current();
         if expected == u64::MAX {
-            return Err(EnforcerError::NotReady);
+            return Err(EnforcerError::NotReady.into());
         }
         if !replay_only {
             self.legacy_require_new_prearm_identity()?;
@@ -134,12 +152,12 @@ impl EnforcerClient {
                 .map_err(|_| EnforcerError::Unhealthy)?;
             if let Some(old) = map.get(target.arm_id()) {
                 if old.digest != digest || !Arc::ptr_eq(&old.generation.0, &generation.0) {
-                    return Err(EnforcerError::Conflict);
+                    return Err(EnforcerError::Conflict.into());
                 }
                 Arc::clone(old)
             } else {
                 if map.len() >= self.0.max_slots as usize {
-                    return Err(EnforcerError::Capacity);
+                    return Err(EnforcerError::Capacity.into());
                 }
                 let retained = Arc::new(LocalProspective {
                     target,
@@ -160,11 +178,11 @@ impl EnforcerClient {
         // while capabilities was in flight. Keep the post-ACK check for
         // invalidation after this sample.
         if !replay_only && retained.generation.current() != expected {
-            return Err(EnforcerError::NotReady);
+            return Err(EnforcerError::NotReady.into());
         }
-        let reply = self
+        let (reply, negotiated) = self
             .0
-            .request(
+            .request_reservation(
                 Request::ReserveProspective {
                     prospective: Box::new(retained.target.clone()),
                     generation: expected,
@@ -173,8 +191,17 @@ impl EnforcerClient {
                 REGISTER_TIMEOUT,
             )
             .await?;
-        let Response::ProspectiveReserved { reservation } = reply else {
-            return Err(response_error(reply));
+        let reservation = match reply {
+            Response::ProspectiveReserved { reservation } => reservation,
+            Response::ProspectiveRefused { code, motif } => {
+                // The closed motif is only meaningful on this negotiated
+                // connection, and only for the not_ready refusal sites.
+                if !negotiated || code != EnforcerError::NotReady {
+                    return Err(EnforcerError::Unavailable.into());
+                }
+                return Err(LegacyReservationRefusalV1::with_motif(code, motif));
+            }
+            reply => return Err(response_error(reply).into()),
         };
         reservation.validate_for(
             &retained.target,
@@ -184,7 +211,7 @@ impl EnforcerClient {
         if (!replay_only && reservation.cancel_generation != expected)
             || (replay_only && reservation.cancel_generation > expected)
         {
-            return Err(EnforcerError::Conflict);
+            return Err(EnforcerError::Conflict.into());
         }
         {
             let mut previous = retained
@@ -195,7 +222,7 @@ impl EnforcerClient {
                 if serde_json::to_vec(old).map_err(|_| EnforcerError::InvalidInput)?
                     != serde_json::to_vec(&reservation).map_err(|_| EnforcerError::InvalidInput)?
                 {
-                    return Err(EnforcerError::Conflict);
+                    return Err(EnforcerError::Conflict.into());
                 }
             } else {
                 *previous = Some(reservation);
@@ -204,7 +231,7 @@ impl EnforcerClient {
         if retained.generation.current() != expected {
             self.legacy_cancel_prospective(&retained.target, retained.generation.current())
                 .await?;
-            return Err(EnforcerError::NotReady);
+            return Err(EnforcerError::NotReady.into());
         }
         Ok(())
     }
@@ -503,3 +530,7 @@ mod launch;
 #[cfg(test)]
 #[path = "client_legacy_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "reservation_motif_tests.rs"]
+mod reservation_motif_tests;

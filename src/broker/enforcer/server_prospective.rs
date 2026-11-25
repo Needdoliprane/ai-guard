@@ -74,6 +74,10 @@ pub(super) struct ProspectiveActor {
 }
 impl ProspectiveActor {
     #[cfg(test)]
+    pub(super) fn fixture_reservation(&self) -> ProspectiveReservationV1 {
+        self.reservation.clone()
+    }
+    #[cfg(test)]
     pub(super) fn fixture_exit_key(&self) -> ActorKey {
         self.test_exit.store(true, Ordering::SeqCst);
         self.wake.notify_all();
@@ -392,10 +396,10 @@ impl State {
         prospective: ProspectiveRegistrationV1,
         generation: u64,
         replay_only: bool,
-    ) -> EnforcerResult<ProspectiveReservationV1> {
+    ) -> Result<ProspectiveReservationV1, LegacyReservationRefusalV1> {
         prospective.validate()?;
         if generation == u64::MAX && !replay_only {
-            return Err(EnforcerError::InvalidInput);
+            return Err(EnforcerError::InvalidInput.into());
         }
         let digest = prospective.digest()?;
         let actor = {
@@ -416,7 +420,7 @@ impl State {
                 if generation < actor.reservation.cancel_generation
                     || (!replay_only && generation != actor.reservation.cancel_generation)
                 {
-                    return Err(EnforcerError::Conflict);
+                    return Err(EnforcerError::Conflict.into());
                 }
                 if replay_only {
                     actor.reserve_stop()?;
@@ -433,19 +437,21 @@ impl State {
                 Arc::clone(actor)
             } else {
                 if replay_only {
-                    return Err(EnforcerError::Conflict);
+                    return Err(EnforcerError::Conflict.into());
                 }
                 self.check_original(&admission)?;
                 let sample = self.clock.sample().map_err(|_| EnforcerError::Unhealthy)?;
-                prospective
-                    .arm
-                    .validate_clock_check(&sample)
-                    .map_err(|_| EnforcerError::NotReady)?;
+                prospective.arm.validate_clock_check(&sample).map_err(|_| {
+                    LegacyReservationRefusalV1::with_motif(
+                        EnforcerError::NotReady,
+                        LegacyReservationMotifV1::ClockRejectedBeforeAllocation,
+                    )
+                })?;
                 if admission.entries.contains(prospective.arm_id()) {
-                    return Err(EnforcerError::Conflict);
+                    return Err(EnforcerError::Conflict.into());
                 }
                 if admission.entries.len() >= self.max_slots as usize {
-                    return Err(EnforcerError::Capacity);
+                    return Err(EnforcerError::Capacity.into());
                 }
                 let nonce = Uuid::new_v4();
                 let reservation = ProspectiveReservationV1 {
@@ -496,10 +502,14 @@ impl State {
         // on its ambiguous first admission. It can only rediscover a retained
         // cell; a fresh retry may still retry a positively failed spawn.
         if !replay_only {
+            #[cfg(test)]
+            self.reserve_probe.hold_before_start().await?;
             actor.start(Arc::clone(&self.clock))?;
         }
         #[cfg(test)]
         tests::before_reserve_ack().await;
+        #[cfg(test)]
+        self.reserve_probe.hold_reserve_ack().await?;
         let expires = Instant::now() + REGISTER_TIMEOUT - Duration::from_secs(1);
         loop {
             {
@@ -511,7 +521,7 @@ impl State {
                     self.check_original(&admission)?;
                 }
                 if self.owners.failed() {
-                    return Err(EnforcerError::Unhealthy);
+                    return Err(EnforcerError::Unhealthy.into());
                 }
                 if actor.runtime_installed.load(Ordering::SeqCst) {
                     if !replay_only {
@@ -520,21 +530,32 @@ impl State {
                             .prospective
                             .arm
                             .validate_clock_check(&sample)
-                            .map_err(|_| EnforcerError::NotReady)?;
+                            .map_err(|_| {
+                                LegacyReservationRefusalV1::with_motif(
+                                    EnforcerError::NotReady,
+                                    LegacyReservationMotifV1::ClockRejectedBeforeAck,
+                                )
+                            })?;
                         if actor
                             .state
                             .lock()
                             .map_err(|_| EnforcerError::Unhealthy)?
                             .stop_reserved
                         {
-                            return Err(EnforcerError::NotReady);
+                            return Err(LegacyReservationRefusalV1::with_motif(
+                                EnforcerError::NotReady,
+                                LegacyReservationMotifV1::StopReservedBeforeAck,
+                            ));
                         }
                     }
                     return Ok(actor.reservation.clone());
                 }
             }
             if Instant::now() >= expires {
-                return Err(EnforcerError::NotReady);
+                return Err(LegacyReservationRefusalV1::with_motif(
+                    EnforcerError::NotReady,
+                    LegacyReservationMotifV1::InstallDeadlineElapsed,
+                ));
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }

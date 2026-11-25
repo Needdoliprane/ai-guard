@@ -139,6 +139,47 @@ impl From<super::local_ipc::IpcError> for EnforcerError {
     }
 }
 
+/// Closed static refusal site of one Legacy fresh reservation attempt. It is
+/// chosen on the branch that refuses and travels only on that attempt's
+/// negotiated response; it grants nothing and names no runtime observation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LegacyReservationMotifV1 {
+    ClockRejectedBeforeAllocation,
+    ClockRejectedBeforeAck,
+    InstallDeadlineElapsed,
+    StopReservedBeforeAck,
+}
+
+/// Closed refusal of one Legacy fresh reservation attempt. The motif is absent
+/// when the peer did not negotiate motif support on this authenticated
+/// connection, or when the response was lost, unknown or incomplete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct LegacyReservationRefusalV1 {
+    code: EnforcerError,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    motif: Option<LegacyReservationMotifV1>,
+}
+impl LegacyReservationRefusalV1 {
+    pub(crate) fn with_motif(code: EnforcerError, motif: LegacyReservationMotifV1) -> Self {
+        Self {
+            code,
+            motif: Some(motif),
+        }
+    }
+    pub(crate) fn code(&self) -> EnforcerError {
+        self.code
+    }
+    pub(crate) fn motif(&self) -> Option<LegacyReservationMotifV1> {
+        self.motif
+    }
+}
+impl From<EnforcerError> for LegacyReservationRefusalV1 {
+    fn from(code: EnforcerError) -> Self {
+        Self { code, motif: None }
+    }
+}
+
 /// In-memory invalidation precedes any awaited durable cancellation. A new
 /// explicit post-cancel export can use the new generation; old guards cannot.
 #[derive(Clone, Default)]
@@ -693,6 +734,10 @@ struct Authentication {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
     ProspectiveCapabilities {},
+    /// Preamble of one authenticated connection, before its single reservation
+    /// write. Historical peers reject this unknown kind and close the
+    /// connection without a response; nothing is reserved by negotiating.
+    NegotiateReservationMotif {},
     ReserveProspective {
         prospective: Box<ProspectiveRegistrationV1>,
         generation: u64,
@@ -743,8 +788,19 @@ enum Response {
     ProspectiveCapabilities {
         value: LegacyProspectiveCapabilitiesV1,
     },
+    /// Only ever written as the preamble reply of a connection that asked for
+    /// motif support; the epoch binds the negotiation to this incarnation.
+    ReservationMotifSupported {
+        epoch: Uuid,
+    },
     ProspectiveReserved {
         reservation: ProspectiveReservationV1,
+    },
+    /// Refusal of the reservation written on this same negotiated connection.
+    /// Unnegotiated historical queries keep receiving `Error { code }` exactly.
+    ProspectiveRefused {
+        code: EnforcerError,
+        motif: LegacyReservationMotifV1,
     },
     ProspectiveArmExchange {
         #[serde(deserialize_with = "deserialize_legacy_optional_uuid")]
@@ -770,6 +826,19 @@ enum Response {
     Error {
         code: EnforcerError,
     },
+}
+impl LegacyReservationRefusalV1 {
+    /// A motif reaches the wire only on the connection that negotiated support
+    /// before this attempt; every other refusal keeps the historical frame.
+    fn into_response(self, motif_negotiated: bool) -> Response {
+        match (motif_negotiated, self.motif) {
+            (true, Some(motif)) => Response::ProspectiveRefused {
+                code: self.code,
+                motif,
+            },
+            _ => Response::Error { code: self.code },
+        }
+    }
 }
 
 fn proof(capability: &[u8; 32], challenge: &Challenge) -> String {
