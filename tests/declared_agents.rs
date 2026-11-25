@@ -4,6 +4,7 @@ use agentsandbox::{
     model::Event,
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 fn declared(session: &str, id: &str, parent: Value, state: Option<&str>) -> Event {
     let mut event = Event::new("agent.declared");
@@ -264,4 +265,41 @@ fn removing_cycle_edges_preserves_noncyclic_descendants() {
     assert!(node(&items, "tail")["hierarchy_warning"].is_null());
     assert!(node(&items, "a")["parent_id"].is_null());
     assert!(node(&items, "b")["parent_id"].is_null());
+}
+
+#[test]
+fn legacy_claude_checkpoint_replay_preserves_canonical_bytes() {
+    let mut parent = declared("session", "parent", Value::Null, Some("started"));
+    parent.source = "claude-adapter".into();
+    parent.coverage = "native".into();
+    parent.timestamp = "2026-11-25T00:00:00.000Z".into();
+    let mut call = parent.clone();
+    call.kind = "delegation.declared".into();
+    call.data = json!({
+        "delegation_tool": "Agent",
+        "provider_tool_use_id": "toolu_call",
+        "provider_agent_id": "parent",
+    });
+    let mut activity = parent.clone();
+    activity.kind = "message.declared".into();
+    activity.data = json!({
+        "provider_agent_id": "child",
+        "provider_parent_tool_use_id": "toolu_call",
+    });
+    let mut child = parent.clone();
+    child.data = json!({"provider_agent_id": "child"});
+
+    let mut projection = DeclaredAgentProjection::default();
+    for event in [parent, call, activity, child] {
+        projection.observe(&event);
+    }
+    let checkpoint = serde_json::to_vec(&projection).unwrap();
+    // The retention verifier replays archived events and hashes the snapshot
+    // containing these bytes. V1 replay must preserve this exact encoding.
+    assert_eq!(
+        hex::encode(Sha256::digest(&checkpoint)),
+        "95ea6f5e3561409572990d005ea55b62facbd196ce46e147a51bcd2c1c2a5e88"
+    );
+    let resumed: DeclaredAgentProjection = serde_json::from_slice(&checkpoint).unwrap();
+    assert_eq!(serde_json::to_vec(&resumed).unwrap(), checkpoint);
 }
