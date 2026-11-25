@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
+import { saveBrowserFailure } from "./browser_failure.mjs";
 
 const require = createRequire(import.meta.url);
 const secrets = [];
@@ -16,6 +17,7 @@ let stage = "configuration";
 let browser;
 let context;
 let page;
+let captureFailure;
 let artifacts;
 let networkViolations = [];
 
@@ -24,7 +26,7 @@ class Blocked extends Error {}
 function redact(value) {
   let text = String(value);
   for (const secret of secrets)
-    for (const form of [secret, encodeURIComponent(secret)])
+    for (const form of [secret, encodeURIComponent(secret), JSON.stringify(secret).slice(1, -1)])
       text = text.split(form).join("[REDACTED]");
   return text;
 }
@@ -233,6 +235,7 @@ async function main() {
   });
 
   const invalid = `invalid-qa-${randomUUID()}`;
+  secrets.push(invalid);
   const project = `qa-browser-${randomUUID()}`;
   const malicious = '<img src=x onerror="window.__aiGuardLiveXss=true">';
   const firstMessage = `${project} SSE ${malicious}`;
@@ -293,11 +296,18 @@ async function main() {
     viewport: { width: 1440, height: 1050 }, reducedMotion: "reduce",
     serviceWorkers: "block",
   });
-  const guard = await installBrowserGuard(context, [dashboard], [viewer, runner]);
+  const guard = await installBrowserGuard(context, [dashboard], [viewer, runner, invalid]);
   networkViolations = guard.violations;
   context.setDefaultTimeout(20000);
   page = await context.newPage();
   await guard.preparePage(page);
+  // Only the two credentials used in the dashboard reach the capture helper.
+  captureFailure = () => page.url() === `${dashboard}/`
+    ? saveBrowserFailure(page, {
+        directory: process.env.AI_GUARD_TEST_ARTIFACT_DIR,
+        secrets: [viewer, invalid],
+      })
+    : null;
   const requests = [];
   const errors = [];
   const streamResponses = [];
@@ -420,7 +430,10 @@ async function main() {
     await row.waitFor();
     await row.getByRole("button", { name: "Détails", exact: true }).click();
     const dialog = page.locator("dialog[open]");
-    await dialog.getByText(worker.attempt.container_id, { exact: true }).waitFor();
+    const container = dialog.locator(".key-value").filter({
+      has: page.getByText("Conteneur", { exact: true }),
+    });
+    await container.getByText(worker.attempt.container_id, { exact: true }).waitFor();
     assert.equal(JSON.parse(await dialog.locator("pre").textContent()).worker_id, worker.worker_id);
     await page.keyboard.press("Escape");
     await dialog.waitFor({ state: "hidden" });
@@ -476,6 +489,10 @@ async function run() {
       message: redact(error.message), checks, artifacts, networkViolations };
     process.exitCode = error instanceof Blocked ? 2 : 1;
   } finally {
+    if (result.status !== "PASS" && networkViolations.length === 0) {
+      const failureArtifacts = await captureFailure?.();
+      if (failureArtifacts) result = { ...result, failureArtifacts };
+    }
     // Même un échec après lancement ou une coupure réseau ferme les flux et Chromium.
     const cleanup = await closeBrowserResources(context, browser);
     if (cleanup.length) {
