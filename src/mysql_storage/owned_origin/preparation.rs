@@ -1,14 +1,10 @@
 //! Read-only operator preflight for a fresh owned MySQL schema.
 
-use super::{
-    OwnedAuditLock, decode_row, driver_error,
-    fresh_anchor::{ConfiguredTenantNamespace, FreshAnchorRequestV1},
-};
+use super::{OwnedAuditLock, decode_row, driver_error};
 use crate::mysql_storage::{
     MysqlAuthentication, MysqlCredentials, MysqlEndpoint, MysqlProbeError, PROBE_TIMEOUT,
     connect_options, open_verified,
 };
-use crate::redaction::Redactor;
 use anyhow::{Context, Result, ensure};
 use mysql_async::{Conn, Row, prelude::Queryable};
 use serde::Serialize;
@@ -88,7 +84,7 @@ pub async fn preflight_owned_preparation(
     })
 }
 
-enum EmptyTargetOperation<'a> {
+enum EmptyTargetOperation {
     Inspect,
     // The complete physical manifest and owned publication are prerequisites
     // for exposing installation to an operator.
@@ -99,11 +95,7 @@ enum EmptyTargetOperation<'a> {
             reason = "internal installation step pending owned publication"
         )
     )]
-    InstallUnpublishedTables {
-        request: &'a FreshAnchorRequestV1,
-        configured: ConfiguredTenantNamespace<'a>,
-        redactor: &'a Redactor,
-    },
+    InstallUnpublishedTables,
 }
 
 async fn prepare_empty_owned_target(
@@ -111,7 +103,7 @@ async fn prepare_empty_owned_target(
     credentials: MysqlCredentials<'_>,
     server: Uuid,
     schema_version: u16,
-    operation: EmptyTargetOperation<'_>,
+    operation: EmptyTargetOperation,
 ) -> Result<(MysqlAuthentication, String)> {
     ensure!(
         !server.is_nil() && matches!(schema_version, 14 | 15),
@@ -123,7 +115,6 @@ async fn prepare_empty_owned_target(
             .any(|schema| endpoint.database.eq_ignore_ascii_case(schema)),
         MysqlOwnedPreparationRefusal::IncompatibleServer
     );
-    let password = credentials.password;
     let (options, configured_authentication) = connect_options(&endpoint, credentials)?;
     tokio::time::timeout(PROBE_TIMEOUT, async {
         let (mut conn, tls_version) =
@@ -136,34 +127,11 @@ async fn prepare_empty_owned_target(
             }
         };
         let checked = async {
+            let target = check_empty_schema(&mut conn, &ownership).await?;
             match operation {
-                EmptyTargetOperation::Inspect => {
-                    check_empty_schema(&mut conn, &ownership).await.map(|_| ())
-                }
-                EmptyTargetOperation::InstallUnpublishedTables {
-                    request,
-                    configured,
-                    redactor,
-                } => {
-                    let redactor = redactor.with_secrets([password.to_owned()]);
-                    let anchor = request.plan(
-                        schema_version,
-                        server,
-                        endpoint.database,
-                        configured,
-                        &redactor,
-                    )?;
-                    match check_empty_schema(&mut conn, &ownership).await {
-                        Ok(target) => audit_tables::install(target, schema_version).await,
-                        Err(error) => {
-                            if error.downcast_ref::<MysqlOwnedPreparationRefusal>()
-                                == Some(&MysqlOwnedPreparationRefusal::TargetNotEmpty)
-                            {
-                                anchor.reject_divergence(&mut conn, &ownership).await?;
-                            }
-                            Err(error)
-                        }
-                    }
+                EmptyTargetOperation::Inspect => Ok(()),
+                EmptyTargetOperation::InstallUnpublishedTables => {
+                    audit_tables::install(target, schema_version).await
                 }
             }
         }

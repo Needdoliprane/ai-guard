@@ -1,4 +1,4 @@
-//! Physical manifest of the unpublished audit, review and format-15 egress tables.
+//! Physical manifest of the unpublished audit, decision, review and format-15 egress tables.
 
 use super::{
     OwnedAuditLock, decode_row, driver_error, egress_manifest as egress, require_catalog_visibility,
@@ -9,6 +9,7 @@ use mysql_async::{
     prelude::{FromRow, Queryable},
 };
 
+const DECISION: &str = "ai_guard_audit_decision";
 const EVENT: &str = "ai_guard_audit_event";
 const STATE: &str = "ai_guard_audit_state";
 const REVIEW_AUTHORITY: &str = "review_authority_meta";
@@ -31,7 +32,15 @@ pub(super) type ExpectedForeignKey = (
     u8,
 );
 
-const FOREIGN_KEYS: [(&str, &str, &str, &str, &str, u8); 3] = [
+const FOREIGN_KEYS: [(&str, &str, &str, &str, &str, u8); 4] = [
+    (
+        DECISION,
+        "ai_guard_audit_decision_event_ref",
+        "event_seq",
+        EVENT,
+        "seq",
+        1,
+    ),
     (
         REVIEW_AUTHORITY,
         "review_authority_anchor_event",
@@ -60,7 +69,11 @@ const FOREIGN_KEYS: [(&str, &str, &str, &str, &str, u8); 3] = [
 
 // Ordered by table and ordinal position. The final flag requires no non-null
 // default or character collation, and either an ordinary or stored column.
-const COLUMNS: [ExpectedColumn; 32] = [
+const COLUMNS: [ExpectedColumn; 36] = [
+    (DECISION, "request_id", "varbinary(64)", "NO", 1),
+    (DECISION, "human_approved", "tinyint unsigned", "NO", 1),
+    (DECISION, "request_hash", "binary(64)", "NO", 1),
+    (DECISION, "event_seq", "bigint", "NO", 1),
     (EVENT, "seq", "bigint", "NO", 1),
     (EVENT, "event_id", "varbinary(64)", "NO", 1),
     (EVENT, "received_at", "varbinary(32)", "NO", 1),
@@ -109,10 +122,39 @@ pub(super) type ExpectedConstraint<'a> = (
     Option<&'a str>,
 );
 
-fn expected_constraints(version_check: &str) -> [ExpectedConstraint<'_>; 29] {
+fn expected_constraints(version_check: &str) -> [ExpectedConstraint<'_>; 34] {
     // CHECK_CLAUSE contains the MySQL data dictionary's rendering, including
     // grouping, the length alias, and hex literals. Compare the whole clause.
     [
+        (DECISION, "PRIMARY", "PRIMARY KEY", "YES", None),
+        (
+            DECISION,
+            "ai_guard_audit_decision_event",
+            "UNIQUE",
+            "YES",
+            None,
+        ),
+        (
+            DECISION,
+            "ai_guard_audit_decision_event_ref",
+            "FOREIGN KEY",
+            "YES",
+            None,
+        ),
+        (
+            DECISION,
+            "ai_guard_audit_decision_phase",
+            "CHECK",
+            "YES",
+            Some("(`human_approved` in (0,1))"),
+        ),
+        (
+            DECISION,
+            "ai_guard_audit_decision_request_size",
+            "CHECK",
+            "YES",
+            Some("(length(`request_id`) between 1 and 64)"),
+        ),
         (EVENT, "PRIMARY", "PRIMARY KEY", "YES", None),
         (
             EVENT,
@@ -310,8 +352,8 @@ fn expected_in_format<T: Copy>(
 
 fn inventory_matches(actual: &[(u64, u64, u64, u8)], version: u16) -> bool {
     match version {
-        14 => actual == [(4, 4, 0, 1)],
-        15 => actual == [(9, 4, 5, 1)],
+        14 => actual == [(5, 5, 0, 1)],
+        15 => actual == [(10, 5, 5, 1)],
         _ => false,
     }
 }
@@ -350,7 +392,16 @@ fn generation_matches(table: &str, column: &str, expression: &str) -> bool {
     }
 }
 
-const INDEXES: [(&str, &str, Option<&str>, u8, u8); 12] = [
+const INDEXES: [(&str, &str, Option<&str>, u8, u8); 15] = [
+    (DECISION, "PRIMARY", Some("request_id"), 1, 1),
+    (DECISION, "PRIMARY", Some("human_approved"), 2, 1),
+    (
+        DECISION,
+        "ai_guard_audit_decision_event",
+        Some("event_seq"),
+        1,
+        1,
+    ),
     (EVENT, "PRIMARY", Some("seq"), 1, 1),
     (EVENT, "event_id", Some("event_id"), 1, 1),
     (STATE, "PRIMARY", Some("singleton"), 1, 1),
@@ -501,7 +552,7 @@ async fn read_constraints(connection: &mut impl Queryable) -> Result<Vec<Constra
          ON t.CONSTRAINT_TYPE = 'CHECK' AND BINARY c.CONSTRAINT_SCHEMA = BINARY t.CONSTRAINT_SCHEMA \
          AND BINARY c.CONSTRAINT_NAME = BINARY t.CONSTRAINT_NAME \
          WHERE BINARY t.TABLE_SCHEMA = BINARY DATABASE() \
-         ORDER BY BINARY t.TABLE_NAME, BINARY t.CONSTRAINT_NAME LIMIT 56",
+         ORDER BY BINARY t.TABLE_NAME, BINARY t.CONSTRAINT_NAME LIMIT 61",
         connection,
     ).await
 }
@@ -562,8 +613,8 @@ pub(super) async fn verify_empty_in_transaction(
     require_constraints_enabled(tx).await?;
     let inventory = metadata_rows(
         "SELECT COUNT(*), COUNT(CASE WHEN TABLE_TYPE = 'BASE TABLE' AND ENGINE = 'InnoDB' \
-         AND BINARY TABLE_NAME IN ('ai_guard_audit_event', 'ai_guard_audit_state', \
-             'review_authority_meta', 'runner_review_bindings') THEN 1 END), \
+         AND BINARY TABLE_NAME IN ('ai_guard_audit_decision', 'ai_guard_audit_event', \
+             'ai_guard_audit_state', 'review_authority_meta', 'runner_review_bindings') THEN 1 END), \
          COUNT(CASE WHEN TABLE_TYPE = 'BASE TABLE' AND ENGINE = 'InnoDB' \
          AND BINARY TABLE_NAME IN ('egress_policy_meta', 'egress_policy_revisions', \
              'egress_policy_heads', 'egress_policy_operations', 'egress_policy_reservations') THEN 1 END), \
@@ -585,6 +636,7 @@ pub(super) async fn verify_empty_in_transaction(
     let empty: Vec<u8> = metadata_rows(
         "SELECT NOT EXISTS (SELECT 1 FROM ai_guard_audit_state) \
          AND NOT EXISTS (SELECT 1 FROM ai_guard_audit_event) \
+         AND NOT EXISTS (SELECT 1 FROM ai_guard_audit_decision) \
          AND NOT EXISTS (SELECT 1 FROM review_authority_meta) \
          AND NOT EXISTS (SELECT 1 FROM runner_review_bindings)",
         tx,
@@ -592,7 +644,7 @@ pub(super) async fn verify_empty_in_transaction(
     .await?;
     ensure!(
         empty == [1],
-        "MySQL unpublished audit or review tables contain rows"
+        "MySQL unpublished audit, decision or review tables contain rows"
     );
     if version == 15 {
         let empty: Vec<u8> = metadata_rows(
@@ -614,7 +666,7 @@ pub(super) async fn verify_empty_in_transaction(
               OR (BINARY EXTRA = 'STORED GENERATED' AND GENERATION_EXPRESSION <> '')), \
          IF(OCTET_LENGTH(GENERATION_EXPRESSION) <= 512, GENERATION_EXPRESSION, NULL) \
          FROM information_schema.COLUMNS WHERE BINARY TABLE_SCHEMA = BINARY DATABASE() \
-         ORDER BY BINARY TABLE_NAME, ORDINAL_POSITION LIMIT 59",
+         ORDER BY BINARY TABLE_NAME, ORDINAL_POSITION LIMIT 63",
         tx,
     )
     .await?;
@@ -628,7 +680,7 @@ pub(super) async fn verify_empty_in_transaction(
          s.SUB_PART IS NULL AND s.COLLATION = 'A' \
          AND s.INDEX_TYPE = 'BTREE' AND s.IS_VISIBLE = 'YES' AND s.EXPRESSION IS NULL \
          FROM information_schema.STATISTICS AS s WHERE BINARY s.TABLE_SCHEMA = BINARY DATABASE() \
-         ORDER BY BINARY s.TABLE_NAME, BINARY s.INDEX_NAME, s.SEQ_IN_INDEX LIMIT 29",
+         ORDER BY BINARY s.TABLE_NAME, BINARY s.INDEX_NAME, s.SEQ_IN_INDEX LIMIT 32",
         tx,
     )
     .await?;
@@ -663,7 +715,7 @@ async fn read_foreign_keys(connection: &mut impl Queryable) -> Result<Vec<Foreig
          AND BINARY r.TABLE_NAME = BINARY k.TABLE_NAME \
          AND BINARY r.CONSTRAINT_NAME = BINARY k.CONSTRAINT_NAME \
          WHERE BINARY k.TABLE_SCHEMA = BINARY DATABASE() AND k.REFERENCED_TABLE_NAME IS NOT NULL \
-         ORDER BY BINARY k.TABLE_NAME, BINARY k.CONSTRAINT_NAME, k.ORDINAL_POSITION LIMIT 13",
+         ORDER BY BINARY k.TABLE_NAME, BINARY k.CONSTRAINT_NAME, k.ORDINAL_POSITION LIMIT 14",
         connection,
     )
     .await
@@ -706,9 +758,14 @@ mod tests {
         extended.sort_by(|left, right| left.0.cmp(&right.0));
         assert!(columns_match(&extended, 15));
         assert!(!columns_match(&extended, 14));
-        columns[2].2 = "varbinary(31)".into();
+        let received_at = columns
+            .iter()
+            .position(|row| row.0 == EVENT && row.1 == "received_at")
+            .unwrap();
+        columns[received_at].2 = "varbinary(31)".into();
         assert!(!columns_match(&columns, 14));
-        columns[2].2 = "varbinary(32)".into();
+        columns[received_at].2 = "varbinary(32)".into();
+        assert!(columns_match(&columns, 14));
         columns.push((
             STATE.into(),
             "unexpected".into(),
@@ -719,7 +776,7 @@ mod tests {
         ));
         assert!(!columns_match(&columns, 14));
 
-        let mut indexes: [Index; 12] = INDEXES.map(|(table, name, column, position, shape)| {
+        let mut indexes: [Index; 15] = INDEXES.map(|(table, name, column, position, shape)| {
             (
                 table.into(),
                 name.into(),
@@ -750,13 +807,25 @@ mod tests {
             .unwrap();
         key.4 = 0;
         assert!(!indexes_match(&extended, 15));
-        indexes[9].3 = 1;
+        let decision_phase = indexes
+            .iter()
+            .position(|row| row.0 == DECISION && row.2.as_deref() == Some("human_approved"))
+            .unwrap();
+        indexes[decision_phase].3 = 1;
         assert!(!indexes_match(&indexes, 14));
-        indexes[9].3 = 2;
-        indexes[1].5 = 0;
+        indexes[decision_phase].3 = 2;
+        let decision_event = indexes
+            .iter()
+            .position(|row| row.1 == "ai_guard_audit_decision_event")
+            .unwrap();
+        indexes[decision_event].4 = 1;
         assert!(!indexes_match(&indexes, 14));
-        indexes[1].5 = 1;
-        assert!(!indexes_match(&indexes[..11], 14));
+        indexes[decision_event].4 = 0;
+        indexes[decision_event].5 = 0;
+        assert!(!indexes_match(&indexes, 14));
+        indexes[decision_event].5 = 1;
+        assert!(indexes_match(&indexes, 14));
+        assert!(!indexes_match(&indexes[..indexes.len() - 1], 14));
     }
 
     #[test]
@@ -787,21 +856,28 @@ mod tests {
             })
             .into();
         assert!(foreign_keys_match(&links, 14));
-        links[2].3 = "other_audit_event".into();
+        let review_event = links
+            .iter()
+            .position(|row| row.1 == "review_binding_audit_event")
+            .unwrap();
+        links[review_event].3 = "other_audit_event".into();
         assert!(!foreign_keys_match(&links, 14));
-        links[2].3 = EVENT.into();
-        links[2].6 = 0;
+        links[review_event].3 = EVENT.into();
+        let decision_event = links.iter().position(|row| row.0 == DECISION).unwrap();
+        links[decision_event].6 = 0;
         assert!(!foreign_keys_match(&links, 14));
     }
 
     #[test]
     fn owned_egress_manifest_rejects_wrong_format_and_composite_edges() {
-        assert!(inventory_matches(&[(4, 4, 0, 1)], 14));
-        assert!(inventory_matches(&[(9, 4, 5, 1)], 15));
-        assert!(!inventory_matches(&[(5, 4, 1, 1)], 14));
-        assert!(!inventory_matches(&[(4, 3, 1, 1)], 14));
-        assert!(!inventory_matches(&[(8, 4, 4, 1)], 15));
-        assert!(!inventory_matches(&[(9, 4, 5, 1)], 14));
+        assert!(inventory_matches(&[(5, 5, 0, 1)], 14));
+        assert!(inventory_matches(&[(10, 5, 5, 1)], 15));
+        // Both formats require the common decision receipt projection.
+        assert!(!inventory_matches(&[(4, 4, 0, 1)], 14));
+        assert!(!inventory_matches(&[(9, 4, 5, 1)], 15));
+        assert!(!inventory_matches(&[(6, 5, 1, 1)], 14));
+        assert!(!inventory_matches(&[(9, 5, 4, 1)], 15));
+        assert!(!inventory_matches(&[(10, 5, 5, 1)], 14));
 
         let common = FOREIGN_KEYS.map(|(t, n, c, p, r, exact)| (t, n, c, p, r, 1, exact));
         let mut links: Vec<ForeignKey> =
@@ -850,7 +926,11 @@ mod tests {
                 &constraints,
                 if version == 14 { 15 } else { 14 }
             ));
-            constraints[11].4 = Some(format!("(schema_version = {version})"));
+            let version_constraint = constraints
+                .iter()
+                .position(|row| row.1 == "ai_guard_audit_state_schema_version")
+                .unwrap();
+            constraints[version_constraint].4 = Some(format!("(schema_version = {version})"));
             assert!(constraints_match(&constraints, version));
             if version == 15 {
                 let reservation = constraints
@@ -863,10 +943,19 @@ mod tests {
                 assert!(!constraints_match(&constraints, version));
                 constraints[reservation].4 = original;
             }
-            constraints[5].3 = "NO".into();
+            let decision_phase = constraints
+                .iter()
+                .position(|row| row.1 == "ai_guard_audit_decision_phase")
+                .unwrap();
+            constraints[decision_phase].3 = "NO".into();
             assert!(!constraints_match(&constraints, version));
-            constraints[5].3 = "YES".into();
-            constraints[8].4 = Some("((`tenant_id` is null) or (`namespace_id` is null))".into());
+            constraints[decision_phase].3 = "YES".into();
+            let binding = constraints
+                .iter()
+                .position(|row| row.1 == "ai_guard_audit_state_binding")
+                .unwrap();
+            constraints[binding].4 =
+                Some("((`tenant_id` is null) or (`namespace_id` is null))".into());
             assert!(!constraints_match(&constraints, version));
         }
     }

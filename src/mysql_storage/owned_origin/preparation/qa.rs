@@ -1,4 +1,3 @@
-use super::super::fresh_anchor::{ConfiguredTenantNamespace, FreshAnchorRequestV1};
 use super::{EmptyTargetOperation, MysqlOwnedPreparationRefusal, prepare_empty_owned_target};
 use crate::{
     control_fs::PrivateFile,
@@ -76,31 +75,13 @@ async fn owned_audit_tables_remain_unpublished_and_refuse_reentry() -> Result<()
                 }
             }),
         };
-        let anchor = FreshAnchorRequestV1 {
-            operation_id: Uuid::from_u128(300 + u128::from(version)),
-            schema_version: version,
-            tenant_id: tenant.tenant_id.clone(),
-            namespace_id: profile.namespace,
-            installation_id: Uuid::from_u128(400),
-            source_id: Uuid::from_u128(400 + u128::from(version)),
-            server_uuid: server,
-            schema: profile.database.clone(),
-        };
-        let redactor = Redactor::new(Vec::new());
         let install = || {
             prepare_empty_owned_target(
                 endpoint(),
                 credentials(),
                 server,
                 version,
-                EmptyTargetOperation::InstallUnpublishedTables {
-                    request: &anchor,
-                    configured: ConfiguredTenantNamespace {
-                        tenant_id: &tenant.tenant_id,
-                        namespace_id: profile.namespace,
-                    },
-                    redactor: &redactor,
-                },
+                EmptyTargetOperation::InstallUnpublishedTables,
             )
         };
         install().await?;

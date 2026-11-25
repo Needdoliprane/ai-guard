@@ -68,16 +68,31 @@ fn review_tables_ddl() -> Result<[&'static str; 2]> {
     Ok([authority, bindings])
 }
 
+fn decision_table_ddl() -> Result<&'static str> {
+    let ddl = include_str!("../../../../schema/mysql/decisions-v1.sql");
+    let (_, body) = ddl
+        .split_once('\n')
+        .context("decision DDL header is missing")?;
+    body.trim()
+        .strip_suffix(';')
+        .filter(|statement| {
+            statement.starts_with("CREATE TABLE ai_guard_audit_decision (")
+                && !statement.contains(';')
+        })
+        .context("unexpected statements in shared decision DDL")
+}
+
 /// Called after the full empty-target check on this locked connection.
 /// The singleton, audit events and all projections stay empty.
 pub(super) async fn install(target: CheckedEmptyTarget<'_>, version: u16) -> Result<()> {
     let CheckedEmptyTarget { conn, lock } = target;
     let (event, state) = audit_tables_ddl(version)?;
+    let decision = decision_table_ddl()?;
     let [authority, bindings] = review_tables_ddl()?;
     let egress =
         egress_manifest::ddl(version).context("unexpected egress DDL for the owned format")?;
     audit_manifest::require_empty_constraints(conn).await?;
-    for statement in [event, state.as_str(), authority, bindings]
+    for statement in [event, state.as_str(), decision, authority, bindings]
         .into_iter()
         .chain(egress)
     {
@@ -90,7 +105,7 @@ pub(super) async fn install(target: CheckedEmptyTarget<'_>, version: u16) -> Res
 
 #[cfg(test)]
 mod tests {
-    use super::{audit_tables_ddl, review_tables_ddl};
+    use super::{audit_tables_ddl, decision_table_ddl, review_tables_ddl};
     use anyhow::Result;
 
     #[test]
@@ -105,6 +120,10 @@ mod tests {
             assert!(!event.contains(';') && !state.contains(';'));
         }
         assert!(audit_tables_ddl(1).is_err());
+        let decision = decision_table_ddl()?;
+        assert!(decision.contains("PRIMARY KEY (request_id, human_approved)"));
+        assert!(decision.contains("FOREIGN KEY (event_seq) REFERENCES ai_guard_audit_event (seq)"));
+        assert!(!decision.contains(';'));
         Ok(())
     }
 
