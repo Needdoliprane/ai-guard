@@ -1,6 +1,6 @@
 //! Unpublished tables on a verified empty MySQL owned target.
 
-use super::{CheckedEmptyTarget, audit_manifest, driver_error, egress_manifest};
+use super::{CheckedEmptyTarget, audit_manifest, driver_error, egress_manifest, worker_manifest};
 use anyhow::{Context, Result, ensure};
 use mysql_async::prelude::Queryable;
 
@@ -89,11 +89,13 @@ pub(super) async fn install(target: CheckedEmptyTarget<'_>, version: u16) -> Res
     let (event, state) = audit_tables_ddl(version)?;
     let decision = decision_table_ddl()?;
     let [authority, bindings] = review_tables_ddl()?;
+    let workers = worker_manifest::ddl().context("unexpected worker reservation DDL")?;
     let egress =
         egress_manifest::ddl(version).context("unexpected egress DDL for the owned format")?;
     audit_manifest::require_empty_constraints(conn).await?;
     for statement in [event, state.as_str(), decision, authority, bindings]
         .into_iter()
+        .chain(workers)
         .chain(egress)
     {
         lock.verify(conn).await?;

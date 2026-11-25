@@ -59,18 +59,22 @@ reçoit `CatalogVisibilityUnconfirmed` avant l’inventaire. [Sélection des dro
 
 Le [sous-manifeste d’audit](../../../src/mysql_storage/owned_origin/preparation/audit_manifest.rs)
 compose le [DDL d’audit partagé](../../../schema/mysql/audit-v1.sql), le
-[DDL des reçus de décision](../../../schema/mysql/decisions-v1.sql) et le
+[DDL des reçus de décision](../../../schema/mysql/decisions-v1.sql), le
+[DDL des réservations worker](../../../schema/mysql/workers-v1.sql) et le
 [DDL MySQL des projections de revue](../../../schema/mysql/review-owned-v1.sql),
 avec cinq [projections egress](../../../schema/mysql/egress-owned-v1.sql)
 exclusives au format 15.
 Après les créations internes, la même connexion verrouillée relit dans une
-transaction de lecture les cinq tables InnoDB du format 14 ou les dix
+transaction de lecture les huit tables InnoDB du format 14 ou les treize
 du format 15, avec leurs colonnes, index et contraintes. Une table egress
 en 14 ou une table egress manquante en 15 entraîne un refus. Le contrôle
 compare l’expression qui réserve l’unicité aux bindings actifs et les
 clés étrangères, y compris les colonnes ordonnées des liens composites.
 Le reçu de décision est unique pour une demande et sa phase. Son lien
 vers la chaîne d’audit et les deux contraintes de validation sont vérifiés.
+Les tables worker, tentative et mutation ont leurs index et références
+attendus. La colonne de rattachement de la mutation porte son index
+explicite pour obtenir le même catalogue lors d’une installation neuve.
 Toutes les tables doivent être vides, y compris les singletons et projections.
 Une reprise refuse ce socle comme cible partielle. Le compte opérateur doit
 pouvoir référencer les tables de la cible et garder `foreign_key_checks` et
@@ -114,9 +118,10 @@ pouvoir référencer les tables de la cible et garder `foreign_key_checks` et
    explicite. Le reçu d’ancre sert ensuite au descripteur privé attendu.
    [Ancre SQLite](../../../src/audit/review_authority.rs) ·
    [Genèse egress SQLite](../../../src/audit/egress/types.rs)
-2. Fermer le manifeste commun et ses marqueurs. Les cinq ou dix tables
-   actuelles forment le socle audit/décision/revue/egress. Le lecteur MySQL
-   ordinaire exige aussi les tables worker/lifecycle et la supervision.
+2. Fermer le manifeste commun et ses marqueurs. Les huit ou treize tables
+   actuelles forment le socle audit, décision, revue, réservation worker et
+   egress. Le lecteur MySQL ordinaire exige aussi les tables d’observation
+   et d’allocation du cycle de vie des workers et la supervision.
    `control_projections()` exige identité et workload, tandis que le registre
    broker reste facultatif dans ce lecteur. Fixer les capacités owned
    obligatoires et les intégrer au manifeste exact avec les DDL MySQL

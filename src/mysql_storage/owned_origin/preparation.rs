@@ -16,6 +16,7 @@ mod audit_tables;
 mod egress_manifest;
 #[cfg(test)]
 mod qa;
+mod worker_manifest;
 
 const REQUIRED_GRANTS: [&str; 6] = [
     "SELECT",
