@@ -838,6 +838,22 @@ et de son ZIP primaire est vérifiée par le manifeste privé
 `efbaf679a9a73ece6bf9821ef81b980572fbfaabaaf77c3c53f3d36be45d9145`.
 [Run Linux exact](https://github.com/Needdoliprane/ai-guard/actions/runs/45155627504)
 
+Deux recettes Linux sur la source `c5a487f7` caractérisent les étapes
+de préparation du navigateur avant cette qualification physique.
+
+- Le conducteur `fc27aad7` aboutit à **FAIL** avec version Chromium
+  `UNKNOWN` et sonde `NOT_RUN`. Le scénario et le navigateur restent
+  respectivement `NOT_RUN` et `NOT_ATTESTED`. Manifeste privé
+  `e4932b37880f068b29d3bf21de67e5e0bb299499fcf3d772fe354a1ced9549e6`.
+  [Run exact](https://github.com/Needdoliprane/ai-guard/actions/runs/45151629692)
+- Le conducteur `a1e195a7` identifie Chromium `157.0.8103.78`. La
+  sonde Chromium, le sandbox et l’inventaire du sélecteur passent.
+  Le scénario se termine sur **FAIL, code 101**, avec un verdict de
+  test `NOT_RUN` et un navigateur `NOT_ATTESTED` pour le parcours
+  produit. Manifeste privé
+  `d479bf7f748ef7cd571c6e29a706c79d9cb1ad05a4498fa2b8f2b65fdc2ee2cb`.
+  [Run exact](https://github.com/Needdoliprane/ai-guard/actions/runs/45152500455)
+
 ## 24 novembre 2026 — ancre d’audit protégée au niveau du processus
 
 **PASS ciblé G06** avec `ai-guard-audit-checkpoint` du paquet macOS
