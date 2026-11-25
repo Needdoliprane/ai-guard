@@ -115,6 +115,9 @@ impl EnforcerClient {
         }
         Ok(generation)
     }
+    /// Historical code-only mapping kept for the existing regressions; the
+    /// production path retains the closed refusal through the diagnosed call.
+    #[cfg(test)]
     pub(crate) async fn legacy_reserve_prospective(
         &self,
         target: ProspectiveRegistrationV1,

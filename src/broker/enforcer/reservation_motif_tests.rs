@@ -106,7 +106,7 @@ async fn clock_rejected_before_allocation_carries_its_own_closed_motif() {
         .unwrap_err();
     assert_eq!(refusal.code(), EnforcerError::NotReady);
     assert_eq!(
-        refusal.motif(),
+        refusal.motif,
         Some(LegacyReservationMotifV1::ClockRejectedBeforeAllocation)
     );
     assert_eq!(fixture.reserve_requests(), 1);
@@ -157,7 +157,7 @@ async fn clock_rejected_at_control_before_ack_carries_distinct_motif() {
         .unwrap_err();
     assert_eq!(refusal.code(), EnforcerError::NotReady);
     assert_eq!(
-        refusal.motif(),
+        refusal.motif,
         Some(LegacyReservationMotifV1::ClockRejectedBeforeAck)
     );
     // The cell stays retained after allocation, but no grant was delivered.
@@ -199,7 +199,7 @@ async fn runtime_unavailable_at_install_deadline_carries_distinct_motif() {
         .unwrap_err();
     assert_eq!(refusal.code(), EnforcerError::NotReady);
     assert_eq!(
-        refusal.motif(),
+        refusal.motif,
         Some(LegacyReservationMotifV1::InstallDeadlineElapsed)
     );
     no_grant(&client, &target, &generation);
@@ -248,7 +248,7 @@ async fn stop_locked_before_ack_with_valid_clock_carries_distinct_motif() {
         .unwrap_err();
     assert_eq!(refusal.code(), EnforcerError::NotReady);
     assert_eq!(
-        refusal.motif(),
+        refusal.motif,
         Some(LegacyReservationMotifV1::StopReservedBeforeAck)
     );
     assert_eq!(
@@ -337,7 +337,7 @@ async fn new_client_against_old_peer_sends_one_reservation_and_gets_legacy_reply
         .await
         .unwrap_err();
     assert_eq!(refusal.code(), EnforcerError::NotReady);
-    assert_eq!(refusal.motif(), None);
+    assert_eq!(refusal.motif, None);
     assert_eq!(fixture.reserve_requests(), 1);
     let nominal = registration(fixture.root().path()).prospective().unwrap();
     client
@@ -379,7 +379,7 @@ async fn concurrent_compatible_peers_keep_motifs_on_their_own_attempts() {
         .await
         .unwrap_err();
     assert_eq!(
-        refusal_a.motif(),
+        refusal_a.motif,
         Some(LegacyReservationMotifV1::ClockRejectedBeforeAllocation)
     );
     assert!(!reserve_b.is_finished());
@@ -405,10 +405,10 @@ async fn concurrent_compatible_peers_keep_motifs_on_their_own_attempts() {
         .unwrap()
         .unwrap_err();
     assert_eq!(
-        refusal_b.motif(),
+        refusal_b.motif,
         Some(LegacyReservationMotifV1::StopReservedBeforeAck)
     );
-    assert_ne!(refusal_a.motif(), refusal_b.motif());
+    assert_ne!(refusal_a.motif, refusal_b.motif);
     assert_eq!(refusal_a.code(), EnforcerError::NotReady);
     assert_eq!(refusal_b.code(), EnforcerError::NotReady);
     no_grant(&peer_b, &target_b, &generation_b);
@@ -433,7 +433,7 @@ async fn lost_refusal_response_keeps_motif_unavailable_and_send_count_one() {
         .await
         .unwrap_err();
     assert_eq!(refusal.code(), EnforcerError::Unavailable);
-    assert_eq!(refusal.motif(), None);
+    assert_eq!(refusal.motif, None);
     assert_eq!(fixture.reserve_requests(), 1);
     let caps = client.legacy_capabilities().await.unwrap();
     assert_eq!(caps.known_stop_slots, 0);
@@ -525,4 +525,31 @@ fn motif_wire_is_closed_and_historical_decoders_reject_unknown_frames() {
         serde_json::from_value::<HistoricalResponse>(json!({"kind":"error","code":"not_ready"}))
             .is_ok()
     );
+    // The exact historical frames still decode with their closed fields.
+    match serde_json::from_value::<HistoricalRequest>(
+        json!({"kind":"reserve_prospective","prospective":{},"generation":0,"replay_only":false}),
+    )
+    .unwrap()
+    {
+        HistoricalRequest::ReserveProspective {
+            prospective,
+            generation,
+            replay_only,
+        } => {
+            assert!(prospective.is_object());
+            assert_eq!(generation, 0);
+            assert!(!replay_only);
+        }
+        HistoricalRequest::Status {} => panic!("historical reserve frame must decode"),
+    }
+    match serde_json::from_value::<HistoricalResponse>(
+        json!({"kind":"prospective_reserved","reservation":{"arm_id":"historical"}}),
+    )
+    .unwrap()
+    {
+        HistoricalResponse::ProspectiveReserved { reservation } => {
+            assert_eq!(reservation["arm_id"], "historical");
+        }
+        HistoricalResponse::Error { .. } => panic!("historical reservation frame must decode"),
+    }
 }

@@ -157,8 +157,10 @@ pub(crate) enum LegacyReservationMotifV1 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct LegacyReservationRefusalV1 {
     code: EnforcerError,
+    /// Closed refusal site, read directly by the diagnostic consumer; absent
+    /// means unknown, never a guessed site.
     #[serde(skip_serializing_if = "Option::is_none")]
-    motif: Option<LegacyReservationMotifV1>,
+    pub(crate) motif: Option<LegacyReservationMotifV1>,
 }
 impl LegacyReservationRefusalV1 {
     pub(crate) fn with_motif(code: EnforcerError, motif: LegacyReservationMotifV1) -> Self {
@@ -169,9 +171,6 @@ impl LegacyReservationRefusalV1 {
     }
     pub(crate) fn code(&self) -> EnforcerError {
         self.code
-    }
-    pub(crate) fn motif(&self) -> Option<LegacyReservationMotifV1> {
-        self.motif
     }
 }
 impl From<EnforcerError> for LegacyReservationRefusalV1 {
