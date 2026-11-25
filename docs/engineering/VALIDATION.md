@@ -286,7 +286,7 @@ Le chemin du répertoire du gardien atteint 108 octets avant le nom
 du socket, pour un maximum de 103 octets du chemin complet.
 L’exécution ne donne aucune preuve sur le claim ou le démarrage
 du worker. Manifeste privé
-`53a3d387d5448a07316ef9648e8d8704f2d00a89466238d6fd3592de39d8135a`.
+`ff270b202e1c55bcdfe900889fd9dbb44a04c84da41fda77dc5358d0f7dd0912` (37 pièces revérifiées à la clôture du worktree).
 
 ## 25 novembre 2026 — harnais de capture Chromium G08
 
