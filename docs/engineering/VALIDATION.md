@@ -1,5 +1,24 @@
 # Validation courante
 
+## 26 novembre 2026 — retrouver le canal d’une session owned
+
+Sur le libtest de `e992a5a1`, les trois sélecteurs exacts de la
+lecture de liaison, du relais dashboard et de la réserve workload
+passent. Le Store réévalue le droit d’envoi et le propriétaire dans la
+même transaction. La fixture confirme le refus d’un autre membre du
+tenant et d’une ancienne projection remise après STOP. Le gateway a
+aussi validé la matrice des méthodes, dont le refus de HEAD.
+Manifeste du passage ciblé
+`274bc4982ffebe6aaf05fb1baa4eb84eab694132b1fd3f7fae8509c9686f61ca`.
+
+Sur `93dfb297`, 426 tests front et le build TypeScript/Vite passent,
+avec 8 tests ignorés. Le DOM de fixture couvre la sélection du canal,
+la fermeture et la réponse tardive après changement de contexte.
+Manifeste
+`d2cd23ca9d62d99ae172191448cf0e2e76fcf5bd3037f90f23b804811464c145`.
+Le candidat `b7ca640d` reprend les mêmes blobs testés pour le front et
+le périmètre Rust. La réception par un fournisseur réel reste ouverte.
+
 ## 26 novembre 2026 — CI du candidat session
 
 Sur `16dd21b9`, le job front et les vérifications Rust préalables
