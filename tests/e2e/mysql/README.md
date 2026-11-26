@@ -202,12 +202,19 @@ The [gateway SQL-06 fixture](GATEWAY_FIXTURE.md) prepares fresh schemas and dedi
 
 ## Fresh owned MySQL publication (QA)
 
-Use the existing tenant registry format in a private file. The selected MySQL
-profile supplies the namespace and must name a dedicated empty schema and an
-operator account separate from the gateway account. Keep other writers and
-schema administration off the target during publication. Both profiles use a
-password file and verify the server name and certificate chain against the
-configured CA over TLS. For mTLS, also reference the client certificate and key.
+Use two private files in the existing tenant registry format. Pass the operator
+registry as `--registry` and the registry used at startup by the gateway of
+the same installation as `--gateway-registry` (the gateway's `--tenants-file`).
+Before connecting, the CLI checks that the selected tenant has the same
+namespace, host, port and database in both files and different SQL usernames.
+This check covers the supplied gateway registry. Use a dedicated empty schema
+and keep other writers and schema administration off it during publication.
+
+The CLI opens only the operator's authentication files. Both TLS profiles
+require a password file and verify the server name and certificate chain
+against the configured CA. For mTLS, also reference the operator's client
+certificate and key. Before publication, the connection verifies that the
+server selected the expected operator username.
 [Operator account and target requirements](OWNED_PREPARATION.md#compte-opérateur-du-prévol)
 
 Obtain the expected server UUID independently from a trusted administrative
@@ -218,7 +225,8 @@ format 15. Use `--schema-version 14` for format 14.
 
 ```sh
 agentsandbox prepare-mysql-owned \
-  --registry "${QA_MYSQL_OPERATOR_REGISTRY:?}" --tenant "${QA_MYSQL_TENANT:?}" \
+  --registry "${QA_MYSQL_OPERATOR_REGISTRY:?}" \
+  --gateway-registry "${QA_MYSQL_GATEWAY_REGISTRY:?}" --tenant "${QA_MYSQL_TENANT:?}" \
   --schema-version 15 --server-uuid "${QA_MYSQL_SERVER_UUID:?}" \
   --operation-id "${QA_MYSQL_OPERATION_ID:?}" \
   --installation-id "${QA_MYSQL_INSTALLATION_ID:?}" \

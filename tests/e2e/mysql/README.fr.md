@@ -200,13 +200,22 @@ La [fixture gateway SQL-06](GATEWAY_FIXTURE.md) prépare les schémas neufs et l
 
 ## Publication MySQL owned sur cible neuve (QA)
 
-Utiliser le format de registre de tenants existant dans un fichier privé. Le
-profil MySQL sélectionné fournit le namespace et doit désigner un schéma dédié
-vide et un compte opérateur distinct du compte gateway. Écarter les autres
-écritures et l’administration du schéma pendant la publication. Les deux
-profils utilisent un fichier de mot de passe et vérifient via TLS le nom du
+Utiliser deux fichiers privés au format de registre de tenants existant.
+Passer le registre opérateur avec `--registry` et celui utilisé au démarrage
+par le gateway de la même installation avec `--gateway-registry` (option
+`--tenants-file` du gateway). Avant toute connexion, le CLI vérifie pour le
+tenant choisi que le namespace, l’hôte, le port et la base sont identiques
+dans les deux fichiers et que les noms de compte SQL diffèrent. Ce contrôle
+porte sur le registre gateway fourni. Utiliser un schéma dédié vide et
+écarter les autres écritures et l’administration du schéma pendant la
+publication.
+
+Le CLI ouvre uniquement les fichiers d’authentification de l’opérateur. Les
+deux profils TLS exigent un fichier de mot de passe et vérifient le nom du
 serveur et sa chaîne de certificats à partir de l’AC configurée. En mTLS,
-référencer aussi le certificat et la clé du client.
+référencer aussi le certificat et la clé du client opérateur. Avant la
+publication, la connexion vérifie que le serveur a retenu le nom de compte
+opérateur attendu.
 [Exigences du compte opérateur et de la cible](OWNED_PREPARATION.md#compte-opérateur-du-prévol)
 
 Obtenir l’UUID serveur attendu indépendamment, depuis une session
@@ -218,7 +227,8 @@ format 14, utiliser `--schema-version 14`.
 
 ```sh
 agentsandbox prepare-mysql-owned \
-  --registry "${QA_MYSQL_OPERATOR_REGISTRY:?}" --tenant "${QA_MYSQL_TENANT:?}" \
+  --registry "${QA_MYSQL_OPERATOR_REGISTRY:?}" \
+  --gateway-registry "${QA_MYSQL_GATEWAY_REGISTRY:?}" --tenant "${QA_MYSQL_TENANT:?}" \
   --schema-version 15 --server-uuid "${QA_MYSQL_SERVER_UUID:?}" \
   --operation-id "${QA_MYSQL_OPERATION_ID:?}" \
   --installation-id "${QA_MYSQL_INSTALLATION_ID:?}" \
