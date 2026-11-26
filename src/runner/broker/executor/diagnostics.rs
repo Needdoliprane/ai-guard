@@ -156,6 +156,47 @@ fn writer_failure(error: &anyhow::Error) -> (Option<WriterFailureCause>, Option<
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub(super) enum OwnershipCommitStage {
+    Reload,
+    Snapshot,
+    Checkpoint,
+    Advance,
+    Receipt,
+    ConflictLimit,
+}
+
+impl fmt::Display for OwnershipCommitStage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&BrokerStep::OwnershipCommit, f)
+    }
+}
+impl std::error::Error for OwnershipCommitStage {}
+
+#[derive(Debug, Serialize)]
+pub(super) struct OwnershipCommitDiagnostic {
+    stage: OwnershipCommitStage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cause: Option<WriterFailureCause>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    journal_code: Option<&'static str>,
+}
+
+impl OwnershipCommitStage {
+    fn diagnostic(self, error: &anyhow::Error) -> OwnershipCommitDiagnostic {
+        let (cause, journal_code) = match self {
+            Self::Reload | Self::Advance => writer_failure(error),
+            _ => (None, None),
+        };
+        OwnershipCommitDiagnostic {
+            stage: self,
+            cause,
+            journal_code,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(super) enum CreateIssuedStage {
     // The client did not return a typed result. The gateway's outcome is unknown.
     HttpExchange,
@@ -384,6 +425,8 @@ pub(super) struct BatchFailureDiagnosticV1 {
     #[serde(skip_serializing_if = "Option::is_none")]
     created_advance: Option<CreatedAdvanceDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    ownership_commit: Option<OwnershipCommitDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     create_issued: Option<CreateIssuedDiagnostic>,
 }
 
@@ -398,6 +441,10 @@ impl BatchFailureDiagnosticV1 {
 
     pub(super) fn created_advance(&self) -> Option<&CreatedAdvanceDiagnostic> {
         self.created_advance.as_ref()
+    }
+
+    pub(super) fn ownership_commit(&self) -> Option<&OwnershipCommitDiagnostic> {
+        self.ownership_commit.as_ref()
     }
 
     pub(super) fn create_issued(&self) -> Option<&CreateIssuedDiagnostic> {
@@ -487,6 +534,12 @@ pub(super) fn classify(
         }
         _ => None,
     };
+    let ownership_commit = match broker_step {
+        Some(BrokerStep::OwnershipCommit) => error
+            .downcast_ref::<OwnershipCommitStage>()
+            .map(|stage| stage.diagnostic(error)),
+        _ => None,
+    };
     if enforcer.is_none() && runtime.is_none() && broker_step.is_none() {
         return None;
     }
@@ -501,6 +554,7 @@ pub(super) fn classify(
         full3_binding,
         created_reload,
         created_advance,
+        ownership_commit,
         create_issued,
     })
 }
@@ -523,6 +577,7 @@ pub(super) fn failure_report(
         full3_binding: None,
         created_reload: None,
         created_advance: None,
+        ownership_commit: None,
         create_issued: None,
     })
 }
@@ -532,6 +587,71 @@ mod tests {
     use super::*;
     use crate::runtime::RuntimePrestartStage;
     use serde_json::json;
+
+    #[test]
+    fn ownership_commit_preserves_v1_and_reports_only_closed_details() {
+        let old = json!({
+            "version":1, "phase":"worker", "runtime_effect":"unknown",
+            "enforcer":null, "runtime":null, "broker_step":"ownership_commit",
+        });
+        let private = "synthetic-private-ownership-detail";
+        let previous = anyhow::anyhow!("{private}").context(BrokerStep::OwnershipCommit);
+        assert_eq!(
+            serde_json::to_value(failure_report(LocalFailurePhaseV1::Worker, &previous)).unwrap(),
+            old
+        );
+        for (stage, cause, expected) in [
+            (
+                OwnershipCommitStage::Reload,
+                Some(WriterCallFailure::QueueFull),
+                json!({"stage":"reload","cause":"queue_full"}),
+            ),
+            (
+                OwnershipCommitStage::Snapshot,
+                None,
+                json!({"stage":"snapshot"}),
+            ),
+            (
+                OwnershipCommitStage::Checkpoint,
+                None,
+                json!({"stage":"checkpoint"}),
+            ),
+            (
+                OwnershipCommitStage::Advance,
+                Some(WriterCallFailure::Actor(JournalError::Io)),
+                json!({"stage":"advance","cause":"actor_error","journal_code":"io"}),
+            ),
+            (
+                OwnershipCommitStage::Receipt,
+                None,
+                json!({"stage":"receipt"}),
+            ),
+            (
+                OwnershipCommitStage::ConflictLimit,
+                None,
+                json!({"stage":"conflict_limit"}),
+            ),
+        ] {
+            let error = anyhow::anyhow!("{private}");
+            let error = match cause {
+                Some(cause) => error.context(cause),
+                None => error,
+            };
+            let error = error.context(stage).context(BrokerStep::OwnershipCommit);
+            let diagnostic = failure_report(LocalFailurePhaseV1::Worker, &error);
+            let mut wanted = old.clone();
+            wanted["ownership_commit"] = expected;
+            assert_eq!(serde_json::to_value(&diagnostic).unwrap(), wanted);
+            assert!(!format!("{:?}", diagnostic.ownership_commit()).contains(private));
+        }
+        let other = anyhow::anyhow!("{private}")
+            .context(OwnershipCommitStage::Reload)
+            .context(BrokerStep::OwnershipReload);
+        let report =
+            serde_json::to_value(failure_report(LocalFailurePhaseV1::Worker, &other)).unwrap();
+        assert_eq!(report["broker_step"], "ownership_reload");
+        assert!(report.get("ownership_commit").is_none());
+    }
 
     #[test]
     fn create_issued_reports_http_and_local_ack_as_distinct_boundaries() {

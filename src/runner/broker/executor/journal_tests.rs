@@ -1053,6 +1053,67 @@ async fn created_pending_checkpoint_reports_three_local_failure_boundaries() {
 }
 
 #[tokio::test]
+async fn ownership_commit_reports_writer_reload_and_advance_without_http() -> Result<()> {
+    let fixture = Fixture::new().await;
+    let operation = Uuid::new_v4();
+    let accepted = fixture.accept(operation, true);
+    let binding = accepted
+        .binding_source()
+        .context("missing test binding")?
+        .path()
+        .to_owned();
+    let preserved = fixture.root.path().join("ownership-commit-binding.bin");
+    MOVE_BINDING_ONCE.with(|slot| {
+        assert!(
+            slot.borrow_mut()
+                .replace((binding.clone(), preserved.clone()))
+                .is_none()
+        );
+    });
+    let publish = || {
+        commit_patch_with(
+            fixture.writer(),
+            operation,
+            &fixture.scope,
+            |_| Ok(()),
+            PublicationMode::OwnershipCommit,
+        )
+    };
+    let advance = publish()
+        .await
+        .err()
+        .context("unexpected checkpoint receipt");
+    let reload = publish().await.err().context("unexpected strict reload");
+    fs::rename(preserved, binding)?;
+    for (error, stage) in [(advance?, "advance"), (reload?, "reload")] {
+        assert!(matches!(
+            error.downcast_ref::<WriterCallFailure>(),
+            Some(WriterCallFailure::Actor(JournalError::Corrupt))
+        ));
+        assert_eq!(
+            serde_json::to_value(diagnostics::failure_report(
+                LocalFailurePhaseV1::Worker,
+                &error.context(BrokerStep::OwnershipCommit),
+            ))?["ownership_commit"],
+            json!({"stage":stage,"cause":"actor_error","journal_code":"corrupt"}),
+        );
+    }
+    assert_eq!(
+        fixture
+            .writer()
+            .load(operation)
+            .await?
+            .context("missing job")?
+            .head(),
+        accepted.head(),
+    );
+    assert_eq!(fixture.requests.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.worker_requests.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.arm_requests.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
 async fn created_reload_reports_mutation_and_rpc_sites_before_worker_http() {
     use crate::control::{
         NetworkV1, RestartPolicyV1, RuntimeInspectionV1, RuntimeKindV1, SecurityPresetV1,

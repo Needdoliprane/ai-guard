@@ -1,7 +1,9 @@
 //! Private batch journal operations.
 use super::*;
 use crate::broker::writer::WriterCallFailure;
-use diagnostics::{CreateIssuedStage, CreatedExchangeStage, CreatedReloadSite};
+use diagnostics::{
+    CreateIssuedStage, CreatedExchangeStage, CreatedReloadSite, OwnershipCommitStage,
+};
 use std::future::Future;
 
 async fn load_draft(
@@ -21,7 +23,9 @@ async fn load_draft(
             let error = anyhow::Error::new(failure.journal_error());
             if matches!(
                 mode,
-                PublicationMode::CreatedPending | PublicationMode::CreateIssuedAck
+                PublicationMode::CreatedPending
+                    | PublicationMode::CreateIssuedAck
+                    | PublicationMode::OwnershipCommit
             ) {
                 error.context(failure)
             } else {
@@ -49,6 +53,8 @@ enum PublicationMode {
     CreatedAck,
     /// Report a failure after the client returned a typed CreateIssued response.
     CreateIssuedAck,
+    /// Fail closed with the local stage of the worker ownership checkpoint.
+    OwnershipCommit,
     /// Accept the outcome only if the durable head is exactly this checkpoint.
     ConfirmExactHead,
 }
@@ -75,11 +81,12 @@ impl PublicationMode {
         result: Result<T>,
         created_stage: CreatedExchangeStage,
         create_issued_stage: CreateIssuedStage,
+        ownership_stage: OwnershipCommitStage,
     ) -> Result<T> {
-        if self == Self::CreateIssuedAck {
-            result.context(create_issued_stage)
-        } else {
-            self.at_created(result, created_stage)
+        match self {
+            Self::CreateIssuedAck => result.context(create_issued_stage),
+            Self::OwnershipCommit => result.context(ownership_stage),
+            _ => self.at_created(result, created_stage),
         }
     }
 
@@ -91,7 +98,7 @@ impl PublicationMode {
         if matches!(self, Self::FailClosed | Self::ConfirmExactHead) {
             return error;
         }
-        let exhausted_cas = writer_failure.is_none();
+        let conflict_limit_reached = writer_failure.is_none();
         let error = match writer_failure {
             Some(failure) => error.context(failure),
             None => error,
@@ -99,8 +106,14 @@ impl PublicationMode {
         match self {
             Self::CreatedPending => error.context(CreatedExchangeStage::AdvancePending),
             Self::CreatedAck => error.context(CreatedExchangeStage::AdvanceAck),
-            Self::CreateIssuedAck if exhausted_cas => error.context(CreateIssuedStage::AckCasLimit),
+            Self::CreateIssuedAck if conflict_limit_reached => {
+                error.context(CreateIssuedStage::AckCasLimit)
+            }
             Self::CreateIssuedAck => error.context(CreateIssuedStage::AckAdvance),
+            Self::OwnershipCommit if conflict_limit_reached => {
+                error.context(OwnershipCommitStage::ConflictLimit)
+            }
+            Self::OwnershipCommit => error.context(OwnershipCommitStage::Advance),
             Self::FailClosed | Self::ConfirmExactHead => error,
         }
     }
@@ -133,16 +146,19 @@ async fn commit_patch_with(
             load_draft(writer, operation, scope, mode).await,
             CreatedExchangeStage::Reload(CreatedReloadSite::CasReload),
             CreateIssuedStage::AckReload,
+            OwnershipCommitStage::Reload,
         )?;
         mode.at_checkpoint(
             change(&mut draft),
             CreatedExchangeStage::PreparePending,
             CreateIssuedStage::AckPrepare,
+            OwnershipCommitStage::Snapshot,
         )?;
         let next = mode.at_checkpoint(
             draft.checkpoint(scope.control_namespace_uuid()),
             CreatedExchangeStage::PreparePending,
             CreateIssuedStage::AckPrepare,
+            OwnershipCommitStage::Checkpoint,
         )?;
         #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
         tests::before_commit()?;
@@ -154,10 +170,14 @@ async fn commit_patch_with(
             Ok(receipt) => {
                 if receipt.operation_id() != operation {
                     let error = anyhow!("checkpoint receipt operation changed");
-                    return Err(if mode == PublicationMode::CreateIssuedAck {
-                        error.context(CreateIssuedStage::AckAdvance)
-                    } else {
-                        error
+                    return Err(match mode {
+                        PublicationMode::CreateIssuedAck => {
+                            error.context(CreateIssuedStage::AckAdvance)
+                        }
+                        PublicationMode::OwnershipCommit => {
+                            error.context(OwnershipCommitStage::Receipt)
+                        }
+                        _ => error,
                     });
                 }
                 // Only an acknowledged exact input produces this value. An
@@ -185,7 +205,12 @@ async fn commit_patch_with(
             }
         }
     }
-    Err(mode.advance_failure(anyhow!("journal contention requires reconciliation"), None))
+    let detail = if mode == PublicationMode::OwnershipCommit {
+        "repeated journal conflicts require reconciliation"
+    } else {
+        "journal contention requires reconciliation"
+    };
+    Err(mode.advance_failure(anyhow!(detail), None))
 }
 
 /// A reply timeout after the actor accepted this advance is an unknown
@@ -368,6 +393,38 @@ impl<'a> Execution<'a> {
         )
     }
 
+    pub(super) async fn commit_worker_ownership(
+        &self,
+        owned: &OwnedContainerSnapshot,
+    ) -> Result<()> {
+        self.patch_committed_with(
+            |draft| {
+                let managed = draft
+                    .run
+                    .plan
+                    .managed
+                    .as_mut()
+                    .context("managed state disappeared")?;
+                if let Some(previous) = &managed.owned {
+                    ensure!(
+                        same(&previous.handle, &owned.handle)?,
+                        "owned worker changed"
+                    );
+                    owned
+                        .observation
+                        .validate_identity_allocation(&previous.observation)?;
+                } else {
+                    managed.owned = Some(owned.clone());
+                }
+                Ok(())
+            },
+            PublicationMode::OwnershipCommit,
+        )
+        .await
+        .map(drop)
+        .context(diagnostics::BrokerStep::OwnershipCommit)
+    }
+
     /// Retain the exact opening request as history before submitting it.
     /// A lost writer acknowledgement must keep the caller from making the POST.
     pub(super) async fn record_egress_opening(
@@ -456,6 +513,10 @@ impl<'a> Execution<'a> {
             if let Some(create_issued) = diagnostic.create_issued() {
                 eprintln!(
                     "broker batch CreateIssued diagnostic delivery incomplete: {create_issued:?}"
+                );
+            } else if let Some(ownership) = diagnostic.ownership_commit() {
+                eprintln!(
+                    "broker batch ownership_commit diagnostic delivery incomplete: {ownership:?}"
                 );
             } else if let Some(reload) = diagnostic.created_reload() {
                 eprintln!("broker batch Created reload diagnostic delivery incomplete: {reload:?}");

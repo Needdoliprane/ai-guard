@@ -1124,28 +1124,7 @@ impl<'a> Execution<'a> {
         *activity = opened.map(|(session, _)| session);
         let callback = |owned: OwnedContainerSnapshot| {
             boxed_execution_phase(|| async move {
-                self.patch(|draft| {
-                    let managed = draft
-                        .run
-                        .plan
-                        .managed
-                        .as_mut()
-                        .context("managed state disappeared")?;
-                    if let Some(previous) = &managed.owned {
-                        ensure!(
-                            same(&previous.handle, &owned.handle)?,
-                            "owned worker changed"
-                        );
-                        owned
-                            .observation
-                            .validate_identity_allocation(&previous.observation)?;
-                    } else {
-                        managed.owned = Some(owned.clone());
-                    }
-                    Ok(())
-                })
-                .await
-                .context(diagnostics::BrokerStep::OwnershipCommit)?;
+                self.commit_worker_ownership(&owned).await?;
                 let (_, draft) = self
                     .load()
                     .await
