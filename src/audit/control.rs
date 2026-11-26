@@ -325,6 +325,10 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
             super::legacy_session_prepare::validate_capability(db, version)?;
             continue;
         }
+        if stored.event.kind == super::legacy_session_prepare::TARGET_KIND {
+            super::legacy_session_prepare::validate_target_event(db, version, &stored)?;
+            continue;
+        }
         if stored.event.kind.starts_with("control.session_message.") {
             anyhow::ensure!(
                 super::session_prepare::format_admits(version),

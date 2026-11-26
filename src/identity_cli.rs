@@ -30,6 +30,8 @@ pub enum HumanCommand {
     ResumeProvision(ResumeProvisionArgs),
     /// Apply a typed offline mutation; actor is derived from control ownership.
     Apply(ApplyArgs),
+    /// Provision a fixed Legacy session target with the control stopped.
+    ProvisionLegacySessionTarget(LegacySessionTargetArgs),
     /// Display authenticated identity and the contexts offered by the control.
     Identity(ConnectionArgs),
     /// Read one authorized resource page, or list contexts when none is selected.
@@ -130,6 +132,15 @@ pub struct ApplyArgs {
     /// Private JSON {version,operation_id,change}; an actor field is refused.
     #[arg(long)]
     pub mutation_file: PathBuf,
+}
+
+#[derive(Args)]
+pub struct LegacySessionTargetArgs {
+    #[command(flatten)]
+    pub offline: OfflineArgs,
+    /// Private JSON containing the exact target and its expected previous revision.
+    #[arg(long)]
+    pub target_file: PathBuf,
 }
 
 #[derive(Args)]
@@ -246,6 +257,9 @@ pub async fn execute(args: HumanArgs) -> Result<()> {
         HumanCommand::Provision(args) => offline::provision(args),
         HumanCommand::ResumeProvision(args) => offline::resume(args),
         HumanCommand::Apply(args) => offline::apply(args),
+        HumanCommand::ProvisionLegacySessionTarget(args) => {
+            offline::provision_legacy_session_target(args)
+        }
         HumanCommand::Identity(args) => http::identity(args).await,
         HumanCommand::Resources(args) => http::resources(args).await,
         HumanCommand::Events(args) => http::events(args).await,

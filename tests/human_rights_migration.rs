@@ -223,7 +223,10 @@ fn legacy_session_prepare_capability_is_explicit_and_survives_reopen() {
     let files = support::private_tempdir();
     let path = files.path().join("tenant.sqlite");
     let backup = files.path().join("before-session-prepare.sqlite");
-    let store = migrated(&path, true);
+    let store = migrated(&path, false);
+    store
+        .migrate_human_workers_v10(&files.path().join("before-store10.sqlite"))
+        .unwrap();
     let open = |path: &Path| {
         Store::open_existing_for_tenant(path, "tenant-a", Redactor::new(vec![]), 1000).unwrap()
     };
@@ -269,7 +272,7 @@ fn legacy_session_prepare_capability_is_explicit_and_survives_reopen() {
     );
     let report: agentsandbox::control::MigrationReportV1 =
         serde_json::from_slice(&enabled.stdout).unwrap();
-    assert_eq!((report.from_version, report.to_version), (13, 13));
+    assert_eq!((report.from_version, report.to_version), (10, 10));
     let store = open(&path);
     assert!(store.integrity().unwrap().valid);
     let markers = store.events(&marker).unwrap();
@@ -294,7 +297,151 @@ fn legacy_session_prepare_capability_is_explicit_and_survives_reopen() {
     assert!(saved.events(&marker).unwrap().is_empty());
     drop(saved);
     assert!(!enable().status.success());
-    assert_eq!(open(&path).integrity().unwrap().head_hash, head);
+    let store = open(&path);
+    assert_eq!(store.integrity().unwrap().head_hash, head);
+    store
+        .migrate_kubernetes_session_reservations_v11(&files.path().join("before-store11.sqlite"))
+        .unwrap();
+    store
+        .migrate_broker_checkpoints_v12(&files.path().join("before-store12.sqlite"))
+        .unwrap();
+    store
+        .migrate_kubernetes_recovery_v13(&files.path().join("before-store13.sqlite"))
+        .unwrap();
+    drop(store);
+    let upgraded = open(&path);
+    assert_eq!(upgraded.supervision_state().unwrap().schema_version, 13);
+    let markers = upgraded.events(&marker).unwrap();
+    assert_eq!(markers.len(), 1);
+    assert_eq!(markers[0].hash, head);
+    assert!(upgraded.integrity().unwrap().valid);
+}
+
+#[test]
+fn legacy_session_target_is_provisioned_and_replayed_by_offline_control() {
+    use agentsandbox::{
+        broker_registry::{BrokerAuthorityV1, BrokerGrantMutationV1, BrokerRuntimeKindV1},
+        workload::{WorkloadBindingIssueV1, WorkloadSubjectV1},
+    };
+    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+
+    let files = support::private_tempdir();
+    let path = files.path().join("tenant.sqlite");
+    let target_file = files.path().join("target.json");
+    let store = migrated(&path, true);
+    store
+        .migrate_human_rights_v2(&files.path().join("before-rights.sqlite"))
+        .unwrap();
+    store
+        .enable_legacy_session_prepare_v1(&files.path().join("before-prepare.sqlite"))
+        .unwrap();
+    let (_, membership) = preparation(&[HumanCapabilityV1::LaunchSession]);
+    let broker_id = Uuid::new_v4();
+    let incarnation_id = Uuid::new_v4();
+    let credential_id = Uuid::new_v4();
+    let authority_id = Uuid::new_v4();
+    let expires_at = "2100-01-01T00:00:00.000Z";
+    store
+        .issue_workload_binding(&WorkloadBindingIssueV1 {
+            version: 1,
+            operation_id: Uuid::new_v4().to_string(),
+            credential_id: credential_id.to_string(),
+            expected_revision: 0,
+            subject: WorkloadSubjectV1::Broker {
+                broker_id: broker_id.to_string(),
+                incarnation_id: incarnation_id.to_string(),
+            },
+            sha256_digest: hex::encode(Sha256::digest(b"synthetic legacy prepare broker")),
+            expires_at: expires_at.into(),
+        })
+        .unwrap();
+    store
+        .mutate_broker_grant(&BrokerGrantMutationV1 {
+            version: 1,
+            operation_id: Uuid::new_v4().to_string(),
+            broker_id: broker_id.to_string(),
+            expected_revision: None,
+            credential_id: credential_id.to_string(),
+            incarnation_id: incarnation_id.to_string(),
+            authorities: vec![BrokerAuthorityV1 {
+                authority_id: authority_id.to_string(),
+                runtime_kind: BrokerRuntimeKindV1::Docker,
+            }],
+            lease_seconds: 120,
+            not_after: expires_at.into(),
+        })
+        .unwrap();
+    let before = store.head().unwrap();
+    drop(store);
+
+    let target_id = Uuid::new_v4();
+    let mut input = serde_json::json!({
+        "expected_revision": 0,
+        "target": {
+            "version": 1,
+            "catalogue": {
+                "version": 1, "launch_target_id": target_id, "revision": 1,
+                "tenant_id": "tenant-a", "organization_scope": membership.organization_scope,
+                "active": true, "launchers": [membership.principal],
+            },
+            "broker_id": broker_id, "incarnation_id": incarnation_id, "broker_grant_revision": 1,
+            "broker_profile_id": "fixture-profile",
+            "launch": {
+                "version": 1, "session_id": target_id, "command": {"argv": ["/usr/bin/id", "-u"], "cwd": "/workspace"},
+                "profile": "observe", "runtime_kind": "docker", "authority_id": authority_id,
+                "image_ref": "worker:fixture", "image_id": format!("sha256:{}", "a".repeat(64)),
+                "network": "none", "cpu_millis": 2000, "memory_bytes": 1073741824_u64, "pids_limit": 256,
+                "timeout_seconds": 60, "security_preset": "fixed_sandbox_v2", "restart_policy": "no",
+                "workspace_manifest_digest": "b".repeat(64), "workspace_import_policy_version": 1,
+                "provider": "generic", "capture_output": false, "credential_binding_id": null, "credential_names": [],
+            }
+        }
+    });
+    let apply = |input: &serde_json::Value| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&target_file)
+            .unwrap()
+            .write_all(&serde_json::to_vec(input).unwrap())
+            .unwrap();
+        Command::new(env!("CARGO_BIN_EXE_agentsandbox"))
+            .args(["human", "provision-legacy-session-target", "--data"])
+            .arg(&path)
+            .args([
+                "--tenant-id",
+                "tenant-a",
+                "--max-events",
+                "1000",
+                "--confirm-control-stopped",
+                "--target-file",
+            ])
+            .arg(&target_file)
+            .output()
+            .unwrap()
+    };
+    let accepted = apply(&input);
+    assert!(
+        accepted.status.success(),
+        "the offline target command refused the canonical fixture"
+    );
+    let receipt: serde_json::Value = serde_json::from_slice(&accepted.stdout).unwrap();
+    assert_eq!(receipt["target_id"], target_id.to_string());
+    assert_eq!(receipt["replayed"], false);
+    let replay = apply(&input);
+    assert!(replay.status.success());
+    let replay: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
+    assert_eq!(replay["audit_hash"], receipt["audit_hash"]);
+    assert_eq!(replay["replayed"], true);
+    input["target"]["broker_profile_id"] = "other-profile".into();
+    assert!(!apply(&input).status.success());
+    let reopened =
+        Store::open_existing_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 1000).unwrap();
+    assert!(reopened.integrity().unwrap().valid);
+    assert_eq!(reopened.head().unwrap(), before + 1);
+    assert!(reopened.workers().unwrap().is_empty());
 }
 
 /// A broad property: the downcast store also fails the schema checks of format 9.

@@ -533,6 +533,65 @@ impl ProvisionSessionLaunchTargetV1 {
     }
 }
 
+/// Offline trusted target for the first Legacy rail. The launch spec uses the
+/// target UUID in its session field until Prepare assigns the real session.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LegacySessionTargetV1 {
+    pub version: u32,
+    pub catalogue: SessionLaunchTargetRecordV1,
+    pub broker_id: Uuid,
+    pub incarnation_id: Uuid,
+    pub broker_grant_revision: u64,
+    pub broker_profile_id: String,
+    pub launch: super::LaunchSpecV1,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProvisionLegacySessionTargetV1 {
+    pub expected_revision: u64,
+    pub target: LegacySessionTargetV1,
+}
+
+impl ProvisionLegacySessionTargetV1 {
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        let target = &self.target;
+        target.catalogue.validate()?;
+        target.launch.validate()?;
+        bounded(&target.broker_profile_id, 128)?;
+        invalid(
+            target.version == 1
+                && self.expected_revision.checked_add(1) == Some(target.catalogue.revision)
+                && !target.broker_id.is_nil()
+                && !target.incarnation_id.is_nil()
+                && (1..=i64::MAX as u64).contains(&target.broker_grant_revision)
+                && target
+                    .catalogue
+                    .launchers
+                    .iter()
+                    .all(|principal| matches!(principal, PrincipalRefV1::HumanLocal { .. }))
+                && target.launch.session_id == target.catalogue.launch_target_id.to_string()
+                && target.launch.network == super::NetworkV1::None
+                && target.launch.security_preset.requires_no_engine_logs()
+                && !target.launch.security_preset.is_interactive()
+                && target.launch.provider == "generic"
+                && target.launch.provider_resolution.is_none()
+                && target.launch.credential_binding_id.is_none()
+                && target.launch.egress.is_none()
+                && !target.launch.command.argv.is_empty()
+                && target.launch.command.argv.len() <= 128
+                && target
+                    .launch
+                    .command
+                    .argv
+                    .iter()
+                    .all(|value| value.len() <= 4096 && !value.contains('\0')),
+        )?;
+        bounded(&target.launch.command.cwd, 4096)
+    }
+}
+
 /// Validate a canonical UUID string used by the catalog and receipts.
 pub(crate) fn canonical_uuid(value: &str) -> anyhow::Result<Uuid> {
     uuid(value)?;

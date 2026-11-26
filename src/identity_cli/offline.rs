@@ -1,4 +1,4 @@
-use super::{ApplyArgs, OfflineArgs, ProvisionArgs, ResumeProvisionArgs};
+use super::{ApplyArgs, LegacySessionTargetArgs, OfflineArgs, ProvisionArgs, ResumeProvisionArgs};
 use crate::{
     audit::Store,
     control_fs::{Directory, PrivateFile, absolute_path},
@@ -475,4 +475,17 @@ pub(super) fn print_json(value: &serde_json::Value) -> Result<()> {
         .lock()
         .write_all(&bytes)
         .context("human CLI output unavailable")
+}
+
+pub(super) fn provision_legacy_session_target(args: LegacySessionTargetArgs) -> Result<()> {
+    let control = open(&args.offline)?;
+    let file = PrivateFile::open(&absolute_path(&args.target_file)?, 65_536)?;
+    let input: crate::control::session_control::ProvisionLegacySessionTargetV1 =
+        serde_json::from_slice(file.bytes())
+            .map_err(|_| anyhow::anyhow!("invalid Legacy session target file"))?;
+    file.revalidate()?;
+    let receipt = control
+        .store
+        .provision_legacy_session_target(control.actor, input)?;
+    print_json(&serde_json::to_value(receipt)?)
 }
