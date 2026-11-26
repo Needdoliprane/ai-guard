@@ -1288,6 +1288,70 @@ fn composition_stop_replay_waits_for_channel_teardown() {
 }
 
 #[test]
+fn composition_stop_interrupts_pending_provider_read() {
+    use std::{sync::mpsc, time::Instant};
+
+    let harness = Harness::new();
+    harness.install_markers();
+    let retained = harness.retained("composition-stop-pending-read.json");
+    let (principal, membership) = provision_membership(&retained).unwrap();
+    let scope = personal_scope(&retained, &principal, &membership);
+    let session = launched_session(&retained, &scope, &principal);
+    let operation = Uuid::new_v4();
+    let composer = SessionConversationComposerV1::new(
+        &retained.store,
+        &retained.owner,
+        &retained.source,
+        Duration::from_secs(12),
+    )
+    .unwrap();
+    composer
+        .admit_channel(
+            Uuid::new_v4(),
+            &session.session_id,
+            0,
+            channel_facts("attempt-1"),
+            spawn_fixture("discordant"),
+        )
+        .unwrap();
+    send_message(
+        &retained,
+        &scope,
+        operation,
+        Uuid::parse_str(&session.session_id).unwrap(),
+        1,
+        "synthetic instruction",
+    )
+    .unwrap();
+
+    let composer = &composer;
+    let session_id = session.session_id.as_str();
+    std::thread::scope(|threads| {
+        let dispatch = threads.spawn(|| composer.dispatch(session_id));
+        let wait = Instant::now() + Duration::from_secs(5);
+        while message_status(&retained.store, operation) != "transmitted" {
+            assert!(Instant::now() < wait, "fixture did not transmit its frame");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!dispatch.is_finished());
+
+        let (finished, wait_for_stop) = mpsc::channel();
+        let stop = threads.spawn(move || {
+            let _ = finished.send(composer.stop(Uuid::new_v4(), session_id));
+        });
+        let binding = wait_for_stop
+            .recv_timeout(Duration::from_secs(3))
+            .expect("STOP waited for the provider read deadline")
+            .unwrap();
+        assert_eq!(binding.status, SessionConversationStatusV1::Closed);
+        assert_eq!(dispatch.join().unwrap().unwrap().len(), 1);
+        stop.join().unwrap();
+    });
+    assert_eq!(message_status(&retained.store, operation), "transmitted");
+    assert_eq!(kind_count(&retained.store, ACKNOWLEDGED_KIND), 0);
+}
+
+#[test]
 fn composition_stop_between_write_chunks() {
     let length = crate::control::session_control::SESSION_MESSAGE_MAX_CONTENT_BYTES;
     let received =
