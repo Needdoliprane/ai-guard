@@ -80,6 +80,8 @@ pub struct SessionConversationComposerV1<'a> {
     source: &'a OwnedSourceToken,
     read_deadline: Duration,
     sessions: Mutex<BTreeMap<String, Arc<Mutex<BoundConversation>>>>,
+    #[cfg(test)]
+    before_first_write: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl<'a> SessionConversationComposerV1<'a> {
@@ -101,7 +103,17 @@ impl<'a> SessionConversationComposerV1<'a> {
             source,
             read_deadline,
             sessions: Mutex::new(BTreeMap::new()),
+            #[cfg(test)]
+            before_first_write: Mutex::new(None),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_before_first_write_for_test(
+        &mut self,
+        pause: impl FnOnce() + Send + 'static,
+    ) {
+        *self.before_first_write.get_mut().unwrap() = Some(Box::new(pause));
     }
 
     /// Write epoch with bounded transient-busy retry (STOP keeps priority over
@@ -249,6 +261,13 @@ impl<'a> SessionConversationComposerV1<'a> {
                 .adapter
                 .issue_turn(operation_id, session_id, &emission.content)?;
             let frame = request.frame()?;
+            #[cfg(test)]
+            {
+                let pause = self.before_first_write.lock().unwrap().take();
+                if let Some(pause) = pause {
+                    pause();
+                }
+            }
             if let Err(error) = bound.channel.write_frame(&frame) {
                 // Possible emission with no observed complete write: delivery
                 // stays unknown, retained by the latch; never resent.

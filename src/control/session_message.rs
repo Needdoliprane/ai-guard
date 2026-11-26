@@ -340,6 +340,14 @@ impl StdioConversation {
         })
     }
 
+    // The fixture can retain the peer past child teardown to observe every
+    // byte already submitted to the stream, followed by EOF.
+    #[cfg(test)]
+    pub(crate) fn with_stdin_for_test(mut self, stdin: std::process::ChildStdin) -> Self {
+        self.stdin = Some(stdin);
+        self
+    }
+
     /// Write one complete frame, newline-terminated, and flush. A partial or
     /// failed write leaves delivery unknown; the caller never resends blindly.
     pub fn write_frame(&mut self, frame: &str) -> std::io::Result<()> {

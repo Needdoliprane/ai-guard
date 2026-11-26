@@ -1264,3 +1264,105 @@ fn composition_bind_failure_leaves_no_channel() {
         Some(SessionMessageFailureV1::ChannelNotAdmitted)
     );
 }
+
+#[test]
+fn composition_stop_after_issue_before_first_byte() {
+    use std::{io::Read, os::fd::OwnedFd, os::unix::net::UnixStream, sync::mpsc, time::Instant};
+
+    const WAIT: Duration = Duration::from_secs(5);
+    let harness = Harness::new();
+    harness.install_markers();
+    let retained = harness.retained("composition-stop-before-first-byte.json");
+    let (principal, membership) = provision_membership(&retained).unwrap();
+    let scope = personal_scope(&retained, &principal, &membership);
+    let session = launched_session(&retained, &scope, &principal);
+    let session_id = &session.session_id;
+    let operation = Uuid::new_v4();
+    let stop_operation = Uuid::new_v4();
+    let (mut peer, writer) = UnixStream::pair().unwrap();
+    peer.set_read_timeout(Some(WAIT)).unwrap();
+    let channel = spawn_fixture("normal").with_stdin_for_test(OwnedFd::from(writer).into());
+    let mut composer = SessionConversationComposerV1::new(
+        &retained.store,
+        &retained.owner,
+        &retained.source,
+        WAIT,
+    )
+    .unwrap();
+    let (paused, wait_for_pause) = mpsc::channel();
+    let (resume, wait_for_resume) = mpsc::channel();
+    composer.set_before_first_write_for_test(move || {
+        paused.send(()).unwrap();
+        wait_for_resume
+            .recv_timeout(WAIT * 2)
+            .expect("fixture did not release dispatch");
+    });
+    composer
+        .admit_channel(
+            Uuid::new_v4(),
+            session_id,
+            0,
+            channel_facts("attempt-1"),
+            channel,
+        )
+        .unwrap();
+    send_message(
+        &retained,
+        &scope,
+        operation,
+        Uuid::parse_str(session_id).unwrap(),
+        1,
+        "synthetic instruction",
+    )
+    .unwrap();
+
+    // The observer sees committed audit without borrowing the STOP write
+    // epoch, which can remain held while channel teardown waits for dispatch.
+    let observer = rusqlite::Connection::open_with_flags(
+        retained.source.descriptor().storage_binding.path(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    observer.busy_timeout(Duration::from_millis(50)).unwrap();
+    let issue_id = message_event_id(b"ai-guard:session-message-emission:v1", operation);
+    let close_id = message_event_id(b"ai-guard:session-conversation-close:v1", stop_operation);
+
+    let closed = std::thread::scope(|threads| {
+        let resume = resume;
+        let dispatch = threads.spawn(|| composer.dispatch(session_id));
+        wait_for_pause
+            .recv_timeout(WAIT)
+            .expect("dispatch did not pause");
+        let issued = event_by_id(&observer, &issue_id)
+            .unwrap()
+            .expect("dispatch paused before the emission audit committed");
+        assert_eq!(issued.event.kind, EMISSION_ISSUED_KIND);
+
+        let stop = threads.spawn(|| composer.stop(stop_operation, session_id));
+        let close_deadline = Instant::now() + WAIT;
+        loop {
+            if let Some(event) = event_by_id(&observer, &close_id).unwrap() {
+                assert_eq!(event.event.kind, CONVERSATION_CLOSED_KIND);
+                break;
+            }
+            assert!(
+                Instant::now() < close_deadline,
+                "STOP did not commit while dispatch was paused"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        resume.send(()).unwrap();
+        let _ = dispatch.join().expect("dispatch thread panicked");
+        stop.join()
+            .expect("STOP thread panicked")
+            .expect("STOP failed")
+    });
+
+    assert_eq!(closed.status, SessionConversationStatusV1::Closed);
+    let mut byte = [0];
+    let received = peer.read(&mut byte).expect("stdio peer did not reach EOF");
+    assert_eq!(
+        received, 0,
+        "the stdio peer received an octet after STOP committed"
+    );
+}
