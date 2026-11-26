@@ -8,6 +8,30 @@ use crate::control::{
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
 
+fn defer_failed_stop_actor(state: &RecoveryState, arm_id: &str) -> EnforcerResult<Arc<StopActor>> {
+    let actor = state
+        .slots
+        .lock()
+        .map_err(|_| EnforcerError::Unhealthy)?
+        .get(arm_id)
+        .cloned()
+        .ok_or(EnforcerError::Conflict)?;
+    let slot = actor.snapshot()?;
+    if actor.worker_owned.load(Ordering::SeqCst)
+        || actor.fail_spawn_once.load(Ordering::SeqCst)
+        || slot.phase != StopPhaseV1::Quarantined
+        || slot.stop_failures != 1
+    {
+        return Err(EnforcerError::Conflict);
+    }
+    // Replays in these IPC fixtures must not start an unowned native thread.
+    *actor
+        .next_start
+        .lock()
+        .map_err(|_| EnforcerError::Unhealthy)? = Instant::now() + Duration::from_secs(3600);
+    Ok(actor)
+}
+
 fn unavailable_registration(root: &Path, suffix: &str) -> RegistrationV1 {
     // Explicitly unavailable fixture metadata; no host program may execute.
     // execute any host program. These are explicit test data, not engine facts.
@@ -395,21 +419,21 @@ async fn real_client2_and_client3_share_stop_dispatch_without_changing_views2() 
                 value: Box::new(value.clone()),
             })
             .await;
-        // The failed first spawn is real. For replay, explicitly postpone this
-        // test actor; no unowned, nonterminating runtime thread may be created.
-        if let Ok(slots) = fixture.state.slots.lock() {
-            for actor in slots.values() {
-                if let Ok(mut next) = actor.next_start.lock() {
-                    *next = Instant::now() + Duration::from_secs(3600);
-                }
-            }
+        if !matches!(reserved, Err(EnforcerError::NotReady)) {
+            return Err(EnforcerError::Conflict);
         }
-        let reserved = reserved?;
+        let actor = defer_failed_stop_actor(&fixture.state, &arm)?;
         let replay = client2
             .request(StopRequest::RestoreRequiredStop {
                 value: Box::new(value.clone()),
             })
-            .await?;
+            .await;
+        if !matches!(replay, Err(EnforcerError::NotReady)) {
+            return Err(EnforcerError::Conflict);
+        }
+        if actor.snapshot()?.stop_failures != 1 || actor.worker_owned.load(Ordering::SeqCst) {
+            return Err(EnforcerError::Conflict);
+        }
         let delivered = client3
             .inner
             .request(StopRequest::DeliverDurableStop {
@@ -440,7 +464,7 @@ async fn real_client2_and_client3_share_stop_dispatch_without_changing_views2() 
             tokio::time::sleep(POLL).await;
         }
         Ok::<_, EnforcerError>((
-            reserved, replay, delivered, queried2, queried3, status2, status3, cancel, hash,
+            delivered, queried2, queried3, status2, status3, cancel, hash,
         ))
     }
     .await;
@@ -449,19 +473,7 @@ async fn real_client2_and_client3_share_stop_dispatch_without_changing_views2() 
         clean,
         "owned transport fixture must stop before its oracles"
     );
-    let (reserved, replay, delivered, queried2, queried3, status2, status3, cancel, hash) =
-        observed.unwrap();
-    assert!(matches!(
-        reserved.1,
-        StopResponse::StopReserved {
-            replayed: false,
-            ..
-        }
-    ));
-    assert!(matches!(
-        replay.1,
-        StopResponse::StopReserved { replayed: true, .. }
-    ));
+    let (delivered, queried2, queried3, status2, status3, cancel, hash) = observed.unwrap();
     assert!(matches!(delivered.1, StopResponse::StopAccepted { .. }));
     for slot in [queried2, queried3] {
         assert_eq!(slot.cancel_command_id(), Some(cancel.command_id));

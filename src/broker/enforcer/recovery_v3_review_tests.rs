@@ -189,31 +189,11 @@ impl AnchorFixture {
             },
         )
         .await;
-        // spawn_once occurs before any OS actor thread. No accepting-loop
-        // maintenance exists here; defer replays to prevent an unowned thread.
-        let snapshot = {
-            let slots = self
-                .state
-                .slots
-                .lock()
-                .map_err(|_| EnforcerError::Unhealthy)?;
-            let actor = slots.get(&arm).ok_or(EnforcerError::Conflict)?;
-            *actor
-                .next_start
-                .lock()
-                .map_err(|_| EnforcerError::Unhealthy)? =
-                Instant::now() + Duration::from_secs(3600);
-            if actor.worker_owned.load(Ordering::SeqCst) {
-                return Err(EnforcerError::Conflict);
-            }
-            serde_json::to_value(actor.snapshot()?).map_err(|_| EnforcerError::InvalidInput)?
-        };
-        match reply? {
-            ReplyValue3::StopReserved {
-                replayed: false, ..
-            } => Ok(snapshot),
-            _ => Err(EnforcerError::Conflict),
+        if !matches!(reply, Err(EnforcerError::NotReady)) {
+            return Err(EnforcerError::Conflict);
         }
+        let actor = defer_failed_stop_actor(&self.state, &arm)?;
+        serde_json::to_value(actor.snapshot()?).map_err(|_| EnforcerError::InvalidInput)
     }
     fn known_snapshot(&self) -> EnforcerResult<serde_json::Value> {
         let slots = self
@@ -558,44 +538,44 @@ async fn embedded_v1_canonical_shape_is_required_in_signed_restore_and_slot_repl
         .map_err(|_| EnforcerError::InvalidInput)?;
         canonical_positive.validate(connection.v3.as_ref().ok_or(EnforcerError::Unauthorized)?)?;
         write_frame(&mut connection.stream, &original, MAX_FRAME, IO_TIMEOUT).await?;
-        let reply: Reply3 = read_frame(&mut connection.stream, MAX_FRAME, IO_TIMEOUT).await?;
-        reply.validate(
+        let restore_reply: Reply3 =
+            read_frame(&mut connection.stream, MAX_FRAME, IO_TIMEOUT).await?;
+        restore_reply.validate(
             connection.v3.as_ref().ok_or(EnforcerError::Unauthorized)?,
             &original,
         )?;
         if !matches!(
-            &reply.result,
-            ReplyValue3::StopReserved {
-                replayed: false,
-                ..
+            restore_reply.result,
+            ReplyValue3::Error {
+                code: EnforcerError::NotReady
             }
         ) {
             return Err(EnforcerError::Conflict);
         }
-        let session = connection
-            .v3
-            .as_ref()
-            .ok_or(EnforcerError::Unauthorized)?
-            .clone();
-        // Freeze the one pre-spawn-fault actor before any replay can start it.
-        {
-            let slots = fixture
-                .state
-                .slots
-                .lock()
-                .map_err(|_| EnforcerError::Unhealthy)?;
-            for actor in slots.values() {
-                if actor.worker_owned.load(Ordering::SeqCst) {
-                    return Err(EnforcerError::Conflict);
-                }
-                *actor
-                    .next_start
-                    .lock()
-                    .map_err(|_| EnforcerError::Unhealthy)? =
-                    Instant::now() + Duration::from_secs(3600);
-            }
-        }
+        let arm_id = &payload.registration.arm.operation_id;
+        defer_failed_stop_actor(&fixture.state, arm_id)?;
         let known = fixture.known_snapshot()?;
+
+        // Query the exact retained STOP for the signed slot reply. The failed
+        // restore cannot acknowledge an installed native owner.
+        let mut connection = fixture.connection().await?;
+        let session = connection.v3.as_ref().ok_or(EnforcerError::Unauthorized)?;
+        let query = Request3::new(
+            session,
+            StopRequest::QueryStop {
+                arm_id: arm_id.clone(),
+                registration_hash: payload.registration_hash.clone(),
+            },
+        )?;
+        write_frame(&mut connection.stream, &query, MAX_FRAME, IO_TIMEOUT).await?;
+        let reply: Reply3 = read_frame(&mut connection.stream, MAX_FRAME, IO_TIMEOUT).await?;
+        reply.validate(session, &query)?;
+        let ReplyValue3::StopStatus { value } = &reply.result else {
+            return Err(EnforcerError::Conflict);
+        };
+        if serde_json::to_value(value).map_err(|_| EnforcerError::InvalidInput)? != known {
+            return Err(EnforcerError::Conflict);
+        }
         let mut request_paths = Vec::new();
         null_members(&wire, "", &mut request_paths);
         let mut request_rejections = Vec::new();
@@ -655,9 +635,7 @@ async fn embedded_v1_canonical_shape_is_required_in_signed_restore_and_slot_repl
             injection_rejections.push((path.to_owned(), !accepted));
         }
         let reply_wire = serde_json::to_value(&reply).map_err(|_| EnforcerError::InvalidInput)?;
-        raw_reply(&reply_wire)
-            .await?
-            .validate(&session, &original)?;
+        raw_reply(&reply_wire).await?.validate(session, &query)?;
         let mut reply_paths = Vec::new();
         null_members(&reply_wire, "", &mut reply_paths);
         let mut reply_rejections = Vec::new();
@@ -668,7 +646,7 @@ async fn embedded_v1_canonical_shape_is_required_in_signed_restore_and_slot_repl
             }
             let accepted = raw_reply(&changed)
                 .await
-                .is_ok_and(|reply| reply.validate(&session, &original).is_ok());
+                .is_ok_and(|reply| reply.validate(session, &query).is_ok());
             reply_rejections.push((path.clone(), !accepted));
         }
         Ok::<_, EnforcerError>((
