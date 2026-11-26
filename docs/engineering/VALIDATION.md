@@ -1,5 +1,20 @@
 # Validation courante
 
+## 26 novembre 2026 — fermeture du canal de conversation
+
+Sur le libtest de `3293e7de`, le témoin suspend l’envoi après le reçu
+d’émission et laisse STOP fermer la liaison durablement. Le pair stdio
+lit un octet après le commit de STOP. Le test sort 101 sur l’assertion
+qui exige zéro octet. Le moteur et le fournisseur du parcours réel
+restent hors de ce test. Manifeste
+`e1218a604779ca16dd6d576a0b8de117d9b72e1a8caa0114cd378f892b91c60e`.
+
+Sur `3fe4d484`, 433 tests front et le build passent, avec 8 tests
+ignorés. Les tests couvrent l’échéance en page ouverte, le retrait de
+la destination après un refus et le maintien du reçu à réconcilier
+pour le même envoi. Manifeste
+`f96afb55f741d6f10c9bfde2b3e4eab1d9cf2be6d60ef39189b1a99792f8afd2`.
+
 ## 26 novembre 2026 — retrouver le canal d’une session owned
 
 Sur le libtest de `e992a5a1`, les trois sélecteurs exacts de la
@@ -41,6 +56,18 @@ sont fermés et vérifiés. Après ce refus, mTLS reste non exécuté. Le
 reçu privé porte l’empreinte
 `773096a7450a98add00a55a99ea9ebc2c7cd6c2e0240677930a930cd11350d71`.
 Le résultat du dictionnaire sur `8e16237b` garde son propre périmètre.
+
+Sur `e992a5a1` (arbre `d5b590e7`), le même sélecteur exact passe une
+fois en TLS puis une fois en mTLS avec le même libtest. Le compte de
+recette dispose de `LOCK TABLES` sur son schéma jetable pour que
+Legacy puisse effectivement lire sous verrou avant de refuser. Sur
+MySQL 8.4.13 ARM64, chaque profil négocie TLS 1.3 et couvre les deux
+formats 14 et 15, l’absence de publication et le refus à la réentrée.
+Retour 0 et fermeture des ressources attestés pour chaque profil.
+Manifeste des deux reçus
+`835ab3cc927a6d671760bbcb6488f9e7cd3c638373dd58c55bd3d73a638969a8`.
+La publication, l’admission gateway et la restauration gardent leurs
+propres critères.
 
 ## 26 novembre 2026 — terminal métier et fermeture Full3
 
