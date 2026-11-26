@@ -124,7 +124,7 @@ async fn fixture(
 ) {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let fixed = outcome.to_string();
-    let app=Router::new().route("/api/decide",post(move |State(calls):State<Arc<Mutex<Vec<DecisionRequest>>>>,Json(req):Json<DecisionRequest>| {
+    let app=Router::new().route("/control/api/decide",post(move |State(calls):State<Arc<Mutex<Vec<DecisionRequest>>>>,Json(req):Json<DecisionRequest>| {
         let fixed=fixed.clone();async move {
             calls.lock().unwrap().push(req.clone());
             let outcome=if fixed=="review"&&req.human_approved {"allow"}else{fixed.as_str()};
@@ -197,7 +197,7 @@ async fn unavailable_or_unacknowledged_audit_never_yields_allow() {
     .unwrap();
     assert!(client.authorize(&request(), None).await.is_err());
     let app = Router::new().route(
-        "/api/decide",
+        "/control/api/decide",
         post(|Json(req): Json<DecisionRequest>| async move {
             Json::<Value>(json!({"decision":{"outcome":"allow"},"request_hash":request_hash(&req)}))
         }),
@@ -212,7 +212,13 @@ async fn unavailable_or_unacknowledged_audit_never_yields_allow() {
         "test-runner-token-32-characters-long",
     )
     .unwrap();
-    assert!(client.authorize(&request(), None).await.is_err());
+    let Err(error) = client.authorize(&request(), None).await else {
+        panic!("a decision without durable audit acknowledgement was accepted");
+    };
+    assert_eq!(
+        error.to_string(),
+        "decision has no durable audit acknowledgement"
+    );
     server.abort();
 }
 
