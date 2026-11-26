@@ -72,6 +72,8 @@ Une installation neuve contient son événement de création du registre ; aucun
 
 ## 4. Lancer une première commande hors ligne
 
+Pour les opérations de session avec un compte personnel, le guide nominatif détaille la préparation, le reçu de lancement et la disponibilité du canal de conversation. [Guide FR](setup/session-control/README.fr.md) · [English guide](setup/session-control/README.md)
+
 ```sh
 "$AIGUARD_BIN" run \
   --config-dir "$AIGUARD_CONFIG" --runtime docker \

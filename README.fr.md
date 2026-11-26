@@ -51,6 +51,8 @@ Le nom de pile par défaut est `agentsandbox`, avec les ports loopback ci-dessus
 
 ## Lancer, suivre et examiner une session
 
+Pour l’accès nominatif, suivez la préparation de session, la reprise après perte du reçu de lancement et la vérification de la livraison d’une consigne. [Guide du dashboard owned](docs/setup/session-control/README.fr.md)
+
 Commencer par une petite commande sans compte fournisseur et sans accès réseau du worker. La CLI de confiance utilise son credential technique runner pour demander l’autorisation de la politique avant l’exécution :
 
 ```sh

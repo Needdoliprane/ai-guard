@@ -51,6 +51,8 @@ The default stack name is `agentsandbox`, with the loopback ports above. `up` re
 
 ## Run, follow and inspect a session
 
+For named access, see the steps to prepare a session, recover a lost launch response and check instruction delivery. [Owned dashboard session guide](docs/setup/session-control/README.md)
+
 Start with a small command that needs no provider account and has no worker network access. The trusted CLI uses its technical runner credential to request policy authorization before execution:
 
 ```sh
