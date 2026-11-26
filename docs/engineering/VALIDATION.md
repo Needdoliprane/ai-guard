@@ -1,5 +1,23 @@
 # Validation courante
 
+## 26 novembre 2026 — terminal métier et fermeture Full3
+
+Sur `b696d94b` (arbre `79b92a72`), Cargo lie le CLI et le test
+en 93,74 s. L’unique exécution de
+`broker_full3_worker_terminal_reconciles_allocation` atteint
+`Running` avec quota retenu puis le terminal injecté. L’audit est
+confirmé, le quota est libéré une seule fois et une ligne d’usage
+est enregistrée. Le moteur de fixture et la passerelle ferment.
+
+Le test sort 101 après 132,59 s avec
+`guardian_reap_unconfirmed`. Le harnais conserve la garde au broker,
+encore présent dans l’inventaire de fin. Le scénario est donc en
+échec sur la fermeture, après les assertions de résultat métier.
+Le passage utilise les processus réels ai-guard avec un moteur
+de fixture. Reçu et manifeste privés
+`8102dc9ac478f678eedb54ee46b478d8e311b59ad0f95697ccf25195f3a68408`
+et `68ca78496950aa88294424f23f1ab789e7761f50e36a126b059125f6b0b0823c`.
+
 ## 26 novembre 2026 — parcours session du dashboard owned
 
 Le candidat `16dd21b9` intègre le proxy de préparation, lancement et
