@@ -1128,18 +1128,26 @@ async fn explicit_full3_refuses_a_live_legacy_role_without_fallback_or_rekey() {
         .tempdir_in(short_ipc_fixture_root())
         .unwrap();
     let parent = Directory::open_existing(files.path()).unwrap();
-    let root = parent.persistent_child("legacy", true).unwrap().unwrap();
-    capability(&root, true).unwrap();
-    let owned = root.clone();
-    let server = tokio::spawn(async move { super::super::run_internal_enforcer(&owned, 2).await });
+    let owned = parent.clone();
+    let server = tokio::spawn(async move {
+        super::super::run_internal_legacy_fresh(&owned, "legacy", 2, 0, Uuid::new_v4()).await
+    });
     let expires = Instant::now() + Duration::from_secs(3);
-    while crate::broker::discovery::load_endpoint(&root)
-        .unwrap()
-        .is_none()
-    {
+    let root = loop {
+        if let Some(root) = parent.persistent_child("legacy", false).unwrap()
+            && crate::broker::discovery::load_endpoint(&root)
+                .unwrap()
+                .is_some()
+        {
+            break root;
+        }
+        assert!(
+            !server.is_finished(),
+            "fresh Legacy server exited before IPC publication"
+        );
         assert!(Instant::now() < expires);
         tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    };
     let auth = std::fs::read(root.path().join("auth")).unwrap();
     assert!(
         EnforcerFullClientV3::connect_existing(&root, 2)
