@@ -359,9 +359,18 @@ impl StdioConversation {
     /// Read the next non-empty line within the deadline. Harness noise lines
     /// that are not JSON objects are skipped by the caller, not here.
     pub fn read_line(&mut self, deadline: std::time::Duration) -> std::io::Result<String> {
-        self.lines.recv_timeout(deadline).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::TimedOut, "conversation read timed out")
-        })?
+        use std::sync::mpsc::RecvTimeoutError;
+
+        self.lines
+            .recv_timeout(deadline)
+            .map_err(|error| match error {
+                RecvTimeoutError::Timeout => {
+                    io::Error::new(io::ErrorKind::TimedOut, "conversation read timed out")
+                }
+                RecvTimeoutError::Disconnected => {
+                    io::Error::new(io::ErrorKind::UnexpectedEof, "conversation channel closed")
+                }
+            })?
     }
 
     /// Close the write side and reap the child. Used by STOP and by teardown.
