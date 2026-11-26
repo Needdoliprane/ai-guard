@@ -67,16 +67,16 @@ const READ_RETIREMENT_CHECK_INTERVAL: Duration = Duration::from_millis(50);
 const EPOCH_RETRY_DEADLINE: Duration = Duration::from_secs(10);
 const EPOCH_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 
-/// One admitted conversation: the exact durable binding it was bound against,
-/// its pinned fingerprint, the correlation state and the exact owned channel.
+/// The mutable correlation state and owned channel of an admitted conversation.
 struct BoundConversation {
-    binding: SessionConversationBindingV1,
-    fingerprint: String,
     adapter: ConversationAdapterV1,
     channel: StdioConversation,
 }
 
+/// The immutable durable binding and the signal to retire its owned channel.
 struct ConversationSlot {
+    binding: SessionConversationBindingV1,
+    fingerprint: String,
     retiring: AtomicBool,
     bound: Mutex<BoundConversation>,
 }
@@ -268,15 +268,8 @@ impl<'a> SessionConversationComposerV1<'a> {
                 .get(session_id)
                 .cloned()
                 .ok_or(SessionMessageFailureV1::ChannelNotAdmitted)?;
-            // Dispatch may hold this slot while acquiring the same write epoch.
-            let existing = existing.try_lock().map_err(|error| match error {
-                std::sync::TryLockError::WouldBlock => {
-                    anyhow::Error::from(HumanAuthorityFailure::GateBusy)
-                }
-                std::sync::TryLockError::Poisoned(_) => {
-                    anyhow::anyhow!("conversation slot poisoned")
-                }
-            })?;
+            // The slot's identity is immutable. A replay need not wait for
+            // dispatch, which may hold the channel while acquiring the epoch.
             anyhow::ensure!(
                 existing.binding == binding,
                 SessionMessageFailureV1::BindingChanged
@@ -285,10 +278,10 @@ impl<'a> SessionConversationComposerV1<'a> {
         }
         let fingerprint = binding.fingerprint()?;
         let slot = Arc::new(ConversationSlot {
+            binding: binding.clone(),
+            fingerprint,
             retiring: AtomicBool::new(false),
             bound: Mutex::new(BoundConversation {
-                binding: binding.clone(),
-                fingerprint,
                 adapter: ConversationAdapterV1::new(),
                 channel: stdio,
             }),
@@ -370,13 +363,13 @@ impl<'a> SessionConversationComposerV1<'a> {
                     &IssueSessionMessageEmissionV1 {
                         version: 1,
                         operation_id,
-                        expected_binding_fingerprint: bound.fingerprint.clone(),
+                        expected_binding_fingerprint: slot.fingerprint.clone(),
                     },
                 )?
             };
             anyhow::ensure!(
-                emission.binding_fingerprint == bound.fingerprint
-                    && emission.input_epoch == bound.binding.input_epoch,
+                emission.binding_fingerprint == slot.fingerprint
+                    && emission.input_epoch == slot.binding.input_epoch,
                 SessionMessageFailureV1::BindingChanged
             );
             let request = bound
@@ -517,8 +510,8 @@ impl<'a> SessionConversationComposerV1<'a> {
             .get(session_id)
             .cloned();
         if let Some(slot) = slot {
-            // The durable close succeeded. Wake an in-progress reconciliation
-            // before waiting to own and reap its exact channel.
+            // The durable close succeeded. Interrupt any in-progress
+            // reconciliation before waiting to reap its exact channel.
             slot.retiring.store(true, Ordering::Release);
             #[cfg(test)]
             if let Some(observer) = &self.stop_slot_observer {
