@@ -435,7 +435,7 @@ fn require_session_owner(
 fn require_emittable_binding(
     binding: &SessionConversationBindingV1,
     now: chrono::DateTime<chrono::Utc>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
     if binding.status == SessionConversationStatusV1::Closed {
         return Err(SessionMessageFailureV1::SessionClosed.into());
     }
@@ -443,7 +443,7 @@ fn require_emittable_binding(
         .map_err(|_| failure(IdentityFailureV1::InvalidRequest))?
         .with_timezone(&chrono::Utc);
     anyhow::ensure!(expires_at > now, SessionMessageFailureV1::BindingExpired);
-    Ok(())
+    Ok(expires_at)
 }
 
 /// Effect-point revalidation of the retained initiator: a revoked identity,
@@ -493,10 +493,10 @@ fn revalidate_emission_binding(
     row: &MessageRow,
     expected_fingerprint: &str,
     now: chrono::DateTime<chrono::Utc>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
     let binding =
         conversation_row(tx, &row.session_id)?.ok_or(failure(IdentityFailureV1::NotFound))?;
-    require_emittable_binding(&binding, now)?;
+    let expires_at = require_emittable_binding(&binding, now)?;
     anyhow::ensure!(
         binding.status == SessionConversationStatusV1::Active,
         SessionMessageFailureV1::ChannelNotAdmitted
@@ -506,7 +506,8 @@ fn revalidate_emission_binding(
         fingerprint == row.binding_fingerprint && fingerprint == expected_fingerprint,
         SessionMessageFailureV1::BindingChanged
     );
-    revalidate_initiator(tx, row)
+    revalidate_initiator(tx, row)?;
+    Ok(expires_at)
 }
 
 impl Store {
@@ -805,6 +806,10 @@ impl Store {
                 binding.tenant_id == self.tenant_id,
                 failure(IdentityFailureV1::NotFound)
             );
+            anyhow::ensure!(
+                binding.status != SessionConversationStatusV1::Closed,
+                SessionMessageFailureV1::SessionClosed
+            );
             let mut statement = tx.prepare(
                 "SELECT operation_id FROM session_messages WHERE session_id=?1 AND status='queued' ORDER BY event_seq",
             )?;
@@ -900,13 +905,14 @@ impl Store {
 
     /// Validate the dispatch's live handoff before a single nonblocking write.
     /// This read never returns the body or issues another emission. The caller
-    /// retains the same write epoch through the syscall to fence durable STOP.
+    /// retains the same write epoch through the syscall to fence durable STOP,
+    /// and checks this original deadline again at the syscall.
     pub(crate) fn revalidate_session_message_emission_scoped(
         &self,
         epoch: &crate::human_authority::HumanSourcesWriteEpoch,
         source: &crate::human_authority::OwnedSourceToken,
         emission: &SessionMessageEmissionV1,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
         let access = HumanSourceAccess::write(epoch, source)?;
         self.with_modern_read(&access, |tx| {
             if !super::session_prepare::installed(tx)? {
@@ -915,7 +921,8 @@ impl Store {
             let row = message_row(tx, &emission.operation_id.to_string())?
                 .ok_or(failure(IdentityFailureV1::NotFound))?;
             let clock = workload::capture_control_time(tx)?;
-            revalidate_emission_binding(tx, &row, &emission.binding_fingerprint, clock.at())?;
+            let expires_at =
+                revalidate_emission_binding(tx, &row, &emission.binding_fingerprint, clock.at())?;
             anyhow::ensure!(
                 row.session_id == emission.session_id
                     && u64::try_from(row.input_epoch)? == emission.input_epoch
@@ -932,7 +939,7 @@ impl Store {
                         .is_some_and(|stored| stored.event.kind == EMISSION_ISSUED_KIND),
                 IdentityFailureV1::Conflict
             );
-            Ok(())
+            Ok(expires_at)
         })
     }
 

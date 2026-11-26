@@ -88,6 +88,8 @@ pub struct SessionConversationComposerV1<'a> {
     sessions: Mutex<BTreeMap<String, Arc<Mutex<BoundConversation>>>>,
     #[cfg(test)]
     before_write: Mutex<Option<BeforeWritePause>>,
+    #[cfg(test)]
+    stop_slot_observer: Option<std::sync::mpsc::Sender<()>>,
 }
 
 impl<'a> SessionConversationComposerV1<'a> {
@@ -111,6 +113,8 @@ impl<'a> SessionConversationComposerV1<'a> {
             sessions: Mutex::new(BTreeMap::new()),
             #[cfg(test)]
             before_write: Mutex::new(None),
+            #[cfg(test)]
+            stop_slot_observer: None,
         })
     }
 
@@ -137,6 +141,11 @@ impl<'a> SessionConversationComposerV1<'a> {
             drop(pending);
             (pause.run)(written);
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observe_stop_slot_for_test(&mut self, observer: std::sync::mpsc::Sender<()>) {
+        self.stop_slot_observer = Some(observer);
     }
 
     /// Write epoch with bounded transient-busy retry (STOP keeps priority over
@@ -252,7 +261,8 @@ impl<'a> SessionConversationComposerV1<'a> {
             }
             .into());
         };
-        let mut bound = slot.lock().expect("admitted conversation");
+        let mut guard = slot.lock().expect("admitted conversation");
+        let bound = &mut *guard;
         let mut receipts = Vec::new();
         loop {
             let queued = {
@@ -268,6 +278,9 @@ impl<'a> SessionConversationComposerV1<'a> {
                 // time, never interleaved.
                 break;
             }
+            // A known lost input has no possible effect. Leave the operation
+            // queued instead of consuming its one durable latch.
+            let mut input = bound.channel.prepare_input()?;
             // The durable latch before the first frame byte. The store
             // revalidates STOP, the original deadline, the resolved channel,
             // the exact pinned fingerprint and the retained initiator here.
@@ -292,18 +305,25 @@ impl<'a> SessionConversationComposerV1<'a> {
                 .adapter
                 .issue_turn(operation_id, session_id, &emission.content)?;
             let frame = request.frame()?;
-            if let Err(error) = bound.channel.write_frame_guarded(
+            if let Err(error) = input.write_frame_guarded(
                 &frame,
                 |_written, deadline| -> anyhow::Result<_> {
                     #[cfg(test)]
                     self.pause_before_write_for_test(_written);
                     let epoch = self.write_epoch_until(deadline)?;
-                    self.store.revalidate_session_message_emission_scoped(
+                    let expires_at = self.store.revalidate_session_message_emission_scoped(
                         &epoch,
                         self.source,
                         &emission,
                     )?;
-                    Ok(epoch)
+                    Ok((epoch, expires_at))
+                },
+                |(_, expires_at)| {
+                    anyhow::ensure!(
+                        chrono::Utc::now() < *expires_at,
+                        SessionMessageFailureV1::BindingExpired
+                    );
+                    Ok(())
                 },
             ) {
                 // Possible emission with no observed complete write: delivery
@@ -408,15 +428,28 @@ impl<'a> SessionConversationComposerV1<'a> {
         // The durable close already fences writing. Dispatch must be able to
         // read that close under its own epoch while it still owns the slot.
         drop(epoch);
-        let removed = self
+        let slot = self
             .sessions
             .lock()
             .expect("conversation registry")
-            .remove(session_id);
-        if let Some(slot) = removed {
+            .get(session_id)
+            .cloned();
+        if let Some(slot) = slot {
+            #[cfg(test)]
+            if let Some(observer) = &self.stop_slot_observer {
+                let _ = observer.send(());
+            }
             let mut bound = slot.lock().expect("admitted conversation");
             bound.adapter.close_turn();
-            bound.channel.close();
+            bound.channel.close_and_reap()?;
+            // A replay must find this slot until teardown has completed.
+            let mut sessions = self.sessions.lock().expect("conversation registry");
+            if sessions
+                .get(session_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &slot))
+            {
+                sessions.remove(session_id);
+            }
         }
         Ok(binding)
     }

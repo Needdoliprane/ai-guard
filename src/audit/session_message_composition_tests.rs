@@ -885,8 +885,8 @@ fn composition_discordant_id_never_acknowledges_nor_resends() {
     );
 }
 
-/// A cut after a possible emission keeps the truthful durable status and never
-/// resends; a channel already closed before the write retains `unknown`.
+/// A cut after possible emission is never resent; a known lost input keeps
+/// an unissued operation queued.
 #[test]
 fn composition_cut_after_emission_retains_uncertainty() {
     let harness = Harness::new();
@@ -936,11 +936,13 @@ fn composition_cut_after_emission_retains_uncertainty() {
         1
     );
 
-    // A channel closed before the write: the latch retains `unknown` exactly.
+    // A lost pipe peer already known at dispatch never consumes its latch.
     let session_two = launched_session(&retained, &scope, &principal);
     let session_two_uuid = Uuid::parse_str(&session_two.session_id).unwrap();
-    let mut dead = spawn_fixture("normal");
-    dead.close();
+    let (reader, writer) = std::io::pipe().unwrap();
+    let dead =
+        spawn_fixture("normal").with_stdin_for_test(std::os::fd::OwnedFd::from(writer).into());
+    drop(reader);
     composer
         .admit_channel(
             Uuid::new_v4(),
@@ -960,17 +962,17 @@ fn composition_cut_after_emission_retains_uncertainty() {
         "synthetic instruction",
     )
     .unwrap();
-    assert!(composer.dispatch(&session_two.session_id).is_err());
-    assert_eq!(message_status(&retained.store, operation_two), "unknown");
-    assert!(
-        composer
-            .dispatch(&session_two.session_id)
-            .unwrap()
-            .is_empty()
-    );
+    for _ in 0..2 {
+        let error = composer.dispatch(&session_two.session_id).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+    }
+    assert_eq!(message_status(&retained.store, operation_two), "queued");
     assert_eq!(
         kind_count(&retained.store, "control.session_message.emission_issued"),
-        2
+        1
     );
     assert_eq!(
         kind_count(&retained.store, "control.session_message.transmitted"),
@@ -1269,26 +1271,48 @@ fn composition_bind_failure_leaves_no_channel() {
 
 #[test]
 fn composition_stop_after_issue_before_first_byte() {
-    let received =
-        assert_stop_fences_remaining_conversation_bytes(0, |_| "synthetic instruction".into());
-    assert!(received.is_empty());
+    assert_eq!(
+        assert_stop_fences_remaining_conversation_bytes(0, false, |_| "synthetic instruction"
+            .into()),
+        0
+    );
+}
+
+#[test]
+fn composition_stop_replay_waits_for_channel_teardown() {
+    assert_eq!(
+        assert_stop_fences_remaining_conversation_bytes(0, true, |_| "synthetic instruction"
+            .into()),
+        0
+    );
 }
 
 #[test]
 fn composition_stop_between_write_chunks() {
     let length = crate::control::session_control::SESSION_MESSAGE_MAX_CONTENT_BYTES;
-    let received = assert_stop_fences_remaining_conversation_bytes(1, |_| "x".repeat(length));
-    assert!(!received.is_empty() && received.len() < length);
+    let received =
+        assert_stop_fences_remaining_conversation_bytes(1, false, |_| "x".repeat(length));
+    assert!(received > 0 && received < length);
 }
 
 #[test]
 fn composition_stop_before_json_terminator_keeps_eof_invalid() {
     use crate::control::session_message::TurnRequestV1;
+    use std::io::Write;
+
+    // The same peer accepts a valid JSON object at EOF even without LF.
+    let positive = br#"{"fixture":1}"#;
+    let (reader, mut writer) = std::io::pipe().unwrap();
+    let mut peer = eof_fixture::Parser::start(reader);
+    writer.write_all(positive).unwrap();
+    assert_eq!(peer.progress_at(positive.len()), 0);
+    drop(writer);
+    assert_eq!(peer.finish(), (positive.len(), 1));
 
     // On the old 4 KiB chunk boundary the last JSON byte was sent alone
     // before the newline. A peer parsing its last line at EOF accepted it.
     const ORIGINAL_CHUNK_BYTES: usize = 4 * 1024;
-    let received = assert_stop_fences_remaining_conversation_bytes(1, |session_id| {
+    let received = assert_stop_fences_remaining_conversation_bytes(1, false, |session_id| {
         let mut request = TurnRequestV1 {
             rpc_id: 1,
             thread_id: session_id.into(),
@@ -1299,17 +1323,15 @@ fn composition_stop_before_json_terminator_keeps_eof_invalid() {
         assert_eq!(request.frame().unwrap().len(), ORIGINAL_CHUNK_BYTES);
         request.text
     });
-    let eof = serde_json::from_slice::<serde_json::Value>(&received)
-        .expect_err("the EOF consumer could parse the incomplete wire frame");
-    assert!(eof.is_eof());
-    assert_eq!(received.len(), ORIGINAL_CHUNK_BYTES - 1);
+    assert_eq!(received, ORIGINAL_CHUNK_BYTES - 1);
 }
 
 fn assert_stop_fences_remaining_conversation_bytes(
     min_written: usize,
+    replay_stop: bool,
     content: impl FnOnce(&str) -> String,
-) -> Vec<u8> {
-    use std::{io::Read, os::fd::OwnedFd, sync::mpsc, time::Instant};
+) -> usize {
+    use std::{os::fd::OwnedFd, sync::mpsc, time::Instant};
 
     const WAIT: Duration = Duration::from_secs(5);
     let harness = Harness::new();
@@ -1321,7 +1343,8 @@ fn assert_stop_fences_remaining_conversation_bytes(
     let session_id = &session.session_id;
     let operation = Uuid::new_v4();
     let stop_operation = Uuid::new_v4();
-    let (mut peer, writer) = std::io::pipe().unwrap();
+    let (reader, writer) = std::io::pipe().unwrap();
+    let mut peer = eof_fixture::Parser::start(reader);
     let channel = spawn_fixture("normal").with_stdin_for_test(OwnedFd::from(writer).into());
     let mut composer = SessionConversationComposerV1::new(
         &retained.store,
@@ -1332,10 +1355,14 @@ fn assert_stop_fences_remaining_conversation_bytes(
     .unwrap();
     let (paused, wait_for_pause) = mpsc::channel();
     let (resume, wait_for_resume) = mpsc::channel();
+    let (stop_waiting, wait_for_stop_slot) = mpsc::channel();
+    if replay_stop {
+        composer.observe_stop_slot_for_test(stop_waiting);
+    }
     composer.set_before_write_for_test(min_written, move |written| {
         paused.send(written).unwrap();
         wait_for_resume
-            .recv_timeout(WAIT * 2)
+            .recv_timeout(WAIT * 4)
             .expect("fixture did not release dispatch");
     });
     composer
@@ -1376,6 +1403,7 @@ fn assert_stop_fences_remaining_conversation_bytes(
             .recv_timeout(WAIT)
             .expect("dispatch did not pause");
         assert_eq!(written_before_stop > 0, min_written > 0);
+        assert_eq!(peer.progress_at(written_before_stop), 0);
         let issued = event_by_id(&observer, &issue_id)
             .unwrap()
             .expect("dispatch paused before the emission audit committed");
@@ -1394,32 +1422,41 @@ fn assert_stop_fences_remaining_conversation_bytes(
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+        let replay = if replay_stop {
+            wait_for_stop_slot
+                .recv_timeout(WAIT)
+                .expect("STOP omitted its slot");
+            let replay = threads.spawn(|| composer.stop(stop_operation, session_id));
+            wait_for_stop_slot
+                .recv_timeout(WAIT)
+                .expect("replayed STOP omitted its slot");
+            assert!(
+                !replay.is_finished(),
+                "replayed STOP returned before teardown"
+            );
+            Some(replay)
+        } else {
+            None
+        };
         resume.send(()).unwrap();
         let dispatch_result = dispatch.join().expect("dispatch thread panicked");
         let closed = stop
             .join()
             .expect("STOP thread panicked")
             .expect("STOP failed");
+        if let Some(replay) = replay {
+            assert_eq!(replay.join().unwrap().unwrap(), closed);
+        }
         (closed, dispatch_result, written_before_stop)
     });
 
     assert_eq!(closed.status, SessionConversationStatusV1::Closed);
-    let (read_done, wait_for_eof) = mpsc::channel();
-    let reader = std::thread::spawn(move || {
-        let mut received = Vec::new();
-        let _ = read_done.send(peer.read_to_end(&mut received).map(|_| received));
-    });
-    let received = wait_for_eof
-        .recv_timeout(WAIT)
-        .expect("stdio peer did not reach EOF")
-        .unwrap();
-    reader.join().unwrap();
+    let (received, parsed) = peer.finish();
     assert_eq!(
-        received.len(),
-        written_before_stop,
+        received, written_before_stop,
         "the stdio peer received bytes after STOP committed"
     );
-    assert!(!received.contains(&b'\n'));
+    assert_eq!(parsed, 0, "the stdio peer parsed a turn at EOF");
     assert_eq!(
         message_failure(&dispatch_result.unwrap_err()),
         Some(SessionMessageFailureV1::SessionClosed)
@@ -1428,4 +1465,147 @@ fn assert_stop_fences_remaining_conversation_bytes(
     assert_eq!(kind_count(&retained.store, EMISSION_ISSUED_KIND), 1);
     assert_eq!(kind_count(&retained.store, TRANSMITTED_KIND), 0);
     received
+}
+
+mod eof_fixture {
+    use std::{
+        io::{BufRead, BufReader, PipeReader, Read},
+        os::fd::OwnedFd,
+        process::{Child, Command, Stdio},
+        sync::mpsc,
+        thread,
+        time::{Duration, Instant},
+    };
+
+    const WAIT: Duration = Duration::from_secs(5);
+    const PREFIX: &str = "G07-EOF ";
+    const CHILD: &str = "audit::session_message::composition_tests::eof_fixture::parse_owned_pipe";
+    const OPT_IN: &str = "AI_GUARD_G07_EOF_PEER";
+
+    struct Observation {
+        eof: bool,
+        bytes: usize,
+        parsed: usize,
+    }
+
+    pub(super) struct Parser {
+        child: Child,
+        observations: mpsc::Receiver<Observation>,
+    }
+
+    impl Parser {
+        pub(super) fn start(pipe: PipeReader) -> Self {
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args(["--ignored", "--exact", CHILD, "--nocapture"])
+                .env_clear()
+                .env(OPT_IN, "1")
+                .stdin(Stdio::from(OwnedFd::from(pipe)))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let stdout = child.stdout.take().unwrap();
+            let (send, observations) = mpsc::channel();
+            thread::spawn(move || {
+                for line in BufReader::new(stdout).lines() {
+                    let Ok(line) = line else { break };
+                    let Some((_, fields)) = line.split_once(PREFIX) else {
+                        continue;
+                    };
+                    let mut fields = fields.split_ascii_whitespace();
+                    let eof = match fields.next() {
+                        Some("progress") => false,
+                        Some("eof") => true,
+                        _ => break,
+                    };
+                    let bytes = fields.next().unwrap().parse().unwrap();
+                    let parsed = fields.next().unwrap().parse().unwrap();
+                    if send.send(Observation { eof, bytes, parsed }).is_err() {
+                        break;
+                    }
+                }
+            });
+            Self {
+                child,
+                observations,
+            }
+        }
+
+        fn observation(&self, deadline: Instant) -> Observation {
+            self.observations
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("EOF peer did not report")
+        }
+
+        pub(super) fn progress_at(&self, expected_bytes: usize) -> usize {
+            let deadline = Instant::now() + WAIT;
+            loop {
+                let observed = self.observation(deadline);
+                assert!(!observed.eof && observed.bytes <= expected_bytes);
+                if observed.bytes == expected_bytes {
+                    return observed.parsed;
+                }
+            }
+        }
+
+        pub(super) fn finish(&mut self) -> (usize, usize) {
+            let deadline = Instant::now() + WAIT;
+            let final_observation = loop {
+                let observed = self.observation(deadline);
+                if observed.eof {
+                    break observed;
+                }
+            };
+            loop {
+                if let Some(status) = self.child.try_wait().unwrap() {
+                    assert!(status.success());
+                    return (final_observation.bytes, final_observation.parsed);
+                }
+                assert!(Instant::now() < deadline, "EOF peer did not exit");
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
+    impl Drop for Parser {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    #[test]
+    #[ignore = "invoked as the isolated owned-pipe peer"]
+    fn parse_owned_pipe() {
+        if std::env::var(OPT_IN).as_deref() != Ok("1") {
+            return;
+        }
+        let mut input = std::io::stdin().lock();
+        let mut buffer = [0; 1024];
+        let mut pending = Vec::new();
+        let mut bytes = 0;
+        let mut parsed = 0;
+        let is_object = |line: &[u8]| {
+            serde_json::from_slice::<serde_json::Value>(line).is_ok_and(|value| value.is_object())
+        };
+        println!("{PREFIX}progress 0 0");
+        loop {
+            let read = input.read(&mut buffer).unwrap();
+            if read == 0 {
+                parsed += usize::from(is_object(&pending));
+                println!("{PREFIX}eof {bytes} {parsed}");
+                break;
+            }
+            bytes += read;
+            assert!(bytes <= crate::control::session_message::MAX_FRAME_BYTES + 1);
+            for part in buffer[..read].split_inclusive(|byte| *byte == b'\n') {
+                pending.extend_from_slice(part);
+                if part.ends_with(b"\n") {
+                    parsed += usize::from(is_object(&pending));
+                    pending.clear();
+                }
+            }
+            println!("{PREFIX}progress {bytes} {parsed}");
+        }
+    }
 }
