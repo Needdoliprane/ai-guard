@@ -2246,6 +2246,8 @@ impl Client {
         self.authenticate(&mut stream).await?;
         write_frame(&mut stream, &request, MAX_FRAME, IO_TIMEOUT).await?;
         let response = read_frame(&mut stream, MAX_FRAME, timeout).await?;
+        #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+        retained_cancel_tests::hold_register_reply(&request, &response).await;
         #[cfg(test)]
         if is_begin
             && matches!(&response, Response::ProspectiveArmExchange { .. })
