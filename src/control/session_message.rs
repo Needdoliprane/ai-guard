@@ -32,6 +32,7 @@ use std::{
 /// beyond this bound is refused, never partially written or read.
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 const MAX_WRITE_CHUNK_BYTES: usize = 4 * 1024;
+const JSON_FRAME_END: &[u8; 2] = b"}\n";
 const FRAME_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 
@@ -375,26 +376,31 @@ impl StdioConversation {
         if frame.len() > MAX_FRAME_BYTES {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "frame too large").into());
         }
+        let prefix = frame
+            .strip_suffix('}')
+            .filter(|prefix| {
+                prefix.starts_with('{')
+                    && !prefix.contains(['\n', '\r'])
+                    && serde_json::from_str::<Value>(frame).is_ok_and(|value| value.is_object())
+            })
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid JSON frame"))?
+            .as_bytes();
         let stdin = self
             .stdin
             .as_mut()
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "stdin closed"))?;
-        let fd = stdin.as_raw_fd();
-        // SAFETY: the owned ChildStdin keeps fd live for both fcntl calls.
-        let nonblocking = unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFL);
-            flags >= 0 && libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) == 0
-        };
-        if !nonblocking {
-            return Err(io::Error::last_os_error().into());
-        }
-        let mut line = Vec::with_capacity(frame.len() + 1);
-        line.extend_from_slice(frame.as_bytes());
-        line.push(b'\n');
+        Self::certify_input_pipe(stdin)?;
         let deadline = Instant::now() + FRAME_WRITE_TIMEOUT;
         let mut written = 0;
-        while written < line.len() {
-            let chunk = &line[written..(written + MAX_WRITE_CHUNK_BYTES).min(line.len())];
+        loop {
+            let final_chunk = written == prefix.len();
+            // An EOF reader may parse its last line without a newline. Keep
+            // the JSON object unparseable until the atomic pipe write of }+LF.
+            let chunk = if final_chunk {
+                JSON_FRAME_END
+            } else {
+                &prefix[written..(written + MAX_WRITE_CHUNK_BYTES).min(prefix.len())]
+            };
             let result = {
                 let _effect = enter_effect(written, deadline)?;
                 if Instant::now() >= deadline {
@@ -409,6 +415,12 @@ impl StdioConversation {
                 stdin.write(chunk)
             };
             match result {
+                Ok(count) if final_chunk && count == JSON_FRAME_END.len() => return Ok(()),
+                Ok(_) if final_chunk => {
+                    return Err(
+                        io::Error::other("incomplete atomic conversation terminator").into(),
+                    );
+                }
                 Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero).into()),
                 Ok(count) => written += count,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -417,6 +429,35 @@ impl StdioConversation {
                 }
                 Err(error) => return Err(error.into()),
             }
+        }
+    }
+
+    fn certify_input_pipe(stdin: &std::process::ChildStdin) -> io::Result<()> {
+        let fd = stdin.as_raw_fd();
+        let mut facts = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: fd is owned and live, and facts is writable.
+        if unsafe { libc::fstat(fd, facts.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: successful fstat initialized facts; fd is still live.
+        let kind = unsafe { facts.assume_init() }.st_mode & libc::S_IFMT;
+        // SAFETY: the descriptor remains owned for the path configuration query.
+        if kind != libc::S_IFIFO
+            || unsafe { libc::fpathconf(fd, libc::_PC_PIPE_BUF) }
+                <= JSON_FRAME_END.len() as libc::c_long
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "input pipe atomicity unavailable",
+            ));
+        }
+        // SAFETY: the owned ChildStdin keeps fd live for both fcntl calls.
+        let nonblocking = unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            flags >= 0 && libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) == 0
+        };
+        if !nonblocking {
+            return Err(io::Error::last_os_error());
         }
         Ok(())
     }

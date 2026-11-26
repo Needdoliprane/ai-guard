@@ -1269,16 +1269,47 @@ fn composition_bind_failure_leaves_no_channel() {
 
 #[test]
 fn composition_stop_after_issue_before_first_byte() {
-    assert_stop_fences_remaining_conversation_bytes(false);
+    let received =
+        assert_stop_fences_remaining_conversation_bytes(0, |_| "synthetic instruction".into());
+    assert!(received.is_empty());
 }
 
 #[test]
 fn composition_stop_between_write_chunks() {
-    assert_stop_fences_remaining_conversation_bytes(true);
+    let length = crate::control::session_control::SESSION_MESSAGE_MAX_CONTENT_BYTES;
+    let received = assert_stop_fences_remaining_conversation_bytes(1, |_| "x".repeat(length));
+    assert!(!received.is_empty() && received.len() < length);
 }
 
-fn assert_stop_fences_remaining_conversation_bytes(after_first_chunk: bool) {
-    use std::{io::Read, os::fd::OwnedFd, os::unix::net::UnixStream, sync::mpsc, time::Instant};
+#[test]
+fn composition_stop_before_json_terminator_keeps_eof_invalid() {
+    use crate::control::session_message::TurnRequestV1;
+
+    // On the old 4 KiB chunk boundary the last JSON byte was sent alone
+    // before the newline. A peer parsing its last line at EOF accepted it.
+    const ORIGINAL_CHUNK_BYTES: usize = 4 * 1024;
+    let received = assert_stop_fences_remaining_conversation_bytes(1, |session_id| {
+        let mut request = TurnRequestV1 {
+            rpc_id: 1,
+            thread_id: session_id.into(),
+            text: "x".into(),
+        };
+        let overhead = request.frame().unwrap().len() - request.text.len();
+        request.text = "x".repeat(ORIGINAL_CHUNK_BYTES - overhead);
+        assert_eq!(request.frame().unwrap().len(), ORIGINAL_CHUNK_BYTES);
+        request.text
+    });
+    let eof = serde_json::from_slice::<serde_json::Value>(&received)
+        .expect_err("the EOF consumer could parse the incomplete wire frame");
+    assert!(eof.is_eof());
+    assert_eq!(received.len(), ORIGINAL_CHUNK_BYTES - 1);
+}
+
+fn assert_stop_fences_remaining_conversation_bytes(
+    min_written: usize,
+    content: impl FnOnce(&str) -> String,
+) -> Vec<u8> {
+    use std::{io::Read, os::fd::OwnedFd, sync::mpsc, time::Instant};
 
     const WAIT: Duration = Duration::from_secs(5);
     let harness = Harness::new();
@@ -1290,8 +1321,7 @@ fn assert_stop_fences_remaining_conversation_bytes(after_first_chunk: bool) {
     let session_id = &session.session_id;
     let operation = Uuid::new_v4();
     let stop_operation = Uuid::new_v4();
-    let (mut peer, writer) = UnixStream::pair().unwrap();
-    peer.set_read_timeout(Some(WAIT)).unwrap();
+    let (mut peer, writer) = std::io::pipe().unwrap();
     let channel = spawn_fixture("normal").with_stdin_for_test(OwnedFd::from(writer).into());
     let mut composer = SessionConversationComposerV1::new(
         &retained.store,
@@ -1302,7 +1332,7 @@ fn assert_stop_fences_remaining_conversation_bytes(after_first_chunk: bool) {
     .unwrap();
     let (paused, wait_for_pause) = mpsc::channel();
     let (resume, wait_for_resume) = mpsc::channel();
-    composer.set_before_write_for_test(usize::from(after_first_chunk), move |written| {
+    composer.set_before_write_for_test(min_written, move |written| {
         paused.send(written).unwrap();
         wait_for_resume
             .recv_timeout(WAIT * 2)
@@ -1317,11 +1347,7 @@ fn assert_stop_fences_remaining_conversation_bytes(after_first_chunk: bool) {
             channel,
         )
         .unwrap();
-    let content = if after_first_chunk {
-        "x".repeat(crate::control::session_control::SESSION_MESSAGE_MAX_CONTENT_BYTES)
-    } else {
-        "synthetic instruction".into()
-    };
+    let content = content(session_id);
     send_message(
         &retained,
         &scope,
@@ -1349,10 +1375,7 @@ fn assert_stop_fences_remaining_conversation_bytes(after_first_chunk: bool) {
         let written_before_stop = wait_for_pause
             .recv_timeout(WAIT)
             .expect("dispatch did not pause");
-        assert_eq!(written_before_stop > 0, after_first_chunk);
-        if after_first_chunk {
-            assert!(written_before_stop < content.len());
-        }
+        assert_eq!(written_before_stop > 0, min_written > 0);
         let issued = event_by_id(&observer, &issue_id)
             .unwrap()
             .expect("dispatch paused before the emission audit committed");
@@ -1381,9 +1404,16 @@ fn assert_stop_fences_remaining_conversation_bytes(after_first_chunk: bool) {
     });
 
     assert_eq!(closed.status, SessionConversationStatusV1::Closed);
-    let mut received = Vec::new();
-    peer.read_to_end(&mut received)
-        .expect("stdio peer did not reach EOF");
+    let (read_done, wait_for_eof) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut received = Vec::new();
+        let _ = read_done.send(peer.read_to_end(&mut received).map(|_| received));
+    });
+    let received = wait_for_eof
+        .recv_timeout(WAIT)
+        .expect("stdio peer did not reach EOF")
+        .unwrap();
+    reader.join().unwrap();
     assert_eq!(
         received.len(),
         written_before_stop,
@@ -1397,4 +1427,5 @@ fn assert_stop_fences_remaining_conversation_bytes(after_first_chunk: bool) {
     assert_eq!(message_status(&retained.store, operation), "unknown");
     assert_eq!(kind_count(&retained.store, EMISSION_ISSUED_KIND), 1);
     assert_eq!(kind_count(&retained.store, TRANSMITTED_KIND), 0);
+    received
 }
