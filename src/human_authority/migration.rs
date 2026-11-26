@@ -20,7 +20,7 @@ use super::{
 };
 use crate::{
     audit::{
-        Store,
+        LegacySessionPrepareAdoptionRefused, Store,
         authentication::{AuthenticationAudit, AuthenticationAuditPolicyV1},
     },
     control_fs::{Directory, PrivateFile},
@@ -95,6 +95,7 @@ impl MigratedHumanSources {
 pub(crate) enum HumanSourcesMigrationFailure {
     InvalidRequest,
     MaintenanceRefused,
+    LegacySessionPrepareUnsupported,
     ReconciliationRequired,
     ClockBehind,
     StartupRefused,
@@ -104,6 +105,9 @@ impl std::fmt::Display for HumanSourcesMigrationFailure {
         f.write_str(match self {
             Self::InvalidRequest => "human_sources_migration_invalid_request",
             Self::MaintenanceRefused => "human_sources_migration_maintenance_refused",
+            Self::LegacySessionPrepareUnsupported => {
+                "human_sources_migration_legacy_session_prepare_unsupported"
+            }
             Self::ReconciliationRequired => "human_sources_migration_reconciliation_required",
             Self::ClockBehind => "human_sources_migration_clock_behind",
             Self::StartupRefused => "human_sources_migration_startup_refused",
@@ -134,7 +138,13 @@ pub(crate) fn migrate_human_sources(
         &request.journal_directory,
         &intent,
     )
-    .map_err(|_| HumanSourcesMigrationFailure::ReconciliationRequired)?;
+    .map_err(|error| {
+        if error.is::<LegacySessionPrepareAdoptionRefused>() {
+            HumanSourcesMigrationFailure::LegacySessionPrepareUnsupported
+        } else {
+            HumanSourcesMigrationFailure::ReconciliationRequired
+        }
+    })?;
     guard
         .check()
         .map_err(|_| HumanSourcesMigrationFailure::ReconciliationRequired)?;
@@ -337,6 +347,14 @@ fn migrate_under_maintenance(
         // This callback is reached only after every real Immediate busy0
         // transaction was acquired. No journal creation/backup/DDL precedes it.
         guard.check()?;
+        let mut observed = BTreeMap::new();
+        // Inspect the complete locked union before writing an intent or
+        // touching a backup. A refusal in the last Store must be effect-free
+        // for every preceding tenant and the authentication ledger.
+        writers.visit(&mut |index, writer| {
+            observed.insert(index, writer.inspect()?);
+            Ok(())
+        })?;
         let resuming = journal.has_intent();
         if !resuming {
             // Check every complete SQLite namespace before the first intent
@@ -367,7 +385,9 @@ fn migrate_under_maintenance(
         let tenants: BTreeSet<_> = ordered.iter().filter_map(|s| s.tenant_id.clone()).collect();
         writers.visit(&mut |index, writer| {
             let token = &tokens[index];
-            let state = writer.inspect()?;
+            let state = observed
+                .remove(&index)
+                .ok_or_else(|| anyhow::anyhow!("source observation absent"))?;
             writer.validate_tenant_closure(
                 &tenants,
                 settings

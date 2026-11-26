@@ -9,6 +9,17 @@ use super::review_authority::{
 use super::*;
 use crate::human_authority::{HumanSourceKindV1, maintenance::HumanMaintenanceSourceToken};
 
+#[derive(Debug)]
+pub(crate) struct LegacySessionPrepareAdoptionRefused;
+
+impl std::fmt::Display for LegacySessionPrepareAdoptionRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Legacy session preparation requires an explicit owned adoption")
+    }
+}
+
+impl std::error::Error for LegacySessionPrepareAdoptionRefused {}
+
 fn require(value: bool) -> anyhow::Result<()> {
     if value {
         Ok(())
@@ -50,6 +61,9 @@ fn verify13(store: &Store, db: &Connection, head: &(i64, String)) -> anyhow::Res
     let format: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
     require(format == 13)?;
     validate_schema(db, false)?;
+    if super::legacy_session_prepare::capability_present(db)? {
+        return Err(LegacySessionPrepareAdoptionRefused.into());
+    }
     Store::validate_metadata(db, store.tenant_id())?;
     control::validate(db)?;
     authority::validate(db)?;

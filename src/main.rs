@@ -130,6 +130,7 @@ enum Command {
     },
     /// Install the Legacy SQLite session preparation capability on a stopped
     /// Store10–13 with human rights enabled, with a verified new backup.
+    /// The current Store13-to-owned migration refuses a marked source.
     EnableLegacySessionPrepare {
         #[arg(long)]
         data: PathBuf,

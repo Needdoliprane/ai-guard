@@ -217,7 +217,7 @@ pub(crate) use metadata::MetadataLookup;
 pub(crate) use review_access::{HumanSourceAccess, StoreOperationClass};
 pub(crate) use review_authority::AuthorityReceiptV1;
 pub(crate) use review_authority_migration::{
-    ReviewSourceMigrationState, VerifiedReviewSourceBackup,
+    LegacySessionPrepareAdoptionRefused, ReviewSourceMigrationState, VerifiedReviewSourceBackup,
 };
 pub(crate) use review_startup::{
     ReviewStoreMaintenance, ReviewStoreMaintenanceWriter, ReviewStoreStartup,

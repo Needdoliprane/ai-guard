@@ -183,6 +183,13 @@ pub(crate) async fn run(args: HumanSourcesArgs) -> Result<()> {
             Ok(())
         }
         Err(error) => {
+            if error.chain().any(|cause| {
+                cause.to_string() == "human_sources_migration_legacy_session_prepare_unsupported"
+            }) {
+                bail!(
+                    "human_sources_step_refused; step={step}; state=legacy_session_prepare_unsupported; action=preserve_legacy_sqlite_and_plan_explicit_owned_adoption"
+                );
+            }
             let code = if error
                 .chain()
                 .any(|cause| cause.to_string() == "human_sources_migration_not_started")

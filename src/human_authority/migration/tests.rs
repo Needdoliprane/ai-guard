@@ -794,6 +794,52 @@ fn last_source_writer_busy_mutates_nothing_and_keeps_backups_absent() {
 }
 
 #[test]
+fn legacy_session_prepare_refuses_owned_transition_before_journal_or_backup() {
+    let fixture = Fixture::new_owned_with_human_rights();
+    let last = *writer_order(&fixture.plan).last().unwrap();
+    assert_eq!(last.kind, HumanSourceKindV1::TenantStore);
+    let store = fixture
+        .legacy
+        .iter()
+        .find(|store| Some(store.tenant_id()) == last.tenant_id.as_deref())
+        .unwrap();
+    let prior =
+        fixture.backup_paths[&last.source_id].with_file_name("before-legacy-capability.sqlite");
+    store.enable_legacy_session_prepare_v1(&prior).unwrap();
+    let heads: Vec<_> = fixture
+        .legacy
+        .iter()
+        .map(|store| store.integrity().unwrap().head_hash)
+        .collect();
+
+    let refusal = migrate_human_sources(fixture.request())
+        .err()
+        .expect("marked source must stay Legacy");
+    for source in &fixture.plan.target.sources {
+        assert_eq!(
+            raw_format(source),
+            if source.kind == HumanSourceKindV1::TenantStore {
+                13
+            } else {
+                1_000_004
+            }
+        );
+        assert!(!fixture.backup_paths[&source.source_id].exists());
+    }
+    assert!(fixture.journal.persistent_entries(16).unwrap().is_empty());
+    assert!(prior.is_file());
+    for (store, expected) in fixture.legacy.iter().zip(heads) {
+        let integrity = store.integrity().unwrap();
+        assert!(integrity.valid);
+        assert_eq!(integrity.head_hash, expected);
+    }
+    assert_eq!(
+        refusal.to_string(),
+        "human_sources_migration_legacy_session_prepare_unsupported"
+    );
+}
+
+#[test]
 fn partial_first_commit_resumes_same_plan_without_new_anchor() {
     let fixture = Fixture::new();
     FAIL_AFTER_COMMIT.with(|point| point.set(Some(0)));
