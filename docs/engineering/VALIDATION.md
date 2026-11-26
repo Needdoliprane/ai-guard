@@ -10,13 +10,23 @@ enforcer qui échouaient sur `16dd21b9` passent séparément. Ils
 utilisent les fixtures corrigées dans `dff416f5`, `038dd12c` et
 `69c9371d`, reprises avec les mêmes blobs source.
 
-La revue laisse deux écarts ouverts pour la conversation. Un ancien
-reçu de bind peut encore rattacher un canal après STOP. Une attente
-de réponse peut retarder la fermeture physique du canal après le
-commit durable. Le correctif conversation reste sur le gel de
-validation. Le fournisseur et le raccord broker de production restent
-hors de cette recette. Manifeste des sélecteurs
+Manifeste des sélecteurs de `63fe6a03`
 `c2eeff44d06eeb4abf4a1a97e3a01759da687679a4b62ea26d620f8fd51229b2`.
+
+Le test ajouté dans `3aaabf2b` reproduit l’attente de STOP derrière
+une réponse non corrélable, code 101. Le gel `6da488b0` passe ensuite
+16 tests de conversation, dont cette régression et les deux cas de
+rejeu de bind. Le sélecteur Service sur un acquittement STOP d’un
+nouvel epoch passe également. Ses deux blobs sont repris dans
+`a9867f7c`. Manifeste des exécutions
+`ccf80b49848b5b05af8b02e1200c56ee2c5b5a263c5830312bcc8e4f80f11e74`.
+
+La revue de `6da488b0` garde deux cas ouverts. Une réponse valide
+concurrente peut engager la reprise de l’epoch alors que STOP attend
+la fin de la lecture. Une déconnexion peut aussi être confondue avec
+le délai de lecture. Le correctif conversation reste sur son gel de
+validation. Le fournisseur et le raccord broker de production gardent
+leurs preuves propres.
 
 ## 27 novembre 2026 — canal de conversation dans Chromium
 
