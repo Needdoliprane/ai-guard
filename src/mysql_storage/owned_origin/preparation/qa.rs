@@ -11,7 +11,7 @@ use crate::{
     },
     mysql_storage::{
         MAX_CERTIFICATE_BYTES, MAX_PASSWORD_BYTES, MAX_PRIVATE_KEY_BYTES, MysqlClientIdentity,
-        MysqlCredentials, MysqlEndpoint, audit::MysqlAuditStore,
+        MysqlCredentials, MysqlEndpoint, MysqlProbeError, audit::MysqlAuditStore,
     },
     redaction::Redactor,
 };
@@ -124,14 +124,25 @@ async fn owned_audit_tables_remain_unpublished_and_refuse_reentry() -> Result<()
             Redactor::new(Vec::new()),
             128,
         )?;
-        for error in [legacy.verify().await.err(), legacy.initialize().await.err()] {
+        let require_refusal = |operation: &str, error: Option<anyhow::Error>| -> Result<()> {
+            let error = error.with_context(|| {
+                format!("Legacy accepted the unpublished target ({operation}, Store{version})")
+            })?;
             ensure!(
-                error
-                    .context("Legacy accepted the unpublished target")?
-                    .to_string()
-                    == "MySQL audit schema was not prepared"
+                !matches!(
+                    error.downcast_ref::<MysqlProbeError>(),
+                    Some(MysqlProbeError::ServerRefused(1142))
+                ),
+                "Legacy {operation} on Store{version}: QA privilege refusal (MySQL 1142)"
             );
-        }
+            ensure!(
+                error.to_string() == "MySQL audit schema was not prepared",
+                "Legacy {operation} on Store{version} did not observe the unpublished-state refusal"
+            );
+            Ok(())
+        };
+        require_refusal("verify", legacy.verify().await.err())?;
+        require_refusal("initialize", legacy.initialize().await.err())?;
     }
     Ok(())
 }

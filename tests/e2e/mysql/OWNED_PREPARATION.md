@@ -219,7 +219,12 @@ pouvoir référencer les tables de la cible et garder `foreign_key_checks` et
   divergent. L’oracle ignoré
   `owned_audit_tables_remain_unpublished_and_refuse_reentry` exerce le
   sous-manifeste SQL sur des cibles séparées, puis le refus de reprise et le
-  refus Legacy. Il reste à exécuter sur MySQL 8.4.
+  refus Legacy. Pour cet oracle, ajouter le privilège `LOCK TABLES` au
+  compte opérateur QA sur son seul schéma jetable, au nom littéral (underscores
+  échappés). Ce droit permet à `initialize()` d’atteindre le contrôle du
+  singleton par `SELECT … FOR UPDATE`. Le code MySQL 1142 signale un défaut
+  de privilèges de la fixture et fait échouer la recette. Le verdict attendu
+  de `verify()` et `initialize()` reste l’absence du singleton.
 - Sur les deux cibles jetables de cet oracle, relever les `CHECK_CLAUSE`
   du cycle de vie et de la supervision. Pour le protocole, le manifeste
   attend le rendu `length` et `_binary\'broker_supervision_v1\'`. Sur
