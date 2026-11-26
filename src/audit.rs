@@ -199,6 +199,7 @@ pub(crate) mod identity;
 pub(crate) mod identity_markers;
 mod kubernetes_admission;
 pub(crate) mod kubernetes_session;
+mod legacy_session_prepare;
 mod metadata;
 mod review_access;
 mod review_authority;
@@ -473,6 +474,7 @@ fn schema_objects(
     version: i64,
     retention: bool,
     prepare: bool,
+    legacy_prepare: bool,
 ) -> impl Iterator<Item = &'static (&'static str, &'static str, &'static str)> {
     // Format14 inherits the complete, closed13 profile. Its extensions are
     // explicit; no future version can inherit it by a range comparison.
@@ -490,6 +492,11 @@ fn schema_objects(
         .chain(session_prepare::SCHEMA.iter().filter(move |_| prepare))
         // The conversation/message tables share the same capability marker.
         .chain(session_message::SCHEMA.iter().filter(move |_| prepare))
+        .chain(
+            legacy_session_prepare::SCHEMA
+                .iter()
+                .filter(move |_| legacy_prepare),
+        )
 }
 
 fn inherited_schema_objects(
@@ -604,6 +611,14 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
         !prepare || session_prepare::format_admits(version),
         "session prepare capability requires Store14 or Store15"
     );
+    let legacy_prepare = objects
+        .iter()
+        .any(|(kind, name, _, _)| kind == "table" && name == "events")
+        && legacy_session_prepare::capability_present(db)?;
+    anyhow::ensure!(
+        !legacy_prepare || legacy_session_prepare::format_admits(version),
+        "Legacy session prepare capability requires Store10 through Store13"
+    );
     let inherited = if matches!(version, 14 | 15) {
         13
     } else {
@@ -711,7 +726,7 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
             );
             continue;
         }
-        let expected = schema_objects(version, retention, prepare)
+        let expected = schema_objects(version, retention, prepare, legacy_prepare)
             .chain(effect_capability.iter())
             .find(|(expected_kind, expected_name, _)| {
                 kind == expected_kind && name == expected_name
@@ -765,7 +780,7 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
         );
     }
     for &(kind, name, _) in
-        schema_objects(version, retention, prepare).chain(effect_capability.iter())
+        schema_objects(version, retention, prepare, legacy_prepare).chain(effect_capability.iter())
     {
         if allow_legacy && version == 0 && name == "tenant_binding" {
             continue;
@@ -795,6 +810,9 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
     human_workers::validate_capability(db, version)?;
     human_rights::validate_capability(db, version)?;
     session_prepare::validate_capability(db, version)?;
+    if legacy_prepare {
+        legacy_session_prepare::validate_capability(db, version)?;
+    }
     // Old profiles, including audit-only1, must never contain a future
     // reserved egress family. Exact15's complete replay runs under control.
     if version != 15 {

@@ -321,6 +321,10 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
             super::session_prepare::validate_replay_event(db, &stored)?;
             continue;
         }
+        if stored.event.kind == super::legacy_session_prepare::GENESIS_KIND {
+            super::legacy_session_prepare::validate_capability(db, version)?;
+            continue;
+        }
         if stored.event.kind.starts_with("control.session_message.") {
             anyhow::ensure!(
                 super::session_prepare::format_admits(version),
@@ -1249,6 +1253,14 @@ impl Store {
     pub fn migrate_human_rights_v2(&self, backup_path: &Path) -> anyhow::Result<MigrationReportV1> {
         self.backed_up_maintenance(backup_path, Maintenance::HumanRights)
     }
+    /// Install the separate Legacy persistence capability under a verified
+    /// offline backup. This does not authorize a launch or activate a broker.
+    pub fn enable_legacy_session_prepare_v1(
+        &self,
+        backup_path: &Path,
+    ) -> anyhow::Result<MigrationReportV1> {
+        self.backed_up_maintenance(backup_path, Maintenance::LegacySessionPrepare)
+    }
     /// Copy the store into a new private backup, under the caller's DB guard,
     /// and prove that the copy has the same verified schema, quota and chain
     /// head. `admits` checks the preflight snapshot before anything is
@@ -1371,6 +1383,18 @@ impl Store {
                     );
                     Ok(())
                 }
+                Maintenance::LegacySessionPrepare => {
+                    anyhow::ensure!(
+                        super::legacy_session_prepare::format_admits(version)
+                            && super::human_rights::installed(preflight)?,
+                        "Legacy session prepare requires Store10 through Store13 with human rights installed"
+                    );
+                    anyhow::ensure!(
+                        !super::legacy_session_prepare::capability_present(preflight)?,
+                        "the Legacy session prepare capability is already installed"
+                    );
+                    Ok(())
+                }
                 Maintenance::KubernetesSessionEffects => {
                     anyhow::ensure!(
                         (11..=13).contains(&version),
@@ -1388,7 +1412,9 @@ impl Store {
                 from_version,
                 to_version,
             } => (from_version, to_version),
-            Maintenance::HumanRights | Maintenance::KubernetesSessionEffects => {
+            Maintenance::HumanRights
+            | Maintenance::LegacySessionPrepare
+            | Maintenance::KubernetesSessionEffects => {
                 let version = u32::try_from(version)?;
                 (version, version)
             }
@@ -1405,37 +1431,35 @@ impl Store {
                 && current.event_count == expected.event_count
                 && current.head_hash == expected.head_hash,
         )?;
-        if step == Maintenance::KubernetesSessionEffects {
-            conflict(!super::kubernetes_session::effects::enabled(&tx)?)?;
-            super::kubernetes_session::effects::initialize(self, &tx)?;
-            validate_schema(&tx, false)?;
-            validate(&tx)?;
-            Self::validate_metadata(&tx, &self.tenant_id)?;
-            anyhow::ensure!(
-                Self::check_integrity(&tx)?.valid,
-                "post-maintenance audit integrity failure"
-            );
-            let (seq, hash): (i64, String) = tx.query_row(
-                "SELECT genesis_seq,genesis_hash FROM kubernetes_session_effect_meta WHERE singleton=1",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
-            self.commit_checked(tx)?;
-            return Ok(MigrationReportV1 {
-                from_version,
-                to_version,
-                backup_path: target.to_string_lossy().into(),
-                genesis_seq: seq,
-                genesis_hash: hash,
-            });
-        }
-        if step == Maintenance::HumanRights {
-            conflict(super::human_rights::maintenance_pending(&tx)?)?;
-            // Each step installs only what this store still lacks, in order,
-            // in the one transaction that follows the verified backup.
-            if !super::human_rights::installed(&tx)? {
-                self.initialize_human_rights(&tx)?;
+        let marker: Option<(i64, String)> = match step {
+            Maintenance::KubernetesSessionEffects => {
+                conflict(!super::kubernetes_session::effects::enabled(&tx)?)?;
+                super::kubernetes_session::effects::initialize(self, &tx)?;
+                Some(tx.query_row(
+                    "SELECT genesis_seq,genesis_hash FROM kubernetes_session_effect_meta WHERE singleton=1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
             }
+            Maintenance::HumanRights => {
+                conflict(super::human_rights::maintenance_pending(&tx)?)?;
+                if !super::human_rights::installed(&tx)? {
+                    self.initialize_human_rights(&tx)?;
+                }
+                Some(tx.query_row(
+                    "SELECT seq,hash FROM events WHERE kind=?1",
+                    [super::human_rights::GENESIS_KIND],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            }
+            Maintenance::LegacySessionPrepare => {
+                conflict(!super::legacy_session_prepare::capability_present(&tx)?)?;
+                let stored = self.initialize_legacy_session_prepare(&tx)?;
+                Some((stored.seq, stored.hash))
+            }
+            Maintenance::Version { .. } => None,
+        };
+        if let Some((genesis_seq, genesis_hash)) = marker {
             validate_schema(&tx, false)?;
             validate(&tx)?;
             Self::validate_metadata(&tx, &self.tenant_id)?;
@@ -1443,18 +1467,13 @@ impl Store {
                 Self::check_integrity(&tx)?.valid,
                 "post-maintenance audit integrity failure"
             );
-            let (seq, hash): (i64, String) = tx.query_row(
-                "SELECT seq,hash FROM events WHERE kind=?1",
-                [super::human_rights::GENESIS_KIND],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
             self.commit_checked(tx)?;
             return Ok(MigrationReportV1 {
                 from_version,
                 to_version,
                 backup_path: target.to_string_lossy().into(),
-                genesis_seq: seq,
-                genesis_hash: hash,
+                genesis_seq,
+                genesis_hash,
             });
         }
         let activate_supervision = to_version == 3 && tx.lease.untouched_fresh_origin(&tx)?;
@@ -1608,5 +1627,6 @@ fn validate_admission_input(
 enum Maintenance {
     Version { from_version: u32, to_version: u32 },
     HumanRights,
+    LegacySessionPrepare,
     KubernetesSessionEffects,
 }

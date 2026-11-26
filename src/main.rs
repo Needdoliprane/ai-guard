@@ -128,6 +128,21 @@ enum Command {
         #[arg(long, default_value_t = 100_000)]
         max_events: u64,
     },
+    /// Install the Legacy SQLite session preparation capability on a stopped
+    /// Store10–13 with human rights enabled, with a verified new backup.
+    EnableLegacySessionPrepare {
+        #[arg(long)]
+        data: PathBuf,
+        #[arg(long)]
+        tenant_id: String,
+        #[arg(long)]
+        backup: PathBuf,
+        /// Operator attestation: gateway and brokers are stopped.
+        #[arg(long, required = true)]
+        confirm_control_stopped: bool,
+        #[arg(long, default_value_t = 100_000)]
+        max_events: u64,
+    },
     /// Offline audit retention: install, plan, apply, verify and export archives.
     AuditRetention(agentsandbox::audit::retention::cli::AuditRetentionArgs),
     /// Enable the Kubernetes session effect ledger on one offline store of
@@ -1352,6 +1367,30 @@ async fn run() -> Result<()> {
                 max_events,
             )?;
             let report = store.migrate_human_rights_v2(&backup)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::EnableLegacySessionPrepare {
+            data,
+            tenant_id,
+            backup,
+            confirm_control_stopped,
+            max_events,
+        } => {
+            anyhow::ensure!(
+                confirm_control_stopped,
+                "Stop the control plane and all brokers before this maintenance"
+            );
+            anyhow::ensure!(
+                (1..=1_000_000).contains(&max_events),
+                "invalid audit capacity"
+            );
+            let store = Store::open_existing_for_tenant(
+                &data,
+                &tenant_id,
+                Redactor::new(vec![]),
+                max_events,
+            )?;
+            let report = store.enable_legacy_session_prepare_v1(&backup)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::EnableKubernetesSessionEffects {

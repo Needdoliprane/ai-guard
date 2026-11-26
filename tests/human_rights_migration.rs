@@ -218,6 +218,85 @@ fn marker_requires_the_worker_registry_marker_and_leaves_the_store_unchanged() {
     assert!(!store.human_rights_installed().unwrap());
 }
 
+#[test]
+fn legacy_session_prepare_capability_is_explicit_and_survives_reopen() {
+    let files = support::private_tempdir();
+    let path = files.path().join("tenant.sqlite");
+    let backup = files.path().join("before-session-prepare.sqlite");
+    let store = migrated(&path, true);
+    let open = |path: &Path| {
+        Store::open_existing_for_tenant(path, "tenant-a", Redactor::new(vec![]), 1000).unwrap()
+    };
+    let marker = agentsandbox::audit::EventQuery {
+        kind: Some("control.legacy_session_prepare.genesis".into()),
+        limit: Some(2),
+        ..Default::default()
+    };
+    let enable = || {
+        Command::new(env!("CARGO_BIN_EXE_agentsandbox"))
+            .arg("enable-legacy-session-prepare")
+            .arg("--data")
+            .arg(&path)
+            .arg("--tenant-id")
+            .arg("tenant-a")
+            .arg("--backup")
+            .arg(&backup)
+            .arg("--max-events")
+            .arg("1000")
+            .arg("--confirm-control-stopped")
+            .output()
+            .unwrap()
+    };
+    let before_rights = store.head().unwrap();
+    drop(store);
+    assert!(!enable().status.success());
+    assert!(!backup.exists());
+    let store = open(&path);
+    assert_eq!(store.head().unwrap(), before_rights);
+    store
+        .migrate_human_rights_v2(&files.path().join("before-rights.sqlite"))
+        .unwrap();
+    let before = store.integrity().unwrap();
+    let quota = store
+        .worker_quota(&agentsandbox::control::QuotaPolicyV1::default())
+        .unwrap();
+    drop(store);
+
+    let enabled = enable();
+    assert!(
+        enabled.status.success(),
+        "the explicit Legacy capability installation failed"
+    );
+    let report: agentsandbox::control::MigrationReportV1 =
+        serde_json::from_slice(&enabled.stdout).unwrap();
+    assert_eq!((report.from_version, report.to_version), (13, 13));
+    let store = open(&path);
+    assert!(store.integrity().unwrap().valid);
+    let markers = store.events(&marker).unwrap();
+    assert_eq!(markers.len(), 1);
+    assert_eq!(markers[0].seq, report.genesis_seq);
+    assert_eq!(markers[0].hash, report.genesis_hash);
+    assert_eq!(
+        store.integrity().unwrap().event_count,
+        before.event_count + 1
+    );
+    assert!(store.workers().unwrap().is_empty());
+    let reopened_quota = store.worker_quota(&quota.policy).unwrap();
+    assert_eq!(reopened_quota.held_workers, quota.held_workers);
+    assert_eq!(reopened_quota.held_cpu_millis, quota.held_cpu_millis);
+    assert_eq!(reopened_quota.held_memory_bytes, quota.held_memory_bytes);
+    let head = store.integrity().unwrap().head_hash;
+    assert_eq!(report.genesis_hash, head);
+    drop(store);
+
+    let saved = open(&backup);
+    assert_eq!(saved.integrity().unwrap().head_hash, before.head_hash);
+    assert!(saved.events(&marker).unwrap().is_empty());
+    drop(saved);
+    assert!(!enable().status.success());
+    assert_eq!(open(&path).integrity().unwrap().head_hash, head);
+}
+
 /// A broad property: the downcast store also fails the schema checks of format 9.
 /// The marker checks themselves are proven against forged markers in
 /// src/audit/human_rights_tests.rs.
