@@ -1,5 +1,23 @@
 # Validation courante
 
+## 27 novembre 2026 — régressions ciblées conversation et enforcer
+
+Le libtest de `63fe6a03` (arbre `1b6776e5`) compile. La famille
+conversation passe 13 cas, dont les témoins du premier octet, de la
+fin JSON à EOF et du rejeu STOP jusqu’à fermeture. Le processus de
+lecture EOF est exécuté par son test parent. Les huit sélecteurs
+enforcer qui échouaient sur `16dd21b9` passent séparément. Ils
+utilisent les fixtures corrigées dans `dff416f5`, `038dd12c` et
+`69c9371d`, reprises avec les mêmes blobs source.
+
+La revue laisse deux écarts ouverts pour la conversation. Un ancien
+reçu de bind peut encore rattacher un canal après STOP. Une attente
+de réponse peut retarder la fermeture physique du canal après le
+commit durable. Le correctif conversation reste sur le gel de
+validation. Le fournisseur et le raccord broker de production restent
+hors de cette recette. Manifeste des sélecteurs
+`c2eeff44d06eeb4abf4a1a97e3a01759da687679a4b62ea26d620f8fd51229b2`.
+
 ## 27 novembre 2026 — canal de conversation dans Chromium
 
 Le front de `bf64c76e` passe les six vérifications dans Chromium
